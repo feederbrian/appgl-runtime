@@ -7,6 +7,7 @@
 #include <cstring>
 #include <execinfo.h>
 #include <functional>
+#include <limits>
 #include <sstream>
 #include <unistd.h>
 #include <unordered_set>
@@ -6981,6 +6982,98 @@ void APIENTRY glGetProgramPipelineInfoLog(GLuint pipeline, GLsizei bufSize, GLsi
 // Metal has no subroutine equivalent. These stubs report 0 subroutines/locations,
 // making them spec-legal for programs without subroutine declarations.
 
+static std::string appglStripBracketZeroSuffix(const std::string& n) {
+    if (n.size() >= 3 && n.compare(n.size() - 3, 3, "[0]") == 0) {
+        return n.substr(0, n.size() - 3);
+    }
+    return n;
+}
+
+static bool appglParseStrictArrayIndex(const std::string& s, GLint& out) {
+    if (s.empty()) return false;
+    if (s[0] == '0' && s.size() > 1) return false;
+    for (char c : s) {
+        if (c < '0' || c > '9') return false;
+    }
+    char* endp = nullptr;
+    long v = std::strtol(s.c_str(), &endp, 10);
+    if (v < 0 || v > std::numeric_limits<GLint>::max()) return false;
+    out = static_cast<GLint>(v);
+    return true;
+}
+
+static bool appglParseArrayElementLookup(
+    const std::string& lookup,
+    std::string& baseName,
+    std::vector<GLint>& indices) {
+    indices.clear();
+    const std::size_t firstBracket = lookup.find('[');
+    if (firstBracket == std::string::npos) {
+        baseName = lookup;
+        return !baseName.empty();
+    }
+    baseName = lookup.substr(0, firstBracket);
+    if (baseName.empty()) return false;
+    std::size_t p = firstBracket;
+    while (p < lookup.size()) {
+        if (lookup[p] != '[') return false;
+        const std::size_t close = lookup.find(']', p + 1);
+        if (close == std::string::npos) return false;
+        GLint idx = 0;
+        if (!appglParseStrictArrayIndex(lookup.substr(p + 1, close - p - 1), idx)) {
+            return false;
+        }
+        indices.push_back(idx);
+        p = close + 1;
+    }
+    return !indices.empty();
+}
+
+static bool appglFlattenArrayElementIndex(
+    const appgl::GLProgramResourceEntry& entry,
+    const std::vector<GLint>& indices,
+    GLint& flatIndex) {
+    if (indices.empty()) {
+        flatIndex = 0;
+        return true;
+    }
+    if (entry.arrayDimensions.empty()) {
+        if (indices.size() != 1) return false;
+        if (indices[0] < 0 || indices[0] >= entry.arraySize) return false;
+        flatIndex = indices[0];
+        return true;
+    }
+    if (indices.size() != entry.arrayDimensions.size()) return false;
+    GLint flat = 0;
+    for (std::size_t i = 0; i < indices.size(); ++i) {
+        const GLint dim = entry.arrayDimensions[i];
+        if (dim <= 0 || indices[i] < 0 || indices[i] >= dim) return false;
+        flat = flat * dim + indices[i];
+    }
+    if (flat < 0 || flat >= entry.arraySize) return false;
+    flatIndex = flat;
+    return true;
+}
+
+static GLint appglSubroutineUniformLocationCount(
+    const std::vector<appgl::GLProgramResourceEntry>& uniforms) {
+    GLint maxLocation = 0;
+    for (const auto& entry : uniforms) {
+        if (entry.location < 0) continue;
+        const GLint count = std::max<GLint>(1, entry.arraySize);
+        maxLocation = std::max(maxLocation, entry.location + count);
+    }
+    return maxLocation;
+}
+
+static std::string appglSubroutineDispatchKey(
+    const std::string& baseName,
+    GLint element,
+    GLint elementCount) {
+    if (elementCount <= 1) return baseName;
+    return baseName + "_" + std::to_string(element);
+}
+
 GLint APIENTRY glGetSubroutineUniformLocation(GLuint program, GLenum shadertype, const GLchar* name) {
     auto* ctx = requireCurrentContext("glGetSubroutineUniformLocation");
     if (!ctx) return -1;
@@ -7000,6 +7093,18 @@ GLint APIENTRY glGetSubroutineUniformLocation(GLuint program, GLenum shadertype,
     const std::string lookup = name;
     for (const auto& entry : prog->resourceSubroutineUniforms[si]) {
         if (entry.name == lookup) return entry.location;
+    }
+    std::string baseName;
+    std::vector<GLint> indices;
+    if (appglParseArrayElementLookup(lookup, baseName, indices) && !indices.empty()) {
+        GLint flatIndex = 0;
+        for (const auto& entry : prog->resourceSubroutineUniforms[si]) {
+            if (appglStripBracketZeroSuffix(entry.name) == baseName &&
+                entry.location >= 0 &&
+                appglFlattenArrayElementIndex(entry, indices, flatIndex)) {
+                return entry.location + flatIndex;
+            }
+        }
     }
     // Array subroutine uniforms are stored with a "[0]" suffix. Bare
     // name → suffixed lookup.
@@ -7030,7 +7135,10 @@ GLuint APIENTRY glGetSubroutineIndex(GLuint program, GLenum shadertype, const GL
     const std::string lookup = name;
     const auto& subs = prog->resourceSubroutines[si];
     for (std::size_t i = 0; i < subs.size(); ++i) {
-        if (subs[i].name == lookup) return static_cast<GLuint>(i);
+        if (subs[i].name == lookup) {
+            return static_cast<GLuint>(
+                subs[i].subroutineIndex >= 0 ? subs[i].subroutineIndex : static_cast<GLint>(i));
+        }
     }
     markProgramFunction(FunctionId::glGetSubroutineIndex, "Subroutine index via GL 4.0 program-resource tables.");
     Runtime::shared().recordBootstrapTrace("glGetSubroutineIndex(program=" + std::to_string(program) + ", name=" + std::string(name) + ") -> GL_INVALID_INDEX (not found)");
@@ -7113,35 +7221,49 @@ void APIENTRY glUniformSubroutinesuiv(GLenum shadertype, GLsizei count, const GL
         return;
     }
 
-    // Spec: count must equal the value of GL_ACTIVE_SUBROUTINE_UNIFORM_LOCATIONS
-    // for the stage (= max(location)+1 for active subroutine uniforms;
-    // since reflection populates locations contiguously from 0, this
-    // equals resourceSubroutineUniforms[si].size() in our impl).
+    // Spec: count must equal GL_ACTIVE_SUBROUTINE_UNIFORM_LOCATIONS,
+    // which is the active location span. Explicit locations can create
+    // holes, so this is max(location + arraySize), not the number of
+    // resource entries.
     const auto& unis = prog->resourceSubroutineUniforms[si];
-    if (count < 0 ||
-        static_cast<std::size_t>(count) != unis.size()) {
+    const GLint activeLocations = appglSubroutineUniformLocationCount(unis);
+    if (count < 0 || count != activeLocations) {
         recordValidationError(ctx, "glUniformSubroutinesuiv",
             GL_INVALID_VALUE,
             "count does not match active subroutine uniform locations");
         return;
     }
+    if (count > 0 && indices == nullptr) {
+        recordValidationError(ctx, "glUniformSubroutinesuiv",
+            GL_INVALID_VALUE, "indices array is null");
+        return;
+    }
 
-    // Update selections; validate each subroutine index.
+    // Update selections by public location and validate each selected
+    // public subroutine index against the uniform's compatible list.
     auto& selections = prog->currentSubroutineSelections[si];
-    selections.resize(unis.size());
-    const auto& subs = prog->resourceSubroutines[si];
-    for (GLsizei i = 0; i < count; ++i) {
-        if (indices == nullptr) {
-            recordValidationError(ctx, "glUniformSubroutinesuiv",
-                GL_INVALID_VALUE, "indices array is null");
-            return;
+    selections.assign(static_cast<std::size_t>(activeLocations), 0u);
+    for (const auto& u : unis) {
+        if (u.location < 0) continue;
+        const GLint elemCount = std::max<GLint>(1, u.arraySize);
+        for (GLint elem = 0; elem < elemCount; ++elem) {
+            const GLint loc = u.location + elem;
+            if (loc < 0 || loc >= activeLocations) {
+                recordValidationError(ctx, "glUniformSubroutinesuiv",
+                    GL_INVALID_VALUE, "subroutine uniform location out of range");
+                return;
+            }
+            const GLuint selected = indices[loc];
+            const auto& compatibles = u.activeVariables;
+            const bool found = std::find(
+                compatibles.begin(), compatibles.end(), static_cast<GLint>(selected)) != compatibles.end();
+            if (!found) {
+                recordValidationError(ctx, "glUniformSubroutinesuiv",
+                    GL_INVALID_VALUE, "subroutine index is not compatible with uniform");
+                return;
+            }
+            selections[static_cast<std::size_t>(loc)] = selected;
         }
-        if (static_cast<std::size_t>(indices[i]) >= subs.size()) {
-            recordValidationError(ctx, "glUniformSubroutinesuiv",
-                GL_INVALID_VALUE, "subroutine index out of range");
-            return;
-        }
-        selections[static_cast<std::size_t>(i)] = indices[i];
     }
     prog->subroutineSelectionsDirty = true;
 
@@ -7157,33 +7279,37 @@ void APIENTRY glUniformSubroutinesuiv(GLenum shadertype, GLsizei count, const GL
     // chain branches on TYPE-LOCAL impl position. Translate via the
     // subroutine uniform's `activeVariables` (compatible subroutines
     // listed in declaration order; matches the chain's branch order).
-    for (GLsizei i = 0; i < count; ++i) {
-        const auto& u = unis[static_cast<std::size_t>(i)];
-        auto locIt = prog->subroutineDispatchUniformLocations.find(u.name);
-        if (locIt == prog->subroutineDispatchUniformLocations.end()) {
-            // Not v1-eligible (or non-subroutine fallback); the
-            // rewriter emitted static FIRST_IMPL_NAME for this
-            // uniform. Nothing to push.
-            continue;
-        }
-        const auto& compatibles = u.activeVariables;
-        const GLint globalIdx = static_cast<GLint>(indices[i]);
-        std::size_t typeLocal = 0;
-        bool found = false;
-        for (std::size_t k = 0; k < compatibles.size(); ++k) {
-            if (compatibles[k] == globalIdx) {
-                typeLocal = k;
-                found = true;
-                break;
+    for (const auto& u : unis) {
+        if (u.location < 0) continue;
+        const std::string baseName = appglStripBracketZeroSuffix(u.name);
+        const GLint elemCount = std::max<GLint>(1, u.arraySize);
+        for (GLint elem = 0; elem < elemCount; ++elem) {
+            const GLint loc = u.location + elem;
+            if (loc < 0 || loc >= activeLocations) continue;
+            const std::string key = appglSubroutineDispatchKey(baseName, elem, elemCount);
+            auto locIt = prog->subroutineDispatchUniformLocations.find(key);
+            if (locIt == prog->subroutineDispatchUniformLocations.end()) {
+                continue;
             }
+            const auto& compatibles = u.activeVariables;
+            const GLint selected = static_cast<GLint>(selections[static_cast<std::size_t>(loc)]);
+            std::size_t typeLocal = 0;
+            bool found = false;
+            for (std::size_t k = 0; k < compatibles.size(); ++k) {
+                if (compatibles[k] == selected) {
+                    typeLocal = k;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) continue;
+            auto valIt = prog->uniformValues.find(locIt->second);
+            if (valIt == prog->uniformValues.end()) continue;
+            if (valIt->second.uints.empty()) {
+                valIt->second.uints.assign(1, 0u);
+            }
+            valIt->second.uints[0] = static_cast<GLuint>(typeLocal);
         }
-        if (!found) continue;  // INVALID_VALUE was already pushed above
-        auto valIt = prog->uniformValues.find(locIt->second);
-        if (valIt == prog->uniformValues.end()) continue;
-        if (valIt->second.uints.empty()) {
-            valIt->second.uints.assign(1, 0u);
-        }
-        valIt->second.uints[0] = static_cast<GLuint>(typeLocal);
     }
 
     markProgramFunction(FunctionId::glUniformSubroutinesuiv,
@@ -7232,9 +7358,9 @@ void APIENTRY glGetUniformSubroutineuiv(GLenum shadertype, GLint location, GLuin
         return;
     }
 
-    if (location < 0 ||
-        static_cast<std::size_t>(location) >=
-            prog->resourceSubroutineUniforms[si].size()) {
+    const GLint activeLocations = appglSubroutineUniformLocationCount(
+        prog->resourceSubroutineUniforms[si]);
+    if (location < 0 || location >= activeLocations) {
         recordValidationError(ctx, "glGetUniformSubroutineuiv",
             GL_INVALID_VALUE, "subroutine uniform location out of range");
         *params = 0;
@@ -7289,11 +7415,7 @@ void APIENTRY glGetProgramStageiv(GLuint program, GLenum shadertype, GLenum pnam
         return m;
     };
     auto totalLocations = [](const std::vector<appgl::GLProgramResourceEntry>& v) -> GLint {
-        GLint total = 0;
-        for (const auto& e : v) {
-            total += (e.arraySize > 0) ? e.arraySize : 1;
-        }
-        return total;
+        return appglSubroutineUniformLocationCount(v);
     };
     switch (pname) {
         case GL_ACTIVE_SUBROUTINES:

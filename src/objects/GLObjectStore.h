@@ -565,6 +565,14 @@ struct GLProgramResourceEntry {
     GLint location = -1;      // uniform location (glGetUniformLocation)
     GLint binding = -1;       // RC-D08: explicit layout(binding=N), -1 = unspecified
     GLint arraySize = 1;
+    // For GL subroutine implementation resources this is the public
+    // subroutine index returned by glGetSubroutineIndex. It differs
+    // from the resource-table position when layout(index=N) is used.
+    GLint subroutineIndex = -1;
+    // Array dimensions in declaration order for resources that need
+    // multidimensional array-element location flattening. arraySize is
+    // still the product/count reported through GL_ARRAY_SIZE.
+    std::vector<GLint> arrayDimensions;
     // GL 4.6 §7.3.1 distinguishes "scalar/vector uniform with
     // arraySize=1" (reports GL_ARRAY_SIZE=1) from "unbounded array
     // uniform with arraySize=0" (reports GL_ARRAY_SIZE=0). Both end

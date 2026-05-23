@@ -24746,6 +24746,11 @@ bool GLContext::compileShader(GLuint shader) {
         std::unordered_map<std::string, std::vector<std::string>> typeToImpls;
         std::unordered_map<std::string, std::string> uniformToType;
         std::unordered_map<std::string, std::string> implToPrototype;
+        struct SubUniformInfo {
+            std::string typeName;
+            std::vector<int> dims;
+        };
+        std::unordered_map<std::string, SubUniformInfo> subUniformInfo;
         // Sprint 17 Day 7+ Bank-Group-C dynamic-dispatch (v1):
         // capture subroutine-type prototype return-type + raw param
         // text. v1 covers void-return parameterless subroutines
@@ -24786,6 +24791,7 @@ bool GLContext::compileShader(GLuint shader) {
             while (pp < in.size() && isIdent(static_cast<unsigned char>(in[pp]))) ++pp;
             return in.substr(s, pp - s);
         };
+        const std::string kw = "subroutine";
         // GLSL `subroutine` is a keyword only at declaration position.
         // CTS `CommonBugs.CommonBug_ReservedNames` plants it as a
         // function-parameter name (`void foo(int subroutine) { ... }`)
@@ -24809,11 +24815,129 @@ bool GLContext::compileShader(GLuint shader) {
             }
             return true;  // start of source
         };
-        const std::string kw = "subroutine";
+        auto parseLayoutInteger = [&](const std::string& content, const char* key, GLint& value) {
+            const std::string keyStr = key;
+            std::size_t keyPos = content.find(keyStr);
+            while (keyPos != std::string::npos) {
+                const bool lb = (keyPos == 0) ||
+                    !isIdent(static_cast<unsigned char>(content[keyPos - 1]));
+                const std::size_t keyEnd = keyPos + keyStr.size();
+                const bool rb = (keyEnd == content.size()) ||
+                    !isIdent(static_cast<unsigned char>(content[keyEnd]));
+                if (lb && rb) break;
+                keyPos = content.find(keyStr, keyEnd);
+            }
+            if (keyPos == std::string::npos) return true;
+            const std::size_t eq = content.find('=', keyPos + keyStr.size());
+            if (eq == std::string::npos) return false;
+            std::size_t nb = eq + 1;
+            while (nb < content.size() && std::isspace(static_cast<unsigned char>(content[nb]))) ++nb;
+            if (nb >= content.size() || !std::isdigit(static_cast<unsigned char>(content[nb]))) {
+                return false;
+            }
+            std::size_t ne = nb;
+            if (ne + 1 < content.size() && content[ne] == '0' &&
+                (content[ne + 1] == 'x' || content[ne + 1] == 'X')) {
+                ne += 2;
+                const std::size_t hexStart = ne;
+                while (ne < content.size() && std::isxdigit(static_cast<unsigned char>(content[ne]))) ++ne;
+                if (ne == hexStart) return false;
+            } else {
+                while (ne < content.size() && std::isdigit(static_cast<unsigned char>(content[ne]))) ++ne;
+            }
+            value = static_cast<GLint>(std::strtol(content.substr(nb, ne - nb).c_str(), nullptr, 0));
+            return true;
+        };
+        auto layoutBeforeSubroutine = [&](std::size_t subPos,
+                                          std::size_t& layoutStart,
+                                          std::size_t& openParen,
+                                          std::size_t& closeParen) {
+            std::size_t back = subPos;
+            while (back > 0 && std::isspace(static_cast<unsigned char>(in[back - 1]))) --back;
+            if (back == 0 || in[back - 1] != ')') return false;
+            int pd = 1;
+            std::size_t bp = back - 1;
+            while (bp > 0 && pd > 0) {
+                --bp;
+                if (in[bp] == ')') ++pd;
+                else if (in[bp] == '(') --pd;
+            }
+            if (pd != 0) return false;
+            std::size_t lp = bp;
+            while (lp > 0 && std::isspace(static_cast<unsigned char>(in[lp - 1]))) --lp;
+            if (lp < 6 || in.compare(lp - 6, 6, "layout") != 0) return false;
+            layoutStart = lp - 6;
+            if (layoutStart > 0 &&
+                isIdent(static_cast<unsigned char>(in[layoutStart - 1]))) {
+                return false;
+            }
+            if (!isDeclPos(layoutStart)) return false;
+            openParen = bp;
+            closeParen = back - 1;
+            return true;
+        };
+        auto layoutQualifierIsNumeric = [&](std::size_t subPos) {
+            std::size_t layoutStart = 0;
+            std::size_t openParen = 0;
+            std::size_t closeParen = 0;
+            if (!layoutBeforeSubroutine(subPos, layoutStart, openParen, closeParen)) {
+                return false;
+            }
+            const std::string content = in.substr(openParen + 1, closeParen - openParen - 1);
+            GLint ignored = -1;
+            return parseLayoutInteger(content, "location", ignored) &&
+                   parseLayoutInteger(content, "index", ignored);
+        };
+        auto isSubroutineDeclPos = [&](std::size_t subPos) {
+            if (isDeclPos(subPos)) return true;
+            return layoutQualifierIsNumeric(subPos);
+        };
+        auto layoutAt = [&](std::size_t layoutStart, std::size_t& subPos) {
+            const std::string layoutKw = "layout";
+            if (layoutStart + layoutKw.size() > in.size() ||
+                in.compare(layoutStart, layoutKw.size(), layoutKw) != 0) {
+                return false;
+            }
+            const bool lb = (layoutStart == 0) ||
+                !isIdent(static_cast<unsigned char>(in[layoutStart - 1]));
+            const bool rb = (layoutStart + layoutKw.size() < in.size()) &&
+                !isIdent(static_cast<unsigned char>(in[layoutStart + layoutKw.size()]));
+            if (!lb || !rb || !isDeclPos(layoutStart)) return false;
+            std::size_t q = layoutStart + layoutKw.size();
+            skipWs(q);
+            if (q >= in.size() || in[q] != '(') return false;
+            int pd = 1;
+            const std::size_t openParen = q;
+            ++q;
+            while (q < in.size() && pd > 0) {
+                if (in[q] == '(') ++pd;
+                else if (in[q] == ')') --pd;
+                ++q;
+            }
+            if (pd != 0) return false;
+            const std::size_t closeParen = q - 1;
+            std::size_t after = q;
+            skipWs(after);
+            if (after + kw.size() > in.size() ||
+                in.compare(after, kw.size(), kw) != 0) {
+                return false;
+            }
+            const bool subRb = (after + kw.size() < in.size()) &&
+                !isIdent(static_cast<unsigned char>(in[after + kw.size()]));
+            if (!subRb) return false;
+            const std::string content = in.substr(openParen + 1, closeParen - openParen - 1);
+            GLint ignored = -1;
+            if (!parseLayoutInteger(content, "location", ignored) ||
+                !parseLayoutInteger(content, "index", ignored)) {
+                return false;
+            }
+            subPos = after;
+            return true;
+        };
         while ((p = in.find(kw, p)) != std::string::npos) {
             const bool lb = (p == 0) || !isIdent(static_cast<unsigned char>(in[p-1]));
             const bool rb = (p + kw.size() < in.size()) && !isIdent(static_cast<unsigned char>(in[p+kw.size()]));
-            if (!lb || !rb || !isDeclPos(p)) { p += kw.size(); continue; }
+            if (!lb || !rb || !isSubroutineDeclPos(p)) { p += kw.size(); continue; }
             std::size_t q = p + kw.size();
             skipWs(q);
             if (q < in.size() && in[q] == '(') {
@@ -24876,6 +25000,29 @@ bool GLContext::compileShader(GLuint shader) {
                 std::string uniName = readWord(q);
                 if (!uniName.empty() && !typeName.empty()) {
                     uniformToType[uniName] = typeName;
+                    std::vector<int> dims;
+                    std::size_t dimPos = q;
+                    skipWs(dimPos);
+                    while (dimPos < in.size() && in[dimPos] == '[') {
+                        ++dimPos;
+                        skipWs(dimPos);
+                        const std::size_t nStart = dimPos;
+                        while (dimPos < in.size() &&
+                               std::isdigit(static_cast<unsigned char>(in[dimPos]))) {
+                            ++dimPos;
+                        }
+                        int dim = 1;
+                        if (dimPos > nStart) {
+                            dim = std::atoi(in.substr(nStart, dimPos - nStart).c_str());
+                            if (dim < 1) dim = 1;
+                        }
+                        dims.push_back(dim);
+                        skipWs(dimPos);
+                        if (dimPos < in.size() && in[dimPos] == ']') ++dimPos;
+                        skipWs(dimPos);
+                    }
+                    subUniformInfo[uniName] = SubUniformInfo{typeName, std::move(dims)};
+                    q = dimPos;
                 }
                 p = q;
                 continue;
@@ -24969,39 +25116,134 @@ bool GLContext::compileShader(GLuint shader) {
                 }
             }
         }
+        auto trimCopy = [](std::string s) {
+            auto notSpace = [](unsigned char c) { return !std::isspace(c); };
+            s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
+            s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
+            return s;
+        };
+        auto elementCountForDims = [](const std::vector<int>& dims) {
+            int count = 1;
+            for (int dim : dims) count *= std::max(1, dim);
+            return count;
+        };
+        auto dispatchKeyForElement = [](const std::string& name, int elem, int elemCount) {
+            if (elemCount <= 1) return name;
+            return name + "_" + std::to_string(elem);
+        };
+        auto helperNameForKey = [](const std::string& key) {
+            return "_appgl_call_" + key;
+        };
+        auto parseParamNames = [&](const std::string& rawParams) {
+            std::vector<std::string> names;
+            if (rawParams.size() < 2 || rawParams.front() != '(' || rawParams.back() != ')') {
+                return names;
+            }
+            std::string body = trimCopy(rawParams.substr(1, rawParams.size() - 2));
+            if (body.empty() || body == "void") return names;
+            std::size_t start = 0;
+            int depth = 0;
+            auto consumeParam = [&](std::size_t begin, std::size_t end) {
+                std::string param = trimCopy(body.substr(begin, end - begin));
+                while (!param.empty() && param.back() == ']') {
+                    const std::size_t open = param.rfind('[');
+                    if (open == std::string::npos) break;
+                    param = trimCopy(param.substr(0, open));
+                }
+                std::size_t p = param.size();
+                while (p > 0 && !isIdent(static_cast<unsigned char>(param[p - 1]))) --p;
+                std::size_t e = p;
+                while (p > 0 && isIdent(static_cast<unsigned char>(param[p - 1]))) --p;
+                if (e > p) names.push_back(param.substr(p, e - p));
+            };
+            for (std::size_t idx = 0; idx <= body.size(); ++idx) {
+                if (idx == body.size() || (body[idx] == ',' && depth == 0)) {
+                    consumeParam(start, idx);
+                    start = idx + 1;
+                    continue;
+                }
+                if (body[idx] == '(' || body[idx] == '[') ++depth;
+                else if ((body[idx] == ')' || body[idx] == ']') && depth > 0) --depth;
+            }
+            return names;
+        };
+        struct DispatchHelperSpec {
+            std::string uniformName;
+            std::string key;
+            std::string typeName;
+            std::string retType;
+            std::string params;
+            std::vector<std::string> impls;
+        };
+        std::vector<DispatchHelperSpec> dispatchHelperSpecs;
+        std::unordered_map<std::string, std::string> dispatchHelperByKey;
+        for (const auto& name : subUniNames) {
+            auto infoIt = subUniformInfo.find(name);
+            auto typeIt = uniformToType.find(name);
+            if (typeIt == uniformToType.end()) continue;
+            const std::string& typeName = typeIt->second;
+            auto retIt = typeReturn.find(typeName);
+            auto parIt = typeParams.find(typeName);
+            auto implIt = typeToImpls.find(typeName);
+            if (retIt == typeReturn.end() || parIt == typeParams.end() ||
+                implIt == typeToImpls.end() || implIt->second.empty()) {
+                continue;
+            }
+            if (retIt->second == "void") {
+                continue;
+            }
+            std::vector<int> dims;
+            if (infoIt != subUniformInfo.end()) dims = infoIt->second.dims;
+            const int elemCount = elementCountForDims(dims);
+            for (int elem = 0; elem < elemCount; ++elem) {
+                const std::string key = dispatchKeyForElement(name, elem, elemCount);
+                dispatchHelperByKey[key] = helperNameForKey(key);
+                dispatchHelperSpecs.push_back(
+                    DispatchHelperSpec{name, key, typeName, retIt->second, parIt->second, implIt->second});
+            }
+        }
 
         // Second pass: rewrite.
         std::string out;
         out.reserve(in.size() + 64);
+        auto rewriteSubroutineDeclAt = [&](std::size_t subPos, std::size_t& nextPos) {
+            std::size_t q = subPos + kw.size();
+            skipWs(q);
+            if (q < in.size() && in[q] == '(') {
+                int pd = 1;
+                ++q;
+                while (q < in.size() && pd > 0) {
+                    if (in[q] == '(') ++pd;
+                    else if (in[q] == ')') --pd;
+                    ++q;
+                }
+                nextPos = q;
+                return true;
+            }
+            const std::size_t semi = in.find(';', q);
+            if (semi != std::string::npos) {
+                nextPos = semi + 1;
+                return true;
+            }
+            nextPos = q;
+            return true;
+        };
         std::size_t i = 0;
         while (i < in.size()) {
+            std::size_t layoutSubPos = 0;
+            if (layoutAt(i, layoutSubPos)) {
+                if (rewriteSubroutineDeclAt(layoutSubPos, i)) {
+                    continue;
+                }
+            }
             // Find `subroutine` word at this position?
             if (i + kw.size() <= in.size() && in.compare(i, kw.size(), kw) == 0) {
                 const bool lb = (i == 0) || !isIdent(static_cast<unsigned char>(in[i-1]));
                 const bool rb = (i + kw.size() < in.size()) && !isIdent(static_cast<unsigned char>(in[i+kw.size()]));
-                if (lb && rb && isDeclPos(i)) {
-                    std::size_t q = i + kw.size();
-                    skipWs(q);
-                    if (q < in.size() && in[q] == '(') {
-                        // Impl — strip `subroutine(LIST)` prefix. Walk past ')'.
-                        int pd = 1; ++q;
-                        while (q < in.size() && pd > 0) {
-                            if (in[q] == '(') ++pd;
-                            else if (in[q] == ')') --pd;
-                            ++q;
-                        }
-                        i = q;  // skip the whole `subroutine(LIST)`
+                if (lb && rb && isSubroutineDeclPos(i)) {
+                    if (rewriteSubroutineDeclAt(i, i)) {
                         continue;
                     }
-                    // Type prototype or uniform: delete to end of
-                    // statement (next `;`).
-                    const std::size_t semi = in.find(';', q);
-                    if (semi != std::string::npos) {
-                        i = semi + 1;
-                        continue;
-                    }
-                    // No semicolon found — skip just the keyword.
-                    i = q;
                     continue;
                 }
             }
@@ -25019,21 +25261,72 @@ bool GLContext::compileShader(GLuint shader) {
                 // impl.
                 std::size_t t = s;
                 skipWs(t);
-                // Walk past `[...]` if present (array subscript).
+                // Walk past one or more `[...]` segments if present
+                // (including multidimensional subroutine uniforms).
                 std::size_t afterSubscript = t;
-                if (t < in.size() && in[t] == '[') {
+                std::vector<int> callIndices;
+                bool constIndices = true;
+                while (afterSubscript < in.size() && in[afterSubscript] == '[') {
+                    const std::size_t contentStart = afterSubscript + 1;
                     int bd = 1;
-                    afterSubscript = t + 1;
-                    while (afterSubscript < in.size() && bd > 0) {
-                        if (in[afterSubscript] == '[') ++bd;
-                        else if (in[afterSubscript] == ']') --bd;
-                        ++afterSubscript;
+                    std::size_t q = contentStart;
+                    while (q < in.size() && bd > 0) {
+                        if (in[q] == '[') ++bd;
+                        else if (in[q] == ']') --bd;
+                        if (bd > 0) ++q;
                     }
+                    if (q >= in.size()) {
+                        constIndices = false;
+                        afterSubscript = q;
+                        break;
+                    }
+                    std::string idxText = trimCopy(in.substr(contentStart, q - contentStart));
+                    if (idxText.empty()) {
+                        constIndices = false;
+                    } else {
+                        int idxVal = 0;
+                        for (char c : idxText) {
+                            if (c < '0' || c > '9') {
+                                constIndices = false;
+                                break;
+                            }
+                            idxVal = idxVal * 10 + (c - '0');
+                        }
+                        if (constIndices) callIndices.push_back(idxVal);
+                    }
+                    afterSubscript = q + 1;
+                    skipWs(afterSubscript);
                 }
                 std::size_t tt = afterSubscript;
                 skipWs(tt);
                 auto it = uniformToImpl.find(word);
                 if (it != uniformToImpl.end() && tt < in.size() && in[tt] == '(') {
+                    std::string dispatchKey = word;
+                    auto infoIt = subUniformInfo.find(word);
+                    if (infoIt != subUniformInfo.end() && !infoIt->second.dims.empty()) {
+                        const auto& dims = infoIt->second.dims;
+                        const int elemCount = elementCountForDims(dims);
+                        bool flattened = constIndices && callIndices.size() == dims.size();
+                        int flat = 0;
+                        if (flattened) {
+                            for (std::size_t k = 0; k < dims.size(); ++k) {
+                                if (callIndices[k] < 0 || callIndices[k] >= dims[k]) {
+                                    flattened = false;
+                                    break;
+                                }
+                                flat = flat * dims[k] + callIndices[k];
+                            }
+                        }
+                        if (flattened) {
+                            dispatchKey = dispatchKeyForElement(word, flat, elemCount);
+                        }
+                    }
+                    auto helperIt = dispatchHelperByKey.find(dispatchKey);
+                    if (helperIt != dispatchHelperByKey.end()) {
+                        out.append(helperIt->second);
+                        i = afterSubscript;
+                        continue;
+                    }
                     // Sprint 17 Day 7+ Bank-Group-C: v1-eligible (void
                     // return, no params) + statement-position call site
                     // → emit inline if-else dispatch chain consuming
@@ -25175,6 +25468,63 @@ bool GLContext::compileShader(GLuint shader) {
             for (const auto& name : protoNames) {
                 synthHeader += implToPrototype[name];
                 synthHeader += "\n";
+            }
+        }
+        if (!dispatchHelperSpecs.empty()) {
+            if (synthHeader.empty()) {
+                synthHeader = "// appgl: subroutine dynamic-dispatch helpers\n";
+            } else {
+                synthHeader += "// appgl: subroutine dynamic-dispatch helpers\n";
+            }
+            std::sort(dispatchHelperSpecs.begin(), dispatchHelperSpecs.end(),
+                [](const DispatchHelperSpec& a, const DispatchHelperSpec& b) {
+                    return a.key < b.key;
+                });
+            for (const auto& spec : dispatchHelperSpecs) {
+                synthHeader += "uniform uint _appgl_sub_";
+                synthHeader += spec.key;
+                synthHeader += ";\n";
+            }
+            for (const auto& spec : dispatchHelperSpecs) {
+                const std::vector<std::string> paramNames = parseParamNames(spec.params);
+                std::string args;
+                for (std::size_t pi = 0; pi < paramNames.size(); ++pi) {
+                    if (pi > 0) args += ", ";
+                    args += paramNames[pi];
+                }
+                synthHeader += spec.retType;
+                synthHeader += " ";
+                synthHeader += helperNameForKey(spec.key);
+                synthHeader += spec.params;
+                synthHeader += " {\n";
+                if (spec.impls.size() == 1) {
+                    synthHeader += "    return ";
+                    synthHeader += spec.impls.front();
+                    synthHeader += "(";
+                    synthHeader += args;
+                    synthHeader += ");\n";
+                } else {
+                    for (std::size_t k = 0; k < spec.impls.size(); ++k) {
+                        if (k == 0) {
+                            synthHeader += "    if (_appgl_sub_";
+                            synthHeader += spec.key;
+                            synthHeader += " == 0u) return ";
+                        } else if (k + 1 < spec.impls.size()) {
+                            synthHeader += "    else if (_appgl_sub_";
+                            synthHeader += spec.key;
+                            synthHeader += " == ";
+                            synthHeader += std::to_string(k);
+                            synthHeader += "u) return ";
+                        } else {
+                            synthHeader += "    else return ";
+                        }
+                        synthHeader += spec.impls[k];
+                        synthHeader += "(";
+                        synthHeader += args;
+                        synthHeader += ");\n";
+                    }
+                }
+                synthHeader += "}\n";
             }
         }
         for (const auto& n : subUniNames) {
@@ -26582,8 +26932,6 @@ static void scanSubroutineDeclarations(
     const std::string& sourceIn,
     std::vector<GLProgramResourceEntry>& outImpls,
     std::vector<GLProgramResourceEntry>& outUniforms) {
-    // Strip comments first so keyword matches inside strings / comments
-    // don't trip the scanner.
     auto strip = [](const std::string& s) {
         std::string out;
         out.reserve(s.size());
@@ -26614,11 +26962,122 @@ static void scanSubroutineDeclarations(
         while (p < src.size() && isIdentChar(static_cast<unsigned char>(src[p]))) ++p;
         return src.substr(start, p - start);
     };
+    auto isDeclPos = [&](std::size_t p) {
+        while (p > 0) {
+            unsigned char c = static_cast<unsigned char>(src[p - 1]);
+            if (std::isspace(c)) {
+                --p;
+                continue;
+            }
+            return c == ';' || c == '{' || c == '}';
+        }
+        return true;
+    };
+    struct LayoutQualifier {
+        GLint location = -1;
+        GLint index = -1;
+    };
+    auto parseLayoutInteger = [&](const std::string& content, const char* key, GLint& value) {
+        const std::string keyStr = key;
+        std::size_t keyPos = content.find(keyStr);
+        while (keyPos != std::string::npos) {
+            const bool lb = (keyPos == 0) ||
+                !isIdentChar(static_cast<unsigned char>(content[keyPos - 1]));
+            const std::size_t keyEnd = keyPos + keyStr.size();
+            const bool rb = (keyEnd == content.size()) ||
+                !isIdentChar(static_cast<unsigned char>(content[keyEnd]));
+            if (lb && rb) break;
+            keyPos = content.find(keyStr, keyEnd);
+        }
+        if (keyPos == std::string::npos) return false;
+        const std::size_t eq = content.find('=', keyPos + keyStr.size());
+        if (eq == std::string::npos) return false;
+        std::size_t nb = eq + 1;
+        while (nb < content.size() && std::isspace(static_cast<unsigned char>(content[nb]))) ++nb;
+        if (nb >= content.size() || !std::isdigit(static_cast<unsigned char>(content[nb]))) {
+            return false;
+        }
+        std::size_t ne = nb;
+        if (ne + 1 < content.size() && content[ne] == '0' &&
+            (content[ne + 1] == 'x' || content[ne + 1] == 'X')) {
+            ne += 2;
+            const std::size_t hexStart = ne;
+            while (ne < content.size() && std::isxdigit(static_cast<unsigned char>(content[ne]))) ++ne;
+            if (ne == hexStart) return false;
+        } else {
+            while (ne < content.size() && std::isdigit(static_cast<unsigned char>(content[ne]))) ++ne;
+        }
+        value = static_cast<GLint>(std::strtol(content.substr(nb, ne - nb).c_str(), nullptr, 0));
+        return true;
+    };
+    auto findLayoutBeforeSubroutine = [&](std::size_t subPos,
+                                          std::size_t& layoutStart,
+                                          std::size_t& openParen,
+                                          std::size_t& closeParen) {
+        std::size_t back = subPos;
+        while (back > 0 && std::isspace(static_cast<unsigned char>(src[back - 1]))) --back;
+        if (back == 0 || src[back - 1] != ')') return false;
+        int pd = 1;
+        std::size_t bp = back - 1;
+        while (bp > 0 && pd > 0) {
+            --bp;
+            if (src[bp] == ')') ++pd;
+            else if (src[bp] == '(') --pd;
+        }
+        if (pd != 0) return false;
+        std::size_t lp = bp;
+        while (lp > 0 && std::isspace(static_cast<unsigned char>(src[lp - 1]))) --lp;
+        if (lp < 6 || src.compare(lp - 6, 6, "layout") != 0) return false;
+        layoutStart = lp - 6;
+        if (layoutStart > 0 &&
+            isIdentChar(static_cast<unsigned char>(src[layoutStart - 1]))) {
+            return false;
+        }
+        if (!isDeclPos(layoutStart)) return false;
+        openParen = bp;
+        closeParen = back - 1;
+        return true;
+    };
+    auto parseLayoutBefore = [&](std::size_t subPos, LayoutQualifier& layout) {
+        std::size_t layoutStart = 0;
+        std::size_t openParen = 0;
+        std::size_t closeParen = 0;
+        if (!findLayoutBeforeSubroutine(subPos, layoutStart, openParen, closeParen)) {
+            return false;
+        }
+        const std::string content = src.substr(openParen + 1, closeParen - openParen - 1);
+        parseLayoutInteger(content, "location", layout.location);
+        parseLayoutInteger(content, "index", layout.index);
+        return true;
+    };
+    auto isSubroutineDeclPos = [&](std::size_t subPos) {
+        if (isDeclPos(subPos)) return true;
+        std::size_t layoutStart = 0;
+        std::size_t openParen = 0;
+        std::size_t closeParen = 0;
+        return findLayoutBeforeSubroutine(subPos, layoutStart, openParen, closeParen);
+    };
+    auto parseArrayDimensions = [&](std::size_t& p, std::vector<GLint>& dims) {
+        dims.clear();
+        skipWs(p);
+        while (p < src.size() && src[p] == '[') {
+            ++p;
+            skipWs(p);
+            const std::size_t nStart = p;
+            while (p < src.size() && std::isdigit(static_cast<unsigned char>(src[p]))) ++p;
+            GLint dim = 1;
+            if (p > nStart) {
+                dim = std::atoi(src.substr(nStart, p - nStart).c_str());
+                if (dim < 1) dim = 1;
+            }
+            dims.push_back(dim);
+            skipWs(p);
+            if (p < src.size() && src[p] == ']') ++p;
+            skipWs(p);
+        }
+    };
 
-    // Map: compatibility-type name → list of impl-resource indices.
     std::unordered_map<std::string, std::vector<GLint>> typeToImpls;
-    // Parallel to outUniforms: the subroutine-type name each uniform
-    // points at (resolved to activeVariables after the main scan).
     std::vector<std::string> pendingUniformTypes;
 
     const std::string kw = "subroutine";
@@ -26628,65 +27087,18 @@ static void scanSubroutineDeclarations(
             !isIdentChar(static_cast<unsigned char>(src[pos - 1]));
         const bool rightBoundary = (pos + kw.size() < src.size()) &&
             !isIdentChar(static_cast<unsigned char>(src[pos + kw.size()]));
-        if (!leftBoundary || !rightBoundary) {
+        if (!leftBoundary || !rightBoundary || !isSubroutineDeclPos(pos)) {
             pos += kw.size();
             continue;
         }
-        // Check for a preceding `layout(location = N)` qualifier on
-        // the subroutine-uniform declaration. GL 4.2
-        // `layout(location=N) subroutine uniform ...` lets the app
-        // pin the subroutine-uniform location. Walk backwards from
-        // `pos` past whitespace and inspect the balanced
-        // `layout(...)` block if present.
-        GLint explicitLocation = -1;
-        {
-            std::size_t back = pos;
-            while (back > 0 && std::isspace(static_cast<unsigned char>(src[back - 1]))) --back;
-            if (back > 0 && src[back - 1] == ')') {
-                // Find matching '('.
-                int pd = 1;
-                std::size_t bp = back - 1;
-                while (bp > 0 && pd > 0) {
-                    --bp;
-                    if (src[bp] == ')') ++pd;
-                    else if (src[bp] == '(') --pd;
-                }
-                if (pd == 0 && bp >= 6) {
-                    std::size_t lp = bp;
-                    while (lp > 0 && std::isspace(static_cast<unsigned char>(src[lp - 1]))) --lp;
-                    if (lp >= 6 && src.compare(lp - 6, 6, "layout") == 0) {
-                        // Parse "location = N" inside the parens.
-                        std::size_t inner = bp + 1;
-                        std::size_t innerEnd = back - 1;
-                        std::string content = src.substr(inner, innerEnd - inner);
-                        std::size_t loc = content.find("location");
-                        if (loc != std::string::npos) {
-                            std::size_t eq = content.find('=', loc);
-                            if (eq != std::string::npos) {
-                                std::size_t nb = eq + 1;
-                                while (nb < content.size() &&
-                                       std::isspace(static_cast<unsigned char>(content[nb]))) ++nb;
-                                std::size_t ne = nb;
-                                while (ne < content.size() &&
-                                       (std::isdigit(static_cast<unsigned char>(content[ne])) ||
-                                        content[ne] == 'x' || content[ne] == 'X')) ++ne;
-                                if (ne > nb) {
-                                    explicitLocation = static_cast<GLint>(
-                                        std::strtol(content.substr(nb, ne - nb).c_str(), nullptr, 0));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+
+        LayoutQualifier layout;
+        parseLayoutBefore(pos, layout);
         std::size_t p = pos + kw.size();
         skipWs(p);
 
-        // Three shapes: `uniform`, `(`, or plain identifier.
         if (p < src.size() && src[p] == '(') {
-            // Subroutine implementation: `subroutine ( typeList ) rettype name() { ... }`.
-            ++p;  // skip '('
+            ++p;
             std::vector<std::string> typeList;
             while (p < src.size() && src[p] != ')') {
                 skipWs(p);
@@ -26697,30 +27109,28 @@ static void scanSubroutineDeclarations(
                 if (p < src.size() && src[p] == ',') ++p;
             }
             if (p < src.size() && src[p] == ')') ++p;
-            // Parse rettype and function name.
             std::string retType = readIdent(p);
             (void)retType;
             std::string fnName = readIdent(p);
             if (fnName.empty()) { pos = p; continue; }
-            // Skip past the parameter list ( ... ) and find the body {.
             skipWs(p);
             if (p < src.size() && src[p] == '(') {
-                int pd = 1; ++p;
+                int pd = 1;
+                ++p;
                 while (p < src.size() && pd > 0) {
                     if (src[p] == '(') ++pd;
                     else if (src[p] == ')') --pd;
                     ++p;
                 }
             }
-            // Push impl entry.
             GLProgramResourceEntry entry;
             entry.name = fnName;
-            entry.type = 0;           // subroutines have no scalar type
-            entry.location = -1;      // not location-addressable
+            entry.type = 0;
+            entry.location = -1;
             entry.arraySize = 1;
+            entry.subroutineIndex = layout.index;
             const GLint implIdx = static_cast<GLint>(outImpls.size());
             outImpls.push_back(std::move(entry));
-            // Register this impl as compatible with each type in the list.
             for (const auto& t : typeList) {
                 typeToImpls[t].push_back(implIdx);
             }
@@ -26728,67 +27138,93 @@ static void scanSubroutineDeclarations(
             continue;
         }
 
-        // Check for `uniform` keyword.
         std::string next = readIdent(p);
         if (next == "uniform") {
-            // Subroutine uniform: `subroutine uniform <typeName> <uniName> [ [N] ] ;`.
             std::string typeName = readIdent(p);
             std::string uniName = readIdent(p);
             if (uniName.empty() || typeName.empty()) { pos = p; continue; }
+            std::vector<GLint> dims;
+            parseArrayDimensions(p, dims);
             GLint arraySize = 1;
-            bool isArray = false;
-            skipWs(p);
-            if (p < src.size() && src[p] == '[') {
-                ++p;
-                skipWs(p);
-                const std::size_t nStart = p;
-                while (p < src.size() &&
-                       std::isdigit(static_cast<unsigned char>(src[p]))) ++p;
-                if (p > nStart) {
-                    arraySize = std::atoi(src.substr(nStart, p - nStart).c_str());
-                }
-                skipWs(p);
-                if (p < src.size() && src[p] == ']') ++p;
-                isArray = true;
+            for (GLint dim : dims) {
+                arraySize *= dim;
             }
+            const bool isArray = !dims.empty();
             GLProgramResourceEntry entry;
-            // GL 4.6 §7.3.1: array uniforms (including subroutine
-            // array uniforms) report the canonical "[0]" suffix.
             entry.name = isArray ? (uniName + "[0]") : uniName;
-            entry.type = 0;  // subroutine uniforms have no scalar type
-            // GL 4.2 `layout(location=N) subroutine uniform …` pins
-            // the uniform's location. Fall back to sequential
-            // assignment when no explicit location is given.
-            entry.location = explicitLocation >= 0
-                ? explicitLocation
-                : static_cast<GLint>(outUniforms.size());
+            entry.type = 0;
+            entry.location = layout.location;
             entry.arraySize = arraySize;
             entry.isArray = isArray;
+            entry.arrayDimensions = std::move(dims);
             outUniforms.push_back(std::move(entry));
-            // Record the subroutine-type name for post-scan
-            // resolution into activeVariables (compatible-subroutine
-            // indices).
             pendingUniformTypes.push_back(typeName);
             pos = p;
             continue;
         }
 
-        // Otherwise: subroutine type prototype — e.g. `subroutine vec4 a_t();`.
-        // `next` is the return-type word. Read the type name next.
         std::string typeName = readIdent(p);
         (void)typeName;
-        // No action — types are resolved via `subroutine uniform <type> …`
-        // and `subroutine(<type>) …` matches.
         pos = p;
     }
 
-    // Second pass: resolve each subroutine uniform's compatibleSubroutines
-    // list from `typeToImpls` using the sibling `pendingUniformTypes`.
+    std::unordered_set<GLint> usedSubroutineIndices;
+    for (const auto& impl : outImpls) {
+        if (impl.subroutineIndex >= 0) {
+            usedSubroutineIndices.insert(impl.subroutineIndex);
+        }
+    }
+    GLint nextSubroutineIndex = 0;
+    for (auto& impl : outImpls) {
+        if (impl.subroutineIndex >= 0) continue;
+        while (usedSubroutineIndices.find(nextSubroutineIndex) != usedSubroutineIndices.end()) {
+            ++nextSubroutineIndex;
+        }
+        impl.subroutineIndex = nextSubroutineIndex;
+        usedSubroutineIndices.insert(nextSubroutineIndex);
+    }
+
+    std::unordered_set<GLint> usedUniformLocations;
+    for (const auto& uni : outUniforms) {
+        if (uni.location < 0) continue;
+        const GLint count = std::max<GLint>(1, uni.arraySize);
+        for (GLint i = 0; i < count; ++i) {
+            usedUniformLocations.insert(uni.location + i);
+        }
+    }
+    auto uniformRangeAvailable = [&](GLint base, GLint count) {
+        for (GLint i = 0; i < count; ++i) {
+            if (usedUniformLocations.find(base + i) != usedUniformLocations.end()) {
+                return false;
+            }
+        }
+        return true;
+    };
+    GLint nextUniformLocation = 0;
+    for (auto& uni : outUniforms) {
+        if (uni.location >= 0) continue;
+        const GLint count = std::max<GLint>(1, uni.arraySize);
+        while (!uniformRangeAvailable(nextUniformLocation, count)) {
+            ++nextUniformLocation;
+        }
+        uni.location = nextUniformLocation;
+        for (GLint i = 0; i < count; ++i) {
+            usedUniformLocations.insert(uni.location + i);
+        }
+    }
+
     for (std::size_t u = 0; u < pendingUniformTypes.size() && u < outUniforms.size(); ++u) {
         const std::string& typeName = pendingUniformTypes[u];
         auto it = typeToImpls.find(typeName);
-        if (it != typeToImpls.end()) {
-            outUniforms[u].activeVariables = it->second;
+        if (it == typeToImpls.end()) continue;
+        outUniforms[u].activeVariables.clear();
+        for (GLint implTableIndex : it->second) {
+            if (implTableIndex < 0 ||
+                static_cast<std::size_t>(implTableIndex) >= outImpls.size()) {
+                continue;
+            }
+            outUniforms[u].activeVariables.push_back(
+                outImpls[static_cast<std::size_t>(implTableIndex)].subroutineIndex);
         }
     }
 }
@@ -28623,6 +29059,10 @@ bool GLContext::linkProgram(GLuint program) {
             impl_->capabilities->queryInteger(
                 GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS, &maxSrUnifLoc);
         }
+        GLint maxSubroutines = 1024;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(GL_MAX_SUBROUTINES, &maxSubroutines);
+        }
         // Per-stage parse. Returns false + sets linkLog on first
         // spec violation (so the link fails with a descriptive
         // message).
@@ -28648,7 +29088,9 @@ bool GLContext::linkProgram(GLuint program) {
         auto validateStage = [&](const std::string& sourceIn) -> bool {
             const std::string src = stripComments(sourceIn);
             std::unordered_set<GLint> usedLocations;
+            std::unordered_set<GLint> usedIndices;
             std::size_t totalLocations = 0;
+            std::size_t totalSubroutines = 0;
             const std::string kw = "subroutine";
             std::size_t pos = 0;
             while ((pos = src.find(kw, pos)) != std::string::npos) {
@@ -28659,6 +29101,7 @@ bool GLContext::linkProgram(GLuint program) {
                 if (!lb || !rb) { pos += kw.size(); continue; }
                 // Walk backward for `layout(location=K)` qualifier.
                 GLint explicitLoc = -1;
+                GLint explicitIndex = -1;
                 {
                     std::size_t back = pos;
                     while (back > 0 && std::isspace(
@@ -28686,11 +29129,41 @@ bool GLContext::linkProgram(GLuint program) {
                                         while (nb < content.size() &&
                                                std::isspace(static_cast<unsigned char>(content[nb]))) ++nb;
                                         std::size_t ne = nb;
-                                        while (ne < content.size() &&
-                                               (std::isdigit(static_cast<unsigned char>(content[ne])) ||
-                                                content[ne] == 'x' || content[ne] == 'X')) ++ne;
+                                        if (ne + 1 < content.size() && content[ne] == '0' &&
+                                            (content[ne + 1] == 'x' || content[ne + 1] == 'X')) {
+                                            ne += 2;
+                                            while (ne < content.size() &&
+                                                   std::isxdigit(static_cast<unsigned char>(content[ne]))) ++ne;
+                                        } else {
+                                            while (ne < content.size() &&
+                                                   std::isdigit(static_cast<unsigned char>(content[ne]))) ++ne;
+                                        }
                                         if (ne > nb) {
                                             explicitLoc = static_cast<GLint>(
+                                                std::strtol(content.substr(nb, ne - nb).c_str(),
+                                                            nullptr, 0));
+                                        }
+                                    }
+                                }
+                                std::size_t idx = content.find("index");
+                                if (idx != std::string::npos) {
+                                    std::size_t eq = content.find('=', idx);
+                                    if (eq != std::string::npos) {
+                                        std::size_t nb = eq + 1;
+                                        while (nb < content.size() &&
+                                               std::isspace(static_cast<unsigned char>(content[nb]))) ++nb;
+                                        std::size_t ne = nb;
+                                        if (ne + 1 < content.size() && content[ne] == '0' &&
+                                            (content[ne + 1] == 'x' || content[ne + 1] == 'X')) {
+                                            ne += 2;
+                                            while (ne < content.size() &&
+                                                   std::isxdigit(static_cast<unsigned char>(content[ne]))) ++ne;
+                                        } else {
+                                            while (ne < content.size() &&
+                                                   std::isdigit(static_cast<unsigned char>(content[ne]))) ++ne;
+                                        }
+                                        if (ne > nb) {
+                                            explicitIndex = static_cast<GLint>(
                                                 std::strtol(content.substr(nb, ne - nb).c_str(),
                                                             nullptr, 0));
                                         }
@@ -28702,6 +29175,32 @@ bool GLContext::linkProgram(GLuint program) {
                 }
                 std::size_t p = pos + kw.size();
                 while (p < src.size() && std::isspace(static_cast<unsigned char>(src[p]))) ++p;
+                if (p < src.size() && src[p] == '(') {
+                    ++totalSubroutines;
+                    if (static_cast<GLint>(totalSubroutines) > maxSubroutines) {
+                        programObject->linkLog =
+                            "subroutine count exceeds GL_MAX_SUBROUTINES="
+                            + std::to_string(maxSubroutines);
+                        return false;
+                    }
+                    if (explicitIndex >= 0) {
+                        if (explicitIndex >= maxSubroutines) {
+                            programObject->linkLog =
+                                "subroutine index "
+                                + std::to_string(explicitIndex)
+                                + " >= GL_MAX_SUBROUTINES="
+                                + std::to_string(maxSubroutines);
+                            return false;
+                        }
+                        if (!usedIndices.insert(explicitIndex).second) {
+                            programObject->linkLog =
+                                "subroutine index "
+                                + std::to_string(explicitIndex)
+                                + " is reused across two declarations";
+                            return false;
+                        }
+                    }
+                }
                 // Only `subroutine uniform …` shapes consume locations.
                 if (p + 7 <= src.size() && src.compare(p, 7, "uniform") == 0 &&
                     (p + 7 == src.size() || !isIdentCh(static_cast<unsigned char>(src[p + 7])))) {
@@ -44095,6 +44594,91 @@ bool GLContext::getActiveAtomicCounterBufferiv(GLuint program, GLuint bufferInde
 
 namespace {
 
+bool isSubroutineResourceInterface(GLenum programInterface) {
+    switch (programInterface) {
+        case GL_VERTEX_SUBROUTINE:
+        case GL_TESS_CONTROL_SUBROUTINE:
+        case GL_TESS_EVALUATION_SUBROUTINE:
+        case GL_GEOMETRY_SUBROUTINE:
+        case GL_FRAGMENT_SUBROUTINE:
+        case GL_COMPUTE_SUBROUTINE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+std::string stripBracketZeroSuffix(const std::string& n) {
+    if (n.size() >= 3 && n.compare(n.size() - 3, 3, "[0]") == 0) {
+        return n.substr(0, n.size() - 3);
+    }
+    return n;
+}
+
+bool parseStrictArrayIndex(const std::string& s, long& out) {
+    if (s.empty()) return false;
+    if (s[0] == '0' && s.size() > 1) return false;
+    for (char c : s) {
+        if (c < '0' || c > '9') return false;
+    }
+    char* endp = nullptr;
+    out = std::strtol(s.c_str(), &endp, 10);
+    return out >= 0;
+}
+
+bool parseArrayElementLookup(
+    const std::string& lookup,
+    std::string& baseName,
+    std::vector<GLint>& indices) {
+    indices.clear();
+    const std::size_t firstBracket = lookup.find('[');
+    if (firstBracket == std::string::npos) {
+        baseName = lookup;
+        return !baseName.empty();
+    }
+    baseName = lookup.substr(0, firstBracket);
+    if (baseName.empty()) return false;
+    std::size_t p = firstBracket;
+    while (p < lookup.size()) {
+        if (lookup[p] != '[') return false;
+        const std::size_t close = lookup.find(']', p + 1);
+        if (close == std::string::npos) return false;
+        long idx = 0;
+        if (!parseStrictArrayIndex(lookup.substr(p + 1, close - p - 1), idx)) {
+            return false;
+        }
+        indices.push_back(static_cast<GLint>(idx));
+        p = close + 1;
+    }
+    return !indices.empty();
+}
+
+bool flattenArrayElementIndex(
+    const GLProgramResourceEntry& entry,
+    const std::vector<GLint>& indices,
+    GLint& flatIndex) {
+    if (indices.empty()) {
+        flatIndex = 0;
+        return true;
+    }
+    if (entry.arrayDimensions.empty()) {
+        if (indices.size() != 1) return false;
+        if (indices[0] < 0 || indices[0] >= entry.arraySize) return false;
+        flatIndex = indices[0];
+        return true;
+    }
+    if (indices.size() != entry.arrayDimensions.size()) return false;
+    GLint flat = 0;
+    for (std::size_t i = 0; i < indices.size(); ++i) {
+        const GLint dim = entry.arrayDimensions[i];
+        if (dim <= 0 || indices[i] < 0 || indices[i] >= dim) return false;
+        flat = flat * dim + indices[i];
+    }
+    if (flat < 0 || flat >= entry.arraySize) return false;
+    flatIndex = flat;
+    return true;
+}
+
 const std::vector<GLProgramResourceEntry>* getResourceTable(const GLProgramObject& prog, GLenum programInterface) {
     switch (programInterface) {
         case GL_UNIFORM:                      return &prog.resourceUniforms;
@@ -44676,6 +45260,10 @@ GLuint GLContext::getProgramResourceIndex(GLuint program, GLenum programInterfac
     }
     for (std::size_t i = 0; i < table->size(); ++i) {
         if ((*table)[i].name == name) {
+            if (isSubroutineResourceInterface(programInterface) &&
+                (*table)[i].subroutineIndex >= 0) {
+                return static_cast<GLuint>((*table)[i].subroutineIndex);
+            }
             return static_cast<GLuint>(i);
         }
     }
@@ -44692,6 +45280,10 @@ GLuint GLContext::getProgramResourceIndex(GLuint program, GLenum programInterfac
         const std::string suffixed = query + "[0]";
         for (std::size_t i = 0; i < table->size(); ++i) {
             if ((*table)[i].name == suffixed) {
+                if (isSubroutineResourceInterface(programInterface) &&
+                    (*table)[i].subroutineIndex >= 0) {
+                    return static_cast<GLuint>((*table)[i].subroutineIndex);
+                }
                 return static_cast<GLuint>(i);
             }
         }
@@ -44701,6 +45293,10 @@ GLuint GLContext::getProgramResourceIndex(GLuint program, GLenum programInterfac
         const std::string baseOnly = query.substr(0, query.size() - 3);
         for (std::size_t i = 0; i < table->size(); ++i) {
             if ((*table)[i].name == baseOnly) {
+                if (isSubroutineResourceInterface(programInterface) &&
+                    (*table)[i].subroutineIndex >= 0) {
+                    return static_cast<GLuint>((*table)[i].subroutineIndex);
+                }
                 return static_cast<GLuint>(i);
             }
         }
@@ -44764,12 +45360,6 @@ GLint GLContext::getProgramResourceLocation(GLuint program, GLenum programInterf
     // Entries in the resource table may be stored under either a
     // bare base name ("u") or a "[0]"-suffixed canonical form ("u[0]"
     // for arrays — GL 4.6 §7.3.1 mandate). Match both shapes here.
-    auto stripBracketZero = [](const std::string& n) -> std::string {
-        if (n.size() >= 3 && n.compare(n.size() - 3, 3, "[0]") == 0) {
-            return n.substr(0, n.size() - 3);
-        }
-        return n;
-    };
     // GL 4.6 §7.3.1 (spec for array-subscript names in uniform /
     // resource lookups): only strictly-formatted decimal integers
     // are accepted. Rejected forms: leading/trailing whitespace
@@ -44778,28 +45368,31 @@ GLint GLContext::getProgramResourceLocation(GLuint program, GLenum programInterf
     // (`"a[\t0]"`, `"a[\n0]"`), leading zero (`"a[01]"`,
     // `"a[00]"`). strtol alone accepts all of these; we pre-validate
     // by scanning the index substring.
-    auto isStrictNonNegIndex = [](const std::string& s, long& out) {
-        if (s.empty()) return false;
-        if (s[0] == '0' && s.size() > 1) return false;   // leading zero
-        for (char c : s) {
-            if (c < '0' || c > '9') return false;
+    std::string baseName;
+    std::vector<GLint> elementIndices;
+    if (parseArrayElementLookup(lookup, baseName, elementIndices) &&
+        !elementIndices.empty()) {
+        GLint flatIndex = 0;
+        for (const auto& entry : *table) {
+            if (stripBracketZeroSuffix(entry.name) == baseName && entry.arraySize >= 1
+                && entry.location >= 0 &&
+                flattenArrayElementIndex(entry, elementIndices, flatIndex)) {
+                return entry.location + flatIndex;
+            }
         }
-        // strtol is safe now — string is non-empty digits only.
-        char* endp = nullptr;
-        out = std::strtol(s.c_str(), &endp, 10);
-        return out >= 0;
-    };
-    const auto openBracket = lookup.rfind('[');
-    if (openBracket != std::string::npos && !lookup.empty() && lookup.back() == ']') {
-        const std::string baseName = lookup.substr(0, openBracket);
-        const std::string indexStr = lookup.substr(openBracket + 1, lookup.size() - openBracket - 2);
-        long idx = 0;
-        if (!baseName.empty() && isStrictNonNegIndex(indexStr, idx)) {
-            for (const auto& entry : *table) {
-                if (stripBracketZero(entry.name) == baseName && entry.arraySize >= 1
-                    && idx < static_cast<long>(entry.arraySize)
-                    && entry.location >= 0) {
-                    return entry.location + static_cast<GLint>(idx);
+    } else {
+        const auto openBracket = lookup.rfind('[');
+        if (openBracket != std::string::npos && !lookup.empty() && lookup.back() == ']') {
+            const std::string legacyBaseName = lookup.substr(0, openBracket);
+            const std::string indexStr = lookup.substr(openBracket + 1, lookup.size() - openBracket - 2);
+            long idx = 0;
+            if (!legacyBaseName.empty() && parseStrictArrayIndex(indexStr, idx)) {
+                for (const auto& entry : *table) {
+                    if (stripBracketZeroSuffix(entry.name) == legacyBaseName && entry.arraySize >= 1
+                        && idx < static_cast<long>(entry.arraySize)
+                        && entry.location >= 0) {
+                        return entry.location + static_cast<GLint>(idx);
+                    }
                 }
             }
         }
@@ -44808,7 +45401,7 @@ GLint GLContext::getProgramResourceLocation(GLuint program, GLenum programInterf
     // §7.3.1 says `getProgramResourceLocation("arr")` equals
     // `getProgramResourceLocation("arr[0]")` for array inputs.
     for (const auto& entry : *table) {
-        if (stripBracketZero(entry.name) == lookup && entry.location >= 0) {
+        if (stripBracketZeroSuffix(entry.name) == lookup && entry.location >= 0) {
             return entry.location;
         }
     }
