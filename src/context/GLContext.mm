@@ -45370,8 +45370,10 @@ GLint GLContext::getProgramResourceLocation(GLuint program, GLenum programInterf
     // by scanning the index substring.
     std::string baseName;
     std::vector<GLint> elementIndices;
-    if (parseArrayElementLookup(lookup, baseName, elementIndices) &&
-        !elementIndices.empty()) {
+    const bool parsedArrayElement =
+        parseArrayElementLookup(lookup, baseName, elementIndices) &&
+        !elementIndices.empty();
+    if (parsedArrayElement) {
         GLint flatIndex = 0;
         for (const auto& entry : *table) {
             if (stripBracketZeroSuffix(entry.name) == baseName && entry.arraySize >= 1
@@ -45380,7 +45382,14 @@ GLint GLContext::getProgramResourceLocation(GLuint program, GLenum programInterf
                 return entry.location + flatIndex;
             }
         }
-    } else {
+    }
+    // Ordinary default-block uniforms for arrays-of-arrays can be stored
+    // as one resource per outer element (`u0[0][0]`, `u0[1][0]`) rather
+    // than as a single base resource with arrayDimensions. If the new
+    // multidimensional flattening path above did not match, preserve the
+    // older innermost-index fallback so `u0[0][1]` resolves through the
+    // `u0[0][0]` resource.
+    {
         const auto openBracket = lookup.rfind('[');
         if (openBracket != std::string::npos && !lookup.empty() && lookup.back() == ']') {
             const std::string legacyBaseName = lookup.substr(0, openBracket);
