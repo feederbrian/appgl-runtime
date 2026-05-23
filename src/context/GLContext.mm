@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <functional>
 #include <limits>
 #include <set>
@@ -23798,22 +23799,43 @@ std::string readGlslIdent(const std::string& s, std::size_t& p) {
 bool parseSignedIntLiteral(std::string_view text, int& value) {
     std::size_t p = 0;
     while (p < text.size() && std::isspace(static_cast<unsigned char>(text[p]))) ++p;
-    bool neg = false;
+    std::string literal;
     if (p < text.size() && (text[p] == '+' || text[p] == '-')) {
-        neg = text[p] == '-';
-        ++p;
+        literal.push_back(text[p++]);
         while (p < text.size() && std::isspace(static_cast<unsigned char>(text[p]))) ++p;
     }
-    if (p >= text.size() || !std::isdigit(static_cast<unsigned char>(text[p]))) {
+    const std::size_t start = p;
+    while (p < text.size()) {
+        const char c = text[p];
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '_') {
+            literal.push_back(c);
+            ++p;
+            continue;
+        }
+        break;
+    }
+    if (p == start) {
         return false;
     }
-    long long v = 0;
-    while (p < text.size() && std::isdigit(static_cast<unsigned char>(text[p]))) {
-        v = v * 10 + (text[p] - '0');
-        if (v > std::numeric_limits<int>::max()) return false;
-        ++p;
+    while (!literal.empty()) {
+        const char c = literal.back();
+        if (c == 'u' || c == 'U' || c == 'l' || c == 'L') {
+            literal.pop_back();
+        } else {
+            break;
+        }
     }
-    value = static_cast<int>(neg ? -v : v);
+    if (literal.empty() || literal == "+" || literal == "-") {
+        return false;
+    }
+    char* endp = nullptr;
+    const long long v = std::strtoll(literal.c_str(), &endp, 0);
+    if (endp == literal.c_str() || *endp != '\0' ||
+        v < std::numeric_limits<int>::min() ||
+        v > std::numeric_limits<int>::max()) {
+        return false;
+    }
+    value = static_cast<int>(v);
     return true;
 }
 
@@ -23833,7 +23855,83 @@ std::size_t findMatchingDelimiter(const std::string& s,
     return std::string::npos;
 }
 
-bool parseLayoutBinding(const std::string& prefix, int& binding) {
+std::unordered_map<std::string, int> parseGlslIntegerDefines(const std::string& s) {
+    std::unordered_map<std::string, int> defines;
+    std::size_t p = 0;
+    while (p < s.size()) {
+        const std::size_t lineStart = p;
+        std::size_t lineEnd = s.find('\n', lineStart);
+        if (lineEnd == std::string::npos) lineEnd = s.size();
+        std::size_t cur = lineStart;
+        while (cur < lineEnd &&
+               (s[cur] == ' ' || s[cur] == '\t' || s[cur] == '\r')) {
+            ++cur;
+        }
+        if (cur < lineEnd && s[cur] == '#') {
+            ++cur;
+            while (cur < lineEnd && (s[cur] == ' ' || s[cur] == '\t')) ++cur;
+            if (cur + 6 <= lineEnd && s.compare(cur, 6, "define") == 0 &&
+                (cur + 6 == lineEnd || !isGlslIdentChar(s[cur + 6]))) {
+                cur += 6;
+                while (cur < lineEnd && (s[cur] == ' ' || s[cur] == '\t')) ++cur;
+                const std::size_t nameStart = cur;
+                std::string name = readGlslIdent(s, cur);
+                if (!name.empty()) {
+                    if (cur < lineEnd && s[cur] == '(') {
+                        p = lineEnd + (lineEnd < s.size() ? 1 : 0);
+                        continue;
+                    }
+                    while (cur < lineEnd && (s[cur] == ' ' || s[cur] == '\t')) ++cur;
+                    int parsed = 0;
+                    if (parseSignedIntLiteral(
+                            std::string_view(s).substr(cur, lineEnd - cur), parsed)) {
+                        defines.emplace(std::move(name), parsed);
+                    }
+                } else {
+                    cur = nameStart;
+                }
+            }
+        }
+        p = lineEnd + (lineEnd < s.size() ? 1 : 0);
+    }
+    return defines;
+}
+
+bool parseGlslIntegerExpression(
+    std::string_view text,
+    const std::unordered_map<std::string, int>& defines,
+    int& value)
+{
+    if (parseSignedIntLiteral(text, value)) {
+        return true;
+    }
+    std::size_t p = 0;
+    while (p < text.size() && std::isspace(static_cast<unsigned char>(text[p]))) ++p;
+    bool neg = false;
+    if (p < text.size() && (text[p] == '+' || text[p] == '-')) {
+        neg = text[p] == '-';
+        ++p;
+        while (p < text.size() && std::isspace(static_cast<unsigned char>(text[p]))) ++p;
+    }
+    if (p >= text.size() ||
+        !(std::isalpha(static_cast<unsigned char>(text[p])) || text[p] == '_')) {
+        return false;
+    }
+    const std::size_t start = p++;
+    while (p < text.size() && isGlslIdentChar(text[p])) ++p;
+    const std::string ident(text.substr(start, p - start));
+    auto it = defines.find(ident);
+    if (it == defines.end()) {
+        return false;
+    }
+    value = neg ? -it->second : it->second;
+    return true;
+}
+
+bool parseLayoutIntegerQualifier(const std::string& prefix,
+                                 const char* qualifier,
+                                 const std::unordered_map<std::string, int>& defines,
+                                 int& value) {
     std::size_t layout = prefix.rfind("layout");
     while (layout != std::string::npos) {
         if (tokenAt(prefix, layout, "layout")) {
@@ -23843,17 +23941,21 @@ bool parseLayoutBinding(const std::string& prefix, int& binding) {
                 const std::size_t close = findMatchingDelimiter(prefix, p, '(', ')');
                 if (close != std::string::npos) {
                     const std::string inner = prefix.substr(p + 1, close - p - 1);
-                    std::size_t b = inner.find("binding");
+                    const std::size_t qualifierLen = std::strlen(qualifier);
+                    std::size_t b = inner.find(qualifier);
                     while (b != std::string::npos) {
                         if ((b == 0 || !isGlslIdentChar(inner[b - 1])) &&
-                            (b + 7 >= inner.size() || !isGlslIdentChar(inner[b + 7]))) {
-                            std::size_t eq = inner.find('=', b + 7);
+                            (b + qualifierLen >= inner.size() ||
+                             !isGlslIdentChar(inner[b + qualifierLen]))) {
+                            std::size_t eq = inner.find('=', b + qualifierLen);
                             if (eq != std::string::npos) {
-                                return parseSignedIntLiteral(
-                                    std::string_view(inner).substr(eq + 1), binding);
+                                return parseGlslIntegerExpression(
+                                    std::string_view(inner).substr(eq + 1),
+                                    defines,
+                                    value);
                             }
                         }
-                        b = inner.find("binding", b + 1);
+                        b = inner.find(qualifier, b + 1);
                     }
                 }
             }
@@ -23864,10 +23966,23 @@ bool parseLayoutBinding(const std::string& prefix, int& binding) {
     return false;
 }
 
-struct ParsedSsboBlockForValidation {
+bool parseLayoutBinding(const std::string& prefix,
+                        const std::unordered_map<std::string, int>& defines,
+                        int& binding) {
+    return parseLayoutIntegerQualifier(prefix, "binding", defines, binding);
+}
+
+bool parseLayoutBinding(const std::string& prefix, int& binding) {
+    static const std::unordered_map<std::string, int> kNoDefines;
+    return parseLayoutBinding(prefix, kNoDefines, binding);
+}
+
+struct ParsedInterfaceBlockForValidation {
     std::string name;
     std::string bodyCanonical;
     bool hasInstance = false;
+    std::string instanceName;
+    bool instanceIsArray = false;
     int instanceArraySize = 1;
     bool hasExplicitBinding = false;
     int explicitBinding = 0;
@@ -23884,25 +23999,28 @@ std::string canonicalizeGlslBlockBody(std::string_view body) {
     return out;
 }
 
-std::vector<ParsedSsboBlockForValidation>
-parseShaderStorageBlocksForValidation(const std::string& rawSource) {
+std::vector<ParsedInterfaceBlockForValidation>
+parseGlslInterfaceBlocksForValidation(const std::string& rawSource,
+                                      const char* keyword) {
     const std::string s = stripGlslCommentsForAppglValidation(rawSource);
-    std::vector<ParsedSsboBlockForValidation> out;
+    const auto defines = parseGlslIntegerDefines(s);
+    std::vector<ParsedInterfaceBlockForValidation> out;
+    const std::size_t keywordLen = std::strlen(keyword);
     std::size_t p = 0;
-    while ((p = s.find("buffer", p)) != std::string::npos) {
-        if (!tokenAt(s, p, "buffer")) {
-            p += 6;
+    while ((p = s.find(keyword, p)) != std::string::npos) {
+        if (!tokenAt(s, p, keyword)) {
+            p += keywordLen;
             continue;
         }
-        std::size_t q = p + 6;
+        std::size_t q = p + keywordLen;
         std::string blockName = readGlslIdent(s, q);
         if (blockName.empty()) {
-            p += 6;
+            p += keywordLen;
             continue;
         }
         skipGlslWs(s, q);
         if (q >= s.size() || s[q] != '{') {
-            p += 6;
+            p += keywordLen;
             continue;
         }
         const std::size_t bodyOpen = q;
@@ -23915,12 +24033,12 @@ parseShaderStorageBlocksForValidation(const std::string& rawSource) {
         }
         const std::string prefix = s.substr(declStart, p - declStart);
 
-        ParsedSsboBlockForValidation block;
+        ParsedInterfaceBlockForValidation block;
         block.name = std::move(blockName);
         block.bodyCanonical = canonicalizeGlslBlockBody(
             std::string_view(s).substr(bodyOpen + 1, bodyClose - bodyOpen - 1));
         int binding = 0;
-        if (parseLayoutBinding(prefix, binding)) {
+        if (parseLayoutBinding(prefix, defines, binding)) {
             block.hasExplicitBinding = true;
             block.explicitBinding = binding;
         }
@@ -23929,13 +24047,16 @@ parseShaderStorageBlocksForValidation(const std::string& rawSource) {
         std::string instance = readGlslIdent(s, after);
         if (!instance.empty()) {
             block.hasInstance = true;
+            block.instanceName = std::move(instance);
             skipGlslWs(s, after);
             if (after < s.size() && s[after] == '[') {
+                block.instanceIsArray = true;
                 const std::size_t close = s.find(']', after + 1);
                 if (close != std::string::npos) {
                     int arraySize = 1;
-                    if (parseSignedIntLiteral(
+                    if (parseGlslIntegerExpression(
                             std::string_view(s).substr(after + 1, close - after - 1),
+                            defines,
                             arraySize) &&
                         arraySize > 0) {
                         block.instanceArraySize = arraySize;
@@ -23947,6 +24068,16 @@ parseShaderStorageBlocksForValidation(const std::string& rawSource) {
         p = bodyClose + 1;
     }
     return out;
+}
+
+std::vector<ParsedInterfaceBlockForValidation>
+parseShaderStorageBlocksForValidation(const std::string& rawSource) {
+    return parseGlslInterfaceBlocksForValidation(rawSource, "buffer");
+}
+
+std::vector<ParsedInterfaceBlockForValidation>
+parseUniformBlocksForValidation(const std::string& rawSource) {
+    return parseGlslInterfaceBlocksForValidation(rawSource, "uniform");
 }
 
 bool validateShaderStorageBufferBindings(const std::string& source,
@@ -23969,9 +24100,30 @@ bool validateShaderStorageBufferBindings(const std::string& source,
     return true;
 }
 
+bool validateUniformBlockBindings(const std::string& source,
+                                  int maxBindings,
+                                  std::string& error) {
+    if (maxBindings <= 0) return true;
+    for (const auto& block : parseUniformBlocksForValidation(source)) {
+        if (!block.hasExplicitBinding) continue;
+        const int count = block.instanceIsArray
+            ? std::max(1, block.instanceArraySize) : 1;
+        if (block.explicitBinding < 0 ||
+            block.explicitBinding >= maxBindings ||
+            block.explicitBinding + count > maxBindings) {
+            error = "ERROR: uniform block '" + block.name +
+                    "' uses layout(binding=" +
+                    std::to_string(block.explicitBinding) +
+                    ") outside GL_MAX_UNIFORM_BUFFER_BINDINGS.";
+            return false;
+        }
+    }
+    return true;
+}
+
 bool validateLinkedShaderStorageBlocks(const std::vector<GLShaderObject*>& shaders,
                                        std::string& error) {
-    std::unordered_map<std::string, ParsedSsboBlockForValidation> firstByName;
+    std::unordered_map<std::string, ParsedInterfaceBlockForValidation> firstByName;
     for (const GLShaderObject* shader : shaders) {
         if (shader == nullptr) continue;
         for (const auto& block : parseShaderStorageBlocksForValidation(shader->source)) {
@@ -25012,6 +25164,25 @@ bool GLContext::compileShader(GLuint shader) {
         }
     }
 
+    {
+        GLint maxUboBindings = 0;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(
+                GL_MAX_UNIFORM_BUFFER_BINDINGS, &maxUboBindings);
+        }
+        std::string validationError;
+        if (!validateUniformBlockBindings(
+                compileSource, maxUboBindings, validationError)) {
+            object->compileLog = std::move(validationError);
+            object->compiled = false;
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", object->compileLog, "", false
+            });
+            return true;
+        }
+    }
+
     // 3b. Tess-eval primitive-mode injection: GL 4.6 §11.2.3 requires
     //     tess-eval shaders to declare `layout(triangles/quads/isolines)
     //     in;` — but the rule is a LINK-time check, not compile-time.
@@ -25652,6 +25823,262 @@ parseExplicitSamplerBindings(const std::string& rawSource) {
     return result;
 }
 
+std::string trimGlslString(std::string_view text) {
+    std::size_t begin = 0;
+    while (begin < text.size() &&
+           std::isspace(static_cast<unsigned char>(text[begin]))) {
+        ++begin;
+    }
+    std::size_t end = text.size();
+    while (end > begin &&
+           std::isspace(static_cast<unsigned char>(text[end - 1]))) {
+        --end;
+    }
+    return std::string(text.substr(begin, end - begin));
+}
+
+std::vector<std::string> splitGlslTopLevelCommas(std::string_view text) {
+    std::vector<std::string> out;
+    std::size_t start = 0;
+    int parenDepth = 0;
+    int bracketDepth = 0;
+    int braceDepth = 0;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (c == '(') ++parenDepth;
+        else if (c == ')' && parenDepth > 0) --parenDepth;
+        else if (c == '[') ++bracketDepth;
+        else if (c == ']' && bracketDepth > 0) --bracketDepth;
+        else if (c == '{') ++braceDepth;
+        else if (c == '}' && braceDepth > 0) --braceDepth;
+        else if (c == ',' && parenDepth == 0 &&
+                 bracketDepth == 0 && braceDepth == 0) {
+            out.push_back(trimGlslString(text.substr(start, i - start)));
+            start = i + 1;
+        }
+    }
+    out.push_back(trimGlslString(text.substr(start)));
+    return out;
+}
+
+struct ParsedAtomicCounterLayoutDecl {
+    std::string name;
+    bool isArray = false;
+    int arraySize = 1;
+    int binding = 0;
+    int offset = 0;
+};
+
+bool validateAtomicCounterBindingAndOffset(int binding,
+                                           int offset,
+                                           int count,
+                                           int maxBindings,
+                                           int maxBufferSize,
+                                           std::string& error) {
+    if (binding < 0 || (maxBindings > 0 && binding >= maxBindings)) {
+        error = "atomic_uint layout(binding=" + std::to_string(binding) +
+                ") is outside GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS";
+        return false;
+    }
+    if (offset < 0 || (offset % 4) != 0) {
+        error = "atomic_uint layout(offset=" + std::to_string(offset) +
+                ") must be a non-negative multiple of 4";
+        return false;
+    }
+    if (count < 1) {
+        error = "atomic_uint array size must be positive";
+        return false;
+    }
+    const long long endByte =
+        static_cast<long long>(offset) + 4ll * static_cast<long long>(count);
+    if (maxBufferSize > 0 && endByte > maxBufferSize) {
+        error = "atomic_uint layout range exceeds GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE";
+        return false;
+    }
+    return true;
+}
+
+bool parseAtomicCounterLayoutsForSource(
+    const std::string& rawSource,
+    int maxBindings,
+    int maxBufferSize,
+    std::vector<ParsedAtomicCounterLayoutDecl>& out,
+    std::string& error)
+{
+    const std::string s = stripGlslCommentsForAppglValidation(rawSource);
+    const auto defines = parseGlslIntegerDefines(s);
+    std::unordered_map<int, int> nextOffsetByBinding;
+    std::unordered_map<int, std::vector<std::pair<int, int>>> usedRangesByBinding;
+    bool hasDefaultBinding = false;
+    int defaultBinding = 0;
+
+    std::size_t p = 0;
+    while ((p = s.find("uniform", p)) != std::string::npos) {
+        if (!tokenAt(s, p, "uniform")) {
+            p += 7;
+            continue;
+        }
+        std::size_t q = p + 7;
+        const std::string typeName = readGlslIdent(s, q);
+        if (typeName != "atomic_uint") {
+            p += 7;
+            continue;
+        }
+        const std::size_t semi = s.find(';', q);
+        if (semi == std::string::npos) {
+            break;
+        }
+
+        std::size_t declStart = p;
+        while (declStart > 0 && s[declStart - 1] != ';' &&
+               s[declStart - 1] != '}') {
+            --declStart;
+        }
+        const std::string prefix = s.substr(declStart, p - declStart);
+        int layoutBinding = 0;
+        int layoutOffset = 0;
+        const bool hasLayoutBinding =
+            parseLayoutIntegerQualifier(prefix, "binding", defines, layoutBinding);
+        const bool hasLayoutOffset =
+            parseLayoutIntegerQualifier(prefix, "offset", defines, layoutOffset);
+        const std::string declaratorText =
+            trimGlslString(std::string_view(s).substr(q, semi - q));
+
+        if (declaratorText.empty()) {
+            if (hasLayoutOffset && !hasLayoutBinding) {
+                error = "atomic_uint layout(offset) default requires layout(binding)";
+                return false;
+            }
+            if (hasLayoutBinding) {
+                if (!validateAtomicCounterBindingAndOffset(
+                        layoutBinding,
+                        hasLayoutOffset ? layoutOffset : 0,
+                        1,
+                        maxBindings,
+                        maxBufferSize,
+                        error)) {
+                    return false;
+                }
+                defaultBinding = layoutBinding;
+                hasDefaultBinding = true;
+                if (hasLayoutOffset) {
+                    nextOffsetByBinding[layoutBinding] = layoutOffset;
+                } else if (nextOffsetByBinding.find(layoutBinding) ==
+                           nextOffsetByBinding.end()) {
+                    nextOffsetByBinding[layoutBinding] = 0;
+                }
+            }
+            p = semi + 1;
+            continue;
+        }
+
+        if (hasLayoutOffset && !hasLayoutBinding) {
+            error = "atomic_uint layout(offset) declaration requires layout(binding)";
+            return false;
+        }
+
+        const int binding = hasLayoutBinding
+            ? layoutBinding
+            : (hasDefaultBinding ? defaultBinding : 0);
+        if (nextOffsetByBinding.find(binding) == nextOffsetByBinding.end()) {
+            nextOffsetByBinding[binding] = 0;
+        }
+
+        const auto declarators = splitGlslTopLevelCommas(declaratorText);
+        for (std::size_t declIndex = 0; declIndex < declarators.size(); ++declIndex) {
+            const std::string& declarator = declarators[declIndex];
+            std::size_t cur = 0;
+            const std::string name = readGlslIdent(declarator, cur);
+            if (name.empty()) {
+                continue;
+            }
+            bool isArray = false;
+            int arraySize = 1;
+            skipGlslWs(declarator, cur);
+            if (cur < declarator.size() && declarator[cur] == '[') {
+                const std::size_t close = declarator.find(']', cur + 1);
+                if (close == std::string::npos) {
+                    error = "atomic_uint array declaration is missing ']'";
+                    return false;
+                }
+                isArray = true;
+                if (!parseGlslIntegerExpression(
+                        std::string_view(declarator).substr(cur + 1, close - cur - 1),
+                        defines,
+                        arraySize) ||
+                    arraySize <= 0) {
+                    error = "atomic_uint array declaration has invalid size";
+                    return false;
+                }
+            }
+
+            const int offset = (hasLayoutOffset && declIndex == 0)
+                ? layoutOffset
+                : nextOffsetByBinding[binding];
+            if (!validateAtomicCounterBindingAndOffset(
+                    binding, offset, arraySize, maxBindings, maxBufferSize, error)) {
+                return false;
+            }
+            const int endByte = offset + 4 * arraySize;
+            auto& usedRanges = usedRangesByBinding[binding];
+            for (const auto& [usedBegin, usedEnd] : usedRanges) {
+                if (offset < usedEnd && endByte > usedBegin) {
+                    error = "atomic_uint declarations overlap within binding " +
+                            std::to_string(binding);
+                    return false;
+                }
+            }
+            usedRanges.push_back({offset, endByte});
+            nextOffsetByBinding[binding] =
+                std::max(nextOffsetByBinding[binding], endByte);
+
+            ParsedAtomicCounterLayoutDecl parsed;
+            parsed.name = name;
+            parsed.isArray = isArray;
+            parsed.arraySize = arraySize;
+            parsed.binding = binding;
+            parsed.offset = offset;
+            out.push_back(std::move(parsed));
+        }
+
+        p = semi + 1;
+    }
+    return true;
+}
+
+bool applyAtomicCounterLayoutsFromSources(
+    const std::vector<GLShaderObject*>& shaders,
+    std::vector<GLProgramUniformInfo>& uniforms,
+    int maxBindings,
+    int maxBufferSize,
+    std::string& error)
+{
+    for (const GLShaderObject* shader : shaders) {
+        if (shader == nullptr) continue;
+        std::vector<ParsedAtomicCounterLayoutDecl> parsedDecls;
+        if (!parseAtomicCounterLayoutsForSource(
+                shader->source, maxBindings, maxBufferSize, parsedDecls, error)) {
+            return false;
+        }
+        for (const auto& parsed : parsedDecls) {
+            for (auto& uniform : uniforms) {
+                if (uniform.type != GL_UNSIGNED_INT_ATOMIC_COUNTER ||
+                    uniform.name != parsed.name) {
+                    continue;
+                }
+                uniform.explicitBinding = parsed.binding;
+                uniform.explicitOffset = parsed.offset;
+                uniform.isArray = uniform.isArray || parsed.isArray;
+                uniform.arraySize = std::max<GLint>(
+                    uniform.arraySize,
+                    parsed.arraySize > 0 ? parsed.arraySize : 1);
+                break;
+            }
+        }
+    }
+    return true;
+}
+
 static bool glslBlockHasInstanceName(const std::string& source,
                                       const std::string& blockName) {
     auto [bodyStart, bodyEnd] = findBlockBody(source, blockName);
@@ -26265,6 +26692,31 @@ bool GLContext::linkProgram(GLuint program) {
         auto stageBindings = parseExplicitSamplerBindings(shaderObject->source);
         for (auto& [name, binding] : stageBindings) {
             programObject->samplerExplicitBindings[name] = binding;
+        }
+    }
+
+    {
+        GLint maxAtomicBindings = 0;
+        GLint maxAtomicBufferSize = 0;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(
+                GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS, &maxAtomicBindings);
+            impl_->capabilities->queryInteger(
+                GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE, &maxAtomicBufferSize);
+        }
+        std::string validationError;
+        if (!applyAtomicCounterLayoutsFromSources(
+                attachedShaderObjects,
+                programObject->uniforms,
+                maxAtomicBindings,
+                maxAtomicBufferSize,
+                validationError)) {
+            programObject->linkLog = std::move(validationError);
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
         }
     }
 
@@ -32056,6 +32508,10 @@ bool GLContext::linkProgram(GLuint program) {
         auto mergeBlocks = [&](const std::vector<ShaderReflection::ResourceBinding>& blocks,
                                GLbitfield stageBit,
                                const std::string& glslSource) {
+            std::unordered_map<std::string, ParsedInterfaceBlockForValidation> parsedBlocks;
+            for (auto parsed : parseUniformBlocksForValidation(glslSource)) {
+                parsedBlocks[parsed.name] = std::move(parsed);
+            }
             for (const auto& block : blocks) {
                 // Skip glslang's synthesized default-block wrapper —
                 // it's not a real user-declared UBO. `supplementFromReflection`
@@ -32079,8 +32535,13 @@ bool GLContext::linkProgram(GLuint program) {
                 // SPIRV-Cross loses instance name info (varName == typeName
                 // for both instanced and non-instanced blocks). Parse the
                 // original GLSL source to recover it.
+                const auto parsedIt = parsedBlocks.find(block.name);
+                const ParsedInterfaceBlockForValidation* parsedBlock =
+                    parsedIt != parsedBlocks.end() ? &parsedIt->second : nullptr;
                 const bool hasInstance =
-                    glslBlockHasInstanceName(glslSource, block.name);
+                    parsedBlock != nullptr
+                        ? parsedBlock->hasInstance
+                        : glslBlockHasInstanceName(glslSource, block.name);
                 // For an INSTANCED ARRAY block (`} e[2];`), narrow the
                 // per-instance stage bit: only the elements actually
                 // indexed in the stage's body are active in that stage.
@@ -32088,7 +32549,9 @@ bool GLContext::linkProgram(GLuint program) {
                 // declares `TrickyBlock e[2]` but only reads `e[0].…`,
                 // so e[1] must report REFERENCED_BY_FRAGMENT_SHADER=0.
                 const std::string instanceName = hasInstance
-                    ? glslBlockInstanceName(glslSource, block.name)
+                    ? (parsedBlock != nullptr && !parsedBlock->instanceName.empty()
+                        ? parsedBlock->instanceName
+                        : glslBlockInstanceName(glslSource, block.name))
                     : std::string();
                 const std::set<int> usedInstanceIndices =
                     !instanceName.empty()
@@ -32103,9 +32566,22 @@ bool GLContext::linkProgram(GLuint program) {
                 // For array blocks (`uniform B { ... } b[N]`), create one
                 // block entry per array element: "BlockName[0]", "BlockName[1]", ...
                 // For non-array blocks, create a single entry: "BlockName".
-                const int numInstances = (block.blockArraySize > 0)
-                    ? static_cast<int>(block.blockArraySize) : 1;
-                const bool isArray = (block.blockArraySize > 0);
+                const int numInstances =
+                    parsedBlock != nullptr && parsedBlock->instanceIsArray
+                        ? std::max(1, parsedBlock->instanceArraySize)
+                        : ((block.blockArraySize > 0)
+                            ? static_cast<int>(block.blockArraySize) : 1);
+                const bool isArray =
+                    parsedBlock != nullptr
+                        ? parsedBlock->instanceIsArray
+                        : (block.blockArraySize > 0);
+                const bool hasExplicitBinding =
+                    (parsedBlock != nullptr && parsedBlock->hasExplicitBinding) ||
+                    block.hasExplicitBinding;
+                const GLint baseBinding =
+                    parsedBlock != nullptr && parsedBlock->hasExplicitBinding
+                        ? static_cast<GLint>(parsedBlock->explicitBinding)
+                        : static_cast<GLint>(block.glBinding);
 
                 // Create block entries for each instance.
                 GLint firstBlockIndex = -1;
@@ -32146,8 +32622,8 @@ bool GLContext::linkProgram(GLuint program) {
                     // binding_block.binding_array_size hits this:
                     //   `layout(binding=81) uniform B { ... } b[2];`
                     //   expects b[0]=81, b[1]=82.
-                    GLint instanceBinding = static_cast<GLint>(block.glBinding);
-                    if (block.hasExplicitBinding && isArray) {
+                    GLint instanceBinding = baseBinding;
+                    if (hasExplicitBinding && isArray) {
                         instanceBinding += inst;
                     }
                     blockEntry.location = instanceBinding;
@@ -32258,6 +32734,41 @@ bool GLContext::linkProgram(GLuint program) {
                     programObject->resourceBufferVariables.push_back(std::move(bvEntry));
                 }
             }
+
+            for (const auto& [_, parsed] : parsedBlocks) {
+                if (!parsed.instanceIsArray) {
+                    continue;
+                }
+                const int numInstances = std::max(1, parsed.instanceArraySize);
+                for (int inst = 0; inst < numInstances; ++inst) {
+                    std::string entryName =
+                        parsed.name + "[" + std::to_string(inst) + "]";
+                    const auto existing = std::find_if(
+                        programObject->resourceUniformBlocks.begin(),
+                        programObject->resourceUniformBlocks.end(),
+                        [&](const GLProgramResourceEntry& e) {
+                            return e.name == entryName;
+                        });
+                    if (existing != programObject->resourceUniformBlocks.end()) {
+                        existing->referencedBy |= stageBit;
+                        if (parsed.hasExplicitBinding) {
+                            existing->location =
+                                static_cast<GLint>(parsed.explicitBinding + inst);
+                        }
+                        continue;
+                    }
+                    GLProgramResourceEntry blockEntry;
+                    blockEntry.name = std::move(entryName);
+                    blockEntry.type = 0;
+                    blockEntry.location = parsed.hasExplicitBinding
+                        ? static_cast<GLint>(parsed.explicitBinding + inst)
+                        : 0;
+                    blockEntry.offset = 0;
+                    blockEntry.arraySize = 1;
+                    blockEntry.referencedBy = stageBit;
+                    programObject->resourceUniformBlocks.push_back(std::move(blockEntry));
+                }
+            }
         };
         static const std::string emptySource;
         const std::string& vsSrc = vertexShader ? vertexShader->source : emptySource;
@@ -32302,6 +32813,10 @@ bool GLContext::linkProgram(GLuint program) {
         auto mergeStorageBlocks = [&](const std::vector<ShaderReflection::ResourceBinding>& blocks,
                                        GLbitfield stageBit,
                                        const std::string& glslSource) {
+            std::unordered_map<std::string, ParsedInterfaceBlockForValidation> parsedBlocks;
+            for (auto parsed : parseShaderStorageBlocksForValidation(glslSource)) {
+                parsedBlocks[parsed.name] = std::move(parsed);
+            }
             for (const auto& block : blocks) {
                 // Track the per-stage referenced bit ONLY when the
                 // block is live in this stage's SPIR-V — a declared-
@@ -32311,10 +32826,17 @@ bool GLContext::linkProgram(GLuint program) {
                 // `Ids` (GS-declared, GS-unused) to have
                 // GL_REFERENCED_BY_GEOMETRY_SHADER = FALSE.
                 const GLbitfield blockStageBit = block.active ? stageBit : 0;
+                const auto parsedIt = parsedBlocks.find(block.name);
+                const ParsedInterfaceBlockForValidation* parsedBlock =
+                    parsedIt != parsedBlocks.end() ? &parsedIt->second : nullptr;
                 const bool hasInstance =
-                    glslBlockHasInstanceName(glslSource, block.name);
+                    parsedBlock != nullptr
+                        ? parsedBlock->hasInstance
+                        : glslBlockHasInstanceName(glslSource, block.name);
                 const std::string instanceName = hasInstance
-                    ? glslBlockInstanceName(glslSource, block.name)
+                    ? (parsedBlock != nullptr && !parsedBlock->instanceName.empty()
+                        ? parsedBlock->instanceName
+                        : glslBlockInstanceName(glslSource, block.name))
                     : std::string();
                 const std::set<int> usedInstanceIndices =
                     !instanceName.empty()
@@ -32322,9 +32844,22 @@ bool GLContext::linkProgram(GLuint program) {
                         : std::set<int>();
                 const bool useInstanceNarrowing = !usedInstanceIndices.empty();
 
-                const int numInstances = (block.blockArraySize > 0)
-                    ? static_cast<int>(block.blockArraySize) : 1;
-                const bool isBlockArray = (block.blockArraySize > 0);
+                const int numInstances =
+                    parsedBlock != nullptr && parsedBlock->instanceIsArray
+                        ? std::max(1, parsedBlock->instanceArraySize)
+                        : ((block.blockArraySize > 0)
+                            ? static_cast<int>(block.blockArraySize) : 1);
+                const bool isBlockArray =
+                    parsedBlock != nullptr
+                        ? parsedBlock->instanceIsArray
+                        : (block.blockArraySize > 0);
+                const bool hasExplicitBinding =
+                    (parsedBlock != nullptr && parsedBlock->hasExplicitBinding) ||
+                    block.hasExplicitBinding;
+                const GLint baseBinding =
+                    parsedBlock != nullptr && parsedBlock->hasExplicitBinding
+                        ? static_cast<GLint>(parsedBlock->explicitBinding)
+                        : static_cast<GLint>(block.glBinding);
 
                 // Create one block entry per array instance. For
                 // non-array blocks, numInstances=1 and we keep the
@@ -32367,8 +32902,8 @@ bool GLContext::linkProgram(GLuint program) {
                     // the SSBO path UNCONDITIONALLY added `inst`,
                     // which is correct for explicit binding (b[i]=N+i)
                     // but wrong for implicit (all default to 0).
-                    GLint instanceBinding = static_cast<GLint>(block.glBinding);
-                    if (block.hasExplicitBinding && isBlockArray) {
+                    GLint instanceBinding = baseBinding;
+                    if (hasExplicitBinding && isBlockArray) {
                         instanceBinding += inst;
                     }
                     entry.location = instanceBinding;
@@ -32451,6 +32986,41 @@ bool GLContext::linkProgram(GLuint program) {
                     }
                 }
             }
+
+            for (const auto& [_, parsed] : parsedBlocks) {
+                if (!parsed.instanceIsArray) {
+                    continue;
+                }
+                const int numInstances = std::max(1, parsed.instanceArraySize);
+                for (int inst = 0; inst < numInstances; ++inst) {
+                    std::string entryName =
+                        parsed.name + "[" + std::to_string(inst) + "]";
+                    const auto existing = std::find_if(
+                        programObject->resourceStorageBlocks.begin(),
+                        programObject->resourceStorageBlocks.end(),
+                        [&](const GLProgramResourceEntry& e) {
+                            return e.name == entryName;
+                        });
+                    if (existing != programObject->resourceStorageBlocks.end()) {
+                        existing->referencedBy |= stageBit;
+                        if (parsed.hasExplicitBinding) {
+                            existing->location =
+                                static_cast<GLint>(parsed.explicitBinding + inst);
+                        }
+                        continue;
+                    }
+                    GLProgramResourceEntry entry;
+                    entry.name = std::move(entryName);
+                    entry.type = 0;
+                    entry.location = parsed.hasExplicitBinding
+                        ? static_cast<GLint>(parsed.explicitBinding + inst)
+                        : 0;
+                    entry.offset = 0;
+                    entry.arraySize = 1;
+                    entry.referencedBy = stageBit;
+                    programObject->resourceStorageBlocks.push_back(std::move(entry));
+                }
+            }
         };
         static const std::string ssboEmptySrc;
         const std::string& ssboVsSrc = vertexShader ? vertexShader->source : ssboEmptySrc;
@@ -32519,6 +33089,67 @@ bool GLContext::linkProgram(GLuint program) {
             }
         }
     }
+
+    auto addParsedBlockArrayResources =
+        [&](const std::string& source, GLbitfield stageBit, bool storage) {
+            const auto parsedBlocks = storage
+                ? parseShaderStorageBlocksForValidation(source)
+                : parseUniformBlocksForValidation(source);
+            auto& table = storage
+                ? programObject->resourceStorageBlocks
+                : programObject->resourceUniformBlocks;
+            for (const auto& parsed : parsedBlocks) {
+                if (!parsed.instanceIsArray) {
+                    continue;
+                }
+                const int numInstances = std::max(1, parsed.instanceArraySize);
+                for (int inst = 0; inst < numInstances; ++inst) {
+                    std::string entryName =
+                        parsed.name + "[" + std::to_string(inst) + "]";
+                    auto existing = std::find_if(
+                        table.begin(),
+                        table.end(),
+                        [&](const GLProgramResourceEntry& e) {
+                            return e.name == entryName;
+                        });
+                    const GLint binding = parsed.hasExplicitBinding
+                        ? static_cast<GLint>(parsed.explicitBinding + inst)
+                        : 0;
+                    if (existing != table.end()) {
+                        existing->referencedBy |= stageBit;
+                        existing->location = binding;
+                        continue;
+                    }
+                    GLProgramResourceEntry entry;
+                    entry.name = std::move(entryName);
+                    entry.type = 0;
+                    entry.location = binding;
+                    entry.offset = 0;
+                    entry.arraySize = 1;
+                    entry.referencedBy = stageBit;
+                    table.push_back(std::move(entry));
+                }
+            }
+        };
+    static const std::string fallbackEmptySource;
+    const std::string& fallbackVsSrc = vertexShader ? vertexShader->source : fallbackEmptySource;
+    const std::string& fallbackFsSrc = fragmentShader ? fragmentShader->source : fallbackEmptySource;
+    const std::string& fallbackGsSrc = geometryShader ? geometryShader->source : fallbackEmptySource;
+    const std::string& fallbackCsSrc = computeShader ? computeShader->source : fallbackEmptySource;
+    const std::string& fallbackTcsSrc = tessControlShader ? tessControlShader->source : fallbackEmptySource;
+    const std::string& fallbackTesSrc = tessEvalShader ? tessEvalShader->source : fallbackEmptySource;
+    addParsedBlockArrayResources(fallbackVsSrc, 0x01, false);
+    addParsedBlockArrayResources(fallbackFsSrc, 0x02, false);
+    addParsedBlockArrayResources(fallbackGsSrc, 0x04, false);
+    addParsedBlockArrayResources(fallbackTcsSrc, 0x08, false);
+    addParsedBlockArrayResources(fallbackTesSrc, 0x10, false);
+    addParsedBlockArrayResources(fallbackCsSrc, 0x20, false);
+    addParsedBlockArrayResources(fallbackVsSrc, 0x01, true);
+    addParsedBlockArrayResources(fallbackFsSrc, 0x02, true);
+    addParsedBlockArrayResources(fallbackGsSrc, 0x04, true);
+    addParsedBlockArrayResources(fallbackTcsSrc, 0x08, true);
+    addParsedBlockArrayResources(fallbackTesSrc, 0x10, true);
+    addParsedBlockArrayResources(fallbackCsSrc, 0x20, true);
 
     return true;
 }
@@ -43060,7 +43691,10 @@ GLint getResourceProperty(const GLProgramResourceEntry& entry, GLenum prop) {
             // arraySize (0 for both scalars and unbounded) and sets
             // isArray. Use isArray to split the 0-case.
             return entry.isArray ? entry.arraySize : std::max<GLint>(entry.arraySize, 1);
-        case GL_OFFSET:            return entry.offset;
+        case GL_OFFSET:
+            return entry.type == GL_UNSIGNED_INT_ATOMIC_COUNTER
+                ? entry.atomicCounterOffset
+                : entry.offset;
         case GL_BLOCK_INDEX:       return entry.blockIndex;
         case GL_LOCATION:          return entry.location;
         // `referencedBy` is a bitmask: 0x01 VS / 0x02 FS /

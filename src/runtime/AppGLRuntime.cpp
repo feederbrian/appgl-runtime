@@ -73,7 +73,7 @@ GLuint maxIndexedBindings(GLenum target) {
         case GL_TRANSFORM_FEEDBACK_BUFFER: return 4;   // GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS
         case GL_UNIFORM_BUFFER:            return 84;  // GL_MAX_UNIFORM_BUFFER_BINDINGS
         case GL_ATOMIC_COUNTER_BUFFER:     return 8;   // GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS
-        case GL_SHADER_STORAGE_BUFFER:     return 8;   // GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS
+        case GL_SHADER_STORAGE_BUFFER:     return 16;  // GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS
         default: return 0;
     }
 }

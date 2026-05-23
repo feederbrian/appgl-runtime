@@ -774,7 +774,7 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     const GLint64 storageBindings = static_cast<GLint64>(
         kBufferSlotsPerStage - kBindingMap.storageBufferBase);
     integerLimits_[GL_MAX_UNIFORM_BUFFER_BINDINGS] = std::max<GLint64>(uniformBindings, 84);
-    integerLimits_[GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS] = std::max<GLint64>(storageBindings, 8);
+    integerLimits_[GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS] = std::max<GLint64>(storageBindings, 16);
     integerLimits_[GL_MAX_SHADER_STORAGE_BLOCK_SIZE] = std::min<GLint64>(
         maxBufferLength, static_cast<GLint64>(128ull * 1024ull * 1024ull));
     integerLimits_[GL_MAX_VERTEX_ATTRIB_BINDINGS] = 16;
