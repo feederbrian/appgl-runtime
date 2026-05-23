@@ -13,7 +13,7 @@ namespace appgl::extensions {
 
 namespace {
 
-constexpr std::array<const char*, 63> kBaseExtensions = {
+constexpr std::array<const char*, 65> kBaseExtensions = {
     "GL_KHR_debug",
     "GL_ARB_debug_output",
     "GL_ARB_multitexture",
@@ -46,6 +46,7 @@ constexpr std::array<const char*, 63> kBaseExtensions = {
     "GL_ARB_shader_storage_buffer_object",
     "GL_ARB_explicit_attrib_location",
     "GL_ARB_explicit_uniform_location",
+    "GL_ARB_shader_subroutine",
     "GL_ARB_buffer_storage",
     "GL_ARB_multi_draw_indirect",
     "GL_ARB_shader_draw_parameters",
@@ -68,6 +69,7 @@ constexpr std::array<const char*, 63> kBaseExtensions = {
     "GL_ARB_texture_swizzle",
     "GL_ARB_separate_shader_objects",
     "GL_ARB_program_interface_query",
+    "GL_ARB_arrays_of_arrays",
     "GL_ARB_shading_language_420pack",
     "GL_ARB_shading_language_packing",
     "GL_EXT_fragment_shading_rate",

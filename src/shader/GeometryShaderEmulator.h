@@ -595,6 +595,8 @@ using TesUniformMap = std::unordered_map<std::string, std::vector<float>>;
 // rebuild cost. Keyed by uniform variable name; top-level uniforms
 // get a direct entry; block members are keyed by member name.
 TesUniformMap buildTesUniformMap(const GLProgramObject& program);
+TesUniformMap buildTesUniformMapForStage(const GLProgramObject& program,
+                                         int stageIndex);
 
 // Phase 3f-14: per-patch varying map shared across the TCS
 // invocations for a single patch AND the TES vertices generated

@@ -1735,6 +1735,233 @@ bool findMatchingParen(const std::string& text,
     return false;
 }
 
+bool findMatchingBrace(const std::string& text,
+                       std::size_t open,
+                       std::size_t& close) {
+    if (open >= text.size() || text[open] != '{') {
+        return false;
+    }
+    int depth = 1;
+    for (std::size_t i = open + 1; i < text.size(); ++i) {
+        if (text[i] == '{') {
+            ++depth;
+        } else if (text[i] == '}') {
+            --depth;
+            if (depth == 0) {
+                close = i;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+struct MslFunctionDefinition {
+    std::string name;
+    std::size_t paramOpen = 0;
+    std::size_t paramClose = 0;
+    std::size_t bodyOpen = 0;
+    std::size_t bodyClose = 0;
+};
+
+std::vector<MslFunctionDefinition> findTopLevelFunctionDefinitions(
+    const std::string& msl) {
+    std::vector<MslFunctionDefinition> functions;
+    int braceDepth = 0;
+    for (std::size_t i = 0; i < msl.size(); ++i) {
+        const char ch = msl[i];
+        if (ch == '{') {
+            ++braceDepth;
+            continue;
+        }
+        if (ch == '}') {
+            if (braceDepth > 0) {
+                --braceDepth;
+            }
+            continue;
+        }
+        if (ch != '(' || braceDepth != 0) {
+            continue;
+        }
+
+        std::size_t nameEnd = i;
+        while (nameEnd > 0 &&
+               std::isspace(static_cast<unsigned char>(msl[nameEnd - 1]))) {
+            --nameEnd;
+        }
+        std::size_t nameBegin = nameEnd;
+        while (nameBegin > 0 && isIdentifierChar(msl[nameBegin - 1])) {
+            --nameBegin;
+        }
+        if (nameBegin == nameEnd) {
+            continue;
+        }
+
+        std::size_t paramClose = 0;
+        if (!findMatchingParen(msl, i, paramClose)) {
+            continue;
+        }
+        std::size_t afterParams = paramClose + 1;
+        while (afterParams < msl.size() &&
+               std::isspace(static_cast<unsigned char>(msl[afterParams]))) {
+            ++afterParams;
+        }
+        if (afterParams >= msl.size() || msl[afterParams] != '{') {
+            i = paramClose;
+            continue;
+        }
+        std::size_t bodyClose = 0;
+        if (!findMatchingBrace(msl, afterParams, bodyClose)) {
+            continue;
+        }
+
+        MslFunctionDefinition fn;
+        fn.name = msl.substr(nameBegin, nameEnd - nameBegin);
+        fn.paramOpen = i;
+        fn.paramClose = paramClose;
+        fn.bodyOpen = afterParams;
+        fn.bodyClose = bodyClose;
+        functions.push_back(std::move(fn));
+        i = bodyClose;
+    }
+    return functions;
+}
+
+bool containsFunctionCallInRange(const std::string& text,
+                                 std::size_t begin,
+                                 std::size_t end,
+                                 const std::string& callee) {
+    std::size_t pos = begin;
+    while ((pos = text.find(callee, pos)) != std::string::npos && pos < end) {
+        const std::size_t afterName = pos + callee.size();
+        if ((pos > 0 && isIdentifierChar(text[pos - 1])) ||
+            (afterName < text.size() && isIdentifierChar(text[afterName]))) {
+            pos = afterName;
+            continue;
+        }
+        std::size_t open = afterName;
+        while (open < end &&
+               std::isspace(static_cast<unsigned char>(text[open]))) {
+            ++open;
+        }
+        if (open >= end || text[open] != '(') {
+            pos = afterName;
+            continue;
+        }
+        std::size_t close = 0;
+        if (!findMatchingParen(text, open, close)) {
+            return false;
+        }
+        return close <= end;
+    }
+    return false;
+}
+
+void threadTextureReductionModesThroughHelpers(std::string& msl,
+                                               const std::string& paramName) {
+    const std::vector<MslFunctionDefinition> functions =
+        findTopLevelFunctionDefinitions(msl);
+    if (functions.empty()) {
+        return;
+    }
+
+    std::unordered_set<std::string> needsModes;
+    for (const auto& fn : functions) {
+        const std::string body =
+            msl.substr(fn.bodyOpen + 1, fn.bodyClose - fn.bodyOpen - 1);
+        if (body.find(paramName) != std::string::npos) {
+            needsModes.insert(fn.name);
+        }
+    }
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto& fn : functions) {
+            if (needsModes.find(fn.name) != needsModes.end()) {
+                continue;
+            }
+            for (const auto& callee : needsModes) {
+                if (containsFunctionCallInRange(
+                        msl, fn.bodyOpen + 1, fn.bodyClose, callee)) {
+                    needsModes.insert(fn.name);
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (needsModes.empty()) {
+        return;
+    }
+
+    struct Insertion {
+        std::size_t pos = 0;
+        std::string text;
+    };
+    std::vector<Insertion> insertions;
+    const std::string helperParam = "constant uint* " + paramName;
+    for (const auto& fn : functions) {
+        for (const auto& callee : needsModes) {
+            if (callee == fn.name && callee != "main0") {
+                continue;
+            }
+            std::size_t pos = fn.bodyOpen + 1;
+            while ((pos = msl.find(callee, pos)) != std::string::npos &&
+                   pos < fn.bodyClose) {
+                const std::size_t afterName = pos + callee.size();
+                if ((pos > 0 && isIdentifierChar(msl[pos - 1])) ||
+                    (afterName < msl.size() && isIdentifierChar(msl[afterName]))) {
+                    pos = afterName;
+                    continue;
+                }
+                std::size_t open = afterName;
+                while (open < fn.bodyClose &&
+                       std::isspace(static_cast<unsigned char>(msl[open]))) {
+                    ++open;
+                }
+                if (open >= fn.bodyClose || msl[open] != '(') {
+                    pos = afterName;
+                    continue;
+                }
+                std::size_t close = 0;
+                if (!findMatchingParen(msl, open, close) || close > fn.bodyClose) {
+                    break;
+                }
+                const std::string args = msl.substr(open + 1, close - open - 1);
+                if (args.find(paramName) == std::string::npos) {
+                    const std::string trimmed = trimCopy(args);
+                    insertions.push_back({
+                        close,
+                        trimmed.empty() ? paramName : ", " + paramName});
+                }
+                pos = close + 1;
+            }
+        }
+
+        if (fn.name == "main0" ||
+            needsModes.find(fn.name) == needsModes.end()) {
+            continue;
+        }
+        const std::string params =
+            msl.substr(fn.paramOpen + 1, fn.paramClose - fn.paramOpen - 1);
+        if (params.find(paramName) != std::string::npos) {
+            continue;
+        }
+        insertions.push_back({
+            fn.paramClose,
+            trimCopy(params).empty() ? helperParam : ", " + helperParam});
+    }
+
+    std::sort(insertions.begin(), insertions.end(),
+              [](const Insertion& a, const Insertion& b) {
+                  return a.pos > b.pos;
+              });
+    for (const auto& insertion : insertions) {
+        msl.insert(insertion.pos, insertion.text);
+    }
+}
+
 enum class TextureReductionTextureKind {
     Unsupported,
     Texture1D,
@@ -2073,6 +2300,7 @@ bool injectTextureReductionMinmax(std::string& msl) {
         ", constant uint* " + std::string(kParamName) +
         " [[buffer(" + std::to_string(bufferSlot) + ")]]";
     msl.insert(paramEnd, param);
+    threadTextureReductionModesThroughHelpers(msl, kParamName);
 
     const std::string usingNeedle = "using namespace metal;\n";
     const std::size_t usingPos = msl.find(usingNeedle);
@@ -2400,6 +2628,15 @@ std::vector<std::uint32_t> ShaderTranslator::compileGLSL(std::string_view source
     const bool usesAtomicCounters =
         source.find("atomic_uint") != std::string_view::npos ||
         source.find("atomicCounter") != std::string_view::npos;
+    const bool usesShaderStorageBuffers =
+        source.find("shader_storage_buffer_object") != std::string_view::npos ||
+        source.find(" buffer ") != std::string_view::npos ||
+        source.find(") buffer") != std::string_view::npos ||
+        source.find("\nbuffer ") != std::string_view::npos;
+    const bool redeclaresPerVertexBlock =
+        source.find("gl_PerVertex") != std::string_view::npos &&
+        source.find("gl_Position") != std::string_view::npos &&
+        source.find('{') != std::string_view::npos;
 
     // Sprint 9 Phase 3 (CKPT103): glslang's strict version-based gating of
     // ARB_sample_shading + OES_sample_variables built-ins (gl_NumSamples,
@@ -2425,7 +2662,17 @@ std::vector<std::uint32_t> ShaderTranslator::compileGLSL(std::string_view source
         // extensions as a preamble so atomic_uint and atomicCounter* parse.
         preamble += "#extension GL_ARB_shader_atomic_counters : enable\n";
         preamble += "#extension GL_ARB_shader_atomic_counter_ops : enable\n";
+    }
+    if (usesAtomicCounters || usesShaderStorageBuffers) {
+        preamble += "#extension GL_ARB_shading_language_420pack : enable\n";
         preamble += "#extension GL_ARB_shader_storage_buffer_object : enable\n";
+    }
+    if (redeclaresPerVertexBlock) {
+        // Glslang gates built-in block redeclaration at GLSL 4.10 or
+        // ARB_separate_shader_objects. Desktop GL 4.x CTS shaders often
+        // redeclare gl_PerVertex in #version 400/420 sources, so enable
+        // the GL extension for the glslang-visible frontend only.
+        preamble += "#extension GL_ARB_separate_shader_objects : enable\n";
     }
     if (eshStage == EShLangFragment) {
         preamble += kFragmentSamplePreamble;

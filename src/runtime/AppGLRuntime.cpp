@@ -4,6 +4,7 @@
 #include <cmath>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <execinfo.h>
 #include <functional>
@@ -6663,6 +6664,11 @@ void APIENTRY glGetShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype
 
 // --- GL 4.1: Program Pipeline Objects (Group 9) ---
 
+static void appglResetProgramSubroutineSelections(GLProgramObject& programObject,
+                                                  bool markDirty);
+static void appglResetPipelineSubroutineSelections(GLContext* ctx,
+                                                   const GLProgramPipelineObject& ppo);
+
 void APIENTRY glGenProgramPipelines(GLsizei n, GLuint* pipelines) {
     auto* ctx = requireCurrentContext("glGenProgramPipelines");
     if (!ctx) return;
@@ -6731,7 +6737,14 @@ void APIENTRY glBindProgramPipeline(GLuint pipeline) {
     // tracker record lets drawArrays / drawElements see which pipeline
     // is current so they can look up pipeline stages and reject draws
     // with no VS (CTS geometry_shader.api.fs_gs_draw_call etc.).
+    const GLuint previousPipeline = ctx->state().currentProgramPipeline();
     ctx->state().setCurrentProgramPipeline(pipeline);
+    if (pipeline != 0 && pipeline != previousPipeline &&
+        ctx->state().currentProgram() == 0) {
+        if (const auto* ppo = ctx->objects().programPipelines().get(pipeline)) {
+            appglResetPipelineSubroutineSelections(ctx, *ppo);
+        }
+    }
     markProgramFunction(FunctionId::glBindProgramPipeline, "Program pipeline binding (state-tracked).");
     Runtime::shared().recordBootstrapTrace("glBindProgramPipeline(pipeline=" + std::to_string(pipeline) + ")");
 }
@@ -6795,6 +6808,13 @@ void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint prog
         ppo->tessControlProgram = program;
         ppo->tessEvalProgram = program;
         ppo->computeProgram = program;
+    }
+    if (program != 0 &&
+        ctx->state().currentProgram() == 0 &&
+        ctx->state().currentProgramPipeline() == pipeline) {
+        if (auto* prog = ctx->objects().programs().get(program)) {
+            appglResetProgramSubroutineSelections(*prog, true);
+        }
     }
     markProgramFunction(FunctionId::glUseProgramStages, "UseProgramStages stage assignment (state-tracked).");
     Runtime::shared().recordBootstrapTrace("glUseProgramStages(pipeline=" + std::to_string(pipeline) + ", stages=" + std::to_string(stages) + ", program=" + std::to_string(program) + ")");
@@ -7081,6 +7101,19 @@ static int appglSubroutineStageIndex(GLenum shadertype) {
 static bool appglProgramHasShaderStage(GLContext* ctx,
                                        const appgl::GLProgramObject& prog,
                                        GLenum shadertype) {
+    GLbitfield stageBit = 0;
+    switch (shadertype) {
+        case GL_VERTEX_SHADER:          stageBit = GL_VERTEX_SHADER_BIT; break;
+        case GL_TESS_CONTROL_SHADER:    stageBit = GL_TESS_CONTROL_SHADER_BIT; break;
+        case GL_TESS_EVALUATION_SHADER: stageBit = GL_TESS_EVALUATION_SHADER_BIT; break;
+        case GL_GEOMETRY_SHADER:        stageBit = GL_GEOMETRY_SHADER_BIT; break;
+        case GL_FRAGMENT_SHADER:        stageBit = GL_FRAGMENT_SHADER_BIT; break;
+        case GL_COMPUTE_SHADER:         stageBit = GL_COMPUTE_SHADER_BIT; break;
+        default:                        stageBit = 0; break;
+    }
+    if (stageBit != 0 && (prog.linkedStageBits & stageBit) != 0) {
+        return true;
+    }
     if (ctx == nullptr) return false;
     for (GLuint shaderId : prog.attachedShaders) {
         const auto* shader = ctx->objects().shaders().get(shaderId);
@@ -7127,6 +7160,127 @@ static std::string appglSubroutineDispatchKey(
     GLint elementCount) {
     if (elementCount <= 1) return baseName;
     return baseName + "_" + std::to_string(element);
+}
+
+static void appglResetProgramSubroutineSelections(GLProgramObject& programObject,
+                                                  bool markDirty) {
+    for (int stage = 0; stage < 6; ++stage) {
+        const auto& uniforms = programObject.resourceSubroutineUniforms[stage];
+        const GLint activeLocations =
+            appglSubroutineUniformLocationCount(uniforms);
+        auto& selections = programObject.currentSubroutineSelections[stage];
+        selections.assign(static_cast<std::size_t>(activeLocations), 0u);
+        for (const auto& uniform : uniforms) {
+            if (uniform.location < 0) continue;
+            const GLuint defaultSelection = uniform.activeVariables.empty()
+                ? 0u
+                : static_cast<GLuint>(uniform.activeVariables.front());
+            const GLint elemCount = std::max<GLint>(1, uniform.arraySize);
+            const std::string baseName =
+                appglStripBracketZeroSuffix(uniform.name);
+            for (GLint elem = 0; elem < elemCount; ++elem) {
+                const GLint loc = uniform.location + elem;
+                if (loc >= 0 && loc < activeLocations) {
+                    selections[static_cast<std::size_t>(loc)] = defaultSelection;
+                }
+                const std::string key =
+                    appglSubroutineDispatchKey(baseName, elem, elemCount);
+                const auto dispatchLoc =
+                    programObject.subroutineDispatchUniformLocations.find(key);
+                if (dispatchLoc == programObject.subroutineDispatchUniformLocations.end()) {
+                    continue;
+                }
+                auto valueIt = programObject.uniformValues.find(dispatchLoc->second);
+                if (valueIt == programObject.uniformValues.end()) continue;
+                valueIt->second.type = GL_UNSIGNED_INT;
+                valueIt->second.arraySize = 1;
+                valueIt->second.uints.assign(1, 0u);
+            }
+        }
+    }
+    programObject.subroutineSelectionsDirty = markDirty;
+}
+
+static void appglResetPipelineSubroutineSelections(GLContext* ctx,
+                                                   const GLProgramPipelineObject& ppo) {
+    if (ctx == nullptr) return;
+    const GLuint programs[] = {
+        ppo.vertexProgram,
+        ppo.tessControlProgram,
+        ppo.tessEvalProgram,
+        ppo.geometryProgram,
+        ppo.fragmentProgram,
+        ppo.computeProgram,
+    };
+    std::unordered_set<GLuint> seen;
+    for (GLuint name : programs) {
+        if (name == 0 || !seen.insert(name).second) continue;
+        if (auto* prog = ctx->objects().programs().get(name)) {
+            if (prog->linked) {
+                appglResetProgramSubroutineSelections(*prog, true);
+            }
+        }
+    }
+}
+
+static GLuint appglPipelineProgramForStage(
+    const GLProgramPipelineObject& ppo,
+    GLenum shadertype) {
+    switch (shadertype) {
+        case GL_VERTEX_SHADER:          return ppo.vertexProgram;
+        case GL_TESS_CONTROL_SHADER:    return ppo.tessControlProgram;
+        case GL_TESS_EVALUATION_SHADER: return ppo.tessEvalProgram;
+        case GL_GEOMETRY_SHADER:        return ppo.geometryProgram;
+        case GL_FRAGMENT_SHADER:        return ppo.fragmentProgram;
+        case GL_COMPUTE_SHADER:         return ppo.computeProgram;
+        default:                        return 0;
+    }
+}
+
+static GLProgramObject* appglCurrentSubroutineProgram(
+    GLContext* ctx,
+    GLenum shadertype,
+    const char* apiName) {
+    if (ctx == nullptr) return nullptr;
+    const GLuint currentProgram = ctx->state().currentProgram();
+    if (currentProgram != 0) {
+        auto* prog = ctx->objects().programs().get(currentProgram);
+        if (prog == nullptr || !prog->linked) {
+            recordValidationError(ctx, apiName, GL_INVALID_OPERATION,
+                                  "no linked program currently bound");
+            return nullptr;
+        }
+        if (!appglProgramHasShaderStage(ctx, *prog, shadertype)) {
+            recordValidationError(ctx, apiName, GL_INVALID_OPERATION,
+                                  "program has no active shader for stage");
+            return nullptr;
+        }
+        return prog;
+    }
+
+    const GLuint pipelineName = ctx->state().currentProgramPipeline();
+    if (pipelineName == 0) {
+        recordValidationError(ctx, apiName, GL_INVALID_OPERATION,
+                              "no linked program currently bound");
+        return nullptr;
+    }
+    const auto* ppo = ctx->objects().programPipelines().get(pipelineName);
+    const GLuint stageProgram =
+        ppo != nullptr ? appglPipelineProgramForStage(*ppo, shadertype) : 0;
+    auto* prog = stageProgram != 0
+        ? ctx->objects().programs().get(stageProgram)
+        : nullptr;
+    if (prog == nullptr || !prog->linked) {
+        recordValidationError(ctx, apiName, GL_INVALID_OPERATION,
+                              "program pipeline has no linked program for stage");
+        return nullptr;
+    }
+    if (!appglProgramHasShaderStage(ctx, *prog, shadertype)) {
+        recordValidationError(ctx, apiName, GL_INVALID_OPERATION,
+                              "program has no active shader for stage");
+        return nullptr;
+    }
+    return prog;
 }
 
 GLint APIENTRY glGetSubroutineUniformLocation(GLuint program, GLenum shadertype, const GLchar* name) {
@@ -7368,21 +7522,9 @@ void APIENTRY glUniformSubroutinesuiv(GLenum shadertype, GLsizei count, const GL
         return;
     }
 
-    // GL 4.6 §7.9: the operation targets the currently-bound program;
-    // no `program` argument is passed. INVALID_OPERATION if no linked
-    // program is active.
-    const GLuint progName = ctx->state().currentProgram();
-    auto* prog = ctx->objects().programs().get(progName);
-    if (prog == nullptr || !prog->linked) {
-        recordValidationError(ctx, "glUniformSubroutinesuiv",
-            GL_INVALID_OPERATION, "no linked program currently bound");
-        return;
-    }
-    if (!appglProgramHasShaderStage(ctx, *prog, shadertype)) {
-        recordValidationError(ctx, "glUniformSubroutinesuiv",
-            GL_INVALID_OPERATION, "program has no active shader for stage");
-        return;
-    }
+    GLProgramObject* prog =
+        appglCurrentSubroutineProgram(ctx, shadertype, "glUniformSubroutinesuiv");
+    if (prog == nullptr) return;
 
     // Spec: count must equal GL_ACTIVE_SUBROUTINE_UNIFORM_LOCATIONS,
     // which is the active location span. Explicit locations can create
@@ -7512,17 +7654,9 @@ void APIENTRY glGetUniformSubroutineuiv(GLenum shadertype, GLint location, GLuin
         return;
     }
 
-    const GLuint progName = ctx->state().currentProgram();
-    auto* prog = ctx->objects().programs().get(progName);
-    if (prog == nullptr || !prog->linked) {
-        recordValidationError(ctx, "glGetUniformSubroutineuiv",
-            GL_INVALID_OPERATION, "no linked program currently bound");
-        *params = 0;
-        return;
-    }
-    if (!appglProgramHasShaderStage(ctx, *prog, shadertype)) {
-        recordValidationError(ctx, "glGetUniformSubroutineuiv",
-            GL_INVALID_OPERATION, "program has no active shader for stage");
+    GLProgramObject* prog =
+        appglCurrentSubroutineProgram(ctx, shadertype, "glGetUniformSubroutineuiv");
+    if (prog == nullptr) {
         *params = 0;
         return;
     }

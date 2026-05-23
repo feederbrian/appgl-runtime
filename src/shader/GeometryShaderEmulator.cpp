@@ -57,7 +57,7 @@ namespace spv {
         OpFNegate = 127,
         OpFAdd = 129, OpFSub = 131, OpFMul = 133, OpFDiv = 136, OpFMod = 141,
         OpIAdd = 128, OpISub = 130, OpIMul = 132,
-        OpSDiv = 135, OpSRem = 138, OpSMod = 139, OpUMod = 137, OpSNegate = 126,
+        OpUDiv = 134, OpSDiv = 135, OpSRem = 138, OpSMod = 139, OpUMod = 137, OpSNegate = 126,
         OpConvertFToS = 110, OpConvertFToU = 109,
         OpConvertSToF = 111, OpConvertUToF = 112, OpFConvert = 115,
         OpBitcast = 124,
@@ -79,7 +79,7 @@ namespace spv {
         OpSelect = 169, OpAny = 154, OpAll = 155,
         OpPhi = 245, OpLoopMerge = 246, OpSelectionMerge = 247,
         OpLabel = 248, OpBranch = 249, OpBranchConditional = 250, OpSwitch = 251,
-        OpReturn = 253, OpReturnValue = 254,
+        OpReturn = 253, OpReturnValue = 254, OpUnreachable = 255,
         OpEmitVertex = 218, OpEndPrimitive = 219,
         // Sprint 8 #9-C (CKPT95) — multi-stream GS emit. Stream operand is
         // an <id> referencing a constant Int specifying the target stream.
@@ -1216,6 +1216,11 @@ Value Interpreter::loadFromVar(std::uint32_t varId, std::uint32_t off,
         if (cIt == module_.types.end()) return false;
         return cIt->second.kind == TypeInfo::Kind::UInt;
     };
+    auto componentIsBool = [&](std::uint32_t compTypeId) -> bool {
+        auto cIt = module_.types.find(compTypeId);
+        if (cIt == module_.types.end()) return false;
+        return cIt->second.kind == TypeInfo::Kind::Bool;
+    };
 
     switch (t.kind) {
         case TypeInfo::Kind::Float:
@@ -1229,6 +1234,9 @@ Value Interpreter::loadFromVar(std::uint32_t varId, std::uint32_t off,
             } else if (componentIsUInt(t.componentType)) {
                 v.kind = Value::Kind::UInt2;
                 for (int k = 0; k < 2; ++k) std::memcpy(&v.i[k], &storage[off + k], 4);
+            } else if (componentIsBool(t.componentType)) {
+                v.kind = Value::Kind::Int2;
+                for (int k = 0; k < 2; ++k) std::memcpy(&v.i[k], &storage[off + k], 4);
             } else {
                 v.kind = Value::Kind::Float2;
                 for (int k = 0; k < 2; ++k) v.f[k] = storage[off + k];
@@ -1241,6 +1249,9 @@ Value Interpreter::loadFromVar(std::uint32_t varId, std::uint32_t off,
             } else if (componentIsUInt(t.componentType)) {
                 v.kind = Value::Kind::UInt3;
                 for (int k = 0; k < 3; ++k) std::memcpy(&v.i[k], &storage[off + k], 4);
+            } else if (componentIsBool(t.componentType)) {
+                v.kind = Value::Kind::Int3;
+                for (int k = 0; k < 3; ++k) std::memcpy(&v.i[k], &storage[off + k], 4);
             } else {
                 v.kind = Value::Kind::Float3;
                 for (int k = 0; k < 3; ++k) v.f[k] = storage[off + k];
@@ -1252,6 +1263,9 @@ Value Interpreter::loadFromVar(std::uint32_t varId, std::uint32_t off,
                 for (int k = 0; k < 4; ++k) std::memcpy(&v.i[k], &storage[off + k], 4);
             } else if (componentIsUInt(t.componentType)) {
                 v.kind = Value::Kind::UInt4;
+                for (int k = 0; k < 4; ++k) std::memcpy(&v.i[k], &storage[off + k], 4);
+            } else if (componentIsBool(t.componentType)) {
+                v.kind = Value::Kind::Int4;
                 for (int k = 0; k < 4; ++k) std::memcpy(&v.i[k], &storage[off + k], 4);
             } else {
                 v.kind = Value::Kind::Float4;
@@ -4037,6 +4051,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
         std::uint32_t currentLabel = 0;
         std::uint32_t calleeFunctionId = 0;
         std::uint32_t resultId = 0;
+        std::uint32_t resultTypeId = 0;
         bool expectsReturnValue = false;
         std::unordered_map<std::uint32_t, std::uint32_t> pointerAliases;
     };
@@ -6224,13 +6239,14 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     if (t.kind == TypeInfo::Kind::Vec2 || t.kind == TypeInfo::Kind::Vec3 ||
                         t.kind == TypeInfo::Kind::Vec4) {
                         // Pick result kind based on component scalar type.
-                        bool isInt = false, isUInt = false;
+                        bool isInt = false, isUInt = false, isBool = false;
                         auto ctIt = module_.types.find(t.componentType);
                         if (ctIt != module_.types.end()) {
                             if (ctIt->second.kind == TypeInfo::Kind::Int) isInt = true;
                             else if (ctIt->second.kind == TypeInfo::Kind::UInt) isUInt = true;
+                            else if (ctIt->second.kind == TypeInfo::Kind::Bool) isBool = true;
                         }
-                        if (isInt) {
+                        if (isInt || isBool) {
                             r.kind = (t.count == 2) ? Value::Kind::Int2 :
                                      (t.count == 3) ? Value::Kind::Int3 : Value::Kind::Int4;
                         } else if (isUInt) {
@@ -6254,8 +6270,10 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                                 // valid SPIR-V (§3.32.12), but
                                 // defensive copy handles both sides
                                 // of the union.
-                                if (isInt || isUInt) {
-                                    if (srcIsFloat) {
+                                if (isInt || isUInt || isBool) {
+                                    if (isBool && cv.kind == Value::Kind::Bool) {
+                                        r.i[dstIdx] = cv.bval ? 1 : 0;
+                                    } else if (srcIsFloat) {
                                         std::memcpy(&r.i[dstIdx], &cv.f[c], 4);
                                     } else {
                                         r.i[dstIdx] = cv.i[c];
@@ -6763,6 +6781,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             }
             // ─ Integer arithmetic / bitcast / conversions ─
             case spv::OpIAdd: case spv::OpISub: case spv::OpIMul:
+            case spv::OpUDiv:
             case spv::OpSDiv: case spv::OpSRem: case spv::OpSMod: case spv::OpUMod: {
                 Value a, b;
                 if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("int-arith: unknown operand"); break; }
@@ -6773,6 +6792,12 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                         case spv::OpIAdd: r.i[k] = a.i[k] + b.i[k]; break;
                         case spv::OpISub: r.i[k] = a.i[k] - b.i[k]; break;
                         case spv::OpIMul: r.i[k] = a.i[k] * b.i[k]; break;
+                        case spv::OpUDiv: {
+                            const std::uint32_t au = static_cast<std::uint32_t>(a.i[k]);
+                            const std::uint32_t bu = static_cast<std::uint32_t>(b.i[k]);
+                            r.i[k] = bu != 0 ? static_cast<std::int32_t>(au / bu) : 0;
+                            break;
+                        }
                         case spv::OpSDiv: r.i[k] = b.i[k] != 0 ? a.i[k] / b.i[k] : 0; break;
                         case spv::OpSRem: r.i[k] = b.i[k] != 0 ? a.i[k] % b.i[k] : 0; break;
                         case spv::OpSMod: {
@@ -7272,7 +7297,11 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 const std::uint32_t resultScalarWidth =
                     expectsReturnValue ? module_.scalarWidth(resultTypeId) : 0;
                 if (expectsReturnValue &&
-                    (resultScalarWidth == 0 || resultScalarWidth > 4)) {
+                    (resultScalarWidth == 0 ||
+                     (resultScalarWidth > 4 &&
+                      typeIt->second.kind != TypeInfo::Kind::Matrix &&
+                      typeIt->second.kind != TypeInfo::Kind::Array &&
+                      typeIt->second.kind != TypeInfo::Kind::Struct))) {
                     bail("OpFunctionCall: unsupported return type deferred");
                     break;
                 }
@@ -7283,10 +7312,6 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 }
                 const auto& fn = fnIt->second;
                 const std::uint32_t argCount = wc - 4;
-                if (!callStack.empty()) {
-                    bail("OpFunctionCall: nested calls deferred");
-                    break;
-                }
                 if (activeFunctions.count(functionId) != 0) {
                     bail("OpFunctionCall: recursion deferred");
                     break;
@@ -7336,21 +7361,40 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     } else {
                         const std::uint32_t paramScalarWidth =
                             module_.scalarWidth(paramTypeId);
-                        if (paramScalarWidth == 0 || paramScalarWidth > 4) {
+                        if (paramScalarWidth == 0) {
                             bail("OpFunctionCall: unsupported value parameter deferred");
                             break;
                         }
-                        Value arg{};
-                        if (!tryGetValue(w[3 + ai], arg)) {
-                            bail("OpFunctionCall: missing value argument");
-                            break;
+                        const std::uint32_t argId = w[3 + ai];
+                        if (paramScalarWidth <= 4) {
+                            Value arg{};
+                            if (!tryGetValue(argId, arg)) {
+                                bail("OpFunctionCall: missing value argument");
+                                break;
+                            }
+                            if (static_cast<std::uint32_t>(arg.componentCount()) !=
+                                paramScalarWidth) {
+                                bail("OpFunctionCall: value parameter width mismatch");
+                                break;
+                            }
+                            valueStore_[paramId] = arg;
+                        } else {
+                            if (const auto* cols = matrixColumnsForId(argId)) {
+                                matrixColumns_[paramId] = *cols;
+                                aggregateValues_.erase(paramId);
+                                valueStore_.erase(paramId);
+                            } else {
+                                AggregateValue agg;
+                                agg.typeId = paramTypeId;
+                                if (!appendFlattenedId(paramTypeId, argId, agg)) {
+                                    bail("OpFunctionCall: unsupported value parameter deferred");
+                                    break;
+                                }
+                                aggregateValues_[paramId] = std::move(agg);
+                                matrixColumns_.erase(paramId);
+                                valueStore_.erase(paramId);
+                            }
                         }
-                        if (static_cast<std::uint32_t>(arg.componentCount()) !=
-                            paramScalarWidth) {
-                            bail("OpFunctionCall: value parameter width mismatch");
-                            break;
-                        }
-                        valueStore_[paramId] = arg;
                     }
                 }
                 if (errored_) break;
@@ -7362,6 +7406,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 frame.currentLabel = currentLabel;
                 frame.calleeFunctionId = functionId;
                 frame.resultId = resultId;
+                frame.resultTypeId = resultTypeId;
                 frame.expectsReturnValue = expectsReturnValue;
                 frame.pointerAliases = std::move(functionPointerAliases);
                 callStack.push_back(std::move(frame));
@@ -7419,11 +7464,25 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     break;
                 }
                 Value ret{};
-                if (!tryGetValue(w[0], ret)) {
-                    bail("OpReturnValue: missing value");
-                    break;
+                if (tryGetValue(w[0], ret)) {
+                    valueStore_[frame.resultId] = ret;
+                    matrixColumns_.erase(frame.resultId);
+                    aggregateValues_.erase(frame.resultId);
+                } else if (const auto* cols = matrixColumnsForId(w[0])) {
+                    matrixColumns_[frame.resultId] = *cols;
+                    valueStore_.erase(frame.resultId);
+                    aggregateValues_.erase(frame.resultId);
+                } else {
+                    AggregateValue agg;
+                    agg.typeId = frame.resultTypeId;
+                    if (!appendFlattenedId(frame.resultTypeId, w[0], agg)) {
+                        bail("OpReturnValue: missing value");
+                        break;
+                    }
+                    aggregateValues_[frame.resultId] = std::move(agg);
+                    valueStore_.erase(frame.resultId);
+                    matrixColumns_.erase(frame.resultId);
                 }
-                valueStore_[frame.resultId] = ret;
                 activeFunctions.erase(frame.calleeFunctionId);
                 pc = frame.returnPc;
                 currentFuncEnd = frame.functionEnd;
@@ -7436,6 +7495,9 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             case spv::OpFunction:
             case spv::OpFunctionEnd:
                 pc += wc;
+                break;
+            case spv::OpUnreachable:
+                bail("OpUnreachable reached");
                 break;
             default:
                 bail("unsupported opcode: " + std::to_string(opcode));
@@ -7493,6 +7555,7 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpIAdd:
         case spv::OpISub:
         case spv::OpIMul:
+        case spv::OpUDiv:
         case spv::OpSDiv:
         case spv::OpSRem:
         case spv::OpSMod:
@@ -7577,6 +7640,7 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         // ─ Function ─
         case spv::OpReturn:
         case spv::OpReturnValue:
+        case spv::OpUnreachable:
         case spv::OpFunction:
         case spv::OpFunctionParameter:
         case spv::OpFunctionCall:
@@ -8161,11 +8225,38 @@ namespace {
 // scalars, vectors, and matrices (laid out as flat float sequence —
 // the interpreter treats ints as bit-cast floats so the same storage
 // serves both types).
-Interpreter::UniformValues buildUniformMap(const GLProgramObject& program) {
+const std::vector<GLProgramUniformInfo>& uniformInfosForStage(
+    const GLProgramObject& program,
+    int stageIndex)
+{
+    if (stageIndex >= 0 && stageIndex < 6 &&
+        program.pipelineEmulationStageUniformsValid[static_cast<std::size_t>(stageIndex)]) {
+        return program.pipelineEmulationStageUniforms[static_cast<std::size_t>(stageIndex)];
+    }
+    return program.uniforms;
+}
+
+const std::unordered_map<GLint, GLProgramUniformValue>& uniformValuesForStage(
+    const GLProgramObject& program,
+    int stageIndex)
+{
+    if (stageIndex >= 0 && stageIndex < 6 &&
+        program.pipelineEmulationStageUniformsValid[static_cast<std::size_t>(stageIndex)]) {
+        return program.pipelineEmulationStageUniformValues[static_cast<std::size_t>(stageIndex)];
+    }
+    return program.uniformValues;
+}
+
+Interpreter::UniformValues buildUniformMapForStage(
+    const GLProgramObject& program,
+    int stageIndex)
+{
     Interpreter::UniformValues out;
-    for (const auto& u : program.uniforms) {
-        auto vIt = program.uniformValues.find(u.location);
-        if (vIt == program.uniformValues.end()) continue;
+    const auto& uniforms = uniformInfosForStage(program, stageIndex);
+    const auto& uniformValues = uniformValuesForStage(program, stageIndex);
+    for (const auto& u : uniforms) {
+        auto vIt = uniformValues.find(u.location);
+        if (vIt == uniformValues.end()) continue;
         const auto& v = vIt->second;
         std::vector<float> flat;
         if (!v.floats.empty()) {
@@ -8180,6 +8271,10 @@ Interpreter::UniformValues buildUniformMap(const GLProgramObject& program) {
         if (!flat.empty()) out[u.name] = std::move(flat);
     }
     return out;
+}
+
+Interpreter::UniformValues buildUniformMap(const GLProgramObject& program) {
+    return buildUniformMapForStage(program, -1);
 }
 
 void addUniformBuffersFromModule(const std::vector<std::uint32_t>& spirv,
@@ -9527,7 +9622,7 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     const Interpreter::StorageBufferMap* vsSsboMapPtr =
         vsSsboMap.empty() ? nullptr : &vsSsboMap;
 
-    Interpreter::UniformValues uniforms = buildUniformMap(program);
+    Interpreter::UniformValues uniforms = buildUniformMapForStage(program, 0);
     std::unordered_map<std::string, std::uint32_t> vsInputLocOverrides =
         buildVsInputLocationOverrides(program);
     const std::vector<VsAttribFetchSource> vsAttribSources =
@@ -10225,7 +10320,8 @@ EmulatedDraw emulateGeometryDraw(
     // constant_expressions path used to work without it because the
     // GS didn't read gl_in[]). In that case we fall back to zero-
     // initialised inputs.
-    Interpreter::UniformValues uniforms = buildUniformMap(program);
+    Interpreter::UniformValues vsUniforms = buildUniformMapForStage(program, 0);
+    Interpreter::UniformValues gsUniforms = buildUniformMapForStage(program, 3);
     // UBO-block-array path: `layout(binding=N) uniform Block { … }
     // arr[K];` values live in GL buffers bound with
     // `glBindBufferBase(GL_UNIFORM_BUFFER, N+i, …)` rather than in
@@ -10237,7 +10333,7 @@ EmulatedDraw emulateGeometryDraw(
     // runtime may re-bind via glUniformBlockBinding — we honour
     // only the layout-specified binding for now (the common case
     // for limits tests).
-    augmentUniformMapWithUBOBlocks(uniforms, mod, state, objects);
+    augmentUniformMapWithUBOBlocks(gsUniforms, mod, state, objects);
 
     // Parse VS SPIR-V (shared across every vertex of this draw). The
     // VS module is small — re-parsing per draw is fine; caching it on
@@ -10247,6 +10343,9 @@ EmulatedDraw emulateGeometryDraw(
     const bool haveVs = !program.vertexSpirv.empty() &&
                         vsMod.parse(program.vertexSpirv.data(), program.vertexSpirv.size()) &&
                         vsMod.haveFuncBody;
+    if (haveVs) {
+        augmentUniformMapWithUBOBlocks(vsUniforms, vsMod, state, objects);
+    }
 
     // VS output varyings (ordered by Location) — the caller's per-
     // vertex-input varying table must match the GS's input-side view.
@@ -10414,7 +10513,7 @@ EmulatedDraw emulateGeometryDraw(
                 }
                 Interpreter vsInterp(vsMod, Interpreter::Stage::Vertex,
                                      vsOutNames, vsOutWidths);
-                vsInterp.setUniforms(&uniforms);
+                vsInterp.setUniforms(&vsUniforms);
                 vsInterp.setVsInputs(&vsAttribs,
                     static_cast<std::int32_t>(vboSlot), glInstanceID);
                 if (vsSampledTextures != nullptr) {
@@ -10510,7 +10609,7 @@ EmulatedDraw emulateGeometryDraw(
                     ? priorStageOutput->varyingWidths : vsOutWidths;
                 Interpreter interp(mod, gsInNames, gsInWidths,
                                    outNames, outWidths);
-                interp.setUniforms(&uniforms);
+                interp.setUniforms(&gsUniforms);
                 interp.setGsPrimitiveId(static_cast<std::int32_t>(p));
                 interp.setGsInvocationId(static_cast<std::int32_t>(invId));
                 if (gsSampledTextures != nullptr) {
@@ -11698,7 +11797,7 @@ bool runVsForVertex(
     // `buildUniformMap` + the VAO fetch-source helpers live in the
     // anon namespace alongside the Interpreter — same TU, so we can
     // call them here.
-    Interpreter::UniformValues uniforms = buildUniformMap(program);
+    Interpreter::UniformValues uniforms = buildUniformMapForStage(program, 0);
 
     // VAO shadow reads take non-const GLObjectStore&
     // because the BufferObject shadow-pointer readback path is
@@ -11786,6 +11885,11 @@ TesUniformMap buildTesUniformMap(const GLProgramObject& program) {
     return buildUniformMap(program);
 }
 
+TesUniformMap buildTesUniformMapForStage(const GLProgramObject& program,
+                                         int stageIndex) {
+    return buildUniformMapForStage(program, stageIndex);
+}
+
 bool runTesForVertex(
     const std::uint32_t* tesSpirv,
     std::size_t tesWordCount,
@@ -11837,7 +11941,7 @@ bool runTesForVertex(
     if (precomputedUniforms != nullptr) {
         uniformsPtr = precomputedUniforms;
     } else {
-        localUniforms = buildUniformMap(program);
+        localUniforms = buildUniformMapForStage(program, 2);
         uniformsPtr = &localUniforms;
     }
     const Interpreter::UniformValues& uniforms = *uniformsPtr;
@@ -12002,7 +12106,7 @@ bool runTcsForVertex(
     if (precomputedUniforms != nullptr) {
         uniformsPtr = precomputedUniforms;
     } else {
-        localUniforms = buildUniformMap(program);
+        localUniforms = buildUniformMapForStage(program, 1);
         uniformsPtr = &localUniforms;
     }
     const Interpreter::UniformValues& uniforms = *uniformsPtr;

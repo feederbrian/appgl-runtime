@@ -391,9 +391,14 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                         } else {
                             v.kind = (t.count == 2) ? Value::Kind::Int2 :
                                      (t.count == 3) ? Value::Kind::Int3 : Value::Kind::Int4;
+                            const bool isBool = (compT.kind == TypeInfo::Kind::Bool);
                             for (std::uint32_t k = 0; k < t.count && (2 + k) < wc; ++k) {
                                 auto cIt = constants.find(w[2 + k]);
-                                if (cIt != constants.end()) v.i[k] = cIt->second.i[0];
+                                if (cIt != constants.end()) {
+                                    v.i[k] = isBool
+                                        ? (cIt->second.bval ? 1 : 0)
+                                        : cIt->second.i[0];
+                                }
                             }
                         }
                     } else if (t.kind == TypeInfo::Kind::Matrix) {

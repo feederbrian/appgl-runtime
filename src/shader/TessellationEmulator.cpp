@@ -2481,11 +2481,15 @@ EmulatedDraw emulateTessellationDraw(
     const bool needUniformMap =
         program.tessellationEmulated || program.tessellationInterpreted ||
         program.tessControlInterpreted;
-    TesUniformMap precomputedUniforms;
-    const TesUniformMap* uniformMapPtr = nullptr;
+    TesUniformMap precomputedTcsUniforms;
+    TesUniformMap precomputedTesUniforms;
+    const TesUniformMap* tcsUniformMapPtr = nullptr;
+    const TesUniformMap* tesUniformMapPtr = nullptr;
     if (needUniformMap) {
-        precomputedUniforms = buildTesUniformMap(program);
-        uniformMapPtr = &precomputedUniforms;
+        precomputedTcsUniforms = buildTesUniformMapForStage(program, 1);
+        precomputedTesUniforms = buildTesUniformMapForStage(program, 2);
+        tcsUniformMapPtr = &precomputedTcsUniforms;
+        tesUniformMapPtr = &precomputedTesUniforms;
     }
 
     UniformBufferMap tessUboMap;
@@ -2691,7 +2695,7 @@ EmulatedDraw emulateTessellationDraw(
                         slot,
                         /*outerLevelsOut=*/nullptr,
                         /*innerLevelsOut=*/nullptr,
-                        uniformMapPtr,
+                        tcsUniformMapPtr,
                         patchVaryingsOut,
                         &diag,
                         /*inVaryingNames=*/  &crossStageVsToTcs,
@@ -2789,7 +2793,7 @@ EmulatedDraw emulateTessellationDraw(
             program, tessCoord, primID,
             interpVaryingNames, interpVaryingWidths,
             ssboMap, thisPatchInputs, outV,
-            uniformMapPtr, thisPatchVaryings, &diag,
+            tesUniformMapPtr, thisPatchVaryings, &diag,
             /*inVaryingNames=*/  &crossStageTcsToTes,
             /*inVaryingWidths=*/ &crossStageTcsToTesWidths,
             /*sampledTextures=*/tesSampledTextures,

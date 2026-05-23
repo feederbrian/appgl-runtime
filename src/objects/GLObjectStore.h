@@ -687,10 +687,23 @@ struct GLProgramObject {
     // any link, the query returns GL_FALSE regardless of request.
     // CTS `sepshaderobjs.PipelineApi` asserts this exact behavior.
     bool separableLinked = false;
+    // Stage bits present in the most recently linked executable.
+    // Unlike attachedShaders, this survives glCreateShaderProgramv's
+    // attach-link-detach flow for separable program pipeline stages.
+    GLbitfield linkedStageBits = 0;
     bool deleteRequested = false;
     std::vector<GLProgramUniformInfo> uniforms;
     std::vector<GLProgramAttributeInfo> attributes;
     std::unordered_map<GLint, GLProgramUniformValue> uniformValues;
+    // Emulation-only view for separable program pipelines whose stages
+    // are temporarily copied onto one GLProgramObject. Stage-local
+    // uniforms can have identical names and locations across source
+    // programs (notably subroutine dispatch uniforms), so CPU/GPU
+    // emulation paths consult these per-stage snapshots when valid.
+    std::array<std::vector<GLProgramUniformInfo>, 6> pipelineEmulationStageUniforms;
+    std::array<std::unordered_map<GLint, GLProgramUniformValue>, 6> pipelineEmulationStageUniformValues;
+    std::array<bool, 6> pipelineEmulationStageUniformsValid{};
+    GLuint pipelineEmulationFragmentProgram = 0;
     std::unordered_map<std::string, GLuint> requestedAttribLocations;
     // Pre-link mapping set by `glBindFragDataLocation(program, color,
     // name)`. GL 4.6 §15.2 — these bindings take effect on the next

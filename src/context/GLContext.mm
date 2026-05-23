@@ -24737,7 +24737,8 @@ bool GLContext::compileShader(GLuint shader) {
     // The real link-time `scanSubroutineDeclarations` then re-reads
     // the ORIGINAL (unrewritten) source so `resourceSubroutines*`
     // tables still reflect the user's declarations.
-    auto rewriteSubroutinesForSpirv = [](const std::string& in) -> std::string {
+    std::string subroutineValidationError;
+    auto rewriteSubroutinesForSpirv = [&](const std::string& in) -> std::string {
         // Strip comments for analysis but rewrite the original text
         // so we don't accidentally erase legitimate code.
         // Collect subroutine-uniform name → first compatible impl.
@@ -24746,6 +24747,13 @@ bool GLContext::compileShader(GLuint shader) {
         std::unordered_map<std::string, std::vector<std::string>> typeToImpls;
         std::unordered_map<std::string, std::string> uniformToType;
         std::unordered_map<std::string, std::string> implToPrototype;
+        struct ImplSignature {
+            std::string name;
+            std::string retType;
+            std::string params;
+            std::vector<std::string> typeNames;
+        };
+        std::vector<ImplSignature> implSignatures;
         struct SubUniformInfo {
             std::string typeName;
             std::vector<int> dims;
@@ -24790,6 +24798,27 @@ bool GLContext::compileShader(GLuint shader) {
             std::size_t s = pp;
             while (pp < in.size() && isIdent(static_cast<unsigned char>(in[pp]))) ++pp;
             return in.substr(s, pp - s);
+        };
+        auto readTypeWithArraySuffix = [&](std::size_t& pp) -> std::string {
+            std::string typeName = readWord(pp);
+            if (typeName.empty()) return typeName;
+            std::size_t q = pp;
+            skipWs(q);
+            while (q < in.size() && in[q] == '[') {
+                const std::size_t bracketStart = q;
+                int bd = 1;
+                ++q;
+                while (q < in.size() && bd > 0) {
+                    if (in[q] == '[') ++bd;
+                    else if (in[q] == ']') --bd;
+                    ++q;
+                }
+                if (bd != 0) break;
+                typeName.append(in, bracketStart, q - bracketStart);
+                pp = q;
+                skipWs(q);
+            }
+            return typeName;
         };
         const std::string kw = "subroutine";
         // GLSL `subroutine` is a keyword only at declaration position.
@@ -24978,7 +25007,7 @@ bool GLContext::compileShader(GLuint shader) {
                     if (q < in.size() && in[q] == ',') ++q;
                 }
                 if (q < in.size()) ++q;  // skip ')'
-                std::string retType = readWord(q);
+                std::string retType = readTypeWithArraySuffix(q);
                 std::string fnName = readWord(q);
                 if (!fnName.empty()) {
                     for (const auto& t : typeList) {
@@ -24999,8 +25028,12 @@ bool GLContext::compileShader(GLuint shader) {
                         ++q;
                     }
                     if (!fnName.empty() && !retType.empty() && q <= in.size()) {
+                        const std::string rawParams =
+                            in.substr(paramsStart, q - paramsStart);
                         implToPrototype[fnName] =
-                            retType + " " + fnName + in.substr(paramsStart, q - paramsStart) + ";";
+                            retType + " " + fnName + rawParams + ";";
+                        implSignatures.push_back(
+                            ImplSignature{fnName, retType, rawParams, typeList});
                     }
                 }
                 skipWs(q);
@@ -25020,7 +25053,7 @@ bool GLContext::compileShader(GLuint shader) {
                 p = q;
                 continue;
             }
-            std::string next = readWord(q);
+            std::string next = readTypeWithArraySuffix(q);
             if (next == "uniform") {
                 std::string typeName = readWord(q);
                 std::string uniName = readWord(q);
@@ -25160,27 +25193,21 @@ bool GLContext::compileShader(GLuint shader) {
         auto helperNameForKey = [](const std::string& key) {
             return "_appgl_call_" + key;
         };
-        auto parseParamNames = [&](const std::string& rawParams) {
-            std::vector<std::string> names;
+        auto dynamicHelperNameForUniform = [](const std::string& name) {
+            return "_appgl_call_" + name + "_dynamic";
+        };
+        auto splitParamList = [&](const std::string& rawParams) {
+            std::vector<std::string> params;
             if (rawParams.size() < 2 || rawParams.front() != '(' || rawParams.back() != ')') {
-                return names;
+                return params;
             }
             std::string body = trimCopy(rawParams.substr(1, rawParams.size() - 2));
-            if (body.empty() || body == "void") return names;
+            if (body.empty() || body == "void") return params;
             std::size_t start = 0;
             int depth = 0;
             auto consumeParam = [&](std::size_t begin, std::size_t end) {
                 std::string param = trimCopy(body.substr(begin, end - begin));
-                while (!param.empty() && param.back() == ']') {
-                    const std::size_t open = param.rfind('[');
-                    if (open == std::string::npos) break;
-                    param = trimCopy(param.substr(0, open));
-                }
-                std::size_t p = param.size();
-                while (p > 0 && !isIdent(static_cast<unsigned char>(param[p - 1]))) --p;
-                std::size_t e = p;
-                while (p > 0 && isIdent(static_cast<unsigned char>(param[p - 1]))) --p;
-                if (e > p) names.push_back(param.substr(p, e - p));
+                if (!param.empty()) params.push_back(std::move(param));
             };
             for (std::size_t idx = 0; idx <= body.size(); ++idx) {
                 if (idx == body.size() || (body[idx] == ',' && depth == 0)) {
@@ -25191,8 +25218,133 @@ bool GLContext::compileShader(GLuint shader) {
                 if (body[idx] == '(' || body[idx] == '[') ++depth;
                 else if ((body[idx] == ')' || body[idx] == ']') && depth > 0) --depth;
             }
+            return params;
+        };
+        auto stripLeadingParamQualifiers = [&](std::string text) {
+            text = trimCopy(std::move(text));
+            bool changed = true;
+            while (changed) {
+                changed = false;
+                std::size_t p = 0;
+                while (p < text.size() && isIdent(static_cast<unsigned char>(text[p]))) ++p;
+                const std::string token = text.substr(0, p);
+                if (token == "const" || token == "in" || token == "out" ||
+                    token == "inout" || token == "highp" ||
+                    token == "mediump" || token == "lowp") {
+                    text = trimCopy(text.substr(p));
+                    changed = true;
+                }
+            }
+            return text;
+        };
+        auto normalizeParamList = [&](const std::string& rawParams,
+                                      std::vector<std::string>* outNames = nullptr) {
+            std::vector<std::string> params = splitParamList(rawParams);
+            if (params.empty()) {
+                return std::string("(void)");
+            }
+            std::string normalized = "(";
+            for (std::size_t idx = 0; idx < params.size(); ++idx) {
+                std::string param = params[idx];
+                std::string nameProbe = param;
+                while (!nameProbe.empty() && nameProbe.back() == ']') {
+                    const std::size_t open = nameProbe.rfind('[');
+                    if (open == std::string::npos) break;
+                    nameProbe = trimCopy(nameProbe.substr(0, open));
+                }
+                std::size_t p = nameProbe.size();
+                while (p > 0 && !isIdent(static_cast<unsigned char>(nameProbe[p - 1]))) --p;
+                std::size_t e = p;
+                while (p > 0 && isIdent(static_cast<unsigned char>(nameProbe[p - 1]))) --p;
+                std::string name;
+                bool hasExplicitName = false;
+                if (e > p) {
+                    name = nameProbe.substr(p, e - p);
+                    const std::string before =
+                        stripLeadingParamQualifiers(nameProbe.substr(0, p));
+                    hasExplicitName = !before.empty();
+                }
+                if (!hasExplicitName) {
+                    name = "_appgl_arg" + std::to_string(idx);
+                    param += " ";
+                    param += name;
+                }
+                if (outNames != nullptr) outNames->push_back(name);
+                if (idx > 0) normalized += ", ";
+                normalized += param;
+            }
+            normalized += ")";
+            return normalized;
+        };
+        auto parseParamNames = [&](const std::string& rawParams) {
+            std::vector<std::string> names;
+            normalizeParamList(rawParams, &names);
             return names;
         };
+        auto canonicalTypeSignature = [&](std::string type) {
+            type = trimCopy(std::move(type));
+            type.erase(std::remove_if(type.begin(), type.end(),
+                [](unsigned char c) { return std::isspace(c); }), type.end());
+            return type;
+        };
+        auto canonicalParamSignature = [&](const std::string& rawParams) {
+            std::vector<std::string> params = splitParamList(rawParams);
+            if (params.empty()) {
+                return std::string("(void)");
+            }
+            std::string normalized = "(";
+            for (std::size_t idx = 0; idx < params.size(); ++idx) {
+                std::string param = trimCopy(params[idx]);
+                std::string arraySuffix;
+                while (!param.empty() && param.back() == ']') {
+                    const std::size_t open = param.rfind('[');
+                    if (open == std::string::npos) break;
+                    arraySuffix.insert(0, param.substr(open));
+                    param = trimCopy(param.substr(0, open));
+                }
+                std::size_t p = param.size();
+                while (p > 0 && !isIdent(static_cast<unsigned char>(param[p - 1]))) --p;
+                std::size_t e = p;
+                while (p > 0 && isIdent(static_cast<unsigned char>(param[p - 1]))) --p;
+                bool hasExplicitName = false;
+                if (e > p) {
+                    const std::string before =
+                        stripLeadingParamQualifiers(param.substr(0, p));
+                    hasExplicitName = !before.empty();
+                }
+                if (hasExplicitName) {
+                    param = trimCopy(param.substr(0, p));
+                }
+                if (!arraySuffix.empty()) {
+                    param += arraySuffix;
+                }
+                param.erase(std::remove_if(param.begin(), param.end(),
+                    [](unsigned char c) { return std::isspace(c); }), param.end());
+                if (idx > 0) normalized += ",";
+                normalized += param;
+            }
+            normalized += ")";
+            return normalized;
+        };
+        for (const auto& impl : implSignatures) {
+            const std::string implReturn = canonicalTypeSignature(impl.retType);
+            const std::string implParams = canonicalParamSignature(impl.params);
+            for (const auto& typeName : impl.typeNames) {
+                auto retIt = typeReturn.find(typeName);
+                auto parIt = typeParams.find(typeName);
+                if (retIt == typeReturn.end() || parIt == typeParams.end()) {
+                    continue;
+                }
+                if (implReturn != canonicalTypeSignature(retIt->second) ||
+                    implParams != canonicalParamSignature(parIt->second)) {
+                    subroutineValidationError =
+                        "ERROR: subroutine implementation '" + impl.name +
+                        "' is not compatible with subroutine type '" +
+                        typeName + "'.";
+                    return in;
+                }
+            }
+        }
         struct DispatchHelperSpec {
             std::string uniformName;
             std::string key;
@@ -25201,8 +25353,19 @@ bool GLContext::compileShader(GLuint shader) {
             std::string params;
             std::vector<std::string> impls;
         };
+        struct DynamicDispatchHelperSpec {
+            std::string uniformName;
+            std::string typeName;
+            std::string retType;
+            std::string params;
+            int elemCount = 1;
+        };
         std::vector<DispatchHelperSpec> dispatchHelperSpecs;
+        std::vector<DynamicDispatchHelperSpec> dynamicDispatchHelperSpecs;
         std::unordered_map<std::string, std::string> dispatchHelperByKey;
+        std::unordered_map<std::string, std::string> dynamicDispatchHelperByUniform;
+        std::unordered_map<std::string, int> subUniformElementCount;
+        std::unordered_set<std::string> dispatchHelperUniformNames;
         for (const auto& name : subUniNames) {
             auto infoIt = subUniformInfo.find(name);
             auto typeIt = uniformToType.find(name);
@@ -25215,17 +25378,21 @@ bool GLContext::compileShader(GLuint shader) {
                 implIt == typeToImpls.end() || implIt->second.empty()) {
                 continue;
             }
-            if (retIt->second == "void") {
-                continue;
-            }
             std::vector<int> dims;
             if (infoIt != subUniformInfo.end()) dims = infoIt->second.dims;
             const int elemCount = elementCountForDims(dims);
+            subUniformElementCount[name] = elemCount;
+            dispatchHelperUniformNames.insert(name);
             for (int elem = 0; elem < elemCount; ++elem) {
                 const std::string key = dispatchKeyForElement(name, elem, elemCount);
                 dispatchHelperByKey[key] = helperNameForKey(key);
                 dispatchHelperSpecs.push_back(
                     DispatchHelperSpec{name, key, typeName, retIt->second, parIt->second, implIt->second});
+            }
+            if (!dims.empty() && elemCount > 1) {
+                dynamicDispatchHelperByUniform[name] = dynamicHelperNameForUniform(name);
+                dynamicDispatchHelperSpecs.push_back(
+                    DynamicDispatchHelperSpec{name, typeName, retIt->second, parIt->second, elemCount});
             }
         }
 
@@ -25291,6 +25458,7 @@ bool GLContext::compileShader(GLuint shader) {
                 // (including multidimensional subroutine uniforms).
                 std::size_t afterSubscript = t;
                 std::vector<int> callIndices;
+                std::vector<std::string> callIndexTexts;
                 bool constIndices = true;
                 while (afterSubscript < in.size() && in[afterSubscript] == '[') {
                     const std::size_t contentStart = afterSubscript + 1;
@@ -25307,6 +25475,7 @@ bool GLContext::compileShader(GLuint shader) {
                         break;
                     }
                     std::string idxText = trimCopy(in.substr(contentStart, q - contentStart));
+                    callIndexTexts.push_back(idxText);
                     if (idxText.empty()) {
                         constIndices = false;
                     } else {
@@ -25326,6 +25495,27 @@ bool GLContext::compileShader(GLuint shader) {
                 std::size_t tt = afterSubscript;
                 skipWs(tt);
                 auto it = uniformToImpl.find(word);
+                if (it != uniformToImpl.end() &&
+                    tt < in.size() && in[tt] == '.' &&
+                    tt + 9 <= in.size() &&
+                    in.compare(tt + 1, 8, "length()") == 0) {
+                    int length = 1;
+                    auto infoIt = subUniformInfo.find(word);
+                    if (infoIt != subUniformInfo.end() && !infoIt->second.dims.empty()) {
+                        const std::size_t depth = callIndexTexts.size();
+                        if (depth < infoIt->second.dims.size()) {
+                            length = std::max(1, infoIt->second.dims[depth]);
+                        }
+                    } else {
+                        auto countIt = subUniformElementCount.find(word);
+                        length = countIt != subUniformElementCount.end()
+                            ? countIt->second : 1;
+                    }
+                    out.append(std::to_string(length));
+                    out.push_back('u');
+                    i = tt + 9;
+                    continue;
+                }
                 if (it != uniformToImpl.end() && tt < in.size() && in[tt] == '(') {
                     std::string dispatchKey = word;
                     auto infoIt = subUniformInfo.find(word);
@@ -25351,6 +25541,53 @@ bool GLContext::compileShader(GLuint shader) {
                     if (helperIt != dispatchHelperByKey.end()) {
                         out.append(helperIt->second);
                         i = afterSubscript;
+                        continue;
+                    }
+                    auto dynHelperIt = dynamicDispatchHelperByUniform.find(word);
+                    if (dynHelperIt != dynamicDispatchHelperByUniform.end() &&
+                        tt < in.size() && in[tt] == '(') {
+                        std::string flatIndexExpr;
+                        auto infoIt = subUniformInfo.find(word);
+                        if (infoIt != subUniformInfo.end() &&
+                            callIndexTexts.size() == infoIt->second.dims.size()) {
+                            for (std::size_t dimIdx = 0;
+                                 dimIdx < callIndexTexts.size();
+                                 ++dimIdx) {
+                                if (callIndexTexts[dimIdx].empty()) {
+                                    flatIndexExpr.clear();
+                                    break;
+                                }
+                                const std::string term =
+                                    "uint(" + callIndexTexts[dimIdx] + ")";
+                                if (flatIndexExpr.empty()) {
+                                    flatIndexExpr = term;
+                                } else {
+                                    flatIndexExpr = "(" + flatIndexExpr + " * " +
+                                        std::to_string(std::max(1, infoIt->second.dims[dimIdx])) +
+                                        "u + " + term + ")";
+                                }
+                            }
+                        }
+                        if (flatIndexExpr.empty()) {
+                            out.append(it->second);
+                            i = afterSubscript;
+                            continue;
+                        }
+                        std::vector<std::string> paramNames;
+                        auto typeNameIt = uniformToType.find(word);
+                        if (typeNameIt != uniformToType.end()) {
+                            auto paramIt = typeParams.find(typeNameIt->second);
+                            if (paramIt != typeParams.end()) {
+                                paramNames = parseParamNames(paramIt->second);
+                            }
+                        }
+                        out.append(dynHelperIt->second);
+                        out.append("(");
+                        out.append(flatIndexExpr);
+                        if (!paramNames.empty()) {
+                            out.append(", ");
+                        }
+                        i = tt + 1;  // consume original '('; keep args and closing ')'
                         continue;
                     }
                     // Sprint 17 Day 7+ Bank-Group-C: v1-eligible (void
@@ -25512,7 +25749,9 @@ bool GLContext::compileShader(GLuint shader) {
                 synthHeader += ";\n";
             }
             for (const auto& spec : dispatchHelperSpecs) {
-                const std::vector<std::string> paramNames = parseParamNames(spec.params);
+                std::vector<std::string> paramNames;
+                const std::string normalizedParams =
+                    normalizeParamList(spec.params, &paramNames);
                 std::string args;
                 for (std::size_t pi = 0; pi < paramNames.size(); ++pi) {
                     if (pi > 0) args += ", ";
@@ -25521,14 +25760,44 @@ bool GLContext::compileShader(GLuint shader) {
                 synthHeader += spec.retType;
                 synthHeader += " ";
                 synthHeader += helperNameForKey(spec.key);
-                synthHeader += spec.params;
+                synthHeader += normalizedParams;
                 synthHeader += " {\n";
+                const bool voidReturn = (spec.retType == "void");
                 if (spec.impls.size() == 1) {
-                    synthHeader += "    return ";
-                    synthHeader += spec.impls.front();
-                    synthHeader += "(";
-                    synthHeader += args;
-                    synthHeader += ");\n";
+                    if (voidReturn) {
+                        synthHeader += "    ";
+                        synthHeader += spec.impls.front();
+                        synthHeader += "(";
+                        synthHeader += args;
+                        synthHeader += ");\n";
+                        synthHeader += "    return;\n";
+                    } else {
+                        synthHeader += "    return ";
+                        synthHeader += spec.impls.front();
+                        synthHeader += "(";
+                        synthHeader += args;
+                        synthHeader += ");\n";
+                    }
+                } else if (voidReturn) {
+                    for (std::size_t k = 0; k < spec.impls.size(); ++k) {
+                        if (k == 0) {
+                            synthHeader += "    if (_appgl_sub_";
+                            synthHeader += spec.key;
+                            synthHeader += " == 0u) { ";
+                        } else if (k + 1 < spec.impls.size()) {
+                            synthHeader += "    else if (_appgl_sub_";
+                            synthHeader += spec.key;
+                            synthHeader += " == ";
+                            synthHeader += std::to_string(k);
+                            synthHeader += "u) { ";
+                        } else {
+                            synthHeader += "    else { ";
+                        }
+                        synthHeader += spec.impls[k];
+                        synthHeader += "(";
+                        synthHeader += args;
+                        synthHeader += "); return; }\n";
+                    }
                 } else {
                     for (std::size_t k = 0; k < spec.impls.size(); ++k) {
                         if (k == 0) {
@@ -25553,7 +25822,77 @@ bool GLContext::compileShader(GLuint shader) {
                 synthHeader += "}\n";
             }
         }
+        if (!dynamicDispatchHelperSpecs.empty()) {
+            if (synthHeader.empty()) {
+                synthHeader = "// appgl: subroutine dynamic-index helpers\n";
+            } else {
+                synthHeader += "// appgl: subroutine dynamic-index helpers\n";
+            }
+            std::sort(dynamicDispatchHelperSpecs.begin(), dynamicDispatchHelperSpecs.end(),
+                [](const DynamicDispatchHelperSpec& a, const DynamicDispatchHelperSpec& b) {
+                    return a.uniformName < b.uniformName;
+                });
+            auto paramsWithDispatchIndex = [&](const std::string& rawParams) {
+                std::vector<std::string> ignoredNames;
+                const std::string normalizedParams =
+                    normalizeParamList(rawParams, &ignoredNames);
+                if (normalizedParams == "(void)" || normalizedParams == "()") {
+                    return std::string("(uint _appgl_idx)");
+                }
+                std::string body = normalizedParams.substr(1, normalizedParams.size() - 2);
+                return std::string("(uint _appgl_idx, ") + body + ")";
+            };
+            for (const auto& spec : dynamicDispatchHelperSpecs) {
+                const std::vector<std::string> paramNames = parseParamNames(spec.params);
+                std::string args;
+                for (std::size_t pi = 0; pi < paramNames.size(); ++pi) {
+                    if (pi > 0) args += ", ";
+                    args += paramNames[pi];
+                }
+                synthHeader += spec.retType;
+                synthHeader += " ";
+                synthHeader += dynamicHelperNameForUniform(spec.uniformName);
+                synthHeader += paramsWithDispatchIndex(spec.params);
+                synthHeader += " {\n";
+                const bool voidReturn = (spec.retType == "void");
+                for (int elem = 0; elem < spec.elemCount; ++elem) {
+                    const std::string key =
+                        dispatchKeyForElement(spec.uniformName, elem, spec.elemCount);
+                    if (voidReturn) {
+                        if (elem == 0) {
+                            synthHeader += "    if (_appgl_idx == 0u) { ";
+                        } else if (elem + 1 < spec.elemCount) {
+                            synthHeader += "    else if (_appgl_idx == ";
+                            synthHeader += std::to_string(elem);
+                            synthHeader += "u) { ";
+                        } else {
+                            synthHeader += "    else { ";
+                        }
+                        synthHeader += helperNameForKey(key);
+                        synthHeader += "(";
+                        synthHeader += args;
+                        synthHeader += "); return; }\n";
+                    } else {
+                        if (elem == 0) {
+                            synthHeader += "    if (_appgl_idx == 0u) return ";
+                        } else if (elem + 1 < spec.elemCount) {
+                            synthHeader += "    else if (_appgl_idx == ";
+                            synthHeader += std::to_string(elem);
+                            synthHeader += "u) return ";
+                        } else {
+                            synthHeader += "    else return ";
+                        }
+                        synthHeader += helperNameForKey(key);
+                        synthHeader += "(";
+                        synthHeader += args;
+                        synthHeader += ");\n";
+                    }
+                }
+                synthHeader += "}\n";
+            }
+        }
         for (const auto& n : subUniNames) {
+            if (dispatchHelperUniformNames.count(n) != 0) continue;
             auto it = uniformIsV1Eligible.find(n);
             if (it == uniformIsV1Eligible.end() || !it->second) continue;
             if (synthHeader.empty()) {
@@ -25572,7 +25911,9 @@ bool GLContext::compileShader(GLuint shader) {
             // preprocessor-directive lines so the synthesized header
             // lands AFTER all extension enables (e.g.
             // GL_ARB_geometry_shader4 / viewport_array) but BEFORE any
-            // user code.
+            // user declarations. Struct-typed subroutine signatures
+            // need the user struct visible before our generated
+            // prototypes/helpers.
             std::size_t injectAt = 0;
             while (injectAt < out.size() &&
                    std::isspace(static_cast<unsigned char>(out[injectAt]))) {
@@ -25588,8 +25929,68 @@ bool GLContext::compileShader(GLuint shader) {
                 // Skip whitespace + blank lines between directives.
                 while (injectAt < out.size() &&
                        (out[injectAt] == ' ' || out[injectAt] == '\t' ||
-                        out[injectAt] == '\r' || out[injectAt] == '\n')) {
+                       out[injectAt] == '\r' || out[injectAt] == '\n')) {
                     ++injectAt;
+                }
+            }
+            auto atWord = [&](std::size_t pos, const char* word) {
+                const std::size_t len = std::strlen(word);
+                if (pos + len > out.size() || out.compare(pos, len, word) != 0) {
+                    return false;
+                }
+                const bool left = (pos == 0) ||
+                    !isIdent(static_cast<unsigned char>(out[pos - 1]));
+                const bool right = (pos + len == out.size()) ||
+                    !isIdent(static_cast<unsigned char>(out[pos + len]));
+                return left && right;
+            };
+            auto skipWsFrom = [&](std::size_t& pos) {
+                while (pos < out.size() &&
+                       std::isspace(static_cast<unsigned char>(out[pos]))) {
+                    ++pos;
+                }
+            };
+            bool advancedDecl = true;
+            while (advancedDecl) {
+                advancedDecl = false;
+                skipWsFrom(injectAt);
+                if (injectAt + 1 < out.size() &&
+                    out[injectAt] == '/' && out[injectAt + 1] == '/') {
+                    const std::size_t lineEnd = out.find('\n', injectAt + 2);
+                    injectAt = (lineEnd == std::string::npos)
+                        ? out.size() : lineEnd + 1;
+                    advancedDecl = true;
+                } else if (injectAt + 1 < out.size() &&
+                           out[injectAt] == '/' && out[injectAt + 1] == '*') {
+                    const std::size_t blockEnd = out.find("*/", injectAt + 2);
+                    if (blockEnd != std::string::npos) {
+                        injectAt = blockEnd + 2;
+                        advancedDecl = true;
+                    }
+                } else if (atWord(injectAt, "precision")) {
+                    const std::size_t semi = out.find(';', injectAt);
+                    if (semi != std::string::npos) {
+                        injectAt = semi + 1;
+                        advancedDecl = true;
+                    }
+                } else if (atWord(injectAt, "struct")) {
+                    const std::size_t brace = out.find('{', injectAt);
+                    if (brace != std::string::npos) {
+                        int depth = 1;
+                        std::size_t p = brace + 1;
+                        while (p < out.size() && depth > 0) {
+                            if (out[p] == '{') ++depth;
+                            else if (out[p] == '}') --depth;
+                            ++p;
+                        }
+                        if (depth == 0) {
+                            const std::size_t semi = out.find(';', p);
+                            if (semi != std::string::npos) {
+                                injectAt = semi + 1;
+                                advancedDecl = true;
+                            }
+                        }
+                    }
                 }
             }
             out.insert(injectAt, synthHeader);
@@ -25600,6 +26001,15 @@ bool GLContext::compileShader(GLuint shader) {
     const std::string& subroutineRewriteInput =
         rewrite.didRewrite ? rewrite.source : object->source;
     std::string afterSubRewrite = rewriteSubroutinesForSpirv(subroutineRewriteInput);
+    if (!subroutineValidationError.empty()) {
+        object->compileLog = subroutineValidationError;
+        object->compiled = false;
+        object->spirv.clear();
+        Runtime::shared().recordShaderTranslation({
+            shaderTag, "compile", sourceHash, "", "", object->compileLog, "", false
+        });
+        return true;
+    }
     const bool didSubRewrite = afterSubRewrite != subroutineRewriteInput;
     const std::string& baseCompileSource =
         didSubRewrite ? afterSubRewrite : subroutineRewriteInput;
@@ -26987,6 +27397,27 @@ static void scanSubroutineDeclarations(
         while (p < src.size() && isIdentChar(static_cast<unsigned char>(src[p]))) ++p;
         return src.substr(start, p - start);
     };
+    auto readTypeWithArraySuffix = [&](std::size_t& p) -> std::string {
+        std::string typeName = readIdent(p);
+        if (typeName.empty()) return typeName;
+        std::size_t q = p;
+        skipWs(q);
+        while (q < src.size() && src[q] == '[') {
+            const std::size_t bracketStart = q;
+            int bd = 1;
+            ++q;
+            while (q < src.size() && bd > 0) {
+                if (src[q] == '[') ++bd;
+                else if (src[q] == ']') --bd;
+                ++q;
+            }
+            if (bd != 0) break;
+            typeName.append(src, bracketStart, q - bracketStart);
+            p = q;
+            skipWs(q);
+        }
+        return typeName;
+    };
     auto isDeclPos = [&](std::size_t p) {
         while (p > 0) {
             unsigned char c = static_cast<unsigned char>(src[p - 1]);
@@ -27134,7 +27565,7 @@ static void scanSubroutineDeclarations(
                 if (p < src.size() && src[p] == ',') ++p;
             }
             if (p < src.size() && src[p] == ')') ++p;
-            std::string retType = readIdent(p);
+            std::string retType = readTypeWithArraySuffix(p);
             (void)retType;
             std::string fnName = readIdent(p);
             if (fnName.empty()) { pos = p; continue; }
@@ -27163,7 +27594,7 @@ static void scanSubroutineDeclarations(
             continue;
         }
 
-        std::string next = readIdent(p);
+        std::string next = readTypeWithArraySuffix(p);
         if (next == "uniform") {
             std::string typeName = readIdent(p);
             std::string uniName = readIdent(p);
@@ -27503,8 +27934,14 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->uniforms.clear();
     programObject->attributes.clear();
     programObject->uniformValues.clear();
+    for (std::size_t stage = 0; stage < programObject->pipelineEmulationStageUniforms.size(); ++stage) {
+        programObject->pipelineEmulationStageUniforms[stage].clear();
+        programObject->pipelineEmulationStageUniformValues[stage].clear();
+        programObject->pipelineEmulationStageUniformsValid[stage] = false;
+    }
     programObject->linkLog.clear();
     programObject->linked = false;
+    programObject->linkedStageBits = 0;
     programObject->advancedBlendSupportMask = 0;
     programObject->advancedBlendSupportAll = false;
 
@@ -27577,19 +28014,35 @@ bool GLContext::linkProgram(GLuint program) {
         attachedShaderObjects.push_back(shaderObject);
         ++shaderCount;
         switch (shaderObject->stage) {
-            case GL_VERTEX_SHADER:          vertexShader = shaderObject; break;
+            case GL_VERTEX_SHADER:
+                vertexShader = shaderObject;
+                programObject->linkedStageBits |= GL_VERTEX_SHADER_BIT;
+                break;
             case GL_FRAGMENT_SHADER:
                 fragmentShader = shaderObject;
+                programObject->linkedStageBits |= GL_FRAGMENT_SHADER_BIT;
                 programObject->advancedBlendSupportMask |=
                     shaderObject->advancedBlendSupportMask;
                 programObject->advancedBlendSupportAll =
                     programObject->advancedBlendSupportAll ||
                     shaderObject->advancedBlendSupportAll;
                 break;
-            case GL_COMPUTE_SHADER:         computeShader = shaderObject; break;
-            case GL_GEOMETRY_SHADER:        geometryShader = shaderObject; break;
-            case GL_TESS_CONTROL_SHADER:    tessControlShader = shaderObject; break;
-            case GL_TESS_EVALUATION_SHADER: tessEvalShader = shaderObject; break;
+            case GL_COMPUTE_SHADER:
+                computeShader = shaderObject;
+                programObject->linkedStageBits |= GL_COMPUTE_SHADER_BIT;
+                break;
+            case GL_GEOMETRY_SHADER:
+                geometryShader = shaderObject;
+                programObject->linkedStageBits |= GL_GEOMETRY_SHADER_BIT;
+                break;
+            case GL_TESS_CONTROL_SHADER:
+                tessControlShader = shaderObject;
+                programObject->linkedStageBits |= GL_TESS_CONTROL_SHADER_BIT;
+                break;
+            case GL_TESS_EVALUATION_SHADER:
+                tessEvalShader = shaderObject;
+                programObject->linkedStageBits |= GL_TESS_EVALUATION_SHADER_BIT;
+                break;
             default: break;
         }
         appendDeclarationsAsUniforms(programObject->uniforms, shaderObject->declaredUniforms);
@@ -35881,6 +36334,28 @@ static void computeStageUniformLayout(
     }
 }
 
+static const std::vector<GLProgramUniformInfo>& uniformsForEmulationStage(
+    const GLProgramObject& program,
+    int stageIndex)
+{
+    if (stageIndex >= 0 && stageIndex < 6 &&
+        program.pipelineEmulationStageUniformsValid[static_cast<std::size_t>(stageIndex)]) {
+        return program.pipelineEmulationStageUniforms[static_cast<std::size_t>(stageIndex)];
+    }
+    return program.uniforms;
+}
+
+static const std::unordered_map<GLint, GLProgramUniformValue>& uniformValuesForEmulationStage(
+    const GLProgramObject& program,
+    int stageIndex)
+{
+    if (stageIndex >= 0 && stageIndex < 6 &&
+        program.pipelineEmulationStageUniformsValid[static_cast<std::size_t>(stageIndex)]) {
+        return program.pipelineEmulationStageUniformValues[static_cast<std::size_t>(stageIndex)];
+    }
+    return program.uniformValues;
+}
+
 // The output is written into |outBuffer|, which is resized via assign().
 // Callers should pass a thread-local vector so that the allocation persists
 // across draw calls — after the first frame this is a zero-alloc operation.
@@ -36645,13 +37120,40 @@ bool isDrawModeCompatibleWithGs(GLenum drawMode, GLenum gsInputTopo) {
 GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
     GLuint currentProgramName, GLuint& outProgramName)
 {
+    auto clearPipelineEmulationUniforms = [](GLProgramObject* program) {
+        if (program == nullptr) return;
+        for (std::size_t stage = 0; stage < program->pipelineEmulationStageUniforms.size(); ++stage) {
+            program->pipelineEmulationStageUniforms[stage].clear();
+            program->pipelineEmulationStageUniformValues[stage].clear();
+            program->pipelineEmulationStageUniformsValid[stage] = false;
+        }
+    };
+    auto invalidateGsPassThroughFragmentCache = [](GLProgramObject* program) {
+        if (program == nullptr) return;
+        for (auto& entry : program->gsPassThroughPipelineStateCache) {
+            if (entry.second != nullptr) {
+                CFRelease(entry.second);
+            }
+        }
+        program->gsPassThroughPipelineStateCache.clear();
+        releaseRetainedMetalObject(program->gsPassThroughPipelineState);
+        program->gsPassThroughPipelineState = nullptr;
+        program->gsPassThroughPipelineColorFormat = 0;
+        releaseRetainedMetalObject(program->gsPassThroughFragmentFunction);
+        program->gsPassThroughFragmentFunction = nullptr;
+        program->gsPassThroughFragmentMSL.clear();
+        program->gsPassThroughFragmentMSLActive = false;
+        program->gsPassThroughFragmentMSLPrimIdLoc = 0;
+    };
     // Fast path: a current program is bound (glUseProgram), use it
     // directly. Don't touch pipeline state even if a pipeline is
     // also bound — GL 4.6 §7.3 says the current program shadows
     // any pipeline binding.
     if (currentProgramName != 0) {
         outProgramName = currentProgramName;
-        return objects->programs().get(currentProgramName);
+        GLProgramObject* program = objects->programs().get(currentProgramName);
+        clearPipelineEmulationUniforms(program);
+        return program;
     }
     // No current program; check the pipeline for a GS program.
     const GLuint pipelineName = state->currentProgramPipeline();
@@ -36660,13 +37162,104 @@ GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
     if (ppo == nullptr || ppo->geometryProgram == 0) return nullptr;
     GLProgramObject* gsProg = objects->programs().get(ppo->geometryProgram);
     if (gsProg == nullptr || !gsProg->geometryEmulated) return nullptr;
+    clearPipelineEmulationUniforms(gsProg);
+    auto setPipelineEmulationStageUniforms = [&](int stageIndex,
+                                                 const GLProgramObject* source) {
+        if (source == nullptr || stageIndex < 0 || stageIndex >= 6) return;
+        const std::size_t stage = static_cast<std::size_t>(stageIndex);
+        gsProg->pipelineEmulationStageUniforms[stage] = source->uniforms;
+        gsProg->pipelineEmulationStageUniformValues[stage] = source->uniformValues;
+        gsProg->pipelineEmulationStageUniformsValid[stage] = true;
+
+        // resolveDrawProgram() may already have spliced the pipeline's
+        // fragment uniforms onto the VS container. Subroutine dispatch
+        // uniforms are intentionally named the same in every separable
+        // stage, so recover each stage's dispatch value from its own
+        // glUniformSubroutinesuiv selection state before CPU emulation
+        // snapshots consume the uniforms.
+        auto stripBracketZeroSuffix = [](const std::string& name) {
+            if (name.size() >= 3 &&
+                name.compare(name.size() - 3, 3, "[0]") == 0) {
+                return name.substr(0, name.size() - 3);
+            }
+            return name;
+        };
+        auto dispatchKey = [](const std::string& baseName,
+                              GLint element,
+                              GLint elementCount) {
+            if (elementCount <= 1) return baseName;
+            return baseName + "_" + std::to_string(element);
+        };
+        const auto& subroutineUniforms =
+            source->resourceSubroutineUniforms[stageIndex];
+        const auto& selections =
+            source->currentSubroutineSelections[stageIndex];
+        for (const auto& uniform : subroutineUniforms) {
+            if (uniform.location < 0) continue;
+            const GLint elemCount = std::max<GLint>(1, uniform.arraySize);
+            const std::string baseName = stripBracketZeroSuffix(uniform.name);
+            for (GLint elem = 0; elem < elemCount; ++elem) {
+                const GLint loc = uniform.location + elem;
+                GLuint selected = uniform.activeVariables.empty()
+                    ? 0u
+                    : static_cast<GLuint>(uniform.activeVariables.front());
+                if (loc >= 0 && static_cast<std::size_t>(loc) < selections.size()) {
+                    selected = selections[static_cast<std::size_t>(loc)];
+                }
+
+                std::size_t typeLocal = 0;
+                for (std::size_t k = 0; k < uniform.activeVariables.size(); ++k) {
+                    if (uniform.activeVariables[k] == static_cast<GLint>(selected)) {
+                        typeLocal = k;
+                        break;
+                    }
+                }
+
+                const std::string key = dispatchKey(baseName, elem, elemCount);
+                const auto locIt =
+                    source->subroutineDispatchUniformLocations.find(key);
+                if (locIt == source->subroutineDispatchUniformLocations.end()) {
+                    continue;
+                }
+                const GLint dispatchLoc = locIt->second;
+                const std::string synthName = "_appgl_sub_" + key;
+                auto& stageUniformInfos =
+                    gsProg->pipelineEmulationStageUniforms[stage];
+                const bool hasDispatchUniform = std::any_of(
+                    stageUniformInfos.begin(), stageUniformInfos.end(),
+                    [&](const GLProgramUniformInfo& info) {
+                        return info.location == dispatchLoc &&
+                               info.name == synthName;
+                    });
+                if (!hasDispatchUniform) {
+                    GLProgramUniformInfo info;
+                    info.name = synthName;
+                    info.type = GL_UNSIGNED_INT;
+                    info.arraySize = 1;
+                    info.location = dispatchLoc;
+                    stageUniformInfos.push_back(std::move(info));
+                }
+
+                auto& value =
+                    gsProg->pipelineEmulationStageUniformValues[stage][dispatchLoc];
+                value.type = GL_UNSIGNED_INT;
+                value.arraySize = 1;
+                value.uints.assign(1, static_cast<GLuint>(typeLocal));
+                value.ints.clear();
+                value.floats.clear();
+                value.doubles.clear();
+                value.df64TransportWords.clear();
+            }
+        }
+    };
     // Copy the VS program's vertexSpirv onto the GS program so
     // emulateGeometryDraw's pre-pass runs against the pipeline's
     // actual VS. Idempotent when the same pipeline draws multiple
     // times — we overwrite to stay in sync even if the pipeline's
     // stages were swapped via useProgramStages between draws.
+    GLProgramObject* vsProg = nullptr;
     if (ppo->vertexProgram != 0) {
-        GLProgramObject* vsProg = objects->programs().get(ppo->vertexProgram);
+        vsProg = objects->programs().get(ppo->vertexProgram);
         if (vsProg != nullptr) {
             gsProg->vertexSpirv = vsProg->vertexSpirv;
             gsProg->vertexReflection = vsProg->vertexReflection;
@@ -36680,20 +37273,46 @@ GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
     // encoder's pipeline build. When absent (FS program missing
     // or not linked), encodeEmulatedGsDraw will fail and the draw
     // falls back — same behaviour as before this patch.
+    GLProgramObject* fsProg = nullptr;
     if (ppo->fragmentProgram != 0) {
-        GLProgramObject* fsProg = objects->programs().get(ppo->fragmentProgram);
+        fsProg = objects->programs().get(ppo->fragmentProgram);
         if (fsProg != nullptr) {
+            const bool fragmentStageChanged =
+                gsProg->pipelineEmulationFragmentProgram != ppo->fragmentProgram ||
+                gsProg->fragmentMSL != fsProg->fragmentMSL;
             gsProg->fragmentMSL = fsProg->fragmentMSL;
             gsProg->fragmentReflection = fsProg->fragmentReflection;
+            gsProg->pipelineEmulationFragmentProgram = ppo->fragmentProgram;
+            if (fragmentStageChanged) {
+                invalidateGsPassThroughFragmentCache(gsProg);
+            }
         }
+    } else if (gsProg->pipelineEmulationFragmentProgram != 0 || !gsProg->fragmentMSL.empty()) {
+        gsProg->fragmentMSL.clear();
+        gsProg->fragmentReflection = ShaderReflection{};
+        gsProg->pipelineEmulationFragmentProgram = 0;
+        invalidateGsPassThroughFragmentCache(gsProg);
     }
+    GLProgramObject* tcsProg = nullptr;
+    GLProgramObject* tesProg = nullptr;
+    bool hasPipelineTessellationStages = false;
     if (ppo->tessControlProgram != 0 && ppo->tessEvalProgram != 0) {
-        GLProgramObject* tcsProg = objects->programs().get(ppo->tessControlProgram);
-        GLProgramObject* tesProg = objects->programs().get(ppo->tessEvalProgram);
+        tcsProg = objects->programs().get(ppo->tessControlProgram);
+        tesProg = objects->programs().get(ppo->tessEvalProgram);
         if (tcsProg != nullptr && tesProg != nullptr) {
+            const bool tcsSpirvChanged =
+                gsProg->tessControlSpirv != tcsProg->tessControlSpirv;
+            const bool tesSpirvChanged =
+                gsProg->tessEvalSpirv != tesProg->tessEvalSpirv;
             gsProg->hasTessellation = true;
             gsProg->tessControlSpirv = tcsProg->tessControlSpirv;
             gsProg->tessEvalSpirv = tesProg->tessEvalSpirv;
+            if (tcsSpirvChanged) {
+                gsProg->tessControlParsedModule.reset();
+            }
+            if (tesSpirvChanged) {
+                gsProg->tessEvalParsedModule.reset();
+            }
             gsProg->tessControlReflection = tcsProg->tessControlReflection;
             gsProg->tessEvalAsComputeReflection = tesProg->tessEvalAsComputeReflection;
             gsProg->tessellationEmulated = tesProg->tessellationEmulated;
@@ -36711,17 +37330,28 @@ GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
                 gsProg->tessPositionOffset[i] = tesProg->tessPositionOffset[i];
                 gsProg->tessPositionConstant[i] = tesProg->tessPositionConstant[i];
             }
+            (void)appgl::detectTessellationEmulatable(*gsProg);
+            hasPipelineTessellationStages = true;
         }
-    } else {
+    }
+    if (!hasPipelineTessellationStages) {
         gsProg->hasTessellation = false;
         gsProg->tessControlSpirv.clear();
         gsProg->tessEvalSpirv.clear();
+        gsProg->tessControlParsedModule.reset();
+        gsProg->tessEvalParsedModule.reset();
         gsProg->tessellationEmulated = false;
         gsProg->tessellationInterpreted = false;
         gsProg->tessControlInterpreted = false;
         gsProg->tessControlOutputVertices = 0;
         gsProg->tessVaryings.clear();
     }
+    setPipelineEmulationStageUniforms(0, vsProg);
+    setPipelineEmulationStageUniforms(1, tcsProg);
+    setPipelineEmulationStageUniforms(2, tesProg);
+    setPipelineEmulationStageUniforms(3, gsProg);
+    setPipelineEmulationStageUniforms(4, fsProg);
+    gsProg->uniformLayoutComputed = false;
     outProgramName = ppo->geometryProgram;
     return gsProg;
 }
@@ -38882,14 +39512,14 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
 
     if (!program.uniformLayoutComputed) {
         computeStageUniformLayout(program.vertexUniformLayout,
-            program.vertexReflection, program.uniforms);
+            program.vertexReflection, uniformsForEmulationStage(program, 0));
         computeStageUniformLayout(program.fragmentUniformLayout,
-            program.fragmentReflection, program.uniforms);
+            program.fragmentReflection, uniformsForEmulationStage(program, 4));
         program.uniformLayoutComputed = true;
     }
     thread_local std::vector<std::uint8_t> gsFragUniformScratch;
     buildStageUniformBuffer(gsFragUniformScratch,
-        program.fragmentReflection, program.uniformValues,
+        program.fragmentReflection, uniformValuesForEmulationStage(program, 4),
         program.fragmentUniformLayout);
     tdi.vertexUniformData = nullptr;
     tdi.vertexUniformSize = 0;

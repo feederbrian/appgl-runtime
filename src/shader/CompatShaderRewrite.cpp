@@ -707,6 +707,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     // be kept so glslang enables the corresponding functionality.
     {
         static const char* const kUnknownExtensions[] = {
+            "GL_ARB_arrays_of_arrays",
             "GL_ARB_cull_distance",
             "GL_ARB_shader_" "subroutine",
             "GL_ARB_texture_query_levels",
