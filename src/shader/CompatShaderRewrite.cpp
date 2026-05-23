@@ -708,6 +708,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     {
         static const char* const kUnknownExtensions[] = {
             "GL_ARB_cull_distance",
+            "GL_ARB_shader_" "subroutine",
             "GL_ARB_texture_query_levels",
         };
         bool strippedCullDistance = false;

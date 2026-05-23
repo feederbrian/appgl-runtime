@@ -24806,12 +24806,38 @@ bool GLContext::compileShader(GLuint shader) {
         auto isDeclPos = [&](std::size_t pos) {
             std::size_t q = pos;
             while (q > 0) {
-                unsigned char c = static_cast<unsigned char>(in[q - 1]);
-                if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-                    --q;
-                } else {
-                    return c == ';' || c == '{' || c == '}';
+                while (q > 0) {
+                    unsigned char c = static_cast<unsigned char>(in[q - 1]);
+                    if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                        --q;
+                    } else {
+                        break;
+                    }
                 }
+                if (q == 0) break;
+
+                std::size_t lineStart = q;
+                while (lineStart > 0 &&
+                       in[lineStart - 1] != '\n' &&
+                       in[lineStart - 1] != '\r') {
+                    --lineStart;
+                }
+                std::size_t first = lineStart;
+                while (first < q && (in[first] == ' ' || in[first] == '\t')) {
+                    ++first;
+                }
+                if (first < q && in[first] == '#') {
+                    q = lineStart;
+                    continue;
+                }
+                const std::size_t lineComment = in.find("//", lineStart);
+                if (lineComment != std::string::npos && lineComment < q) {
+                    q = lineComment;
+                    continue;
+                }
+
+                unsigned char c = static_cast<unsigned char>(in[q - 1]);
+                return c == ';' || c == '{' || c == '}';
             }
             return true;  // start of source
         };
@@ -25571,13 +25597,12 @@ bool GLContext::compileShader(GLuint shader) {
         return out;
     };
     // Apply to the compat-rewritten source.
-    std::string afterSubRewrite = rewriteSubroutinesForSpirv(
-        rewrite.didRewrite ? rewrite.source : object->source);
-    const bool didSubRewrite =
-        afterSubRewrite.size() != (rewrite.didRewrite ? rewrite.source : object->source).size();
-    const std::string baseCompileSource =
-        didSubRewrite ? afterSubRewrite
-                       : (rewrite.didRewrite ? rewrite.source : object->source);
+    const std::string& subroutineRewriteInput =
+        rewrite.didRewrite ? rewrite.source : object->source;
+    std::string afterSubRewrite = rewriteSubroutinesForSpirv(subroutineRewriteInput);
+    const bool didSubRewrite = afterSubRewrite != subroutineRewriteInput;
+    const std::string& baseCompileSource =
+        didSubRewrite ? afterSubRewrite : subroutineRewriteInput;
     std::string after420packImplicitRewrite =
         rewrite420packImplicitConversionsForSpirv(baseCompileSource);
     const std::string& sourceAfterImplicitRewrite =
