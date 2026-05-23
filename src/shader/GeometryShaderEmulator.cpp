@@ -5036,27 +5036,22 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 auto sIt = sampledImages_.find(w[2]);
                 if (sIt == sampledImages_.end() ||
                     sampledTextures_ == nullptr) {
-                    // Sampler not bound or untracked — return zeros.
-                    valueStore_[w[1]] = Value{Value::Kind::UInt4,
-                                              {0, 0, 0, 0},
-                                              {0, 0, 0, 0},
-                                              false};
-                    pc += wc;
-                    break;
+                    bail("OpImageSample: sampled texture data unavailable");
+                    return false;
                 }
                 const SampledImageHandle& h = sIt->second;
                 auto arrIt = sampledTextures_->find(h.arrayVarId);
                 if (arrIt == sampledTextures_->end() ||
                     h.elementIdx >= arrIt->second.size()) {
-                    valueStore_[w[1]] = Value{Value::Kind::UInt4,
-                                              {0, 0, 0, 0},
-                                              {0, 0, 0, 0},
-                                              false};
-                    pc += wc;
-                    break;
+                    bail("OpImageSample: sampled texture slot unavailable");
+                    return false;
                 }
                 const SampledTextureSlot& slot =
                     arrIt->second[h.elementIdx];
+                if (slot.data.empty()) {
+                    bail("OpImageSample: sampled texture slot has no data");
+                    return false;
+                }
                 // Resolve coord → texel (NEAREST). For 2D, multiply
                 // normalized uv by dim and clamp. Coord can be vec2
                 // (regular sampler2D) or vec3 (cubeArr / 2DArr — we
@@ -5115,18 +5110,133 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                                                                        /*GL_RGBA8*/ 0x8058
                                                            ? 4u
                                                            : 4u);
+                const std::uint32_t bytesPerTexel =
+                    (slot.width != 0 && bpr >= slot.width)
+                        ? std::max<std::uint32_t>(1u, bpr / slot.width)
+                        : 4u;
                 const std::size_t off =
                     static_cast<std::size_t>(v) * bpr +
-                    static_cast<std::size_t>(u) * 4u;
+                    static_cast<std::size_t>(u) * bytesPerTexel;
                 if (off + 4 <= slot.data.size()) {
                     std::uint32_t raw = 0;
                     std::memcpy(&raw, slot.data.data() + off, 4);
+                    const std::uint8_t* p = slot.data.data() + off;
+                    auto have = [&](std::size_t bytes) -> bool {
+                        return off + bytes <= slot.data.size();
+                    };
+                    auto readU8 = [&](int component) -> std::uint8_t {
+                        return have(static_cast<std::size_t>(component) + 1u)
+                            ? p[component] : 0u;
+                    };
+                    auto readI8 = [&](int component) -> std::int8_t {
+                        return static_cast<std::int8_t>(readU8(component));
+                    };
+                    auto readU16 = [&](int component) -> std::uint16_t {
+                        std::uint16_t v16 = 0;
+                        if (have(static_cast<std::size_t>(component) * 2u + sizeof(v16))) {
+                            std::memcpy(&v16, p + component * 2, sizeof(v16));
+                        }
+                        return v16;
+                    };
+                    auto readI16 = [&](int component) -> std::int16_t {
+                        std::int16_t v16 = 0;
+                        if (have(static_cast<std::size_t>(component) * 2u + sizeof(v16))) {
+                            std::memcpy(&v16, p + component * 2, sizeof(v16));
+                        }
+                        return v16;
+                    };
+                    auto readU32 = [&](int component) -> std::uint32_t {
+                        std::uint32_t v32 = 0;
+                        if (have(static_cast<std::size_t>(component) * 4u + sizeof(v32))) {
+                            std::memcpy(&v32, p + component * 4, sizeof(v32));
+                        }
+                        return v32;
+                    };
+                    auto readI32 = [&](int component) -> std::int32_t {
+                        return static_cast<std::int32_t>(readU32(component));
+                    };
+                    auto readF32 = [&](int component) -> float {
+                        float f = 0.0f;
+                        const std::uint32_t bits = readU32(component);
+                        std::memcpy(&f, &bits, sizeof(f));
+                        return f;
+                    };
                     switch (slot.internalFormat) {
+                        case 0x8814: { // GL_RGBA32F
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = readF32(0); out.f[1] = readF32(1);
+                            out.f[2] = readF32(2); out.f[3] = readF32(3);
+                            break;
+                        }
+                        case 0x8230: { // GL_RG32F
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = readF32(0); out.f[1] = readF32(1);
+                            out.f[2] = 0.0f; out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x881A: { // GL_RGBA16F
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = imageHalfToFloat(readU16(0));
+                            out.f[1] = imageHalfToFloat(readU16(1));
+                            out.f[2] = imageHalfToFloat(readU16(2));
+                            out.f[3] = imageHalfToFloat(readU16(3));
+                            break;
+                        }
+                        case 0x822F: { // GL_RG16F
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = imageHalfToFloat(readU16(0));
+                            out.f[1] = imageHalfToFloat(readU16(1));
+                            out.f[2] = 0.0f; out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x8C3A: { // GL_R11F_G11F_B10F
+                            out.kind = Value::Kind::Float4;
+                            decodeImageRG11B10F(raw, out.f[0], out.f[1], out.f[2]);
+                            out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x8C3D: { // GL_RGB9_E5
+                            out.kind = Value::Kind::Float4;
+                            const std::uint32_t exp = (raw >> 27) & 0x1Fu;
+                            const float scale = std::ldexp(1.0f, static_cast<int>(exp) - 24);
+                            out.f[0] = static_cast<float>((raw >> 0) & 0x1FFu) * scale;
+                            out.f[1] = static_cast<float>((raw >> 9) & 0x1FFu) * scale;
+                            out.f[2] = static_cast<float>((raw >> 18) & 0x1FFu) * scale;
+                            out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x8D70: { // GL_RGBA32UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(readU32(0));
+                            out.i[1] = static_cast<std::int32_t>(readU32(1));
+                            out.i[2] = static_cast<std::int32_t>(readU32(2));
+                            out.i[3] = static_cast<std::int32_t>(readU32(3));
+                            break;
+                        }
+                        case 0x823C: { // GL_RG32UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(readU32(0));
+                            out.i[1] = static_cast<std::int32_t>(readU32(1));
+                            out.i[2] = 0; out.i[3] = static_cast<std::int32_t>(1u);
+                            break;
+                        }
                         case 0x8236: { // GL_R32UI
                             out.kind = Value::Kind::UInt4;
                             out.i[0] = static_cast<std::int32_t>(raw);
                             out.i[1] = 0; out.i[2] = 0;
                             out.i[3] = static_cast<std::int32_t>(1u);
+                            break;
+                        }
+                        case 0x8D82: { // GL_RGBA32I
+                            out.kind = Value::Kind::Int4;
+                            out.i[0] = readI32(0); out.i[1] = readI32(1);
+                            out.i[2] = readI32(2); out.i[3] = readI32(3);
+                            break;
+                        }
+                        case 0x823B: { // GL_RG32I
+                            out.kind = Value::Kind::Int4;
+                            out.i[0] = readI32(0); out.i[1] = readI32(1);
+                            out.i[2] = 0; out.i[3] = 1;
                             break;
                         }
                         case 0x8235: { // GL_R32I
@@ -5142,14 +5252,118 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             out.f[3] = 1.0f;
                             break;
                         }
+                        case 0x8059: { // GL_RGB10_A2
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = static_cast<float>((raw >> 0) & 0x3FFu) / 1023.0f;
+                            out.f[1] = static_cast<float>((raw >> 10) & 0x3FFu) / 1023.0f;
+                            out.f[2] = static_cast<float>((raw >> 20) & 0x3FFu) / 1023.0f;
+                            out.f[3] = static_cast<float>((raw >> 30) & 0x3u) / 3.0f;
+                            break;
+                        }
+                        case 0x906F: { // GL_RGB10_A2UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>((raw >> 0) & 0x3FFu);
+                            out.i[1] = static_cast<std::int32_t>((raw >> 10) & 0x3FFu);
+                            out.i[2] = static_cast<std::int32_t>((raw >> 20) & 0x3FFu);
+                            out.i[3] = static_cast<std::int32_t>((raw >> 30) & 0x3u);
+                            break;
+                        }
+                        case 0x805B: { // GL_RGBA16
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = static_cast<float>(readU16(0)) / 65535.0f;
+                            out.f[1] = static_cast<float>(readU16(1)) / 65535.0f;
+                            out.f[2] = static_cast<float>(readU16(2)) / 65535.0f;
+                            out.f[3] = static_cast<float>(readU16(3)) / 65535.0f;
+                            break;
+                        }
                         case 0x8058: { // GL_RGBA8 — UNORM decode
                             out.kind = Value::Kind::Float4;
-                            const std::uint8_t* p =
-                                slot.data.data() + off;
-                            out.f[0] = p[0] / 255.0f;
-                            out.f[1] = p[1] / 255.0f;
-                            out.f[2] = p[2] / 255.0f;
-                            out.f[3] = p[3] / 255.0f;
+                            out.f[0] = static_cast<float>(readU8(0)) / 255.0f;
+                            out.f[1] = static_cast<float>(readU8(1)) / 255.0f;
+                            out.f[2] = static_cast<float>(readU8(2)) / 255.0f;
+                            out.f[3] = static_cast<float>(readU8(3)) / 255.0f;
+                            break;
+                        }
+                        case 0x8C43: { // GL_SRGB8_ALPHA8
+                            auto decodeSrgb = [](std::uint8_t c) -> float {
+                                const float x = static_cast<float>(c) / 255.0f;
+                                return x <= 0.04045f
+                                    ? x / 12.92f
+                                    : std::pow((x + 0.055f) / 1.055f, 2.4f);
+                            };
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = decodeSrgb(readU8(0));
+                            out.f[1] = decodeSrgb(readU8(1));
+                            out.f[2] = decodeSrgb(readU8(2));
+                            out.f[3] = static_cast<float>(readU8(3)) / 255.0f;
+                            break;
+                        }
+                        case 0x8D76: { // GL_RGBA16UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(readU16(0));
+                            out.i[1] = static_cast<std::int32_t>(readU16(1));
+                            out.i[2] = static_cast<std::int32_t>(readU16(2));
+                            out.i[3] = static_cast<std::int32_t>(readU16(3));
+                            break;
+                        }
+                        case 0x823A: { // GL_RG16UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(readU16(0));
+                            out.i[1] = static_cast<std::int32_t>(readU16(1));
+                            out.i[2] = 0; out.i[3] = static_cast<std::int32_t>(1u);
+                            break;
+                        }
+                        case 0x8D88: { // GL_RGBA16I
+                            out.kind = Value::Kind::Int4;
+                            out.i[0] = static_cast<std::int32_t>(readI16(0));
+                            out.i[1] = static_cast<std::int32_t>(readI16(1));
+                            out.i[2] = static_cast<std::int32_t>(readI16(2));
+                            out.i[3] = static_cast<std::int32_t>(readI16(3));
+                            break;
+                        }
+                        case 0x8239: { // GL_RG16I
+                            out.kind = Value::Kind::Int4;
+                            out.i[0] = static_cast<std::int32_t>(readI16(0));
+                            out.i[1] = static_cast<std::int32_t>(readI16(1));
+                            out.i[2] = 0; out.i[3] = 1;
+                            break;
+                        }
+                        case 0x8D7C: { // GL_RGBA8UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(readU8(0));
+                            out.i[1] = static_cast<std::int32_t>(readU8(1));
+                            out.i[2] = static_cast<std::int32_t>(readU8(2));
+                            out.i[3] = static_cast<std::int32_t>(readU8(3));
+                            break;
+                        }
+                        case 0x8D8E: { // GL_RGBA8I
+                            out.kind = Value::Kind::Int4;
+                            out.i[0] = static_cast<std::int32_t>(readI8(0));
+                            out.i[1] = static_cast<std::int32_t>(readI8(1));
+                            out.i[2] = static_cast<std::int32_t>(readI8(2));
+                            out.i[3] = static_cast<std::int32_t>(readI8(3));
+                            break;
+                        }
+                        case 0x822C: { // GL_RG16
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = static_cast<float>(readU16(0)) / 65535.0f;
+                            out.f[1] = static_cast<float>(readU16(1)) / 65535.0f;
+                            out.f[2] = 0.0f; out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x8F97: { // GL_RGBA8_SNORM
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = imageSnorm8(readI8(0));
+                            out.f[1] = imageSnorm8(readI8(1));
+                            out.f[2] = imageSnorm8(readI8(2));
+                            out.f[3] = imageSnorm8(readI8(3));
+                            break;
+                        }
+                        case 0x8F99: { // GL_RG16_SNORM
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = imageSnorm16(readI16(0));
+                            out.f[1] = imageSnorm16(readI16(1));
+                            out.f[2] = 0.0f; out.f[3] = 1.0f;
                             break;
                         }
                         default: {
@@ -5173,25 +5387,21 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 auto sIt = sampledImages_.find(w[2]);
                 if (sIt == sampledImages_.end() ||
                     sampledTextures_ == nullptr) {
-                    valueStore_[w[1]] = Value{Value::Kind::UInt4,
-                                              {0, 0, 0, 0},
-                                              {0, 0, 0, 0},
-                                              false};
-                    pc += wc;
-                    break;
+                    bail("OpImageFetch: sampled texture data unavailable");
+                    return false;
                 }
                 const SampledImageHandle& h = sIt->second;
                 auto arrIt = sampledTextures_->find(h.arrayVarId);
                 if (arrIt == sampledTextures_->end() ||
                     h.elementIdx >= arrIt->second.size()) {
-                    valueStore_[w[1]] = Value{Value::Kind::UInt4,
-                                              {0, 0, 0, 0},
-                                              {0, 0, 0, 0},
-                                              false};
-                    pc += wc;
-                    break;
+                    bail("OpImageFetch: sampled texture slot unavailable");
+                    return false;
                 }
                 const SampledTextureSlot& slot = arrIt->second[h.elementIdx];
+                if (slot.data.empty()) {
+                    bail("OpImageFetch: sampled texture slot has no data");
+                    return false;
+                }
                 Value coord{};
                 std::int32_t ix = 0;
                 std::int32_t iy = 0;

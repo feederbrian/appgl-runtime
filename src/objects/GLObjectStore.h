@@ -158,6 +158,15 @@ struct GLTextureObject {
     std::array<std::unordered_map<GLint, GLTextureImageLevel>, 6> cubeFaceLevels;
     bool instantiated = false;
 
+    // ARB_texture_view source metadata. A view object owns a Metal
+    // texture view in metalTexture when materialized, but the source
+    // name/range remains useful for queries and lazy rebuilds.
+    GLuint viewSourceTexture = 0;
+    GLint viewMinLevel = 0;
+    GLint viewNumLevels = 0;
+    GLint viewMinLayer = 0;
+    GLint viewNumLayers = 0;
+
     // Phase 8X Group 4d follow-up⁷ — lazy MTLSamplerState cached on the
     // texture object itself, rebuilt from `params` on demand. GL's
     // glTexParameter path sets filter/wrap/lod/compare state *on the

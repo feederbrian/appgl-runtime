@@ -7851,6 +7851,14 @@ struct GLContext::Impl {
                     texObject->metalTexture == nullptr) {
                     continue;
                 }
+                if (texObject->viewSourceTexture != 0) {
+                    // Texture views require exact byte reinterpretation.
+                    // Metal getBytes on a pixel-format view can expose
+                    // converted/expanded values, so let the draw fall back
+                    // to the non-CPU sampled path instead of feeding the
+                    // VS/GS interpreter lossy data.
+                    return {};
+                }
                 id<MTLTexture> mtlTex =
                     (__bridge id<MTLTexture>)texObject->metalTexture;
                 if (mtlTex.width == 0 || mtlTex.height == 0) continue;
@@ -7880,16 +7888,49 @@ struct GLContext::Impl {
                     case GL_R32UI:
                     case GL_R32I:
                     case GL_R32F:
+                    case GL_RGBA8:
+                    case GL_RG16F:
+                    case GL_RG16:
+                    case GL_RG16_SNORM:
+                    case GL_RG16I:
+                    case GL_RG16UI:
+                    case GL_RGBA8I:
+                    case GL_RGBA8UI:
+                    case GL_RGBA8_SNORM:
+                    case GL_R11F_G11F_B10F:
+                    case GL_RGB10_A2:
+                    case GL_RGB10_A2UI:
+                    case GL_SRGB8_ALPHA8:
+                    case GL_RGB9_E5:
                         bpp = 4;
                         break;
-                    case GL_RGBA8:
-                        bpp = 4;
+                    case GL_RG32F:
+                    case GL_RG32I:
+                    case GL_RG32UI:
+                    case GL_RGBA16F:
+                    case GL_RGBA16I:
+                    case GL_RGBA16UI:
+                    case GL_RGBA16:
+                    case GL_RGBA16_SNORM:
+                        bpp = 8;
+                        break;
+                    case GL_RGBA32F:
+                    case GL_RGBA32I:
+                    case GL_RGBA32UI:
+                        bpp = 16;
                         break;
                     default:
                         break;
                 }
                 if (bpp == 0) continue;
                 slot.bytesPerRow = slot.width * bpp;
+                slot.bytesPerImage = slot.bytesPerRow * slot.height;
+                if (mtlTex.arrayLength > 1) {
+                    slot.layerFaces = static_cast<std::uint32_t>(
+                        std::max<NSUInteger>(mtlTex.arrayLength, 1u));
+                } else {
+                    slot.layerFaces = 1;
+                }
                 const std::uint32_t readbackHeight =
                     static_cast<std::uint32_t>(mtlTex.height);
                 slot.data.assign(slot.bytesPerRow * readbackHeight, 0u);
@@ -18775,13 +18816,15 @@ bool GLContext::texBufferRange(
                     ((rowBytesUnaligned + 15u) / 16u) * 16u;
                 const NSUInteger rowCount =
                     rowTexels > 0 ? (visibleTexelCount + rowTexels - 1u) / rowTexels : 0;
-                const NSUInteger viewBytes = rowBytes * rowCount;
+                const NSUInteger requiredViewBytes =
+                    rowCount > 0 ? rowBytes * (rowCount - 1u) + rowBytesUnaligned : 0u;
                 // Metal asserts on zero dimensions or when the strided
-                // 2D buffer view exceeds the buffer length. Skip Metal-side
-                // creation under those degenerate conditions; validation
-                // has already reported GL errors for invalid API inputs.
+                // 2D buffer view exceeds the buffer length. The final row
+                // does not require trailing stride padding in the GL buffer;
+                // requiring it incorrectly drops small 1/2/4-byte texel
+                // buffer views used by DSA texture-buffer CTS cases.
                 if (rowTexels > 0 && rowCount > 0 &&
-                    static_cast<NSUInteger>(offset) + viewBytes <= mtlBuffer.length) {
+                    static_cast<NSUInteger>(offset) + requiredViewBytes <= mtlBuffer.length) {
                     desc.width = rowTexels;
                     desc.height = rowCount;
                     desc.depth = 1;
@@ -19193,14 +19236,24 @@ bool GLContext::getTexParameterInteger(GLenum target, GLenum pname, GLint* param
             if (params) *params = object->desc.levels;
             return true;
         case GL_TEXTURE_VIEW_MIN_LEVEL:
+            if (params) *params = object->viewMinLevel;
+            return true;
         case GL_TEXTURE_VIEW_MIN_LAYER:
-            if (params) *params = 0;
+            if (params) *params = object->viewMinLayer;
             return true;
         case GL_TEXTURE_VIEW_NUM_LEVELS:
-            if (params) *params = object->desc.levels;
+            if (params) {
+                *params = object->viewNumLevels > 0
+                    ? object->viewNumLevels
+                    : object->desc.levels;
+            }
             return true;
         case GL_TEXTURE_VIEW_NUM_LAYERS:
-            if (params) *params = object->desc.layers > 0 ? object->desc.layers : 1;
+            if (params) {
+                *params = object->viewNumLayers > 0
+                    ? object->viewNumLayers
+                    : (object->desc.layers > 0 ? object->desc.layers : 1);
+            }
             return true;
         case GL_NUM_SPARSE_LEVELS_ARB:
             {
@@ -32563,7 +32616,13 @@ bool GLContext::linkProgram(GLuint program) {
                 // every stage's _DefaultUniforms with the union.
                 const std::string topName = topLevelName(member.name);
                 const bool stageDeclares = stageDeclaresTopUniform(stageSrc, topName);
-                const GLbitfield effStageBit = stageDeclares ? stageBit : 0;
+                bool stageReferences = stageDeclares;
+                if (stageReferences && stageBit == kBitGeometry && !gsRefSet.empty()) {
+                    stageReferences =
+                        gsRefSet.count(member.name) != 0 ||
+                        gsRefSet.count(topName) != 0;
+                }
+                const GLbitfield effStageBit = stageReferences ? stageBit : 0;
                 // GL 4.6 §7.3.1 canonical resource name for an array
                 // uniform carries the "[0]" suffix even when the
                 // member's SPIR-V name does not. Compute both forms
@@ -32588,7 +32647,7 @@ bool GLContext::linkProgram(GLuint program) {
                 // Skip members this stage doesn't declare — they'll
                 // be added by the OTHER stage's supplement pass with
                 // the correct referencedBy bit.
-                if (!stageDeclares) continue;
+                if (!stageReferences) continue;
                 // New uniform discovered by SPIR-V but not by the scanner.
                 GLProgramUniformInfo info;
                 info.name = member.name;
@@ -33088,7 +33147,6 @@ bool GLContext::linkProgram(GLuint program) {
                             return e.name == entryName;
                         });
                     if (existing != programObject->resourceUniformBlocks.end()) {
-                        existing->referencedBy |= stageBit;
                         if (parsed.hasExplicitBinding) {
                             existing->location =
                                 static_cast<GLint>(parsed.explicitBinding + inst);
@@ -33103,7 +33161,7 @@ bool GLContext::linkProgram(GLuint program) {
                         : 0;
                     blockEntry.offset = 0;
                     blockEntry.arraySize = 1;
-                    blockEntry.referencedBy = stageBit;
+                    blockEntry.referencedBy = 0;
                     programObject->resourceUniformBlocks.push_back(std::move(blockEntry));
                 }
             }
@@ -33436,6 +33494,7 @@ bool GLContext::linkProgram(GLuint program) {
             auto& table = storage
                 ? programObject->resourceStorageBlocks
                 : programObject->resourceUniformBlocks;
+            const bool sourceCanImplyStageReference = storage;
             for (const auto& parsed : parsedBlocks) {
                 if (!parsed.instanceIsArray) {
                     continue;
@@ -33454,7 +33513,9 @@ bool GLContext::linkProgram(GLuint program) {
                         ? static_cast<GLint>(parsed.explicitBinding + inst)
                         : 0;
                     if (existing != table.end()) {
-                        existing->referencedBy |= stageBit;
+                        if (sourceCanImplyStageReference) {
+                            existing->referencedBy |= stageBit;
+                        }
                         existing->location = binding;
                         continue;
                     }
@@ -33464,7 +33525,8 @@ bool GLContext::linkProgram(GLuint program) {
                     entry.location = binding;
                     entry.offset = 0;
                     entry.arraySize = 1;
-                    entry.referencedBy = stageBit;
+                    entry.referencedBy =
+                        sourceCanImplyStageReference ? stageBit : 0;
                     table.push_back(std::move(entry));
                 }
             }
@@ -46336,6 +46398,51 @@ bool GLContext::textureView(GLuint texture, GLenum target, GLuint origtexture, G
     viewObj->desc.levels = static_cast<GLsizei>(numlevels);
     viewObj->desc.layers = static_cast<GLsizei>(numlayers);
     viewObj->desc.immutable = true;
+    viewObj->viewSourceTexture = origtexture;
+    viewObj->viewMinLevel = static_cast<GLint>(minlevel);
+    viewObj->viewNumLevels = static_cast<GLint>(numlevels);
+    viewObj->viewMinLayer = static_cast<GLint>(minlayer);
+    viewObj->viewNumLayers = static_cast<GLint>(numlayers);
+
+    releaseRetainedMetalObject(viewObj->metalTexture);
+    viewObj->metalTexture = nullptr;
+    viewObj->instantiated = false;
+    releaseRetainedMetalObject(viewObj->metalSwizzledView);
+    viewObj->metalSwizzledView = nullptr;
+    viewObj->swizzleDirty = true;
+
+    if ((origObj->metalTexture == nullptr || !origObj->instantiated) &&
+        !origObj->levels.empty()) {
+        (void)impl_->replaceMetalTexture(*origObj, origtexture);
+    }
+    MTLPixelFormat viewPixelFormat = metalRenderbufferFormat(internalformat);
+    if (viewPixelFormat != MTLPixelFormatInvalid &&
+        origObj->metalTexture != nullptr) {
+        id<MTLTexture> baseTex =
+            (__bridge id<MTLTexture>)origObj->metalTexture;
+        const MTLTextureType viewTextureType = metalTextureTypeForTarget(target);
+        const NSRange levelRange =
+            NSMakeRange(static_cast<NSUInteger>(minlevel),
+                        static_cast<NSUInteger>(numlevels));
+        const NSRange sliceRange =
+            NSMakeRange(static_cast<NSUInteger>(minlayer),
+                        static_cast<NSUInteger>(numlayers));
+        const NSUInteger sourceLevels = baseTex.mipmapLevelCount;
+        const bool levelRangeFits =
+            levelRange.location < sourceLevels &&
+            levelRange.length <= sourceLevels - levelRange.location;
+        if (levelRangeFits) {
+            id<MTLTexture> viewTex =
+                [baseTex newTextureViewWithPixelFormat:viewPixelFormat
+                                           textureType:viewTextureType
+                                                levels:levelRange
+                                                slices:sliceRange];
+            if (viewTex != nil) {
+                viewObj->metalTexture = transferRetainedMetalObject(viewTex);
+                viewObj->instantiated = true;
+            }
+        }
+    }
     return true;
 }
 
