@@ -27229,6 +27229,73 @@ static void scanSubroutineDeclarations(
     }
 }
 
+static std::string stripSubroutineArrayZeroSuffixForReset(const std::string& name) {
+    if (name.size() >= 3 && name.compare(name.size() - 3, 3, "[0]") == 0) {
+        return name.substr(0, name.size() - 3);
+    }
+    return name;
+}
+
+static GLint subroutineUniformLocationCountForReset(
+    const std::vector<GLProgramResourceEntry>& uniforms) {
+    GLint maxLocation = 0;
+    for (const auto& entry : uniforms) {
+        if (entry.location < 0) continue;
+        const GLint count = std::max<GLint>(1, entry.arraySize);
+        maxLocation = std::max(maxLocation, entry.location + count);
+    }
+    return maxLocation;
+}
+
+static std::string subroutineDispatchKeyForReset(
+    const std::string& baseName,
+    GLint element,
+    GLint elementCount) {
+    if (elementCount <= 1) return baseName;
+    return baseName + "_" + std::to_string(element);
+}
+
+static void resetProgramSubroutineSelections(GLProgramObject& programObject,
+                                             bool markDirty) {
+    for (int stage = 0; stage < 6; ++stage) {
+        const auto& uniforms = programObject.resourceSubroutineUniforms[stage];
+        const GLint activeLocations = subroutineUniformLocationCountForReset(uniforms);
+        auto& selections = programObject.currentSubroutineSelections[stage];
+        selections.assign(static_cast<std::size_t>(activeLocations), 0u);
+        for (const auto& uniform : uniforms) {
+            if (uniform.location < 0) continue;
+            const GLuint defaultSelection = uniform.activeVariables.empty()
+                ? 0u
+                : static_cast<GLuint>(uniform.activeVariables.front());
+            const GLint elemCount = std::max<GLint>(1, uniform.arraySize);
+            for (GLint elem = 0; elem < elemCount; ++elem) {
+                const GLint loc = uniform.location + elem;
+                if (loc >= 0 && loc < activeLocations) {
+                    selections[static_cast<std::size_t>(loc)] = defaultSelection;
+                }
+
+                const std::string baseName =
+                    stripSubroutineArrayZeroSuffixForReset(uniform.name);
+                const std::string key =
+                    subroutineDispatchKeyForReset(baseName, elem, elemCount);
+                auto dispatchLoc =
+                    programObject.subroutineDispatchUniformLocations.find(key);
+                if (dispatchLoc == programObject.subroutineDispatchUniformLocations.end()) {
+                    continue;
+                }
+                auto valueIt = programObject.uniformValues.find(dispatchLoc->second);
+                if (valueIt == programObject.uniformValues.end()) {
+                    continue;
+                }
+                valueIt->second.type = GL_UNSIGNED_INT;
+                valueIt->second.arraySize = 1;
+                valueIt->second.uints.assign(1, 0u);
+            }
+        }
+    }
+    programObject.subroutineSelectionsDirty = markDirty;
+}
+
 // Search a code region for "boolType name" where boolType is bool/bvec2/3/4.
 // Returns the GL_BOOL* enum, or 0 if not found.
 static GLenum searchForBoolType(std::string_view body, std::string_view name) {
@@ -29558,7 +29625,10 @@ bool GLContext::linkProgram(GLuint program) {
     for (int s = 0; s < 6; ++s) {
         programObject->resourceSubroutines[s].clear();
         programObject->resourceSubroutineUniforms[s].clear();
+        programObject->currentSubroutineSelections[s].clear();
     }
+    programObject->subroutineDispatchUniformLocations.clear();
+    programObject->subroutineSelectionsDirty = false;
     programObject->ssboBindingRemap.clear();
 
     // Per-stage "referenced by" bitmask for program-resource
@@ -30389,6 +30459,7 @@ bool GLContext::linkProgram(GLuint program) {
                 programObject->resourceSubroutines[si],
                 programObject->resourceSubroutineUniforms[si]);
         }
+        resetProgramSubroutineSelections(*programObject, false);
     }
 
     // Run SPIRV-Cross on each attached stage's cached SPIR-V (compiled by
@@ -34123,6 +34194,12 @@ bool GLContext::useProgram(GLuint program) {
         }
     }
     impl_->state->useProgram(program);
+    if (program != 0) {
+        GLProgramObject* object = impl_->objects->programs().get(program);
+        if (object != nullptr) {
+            resetProgramSubroutineSelections(*object, true);
+        }
+    }
     return true;
 }
 

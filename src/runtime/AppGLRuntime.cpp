@@ -7066,6 +7066,61 @@ static GLint appglSubroutineUniformLocationCount(
     return maxLocation;
 }
 
+static int appglSubroutineStageIndex(GLenum shadertype) {
+    switch (shadertype) {
+        case GL_VERTEX_SHADER:          return 0;
+        case GL_TESS_CONTROL_SHADER:    return 1;
+        case GL_TESS_EVALUATION_SHADER: return 2;
+        case GL_GEOMETRY_SHADER:        return 3;
+        case GL_FRAGMENT_SHADER:        return 4;
+        case GL_COMPUTE_SHADER:         return 5;
+        default:                        return -1;
+    }
+}
+
+static bool appglProgramHasShaderStage(GLContext* ctx,
+                                       const appgl::GLProgramObject& prog,
+                                       GLenum shadertype) {
+    if (ctx == nullptr) return false;
+    for (GLuint shaderId : prog.attachedShaders) {
+        const auto* shader = ctx->objects().shaders().get(shaderId);
+        if (shader != nullptr && shader->stage == shadertype) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool appglIsActiveSubroutineIndex(
+    const std::vector<appgl::GLProgramResourceEntry>& subs,
+    GLuint index) {
+    for (std::size_t i = 0; i < subs.size(); ++i) {
+        const GLint publicIndex =
+            subs[i].subroutineIndex >= 0 ? subs[i].subroutineIndex : static_cast<GLint>(i);
+        if (publicIndex >= 0 && static_cast<GLuint>(publicIndex) == index) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void appglCopyGLName(const std::string& source,
+                            GLsizei bufSize,
+                            GLsizei* length,
+                            GLchar* name) {
+    if (length) *length = 0;
+    if (name == nullptr || bufSize <= 0) {
+        return;
+    }
+    const std::size_t copied =
+        std::min<std::size_t>(source.size(), static_cast<std::size_t>(bufSize - 1));
+    if (copied > 0) {
+        std::memcpy(name, source.c_str(), copied);
+    }
+    name[copied] = '\0';
+    if (length) *length = static_cast<GLsizei>(copied);
+}
+
 static std::string appglSubroutineDispatchKey(
     const std::string& baseName,
     GLint element,
@@ -7079,16 +7134,21 @@ GLint APIENTRY glGetSubroutineUniformLocation(GLuint program, GLenum shadertype,
     if (!ctx) return -1;
     if (name == nullptr) return -1;
     auto* prog = ctx->objects().programs().get(program);
-    if (prog == nullptr || !prog->linked) return -1;
-    int si = -1;
-    switch (shadertype) {
-        case GL_VERTEX_SHADER:          si = 0; break;
-        case GL_TESS_CONTROL_SHADER:    si = 1; break;
-        case GL_TESS_EVALUATION_SHADER: si = 2; break;
-        case GL_GEOMETRY_SHADER:        si = 3; break;
-        case GL_FRAGMENT_SHADER:        si = 4; break;
-        case GL_COMPUTE_SHADER:         si = 5; break;
-        default: return -1;
+    if (prog == nullptr) {
+        recordValidationError(ctx, "glGetSubroutineUniformLocation",
+            GL_INVALID_VALUE, "program is not a program object");
+        return -1;
+    }
+    if (!prog->linked) {
+        recordValidationError(ctx, "glGetSubroutineUniformLocation",
+            GL_INVALID_OPERATION, "program is not linked");
+        return -1;
+    }
+    const int si = appglSubroutineStageIndex(shadertype);
+    if (si < 0) {
+        recordValidationError(ctx, "glGetSubroutineUniformLocation",
+            GL_INVALID_ENUM, "invalid shader type");
+        return -1;
     }
     const std::string lookup = name;
     for (const auto& entry : prog->resourceSubroutineUniforms[si]) {
@@ -7121,16 +7181,21 @@ GLuint APIENTRY glGetSubroutineIndex(GLuint program, GLenum shadertype, const GL
     if (!ctx) return GL_INVALID_INDEX;
     if (name == nullptr) return GL_INVALID_INDEX;
     auto* prog = ctx->objects().programs().get(program);
-    if (prog == nullptr || !prog->linked) return GL_INVALID_INDEX;
-    int si = -1;
-    switch (shadertype) {
-        case GL_VERTEX_SHADER:          si = 0; break;
-        case GL_TESS_CONTROL_SHADER:    si = 1; break;
-        case GL_TESS_EVALUATION_SHADER: si = 2; break;
-        case GL_GEOMETRY_SHADER:        si = 3; break;
-        case GL_FRAGMENT_SHADER:        si = 4; break;
-        case GL_COMPUTE_SHADER:         si = 5; break;
-        default: return GL_INVALID_INDEX;
+    if (prog == nullptr) {
+        recordValidationError(ctx, "glGetSubroutineIndex",
+            GL_INVALID_VALUE, "program is not a program object");
+        return GL_INVALID_INDEX;
+    }
+    if (!prog->linked) {
+        recordValidationError(ctx, "glGetSubroutineIndex",
+            GL_INVALID_OPERATION, "program is not linked");
+        return GL_INVALID_INDEX;
+    }
+    const int si = appglSubroutineStageIndex(shadertype);
+    if (si < 0) {
+        recordValidationError(ctx, "glGetSubroutineIndex",
+            GL_INVALID_ENUM, "invalid shader type");
+        return GL_INVALID_INDEX;
     }
     const std::string lookup = name;
     const auto& subs = prog->resourceSubroutines[si];
@@ -7148,36 +7213,136 @@ GLuint APIENTRY glGetSubroutineIndex(GLuint program, GLenum shadertype, const GL
 void APIENTRY glGetActiveSubroutineUniformiv(GLuint program, GLenum shadertype, GLuint index, GLenum pname, GLint* values) {
     auto* ctx = requireCurrentContext("glGetActiveSubroutineUniformiv");
     if (!ctx) return;
-    (void)program; (void)shadertype; (void)index;
-    // 0 active subroutine uniforms → any index is invalid.
-    if (pname == GL_NUM_COMPATIBLE_SUBROUTINES && values) {
-        *values = 0;
-    } else if (values) {
-        *values = 0;
+    const int si = appglSubroutineStageIndex(shadertype);
+    if (si < 0) {
+        recordValidationError(ctx, "glGetActiveSubroutineUniformiv",
+            GL_INVALID_ENUM, "invalid shader type");
+        return;
     }
-    markProgramFunction(FunctionId::glGetActiveSubroutineUniformiv, "Active subroutine uniform query stub (0 subroutines).");
+    switch (pname) {
+        case GL_NUM_COMPATIBLE_SUBROUTINES:
+        case GL_COMPATIBLE_SUBROUTINES:
+        case GL_UNIFORM_SIZE:
+        case GL_UNIFORM_NAME_LENGTH:
+            break;
+        default:
+            recordValidationError(ctx, "glGetActiveSubroutineUniformiv",
+                GL_INVALID_ENUM, "invalid pname");
+            return;
+    }
+    auto* prog = ctx->objects().programs().get(program);
+    if (prog == nullptr) {
+        recordValidationError(ctx, "glGetActiveSubroutineUniformiv",
+            GL_INVALID_VALUE, "program is not a program object");
+        return;
+    }
+    if (!prog->linked) {
+        recordValidationError(ctx, "glGetActiveSubroutineUniformiv",
+            GL_INVALID_OPERATION, "program is not linked");
+        return;
+    }
+    const auto& unis = prog->resourceSubroutineUniforms[si];
+    if (index >= unis.size()) {
+        recordValidationError(ctx, "glGetActiveSubroutineUniformiv",
+            GL_INVALID_VALUE, "subroutine uniform index out of range");
+        return;
+    }
+    if (values == nullptr) {
+        return;
+    }
+    const auto& entry = unis[static_cast<std::size_t>(index)];
+    switch (pname) {
+        case GL_NUM_COMPATIBLE_SUBROUTINES:
+            *values = static_cast<GLint>(entry.activeVariables.size());
+            break;
+        case GL_COMPATIBLE_SUBROUTINES:
+            for (std::size_t i = 0; i < entry.activeVariables.size(); ++i) {
+                values[i] = entry.activeVariables[i];
+            }
+            break;
+        case GL_UNIFORM_SIZE:
+            *values = std::max<GLint>(1, entry.arraySize);
+            break;
+        case GL_UNIFORM_NAME_LENGTH:
+            *values = static_cast<GLint>(entry.name.size() + 1);
+            break;
+        default:
+            break;
+    }
+    markProgramFunction(FunctionId::glGetActiveSubroutineUniformiv, "Active subroutine uniform query via program-resource tables.");
     Runtime::shared().recordBootstrapTrace("glGetActiveSubroutineUniformiv(program=" + std::to_string(program) + ", index=" + std::to_string(index) + ")");
 }
 
 void APIENTRY glGetActiveSubroutineUniformName(GLuint program, GLenum shadertype, GLuint index, GLsizei bufsize, GLsizei* length, GLchar* name) {
     auto* ctx = requireCurrentContext("glGetActiveSubroutineUniformName");
     if (!ctx) return;
-    (void)program; (void)shadertype; (void)index;
-    // 0 active subroutine uniforms → GL_INVALID_VALUE for any index.
-    recordValidationError(ctx, "glGetActiveSubroutineUniformName", GL_INVALID_VALUE, "no active subroutine uniforms");
-    if (name && bufsize > 0) name[0] = '\0';
     if (length) *length = 0;
-    markProgramFunction(FunctionId::glGetActiveSubroutineUniformName, "Active subroutine uniform name stub (no subroutines).");
+    const int si = appglSubroutineStageIndex(shadertype);
+    if (si < 0) {
+        recordValidationError(ctx, "glGetActiveSubroutineUniformName",
+            GL_INVALID_ENUM, "invalid shader type");
+        return;
+    }
+    if (bufsize < 0) {
+        recordValidationError(ctx, "glGetActiveSubroutineUniformName",
+            GL_INVALID_VALUE, "negative buffer size");
+        return;
+    }
+    auto* prog = ctx->objects().programs().get(program);
+    if (prog == nullptr) {
+        recordValidationError(ctx, "glGetActiveSubroutineUniformName",
+            GL_INVALID_VALUE, "program is not a program object");
+        return;
+    }
+    if (!prog->linked) {
+        recordValidationError(ctx, "glGetActiveSubroutineUniformName",
+            GL_INVALID_OPERATION, "program is not linked");
+        return;
+    }
+    const auto& unis = prog->resourceSubroutineUniforms[si];
+    if (index >= unis.size()) {
+        recordValidationError(ctx, "glGetActiveSubroutineUniformName",
+            GL_INVALID_VALUE, "subroutine uniform index out of range");
+        return;
+    }
+    appglCopyGLName(unis[static_cast<std::size_t>(index)].name, bufsize, length, name);
+    markProgramFunction(FunctionId::glGetActiveSubroutineUniformName, "Active subroutine uniform name via program-resource tables.");
 }
 
 void APIENTRY glGetActiveSubroutineName(GLuint program, GLenum shadertype, GLuint index, GLsizei bufsize, GLsizei* length, GLchar* name) {
     auto* ctx = requireCurrentContext("glGetActiveSubroutineName");
     if (!ctx) return;
-    (void)program; (void)shadertype; (void)index;
-    recordValidationError(ctx, "glGetActiveSubroutineName", GL_INVALID_VALUE, "no active subroutines");
-    if (name && bufsize > 0) name[0] = '\0';
     if (length) *length = 0;
-    markProgramFunction(FunctionId::glGetActiveSubroutineName, "Active subroutine name stub (no subroutines).");
+    const int si = appglSubroutineStageIndex(shadertype);
+    if (si < 0) {
+        recordValidationError(ctx, "glGetActiveSubroutineName",
+            GL_INVALID_ENUM, "invalid shader type");
+        return;
+    }
+    if (bufsize < 0) {
+        recordValidationError(ctx, "glGetActiveSubroutineName",
+            GL_INVALID_VALUE, "negative buffer size");
+        return;
+    }
+    auto* prog = ctx->objects().programs().get(program);
+    if (prog == nullptr) {
+        recordValidationError(ctx, "glGetActiveSubroutineName",
+            GL_INVALID_VALUE, "program is not a program object");
+        return;
+    }
+    if (!prog->linked) {
+        recordValidationError(ctx, "glGetActiveSubroutineName",
+            GL_INVALID_OPERATION, "program is not linked");
+        return;
+    }
+    const auto& subs = prog->resourceSubroutines[si];
+    if (index >= subs.size()) {
+        recordValidationError(ctx, "glGetActiveSubroutineName",
+            GL_INVALID_VALUE, "subroutine index out of range");
+        return;
+    }
+    appglCopyGLName(subs[static_cast<std::size_t>(index)].name, bufsize, length, name);
+    markProgramFunction(FunctionId::glGetActiveSubroutineName, "Active subroutine name via program-resource tables.");
 }
 
 // Sprint 17 Day 3 (CKPT238) [Track 3A — shape-agnostic foundational]:
@@ -7196,18 +7361,11 @@ void APIENTRY glUniformSubroutinesuiv(GLenum shadertype, GLsizei count, const GL
 
     // Stage validation — GL 4.6 §7.9 specifies one of the 6 valid
     // shader-stage enums; anything else is GL_INVALID_ENUM.
-    int si = -1;
-    switch (shadertype) {
-        case GL_VERTEX_SHADER:          si = 0; break;
-        case GL_TESS_CONTROL_SHADER:    si = 1; break;
-        case GL_TESS_EVALUATION_SHADER: si = 2; break;
-        case GL_GEOMETRY_SHADER:        si = 3; break;
-        case GL_FRAGMENT_SHADER:        si = 4; break;
-        case GL_COMPUTE_SHADER:         si = 5; break;
-        default:
-            recordValidationError(ctx, "glUniformSubroutinesuiv",
-                GL_INVALID_ENUM, "invalid shader type");
-            return;
+    const int si = appglSubroutineStageIndex(shadertype);
+    if (si < 0) {
+        recordValidationError(ctx, "glUniformSubroutinesuiv",
+            GL_INVALID_ENUM, "invalid shader type");
+        return;
     }
 
     // GL 4.6 §7.9: the operation targets the currently-bound program;
@@ -7218,6 +7376,11 @@ void APIENTRY glUniformSubroutinesuiv(GLenum shadertype, GLsizei count, const GL
     if (prog == nullptr || !prog->linked) {
         recordValidationError(ctx, "glUniformSubroutinesuiv",
             GL_INVALID_OPERATION, "no linked program currently bound");
+        return;
+    }
+    if (!appglProgramHasShaderStage(ctx, *prog, shadertype)) {
+        recordValidationError(ctx, "glUniformSubroutinesuiv",
+            GL_INVALID_OPERATION, "program has no active shader for stage");
         return;
     }
 
@@ -7243,6 +7406,7 @@ void APIENTRY glUniformSubroutinesuiv(GLenum shadertype, GLsizei count, const GL
     // public subroutine index against the uniform's compatible list.
     auto& selections = prog->currentSubroutineSelections[si];
     selections.assign(static_cast<std::size_t>(activeLocations), 0u);
+    const auto& subs = prog->resourceSubroutines[si];
     for (const auto& u : unis) {
         if (u.location < 0) continue;
         const GLint elemCount = std::max<GLint>(1, u.arraySize);
@@ -7258,8 +7422,14 @@ void APIENTRY glUniformSubroutinesuiv(GLenum shadertype, GLsizei count, const GL
             const bool found = std::find(
                 compatibles.begin(), compatibles.end(), static_cast<GLint>(selected)) != compatibles.end();
             if (!found) {
-                recordValidationError(ctx, "glUniformSubroutinesuiv",
-                    GL_INVALID_VALUE, "subroutine index is not compatible with uniform");
+                if (appglIsActiveSubroutineIndex(subs, selected)) {
+                    recordValidationError(ctx, "glUniformSubroutinesuiv",
+                        GL_INVALID_OPERATION,
+                        "subroutine index is not compatible with uniform");
+                } else {
+                    recordValidationError(ctx, "glUniformSubroutinesuiv",
+                        GL_INVALID_VALUE, "subroutine index is not active");
+                }
                 return;
             }
             selections[static_cast<std::size_t>(loc)] = selected;
@@ -7334,19 +7504,12 @@ void APIENTRY glGetUniformSubroutineuiv(GLenum shadertype, GLint location, GLuin
         return;
     }
 
-    int si = -1;
-    switch (shadertype) {
-        case GL_VERTEX_SHADER:          si = 0; break;
-        case GL_TESS_CONTROL_SHADER:    si = 1; break;
-        case GL_TESS_EVALUATION_SHADER: si = 2; break;
-        case GL_GEOMETRY_SHADER:        si = 3; break;
-        case GL_FRAGMENT_SHADER:        si = 4; break;
-        case GL_COMPUTE_SHADER:         si = 5; break;
-        default:
-            recordValidationError(ctx, "glGetUniformSubroutineuiv",
-                GL_INVALID_ENUM, "invalid shader type");
-            *params = 0;
-            return;
+    const int si = appglSubroutineStageIndex(shadertype);
+    if (si < 0) {
+        recordValidationError(ctx, "glGetUniformSubroutineuiv",
+            GL_INVALID_ENUM, "invalid shader type");
+        *params = 0;
+        return;
     }
 
     const GLuint progName = ctx->state().currentProgram();
@@ -7354,6 +7517,12 @@ void APIENTRY glGetUniformSubroutineuiv(GLenum shadertype, GLint location, GLuin
     if (prog == nullptr || !prog->linked) {
         recordValidationError(ctx, "glGetUniformSubroutineuiv",
             GL_INVALID_OPERATION, "no linked program currently bound");
+        *params = 0;
+        return;
+    }
+    if (!appglProgramHasShaderStage(ctx, *prog, shadertype)) {
+        recordValidationError(ctx, "glGetUniformSubroutineuiv",
+            GL_INVALID_OPERATION, "program has no active shader for stage");
         *params = 0;
         return;
     }
@@ -7389,17 +7558,10 @@ void APIENTRY glGetUniformSubroutineuiv(GLenum shadertype, GLint location, GLuin
 void APIENTRY glGetProgramStageiv(GLuint program, GLenum shadertype, GLenum pname, GLint* values) {
     auto* ctx = requireCurrentContext("glGetProgramStageiv");
     if (!ctx || !values) return;
-    int si = -1;
-    switch (shadertype) {
-        case GL_VERTEX_SHADER:          si = 0; break;
-        case GL_TESS_CONTROL_SHADER:    si = 1; break;
-        case GL_TESS_EVALUATION_SHADER: si = 2; break;
-        case GL_GEOMETRY_SHADER:        si = 3; break;
-        case GL_FRAGMENT_SHADER:        si = 4; break;
-        case GL_COMPUTE_SHADER:         si = 5; break;
-        default:
-            recordValidationError(ctx, "glGetProgramStageiv", GL_INVALID_ENUM, "invalid shadertype");
-            return;
+    const int si = appglSubroutineStageIndex(shadertype);
+    if (si < 0) {
+        recordValidationError(ctx, "glGetProgramStageiv", GL_INVALID_ENUM, "invalid shadertype");
+        return;
     }
     auto* prog = ctx->objects().programs().get(program);
     const auto& subs = prog ? prog->resourceSubroutines[si]

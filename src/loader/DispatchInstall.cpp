@@ -746,15 +746,15 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glValidateProgramPipeline, "ValidateProgramPipeline (always passes, stub).");
     coverage.markImplemented(FunctionId::glGetProgramPipelineiv, "GetProgramPipelineiv returns pipeline state.");
     coverage.markImplemented(FunctionId::glGetProgramPipelineInfoLog, "GetProgramPipelineInfoLog returns validation log.");
-    // GL 4.0 — subroutine uniforms (Group 3, stub-with-state).
-    coverage.markImplemented(FunctionId::glGetSubroutineUniformLocation, "Subroutine uniform location stub (always -1).");
-    coverage.markImplemented(FunctionId::glGetSubroutineIndex, "Subroutine index stub (always GL_INVALID_INDEX).");
-    coverage.markImplemented(FunctionId::glGetActiveSubroutineUniformiv, "Active subroutine uniform query stub (0 subroutines).");
-    coverage.markImplemented(FunctionId::glGetActiveSubroutineUniformName, "Active subroutine uniform name stub (GL_INVALID_VALUE).");
-    coverage.markImplemented(FunctionId::glGetActiveSubroutineName, "Active subroutine name stub (GL_INVALID_VALUE).");
-    coverage.markImplemented(FunctionId::glUniformSubroutinesuiv, "UniformSubroutinesuiv stub (no-op).");
-    coverage.markImplemented(FunctionId::glGetUniformSubroutineuiv, "GetUniformSubroutineuiv stub (returns 0).");
-    coverage.markImplemented(FunctionId::glGetProgramStageiv, "GetProgramStageiv reports 0 subroutines.");
+    // GL 4.0 — subroutine uniforms (Group 3).
+    coverage.markImplemented(FunctionId::glGetSubroutineUniformLocation, "Subroutine uniform location via program-resource tables.");
+    coverage.markImplemented(FunctionId::glGetSubroutineIndex, "Subroutine index via program-resource tables.");
+    coverage.markImplemented(FunctionId::glGetActiveSubroutineUniformiv, "Active subroutine uniform query via program-resource tables.");
+    coverage.markImplemented(FunctionId::glGetActiveSubroutineUniformName, "Active subroutine uniform name query via program-resource tables.");
+    coverage.markImplemented(FunctionId::glGetActiveSubroutineName, "Active subroutine name query via program-resource tables.");
+    coverage.markImplemented(FunctionId::glUniformSubroutinesuiv, "UniformSubroutinesuiv updates selection state and synthetic dispatch uniforms.");
+    coverage.markImplemented(FunctionId::glGetUniformSubroutineuiv, "GetUniformSubroutineuiv returns current selection state.");
+    coverage.markImplemented(FunctionId::glGetProgramStageiv, "GetProgramStageiv reports subroutine stage resource counts.");
     // GL 4.0 — transform feedback objects (Group 4).
     coverage.markImplemented(FunctionId::glGenTransformFeedbacks, "Transform feedback object name generation.");
     coverage.markImplemented(FunctionId::glDeleteTransformFeedbacks, "Transform feedback object deletion.");
