@@ -5527,7 +5527,9 @@ struct GLContext::Impl {
             generated.desc = baseLevel.desc;
             generated.desc.width = mipDimension(baseLevel.desc.width, offsetFromBase);
             generated.desc.height = object.target == GL_TEXTURE_1D ? 1 : mipDimension(baseLevel.desc.height, offsetFromBase);
-            generated.desc.depth = object.target == GL_TEXTURE_3D ? mipDimension(baseLevel.desc.depth, offsetFromBase) : 1;
+            generated.desc.depth = object.target == GL_TEXTURE_3D
+                ? mipDimension(baseLevel.desc.depth, offsetFromBase)
+                : baseLevel.desc.depth;
             generated.desc.levels = std::max<GLsizei>(object.desc.levels, levelIndex + 1);
             generated.defined = true;
             generated.rgba8 = downsampleRGBA8(
@@ -8224,19 +8226,51 @@ struct GLContext::Impl {
                 // all levels).
                 if (mtlTex.depth > 1) {
                     slot.depth = levelDim(mtlTex.depth);
+                    slot.layerFaces = slot.depth;
+                } else if (texObj->target == GL_TEXTURE_CUBE_MAP_ARRAY ||
+                           mtlTex.textureType == MTLTextureTypeCubeArray) {
+                    const std::uint32_t cubes = static_cast<std::uint32_t>(
+                        std::max<NSUInteger>(mtlTex.arrayLength, 1));
+                    slot.depth = cubes;
+                    slot.layerFaces = 6u * cubes;
+                } else if (texObj->target == GL_TEXTURE_CUBE_MAP ||
+                           mtlTex.textureType == MTLTextureTypeCube) {
+                    slot.depth = 1;
+                    slot.layerFaces = 6;
+                } else if (mtlTex.arrayLength > 1) {
+                    slot.depth = static_cast<std::uint32_t>(mtlTex.arrayLength);
+                    slot.layerFaces = slot.depth;
                 } else {
                     slot.depth = static_cast<std::uint32_t>(mtlTex.arrayLength);
+                    slot.layerFaces = 1;
                 }
                 slot.bytesPerRow = slot.width * bpp;
+                slot.bytesPerImage = slot.bytesPerRow * slot.height;
                 slot.internalFormat = intFmt;
                 slot.samplerType = 0;  // not applicable for storage images
-                slot.data.assign(slot.bytesPerRow * slot.height, 0u);
+                const NSUInteger sliceCount = std::max<NSUInteger>(slot.layerFaces, 1);
+                slot.data.assign(
+                    static_cast<std::size_t>(slot.bytesPerImage) * sliceCount,
+                    0u);
                 MTLRegion region = MTLRegionMake2D(0, 0, slot.width, slot.height);
                 @try {
-                    [mtlTex getBytes:slot.data.data()
-                         bytesPerRow:slot.bytesPerRow
-                          fromRegion:region
-                         mipmapLevel:0];
+                    if (sliceCount > 1) {
+                        for (NSUInteger slice = 0; slice < sliceCount; ++slice) {
+                            [mtlTex getBytes:slot.data.data() +
+                                              static_cast<std::size_t>(slice) *
+                                                  slot.bytesPerImage
+                                 bytesPerRow:slot.bytesPerRow
+                               bytesPerImage:slot.bytesPerImage
+                                  fromRegion:region
+                                 mipmapLevel:static_cast<NSUInteger>(boundLevel)
+                                       slice:slice];
+                        }
+                    } else {
+                        [mtlTex getBytes:slot.data.data()
+                             bytesPerRow:slot.bytesPerRow
+                              fromRegion:region
+                             mipmapLevel:static_cast<NSUInteger>(boundLevel)];
+                    }
                 } @catch (NSException* exc) {
                     // Private storage textures don't support getBytes.
                     // Leave the slot data zero-filled; OpImageRead
@@ -8245,11 +8279,15 @@ struct GLContext::Impl {
                     slot.data.clear();
                     slot.width = 0;
                     slot.height = 0;
+                    slot.depth = 0;
+                    slot.layerFaces = 0;
+                    slot.bytesPerImage = 0;
                 }
                 if (trace) std::fprintf(stderr,
                     "[GS-img]   element %d unit=%u tex=%u fmt=0x%X "
-                    "dim=%ux%u datasz=%zu\n",
+                    "dim=%ux%ux%u layerFaces=%u datasz=%zu\n",
                     i, effUnit, ib.texture, intFmt, slot.width, slot.height,
+                    slot.depth, slot.layerFaces,
                     slot.data.size());
             }
             result[v.varId] = std::move(slots);
@@ -8262,14 +8300,20 @@ struct GLContext::Impl {
     // by reference) instead of taking ImageBinding directly so the
     // helper can sit before ImageBinding's class-scope declaration.
     void* resolveImageMetalTextureImpl(GLTextureObject* texObj,
-                                       GLuint texName,
-                                       GLint level,
-                                       GLenum imageFormat,
-                                       void*& cachedView,
-                                       GLuint& cachedTex,
-                                       GLint& cachedLev,
-                                       GLenum& cachedFmt,
-                                       void* overrideMetalTexture = nullptr);
+                                        GLuint texName,
+                                        GLint level,
+                                        GLenum imageFormat,
+                                        GLboolean layered,
+                                        GLint layer,
+                                        GLenum shaderTarget,
+                                        void*& cachedView,
+                                        GLuint& cachedTex,
+                                        GLint& cachedLev,
+                                        GLenum& cachedFmt,
+                                        GLboolean& cachedLayered,
+                                        GLint& cachedLayer,
+                                        GLenum& cachedTarget,
+                                        void* overrideMetalTexture = nullptr);
 
     // Graphics-stage storage-image binding (imageLoad/imageStore in VS/FS).
     // Mirrors the compute-dispatch storage-image path but appends to the
@@ -8359,7 +8403,8 @@ struct GLContext::Impl {
                     TranslatedDrawInfo::TextureBinding tb;
                     // CKPT119: prefer level-restricted view when ib.level > 0
                     // so imageSize() returns LEVEL-N dimensions.
-                    tb.metalTexture = resolveImageMetalTexture(ib, texObj);
+                    tb.metalTexture = resolveImageMetalTexture(
+                        ib, texObj, img.storageImageTarget);
                     if (tb.metalTexture == nullptr) {
                         if (trace) std::fprintf(stderr,
                             " SKIP=image_view_nil tex=%u fmt=0x%X\n",
@@ -13200,10 +13245,16 @@ struct GLContext::Impl {
         GLuint cachedViewTexture = 0;  // texture name the view was created from
         GLint cachedViewLevel = -1;    // level the view was created for
         GLenum cachedViewFormat = 0;   // image binding format used for the view
+        GLboolean cachedViewLayered = GL_TRUE;
+        GLint cachedViewLayer = 0;
+        GLenum cachedViewTarget = 0;
         void* sparseSidecarLevelView = nullptr;
         GLuint sparseCachedViewTexture = 0;
         GLint sparseCachedViewLevel = -1;
         GLenum sparseCachedViewFormat = 0;
+        GLboolean sparseCachedViewLayered = GL_TRUE;
+        GLint sparseCachedViewLayer = 0;
+        GLenum sparseCachedViewTarget = 0;
         void* sparseCachedViewBase = nullptr;
 
         void invalidateMetalView() {
@@ -13217,10 +13268,16 @@ struct GLContext::Impl {
             cachedViewTexture = 0;
             cachedViewLevel = -1;
             cachedViewFormat = 0;
+            cachedViewLayered = GL_TRUE;
+            cachedViewLayer = 0;
+            cachedViewTarget = 0;
             sparseSidecarLevelView = nullptr;
             sparseCachedViewTexture = 0;
             sparseCachedViewLevel = -1;
             sparseCachedViewFormat = 0;
+            sparseCachedViewLayered = GL_TRUE;
+            sparseCachedViewLayer = 0;
+            sparseCachedViewTarget = 0;
             sparseCachedViewBase = nullptr;
         }
     };
@@ -13228,13 +13285,20 @@ struct GLContext::Impl {
     // CKPT119 wrapper: type-aware adapter for resolveImageMetalTextureImpl
     // that takes ImageBinding directly. Defined after ImageBinding so
     // the type is in scope.
-    void* resolveImageMetalTexture(ImageBinding& ib, GLTextureObject* texObj) {
+    void* resolveImageMetalTexture(ImageBinding& ib,
+                                   GLTextureObject* texObj,
+                                   GLenum shaderTarget) {
         return resolveImageMetalTextureImpl(texObj, ib.texture, ib.level,
                                             ib.format,
+                                            ib.layered, ib.layer,
+                                            shaderTarget,
                                             ib.metalLevelView,
                                             ib.cachedViewTexture,
                                             ib.cachedViewLevel,
-                                            ib.cachedViewFormat);
+                                            ib.cachedViewFormat,
+                                            ib.cachedViewLayered,
+                                            ib.cachedViewLayer,
+                                            ib.cachedViewTarget);
     }
 
     void* resolveSparseSidecarImageMetalTexture(
@@ -13258,10 +13322,14 @@ struct GLContext::Impl {
         }
         void* result = resolveImageMetalTextureImpl(
             texObj, ib.texture, ib.level, ib.format,
+            ib.layered, ib.layer, sidecarInfo.target,
             ib.sparseSidecarLevelView,
             ib.sparseCachedViewTexture,
             ib.sparseCachedViewLevel,
             ib.sparseCachedViewFormat,
+            ib.sparseCachedViewLayered,
+            ib.sparseCachedViewLayer,
+            ib.sparseCachedViewTarget,
             sidecarInfo.metalTexture);
         if (ib.sparseSidecarLevelView != nullptr) {
             ib.sparseCachedViewBase = sidecarInfo.metalTexture;
@@ -21005,10 +21073,16 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
                                                     GLuint texName,
                                                     GLint level,
                                                     GLenum imageFormat,
+                                                    GLboolean layered,
+                                                    GLint layer,
+                                                    GLenum shaderTarget,
                                                     void*& cachedView,
                                                     GLuint& cachedTex,
                                                     GLint& cachedLev,
                                                     GLenum& cachedFmt,
+                                                    GLboolean& cachedLayered,
+                                                    GLint& cachedLayer,
+                                                    GLenum& cachedTarget,
                                                     void* overrideMetalTexture) {
     void* baseMetalTexture = overrideMetalTexture != nullptr
         ? overrideMetalTexture
@@ -21021,11 +21095,15 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
     if (cachedView != nullptr &&
         cachedTex == texName &&
         cachedLev == level &&
-        cachedFmt == imageFormat) {
+        cachedFmt == imageFormat &&
+        cachedLayered == layered &&
+        cachedLayer == layer &&
+        cachedTarget == shaderTarget) {
         if (trace) {
             std::fprintf(stderr,
-                "[IMG-VIEW] tex=%u level=%d fmt=0x%X cache-hit view=%p\n",
-                texName, level, imageFormat, cachedView);
+                "[IMG-VIEW] tex=%u level=%d fmt=0x%X layered=%d layer=%d target=0x%X cache-hit view=%p\n",
+                texName, level, imageFormat, layered ? 1 : 0, layer,
+                shaderTarget, cachedView);
         }
         return cachedView;
     }
@@ -21044,11 +21122,45 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
         }
         return nullptr;
     }
-    if (level == 0 && imagePixelFormat == baseTex.pixelFormat) {
+    auto totalSliceCount = [&]() -> NSUInteger {
+        switch (baseTex.textureType) {
+            case MTLTextureType1DArray:
+            case MTLTextureType2DArray:
+            case MTLTextureType2DMultisampleArray:
+                return std::max<NSUInteger>(baseTex.arrayLength, 1);
+            case MTLTextureTypeCube:
+                return 6;
+            case MTLTextureTypeCubeArray:
+                return 6 * std::max<NSUInteger>(baseTex.arrayLength, 1);
+            default:
+                return 1;
+        }
+    };
+    const bool shaderWantsSingle2D =
+        shaderTarget == GL_TEXTURE_2D ||
+        shaderTarget == GL_TEXTURE_RECTANGLE;
+    const NSUInteger availableSlices = totalSliceCount();
+    const bool sourceHasSliceSpace = availableSlices > 1;
+    const bool singleLayerView =
+        layered == GL_FALSE &&
+        shaderWantsSingle2D &&
+        sourceHasSliceSpace;
+    if (singleLayerView &&
+        (layer < 0 || static_cast<NSUInteger>(layer) >= availableSlices)) {
         if (trace) {
             std::fprintf(stderr,
-                "[IMG-VIEW] tex=%u level=0 fmt=0x%X base-pf=%lu use=base\n",
-                texName, imageFormat, static_cast<unsigned long>(baseTex.pixelFormat));
+                "[IMG-VIEW] tex=%u level=%d fmt=0x%X layered=0 layer=%d target=0x%X skip=layer-oob slices=%lu\n",
+                texName, level, imageFormat, layer, shaderTarget,
+                static_cast<unsigned long>(availableSlices));
+        }
+        return nullptr;
+    }
+    if (!singleLayerView && level == 0 && imagePixelFormat == baseTex.pixelFormat) {
+        if (trace) {
+            std::fprintf(stderr,
+                "[IMG-VIEW] tex=%u level=0 fmt=0x%X layered=%d layer=%d target=0x%X base-pf=%lu use=base\n",
+                texName, imageFormat, layered ? 1 : 0, layer, shaderTarget,
+                static_cast<unsigned long>(baseTex.pixelFormat));
         }
         return baseMetalTexture;
     }
@@ -21069,26 +21181,23 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
         cachedTex = 0;
         cachedLev = -1;
         cachedFmt = 0;
+        cachedLayered = GL_TRUE;
+        cachedLayer = 0;
+        cachedTarget = 0;
     }
     NSRange levelRange = NSMakeRange(static_cast<NSUInteger>(level), 1);
     // CKPT119: per-textureType slice range. Metal asserts:
     // - Cube / CubeArray: slice range must be multiple of 6
     // - 2DArray / 1DArray: slice range = arrayLength
     // - 2D / 2DMS / 3D / 1D: slice range = 1 (default)
-    NSUInteger sliceCount = std::max<NSUInteger>(baseTex.arrayLength, 1);
-    switch (baseTex.textureType) {
-        case MTLTextureTypeCube:
-            sliceCount = 6;
-            break;
-        case MTLTextureTypeCubeArray:
-            sliceCount = 6 * std::max<NSUInteger>(baseTex.arrayLength, 1);
-            break;
-        default:
-            break;
-    }
-    NSRange sliceRange = NSMakeRange(0, sliceCount);
+    const NSUInteger sliceCount = singleLayerView ? 1 : availableSlices;
+    NSRange sliceRange = singleLayerView
+        ? NSMakeRange(static_cast<NSUInteger>(layer), 1)
+        : NSMakeRange(0, sliceCount);
+    const MTLTextureType viewTextureType =
+        singleLayerView ? MTLTextureType2D : baseTex.textureType;
     id<MTLTexture> levelView = [baseTex newTextureViewWithPixelFormat:imagePixelFormat
-                                                          textureType:baseTex.textureType
+                                                          textureType:viewTextureType
                                                                levels:levelRange
                                                                slices:sliceRange];
     if (levelView == nil) {
@@ -21105,12 +21214,19 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
     cachedTex = texName;
     cachedLev = level;
     cachedFmt = imageFormat;
+    cachedLayered = layered;
+    cachedLayer = layer;
+    cachedTarget = shaderTarget;
     if (trace) {
         std::fprintf(stderr,
-            "[IMG-VIEW] tex=%u level=%d fmt=0x%X base-pf=%lu view-pf=%lu view=%p\n",
-            texName, level, imageFormat,
+            "[IMG-VIEW] tex=%u level=%d fmt=0x%X layered=%d layer=%d target=0x%X base-pf=%lu view-pf=%lu view-type=%lu slices=(%lu,%lu) view=%p\n",
+            texName, level, imageFormat, layered ? 1 : 0, layer,
+            shaderTarget,
             static_cast<unsigned long>(baseTex.pixelFormat),
             static_cast<unsigned long>(imagePixelFormat),
+            static_cast<unsigned long>(viewTextureType),
+            static_cast<unsigned long>(sliceRange.location),
+            static_cast<unsigned long>(sliceRange.length),
             cachedView);
     }
     return cachedView;
@@ -41225,7 +41341,8 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
                             extensionContext, *texObj);
                     }
                     // CKPT119: level-restricted view when ib.level > 0.
-                    tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
+                    tb.metalTexture = impl_->resolveImageMetalTexture(
+                        ib, texObj, img.storageImageTarget);
                 }
             }
             tb.metalSamplerState = nullptr;  // no sampler for storage images
@@ -41714,7 +41831,8 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
                             extensionContext, *texObj);
                     }
                     // CKPT119: level-restricted view when ib.level > 0.
-                    tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
+                    tb.metalTexture = impl_->resolveImageMetalTexture(
+                        ib, texObj, img.storageImageTarget);
                 }
             }
             tb.metalSamplerState = nullptr;
@@ -41808,10 +41926,13 @@ bool GLContext::bindImageTexture(GLuint unit, GLuint texture, GLint level, GLboo
     // the binding identity changes. The image format is part of the
     // identity because native storage images may need a PixelFormatView
     // even when the mip level is zero.
-    if (binding.metalLevelView != nullptr &&
+    if ((binding.metalLevelView != nullptr ||
+         binding.sparseSidecarLevelView != nullptr) &&
         (binding.cachedViewTexture != texture ||
          binding.cachedViewLevel != level ||
-         binding.cachedViewFormat != format)) {
+         binding.cachedViewFormat != format ||
+         binding.cachedViewLayered != layered ||
+         binding.cachedViewLayer != layer)) {
         binding.invalidateMetalView();
     }
     binding.texture = texture;

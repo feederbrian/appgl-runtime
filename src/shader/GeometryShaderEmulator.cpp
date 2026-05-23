@@ -5209,7 +5209,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 // OOB is undefined but returning zeros is the standard
                 // emulator pattern).
                 Value coord;
-                std::uint32_t u = 0, v = 0;
+                std::uint32_t u = 0, v = 0, layer = 0;
                 if (tryGetValue(w[3], coord)) {
                     auto pickI = [&](int idx) -> std::int32_t {
                         if (idx >= coord.componentCount()) return 0;
@@ -5226,6 +5226,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     };
                     const std::int32_t iu = pickI(0);
                     const std::int32_t iv = pickI(1);
+                    const std::int32_t il = pickI(2);
                     if (iu >= 0 &&
                         static_cast<std::uint32_t>(iu) < slot.width) {
                         u = static_cast<std::uint32_t>(iu);
@@ -5234,13 +5235,22 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                         static_cast<std::uint32_t>(iv) < slot.height) {
                         v = static_cast<std::uint32_t>(iv);
                     }
+                    const std::uint32_t addressableLayers =
+                        slot.layerFaces != 0
+                            ? slot.layerFaces
+                            : (slot.depth != 0 ? slot.depth : 1u);
+                    if (il >= 0 &&
+                        static_cast<std::uint32_t>(il) < addressableLayers) {
+                        layer = static_cast<std::uint32_t>(il);
+                    }
                 }
                 if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
                     std::fprintf(stderr,
-                        "[GS-img] read: var=%u elem=%u uv=(%u,%u) "
-                        "fmt=0x%X dim=%ux%u datasz=%zu storage=%d\n",
-                        h.arrayVarId, h.elementIdx, u, v,
+                        "[GS-img] read: var=%u elem=%u uvw=(%u,%u,%u) "
+                        "fmt=0x%X dim=%ux%ux%u layerFaces=%u datasz=%zu storage=%d\n",
+                        h.arrayVarId, h.elementIdx, u, v, layer,
                         slot.internalFormat, slot.width, slot.height,
+                        slot.depth, slot.layerFaces,
                         slot.data.size(), h.isStorage ? 1 : 0);
                 }
                 Value out{};
@@ -5251,7 +5261,11 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     (slot.width != 0 && bpr >= slot.width)
                         ? std::max<std::uint32_t>(1u, bpr / slot.width)
                         : 4u;
+                const std::uint32_t bpi =
+                    slot.bytesPerImage != 0 ? slot.bytesPerImage
+                                            : bpr * slot.height;
                 const std::size_t off =
+                    static_cast<std::size_t>(layer) * bpi +
                     static_cast<std::size_t>(v) * bpr +
                     static_cast<std::size_t>(u) * bytesPerTexel;
                 if (off < slot.data.size()) {

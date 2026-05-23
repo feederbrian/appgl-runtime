@@ -317,6 +317,13 @@ struct SampledTextureSlot {
     // is requested.
     std::uint32_t depth = 0;
     std::uint32_t bytesPerRow = 0;
+    // Byte stride between array/cube layer-faces in data. When zero,
+    // readers fall back to bytesPerRow * height.
+    std::uint32_t bytesPerImage = 0;
+    // Number of addressable storage-image layer-faces. For cube arrays
+    // imageSize() reports cube count in depth, while imageLoad/store
+    // coordinates address the six faces per cube via coord.z.
+    std::uint32_t layerFaces = 0;
     std::uint32_t internalFormat = 0;
     std::uint32_t samplerType = 0;
 };

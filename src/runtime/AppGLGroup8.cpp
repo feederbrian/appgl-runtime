@@ -520,16 +520,20 @@ static void APIENTRY glDrawRangeElements(GLenum mode, GLuint start, GLuint end, 
 }
 
 static void APIENTRY glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
-    (void)target;
-    (void)level;
-    (void)xoffset;
-    (void)yoffset;
-    (void)zoffset;
-    (void)x;
-    (void)y;
-    (void)width;
-    (void)height;
-    warnDataDroppedOnce("glCopyTexSubImage3D");
+    auto* ctx = currentContextOrNull();
+    if (ctx == nullptr) return;
+    const GLuint texture = ctx->state().boundTexture(target);
+    if (!ctx->validateCopyTextureSubImage(texture, 3, level,
+                                          xoffset, yoffset, zoffset,
+                                          width, height)) {
+        return;
+    }
+    if (!ctx->blitReadFBOToTextureSubImage(texture, level,
+                                           xoffset, yoffset, zoffset,
+                                           x, y, width, height,
+                                           0)) {
+        warnDataDroppedOnce("glCopyTexSubImage3D");
+    }
 }
 
 static void APIENTRY glSampleCoverage(GLfloat value, GLboolean invert) {
