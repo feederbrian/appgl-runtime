@@ -4764,7 +4764,12 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                         // `vec4 a[3][4][5]` array = [5, 4, 3].
                         const std::uint32_t innermostDim = memberType.array[0];
                         GLint baseArrayStride = 0;
-                        if (compiler.has_member_decoration(parentType.self, mi,
+                        try {
+                            baseArrayStride = static_cast<GLint>(
+                                compiler.type_struct_member_array_stride(parentType, mi));
+                        } catch (...) {}
+                        if (baseArrayStride <= 0 &&
+                            compiler.has_member_decoration(parentType.self, mi,
                                 spv::DecorationArrayStride)) {
                             baseArrayStride = static_cast<GLint>(
                                 compiler.get_member_decoration(parentType.self, mi,
@@ -4774,7 +4779,19 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                         for (std::size_t d = 1; d < memberType.array.size(); ++d) {
                             totalCombos *= (memberType.array[d] > 0 ? memberType.array[d] : 1);
                         }
-                        const GLint perEntryStride = baseArrayStride;
+                        std::size_t memberTotalSize = 0;
+                        try {
+                            memberTotalSize =
+                                compiler.get_declared_struct_member_size(parentType, mi);
+                        } catch (...) {}
+                        const GLint perEntryStride =
+                            totalCombos > 0 && memberTotalSize > 0
+                                ? static_cast<GLint>(memberTotalSize / totalCombos)
+                                : baseArrayStride;
+                        const GLint innerArrayStride =
+                            innermostDim > 0 && perEntryStride > 0
+                                ? perEntryStride / static_cast<GLint>(innermostDim)
+                                : baseArrayStride;
                         for (std::uint32_t combo = 0; combo < totalCombos; ++combo) {
                             std::string subscript;
                             std::uint32_t remain = combo;
@@ -4792,13 +4809,13 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                             member.name = (prefix.empty()
                                 ? memberName : (prefix + "." + memberName)) + subscript;
                             member.offset = memberOffset + combo * perEntryStride;
-                            member.size = static_cast<std::size_t>(perEntryStride * innermostDim);
+                            member.size = static_cast<std::size_t>(perEntryStride);
                             member.type = spirvBaseTypeToGL(memberType);
                             member.containsFp64 = spirvTypeUsesFp64(compiler, memberType);
                             rb.containsFp64 = rb.containsFp64 || member.containsFp64;
                             member.isArray = true;
                             member.arraySize = innermostDim;
-                            member.arrayStride = baseArrayStride;
+                            member.arrayStride = innerArrayStride;
                             if (memberType.columns > 1) {
                                 member.isRowMajor = compiler.has_member_decoration(
                                     parentType.self, mi, spv::DecorationRowMajor);
@@ -4980,7 +4997,12 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                         const std::uint32_t innermostDim =
                             memberType.array[0];
                         GLint baseArrayStride = 0;
-                        if (compiler.has_member_decoration(
+                        try {
+                            baseArrayStride = static_cast<GLint>(
+                                compiler.type_struct_member_array_stride(parentType, mi));
+                        } catch (...) {}
+                        if (baseArrayStride <= 0 &&
+                            compiler.has_member_decoration(
                                 parentType.self, mi,
                                 spv::DecorationArrayStride)) {
                             baseArrayStride = static_cast<GLint>(
@@ -4994,6 +5016,16 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                             totalCombos *=
                                 memberType.array[d] > 0 ? memberType.array[d] : 1;
                         }
+                        const std::size_t memberTotalSize =
+                            compiler.get_declared_struct_member_size(parentType, mi);
+                        const std::size_t perEntryStride =
+                            totalCombos > 0 && memberTotalSize > 0
+                                ? memberTotalSize / totalCombos
+                                : static_cast<std::size_t>(baseArrayStride);
+                        const GLint innerArrayStride =
+                            innermostDim > 0 && perEntryStride > 0
+                                ? static_cast<GLint>(perEntryStride / innermostDim)
+                                : baseArrayStride;
                         for (std::uint32_t combo = 0; combo < totalCombos;
                              ++combo) {
                             std::string subscript;
@@ -5015,9 +5047,8 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                             ShaderReflection::UniformMember member;
                             member.name = qualifiedName + subscript;
                             member.offset = memberOffset +
-                                combo * static_cast<std::size_t>(baseArrayStride);
-                            member.size = static_cast<std::size_t>(
-                                baseArrayStride * innermostDim);
+                                combo * perEntryStride;
+                            member.size = perEntryStride;
                             member.type = spirvBaseTypeToGL(memberType);
                             member.containsFp64 =
                                 spirvTypeUsesFp64(compiler, memberType);
@@ -5025,7 +5056,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                                 rb.containsFp64 || member.containsFp64;
                             member.isArray = true;
                             member.arraySize = innermostDim;
-                            member.arrayStride = baseArrayStride;
+                            member.arrayStride = innerArrayStride;
                             if (memberType.columns > 1) {
                                 member.isRowMajor =
                                     compiler.has_member_decoration(
@@ -5440,7 +5471,12 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                         // walk them in reverse so we emit names in
                         // GLSL subscript order (outermost first).
                         GLint baseArrayStride = 0;
-                        if (compiler.has_member_decoration(parentType.self, mi,
+                        try {
+                            baseArrayStride = static_cast<GLint>(
+                                compiler.type_struct_member_array_stride(parentType, mi));
+                        } catch (...) {}
+                        if (baseArrayStride <= 0 &&
+                            compiler.has_member_decoration(parentType.self, mi,
                                 spv::DecorationArrayStride)) {
                             baseArrayStride = static_cast<GLint>(
                                 compiler.get_member_decoration(parentType.self, mi,
@@ -5458,19 +5494,18 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                         try {
                             memberTotalSize = compiler.get_declared_struct_member_size(parentType, mi);
                         } catch (...) {}
-                        // Per-outer-entry stride for offset bookkeeping —
-                        // stride between consecutive innermost "slices".
-                        // Each slice is `innermost * baseStride / innermost`
-                        // but our combo iteration places slices linearly
-                        // by combo index; perEntryStride = baseArrayStride
-                        // gives the correct size for consecutive innermost
-                        // arrays (a[0][0] vs a[0][1]) but wrong for outer
-                        // (a[0][0] vs a[1][0]). CTS `top-level-array`
-                        // doesn't verify per-entry offsets so we skip
-                        // the per-outer-dim jump and use baseArrayStride
-                        // uniformly. TODO: walk combo indices individually
-                        // if a future test verifies per-entry offsets.
-                        const GLint perEntryStride = baseArrayStride;
+                        // Per-entry stride for offset bookkeeping: each
+                        // flattened member represents one innermost array
+                        // slice, while topLevelArrayStride below keeps the
+                        // distance between outermost elements.
+                        const GLint perEntryStride =
+                            totalCombos > 0 && memberTotalSize > 0
+                                ? static_cast<GLint>(memberTotalSize / totalCombos)
+                                : baseArrayStride;
+                        const GLint innerArrayStride =
+                            innermostDim > 0 && perEntryStride > 0
+                                ? perEntryStride / static_cast<GLint>(innermostDim)
+                                : baseArrayStride;
                         GLint tlStride = 0;
                         if (outermostDim > 0 && memberTotalSize > 0) {
                             tlStride = static_cast<GLint>(memberTotalSize / outermostDim);
@@ -5504,7 +5539,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                             member.name = (prefix.empty()
                                 ? memberName : (prefix + "." + memberName)) + subscript;
                             member.offset = memberOffset + combo * perEntryStride;
-                            member.size = perEntryStride * innermostDim;
+                            member.size = perEntryStride;
                             member.type = spirvBaseTypeToGL(memberType);
                             member.containsFp64 = spirvTypeUsesFp64(compiler, memberType);
                             rb.containsFp64 = rb.containsFp64 || member.containsFp64;
@@ -5512,7 +5547,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                             member.topLevelArrayStride = tlStride;
                             member.isArray = true;
                             member.arraySize = innermostDim;  // 0 for unbounded
-                            member.arrayStride = baseArrayStride;
+                            member.arrayStride = innerArrayStride;
                             // Row-major decoration (matrix of array).
                             if (memberType.columns > 1) {
                                 member.isRowMajor = compiler.has_member_decoration(

@@ -25856,6 +25856,24 @@ bool GLContext::linkProgram(GLuint program) {
         }
     }
 
+    // GL 4.6 §4.4.6: explicit uniform locations do not apply to
+    // atomic-counter uniforms. glslang accepts this combination on macOS, so
+    // reject it at program link where AppGL already validates default-block
+    // uniform locations.
+    for (const auto& uniform : programObject->uniforms) {
+        if (uniform.type == GL_UNSIGNED_INT_ATOMIC_COUNTER &&
+            uniform.explicitLocation >= 0) {
+            programObject->linkLog =
+                "layout(location) is not allowed for atomic counter uniform '" +
+                uniform.name + "'";
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+    }
+
     // Build the vertex attribute table from the scanner's declared inputs
     // on the vertex stage. The scanner-driven path honours
     // glBindAttribLocation requests (via requestedAttribLocations) which
@@ -31116,8 +31134,10 @@ bool GLContext::linkProgram(GLuint program) {
                 // closing brace, so scan there before the simpler scalar
                 // declaration path.
                 std::size_t scan = pos + uniformKw.size();
+                const std::size_t firstSemi = src.find(';', scan);
                 const std::size_t openBrace = src.find('{', scan);
-                if (openBrace != std::string::npos) {
+                if (openBrace != std::string::npos &&
+                    (firstSemi == std::string::npos || openBrace < firstSemi)) {
                     int depth = 1;
                     std::size_t closeBrace = openBrace + 1;
                     while (closeBrace < src.size() && depth > 0) {
@@ -31161,6 +31181,79 @@ bool GLContext::linkProgram(GLuint program) {
             }
             return false;
         };
+        auto explicitUniformLocationFor = [](const std::string& src,
+                                             const std::string& topName) -> GLint {
+            if (topName.empty()) return -1;
+            auto isIdent = [](char c) {
+                const unsigned char uc = static_cast<unsigned char>(c);
+                return std::isalnum(uc) || c == '_';
+            };
+            auto hasWord = [&](std::string_view text,
+                               const std::string& word) -> bool {
+                std::size_t pos = 0;
+                while ((pos = text.find(word, pos)) != std::string_view::npos) {
+                    const bool leftOk = (pos == 0) || !isIdent(text[pos - 1]);
+                    const std::size_t end = pos + word.size();
+                    const bool rightOk = (end >= text.size()) || !isIdent(text[end]);
+                    if (leftOk && rightOk) return true;
+                    pos = end;
+                }
+                return false;
+            };
+            auto findLocation = [&](std::string_view text) -> GLint {
+                std::size_t pos = 0;
+                while ((pos = text.find("location", pos)) != std::string_view::npos) {
+                    const bool leftOk = (pos == 0) || !isIdent(text[pos - 1]);
+                    const std::size_t wordEnd = pos + 8;
+                    const bool rightOk = (wordEnd >= text.size()) || !isIdent(text[wordEnd]);
+                    if (!(leftOk && rightOk)) {
+                        pos = wordEnd;
+                        continue;
+                    }
+                    std::size_t eq = wordEnd;
+                    while (eq < text.size() &&
+                           std::isspace(static_cast<unsigned char>(text[eq]))) {
+                        ++eq;
+                    }
+                    if (eq >= text.size() || text[eq] != '=') {
+                        pos = wordEnd;
+                        continue;
+                    }
+                    ++eq;
+                    while (eq < text.size() &&
+                           std::isspace(static_cast<unsigned char>(text[eq]))) {
+                        ++eq;
+                    }
+                    char* endp = nullptr;
+                    const long value = std::strtol(text.data() + eq, &endp, 0);
+                    if (endp != text.data() + eq) {
+                        return static_cast<GLint>(value);
+                    }
+                    pos = wordEnd;
+                }
+                return -1;
+            };
+
+            std::string statement;
+            statement.reserve(256);
+            int braceDepth = 0;
+            for (char c : src) {
+                statement.push_back(c);
+                if (c == '{') {
+                    ++braceDepth;
+                } else if (c == '}') {
+                    if (braceDepth > 0) --braceDepth;
+                } else if (c == ';' && braceDepth == 0) {
+                    const std::string_view stmt(statement.data(), statement.size());
+                    if (hasWord(stmt, "uniform") && hasWord(stmt, topName)) {
+                        const GLint loc = findLocation(stmt);
+                        if (loc >= 0) return loc;
+                    }
+                    statement.clear();
+                }
+            }
+            return -1;
+        };
         // Extract the top-level uniform name from a flattened member
         // name. `j.b` → `j`, `k.a[0].c` → `k`, `l[2].b[1].d[0]` → `l`.
         auto topLevelName = [](const std::string& flat) -> std::string {
@@ -31190,6 +31283,7 @@ bool GLContext::linkProgram(GLuint program) {
             // The _DefaultUniforms block is always at index 0 when present.
             const auto& block = refl.uniformBlocks[0];
             if (block.name != "_DefaultUniforms") return;
+            std::unordered_map<std::string, GLint> explicitMemberNextLoc;
             for (const auto& member : block.members) {
                 // Sprint 17 Day 7+ Bank-Group-C: skip synthetic
                 // dispatch uniforms emitted by
@@ -31285,15 +31379,21 @@ bool GLContext::linkProgram(GLuint program) {
                         break;
                     }
                 }
-                bool locationSet = false;
+                GLint parentExplicitLocation = -1;
                 if (parent != nullptr) {
+                    parentExplicitLocation = parent->explicitLocation;
+                } else {
+                    parentExplicitLocation =
+                        explicitUniformLocationFor(stageSrc, memberTopName);
+                }
+                bool locationSet = false;
+                if (parentExplicitLocation >= 0) {
                     // Parse the member name's subscript chain relative to the
                     // parent. `u0[i]` for a single-subscript member of an
                     // outer-dim-split array-of-arrays gives flattened offset
-                    // i * inner_arraySize. `u0[i].field` for a struct array
-                    // gives i * struct_size_in_locations + field_offset —
-                    // but we don't track per-field offsets here, so fall
-                    // through to supplementNextLoc for struct-member shapes.
+                    // i * inner_arraySize. Struct member shapes use the
+                    // per-parent explicit cursor below, which follows
+                    // reflection order from the declared base location.
                     const std::string tail = member.name.substr(memberTopName.size());
                     // Require pure `[i]` form; anything else (containing `.`
                     // or multiple brackets) is structurally complex and we
@@ -31306,10 +31406,21 @@ bool GLContext::linkProgram(GLuint program) {
                         const long idx = std::strtol(idxText.c_str(), &endp, 10);
                         if (endp && *endp == '\0' && idx >= 0) {
                             const GLint perEntryLocs = std::max<GLint>(info.arraySize, 1);
-                            info.location = parent->explicitLocation +
+                            info.location = parentExplicitLocation +
                                 static_cast<GLint>(idx) * perEntryLocs;
                             locationSet = true;
                         }
+                    }
+                    if (!locationSet) {
+                        auto cursor = explicitMemberNextLoc.find(memberTopName);
+                        if (cursor == explicitMemberNextLoc.end()) {
+                            cursor = explicitMemberNextLoc
+                                .emplace(memberTopName, parentExplicitLocation)
+                                .first;
+                        }
+                        info.location = cursor->second;
+                        cursor->second += std::max<GLint>(info.arraySize, 1);
+                        locationSet = true;
                     }
                 }
                 if (!locationSet) {
@@ -42705,7 +42816,7 @@ GLint GLContext::getProgramResourceLocation(GLuint program, GLenum programInterf
         out = std::strtol(s.c_str(), &endp, 10);
         return out >= 0;
     };
-    const auto openBracket = lookup.find('[');
+    const auto openBracket = lookup.rfind('[');
     if (openBracket != std::string::npos && !lookup.empty() && lookup.back() == ']') {
         const std::string baseName = lookup.substr(0, openBracket);
         const std::string indexStr = lookup.substr(openBracket + 1, lookup.size() - openBracket - 2);
