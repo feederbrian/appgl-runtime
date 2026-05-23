@@ -1372,6 +1372,172 @@ bool isSupportedInternalTextureFormat(const GLCapabilities& caps, GLenum interna
     return caps.isSupportedInternalFormat(internalFormat);
 }
 
+enum class TextureViewClass {
+    Undefined,
+    Bits128,
+    Bits96,
+    Bits64,
+    Bits48,
+    Bits32,
+    Bits24,
+    Bits16,
+    Bits8,
+    Rgtc1Red,
+    Rgtc2Rg,
+    BptcUnorm,
+    BptcFloat,
+};
+
+TextureViewClass textureViewClassForInternalFormat(GLenum internalFormat) {
+    switch (internalFormat) {
+        case GL_RGBA32F:
+        case GL_RGBA32UI:
+        case GL_RGBA32I:
+            return TextureViewClass::Bits128;
+        case GL_RGB32F:
+        case GL_RGB32UI:
+        case GL_RGB32I:
+            return TextureViewClass::Bits96;
+        case GL_RGBA16F:
+        case GL_RG32F:
+        case GL_RGBA16UI:
+        case GL_RG32UI:
+        case GL_RGBA16I:
+        case GL_RG32I:
+        case GL_RGBA16:
+        case GL_RGBA16_SNORM:
+            return TextureViewClass::Bits64;
+        case GL_RGB16:
+        case GL_RGB16_SNORM:
+        case GL_RGB16F:
+        case GL_RGB16UI:
+        case GL_RGB16I:
+            return TextureViewClass::Bits48;
+        case GL_RG16F:
+        case GL_R11F_G11F_B10F:
+        case GL_R32F:
+        case GL_RGB10_A2UI:
+        case GL_RGBA8UI:
+        case GL_RG16UI:
+        case GL_R32UI:
+        case GL_RGBA8I:
+        case GL_RG16I:
+        case GL_R32I:
+        case GL_RGB10_A2:
+        case GL_RGBA8:
+        case GL_RG16:
+        case GL_RGBA8_SNORM:
+        case GL_RG16_SNORM:
+        case GL_SRGB8_ALPHA8:
+        case GL_RGB9_E5:
+            return TextureViewClass::Bits32;
+        case GL_RGB8:
+        case GL_RGB8_SNORM:
+        case GL_SRGB8:
+        case GL_RGB8UI:
+        case GL_RGB8I:
+            return TextureViewClass::Bits24;
+        case GL_R16F:
+        case GL_RG8UI:
+        case GL_R16UI:
+        case GL_RG8I:
+        case GL_R16I:
+        case GL_RG8:
+        case GL_R16:
+        case GL_RG8_SNORM:
+        case GL_R16_SNORM:
+            return TextureViewClass::Bits16;
+        case GL_R8UI:
+        case GL_R8I:
+        case GL_R8:
+        case GL_R8_SNORM:
+            return TextureViewClass::Bits8;
+        case GL_COMPRESSED_RED_RGTC1:
+        case GL_COMPRESSED_SIGNED_RED_RGTC1:
+            return TextureViewClass::Rgtc1Red;
+        case GL_COMPRESSED_RG_RGTC2:
+        case GL_COMPRESSED_SIGNED_RG_RGTC2:
+            return TextureViewClass::Rgtc2Rg;
+        case GL_COMPRESSED_RGBA_BPTC_UNORM:
+        case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM:
+            return TextureViewClass::BptcUnorm;
+        case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT:
+        case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT:
+            return TextureViewClass::BptcFloat;
+        default:
+            return TextureViewClass::Undefined;
+    }
+}
+
+bool textureViewInternalFormatsCompatible(GLenum originalFormat, GLenum viewFormat) {
+    const TextureViewClass originalClass =
+        textureViewClassForInternalFormat(originalFormat);
+    const TextureViewClass viewClass =
+        textureViewClassForInternalFormat(viewFormat);
+    if (originalClass == TextureViewClass::Undefined) {
+        return originalFormat == viewFormat;
+    }
+    return originalClass == viewClass;
+}
+
+GLsizei textureViewSourceLayerCount(const GLTextureObject& object) {
+    const GLenum target = object.desc.target != 0 ? object.desc.target : object.target;
+    switch (target) {
+        case GL_TEXTURE_1D_ARRAY:
+            return std::max<GLsizei>(
+                std::max<GLsizei>(object.desc.layers, 1),
+                std::max<GLsizei>(object.desc.height, 1));
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            return std::max<GLsizei>(object.desc.layers, 1);
+        case GL_TEXTURE_CUBE_MAP:
+            return 6;
+        case GL_TEXTURE_3D:
+            return std::max<GLsizei>(object.desc.depth, 1);
+        default:
+            return 1;
+    }
+}
+
+bool textureViewTargetLayerCountValid(GLenum target, GLuint numlayers) {
+    switch (target) {
+        case GL_TEXTURE_CUBE_MAP:
+            return numlayers == 6;
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+            return numlayers != 0 && (numlayers % 6) == 0;
+        case GL_TEXTURE_1D:
+        case GL_TEXTURE_2D:
+        case GL_TEXTURE_3D:
+        case GL_TEXTURE_RECTANGLE:
+        case GL_TEXTURE_2D_MULTISAMPLE:
+            return numlayers == 1;
+        default:
+            return true;
+    }
+}
+
+bool textureViewCubeTargetRequiresSquareLevels(
+    const GLTextureObject& object,
+    GLuint minlevel,
+    GLuint numlevels
+) {
+    for (GLuint offset = 0; offset < numlevels; ++offset) {
+        const GLint level = static_cast<GLint>(minlevel + offset);
+        const auto found = object.levels.find(level);
+        GLsizei width = std::max<GLsizei>(object.desc.width >> level, 1);
+        GLsizei height = std::max<GLsizei>(object.desc.height >> level, 1);
+        if (found != object.levels.end() && found->second.defined) {
+            width = found->second.desc.width;
+            height = found->second.desc.height;
+        }
+        if (width != height) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::size_t componentCountForFormat(GLenum format) {
     switch (format) {
         case GL_RED:
@@ -46121,6 +46287,44 @@ bool GLContext::textureView(GLuint texture, GLenum target, GLuint origtexture, G
     }
     if (numlevels == 0 || numlayers == 0) {
         pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (!isTextureTarget(target) ||
+        target == GL_TEXTURE_BUFFER ||
+        target == GL_TEXTURE_CUBE_MAP_POSITIVE_X ||
+        target == GL_TEXTURE_CUBE_MAP_NEGATIVE_X ||
+        target == GL_TEXTURE_CUBE_MAP_POSITIVE_Y ||
+        target == GL_TEXTURE_CUBE_MAP_NEGATIVE_Y ||
+        target == GL_TEXTURE_CUBE_MAP_POSITIVE_Z ||
+        target == GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (!isSupportedInternalTextureFormat(*impl_->capabilities, internalformat)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (!textureViewInternalFormatsCompatible(origObj->desc.internalFormat, internalformat)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (minlevel >= static_cast<GLuint>(std::max<GLsizei>(origObj->desc.levels, 1))) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLuint sourceLayers =
+        static_cast<GLuint>(textureViewSourceLayerCount(*origObj));
+    if (minlayer >= sourceLayers) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (!textureViewTargetLayerCountValid(target, numlayers)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if ((target == GL_TEXTURE_CUBE_MAP || target == GL_TEXTURE_CUBE_MAP_ARRAY) &&
+        !textureViewCubeTargetRequiresSquareLevels(*origObj, minlevel, numlevels)) {
+        pushError(GL_INVALID_OPERATION);
         return false;
     }
     // Record the view relationship. Actual Metal texture view
