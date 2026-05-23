@@ -4484,6 +4484,30 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             injectTextureReductionMinmax(msl);
         }
 
+        if ((execModel == spv::ExecutionModelFragment ||
+             execModel == spv::ExecutionModelVertex) &&
+            msl.find("volatile") != std::string::npos &&
+            (msl.find("float3x3") != std::string::npos ||
+             msl.find("float4x3") != std::string::npos ||
+             msl.find("float3x4") != std::string::npos)) {
+            auto replaceAll = [](std::string& text,
+                                 const std::string& from,
+                                 const std::string& to) {
+                std::size_t pos = 0;
+                while ((pos = text.find(from, pos)) != std::string::npos) {
+                    text.replace(pos, from.size(), to);
+                    pos += to.size();
+                }
+            };
+            // SPIRV-Cross maps GLSL `coherent` SSBOs to volatile device
+            // pointers. Metal's matrix/vector helper methods are not
+            // volatile-qualified, so dynamic indexing of matrix members
+            // fails library compilation. Preserve address space and constness;
+            // drop only the qualifier that Metal cannot apply to matrices.
+            replaceAll(msl, "volatile const device ", "const device ");
+            replaceAll(msl, "volatile device ", "device ");
+        }
+
         if (log != nullptr) {
             *log = "ok";
         }

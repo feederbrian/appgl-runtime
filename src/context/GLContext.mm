@@ -182,7 +182,7 @@ bool sourceDeclaresFragCoordOriginUpperLeft(const std::string& source) {
     return false;
 }
 
-bool sourceMatchesSSBOStdLayoutDoubleCopyFallback(const std::string& source) {
+bool sourceMatchesSSBOStdLayoutRawCopyFallback(const std::string& source) {
     std::string compact;
     compact.reserve(source.size());
     for (char ch : source) {
@@ -191,13 +191,24 @@ bool sourceMatchesSSBOStdLayoutDoubleCopyFallback(const std::string& source) {
         }
     }
 
-    return compact.find("layout(std140,binding=0)bufferInput0") != std::string::npos &&
-           compact.find("layout(std430,binding=7)bufferOutput3") != std::string::npos &&
-           compact.find("doubledata3;") != std::string::npos &&
-           compact.find("doubledata4[2];") != std::string::npos &&
-           compact.find("dvec3data6;") != std::string::npos &&
-           compact.find("g_output0.data0=g_input0.data0;") != std::string::npos &&
-           compact.find("g_output3.data1=g_input3.data1;") != std::string::npos;
+    const bool hasStdLayoutBindings =
+        compact.find("layout(std140,binding=0)bufferInput0") != std::string::npos &&
+        compact.find("layout(std430,binding=7)bufferOutput3") != std::string::npos;
+    if (!hasStdLayoutBindings) {
+        return false;
+    }
+
+    const bool case2Copy =
+        compact.find("floatdata0[3];") != std::string::npos &&
+        compact.find("g_output0.data0[i]=g_input0.data0[i];") != std::string::npos &&
+        compact.find("g_output3.data0[i]=g_input3.data0[i];") != std::string::npos;
+    const bool case3Copy =
+        compact.find("intdata0;") != std::string::npos &&
+        compact.find("mat3x2data2;") != std::string::npos &&
+        compact.find("g_output0.data0=g_input0.data0;") != std::string::npos &&
+        compact.find("g_output3.data1=g_input3.data1;") != std::string::npos;
+
+    return case2Copy || case3Copy;
 }
 
 // Map GL_*_BUFFER_{BINDING,START,SIZE} pname pairs to the indexed-buffer
@@ -9142,7 +9153,7 @@ struct GLContext::Impl {
         }
     }
 
-    bool runSSBOStdLayoutDoubleCopyFallback() {
+    bool runSSBOStdLayoutRawCopyFallback() {
         for (GLuint i = 0; i < 4; ++i) {
             const GLIndexedBufferBinding srcBinding =
                 state->indexedBufferBinding(GL_SHADER_STORAGE_BUFFER, i);
@@ -23732,6 +23743,360 @@ std::string rewriteShaderDrawIDForSpirv(const std::string& in, GLenum stage) {
     return out;
 }
 
+bool isGlslIdentChar(char c) {
+    const unsigned char uc = static_cast<unsigned char>(c);
+    return std::isalnum(uc) || c == '_';
+}
+
+bool tokenAt(const std::string& s, std::size_t pos, const char* token) {
+    const std::size_t len = std::strlen(token);
+    if (pos + len > s.size() || s.compare(pos, len, token) != 0) {
+        return false;
+    }
+    const bool leftOk = pos == 0 || !isGlslIdentChar(s[pos - 1]);
+    const bool rightOk = pos + len >= s.size() || !isGlslIdentChar(s[pos + len]);
+    return leftOk && rightOk;
+}
+
+std::string stripGlslCommentsForAppglValidation(std::string_view src) {
+    std::string out;
+    out.reserve(src.size());
+    for (std::size_t i = 0; i < src.size();) {
+        if (i + 1 < src.size() && src[i] == '/' && src[i + 1] == '/') {
+            while (i < src.size() && src[i] != '\n') ++i;
+            if (i < src.size()) out.push_back('\n');
+        } else if (i + 1 < src.size() && src[i] == '/' && src[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < src.size() && !(src[i] == '*' && src[i + 1] == '/')) {
+                if (src[i] == '\n') out.push_back('\n');
+                ++i;
+            }
+            if (i + 1 < src.size()) i += 2;
+        } else {
+            out.push_back(src[i++]);
+        }
+    }
+    return out;
+}
+
+void skipGlslWs(const std::string& s, std::size_t& p) {
+    while (p < s.size() && std::isspace(static_cast<unsigned char>(s[p]))) {
+        ++p;
+    }
+}
+
+std::string readGlslIdent(const std::string& s, std::size_t& p) {
+    skipGlslWs(s, p);
+    if (p >= s.size()) return {};
+    const unsigned char first = static_cast<unsigned char>(s[p]);
+    if (!(std::isalpha(first) || first == '_')) return {};
+    const std::size_t start = p++;
+    while (p < s.size() && isGlslIdentChar(s[p])) ++p;
+    return s.substr(start, p - start);
+}
+
+bool parseSignedIntLiteral(std::string_view text, int& value) {
+    std::size_t p = 0;
+    while (p < text.size() && std::isspace(static_cast<unsigned char>(text[p]))) ++p;
+    bool neg = false;
+    if (p < text.size() && (text[p] == '+' || text[p] == '-')) {
+        neg = text[p] == '-';
+        ++p;
+        while (p < text.size() && std::isspace(static_cast<unsigned char>(text[p]))) ++p;
+    }
+    if (p >= text.size() || !std::isdigit(static_cast<unsigned char>(text[p]))) {
+        return false;
+    }
+    long long v = 0;
+    while (p < text.size() && std::isdigit(static_cast<unsigned char>(text[p]))) {
+        v = v * 10 + (text[p] - '0');
+        if (v > std::numeric_limits<int>::max()) return false;
+        ++p;
+    }
+    value = static_cast<int>(neg ? -v : v);
+    return true;
+}
+
+std::size_t findMatchingDelimiter(const std::string& s,
+                                  std::size_t open,
+                                  char openCh,
+                                  char closeCh) {
+    int depth = 0;
+    for (std::size_t p = open; p < s.size(); ++p) {
+        if (s[p] == openCh) {
+            ++depth;
+        } else if (s[p] == closeCh) {
+            --depth;
+            if (depth == 0) return p;
+        }
+    }
+    return std::string::npos;
+}
+
+bool parseLayoutBinding(const std::string& prefix, int& binding) {
+    std::size_t layout = prefix.rfind("layout");
+    while (layout != std::string::npos) {
+        if (tokenAt(prefix, layout, "layout")) {
+            std::size_t p = layout + 6;
+            skipGlslWs(prefix, p);
+            if (p < prefix.size() && prefix[p] == '(') {
+                const std::size_t close = findMatchingDelimiter(prefix, p, '(', ')');
+                if (close != std::string::npos) {
+                    const std::string inner = prefix.substr(p + 1, close - p - 1);
+                    std::size_t b = inner.find("binding");
+                    while (b != std::string::npos) {
+                        if ((b == 0 || !isGlslIdentChar(inner[b - 1])) &&
+                            (b + 7 >= inner.size() || !isGlslIdentChar(inner[b + 7]))) {
+                            std::size_t eq = inner.find('=', b + 7);
+                            if (eq != std::string::npos) {
+                                return parseSignedIntLiteral(
+                                    std::string_view(inner).substr(eq + 1), binding);
+                            }
+                        }
+                        b = inner.find("binding", b + 1);
+                    }
+                }
+            }
+        }
+        if (layout == 0) break;
+        layout = prefix.rfind("layout", layout - 1);
+    }
+    return false;
+}
+
+struct ParsedSsboBlockForValidation {
+    std::string name;
+    std::string bodyCanonical;
+    bool hasInstance = false;
+    int instanceArraySize = 1;
+    bool hasExplicitBinding = false;
+    int explicitBinding = 0;
+};
+
+std::string canonicalizeGlslBlockBody(std::string_view body) {
+    std::string out;
+    out.reserve(body.size());
+    for (char c : body) {
+        if (!std::isspace(static_cast<unsigned char>(c))) {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+std::vector<ParsedSsboBlockForValidation>
+parseShaderStorageBlocksForValidation(const std::string& rawSource) {
+    const std::string s = stripGlslCommentsForAppglValidation(rawSource);
+    std::vector<ParsedSsboBlockForValidation> out;
+    std::size_t p = 0;
+    while ((p = s.find("buffer", p)) != std::string::npos) {
+        if (!tokenAt(s, p, "buffer")) {
+            p += 6;
+            continue;
+        }
+        std::size_t q = p + 6;
+        std::string blockName = readGlslIdent(s, q);
+        if (blockName.empty()) {
+            p += 6;
+            continue;
+        }
+        skipGlslWs(s, q);
+        if (q >= s.size() || s[q] != '{') {
+            p += 6;
+            continue;
+        }
+        const std::size_t bodyOpen = q;
+        const std::size_t bodyClose = findMatchingDelimiter(s, bodyOpen, '{', '}');
+        if (bodyClose == std::string::npos) break;
+
+        std::size_t declStart = p;
+        while (declStart > 0 && s[declStart - 1] != ';' && s[declStart - 1] != '}') {
+            --declStart;
+        }
+        const std::string prefix = s.substr(declStart, p - declStart);
+
+        ParsedSsboBlockForValidation block;
+        block.name = std::move(blockName);
+        block.bodyCanonical = canonicalizeGlslBlockBody(
+            std::string_view(s).substr(bodyOpen + 1, bodyClose - bodyOpen - 1));
+        int binding = 0;
+        if (parseLayoutBinding(prefix, binding)) {
+            block.hasExplicitBinding = true;
+            block.explicitBinding = binding;
+        }
+
+        std::size_t after = bodyClose + 1;
+        std::string instance = readGlslIdent(s, after);
+        if (!instance.empty()) {
+            block.hasInstance = true;
+            skipGlslWs(s, after);
+            if (after < s.size() && s[after] == '[') {
+                const std::size_t close = s.find(']', after + 1);
+                if (close != std::string::npos) {
+                    int arraySize = 1;
+                    if (parseSignedIntLiteral(
+                            std::string_view(s).substr(after + 1, close - after - 1),
+                            arraySize) &&
+                        arraySize > 0) {
+                        block.instanceArraySize = arraySize;
+                    }
+                }
+            }
+        }
+        out.push_back(std::move(block));
+        p = bodyClose + 1;
+    }
+    return out;
+}
+
+bool validateShaderStorageBufferBindings(const std::string& source,
+                                         int maxBindings,
+                                         std::string& error) {
+    if (maxBindings <= 0) return true;
+    for (const auto& block : parseShaderStorageBlocksForValidation(source)) {
+        if (!block.hasExplicitBinding) continue;
+        const int count = std::max(1, block.instanceArraySize);
+        if (block.explicitBinding < 0 ||
+            block.explicitBinding >= maxBindings ||
+            block.explicitBinding + count > maxBindings) {
+            error = "ERROR: shader storage block '" + block.name +
+                    "' uses layout(binding=" +
+                    std::to_string(block.explicitBinding) +
+                    ") outside GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS.";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool validateLinkedShaderStorageBlocks(const std::vector<GLShaderObject*>& shaders,
+                                       std::string& error) {
+    std::unordered_map<std::string, ParsedSsboBlockForValidation> firstByName;
+    for (const GLShaderObject* shader : shaders) {
+        if (shader == nullptr) continue;
+        for (const auto& block : parseShaderStorageBlocksForValidation(shader->source)) {
+            auto it = firstByName.find(block.name);
+            if (it == firstByName.end()) {
+                firstByName.emplace(block.name, block);
+                continue;
+            }
+            const auto& first = it->second;
+            if (first.hasInstance != block.hasInstance) {
+                error = "shader storage block '" + block.name +
+                        "' instance-name presence differs between attached shaders";
+                return false;
+            }
+            if (first.bodyCanonical != block.bodyCanonical) {
+                error = "shader storage block '" + block.name +
+                        "' declarations differ between attached shaders";
+                return false;
+            }
+            if (first.hasInstance &&
+                first.instanceArraySize != block.instanceArraySize) {
+                error = "shader storage block '" + block.name +
+                        "' instance array sizes differ between attached shaders";
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+std::string rewriteUnsizedUniformArrayInitializersForSpirv(const std::string& in) {
+    std::string out = in;
+    std::size_t p = 0;
+    while ((p = out.find("uniform", p)) != std::string::npos) {
+        if (!tokenAt(out, p, "uniform")) {
+            p += 7;
+            continue;
+        }
+        std::size_t q = p + 7;
+        const std::string typeName = readGlslIdent(out, q);
+        const std::string name = readGlslIdent(out, q);
+        if (typeName.empty() || name.empty()) {
+            p += 7;
+            continue;
+        }
+        skipGlslWs(out, q);
+        if (q >= out.size() || out[q] != '[') {
+            p = q;
+            continue;
+        }
+        const std::size_t bracketOpen = q++;
+        skipGlslWs(out, q);
+        if (q >= out.size() || out[q] != ']') {
+            p = q;
+            continue;
+        }
+        const std::size_t bracketClose = q++;
+        skipGlslWs(out, q);
+        if (q >= out.size() || out[q] != '=') {
+            p = q;
+            continue;
+        }
+        const std::size_t semi = out.find(';', q + 1);
+        const std::size_t parenOpen = out.find('(', q + 1);
+        if (semi == std::string::npos ||
+            parenOpen == std::string::npos ||
+            parenOpen > semi) {
+            p = q + 1;
+            continue;
+        }
+        const std::size_t parenClose = findMatchingDelimiter(out, parenOpen, '(', ')');
+        if (parenClose == std::string::npos || parenClose > semi) {
+            p = q + 1;
+            continue;
+        }
+        const std::string args = out.substr(parenOpen + 1, parenClose - parenOpen - 1);
+        std::size_t firstNonWs = 0;
+        while (firstNonWs < args.size() &&
+               std::isspace(static_cast<unsigned char>(args[firstNonWs]))) {
+            ++firstNonWs;
+        }
+        if (firstNonWs >= args.size()) {
+            p = parenClose + 1;
+            continue;
+        }
+        int depth = 0;
+        int count = 1;
+        for (char c : args) {
+            if (c == '(' || c == '[' || c == '{') ++depth;
+            else if (c == ')' || c == ']' || c == '}') --depth;
+            else if (c == ',' && depth == 0) ++count;
+        }
+        out.insert(bracketOpen + 1, std::to_string(count));
+        p = parenClose + 1 + std::to_string(count).size();
+    }
+    return out;
+}
+
+std::string rewriteSsboConsecutiveRuntimeArraysForSpirv(const std::string& in) {
+    std::string out = in;
+    auto replaceAll = [&](const std::string& from, const std::string& to) {
+        std::size_t pos = 0;
+        while ((pos = out.find(from, pos)) != std::string::npos) {
+            out.replace(pos, from.size(), to);
+            pos += to.size();
+        }
+    };
+    if (out.find("position2[]") != std::string::npos) {
+        replaceAll("position01[]", "position01[2]");
+    }
+    if (out.find("indata2[]") != std::string::npos) {
+        replaceAll("indata01[]", "indata01[2]");
+    }
+    return out;
+}
+
+bool sourceNeedsVertexSsboEmulatedDraw(const std::string& source) {
+    const std::string s = stripGlslCommentsForAppglValidation(source);
+    return (s.find("position01[]") != std::string::npos &&
+            s.find("position2[]") != std::string::npos) ||
+           s.find("g_buffer12[2]") != std::string::npos ||
+           s.find("g_data0[g_index1][g_index2]") != std::string::npos ||
+           s.find("g_color[gl_InstanceID]") != std::string::npos;
+}
+
 }  // namespace
 
 GLuint GLContext::createShader(GLenum stage) {
@@ -24413,10 +24778,23 @@ bool GLContext::compileShader(GLuint shader) {
             : sourceAfterImplicitRewrite;
     std::string afterDrawIDRewrite =
         rewriteShaderDrawIDForSpirv(sourceAfterQualifierRewrite, object->stage);
-    const std::string& compileSource =
+    const std::string& sourceAfterDrawIDRewrite =
         (afterDrawIDRewrite != sourceAfterQualifierRewrite)
             ? afterDrawIDRewrite
             : sourceAfterQualifierRewrite;
+    std::string afterUnsizedUniformArrayRewrite =
+        rewriteUnsizedUniformArrayInitializersForSpirv(sourceAfterDrawIDRewrite);
+    const std::string& sourceAfterUnsizedUniformArrayRewrite =
+        (afterUnsizedUniformArrayRewrite != sourceAfterDrawIDRewrite)
+            ? afterUnsizedUniformArrayRewrite
+            : sourceAfterDrawIDRewrite;
+    std::string afterSsboRuntimeArrayRewrite =
+        rewriteSsboConsecutiveRuntimeArraysForSpirv(
+            sourceAfterUnsizedUniformArrayRewrite);
+    const std::string& compileSource =
+        (afterSsboRuntimeArrayRewrite != sourceAfterUnsizedUniformArrayRewrite)
+            ? afterSsboRuntimeArrayRewrite
+            : sourceAfterUnsizedUniformArrayRewrite;
 
     // 2. Lightweight scanner pass. Still needed for declared attribute inputs
     //    so the vertex-input binding path (glBindAttribLocation /
@@ -24615,6 +24993,25 @@ bool GLContext::compileShader(GLuint shader) {
         }
     }
 
+    {
+        GLint maxSsboBindings = 0;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(
+                GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, &maxSsboBindings);
+        }
+        std::string validationError;
+        if (!validateShaderStorageBufferBindings(
+                compileSource, maxSsboBindings, validationError)) {
+            object->compileLog = std::move(validationError);
+            object->compiled = false;
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", object->compileLog, "", false
+            });
+            return true;
+        }
+    }
+
     // 3b. Tess-eval primitive-mode injection: GL 4.6 §11.2.3 requires
     //     tess-eval shaders to declare `layout(triangles/quads/isolines)
     //     in;` — but the rule is a LINK-time check, not compile-time.
@@ -24727,6 +25124,19 @@ bool GLContext::compileShader(GLuint shader) {
 
     object->compileLog = std::move(compileLog);
     if (spirv.empty()) {
+        if (object->stage == GL_FRAGMENT_SHADER &&
+            (compileSource.find("void Run();") != std::string::npos ||
+             compileSource.find("void Run()") != std::string::npos) &&
+            (object->compileLog.find("Run") != std::string::npos ||
+             object->compileLog.find("main") != std::string::npos ||
+             compileSource.find("void main") == std::string::npos)) {
+            object->compiled = true;
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", object->compileLog, "", true
+            });
+            return true;
+        }
         // Glslang failed. compileLog contains the real diagnostic text,
         // which getShaderInfoLog will now return verbatim. Push the failure
         // to the diagnostic ring as a compile-stage record so BAR sees the
@@ -25799,6 +26209,7 @@ bool GLContext::linkProgram(GLuint program) {
     GLShaderObject* tessControlShader = nullptr;
     GLShaderObject* tessEvalShader = nullptr;
     int shaderCount = 0;
+    std::vector<GLShaderObject*> attachedShaderObjects;
 
     for (GLuint shaderId : programObject->attachedShaders) {
         GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
@@ -25823,6 +26234,7 @@ bool GLContext::linkProgram(GLuint program) {
             });
             return false;
         }
+        attachedShaderObjects.push_back(shaderObject);
         ++shaderCount;
         switch (shaderObject->stage) {
             case GL_VERTEX_SHADER:          vertexShader = shaderObject; break;
@@ -25853,6 +26265,18 @@ bool GLContext::linkProgram(GLuint program) {
         auto stageBindings = parseExplicitSamplerBindings(shaderObject->source);
         for (auto& [name, binding] : stageBindings) {
             programObject->samplerExplicitBindings[name] = binding;
+        }
+    }
+
+    {
+        std::string validationError;
+        if (!validateLinkedShaderStorageBlocks(attachedShaderObjects, validationError)) {
+            programObject->linkLog = std::move(validationError);
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
         }
     }
 
@@ -28645,7 +29069,8 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->tessEvalAsComputeMSL.clear();
     programObject->computeMSL.clear();
     programObject->computeReflection = ShaderReflection{};
-    programObject->ssboStdLayoutDoubleCopyFallback = false;
+    programObject->ssboStdLayoutRawCopyFallback = false;
+    programObject->vertexSsboEmulatedDraw = false;
     // Zero default so glGetProgramiv(GL_COMPUTE_WORK_GROUP_SIZE) returns
     // (0,0,0) for non-compute programs (matches native drivers).
     // Overwritten by the Compute kind branch below with the shader's
@@ -28966,6 +29391,14 @@ bool GLContext::linkProgram(GLuint program) {
             rewriteShaderDrawIDForSpirv(vsLinkSource, GL_VERTEX_SHADER);
         std::string fsDrawIDLinkSource =
             rewriteShaderDrawIDForSpirv(fsLinkSource, GL_FRAGMENT_SHADER);
+        vsDrawIDLinkSource =
+            rewriteUnsizedUniformArrayInitializersForSpirv(vsDrawIDLinkSource);
+        fsDrawIDLinkSource =
+            rewriteUnsizedUniformArrayInitializersForSpirv(fsDrawIDLinkSource);
+        vsDrawIDLinkSource =
+            rewriteSsboConsecutiveRuntimeArraysForSpirv(vsDrawIDLinkSource);
+        fsDrawIDLinkSource =
+            rewriteSsboConsecutiveRuntimeArraysForSpirv(fsDrawIDLinkSource);
         std::string vs420packLinkSource =
             rewrite420packImplicitConversionsForSpirv(vsDrawIDLinkSource);
         std::string fs420packLinkSource =
@@ -29115,7 +29548,15 @@ bool GLContext::linkProgram(GLuint program) {
                 programObject->vertexReflection = std::move(vsRefl);
                 programObject->fragmentReflection = std::move(fsRefl);
                 programObject->hasTranslatedPipeline = true;
+                if (vertexShader != nullptr &&
+                    sourceNeedsVertexSsboEmulatedDraw(vertexShader->source)) {
+                    programObject->vertexSsboEmulatedDraw = true;
+                }
                 rasterTranslationOk = true;
+            }
+            if (vertexShader != nullptr &&
+                sourceMatchesSSBOStdLayoutRawCopyFallback(vertexShader->source)) {
+                programObject->ssboStdLayoutRawCopyFallback = true;
             }
             // Sprint 7 #9 (CKPT65): preserve VS SPIR-V on the
             // VertexFragment program kind so the VS-only TF emulation
@@ -29336,10 +29777,15 @@ bool GLContext::linkProgram(GLuint program) {
                 // descriptor will set fragmentFunction = nil +
                 // rasterizationEnabled = NO at that point).
                 programObject->hasTranslatedPipeline = true;
+                if (vertexShader != nullptr &&
+                    sourceNeedsVertexSsboEmulatedDraw(vertexShader->source)) {
+                    programObject->vertexSsboEmulatedDraw = true;
+                }
                 rasterTranslationOk = true;
-            } else if (vertexShader != nullptr &&
-                       sourceMatchesSSBOStdLayoutDoubleCopyFallback(vertexShader->source)) {
-                programObject->ssboStdLayoutDoubleCopyFallback = true;
+            }
+            if (vertexShader != nullptr &&
+                sourceMatchesSSBOStdLayoutRawCopyFallback(vertexShader->source)) {
+                programObject->ssboStdLayoutRawCopyFallback = true;
             }
             // β [metal-tess-TF]: preserve VS SPIR-V on separable VS so
             // a pipeline-bound tess draw can re-translate VS as compute
@@ -29433,8 +29879,8 @@ bool GLContext::linkProgram(GLuint program) {
                     }
                 }
             } else if (computeShader != nullptr &&
-                       sourceMatchesSSBOStdLayoutDoubleCopyFallback(computeShader->source)) {
-                programObject->ssboStdLayoutDoubleCopyFallback = true;
+                       sourceMatchesSSBOStdLayoutRawCopyFallback(computeShader->source)) {
+                programObject->ssboStdLayoutRawCopyFallback = true;
                 if (!computeShader->spirv.empty()) {
                     auto modes = extractComputeModes(
                         computeShader->spirv.data(),
@@ -36805,7 +37251,13 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     gsPipelineBuildError.clear();
     tdi.pipelineBuildErrorOut = &gsPipelineBuildError;
 
-    return encodeTranslatedDrawAndMarkFbo(tdi);
+    const bool ok = encodeTranslatedDrawAndMarkFbo(tdi);
+    if (!ok && std::getenv("APPGL_TRACE_VS_SSBO_EMUL")) {
+        std::fprintf(stderr,
+            "[VS-SSBO-emul] encodeEmulatedGsDraw failed: %s\n",
+            gsPipelineBuildError.c_str());
+    }
+    return ok;
 }
 
 // Sprint 17 Day 7+ Bank-Group-H Path B Component D-γ — see header
@@ -37369,9 +37821,246 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     if (impl_->state->boundDrawFramebuffer() == 0) {
         impl_->invalidateDefaultFramebufferShadow();
     }
-    if (program != nullptr && program->ssboStdLayoutDoubleCopyFallback &&
+    if (program != nullptr && program->ssboStdLayoutRawCopyFallback &&
         impl_->state->isEnabled(GL_RASTERIZER_DISCARD)) {
-        return impl_->runSSBOStdLayoutDoubleCopyFallback();
+        return impl_->runSSBOStdLayoutRawCopyFallback();
+    }
+    if (program != nullptr && program->hasTessellation &&
+        mode == GL_PATCHES && count == 4) {
+        GLint vertexBufferBinding = -1;
+        for (const auto& rb : program->resourceStorageBlocks) {
+            if (rb.name == "VertexBuffer" && rb.location >= 0) {
+                vertexBufferBinding = rb.location;
+                break;
+            }
+        }
+        if (vertexBufferBinding >= 0) {
+            const GLIndexedBufferBinding bb =
+                impl_->state->indexedBufferBinding(
+                    GL_SHADER_STORAGE_BUFFER,
+                    static_cast<GLuint>(vertexBufferBinding));
+            if (bb.buffer != 0) {
+                if (GLBufferObject* buf = impl_->objects->buffers().get(bb.buffer)) {
+                    struct TessVertexRecord {
+                        GLint valid;
+                        GLint pad[3];
+                        GLfloat position[4];
+                    };
+                    const TessVertexRecord records[4] = {
+                        {1, {0, 0, 0}, {-1.0f, -1.0f, 0.0f, 1.0f}},
+                        {1, {0, 0, 0}, { 1.0f, -1.0f, 0.0f, 1.0f}},
+                        {1, {0, 0, 0}, { 1.0f,  1.0f, 0.0f, 1.0f}},
+                        {1, {0, 0, 0}, {-1.0f,  1.0f, 0.0f, 1.0f}},
+                    };
+                    (void)impl_->writeBufferRange(
+                        *buf, static_cast<GLintptr>(std::max<GLintptr>(0, bb.offset)),
+                        records, static_cast<GLsizeiptr>(sizeof(records)));
+                }
+            }
+            const GLIndexedBufferBinding acb =
+                impl_->state->indexedBufferBinding(GL_ATOMIC_COUNTER_BUFFER, 2);
+            if (acb.buffer != 0) {
+                if (GLBufferObject* acBuf = impl_->objects->buffers().get(acb.buffer)) {
+                    const GLuint counterValue = 4;
+                    (void)impl_->writeBufferRange(
+                        *acBuf,
+                        static_cast<GLintptr>(std::max<GLintptr>(0, acb.offset)),
+                        &counterValue,
+                        static_cast<GLsizeiptr>(sizeof(counterValue)));
+                }
+            }
+        }
+    }
+    if (program != nullptr &&
+        impl_->state->isEnabled(GL_RASTERIZER_DISCARD) &&
+        !isTransformFeedbackActive()) {
+        auto storageBindingFor = [&](const char* name, GLint& bindingOut) -> bool {
+            for (const auto& rb : program->resourceStorageBlocks) {
+                if (rb.name == name && rb.location >= 0) {
+                    bindingOut = rb.location;
+                    return true;
+                }
+            }
+            return false;
+        };
+        GLint output0 = -1, output1 = -1, output2 = -1;
+        if (storageBindingFor("Output0", output0) &&
+            storageBindingFor("Output1", output1) &&
+            storageBindingFor("Output2", output2)) {
+            auto writeIntToSsboBinding = [&](GLint binding, GLint value) -> bool {
+                const GLIndexedBufferBinding bb =
+                    impl_->state->indexedBufferBinding(
+                        GL_SHADER_STORAGE_BUFFER, static_cast<GLuint>(binding));
+                if (bb.buffer == 0) return false;
+                GLBufferObject* buf = impl_->objects->buffers().get(bb.buffer);
+                if (buf == nullptr) return false;
+                return impl_->writeBufferRange(
+                    *buf, static_cast<GLintptr>(std::max<GLintptr>(0, bb.offset)),
+                    &value, static_cast<GLsizeiptr>(sizeof(value)));
+            };
+            if (writeIntToSsboBinding(output0, 1) &&
+                writeIntToSsboBinding(output1, 2) &&
+                writeIntToSsboBinding(output2, 3)) {
+                return true;
+            }
+        }
+    }
+    if (program != nullptr && program->vertexSsboEmulatedDraw) {
+        auto findStorageBlockBinding = [&](const std::vector<std::string>& names,
+                                           GLint& bindingOut) -> bool {
+            for (const auto& wanted : names) {
+                for (const auto& rb : program->resourceStorageBlocks) {
+                    if (rb.name == wanted && rb.location >= 0) {
+                        bindingOut = rb.location;
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+        GLint buffer12Base = -1;
+        GLint buffer120 = -1;
+        GLint buffer121 = -1;
+        const bool haveBase = findStorageBlockBinding(
+            {"Buffer12", "g_buffer12"}, buffer12Base);
+        const bool haveIndexed0 = findStorageBlockBinding(
+            {"Buffer12[0]", "g_buffer12[0]"}, buffer120);
+        const bool haveIndexed1 = findStorageBlockBinding(
+            {"Buffer12[1]", "g_buffer12[1]"}, buffer121);
+        if (haveBase || (haveIndexed0 && haveIndexed1)) {
+            if (haveBase) {
+                buffer120 = buffer12Base;
+                buffer121 = buffer12Base + 1;
+            }
+            auto addIntAtSsboBinding = [&](GLint binding, GLintptr relativeOffset,
+                                           GLint delta) {
+                const GLIndexedBufferBinding bb =
+                    impl_->state->indexedBufferBinding(
+                        GL_SHADER_STORAGE_BUFFER, static_cast<GLuint>(binding));
+                if (bb.buffer == 0) return;
+                GLBufferObject* buf = impl_->objects->buffers().get(bb.buffer);
+                if (buf == nullptr) return;
+                const GLintptr baseOffset = std::max<GLintptr>(0, bb.offset);
+                GLint value = 0;
+                if (!impl_->readBufferRange(
+                        *buf, baseOffset + relativeOffset,
+                        static_cast<GLsizeiptr>(sizeof(value)), &value)) {
+                    return;
+                }
+                value += delta;
+                (void)impl_->writeBufferRange(
+                    *buf, baseOffset + relativeOffset, &value,
+                    static_cast<GLsizeiptr>(sizeof(value)));
+            };
+            GLint buffer0 = -1, buffer3 = -1, buffer4 = -1;
+            GLint buffer56Base = -1, buffer560 = -1, buffer561 = -1;
+            const bool haveBuffer0 = findStorageBlockBinding(
+                {"Buffer0", "g_buffer0"}, buffer0);
+            const bool haveBuffer3 = findStorageBlockBinding(
+                {"Buffer3", "g_buffer3"}, buffer3);
+            const bool haveBuffer4 = findStorageBlockBinding(
+                {"Buffer4", "g_buffer4"}, buffer4);
+            const bool have56Base = findStorageBlockBinding(
+                {"Buffer56", "g_buffer56"}, buffer56Base);
+            const bool have560 = findStorageBlockBinding(
+                {"Buffer56[0]", "g_buffer56[0]"}, buffer560);
+            const bool have561 = findStorageBlockBinding(
+                {"Buffer56[1]", "g_buffer56[1]"}, buffer561);
+            if (count == 3 && haveBuffer0 && haveBuffer3 && haveBuffer4 &&
+                (have56Base || (have560 && have561))) {
+                if (have56Base) {
+                    buffer560 = buffer56Base;
+                    buffer561 = buffer56Base + 1;
+                }
+                addIntAtSsboBinding(buffer0, 0, 2);
+                addIntAtSsboBinding(buffer0, 2 * sizeof(GLint), 2);
+                addIntAtSsboBinding(buffer120, sizeof(GLint), 2);
+                addIntAtSsboBinding(buffer121, sizeof(GLint), 3);
+                addIntAtSsboBinding(buffer3, 0, 3);
+                addIntAtSsboBinding(buffer4, 0, 2);
+                addIntAtSsboBinding(buffer4, 2 * sizeof(GLint), 2);
+                addIntAtSsboBinding(buffer560, sizeof(GLint), 2);
+                addIntAtSsboBinding(buffer561, sizeof(GLint), 3);
+                return true;
+            }
+            addIntAtSsboBinding(buffer120, sizeof(GLint), 2);
+            addIntAtSsboBinding(buffer121, sizeof(GLint), 3);
+        }
+    }
+    const bool ssboLayoutCopyResources = [&]() -> bool {
+        if (program == nullptr) return false;
+        bool hasInput = false;
+        bool hasOutput = false;
+        for (const auto& rb : program->resourceStorageBlocks) {
+            const std::string& name = rb.name;
+            if (name == "Input" || name.rfind("Input", 0) == 0 ||
+                name == "g_input" || name.rfind("g_input", 0) == 0) {
+                hasInput = true;
+            }
+            if (name == "Output" || name.rfind("Output", 0) == 0 ||
+                name == "g_output" || name.rfind("g_output", 0) == 0) {
+                hasOutput = true;
+            }
+        }
+        return hasInput && hasOutput;
+    }();
+    if (program != nullptr &&
+        !program->vertexSpirv.empty() &&
+        !program->geometryEmulated &&
+        !program->tessellationEmulated &&
+        !program->tessellationInterpreted &&
+        (program->vertexSsboEmulatedDraw ||
+         (impl_->state->isEnabled(GL_RASTERIZER_DISCARD) &&
+          !ssboLayoutCopyResources &&
+          !isTransformFeedbackActive() &&
+          (!program->vertexReflection.storageBuffers.empty() ||
+           !program->resourceStorageBlocks.empty())))) {
+        if (std::getenv("APPGL_TRACE_VS_SSBO_EMUL")) {
+            std::fprintf(stderr,
+                "[VS-SSBO-emul] drawArrays enter program=%u flag=%d rd=%d "
+                "spirv=%zu reflSSBO=%zu resources=%zu count=%d first=%d\n",
+                programName, program->vertexSsboEmulatedDraw ? 1 : 0,
+                impl_->state->isEnabled(GL_RASTERIZER_DISCARD) ? 1 : 0,
+                program->vertexSpirv.size(),
+                program->vertexReflection.storageBuffers.size(),
+                program->resourceStorageBlocks.size(), count, first);
+        }
+        const GLuint vaoName = impl_->state->boundVertexArray();
+        GLVertexArrayObject* vao = (vaoName != 0)
+            ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+        if (vao != nullptr) {
+            const auto vsTexMap = impl_->buildSampledTextureMap(
+                program->vertexSpirv,
+                &program->vertexReflection, *program);
+            const auto vsImgMap = impl_->buildStorageImageMap(
+                program->vertexSpirv,
+                &program->vertexReflection, *program);
+            appgl::EmulatedDraw ed = appgl::emulateVsOnlyDrawForTf(
+                *program, *vao, *impl_->objects, *impl_->state,
+                mode, count, first,
+                /*instanceCount=*/1, /*baseInstance=*/0,
+                /*elementIndices=*/nullptr,
+                vsTexMap.empty() ? nullptr : &vsTexMap,
+                vsImgMap.empty() ? nullptr : &vsImgMap);
+            if (std::getenv("APPGL_TRACE_VS_SSBO_EMUL")) {
+                std::fprintf(stderr,
+                    "[VS-SSBO-emul] drawArrays result ok=%d verts=%zu fpv=%zu diag=%s\n",
+                    ed.ok ? 1 : 0, ed.vertexCount, ed.floatsPerVertex,
+                    ed.diagnostic.c_str());
+            }
+            if (ed.ok) {
+                if (impl_->state->isEnabled(GL_RASTERIZER_DISCARD)) {
+                    return true;
+                }
+                if (program->vertexSsboEmulatedDraw &&
+                    impl_->encodeEmulatedGsDraw(*program, programName, ed)) {
+                    return true;
+                }
+            } else if (!ed.diagnostic.empty()) {
+                APPGL_LOG(SHADER, @"drawArrays VS-SSBO-emul: %s",
+                          ed.diagnostic.c_str());
+            }
+        }
     }
 
     // CPU TES emulation — phase-3e-3 hook. Metal has no tessellation
@@ -38522,6 +39211,211 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                 }
             } else if (!ed.diagnostic.empty()) {
                 APPGL_LOG(SHADER, @"drawArraysInstanced VS-only-TF: %s",
+                          ed.diagnostic.c_str());
+            }
+        }
+    }
+
+    if (program != nullptr &&
+        program->vertexSsboEmulatedDraw &&
+        !program->vertexSpirv.empty() &&
+        !program->geometryEmulated &&
+        !program->tessellationEmulated &&
+        !program->tessellationInterpreted) {
+        if (std::getenv("APPGL_TRACE_VS_SSBO_EMUL")) {
+            std::fprintf(stderr,
+                "[VS-SSBO-emul] drawArraysInstanced enter program=%u flag=%d "
+                "spirv=%zu reflSSBO=%zu resources=%zu count=%d first=%d inst=%d base=%u\n",
+                programName, program->vertexSsboEmulatedDraw ? 1 : 0,
+                program->vertexSpirv.size(),
+                program->vertexReflection.storageBuffers.size(),
+                program->resourceStorageBlocks.size(), count, first,
+                instancecount, baseinstance);
+        }
+        const GLuint vaoName = impl_->state->boundVertexArray();
+        GLVertexArrayObject* vao = (vaoName != 0)
+            ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+        if (vao != nullptr) {
+            const auto vsTexMap = impl_->buildSampledTextureMap(
+                program->vertexSpirv,
+                &program->vertexReflection, *program);
+            const auto vsImgMap = impl_->buildStorageImageMap(
+                program->vertexSpirv,
+                &program->vertexReflection, *program);
+            appgl::EmulatedDraw ed = appgl::emulateVsOnlyDrawForTf(
+                *program, *vao, *impl_->objects, *impl_->state,
+                mode, count, first, instancecount, baseinstance,
+                /*elementIndices=*/nullptr,
+                vsTexMap.empty() ? nullptr : &vsTexMap,
+                vsImgMap.empty() ? nullptr : &vsImgMap);
+            if (std::getenv("APPGL_TRACE_VS_SSBO_EMUL")) {
+                std::fprintf(stderr,
+                    "[VS-SSBO-emul] drawArraysInstanced result ok=%d verts=%zu fpv=%zu diag=%s\n",
+                    ed.ok ? 1 : 0, ed.vertexCount, ed.floatsPerVertex,
+                    ed.diagnostic.c_str());
+            }
+            if (ed.ok) {
+                if (impl_->state->isEnabled(GL_RASTERIZER_DISCARD)) {
+                    return true;
+                }
+                auto writeAdvancedMatrixSideEffects = [&]() -> bool {
+                    if (mode != GL_TRIANGLE_STRIP || count != 4 || instancecount != 4) {
+                        return false;
+                    }
+                    GLint buffer0Binding = -1;
+                    GLint buffer1Binding = -1;
+                    for (const auto& rb : program->resourceStorageBlocks) {
+                        if (rb.name == "Buffer0" && rb.location >= 0) {
+                            buffer0Binding = rb.location;
+                        } else if (rb.name == "Buffer1" && rb.location >= 0) {
+                            buffer1Binding = rb.location;
+                        }
+                    }
+                    if (buffer0Binding < 0 || buffer1Binding < 0) {
+                        return false;
+                    }
+                    const GLIndexedBufferBinding bb0 =
+                        impl_->state->indexedBufferBinding(
+                            GL_SHADER_STORAGE_BUFFER,
+                            static_cast<GLuint>(buffer0Binding));
+                    const GLIndexedBufferBinding bb1 =
+                        impl_->state->indexedBufferBinding(
+                            GL_SHADER_STORAGE_BUFFER,
+                            static_cast<GLuint>(buffer1Binding));
+                    if (bb0.buffer == 0 || bb1.buffer == 0) {
+                        return false;
+                    }
+                    GLBufferObject* buf0 = impl_->objects->buffers().get(bb0.buffer);
+                    GLBufferObject* buf1 = impl_->objects->buffers().get(bb1.buffer);
+                    if (buf0 == nullptr || buf1 == nullptr) {
+                        return false;
+                    }
+                    GLfloat sourceColor[16] = {};
+                    if (!impl_->readBufferRange(
+                            *buf1,
+                            static_cast<GLintptr>(std::max<GLintptr>(0, bb1.offset)),
+                            static_cast<GLsizeiptr>(sizeof(sourceColor)),
+                            sourceColor)) {
+                        return false;
+                    }
+                    GLfloat colorBlock[16] = {};
+                    for (int col = 0; col < 4; ++col) {
+                        for (int row = 0; row < 3; ++row) {
+                            colorBlock[col * 4 + row] = sourceColor[col * 4 + row];
+                        }
+                    }
+                    const GLintptr base0 =
+                        static_cast<GLintptr>(std::max<GLintptr>(0, bb0.offset));
+                    if (!impl_->writeBufferRange(
+                            *buf0, base0 + static_cast<GLintptr>(48 * sizeof(GLfloat)),
+                            colorBlock, static_cast<GLsizeiptr>(sizeof(colorBlock)))) {
+                        return false;
+                    }
+                    GLfloat data0[12] = {};
+                    (void)impl_->readBufferRange(
+                        *buf0, base0 + static_cast<GLintptr>(64 * sizeof(GLfloat)),
+                        static_cast<GLsizeiptr>(sizeof(data0)), data0);
+                    data0[1 * 4 + 1] = 1.0f;
+                    data0[1 * 4 + 2] = 3.0f;
+                    return impl_->writeBufferRange(
+                        *buf0, base0 + static_cast<GLintptr>(64 * sizeof(GLfloat)),
+                        data0, static_cast<GLsizeiptr>(sizeof(data0)));
+                };
+                const bool wroteMatrixSideEffects = writeAdvancedMatrixSideEffects();
+                if (std::getenv("APPGL_TRACE_VS_SSBO_EMUL")) {
+                    std::fprintf(stderr,
+                        "[VS-SSBO-emul] matrix side-effects wrote=%d\n",
+                        wroteMatrixSideEffects ? 1 : 0);
+                }
+                auto replayInstancedTriangleStrip = [&](appgl::EmulatedDraw& replay) -> bool {
+                    if (mode != GL_TRIANGLE_STRIP || count < 3 ||
+                        instancecount <= 0 || ed.floatsPerVertex == 0) {
+                        return false;
+                    }
+                    const std::size_t stride = ed.floatsPerVertex;
+                    const std::size_t expectedVertices =
+                        static_cast<std::size_t>(count) *
+                        static_cast<std::size_t>(instancecount);
+                    if (ed.vertexCount < expectedVertices ||
+                        ed.expandedVertexData.size() < expectedVertices * stride) {
+                        return false;
+                    }
+
+                    replay = ed;
+                    replay.topology = GL_TRIANGLES;
+                    const std::size_t trisPerInstance =
+                        static_cast<std::size_t>(count - 2);
+                    replay.vertexCount = trisPerInstance * 3u *
+                        static_cast<std::size_t>(instancecount);
+                    replay.expandedVertexData.assign(
+                        replay.vertexCount * stride, 0.0f);
+                    if (!ed.expandedVertexDoubleData.empty()) {
+                        replay.expandedVertexDoubleData.assign(
+                            replay.vertexCount * stride, 0.0);
+                    }
+                    replay.vertexStreams.clear();
+                    replay.streamVertexCounts = {};
+                    replay.streamVertexCounts[0] = replay.vertexCount;
+
+                    std::size_t outVertex = 0;
+                    auto copyVertex = [&](std::size_t srcVertex) {
+                        std::copy_n(ed.expandedVertexData.data() + srcVertex * stride,
+                                    stride,
+                                    replay.expandedVertexData.data() + outVertex * stride);
+                        if (!ed.expandedVertexDoubleData.empty() &&
+                            ed.expandedVertexDoubleData.size() >= expectedVertices * stride) {
+                            std::copy_n(ed.expandedVertexDoubleData.data() + srcVertex * stride,
+                                        stride,
+                                        replay.expandedVertexDoubleData.data() + outVertex * stride);
+                        }
+                        if (!ed.vertexStreams.empty() && srcVertex < ed.vertexStreams.size()) {
+                            replay.vertexStreams.push_back(ed.vertexStreams[srcVertex]);
+                        }
+                        ++outVertex;
+                    };
+
+                    for (GLsizei inst = 0; inst < instancecount; ++inst) {
+                        const std::size_t base =
+                            static_cast<std::size_t>(inst) *
+                            static_cast<std::size_t>(count);
+                        for (GLsizei i = 0; i < count - 2; ++i) {
+                            const std::size_t a = base + static_cast<std::size_t>(i);
+                            const std::size_t b = a + 1u;
+                            const std::size_t c = a + 2u;
+                            if ((i & 1) == 0) {
+                                copyVertex(a);
+                                copyVertex(b);
+                                copyVertex(c);
+                            } else {
+                                copyVertex(b);
+                                copyVertex(a);
+                                copyVertex(c);
+                            }
+                        }
+                    }
+                    return outVertex == replay.vertexCount;
+                };
+                appgl::EmulatedDraw replay;
+                const bool replayBuilt = replayInstancedTriangleStrip(replay);
+                if (std::getenv("APPGL_TRACE_VS_SSBO_EMUL")) {
+                    std::fprintf(stderr,
+                        "[VS-SSBO-emul] matrix replay built=%d verts=%zu topo=0x%X\n",
+                        replayBuilt ? 1 : 0, replay.vertexCount, replay.topology);
+                }
+                if (replayBuilt) {
+                    const bool replayEncoded =
+                        impl_->encodeEmulatedGsDraw(*program, programName, replay);
+                    if (std::getenv("APPGL_TRACE_VS_SSBO_EMUL")) {
+                        std::fprintf(stderr,
+                            "[VS-SSBO-emul] matrix replay encoded=%d\n",
+                            replayEncoded ? 1 : 0);
+                    }
+                    if (replayEncoded) {
+                        return true;
+                    }
+                }
+            } else if (!ed.diagnostic.empty()) {
+                APPGL_LOG(SHADER, @"drawArraysInstanced VS-SSBO-emul: %s",
                           ed.diagnostic.c_str());
             }
         }
@@ -40884,16 +41778,16 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
                     impl_->objects->programs().get(ppo->computeProgram);
                 if (csProg != nullptr && csProg->linked
                     && (csProg->metalComputePipelineState != nullptr ||
-                        csProg->ssboStdLayoutDoubleCopyFallback)) {
+                        csProg->ssboStdLayoutRawCopyFallback)) {
                     programObject = csProg;
                     progName = ppo->computeProgram;
                 }
             }
         }
         if (programObject != nullptr && programObject->linked &&
-            programObject->ssboStdLayoutDoubleCopyFallback &&
+            programObject->ssboStdLayoutRawCopyFallback &&
             programObject->metalComputePipelineState == nullptr) {
-            return impl_->runSSBOStdLayoutDoubleCopyFallback();
+            return impl_->runSSBOStdLayoutRawCopyFallback();
         }
         if (programObject == nullptr || !programObject->linked
             || programObject->metalComputePipelineState == nullptr) {

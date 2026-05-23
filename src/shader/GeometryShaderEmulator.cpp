@@ -49,6 +49,7 @@ namespace spv {
         OpImageRead = 98, OpImageWrite = 99, OpImage = 100,
         OpImageQuerySizeLod = 103, OpImageQuerySize = 104,
         OpCompositeExtract = 81, OpCompositeConstruct = 80,
+        OpTranspose = 84,
         OpVectorShuffle = 79,
         OpVectorTimesScalar = 142, OpMatrixTimesScalar = 143,
         OpVectorTimesMatrix = 144, OpMatrixTimesVector = 145,
@@ -847,6 +848,10 @@ private:
     // the common CE test case).
     Value loadFromSSBO(std::uint32_t binding, std::uint32_t byteOffset,
                        std::uint32_t leafTypeId);
+    std::vector<Value> loadMatrixColumnsFromSSBO(std::uint32_t binding,
+                                                 std::uint32_t byteOffset,
+                                                 std::uint32_t matrixTypeId,
+                                                 std::uint32_t matrixStride);
     void storeToSSBO(std::uint32_t binding, std::uint32_t byteOffset,
                      const Value& v, std::uint32_t leafTypeId);
     bool loadSSBOScalarRaw(const AccessChainResult& ac, std::uint32_t& raw);
@@ -929,6 +934,14 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
             rootBinding = dIt->second.binding;
         }
     }
+    bool rootIsSSBOArray = false;
+    {
+        auto pIt = module_.types.find(tIt->second.pointeeType);
+        if (rootIsSSBO && pIt != module_.types.end() &&
+            pIt->second.kind == TypeInfo::Kind::Array) {
+            rootIsSSBOArray = true;
+        }
+    }
 
     // Sprint 17 Day 4+ BONUS-2 [gpu_shader5 array-indexing]: detect
     // UBO array root via the per-variable meta populated at
@@ -942,6 +955,8 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
     const bool rootIsUBO = (uboBlockMetaIt != uboVarMeta_.end());
     std::uint32_t uboArrayElemBinding = 0;
     bool uboFirstIndexResolved = false;
+    std::uint32_t ssboArrayElemBinding = rootBinding;
+    bool ssboFirstIndexResolved = false;
 
     std::uint32_t curType = tIt->second.pointeeType;   // deref pointer
     std::uint32_t offset = 0;         // scalar offset (non-SSBO path)
@@ -1040,6 +1055,13 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
                 curType = t.componentType;
                 continue;
             }
+            if (rootIsSSBOArray && !ssboFirstIndexResolved) {
+                ssboArrayElemBinding =
+                    rootBinding + static_cast<std::uint32_t>(idx);
+                ssboFirstIndexResolved = true;
+                curType = t.componentType;
+                continue;
+            }
             offset += static_cast<std::uint32_t>(idx) * elemW;
             // SSBO byte offset: use DecorationArrayStride on the array
             // type, else fall back to scalar-width * 4 bytes (covers
@@ -1125,7 +1147,8 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
     r.ok = true;
     r.isStorageBuffer = rootIsSSBO;
     r.byteOffset = byteOffset;
-    r.binding = rootBinding;
+    r.binding = (rootIsSSBOArray && ssboFirstIndexResolved)
+        ? ssboArrayElemBinding : rootBinding;
     if (rootIsSSBO || rootIsUboArray || rootIsUBO) {
         auto leafTIt = module_.types.find(curType);
         if (leafTIt != module_.types.end() &&
@@ -1507,6 +1530,89 @@ Value Interpreter::loadFromSSBO(std::uint32_t binding,
         }
     }
     return v;
+}
+
+std::vector<Value> Interpreter::loadMatrixColumnsFromSSBO(
+    std::uint32_t binding,
+    std::uint32_t byteOffset,
+    std::uint32_t matrixTypeId,
+    std::uint32_t matrixStride)
+{
+    std::vector<Value> columns;
+    auto mIt = module_.types.find(matrixTypeId);
+    if (mIt == module_.types.end() ||
+        mIt->second.kind != TypeInfo::Kind::Matrix) {
+        bail("loadMatrixColumnsFromSSBO: unknown matrix type");
+        return columns;
+    }
+    const TypeInfo& matrix = mIt->second;
+    auto cIt = module_.types.find(matrix.componentType);
+    if (cIt == module_.types.end()) {
+        bail("loadMatrixColumnsFromSSBO: unknown column type");
+        return columns;
+    }
+    const TypeInfo& columnType = cIt->second;
+
+    int rows = 1;
+    switch (columnType.kind) {
+        case TypeInfo::Kind::Vec2: rows = 2; break;
+        case TypeInfo::Kind::Vec3: rows = 3; break;
+        case TypeInfo::Kind::Vec4: rows = 4; break;
+        default: rows = 1; break;
+    }
+
+    std::uint32_t scalarBytes = 4;
+    auto scalarIt = module_.types.find(columnType.componentType);
+    if (scalarIt != module_.types.end()) {
+        scalarBytes = std::max<std::uint32_t>(
+            scalarIt->second.elementScalarWidth, 4u);
+    }
+    if (matrixStride == 0) {
+        matrixStride = static_cast<std::uint32_t>(rows) * scalarBytes;
+    }
+
+    const std::uint8_t* base = nullptr;
+    std::size_t size = 0;
+    if (storageBuffers_ == nullptr) {
+        bail("loadMatrixColumnsFromSSBO: no SSBO map set");
+    } else {
+        auto bIt = storageBuffers_->find(binding);
+        if (bIt != storageBuffers_->end()) {
+            base = static_cast<const std::uint8_t*>(bIt->second.ptr);
+            size = bIt->second.size;
+        }
+    }
+
+    auto readFloatScalar = [&](std::uint32_t off) -> float {
+        if (base == nullptr) return 0.0f;
+        if (scalarBytes == 8u) {
+            if (off + sizeof(double) > size) return 0.0f;
+            double d = 0.0;
+            std::memcpy(&d, base + off, sizeof(d));
+            return static_cast<float>(d);
+        }
+        if (off + sizeof(float) > size) return 0.0f;
+        float f = 0.0f;
+        std::memcpy(&f, base + off, sizeof(f));
+        return f;
+    };
+
+    columns.reserve(matrix.count);
+    for (std::uint32_t col = 0; col < matrix.count; ++col) {
+        Value v;
+        v.kind = rows == 2 ? Value::Kind::Float2
+               : rows == 3 ? Value::Kind::Float3
+               : rows == 4 ? Value::Kind::Float4
+                            : Value::Kind::Float;
+        for (int row = 0; row < rows; ++row) {
+            const std::uint32_t off =
+                byteOffset + col * matrixStride +
+                static_cast<std::uint32_t>(row) * scalarBytes;
+            v.f[row] = readFloatScalar(off);
+        }
+        columns.push_back(v);
+    }
+    return columns;
 }
 
 // Sprint 17 Day 4+ BONUS-2 [gpu_shader5 array-indexing]: byte-level
@@ -4535,10 +4641,21 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     auto acIt = accessChains_.find(ptrId);
                     if (acIt != accessChains_.end()) {
                         if (acIt->second.isStorageBuffer) {
-                            valueStore_[w[1]] = loadFromSSBO(
-                                acIt->second.binding,
-                                acIt->second.byteOffset,
-                                acIt->second.leafTypeId);
+                            auto resultTypeIt = module_.types.find(w[0]);
+                            if (resultTypeIt != module_.types.end() &&
+                                resultTypeIt->second.kind == TypeInfo::Kind::Matrix) {
+                                matrixColumns_[w[1]] = loadMatrixColumnsFromSSBO(
+                                    acIt->second.binding,
+                                    acIt->second.byteOffset,
+                                    w[0],
+                                    acIt->second.matrixStride);
+                                valueStore_.erase(w[1]);
+                            } else {
+                                valueStore_[w[1]] = loadFromSSBO(
+                                    acIt->second.binding,
+                                    acIt->second.byteOffset,
+                                    acIt->second.leafTypeId);
+                            }
                         } else if (acIt->second.isUniformBuffer) {
                             // Sprint 17 Day 4+ BONUS-2: UBO array load
                             // — read from the per-binding UBO map at
@@ -6180,6 +6297,32 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 for (const Value& bCol : *bCols) {
                     outCols.push_back(
                         multiplyMatrixVector(*aCols, bCol, w[0], fallbackRows));
+                }
+                matrixColumns_[w[1]] = std::move(outCols);
+                valueStore_.erase(w[1]);
+                pc += wc;
+                break;
+            }
+            case spv::OpTranspose: {
+                const auto* cols = matrixColumnsForId(w[2]);
+                if (cols == nullptr || cols->empty()) {
+                    bail("OpTranspose: unknown operand");
+                    break;
+                }
+                const int oldCols = static_cast<int>(cols->size());
+                const int oldRows = cols->front().componentCount();
+                std::vector<Value> outCols;
+                outCols.reserve(static_cast<std::size_t>(oldRows));
+                for (int newCol = 0; newCol < oldRows; ++newCol) {
+                    Value outCol;
+                    outCol.kind = floatKindForWidth(oldCols);
+                    for (int newRow = 0; newRow < oldCols && newRow < 4; ++newRow) {
+                        const Value& srcCol = (*cols)[newRow];
+                        if (newCol < srcCol.componentCount()) {
+                            outCol.f[newRow] = srcCol.f[newCol];
+                        }
+                    }
+                    outCols.push_back(outCol);
                 }
                 matrixColumns_[w[1]] = std::move(outCols);
                 valueStore_.erase(w[1]);
@@ -7943,6 +8086,129 @@ void addUniformBuffersFromModule(const std::vector<std::uint32_t>& spirv,
     }
 }
 
+void addStorageBuffersFromModule(const std::vector<std::uint32_t>& spirv,
+                                 GLObjectStore& objects,
+                                 const GLStateTracker& state,
+                                 const GLProgramObject& program,
+                                 Interpreter::StorageBufferMap& out) {
+    if (spirv.empty()) return;
+    SpirvModule mod;
+    if (!mod.parse(spirv.data(), spirv.size())) return;
+
+    auto addBinding = [&](std::uint32_t mapBinding, std::uint32_t boundBinding) {
+        if (out.count(mapBinding) != 0) return;
+        const GLIndexedBufferBinding bb =
+            state.indexedBufferBinding(GL_SHADER_STORAGE_BUFFER, boundBinding);
+        if (std::getenv("APPGL_TRACE_VS_SSBO_EMUL")) {
+            std::fprintf(stderr,
+                "[VS-SSBO-emul] ssbo map try spv=%u gl=%u buffer=%u off=%lld size=%lld\n",
+                mapBinding, boundBinding, bb.buffer,
+                static_cast<long long>(bb.offset),
+                static_cast<long long>(bb.size));
+        }
+        if (bb.buffer == 0) return;
+        GLBufferObject* bufObj = objects.buffers().get(bb.buffer);
+        if (bufObj == nullptr || bufObj->metalBuffer == nullptr) return;
+        void* base = metalBufferContents(bufObj->metalBuffer);
+        if (base == nullptr) return;
+        const std::size_t totalSize = static_cast<std::size_t>(bufObj->size);
+        const std::size_t off =
+            static_cast<std::size_t>(bb.offset < 0 ? 0 : bb.offset);
+        if (off >= totalSize) return;
+        const std::size_t span = (bb.size > 0)
+            ? std::min<std::size_t>(static_cast<std::size_t>(bb.size),
+                                    totalSize - off)
+            : (totalSize - off);
+        Interpreter::StorageBufferRegion region;
+        region.ptr = static_cast<std::uint8_t*>(base) + off;
+        region.size = span;
+        out[mapBinding] = region;
+        if (std::getenv("APPGL_TRACE_VS_SSBO_EMUL")) {
+            std::fprintf(stderr,
+                "[VS-SSBO-emul] ssbo map add spv=%u gl=%u bytes=%zu\n",
+                mapBinding, boundBinding, span);
+        }
+    };
+
+    auto remapBinding = [&](std::uint32_t baseBinding,
+                            const std::string& blockName,
+                            const std::string& varName,
+                            std::uint32_t inst,
+                            bool isArray) -> std::uint32_t {
+        std::array<std::string, 4> lookupNames{};
+        std::array<bool, 4> lookupAddsIndex{};
+        std::size_t count = 0;
+        auto pushName = [&](const std::string& name, bool addIndex) {
+            if (name.empty() || count >= lookupNames.size()) return;
+            lookupNames[count] = name;
+            lookupAddsIndex[count] = addIndex;
+            ++count;
+        };
+        if (isArray) {
+            pushName(blockName + "[" + std::to_string(inst) + "]", false);
+            pushName(varName + "[" + std::to_string(inst) + "]", false);
+        }
+        pushName(blockName, isArray);
+        pushName(varName, isArray);
+        for (const auto& rb : program.resourceStorageBlocks) {
+            if (rb.location < 0) continue;
+            for (std::size_t i = 0; i < count; ++i) {
+                if (rb.name == lookupNames[i]) {
+                    return static_cast<std::uint32_t>(rb.location) +
+                           (lookupAddsIndex[i] ? inst : 0u);
+                }
+            }
+        }
+        return baseBinding + (isArray ? inst : 0u);
+    };
+
+    for (const auto& [varId, info] : mod.variables) {
+        bool isSSBO = false;
+        auto tIt = mod.types.find(info.typeId);
+        if (tIt == mod.types.end()) continue;
+        auto pT = mod.types.find(tIt->second.pointeeType);
+        if (pT == mod.types.end()) continue;
+        if (info.storageClass == spv::StorageClassStorageBuffer) {
+            isSSBO = true;
+        } else if (info.storageClass == spv::StorageClassUniform) {
+            auto dIt = mod.decorations.find(tIt->second.pointeeType);
+            if (dIt != mod.decorations.end() && dIt->second.isBufferBlock) {
+                isSSBO = true;
+            }
+        }
+        if (!isSSBO) continue;
+        auto vDec = mod.decorations.find(varId);
+        const std::uint32_t baseBinding =
+            (vDec != mod.decorations.end() && vDec->second.hasBinding)
+                ? vDec->second.binding : 0u;
+
+        if (pT->second.kind == TypeInfo::Kind::Struct) {
+            const std::uint32_t structType = tIt->second.pointeeType;
+            std::string blockName;
+            auto nameIt = mod.names.find(structType);
+            if (nameIt != mod.names.end()) blockName = nameIt->second;
+            addBinding(baseBinding,
+                       remapBinding(baseBinding, blockName, info.name, 0, false));
+        } else if (pT->second.kind == TypeInfo::Kind::Array) {
+            auto innerT = mod.types.find(pT->second.componentType);
+            if (innerT == mod.types.end() ||
+                innerT->second.kind != TypeInfo::Kind::Struct) {
+                continue;
+            }
+            auto lenIt = mod.constants.find(pT->second.arrayLengthConstId);
+            const std::uint32_t arrayLen = (lenIt != mod.constants.end())
+                ? static_cast<std::uint32_t>(lenIt->second.i[0]) : 0u;
+            std::string blockName;
+            auto nameIt = mod.names.find(pT->second.componentType);
+            if (nameIt != mod.names.end()) blockName = nameIt->second;
+            for (std::uint32_t inst = 0; inst < arrayLen; ++inst) {
+                addBinding(baseBinding + inst,
+                           remapBinding(baseBinding, blockName, info.name, inst, true));
+            }
+        }
+    }
+}
+
 // Scan a SPIR-V module for OpStore instructions whose pointer
 // ultimately reaches a gl_ClipDistance / gl_CullDistance BuiltIn
 // (either a direct Output variable or a member of gl_PerVertex).
@@ -8886,11 +9152,6 @@ EmulatedDraw emulateVsOnlyDrawForTf(
         d.diagnostic = "emulateVsOnlyDrawForTf: empty VS SPIR-V";
         return d;
     }
-    if (program.transformFeedbackVaryingNames.empty()) {
-        markFailure();
-        d.diagnostic = "emulateVsOnlyDrawForTf: no TF varyings recorded";
-        return d;
-    }
     const std::uint64_t parseStart = timing ? vsOnlyTfTimingNowNs() : 0;
     SpirvModule vsMod;
     if (!vsMod.parse(program.vertexSpirv.data(), program.vertexSpirv.size())) {
@@ -8970,6 +9231,11 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     };
 
     std::vector<VsOutputVaryingInfo> captured;
+    if (program.transformFeedbackVaryingNames.empty()) {
+        for (const auto& v : allOutputs) {
+            appendCapturedOnce(captured, v);
+        }
+    }
     for (const auto& tfName : program.transformFeedbackVaryingNames) {
         if (tfName == "gl_Position") continue;   // handled by position[4]
 
@@ -9017,7 +9283,7 @@ EmulatedDraw emulateVsOnlyDrawForTf(
         d.varyingNames.push_back(v.name);
         d.varyingWidths.push_back(v.width);
         d.varyingLocations.push_back(v.location);
-        d.varyingInterp.push_back(0);          // smooth (default; TF doesn't care)
+        d.varyingInterp.push_back(v.baseType == 0 ? 0 : 1);
         d.varyingBaseType.push_back(v.baseType);
         d.varyingScalarByteSize.push_back(v.scalarByteSize);
     }
@@ -9046,6 +9312,10 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     addUniformBuffersFromModule(program.vertexSpirv, objects, state, program, vsUboMap);
     const Interpreter::UniformBufferMap* vsUboMapPtr =
         vsUboMap.empty() ? nullptr : &vsUboMap;
+    Interpreter::StorageBufferMap vsSsboMap;
+    addStorageBuffersFromModule(program.vertexSpirv, objects, state, program, vsSsboMap);
+    const Interpreter::StorageBufferMap* vsSsboMapPtr =
+        vsSsboMap.empty() ? nullptr : &vsSsboMap;
 
     Interpreter::UniformValues uniforms = buildUniformMap(program);
     std::unordered_map<std::string, std::uint32_t> vsInputLocOverrides =
@@ -9068,6 +9338,9 @@ EmulatedDraw emulateVsOnlyDrawForTf(
         }
         if (vsUboMapPtr != nullptr) {
             interp.setUniformBuffers(vsUboMapPtr);
+        }
+        if (vsSsboMapPtr != nullptr) {
+            interp.setStorageBuffers(vsSsboMapPtr);
         }
         if (sampledTextures != nullptr) {
             interp.setSampledTextures(sampledTextures);
