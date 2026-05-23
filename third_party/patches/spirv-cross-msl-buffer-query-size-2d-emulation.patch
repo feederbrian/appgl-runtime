@@ -1,0 +1,27 @@
+AppGL — SPIRV-Cross MSL: report logical samplerBuffer size for 2D emulation
+
+AppGL emulates non-native Metal texture buffers as a synthetic 2D texture.
+For `textureSize(samplerBuffer)`, SPIRV-Cross previously emitted only
+`texture.get_width()`, which returns the row width of the synthetic backing
+texture rather than the logical texel count visible to GL shaders.
+
+CTS `KHR-GL46.texture_buffer.texture_buffer_max_size` writes
+`textureSize(sampler_buffer)` from a compute shader and expects
+`GL_MAX_TEXTURE_BUFFER_SIZE`. With the AppGL buffer-texture row width at 8192,
+the max-size backing is 8192 x 16384 texels, so logical size must be
+`width * height`.
+
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -11940,7 +11940,10 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+ 		}
+ 
+ 		string expr = type_to_glsl(rslt_type) + "(";
+-		expr += img_exp + ".get_width(" + lod + ")";
++		if (img_dim == DimBuffer && !msl_options.texture_buffer_native)
++			expr += img_exp + ".get_width() * " + img_exp + ".get_height()";
++		else
++			expr += img_exp + ".get_width(" + lod + ")";
+ 
+ 		// CKPT119 (AppGL): include DimRect (image2DRect / sampler2DRect) so
+ 		// imageSize / textureSize emit BOTH width and height. Upstream

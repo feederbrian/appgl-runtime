@@ -59,6 +59,29 @@ void setCurrentUIntAttrib(GLuint index, GLuint x, GLuint y, GLuint z, GLuint w) 
     context->setVertexAttribIImmediate(index, values, true);
 }
 
+GLint bufferTextureBytesPerTexel(GLenum fmt) {
+    switch (fmt) {
+        case GL_R8: case GL_R8I: case GL_R8UI:
+            return 1;
+        case GL_R16: case GL_R16I: case GL_R16UI: case GL_R16F:
+        case GL_RG8: case GL_RG8I: case GL_RG8UI:
+            return 2;
+        case GL_R32I: case GL_R32UI: case GL_R32F:
+        case GL_RG16: case GL_RG16I: case GL_RG16UI: case GL_RG16F:
+        case GL_RGBA8: case GL_RGBA8I: case GL_RGBA8UI:
+            return 4;
+        case GL_RG32I: case GL_RG32UI: case GL_RG32F:
+        case GL_RGBA16: case GL_RGBA16I: case GL_RGBA16UI: case GL_RGBA16F:
+            return 8;
+        case GL_RGB32I: case GL_RGB32UI: case GL_RGB32F:
+            return 12;
+        case GL_RGBA32I: case GL_RGBA32UI: case GL_RGBA32F:
+            return 16;
+        default:
+            return 0;
+    }
+}
+
 // Phase 8X Group 4d follow-up¹¹ — §Tertiary chokepoint-bypass
 // warning helper. Many 3.3 texture-upload entry points in this file
 // are still pass-through no-op stubs (`(void)data;`) from the
@@ -191,10 +214,25 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
     auto it = tex->levels.find(level);
     bool hasMip = (it != tex->levels.end() && it->second.defined);
     const auto& desc = hasMip ? it->second.desc : tex->desc;
+    const bool isBufferTexture =
+        target == GL_TEXTURE_BUFFER || tex->target == GL_TEXTURE_BUFFER ||
+        desc.target == GL_TEXTURE_BUFFER;
+    auto textureBufferWidth = [&]() -> GLint {
+        if (!isBufferTexture) return 0;
+        GLint64 maxTexels = 0;
+        context->queryInteger64(GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels);
+        const GLint bytesPerTexel = bufferTextureBytesPerTexel(desc.internalFormat);
+        if (bytesPerTexel <= 0 || desc.bufferSize <= 0 || maxTexels <= 0) {
+            return 0;
+        }
+        const GLint64 texels =
+            static_cast<GLint64>(desc.bufferSize) / bytesPerTexel;
+        return static_cast<GLint>(texels < maxTexels ? texels : maxTexels);
+    };
 
     switch (pname) {
         case GL_TEXTURE_WIDTH:
-            *params = hasMip ? desc.width : 0;
+            *params = isBufferTexture ? textureBufferWidth() : (hasMip ? desc.width : 0);
             break;
         case GL_TEXTURE_HEIGHT:
             *params = hasMip ? desc.height : 0;

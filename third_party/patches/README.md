@@ -1566,6 +1566,31 @@ distinction is made at the SPIR-V decoration level, not the text.
 
 **Regression-safe:** the new arm fires only on `image_type.dim == DimRect`. `default:` arm preserved for any future SPIR-V Dim values. Section sweep verified zero regression: 272/297 P, 22 F, 3 NS on `tessellation_shader.* + geometry_shader.* + transform_feedback.*`.
 
+### `spirv-cross-msl-buffer-query-size-2d-emulation.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` —
+`CompilerMSL::emit_instruction()` `OpImageQuerySize` lowering for
+non-native `DimBuffer` textures.
+
+**Summary:** Emits `texture.get_width() * texture.get_height()` for
+`textureSize(samplerBuffer)` when AppGL is using SPIRV-Cross's synthetic
+2D texture-buffer backing, instead of reporting only the backing row
+width.
+
+**Why:** `GL_TEXTURE_BUFFER` shaders must see the logical texel count, not
+the width of AppGL's Metal backing texture. CTS
+`KHR-GL46.texture_buffer.texture_buffer_max_size` expects
+`textureSize(sampler_buffer) == GL_MAX_TEXTURE_BUFFER_SIZE`; with the
+8192-wide synthetic backing, that requires multiplying by height.
+
+**CTS tests unlocked:** Sprint 22 G8-A
+`KHR-GL46.texture_buffer.texture_buffer_max_size`, paired with the AppGL
+runtime buffer-texture width/size query fixes.
+
+**Regression-safe:** the new branch is limited to `DimBuffer` when native
+Metal texture buffers are disabled. Native texture-buffer emission and all
+non-buffer image query-size paths keep their previous lowering.
+
 ### `spirv-cross-msl-dim-rect-skip-level.patch`
 
 **Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` — `CompilerMSL::to_function_args()` LOD/bias/gradient option emission.

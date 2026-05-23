@@ -2697,6 +2697,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             extensions::ExtensionRegistry::isExtensionActive("GL_ARB_texture_query_levels");
         mslOpts.texture_1D_as_2D =
             extensionNeeds1DAs2D && resourcesUse1DImages(compiler, shaderResourcesForOptions);
+        mslOpts.texel_buffer_texture_width = 8192;
         mslOpts.sample_dref_lod_cube_as_nearest_level =
             extensions::ExtensionRegistry::isExtensionActive("GL_EXT_texture_shadow_lod");
         // Step 8 (tessellation on Metal via SPIRV-Cross): when the shader is

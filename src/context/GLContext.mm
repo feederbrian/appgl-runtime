@@ -18470,6 +18470,29 @@ static bool isValidBufferTextureSizedFormat(GLenum fmt) {
     }
 }
 
+static GLint bufferTextureBytesPerTexel(GLenum fmt) {
+    switch (fmt) {
+        case GL_R8: case GL_R8I: case GL_R8UI:
+            return 1;
+        case GL_R16: case GL_R16I: case GL_R16UI: case GL_R16F:
+        case GL_RG8: case GL_RG8I: case GL_RG8UI:
+            return 2;
+        case GL_R32I: case GL_R32UI: case GL_R32F:
+        case GL_RG16: case GL_RG16I: case GL_RG16UI: case GL_RG16F:
+        case GL_RGBA8: case GL_RGBA8I: case GL_RGBA8UI:
+            return 4;
+        case GL_RG32I: case GL_RG32UI: case GL_RG32F:
+        case GL_RGBA16: case GL_RGBA16I: case GL_RGBA16UI: case GL_RGBA16F:
+            return 8;
+        case GL_RGB32I: case GL_RGB32UI: case GL_RGB32F:
+            return 12;
+        case GL_RGBA32I: case GL_RGBA32UI: case GL_RGBA32F:
+            return 16;
+        default:
+            return 0;
+    }
+}
+
 bool GLContext::texBufferRange(
     GLenum target,
     GLenum internalformat,
@@ -18533,11 +18556,25 @@ bool GLContext::texBufferRange(
     object->desc.bufferOffset = offset;
     object->desc.bufferSize = size;
     object->desc.immutable = true;
+    {
+        GLint64 maxTexels = 0;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger64(GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels);
+        }
+        const GLint bytesPerTexel = bufferTextureBytesPerTexel(internalformat);
+        const GLint64 texels = bytesPerTexel > 0
+            ? static_cast<GLint64>(size) / bytesPerTexel
+            : 0;
+        object->desc.width = static_cast<GLsizei>(
+            std::min<GLint64>(texels, std::max<GLint64>(maxTexels, 0)));
+        object->desc.height = 1;
+        object->desc.depth = 1;
+    }
     object->target = target;
 
     // SPIRV-Cross lowers GL samplerBuffer to a synthetic texture2d<T>
-    // with texel coordinates (index % 4096, index / 4096). Build the
-    // Metal view with the same 4096-wide row layout so accesses past
+    // with texel coordinates (index % 8192, index / 8192). Build the
+    // Metal view with the same 8192-wide row layout so accesses past
     // the first row remain valid.
     GLBufferObject* bufObj = impl_->objects->buffers().get(buffer);
     if (bufObj != nullptr && bufObj->metalBuffer != nullptr) {
@@ -18554,7 +18591,7 @@ bool GLContext::texBufferRange(
             if (bpp > 0) {
                 const NSUInteger byteLen = static_cast<NSUInteger>(size);
                 const NSUInteger texelCount = byteLen / bpp;
-                constexpr NSUInteger kTexelBufferRowTexels = 4096;
+                constexpr NSUInteger kTexelBufferRowTexels = 8192;
                 GLint64 maxTextureHeight = 16384;
                 if (impl_->capabilities != nullptr) {
                     impl_->capabilities->queryInteger64(GL_MAX_TEXTURE_SIZE, &maxTextureHeight);
@@ -21500,7 +21537,7 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
     // TF plumbing only runs when the program has varyings recorded
     // and TF is active. Counter updates always run (PRIMITIVES_
     // GENERATED tracks every draw regardless).
-    const bool tfActive = isTfActiveOnBoundImpl();
+    const bool tfActive = isTfActiveOnBoundImpl() && !isTfPausedOnBoundImpl();
     auto capturedVerticesBeforeDraw = [this](std::size_t stream) -> std::size_t {
         if (boundTransformFeedbackId == 0) {
             if (stream < defaultTransformFeedbackCapturedVertexCount.size()) {
@@ -21851,6 +21888,8 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
     // Accumulate counts — mirror the writeGsXfbAndCheckDiscard path.
     objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
         if (!q.active) return;
+        const bool overflowed =
+            tfActive && !isTfPausedOnBoundImpl() && primsGenerated > primsWritten;
         switch (q.target) {
             case GL_PRIMITIVES_GENERATED:
                 q.result += static_cast<GLuint64>(primsGenerated);
@@ -21868,6 +21907,12 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
                 if (tfActive) {
                     q.result += static_cast<GLuint64>(primsWritten);
                 }
+                break;
+            case GL_TRANSFORM_FEEDBACK_OVERFLOW:
+                if (overflowed) q.result = 1;
+                break;
+            case GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW:
+                if (q.index == 0 && overflowed) q.result = 1;
                 break;
             default: break;
         }
@@ -21952,7 +21997,7 @@ void GLContext::Impl::writeVsTfFromComputeOutput(
                                static_cast<GLsizeiptr>(bytes));
     };
 
-    const bool tfActive = isTfActiveOnBoundImpl();
+    const bool tfActive = isTfActiveOnBoundImpl() && !isTfPausedOnBoundImpl();
     auto capturedVerticesBeforeDraw = [this](std::size_t stream) -> std::size_t {
         if (boundTransformFeedbackId == 0) {
             if (stream < defaultTransformFeedbackCapturedVertexCount.size()) {
@@ -22075,6 +22120,8 @@ void GLContext::Impl::writeVsTfFromComputeOutput(
     // Accumulate counts — mirror the writeTessTFAndUpdateCounters path.
     objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
         if (!q.active) return;
+        const bool overflowed =
+            tfActive && !isTfPausedOnBoundImpl() && primsGenerated > primsWritten;
         switch (q.target) {
             case GL_PRIMITIVES_GENERATED:
                 q.result += static_cast<GLuint64>(primsGenerated);
@@ -22083,6 +22130,12 @@ void GLContext::Impl::writeVsTfFromComputeOutput(
                 if (tfActive) {
                     q.result += static_cast<GLuint64>(primsWritten);
                 }
+                break;
+            case GL_TRANSFORM_FEEDBACK_OVERFLOW:
+                if (overflowed) q.result = 1;
+                break;
+            case GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW:
+                if (q.index == 0 && overflowed) q.result = 1;
                 break;
             default: break;
         }
@@ -22563,7 +22616,7 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     // vertex into a single buffer at index 0.
     // Built-in `gl_Position` captures from the EmulatedVertex
     // position field.
-    const bool tfActive = isTfActiveOnBoundImpl();
+    const bool tfActive = isTfActiveOnBoundImpl() && !isTfPausedOnBoundImpl();
     auto capturedVerticesBeforeDraw = [this](std::size_t stream) -> std::size_t {
         if (boundTransformFeedbackId == 0) {
             if (stream < defaultTransformFeedbackCapturedVertexCount.size()) {
@@ -23291,6 +23344,19 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
 
     objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
         if (!q.active) return;
+        const bool tfCapturing = tfActive && !isTfPausedOnBoundImpl();
+        auto streamOverflowed = [&](GLuint stream) {
+            return tfCapturing &&
+                   generatedPrimsForStream(stream) > writtenPrimsForStream(stream);
+        };
+        auto anyStreamOverflowed = [&]() {
+            for (GLuint stream = 0;
+                 stream < GLTransformFeedbackObject::kMaxTransformFeedbackStreams;
+                 ++stream) {
+                if (streamOverflowed(stream)) return true;
+            }
+            return false;
+        };
         switch (q.target) {
             case GL_PRIMITIVES_GENERATED:
                 if (program.gsPresent) {
@@ -23320,6 +23386,12 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                 // pair the GS executed. Maps directly to primsGenerated
                 // (the emulator's expanded-output primitive count).
                 q.result += static_cast<GLuint64>(primsGenerated);
+                break;
+            case GL_TRANSFORM_FEEDBACK_OVERFLOW:
+                if (anyStreamOverflowed()) q.result = 1;
+                break;
+            case GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW:
+                if (streamOverflowed(q.index)) q.result = 1;
                 break;
             default:
                 break;
@@ -46790,6 +46862,66 @@ struct FillLevelArgs {
     GLsizei regionD;
 };
 
+static bool isClearTexIntegerFormat(GLenum format) {
+    switch (format) {
+        case GL_RED_INTEGER:
+        case GL_GREEN_INTEGER:
+        case GL_BLUE_INTEGER:
+        case GL_RG_INTEGER:
+        case GL_RGB_INTEGER:
+        case GL_BGR_INTEGER:
+        case GL_RGBA_INTEGER:
+        case GL_BGRA_INTEGER:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool isClearTexIntegerInternalFormat(GLenum internalFormat) {
+    switch (internalFormat) {
+        case GL_R8I: case GL_R8UI: case GL_R16I: case GL_R16UI:
+        case GL_R32I: case GL_R32UI:
+        case GL_RG8I: case GL_RG8UI: case GL_RG16I: case GL_RG16UI:
+        case GL_RG32I: case GL_RG32UI:
+        case GL_RGB8I: case GL_RGB8UI: case GL_RGB16I: case GL_RGB16UI:
+        case GL_RGB32I: case GL_RGB32UI:
+        case GL_RGBA8I: case GL_RGBA8UI: case GL_RGBA16I: case GL_RGBA16UI:
+        case GL_RGBA32I: case GL_RGBA32UI:
+        case GL_RGB10_A2UI:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool isDepthStencilInternalFormat(GLenum internalFormat) {
+    return internalFormat == GL_DEPTH_STENCIL ||
+           internalFormat == GL_DEPTH24_STENCIL8 ||
+           internalFormat == GL_DEPTH32F_STENCIL8;
+}
+
+static bool clearTexFormatCompatible(GLenum internalFormat, GLenum format) {
+    const bool formatIsDepth = (format == GL_DEPTH_COMPONENT);
+    const bool formatIsStencil = (format == GL_STENCIL_INDEX);
+    const bool formatIsDS = (format == GL_DEPTH_STENCIL);
+    const bool formatIsInteger = isClearTexIntegerFormat(format);
+    const bool formatIsColor = !formatIsDepth && !formatIsStencil && !formatIsDS;
+
+    const bool internalIsDepth = isDepthFormat(internalFormat);
+    const bool internalIsStencil = isStencilFormat(internalFormat);
+    const bool internalIsDS = isDepthStencilInternalFormat(internalFormat);
+    const bool internalIsColor = !internalIsDepth && !internalIsStencil;
+    const bool internalIsInteger = isClearTexIntegerInternalFormat(internalFormat);
+
+    if (formatIsColor && !internalIsColor) return false;
+    if (formatIsDepth && !(internalIsDepth || internalIsDS)) return false;
+    if (formatIsDS && !internalIsDS) return false;
+    if (formatIsStencil && !(internalIsStencil || internalIsDS)) return false;
+    if (internalIsColor && (formatIsInteger != internalIsInteger)) return false;
+    return true;
+}
+
 }  // namespace
 
 // Helper: fill an existing level's rgba8 + native-format buffers with
@@ -46921,6 +47053,12 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    const GLenum internalFormat = it->second.desc.internalFormat;
+    if (isCompressedInternalFormat(internalFormat) ||
+        !clearTexFormatCompatible(internalFormat, format)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     fillLevelWithClearValue_T(impl_.get(), *tex, it->second,
                             0, 0, 0,
                             it->second.desc.width,
@@ -46942,6 +47080,10 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (width < 0 || height < 0 || depth < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
     auto it = tex->levels.find(level);
     if (it == tex->levels.end() || !it->second.defined) {
         pushError(GL_INVALID_OPERATION);
@@ -46949,6 +47091,12 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
     }
     // Zero-dimension sub-image is a no-op per GL spec — accept and return.
     if (width == 0 || height == 0 || depth == 0) return true;
+    const GLenum internalFormat = it->second.desc.internalFormat;
+    if (isCompressedInternalFormat(internalFormat) ||
+        !clearTexFormatCompatible(internalFormat, format)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     fillLevelWithClearValue_T(impl_.get(), *tex, it->second,
                             xoffset, yoffset, zoffset,
                             width, height, depth,
@@ -48019,6 +48167,14 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    if ((obj->target == GL_TEXTURE_BUFFER ||
+         obj->target == GL_TEXTURE_RECTANGLE ||
+         obj->target == GL_TEXTURE_2D_MULTISAMPLE ||
+         obj->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) &&
+        level != 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
     {
         GLint64 maxTexSize = 16384;
         if (impl_->capabilities != nullptr) {
@@ -48049,6 +48205,22 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
     auto it = obj->levels.find(level);
     const bool hasMip = (it != obj->levels.end() && it->second.defined);
     const auto& desc = hasMip ? it->second.desc : obj->desc;
+    const bool isBufferTexture =
+        obj->target == GL_TEXTURE_BUFFER || desc.target == GL_TEXTURE_BUFFER;
+    auto textureBufferWidth = [&]() -> GLint {
+        if (!isBufferTexture) return 0;
+        GLint64 maxTexels = 0;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger64(GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels);
+        }
+        const GLint bytesPerTexel = bufferTextureBytesPerTexel(desc.internalFormat);
+        if (bytesPerTexel <= 0 || desc.bufferSize <= 0 || maxTexels <= 0) {
+            return 0;
+        }
+        const GLint64 texels =
+            static_cast<GLint64>(desc.bufferSize) / bytesPerTexel;
+        return static_cast<GLint>(std::min<GLint64>(texels, maxTexels));
+    };
 
     const auto componentType = [](GLenum fmt) -> GLint {
         if (fmt == GL_R32F || fmt == GL_RG32F || fmt == GL_RGB32F || fmt == GL_RGBA32F
@@ -48075,10 +48247,10 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
     };
 
     switch (pname) {
-        case GL_TEXTURE_WIDTH:           *params = hasMip ? desc.width  : 0; return true;
+        case GL_TEXTURE_WIDTH:           *params = isBufferTexture ? textureBufferWidth() : (hasMip ? desc.width : 0); return true;
         case GL_TEXTURE_HEIGHT:          *params = hasMip ? desc.height : 0; return true;
         case GL_TEXTURE_DEPTH:           *params = hasMip ? desc.depth  : 0; return true;
-        case GL_TEXTURE_INTERNAL_FORMAT: *params = hasMip ? static_cast<GLint>(desc.internalFormat) : static_cast<GLint>(GL_RGBA8); return true;
+        case GL_TEXTURE_INTERNAL_FORMAT: *params = (hasMip || isBufferTexture) ? static_cast<GLint>(desc.internalFormat) : static_cast<GLint>(GL_RGBA8); return true;
         case GL_TEXTURE_RED_SIZE:
         case GL_TEXTURE_GREEN_SIZE:
         case GL_TEXTURE_BLUE_SIZE:

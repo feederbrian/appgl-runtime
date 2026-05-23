@@ -6024,6 +6024,8 @@ void APIENTRY glEndQueryIndexed(GLenum target, GLuint index) {
                 switch (q.target) {
                     case GL_PRIMITIVES_GENERATED:
                     case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
+                    case GL_TRANSFORM_FEEDBACK_OVERFLOW:
+                    case GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW:
                         break;
                     default:
                         q.result = 1;

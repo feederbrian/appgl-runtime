@@ -5218,8 +5218,8 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     slot.samplerType == GL_UNSIGNED_INT_SAMPLER_BUFFER;
                 if (isBufferSampler) {
                     const std::uint32_t idx = ix < 0 ? 0u : static_cast<std::uint32_t>(ix);
-                    u = idx % 4096u;
-                    v = idx / 4096u;
+                    u = idx % 8192u;
+                    v = idx / 8192u;
                 } else {
                     u = ix < 0 ? 0u : static_cast<std::uint32_t>(ix);
                     v = iy < 0 ? 0u : static_cast<std::uint32_t>(iy);
