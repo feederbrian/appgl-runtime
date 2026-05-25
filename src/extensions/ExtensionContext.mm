@@ -23,6 +23,10 @@ void* ExtensionContext::metalCommandQueue() const {
     return context_->extensionMetalCommandQueue();
 }
 
+void* ExtensionContext::metalCommandSubmission() const {
+    return context_->extensionMetalCommandSubmission();
+}
+
 GLCapabilities& ExtensionContext::capabilities() {
     return context_->capabilities();
 }

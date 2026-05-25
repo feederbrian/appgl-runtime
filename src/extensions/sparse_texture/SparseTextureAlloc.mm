@@ -5,6 +5,7 @@
 #include "../ExtensionContext.h"
 #include "../../caps/GLCapabilities.h"
 #include "../../context/GLContext.h"
+#include "../../context/MetalCommandSubmission.h"
 #include "../../objects/GLObjectStore.h"
 
 #include <CoreFoundation/CoreFoundation.h>
@@ -91,6 +92,10 @@ id<MTLDevice> metalDevice(ExtensionContext& ctx) {
 
 id<MTLCommandQueue> metalCommandQueue(ExtensionContext& ctx) {
     return (__bridge id<MTLCommandQueue>)ctx.metalCommandQueue();
+}
+
+MetalCommandSubmission* metalCommandSubmission(ExtensionContext& ctx) {
+    return static_cast<MetalCommandSubmission*>(ctx.metalCommandSubmission());
 }
 
 MTLTextureType metalTextureTypeForTarget(GLenum target) {
@@ -337,7 +342,11 @@ bool updateTextureMapping(ExtensionContext& ctx,
         return true;
     }
 
-    id<MTLCommandBuffer> cmd = [commandQueue commandBuffer];
+    MetalCommandSubmission* submission = metalCommandSubmission(ctx);
+    auto lease = submission != nullptr
+        ? submission->makeCommandBuffer(@"sparse-texture-map")
+        : MetalCommandBufferLease{};
+    id<MTLCommandBuffer> cmd = lease.get();
     if (cmd == nil) {
         return false;
     }
@@ -385,9 +394,7 @@ bool updateTextureMapping(ExtensionContext& ctx,
     }
 
     [encoder endEncoding];
-    [cmd commit];
-    [cmd waitUntilCompleted];
-    return cmd.status == MTLCommandBufferStatusCompleted;
+    return lease.commitAndWait(@"sparse-texture-map");
 }
 
 }  // namespace
@@ -757,7 +764,11 @@ bool uploadCommittedRegions(ExtensionContext& ctx,
     if (commandQueue == nil) {
         return false;
     }
-    id<MTLCommandBuffer> blitCmdBuf = [commandQueue commandBuffer];
+    MetalCommandSubmission* submission = metalCommandSubmission(ctx);
+    auto blitLease = submission != nullptr
+        ? submission->makeCommandBuffer(@"sparse-texture-upload-committed")
+        : MetalCommandBufferLease{};
+    id<MTLCommandBuffer> blitCmdBuf = blitLease.get();
     if (blitCmdBuf == nil) {
         return false;
     }
@@ -872,11 +883,10 @@ bool uploadCommittedRegions(ExtensionContext& ctx,
         }
     }
     [blitEnc endEncoding];
-    [blitCmdBuf commit];
-    [blitCmdBuf waitUntilCompleted];
+    const bool completed = blitLease.commitAndWait(@"sparse-texture-upload-committed");
     textureObject.instantiated = true;
     (void)textureName;
-    return ok && blitCmdBuf.status == MTLCommandBufferStatusCompleted;
+    return ok && completed;
 }
 
 bool pageCommitment(ExtensionContext& ctx,

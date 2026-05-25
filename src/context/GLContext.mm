@@ -1,6 +1,7 @@
 #include "GLContext.h"
 #include "../runtime/AppGLLog.h"
 #include "MetalFrameGraph.h"
+#include "MetalCommandSubmission.h"
 #include "../../third_party/SPIRV-Cross/spirv_cross.hpp"
 #include "../caps/GLCapabilities.h"
 #include "../objects/GLObjectStore.h"
@@ -2849,7 +2850,8 @@ struct GLContext::Impl {
             viewportHeight = initialHeight > 0 ? initialHeight : viewportHeight;
         }
         if (device != nil) {
-            commandQueue = [device newCommandQueue];
+            commandQueue = [device newCommandQueueWithMaxCommandBufferCount:512];
+            commandSubmission = std::make_unique<MetalCommandSubmission>(commandQueue);
             rendererString = "AppGL on Metal (" + std::string([[device name] UTF8String]) + ")";
         } else {
             rendererString = "AppGL on Metal (No Metal Device)";
@@ -2857,7 +2859,8 @@ struct GLContext::Impl {
         frameGraph = std::make_unique<MetalFrameGraph>(ownerContext,
                                                        (__bridge void*)layer,
                                                        (__bridge void*)device,
-                                                       (__bridge void*)commandQueue);
+                                                       (__bridge void*)commandQueue,
+                                                       commandSubmission.get());
         capabilities = std::make_unique<GLCapabilities>((__bridge void*)device);
         // Must match GL_MAX_VERTEX_ATTRIBS reported via GLCapabilities (32).
         // CTS cull_distance uses 17+ attributes (8 clip + 8 cull + 1 pos),
@@ -4850,11 +4853,13 @@ struct GLContext::Impl {
                 const bool fastPathNeedsBlit =
                     (existing.storageMode == MTLStorageModePrivate);
                 id<MTLCommandBuffer> fpBlitCmdBuf = nil;
+                MetalCommandBufferLease fpBlitLease;
                 id<MTLBlitCommandEncoder> fpBlitEnc = nil;
                 auto fpEnsureBlitEnc = [&]() -> bool {
                     if (fpBlitEnc != nil) return true;
                     if (commandQueue == nil) return false;
-                    fpBlitCmdBuf = [commandQueue commandBuffer];
+                    fpBlitLease = makeCommandBuffer(@"texture-fastpath-blit-upload");
+                    fpBlitCmdBuf = fpBlitLease.get();
                     if (fpBlitCmdBuf == nil) return false;
                     fpBlitEnc = [fpBlitCmdBuf blitCommandEncoder];
                     return fpBlitEnc != nil;
@@ -5010,8 +5015,7 @@ struct GLContext::Impl {
                 }
                 if (fpBlitEnc != nil) {
                     [fpBlitEnc endEncoding];
-                    [fpBlitCmdBuf commit];
-                    [fpBlitCmdBuf waitUntilCompleted];
+                    fpBlitLease.commitAndWait(@"texture-fastpath-blit-upload");
                 }
                 if (object.metalSwizzledView != nullptr) {
                     object.swizzleDirty = true;
@@ -5200,11 +5204,13 @@ struct GLContext::Impl {
         const bool needsBlitUpload =
             (texture.storageMode == MTLStorageModePrivate);
         id<MTLCommandBuffer> blitCmdBuf = nil;
+        MetalCommandBufferLease blitLease;
         id<MTLBlitCommandEncoder> blitEnc = nil;
         auto ensureBlitEnc = [&]() -> bool {
             if (blitEnc != nil) return true;
             if (commandQueue == nil) return false;
-            blitCmdBuf = [commandQueue commandBuffer];
+            blitLease = makeCommandBuffer(@"texture-blit-upload");
+            blitCmdBuf = blitLease.get();
             if (blitCmdBuf == nil) return false;
             blitEnc = [blitCmdBuf blitCommandEncoder];
             return blitEnc != nil;
@@ -5397,8 +5403,7 @@ struct GLContext::Impl {
         }
         if (blitEnc != nil) {
             [blitEnc endEncoding];
-            [blitCmdBuf commit];
-            [blitCmdBuf waitUntilCompleted];
+            blitLease.commitAndWait(@"texture-blit-upload");
         }
         object.metalTexture = transferRetainedMetalObject(texture);
         // Mark the texture as instantiated so consumers (getTextureImage,
@@ -6352,7 +6357,8 @@ struct GLContext::Impl {
                                 options:MTLResourceStorageModeShared];
         if (depthBuf == nil || stencilBuf == nil) return nil;
 
-        id<MTLCommandBuffer> readCmd = [commandQueue commandBuffer];
+        auto readLease = makeCommandBuffer(@"depth-stencil-flip-read");
+        id<MTLCommandBuffer> readCmd = readLease.get();
         id<MTLBlitCommandEncoder> readBlit = [readCmd blitCommandEncoder];
         if (readCmd == nil || readBlit == nil) return nil;
         MTLRegion fullRegion = MTLRegionMake2D(0, 0, width, height);
@@ -6377,8 +6383,7 @@ struct GLContext::Impl {
           destinationBytesPerImage:stencilImageBytes
                            options:MTLBlitOptionStencilFromDepthStencil];
         [readBlit endEncoding];
-        [readCmd commit];
-        [readCmd waitUntilCompleted];
+        readLease.commitAndWait(@"depth-stencil-flip-read");
 
         const auto* depthBytes =
             static_cast<const std::uint8_t*>([depthBuf contents]);
@@ -6415,7 +6420,8 @@ struct GLContext::Impl {
         id<MTLTexture> flippedTex = [device newTextureWithDescriptor:desc];
         if (flippedTex == nil) return nil;
 
-        id<MTLCommandBuffer> uploadCmd = [commandQueue commandBuffer];
+        auto uploadLease = makeCommandBuffer(@"depth-stencil-flip-upload");
+        id<MTLCommandBuffer> uploadCmd = uploadLease.get();
         id<MTLBlitCommandEncoder> uploadBlit = [uploadCmd blitCommandEncoder];
         if (uploadCmd == nil || uploadBlit == nil) return nil;
         const bool uploaded = blitUpload2DRegion(
@@ -6424,8 +6430,7 @@ struct GLContext::Impl {
             static_cast<NSUInteger>(flipped.size()),
             fullRegion, 0, 0, nativeBpp);
         [uploadBlit endEncoding];
-        [uploadCmd commit];
-        [uploadCmd waitUntilCompleted];
+        uploadLease.commitAndWait(@"depth-stencil-flip-upload");
         return uploaded ? flippedTex : nil;
     }
 
@@ -6881,7 +6886,8 @@ struct GLContext::Impl {
                                                     length:depthImageBytes
                                                    options:MTLResourceStorageModeShared];
         if (staging == nil) return false;
-        id<MTLCommandBuffer> cmd = [commandQueue commandBuffer];
+        auto lease = makeCommandBuffer(@"mirror-depth-renderbuffer");
+        id<MTLCommandBuffer> cmd = lease.get();
         id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
         if (cmd == nil || blit == nil) return false;
         const NSUInteger metalY = static_cast<NSUInteger>(
@@ -6898,8 +6904,7 @@ struct GLContext::Impl {
            destinationOrigin:MTLOriginMake(static_cast<NSUInteger>(x), metalY, 0)
                      options:MTLBlitOptionDepthFromDepthStencil];
         [blit endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        lease.commitAndWait(@"mirror-depth-renderbuffer");
         renderbuffer.wasMetalDepthRendered = true;
         return true;
     }
@@ -6938,7 +6943,8 @@ struct GLContext::Impl {
                                                     length:stencilImageBytes
                                                    options:MTLResourceStorageModeShared];
         if (staging == nil) return false;
-        id<MTLCommandBuffer> cmd = [commandQueue commandBuffer];
+        auto lease = makeCommandBuffer(@"mirror-stencil-renderbuffer");
+        id<MTLCommandBuffer> cmd = lease.get();
         id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
         if (cmd == nil || blit == nil) return false;
         const NSUInteger metalY = static_cast<NSUInteger>(
@@ -6955,8 +6961,7 @@ struct GLContext::Impl {
            destinationOrigin:MTLOriginMake(static_cast<NSUInteger>(x), metalY, 0)
                      options:MTLBlitOptionStencilFromDepthStencil];
         [blit endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        lease.commitAndWait(@"mirror-stencil-renderbuffer");
         return true;
     }
 
@@ -11267,12 +11272,12 @@ struct GLContext::Impl {
                 rpd.colorAttachments[0].resolveTexture = resolvedTex;
                 rpd.colorAttachments[0].resolveLevel = 0;
                 rpd.colorAttachments[0].resolveSlice = 0;
-                id<MTLCommandBuffer> cb = [commandQueue commandBuffer];
+                auto resolveLease = makeCommandBuffer(@"texture-msaa-resolve-readback");
+                id<MTLCommandBuffer> cb = resolveLease.get();
                 id<MTLRenderCommandEncoder> enc =
                     [cb renderCommandEncoderWithDescriptor:rpd];
                 [enc endEncoding];
-                [cb commit];
-                [cb waitUntilCompleted];
+                resolveLease.commitAndWait(@"texture-msaa-resolve-readback");
                 readTex = resolvedTex;
                 // After resolve, the destination is single-slice 2D
                 // and contains the data from the source's requested
@@ -11464,7 +11469,8 @@ struct GLContext::Impl {
             id<MTLBuffer> staging = [mtlDevice newBufferWithLength:stagingSize
                                                           options:MTLResourceStorageModeShared];
             if (staging == nil) return false;
-            id<MTLCommandBuffer> cmd = [mtlQueue commandBuffer];
+            auto readbackLease = makeCommandBuffer(@"depth-stencil-texture-readback");
+            id<MTLCommandBuffer> cmd = readbackLease.get();
             if (cmd == nil) return false;
             id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
             if (blit == nil) return false;
@@ -11480,8 +11486,7 @@ struct GLContext::Impl {
          destinationBytesPerImage:stagingSize
                          options:depthStencilBlitOptions];
             [blit endEncoding];
-            [cmd commit];
-            [cmd waitUntilCompleted];
+            readbackLease.commitAndWait(@"depth-stencil-texture-readback");
             std::memcpy(raw.data(), [staging contents], stagingSize);
         }
         auto readDepth = [&](NSUInteger srcX, NSUInteger srcY) -> float {
@@ -11652,7 +11657,8 @@ struct GLContext::Impl {
                         [device newBufferWithLength:stencilBytesPerImage
                                             options:MTLResourceStorageModeShared];
                     if (stencilBuf != nil) {
-                        id<MTLCommandBuffer> cmd = [commandQueue commandBuffer];
+                        auto lease = makeCommandBuffer(@"stencil-renderbuffer-readback");
+                        id<MTLCommandBuffer> cmd = lease.get();
                         id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
                         if (cmd != nil && blit != nil) {
                             MTLRegion region = MTLRegionMake2D(0, 0, texW, texH);
@@ -11671,8 +11677,7 @@ struct GLContext::Impl {
                          destinationBytesPerImage:stencilBytesPerImage
                                           options:stencilOption];
                             [blit endEncoding];
-                            [cmd commit];
-                            [cmd waitUntilCompleted];
+                            lease.commitAndWait(@"stencil-renderbuffer-readback");
                             const auto* stencilBytes =
                                 static_cast<const std::uint8_t*>([stencilBuf contents]);
                             const bool yFlipStencilReadback =
@@ -11760,7 +11765,8 @@ struct GLContext::Impl {
                 [device newBufferWithLength:stencilBytesPerImage
                                     options:MTLResourceStorageModeShared];
             if (stencilBuf == nil) return false;
-            id<MTLCommandBuffer> cmd = [commandQueue commandBuffer];
+            auto lease = makeCommandBuffer(@"stencil-texture-readback");
+            id<MTLCommandBuffer> cmd = lease.get();
             id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
             MTLRegion region = MTLRegionMake2D(0, 0, texW, texH);
             const MTLBlitOption stencilOption =
@@ -11774,8 +11780,7 @@ struct GLContext::Impl {
           destinationBytesPerImage:stencilBytesPerImage
                           options:stencilOption];
             [blit endEncoding];
-            [cmd commit];
-            [cmd waitUntilCompleted];
+            lease.commitAndWait(@"stencil-texture-readback");
             const std::uint8_t* stencilBytes =
                 static_cast<const std::uint8_t*>([stencilBuf contents]);
             const bool yFlipStencilReadback =
@@ -13131,9 +13136,16 @@ struct GLContext::Impl {
         }
     }
 
+    MetalCommandBufferLease makeCommandBuffer(NSString* label) const {
+        return commandSubmission != nullptr
+            ? commandSubmission->makeCommandBuffer(label)
+            : MetalCommandBufferLease{};
+    }
+
     CAMetalLayer* layer = nil;
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> commandQueue = nil;
+    std::unique_ptr<MetalCommandSubmission> commandSubmission;
     std::unique_ptr<MetalFrameGraph> frameGraph;
     std::unique_ptr<GLCapabilities> capabilities;
     std::unique_ptr<GLObjectStore> objects;
@@ -17688,7 +17700,8 @@ bool GLContext::copyTexImage2D(
             pushError(GL_INVALID_OPERATION);
             return false;
         }
-        id<MTLCommandBuffer> cmd = [impl_->commandQueue commandBuffer];
+        auto lease = impl_->makeCommandBuffer(@"copy-image-sub-data");
+        id<MTLCommandBuffer> cmd = lease.get();
         if (cmd == nil) {
             pushError(GL_INVALID_OPERATION);
             return false;
@@ -17716,8 +17729,7 @@ bool GLContext::copyTexImage2D(
                 destinationOrigin:MTLOriginMake(0, 0, 0)];
         }
         [blit endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        lease.commitAndWait(@"copy-image-sub-data");
         return true;
     }
 
@@ -21099,6 +21111,10 @@ void* GLContext::extensionMetalDevice() const {
 
 void* GLContext::extensionMetalCommandQueue() const {
     return (__bridge void*)impl_->commandQueue;
+}
+
+void* GLContext::extensionMetalCommandSubmission() const {
+    return impl_->commandSubmission.get();
 }
 
 GLTextureObject* GLContext::extensionCurrentTexture(GLenum target) {
@@ -49584,7 +49600,8 @@ bool GLContext::blitReadFBOToTextureSubImage(
     id<MTLDevice> mtlDevice = impl_->device;
     id<MTLCommandQueue> mtlQueue = impl_->commandQueue;
     if (mtlDevice == nil || mtlQueue == nil) return false;
-    id<MTLCommandBuffer> cmd = [mtlQueue commandBuffer];
+    auto lease = impl_->makeCommandBuffer(@"copy-texture-sub-image");
+    id<MTLCommandBuffer> cmd = lease.get();
     if (cmd == nil) return false;
     id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
     if (blit == nil) return false;
@@ -49614,8 +49631,7 @@ bool GLContext::blitReadFBOToTextureSubImage(
                  static_cast<NSUInteger>(std::max<GLint>(yoffset, 0)),
                  dstZ)];
     [blit endEncoding];
-    [cmd commit];
-    [cmd waitUntilCompleted];
+    lease.commitAndWait(@"copy-texture-sub-image");
     return true;
 }
 
@@ -50411,7 +50427,8 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                     pushError(GL_OUT_OF_MEMORY);
                     return false;
                 }
-                id<MTLCommandBuffer> cmd = [mtlQueue commandBuffer];
+                auto lease = impl_->makeCommandBuffer(@"get-texture-image-array-private");
+                id<MTLCommandBuffer> cmd = lease.get();
                 id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
                 MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
                 for (NSUInteger slice = 0; slice < numSlices; ++slice) {
@@ -50426,8 +50443,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                  destinationBytesPerImage:bytesPerImage];
                 }
                 [blit endEncoding];
-                [cmd commit];
-                [cmd waitUntilCompleted];
+                lease.commitAndWait(@"get-texture-image-array-private");
                 std::memcpy(raw.data(), [staging contents], totalBytes);
             }
             auto readDepthFloat = [&](NSUInteger slice, NSUInteger sx, NSUInteger sy) -> float {
@@ -50608,7 +50624,8 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                 pushError(GL_OUT_OF_MEMORY);
                 return false;
             }
-            id<MTLCommandBuffer> cmd = [mtlQueue commandBuffer];
+            auto lease = impl_->makeCommandBuffer(@"get-texture-image-depth-stencil");
+            id<MTLCommandBuffer> cmd = lease.get();
             id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
             MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
             for (NSUInteger slice = 0; slice < numSlices; ++slice) {
@@ -50626,8 +50643,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                               options:MTLBlitOptionStencilFromDepthStencil];
             }
             [blit endEncoding];
-            [cmd commit];
-            [cmd waitUntilCompleted];
+            lease.commitAndWait(@"get-texture-image-depth-stencil");
             const std::uint8_t* depthBytes =
                 static_cast<const std::uint8_t*>([depthBuf contents]);
             const std::uint8_t* stencilBytes =
@@ -50947,7 +50963,8 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             pushError(GL_OUT_OF_MEMORY);
             return false;
         }
-        id<MTLCommandBuffer> cmd = [mtlQueue commandBuffer];
+        auto lease = impl_->makeCommandBuffer(@"get-texture-image-private");
+        id<MTLCommandBuffer> cmd = lease.get();
         id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
         if (cmd == nil || blit == nil) {
             pushError(GL_INVALID_OPERATION);
@@ -50990,9 +51007,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
           destinationBytesPerImage:bytesPerImage];
         }
         [blit endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
-        if (cmd.status != MTLCommandBufferStatusCompleted) {
+        if (!lease.commitAndWait(@"get-texture-image-private")) {
             pushError(GL_INVALID_OPERATION);
             return false;
         }

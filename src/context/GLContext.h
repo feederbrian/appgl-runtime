@@ -578,6 +578,7 @@ public:
     // of letting modules reach through GLContext internals directly.
     void* extensionMetalDevice() const;
     void* extensionMetalCommandQueue() const;
+    void* extensionMetalCommandSubmission() const;
     GLTextureObject* extensionCurrentTexture(GLenum target);
     bool extensionReplaceMetalTexture(GLTextureObject& texture, GLuint textureName = 0);
 

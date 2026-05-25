@@ -22,6 +22,7 @@ public:
 
     void* metalDevice() const;
     void* metalCommandQueue() const;
+    void* metalCommandSubmission() const;
 
     GLCapabilities& capabilities();
     const GLCapabilities& capabilities() const;

@@ -1,4 +1,5 @@
 #include "MetalFrameGraph.h"
+#include "MetalCommandSubmission.h"
 
 #include "../extensions/ExtensionContext.h"
 #include "../extensions/ExtensionRegistry.h"
@@ -785,11 +786,16 @@ static std::string rewriteFragmentMSLForPerSample(const std::string& fsMsl)
 }
 
 struct MetalFrameGraph::Impl {
-    Impl(GLContext* ownerContext, void* rawLayer, void* rawDevice, void* rawCommandQueue)
+    Impl(GLContext* ownerContext,
+         void* rawLayer,
+         void* rawDevice,
+         void* rawCommandQueue,
+         MetalCommandSubmission* rawCommandSubmission)
         : owner(ownerContext),
           layer((__bridge CAMetalLayer*)rawLayer),
           device((__bridge id<MTLDevice>)rawDevice),
-          commandQueue((__bridge id<MTLCommandQueue>)rawCommandQueue) {
+          commandQueue((__bridge id<MTLCommandQueue>)rawCommandQueue),
+          commandSubmission(rawCommandSubmission) {
         if (layer != nil && device != nil) {
             layer.device = device;
             layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
@@ -806,8 +812,7 @@ struct MetalFrameGraph::Impl {
         // triggers "Command encoder released without endEncoding".
         endRenderPass();
         if (currentCommandBuffer != nil) {
-            [currentCommandBuffer commit];
-            [currentCommandBuffer waitUntilCompleted];
+            currentCommandBufferLease.commitAndWait(@"framegraph-destruct");
             currentCommandBuffer = nil;
         }
         // OPT-8: Release any acquired ring slot to balance the semaphore.
@@ -815,7 +820,7 @@ struct MetalFrameGraph::Impl {
         // in commit order, and waitUntilCompleted on the last ensures all
         // prior CBs completed).
         if (ringSlotAcquired) {
-            dispatch_semaphore_signal(frameSemaphore);
+            signalRingSlotNow();
             ringSlotAcquired = false;
         }
         // ADV-14: persist the pipeline binary archive to disk so the
@@ -893,7 +898,7 @@ struct MetalFrameGraph::Impl {
         // eliminating the old separate clear-only render pass (OPT-4).
         endRenderPass();
         if (currentCommandBuffer != nil) {
-            commitWithFrameSignal(currentCommandBuffer);  // OPT-8
+            commitWithFrameSignal(currentCommandBufferLease);  // OPT-8
             currentCommandBuffer = nil;
             currentDrawable = nil;
             pendingPresent = false;
@@ -924,8 +929,7 @@ struct MetalFrameGraph::Impl {
         endRenderPass();
         ensureDrawableResources();
         if (currentCommandBuffer == nil) {
-            currentCommandBuffer = [commandQueue commandBuffer];
-            attachErrorHandler(currentCommandBuffer, @"beginRenderPass");
+            ensureCurrentCommandBuffer(@"beginRenderPass");
         }
         if (!acquireDrawableIfNeeded()) {  // ADV-7
             return;
@@ -968,6 +972,25 @@ struct MetalFrameGraph::Impl {
 #endif
     }
 
+    MetalCommandBufferLease makeCommandBuffer(NSString* label) {
+        return commandSubmission != nullptr
+            ? commandSubmission->makeCommandBuffer(label)
+            : MetalCommandBufferLease{};
+    }
+
+    bool ensureCurrentCommandBuffer(NSString* label) {
+        if (currentCommandBuffer != nil) {
+            return true;
+        }
+        currentCommandBufferLease = makeCommandBuffer(label);
+        currentCommandBuffer = currentCommandBufferLease.get();
+        if (currentCommandBuffer != nil) {
+            attachErrorHandler(currentCommandBuffer, label);
+            return true;
+        }
+        return false;
+    }
+
     void endRenderPass() {
         if (currentRenderEncoder != nil) {
             FG_TRACE(@"endRenderPass: ending encoder %p on cmdBuf %p", currentRenderEncoder, currentCommandBuffer);
@@ -985,8 +1008,7 @@ struct MetalFrameGraph::Impl {
 
         ensureDrawableResources();
         if (currentCommandBuffer == nil) {
-            currentCommandBuffer = [commandQueue commandBuffer];
-            attachErrorHandler(currentCommandBuffer, @"flushClear");
+            ensureCurrentCommandBuffer(@"flushClear");
             if (currentCommandBuffer == nil) { hasPendingClear = false; return; }
         }
         if (!acquireDrawableIfNeeded()) {  // ADV-7
@@ -1058,8 +1080,7 @@ struct MetalFrameGraph::Impl {
 
         // Reuse the current command buffer if one exists, otherwise create new.
         if (currentCommandBuffer == nil) {
-            currentCommandBuffer = [commandQueue commandBuffer];
-            attachErrorHandler(currentCommandBuffer, @"solidColorDraw");
+            ensureCurrentCommandBuffer(@"solidColorDraw");
             if (currentCommandBuffer == nil) {
                 return false;
             }
@@ -2250,8 +2271,7 @@ struct MetalFrameGraph::Impl {
             // Reuse the current command buffer if one exists (e.g. from a
             // prior solid-color draw), otherwise create a new one.
             if (currentCommandBuffer == nil) {
-                currentCommandBuffer = [commandQueue commandBuffer];
-                attachErrorHandler(currentCommandBuffer, @"translatedDraw");
+                ensureCurrentCommandBuffer(@"translatedDraw");
                 if (currentCommandBuffer == nil) {
                     return false;
                 }
@@ -3736,8 +3756,9 @@ struct MetalFrameGraph::Impl {
             activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
             resetCachedEncoderState();
 
-            [currentCommandBuffer commit];
-            [currentCommandBuffer waitUntilCompleted];
+            if (!currentCommandBufferLease.commitAndWait(@"fbo-solid-readback-drain")) {
+                return false;
+            }
             currentCommandBuffer = nil;
         }
 
@@ -4961,12 +4982,33 @@ fragment float4 appgl_immediate_textured_fs(
             resetCachedEncoderState();
         }
         if (currentCommandBuffer == nil) {
-            currentCommandBuffer = [commandQueue commandBuffer];
-            attachErrorHandler(currentCommandBuffer, @"layeredClear");
+            ensureCurrentCommandBuffer(@"layeredClear");
             if (currentCommandBuffer == nil) return false;
         }
+        auto commitClearChunk = [&]() -> bool {
+            if (currentCommandBuffer == nil) {
+                return true;
+            }
+            if (!usesOffscreenTarget && currentDrawable != nil && pendingPresent) {
+                [currentCommandBuffer presentDrawable:currentDrawable];
+            }
+            const bool completed = currentCommandBufferLease.commitAndWait(@"layered-clear-sync");
+            if (ringSlotAcquired) {
+                signalRingSlotNow();
+                advanceRingBuffer();
+            }
+            currentCommandBuffer = nil;
+            currentDrawable = nil;
+            pendingPresent = false;
+            resetCachedEncoderState();
+            return completed;
+        };
         auto encodeClearPass = [&](std::uint32_t targetSlice,
                                    std::uint32_t targetArrayLength) -> bool {
+            if (currentCommandBuffer == nil) {
+                ensureCurrentCommandBuffer(@"layeredClear");
+                if (currentCommandBuffer == nil) return false;
+            }
             MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
             if (isColor) {
                 pass.colorAttachments[0].texture = tex;
@@ -5002,10 +5044,17 @@ fragment float4 appgl_immediate_textured_fs(
             return true;
         };
         if (!isColor && (isDepth || isStencil) && arrayLength > 0) {
+            static constexpr std::uint32_t kMaxLayeredClearPassesPerCommandBuffer = 8;
+            std::uint32_t passesInCommandBuffer = 0;
             for (std::uint32_t i = 0; i < arrayLength; ++i) {
                 if (!encodeClearPass(slice + i, 0)) return false;
+                ++passesInCommandBuffer;
+                if (passesInCommandBuffer == kMaxLayeredClearPassesPerCommandBuffer) {
+                    if (!commitClearChunk()) return false;
+                    passesInCommandBuffer = 0;
+                }
             }
-            return true;
+            return commitClearChunk();
         }
         MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
         if (isColor) {
@@ -5038,6 +5087,9 @@ fragment float4 appgl_immediate_textured_fs(
         id<MTLRenderCommandEncoder> enc = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
         if (enc == nil) return false;
         [enc endEncoding];
+        if (arrayLength > 0) {
+            return commitClearChunk();
+        }
         return true;
     }
     bool clearLayeredTextureDepth(void* tex, std::uint32_t arrayLength, float depth) {
@@ -5099,8 +5151,7 @@ fragment float4 appgl_immediate_textured_fs(
         endRenderPass();
 
         if (currentCommandBuffer == nil) {
-            currentCommandBuffer = [commandQueue commandBuffer];
-            attachErrorHandler(currentCommandBuffer, @"immediateModeDraw");
+            ensureCurrentCommandBuffer(@"immediateModeDraw");
             if (currentCommandBuffer == nil) {
                 return false;
             }
@@ -5332,7 +5383,7 @@ fragment float4 appgl_immediate_textured_fs(
             if (!usesOffscreenTarget && currentDrawable != nil) {
                 [currentCommandBuffer presentDrawable:currentDrawable];
             }
-            commitWithFrameSignal(currentCommandBuffer);  // OPT-8
+            commitWithFrameSignal(currentCommandBufferLease);  // OPT-8
             invalidateTransientState();
             advanceRingBuffer();
         } else {
@@ -5358,7 +5409,7 @@ fragment float4 appgl_immediate_textured_fs(
         // semaphore, allowing the CPU to encode the next frame while the GPU
         // processes this one.  Replaces the old waitUntilCompleted which
         // serialised CPU and GPU completely for offscreen targets.
-        commitWithFrameSignal(currentCommandBuffer);
+        commitWithFrameSignal(currentCommandBufferLease);
         invalidateTransientState();
         advanceRingBuffer();
     }
@@ -5399,28 +5450,24 @@ fragment float4 appgl_immediate_textured_fs(
         id<MTLBuffer> readbackBuffer = nil;
 
         const auto waitForQueue = [&]() -> bool {
-            id<MTLCommandBuffer> fence = [commandQueue commandBuffer];
+            auto fenceLease = makeCommandBuffer(@"copy-pixels-fence");
+            id<MTLCommandBuffer> fence = fenceLease.get();
             if (fence == nil) {
                 return false;
             }
-            [fence commit];
-            [fence waitUntilCompleted];
-            return fence.status != MTLCommandBufferStatusError;
+            return fenceLease.commitAndWait(@"copy-pixels-fence");
         };
 
         if (sourceTexture.storageMode == MTLStorageModeShared) {
             if (currentCommandBuffer != nil) {
-                [currentCommandBuffer commit];
-                [currentCommandBuffer waitUntilCompleted];
+                if (!currentCommandBufferLease.commitAndWait(@"copy-pixels-shared-drain")) {
+                    return false;
+                }
                 // OPT-8: GPU finished synchronously — release the ring slot
                 // so the semaphore stays balanced (no completion handler here).
                 if (ringSlotAcquired) {
-                    dispatch_semaphore_signal(frameSemaphore);
+                    signalRingSlotNow();
                     ringSlotAcquired = false;
-                }
-                if (currentCommandBuffer.status == MTLCommandBufferStatusError) {
-                    invalidateTransientState();
-                    return false;
                 }
                 invalidateTransientState();
             } else if (!waitForQueue()) {
@@ -5441,7 +5488,12 @@ fragment float4 appgl_immediate_textured_fs(
                 return false;
             }
 
-            id<MTLCommandBuffer> commandBuffer = currentCommandBuffer != nil ? currentCommandBuffer : [commandQueue commandBuffer];
+            MetalCommandBufferLease standaloneLease;
+            id<MTLCommandBuffer> commandBuffer = currentCommandBuffer;
+            if (commandBuffer == nil) {
+                standaloneLease = makeCommandBuffer(@"copy-pixels-blit");
+                commandBuffer = standaloneLease.get();
+            }
             if (commandBuffer == nil) {
                 return false;
             }
@@ -5457,18 +5509,19 @@ fragment float4 appgl_immediate_textured_fs(
          destinationBytesPerImage:readbackRowBytes * sourceHeight];
             [blit endEncoding];
             const bool consumedCurrentCommandBuffer = commandBuffer == currentCommandBuffer;
-            [commandBuffer commit];
-            [commandBuffer waitUntilCompleted];
+            bool completed = false;
+            if (consumedCurrentCommandBuffer) {
+                completed = currentCommandBufferLease.commitAndWait(@"copy-pixels-current-blit");
+            } else {
+                completed = standaloneLease.commitAndWait(@"copy-pixels-blit");
+            }
+            if (!completed) {
+                return false;
+            }
             // OPT-8: release ring slot if we consumed the current CB synchronously.
             if (consumedCurrentCommandBuffer && ringSlotAcquired) {
-                dispatch_semaphore_signal(frameSemaphore);
+                signalRingSlotNow();
                 ringSlotAcquired = false;
-            }
-            if (commandBuffer.status == MTLCommandBufferStatusError) {
-                if (consumedCurrentCommandBuffer) {
-                    invalidateTransientState();
-                }
-                return false;
             }
             if (consumedCurrentCommandBuffer) {
                 invalidateTransientState();
@@ -5502,6 +5555,9 @@ fragment float4 appgl_immediate_textured_fs(
                 }
             }
         }
+        if (readbackBuffer != nil) {
+            [readbackBuffer release];
+        }
         return true;
     }
 
@@ -5512,10 +5568,11 @@ fragment float4 appgl_immediate_textured_fs(
     void flushForReadback() {
         endRenderPass();
         if (currentCommandBuffer != nil) {
-            [currentCommandBuffer commit];
-            [currentCommandBuffer waitUntilCompleted];
+            if (!currentCommandBufferLease.commitAndWait(@"flush-for-readback")) {
+                return;
+            }
             if (ringSlotAcquired) {
-                dispatch_semaphore_signal(frameSemaphore);
+                signalRingSlotNow();
                 ringSlotAcquired = false;
             }
             invalidateTransientState();
@@ -5528,14 +5585,17 @@ fragment float4 appgl_immediate_textured_fs(
             return true;
         }
 
-        id<MTLCommandBuffer> drained = currentCommandBuffer;
         if (!usesOffscreenTarget && currentDrawable != nil && pendingPresent) {
-            [drained presentDrawable:currentDrawable];
+            [currentCommandBuffer presentDrawable:currentDrawable];
         }
-        [drained commit];
-        [drained waitUntilCompleted];
+        if (!currentCommandBufferLease.commitAndWait(@"drain-current-standalone")) {
+            if (diagnostic != nullptr) {
+                *diagnostic = "prior command buffer failed or timed out";
+            }
+            return false;
+        }
         if (ringSlotAcquired) {
-            dispatch_semaphore_signal(frameSemaphore);
+            signalRingSlotNow();
             advanceRingBuffer();
         }
         currentCommandBuffer = nil;
@@ -5543,14 +5603,6 @@ fragment float4 appgl_immediate_textured_fs(
         pendingPresent = false;
         resetCachedEncoderState();
 
-        if (drained.status == MTLCommandBufferStatusError) {
-            if (diagnostic != nullptr) {
-                NSString* msg = drained.error.localizedDescription;
-                *diagnostic = msg != nil ? msg.UTF8String
-                                         : "prior command buffer failed";
-            }
-            return false;
-        }
         return true;
     }
 
@@ -5667,7 +5719,8 @@ fragment float4 appgl_immediate_textured_fs(
         }
         outBuf.label = @"appgl-vstf-out";
 
-        id<MTLCommandBuffer> cmdBuf = [commandQueue commandBuffer];
+        auto lease = makeCommandBuffer(@"vstf-vs-compute");
+        id<MTLCommandBuffer> cmdBuf = lease.get();
         if (cmdBuf == nil) {
             return false;
         }
@@ -5717,9 +5770,7 @@ fragment float4 appgl_immediate_textured_fs(
         [enc dispatchThreads:MTLSizeMake(vertexCount, 1, 1)
          threadsPerThreadgroup:MTLSizeMake(tgWidth, 1, 1)];
         [enc endEncoding];
-        [cmdBuf commit];
-        [cmdBuf waitUntilCompleted];
-        if (cmdBuf.status == MTLCommandBufferStatusError) {
+        if (!lease.commitAndWait(@"vstf-vs-compute")) {
             return false;
         }
 
@@ -6068,8 +6119,9 @@ fragment float4 appgl_immediate_textured_fs(
         // factor-buffer writes.
         endRenderPass();
         if (currentCommandBuffer != nil) {
-            [currentCommandBuffer commit];
-            [currentCommandBuffer waitUntilCompleted];
+            if (!currentCommandBufferLease.commitAndWait(@"tess-drain-current")) {
+                return false;
+            }
             currentCommandBuffer = nil;
         }
 
@@ -6204,7 +6256,8 @@ fragment float4 appgl_immediate_textured_fs(
         // `spvIn [[buffer(22)]]` (no stage-input descriptor needed with
         // `multi_patch_workgroup = true`).
         if (isPhase3 && info.vertexComputePipelineState != nullptr) {
-            id<MTLCommandBuffer> vsCmdBuf = [commandQueue commandBuffer];
+            auto vsLease = makeCommandBuffer(@"tess-vs-compute");
+            id<MTLCommandBuffer> vsCmdBuf = vsLease.get();
             if (vsCmdBuf == nil) return false;
             vsCmdBuf.label = @"appgl-tess-vs-compute";
             id<MTLComputeCommandEncoder> vsEnc =
@@ -6270,8 +6323,7 @@ fragment float4 appgl_immediate_textured_fs(
                  threadsPerThreadgroup:MTLSizeMake(tgWidth, 1, 1)];
             }
             [vsEnc endEncoding];
-            [vsCmdBuf commit];
-            [vsCmdBuf waitUntilCompleted];
+            vsLease.commitAndWait(@"tess-vs-compute");
             // CKPT137: dump vsOutBuf post-VS-compute when APPGL_TRACE_TESS_BUF.
             // vsOutBuf is allocated Shared above when env-gate is set, so
             // contents are accessible without additional blit.
@@ -6297,7 +6349,8 @@ fragment float4 appgl_immediate_textured_fs(
         }
 
         // (3b) Compute-encode the TCS dispatch.
-        id<MTLCommandBuffer> computeCmdBuf = [commandQueue commandBuffer];
+        auto computeLease = makeCommandBuffer(@"tess-compute");
+        id<MTLCommandBuffer> computeCmdBuf = computeLease.get();
         if (computeCmdBuf == nil) return false;
         computeCmdBuf.label = @"appgl-tess-compute";
         id<MTLComputeCommandEncoder> cenc = [computeCmdBuf computeCommandEncoder];
@@ -6328,8 +6381,7 @@ fragment float4 appgl_immediate_textured_fs(
             (NSUInteger)info.tessControlOutputVertices, 1, 1);
         [cenc dispatchThreadgroups:groups threadsPerThreadgroup:threads];
         [cenc endEncoding];
-        [computeCmdBuf commit];
-        [computeCmdBuf waitUntilCompleted];
+        computeLease.commitAndWait(@"tess-compute");
 
         // CKPT137: dump cpOutBuf + spvIndirectParams post-TCS-compute.
         if (std::getenv("APPGL_TRACE_TESS_BUF") != nullptr) {
@@ -6649,7 +6701,8 @@ fragment float4 appgl_immediate_textured_fs(
                         ensureTessFactorClampPipelineState();
                     if (clampPSO != nil) {
                         uint32_t patchCountU = (uint32_t)info.patchCount;
-                        id<MTLCommandBuffer> clampCmd = [commandQueue commandBuffer];
+                        auto clampLease = makeCommandBuffer(@"tess-factor-clamp");
+                        id<MTLCommandBuffer> clampCmd = clampLease.get();
                         clampCmd.label = @"appgl-tess-factor-clamp";
                         id<MTLComputeCommandEncoder> clampEnc =
                             [clampCmd computeCommandEncoder];
@@ -6661,15 +6714,15 @@ fragment float4 appgl_immediate_textured_fs(
                         [clampEnc dispatchThreads:MTLSizeMake((NSUInteger)patchCountU, 1, 1)
                           threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
                         [clampEnc endEncoding];
-                        [clampCmd commit];
-                        [clampCmd waitUntilCompleted];
+                        clampLease.commitAndWait(@"tess-factor-clamp");
                     }
 
                     MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor new];
                     rpd.renderTargetWidth = 1;
                     rpd.renderTargetHeight = 1;
                     rpd.defaultRasterSampleCount = 1;
-                    id<MTLCommandBuffer> dgCmdBuf = [commandQueue commandBuffer];
+                    auto dgLease = makeCommandBuffer(@"tess-domain-gen-hw");
+                    id<MTLCommandBuffer> dgCmdBuf = dgLease.get();
                     dgCmdBuf.label = @"appgl-tess-domain-gen-hw";
                     id<MTLRenderCommandEncoder> dgEnc =
                         [dgCmdBuf renderCommandEncoderWithDescriptor:rpd];
@@ -6688,8 +6741,7 @@ fragment float4 appgl_immediate_textured_fs(
                            instanceCount:1
                             baseInstance:0];
                     [dgEnc endEncoding];
-                    [dgCmdBuf commit];
-                    [dgCmdBuf waitUntilCompleted];
+                    dgLease.commitAndWait(@"tess-domain-gen-hw");
                 } else {
                     // Phase 4A [metal-tess-TF]: when
                     // APPGL_TESS_DOMAIN_PORT is set and the genMode is
@@ -6738,8 +6790,8 @@ fragment float4 appgl_immediate_textured_fs(
                                         length:sizeof(pp)
                                        options:MTLResourceStorageModeShared];
 
-                        id<MTLCommandBuffer> dgCmdBuf =
-                            [commandQueue commandBuffer];
+                        auto dgLease = makeCommandBuffer(@"tess-domain-port");
+                        id<MTLCommandBuffer> dgCmdBuf = dgLease.get();
                         dgCmdBuf.label = @"appgl-tess-domain-port";
                         id<MTLComputeCommandEncoder> dgEnc =
                             [dgCmdBuf computeCommandEncoder];
@@ -6752,8 +6804,7 @@ fragment float4 appgl_immediate_textured_fs(
                         [dgEnc dispatchThreads:MTLSizeMake(1, 1, 1)
                           threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
                         [dgEnc endEncoding];
-                        [dgCmdBuf commit];
-                        [dgCmdBuf waitUntilCompleted];
+                        dgLease.commitAndWait(@"tess-domain-port");
                     } else {
                         // Compute-kernel path (default, and fallback
                         // when port PSO unavailable or flag disabled).
@@ -6763,8 +6814,8 @@ fragment float4 appgl_immediate_textured_fs(
                         // Parallelization revisited once Phase 4/5
                         // stabilize the TF capture protocol — the
                         // atomic cursor then becomes safe.
-                        id<MTLCommandBuffer> dgCmdBuf =
-                            [commandQueue commandBuffer];
+                        auto dgLease = makeCommandBuffer(@"tess-domain-gen");
+                        id<MTLCommandBuffer> dgCmdBuf = dgLease.get();
                         dgCmdBuf.label = @"appgl-tess-domain-gen";
                         id<MTLComputeCommandEncoder> dgEnc =
                             [dgCmdBuf computeCommandEncoder];
@@ -6777,8 +6828,7 @@ fragment float4 appgl_immediate_textured_fs(
                         [dgEnc dispatchThreads:MTLSizeMake(1, 1, 1)
                           threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
                         [dgEnc endEncoding];
-                        [dgCmdBuf commit];
-                        [dgCmdBuf waitUntilCompleted];
+                        dgLease.commitAndWait(@"tess-domain-gen");
                     }
                 }
 
@@ -6878,7 +6928,8 @@ fragment float4 appgl_immediate_textured_fs(
                 // just-generated buffers, writes spvOut into
                 // tesComputeOutBuf.
                 if (tessTFGeneratedVerts > 0) {
-                    id<MTLCommandBuffer> tesCmdBuf = [commandQueue commandBuffer];
+                    auto tesLease = makeCommandBuffer(@"tess-tes-compute");
+                    id<MTLCommandBuffer> tesCmdBuf = tesLease.get();
                     tesCmdBuf.label = @"appgl-tess-tes-compute";
                     id<MTLComputeCommandEncoder> tesEnc =
                         [tesCmdBuf computeCommandEncoder];
@@ -6944,8 +6995,7 @@ fragment float4 appgl_immediate_textured_fs(
                     [tesEnc dispatchThreads:MTLSizeMake((NSUInteger)tessTFGeneratedVerts, 1, 1)
                       threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
                     [tesEnc endEncoding];
-                    [tesCmdBuf commit];
-                    [tesCmdBuf waitUntilCompleted];
+                    tesLease.commitAndWait(@"tess-tes-compute");
 
                     if (std::getenv("APPGL_TRACE_TESS")) {
                         std::fprintf(stderr,
@@ -7181,8 +7231,7 @@ fragment float4 appgl_immediate_textured_fs(
         // impl's beginRenderPass path by acquiring a drawable +
         // attaching the swapchain texture directly.
         if (currentCommandBuffer == nil) {
-            currentCommandBuffer = [commandQueue commandBuffer];
-            attachErrorHandler(currentCommandBuffer, @"tessellationDraw");
+            ensureCurrentCommandBuffer(@"tessellationDraw");
             if (currentCommandBuffer == nil) return false;
         }
 
@@ -7439,8 +7488,9 @@ fragment float4 appgl_immediate_textured_fs(
 
         // Commit + wait so subsequent readbacks / copies observe the
         // tess draw's output. Matches compute-dispatch's sync semantics.
-        [currentCommandBuffer commit];
-        [currentCommandBuffer waitUntilCompleted];
+        if (!currentCommandBufferLease.commitAndWait(@"tess-render")) {
+            return false;
+        }
         currentCommandBuffer = nil;
 
         if (std::getenv("APPGL_TRACE_TESS")) {
@@ -7502,7 +7552,8 @@ fragment float4 appgl_immediate_textured_fs(
         vsOutBuf.label = @"appgl-mesh-gs-vs-output";
 
         {
-            id<MTLCommandBuffer> vsCmdBuf = [commandQueue commandBuffer];
+            auto vsLease = makeCommandBuffer(@"mesh-gs-vs-compute");
+            id<MTLCommandBuffer> vsCmdBuf = vsLease.get();
             if (vsCmdBuf == nil) {
                 info.diagnostic = "vs cmdBuf alloc failed";
                 return false;
@@ -7541,12 +7592,8 @@ fragment float4 appgl_immediate_textured_fs(
             [vsEnc dispatchThreads:MTLSizeMake(info.vertexCount, 1, 1)
              threadsPerThreadgroup:MTLSizeMake(tgWidth, 1, 1)];
             [vsEnc endEncoding];
-            [vsCmdBuf commit];
-            [vsCmdBuf waitUntilCompleted];
-            if (vsCmdBuf.status == MTLCommandBufferStatusError) {
-                NSString* msg = vsCmdBuf.error.localizedDescription;
-                info.diagnostic = msg != nil ? msg.UTF8String
-                                             : "vs compute command buffer failed";
+            if (!vsLease.commitAndWait(@"mesh-gs-vs-compute")) {
+                info.diagnostic = "vs compute command buffer failed";
                 return false;
             }
         }
@@ -7620,7 +7667,8 @@ fragment float4 appgl_immediate_textured_fs(
             currentRenderEncoder = nil;
             activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
         }
-        id<MTLCommandBuffer> rcmd = [commandQueue commandBuffer];
+        auto renderLease = makeCommandBuffer(@"mesh-gs-draw");
+        id<MTLCommandBuffer> rcmd = renderLease.get();
         if (rcmd == nil) {
             info.diagnostic = "render cmdBuf alloc failed";
             return false;
@@ -7942,8 +7990,7 @@ fragment float4 appgl_immediate_textured_fs(
             threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
               threadsPerMeshThreadgroup:MTLSizeMake(1, 1, 1)];
         [renc endEncoding];
-        [rcmd commit];
-        [rcmd waitUntilCompleted];
+        renderLease.commitAndWait(@"mesh-gs-draw");
 
         // Path D — clear the pending-clear flag now that the pass has
         // consumed it (matches MetalFrameGraph.mm:984's `hasPendingClear
@@ -7977,7 +8024,8 @@ fragment float4 appgl_immediate_textured_fs(
         // flushForReadback plumbing for render paths stays separate.
         endRenderPass();
 
-        id<MTLCommandBuffer> cmdBuf = [commandQueue commandBuffer];
+        auto computeLease = makeCommandBuffer(@"compute-dispatch");
+        id<MTLCommandBuffer> cmdBuf = computeLease.get();
         if (cmdBuf == nil) {
             return false;
         }
@@ -8186,8 +8234,7 @@ fragment float4 appgl_immediate_textured_fs(
             [enc dispatchThreadgroups:threadGroups threadsPerThreadgroup:threadsPerGroup];
         }
         [enc endEncoding];
-        [cmdBuf commit];
-        [cmdBuf waitUntilCompleted];
+        computeLease.commitAndWait(@"compute-dispatch");
         return true;
     }
 
@@ -8330,6 +8377,7 @@ private:
         if (staging == nil) {
             return;
         }
+        currentCommandBufferLease.adoptRetainedObject(staging);
 
         const std::uint8_t rgba[4] = {
             normalizedByte(red),
@@ -8363,6 +8411,7 @@ private:
     void invalidateTransientState() {
         // Ensure the render encoder is properly ended before we drop it.
         endRenderPass();
+        currentCommandBufferLease.abandon("invalidate-transient-state");
         currentCommandBuffer = nil;
         currentDrawable = nil;
         pendingPresent = false;
@@ -8374,10 +8423,12 @@ private:
     CAMetalLayer* layer = nil;
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> commandQueue = nil;
+    MetalCommandSubmission* commandSubmission = nullptr;
     id<MTLTexture> depthStencilTexture = nil;
     id<MTLTexture> offscreenColorTexture = nil;
     id<MTLTexture> readbackSourceTexture = nil;
     id<MTLCommandBuffer> currentCommandBuffer = nil;
+    MetalCommandBufferLease currentCommandBufferLease;
     id<MTLRenderCommandEncoder> currentRenderEncoder = nil;
     GLenum activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
     id<CAMetalDrawable> currentDrawable = nil;
@@ -8653,6 +8704,7 @@ private:
         id<MTLBuffer> fallback = [device newBufferWithBytes:src
                                                       length:byteCount
                                                      options:MTLResourceStorageModeShared];
+        currentCommandBufferLease.adoptRetainedObject(fallback);
         return { fallback, 0 };
     }
 
@@ -8675,6 +8727,7 @@ private:
         }
         id<MTLBuffer> fallback = [device newBufferWithLength:byteCount
                                                      options:MTLResourceStorageModeShared];
+        currentCommandBufferLease.adoptRetainedObject(fallback);
         return { fallback, 0 };
     }
 
@@ -8683,20 +8736,28 @@ private:
     // once per ring-buffer generation.
     void acquireRingSlot() {
         if (!ringSlotAcquired) {
-            dispatch_semaphore_wait(frameSemaphore, DISPATCH_TIME_FOREVER);
-            ringSlotAcquired = true;
+            ringSlotAcquired = commandSubmission != nullptr
+                ? commandSubmission->waitForRingSlot(frameSemaphore, @"frame-ring-slot")
+                : (dispatch_semaphore_wait(frameSemaphore, DISPATCH_TIME_FOREVER) == 0);
+        }
+    }
+
+    void signalRingSlotNow() {
+        if (commandSubmission != nullptr) {
+            commandSubmission->signalRingSlot(frameSemaphore);
+        } else {
+            dispatch_semaphore_signal(frameSemaphore);
         }
     }
 
     // OPT-8: Commit a command buffer with a completion handler that signals
     // the frame semaphore when the GPU finishes.  Use this (instead of raw
     // [cb commit]) whenever the commit releases a ring buffer slot.
-    void commitWithFrameSignal(id<MTLCommandBuffer> cb) {
+    void commitWithFrameSignal(MetalCommandBufferLease& lease) {
         dispatch_semaphore_t sem = frameSemaphore;
-        [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
+        lease.commitWithCompletion(@"frame-command-buffer", ^(id<MTLCommandBuffer>) {
             dispatch_semaphore_signal(sem);
-        }];
-        [cb commit];
+        });
     }
 
     void advanceRingBuffer() {
@@ -8850,7 +8911,8 @@ static void stopMetalCaptureIfActive() {
 // Scope of this first landing: triangles, equal-spacing, integer
 // partition, no winding flip, no point_mode. Later commits widen.
 static void phaseAProbeTessDomainPort(id<MTLDevice> device,
-                                       id<MTLCommandQueue> commandQueue)
+                                       id<MTLCommandQueue> commandQueue,
+                                       MetalCommandSubmission* commandSubmission)
 {
     if (std::getenv("APPGL_TEST_TESS_DOMAIN_PORT") == nullptr) return;
     if (device == nil || commandQueue == nil) return;
@@ -9052,7 +9114,10 @@ static void phaseAProbeTessDomainPort(id<MTLDevice> device,
             newBufferWithLength:kMaxVerts * sizeof(uint32_t)
                         options:MTLResourceStorageModeShared];
 
-        id<MTLCommandBuffer> cb = [commandQueue commandBuffer];
+        auto lease = commandSubmission != nullptr
+            ? commandSubmission->makeCommandBuffer(@"tess-domain-probe-compute")
+            : MetalCommandBufferLease{};
+        id<MTLCommandBuffer> cb = lease.get();
         id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
         [enc setComputePipelineState:pso];
         [enc setBuffer:paramsBuf offset:0 atIndex:0];
@@ -9063,8 +9128,7 @@ static void phaseAProbeTessDomainPort(id<MTLDevice> device,
         [enc dispatchThreads:MTLSizeMake(1, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
         [enc endEncoding];
-        [cb commit];
-        [cb waitUntilCompleted];
+        lease.commitAndWait(@"tess-domain-probe-compute");
 
         uint32_t gpuVerts = *(const uint32_t*)cursorBuf.contents;
         const float* gpuCoords = (const float*)coordsBuf.contents;
@@ -9136,7 +9200,8 @@ static void phaseAProbeTessDomainPort(id<MTLDevice> device,
 // tessDomainOriginLowerLeft flip (Y = 1 - Metal_Y for quads,
 // barycentric permutation for triangles).
 static void phase5ProbeMetalNativeTess(id<MTLDevice> device,
-                                        id<MTLCommandQueue> commandQueue)
+                                        id<MTLCommandQueue> commandQueue,
+                                        MetalCommandSubmission* commandSubmission)
 {
     if (std::getenv("APPGL_TEST_METAL_TESS") == nullptr) return;
     if (device == nil || commandQueue == nil) return;
@@ -9276,7 +9341,10 @@ using namespace metal;
         rpd.renderTargetHeight = 1;
         rpd.defaultRasterSampleCount = 1;
 
-        id<MTLCommandBuffer> cb = [commandQueue commandBuffer];
+        auto lease = commandSubmission != nullptr
+            ? commandSubmission->makeCommandBuffer(@"tess-domain-probe-render")
+            : MetalCommandBufferLease{};
+        id<MTLCommandBuffer> cb = lease.get();
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rpd];
         [enc setRenderPipelineState:pso];
         [enc setVertexBuffer:cursorBuf offset:0 atIndex:0];
@@ -9291,12 +9359,8 @@ using namespace metal;
            instanceCount:1
             baseInstance:0];
         [enc endEncoding];
-        [cb commit];
-        [cb waitUntilCompleted];
-
-        if (cb.error != nil) {
-            std::fprintf(stderr, "[APPGL probe] %s cmd err: %s\n",
-                         label, cb.error.localizedDescription.UTF8String);
+        if (!lease.commitAndWait(@"tess-domain-probe-render")) {
+            std::fprintf(stderr, "[APPGL probe] %s cmd failed\n", label);
             return;
         }
 
@@ -9328,13 +9392,19 @@ using namespace metal;
     std::fprintf(stderr, "[APPGL probe] done\n");
 }
 
-MetalFrameGraph::MetalFrameGraph(GLContext* context, void* layer, void* device, void* commandQueue)
-    : impl_(std::make_unique<Impl>(context, layer, device, commandQueue)) {
+MetalFrameGraph::MetalFrameGraph(GLContext* context,
+                                 void* layer,
+                                 void* device,
+                                 void* commandQueue,
+                                 MetalCommandSubmission* commandSubmission)
+    : impl_(std::make_unique<Impl>(context, layer, device, commandQueue, commandSubmission)) {
     startMetalCaptureIfRequested((__bridge id<MTLDevice>)device);
     phase5ProbeMetalNativeTess((__bridge id<MTLDevice>)device,
-                                (__bridge id<MTLCommandQueue>)commandQueue);
+                                (__bridge id<MTLCommandQueue>)commandQueue,
+                                commandSubmission);
     phaseAProbeTessDomainPort((__bridge id<MTLDevice>)device,
-                               (__bridge id<MTLCommandQueue>)commandQueue);
+                               (__bridge id<MTLCommandQueue>)commandQueue,
+                               commandSubmission);
 }
 
 MetalFrameGraph::~MetalFrameGraph() {

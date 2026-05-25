@@ -24,6 +24,7 @@ namespace appgl {
 class GLContext;
 class GLObjectStore;
 class GLStateTracker;
+class MetalCommandSubmission;
 
 // Describes a single draw call. Phase A Group 7 delivers a minimal draw path:
 // one vertex attribute (vec3 position at attribute 0) and one fragment uniform
@@ -857,7 +858,11 @@ struct MetalTessDrawInfo {
 
 class MetalFrameGraph {
 public:
-    MetalFrameGraph(GLContext* context, void* layer, void* device, void* commandQueue);
+    MetalFrameGraph(GLContext* context,
+                    void* layer,
+                    void* device,
+                    void* commandQueue,
+                    MetalCommandSubmission* commandSubmission);
     ~MetalFrameGraph();
 
     MetalFrameGraph(const MetalFrameGraph&) = delete;

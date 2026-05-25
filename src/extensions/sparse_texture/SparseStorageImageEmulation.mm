@@ -3,6 +3,7 @@
 #include "MultisampleStorageImageEmulation.h"
 #include "SparseTextureAlloc.h"
 #include "../ExtensionContext.h"
+#include "../../context/MetalCommandSubmission.h"
 #include "../../objects/GLObjectStore.h"
 
 #include <CoreFoundation/CoreFoundation.h>
@@ -81,6 +82,10 @@ id<MTLDevice> metalDevice(ExtensionContext& ctx) {
 
 id<MTLCommandQueue> metalCommandQueue(ExtensionContext& ctx) {
     return (__bridge id<MTLCommandQueue>)ctx.metalCommandQueue();
+}
+
+MetalCommandSubmission* metalCommandSubmission(ExtensionContext& ctx) {
+    return static_cast<MetalCommandSubmission*>(ctx.metalCommandSubmission());
 }
 
 MTLTextureType metalTextureTypeForTarget(GLenum target) {
@@ -565,7 +570,11 @@ bool initializeSidecarFromCommittedRegions(ExtensionContext& ctx,
     if (commandQueue == nil || sidecar == nil) {
         return false;
     }
-    id<MTLCommandBuffer> cmd = [commandQueue commandBuffer];
+    MetalCommandSubmission* submission = metalCommandSubmission(ctx);
+    auto lease = submission != nullptr
+        ? submission->makeCommandBuffer(@"sparse-storage-sidecar-init")
+        : MetalCommandBufferLease{};
+    id<MTLCommandBuffer> cmd = lease.get();
     if (cmd == nil) {
         return false;
     }
@@ -584,9 +593,7 @@ bool initializeSidecarFromCommittedRegions(ExtensionContext& ctx,
         }
     }
     [blit endEncoding];
-    [cmd commit];
-    [cmd waitUntilCompleted];
-    return ok && cmd.status == MTLCommandBufferStatusCompleted;
+    return ok && lease.commitAndWait(@"sparse-storage-sidecar-init");
 }
 
 }  // namespace
