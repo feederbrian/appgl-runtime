@@ -294,7 +294,11 @@ struct GLRenderbufferObject {
     std::vector<std::uint8_t> nativeData;
     std::size_t nativeBpp = 0;
     std::vector<GLfloat> depth32;
+    bool depth32ShadowClearPending = false;
+    GLfloat depth32ShadowClearValue = 1.0f;
     std::vector<std::uint8_t> stencil8;
+    bool stencil8ShadowClearPending = false;
+    std::uint8_t stencil8ShadowClearValue = 0;
     bool instantiated = false;
     bool storageDefined = false;
     // Sprint 17 Day 9+ Bank-Group-A-1 narrow-gate (regression-debt #1+#2):

@@ -647,6 +647,8 @@ public:
         std::uint64_t bufferBytes = 0;
         std::uint64_t textureCount = 0;
         std::uint64_t textureBytes = 0;
+        std::uint64_t renderbufferTextureCount = 0;
+        std::uint64_t renderbufferTextureBytes = 0;
         std::uint64_t textureViewCount = 0;
         std::uint64_t textureViewBytes = 0;
         std::uint64_t samplerCount = 0;

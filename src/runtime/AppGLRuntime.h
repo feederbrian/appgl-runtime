@@ -744,6 +744,8 @@ public:
         std::uint64_t metalBufferBytes = 0;
         std::uint64_t metalTextureCount = 0;
         std::uint64_t metalTextureBytes = 0;
+        std::uint64_t metalRenderbufferTextureCount = 0;
+        std::uint64_t metalRenderbufferTextureBytes = 0;
         std::uint64_t metalTextureViewCount = 0;
         std::uint64_t metalTextureViewBytes = 0;
         std::uint64_t metalSamplerCount = 0;

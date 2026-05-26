@@ -1942,6 +1942,7 @@ void Runtime::snapshotContextInventoryLocked(GLContext* context) {
     });
     store.renderbuffers().forEach([&snap](GLuint, GLRenderbufferObject& rb) {
         snap.renderbufferBytes += static_cast<std::uint64_t>(rb.rgba8.size())
+            + static_cast<std::uint64_t>(rb.nativeData.size())
             + static_cast<std::uint64_t>(rb.depth32.size() * sizeof(GLfloat))
             + static_cast<std::uint64_t>(rb.stencil8.size());
     });
@@ -1951,6 +1952,8 @@ void Runtime::snapshotContextInventoryLocked(GLContext* context) {
     snap.metalBufferBytes = metal.bufferBytes;
     snap.metalTextureCount = metal.textureCount;
     snap.metalTextureBytes = metal.textureBytes;
+    snap.metalRenderbufferTextureCount = metal.renderbufferTextureCount;
+    snap.metalRenderbufferTextureBytes = metal.renderbufferTextureBytes;
     snap.metalTextureViewCount = metal.textureViewCount;
     snap.metalTextureViewBytes = metal.textureViewBytes;
     snap.metalSamplerCount = metal.samplerCount;
@@ -2151,6 +2154,7 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
         std::uint64_t renderbufferBytes = 0;
         store.renderbuffers().forEach([&renderbufferBytes](GLuint, GLRenderbufferObject& rb) {
             renderbufferBytes += static_cast<std::uint64_t>(rb.rgba8.size())
+                + static_cast<std::uint64_t>(rb.nativeData.size())
                 + static_cast<std::uint64_t>(rb.depth32.size() * sizeof(GLfloat))
                 + static_cast<std::uint64_t>(rb.stencil8.size());
         });
@@ -2204,6 +2208,8 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
         metalInventory.bufferBytes = snap.metalBufferBytes;
         metalInventory.textureCount = snap.metalTextureCount;
         metalInventory.textureBytes = snap.metalTextureBytes;
+        metalInventory.renderbufferTextureCount = snap.metalRenderbufferTextureCount;
+        metalInventory.renderbufferTextureBytes = snap.metalRenderbufferTextureBytes;
         metalInventory.textureViewCount = snap.metalTextureViewCount;
         metalInventory.textureViewBytes = snap.metalTextureViewBytes;
         metalInventory.samplerCount = snap.metalSamplerCount;
@@ -2238,6 +2244,8 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << "\"bufferBytes\":" << metalInventory.bufferBytes << ","
            << "\"textures\":" << metalInventory.textureCount << ","
            << "\"textureBytes\":" << metalInventory.textureBytes << ","
+           << "\"renderbufferTextures\":" << metalInventory.renderbufferTextureCount << ","
+           << "\"renderbufferTextureBytes\":" << metalInventory.renderbufferTextureBytes << ","
            << "\"textureViews\":" << metalInventory.textureViewCount << ","
            << "\"textureViewBytes\":" << metalInventory.textureViewBytes << ","
            << "\"samplers\":" << metalInventory.samplerCount << ","
