@@ -209,6 +209,16 @@ public:
           state_(std::make_shared<MetalCommandBufferLease::SharedState>(inFlightBound)) {}
 
     MetalCommandBufferLease makeCommandBuffer(NSString* label = nil) {
+        return makeCommandBufferImpl(label, false);
+    }
+
+    MetalCommandBufferLease makeCommandBufferDrainingAutorelease(NSString* label = nil) {
+        return makeCommandBufferImpl(label, true);
+    }
+
+private:
+    MetalCommandBufferLease makeCommandBufferImpl(NSString* label,
+                                                  bool drainAutoreleasedCommandBuffer) {
         if (commandQueue_ == nil || !waitOnSemaphore(state_->inFlightSemaphore, WaitKind::InFlightToken, label)) {
             return {};
         }
@@ -219,14 +229,17 @@ public:
                && !state_->peakInFlight.compare_exchange_weak(observedPeak, afterAcquire)) {}
         assert(afterAcquire <= state_->inFlightBound && "Metal command buffer in-flight bound exceeded");
         id<MTLCommandBuffer> commandBuffer = nil;
-        @autoreleasepool {
-            commandBuffer = [commandQueue_ commandBuffer];
-            // `commandBuffer` is autoreleased. Take a temporary retain before
-            // draining this local pool so the lease becomes the only owner that
-            // survives until the completion handler releases it.
-            if (commandBuffer != nil) {
-                [commandBuffer retain];
+        bool releaseTemporaryRetain = false;
+        if (drainAutoreleasedCommandBuffer) {
+            @autoreleasepool {
+                commandBuffer = [commandQueue_ commandBuffer];
+                if (commandBuffer != nil) {
+                    [commandBuffer retain];
+                    releaseTemporaryRetain = true;
+                }
             }
+        } else {
+            commandBuffer = [commandQueue_ commandBuffer];
         }
         if (commandBuffer == nil) {
             const std::uint32_t previous = state_->inFlightCount.fetch_sub(1);
@@ -248,10 +261,13 @@ public:
             std::fflush(stderr);
         }
         MetalCommandBufferLease lease(state_, commandBuffer);
-        [commandBuffer release];
+        if (releaseTemporaryRetain) {
+            [commandBuffer release];
+        }
         return lease;
     }
 
+public:
     bool waitForRingSlot(dispatch_semaphore_t semaphore, NSString* label = nil) {
         return waitOnSemaphore(semaphore, WaitKind::RingSlot, label);
     }
