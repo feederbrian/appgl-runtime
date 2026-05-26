@@ -738,6 +738,18 @@ public:
         std::uint64_t bufferBytes = 0;
         std::uint64_t textureBytes = 0;
         std::uint64_t renderbufferBytes = 0;
+        std::uint64_t metalDeviceAllocatedBytes = 0;
+        std::uint64_t metalBufferCount = 0;
+        std::uint64_t metalBufferBytes = 0;
+        std::uint64_t metalTextureCount = 0;
+        std::uint64_t metalTextureBytes = 0;
+        std::uint64_t metalTextureViewCount = 0;
+        std::uint64_t metalTextureViewBytes = 0;
+        std::uint64_t metalSamplerCount = 0;
+        std::uint64_t metalRenderPipelineCount = 0;
+        std::uint64_t metalComputePipelineCount = 0;
+        std::uint64_t metalFunctionCount = 0;
+        std::uint64_t metalLibraryCacheEntries = 0;
         std::uint64_t pipelineCacheHits = 0;
         std::uint64_t pipelineCacheMisses = 0;
         // Phase 8X Group 4d follow-up⁴ — split the build counters so the

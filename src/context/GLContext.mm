@@ -2826,6 +2826,12 @@ struct GLContext::Impl {
         objects->vertexArrays().forEach([&](GLuint, GLVertexArrayObject& vertexArray) {
             releaseVertexDescriptor(vertexArray);
         });
+        objects->programs().forEach([&](GLuint, GLProgramObject& program) {
+            releaseProgramMetalResources(program);
+        });
+        objects->programPipelines().forEach([&](GLuint, GLProgramPipelineObject& pipeline) {
+            releaseProgramPipelineResources(pipeline);
+        });
     }
 
     Impl(GLContext* ownerContext,
@@ -2968,6 +2974,94 @@ struct GLContext::Impl {
         releaseRetainedMetalObject(object.metalSampler);
         object.metalSampler = nullptr;
         object.dirty = true;
+    }
+
+    void releaseProgramMetalResources(GLProgramObject& object) {
+        auto releaseMap = [](auto& map) {
+            for (auto& entry : map) {
+                releaseRetainedMetalObject(entry.second);
+                entry.second = nullptr;
+            }
+            map.clear();
+        };
+
+        releaseRetainedMetalObject(object.metalComputePipelineState);
+        object.metalComputePipelineState = nullptr;
+        releaseRetainedMetalObject(object.metalComputeFunction);
+        object.metalComputeFunction = nullptr;
+        releaseRetainedMetalObject(object.metalTessControlPipelineState);
+        object.metalTessControlPipelineState = nullptr;
+        releaseRetainedMetalObject(object.metalTessVertexPipelineState);
+        object.metalTessVertexPipelineState = nullptr;
+        releaseMap(object.metalTessVertexPSOCache);
+        object.metalTessVertexNeedsDescriptor = false;
+        releaseRetainedMetalObject(object.metalTessEvalComputePipelineState);
+        object.metalTessEvalComputePipelineState = nullptr;
+        releaseRetainedMetalObject(object.metalVsTfComputePipelineState);
+        object.metalVsTfComputePipelineState = nullptr;
+        releaseMap(object.metalVsTfComputePSOCache);
+        object.metalVsTfNeedsDescriptor = false;
+        object.metalVsTfTier = GLProgramObject::MetalVsTfTier::None;
+        releaseRetainedMetalObject(object.metalVertexFunction);
+        object.metalVertexFunction = nullptr;
+        releaseRetainedMetalObject(object.metalFragmentFunction);
+        object.metalFragmentFunction = nullptr;
+        releaseRetainedMetalObject(object.metalPipelineState);
+        object.metalPipelineState = nullptr;
+        releaseMap(object.metalPipelineStateCache);
+        object.metalPipelineColorFormat = 0;
+        releaseRetainedMetalObject(object.gsPassThroughPipelineState);
+        object.gsPassThroughPipelineState = nullptr;
+        releaseMap(object.gsPassThroughPipelineStateCache);
+        object.gsPassThroughPipelineColorFormat = 0;
+        releaseRetainedMetalObject(object.gsPassThroughVertexFunction);
+        object.gsPassThroughVertexFunction = nullptr;
+        releaseRetainedMetalObject(object.gsPassThroughFragmentFunction);
+        object.gsPassThroughFragmentFunction = nullptr;
+        releaseRetainedMetalObject(object.metalGSVsComputePipelineState);
+        object.metalGSVsComputePipelineState = nullptr;
+        releaseMap(object.metalGSVsComputePSOCache);
+        object.metalGSVsComputeNeedsDescriptor = false;
+        releaseRetainedMetalObject(object.metalGSMeshPipelineState);
+        object.metalGSMeshPipelineState = nullptr;
+        releaseRetainedMetalObject(object.metalGSMeshFunction);
+        object.metalGSMeshFunction = nullptr;
+        releaseRetainedMetalObject(object.metalGSFragmentFunction);
+        object.metalGSFragmentFunction = nullptr;
+    }
+
+    void releaseProgramPipelineResources(GLProgramPipelineObject& pipeline) {
+        if (pipeline.syntheticTessProgram != nullptr) {
+            releaseProgramMetalResources(*pipeline.syntheticTessProgram);
+            pipeline.syntheticTessProgram.reset();
+        }
+        pipeline.syntheticTessProbeAttempted = false;
+        pipeline.syntheticTessVsSnapshot = 0;
+        pipeline.syntheticTessTcsSnapshot = 0;
+        pipeline.syntheticTessTesSnapshot = 0;
+        pipeline.syntheticTessFsSnapshot = 0;
+    }
+
+    void finalizeProgramDeletion(GLuint program) {
+        GLProgramObject* object = objects->programs().get(program);
+        if (object == nullptr) {
+            return;
+        }
+        std::vector<GLuint> attached = object->attachedShaders;
+        releaseProgramMetalResources(*object);
+        for (GLuint shaderId : attached) {
+            GLShaderObject* shaderObject = objects->shaders().get(shaderId);
+            if (shaderObject == nullptr) {
+                continue;
+            }
+            if (shaderObject->attachmentCount > 0) {
+                --shaderObject->attachmentCount;
+            }
+            if (shaderObject->deleteRequested && shaderObject->attachmentCount == 0) {
+                objects->shaders().erase(shaderId);
+            }
+        }
+        objects->programs().erase(program);
     }
 
     // Normalize a GL texture target for binding lookups.
@@ -21324,6 +21418,143 @@ std::uint64_t GLContext::metalAllocatedBytes() const {
     return 0;
 }
 
+GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
+    MetalResourceInventory inventory;
+    inventory.deviceAllocatedBytes = metalAllocatedBytes();
+    if (impl_->frameGraph) {
+        inventory.libraryCacheEntries = impl_->frameGraph->mslLibraryCacheEntries();
+    }
+
+    std::unordered_set<void*> bufferResources;
+    std::unordered_set<void*> textureResources;
+    std::unordered_set<void*> textureViewResources;
+    std::unordered_set<void*> samplerObjects;
+    std::unordered_set<void*> renderPipelines;
+    std::unordered_set<void*> computePipelines;
+    std::unordered_set<void*> functions;
+
+    auto allocatedSize = [](void* raw) -> std::uint64_t {
+        if (raw == nullptr) {
+            return 0;
+        }
+        id<MTLResource> resource = (__bridge id<MTLResource>)raw;
+        if (resource != nil && [resource respondsToSelector:@selector(allocatedSize)]) {
+            return static_cast<std::uint64_t>(resource.allocatedSize);
+        }
+        return 0;
+    };
+    auto addBuffer = [&](void* raw) {
+        if (raw == nullptr || !bufferResources.insert(raw).second) {
+            return;
+        }
+        ++inventory.bufferCount;
+        inventory.bufferBytes += allocatedSize(raw);
+    };
+    auto addTexture = [&](void* raw) {
+        if (raw == nullptr || !textureResources.insert(raw).second) {
+            return;
+        }
+        ++inventory.textureCount;
+        inventory.textureBytes += allocatedSize(raw);
+    };
+    auto addTextureView = [&](void* raw) {
+        if (raw == nullptr || !textureViewResources.insert(raw).second) {
+            return;
+        }
+        ++inventory.textureViewCount;
+        inventory.textureViewBytes += allocatedSize(raw);
+    };
+    auto addSampler = [&](void* raw) {
+        if (raw != nullptr && samplerObjects.insert(raw).second) {
+            ++inventory.samplerCount;
+        }
+    };
+    auto addRenderPipeline = [&](void* raw) {
+        if (raw != nullptr && renderPipelines.insert(raw).second) {
+            ++inventory.renderPipelineCount;
+        }
+    };
+    auto addComputePipeline = [&](void* raw) {
+        if (raw != nullptr && computePipelines.insert(raw).second) {
+            ++inventory.computePipelineCount;
+        }
+    };
+    auto addFunction = [&](void* raw) {
+        if (raw != nullptr && functions.insert(raw).second) {
+            ++inventory.functionCount;
+        }
+    };
+    auto addProgram = [&](const GLProgramObject& program) {
+        addComputePipeline(program.metalComputePipelineState);
+        addComputePipeline(program.metalTessControlPipelineState);
+        addComputePipeline(program.metalTessVertexPipelineState);
+        for (const auto& entry : program.metalTessVertexPSOCache) {
+            addComputePipeline(entry.second);
+        }
+        addComputePipeline(program.metalTessEvalComputePipelineState);
+        addComputePipeline(program.metalVsTfComputePipelineState);
+        for (const auto& entry : program.metalVsTfComputePSOCache) {
+            addComputePipeline(entry.second);
+        }
+        addComputePipeline(program.metalGSVsComputePipelineState);
+        for (const auto& entry : program.metalGSVsComputePSOCache) {
+            addComputePipeline(entry.second);
+        }
+        addRenderPipeline(program.metalPipelineState);
+        for (const auto& entry : program.metalPipelineStateCache) {
+            addRenderPipeline(entry.second);
+        }
+        addRenderPipeline(program.gsPassThroughPipelineState);
+        for (const auto& entry : program.gsPassThroughPipelineStateCache) {
+            addRenderPipeline(entry.second);
+        }
+        addRenderPipeline(program.metalGSMeshPipelineState);
+        addFunction(program.metalComputeFunction);
+        addFunction(program.metalVertexFunction);
+        addFunction(program.metalFragmentFunction);
+        addFunction(program.gsPassThroughVertexFunction);
+        addFunction(program.gsPassThroughFragmentFunction);
+        addFunction(program.metalGSMeshFunction);
+        addFunction(program.metalGSFragmentFunction);
+    };
+
+    auto* store = impl_->objects.get();
+    if (store == nullptr) {
+        return inventory;
+    }
+    store->buffers().forEach([&](GLuint, GLBufferObject& buffer) {
+        addBuffer(buffer.metalBuffer);
+        for (const auto& sidecar : buffer.fp64TransportSidecars) {
+            addBuffer(sidecar.metalBuffer);
+        }
+    });
+    store->textures().forEach([&](GLuint, GLTextureObject& texture) {
+        if (texture.viewSourceTexture != 0) {
+            addTextureView(texture.metalTexture);
+        } else {
+            addTexture(texture.metalTexture);
+        }
+        addTextureView(texture.metalSwizzledView);
+        addSampler(texture.metalSampler);
+    });
+    store->renderbuffers().forEach([&](GLuint, GLRenderbufferObject& renderbuffer) {
+        addTexture(renderbuffer.metalTexture);
+    });
+    store->samplers().forEach([&](GLuint, GLSamplerObject& sampler) {
+        addSampler(sampler.metalSampler);
+    });
+    store->programs().forEach([&](GLuint, GLProgramObject& program) {
+        addProgram(program);
+    });
+    store->programPipelines().forEach([&](GLuint, GLProgramPipelineObject& pipeline) {
+        if (pipeline.syntheticTessProgram != nullptr) {
+            addProgram(*pipeline.syntheticTessProgram);
+        }
+    });
+
+    return inventory;
+}
+
 bool GLContext::isTransformFeedbackActive() const {
     // Sprint 8 #9-B (CKPT85): per-TF-object active-state tracking.
     // GL 4.6 §13.2.2 mandates that begin/end/pause/resume validation is
@@ -26634,25 +26865,7 @@ bool GLContext::deleteProgram(GLuint program) {
         // current. `useProgram` finalises the deletion at that point.
         return true;
     }
-    // Inline helper: decrement shader attachment counts (mirrors the
-    // synthetic-detach that deleteProgram has always performed) and
-    // erase the program. Used from both the immediate-erase path (not
-    // currently bound) and the deferred-erase path (`useProgram` when
-    // replacing a delete-requested program).
-    std::vector<GLuint> attached = object->attachedShaders;
-    for (GLuint shaderId : attached) {
-        GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
-        if (shaderObject == nullptr) {
-            continue;
-        }
-        if (shaderObject->attachmentCount > 0) {
-            --shaderObject->attachmentCount;
-        }
-        if (shaderObject->deleteRequested && shaderObject->attachmentCount == 0) {
-            impl_->objects->shaders().erase(shaderId);
-        }
-    }
-    impl_->objects->programs().erase(program);
+    impl_->finalizeProgramDeletion(program);
     return true;
 }
 
@@ -30979,6 +31192,7 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->computeLocalSizeX = 0;
     programObject->computeLocalSizeY = 0;
     programObject->computeLocalSizeZ = 0;
+    impl_->releaseProgramMetalResources(*programObject);
     programObject->metalPipelineState = nullptr;
     // Release the retained MTLComputePipelineState on relink.
     releaseRetainedMetalObject(programObject->metalComputePipelineState);
@@ -34671,20 +34885,7 @@ bool GLContext::useProgram(GLuint program) {
     if (outgoing != 0 && outgoing != program) {
         GLProgramObject* outgoingObj = impl_->objects->programs().get(outgoing);
         if (outgoingObj != nullptr && outgoingObj->deleteRequested) {
-            std::vector<GLuint> attached = outgoingObj->attachedShaders;
-            for (GLuint shaderId : attached) {
-                GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
-                if (shaderObject == nullptr) {
-                    continue;
-                }
-                if (shaderObject->attachmentCount > 0) {
-                    --shaderObject->attachmentCount;
-                }
-                if (shaderObject->deleteRequested && shaderObject->attachmentCount == 0) {
-                    impl_->objects->shaders().erase(shaderId);
-                }
-            }
-            impl_->objects->programs().erase(outgoing);
+            impl_->finalizeProgramDeletion(outgoing);
         }
     }
     impl_->state->useProgram(program);
@@ -37500,18 +37701,7 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
     // useProgramStages swap leaks one set of MTLComputePipelineStates
     // per swap.
     if (ppo.syntheticTessProgram != nullptr) {
-        GLProgramObject* old = ppo.syntheticTessProgram.get();
-        releaseRetainedMetalObject(old->metalTessControlPipelineState);
-        old->metalTessControlPipelineState = nullptr;
-        releaseRetainedMetalObject(old->metalTessVertexPipelineState);
-        old->metalTessVertexPipelineState = nullptr;
-        for (auto& entry : old->metalTessVertexPSOCache) {
-            releaseRetainedMetalObject(entry.second);
-        }
-        old->metalTessVertexPSOCache.clear();
-        old->metalTessVertexNeedsDescriptor = false;
-        releaseRetainedMetalObject(old->metalTessEvalComputePipelineState);
-        old->metalTessEvalComputePipelineState = nullptr;
+        releaseProgramMetalResources(*ppo.syntheticTessProgram);
     }
     ppo.syntheticTessProgram.reset();
     ppo.syntheticTessVsSnapshot = vsName;
@@ -39267,7 +39457,11 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         (program.gsPassThroughVertexMSLLayered != routeLayer ||
          program.gsPassThroughVertexMSLViewportArray != routeViewportIndex)) {
         program.gsPassThroughVertexMSL.clear();
+        for (auto& entry : program.gsPassThroughPipelineStateCache) {
+            releaseRetainedMetalObject(entry.second);
+        }
         program.gsPassThroughPipelineStateCache.clear();
+        releaseRetainedMetalObject(program.gsPassThroughPipelineState);
         program.gsPassThroughPipelineState = nullptr;
         program.gsPassThroughPipelineColorFormat = 0;
         releaseRetainedMetalObject(program.gsPassThroughVertexFunction);
@@ -39500,7 +39694,11 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             program.gsPassThroughFragmentMSLPrimIdLoc = replayDraw.primitiveIDLocation;
             program.gsPassThroughFragmentMSLActive = true;
             // Rebuilding FS invalidates any cached pipeline state.
+            for (auto& entry : program.gsPassThroughPipelineStateCache) {
+                releaseRetainedMetalObject(entry.second);
+            }
             program.gsPassThroughPipelineStateCache.clear();
+            releaseRetainedMetalObject(program.gsPassThroughPipelineState);
             program.gsPassThroughPipelineState = nullptr;
             program.gsPassThroughPipelineColorFormat = 0;
             releaseRetainedMetalObject(program.gsPassThroughFragmentFunction);
@@ -48910,6 +49108,29 @@ bool GLContext::createProgramPipelines(GLsizei n, GLuint* pipelines) {
             // DSA glCreateProgramPipelines instantiates up-front.
             obj->instantiated = true;
         }
+    }
+    return true;
+}
+
+bool GLContext::deleteProgramPipelines(GLsizei n, const GLuint* pipelines) {
+    if (n < 0 || (n > 0 && pipelines == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLuint boundPipeline = impl_->state->currentProgramPipeline();
+    for (GLsizei i = 0; i < n; ++i) {
+        const GLuint name = pipelines[i];
+        if (name == 0) {
+            continue;
+        }
+        if (name == boundPipeline) {
+            impl_->state->setCurrentProgramPipeline(0);
+        }
+        if (GLProgramPipelineObject* pipeline = impl_->objects->programPipelines().get(name);
+            pipeline != nullptr) {
+            impl_->releaseProgramPipelineResources(*pipeline);
+        }
+        impl_->objects->programPipelines().erase(name);
     }
     return true;
 }

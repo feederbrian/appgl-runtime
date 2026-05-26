@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <source_location>
@@ -375,6 +376,7 @@ public:
     bool createVertexArrays(GLsizei n, GLuint* arrays);
     bool createTransformFeedbacks(GLsizei n, GLuint* ids);
     bool createProgramPipelines(GLsizei n, GLuint* pipelines);
+    bool deleteProgramPipelines(GLsizei n, const GLuint* pipelines);
     bool createQueries(GLenum target, GLsizei n, GLuint* ids);
 
     // GL 4.5 — DSA buffer operations.
@@ -638,6 +640,22 @@ public:
     PipelineCacheMetrics pipelineCacheMetrics() const;
     void resetPipelineCacheMetrics();
     std::uint64_t metalAllocatedBytes() const;
+
+    struct MetalResourceInventory {
+        std::uint64_t deviceAllocatedBytes = 0;
+        std::uint64_t bufferCount = 0;
+        std::uint64_t bufferBytes = 0;
+        std::uint64_t textureCount = 0;
+        std::uint64_t textureBytes = 0;
+        std::uint64_t textureViewCount = 0;
+        std::uint64_t textureViewBytes = 0;
+        std::uint64_t samplerCount = 0;
+        std::uint64_t renderPipelineCount = 0;
+        std::uint64_t computePipelineCount = 0;
+        std::uint64_t functionCount = 0;
+        std::uint64_t libraryCacheEntries = 0;
+    };
+    MetalResourceInventory metalResourceInventory() const;
 
     // Transform feedback active state tracking (for CTS api_errors_test).
     bool isTransformFeedbackActive() const;

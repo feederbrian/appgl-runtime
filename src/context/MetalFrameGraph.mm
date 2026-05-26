@@ -16,6 +16,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <unordered_map>
@@ -35,6 +36,27 @@ namespace appgl {
 
 static constexpr NSUInteger kAppGLFragCoordParamsBufferSlot = 15;
 static constexpr NSUInteger kAppGLFragmentShadingRateParamsBufferSlot = 30;
+
+static void releaseOwnedObjCObject(id object) {
+#if __has_feature(objc_arc)
+    (void)object;
+#else
+    [object release];
+#endif
+}
+
+static std::size_t mslLibraryCacheLimit() {
+    const char* raw = std::getenv("APPGL_MSL_LIBRARY_CACHE_LIMIT");
+    if (raw == nullptr || raw[0] == '\0') {
+        return 512;
+    }
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(raw, &end, 10);
+    if (end == raw) {
+        return 512;
+    }
+    return static_cast<std::size_t>(parsed);
+}
 
 static bool appglEnvEnabledDefaultOn(const char* name) {
     const char* value = std::getenv(name);
@@ -826,6 +848,11 @@ struct MetalFrameGraph::Impl {
         // ADV-14: persist the pipeline binary archive to disk so the
         // next launch gets pre-compiled GPU binaries.
         savePipelineArchive();
+        for (auto& entry : mslLibraryCache) {
+            releaseOwnedObjCObject(entry.second);
+        }
+        mslLibraryCache.clear();
+        mslLibraryCacheOrder.clear();
     }
 
     void attachFragmentShadingRateMap(
@@ -8265,6 +8292,9 @@ fragment float4 appgl_immediate_textured_fs(
         }
         return 0;
     }
+    std::uint64_t getMslLibraryCacheEntries() const {
+        return static_cast<std::uint64_t>(mslLibraryCache.size());
+    }
 
 private:
     void ensureDrawableResources() {
@@ -8524,6 +8554,7 @@ private:
     // silently return the wrong library, but in practice MSL texts
     // are unique-enough that this doesn't happen.
     std::unordered_map<std::size_t, id<MTLLibrary>> mslLibraryCache;
+    std::vector<std::size_t> mslLibraryCacheOrder;
 
     // ADV-4: reusable render pass descriptor.  Avoids allocating a
     // fresh autoreleased ObjC object at each of the five call sites.
@@ -8568,6 +8599,19 @@ private:
         id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil error:&err];
         if (lib != nil) {
             mslLibraryCache[hash] = lib;
+            mslLibraryCacheOrder.push_back(hash);
+            const std::size_t limit = mslLibraryCacheLimit();
+            while (limit > 0 && mslLibraryCache.size() > limit &&
+                   !mslLibraryCacheOrder.empty()) {
+                const std::size_t evictHash = mslLibraryCacheOrder.front();
+                mslLibraryCacheOrder.erase(mslLibraryCacheOrder.begin());
+                auto evict = mslLibraryCache.find(evictHash);
+                if (evict == mslLibraryCache.end()) {
+                    continue;
+                }
+                releaseOwnedObjCObject(evict->second);
+                mslLibraryCache.erase(evict);
+            }
         } else if (std::getenv("APPGL_TRACE_SHADER_BUILD")) {
             std::fprintf(stderr, "[APPGL] MSL library build failed: %s\n",
                 err ? err.localizedDescription.UTF8String : "(no err)");
@@ -9574,6 +9618,10 @@ void MetalFrameGraph::resetPipelineCacheMetrics() {
 
 std::uint64_t MetalFrameGraph::metalAllocatedBytes() const {
     return impl_->getMetalAllocatedBytes();
+}
+
+std::uint64_t MetalFrameGraph::mslLibraryCacheEntries() const {
+    return impl_->getMslLibraryCacheEntries();
 }
 
 }  // namespace appgl

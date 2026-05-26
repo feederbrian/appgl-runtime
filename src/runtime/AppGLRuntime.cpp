@@ -1935,6 +1935,19 @@ void Runtime::snapshotContextInventoryLocked(GLContext* context) {
             + static_cast<std::uint64_t>(rb.depth32.size() * sizeof(GLfloat))
             + static_cast<std::uint64_t>(rb.stencil8.size());
     });
+    const auto metal = context->metalResourceInventory();
+    snap.metalDeviceAllocatedBytes = metal.deviceAllocatedBytes;
+    snap.metalBufferCount = metal.bufferCount;
+    snap.metalBufferBytes = metal.bufferBytes;
+    snap.metalTextureCount = metal.textureCount;
+    snap.metalTextureBytes = metal.textureBytes;
+    snap.metalTextureViewCount = metal.textureViewCount;
+    snap.metalTextureViewBytes = metal.textureViewBytes;
+    snap.metalSamplerCount = metal.samplerCount;
+    snap.metalRenderPipelineCount = metal.renderPipelineCount;
+    snap.metalComputePipelineCount = metal.computePipelineCount;
+    snap.metalFunctionCount = metal.functionCount;
+    snap.metalLibraryCacheEntries = metal.libraryCacheEntries;
     const auto metrics = context->pipelineCacheMetrics();
     snap.pipelineCacheHits = metrics.hits;
     snap.pipelineCacheMisses = metrics.misses;
@@ -2086,6 +2099,7 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
     std::uint64_t pipelineBuildAttempts = 0;
     std::uint64_t pipelineBuildFailures = 0;
     double pipelineCumulativeBuildMillis = 0.0;
+    GLContext::MetalResourceInventory metalInventory;
     if (contextIsLive) {
         auto& store = currentContext->objects();
 
@@ -2129,6 +2143,7 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
         pipelineBuildAttempts = metrics.buildAttempts;
         pipelineBuildFailures = metrics.buildFailures;
         pipelineCumulativeBuildMillis = metrics.cumulativeBuildMillis;
+        metalInventory = currentContext->metalResourceInventory();
     } else if (lastKnownInventory_.valid) {
         const auto& snap = lastKnownInventory_;
         stream << "\"buffers\":" << snap.buffers << ",";
@@ -2151,6 +2166,18 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
         pipelineBuildAttempts = snap.pipelineBuildAttempts;
         pipelineBuildFailures = snap.pipelineBuildFailures;
         pipelineCumulativeBuildMillis = snap.pipelineCumulativeBuildMillis;
+        metalInventory.deviceAllocatedBytes = snap.metalDeviceAllocatedBytes;
+        metalInventory.bufferCount = snap.metalBufferCount;
+        metalInventory.bufferBytes = snap.metalBufferBytes;
+        metalInventory.textureCount = snap.metalTextureCount;
+        metalInventory.textureBytes = snap.metalTextureBytes;
+        metalInventory.textureViewCount = snap.metalTextureViewCount;
+        metalInventory.textureViewBytes = snap.metalTextureViewBytes;
+        metalInventory.samplerCount = snap.metalSamplerCount;
+        metalInventory.renderPipelineCount = snap.metalRenderPipelineCount;
+        metalInventory.computePipelineCount = snap.metalComputePipelineCount;
+        metalInventory.functionCount = snap.metalFunctionCount;
+        metalInventory.libraryCacheEntries = snap.metalLibraryCacheEntries;
     } else {
         stream << "\"buffers\":0,\"textures\":0,\"samplers\":0,\"renderbuffers\":0,"
                   "\"framebuffers\":0,\"vertexArrays\":0,\"shaders\":0,\"programs\":0,"
@@ -2159,10 +2186,25 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
     }
     stream << "},";
 
+    stream << "\"metalResources\":{"
+           << "\"deviceAllocatedBytes\":" << metalInventory.deviceAllocatedBytes << ","
+           << "\"buffers\":" << metalInventory.bufferCount << ","
+           << "\"bufferBytes\":" << metalInventory.bufferBytes << ","
+           << "\"textures\":" << metalInventory.textureCount << ","
+           << "\"textureBytes\":" << metalInventory.textureBytes << ","
+           << "\"textureViews\":" << metalInventory.textureViewCount << ","
+           << "\"textureViewBytes\":" << metalInventory.textureViewBytes << ","
+           << "\"samplers\":" << metalInventory.samplerCount << ","
+           << "\"renderPipelines\":" << metalInventory.renderPipelineCount << ","
+           << "\"computePipelines\":" << metalInventory.computePipelineCount << ","
+           << "\"functions\":" << metalInventory.functionCount << ","
+           << "\"libraryCacheEntries\":" << metalInventory.libraryCacheEntries
+           << "},";
+
     // ── Pipeline cache metrics ──
-    // Entries = total misses (every miss constructs a new MTLRenderPipelineState,
-    // and the frame graph currently does not evict entries, so this count is
-    // monotonic over the context's lifetime).
+    // Entries remains the lifetime success count for compatibility with
+    // existing tooling. Live retained pipeline objects are reported under
+    // `metalResources.renderPipelines`.
     //
     // Phase 8X Group 4d follow-up⁴ — `buildAttempts` and `buildFailures` are
     // emitted alongside hits/misses so BAR-side tooling can disambiguate
@@ -6690,19 +6732,7 @@ void APIENTRY glDeleteProgramPipelines(GLsizei n, const GLuint* pipelines) {
         recordValidationError(ctx, "glDeleteProgramPipelines", GL_INVALID_VALUE, "n < 0");
         return;
     }
-    // GL 4.6 §7.4: if a currently-bound pipeline is deleted, the
-    // binding reverts to 0. CTS `sepshaderobjs.PipelineApi`
-    // explicitly checks `glGetIntegerv(GL_PROGRAM_PIPELINE_BINDING)`
-    // returns 0 after deleting the bound pipeline.
-    const GLuint boundPipeline = ctx->state().currentProgramPipeline();
-    for (GLsizei i = 0; i < n; ++i) {
-        if (pipelines[i] != 0) {
-            if (pipelines[i] == boundPipeline) {
-                ctx->state().setCurrentProgramPipeline(0);
-            }
-            ctx->objects().programPipelines().erase(pipelines[i]);
-        }
-    }
+    if (!ctx->deleteProgramPipelines(n, pipelines)) return;
     markProgramFunction(FunctionId::glDeleteProgramPipelines, "Program pipeline deletion.");
     Runtime::shared().recordBootstrapTrace("glDeleteProgramPipelines(n=" + std::to_string(n) + ")");
 }

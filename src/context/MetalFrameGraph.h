@@ -1305,6 +1305,7 @@ public:
 
     // Metal device allocated memory (bytes).  Returns 0 if device unavailable.
     std::uint64_t metalAllocatedBytes() const;
+    std::uint64_t mslLibraryCacheEntries() const;
 
 private:
     struct Impl;
