@@ -4981,6 +4981,114 @@ fragment float4 appgl_immediate_textured_fs(
             activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
             resetCachedEncoderState();
         }
+        auto drainCurrentCommandBuffer = [&]() -> bool {
+            if (currentCommandBuffer == nil) {
+                return true;
+            }
+            if (!usesOffscreenTarget && currentDrawable != nil && pendingPresent) {
+                [currentCommandBuffer presentDrawable:currentDrawable];
+            }
+            const bool completed = currentCommandBufferLease.commitAndWait(@"layered-clear-drain-current");
+            if (ringSlotAcquired) {
+                signalRingSlotNow();
+                advanceRingBuffer();
+            }
+            currentCommandBuffer = nil;
+            currentDrawable = nil;
+            pendingPresent = false;
+            resetCachedEncoderState();
+            return completed;
+        };
+        if (arrayLength > 0) {
+            if (!drainCurrentCommandBuffer()) {
+                return false;
+            }
+
+            MetalCommandBufferLease clearLease;
+            id<MTLCommandBuffer> clearCommandBuffer = nil;
+            auto beginClearChunk = [&]() -> bool {
+                if (clearCommandBuffer != nil) {
+                    return true;
+                }
+                clearLease = makeCommandBuffer(@"layeredClear");
+                clearCommandBuffer = clearLease.get();
+                if (clearCommandBuffer == nil) {
+                    return false;
+                }
+                attachErrorHandler(clearCommandBuffer, @"layeredClear");
+                return true;
+            };
+            auto commitClearChunk = [&]() -> bool {
+                if (clearCommandBuffer == nil) {
+                    return true;
+                }
+                const bool completed = clearLease.commitAndWait(@"layered-clear-sync");
+                clearCommandBuffer = nil;
+                resetCachedEncoderState();
+                return completed;
+            };
+            auto encodeClearPass = [&](std::uint32_t targetSlice,
+                                       std::uint32_t targetArrayLength) -> bool {
+                if (!beginClearChunk()) {
+                    return false;
+                }
+                @autoreleasepool {
+                    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+                    if (isColor) {
+                        pass.colorAttachments[0].texture = tex;
+                        pass.colorAttachments[0].level = level;
+                        pass.colorAttachments[0].slice = targetSlice;
+                        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+                        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+                        pass.colorAttachments[0].clearColor =
+                            MTLClearColorMake(rgba[0], rgba[1], rgba[2], rgba[3]);
+                    }
+                    if (isDepth) {
+                        pass.depthAttachment.texture = tex;
+                        pass.depthAttachment.level = level;
+                        pass.depthAttachment.slice = targetSlice;
+                        pass.depthAttachment.loadAction = MTLLoadActionClear;
+                        pass.depthAttachment.storeAction = MTLStoreActionStore;
+                        pass.depthAttachment.clearDepth = depth;
+                    }
+                    if (isStencil) {
+                        pass.stencilAttachment.texture = tex;
+                        pass.stencilAttachment.level = level;
+                        pass.stencilAttachment.slice = targetSlice;
+                        pass.stencilAttachment.loadAction = MTLLoadActionClear;
+                        pass.stencilAttachment.storeAction = MTLStoreActionStore;
+                        pass.stencilAttachment.clearStencil = stencil & 0xFF;
+                    }
+                    if (targetArrayLength > 0) {
+                        pass.renderTargetArrayLength = targetArrayLength;
+                    }
+                    id<MTLRenderCommandEncoder> enc =
+                        [clearCommandBuffer renderCommandEncoderWithDescriptor:pass];
+                    if (enc == nil) {
+                        return false;
+                    }
+                    [enc endEncoding];
+                }
+                return true;
+            };
+            if (!isColor && (isDepth || isStencil)) {
+                static constexpr std::uint32_t kMaxLayeredClearPassesPerCommandBuffer = 8;
+                std::uint32_t passesInCommandBuffer = 0;
+                for (std::uint32_t i = 0; i < arrayLength; ++i) {
+                    if (!encodeClearPass(slice + i, 0)) return false;
+                    ++passesInCommandBuffer;
+                    if (passesInCommandBuffer == kMaxLayeredClearPassesPerCommandBuffer) {
+                        if (!commitClearChunk()) return false;
+                        passesInCommandBuffer = 0;
+                    }
+                }
+                return commitClearChunk();
+            }
+            if (!encodeClearPass(slice, arrayLength)) {
+                return false;
+            }
+            return commitClearChunk();
+        }
         if (currentCommandBuffer == nil) {
             ensureCurrentCommandBuffer(@"layeredClear");
             if (currentCommandBuffer == nil) return false;

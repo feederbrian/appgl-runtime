@@ -218,7 +218,16 @@ public:
         while (afterAcquire > observedPeak
                && !state_->peakInFlight.compare_exchange_weak(observedPeak, afterAcquire)) {}
         assert(afterAcquire <= state_->inFlightBound && "Metal command buffer in-flight bound exceeded");
-        id<MTLCommandBuffer> commandBuffer = [commandQueue_ commandBuffer];
+        id<MTLCommandBuffer> commandBuffer = nil;
+        @autoreleasepool {
+            commandBuffer = [commandQueue_ commandBuffer];
+            // `commandBuffer` is autoreleased. Take a temporary retain before
+            // draining this local pool so the lease becomes the only owner that
+            // survives until the completion handler releases it.
+            if (commandBuffer != nil) {
+                [commandBuffer retain];
+            }
+        }
         if (commandBuffer == nil) {
             const std::uint32_t previous = state_->inFlightCount.fetch_sub(1);
             assert(previous > 0 && "Metal command buffer in-flight count underflow after allocation failure");
@@ -238,7 +247,9 @@ public:
                          state_->inFlightBound);
             std::fflush(stderr);
         }
-        return MetalCommandBufferLease(state_, commandBuffer);
+        MetalCommandBufferLease lease(state_, commandBuffer);
+        [commandBuffer release];
+        return lease;
     }
 
     bool waitForRingSlot(dispatch_semaphore_t semaphore, NSString* label = nil) {
