@@ -21423,6 +21423,20 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
     inventory.deviceAllocatedBytes = metalAllocatedBytes();
     if (impl_->frameGraph) {
         inventory.libraryCacheEntries = impl_->frameGraph->mslLibraryCacheEntries();
+        const auto frameGraphMetal = impl_->frameGraph->internalMetalResourceInventory();
+        inventory.frameGraphBufferCount = frameGraphMetal.bufferCount;
+        inventory.frameGraphBufferBytes = frameGraphMetal.bufferBytes;
+        inventory.frameGraphTextureCount = frameGraphMetal.textureCount;
+        inventory.frameGraphTextureBytes = frameGraphMetal.textureBytes;
+        inventory.frameGraphDrawableCount = frameGraphMetal.drawableCount;
+        inventory.frameGraphDrawableTextureBytes = frameGraphMetal.drawableTextureBytes;
+        inventory.frameGraphSamplerCount = frameGraphMetal.samplerCount;
+        inventory.frameGraphRenderPipelineCount = frameGraphMetal.renderPipelineCount;
+        inventory.frameGraphComputePipelineCount = frameGraphMetal.computePipelineCount;
+        inventory.frameGraphFunctionCount = frameGraphMetal.functionCount;
+        inventory.frameGraphLibraryCount = frameGraphMetal.libraryCount;
+        inventory.frameGraphDepthStencilStateCount = frameGraphMetal.depthStencilStateCount;
+        inventory.frameGraphBinaryArchiveCount = frameGraphMetal.binaryArchiveCount;
     }
 
     std::unordered_set<void*> bufferResources;

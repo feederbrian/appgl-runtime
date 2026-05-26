@@ -45,6 +45,43 @@ static void releaseOwnedObjCObject(id object) {
 #endif
 }
 
+static std::uint64_t metalAllocatedSize(id object) {
+    if (object == nil || ![object respondsToSelector:@selector(allocatedSize)]) {
+        return 0;
+    }
+    return static_cast<std::uint64_t>(((id<MTLResource>)object).allocatedSize);
+}
+
+static void releaseOwnedMetalResource(id object) {
+    if (object != nil && [object respondsToSelector:@selector(setPurgeableState:)]) {
+        [(id<MTLResource>)object setPurgeableState:MTLPurgeableStateEmpty];
+    }
+    releaseOwnedObjCObject(object);
+}
+
+class ScopedOwnedObjCObject {
+public:
+    explicit ScopedOwnedObjCObject(id object = nil) : object_(object) {}
+    ScopedOwnedObjCObject(const ScopedOwnedObjCObject&) = delete;
+    ScopedOwnedObjCObject& operator=(const ScopedOwnedObjCObject&) = delete;
+    ~ScopedOwnedObjCObject() {
+        releaseOwnedObjCObject(object_);
+    }
+    id release() {
+        id object = object_;
+        object_ = nil;
+        return object;
+    }
+    void reset(id object = nil) {
+        if (object_ != object) {
+            releaseOwnedObjCObject(object_);
+            object_ = object;
+        }
+    }
+private:
+    id object_ = nil;
+};
+
 static std::size_t mslLibraryCacheLimit() {
     const char* raw = std::getenv("APPGL_MSL_LIBRARY_CACHE_LIMIT");
     if (raw == nullptr || raw[0] == '\0') {
@@ -848,11 +885,77 @@ struct MetalFrameGraph::Impl {
         // ADV-14: persist the pipeline binary archive to disk so the
         // next launch gets pre-compiled GPU binaries.
         savePipelineArchive();
+        releaseDefaultFramebufferTextures();
+        readbackSourceTexture = nil;
+        for (id<MTLBuffer>& buffer : ringBuffers) {
+            releaseOwnedMetalResource(buffer);
+            buffer = nil;
+        }
+        for (auto& entry : depthStencilCache) {
+            releaseOwnedObjCObject(entry.second);
+        }
+        depthStencilCache.clear();
+        for (auto& entry : tessDomainCapturePSOCache) {
+            releaseOwnedObjCObject(entry.second);
+        }
+        tessDomainCapturePSOCache.clear();
         for (auto& entry : mslLibraryCache) {
             releaseOwnedObjCObject(entry.second);
         }
         mslLibraryCache.clear();
         mslLibraryCacheOrder.clear();
+        releaseOwnedObjCObject(solidColorLibrary);
+        releaseOwnedObjCObject(solidColorVertexFn);
+        releaseOwnedObjCObject(solidColorFragmentFn);
+        releaseOwnedObjCObject(solidColorPipelineState);
+        releaseOwnedObjCObject(tessDomainGenLibrary);
+        releaseOwnedObjCObject(tessDomainGenPipelineState);
+        releaseOwnedObjCObject(tessDomainCaptureLibrary);
+        releaseOwnedObjCObject(tessFactorClampPipelineState);
+        releaseOwnedObjCObject(tessDomainPortLibrary);
+        releaseOwnedObjCObject(tessDomainPortTrianglesPSO);
+        releaseOwnedObjCObject(tessDomainPortQuadsPSO);
+        releaseOwnedObjCObject(immediateModeLibrary);
+        releaseOwnedObjCObject(immediateModeVertexFn);
+        releaseOwnedObjCObject(immediateModeColorFragmentFn);
+        releaseOwnedObjCObject(immediateModeTexturedFragmentFn);
+        releaseOwnedObjCObject(immediateModeColorPipelineState);
+        releaseOwnedObjCObject(immediateModeTexturedPipelineState);
+        releaseOwnedObjCObject(immediateModeSamplerState);
+        releaseOwnedObjCObject(reusablePassDescriptor);
+        releaseOwnedObjCObject(pipelineArchive);
+    }
+
+    void releaseDefaultFramebufferTextures() {
+        releaseOwnedTexture(depthStencilTexture);
+        releaseOwnedTexture(offscreenColorTexture);
+    }
+
+    void releaseOwnedTexture(id<MTLTexture>& texture) {
+        if (texture == nil) {
+            return;
+        }
+        if (readbackSourceTexture == texture) {
+            readbackSourceTexture = nil;
+        }
+        releaseOwnedMetalResource(texture);
+        texture = nil;
+    }
+
+    void replaceOwnedTexture(id<MTLTexture>& slot, id<MTLTexture> replacement) {
+        if (slot == replacement) {
+            return;
+        }
+        releaseOwnedTexture(slot);
+        slot = replacement;
+    }
+
+    void replaceOwnedObjCObject(id& slot, id replacement) {
+        if (slot == replacement) {
+            return;
+        }
+        releaseOwnedObjCObject(slot);
+        slot = replacement;
     }
 
     void attachFragmentShadingRateMap(
@@ -891,7 +994,7 @@ struct MetalFrameGraph::Impl {
         }
         endRenderPass();
         invalidateTransientState();
-        ensureDrawableResources();
+        releaseDefaultFramebufferTextures();
     }
 
     void enableOffscreen(GLsizei width, GLsizei height) {
@@ -1315,6 +1418,7 @@ struct MetalFrameGraph::Impl {
         id<MTLTexture> fboDepthStencilTex = (info.fboDepthStencilTexture != nullptr)
             ? (__bridge id<MTLTexture>)info.fboDepthStencilTexture : nil;
         id<MTLTexture> attachmentlessColorTex = nil;
+        ScopedOwnedObjCObject attachmentlessColorTexRelease;
         if (isAttachmentlessFBODraw) {
             const NSUInteger fboWidth =
                 static_cast<NSUInteger>(std::max<GLsizei>(info.fboWidth, 1));
@@ -1334,9 +1438,11 @@ struct MetalFrameGraph::Impl {
                 dummyDesc.arrayLength = fboLayers;
             }
             attachmentlessColorTex = [device newTextureWithDescriptor:dummyDesc];
+            attachmentlessColorTexRelease.reset(attachmentlessColorTex);
             fboColorTex = attachmentlessColorTex;
         }
         id<MTLTexture> dsOnlyColorTex = nil;
+        ScopedOwnedObjCObject dsOnlyColorTexRelease;
         if (isFBODraw && fboColorTex == nil && fboDepthStencilTex != nil) {
             MTLTextureDescriptor* dummyDesc =
                 [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
@@ -1350,6 +1456,7 @@ struct MetalFrameGraph::Impl {
                 dummyDesc.sampleCount = fboDepthStencilTex.sampleCount;
             }
             dsOnlyColorTex = [device newTextureWithDescriptor:dummyDesc];
+            dsOnlyColorTexRelease.reset(dsOnlyColorTex);
             fboColorTex = dsOnlyColorTex;
         }
 
@@ -1450,10 +1557,19 @@ struct MetalFrameGraph::Impl {
         id<MTLArgumentEncoder> vertArgEncoderSet0 = nil;
         id<MTLArgumentEncoder> fragArgEncoderSet1 = nil;
         id<MTLArgumentEncoder> vertArgEncoderSet1 = nil;
+        ScopedOwnedObjCObject fragArgEncoderSet0Release;
+        ScopedOwnedObjCObject vertArgEncoderSet0Release;
+        ScopedOwnedObjCObject fragArgEncoderSet1Release;
+        ScopedOwnedObjCObject vertArgEncoderSet1Release;
         // Seeded from the program's cached functions; populated by the
         // pipeline-build branch on first miss.
         id<MTLFunction> cachedVertFn = (__bridge id<MTLFunction>)info.metalVertexFunction;
         id<MTLFunction> cachedFragFn = (__bridge id<MTLFunction>)info.metalFragmentFunction;
+        ScopedOwnedObjCObject ownedEmptyConstants;
+        ScopedOwnedObjCObject ownedVertFn;
+        ScopedOwnedObjCObject ownedFragFn;
+        ScopedOwnedObjCObject ownedPipelineDescriptor;
+        ScopedOwnedObjCObject ownedPipelineState;
 
         id<MTLRenderPipelineState> pipelineState = nil;
         if (info.pipelineStateCacheOut != nullptr) {
@@ -1541,6 +1657,7 @@ struct MetalFrameGraph::Impl {
             //    state. Use newFunctionWithName:constantValues:... ..."
             // at pipeline-descriptor validation time.
             MTLFunctionConstantValues* emptyConstants = [[MTLFunctionConstantValues alloc] init];
+            ownedEmptyConstants.reset(emptyConstants);
             NSError* vertFnError = nil;
             id<MTLFunction> vertFn = [vertLib newFunctionWithName:@"main0"
                                                    constantValues:emptyConstants
@@ -1554,6 +1671,7 @@ struct MetalFrameGraph::Impl {
                 recordBuildFailure("vertex-function", vertFnError);
                 return false;
             }
+            ownedVertFn.reset(vertFn);
             // Step 7-4: cache the MTLFunction on the program so future
             // pipeline-cache hits can still reach it for argbuf encoder
             // creation. Only populated when the caller opts in by
@@ -1602,6 +1720,7 @@ struct MetalFrameGraph::Impl {
                     recordBuildFailure("fragment-function", fragFnError);
                     return false;
                 }
+                ownedFragFn.reset(fragFn);
                 // Step 7-4: cache the fragment MTLFunction. See the
                 // matching vertex-function block above.
                 if (useArgBuf) {
@@ -1762,6 +1881,7 @@ struct MetalFrameGraph::Impl {
             }
 
             MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+            ownedPipelineDescriptor.reset(desc);
             desc.vertexFunction = vertFn;
             desc.fragmentFunction = info.rasterizerDiscard ? nil : fragFn;
             // Attributeless draws don't need a vertex descriptor at all.
@@ -2191,6 +2311,7 @@ struct MetalFrameGraph::Impl {
                 recordBuildFailure("pipeline-state", error);
                 return false;
             }
+            ownedPipelineState.reset(pipelineState);
             // addPipelineToArchive(desc);  // ADV-14: disabled pending investigation
 
             const auto buildEnd = std::chrono::steady_clock::now();
@@ -2260,9 +2381,11 @@ struct MetalFrameGraph::Impl {
             }
             if (cachedVertFn != nil && vertNeedsSet0) {
                 vertArgEncoderSet0 = [cachedVertFn newArgumentEncoderWithBufferIndex:24];
+                vertArgEncoderSet0Release.reset(vertArgEncoderSet0);
             }
             if (cachedFragFn != nil && fragNeedsSet0) {
                 fragArgEncoderSet0 = [cachedFragFn newArgumentEncoderWithBufferIndex:24];
+                fragArgEncoderSet0Release.reset(fragArgEncoderSet0);
             }
             bool vertNeedsSet1 = vertexUsesArgBuf &&
                 (info.vertexUniformData != nullptr && info.vertexUniformSize > 0);
@@ -2275,9 +2398,11 @@ struct MetalFrameGraph::Impl {
             }
             if (cachedVertFn != nil && vertNeedsSet1) {
                 vertArgEncoderSet1 = [cachedVertFn newArgumentEncoderWithBufferIndex:25];
+                vertArgEncoderSet1Release.reset(vertArgEncoderSet1);
             }
             if (cachedFragFn != nil && fragNeedsSet1) {
                 fragArgEncoderSet1 = [cachedFragFn newArgumentEncoderWithBufferIndex:25];
+                fragArgEncoderSet1Release.reset(fragArgEncoderSet1);
             }
         }
 
@@ -2344,7 +2469,7 @@ struct MetalFrameGraph::Impl {
                                             mipmapped:NO];
                 dd.storageMode = MTLStorageModePrivate;
                 dd.usage = MTLTextureUsageRenderTarget;
-                depthStencilTexture = [device newTextureWithDescriptor:dd];
+                replaceOwnedTexture(depthStencilTexture, [device newTextureWithDescriptor:dd]);
                 passDepthStencil = depthStencilTexture;
                 drawableWidth = static_cast<GLsizei>(colorTexture.width);
                 drawableHeight = static_cast<GLsizei>(colorTexture.height);
@@ -2380,7 +2505,7 @@ struct MetalFrameGraph::Impl {
                         dd.textureType = MTLTextureType2DMultisample;
                         dd.sampleCount = colorTexture.sampleCount;
                     }
-                    depthStencilTexture = [device newTextureWithDescriptor:dd];
+                    replaceOwnedTexture(depthStencilTexture, [device newTextureWithDescriptor:dd]);
                     passDepthStencil = depthStencilTexture;
                 } else {
                     APPGL_LOG(PIPELINE, @"[FG] FBO depth/color sample-count MISMATCH: depth=%lu color=%lu — dropping depth",
@@ -4550,6 +4675,7 @@ kernel void spvGenTessDomain(
         if (fn == nil) {
             return false;
         }
+        ScopedOwnedObjCObject fnRelease(fn);
         NSError* psoError = nil;
         tessDomainGenPipelineState = [device newComputePipelineStateWithFunction:fn
                                                                             error:&psoError];
@@ -4650,6 +4776,7 @@ kernel void spvTessFactorClamp(
         id<MTLFunction> fn =
             [tessDomainCaptureLibrary newFunctionWithName:@"spvTessFactorClamp"];
         if (fn == nil) return nil;
+        ScopedOwnedObjCObject fnRelease(fn);
         NSError* err = nil;
         tessFactorClampPipelineState =
             [device newComputePipelineStateWithFunction:fn error:&err];
@@ -4675,6 +4802,7 @@ kernel void spvTessFactorClamp(
         }
         if (tessDomainPortLibrary == nil) {
             MTLCompileOptions* opts = [MTLCompileOptions new];
+            ScopedOwnedObjCObject optsRelease(opts);
             if (@available(macOS 15.0, *)) {
                 opts.mathMode = MTLMathModeSafe;
             } else {
@@ -4694,6 +4822,7 @@ kernel void spvTessFactorClamp(
         auto buildPSO = [&](NSString* fnName) -> id<MTLComputePipelineState> {
             id<MTLFunction> f = [tessDomainPortLibrary newFunctionWithName:fnName];
             if (f == nil) return nil;
+            ScopedOwnedObjCObject fnRelease(f);
             NSError* perr = nil;
             id<MTLComputePipelineState> p =
                 [device newComputePipelineStateWithFunction:f error:&perr];
@@ -4741,7 +4870,9 @@ kernel void spvTessFactorClamp(
             FG_TRACE(@"ensureTessDomainCapturePSO: function %@ not found", fnName);
             return nil;
         }
+        ScopedOwnedObjCObject vfnRelease(vfn);
         MTLRenderPipelineDescriptor* pd = [MTLRenderPipelineDescriptor new];
+        ScopedOwnedObjCObject pdRelease(pd);
         pd.vertexFunction = vfn;
         pd.fragmentFunction = nil;
         pd.rasterizationEnabled = NO;
@@ -4824,6 +4955,7 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
         vertexDescriptor.layouts[0].stepRate = 1;
 
         MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+        ScopedOwnedObjCObject descRelease(desc);
         desc.vertexFunction = solidColorVertexFn;
         desc.fragmentFunction = solidColorFragmentFn;
         desc.vertexDescriptor = vertexDescriptor;
@@ -4832,10 +4964,13 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
         desc.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
 
         NSError* error = nil;
-        solidColorPipelineState = [device newRenderPipelineStateWithDescriptor:desc error:&error];
-        if (solidColorPipelineState == nil) {
+        id<MTLRenderPipelineState> newState =
+            [device newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (newState == nil) {
             return false;
         }
+        releaseOwnedObjCObject(solidColorPipelineState);
+        solidColorPipelineState = newState;
         solidColorPipelineColorFormat = colorFormat;
         return true;
     }
@@ -4940,6 +5075,7 @@ fragment float4 appgl_immediate_textured_fs(
         // glColor*/glTexCoord* path assumes straight-alpha blending.
         auto makePipeline = [&](id<MTLFunction> fragmentFn) -> id<MTLRenderPipelineState> {
             MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+            ScopedOwnedObjCObject descRelease(desc);
             desc.vertexFunction = immediateModeVertexFn;
             desc.fragmentFunction = fragmentFn;
             desc.vertexDescriptor = vertexDescriptor;
@@ -4961,11 +5097,17 @@ fragment float4 appgl_immediate_textured_fs(
             return state;
         };
 
-        immediateModeColorPipelineState = makePipeline(immediateModeColorFragmentFn);
-        immediateModeTexturedPipelineState = makePipeline(immediateModeTexturedFragmentFn);
-        if (immediateModeColorPipelineState == nil || immediateModeTexturedPipelineState == nil) {
+        id<MTLRenderPipelineState> colorState = makePipeline(immediateModeColorFragmentFn);
+        id<MTLRenderPipelineState> texturedState = makePipeline(immediateModeTexturedFragmentFn);
+        if (colorState == nil || texturedState == nil) {
+            releaseOwnedObjCObject(colorState);
+            releaseOwnedObjCObject(texturedState);
             return false;
         }
+        releaseOwnedObjCObject(immediateModeColorPipelineState);
+        releaseOwnedObjCObject(immediateModeTexturedPipelineState);
+        immediateModeColorPipelineState = colorState;
+        immediateModeTexturedPipelineState = texturedState;
         immediateModePipelineColorFormat = colorFormat;
         return true;
     }
@@ -4980,6 +5122,7 @@ fragment float4 appgl_immediate_textured_fs(
             return immediateModeSamplerState;
         }
         MTLSamplerDescriptor* sdesc = [[MTLSamplerDescriptor alloc] init];
+        ScopedOwnedObjCObject sdescRelease(sdesc);
         sdesc.minFilter = MTLSamplerMinMagFilterLinear;
         sdesc.magFilter = MTLSamplerMinMagFilterLinear;
         sdesc.sAddressMode = MTLSamplerAddressModeClampToEdge;
@@ -5376,6 +5519,7 @@ fragment float4 appgl_immediate_textured_fs(
         }
 
         MTLDepthStencilDescriptor* desc = [[MTLDepthStencilDescriptor alloc] init];
+        ScopedOwnedObjCObject descRelease(desc);
         desc.depthWriteEnabled = info.depthTestEnabled && info.depthWriteMask;
         if (info.depthTestEnabled) {
             switch (info.depthFunc) {
@@ -5483,6 +5627,7 @@ fragment float4 appgl_immediate_textured_fs(
         const std::uint8_t* sourceBytes = nullptr;
         std::vector<std::uint8_t> directReadback;
         id<MTLBuffer> readbackBuffer = nil;
+        ScopedOwnedObjCObject readbackBufferRelease;
 
         const auto waitForQueue = [&]() -> bool {
             auto fenceLease = makeCommandBuffer(@"copy-pixels-fence");
@@ -5522,6 +5667,7 @@ fragment float4 appgl_immediate_textured_fs(
             if (readbackBuffer == nil) {
                 return false;
             }
+            readbackBufferRelease.reset(readbackBuffer);
 
             MetalCommandBufferLease standaloneLease;
             id<MTLCommandBuffer> commandBuffer = currentCommandBuffer;
@@ -5590,9 +5736,6 @@ fragment float4 appgl_immediate_textured_fs(
                 }
             }
         }
-        if (readbackBuffer != nil) {
-            [readbackBuffer release];
-        }
         return true;
     }
 
@@ -5642,7 +5785,7 @@ fragment float4 appgl_immediate_textured_fs(
     }
 
     bool isReady() const {
-        return device != nil && commandQueue != nil && depthStencilTexture != nil && (layer != nil || offscreenColorTexture != nil);
+        return device != nil && commandQueue != nil && (layer != nil || usesOffscreenTarget);
     }
 
     // Compile MSL into a retained MTLComputePipelineState. Returns
@@ -5676,9 +5819,11 @@ fragment float4 appgl_immediate_textured_fs(
             }
             return nullptr;
         }
+        ScopedOwnedObjCObject libRelease(lib);
         // SPIRV-Cross emits the entry point as "main0" by default (same
         // convention as the vertex/fragment paths).
         MTLFunctionConstantValues* emptyConstants = [[MTLFunctionConstantValues alloc] init];
+        ScopedOwnedObjCObject emptyConstantsRelease(emptyConstants);
         NSError* fnError = nil;
         id<MTLFunction> fn = [lib newFunctionWithName:@"main0"
                                         constantValues:emptyConstants
@@ -5690,6 +5835,7 @@ fragment float4 appgl_immediate_textured_fs(
             }
             return nullptr;
         }
+        ScopedOwnedObjCObject fnRelease(fn);
         NSError* psoError = nil;
         id<MTLComputePipelineState> pso = nil;
         if (stageInputOutputDescriptor != nullptr) {
@@ -5701,6 +5847,7 @@ fragment float4 appgl_immediate_textured_fs(
             // bound VAO (see `buildMetalStageInputOutputDescriptor`).
             MTLComputePipelineDescriptor* psoDesc =
                 [[MTLComputePipelineDescriptor alloc] init];
+            ScopedOwnedObjCObject psoDescRelease(psoDesc);
             psoDesc.computeFunction = fn;
             psoDesc.stageInputDescriptor =
                 (__bridge MTLStageInputOutputDescriptor*)stageInputOutputDescriptor;
@@ -5722,7 +5869,9 @@ fragment float4 appgl_immediate_textured_fs(
         if (outFunction != nullptr) {
             *outFunction = (void*)CFBridgingRetain(fn);
         }
-        return (void*)CFBridgingRetain(pso);
+        void* retained = (void*)CFBridgingRetain(pso);
+        releaseOwnedObjCObject(pso);
+        return retained;
     }
 
     // Sprint 15 Q3-Option-B Phase 3a [metal-tf-vs]: dispatch VS-as-
@@ -5752,6 +5901,7 @@ fragment float4 appgl_immediate_textured_fs(
         if (outBuf == nil) {
             return false;
         }
+        ScopedOwnedObjCObject outBufRelease(outBuf);
         outBuf.label = @"appgl-vstf-out";
 
         auto lease = makeCommandBuffer(@"vstf-vs-compute");
@@ -5838,12 +5988,15 @@ fragment float4 appgl_immediate_textured_fs(
             }
             return nullptr;
         }
+        ScopedOwnedObjCObject libRelease(lib);
         id<MTLFunction> fn = [lib newFunctionWithName:@"main0"];
         if (fn == nil) {
             if (outError) *outError = "newFunctionWithName(main0) failed";
             return nullptr;
         }
-        return (void*)CFBridgingRetain(fn);
+        void* retained = (void*)CFBridgingRetain(fn);
+        releaseOwnedObjCObject(fn);
+        return retained;
     }
 
     // Metal tess Phase 1 probe — validates that the SPIRV-Cross-emitted
@@ -6183,6 +6336,7 @@ fragment float4 appgl_immediate_textured_fs(
             [device newBufferWithLength:factorBytes
                                 options:factorBufOpts];
         if (factorBuf == nil) return false;
+        ScopedOwnedObjCObject factorBufRelease(factorBuf);
         factorBuf.label = @"appgl-tess-factor";
 
         // Phase 3: additional buffers for VS-compute + TCS user
@@ -6209,6 +6363,9 @@ fragment float4 appgl_immediate_textured_fs(
         id<MTLBuffer> vsOutBuf = nil;
         id<MTLBuffer> cpOutBuf = nil;
         id<MTLBuffer> patchOutBuf = nil;
+        ScopedOwnedObjCObject vsOutBufRelease;
+        ScopedOwnedObjCObject cpOutBufRelease;
+        ScopedOwnedObjCObject patchOutBufRelease;
         if (isPhase3) {
             // CKPT137 (Sprint 13 Phase 2 Day 1 — γ2.1 runtime instrumentation):
             // when APPGL_TRACE_TESS_BUF is set, allocate vsOutBuf/cpOutBuf in
@@ -6227,6 +6384,9 @@ fragment float4 appgl_immediate_textured_fs(
             if (vsOutBuf == nil || cpOutBuf == nil || patchOutBuf == nil) {
                 return false;
             }
+            vsOutBufRelease.reset(vsOutBuf);
+            cpOutBufRelease.reset(cpOutBuf);
+            patchOutBufRelease.reset(patchOutBuf);
 	            vsOutBuf.label = @"appgl-tess-vs-out";
 	            cpOutBuf.label = @"appgl-tess-cp-out";
 	            patchOutBuf.label = @"appgl-tess-patch-out";
@@ -6265,6 +6425,7 @@ fragment float4 appgl_immediate_textured_fs(
             [device newBufferWithLength:(fullFactorBytes > 0 ? fullFactorBytes : 4)
                                 options:MTLResourceStorageModeShared];
         if (factorBufFull == nil) return false;
+        ScopedOwnedObjCObject factorBufFullRelease(factorBufFull);
         factorBufFull.label = @"appgl-tess-factor-full";
 
         // spvIndirectParams: SPIRV-Cross `constant uint*` — element [0]
@@ -6283,6 +6444,7 @@ fragment float4 appgl_immediate_textured_fs(
                                 length:sizeof(indirectParams)
                                options:MTLResourceStorageModeShared];
         if (indirectBuf == nil) return false;
+        ScopedOwnedObjCObject indirectBufRelease(indirectBuf);
         indirectBuf.label = @"appgl-tess-indirect-params";
 
         // (3a) Phase 3: VS-as-compute dispatch. Runs once per vertex
@@ -6575,6 +6737,10 @@ fragment float4 appgl_immediate_textured_fs(
         id<MTLBuffer> domainPrimIDBuf = nil;
         id<MTLBuffer> totalVertCountBuf = nil;
         id<MTLBuffer> tesComputeOutBuf = nil;
+        ScopedOwnedObjCObject domainCoordBufRelease;
+        ScopedOwnedObjCObject domainPrimIDBufRelease;
+        ScopedOwnedObjCObject totalVertCountBufRelease;
+        ScopedOwnedObjCObject tesComputeOutBufRelease;
         NSUInteger tessTFGeneratedVerts = 0;
         if (isTessTF) {
             if (!ensureTessDomainGenLibrary()) {
@@ -6634,6 +6800,10 @@ fragment float4 appgl_immediate_textured_fs(
                     !totalVertCountBuf || !tesComputeOutBuf) {
                     return false;
                 }
+                domainCoordBufRelease.reset(domainCoordBuf);
+                domainPrimIDBufRelease.reset(domainPrimIDBuf);
+                totalVertCountBufRelease.reset(totalVertCountBuf);
+                tesComputeOutBufRelease.reset(tesComputeOutBuf);
                 domainCoordBuf.label = @"appgl-tess-domain-coord";
                 domainPrimIDBuf.label = @"appgl-tess-domain-primid";
                 totalVertCountBuf.label = @"appgl-tess-total-count";
@@ -6670,6 +6840,7 @@ fragment float4 appgl_immediate_textured_fs(
                     newBufferWithBytes:&paramsCPU
                                 length:sizeof(paramsCPU)
                                options:MTLResourceStorageModeShared];
+                ScopedOwnedObjCObject domainGenParamsBufRelease(domainGenParamsBuf);
 
                 // Phase 3C [metal-tess-TF] — when the env flag
                 // `APPGL_TESS_DOMAIN_USE_METAL_HW` is set and the
@@ -6753,6 +6924,7 @@ fragment float4 appgl_immediate_textured_fs(
                     }
 
                     MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor new];
+                    ScopedOwnedObjCObject rpdRelease(rpd);
                     rpd.renderTargetWidth = 1;
                     rpd.renderTargetHeight = 1;
                     rpd.defaultRasterSampleCount = 1;
@@ -6824,6 +6996,7 @@ fragment float4 appgl_immediate_textured_fs(
                             newBufferWithBytes:&pp
                                         length:sizeof(pp)
                                        options:MTLResourceStorageModeShared];
+                        ScopedOwnedObjCObject portParamsBufRelease(portParamsBuf);
 
                         auto dgLease = makeCommandBuffer(@"tess-domain-port");
                         id<MTLCommandBuffer> dgCmdBuf = dgLease.get();
@@ -7148,18 +7321,22 @@ fragment float4 appgl_immediate_textured_fs(
         id<MTLLibrary> fsLib = getOrCompileLibrary(*info.fragmentMSL);
         if (fsLib == nil) return false;
         MTLFunctionConstantValues* emptyConstants = [[MTLFunctionConstantValues alloc] init];
+        ScopedOwnedObjCObject emptyConstantsRelease(emptyConstants);
         NSError* fnErr = nil;
         id<MTLFunction> tesFn = [tesLib newFunctionWithName:@"main0"
                                               constantValues:emptyConstants
                                                        error:&fnErr];
         if (tesFn == nil) return false;
+        ScopedOwnedObjCObject tesFnRelease(tesFn);
         id<MTLFunction> fsFn = [fsLib newFunctionWithName:@"main0"
                                             constantValues:emptyConstants
                                                      error:&fnErr];
         if (fsFn == nil) return false;
+        ScopedOwnedObjCObject fsFnRelease(fsFn);
 
         MTLRenderPipelineDescriptor* pipeDesc =
             [[MTLRenderPipelineDescriptor alloc] init];
+        ScopedOwnedObjCObject pipeDescRelease(pipeDesc);
         pipeDesc.vertexFunction = tesFn;
         pipeDesc.fragmentFunction = fsFn;
         pipeDesc.colorAttachments[0].pixelFormat = colorFormat;
@@ -7259,6 +7436,7 @@ fragment float4 appgl_immediate_textured_fs(
                       psoErr ? psoErr.localizedDescription : @"(nil err)");
             return false;
         }
+        ScopedOwnedObjCObject renderPSORelease(renderPSO);
 
         // (5) Begin a render pass. For FBO draws we build the pass
         // descriptor inline (single color attachment; Phase 2 doesn't
@@ -7442,6 +7620,7 @@ fragment float4 appgl_immediate_textured_fs(
             && (info.depthTestEnabled || info.stencilTestEnabled)) {
             MTLDepthStencilDescriptor* dsDesc =
                 [[MTLDepthStencilDescriptor alloc] init];
+            ScopedOwnedObjCObject dsDescRelease(dsDesc);
             if (info.depthTestEnabled) {
                 switch (info.depthFunc) {
                     case GL_NEVER:    dsDesc.depthCompareFunction = MTLCompareFunctionNever; break;
@@ -7468,6 +7647,7 @@ fragment float4 appgl_immediate_textured_fs(
             }
             id<MTLDepthStencilState> ds =
                 [device newDepthStencilStateWithDescriptor:dsDesc];
+            ScopedOwnedObjCObject dsRelease(ds);
             [enc setDepthStencilState:ds];
             if (info.stencilTestEnabled) {
                 [enc setStencilFrontReferenceValue:
@@ -7584,6 +7764,7 @@ fragment float4 appgl_immediate_textured_fs(
             info.diagnostic = "vsOutBuf alloc failed";
             return false;
         }
+        ScopedOwnedObjCObject vsOutBufRelease(vsOutBuf);
         vsOutBuf.label = @"appgl-mesh-gs-vs-output";
 
         {
@@ -7635,6 +7816,7 @@ fragment float4 appgl_immediate_textured_fs(
 
         // (3b) Mesh-render PSO build / cache lookup.
         id<MTLRenderPipelineState> meshPSO = nil;
+        ScopedOwnedObjCObject meshPSORelease;
         if (info.meshPipelineStateInOut != nullptr &&
             *info.meshPipelineStateInOut != nullptr) {
             meshPSO = (__bridge id<MTLRenderPipelineState>)
@@ -7647,6 +7829,7 @@ fragment float4 appgl_immediate_textured_fs(
                 : nil;
             MTLMeshRenderPipelineDescriptor* meshDesc =
                 [[MTLMeshRenderPipelineDescriptor alloc] init];
+            ScopedOwnedObjCObject meshDescRelease(meshDesc);
             meshDesc.meshFunction =
                 (__bridge id<MTLFunction>)info.meshFunction;
             meshDesc.fragmentFunction =
@@ -7684,6 +7867,7 @@ fragment float4 appgl_immediate_textured_fs(
                     : "newRenderPipelineStateWithMeshDescriptor failed";
                 return false;
             }
+            meshPSORelease.reset(meshPSO);
             if (info.meshPipelineStateInOut != nullptr) {
                 *info.meshPipelineStateInOut =
                     (void*)CFBridgingRetain(meshPSO);
@@ -8094,8 +8278,10 @@ fragment float4 appgl_immediate_textured_fs(
             const bool hasTextures = !info.textures.empty();
             const bool hasBuffers  = !info.buffers.empty();
             id<MTLArgumentEncoder> argEncSet0 = nil;
+            ScopedOwnedObjCObject argEncSet0Release;
             if (hasTextures || hasBuffers) {
                 argEncSet0 = [computeFn newArgumentEncoderWithBufferIndex:24];
+                argEncSet0Release.reset(argEncSet0);
             }
             // Desc_set 1: UBOs (default-uniform block comes in at
             // [[id(16)]] from computeUniformData, plus any explicit
@@ -8104,8 +8290,10 @@ fragment float4 appgl_immediate_textured_fs(
             const bool hasUniformData =
                 (info.computeUniformData != nullptr && info.computeUniformSize > 0);
             id<MTLArgumentEncoder> argEncSet1 = nil;
+            ScopedOwnedObjCObject argEncSet1Release;
             if (hasUniformData) {
                 argEncSet1 = [computeFn newArgumentEncoderWithBufferIndex:25];
+                argEncSet1Release.reset(argEncSet1);
             }
             if (argEncSet0 != nil) {
                 const NSUInteger len0 = [argEncSet0 encodedLength];
@@ -8295,6 +8483,81 @@ fragment float4 appgl_immediate_textured_fs(
     std::uint64_t getMslLibraryCacheEntries() const {
         return static_cast<std::uint64_t>(mslLibraryCache.size());
     }
+    MetalFrameGraph::InternalMetalResourceInventory getInternalMetalResourceInventory() const {
+        MetalFrameGraph::InternalMetalResourceInventory inventory;
+        auto addBuffer = [&inventory](id<MTLBuffer> buffer) {
+            if (buffer != nil) {
+                ++inventory.bufferCount;
+                inventory.bufferBytes += metalAllocatedSize(buffer);
+            }
+        };
+        auto addTexture = [&inventory](id<MTLTexture> texture) {
+            if (texture != nil) {
+                ++inventory.textureCount;
+                inventory.textureBytes += metalAllocatedSize(texture);
+            }
+        };
+        auto addDrawable = [&inventory](id<CAMetalDrawable> drawable) {
+            if (drawable != nil) {
+                ++inventory.drawableCount;
+                inventory.drawableTextureBytes += metalAllocatedSize(drawable.texture);
+            }
+        };
+        auto addLibrary = [&inventory](id<MTLLibrary> library) {
+            if (library != nil) ++inventory.libraryCount;
+        };
+        auto addFunction = [&inventory](id<MTLFunction> function) {
+            if (function != nil) ++inventory.functionCount;
+        };
+        auto addRenderPipeline = [&inventory](id<MTLRenderPipelineState> pipeline) {
+            if (pipeline != nil) ++inventory.renderPipelineCount;
+        };
+        auto addComputePipeline = [&inventory](id<MTLComputePipelineState> pipeline) {
+            if (pipeline != nil) ++inventory.computePipelineCount;
+        };
+        auto addSampler = [&inventory](id<MTLSamplerState> sampler) {
+            if (sampler != nil) ++inventory.samplerCount;
+        };
+        auto addDepthStencil = [&inventory](id<MTLDepthStencilState> state) {
+            if (state != nil) ++inventory.depthStencilStateCount;
+        };
+
+        addTexture(depthStencilTexture);
+        addTexture(offscreenColorTexture);
+        addDrawable(currentDrawable);
+        for (id<MTLBuffer> buffer : ringBuffers) addBuffer(buffer);
+        addLibrary(solidColorLibrary);
+        addFunction(solidColorVertexFn);
+        addFunction(solidColorFragmentFn);
+        addRenderPipeline(solidColorPipelineState);
+        addLibrary(tessDomainGenLibrary);
+        addComputePipeline(tessDomainGenPipelineState);
+        addLibrary(tessDomainCaptureLibrary);
+        for (const auto& entry : tessDomainCapturePSOCache) {
+            addRenderPipeline(entry.second);
+        }
+        addComputePipeline(tessFactorClampPipelineState);
+        addLibrary(tessDomainPortLibrary);
+        addComputePipeline(tessDomainPortTrianglesPSO);
+        addComputePipeline(tessDomainPortQuadsPSO);
+        addLibrary(immediateModeLibrary);
+        addFunction(immediateModeVertexFn);
+        addFunction(immediateModeColorFragmentFn);
+        addFunction(immediateModeTexturedFragmentFn);
+        addRenderPipeline(immediateModeColorPipelineState);
+        addRenderPipeline(immediateModeTexturedPipelineState);
+        addSampler(immediateModeSamplerState);
+        for (const auto& entry : mslLibraryCache) {
+            addLibrary(entry.second);
+        }
+        for (const auto& entry : depthStencilCache) {
+            addDepthStencil(entry.second);
+        }
+        if (pipelineArchive != nil) {
+            ++inventory.binaryArchiveCount;
+        }
+        return inventory;
+    }
 
 private:
     void ensureDrawableResources() {
@@ -8329,7 +8592,7 @@ private:
                                                                                                mipmapped:NO];
             descriptor.storageMode = MTLStorageModePrivate;
             descriptor.usage = MTLTextureUsageRenderTarget;
-            depthStencilTexture = [device newTextureWithDescriptor:descriptor];
+            replaceOwnedTexture(depthStencilTexture, [device newTextureWithDescriptor:descriptor]);
         }
 
         const bool needsOffscreenRebuild =
@@ -8344,7 +8607,7 @@ private:
                                                                                                    mipmapped:NO];
             colorDescriptor.storageMode = MTLStorageModePrivate;
             colorDescriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-            offscreenColorTexture = [device newTextureWithDescriptor:colorDescriptor];
+            replaceOwnedTexture(offscreenColorTexture, [device newTextureWithDescriptor:colorDescriptor]);
         }
     }
 
@@ -9622,6 +9885,11 @@ std::uint64_t MetalFrameGraph::metalAllocatedBytes() const {
 
 std::uint64_t MetalFrameGraph::mslLibraryCacheEntries() const {
     return impl_->getMslLibraryCacheEntries();
+}
+
+MetalFrameGraph::InternalMetalResourceInventory MetalFrameGraph::internalMetalResourceInventory() const {
+    return impl_ ? impl_->getInternalMetalResourceInventory()
+                 : InternalMetalResourceInventory{};
 }
 
 }  // namespace appgl

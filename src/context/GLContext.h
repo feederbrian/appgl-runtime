@@ -654,6 +654,19 @@ public:
         std::uint64_t computePipelineCount = 0;
         std::uint64_t functionCount = 0;
         std::uint64_t libraryCacheEntries = 0;
+        std::uint64_t frameGraphBufferCount = 0;
+        std::uint64_t frameGraphBufferBytes = 0;
+        std::uint64_t frameGraphTextureCount = 0;
+        std::uint64_t frameGraphTextureBytes = 0;
+        std::uint64_t frameGraphDrawableCount = 0;
+        std::uint64_t frameGraphDrawableTextureBytes = 0;
+        std::uint64_t frameGraphSamplerCount = 0;
+        std::uint64_t frameGraphRenderPipelineCount = 0;
+        std::uint64_t frameGraphComputePipelineCount = 0;
+        std::uint64_t frameGraphFunctionCount = 0;
+        std::uint64_t frameGraphLibraryCount = 0;
+        std::uint64_t frameGraphDepthStencilStateCount = 0;
+        std::uint64_t frameGraphBinaryArchiveCount = 0;
     };
     MetalResourceInventory metalResourceInventory() const;
 

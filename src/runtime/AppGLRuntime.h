@@ -615,6 +615,7 @@ public:
     void registerContext(GLContext* context);
     void unregisterContext(GLContext* context);
     bool isContextLiveLocked(GLContext* context) const;
+    GLContext* diagnosticContextLocked() const;
     std::mutex& contextMutex();
     std::string claimedVersionString() const;
     void refreshCurrentContextClaimedVersion();
@@ -750,6 +751,19 @@ public:
         std::uint64_t metalComputePipelineCount = 0;
         std::uint64_t metalFunctionCount = 0;
         std::uint64_t metalLibraryCacheEntries = 0;
+        std::uint64_t metalFrameGraphBufferCount = 0;
+        std::uint64_t metalFrameGraphBufferBytes = 0;
+        std::uint64_t metalFrameGraphTextureCount = 0;
+        std::uint64_t metalFrameGraphTextureBytes = 0;
+        std::uint64_t metalFrameGraphDrawableCount = 0;
+        std::uint64_t metalFrameGraphDrawableTextureBytes = 0;
+        std::uint64_t metalFrameGraphSamplerCount = 0;
+        std::uint64_t metalFrameGraphRenderPipelineCount = 0;
+        std::uint64_t metalFrameGraphComputePipelineCount = 0;
+        std::uint64_t metalFrameGraphFunctionCount = 0;
+        std::uint64_t metalFrameGraphLibraryCount = 0;
+        std::uint64_t metalFrameGraphDepthStencilStateCount = 0;
+        std::uint64_t metalFrameGraphBinaryArchiveCount = 0;
         std::uint64_t pipelineCacheHits = 0;
         std::uint64_t pipelineCacheMisses = 0;
         // Phase 8X Group 4d follow-up⁴ — split the build counters so the
@@ -775,6 +789,7 @@ private:
     std::string rendererString_ = "AppGL on Metal";
     mutable std::mutex contextMutex_;
     std::unordered_set<GLContext*> liveContexts_;
+    GLContext* diagnosticContext_ = nullptr;
     std::mutex translationMutex_;
     std::vector<ShaderTranslationRecord> shaderTranslations_;
     std::uint64_t shaderTranslationsEverPushed_ = 0;

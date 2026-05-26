@@ -1868,6 +1868,12 @@ void Runtime::makeCurrent(GLContext* context) {
         noteRenderer(context->rendererString());
         refreshCurrentContextClaimedVersion();
     }
+    std::lock_guard<std::mutex> lock(contextMutex_);
+    if (context != nullptr && isContextLiveLocked(context)) {
+        diagnosticContext_ = context;
+    } else if (context == nullptr) {
+        diagnosticContext_ = liveContexts_.empty() ? nullptr : *liveContexts_.begin();
+    }
 }
 
 GLContext* Runtime::currentContext() {
@@ -1880,6 +1886,7 @@ void Runtime::registerContext(GLContext* context) {
     }
     std::lock_guard<std::mutex> lock(contextMutex_);
     liveContexts_.insert(context);
+    diagnosticContext_ = context;
 }
 
 void Runtime::unregisterContext(GLContext* context) {
@@ -1894,6 +1901,9 @@ void Runtime::unregisterContext(GLContext* context) {
     // still a live pointer; we cannot simply re-query after erase.
     snapshotContextInventoryLocked(context);
     liveContexts_.erase(context);
+    if (diagnosticContext_ == context) {
+        diagnosticContext_ = liveContexts_.empty() ? nullptr : *liveContexts_.begin();
+    }
     // Clear the current-context slot on THIS thread if it still points at the
     // context being destroyed. Other threads cannot be reached through thread_local
     // storage, but isContextLiveLocked() protects diagnostic readers on those
@@ -1948,6 +1958,19 @@ void Runtime::snapshotContextInventoryLocked(GLContext* context) {
     snap.metalComputePipelineCount = metal.computePipelineCount;
     snap.metalFunctionCount = metal.functionCount;
     snap.metalLibraryCacheEntries = metal.libraryCacheEntries;
+    snap.metalFrameGraphBufferCount = metal.frameGraphBufferCount;
+    snap.metalFrameGraphBufferBytes = metal.frameGraphBufferBytes;
+    snap.metalFrameGraphTextureCount = metal.frameGraphTextureCount;
+    snap.metalFrameGraphTextureBytes = metal.frameGraphTextureBytes;
+    snap.metalFrameGraphDrawableCount = metal.frameGraphDrawableCount;
+    snap.metalFrameGraphDrawableTextureBytes = metal.frameGraphDrawableTextureBytes;
+    snap.metalFrameGraphSamplerCount = metal.frameGraphSamplerCount;
+    snap.metalFrameGraphRenderPipelineCount = metal.frameGraphRenderPipelineCount;
+    snap.metalFrameGraphComputePipelineCount = metal.frameGraphComputePipelineCount;
+    snap.metalFrameGraphFunctionCount = metal.frameGraphFunctionCount;
+    snap.metalFrameGraphLibraryCount = metal.frameGraphLibraryCount;
+    snap.metalFrameGraphDepthStencilStateCount = metal.frameGraphDepthStencilStateCount;
+    snap.metalFrameGraphBinaryArchiveCount = metal.frameGraphBinaryArchiveCount;
     const auto metrics = context->pipelineCacheMetrics();
     snap.pipelineCacheHits = metrics.hits;
     snap.pipelineCacheMisses = metrics.misses;
@@ -1966,6 +1989,16 @@ bool Runtime::isContextLiveLocked(GLContext* context) const {
         return false;
     }
     return liveContexts_.find(context) != liveContexts_.end();
+}
+
+GLContext* Runtime::diagnosticContextLocked() const {
+    if (isContextLiveLocked(gCurrentContext)) {
+        return gCurrentContext;
+    }
+    if (isContextLiveLocked(diagnosticContext_)) {
+        return diagnosticContext_;
+    }
+    return nullptr;
 }
 
 std::mutex& Runtime::contextMutex() {
@@ -2067,7 +2100,7 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
     // dereferencing. If `gCurrentContext` was cleared by unregisterContext on
     // this thread, the liveness check below will cleanly take the null branch.
     std::lock_guard<std::mutex> contextLock(contextMutex_);
-    GLContext* const currentContext = gCurrentContext;
+    GLContext* const currentContext = diagnosticContextLocked();
     const bool contextIsLive = isContextLiveLocked(currentContext);
 
     std::ostringstream stream;
@@ -2178,6 +2211,19 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
         metalInventory.computePipelineCount = snap.metalComputePipelineCount;
         metalInventory.functionCount = snap.metalFunctionCount;
         metalInventory.libraryCacheEntries = snap.metalLibraryCacheEntries;
+        metalInventory.frameGraphBufferCount = snap.metalFrameGraphBufferCount;
+        metalInventory.frameGraphBufferBytes = snap.metalFrameGraphBufferBytes;
+        metalInventory.frameGraphTextureCount = snap.metalFrameGraphTextureCount;
+        metalInventory.frameGraphTextureBytes = snap.metalFrameGraphTextureBytes;
+        metalInventory.frameGraphDrawableCount = snap.metalFrameGraphDrawableCount;
+        metalInventory.frameGraphDrawableTextureBytes = snap.metalFrameGraphDrawableTextureBytes;
+        metalInventory.frameGraphSamplerCount = snap.metalFrameGraphSamplerCount;
+        metalInventory.frameGraphRenderPipelineCount = snap.metalFrameGraphRenderPipelineCount;
+        metalInventory.frameGraphComputePipelineCount = snap.metalFrameGraphComputePipelineCount;
+        metalInventory.frameGraphFunctionCount = snap.metalFrameGraphFunctionCount;
+        metalInventory.frameGraphLibraryCount = snap.metalFrameGraphLibraryCount;
+        metalInventory.frameGraphDepthStencilStateCount = snap.metalFrameGraphDepthStencilStateCount;
+        metalInventory.frameGraphBinaryArchiveCount = snap.metalFrameGraphBinaryArchiveCount;
     } else {
         stream << "\"buffers\":0,\"textures\":0,\"samplers\":0,\"renderbuffers\":0,"
                   "\"framebuffers\":0,\"vertexArrays\":0,\"shaders\":0,\"programs\":0,"
@@ -2198,7 +2244,22 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << "\"renderPipelines\":" << metalInventory.renderPipelineCount << ","
            << "\"computePipelines\":" << metalInventory.computePipelineCount << ","
            << "\"functions\":" << metalInventory.functionCount << ","
-           << "\"libraryCacheEntries\":" << metalInventory.libraryCacheEntries
+           << "\"libraryCacheEntries\":" << metalInventory.libraryCacheEntries << ","
+           << "\"frameGraph\":{"
+           << "\"buffers\":" << metalInventory.frameGraphBufferCount << ","
+           << "\"bufferBytes\":" << metalInventory.frameGraphBufferBytes << ","
+           << "\"textures\":" << metalInventory.frameGraphTextureCount << ","
+           << "\"textureBytes\":" << metalInventory.frameGraphTextureBytes << ","
+           << "\"drawables\":" << metalInventory.frameGraphDrawableCount << ","
+           << "\"drawableTextureBytes\":" << metalInventory.frameGraphDrawableTextureBytes << ","
+           << "\"samplers\":" << metalInventory.frameGraphSamplerCount << ","
+           << "\"renderPipelines\":" << metalInventory.frameGraphRenderPipelineCount << ","
+           << "\"computePipelines\":" << metalInventory.frameGraphComputePipelineCount << ","
+           << "\"functions\":" << metalInventory.frameGraphFunctionCount << ","
+           << "\"libraries\":" << metalInventory.frameGraphLibraryCount << ","
+           << "\"depthStencilStates\":" << metalInventory.frameGraphDepthStencilStateCount << ","
+           << "\"binaryArchives\":" << metalInventory.frameGraphBinaryArchiveCount
+           << "}"
            << "},";
 
     // ── Pipeline cache metrics ──
@@ -2302,9 +2363,10 @@ std::size_t Runtime::writeLiveDiagnosticsJSON(char* out, std::size_t cap) {
     {
         std::lock_guard<std::mutex> contextLock(contextMutex_);
         rendererCopy = rendererString_;
-        contextIsLive = isContextLiveLocked(gCurrentContext);
+        GLContext* const currentContext = diagnosticContextLocked();
+        contextIsLive = isContextLiveLocked(currentContext);
         if (contextIsLive) {
-            const auto m = gCurrentContext->pipelineCacheMetrics();
+            const auto m = currentContext->pipelineCacheMetrics();
             pipelineCacheHits = m.hits;
             pipelineCacheMisses = m.misses;
             pipelineBuildAttempts = m.buildAttempts;

@@ -1306,6 +1306,22 @@ public:
     // Metal device allocated memory (bytes).  Returns 0 if device unavailable.
     std::uint64_t metalAllocatedBytes() const;
     std::uint64_t mslLibraryCacheEntries() const;
+    struct InternalMetalResourceInventory {
+        std::uint64_t bufferCount = 0;
+        std::uint64_t bufferBytes = 0;
+        std::uint64_t textureCount = 0;
+        std::uint64_t textureBytes = 0;
+        std::uint64_t drawableCount = 0;
+        std::uint64_t drawableTextureBytes = 0;
+        std::uint64_t samplerCount = 0;
+        std::uint64_t renderPipelineCount = 0;
+        std::uint64_t computePipelineCount = 0;
+        std::uint64_t functionCount = 0;
+        std::uint64_t libraryCount = 0;
+        std::uint64_t depthStencilStateCount = 0;
+        std::uint64_t binaryArchiveCount = 0;
+    };
+    InternalMetalResourceInventory internalMetalResourceInventory() const;
 
 private:
     struct Impl;
