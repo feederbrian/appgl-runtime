@@ -1937,7 +1937,8 @@ void Runtime::snapshotContextInventoryLocked(GLContext* context) {
     store.textures().forEach([&snap](GLuint, GLTextureObject& texture) {
         for (const auto& [level, image] : texture.levels) {
             (void)level;
-            snap.textureBytes += static_cast<std::uint64_t>(image.rgba8.size());
+            snap.textureBytes += static_cast<std::uint64_t>(image.rgba8.size())
+                + static_cast<std::uint64_t>(image.nativeData.size());
         }
     });
     store.renderbuffers().forEach([&snap](GLuint, GLRenderbufferObject& rb) {
@@ -2148,7 +2149,8 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
         store.textures().forEach([&textureBytes](GLuint, GLTextureObject& texture) {
             for (const auto& [level, image] : texture.levels) {
                 (void)level;
-                textureBytes += static_cast<std::uint64_t>(image.rgba8.size());
+                textureBytes += static_cast<std::uint64_t>(image.rgba8.size())
+                    + static_cast<std::uint64_t>(image.nativeData.size());
             }
         });
         std::uint64_t renderbufferBytes = 0;

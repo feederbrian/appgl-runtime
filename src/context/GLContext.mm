@@ -4611,6 +4611,7 @@ struct GLContext::Impl {
                                                         length:bytesPerImage
                                                        options:MTLResourceStorageModeShared];
             if (staging == nil) return false;
+            ScopedOwnedObjCObject stagingRelease(staging);
             [blit copyFromBuffer:staging
                     sourceOffset:0
                sourceBytesPerRow:bytesPerRow
@@ -4665,6 +4666,8 @@ struct GLContext::Impl {
         id<MTLBuffer> stencilStaging = [device newBufferWithBytes:stencilBytes.data()
                                                            length:stencilImageBytes
                                                           options:MTLResourceStorageModeShared];
+        ScopedOwnedObjCObject depthStagingRelease(depthStaging);
+        ScopedOwnedObjCObject stencilStagingRelease(stencilStaging);
         if (depthStaging == nil || stencilStaging == nil) return false;
         [blit copyFromBuffer:depthStaging
                 sourceOffset:0
@@ -4889,7 +4892,7 @@ struct GLContext::Impl {
                    : (object.target == GL_TEXTURE_CUBE_MAP_ARRAY
                       ? static_cast<NSUInteger>(std::max<GLsizei>(baseLevel.desc.depth, 6) / 6)
                       : 1));
-            const bool hasNativeData = (baseLevel.nativeBpp > 0 && !baseLevel.nativeData.empty());
+            const bool hasNativeStorage = (baseLevel.nativeBpp > 0);
             const bool use2DFor1D = uses2DBackingFor1DTextures();
             // Pick the Metal format. There are three cases:
             //   1. Storage-only depth/stencil/stencil format
@@ -4945,7 +4948,7 @@ struct GLContext::Impl {
                           object.target == GL_TEXTURE_1D_ARRAY) && use2DFor1D));
                     if (isDepthStencil && !targetSupportsDepth) {
                         // Keep RGBA8 fallback to avoid Metal crash.
-                    } else if (isDepthStencil || hasNativeData) {
+                    } else if (isDepthStencil || hasNativeStorage) {
                         wantFormat = native;
                     }
                     // Case 3: color format, no native data yet → leave
@@ -5198,7 +5201,7 @@ struct GLContext::Impl {
         //      CTS `pixelstoragemodes.teximage2d.rgb10a2` is the
         //      canonical witness of the wrong behaviour (16 tests
         //      regressed when the gate was dropped in e1bd4cf).
-        const bool hasNativeData = (baseLevel.nativeBpp > 0 && !baseLevel.nativeData.empty());
+        const bool hasNativeStorage = (baseLevel.nativeBpp > 0);
         const bool use2DFor1D = uses2DBackingFor1DTextures();
         MTLPixelFormat chosenFormat = MTLPixelFormatRGBA8Unorm;
         {
@@ -5235,7 +5238,7 @@ struct GLContext::Impl {
                 if (isDepthStencil && !targetSupportsDepth) {
                     // Depth/stencil format on unsupported target —
                     // Metal would reject. Keep RGBA8Unorm fallback.
-                } else if (isDepthStencil || hasNativeData) {
+                } else if (isDepthStencil || hasNativeStorage) {
                     chosenFormat = nativeFmt;
                 }
             }
@@ -17801,15 +17804,30 @@ bool GLContext::texImage(
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    if (!impl_->buildRGBA8Upload(image.desc.width, image.desc.height, image.desc.depth, format, type, resolvedPixels, image.rgba8)) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
+    const bool hasUploadPixels =
+        resolvedPixels != nullptr &&
+        image.desc.width > 0 &&
+        image.desc.height > 0 &&
+        image.desc.depth > 0;
+    if (hasUploadPixels) {
+        if (!impl_->buildRGBA8Upload(image.desc.width, image.desc.height, image.desc.depth, format, type, resolvedPixels, image.rgba8)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        // Also build native-format data for non-RGBA8 internal formats.
+        impl_->buildNativeUpload(
+            static_cast<GLenum>(internalformat),
+            image.desc.width, image.desc.height, image.desc.depth,
+            format, type, resolvedPixels, image.nativeData, image.nativeBpp);
+    } else {
+        MTLPixelFormat nativeFmt = metalRenderbufferFormat(static_cast<GLenum>(internalformat));
+        if (nativeFmt != MTLPixelFormatInvalid &&
+            nativeFmt != MTLPixelFormatRGBA8Unorm &&
+            nativeFmt != MTLPixelFormatRGBA8Unorm_sRGB) {
+            auto nativeInfo = Impl::nativeFormatInfo(nativeFmt);
+            image.nativeBpp = static_cast<std::size_t>(nativeInfo.bytesPerPixel);
+        }
     }
-    // Also build native-format data for non-RGBA8 internal formats.
-    impl_->buildNativeUpload(
-        static_cast<GLenum>(internalformat),
-        image.desc.width, image.desc.height, image.desc.depth,
-        format, type, resolvedPixels, image.nativeData, image.nativeBpp);
 
     if (level == 0 || !object->levels.contains(0)) {
         object->desc = image.desc;
@@ -18192,6 +18210,187 @@ bool GLContext::texSubImage(
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    std::vector<std::uint8_t> nativeUpload;
+    std::size_t nativeUploadBpp = 0;
+    const bool hasNativeUpload = impl_->buildNativeUpload(
+        image.desc.internalFormat,
+        width, height, depth, format, type, resolvedPixels,
+        nativeUpload, nativeUploadBpp);
+    if (hasNativeUpload && nativeUploadBpp > 0 && image.nativeBpp == 0) {
+        image.nativeBpp = nativeUploadBpp;
+    }
+    auto tryDirectMetalSubImageUpload = [&]() -> bool {
+        if (object->metalTexture == nullptr || width <= 0 || height <= 0 || depth <= 0) {
+            return false;
+        }
+        id<MTLTexture> metalTex = (__bridge id<MTLTexture>)object->metalTexture;
+        if (metalTex == nil || metalTex.sampleCount > 1) {
+            return false;
+        }
+        const MTLPixelFormat pf = metalTex.pixelFormat;
+        const bool useNativeUpload =
+            pf != MTLPixelFormatRGBA8Unorm &&
+            pf != MTLPixelFormatRGBA8Unorm_sRGB;
+        const std::uint8_t* uploadBytes = upload.data();
+        std::size_t uploadBpp = 4u;
+        if (useNativeUpload) {
+            if (!hasNativeUpload || nativeUploadBpp == 0 || nativeUpload.empty()) {
+                return false;
+            }
+            uploadBytes = nativeUpload.data();
+            uploadBpp = nativeUploadBpp;
+        } else if (upload.empty()) {
+            return false;
+        }
+
+        const NSUInteger rowBytes =
+            static_cast<NSUInteger>(width) * static_cast<NSUInteger>(uploadBpp);
+        const NSUInteger imageBytes =
+            rowBytes * static_cast<NSUInteger>(height);
+        const bool needsBlitUpload =
+            metalTex.storageMode == MTLStorageModePrivate;
+        const bool use2DFor1D = uses2DBackingFor1DTextures();
+        MetalCommandBufferLease lease;
+        id<MTLBlitCommandEncoder> blit = nil;
+        auto ensureBlit = [&]() -> bool {
+            if (blit != nil) return true;
+            lease = impl_->makeCommandBuffer(@"texture-subimage-blit-upload");
+            id<MTLCommandBuffer> cmd = lease.get();
+            if (cmd == nil) return false;
+            blit = [cmd blitCommandEncoder];
+            return blit != nil;
+        };
+        auto upload2D = [&](const std::uint8_t* bytes,
+                            const MTLRegion& region,
+                            NSUInteger slice) -> bool {
+            if (needsBlitUpload) {
+                if (!ensureBlit()) return false;
+                return impl_->blitUpload2DRegion(
+                    metalTex, blit, bytes, rowBytes, imageBytes,
+                    region, static_cast<NSUInteger>(level), slice, uploadBpp);
+            }
+            [metalTex replaceRegion:region
+                         mipmapLevel:static_cast<NSUInteger>(level)
+                               slice:slice
+                           withBytes:bytes
+                         bytesPerRow:rowBytes
+                       bytesPerImage:imageBytes];
+            return true;
+        };
+
+        bool ok = true;
+        if (object->target == GL_TEXTURE_3D) {
+            for (GLsizei z = 0; z < depth && ok; ++z) {
+                const MTLRegion region = MTLRegionMake3D(
+                    static_cast<NSUInteger>(xoffset),
+                    static_cast<NSUInteger>(yoffset),
+                    static_cast<NSUInteger>(zoffset + z),
+                    static_cast<NSUInteger>(width),
+                    static_cast<NSUInteger>(height),
+                    1);
+                const std::uint8_t* sliceBytes =
+                    uploadBytes + static_cast<std::size_t>(z) * imageBytes;
+                if (needsBlitUpload) {
+                    const MTLRegion blitRegion = MTLRegionMake3D(
+                        static_cast<NSUInteger>(xoffset),
+                        static_cast<NSUInteger>(yoffset),
+                        0,
+                        static_cast<NSUInteger>(width),
+                        static_cast<NSUInteger>(height),
+                        1);
+                    ok = upload2D(sliceBytes, blitRegion, static_cast<NSUInteger>(zoffset + z));
+                } else {
+                    [metalTex replaceRegion:region
+                                 mipmapLevel:static_cast<NSUInteger>(level)
+                                   withBytes:sliceBytes
+                                 bytesPerRow:rowBytes];
+                }
+            }
+        } else if (object->target == GL_TEXTURE_2D_ARRAY ||
+                   object->target == GL_TEXTURE_CUBE_MAP_ARRAY) {
+            const MTLRegion region = MTLRegionMake2D(
+                static_cast<NSUInteger>(xoffset),
+                static_cast<NSUInteger>(yoffset),
+                static_cast<NSUInteger>(width),
+                static_cast<NSUInteger>(height));
+            for (GLsizei z = 0; z < depth && ok; ++z) {
+                const std::uint8_t* layerBytes =
+                    uploadBytes + static_cast<std::size_t>(z) * imageBytes;
+                ok = upload2D(layerBytes, region, static_cast<NSUInteger>(effectiveZoffset + z));
+            }
+        } else if (cubeFaceForSubImage >= 0) {
+            const MTLRegion region = MTLRegionMake2D(
+                static_cast<NSUInteger>(xoffset),
+                static_cast<NSUInteger>(yoffset),
+                static_cast<NSUInteger>(width),
+                static_cast<NSUInteger>(height));
+            ok = upload2D(uploadBytes, region, static_cast<NSUInteger>(cubeFaceForSubImage));
+        } else if (object->target == GL_TEXTURE_1D_ARRAY) {
+            const MTLRegion region = MTLRegionMake2D(
+                static_cast<NSUInteger>(xoffset),
+                0,
+                static_cast<NSUInteger>(width),
+                1);
+            const bool native1DArray = !use2DFor1D;
+            for (GLsizei layer = 0; layer < height && ok; ++layer) {
+                const std::uint8_t* layerBytes =
+                    uploadBytes + static_cast<std::size_t>(layer) * rowBytes;
+                if (needsBlitUpload) {
+                    ok = upload2D(layerBytes, region, static_cast<NSUInteger>(yoffset + layer));
+                } else {
+                    [metalTex replaceRegion:region
+                                 mipmapLevel:static_cast<NSUInteger>(level)
+                                       slice:static_cast<NSUInteger>(yoffset + layer)
+                                   withBytes:layerBytes
+                                 bytesPerRow:(native1DArray ? 0u : rowBytes)
+                               bytesPerImage:(native1DArray ? 0u : rowBytes)];
+                }
+            }
+        } else {
+            const MTLRegion region = MTLRegionMake2D(
+                static_cast<NSUInteger>(xoffset),
+                static_cast<NSUInteger>(yoffset),
+                static_cast<NSUInteger>(width),
+                static_cast<NSUInteger>(height));
+            if (needsBlitUpload) {
+                ok = upload2D(uploadBytes, region, 0);
+            } else {
+                const bool native1D = object->target == GL_TEXTURE_1D && !use2DFor1D;
+                [metalTex replaceRegion:region
+                             mipmapLevel:static_cast<NSUInteger>(level)
+                               withBytes:uploadBytes
+                             bytesPerRow:(native1D ? 0u : rowBytes)];
+            }
+        }
+        if (blit != nil) {
+            [blit endEncoding];
+            lease.commitAndWait(@"texture-subimage-blit-upload");
+        }
+        if (ok) {
+            object->instantiated = true;
+            object->swizzleDirty = true;
+            image.rgba8.clear();
+            image.nativeData.clear();
+            if (cubeFaceForSubImage >= 0 && sparseCubeFace < 0) {
+                object->levels[level].rgba8.clear();
+                object->levels[level].nativeData.clear();
+                object->levels[level].nativeBpp = image.nativeBpp;
+            }
+        }
+        return ok;
+    };
+    const bool persistentShadowAvailable =
+        !image.rgba8.empty() || !image.nativeData.empty();
+    if (!persistentShadowAvailable && tryDirectMetalSubImageUpload()) {
+        return true;
+    }
+    const std::size_t fullRGBA8Bytes =
+        static_cast<std::size_t>(image.desc.width) *
+        static_cast<std::size_t>(image.desc.height) *
+        static_cast<std::size_t>(image.desc.depth) * 4u;
+    if (image.rgba8.size() < fullRGBA8Bytes) {
+        image.rgba8.assign(fullRGBA8Bytes, 0);
+    }
     for (GLsizei z = 0; z < depth; ++z) {
         for (GLsizei y = 0; y < height; ++y) {
             const std::size_t sourceOffset =
@@ -18212,28 +18411,32 @@ bool GLContext::texSubImage(
     }
 
     // Also update native-format data when present.
-    if (image.nativeBpp > 0 && !image.nativeData.empty()) {
-        std::vector<std::uint8_t> nativeUpload;
-        std::size_t nativeBpp = 0;
-        if (impl_->buildNativeUpload(image.desc.internalFormat,
-                width, height, depth, format, type, resolvedPixels,
-                nativeUpload, nativeBpp) && nativeBpp == image.nativeBpp) {
+    if (image.nativeBpp > 0) {
+        if (image.nativeData.empty()) {
+            const std::size_t nativeBytes =
+                static_cast<std::size_t>(image.desc.width) *
+                static_cast<std::size_t>(image.desc.height) *
+                static_cast<std::size_t>(image.desc.depth) *
+                image.nativeBpp;
+            image.nativeData.assign(nativeBytes, 0);
+        }
+        if (hasNativeUpload && nativeUploadBpp == image.nativeBpp) {
             for (GLsizei z = 0; z < depth; ++z) {
                 for (GLsizei y = 0; y < height; ++y) {
                     const std::size_t srcOff =
                         (static_cast<std::size_t>(z) * static_cast<std::size_t>(height)
                          + static_cast<std::size_t>(y))
-                        * static_cast<std::size_t>(width) * nativeBpp;
+                        * static_cast<std::size_t>(width) * nativeUploadBpp;
                     const std::size_t dstOff =
                         ((static_cast<std::size_t>(z + effectiveZoffset) * static_cast<std::size_t>(image.desc.height)
                           + static_cast<std::size_t>(y + yoffset))
                          * static_cast<std::size_t>(image.desc.width)
                          + static_cast<std::size_t>(xoffset))
-                        * nativeBpp;
+                        * nativeUploadBpp;
                     std::memcpy(
                         image.nativeData.data() + dstOff,
                         nativeUpload.data() + srcOff,
-                        static_cast<std::size_t>(width) * nativeBpp);
+                        static_cast<std::size_t>(width) * nativeUploadBpp);
                 }
             }
         }
@@ -18715,13 +18918,15 @@ bool GLContext::texStorage(
             static_cast<std::size_t>(image.desc.width)
             * static_cast<std::size_t>(image.desc.height)
             * static_cast<std::size_t>(image.desc.depth);
-        image.rgba8.resize(lvlPixels * 4u, 0);
+        // CPU shadows are lazy: immutable storage defines texture images
+        // and Metal storage, but it does not allocate a persistent CPU
+        // mirror until a CPU fallback path actually needs one.
         // Packed native formats report channels==0 but still need their
-        // 4-byte native shadow so sparse uploads can commit real Metal texels.
+        // bytes-per-pixel metadata so later subimage uploads can pick the
+        // native Metal format without carrying a zero-filled full shadow.
         if (nativeInfo.bytesPerPixel > 0) {
             image.nativeBpp =
                 static_cast<std::size_t>(nativeInfo.bytesPerPixel);
-            image.nativeData.resize(lvlPixels * image.nativeBpp, 0);
         }
         if (target == GL_TEXTURE_CUBE_MAP) {
             for (auto& faceLevels : object->cubeFaceLevels) {
@@ -18872,8 +19077,6 @@ bool GLContext::texStorageMultisample(
     GLTextureImageLevel baseLevel;
     baseLevel.desc = object->desc;
     baseLevel.defined = true;
-    const std::size_t byteCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * static_cast<std::size_t>(object->desc.depth) * 4u;
-    baseLevel.rgba8.resize(byteCount, 0);
     object->levels[0] = std::move(baseLevel);
 
     if (allocateSparse) {
@@ -50862,6 +51065,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                 const NSUInteger totalBytes = bytesPerImage * numSlices;
                 id<MTLBuffer> staging = [mtlDevice newBufferWithLength:totalBytes
                                                               options:MTLResourceStorageModeShared];
+                ScopedOwnedObjCObject stagingRelease(staging);
                 if (staging == nil) {
                     pushError(GL_OUT_OF_MEMORY);
                     return false;
@@ -51059,6 +51263,8 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                                                             options:MTLResourceStorageModeShared];
             id<MTLBuffer> stencilBuf = [mtlDevice newBufferWithLength:stencilTotalBytes
                                                               options:MTLResourceStorageModeShared];
+            ScopedOwnedObjCObject depthBufRelease(depthBuf);
+            ScopedOwnedObjCObject stencilBufRelease(stencilBuf);
             if (depthBuf == nil || stencilBuf == nil) {
                 pushError(GL_OUT_OF_MEMORY);
                 return false;
@@ -51398,6 +51604,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
         }
         id<MTLBuffer> staging = [mtlDevice newBufferWithLength:std::max<std::size_t>(totalBytes, 1)
                                                         options:MTLResourceStorageModeShared];
+        ScopedOwnedObjCObject stagingRelease(staging);
         if (staging == nil) {
             pushError(GL_OUT_OF_MEMORY);
             return false;
