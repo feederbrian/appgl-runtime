@@ -765,39 +765,6 @@ void releaseRetainedMetalObject(void* object) {
 #endif
 }
 
-void releaseOwnedObjCObject(id object) {
-    if (object == nil) {
-        return;
-    }
-#if __has_feature(objc_arc)
-    (void)object;
-#else
-    [object release];
-#endif
-}
-
-class ScopedOwnedObjCObject {
-public:
-    explicit ScopedOwnedObjCObject(id object = nil) : object_(object) {}
-    ScopedOwnedObjCObject(const ScopedOwnedObjCObject&) = delete;
-    ScopedOwnedObjCObject& operator=(const ScopedOwnedObjCObject&) = delete;
-    ~ScopedOwnedObjCObject() {
-        releaseOwnedObjCObject(object_);
-    }
-    void reset(id object = nil) {
-        if (object_ != object) {
-            releaseOwnedObjCObject(object_);
-            object_ = object;
-        }
-    }
-    id get() const {
-        return object_;
-    }
-
-private:
-    id object_ = nil;
-};
-
 id<MTLBuffer> metalBufferFromRaw(void* object) {
     if (object == nullptr) {
         return nil;
@@ -2995,14 +2962,8 @@ struct GLContext::Impl {
         object.rgba8.clear();
         object.rgba8ShadowClearPending = false;
         object.rgba8ShadowClearValue = {0, 0, 0, 0};
-        object.nativeData.clear();
-        object.nativeBpp = 0;
         object.depth32.clear();
-        object.depth32ShadowClearPending = false;
-        object.depth32ShadowClearValue = 1.0f;
         object.stencil8.clear();
-        object.stencil8ShadowClearPending = false;
-        object.stencil8ShadowClearValue = 0;
         object.storageDefined = false;
         object.wasMetalDepthRendered = false;
         object.wasMetalStencilRendered = false;
@@ -5743,13 +5704,14 @@ struct GLContext::Impl {
         object.width = width;
         object.height = height;
         object.samples = samples;
+        const std::size_t texelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
         if (isColorFormat(internalFormat)) {
+            object.rgba8.assign(texelCount * 4u, 0);
             object.rgba8ShadowClearPending = false;
             object.rgba8ShadowClearValue = {0, 0, 0, 0};
-            // CKPT117 (Sprint 11 Phase 1 1a): track the native-precision
-            // shadow width for non-RGBA8 Metal pixel formats. The actual
-            // CPU shadow is materialized only by read/copy paths that need
-            // it; renderbuffer storage itself stays GPU-only. This unblocks copy_image
+            // CKPT117 (Sprint 11 Phase 1 1a): allocate a native-precision
+            // shadow alongside rgba8 when the internal format maps to a
+            // non-RGBA8 Metal pixel format. This unblocks copy_image
             // round-trips that need >8-bit precision (rgb10 / rgb32f /
             // RGBA32UI etc.) per CKPT109 carryover. nativeBpp = 0 for
             // RGBA8-mapped formats (no native shadow needed; rgba8 IS the
@@ -5762,6 +5724,7 @@ struct GLContext::Impl {
                 && nativePixelFmt != MTLPixelFormatRGBA8Unorm_sRGB
                 && nativePixelFmt != MTLPixelFormatRGBA8Snorm) {
                 object.nativeBpp = static_cast<std::size_t>(nativeInfo.bytesPerPixel);
+                object.nativeData.assign(texelCount * object.nativeBpp, 0);
             } else {
                 // RGBA8-mapped formats use rgba8 as the canonical native
                 // shadow; unsupported native formats fall back to no native
@@ -5771,12 +5734,10 @@ struct GLContext::Impl {
             }
         }
         if (isDepthFormat(internalFormat)) {
-            object.depth32ShadowClearPending = false;
-            object.depth32ShadowClearValue = 1.0f;
+            object.depth32.assign(texelCount, 1.0f);
         }
         if (isStencilFormat(internalFormat)) {
-            object.stencil8ShadowClearPending = false;
-            object.stencil8ShadowClearValue = 0;
+            object.stencil8.assign(texelCount, 0);
         }
         object.storageDefined = true;
         return true;
@@ -7019,7 +6980,6 @@ struct GLContext::Impl {
                                                     length:depthImageBytes
                                                    options:MTLResourceStorageModeShared];
         if (staging == nil) return false;
-        ScopedOwnedObjCObject stagingRelease(staging);
         auto lease = makeCommandBuffer(@"mirror-depth-renderbuffer");
         id<MTLCommandBuffer> cmd = lease.get();
         id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
@@ -7077,7 +7037,6 @@ struct GLContext::Impl {
                                                     length:stencilImageBytes
                                                    options:MTLResourceStorageModeShared];
         if (staging == nil) return false;
-        ScopedOwnedObjCObject stagingRelease(staging);
         auto lease = makeCommandBuffer(@"mirror-stencil-renderbuffer");
         id<MTLCommandBuffer> cmd = lease.get();
         id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
@@ -10171,31 +10130,13 @@ struct GLContext::Impl {
         return clearColorAttachmentIntImpl<GLuint>(attachment, value);
     }
 
-    bool renderbufferAllowsPersistentCPUShadow(const GLRenderbufferObject& renderbuffer) const {
-        return renderbuffer.samples <= 1;
-    }
-
-    std::size_t renderbufferPixelCount(const GLRenderbufferObject& renderbuffer) const {
-        if (renderbuffer.width <= 0 || renderbuffer.height <= 0) {
-            return 0;
-        }
-        return static_cast<std::size_t>(renderbuffer.width) *
-               static_cast<std::size_t>(renderbuffer.height);
-    }
-
-    std::size_t renderbufferRGBA8ByteCount(const GLRenderbufferObject& renderbuffer) const {
-        return renderbufferPixelCount(renderbuffer) * 4u;
-    }
-
-    bool materializeRenderbufferRGBA8Clear(GLRenderbufferObject& renderbuffer) {
+    void materializeRenderbufferRGBA8Clear(GLRenderbufferObject& renderbuffer) {
         if (!renderbuffer.rgba8ShadowClearPending) {
-            return true;
+            return;
         }
-        if (!renderbufferAllowsPersistentCPUShadow(renderbuffer)) {
-            renderbuffer.rgba8ShadowClearPending = false;
-            return false;
-        }
-        const std::size_t rbBytes = renderbufferRGBA8ByteCount(renderbuffer);
+        const std::size_t rbBytes =
+            static_cast<std::size_t>(renderbuffer.width) *
+            static_cast<std::size_t>(renderbuffer.height) * 4u;
         if (renderbuffer.rgba8.size() != rbBytes) {
             renderbuffer.rgba8.assign(rbBytes, 0);
         }
@@ -10209,35 +10150,6 @@ struct GLContext::Impl {
             std::memcpy(renderbuffer.rgba8.data() + offset, px, 4u);
         }
         renderbuffer.rgba8ShadowClearPending = false;
-        return true;
-    }
-
-    bool materializeRenderbufferDepthClear(GLRenderbufferObject& renderbuffer) {
-        if (!renderbuffer.depth32ShadowClearPending) {
-            return true;
-        }
-        if (!renderbufferAllowsPersistentCPUShadow(renderbuffer)) {
-            renderbuffer.depth32ShadowClearPending = false;
-            return false;
-        }
-        renderbuffer.depth32.assign(renderbufferPixelCount(renderbuffer),
-                                    renderbuffer.depth32ShadowClearValue);
-        renderbuffer.depth32ShadowClearPending = false;
-        return true;
-    }
-
-    bool materializeRenderbufferStencilClear(GLRenderbufferObject& renderbuffer) {
-        if (!renderbuffer.stencil8ShadowClearPending) {
-            return true;
-        }
-        if (!renderbufferAllowsPersistentCPUShadow(renderbuffer)) {
-            renderbuffer.stencil8ShadowClearPending = false;
-            return false;
-        }
-        renderbuffer.stencil8.assign(renderbufferPixelCount(renderbuffer),
-                                     renderbuffer.stencil8ShadowClearValue);
-        renderbuffer.stencil8ShadowClearPending = false;
-        return true;
     }
 
     bool clearColorAttachment(const GLFramebufferAttachment& attachment,
@@ -10580,38 +10492,54 @@ struct GLContext::Impl {
             const std::size_t renderbufferPixels =
                 static_cast<std::size_t>(renderbuffer->width) *
                 static_cast<std::size_t>(renderbuffer->height);
-            (void)renderbufferPixels;
+            const bool defaultClipControl =
+                state->clipOrigin() == GL_LOWER_LEFT &&
+                state->clipDepthMode() == GL_NEGATIVE_ONE_TO_ONE;
+            const bool blackColorClear =
+                rgba[0] == 0 && rgba[1] == 0 && rgba[2] == 0;
+            // Keep native clears to the CTS cleanup pattern that motivated
+            // this fast path. Nonzero-background clip_control cases read
+            // partial draw results back from max-size FBOs and stay on the
+            // proven CPU-shadow path.
+            constexpr std::size_t kMaxNativeRenderbufferClearPixels =
+                256u * 1024u * 1024u;
             if (allowNativeRenderbufferClear &&
                 !clearScissorActive &&
                 fullColorMask &&
+                defaultClipControl &&
+                blackColorClear &&
                 frameGraph != nullptr &&
+                frameGraph->currentRenderEncoder() == nullptr &&
                 renderbuffer->metalTexture != nullptr &&
+                renderbuffer->nativeBpp == 0 &&
                 renderbuffer->width > 0 &&
-                renderbuffer->height > 0) {
-                const float rgbaF[4] = {
-                    color[0], color[1], color[2], color[3]
-                };
-                if (frameGraph->clearLayeredTextureColor(
-                        renderbuffer->metalTexture, 0, rgbaF)) {
-                    renderbuffer->rgba8.clear();
-                    renderbuffer->nativeData.clear();
-                    renderbuffer->rgba8ShadowClearPending =
-                        renderbufferAllowsPersistentCPUShadow(*renderbuffer);
-                    renderbuffer->rgba8ShadowClearValue = {
-                        rgba[0], rgba[1], rgba[2], rgba[3]
+                renderbuffer->height > 0 &&
+                renderbufferPixels <= kMaxNativeRenderbufferClearPixels) {
+                id<MTLTexture> metalTex =
+                    (__bridge id<MTLTexture>)renderbuffer->metalTexture;
+                const MTLPixelFormat pf = metalTex.pixelFormat;
+                const bool nativeRGBA8Clear =
+                    pf == MTLPixelFormatRGBA8Unorm ||
+                    pf == MTLPixelFormatRGBA8Unorm_sRGB;
+                if (nativeRGBA8Clear) {
+                    const float rgbaF[4] = {
+                        color[0], color[1], color[2], color[3]
                     };
-                    return true;
+                    if (frameGraph->clearLayeredTextureColor(
+                            renderbuffer->metalTexture, 0, rgbaF)) {
+                        renderbuffer->rgba8ShadowClearPending = true;
+                        renderbuffer->rgba8ShadowClearValue = {
+                            rgba[0], rgba[1], rgba[2], rgba[3]
+                        };
+                        return true;
+                    }
                 }
             }
             if (renderbuffer->rgba8ShadowClearPending && frameGraph != nullptr) {
                 frameGraph->flushForReadback();
             }
             if (clearScissorActive) {
-                (void)materializeRenderbufferRGBA8Clear(*renderbuffer);
-            }
-            if (!renderbufferAllowsPersistentCPUShadow(*renderbuffer)) {
-                renderbuffer->rgba8ShadowClearPending = false;
-                return true;
+                materializeRenderbufferRGBA8Clear(*renderbuffer);
             }
             const std::size_t rbBytes =
                 static_cast<std::size_t>(renderbuffer->width) *
@@ -11156,24 +11084,22 @@ struct GLContext::Impl {
         if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isDepthFormat(renderbuffer->internalFormat)) {
             return false;
         }
+        renderbuffer->depth32.assign(static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height), depth);
         if (frameGraph != nullptr && renderbuffer->metalTexture != nullptr) {
-            if (frameGraph->clearLayeredTextureDepth(renderbuffer->metalTexture, 0, depth)) {
-                renderbuffer->depth32.clear();
-                renderbuffer->depth32ShadowClearPending =
-                    renderbufferAllowsPersistentCPUShadow(*renderbuffer);
-                renderbuffer->depth32ShadowClearValue = depth;
-                renderbuffer->wasMetalDepthRendered = false;
+            id<MTLTexture> metalTex =
+                (__bridge id<MTLTexture>)renderbuffer->metalTexture;
+            // Single-sample depth RB clears must reach Metal before a draw:
+            // clipped fragments leave the clear value behind. Keep MS RBs on
+            // the CPU-shadow path because depth MS readback is not resolved here.
+            if (metalTex.sampleCount <= 1 &&
+                frameGraph->clearLayeredTextureDepth(renderbuffer->metalTexture, 0, depth)) {
+                renderbuffer->wasMetalDepthRendered = true;
                 return true;
             }
         }
-        if (!renderbufferAllowsPersistentCPUShadow(*renderbuffer)) {
-            renderbuffer->depth32.clear();
-            renderbuffer->depth32ShadowClearPending = false;
-            return true;
-        }
-        renderbuffer->depth32.clear();
-        renderbuffer->depth32ShadowClearPending = true;
-        renderbuffer->depth32ShadowClearValue = depth;
+        (void)mirrorDepthRenderbufferRegionToMetal(
+            *renderbuffer, 0, 0, renderbuffer->width, renderbuffer->height,
+            renderbuffer->depth32.data());
         return true;
     }
 
@@ -11226,27 +11152,13 @@ struct GLContext::Impl {
         if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isStencilFormat(renderbuffer->internalFormat)) {
             return false;
         }
-        const std::uint8_t clearValue = static_cast<std::uint8_t>(value & 0xff);
-        if (frameGraph != nullptr && renderbuffer->metalTexture != nullptr) {
-            if (frameGraph->clearLayeredTextureStencil(
-                    renderbuffer->metalTexture, 0,
-                    static_cast<std::uint32_t>(clearValue))) {
-                renderbuffer->stencil8.clear();
-                renderbuffer->stencil8ShadowClearPending =
-                    renderbufferAllowsPersistentCPUShadow(*renderbuffer);
-                renderbuffer->stencil8ShadowClearValue = clearValue;
-                renderbuffer->wasMetalStencilRendered = false;
-                return true;
-            }
-        }
-        if (!renderbufferAllowsPersistentCPUShadow(*renderbuffer)) {
-            renderbuffer->stencil8.clear();
-            renderbuffer->stencil8ShadowClearPending = false;
-            return true;
-        }
-        renderbuffer->stencil8.clear();
-        renderbuffer->stencil8ShadowClearPending = true;
-        renderbuffer->stencil8ShadowClearValue = clearValue;
+        renderbuffer->stencil8.assign(
+            static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height),
+            static_cast<std::uint8_t>(value & 0xff)
+        );
+        (void)mirrorStencilRenderbufferRegionToMetal(
+            *renderbuffer, 0, 0, renderbuffer->width, renderbuffer->height,
+            renderbuffer->stencil8.data());
         return true;
     }
 
@@ -11367,30 +11279,6 @@ struct GLContext::Impl {
             }
             sourceNeedsFboYFlip = rb->framebufferReadbackYFlip;
             if (metalTex == nil) {
-                if (rb->rgba8ShadowClearPending) {
-                    const std::uint8_t px[4] = {
-                        rb->rgba8ShadowClearValue[0],
-                        rb->rgba8ShadowClearValue[1],
-                        rb->rgba8ShadowClearValue[2],
-                        rb->rgba8ShadowClearValue[3],
-                    };
-                    auto* out = static_cast<std::uint8_t*>(pixels);
-                    for (GLsizei row = 0; row < height; ++row) {
-                        for (GLsizei col = 0; col < width; ++col) {
-                            const GLint srcX = x + col;
-                            const GLint srcY = y + row;
-                            const std::size_t dstOffset =
-                                static_cast<std::size_t>(row * width + col) * 4u;
-                            if (srcX < 0 || srcY < 0 ||
-                                srcX >= sourceWidth || srcY >= sourceHeight) {
-                                std::memset(out + dstOffset, 0, 4);
-                                continue;
-                            }
-                            std::memcpy(out + dstOffset, px, 4);
-                        }
-                    }
-                    return true;
-                }
                 if (rb->rgba8.empty()) return false;
                 const std::uint8_t* source = rb->rgba8.data();
                 auto* out = static_cast<std::uint8_t*>(pixels);
@@ -11454,7 +11342,6 @@ struct GLContext::Impl {
         // destination-slice indices stay at 0 → behaviour identical
         // to pre-Probe-C (B2 §8.3 sister-pattern verified correct).
         id<MTLTexture> readTex = metalTex;
-        ScopedOwnedObjCObject resolvedTexRelease;
         if (metalTex.sampleCount > 1 && device != nil && commandQueue != nil) {
             const bool sourceIsArray =
                 metalTex.textureType == MTLTextureType2DMultisampleArray;
@@ -11467,7 +11354,6 @@ struct GLContext::Impl {
             tempDesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
             id<MTLTexture> resolvedTex = [device newTextureWithDescriptor:tempDesc];
             if (resolvedTex != nil) {
-                resolvedTexRelease.reset(resolvedTex);
                 MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
                 rpd.colorAttachments[0].texture = metalTex;
                 // For 2DMSArray sources, read the caller's requested
@@ -11677,7 +11563,6 @@ struct GLContext::Impl {
             id<MTLBuffer> staging = [mtlDevice newBufferWithLength:stagingSize
                                                           options:MTLResourceStorageModeShared];
             if (staging == nil) return false;
-            ScopedOwnedObjCObject stagingRelease(staging);
             auto readbackLease = makeCommandBuffer(@"depth-stencil-texture-readback");
             id<MTLCommandBuffer> cmd = readbackLease.get();
             if (cmd == nil) return false;
@@ -11797,22 +11682,6 @@ struct GLContext::Impl {
             // CPU shadow fallback — preserves CPU-blit code path
             // (writeDepthAttachmentPixels at line ~7536) and the
             // glClearDepth-only no-render scenario.
-            if (renderbuffer->depth32ShadowClearPending) {
-                auto* out = static_cast<GLfloat*>(pixels);
-                for (GLsizei row = 0; row < height; ++row) {
-                    for (GLsizei col = 0; col < width; ++col) {
-                        const GLint srcX = x + col;
-                        const GLint srcY = y + row;
-                        const std::size_t dstOffset = static_cast<std::size_t>(row * width + col);
-                        out[dstOffset] =
-                            (srcX < 0 || srcY < 0 ||
-                             srcX >= renderbuffer->width || srcY >= renderbuffer->height)
-                                ? 0.0f
-                                : renderbuffer->depth32ShadowClearValue;
-                    }
-                }
-                return true;
-            }
             if (renderbuffer->depth32.empty()) return false;
             auto* out = static_cast<GLfloat*>(pixels);
             for (GLsizei row = 0; row < height; ++row) {
@@ -11862,7 +11731,7 @@ struct GLContext::Impl {
     bool readStencilAttachmentPixels(const GLFramebufferAttachment& attachment, GLint x, GLint y, GLsizei width, GLsizei height, void* pixels) const {
         if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
             const GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
-            if (renderbuffer == nullptr || !renderbuffer->storageDefined) {
+            if (renderbuffer == nullptr || !renderbuffer->storageDefined || renderbuffer->stencil8.empty()) {
                 return false;
             }
             if (renderbuffer->metalTexture != nullptr &&
@@ -11882,7 +11751,6 @@ struct GLContext::Impl {
                         [device newBufferWithLength:stencilBytesPerImage
                                             options:MTLResourceStorageModeShared];
                     if (stencilBuf != nil) {
-                        ScopedOwnedObjCObject stencilBufRelease(stencilBuf);
                         auto lease = makeCommandBuffer(@"stencil-renderbuffer-readback");
                         id<MTLCommandBuffer> cmd = lease.get();
                         id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
@@ -11933,25 +11801,6 @@ struct GLContext::Impl {
                         }
                     }
                 }
-            }
-            if (renderbuffer->stencil8ShadowClearPending) {
-                auto* out = static_cast<std::uint8_t*>(pixels);
-                for (GLsizei row = 0; row < height; ++row) {
-                    for (GLsizei col = 0; col < width; ++col) {
-                        const GLint srcX = x + col;
-                        const GLint srcY = y + row;
-                        const std::size_t dstOffset = static_cast<std::size_t>(row * width + col);
-                        out[dstOffset] =
-                            (srcX < 0 || srcY < 0 ||
-                             srcX >= renderbuffer->width || srcY >= renderbuffer->height)
-                                ? 0
-                                : renderbuffer->stencil8ShadowClearValue;
-                    }
-                }
-                return true;
-            }
-            if (renderbuffer->stencil8.empty()) {
-                return false;
             }
             auto* out = static_cast<std::uint8_t*>(pixels);
             for (GLsizei row = 0; row < height; ++row) {
@@ -12010,7 +11859,6 @@ struct GLContext::Impl {
                 [device newBufferWithLength:stencilBytesPerImage
                                     options:MTLResourceStorageModeShared];
             if (stencilBuf == nil) return false;
-            ScopedOwnedObjCObject stencilBufRelease(stencilBuf);
             auto lease = makeCommandBuffer(@"stencil-texture-readback");
             id<MTLCommandBuffer> cmd = lease.get();
             id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
@@ -12097,86 +11945,16 @@ struct GLContext::Impl {
             if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isColorFormat(renderbuffer->internalFormat)) {
                 return false;
             }
-            destWidth = renderbuffer->width;
-            destHeight = renderbuffer->height;
-            // Mirror the shadow write to the Metal texture so readback
-            // from the Metal side sees the blitted pixels. Metal textures
-            // store row 0 at the top but our shadow/GL coord puts y=0
-            // at the bottom; readColorAttachmentPixels applies the
-            // Y-flip when reading from the Metal texture, so we must
-            // Y-flip here too (write GL y=N to Metal row sourceHeight-
-            // 1-N) to keep the two sides consistent.
-            if (renderbuffer->metalTexture != nullptr) {
-                id<MTLTexture> metalTex = (__bridge id<MTLTexture>)renderbuffer->metalTexture;
-                if (metalTex.sampleCount <= 1) {
-                    const MTLPixelFormat pf = metalTex.pixelFormat;
-                    if (pf == MTLPixelFormatRGBA8Unorm ||
-                        pf == MTLPixelFormatRGBA8Unorm_sRGB ||
-                        pf == MTLPixelFormatBGRA8Unorm ||
-                        pf == MTLPixelFormatBGRA8Unorm_sRGB) {
-                        const bool bgraUpload =
-                            pf == MTLPixelFormatBGRA8Unorm ||
-                            pf == MTLPixelFormatBGRA8Unorm_sRGB;
-                        // Build the Y-flipped upload buffer. For each
-                        // GL row in [y, y+height), the Metal row is
-                        // (destHeight - 1 - glRow).
-                        std::vector<std::uint8_t> flipped(
-                            static_cast<std::size_t>(width) *
-                            static_cast<std::size_t>(height) * 4u);
-                        for (GLsizei row = 0; row < height; ++row) {
-                            const std::size_t srcOff =
-                                static_cast<std::size_t>(row) *
-                                static_cast<std::size_t>(width) * 4u;
-                            const std::size_t dstOff =
-                                static_cast<std::size_t>(height - 1 - row) *
-                                static_cast<std::size_t>(width) * 4u;
-                            if (!bgraUpload) {
-                                std::memcpy(&flipped[dstOff], pixels + srcOff,
-                                            static_cast<std::size_t>(width) * 4u);
-                                continue;
-                            }
-                            for (GLsizei col = 0; col < width; ++col) {
-                                const std::size_t srcPixel = srcOff + static_cast<std::size_t>(col) * 4u;
-                                const std::size_t dstPixel = dstOff + static_cast<std::size_t>(col) * 4u;
-                                flipped[dstPixel + 0] = pixels[srcPixel + 2];
-                                flipped[dstPixel + 1] = pixels[srcPixel + 1];
-                                flipped[dstPixel + 2] = pixels[srcPixel + 0];
-                                flipped[dstPixel + 3] = pixels[srcPixel + 3];
-                            }
-                        }
-                        const NSUInteger bytesPerRow =
-                            static_cast<NSUInteger>(width) * 4u;
-                        const NSUInteger metalY = static_cast<NSUInteger>(
-                            destHeight - (y + height));
-                        MTLRegion region = MTLRegionMake2D(
-                            static_cast<NSUInteger>(x),
-                            metalY,
-                            static_cast<NSUInteger>(width),
-                            static_cast<NSUInteger>(height));
-                        [metalTex replaceRegion:region
-                                    mipmapLevel:0
-                                      withBytes:flipped.data()
-                                    bytesPerRow:bytesPerRow];
-                        renderbuffer->rgba8.clear();
-                        renderbuffer->nativeData.clear();
-                        renderbuffer->rgba8ShadowClearPending = false;
-                        return true;
-                    }
-                }
-            }
-            if (!renderbufferAllowsPersistentCPUShadow(*renderbuffer)) {
-                renderbuffer->rgba8.clear();
-                renderbuffer->rgba8ShadowClearPending = false;
-                return true;
-            }
-            (void)materializeRenderbufferRGBA8Clear(*renderbuffer);
-            const std::size_t rbBytes =
-                static_cast<std::size_t>(renderbuffer->width) *
-                static_cast<std::size_t>(renderbuffer->height) * 4u;
-            if (renderbuffer->rgba8.size() < rbBytes) {
-                renderbuffer->rgba8.assign(rbBytes, 0);
+            materializeRenderbufferRGBA8Clear(*renderbuffer);
+            if (renderbuffer->rgba8.empty()) {
+                renderbuffer->rgba8.assign(static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height) * 4u, 0);
             }
             dest = renderbuffer->rgba8.data();
+            destWidth = renderbuffer->width;
+            destHeight = renderbuffer->height;
+            // Scope the metalTexture update below to this branch; needed
+            // so glBlitFramebuffer's shadow-only write is visible to the
+            // subsequent glReadPixels → Metal-texture readback path.
             for (GLsizei row = 0; row < height; ++row) {
                 for (GLsizei col = 0; col < width; ++col) {
                     const GLint dstX = x + col;
@@ -12192,7 +11970,53 @@ struct GLContext::Impl {
                     std::memcpy(dest + dstOffset, pixels + srcOffset, 4);
                 }
             }
-            renderbuffer->rgba8ShadowClearPending = false;
+            // Mirror the shadow write to the Metal texture so readback
+            // from the Metal side sees the blitted pixels. Metal textures
+            // store row 0 at the top but our shadow/GL coord puts y=0
+            // at the bottom; readColorAttachmentPixels applies the
+            // Y-flip when reading from the Metal texture, so we must
+            // Y-flip here too (write GL y=N to Metal row sourceHeight-
+            // 1-N) to keep the two sides consistent.
+            if (renderbuffer->metalTexture != nullptr) {
+                id<MTLTexture> metalTex = (__bridge id<MTLTexture>)renderbuffer->metalTexture;
+                if (metalTex.sampleCount <= 1) {
+                    const MTLPixelFormat pf = metalTex.pixelFormat;
+                    if (pf == MTLPixelFormatRGBA8Unorm ||
+                        pf == MTLPixelFormatRGBA8Unorm_sRGB ||
+                        pf == MTLPixelFormatBGRA8Unorm ||
+                        pf == MTLPixelFormatBGRA8Unorm_sRGB) {
+                        // Build the Y-flipped upload buffer. For each
+                        // GL row in [y, y+height), the Metal row is
+                        // (destHeight - 1 - glRow).
+                        std::vector<std::uint8_t> flipped(
+                            static_cast<std::size_t>(width) *
+                            static_cast<std::size_t>(height) * 4u);
+                        for (GLsizei row = 0; row < height; ++row) {
+                            const std::size_t srcOff =
+                                static_cast<std::size_t>(row) *
+                                static_cast<std::size_t>(width) * 4u;
+                            const std::size_t dstOff =
+                                static_cast<std::size_t>(height - 1 - row) *
+                                static_cast<std::size_t>(width) * 4u;
+                            std::memcpy(&flipped[dstOff], pixels + srcOff,
+                                        static_cast<std::size_t>(width) * 4u);
+                        }
+                        const NSUInteger bytesPerRow =
+                            static_cast<NSUInteger>(width) * 4u;
+                        const NSUInteger metalY = static_cast<NSUInteger>(
+                            destHeight - (y + height));
+                        MTLRegion region = MTLRegionMake2D(
+                            static_cast<NSUInteger>(x),
+                            metalY,
+                            static_cast<NSUInteger>(width),
+                            static_cast<NSUInteger>(height));
+                        [metalTex replaceRegion:region
+                                    mipmapLevel:0
+                                      withBytes:flipped.data()
+                                    bytesPerRow:bytesPerRow];
+                    }
+                }
+            }
             return true;
         } else {
             return false;
@@ -12256,17 +12080,6 @@ struct GLContext::Impl {
         if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isDepthFormat(renderbuffer->internalFormat)) {
             return false;
         }
-        if (mirrorDepthRenderbufferRegionToMetal(*renderbuffer, x, y, width, height, pixels)) {
-            renderbuffer->depth32.clear();
-            renderbuffer->depth32ShadowClearPending = false;
-            return true;
-        }
-        if (!renderbufferAllowsPersistentCPUShadow(*renderbuffer)) {
-            renderbuffer->depth32.clear();
-            renderbuffer->depth32ShadowClearPending = false;
-            return true;
-        }
-        (void)materializeRenderbufferDepthClear(*renderbuffer);
         if (renderbuffer->depth32.empty()) {
             renderbuffer->depth32.assign(static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height), 0.0f);
         }
@@ -12282,7 +12095,7 @@ struct GLContext::Impl {
                 ] = pixels[static_cast<std::size_t>(row * width + col)];
             }
         }
-        renderbuffer->depth32ShadowClearPending = false;
+        (void)mirrorDepthRenderbufferRegionToMetal(*renderbuffer, x, y, width, height, pixels);
         return true;
     }
 
@@ -12294,17 +12107,6 @@ struct GLContext::Impl {
         if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isStencilFormat(renderbuffer->internalFormat)) {
             return false;
         }
-        if (mirrorStencilRenderbufferRegionToMetal(*renderbuffer, x, y, width, height, pixels)) {
-            renderbuffer->stencil8.clear();
-            renderbuffer->stencil8ShadowClearPending = false;
-            return true;
-        }
-        if (!renderbufferAllowsPersistentCPUShadow(*renderbuffer)) {
-            renderbuffer->stencil8.clear();
-            renderbuffer->stencil8ShadowClearPending = false;
-            return true;
-        }
-        (void)materializeRenderbufferStencilClear(*renderbuffer);
         if (renderbuffer->stencil8.empty()) {
             renderbuffer->stencil8.assign(static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height), 0);
         }
@@ -12320,7 +12122,7 @@ struct GLContext::Impl {
                 ] = pixels[static_cast<std::size_t>(row * width + col)];
             }
         }
-        renderbuffer->stencil8ShadowClearPending = false;
+        (void)mirrorStencilRenderbufferRegionToMetal(*renderbuffer, x, y, width, height, pixels);
         return true;
     }
 
@@ -21750,10 +21552,6 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         addSampler(texture.metalSampler);
     });
     store->renderbuffers().forEach([&](GLuint, GLRenderbufferObject& renderbuffer) {
-        if (renderbuffer.metalTexture != nullptr) {
-            ++inventory.renderbufferTextureCount;
-            inventory.renderbufferTextureBytes += allocatedSize(renderbuffer.metalTexture);
-        }
         addTexture(renderbuffer.metalTexture);
     });
     store->samplers().forEach([&](GLuint, GLSamplerObject& sampler) {
@@ -40368,7 +40166,6 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                     if (GLRenderbufferObject* rb =
                             objects->renderbuffers().get(it->second.object)) {
                         rb->wasMetalDepthRendered = true;
-                        rb->depth32ShadowClearPending = false;
                         rb->framebufferReadbackYFlip =
                             lowerLeftFramebufferReadbackFlip;
                     }
@@ -40383,7 +40180,6 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                     if (GLRenderbufferObject* rb =
                             objects->renderbuffers().get(it->second.object)) {
                         rb->wasMetalStencilRendered = true;
-                        rb->stencil8ShadowClearPending = false;
                     }
                 };
                 markStencilAttachment(GL_STENCIL_ATTACHMENT);
