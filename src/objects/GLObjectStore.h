@@ -24,6 +24,52 @@ struct SpirvModule;
 
 namespace appgl {
 
+class GLProducerPendingAccess;
+
+enum GLProducerPendingBits : std::uint32_t {
+    kProducerFboColorWrite        = 1u << 0,
+    kProducerFboDepthStencilWrite = 1u << 1,
+    kProducerStorageImageWrite    = 1u << 2,
+    kProducerShaderStorageWrite   = 1u << 3,
+    kProducerAtomicCounterWrite   = 1u << 4,
+    kProducerTransformFeedback    = 1u << 5,
+    kProducerCopyWrite            = 1u << 6,
+    kProducerClearWrite           = 1u << 7,
+    kProducerComputeWrite         = 1u << 8,
+    kProducerUploadWrite          = 1u << 9,
+    kProducerSparseResidency      = 1u << 10,
+    kProducerMipmapWrite          = 1u << 11,
+    kProducerAll                  = 0xFFFFFFFFu,
+};
+
+class GLProducerPendingState {
+public:
+    bool hasAny(std::uint32_t mask = kProducerAll) const {
+        return (bits_ & mask) != 0;
+    }
+
+    std::uint32_t bits() const {
+        return bits_;
+    }
+
+private:
+    friend class GLProducerPendingAccess;
+
+    void mark(std::uint32_t bits) {
+        bits_ |= bits;
+    }
+
+    void clear(std::uint32_t bits) {
+        bits_ &= ~bits;
+    }
+
+    void clearAll() {
+        bits_ = 0;
+    }
+
+    std::uint32_t bits_ = 0;
+};
+
 template <typename T>
 class ObjectTable {
 public:
@@ -90,6 +136,7 @@ struct GLBufferObject {
     std::vector<std::uint8_t> cachedExpandedIndices;
     uint32_t indexExpansionGeneration = 0;   // bumped on data change
     uint32_t cachedExpansionGeneration = 0;  // generation when cache was built
+    GLProducerPendingState producerPending;
 };
 
 struct GLTextureDesc {
@@ -272,6 +319,7 @@ struct GLTextureObject {
     // samples it. This keeps the DCR3-C wait on the dependent resolve path
     // instead of reinstating a draw-tail wait on every FBO draw.
     bool msaaFramebufferWriteNeedsSamplerFlush = false;
+    GLProducerPendingState producerPending;
 };
 
 struct GLSamplerObject {
@@ -326,6 +374,7 @@ struct GLRenderbufferObject {
     // and depth readback use it to decide whether GL row 0 must sample the
     // bottom Metal row.
     bool framebufferReadbackYFlip = true;
+    GLProducerPendingState producerPending;
 };
 
 struct GLFramebufferAttachment {

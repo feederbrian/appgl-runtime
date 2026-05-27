@@ -441,6 +441,7 @@ struct TranslatedDrawInfo {
     struct SSBOBinding {
         std::uint32_t metalSlot = 0;
         void* metalBuffer = nullptr;
+        GLuint glBufferName = 0;
         std::size_t offset = 0;
         // Effective bound byte range. Used by the Sprint 18 Item42
         // graphics argbuf sidecar for SSBO `.length()` / OpArrayLength.
@@ -456,11 +457,16 @@ struct TranslatedDrawInfo {
     struct AtomicCounterBinding {
         std::uint32_t metalSlot = 0;
         void* metalBuffer = nullptr;
+        GLuint glBufferName = 0;
         std::size_t offset = 0;
         bool isVertex = false;
         bool isFragment = false;
     };
     std::vector<AtomicCounterBinding> atomicCounterBindings;
+
+    std::vector<GLuint> sampledTextureNames;
+    std::vector<GLuint> readImageTextureNames;
+    std::vector<GLuint> writtenImageTextureNames;
 
     // Translated MSL + reflection (borrowed from GLProgramObject).
     const std::string* vertexMSL = nullptr;

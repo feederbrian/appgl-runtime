@@ -10128,6 +10128,682 @@ TestResult runDCR3CMSAAShaderResolveReadbackSentinel() {
     return result;
 }
 
+std::string pendingBitsSummary(std::uint32_t bits) {
+    std::ostringstream stream;
+    stream << "0x" << std::hex << bits;
+    return stream.str();
+}
+
+std::uint32_t texturePendingBits(GLContext& context, GLuint texture) {
+    const GLTextureObject* object = context.objects().textures().get(texture);
+    expectCondition(object != nullptr, "dcr3c pending texture object exists");
+    return object->producerPending.bits();
+}
+
+std::uint32_t renderbufferPendingBits(GLContext& context, GLuint renderbuffer) {
+    const GLRenderbufferObject* object =
+        context.objects().renderbuffers().get(renderbuffer);
+    expectCondition(object != nullptr, "dcr3c pending renderbuffer object exists");
+    return object->producerPending.bits();
+}
+
+std::uint32_t bufferPendingBits(GLContext& context, GLuint buffer) {
+    const GLBufferObject* object = context.objects().buffers().get(buffer);
+    expectCondition(object != nullptr, "dcr3c pending buffer object exists");
+    return object->producerPending.bits();
+}
+
+void expectPendingHas(std::uint32_t actual,
+                      std::uint32_t expected,
+                      std::string_view label) {
+    if ((actual & expected) != expected) {
+        throw std::runtime_error(
+            std::string(label) + " missing pending bits expected="
+            + pendingBitsSummary(expected) + " actual="
+            + pendingBitsSummary(actual));
+    }
+}
+
+void expectPendingClear(std::uint32_t actual,
+                        std::uint32_t mask,
+                        std::string_view label) {
+    if ((actual & mask) != 0) {
+        throw std::runtime_error(
+            std::string(label) + " retained pending bits mask="
+            + pendingBitsSummary(mask) + " actual="
+            + pendingBitsSummary(actual));
+    }
+}
+
+void setupDCR3CFullscreenTriangle(GLDispatchTable& gl,
+                                  GLuint& vao,
+                                  GLuint& vbo) {
+    const GLfloat vertices[] = {
+        -1.0f, -1.0f,
+         3.0f, -1.0f,
+        -1.0f,  3.0f,
+    };
+    gl.glGenVertexArrays(1, &vao);
+    gl.glBindVertexArray(vao);
+    gl.glGenBuffers(1, &vbo);
+    gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    gl.glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+    gl.glEnableVertexAttribArray(0);
+    gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE,
+                             2 * sizeof(GLfloat), nullptr);
+}
+
+GLuint buildDCR3CComputeProgram(const char* csSrc) {
+    auto& gl = Runtime::shared().dispatch();
+    GLuint cs = gl.glCreateShader(GL_COMPUTE_SHADER);
+    gl.glShaderSource(cs, 1, &csSrc, nullptr);
+    gl.glCompileShader(cs);
+    GLuint program = gl.glCreateProgram();
+    gl.glAttachShader(program, cs);
+    gl.glLinkProgram(program);
+    gl.glDeleteShader(cs);
+    return program;
+}
+
+void setupDCR3CRGBA8Texture(GLDispatchTable& gl,
+                            GLuint texture,
+                            GLsizei width,
+                            GLsizei height,
+                            GLsizei levels = 1) {
+    gl.glBindTexture(GL_TEXTURE_2D, texture);
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                       levels > 1 ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST);
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    gl.glTexStorage2D(GL_TEXTURE_2D, levels, GL_RGBA8, width, height);
+}
+
+void setupDCR3CTextureFbo(GLDispatchTable& gl,
+                          GLuint& fbo,
+                          GLuint texture,
+                          GLint level = 0) {
+    gl.glGenFramebuffers(1, &fbo);
+    gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                              GL_TEXTURE_2D, texture, level);
+    gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+    expectCondition(gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
+                        GL_FRAMEBUFFER_COMPLETE,
+                    "dcr3c sentinel framebuffer complete");
+}
+
+TestResult runDCR3CProducerInventorySentinel() {
+    auto result = runDirectSentinel("dcr3c.producer-inventory-bits", [&] {
+        static constexpr GLsizei kSize = 8;
+        static constexpr const char* kFullscreenVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() {\n"
+            "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kColorFS =
+            "#version 330 core\n"
+            "uniform vec4 uColor;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    fragColor = uColor;\n"
+            "}\n";
+        static constexpr const char* kSampleFS =
+            "#version 330 core\n"
+            "uniform sampler2D uSource;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    fragColor = texture(uSource, vec2(0.5, 0.5));\n"
+            "}\n";
+        static constexpr const char* kComputeCS =
+            "#version 430 core\n"
+            "layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;\n"
+            "layout(rgba8, binding = 0) uniform writeonly image2D outImage;\n"
+            "layout(std430, binding = 0) buffer OutData { uint value; } outData;\n"
+            "layout(binding = 0, offset = 0) uniform atomic_uint counter;\n"
+            "void main() {\n"
+            "    imageStore(outImage, ivec2(0, 0), vec4(0.0, 0.0, 1.0, 1.0));\n"
+            "    outData.value = 0x12345678u;\n"
+            "    atomicCounterIncrement(counter);\n"
+            "}\n";
+
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        const GLuint colorProgram = buildBenchProgram(kFullscreenVS, kColorFS);
+        const GLuint sampleProgram = buildBenchProgram(kFullscreenVS, kSampleFS);
+        GLint colorLinked = GL_FALSE;
+        GLint sampleLinked = GL_FALSE;
+        gl.glGetProgramiv(colorProgram, GL_LINK_STATUS, &colorLinked);
+        gl.glGetProgramiv(sampleProgram, GL_LINK_STATUS, &sampleLinked);
+        expectCondition(colorLinked == GL_TRUE, "dcr3c inventory color program links");
+        expectCondition(sampleLinked == GL_TRUE, "dcr3c inventory sample program links");
+        const GLint colorLocation = gl.glGetUniformLocation(colorProgram, "uColor");
+        const GLint sampleLocation = gl.glGetUniformLocation(sampleProgram, "uSource");
+        expectCondition(colorLocation >= 0, "dcr3c inventory color uniform exists");
+        expectCondition(sampleLocation >= 0, "dcr3c inventory sampler uniform exists");
+
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+
+        GLuint textures[3] = {};
+        GLuint framebuffers[2] = {};
+        gl.glGenTextures(3, textures);
+        const GLuint sourceTex = textures[0];
+        const GLuint sampledTex = textures[1];
+        const GLuint imageTex = textures[2];
+        setupDCR3CRGBA8Texture(gl, sourceTex, kSize, kSize);
+        setupDCR3CRGBA8Texture(gl, sampledTex, kSize, kSize);
+        setupDCR3CRGBA8Texture(gl, imageTex, 4, 4);
+        setupDCR3CTextureFbo(gl, framebuffers[0], sourceTex);
+        setupDCR3CTextureFbo(gl, framebuffers[1], sampledTex);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c inventory texture/fbo setup");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffers[0]);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glUseProgram(colorProgram);
+        gl.glUniform4f(colorLocation, 1.0f, 0.0f, 0.0f, 1.0f);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c inventory FBO producer draw");
+        expectPendingHas(texturePendingBits(context, sourceTex),
+                         kProducerFboColorWrite,
+                         "FBO color producer");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffers[1]);
+        gl.glUseProgram(sampleProgram);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D, sourceTex);
+        gl.glUniform1i(sampleLocation, 0);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c inventory sampler consumer draw");
+        expectPendingClear(texturePendingBits(context, sourceTex),
+                           kProducerFboColorWrite,
+                           "sampler consumer drain");
+        expectPendingHas(texturePendingBits(context, sampledTex),
+                         kProducerFboColorWrite,
+                         "sampled FBO destination producer");
+
+        std::array<std::uint8_t, kSize * kSize * 4> readback = {};
+        gl.glReadPixels(0, 0, kSize, kSize, GL_RGBA, GL_UNSIGNED_BYTE,
+                        readback.data());
+        expectGLError(gl, GL_NO_ERROR, "dcr3c inventory sampled readback");
+        expectPendingClear(texturePendingBits(context, sampledTex),
+                           kProducerFboColorWrite,
+                           "FBO readback drain");
+
+        const GLfloat clearGreen[] = {0.0f, 1.0f, 0.0f, 1.0f};
+        gl.glClearBufferfv(GL_COLOR, 0, clearGreen);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c inventory clear producer");
+        expectPendingHas(texturePendingBits(context, sampledTex),
+                         kProducerClearWrite,
+                         "clear producer");
+        gl.glReadPixels(0, 0, kSize, kSize, GL_RGBA, GL_UNSIGNED_BYTE,
+                        readback.data());
+        expectGLError(gl, GL_NO_ERROR, "dcr3c inventory clear readback");
+        expectPendingClear(texturePendingBits(context, sampledTex),
+                           kProducerClearWrite,
+                           "clear readback drain");
+
+        const GLuint computeProgram = buildDCR3CComputeProgram(kComputeCS);
+        GLint computeLinked = GL_FALSE;
+        gl.glGetProgramiv(computeProgram, GL_LINK_STATUS, &computeLinked);
+        expectCondition(computeLinked == GL_TRUE, "dcr3c inventory compute program links");
+
+        GLuint ssbo = 0;
+        GLuint atomicBuffer = 0;
+        std::uint32_t zero = 0;
+        gl.glGenBuffers(1, &ssbo);
+        gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+        gl.glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(std::uint32_t),
+                        &zero, GL_DYNAMIC_DRAW);
+        gl.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo);
+        gl.glGenBuffers(1, &atomicBuffer);
+        gl.glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, atomicBuffer);
+        gl.glBufferData(GL_ATOMIC_COUNTER_BUFFER, sizeof(std::uint32_t),
+                        &zero, GL_DYNAMIC_DRAW);
+        gl.glBindBufferBase(GL_ATOMIC_COUNTER_BUFFER, 0, atomicBuffer);
+        gl.glBindImageTexture(0, imageTex, 0, GL_FALSE, 0,
+                              GL_WRITE_ONLY, GL_RGBA8);
+        gl.glUseProgram(computeProgram);
+        gl.glDispatchCompute(1, 1, 1);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c inventory compute dispatch");
+
+        expectPendingHas(texturePendingBits(context, imageTex),
+                         kProducerComputeWrite | kProducerStorageImageWrite,
+                         "compute storage-image producer");
+        expectPendingHas(bufferPendingBits(context, ssbo),
+                         kProducerComputeWrite | kProducerShaderStorageWrite,
+                         "compute SSBO producer");
+        expectPendingHas(bufferPendingBits(context, atomicBuffer),
+                         kProducerComputeWrite | kProducerAtomicCounterWrite,
+                         "compute atomic producer");
+
+        std::array<std::uint8_t, 4 * 4 * 4> imagePixels = {};
+        gl.glGetTextureImage(imageTex, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                             static_cast<GLsizei>(imagePixels.size()),
+                             imagePixels.data());
+        expectGLError(gl, GL_NO_ERROR, "dcr3c inventory image readback");
+        expectPendingClear(texturePendingBits(context, imageTex),
+                           kProducerComputeWrite | kProducerStorageImageWrite,
+                           "storage-image readback drain");
+
+        std::uint32_t ssboValue = 0;
+        gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+        gl.glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+                              sizeof(ssboValue), &ssboValue);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c inventory SSBO readback");
+        expectPendingClear(bufferPendingBits(context, ssbo),
+                           kProducerComputeWrite | kProducerShaderStorageWrite,
+                           "SSBO readback drain");
+
+        std::uint32_t atomicValue = 0;
+        gl.glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, atomicBuffer);
+        gl.glGetBufferSubData(GL_ATOMIC_COUNTER_BUFFER, 0,
+                              sizeof(atomicValue), &atomicValue);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c inventory atomic readback");
+        expectPendingClear(bufferPendingBits(context, atomicBuffer),
+                           kProducerComputeWrite | kProducerAtomicCounterWrite,
+                           "atomic readback drain");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glBindVertexArray(0);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+        gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        gl.glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, 0);
+        gl.glBindTexture(GL_TEXTURE_2D, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteBuffers(1, &ssbo);
+        gl.glDeleteBuffers(1, &atomicBuffer);
+        gl.glDeleteFramebuffers(2, framebuffers);
+        gl.glDeleteTextures(3, textures);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteProgram(colorProgram);
+        gl.glDeleteProgram(sampleProgram);
+        gl.glDeleteProgram(computeProgram);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c inventory cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "producer bits marked and drained for texture, compute image, SSBO, and atomic paths";
+    }
+    return result;
+}
+
+TestResult runDCR3CBarBlitCopyMipmapSentinel() {
+    auto result = runDirectSentinel("dcr3c.bar-blit-copy-mipmap", [&] {
+        static constexpr GLsizei kSize = 8;
+        static constexpr const char* kFullscreenVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() {\n"
+            "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kColorFS =
+            "#version 330 core\n"
+            "uniform vec4 uColor;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    fragColor = uColor;\n"
+            "}\n";
+
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        const GLuint colorProgram = buildBenchProgram(kFullscreenVS, kColorFS);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(colorProgram, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "dcr3c BAR color program links");
+        const GLint colorLocation = gl.glGetUniformLocation(colorProgram, "uColor");
+        expectCondition(colorLocation >= 0, "dcr3c BAR color uniform exists");
+
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+
+        GLuint textures[3] = {};
+        GLuint framebuffers[3] = {};
+        gl.glGenTextures(3, textures);
+        const GLuint srcTex = textures[0];
+        const GLuint dstTex = textures[1];
+        const GLuint mipTex = textures[2];
+        setupDCR3CRGBA8Texture(gl, srcTex, kSize, kSize);
+        setupDCR3CRGBA8Texture(gl, dstTex, kSize, kSize);
+        setupDCR3CRGBA8Texture(gl, mipTex, 4, 4, 3);
+        setupDCR3CTextureFbo(gl, framebuffers[0], srcTex);
+        setupDCR3CTextureFbo(gl, framebuffers[1], dstTex);
+        setupDCR3CTextureFbo(gl, framebuffers[2], mipTex, 0);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c BAR blit/mipmap setup");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffers[0]);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glUseProgram(colorProgram);
+        gl.glUniform4f(colorLocation, 1.0f, 0.0f, 0.0f, 1.0f);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c BAR blit source draw");
+        expectPendingHas(texturePendingBits(context, srcTex),
+                         kProducerFboColorWrite,
+                         "blit source FBO producer");
+
+        gl.glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffers[0]);
+        gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+        gl.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffers[1]);
+        gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        gl.glBlitFramebuffer(0, 0, kSize, kSize,
+                             0, 0, kSize, kSize,
+                             GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c BAR blit");
+        expectPendingClear(texturePendingBits(context, srcTex),
+                           kProducerFboColorWrite,
+                           "blit source drain");
+        expectPendingHas(texturePendingBits(context, dstTex),
+                         kProducerCopyWrite,
+                         "blit destination producer");
+
+        std::array<std::uint8_t, kSize * kSize * 4> pixels = {};
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffers[1]);
+        gl.glReadPixels(0, 0, kSize, kSize, GL_RGBA, GL_UNSIGNED_BYTE,
+                        pixels.data());
+        expectGLError(gl, GL_NO_ERROR, "dcr3c BAR blit destination readback");
+        expectPendingClear(texturePendingBits(context, dstTex),
+                           kProducerCopyWrite,
+                           "blit destination readback drain");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffers[2]);
+        gl.glViewport(0, 0, 4, 4);
+        gl.glUniform4f(colorLocation, 0.0f, 0.0f, 1.0f, 1.0f);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c BAR mipmap base draw");
+        expectPendingHas(texturePendingBits(context, mipTex),
+                         kProducerFboColorWrite,
+                         "mipmap base FBO producer");
+        gl.glBindTexture(GL_TEXTURE_2D, mipTex);
+        gl.glGenerateMipmap(GL_TEXTURE_2D);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c BAR mipmap generation");
+        expectPendingClear(texturePendingBits(context, mipTex),
+                           kProducerFboColorWrite,
+                           "mipmap generation source drain");
+        expectPendingHas(texturePendingBits(context, mipTex),
+                         kProducerMipmapWrite,
+                         "mipmap generation producer");
+        std::array<std::uint8_t, 2 * 2 * 4> mipPixels = {};
+        gl.glGetTextureImage(mipTex, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                             static_cast<GLsizei>(mipPixels.size()),
+                             mipPixels.data());
+        expectGLError(gl, GL_NO_ERROR, "dcr3c BAR mip level readback");
+        expectPendingClear(texturePendingBits(context, mipTex),
+                           kProducerMipmapWrite,
+                           "mipmap readback drain");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glBindVertexArray(0);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+        gl.glBindTexture(GL_TEXTURE_2D, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteFramebuffers(3, framebuffers);
+        gl.glDeleteTextures(3, textures);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteProgram(colorProgram);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c BAR blit/mipmap cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "blit/copy and mipmap producers marked destinations and drained on readback";
+    }
+    return result;
+}
+
+TestResult runDCR3CBarCopyImageSparseLifecycleSentinel() {
+    auto result = runDirectSentinel("dcr3c.bar-copyimage-sparse-lifecycle", [&] {
+        static constexpr const char* kFullscreenVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() {\n"
+            "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kColorFS =
+            "#version 330 core\n"
+            "uniform vec4 uColor;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    fragColor = uColor;\n"
+            "}\n";
+
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        const GLuint colorProgram = buildBenchProgram(kFullscreenVS, kColorFS);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(colorProgram, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "dcr3c copy/sparse color program links");
+        const GLint colorLocation = gl.glGetUniformLocation(colorProgram, "uColor");
+        expectCondition(colorLocation >= 0, "dcr3c copy/sparse color uniform exists");
+
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+
+        GLuint textures[3] = {};
+        GLuint framebuffers[2] = {};
+        gl.glGenTextures(3, textures);
+        const GLuint srcTex = textures[0];
+        const GLuint dstTex = textures[1];
+        GLuint lifecycleTex = textures[2];
+        setupDCR3CRGBA8Texture(gl, srcTex, 4, 4);
+        setupDCR3CRGBA8Texture(gl, dstTex, 4, 4);
+        setupDCR3CRGBA8Texture(gl, lifecycleTex, 4, 4);
+        setupDCR3CTextureFbo(gl, framebuffers[0], srcTex);
+        setupDCR3CTextureFbo(gl, framebuffers[1], lifecycleTex);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c copy/sparse texture setup");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffers[0]);
+        gl.glViewport(0, 0, 4, 4);
+        gl.glUseProgram(colorProgram);
+        gl.glUniform4f(colorLocation, 1.0f, 0.0f, 0.0f, 1.0f);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c copyImage source draw");
+        expectPendingHas(texturePendingBits(context, srcTex),
+                         kProducerFboColorWrite,
+                         "copyImage source FBO producer");
+        gl.glCopyImageSubData(srcTex, GL_TEXTURE_2D, 0, 0, 0, 0,
+                              dstTex, GL_TEXTURE_2D, 0, 0, 0, 0,
+                              4, 4, 1);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c copyImageSubData");
+        expectPendingClear(texturePendingBits(context, srcTex),
+                           kProducerFboColorWrite,
+                           "copyImage CPU-shadow source drain");
+        expectPendingHas(texturePendingBits(context, dstTex),
+                         kProducerCopyWrite,
+                         "copyImage destination producer");
+        std::array<std::uint8_t, 4 * 4 * 4> copyPixels = {};
+        gl.glGetTextureImage(dstTex, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                             static_cast<GLsizei>(copyPixels.size()),
+                             copyPixels.data());
+        expectGLError(gl, GL_NO_ERROR, "dcr3c copyImage destination readback");
+        expectPendingClear(texturePendingBits(context, dstTex),
+                           kProducerCopyWrite,
+                           "copyImage destination readback drain");
+
+        GLuint sparseBuffer = 0;
+        gl.glGenBuffers(1, &sparseBuffer);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, sparseBuffer);
+        gl.glBufferStorage(GL_ARRAY_BUFFER, 65536, nullptr,
+                           GL_SPARSE_STORAGE_BIT_ARB);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c sparse buffer storage");
+        gl.glBufferPageCommitmentARB(GL_ARRAY_BUFFER, 0, 65536, GL_TRUE);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c sparse buffer commitment");
+        expectPendingHas(bufferPendingBits(context, sparseBuffer),
+                         kProducerSparseResidency,
+                         "sparse buffer commitment producer");
+        std::array<std::uint8_t, 16> sparseReadback = {};
+        gl.glGetBufferSubData(GL_ARRAY_BUFFER, 0,
+                              static_cast<GLsizeiptr>(sparseReadback.size()),
+                              sparseReadback.data());
+        expectGLError(gl, GL_NO_ERROR, "dcr3c sparse buffer readback");
+        expectPendingClear(bufferPendingBits(context, sparseBuffer),
+                           kProducerSparseResidency,
+                           "sparse buffer readback drain");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffers[1]);
+        gl.glViewport(0, 0, 4, 4);
+        gl.glUniform4f(colorLocation, 0.0f, 1.0f, 0.0f, 1.0f);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c lifecycle texture draw");
+        expectPendingHas(texturePendingBits(context, lifecycleTex),
+                         kProducerFboColorWrite,
+                         "lifecycle pending texture producer");
+        const auto beforeDelete = context.commandSubmissionDebugCounters();
+        gl.glDeleteTextures(1, &lifecycleTex);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c lifecycle pending texture delete");
+        const auto afterDelete = context.commandSubmissionDebugCounters();
+        if (afterDelete.lastWaitReason != AppGLCommandReason::FlushForReadback ||
+            afterDelete.lastWaitMode != AppGLSubmitMode::CommitAndWait ||
+            afterDelete.waitReasonLogEntries == beforeDelete.waitReasonLogEntries) {
+            throw std::runtime_error(
+                "pending-producer texture delete did not drain through FlushForReadback: before{"
+                + countersSummary(beforeDelete) + "} after{"
+                + countersSummary(afterDelete) + "}");
+        }
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glBindVertexArray(0);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+        gl.glBindTexture(GL_TEXTURE_2D, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteBuffers(1, &sparseBuffer);
+        gl.glDeleteFramebuffers(2, framebuffers);
+        GLuint remainingTextures[] = {srcTex, dstTex};
+        gl.glDeleteTextures(2, remainingTextures);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteProgram(colorProgram);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c copy/sparse/lifecycle cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "copyImage source drains, sparse commit marks, and lifecycle delete drains pending producers";
+    }
+    return result;
+}
+
+TestResult runDCR3CBufferRoleSentinel() {
+    auto result = runDirectSentinel("dcr3c.buffer-as-different-role", [&] {
+        static constexpr const char* kWriteCS =
+            "#version 430 core\n"
+            "layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;\n"
+            "layout(std430, binding = 0) buffer Data { uint value; } dataOut;\n"
+            "void main() {\n"
+            "    dataOut.value = 0x12345678u;\n"
+            "}\n";
+        static constexpr const char* kFullscreenVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() {\n"
+            "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kBufferSampleFS =
+            "#version 430 core\n"
+            "uniform usamplerBuffer uData;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    uint value = texelFetch(uData, 0).r;\n"
+            "    fragColor = value == 0x12345678u\n"
+            "        ? vec4(0.0, 1.0, 0.0, 1.0)\n"
+            "        : vec4(1.0, 0.0, 0.0, 1.0);\n"
+            "}\n";
+
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        const GLuint computeProgram = buildDCR3CComputeProgram(kWriteCS);
+        const GLuint sampleProgram = buildBenchProgram(kFullscreenVS, kBufferSampleFS);
+        GLint computeLinked = GL_FALSE;
+        GLint sampleLinked = GL_FALSE;
+        gl.glGetProgramiv(computeProgram, GL_LINK_STATUS, &computeLinked);
+        gl.glGetProgramiv(sampleProgram, GL_LINK_STATUS, &sampleLinked);
+        expectCondition(computeLinked == GL_TRUE, "dcr3c buffer-role compute program links");
+        expectCondition(sampleLinked == GL_TRUE, "dcr3c buffer-role sample program links");
+        const GLint samplerLocation = gl.glGetUniformLocation(sampleProgram, "uData");
+        expectCondition(samplerLocation >= 0, "dcr3c buffer-role sampler uniform exists");
+
+        GLuint ssbo = 0;
+        std::array<std::uint32_t, 4> zeros = {};
+        gl.glGenBuffers(1, &ssbo);
+        gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+        gl.glBufferData(GL_SHADER_STORAGE_BUFFER,
+                        static_cast<GLsizeiptr>(zeros.size() * sizeof(std::uint32_t)),
+                        zeros.data(), GL_DYNAMIC_DRAW);
+        gl.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo);
+        gl.glUseProgram(computeProgram);
+        gl.glDispatchCompute(1, 1, 1);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c buffer-role compute dispatch");
+        expectPendingHas(bufferPendingBits(context, ssbo),
+                         kProducerComputeWrite | kProducerShaderStorageWrite,
+                         "buffer-role SSBO producer");
+
+        GLuint tbo = 0;
+        gl.glGenTextures(1, &tbo);
+        gl.glBindTexture(GL_TEXTURE_BUFFER, tbo);
+        gl.glTexBuffer(GL_TEXTURE_BUFFER, GL_R32UI, ssbo);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c buffer-role texture buffer setup");
+
+        GLuint colorTex = 0;
+        GLuint fbo = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 4, 4);
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, 4, 4);
+        gl.glUseProgram(sampleProgram);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_BUFFER, tbo);
+        gl.glUniform1i(samplerLocation, 0);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c buffer-role texture-buffer draw");
+        expectPendingClear(bufferPendingBits(context, ssbo),
+                           kProducerComputeWrite | kProducerShaderStorageWrite,
+                           "texture-buffer consumer drain");
+
+        std::array<std::uint8_t, 4 * 4 * 4> pixels = {};
+        gl.glReadPixels(0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        expectGLError(gl, GL_NO_ERROR, "dcr3c buffer-role readback");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glBindVertexArray(0);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+        gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        gl.glBindTexture(GL_TEXTURE_BUFFER, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteTextures(1, &tbo);
+        gl.glDeleteTextures(1, &colorTex);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteBuffers(1, &ssbo);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteProgram(computeProgram);
+        gl.glDeleteProgram(sampleProgram);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c buffer-role cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "SSBO-produced buffer drained when rebound as texture-buffer sampler input";
+    }
+    return result;
+}
+
 void appendCoverageDelta(TestResult& result, const std::string& phase) {
     // Bootstrap coverage checks only apply to phase-a scenes. Phase-c and later
     // scenes validate their own scenarioCoverage() list; requiring the full
@@ -10324,6 +11000,10 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runDCR3CSoakBarBenchmarkSentinel());
         tests.push_back(runDCR3CMSAAResolveReadbackSentinel());
         tests.push_back(runDCR3CMSAAShaderResolveReadbackSentinel());
+        tests.push_back(runDCR3CProducerInventorySentinel());
+        tests.push_back(runDCR3CBarBlitCopyMipmapSentinel());
+        tests.push_back(runDCR3CBarCopyImageSparseLifecycleSentinel());
+        tests.push_back(runDCR3CBufferRoleSentinel());
         return buildJSON(normalizedPhase, tests);
     }
 

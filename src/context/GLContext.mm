@@ -97,6 +97,21 @@ namespace appgl {
 // both the API-surface validators and the readPixels path in this TU).
 bool isFormatTypeCompatible_extern(GLenum format, GLenum type);
 
+class GLProducerPendingAccess {
+public:
+    static void mark(GLProducerPendingState& state, std::uint32_t bits) {
+        state.mark(bits);
+    }
+
+    static void clear(GLProducerPendingState& state, std::uint32_t bits) {
+        state.clear(bits);
+    }
+
+    static void clearAll(GLProducerPendingState& state) {
+        state.clearAll();
+    }
+};
+
 // Global-ish gate for the CTS-sweep hot-path NSLog calls — the
 // per-program linkProgram / spirv-to-msl / reflect / pipeline-build
 // markers fire thousands of times in a sweep and Foundation's
@@ -2902,7 +2917,209 @@ struct GLContext::Impl {
         immediateAttribKinds.fill(GLVertexAttributeState::ImmediateKind::Float);
     }
 
+    struct GpuResourceAccess {
+        enum class Kind {
+            Texture,
+            Renderbuffer,
+            Buffer,
+        };
+
+        Kind kind = Kind::Texture;
+        GLuint name = 0;
+        std::uint32_t bits = kProducerAll;
+    };
+
+    using GpuResourceWriteSet = std::vector<GpuResourceAccess>;
+    using GpuResourceReadSet = std::vector<GpuResourceAccess>;
+
+    GLProducerPendingState* pendingStateForResource(GpuResourceAccess::Kind kind,
+                                                    GLuint name) const {
+        if (name == 0 || objects == nullptr) return nullptr;
+        switch (kind) {
+            case GpuResourceAccess::Kind::Texture:
+                if (GLTextureObject* tex = objects->textures().get(name)) {
+                    return &tex->producerPending;
+                }
+                break;
+            case GpuResourceAccess::Kind::Renderbuffer:
+                if (GLRenderbufferObject* rb = objects->renderbuffers().get(name)) {
+                    return &rb->producerPending;
+                }
+                break;
+            case GpuResourceAccess::Kind::Buffer:
+                if (GLBufferObject* buf = objects->buffers().get(name)) {
+                    return &buf->producerPending;
+                }
+                break;
+        }
+        return nullptr;
+    }
+
+    void clearLegacyMsaaSamplerFlushIfTexture(GLuint textureName) const {
+        if (textureName == 0 || objects == nullptr) return;
+        if (GLTextureObject* tex = objects->textures().get(textureName)) {
+            tex->msaaFramebufferWriteNeedsSamplerFlush = false;
+        }
+    }
+
+    void markGpuResourceWrites(const GpuResourceWriteSet& writes) const {
+        for (const auto& write : writes) {
+            if (write.name == 0 || write.bits == 0) continue;
+            GLProducerPendingState* state =
+                pendingStateForResource(write.kind, write.name);
+            if (state == nullptr) continue;
+            GLProducerPendingAccess::mark(*state, write.bits);
+        }
+    }
+
+    void drainPendingGpuProducers(const GpuResourceReadSet& reads) const {
+        bool needsDrain = false;
+        for (const auto& read : reads) {
+            if (read.name == 0 || read.bits == 0) continue;
+            const GLProducerPendingState* state =
+                pendingStateForResource(read.kind, read.name);
+            if (state != nullptr && state->hasAny(read.bits)) {
+                needsDrain = true;
+                break;
+            }
+        }
+        if (!needsDrain) {
+            return;
+        }
+        if (frameGraph != nullptr) {
+            frameGraph->flushForReadback();
+        }
+        for (const auto& read : reads) {
+            if (read.name == 0 || read.bits == 0) continue;
+            GLProducerPendingState* state =
+                pendingStateForResource(read.kind, read.name);
+            if (state == nullptr) continue;
+            GLProducerPendingAccess::clear(*state, read.bits);
+            if (read.kind == GpuResourceAccess::Kind::Texture) {
+                clearLegacyMsaaSamplerFlushIfTexture(read.name);
+            }
+        }
+    }
+
+    void drainPendingGpuProducers(GLBufferObject& object,
+                                  std::uint32_t bits = kProducerAll) const {
+        if (!object.producerPending.hasAny(bits)) {
+            return;
+        }
+        if (frameGraph != nullptr) {
+            frameGraph->flushForReadback();
+        }
+        GLProducerPendingAccess::clear(object.producerPending, bits);
+    }
+
+    void drainPendingGpuProducers(GLTextureObject& object,
+                                  std::uint32_t bits = kProducerAll) const {
+        if (!object.producerPending.hasAny(bits) &&
+            !object.msaaFramebufferWriteNeedsSamplerFlush) {
+            return;
+        }
+        if (frameGraph != nullptr) {
+            frameGraph->flushForReadback();
+        }
+        GLProducerPendingAccess::clear(object.producerPending, bits);
+        object.msaaFramebufferWriteNeedsSamplerFlush = false;
+    }
+
+    void drainPendingGpuProducers(GLRenderbufferObject& object,
+                                  std::uint32_t bits = kProducerAll) const {
+        if (!object.producerPending.hasAny(bits)) {
+            return;
+        }
+        if (frameGraph != nullptr) {
+            frameGraph->flushForReadback();
+        }
+        GLProducerPendingAccess::clear(object.producerPending, bits);
+    }
+
+    void clearAllPendingGpuProducers(GLBufferObject& object) const {
+        GLProducerPendingAccess::clearAll(object.producerPending);
+    }
+
+    void clearAllPendingGpuProducers(GLTextureObject& object) const {
+        GLProducerPendingAccess::clearAll(object.producerPending);
+        object.msaaFramebufferWriteNeedsSamplerFlush = false;
+    }
+
+    void clearAllPendingGpuProducers(GLRenderbufferObject& object) const {
+        GLProducerPendingAccess::clearAll(object.producerPending);
+    }
+
+    void appendAttachmentRead(GpuResourceReadSet& reads,
+                              const GLFramebufferAttachment& attachment,
+                              std::uint32_t bits = kProducerAll) const {
+        if (attachment.object == 0) return;
+        if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
+            reads.push_back({GpuResourceAccess::Kind::Texture,
+                             attachment.object, bits});
+        } else if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+            reads.push_back({GpuResourceAccess::Kind::Renderbuffer,
+                             attachment.object, bits});
+        }
+    }
+
+    void drainFramebufferAttachmentProducer(const GLFramebufferAttachment& attachment,
+                                            std::uint32_t bits = kProducerAll) const {
+        GpuResourceReadSet reads;
+        appendAttachmentRead(reads, attachment, bits);
+        drainPendingGpuProducers(reads);
+    }
+
+    void appendAttachmentWrite(GpuResourceWriteSet& writes,
+                               const GLFramebufferAttachment& attachment,
+                               std::uint32_t bits) const {
+        if (attachment.object == 0 || bits == 0) return;
+        if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
+            writes.push_back({GpuResourceAccess::Kind::Texture,
+                              attachment.object, bits});
+        } else if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+            writes.push_back({GpuResourceAccess::Kind::Renderbuffer,
+                              attachment.object, bits});
+        }
+    }
+
+    void markFramebufferAttachmentWrite(const GLFramebufferAttachment& attachment,
+                                        std::uint32_t bits) const {
+        GpuResourceWriteSet writes;
+        appendAttachmentWrite(writes, attachment, bits);
+        markGpuResourceWrites(writes);
+    }
+
+    void appendFramebufferAttachmentWrites(GpuResourceWriteSet& writes,
+                                           const GLFramebufferObject& fbo,
+                                           std::uint32_t extraBits = 0) const {
+        for (const auto& kv : fbo.attachments) {
+            const auto& attachment = kv.second;
+            if (attachment.object == 0 ||
+                attachment.kind == GLFramebufferAttachment::Kind::None) {
+                continue;
+            }
+            std::uint32_t bits = extraBits;
+            bits |= isColorAttachment(kv.first)
+                ? kProducerFboColorWrite
+                : kProducerFboDepthStencilWrite;
+            appendAttachmentWrite(writes, attachment, bits);
+        }
+    }
+
+    void markBoundDrawFramebufferWrites(std::uint32_t extraBits = 0) const {
+        if (state == nullptr || objects == nullptr) return;
+        const GLuint drawFboName = state->boundDrawFramebuffer();
+        if (drawFboName == 0) return;
+        const GLFramebufferObject* fbo =
+            objects->framebuffers().get(drawFboName);
+        if (fbo == nullptr) return;
+        GpuResourceWriteSet writes;
+        appendFramebufferAttachmentWrites(writes, *fbo, extraBits);
+        markGpuResourceWrites(writes);
+    }
+
     void releaseBufferStorage(GLBufferObject& object) {
+        drainPendingGpuProducers(object);
         releaseRetainedMetalObject(object.metalBuffer);
         object.metalBuffer = nullptr;
         for (auto& sidecar : object.fp64TransportSidecars) {
@@ -2915,6 +3132,7 @@ struct GLContext::Impl {
         object.sparseStorage = false;
         object.sparsePageSize = 0;
         object.sparseCommittedPages.clear();
+        clearAllPendingGpuProducers(object);
         resetBufferMapping(object);
     }
 
@@ -2927,6 +3145,7 @@ struct GLContext::Impl {
     }
 
     void releaseTextureStorage(GLTextureObject& object) {
+        drainPendingGpuProducers(object);
         releaseRetainedMetalObject(object.metalTexture);
         object.metalTexture = nullptr;
         if (owner != nullptr) {
@@ -2946,6 +3165,7 @@ struct GLContext::Impl {
         object.metalSwizzledView = nullptr;
         object.swizzleDirty = true;
         object.msaaFramebufferWriteNeedsSamplerFlush = false;
+        clearAllPendingGpuProducers(object);
         object.desc = {};
         object.levels.clear();
         for (auto& faceLevels : object.cubeFaceLevels) {
@@ -2954,6 +3174,7 @@ struct GLContext::Impl {
     }
 
     void releaseRenderbufferStorage(GLRenderbufferObject& object) {
+        drainPendingGpuProducers(object);
         releaseRetainedMetalObject(object.metalTexture);
         object.metalTexture = nullptr;
         object.internalFormat = 0;
@@ -2969,6 +3190,7 @@ struct GLContext::Impl {
         object.wasMetalDepthRendered = false;
         object.wasMetalStencilRendered = false;
         object.framebufferReadbackYFlip = true;
+        clearAllPendingGpuProducers(object);
     }
 
     void releaseSamplerState(GLSamplerObject& object) {
@@ -5753,6 +5975,7 @@ struct GLContext::Impl {
         if (object.params.maxLevel < baseLevelIndex) {
             return false;
         }
+        drainPendingGpuProducers(object);
 
         const GLTextureImageLevel baseLevel = baseIt->second;
         const GLint tailOffset = mipTailOffset(
@@ -7605,14 +7828,17 @@ struct GLContext::Impl {
                     continue;  // sampler build failure; nothing to bind
                 }
 
-                id<MTLTexture> samplerSourceTex =
-                    metalTextureFromRaw(texObject->metalTexture);
-                if (samplerSourceTex.sampleCount > 1 &&
-                    texObject->msaaFramebufferWriteNeedsSamplerFlush &&
-                    frameGraph != nullptr) {
-                    frameGraph->flushForReadback();
-                    texObject->msaaFramebufferWriteNeedsSamplerFlush = false;
+                GpuResourceReadSet samplerReads = {
+                    {GpuResourceAccess::Kind::Texture, texName, kProducerAll},
+                };
+                if (texObject->target == GL_TEXTURE_BUFFER &&
+                    texObject->desc.sourceBuffer != 0) {
+                    samplerReads.push_back(
+                        {GpuResourceAccess::Kind::Buffer,
+                         texObject->desc.sourceBuffer, kProducerAll});
                 }
+                drainPendingGpuProducers(samplerReads);
+                info.sampledTextureNames.push_back(texName);
 
                 // Step 5: push the binding at the reflected Metal slot.
                 // For sampler arrays, each array element maps to a
@@ -8221,9 +8447,14 @@ struct GLContext::Impl {
                     if (binding.buffer == 0) continue;
                     GLBufferObject* bufObj = objects->buffers().get(binding.buffer);
                     if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+                    drainPendingGpuProducers({
+                        {GpuResourceAccess::Kind::Buffer,
+                         binding.buffer, kProducerAll},
+                    });
                     TranslatedDrawInfo::SSBOBinding sb;
                     sb.metalSlot = ssbo.metalBinding + static_cast<std::uint32_t>(inst);
                     sb.metalBuffer = bufObj->metalBuffer;
+                    sb.glBufferName = binding.buffer;
                     sb.offset = static_cast<std::size_t>(binding.offset);
                     if (binding.size > 0) {
                         sb.size = static_cast<std::size_t>(binding.size);
@@ -8278,10 +8509,15 @@ struct GLContext::Impl {
             if (binding.buffer == 0) return;
             GLBufferObject* bufObj = objects->buffers().get(binding.buffer);
             if (bufObj == nullptr || bufObj->metalBuffer == nullptr) return;
+            drainPendingGpuProducers({
+                {GpuResourceAccess::Kind::Buffer,
+                 binding.buffer, kProducerAll},
+            });
 
             TranslatedDrawInfo::AtomicCounterBinding ab;
             ab.metalSlot = metalSlot;
             ab.metalBuffer = bufObj->metalBuffer;
+            ab.glBufferName = binding.buffer;
             ab.offset = static_cast<std::size_t>(binding.offset);
             ab.isVertex = isVertex;
             ab.isFragment = isFragment;
@@ -8731,6 +8967,16 @@ struct GLContext::Impl {
                             ib.texture, ib.level);
                         continue;
                     }
+                    if (ib.access != GL_WRITE_ONLY) {
+                        drainPendingGpuProducers({
+                            {GpuResourceAccess::Kind::Texture,
+                             ib.texture, kProducerAll},
+                        });
+                        info.readImageTextureNames.push_back(ib.texture);
+                    }
+                    if (ib.access != GL_READ_ONLY) {
+                        info.writtenImageTextureNames.push_back(ib.texture);
+                    }
                     TranslatedDrawInfo::TextureBinding tb;
                     // CKPT119: prefer level-restricted view when ib.level > 0
                     // so imageSize() returns LEVEL-N dimensions.
@@ -9003,6 +9249,7 @@ struct GLContext::Impl {
         if (size <= 0) {
             return true;
         }
+        drainPendingGpuProducers(object);
         if (object.sparseStorage) {
             std::memset(data, 0, static_cast<std::size_t>(size));
             if (!sparseRangeHasCommittedPages(object, offset, size)) {
@@ -10545,8 +10792,8 @@ struct GLContext::Impl {
                     }
                 }
             }
-            if (renderbuffer->rgba8ShadowClearPending && frameGraph != nullptr) {
-                frameGraph->flushForReadback();
+            if (renderbuffer->rgba8ShadowClearPending) {
+                drainPendingGpuProducers(*renderbuffer);
             }
             if (clearScissorActive) {
                 materializeRenderbufferRGBA8Clear(*renderbuffer);
@@ -11078,12 +11325,8 @@ struct GLContext::Impl {
                 if (layers > 1) arrayLen = static_cast<std::uint32_t>(layers);
             }
             if (frameGraph != nullptr && texture->metalTexture != nullptr) {
-                const bool cleared = frameGraph->clearTextureDepth(
+                return frameGraph->clearTextureDepth(
                     texture->metalTexture, mipLevel, slice, arrayLen, depth);
-                if (cleared && arrayLen > 0) {
-                    frameGraph->flushForReadback();
-                }
-                return cleared;
             }
             return true;
         }
@@ -11179,6 +11422,7 @@ struct GLContext::Impl {
             return false;
         }
 
+        GpuResourceWriteSet clearWrites;
         if ((mask & GL_COLOR_BUFFER_BIT) != 0) {
             for (GLenum buffer : framebuffer->drawBuffers) {
                 if (buffer == GL_NONE) {
@@ -11191,6 +11435,11 @@ struct GLContext::Impl {
                                           true)) {
                     return false;
                 }
+                if (attachment != nullptr) {
+                    appendAttachmentWrite(clearWrites, *attachment,
+                                          kProducerClearWrite |
+                                          kProducerFboColorWrite);
+                }
             }
         }
         if ((mask & GL_DEPTH_BUFFER_BIT) != 0) {
@@ -11198,17 +11447,30 @@ struct GLContext::Impl {
             if (attachment != nullptr && !clearDepthAttachment(*attachment, state->clearState().depth)) {
                 return false;
             }
+            if (attachment != nullptr) {
+                appendAttachmentWrite(clearWrites, *attachment,
+                                      kProducerClearWrite |
+                                      kProducerFboDepthStencilWrite);
+            }
         }
         if ((mask & GL_STENCIL_BUFFER_BIT) != 0) {
             const GLFramebufferAttachment* attachment = framebufferAttachment(*framebuffer, GL_STENCIL_ATTACHMENT);
             if (attachment != nullptr && !clearStencilAttachment(*attachment, state->clearState().stencil)) {
                 return false;
             }
+            if (attachment != nullptr) {
+                appendAttachmentWrite(clearWrites, *attachment,
+                                      kProducerClearWrite |
+                                      kProducerFboDepthStencilWrite);
+            }
         }
+        markGpuResourceWrites(clearWrites);
         return true;
     }
 
     bool readColorAttachmentPixels(const GLFramebufferAttachment& attachment, GLint x, GLint y, GLsizei width, GLsizei height, void* pixels) const {
+        drainFramebufferAttachmentProducer(attachment);
+
         // RC-A02: Try reading from the actual Metal texture first (has GPU-
         // rendered data).  Fall back to CPU shadow if no Metal texture exists.
         id<MTLTexture> metalTex = nil;
@@ -11312,15 +11574,6 @@ struct GLContext::Impl {
             }
         } else {
             return false;
-        }
-
-        // This helper is shared by glReadPixels and the CPU-backed
-        // glBlitFramebuffer path. glReadPixels already flushes before it
-        // gets here, but blit can read an FBO attachment directly. Make the
-        // producer wait local to the Metal read so MSAA resolve/readback is
-        // queued only after the draw that produced the multisample texture.
-        if (frameGraph != nullptr) {
-            frameGraph->flushForReadback();
         }
 
         // Read from the Metal texture — this has the actual GPU-rendered data.
@@ -11517,10 +11770,6 @@ struct GLContext::Impl {
         const MTLPixelFormat pf = metalTex.pixelFormat;
         const NSUInteger texWidth = std::max<NSUInteger>(metalTex.width >> mipLevel, 1);
         const NSUInteger texHeight = std::max<NSUInteger>(metalTex.height >> mipLevel, 1);
-        // Flush any pending render encoder so the depth writes are visible.
-        if (frameGraph != nullptr) {
-            frameGraph->flushForReadback();
-        }
         // Raw-bytes read depends on the extracted depth-plane width. Metal
         // depth-stencil textures must be blitted with the depth-plane option;
         // copying them as an interleaved texture gives undefined packed bytes
@@ -11649,6 +11898,8 @@ struct GLContext::Impl {
     }
 
     bool readDepthAttachmentPixels(const GLFramebufferAttachment& attachment, GLint x, GLint y, GLsizei width, GLsizei height, void* pixels) const {
+        drainFramebufferAttachmentProducer(attachment);
+
         if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
             const GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
             if (renderbuffer == nullptr || !renderbuffer->storageDefined) {
@@ -11748,6 +11999,8 @@ struct GLContext::Impl {
     }
 
     bool readStencilAttachmentPixels(const GLFramebufferAttachment& attachment, GLint x, GLint y, GLsizei width, GLsizei height, void* pixels) const {
+        drainFramebufferAttachmentProducer(attachment);
+
         if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
             const GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
             if (renderbuffer == nullptr || !renderbuffer->storageDefined || renderbuffer->stencil8.empty()) {
@@ -12256,6 +12509,9 @@ struct GLContext::Impl {
                                                 dstWidth, dstHeight, copySrc)) {
                     return false;
                 }
+                markFramebufferAttachmentWrite(*dstAttachment,
+                                               kProducerCopyWrite |
+                                               kProducerFboColorWrite);
             }
         }
 
@@ -12294,6 +12550,9 @@ struct GLContext::Impl {
                                                  dstWidth, dstHeight, stagePtr)) {
                     return false;
                 }
+                markFramebufferAttachmentWrite(*dstAttachment,
+                                               kProducerCopyWrite |
+                                               kProducerFboDepthStencilWrite);
             }
         }
 
@@ -12332,6 +12591,9 @@ struct GLContext::Impl {
                                                    dstWidth, dstHeight, stagePtr)) {
                     return false;
                 }
+                markFramebufferAttachmentWrite(*dstAttachment,
+                                               kProducerCopyWrite |
+                                               kProducerFboDepthStencilWrite);
             }
         }
 
@@ -12376,6 +12638,7 @@ struct GLContext::Impl {
 
         const GLFramebufferAttachment* att = framebufferAttachment(*fb, fb->readBuffer);
         if (att == nullptr) return false;
+        drainFramebufferAttachmentProducer(*att);
 
         id<MTLTexture> metalTex = nil;
         GLsizei sourceWidth = 0, sourceHeight = 0;
@@ -14365,12 +14628,6 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
                 return false;
             }
         }
-        // Flush the GPU before FBO readback — the render encoder may still
-        // be open from a prior draw, and the texture data won't be CPU-
-        // visible until the command buffer is committed and completed.
-        if (impl_->frameGraph != nullptr) {
-            impl_->frameGraph->flushForReadback();
-        }
         if (isDepthStencilReadback) {
             const std::size_t pixelCount =
                 static_cast<std::size_t>(width) *
@@ -16244,6 +16501,11 @@ bool GLContext::copyBufferSubData(
             pushError(GL_OUT_OF_MEMORY);
             return false;
         }
+        impl_->markGpuResourceWrites({
+            {Impl::GpuResourceAccess::Kind::Buffer,
+             writeName,
+             kProducerCopyWrite}
+        });
     }
     return true;
 }
@@ -16432,6 +16694,10 @@ void* GLContext::mapBufferRange(GLenum target, GLintptr offset, GLsizeiptr lengt
     if (offset > object->size || length > object->size - offset) {
         pushError(GL_INVALID_VALUE);
         return nullptr;
+    }
+
+    if (access & GL_MAP_READ_BIT) {
+        impl_->drainPendingGpuProducers(*object);
     }
 
     std::uint8_t* contents = impl_->mutableBufferContents(*object);
@@ -17834,9 +18100,7 @@ bool GLContext::copyTexImage2D(
         }
         id<MTLTexture> dstTexture =
             (__bridge id<MTLTexture>)dstObject->metalTexture;
-        if (impl_->frameGraph != nullptr) {
-            impl_->frameGraph->flushForReadback();
-        }
+        impl_->drainFramebufferAttachmentProducer(*depthAttachment);
         if (impl_->device == nil || impl_->commandQueue == nil) {
             pushError(GL_INVALID_OPERATION);
             return false;
@@ -17871,6 +18135,11 @@ bool GLContext::copyTexImage2D(
         }
         [blit endEncoding];
         lease.commitAndWait(AppGLCommandReason::CopyImageBlit);
+        impl_->markGpuResourceWrites({
+            {Impl::GpuResourceAccess::Kind::Texture,
+             impl_->state->boundTexture(target),
+             kProducerCopyWrite}
+        });
         return true;
     }
 
@@ -17878,10 +18147,6 @@ bool GLContext::copyTexImage2D(
         static_cast<std::size_t>(width) *
         static_cast<std::size_t>(height);
     std::vector<std::uint8_t> uploadBytes(pixelCount * uploadPixelBytes, 0);
-
-    if (impl_->frameGraph != nullptr) {
-        impl_->frameGraph->flushForReadback();
-    }
 
     GLenum readFormat = GL_RGBA;
     if (isDepthCopy) {
@@ -17906,9 +18171,19 @@ bool GLContext::copyTexImage2D(
         return false;
     }
 
-    return texImage(target, level, static_cast<GLint>(uploadInternalFormat),
-                    width, height, 1, border, uploadFormat, uploadType,
-                    uploadBytes.data());
+    const bool copied = texImage(target, level,
+                                 static_cast<GLint>(uploadInternalFormat),
+                                 width, height, 1, border,
+                                 uploadFormat, uploadType,
+                                 uploadBytes.data());
+    if (copied) {
+        impl_->markGpuResourceWrites({
+            {Impl::GpuResourceAccess::Kind::Texture,
+             impl_->state->boundTexture(target),
+             kProducerCopyWrite}
+        });
+    }
+    return copied;
 }
 
 bool GLContext::texSubImage(
@@ -18759,17 +19034,26 @@ bool GLContext::texPageCommitment(GLenum target,
         return false;
     }
     ExtensionContext extensionContext(*this);
-    return extensions::sparse_texture::pageCommitment(extensionContext,
-                                                      *object,
-                                                      impl_->state->boundTexture(target),
-                                                      level,
-                                                      xoffset,
-                                                      yoffset,
-                                                      zoffset,
-                                                      width,
-                                                      height,
-                                                      depth,
-                                                      commit);
+    const GLuint textureName = impl_->state->boundTexture(target);
+    const bool ok = extensions::sparse_texture::pageCommitment(extensionContext,
+                                                               *object,
+                                                               textureName,
+                                                               level,
+                                                               xoffset,
+                                                               yoffset,
+                                                               zoffset,
+                                                               width,
+                                                               height,
+                                                               depth,
+                                                               commit);
+    if (ok) {
+        impl_->markGpuResourceWrites({
+            {Impl::GpuResourceAccess::Kind::Texture,
+             textureName,
+             kProducerSparseResidency}
+        });
+    }
+    return ok;
 }
 
 bool GLContext::texturePageCommitment(GLuint texture,
@@ -18792,17 +19076,25 @@ bool GLContext::texturePageCommitment(GLuint texture,
         return false;
     }
     ExtensionContext extensionContext(*this);
-    return extensions::sparse_texture::pageCommitment(extensionContext,
-                                                      *object,
-                                                      texture,
-                                                      level,
-                                                      xoffset,
-                                                      yoffset,
-                                                      zoffset,
-                                                      width,
-                                                      height,
-                                                      depth,
-                                                      commit);
+    const bool ok = extensions::sparse_texture::pageCommitment(extensionContext,
+                                                               *object,
+                                                               texture,
+                                                               level,
+                                                               xoffset,
+                                                               yoffset,
+                                                               zoffset,
+                                                               width,
+                                                               height,
+                                                               depth,
+                                                               commit);
+    if (ok) {
+        impl_->markGpuResourceWrites({
+            {Impl::GpuResourceAccess::Kind::Texture,
+             texture,
+             kProducerSparseResidency}
+        });
+    }
+    return ok;
 }
 
 // GL 4.6 Table 8.12 — sized internal formats allowed for
@@ -19536,6 +19828,11 @@ bool GLContext::generateMipmap(GLenum target) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    impl_->markGpuResourceWrites({
+        {Impl::GpuResourceAccess::Kind::Texture,
+         impl_->state->boundTexture(target),
+         kProducerMipmapWrite}
+    });
     return true;
 }
 
@@ -19790,37 +20087,11 @@ bool GLContext::deleteFramebuffers(GLsizei count, const GLuint* framebuffers) {
         }
         if (GLFramebufferObject* fbo =
                 impl_->objects->framebuffers().get(name)) {
-            bool needsMsaaProducerFlush = false;
+            GLContext::Impl::GpuResourceReadSet attachmentReads;
             for (const auto& kv : fbo->attachments) {
-                if (!isColorAttachment(kv.first)) continue;
-                if (kv.second.kind !=
-                        GLFramebufferAttachment::Kind::Texture) continue;
-                GLTextureObject* tex =
-                    impl_->objects->textures().get(kv.second.object);
-                if (tex == nullptr ||
-                    !tex->msaaFramebufferWriteNeedsSamplerFlush ||
-                    tex->metalTexture == nullptr) {
-                    continue;
-                }
-                id<MTLTexture> metalTex =
-                    metalTextureFromRaw(tex->metalTexture);
-                if (metalTex.sampleCount > 1) {
-                    needsMsaaProducerFlush = true;
-                    break;
-                }
+                impl_->appendAttachmentRead(attachmentReads, kv.second);
             }
-            if (needsMsaaProducerFlush && impl_->frameGraph != nullptr) {
-                impl_->frameGraph->flushForReadback();
-                for (const auto& kv : fbo->attachments) {
-                    if (!isColorAttachment(kv.first)) continue;
-                    if (kv.second.kind !=
-                            GLFramebufferAttachment::Kind::Texture) continue;
-                    if (GLTextureObject* tex =
-                            impl_->objects->textures().get(kv.second.object)) {
-                        tex->msaaFramebufferWriteNeedsSamplerFlush = false;
-                    }
-                }
-            }
+            impl_->drainPendingGpuProducers(attachmentReads);
         }
         if (impl_->objects->framebuffers().erase(name)) {
             impl_->state->deleteFramebufferBindings(name);
@@ -21458,6 +21729,9 @@ void GLContext::endImmediate() {
     info.fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
 
     const bool ok = impl_->frameGraph->encodeImmediateModeDraw(info);
+    if (ok) {
+        impl_->markBoundDrawFramebufferWrites();
+    }
     if (ok && impl_->state->boundDrawFramebuffer() == 0) {
         impl_->invalidateDefaultFramebufferShadow();
     }
@@ -40163,6 +40437,29 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
 
     const bool ok = frameGraph->encodeTranslatedDraw(tdi);
     if (ok) {
+        GpuResourceWriteSet producerWrites;
+        if (drawFboName != 0) {
+            if (const GLFramebufferObject* drawFbo =
+                    objects->framebuffers().get(drawFboName)) {
+                appendFramebufferAttachmentWrites(producerWrites, *drawFbo);
+            }
+        }
+        for (GLuint texName : tdi.writtenImageTextureNames) {
+            producerWrites.push_back(
+                {GpuResourceAccess::Kind::Texture, texName,
+                 kProducerStorageImageWrite});
+        }
+        for (const auto& ssbo : tdi.ssboBindings) {
+            producerWrites.push_back(
+                {GpuResourceAccess::Kind::Buffer, ssbo.glBufferName,
+                 kProducerShaderStorageWrite});
+        }
+        for (const auto& atomic : tdi.atomicCounterBindings) {
+            producerWrites.push_back(
+                {GpuResourceAccess::Kind::Buffer, atomic.glBufferName,
+                 kProducerAtomicCounterWrite});
+        }
+        markGpuResourceWrites(producerWrites);
         if (!pendingFp64GraphicsSsboSidecars.empty()) {
             frameGraph->flushForReadback();
             for (const auto& sync : pendingFp64GraphicsSsboSidecars) {
@@ -41692,6 +41989,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     setup.info.indexType = 0;
 
     const bool ok = impl_->frameGraph->encodeSolidColorDraw(setup.info);
+    if (ok) {
+        impl_->markBoundDrawFramebufferWrites();
+    }
     if (!ok) {
         emitDebugMessage(
             GL_DEBUG_SOURCE_API,
@@ -43264,6 +43564,9 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     setup.info.indexType = effectiveType;
 
     const bool ok = impl_->frameGraph->encodeSolidColorDraw(setup.info);
+    if (ok) {
+        impl_->markBoundDrawFramebufferWrites();
+    }
     if (!ok) {
         emitDebugMessage(
             GL_DEBUG_SOURCE_API,
@@ -43632,6 +43935,9 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
     setup.info.indexType = effectiveType;
 
     const bool solidOk = impl_->frameGraph->encodeSolidColorDraw(setup.info);
+    if (solidOk) {
+        impl_->markBoundDrawFramebufferWrites();
+    }
     if (solidOk && impl_->state->boundDrawFramebuffer() == 0) {
         impl_->invalidateDefaultFramebufferShadow();
     }
@@ -44184,6 +44490,9 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
     setup.info.indexType = effectiveType;
 
     const bool solidOk = impl_->frameGraph->encodeSolidColorDraw(setup.info);
+    if (solidOk) {
+        impl_->markBoundDrawFramebufferWrites();
+    }
     if (solidOk && impl_->state->boundDrawFramebuffer() == 0) {
         impl_->invalidateDefaultFramebufferShadow();
     }
@@ -44454,6 +44763,8 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
         GLBufferObject::Fp64TransportSidecar* sidecar = nullptr;
     };
     std::vector<Fp64ComputeSidecarSync> fp64SsboSidecars;
+    GLContext::Impl::GpuResourceReadSet computeReads;
+    GLContext::Impl::GpuResourceWriteSet computeWrites;
 
     // Pack default uniforms (bare GL uniforms in the _DefaultUniforms
     // block) for the compute stage. Mirrors the graphics-stage path:
@@ -44538,6 +44849,12 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             if (binding.buffer == 0) continue;
             GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
             if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+            computeReads.push_back({Impl::GpuResourceAccess::Kind::Buffer,
+                                    binding.buffer, kProducerAll});
+            computeWrites.push_back({Impl::GpuResourceAccess::Kind::Buffer,
+                                     binding.buffer,
+                                     kProducerComputeWrite |
+                                         kProducerShaderStorageWrite});
 
             ComputeDispatchInfo::BufferBinding bb;
             bb.metalBuffer = bufObj->metalBuffer;
@@ -44612,6 +44929,8 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             if (binding.buffer == 0) continue;
             GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
             if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+            computeReads.push_back({Impl::GpuResourceAccess::Kind::Buffer,
+                                    binding.buffer, kProducerAll});
 
             ComputeDispatchInfo::BufferBinding bb;
             bb.metalBuffer = bufObj->metalBuffer;
@@ -44652,6 +44971,12 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
         if (binding.buffer == 0) continue;
         const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
         if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+        computeReads.push_back({Impl::GpuResourceAccess::Kind::Buffer,
+                                binding.buffer, kProducerAll});
+        computeWrites.push_back({Impl::GpuResourceAccess::Kind::Buffer,
+                                 binding.buffer,
+                                 kProducerComputeWrite |
+                                     kProducerAtomicCounterWrite});
 
         ComputeDispatchInfo::BufferBinding bb;
         bb.metalBuffer = bufObj->metalBuffer;
@@ -44820,6 +45145,14 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
                 if (traceCompSamp) std::fprintf(stderr, " SKIP=null_metalTexture\n");
                 continue;
             }
+            computeReads.push_back({Impl::GpuResourceAccess::Kind::Texture,
+                                    texName, kProducerAll});
+            if (texObj->target == GL_TEXTURE_BUFFER &&
+                texObj->desc.sourceBuffer != 0) {
+                computeReads.push_back(
+                    {Impl::GpuResourceAccess::Kind::Buffer,
+                     texObj->desc.sourceBuffer, kProducerAll});
+            }
             // Build the sampler state if dirty.
             if (texObj->samplerDirty) {
                 impl_->rebuildTextureSamplerState(texName, *texObj);
@@ -44922,6 +45255,16 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             GLTextureObject* texObj = impl_->objects->textures().get(ib.texture);
             if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
             if (!impl_->imageBindingLevelAvailable(ib, texObj)) continue;
+            if (ib.access != GL_WRITE_ONLY) {
+                computeReads.push_back({Impl::GpuResourceAccess::Kind::Texture,
+                                        ib.texture, kProducerAll});
+            }
+            if (ib.access != GL_READ_ONLY) {
+                computeWrites.push_back(
+                    {Impl::GpuResourceAccess::Kind::Texture,
+                     ib.texture,
+                     kProducerComputeWrite | kProducerStorageImageWrite});
+            }
             ComputeDispatchInfo::TextureBinding tb;
             if (img.multisampleStorageImage) {
                 extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
@@ -44990,8 +45333,10 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             multisampleStorageImageSampleCountSlotForMSL(programObject->computeMSL);
     }
 
+    impl_->drainPendingGpuProducers(computeReads);
     const bool encoded = impl_->frameGraph->encodeComputeDispatch(info);
     if (encoded) {
+        impl_->markGpuResourceWrites(computeWrites);
         for (const auto& sync : fp64SsboSidecars) {
             if (sync.buffer != nullptr && sync.binding != nullptr &&
                 sync.sidecar != nullptr) {
@@ -45104,6 +45449,10 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
         GLBufferObject::Fp64TransportSidecar* sidecar = nullptr;
     };
     std::vector<Fp64IndirectSidecarSync> fp64SsboSidecars;
+    GLContext::Impl::GpuResourceReadSet computeReads;
+    GLContext::Impl::GpuResourceWriteSet computeWrites;
+    computeReads.push_back({Impl::GpuResourceAccess::Kind::Buffer,
+                            dispatchBufName, kProducerAll});
 
     // Same resource plumbing as the direct dispatch path: SSBOs, UBOs,
     // default-uniform push constants, sampled textures. Keep in sync
@@ -45134,6 +45483,12 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             if (binding.buffer == 0) continue;
             GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
             if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+            computeReads.push_back({Impl::GpuResourceAccess::Kind::Buffer,
+                                    binding.buffer, kProducerAll});
+            computeWrites.push_back({Impl::GpuResourceAccess::Kind::Buffer,
+                                     binding.buffer,
+                                     kProducerComputeWrite |
+                                         kProducerShaderStorageWrite});
             ComputeDispatchInfo::BufferBinding bb;
             bb.metalBuffer = bufObj->metalBuffer;
             bb.offset = static_cast<std::size_t>(binding.offset);
@@ -45187,6 +45542,8 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             if (binding.buffer == 0) continue;
             GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
             if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+            computeReads.push_back({Impl::GpuResourceAccess::Kind::Buffer,
+                                    binding.buffer, kProducerAll});
             ComputeDispatchInfo::BufferBinding bb;
             bb.metalBuffer = bufObj->metalBuffer;
             bb.offset = static_cast<std::size_t>(binding.offset);
@@ -45218,6 +45575,12 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
         if (binding.buffer == 0) continue;
         const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
         if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+        computeReads.push_back({Impl::GpuResourceAccess::Kind::Buffer,
+                                binding.buffer, kProducerAll});
+        computeWrites.push_back({Impl::GpuResourceAccess::Kind::Buffer,
+                                 binding.buffer,
+                                 kProducerComputeWrite |
+                                     kProducerAtomicCounterWrite});
 
         ComputeDispatchInfo::BufferBinding bb;
         bb.metalBuffer = bufObj->metalBuffer;
@@ -45329,6 +45692,14 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             if (texName == 0) continue;
             GLTextureObject* texObj = impl_->objects->textures().get(texName);
             if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
+            computeReads.push_back({Impl::GpuResourceAccess::Kind::Texture,
+                                    texName, kProducerAll});
+            if (texObj->target == GL_TEXTURE_BUFFER &&
+                texObj->desc.sourceBuffer != 0) {
+                computeReads.push_back(
+                    {Impl::GpuResourceAccess::Kind::Buffer,
+                     texObj->desc.sourceBuffer, kProducerAll});
+            }
             if (texObj->samplerDirty) {
                 impl_->rebuildTextureSamplerState(texName, *texObj);
             }
@@ -45411,6 +45782,16 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             GLTextureObject* texObj = impl_->objects->textures().get(ib.texture);
             if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
             if (!impl_->imageBindingLevelAvailable(ib, texObj)) continue;
+            if (ib.access != GL_WRITE_ONLY) {
+                computeReads.push_back({Impl::GpuResourceAccess::Kind::Texture,
+                                        ib.texture, kProducerAll});
+            }
+            if (ib.access != GL_READ_ONLY) {
+                computeWrites.push_back(
+                    {Impl::GpuResourceAccess::Kind::Texture,
+                     ib.texture,
+                     kProducerComputeWrite | kProducerStorageImageWrite});
+            }
             ComputeDispatchInfo::TextureBinding tb;
             if (img.multisampleStorageImage) {
                 extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
@@ -45480,8 +45861,10 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             multisampleStorageImageSampleCountSlotForMSL(programObject->computeMSL);
     }
 
+    impl_->drainPendingGpuProducers(computeReads);
     const bool encoded = impl_->frameGraph->encodeComputeDispatch(info);
     if (encoded) {
+        impl_->markGpuResourceWrites(computeWrites);
         for (const auto& sync : fp64SsboSidecars) {
             if (sync.buffer != nullptr && sync.binding != nullptr &&
                 sync.sidecar != nullptr) {
@@ -47665,6 +48048,13 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     // No-op for zero-sized copies.
     if (srcWidth == 0 || srcHeight == 0 || srcDepth == 0) return true;
 
+    impl_->drainPendingGpuProducers({
+        {srcIsTex ? Impl::GpuResourceAccess::Kind::Texture
+                  : Impl::GpuResourceAccess::Kind::Renderbuffer,
+         srcName,
+         kProducerAll}
+    });
+
     // -----------------------------------------------------------------------
     // Resolve source image shadow buffer, dimensions, and bytes-per-pixel.
     // -----------------------------------------------------------------------
@@ -47975,6 +48365,12 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     if (dstRB) {
         dstRB->instantiated = false;
     }
+    impl_->markGpuResourceWrites({
+        {dstIsTex ? Impl::GpuResourceAccess::Kind::Texture
+                  : Impl::GpuResourceAccess::Kind::Renderbuffer,
+         dstName,
+         kProducerCopyWrite}
+    });
     return true;
 }
 
@@ -48558,6 +48954,11 @@ bool GLContext::bufferPageCommitment(GLenum target, GLintptr offset, GLsizeiptr 
         pushError(GL_OUT_OF_MEMORY);
         return false;
     }
+    impl_->markGpuResourceWrites({
+        {Impl::GpuResourceAccess::Kind::Buffer,
+         name,
+         kProducerSparseResidency}
+    });
     return true;
 }
 
@@ -49032,6 +49433,11 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
         if (tex->metalTexture != nullptr) {
             impl_->replaceMetalTexture(*tex);
         }
+        impl_->markGpuResourceWrites({
+            {Impl::GpuResourceAccess::Kind::Texture,
+             texture,
+             kProducerClearWrite}
+        });
         return true;
     }
     auto it = tex->levels.find(level);
@@ -49054,6 +49460,11 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
     if (tex->metalTexture != nullptr) {
         impl_->replaceMetalTexture(*tex);
     }
+    impl_->markGpuResourceWrites({
+        {Impl::GpuResourceAccess::Kind::Texture,
+         texture,
+         kProducerClearWrite}
+    });
     return true;
 }
 
@@ -49090,6 +49501,11 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
     if (tex->metalTexture != nullptr) {
         impl_->replaceMetalTexture(*tex);
     }
+    impl_->markGpuResourceWrites({
+        {Impl::GpuResourceAccess::Kind::Texture,
+         texture,
+         kProducerClearWrite}
+    });
     return true;
 }
 
@@ -49922,10 +50338,7 @@ bool GLContext::blitReadFBOToTextureSubImage(
     }
     if (srcTex == nil) return false;
     id<MTLTexture> dstTex = (__bridge id<MTLTexture>)dstObj->metalTexture;
-    // Flush any pending render encoder so source pixels are visible.
-    if (impl_->frameGraph != nullptr) {
-        impl_->frameGraph->flushForReadback();
-    }
+    impl_->drainFramebufferAttachmentProducer(*srcAttach);
     id<MTLDevice> mtlDevice = impl_->device;
     id<MTLCommandQueue> mtlQueue = impl_->commandQueue;
     if (mtlDevice == nil || mtlQueue == nil) return false;
@@ -49961,6 +50374,11 @@ bool GLContext::blitReadFBOToTextureSubImage(
                  dstZ)];
     [blit endEncoding];
     lease.commitAndWait(AppGLCommandReason::CopyTextureSubImage);
+    impl_->markGpuResourceWrites({
+        {Impl::GpuResourceAccess::Kind::Texture,
+         dstTextureName,
+         kProducerCopyWrite}
+    });
     return true;
 }
 
@@ -50659,11 +51077,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
         return false;
     }
 
-    // Flush the GPU — the texture may have been rendered to and the data
-    // won't be CPU-visible until the command buffer completes.
-    if (impl_->frameGraph != nullptr) {
-        impl_->frameGraph->flushForReadback();
-    }
+    impl_->drainPendingGpuProducers(*obj);
 
     id<MTLTexture> metalTex = (__bridge id<MTLTexture>)obj->metalTexture;
     NSUInteger mipLevel = static_cast<NSUInteger>(level);
@@ -52353,7 +52767,13 @@ bool GLContext::clearNamedFramebufferfv(GLuint framebuffer, GLenum buffer, GLint
         }
         GLFramebufferAttachment* att = impl_->framebufferAttachment(*fbo, attachmentEnum);
         if (att == nullptr) return true;
-        return impl_->clearColorAttachment(*att, value, false);
+        const bool ok = impl_->clearColorAttachment(*att, value, false);
+        if (ok) {
+            impl_->markFramebufferAttachmentWrite(*att,
+                                                  kProducerClearWrite |
+                                                  kProducerFboColorWrite);
+        }
+        return ok;
     }
     if (buffer == GL_DEPTH) {
         if (drawbuffer != 0) {
@@ -52362,7 +52782,13 @@ bool GLContext::clearNamedFramebufferfv(GLuint framebuffer, GLenum buffer, GLint
         }
         GLFramebufferAttachment* att = impl_->framebufferAttachment(*fbo, GL_DEPTH_ATTACHMENT);
         if (att == nullptr) return true;
-        return impl_->clearDepthAttachment(*att, value[0]);
+        const bool ok = impl_->clearDepthAttachment(*att, value[0]);
+        if (ok) {
+            impl_->markFramebufferAttachmentWrite(*att,
+                                                  kProducerClearWrite |
+                                                  kProducerFboDepthStencilWrite);
+        }
+        return ok;
     }
     pushError(GL_INVALID_ENUM);
     return false;
@@ -52393,6 +52819,9 @@ bool GLContext::clearNamedFramebufferiv(GLuint framebuffer, GLenum buffer, GLint
         // CLEAR_BUFFERIV subcase targets RGBA32I where the raw
         // int must survive.
         if (impl_->clearColorAttachmentInt(*att, value)) {
+            impl_->markFramebufferAttachmentWrite(*att,
+                                                  kProducerClearWrite |
+                                                  kProducerFboColorWrite);
             return true;
         }
         float fv[4] = {
@@ -52401,7 +52830,13 @@ bool GLContext::clearNamedFramebufferiv(GLuint framebuffer, GLenum buffer, GLint
             static_cast<float>(value[2]),
             static_cast<float>(value[3]),
         };
-        return impl_->clearColorAttachment(*att, fv, false);
+        const bool ok = impl_->clearColorAttachment(*att, fv, false);
+        if (ok) {
+            impl_->markFramebufferAttachmentWrite(*att,
+                                                  kProducerClearWrite |
+                                                  kProducerFboColorWrite);
+        }
+        return ok;
     }
     if (buffer == GL_STENCIL) {
         if (drawbuffer != 0) {
@@ -52410,7 +52845,13 @@ bool GLContext::clearNamedFramebufferiv(GLuint framebuffer, GLenum buffer, GLint
         }
         GLFramebufferAttachment* att = impl_->framebufferAttachment(*fbo, GL_STENCIL_ATTACHMENT);
         if (att == nullptr) return true;
-        return impl_->clearStencilAttachment(*att, value[0]);
+        const bool ok = impl_->clearStencilAttachment(*att, value[0]);
+        if (ok) {
+            impl_->markFramebufferAttachmentWrite(*att,
+                                                  kProducerClearWrite |
+                                                  kProducerFboDepthStencilWrite);
+        }
+        return ok;
     }
     pushError(GL_INVALID_ENUM);
     return false;
@@ -52438,6 +52879,9 @@ bool GLContext::clearNamedFramebufferuiv(GLuint framebuffer, GLenum buffer, GLin
     if (att == nullptr) return true;
     // Unsigned-integer fast path — raw uint into nativeData.
     if (impl_->clearColorAttachmentUInt(*att, value)) {
+        impl_->markFramebufferAttachmentWrite(*att,
+                                              kProducerClearWrite |
+                                              kProducerFboColorWrite);
         return true;
     }
     float fv[4] = {
@@ -52446,7 +52890,13 @@ bool GLContext::clearNamedFramebufferuiv(GLuint framebuffer, GLenum buffer, GLin
         static_cast<float>(value[2]),
         static_cast<float>(value[3]),
     };
-    return impl_->clearColorAttachment(*att, fv, false);
+    const bool ok = impl_->clearColorAttachment(*att, fv, false);
+    if (ok) {
+        impl_->markFramebufferAttachmentWrite(*att,
+                                              kProducerClearWrite |
+                                              kProducerFboColorWrite);
+    }
+    return ok;
 }
 
 bool GLContext::clearNamedFramebufferfi(GLuint framebuffer, GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil) {
@@ -52467,10 +52917,22 @@ bool GLContext::clearNamedFramebufferfi(GLuint framebuffer, GLenum buffer, GLint
     // DEPTH_ATTACHMENT / STENCIL_ATTACHMENT specifically.
     bool ok = true;
     if (GLFramebufferAttachment* depthAtt = impl_->framebufferAttachment(*fbo, GL_DEPTH_ATTACHMENT)) {
-        ok = impl_->clearDepthAttachment(*depthAtt, depth) && ok;
+        const bool depthOk = impl_->clearDepthAttachment(*depthAtt, depth);
+        if (depthOk) {
+            impl_->markFramebufferAttachmentWrite(*depthAtt,
+                                                  kProducerClearWrite |
+                                                  kProducerFboDepthStencilWrite);
+        }
+        ok = depthOk && ok;
     }
     if (GLFramebufferAttachment* stencilAtt = impl_->framebufferAttachment(*fbo, GL_STENCIL_ATTACHMENT)) {
-        ok = impl_->clearStencilAttachment(*stencilAtt, stencil) && ok;
+        const bool stencilOk = impl_->clearStencilAttachment(*stencilAtt, stencil);
+        if (stencilOk) {
+            impl_->markFramebufferAttachmentWrite(*stencilAtt,
+                                                  kProducerClearWrite |
+                                                  kProducerFboDepthStencilWrite);
+        }
+        ok = stencilOk && ok;
     }
     return ok;
 }
