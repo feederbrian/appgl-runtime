@@ -2945,6 +2945,7 @@ struct GLContext::Impl {
         releaseRetainedMetalObject(object.metalSwizzledView);
         object.metalSwizzledView = nullptr;
         object.swizzleDirty = true;
+        object.msaaFramebufferWriteNeedsSamplerFlush = false;
         object.desc = {};
         object.levels.clear();
         for (auto& faceLevels : object.cubeFaceLevels) {
@@ -7602,6 +7603,15 @@ struct GLContext::Impl {
                               samplerName);
                     }
                     continue;  // sampler build failure; nothing to bind
+                }
+
+                id<MTLTexture> samplerSourceTex =
+                    metalTextureFromRaw(texObject->metalTexture);
+                if (samplerSourceTex.sampleCount > 1 &&
+                    texObject->msaaFramebufferWriteNeedsSamplerFlush &&
+                    frameGraph != nullptr) {
+                    frameGraph->flushForReadback();
+                    texObject->msaaFramebufferWriteNeedsSamplerFlush = false;
                 }
 
                 // Step 5: push the binding at the reflected Metal slot.
@@ -19777,6 +19787,40 @@ bool GLContext::deleteFramebuffers(GLsizei count, const GLuint* framebuffers) {
         const GLuint name = framebuffers[index];
         if (name == 0) {
             continue;
+        }
+        if (GLFramebufferObject* fbo =
+                impl_->objects->framebuffers().get(name)) {
+            bool needsMsaaProducerFlush = false;
+            for (const auto& kv : fbo->attachments) {
+                if (!isColorAttachment(kv.first)) continue;
+                if (kv.second.kind !=
+                        GLFramebufferAttachment::Kind::Texture) continue;
+                GLTextureObject* tex =
+                    impl_->objects->textures().get(kv.second.object);
+                if (tex == nullptr ||
+                    !tex->msaaFramebufferWriteNeedsSamplerFlush ||
+                    tex->metalTexture == nullptr) {
+                    continue;
+                }
+                id<MTLTexture> metalTex =
+                    metalTextureFromRaw(tex->metalTexture);
+                if (metalTex.sampleCount > 1) {
+                    needsMsaaProducerFlush = true;
+                    break;
+                }
+            }
+            if (needsMsaaProducerFlush && impl_->frameGraph != nullptr) {
+                impl_->frameGraph->flushForReadback();
+                for (const auto& kv : fbo->attachments) {
+                    if (!isColorAttachment(kv.first)) continue;
+                    if (kv.second.kind !=
+                            GLFramebufferAttachment::Kind::Texture) continue;
+                    if (GLTextureObject* tex =
+                            impl_->objects->textures().get(kv.second.object)) {
+                        tex->msaaFramebufferWriteNeedsSamplerFlush = false;
+                    }
+                }
+            }
         }
         if (impl_->objects->framebuffers().erase(name)) {
             impl_->state->deleteFramebufferBindings(name);
@@ -40141,6 +40185,19 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                     if (GLRenderbufferObject* rb =
                             objects->renderbuffers().get(kv.second.object)) {
                         rb->rgba8ShadowClearPending = false;
+                    }
+                }
+                for (const auto& kv : fbo->attachments) {
+                    if (!isColorAttachment(kv.first)) continue;
+                    if (kv.second.kind !=
+                            GLFramebufferAttachment::Kind::Texture) continue;
+                    GLTextureObject* tex =
+                        objects->textures().get(kv.second.object);
+                    if (tex == nullptr || tex->metalTexture == nullptr) continue;
+                    id<MTLTexture> metalTex =
+                        metalTextureFromRaw(tex->metalTexture);
+                    if (metalTex.sampleCount > 1) {
+                        tex->msaaFramebufferWriteNeedsSamplerFlush = true;
                     }
                 }
                 // Split the two color-texture readback contracts:

@@ -9936,6 +9936,198 @@ TestResult runDCR3CMSAAResolveReadbackSentinel() {
     return result;
 }
 
+TestResult runDCR3CMSAAShaderResolveReadbackSentinel() {
+    auto result = runDirectSentinel("dcr3c.msaa-shader-resolve-readback-sync", [&] {
+        static constexpr GLsizei kSize = 8;
+        static constexpr GLsizei kSamples = 4;
+        static constexpr const char* kFullscreenVS =
+            "#version 440\n"
+            "layout(location = 0) in vec2 a_position;\n"
+            "void main() {\n"
+            "    gl_Position = vec4(a_position, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kMaskFS =
+            "#version 440\n"
+            "layout(location = 0) out highp vec4 o_color;\n"
+            "uniform int u_sampleMask;\n"
+            "void main() {\n"
+            "    for (int i = 0; i < (gl_NumSamples + 31) / 32; ++i) {\n"
+            "        gl_SampleMask[i] = u_sampleMask & gl_SampleMaskIn[i];\n"
+            "    }\n"
+            "    o_color = vec4(1.0, 0.0, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kResolveFS =
+            "#version 440\n"
+            "uniform highp sampler2D u_tex;\n"
+            "uniform highp sampler2DMS u_texMS;\n"
+            "uniform int u_samples;\n"
+            "layout(location = 0) out highp vec4 o_color;\n"
+            "void main() {\n"
+            "    if (u_samples > 0) {\n"
+            "        ivec2 coord = ivec2(int(gl_FragCoord.x) / u_samples, gl_FragCoord.y);\n"
+            "        int sampleId = int(gl_FragCoord.x) % u_samples;\n"
+            "        o_color = texelFetch(u_texMS, coord, sampleId);\n"
+            "    } else {\n"
+            "        ivec2 coord = ivec2(gl_FragCoord.x, gl_FragCoord.y);\n"
+            "        o_color = texelFetch(u_tex, coord, 0);\n"
+            "    }\n"
+            "}\n";
+
+        ScopedEnvVar profile("APPGL_CB_PROFILE", "1");
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        const GLuint maskProgram = buildBenchProgram(kFullscreenVS, kMaskFS);
+        const GLuint resolveProgram = buildBenchProgram(kFullscreenVS, kResolveFS);
+        GLint maskLinked = GL_FALSE;
+        GLint resolveLinked = GL_FALSE;
+        gl.glGetProgramiv(maskProgram, GL_LINK_STATUS, &maskLinked);
+        gl.glGetProgramiv(resolveProgram, GL_LINK_STATUS, &resolveLinked);
+        expectCondition(maskLinked == GL_TRUE, "dcr3c msaa shader producer program links");
+        expectCondition(resolveLinked == GL_TRUE, "dcr3c msaa shader resolve program links");
+        const GLint maskLocation = gl.glGetUniformLocation(maskProgram, "u_sampleMask");
+        const GLint samplesLocation = gl.glGetUniformLocation(resolveProgram, "u_samples");
+        const GLint texLocation = gl.glGetUniformLocation(resolveProgram, "u_tex");
+        const GLint texMSLocation = gl.glGetUniformLocation(resolveProgram, "u_texMS");
+        expectCondition(maskLocation >= 0, "dcr3c msaa shader producer mask uniform exists");
+        expectCondition(samplesLocation >= 0, "dcr3c msaa shader resolve samples uniform exists");
+        expectCondition(texLocation >= 0, "dcr3c msaa shader resolve 2d sampler uniform exists");
+        expectCondition(texMSLocation >= 0, "dcr3c msaa shader resolve 2dms sampler uniform exists");
+
+        const GLfloat vertices[] = {
+            -1.0f, -1.0f,
+            -1.0f,  1.0f,
+             1.0f, -1.0f,
+             1.0f,  1.0f,
+        };
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        gl.glGenVertexArrays(1, &vao);
+        gl.glBindVertexArray(vao);
+        gl.glGenBuffers(1, &vbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), nullptr);
+
+        GLuint msaaTex = 0;
+        gl.glGenTextures(1, &msaaTex);
+        gl.glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, msaaTex);
+        gl.glTexStorage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, kSamples, GL_RGBA8,
+                                     kSize, kSize, GL_FALSE);
+
+        GLuint msaaFbo = 0;
+        gl.glGenFramebuffers(1, &msaaFbo);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, msaaFbo);
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_TEXTURE_2D_MULTISAMPLE, msaaTex, 0);
+        gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+        expectCondition(gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
+                        "dcr3c shader MSAA source framebuffer complete");
+
+        const GLfloat clearGreen[] = {0.0f, 1.0f, 0.0f, 1.0f};
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glClearBufferfv(GL_COLOR, 0, clearGreen);
+        gl.glUseProgram(maskProgram);
+        gl.glUniform1i(maskLocation, 1);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c shader MSAA producer draw");
+
+        const auto afterProducer = context.commandSubmissionDebugCounters();
+        if (afterProducer.lastWaitReason == AppGLCommandReason::FlushForReadback &&
+            afterProducer.lastWaitMode == AppGLSubmitMode::CommitAndWait) {
+            throw std::runtime_error(
+                "MSAA shader producer draw used eager FlushForReadback wait: "
+                + countersSummary(afterProducer));
+        }
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &msaaFbo);
+
+        GLuint resolveRbo = 0;
+        gl.glGenRenderbuffers(1, &resolveRbo);
+        gl.glBindRenderbuffer(GL_RENDERBUFFER, resolveRbo);
+        gl.glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, kSize * kSamples, kSize);
+
+        GLuint resolveFbo = 0;
+        gl.glGenFramebuffers(1, &resolveFbo);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, resolveFbo);
+        gl.glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                     GL_RENDERBUFFER, resolveRbo);
+        gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+        expectCondition(gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
+                        "dcr3c shader resolve framebuffer complete");
+        expectGLError(gl, GL_NO_ERROR, "dcr3c shader resolve setup");
+
+        gl.glViewport(0, 0, kSize * kSamples, kSize);
+        gl.glUseProgram(resolveProgram);
+        gl.glUniform1i(samplesLocation, kSamples);
+        gl.glUniform1i(texLocation, 1);
+        gl.glUniform1i(texMSLocation, 0);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, msaaTex);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c shader MSAA resolve draw");
+
+        std::array<std::uint8_t, kSize * kSamples * kSize * 4> pixels = {};
+        gl.glReadPixels(0, 0, kSize * kSamples, kSize,
+                        GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        expectGLError(gl, GL_NO_ERROR, "dcr3c shader resolved FBO readback");
+
+        for (GLsizei y = 0; y < kSize; ++y) {
+            for (GLsizei x = 0; x < kSize; ++x) {
+                for (GLsizei sample = 0; sample < kSamples; ++sample) {
+                    const std::size_t offset =
+                        (static_cast<std::size_t>(y) * kSize * kSamples
+                         + static_cast<std::size_t>(x) * kSamples
+                         + static_cast<std::size_t>(sample)) * 4u;
+                    const bool expectRed = sample == 0;
+                    const std::uint8_t r = pixels[offset + 0];
+                    const std::uint8_t g = pixels[offset + 1];
+                    const std::uint8_t b = pixels[offset + 2];
+                    const std::uint8_t a = pixels[offset + 3];
+                    const bool redOk = r > 240 && g < 15 && b < 15 && a > 240;
+                    const bool greenOk = r < 15 && g > 240 && b < 15 && a > 240;
+                    if ((expectRed && !redOk) || (!expectRed && !greenOk)) {
+                        std::ostringstream message;
+                        message << "shader-resolved sample mismatch at pixel=("
+                                << x << "," << y << ") sample=" << sample
+                                << " rgba=(" << static_cast<unsigned>(r) << ","
+                                << static_cast<unsigned>(g) << ","
+                                << static_cast<unsigned>(b) << ","
+                                << static_cast<unsigned>(a) << ")";
+                        throw std::runtime_error(message.str());
+                    }
+                }
+            }
+        }
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glBindVertexArray(0);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+        gl.glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0);
+        gl.glBindRenderbuffer(GL_RENDERBUFFER, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteRenderbuffers(1, &resolveRbo);
+        gl.glDeleteFramebuffers(1, &resolveFbo);
+        gl.glDeleteTextures(1, &msaaTex);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteProgram(maskProgram);
+        gl.glDeleteProgram(resolveProgram);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c shader resolve cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "MSAA texture draw -> sampler2DMS shader resolve -> readback stayed coherent without per-draw wait";
+    }
+    return result;
+}
+
 void appendCoverageDelta(TestResult& result, const std::string& phase) {
     // Bootstrap coverage checks only apply to phase-a scenes. Phase-c and later
     // scenes validate their own scenarioCoverage() list; requiring the full
@@ -10131,6 +10323,7 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runDCR3CFboPressureReadbackSentinel());
         tests.push_back(runDCR3CSoakBarBenchmarkSentinel());
         tests.push_back(runDCR3CMSAAResolveReadbackSentinel());
+        tests.push_back(runDCR3CMSAAShaderResolveReadbackSentinel());
         return buildJSON(normalizedPhase, tests);
     }
 

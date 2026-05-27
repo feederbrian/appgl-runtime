@@ -267,6 +267,11 @@ struct GLTextureObject {
     // copy_image keep texture-image readback on the narrower
     // wasViewportRenderedTo contract above.
     bool wasFramebufferRenderedTo = false;
+    // A multisample texture was written as an FBO color attachment and
+    // still needs a producer drain before a sampler2DMS shader resolve
+    // samples it. This keeps the DCR3-C wait on the dependent resolve path
+    // instead of reinstating a draw-tail wait on every FBO draw.
+    bool msaaFramebufferWriteNeedsSamplerFlush = false;
 };
 
 struct GLSamplerObject {
