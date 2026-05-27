@@ -9390,6 +9390,408 @@ TestResult runDCR3ReducedBoundContendedPressureSentinel() {
     });
 }
 
+struct DCR3CFboWorkloadMetrics {
+    int fboDraws = 0;
+    int textureUploads = 0;
+    double drawLoopMs = 0.0;
+    double peakMemoryMB = 0.0;
+    double settledMemoryMB = 0.0;
+    std::uint64_t pressureFlushDelta = 0;
+    std::uint64_t submittedDelta = 0;
+    std::uint64_t waitLogDelta = 0;
+    std::uint32_t peakInFlight = 0;
+    std::uint32_t bound = 0;
+    std::uint32_t softCap = 0;
+    std::uint64_t allocWaitTimeouts = 0;
+    std::array<std::uint8_t, 4> readbackPixel{};
+};
+
+std::string dcr3cWorkloadSummary(std::string_view label,
+                                 const DCR3CFboWorkloadMetrics& metrics) {
+    std::ostringstream stream;
+    stream << label
+           << " draws=" << metrics.fboDraws
+           << " uploads=" << metrics.textureUploads
+           << " drawLoopMs=" << formatDouble(metrics.drawLoopMs)
+           << " pressureFlushDelta=" << metrics.pressureFlushDelta
+           << " submittedDelta=" << metrics.submittedDelta
+           << " waitLogDelta=" << metrics.waitLogDelta
+           << " peakInFlight=" << metrics.peakInFlight
+           << " bound=" << metrics.bound
+           << " softCap=" << metrics.softCap
+           << " allocWaitTimeouts=" << metrics.allocWaitTimeouts
+           << " peakMemoryMB=" << formatDouble(metrics.peakMemoryMB)
+           << " settledMemoryMB=" << formatDouble(metrics.settledMemoryMB)
+           << " readbackRGBA=("
+           << static_cast<unsigned>(metrics.readbackPixel[0]) << ","
+           << static_cast<unsigned>(metrics.readbackPixel[1]) << ","
+           << static_cast<unsigned>(metrics.readbackPixel[2]) << ","
+           << static_cast<unsigned>(metrics.readbackPixel[3]) << ")";
+    return stream.str();
+}
+
+DCR3CFboWorkloadMetrics runDCR3CFboWorkload(GLContext& context,
+                                            GLDispatchTable& gl,
+                                            int chainDraws,
+                                            int uploadEvery,
+                                            bool presentOnce,
+                                            bool finalReadback,
+                                            std::vector<std::string>& failures,
+                                            std::string_view label) {
+    static constexpr GLsizei kSize = 32;
+    static constexpr const char* kFullscreenVS =
+        "#version 330 core\n"
+        "layout(location = 0) in vec2 aPos;\n"
+        "void main() {\n"
+        "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+        "}\n";
+    static constexpr const char* kSeedFS =
+        "#version 330 core\n"
+        "uniform vec4 uColor;\n"
+        "out vec4 fragColor;\n"
+        "void main() {\n"
+        "    fragColor = uColor;\n"
+        "}\n";
+    static constexpr const char* kSampleFS =
+        "#version 330 core\n"
+        "uniform sampler2D uSource;\n"
+        "out vec4 fragColor;\n"
+        "void main() {\n"
+        "    vec4 s = texture(uSource, vec2(0.5, 0.5));\n"
+        "    fragColor = vec4(s.g, s.b, s.r, 1.0);\n"
+        "}\n";
+
+    DCR3CFboWorkloadMetrics metrics;
+    metrics.fboDraws = chainDraws + 1;
+
+    const std::size_t baselineBuffers = context.objects().buffers().size();
+    const std::size_t baselineTextures = context.objects().textures().size();
+    const std::size_t baselineFramebuffers = context.objects().framebuffers().size();
+    const std::size_t baselineVertexArrays = context.objects().vertexArrays().size();
+    const std::size_t baselinePrograms = context.objects().programs().size();
+    const std::size_t baselineShaders = context.objects().shaders().size();
+
+    const GLuint seedProgram = buildBenchProgram(kFullscreenVS, kSeedFS);
+    const GLuint sampleProgram = buildBenchProgram(kFullscreenVS, kSampleFS);
+    GLint seedLinked = GL_FALSE;
+    GLint sampleLinked = GL_FALSE;
+    gl.glGetProgramiv(seedProgram, GL_LINK_STATUS, &seedLinked);
+    gl.glGetProgramiv(sampleProgram, GL_LINK_STATUS, &sampleLinked);
+    expectCondition(seedLinked == GL_TRUE, "dcr3c seed program links");
+    expectCondition(sampleLinked == GL_TRUE, "dcr3c sample program links");
+    const GLint seedColorLocation = gl.glGetUniformLocation(seedProgram, "uColor");
+    const GLint sampleSourceLocation = gl.glGetUniformLocation(sampleProgram, "uSource");
+    expectCondition(seedColorLocation >= 0, "dcr3c seed color uniform exists");
+    expectCondition(sampleSourceLocation >= 0, "dcr3c sample source uniform exists");
+
+    const GLfloat vertices[] = {
+        -1.0f, -1.0f,
+         3.0f, -1.0f,
+        -1.0f,  3.0f,
+    };
+    GLuint vao = 0;
+    GLuint vbo = 0;
+    gl.glGenVertexArrays(1, &vao);
+    gl.glBindVertexArray(vao);
+    gl.glGenBuffers(1, &vbo);
+    gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    gl.glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+    gl.glEnableVertexAttribArray(0);
+    gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), nullptr);
+
+    GLuint textures[2] = {};
+    GLuint depthUploadTexture = 0;
+    GLuint framebuffers[2] = {};
+    gl.glGenTextures(2, textures);
+    for (GLuint texture : textures) {
+        gl.glBindTexture(GL_TEXTURE_2D, texture);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        gl.glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, kSize, kSize);
+    }
+    gl.glGenFramebuffers(2, framebuffers);
+    for (int index = 0; index < 2; ++index) {
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffers[index]);
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_TEXTURE_2D, textures[index], 0);
+        gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+        expectCondition(gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
+                        "dcr3c ping-pong framebuffer is complete");
+    }
+
+    std::array<std::uint16_t, 8 * 8> depthPixels = {};
+    gl.glGenTextures(1, &depthUploadTexture);
+    gl.glBindTexture(GL_TEXTURE_2D, depthUploadTexture);
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    expectGLError(gl, GL_NO_ERROR, "dcr3c workload setup");
+
+    gl.glFinish();
+    const auto initialCounters = context.commandSubmissionDebugCounters();
+    double peakMemoryMB = static_cast<double>(context.metalAllocatedBytes()) / (1024.0 * 1024.0);
+
+    auto noteMemory = [&]() {
+        const double memoryMB = static_cast<double>(context.metalAllocatedBytes()) / (1024.0 * 1024.0);
+        if (memoryMB > peakMemoryMB) {
+            peakMemoryMB = memoryMB;
+        }
+    };
+    auto checkDrawDidNotReadbackWait = [&](int drawIndex) {
+        const auto counters = context.commandSubmissionDebugCounters();
+        if (counters.lastWaitReason == AppGLCommandReason::FlushForReadback &&
+            counters.lastWaitMode == AppGLSubmitMode::CommitAndWait) {
+            recordSentinelFailure(
+                failures,
+                "FBO draw used per-draw FlushForReadback wait",
+                std::string(label) + " draw=" + std::to_string(drawIndex)
+                    + " counters{" + countersSummary(counters) + "}"
+            );
+        }
+        noteMemory();
+    };
+
+    const auto loopStart = std::chrono::steady_clock::now();
+
+    gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffers[0]);
+    gl.glViewport(0, 0, kSize, kSize);
+    gl.glUseProgram(seedProgram);
+    gl.glUniform4f(seedColorLocation, 1.0f, 0.0f, 0.0f, 1.0f);
+    gl.glBindVertexArray(vao);
+    gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+    expectGLError(gl, GL_NO_ERROR, "dcr3c seed FBO draw");
+    checkDrawDidNotReadbackWait(0);
+
+    int currentTexture = 0;
+    for (int iteration = 0; iteration < chainDraws; ++iteration) {
+        const int destination = 1 - currentTexture;
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffers[destination]);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glUseProgram(sampleProgram);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D, textures[currentTexture]);
+        gl.glUniform1i(sampleSourceLocation, 0);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c chained FBO draw");
+        checkDrawDidNotReadbackWait(iteration + 1);
+        currentTexture = destination;
+
+        if (uploadEvery > 0 && ((iteration + 1) % uploadEvery) == 0) {
+            for (std::size_t pixel = 0; pixel < depthPixels.size(); ++pixel) {
+                depthPixels[pixel] = static_cast<std::uint16_t>(
+                    0x1000u + ((iteration * 97u + pixel * 13u) & 0x7fffu));
+            }
+            gl.glBindTexture(GL_TEXTURE_2D, depthUploadTexture);
+            gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT16, 8, 8, 0,
+                            GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, depthPixels.data());
+            ++metrics.textureUploads;
+            expectGLError(gl, GL_NO_ERROR, "dcr3c pressure-triggering depth upload");
+            noteMemory();
+        }
+    }
+
+    const auto loopEnd = std::chrono::steady_clock::now();
+    metrics.drawLoopMs = std::chrono::duration<double, std::milli>(loopEnd - loopStart).count();
+
+    if (presentOnce) {
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glUseProgram(sampleProgram);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D, textures[currentTexture]);
+        gl.glUniform1i(sampleSourceLocation, 0);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c present-once default draw");
+        checkDrawDidNotReadbackWait(chainDraws + 1);
+        context.swapBuffers();
+    }
+
+    if (finalReadback) {
+        std::array<std::uint8_t, kSize * kSize * 4> readback = {};
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffers[currentTexture]);
+        gl.glReadPixels(0, 0, kSize, kSize, GL_RGBA, GL_UNSIGNED_BYTE, readback.data());
+        expectGLError(gl, GL_NO_ERROR, "dcr3c final FBO readback");
+        const std::size_t centerOffset = ((kSize / 2) * kSize + (kSize / 2)) * 4;
+        metrics.readbackPixel = {
+            readback[centerOffset + 0],
+            readback[centerOffset + 1],
+            readback[centerOffset + 2],
+            readback[centerOffset + 3],
+        };
+        if (metrics.readbackPixel[0] < 240 ||
+            metrics.readbackPixel[1] > 15 ||
+            metrics.readbackPixel[2] > 15 ||
+            metrics.readbackPixel[3] < 240) {
+            recordSentinelFailure(
+                failures,
+                "final ping-pong readback was not red",
+                "rgba=(" + std::to_string(metrics.readbackPixel[0]) + ","
+                    + std::to_string(metrics.readbackPixel[1]) + ","
+                    + std::to_string(metrics.readbackPixel[2]) + ","
+                    + std::to_string(metrics.readbackPixel[3]) + ")"
+            );
+        }
+        const auto afterReadback = context.commandSubmissionDebugCounters();
+        if (afterReadback.lastWaitReason != AppGLCommandReason::FlushForReadback ||
+            afterReadback.lastWaitMode != AppGLSubmitMode::CommitAndWait) {
+            recordSentinelFailure(
+                failures,
+                "final readback was not FlushForReadback-attributed",
+                countersSummary(afterReadback)
+            );
+        }
+    }
+
+    gl.glFinish();
+    const auto afterWork = context.commandSubmissionDebugCounters();
+    metrics.pressureFlushDelta = afterWork.pressureFlushCount - initialCounters.pressureFlushCount;
+    metrics.submittedDelta = afterWork.submittedCommandBuffers - initialCounters.submittedCommandBuffers;
+    metrics.waitLogDelta = afterWork.waitReasonLogEntries - initialCounters.waitReasonLogEntries;
+    metrics.peakInFlight = afterWork.peakInFlight;
+    metrics.bound = afterWork.inFlightBound;
+    metrics.softCap = afterWork.pressureSoftCap;
+    metrics.allocWaitTimeouts = allocWaitTimeoutTotal(afterWork);
+    metrics.peakMemoryMB = peakMemoryMB;
+
+    if (metrics.pressureFlushDelta == 0) {
+        recordSentinelFailure(
+            failures,
+            "pressure net did not fire under FBO accumulation",
+            "initial{" + countersSummary(initialCounters) + "} after{" + countersSummary(afterWork) + "}"
+        );
+    }
+    if (afterWork.peakInFlight <= afterWork.pressureSoftCap) {
+        recordSentinelFailure(
+            failures,
+            "FBO accumulation did not enter pressure reserve",
+            countersSummary(afterWork)
+        );
+    }
+    if (afterWork.peakInFlight > afterWork.inFlightBound) {
+        recordSentinelFailure(
+            failures,
+            "peak in-flight exceeded bound",
+            countersSummary(afterWork)
+        );
+    }
+    if (metrics.allocWaitTimeouts != 0) {
+        recordSentinelFailure(
+            failures,
+            "allocation wait timed out",
+            countersSummary(afterWork)
+        );
+    }
+    if (afterWork.currentInFlight != 0 ||
+        afterWork.completedCommandBuffers != afterWork.submittedCommandBuffers) {
+        recordSentinelFailure(
+            failures,
+            "finish left command buffers incomplete",
+            countersSummary(afterWork)
+        );
+    }
+
+    gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    gl.glBindVertexArray(0);
+    gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+    gl.glBindTexture(GL_TEXTURE_2D, 0);
+    gl.glUseProgram(0);
+    gl.glDeleteFramebuffers(2, framebuffers);
+    gl.glDeleteTextures(2, textures);
+    gl.glDeleteTextures(1, &depthUploadTexture);
+    gl.glDeleteBuffers(1, &vbo);
+    gl.glDeleteVertexArrays(1, &vao);
+    gl.glDeleteProgram(seedProgram);
+    gl.glDeleteProgram(sampleProgram);
+    expectGLError(gl, GL_NO_ERROR, "dcr3c workload cleanup");
+    gl.glFinish();
+    metrics.settledMemoryMB = static_cast<double>(context.metalAllocatedBytes()) / (1024.0 * 1024.0);
+
+    const bool objectCountsRestored =
+        context.objects().buffers().size() == baselineBuffers &&
+        context.objects().textures().size() == baselineTextures &&
+        context.objects().framebuffers().size() == baselineFramebuffers &&
+        context.objects().vertexArrays().size() == baselineVertexArrays &&
+        context.objects().programs().size() == baselinePrograms &&
+        context.objects().shaders().size() == baselineShaders;
+    if (!objectCountsRestored) {
+        recordSentinelFailure(
+            failures,
+            "cleanup did not restore object store counts",
+            "buffers=" + std::to_string(context.objects().buffers().size())
+                + " textures=" + std::to_string(context.objects().textures().size())
+                + " framebuffers=" + std::to_string(context.objects().framebuffers().size())
+                + " vertexArrays=" + std::to_string(context.objects().vertexArrays().size())
+                + " programs=" + std::to_string(context.objects().programs().size())
+                + " shaders=" + std::to_string(context.objects().shaders().size())
+        );
+    }
+
+    const auto finalCounters = context.commandSubmissionDebugCounters();
+    if (finalCounters.currentInFlight != 0 ||
+        finalCounters.completedCommandBuffers != finalCounters.submittedCommandBuffers ||
+        allocWaitTimeoutTotal(finalCounters) != 0) {
+        recordSentinelFailure(
+            failures,
+            "final command-submission counters were not clean",
+            countersSummary(finalCounters)
+        );
+    }
+
+    return metrics;
+}
+
+TestResult runDCR3CFboPressureReadbackSentinel() {
+    std::string summary;
+    auto result = runDirectSentinel("dcr3c.fbo-pressure-readback", [&] {
+        ScopedEnvVar reducedBound("APPGL_COMMAND_BUFFER_BOUND", "5");
+        ScopedEnvVar pressureReserve("APPGL_COMMAND_BUFFER_RESERVE", "4");
+        ScopedEnvVar timeout("APPGL_COMMAND_BUFFER_TIMEOUT_MS", "10000");
+        ScopedEnvVar profile("APPGL_CB_PROFILE", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+
+        const auto metrics = runDCR3CFboWorkload(
+            context, gl, 21, 4, false, true, failures, "readback");
+        throwIfSentinelFailed(failures);
+        summary = dcr3cWorkloadSummary("readback", metrics);
+    });
+    if (result.status == "passed") {
+        result.message = summary;
+    }
+    return result;
+}
+
+TestResult runDCR3CSoakBarBenchmarkSentinel() {
+    std::string summary;
+    auto result = runDirectSentinel("dcr3c.sustained-soak-bar", [&] {
+        ScopedEnvVar reducedBound("APPGL_COMMAND_BUFFER_BOUND", "5");
+        ScopedEnvVar pressureReserve("APPGL_COMMAND_BUFFER_RESERVE", "4");
+        ScopedEnvVar timeout("APPGL_COMMAND_BUFFER_TIMEOUT_MS", "10000");
+        ScopedEnvVar profile("APPGL_CB_PROFILE", "1");
+
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+
+        const auto metrics = runDCR3CFboWorkload(
+            context, gl, 181, 6, true, false, failures, "soak");
+        throwIfSentinelFailed(failures);
+        summary = dcr3cWorkloadSummary("soak", metrics);
+    });
+    if (result.status == "passed") {
+        result.message = summary;
+    }
+    return result;
+}
+
 void appendCoverageDelta(TestResult& result, const std::string& phase) {
     // Bootstrap coverage checks only apply to phase-a scenes. Phase-c and later
     // scenes validate their own scenarioCoverage() list; requiring the full
@@ -9578,6 +9980,12 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
 
     if (normalizedPhase == "dcr3-sentinels") {
         tests.push_back(runDCR3ReducedBoundContendedPressureSentinel());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "dcr3c-sentinels") {
+        tests.push_back(runDCR3CFboPressureReadbackSentinel());
+        tests.push_back(runDCR3CSoakBarBenchmarkSentinel());
         return buildJSON(normalizedPhase, tests);
     }
 
