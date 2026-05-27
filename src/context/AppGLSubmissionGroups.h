@@ -17,6 +17,13 @@ enum class AppGLSubmissionGroupKind : std::uint8_t {
     MeshGsDraw,
     MeshGsPrepass,
     MeshGsRender,
+    TessDraw,
+    TessVertex,
+    TessControl,
+    TessFactorClamp,
+    TessDomain,
+    TessEval,
+    TessRender,
     FallbackNs,
 };
 
@@ -33,6 +40,16 @@ enum class AppGLSubmissionTransientKind : std::uint8_t {
     SsboSizeBuffer,
     MeshVsOutputBuffer,
     SidecarBinding,
+    TessFactorBuffer,
+    TessFactorFullBuffer,
+    TessIndirectParamsBuffer,
+    TessVsOutputBuffer,
+    TessControlPointOutputBuffer,
+    TessPatchOutputBuffer,
+    TessDomainCoordBuffer,
+    TessDomainPrimIdBuffer,
+    TessTotalVertexCountBuffer,
+    TessEvalComputeOutputBuffer,
 };
 
 enum class AppGLSubmissionOrderingMechanism : std::uint8_t {
@@ -173,6 +190,13 @@ inline const char* appGLSubmissionGroupKindName(AppGLSubmissionGroupKind kind) {
         case AppGLSubmissionGroupKind::MeshGsDraw: return "MeshGsDrawGroup";
         case AppGLSubmissionGroupKind::MeshGsPrepass: return "MeshGsPrepassGroup";
         case AppGLSubmissionGroupKind::MeshGsRender: return "MeshGsRenderGroup";
+        case AppGLSubmissionGroupKind::TessDraw: return "TessDrawGroup";
+        case AppGLSubmissionGroupKind::TessVertex: return "TessVertexGroup";
+        case AppGLSubmissionGroupKind::TessControl: return "TessControlGroup";
+        case AppGLSubmissionGroupKind::TessFactorClamp: return "TessFactorClampGroup";
+        case AppGLSubmissionGroupKind::TessDomain: return "TessDomainGroup";
+        case AppGLSubmissionGroupKind::TessEval: return "TessEvalGroup";
+        case AppGLSubmissionGroupKind::TessRender: return "TessRenderGroup";
         case AppGLSubmissionGroupKind::FallbackNs: return "FallbackNsGroup";
     }
     return "Unknown";

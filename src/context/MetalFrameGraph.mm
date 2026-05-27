@@ -6348,7 +6348,13 @@ fragment float4 appgl_immediate_textured_fs(
     //       set viewport/scissor/cull/depth state, setRenderPipelineState,
     //       setTessellationFactorBuffer, and drawPatches.
     //   (6) End the render pass and commit.
-    bool encodeMetalTessellationDraw(const MetalTessDrawInfo& info) {
+    bool encodeMetalTessellationDraw(MetalTessDrawInfo& info) {
+        info.didRender = false;
+        if (!info.submissionGroup.declared) {
+            info.submissionGroup.reset(AppGLSubmissionGroupKind::TessDraw,
+                                       AppGLCommandReason::TessRender);
+            info.submissionGroup.approximateFallbackDisallowed = true;
+        }
         if (device == nil || commandQueue == nil) return false;
         if (info.tessControlPipelineState == nullptr) return false;
         // Allow `tessEvalMSL` to be empty when the as-compute kernel is
@@ -6429,6 +6435,32 @@ fragment float4 appgl_immediate_textured_fs(
             currentCommandBuffer = nil;
         }
 
+        auto fillTransientBufferAndWait =
+            [&](id<MTLBuffer> buffer,
+                NSUInteger byteCount,
+                AppGLCommandReason reason,
+                NSString* label) -> bool {
+                if (buffer == nil || byteCount == 0) {
+                    return true;
+                }
+                auto fillLease = makeCommandBuffer(reason);
+                id<MTLCommandBuffer> fillCmd = fillLease.get();
+                if (fillCmd == nil) {
+                    return false;
+                }
+                fillCmd.label = label;
+                id<MTLBlitCommandEncoder> fillEnc =
+                    [fillCmd blitCommandEncoder];
+                if (fillEnc == nil) {
+                    return false;
+                }
+                [fillEnc fillBuffer:buffer
+                               range:NSMakeRange(0, byteCount)
+                               value:0];
+                [fillEnc endEncoding];
+                return fillLease.commitAndWait(reason);
+            };
+
         // (2) Allocate factor buffer (over-size to quad for conservatism;
         // SPIRV-Cross always emits the quad struct even for triangle
         // TES and Metal reads the triangle subset).
@@ -6454,6 +6486,12 @@ fragment float4 appgl_immediate_textured_fs(
         if (factorBuf == nil) return false;
         ScopedOwnedObjCObject factorBufRelease(factorBuf);
         factorBuf.label = @"appgl-tess-factor";
+        info.submissionGroup.addTransient(
+            AppGLSubmissionTransientKind::TessFactorBuffer,
+            AppGLSubmissionOrderingMechanism::CpuCompletionWait,
+            AppGLCommandReason::TessControlCompute,
+            26,
+            static_cast<std::size_t>(factorBytes));
 
         // Phase 3: additional buffers for VS-compute + TCS user
         // output. Conservative over-allocation: 256 bytes per struct
@@ -6506,6 +6544,32 @@ fragment float4 appgl_immediate_textured_fs(
 	            vsOutBuf.label = @"appgl-tess-vs-out";
 	            cpOutBuf.label = @"appgl-tess-cp-out";
 	            patchOutBuf.label = @"appgl-tess-patch-out";
+            const AppGLSubmissionOrderingMechanism vsOutOrdering =
+                info.vertexComputePipelineState != nullptr
+                    ? AppGLSubmissionOrderingMechanism::CpuCompletionWait
+                    : AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer;
+            const AppGLCommandReason vsOutReason =
+                info.vertexComputePipelineState != nullptr
+                    ? AppGLCommandReason::TessVertexCompute
+                    : AppGLCommandReason::TessControlCompute;
+            info.submissionGroup.addTransient(
+                AppGLSubmissionTransientKind::TessVsOutputBuffer,
+                vsOutOrdering,
+                vsOutReason,
+                22,
+                static_cast<std::size_t>(vsOutBytes));
+            info.submissionGroup.addTransient(
+                AppGLSubmissionTransientKind::TessControlPointOutputBuffer,
+                AppGLSubmissionOrderingMechanism::CpuCompletionWait,
+                AppGLCommandReason::TessControlCompute,
+                22,
+                static_cast<std::size_t>(cpOutBytes));
+            info.submissionGroup.addTransient(
+                AppGLSubmissionTransientKind::TessPatchOutputBuffer,
+                AppGLSubmissionOrderingMechanism::CpuCompletionWait,
+                AppGLCommandReason::TessControlCompute,
+                20,
+                static_cast<std::size_t>(patchOutBytes));
 	            if (info.forcePhase3Buffers) {
 	                if (void* p = [vsOutBuf contents]) {
 	                    std::memset(p, 0, (std::size_t)vsOutBytes);
@@ -6543,6 +6607,12 @@ fragment float4 appgl_immediate_textured_fs(
         if (factorBufFull == nil) return false;
         ScopedOwnedObjCObject factorBufFullRelease(factorBufFull);
         factorBufFull.label = @"appgl-tess-factor-full";
+        info.submissionGroup.addTransient(
+            AppGLSubmissionTransientKind::TessFactorFullBuffer,
+            AppGLSubmissionOrderingMechanism::CpuCompletionWait,
+            AppGLCommandReason::TessControlCompute,
+            23,
+            static_cast<std::size_t>(fullFactorBytes));
 
         // spvIndirectParams: SPIRV-Cross `constant uint*` — element [0]
         // is gl_PatchVerticesIn (from glPatchParameteri, default 3),
@@ -6562,6 +6632,12 @@ fragment float4 appgl_immediate_textured_fs(
         if (indirectBuf == nil) return false;
         ScopedOwnedObjCObject indirectBufRelease(indirectBuf);
         indirectBuf.label = @"appgl-tess-indirect-params";
+        info.submissionGroup.addTransient(
+            AppGLSubmissionTransientKind::TessIndirectParamsBuffer,
+            AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
+            AppGLCommandReason::TessControlCompute,
+            29,
+            sizeof(indirectParams));
 
         // (3a) Phase 3: VS-as-compute dispatch. Runs once per vertex
         // in the draw range and writes per-vertex output into
@@ -6569,6 +6645,9 @@ fragment float4 appgl_immediate_textured_fs(
         // `spvIn [[buffer(22)]]` (no stage-input descriptor needed with
         // `multi_patch_workgroup = true`).
         if (isPhase3 && info.vertexComputePipelineState != nullptr) {
+            info.submissionGroup.addSubgroup(
+                AppGLSubmissionGroupKind::TessVertex,
+                AppGLCommandReason::TessVertexCompute);
             auto vsLease = makeCommandBuffer(AppGLCommandReason::TessVertexCompute);
             id<MTLCommandBuffer> vsCmdBuf = vsLease.get();
             if (vsCmdBuf == nil) return false;
@@ -6637,6 +6716,12 @@ fragment float4 appgl_immediate_textured_fs(
             }
             [vsEnc endEncoding];
             vsLease.commitAndWait(AppGLCommandReason::TessVertexCompute);
+            if (std::getenv("APPGL_DCR4D_TESS_ZERO_VSOUT") != nullptr &&
+                !fillTransientBufferAndWait(vsOutBuf, vsOutBytes,
+                                            AppGLCommandReason::TessVertexCompute,
+                                            @"appgl-dcr4d-zero-tess-vsout")) {
+                return false;
+            }
             // CKPT137: dump vsOutBuf post-VS-compute when APPGL_TRACE_TESS_BUF.
             // vsOutBuf is allocated Shared above when env-gate is set, so
             // contents are accessible without additional blit.
@@ -6662,6 +6747,9 @@ fragment float4 appgl_immediate_textured_fs(
         }
 
         // (3b) Compute-encode the TCS dispatch.
+        info.submissionGroup.addSubgroup(
+            AppGLSubmissionGroupKind::TessControl,
+            AppGLCommandReason::TessControlCompute);
         auto computeLease = makeCommandBuffer(AppGLCommandReason::TessControlCompute);
         id<MTLCommandBuffer> computeCmdBuf = computeLease.get();
         if (computeCmdBuf == nil) return false;
@@ -6834,6 +6922,18 @@ fragment float4 appgl_immediate_textured_fs(
                 }
             }
         }
+        if (std::getenv("APPGL_DCR4D_TESS_ZERO_FACTORBUF") != nullptr) {
+            if (!fillTransientBufferAndWait(factorBuf, factorBytes,
+                                            AppGLCommandReason::TessControlCompute,
+                                            @"appgl-dcr4d-zero-tess-factor")) {
+                return false;
+            }
+            if (!fillTransientBufferAndWait(factorBufFull, fullFactorBytes,
+                                            AppGLCommandReason::TessControlCompute,
+                                            @"appgl-dcr4d-zero-tess-factor-full")) {
+                return false;
+            }
+        }
 
         // (3c) Phase 3B.4 [metal-tess-TF]: domain-generator + TES-as-
         // compute dispatch chain. Runs after TCS compute (which writes
@@ -6924,6 +7024,30 @@ fragment float4 appgl_immediate_textured_fs(
                 domainPrimIDBuf.label = @"appgl-tess-domain-primid";
                 totalVertCountBuf.label = @"appgl-tess-total-count";
                 tesComputeOutBuf.label = @"appgl-tess-compute-out";
+                info.submissionGroup.addTransient(
+                    AppGLSubmissionTransientKind::TessDomainCoordBuffer,
+                    AppGLSubmissionOrderingMechanism::CpuCompletionWait,
+                    AppGLCommandReason::TessDomainGenerate,
+                    25,
+                    static_cast<std::size_t>(maxTotalVerts * 12));
+                info.submissionGroup.addTransient(
+                    AppGLSubmissionTransientKind::TessDomainPrimIdBuffer,
+                    AppGLSubmissionOrderingMechanism::CpuCompletionWait,
+                    AppGLCommandReason::TessDomainGenerate,
+                    24,
+                    static_cast<std::size_t>(maxTotalVerts * sizeof(uint32_t)));
+                info.submissionGroup.addTransient(
+                    AppGLSubmissionTransientKind::TessTotalVertexCountBuffer,
+                    AppGLSubmissionOrderingMechanism::CpuCompletionWait,
+                    AppGLCommandReason::TessDomainGenerate,
+                    23,
+                    sizeof(uint32_t));
+                info.submissionGroup.addTransient(
+                    AppGLSubmissionTransientKind::TessEvalComputeOutputBuffer,
+                    AppGLSubmissionOrderingMechanism::CpuCompletionWait,
+                    AppGLCommandReason::TessEvalCompute,
+                    28,
+                    static_cast<std::size_t>(maxTotalVerts * 256));
 
                 // Domain-gen params struct. Layout mirrors the MSL
                 // `TessGenParams` definition in
@@ -7022,6 +7146,9 @@ fragment float4 appgl_immediate_textured_fs(
                     id<MTLComputePipelineState> clampPSO =
                         ensureTessFactorClampPipelineState();
                     if (clampPSO != nil) {
+                        info.submissionGroup.addSubgroup(
+                            AppGLSubmissionGroupKind::TessFactorClamp,
+                            AppGLCommandReason::TessFactorClamp);
                         uint32_t patchCountU = (uint32_t)info.patchCount;
                         auto clampLease = makeCommandBuffer(AppGLCommandReason::TessFactorClamp);
                         id<MTLCommandBuffer> clampCmd = clampLease.get();
@@ -7044,6 +7171,9 @@ fragment float4 appgl_immediate_textured_fs(
                     rpd.renderTargetWidth = 1;
                     rpd.renderTargetHeight = 1;
                     rpd.defaultRasterSampleCount = 1;
+                    info.submissionGroup.addSubgroup(
+                        AppGLSubmissionGroupKind::TessDomain,
+                        AppGLCommandReason::TessDomainGenerate);
                     auto dgLease = makeCommandBuffer(AppGLCommandReason::TessDomainGenerate);
                     id<MTLCommandBuffer> dgCmdBuf = dgLease.get();
                     dgCmdBuf.label = @"appgl-tess-domain-gen-hw";
@@ -7114,6 +7244,9 @@ fragment float4 appgl_immediate_textured_fs(
                                        options:MTLResourceStorageModeShared];
                         ScopedOwnedObjCObject portParamsBufRelease(portParamsBuf);
 
+                        info.submissionGroup.addSubgroup(
+                            AppGLSubmissionGroupKind::TessDomain,
+                            AppGLCommandReason::TessDomainGenerate);
                         auto dgLease = makeCommandBuffer(AppGLCommandReason::TessDomainGenerate);
                         id<MTLCommandBuffer> dgCmdBuf = dgLease.get();
                         dgCmdBuf.label = @"appgl-tess-domain-port";
@@ -7138,6 +7271,9 @@ fragment float4 appgl_immediate_textured_fs(
                         // Parallelization revisited once Phase 4/5
                         // stabilize the TF capture protocol — the
                         // atomic cursor then becomes safe.
+                        info.submissionGroup.addSubgroup(
+                            AppGLSubmissionGroupKind::TessDomain,
+                            AppGLCommandReason::TessDomainGenerate);
                         auto dgLease = makeCommandBuffer(AppGLCommandReason::TessDomainGenerate);
                         id<MTLCommandBuffer> dgCmdBuf = dgLease.get();
                         dgCmdBuf.label = @"appgl-tess-domain-gen";
@@ -7252,6 +7388,9 @@ fragment float4 appgl_immediate_textured_fs(
                 // just-generated buffers, writes spvOut into
                 // tesComputeOutBuf.
                 if (tessTFGeneratedVerts > 0) {
+                    info.submissionGroup.addSubgroup(
+                        AppGLSubmissionGroupKind::TessEval,
+                        AppGLCommandReason::TessEvalCompute);
                     auto tesLease = makeCommandBuffer(AppGLCommandReason::TessEvalCompute);
                     id<MTLCommandBuffer> tesCmdBuf = tesLease.get();
                     tesCmdBuf.label = @"appgl-tess-tes-compute";
@@ -7559,6 +7698,9 @@ fragment float4 appgl_immediate_textured_fs(
         // support MRT yet). For default-framebuffer draws we reuse the
         // impl's beginRenderPass path by acquiring a drawable +
         // attaching the swapchain texture directly.
+        info.submissionGroup.addSubgroup(
+            AppGLSubmissionGroupKind::TessRender,
+            AppGLCommandReason::TessRender);
         if (currentCommandBuffer == nil) {
             ensureCurrentCommandBuffer(@"tessellationDraw");
             if (currentCommandBuffer == nil) return false;
@@ -7823,6 +7965,7 @@ fragment float4 appgl_immediate_textured_fs(
             return false;
         }
         currentCommandBuffer = nil;
+        info.didRender = true;
 
         if (std::getenv("APPGL_TRACE_TESS")) {
             std::fprintf(stderr,
@@ -10029,7 +10172,7 @@ MetalFrameGraph::TessPipelineProbeResult MetalFrameGraph::probeTessellationPipel
                                              vsComputeMSL, tesComputeMSL);
 }
 
-bool MetalFrameGraph::encodeMetalTessellationDraw(const MetalTessDrawInfo& info) {
+bool MetalFrameGraph::encodeMetalTessellationDraw(MetalTessDrawInfo& info) {
     return impl_->encodeMetalTessellationDraw(info);
 }
 

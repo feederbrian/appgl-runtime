@@ -3325,6 +3325,36 @@ struct GLContext::Impl {
                 static_cast<std::size_t>(info.vsOutputStrideBytes));
     }
 
+    void declareTessSubmissionGroup(
+        MetalTessDrawInfo& info,
+        const std::vector<GLuint>& vertexBufferNames,
+        const std::vector<GLuint>& sampledTextureNames,
+        bool willRender) const {
+        AppGLSubmissionGroup& group = info.submissionGroup;
+        group.reset(AppGLSubmissionGroupKind::TessDraw,
+                    AppGLCommandReason::TessRender);
+        group.approximateFallbackDisallowed = true;
+        group.argumentBuffersEnabled =
+            std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr ||
+            submissionMslUsesArgumentBuffer(info.tessEvalMSL) ||
+            submissionMslUsesArgumentBuffer(info.fragmentMSL);
+        if (group.argumentBuffersEnabled) {
+            group.addSubgroup(AppGLSubmissionGroupKind::ArgumentBinding,
+                              AppGLCommandReason::TessRender);
+        }
+        for (GLuint bufferName : vertexBufferNames) {
+            group.addRead(AppGLSubmissionResourceKind::Buffer,
+                          bufferName, kProducerAll);
+        }
+        for (GLuint textureName : sampledTextureNames) {
+            group.addRead(AppGLSubmissionResourceKind::Texture,
+                          textureName, kProducerAll);
+        }
+        if (willRender) {
+            appendBoundDrawFramebufferSubmissionWrites(group);
+        }
+    }
+
     void declareMeshGsFallbackSubmissionGroup(AppGLSubmissionGroup& group) const {
         group.reset(AppGLSubmissionGroupKind::MeshGsDraw,
                     AppGLCommandReason::MeshDraw);
@@ -22613,7 +22643,14 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
                       totalVerts > 0 &&
                       program.tessEvalOutputLayout.structSize > 0;
 
-    if (doTF) {
+    const bool skipCpuTfWriteForSentinel =
+        std::getenv("APPGL_DCR4D_TF_EXCLUDE_SKIP_CPU_WRITE") != nullptr;
+
+    // DCR4-D deliberately excludes transform-feedback writes from GPU
+    // producer marking: by the time this function runs, TES-compute has
+    // completed and the TF buffer update below is an immediate CPU
+    // writeBufferRange into GL-owned storage.
+    if (doTF && !skipCpuTfWriteForSentinel) {
         const bool interleaved =
             (program.transformFeedbackBufferMode == GL_INTERLEAVED_ATTRIBS);
         const auto& tfNames = program.transformFeedbackVaryingNames;
@@ -22934,10 +22971,14 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
                 ++primsWritten;
             }
         }
+    } else if (doTF) {
+        primsWritten = primsGenerated;
     } else if (tfActive) {
         primsWritten = primsGenerated;
     }
 
+    // DCR4-D query side effects are CPU-side GLQueryObject state updates.
+    // There is no GL buffer/texture/renderbuffer producer to mark or drain.
     // Accumulate counts — mirror the writeGsXfbAndCheckDiscard path.
     objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
         if (!q.active) return;
@@ -38897,6 +38938,8 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     if (patchCount <= 0) return false;
 
     MetalTessDrawInfo info;
+    std::vector<GLuint> tessVertexBufferNames;
+    std::vector<GLuint> tessSampledTextureNames;
     info.tessControlPipelineState = program.metalTessControlPipelineState;
     if (program.metalTessTier == GLProgramObject::MetalTessTier::Phase3) {
         info.vertexComputePipelineState = program.metalTessVertexPipelineState;
@@ -38979,6 +39022,9 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
             if (useZeroedVsOutputs) {
                 break;
             }
+            if (binding.glBuffer != 0) {
+                tessVertexBufferNames.push_back(binding.glBuffer);
+            }
             GLBufferObject* vbo = objects->buffers().get(binding.glBuffer);
             if (vbo == nullptr || vbo->metalBuffer == nullptr) {
                 if (std::getenv("APPGL_TRACE_TESS")) {
@@ -39044,6 +39090,9 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
             textureInfo.program = programName;
             textureInfo.vertexReflection = &reflection;
             resolveSamplerBindings(program, textureInfo);
+            tessSampledTextureNames.insert(tessSampledTextureNames.end(),
+                                           textureInfo.sampledTextureNames.begin(),
+                                           textureInfo.sampledTextureNames.end());
             outBindings = std::move(textureInfo.vertexTextures);
         };
     resolveTessStageSamplerBindings(program.tessControlReflection,
@@ -39056,6 +39105,9 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
         textureInfo.vertexReflection = &program.tessEvalAsComputeReflection;
         textureInfo.fragmentReflection = &program.fragmentReflection;
         resolveSamplerBindings(program, textureInfo);
+        tessSampledTextureNames.insert(tessSampledTextureNames.end(),
+                                       textureInfo.sampledTextureNames.begin(),
+                                       textureInfo.sampledTextureNames.end());
         info.tessEvalTextures = std::move(textureInfo.vertexTextures);
         info.fragmentTextures = std::move(textureInfo.fragmentTextures);
     }
@@ -39305,12 +39357,23 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
             runTessTFWrite ? 1 : 0);
     }
 
+    const bool tessWillRender =
+        !state->isEnabled(GL_RASTERIZER_DISCARD) &&
+        info.tessEvalMSL != nullptr &&
+        !info.tessEvalMSL->empty() &&
+        !(info.pointMode && runTessTFWrite);
+    declareTessSubmissionGroup(info, tessVertexBufferNames,
+                               tessSampledTextureNames, tessWillRender);
+
     const bool encodeOk = frameGraph->encodeMetalTessellationDraw(info);
-    if (encodeOk && state->boundDrawFramebuffer() == 0) {
+    if (encodeOk && info.didRender && state->boundDrawFramebuffer() == 0) {
         invalidateDefaultFramebufferShadow();
-    } else if (encodeOk) {
+    } else if (encodeOk && info.didRender) {
         if (GLFramebufferObject* fbo =
                 objects->framebuffers().get(state->boundDrawFramebuffer())) {
+            GpuResourceWriteSet producerWrites;
+            appendFramebufferAttachmentWrites(producerWrites, *fbo);
+            markGpuResourceWrites(producerWrites);
             const bool markViewportReadback =
                 info.viewportArrayCount > 1 &&
                 mslWritesViewportArrayIndex(info.tessEvalMSL) &&
@@ -41343,24 +41406,40 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             }
             return false;
         };
-        const bool interpretedTess =
-            tessProgram->tessControlInterpreted ||
-            tessProgram->tessellationInterpreted;
-        const bool preferCpuTessSideEffects =
-            interpretedTess &&
-            (!tessProgram->tessControlReflection.storageBuffers.empty() ||
-             !tessProgram->tessEvalAsComputeReflection.storageBuffers.empty() ||
-             hasStorageImageUniform(tessProgram->tessControlSpirv,
-                                    tessProgram->tessControlReflection) ||
-             hasStorageImageUniform(tessProgram->tessEvalSpirv,
-                                    tessProgram->tessEvalAsComputeReflection));
+        const bool hasTessAtomicCounterSideEffects = std::any_of(
+            tessProgram->resourceAtomicCounterBuffers.begin(),
+            tessProgram->resourceAtomicCounterBuffers.end(),
+            [](const GLProgramResourceEntry& ac) {
+                constexpr GLbitfield kTessHardwareStages =
+                    0x01u | 0x02u | 0x08u | 0x10u;  // VS/FS/TCS/TES
+                return (ac.referencedBy & kTessHardwareStages) != 0;
+            });
+        const bool hasImageUniformSideEffects = std::any_of(
+            tessProgram->uniforms.begin(),
+            tessProgram->uniforms.end(),
+            [](const GLProgramUniformInfo& uniform) {
+                return isImageUniformType(uniform.type);
+            });
+        const bool rejectMetalTessSideEffects =
+            !tessProgram->vertexReflection.storageBuffers.empty() ||
+            !tessProgram->tessControlReflection.storageBuffers.empty() ||
+            !tessProgram->tessEvalAsComputeReflection.storageBuffers.empty() ||
+            !tessProgram->fragmentReflection.storageBuffers.empty() ||
+            hasStorageImageUniform(tessProgram->vertexSpirv,
+                                   tessProgram->vertexReflection) ||
+            hasStorageImageUniform(tessProgram->tessControlSpirv,
+                                   tessProgram->tessControlReflection) ||
+            hasStorageImageUniform(tessProgram->tessEvalSpirv,
+                                   tessProgram->tessEvalAsComputeReflection) ||
+            !tessProgram->fragmentReflection.storageImages.empty() ||
+            hasImageUniformSideEffects ||
+            hasTessAtomicCounterSideEffects;
         // TCS/TES side-effect routing: the Metal tess encoder currently binds only
-        // its internal tess buffers (factors, per-CP/per-patch, indirect
-        // params). Keep interpreted storage-buffer/image side effects on the CPU path,
-        // sister to the GS-emul SSBO resolver, until arbitrary tess-stage
-        // storage slots are plumbed through Metal.
-        if (preferCpuTessSideEffects) {
-            APPGL_LOG(SHADER, @"drawArrays metal-tess skipped for interpreted tess side effects");
+        // its internal tess buffers plus sampled textures. Storage-image,
+        // SSBO and atomic-counter side effects must route through the CPU
+        // tess domain, where those GL objects are bound and observable.
+        if (rejectMetalTessSideEffects) {
+            APPGL_LOG(SHADER, @"drawArrays metal-tess skipped for storage-image/SSBO/atomic side effects");
         } else {
             if (impl_->tryMetalTessellationDraw(
                     *tessProgram, tessProgramName, mode, count, first)) {

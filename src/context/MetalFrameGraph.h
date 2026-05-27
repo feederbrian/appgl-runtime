@@ -704,6 +704,8 @@ struct MetalTessVertexBufferBinding {
 };
 
 struct MetalTessDrawInfo {
+    AppGLSubmissionGroup submissionGroup;
+
     // TCS compute pipeline state (retained by the program; not a
     // transfer). Set by the caller from
     // GLProgramObject::metalTessControlPipelineState.
@@ -870,6 +872,11 @@ struct MetalTessDrawInfo {
     GLfloat clearDepth = 1.0f;
     bool pendingClearStencil = false;
     GLint clearStencil = 0;
+
+    // Set by the encoder only when a tess render pass actually
+    // reaches drawPatches. Compute-only TF/rasterizer-discard paths
+    // leave FBO producer state untouched.
+    bool didRender = false;
 };
 
 class MetalFrameGraph {
@@ -1063,7 +1070,7 @@ public:
     // Returns true on success; false on any encode failure (the caller
     // falls through to the CPU tess interpreter path). On failure a
     // diagnostic is recorded via `recordShaderTranslation`.
-    bool encodeMetalTessellationDraw(const MetalTessDrawInfo& info);
+    bool encodeMetalTessellationDraw(MetalTessDrawInfo& info);
 
     // -------------------------------------------------------------
     // Sprint 3 [metal-mesh-GS] — DESIGN PRIMER (no impl yet)

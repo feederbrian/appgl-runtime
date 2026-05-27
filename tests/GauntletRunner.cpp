@@ -10471,6 +10471,432 @@ TestResult runDCR4CMeshGsFboProducerSentinel() {
     return result;
 }
 
+constexpr GLsizei kDCR4DTessSize = 32;
+
+static constexpr const char* kDCR4DTessVS =
+    "#version 430 core\n"
+    "out gl_PerVertex { vec4 gl_Position; };\n"
+    "void main() {\n"
+    "    vec2 p[3] = vec2[3](vec2(-0.75, -0.75), vec2(0.75, -0.75), vec2(0.0, 0.75));\n"
+    "    gl_Position = vec4(p[gl_VertexID], 0.0, 1.0);\n"
+    "}\n";
+
+static constexpr const char* kDCR4DTessTCS =
+    "#version 430 core\n"
+    "layout(vertices = 3) out;\n"
+    "in gl_PerVertex { vec4 gl_Position; } gl_in[];\n"
+    "out gl_PerVertex { vec4 gl_Position; } gl_out[];\n"
+    "void main() {\n"
+    "    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;\n"
+    "    if (gl_InvocationID == 0) {\n"
+    "        gl_TessLevelOuter[0] = 1.0;\n"
+    "        gl_TessLevelOuter[1] = 1.0;\n"
+    "        gl_TessLevelOuter[2] = 1.0;\n"
+    "        gl_TessLevelInner[0] = 1.0;\n"
+    "    }\n"
+    "}\n";
+
+static constexpr const char* kDCR4DTessTES =
+    "#version 430 core\n"
+    "layout(triangles, equal_spacing, ccw) in;\n"
+    "in gl_PerVertex { vec4 gl_Position; } gl_in[];\n"
+    "out gl_PerVertex { vec4 gl_Position; };\n"
+    "void main() {\n"
+    "    gl_Position = gl_TessCoord.x * gl_in[0].gl_Position +\n"
+    "                  gl_TessCoord.y * gl_in[1].gl_Position +\n"
+    "                  gl_TessCoord.z * gl_in[2].gl_Position;\n"
+    "}\n";
+
+static constexpr const char* kDCR4DTessTF_TES =
+    "#version 430 core\n"
+    "layout(triangles, equal_spacing, ccw) in;\n"
+    "in gl_PerVertex { vec4 gl_Position; } gl_in[];\n"
+    "out gl_PerVertex { vec4 gl_Position; };\n"
+    "out float tfValue;\n"
+    "void main() {\n"
+    "    gl_Position = gl_TessCoord.x * gl_in[0].gl_Position +\n"
+    "                  gl_TessCoord.y * gl_in[1].gl_Position +\n"
+    "                  gl_TessCoord.z * gl_in[2].gl_Position;\n"
+    "    tfValue = 7.0;\n"
+    "}\n";
+
+static constexpr const char* kDCR4DTessGreenFS =
+    "#version 430 core\n"
+    "out vec4 fragColor;\n"
+    "void main() { fragColor = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+
+static constexpr const char* kDCR4DTessImageFS =
+    "#version 430 core\n"
+    "layout(rgba8, binding = 0) uniform writeonly image2D outImg;\n"
+    "out vec4 fragColor;\n"
+    "void main() {\n"
+    "    imageStore(outImg, ivec2(0, 0), vec4(1.0, 0.0, 0.0, 1.0));\n"
+    "    fragColor = vec4(0.0, 1.0, 0.0, 1.0);\n"
+    "}\n";
+
+static constexpr const char* kDCR4DTessSsboFS =
+    "#version 430 core\n"
+    "layout(std430, binding = 0) buffer Out { uint value; } outBuf;\n"
+    "out vec4 fragColor;\n"
+    "void main() {\n"
+    "    outBuf.value = 0x12345678u;\n"
+    "    fragColor = vec4(0.0, 1.0, 0.0, 1.0);\n"
+    "}\n";
+
+static constexpr const char* kDCR4DTessAtomicFS =
+    "#version 430 core\n"
+    "layout(binding = 0, offset = 0) uniform atomic_uint ac;\n"
+    "out vec4 fragColor;\n"
+    "void main() {\n"
+    "    atomicCounterIncrement(ac);\n"
+    "    fragColor = vec4(0.0, 1.0, 0.0, 1.0);\n"
+    "}\n";
+
+GLuint buildDCR4DTessProgram(const char* vsSrc,
+                             const char* tcsSrc,
+                             const char* tesSrc,
+                             const char* fsSrc,
+                             const char* const* tfVaryings = nullptr,
+                             GLsizei tfVaryingCount = 0) {
+    auto& gl = Runtime::shared().dispatch();
+    const GLuint vs =
+        compileRequiredShader(gl, GL_VERTEX_SHADER, vsSrc, "dcr4d vertex");
+    const GLuint tcs =
+        compileRequiredShader(gl, GL_TESS_CONTROL_SHADER, tcsSrc, "dcr4d tess-control");
+    const GLuint tes =
+        compileRequiredShader(gl, GL_TESS_EVALUATION_SHADER, tesSrc, "dcr4d tess-eval");
+    const GLuint fs =
+        compileRequiredShader(gl, GL_FRAGMENT_SHADER, fsSrc, "dcr4d fragment");
+    GLuint program = gl.glCreateProgram();
+    gl.glAttachShader(program, vs);
+    gl.glAttachShader(program, tcs);
+    gl.glAttachShader(program, tes);
+    gl.glAttachShader(program, fs);
+    if (tfVaryings != nullptr && tfVaryingCount > 0) {
+        gl.glTransformFeedbackVaryings(program, tfVaryingCount, tfVaryings,
+                                       GL_INTERLEAVED_ATTRIBS);
+    }
+    gl.glLinkProgram(program);
+    gl.glDeleteShader(vs);
+    gl.glDeleteShader(tcs);
+    gl.glDeleteShader(tes);
+    gl.glDeleteShader(fs);
+    GLint status = GL_FALSE;
+    gl.glGetProgramiv(program, GL_LINK_STATUS, &status);
+    if (status != GL_TRUE) {
+        const std::string log = programInfoLog(gl, program);
+        gl.glDeleteProgram(program);
+        throw std::runtime_error(
+            "DCR4-D tess program link failed" +
+            (log.empty() ? std::string{} : ": " + log));
+    }
+    return program;
+}
+
+GLuint buildDCR4DTessGreenProgram() {
+    return buildDCR4DTessProgram(
+        kDCR4DTessVS, kDCR4DTessTCS, kDCR4DTessTES,
+        kDCR4DTessGreenFS);
+}
+
+void setupDCR4DTessTarget(GLDispatchTable& gl,
+                          GLuint& texture,
+                          GLuint& framebuffer) {
+    gl.glGenTextures(1, &texture);
+    setupDCR3CRGBA8Texture(gl, texture, kDCR4DTessSize, kDCR4DTessSize);
+    setupDCR3CTextureFbo(gl, framebuffer, texture);
+    gl.glViewport(0, 0, kDCR4DTessSize, kDCR4DTessSize);
+    gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    gl.glClear(GL_COLOR_BUFFER_BIT);
+    std::array<std::uint8_t, 4> drainPixel = {};
+    gl.glReadPixels(kDCR4DTessSize / 2, kDCR4DTessSize / 2,
+                    1, 1, GL_RGBA, GL_UNSIGNED_BYTE, drainPixel.data());
+    expectGLError(gl, GL_NO_ERROR, "dcr4d tess target setup readback drain");
+}
+
+bool isDCR4DTessGreen(const std::array<std::uint8_t, 4>& pixel) {
+    return pixel[0] <= 40 && pixel[1] >= 180 &&
+           pixel[2] <= 40 && pixel[3] >= 240;
+}
+
+std::array<std::uint8_t, 4> readDCR4DTessCenter(GLDispatchTable& gl) {
+    std::array<std::uint8_t, 4> pixel = {};
+    gl.glReadPixels(kDCR4DTessSize / 2, kDCR4DTessSize / 2,
+                    1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel.data());
+    expectGLError(gl, GL_NO_ERROR, "dcr4d tess center readback");
+    return pixel;
+}
+
+void drawDCR4DTessPatch(GLDispatchTable& gl, GLuint program) {
+    GLuint vao = 0;
+    gl.glGenVertexArrays(1, &vao);
+    gl.glBindVertexArray(vao);
+    gl.glUseProgram(program);
+    gl.glPatchParameteri(GL_PATCH_VERTICES, 3);
+    gl.glDrawArrays(GL_PATCHES, 0, 3);
+    expectGLError(gl, GL_NO_ERROR, "dcr4d tess patch draw");
+    gl.glBindVertexArray(0);
+    gl.glDeleteVertexArrays(1, &vao);
+}
+
+TestResult runDCR4DTessDependencySentinel() {
+    auto result = runDirectSentinel("dcr4d.tess-transient-dependencies", [&] {
+        ScopedSentinelContext scoped(kDCR4DTessSize, kDCR4DTessSize);
+        auto& gl = scoped.gl();
+        const GLuint program = buildDCR4DTessGreenProgram();
+
+        GLuint texture = 0;
+        GLuint framebuffer = 0;
+        setupDCR4DTessTarget(gl, texture, framebuffer);
+        drawDCR4DTessPatch(gl, program);
+        auto pixel = readDCR4DTessCenter(gl);
+        expectCondition(isDCR4DTessGreen(pixel),
+                        "dcr4d normal tess draw produces green center");
+
+        gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        {
+            ScopedEnvVar zeroVsOut("APPGL_DCR4D_TESS_ZERO_VSOUT", "1");
+            drawDCR4DTessPatch(gl, program);
+        }
+        pixel = readDCR4DTessCenter(gl);
+        expectCondition(!isDCR4DTessGreen(pixel),
+                        "dcr4d zeroed tess VS output changes render result");
+
+        gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        {
+            ScopedEnvVar zeroFactor("APPGL_DCR4D_TESS_ZERO_FACTORBUF", "1");
+            drawDCR4DTessPatch(gl, program);
+        }
+        pixel = readDCR4DTessCenter(gl);
+        expectCondition(!isDCR4DTessGreen(pixel),
+                        "dcr4d zeroed tess factor buffer changes render result");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        gl.glDeleteTextures(1, &texture);
+        gl.glDeleteProgram(program);
+        expectGLError(gl, GL_NO_ERROR, "dcr4d tess dependency cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "tess render consumes VS-output and factor-buffer transients";
+    }
+    return result;
+}
+
+TestResult runDCR4DTessFboProducerSentinel() {
+    auto result = runDirectSentinel("dcr4d.tess-fbo-producer-readback", [&] {
+        ScopedSentinelContext scoped(kDCR4DTessSize, kDCR4DTessSize);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        const GLuint program = buildDCR4DTessGreenProgram();
+
+        GLuint texture = 0;
+        GLuint framebuffer = 0;
+        setupDCR4DTessTarget(gl, texture, framebuffer);
+        expectPendingClear(texturePendingBits(context, texture),
+                           kProducerFboColorWrite,
+                           "dcr4d tess setup has no stale FBO producer bits");
+
+        drawDCR4DTessPatch(gl, program);
+        expectPendingHas(texturePendingBits(context, texture),
+                         kProducerFboColorWrite,
+                         "dcr4d tess FBO draw marks texture producer bits");
+
+        const auto pixel = readDCR4DTessCenter(gl);
+        expectCondition(isDCR4DTessGreen(pixel),
+                        "dcr4d tess FBO readback observes green center");
+        expectPendingClear(texturePendingBits(context, texture),
+                           kProducerFboColorWrite,
+                           "dcr4d tess readback clears FBO producer bits");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        gl.glDeleteTextures(1, &texture);
+        gl.glDeleteProgram(program);
+        expectGLError(gl, GL_NO_ERROR, "dcr4d tess producer cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "native tess FBO draw marks producer bits and readback drains them";
+    }
+    return result;
+}
+
+TestResult runDCR4DTessSideEffectRejectSentinel() {
+    auto result = runDirectSentinel("dcr4d.tess-side-effect-rejects", [&] {
+        ScopedSentinelContext scoped(kDCR4DTessSize, kDCR4DTessSize);
+        auto& gl = scoped.gl();
+
+        GLuint colorTex = 0;
+        GLuint framebuffer = 0;
+        setupDCR4DTessTarget(gl, colorTex, framebuffer);
+
+        GLuint imageTex = 0;
+        gl.glGenTextures(1, &imageTex);
+        setupDCR3CRGBA8Texture(gl, imageTex, 4, 4);
+        const GLuint imageProgram = buildDCR4DTessProgram(
+            kDCR4DTessVS, kDCR4DTessTCS, kDCR4DTessTES,
+            kDCR4DTessImageFS);
+        gl.glBindImageTexture(0, imageTex, 0, GL_FALSE, 0,
+                              GL_WRITE_ONLY, GL_RGBA8);
+        drawDCR4DTessPatch(gl, imageProgram);
+        gl.glMemoryBarrier(GL_ALL_BARRIER_BITS);
+        std::array<std::uint8_t, 4 * 4 * 4> imagePixels = {};
+        gl.glGetTextureImage(imageTex, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                             static_cast<GLsizei>(imagePixels.size()),
+                             imagePixels.data());
+        expectGLError(gl, GL_NO_ERROR, "dcr4d storage-image reject readback");
+        expectCondition(imagePixels[0] >= 180 && imagePixels[1] <= 40 &&
+                            imagePixels[2] <= 40 && imagePixels[3] >= 240,
+                        "dcr4d storage-image tess draw routed to CPU fallback");
+
+        std::uint32_t zero = 0;
+        GLuint ssbo = 0;
+        gl.glGenBuffers(1, &ssbo);
+        gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+        gl.glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(std::uint32_t),
+                        &zero, GL_DYNAMIC_DRAW);
+        gl.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo);
+        const GLuint ssboProgram = buildDCR4DTessProgram(
+            kDCR4DTessVS, kDCR4DTessTCS, kDCR4DTessTES,
+            kDCR4DTessSsboFS);
+        drawDCR4DTessPatch(gl, ssboProgram);
+        gl.glMemoryBarrier(GL_ALL_BARRIER_BITS);
+        std::uint32_t ssboValue = 0;
+        gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+        gl.glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+                              sizeof(ssboValue), &ssboValue);
+        expectGLError(gl, GL_NO_ERROR, "dcr4d SSBO reject readback");
+        expectCondition(ssboValue == 0x12345678u,
+                        "dcr4d SSBO tess draw routed to CPU fallback");
+
+        GLuint atomicBuffer = 0;
+        gl.glGenBuffers(1, &atomicBuffer);
+        gl.glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, atomicBuffer);
+        gl.glBufferData(GL_ATOMIC_COUNTER_BUFFER, sizeof(std::uint32_t),
+                        &zero, GL_DYNAMIC_DRAW);
+        gl.glBindBufferBase(GL_ATOMIC_COUNTER_BUFFER, 0, atomicBuffer);
+        const GLuint atomicProgram = buildDCR4DTessProgram(
+            kDCR4DTessVS, kDCR4DTessTCS, kDCR4DTessTES,
+            kDCR4DTessAtomicFS);
+        drawDCR4DTessPatch(gl, atomicProgram);
+        gl.glMemoryBarrier(GL_ALL_BARRIER_BITS);
+        std::uint32_t atomicValue = 0;
+        gl.glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, atomicBuffer);
+        gl.glGetBufferSubData(GL_ATOMIC_COUNTER_BUFFER, 0,
+                              sizeof(atomicValue), &atomicValue);
+        expectGLError(gl, GL_NO_ERROR, "dcr4d atomic reject readback");
+        expectCondition(atomicValue > 0,
+                        "dcr4d atomic tess draw routed to CPU fallback");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glBindImageTexture(0, 0, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA8);
+        gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        gl.glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteBuffers(1, &ssbo);
+        gl.glDeleteBuffers(1, &atomicBuffer);
+        gl.glDeleteTextures(1, &imageTex);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        gl.glDeleteTextures(1, &colorTex);
+        gl.glDeleteProgram(imageProgram);
+        gl.glDeleteProgram(ssboProgram);
+        gl.glDeleteProgram(atomicProgram);
+        expectGLError(gl, GL_NO_ERROR, "dcr4d reject cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "tess storage-image, SSBO and atomic side effects route to CPU fallback";
+    }
+    return result;
+}
+
+TestResult runDCR4DTessTfExcludeSentinel() {
+    auto result = runDirectSentinel("dcr4d.tess-tf-cpu-write-exclude", [&] {
+        ScopedSentinelContext scoped(kDCR4DTessSize, kDCR4DTessSize);
+        auto& gl = scoped.gl();
+        const char* tfName = "tfValue";
+        const GLuint program = buildDCR4DTessProgram(
+            kDCR4DTessVS, kDCR4DTessTCS, kDCR4DTessTF_TES,
+            kDCR4DTessGreenFS, &tfName, 1);
+
+        GLuint tfBuffer = 0;
+        gl.glGenBuffers(1, &tfBuffer);
+        gl.glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, tfBuffer);
+        std::array<float, 8> zeros = {};
+        gl.glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER,
+                        static_cast<GLsizeiptr>(zeros.size() * sizeof(float)),
+                        zeros.data(), GL_DYNAMIC_DRAW);
+        gl.glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, tfBuffer);
+
+        auto runTfDraw = [&](bool skipCpuWrite) {
+            GLuint vao = 0;
+            gl.glGenVertexArrays(1, &vao);
+            gl.glBindVertexArray(vao);
+            gl.glUseProgram(program);
+            gl.glPatchParameteri(GL_PATCH_VERTICES, 3);
+            gl.glEnable(GL_RASTERIZER_DISCARD);
+            if (skipCpuWrite) {
+                ScopedEnvVar skip("APPGL_DCR4D_TF_EXCLUDE_SKIP_CPU_WRITE", "1");
+                gl.glBeginTransformFeedback(GL_TRIANGLES);
+                gl.glDrawArrays(GL_PATCHES, 0, 3);
+                gl.glEndTransformFeedback();
+            } else {
+                gl.glBeginTransformFeedback(GL_TRIANGLES);
+                gl.glDrawArrays(GL_PATCHES, 0, 3);
+                gl.glEndTransformFeedback();
+            }
+            gl.glDisable(GL_RASTERIZER_DISCARD);
+            gl.glBindVertexArray(0);
+            gl.glDeleteVertexArrays(1, &vao);
+        };
+
+        runTfDraw(false);
+        std::array<float, 8> tfValues = {};
+        gl.glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, tfBuffer);
+        gl.glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0,
+                              static_cast<GLsizeiptr>(tfValues.size() * sizeof(float)),
+                              tfValues.data());
+        expectGLError(gl, GL_NO_ERROR, "dcr4d TF normal readback");
+        const bool sawSeven = std::any_of(
+            tfValues.begin(), tfValues.end(),
+            [](float value) { return std::fabs(value - 7.0f) < 0.01f; });
+        expectCondition(sawSeven,
+                        "dcr4d tess TF CPU write is visible immediately");
+
+        gl.glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER,
+                        static_cast<GLsizeiptr>(zeros.size() * sizeof(float)),
+                        zeros.data(), GL_DYNAMIC_DRAW);
+        runTfDraw(true);
+        tfValues.fill(0.0f);
+        gl.glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0,
+                              static_cast<GLsizeiptr>(tfValues.size() * sizeof(float)),
+                              tfValues.data());
+        expectGLError(gl, GL_NO_ERROR, "dcr4d TF skipped-write readback");
+        const bool stillSawSeven = std::any_of(
+            tfValues.begin(), tfValues.end(),
+            [](float value) { return std::fabs(value - 7.0f) < 0.01f; });
+        expectCondition(!stillSawSeven,
+                        "dcr4d TF sentinel is non-vacuous when CPU write is skipped");
+
+        gl.glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteBuffers(1, &tfBuffer);
+        gl.glDeleteProgram(program);
+        expectGLError(gl, GL_NO_ERROR, "dcr4d TF exclude cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "tess TF write is CPU-side and excluded from GPU producer marking";
+    }
+    return result;
+}
+
 TestResult runDCR3CViewportRestoreAbandonmentSentinel() {
     auto result = runDirectSentinel("dcr3c.viewport-restore-abandonment", [&] {
         ScopedSentinelContext scoped(32, 32);
@@ -11386,6 +11812,14 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
     if (normalizedPhase == "dcr4c-sentinels") {
         tests.push_back(runDCR4CMeshGsDependencySentinel());
         tests.push_back(runDCR4CMeshGsFboProducerSentinel());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "dcr4d-sentinels") {
+        tests.push_back(runDCR4DTessDependencySentinel());
+        tests.push_back(runDCR4DTessFboProducerSentinel());
+        tests.push_back(runDCR4DTessSideEffectRejectSentinel());
+        tests.push_back(runDCR4DTessTfExcludeSentinel());
         return buildJSON(normalizedPhase, tests);
     }
 
