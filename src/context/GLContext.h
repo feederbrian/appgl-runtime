@@ -9,6 +9,7 @@
 #include <string_view>
 
 #include "../../include/AppGL/glcorearb.h"
+#include "AppGLCommandReasons.h"
 
 namespace appgl {
 
@@ -73,7 +74,9 @@ public:
     void setPointSize(GLfloat size);
     void setHint(GLenum target, GLenum mode);
     void flush();
+    void finish();
     void swapBuffers();
+    AppGLCommandSubmissionDebugCounters commandSubmissionDebugCounters() const;
     bool readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void* pixels);
     bool queryBoolean(GLenum pname, GLboolean* data);
     bool queryInteger(GLenum pname, GLint* data);

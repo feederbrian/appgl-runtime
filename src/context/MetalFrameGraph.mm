@@ -1028,7 +1028,7 @@ struct MetalFrameGraph::Impl {
         // eliminating the old separate clear-only render pass (OPT-4).
         endRenderPass();
         if (currentCommandBuffer != nil) {
-            commitWithFrameSignal(currentCommandBufferLease);  // OPT-8
+            commitWithFrameSignal(currentCommandBufferLease, AppGLCommandReason::FrameCommandBuffer);  // OPT-8
             currentCommandBuffer = nil;
             currentDrawable = nil;
             pendingPresent = false;
@@ -1059,7 +1059,7 @@ struct MetalFrameGraph::Impl {
         endRenderPass();
         ensureDrawableResources();
         if (currentCommandBuffer == nil) {
-            ensureCurrentCommandBuffer(@"beginRenderPass");
+            ensureCurrentCommandBuffer(AppGLCommandReason::BeginRenderPass);
         }
         if (!acquireDrawableIfNeeded()) {  // ADV-7
             return;
@@ -1108,17 +1108,39 @@ struct MetalFrameGraph::Impl {
             : MetalCommandBufferLease{};
     }
 
+    MetalCommandBufferLease makeCommandBuffer(AppGLCommandReason reason) {
+        return commandSubmission != nullptr
+            ? commandSubmission->makeCommandBuffer(reason)
+            : MetalCommandBufferLease{};
+    }
+
     MetalCommandBufferLease makeCommandBufferDrainingAutorelease(NSString* label) {
         return commandSubmission != nullptr
             ? commandSubmission->makeCommandBufferDrainingAutorelease(label)
             : MetalCommandBufferLease{};
     }
 
+    MetalCommandBufferLease makeCommandBufferDrainingAutorelease(AppGLCommandReason reason) {
+        return commandSubmission != nullptr
+            ? commandSubmission->makeCommandBufferDrainingAutorelease(reason)
+            : MetalCommandBufferLease{};
+    }
+
     bool ensureCurrentCommandBuffer(NSString* label) {
+        return ensureCurrentCommandBuffer(label, AppGLCommandReason::Legacy);
+    }
+
+    bool ensureCurrentCommandBuffer(AppGLCommandReason reason) {
+        return ensureCurrentCommandBuffer(appGLCommandReasonNSString(reason), reason);
+    }
+
+    bool ensureCurrentCommandBuffer(NSString* label, AppGLCommandReason reason) {
         if (currentCommandBuffer != nil) {
             return true;
         }
-        currentCommandBufferLease = makeCommandBuffer(label);
+        currentCommandBufferLease = reason == AppGLCommandReason::Legacy
+            ? makeCommandBuffer(label)
+            : makeCommandBuffer(reason);
         currentCommandBuffer = currentCommandBufferLease.get();
         if (currentCommandBuffer != nil) {
             attachErrorHandler(currentCommandBuffer, label);
@@ -1144,7 +1166,7 @@ struct MetalFrameGraph::Impl {
 
         ensureDrawableResources();
         if (currentCommandBuffer == nil) {
-            ensureCurrentCommandBuffer(@"flushClear");
+            ensureCurrentCommandBuffer(AppGLCommandReason::FlushClear);
             if (currentCommandBuffer == nil) { hasPendingClear = false; return; }
         }
         if (!acquireDrawableIfNeeded()) {  // ADV-7
@@ -1216,7 +1238,7 @@ struct MetalFrameGraph::Impl {
 
         // Reuse the current command buffer if one exists, otherwise create new.
         if (currentCommandBuffer == nil) {
-            ensureCurrentCommandBuffer(@"solidColorDraw");
+            ensureCurrentCommandBuffer(AppGLCommandReason::SolidColorDraw);
             if (currentCommandBuffer == nil) {
                 return false;
             }
@@ -2429,7 +2451,7 @@ struct MetalFrameGraph::Impl {
             // Reuse the current command buffer if one exists (e.g. from a
             // prior solid-color draw), otherwise create a new one.
             if (currentCommandBuffer == nil) {
-                ensureCurrentCommandBuffer(@"translatedDraw");
+                ensureCurrentCommandBuffer(AppGLCommandReason::TranslatedDraw);
                 if (currentCommandBuffer == nil) {
                     return false;
                 }
@@ -5329,7 +5351,7 @@ fragment float4 appgl_immediate_textured_fs(
         endRenderPass();
 
         if (currentCommandBuffer == nil) {
-            ensureCurrentCommandBuffer(@"immediateModeDraw");
+            ensureCurrentCommandBuffer(AppGLCommandReason::ImmediateModeDraw);
             if (currentCommandBuffer == nil) {
                 return false;
             }
@@ -5562,7 +5584,7 @@ fragment float4 appgl_immediate_textured_fs(
             if (!usesOffscreenTarget && currentDrawable != nil) {
                 [currentCommandBuffer presentDrawable:currentDrawable];
             }
-            commitWithFrameSignal(currentCommandBufferLease);  // OPT-8
+            commitWithFrameSignal(currentCommandBufferLease, AppGLCommandReason::EndFrame);  // OPT-8
             invalidateTransientState();
             advanceRingBuffer();
         } else {
@@ -5570,7 +5592,7 @@ fragment float4 appgl_immediate_textured_fs(
         }
     }
 
-    void present() {
+    void present(AppGLCommandReason reason = AppGLCommandReason::PresentPendingWork) {
         FG_TRACE(@"present: enter  pendingPresent=%d encoder=%p cmdBuf=%p drawable=%p",
                  pendingPresent, currentRenderEncoder, currentCommandBuffer, currentDrawable);
         // Flush any deferred clear that wasn't consumed by a draw call.
@@ -5588,9 +5610,30 @@ fragment float4 appgl_immediate_textured_fs(
         // semaphore, allowing the CPU to encode the next frame while the GPU
         // processes this one.  Replaces the old waitUntilCompleted which
         // serialised CPU and GPU completely for offscreen targets.
-        commitWithFrameSignal(currentCommandBufferLease);
+        commitWithFrameSignal(currentCommandBufferLease, reason);
         invalidateTransientState();
         advanceRingBuffer();
+    }
+
+    bool finish() {
+        if (hasPendingClear) {
+            flushPendingClear();
+        }
+        endRenderPass();
+        if (currentCommandBuffer != nil) {
+            if (!usesOffscreenTarget && currentDrawable != nil && pendingPresent) {
+                [currentCommandBuffer presentDrawable:currentDrawable];
+            }
+            commitWithFrameSignal(currentCommandBufferLease, AppGLCommandReason::FinishWait);
+            invalidateTransientState();
+            advanceRingBuffer();
+            currentCommandBuffer = nil;
+            currentDrawable = nil;
+            pendingPresent = false;
+        }
+        return commandSubmission == nullptr
+            ? true
+            : commandSubmission->drainAllOutstanding(AppGLCommandReason::LifetimeDrain);
     }
 
     bool copyPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* outPixels) {
@@ -5746,7 +5789,7 @@ fragment float4 appgl_immediate_textured_fs(
     void flushForReadback() {
         endRenderPass();
         if (currentCommandBuffer != nil) {
-            if (!currentCommandBufferLease.commitAndWait(@"flush-for-readback")) {
+            if (!currentCommandBufferLease.commitAndWait(AppGLCommandReason::FlushForReadback)) {
                 return;
             }
             if (ringSlotAcquired) {
@@ -5766,7 +5809,7 @@ fragment float4 appgl_immediate_textured_fs(
         if (!usesOffscreenTarget && currentDrawable != nil && pendingPresent) {
             [currentCommandBuffer presentDrawable:currentDrawable];
         }
-        if (!currentCommandBufferLease.commitAndWait(@"drain-current-standalone")) {
+        if (!currentCommandBufferLease.commitAndWait(AppGLCommandReason::DrainCurrentStandalone)) {
             if (diagnostic != nullptr) {
                 *diagnostic = "prior command buffer failed or timed out";
             }
@@ -9052,7 +9095,7 @@ private:
     void acquireRingSlot() {
         if (!ringSlotAcquired) {
             ringSlotAcquired = commandSubmission != nullptr
-                ? commandSubmission->waitForRingSlot(frameSemaphore, @"frame-ring-slot")
+                ? commandSubmission->waitForRingSlot(frameSemaphore, AppGLCommandReason::FrameRingSlot)
                 : (dispatch_semaphore_wait(frameSemaphore, DISPATCH_TIME_FOREVER) == 0);
         }
     }
@@ -9068,9 +9111,10 @@ private:
     // OPT-8: Commit a command buffer with a completion handler that signals
     // the frame semaphore when the GPU finishes.  Use this (instead of raw
     // [cb commit]) whenever the commit releases a ring buffer slot.
-    void commitWithFrameSignal(MetalCommandBufferLease& lease) {
+    void commitWithFrameSignal(MetalCommandBufferLease& lease,
+                               AppGLCommandReason reason = AppGLCommandReason::FrameCommandBuffer) {
         dispatch_semaphore_t sem = frameSemaphore;
-        lease.commitWithCompletion(@"frame-command-buffer", ^(id<MTLCommandBuffer>) {
+        lease.commitWithCompletion(reason, ^(id<MTLCommandBuffer>) {
             dispatch_semaphore_signal(sem);
         });
     }
@@ -9762,6 +9806,10 @@ void MetalFrameGraph::flushForReadback() {
     impl_->flushForReadback();
 }
 
+bool MetalFrameGraph::finish() {
+    return impl_->finish();
+}
+
 bool MetalFrameGraph::encodeSolidColorDraw(const MetalDrawInfo& info) {
     return impl_->encodeSolidColorDraw(info);
 }
@@ -9853,8 +9901,8 @@ void MetalFrameGraph::endFrame(GLObjectStore& objects) {
     impl_->endFrame(objects);
 }
 
-void MetalFrameGraph::present() {
-    impl_->present();
+void MetalFrameGraph::present(AppGLCommandReason reason) {
+    impl_->present(reason);
 }
 
 bool MetalFrameGraph::copyRGBA8Pixels(GLint x, GLint y, GLsizei width, GLsizei height, void* outPixels) {

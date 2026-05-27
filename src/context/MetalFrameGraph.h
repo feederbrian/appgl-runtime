@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "../../include/AppGL/glcorearb.h"
+#include "AppGLCommandReasons.h"
 #include "../shader/ShaderTranslator.h"
 #include "../state/MatrixStateMirror.h"
 
@@ -1267,7 +1268,8 @@ public:
     // compute writes to be visible).
     bool encodeComputeDispatch(const ComputeDispatchInfo& info);
     void endFrame(GLObjectStore& objects);
-    void present();
+    void present(AppGLCommandReason reason = AppGLCommandReason::PresentPendingWork);
+    bool finish();
     bool copyRGBA8Pixels(GLint x, GLint y, GLsizei width, GLsizei height, void* outPixels);
     // Ends any open render encoder and commits/waits the current command
     // buffer so GPU-rendered texture data can be read back by the CPU.

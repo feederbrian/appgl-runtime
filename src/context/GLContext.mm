@@ -13194,8 +13194,13 @@ struct GLContext::Impl {
     void presentPendingWork() {
         encodePendingWork();
         if (frameGraph != nullptr) {
-            frameGraph->present();
+            frameGraph->present(AppGLCommandReason::PresentPendingWork);
         }
+    }
+
+    bool finishPendingWork() {
+        encodePendingWork();
+        return frameGraph == nullptr ? true : frameGraph->finish();
     }
 
     bool debugMessageEnabled(const DebugMessageRecord& message) const {
@@ -13234,6 +13239,12 @@ struct GLContext::Impl {
         return commandSubmission != nullptr
             ? commandSubmission->makeCommandBuffer(label)
             : MetalCommandBufferLease{};
+    }
+
+    AppGLCommandSubmissionDebugCounters commandSubmissionDebugCounters() const {
+        return commandSubmission != nullptr
+            ? commandSubmission->debugCounters()
+            : AppGLCommandSubmissionDebugCounters{};
     }
 
     CAMetalLayer* layer = nil;
@@ -14119,8 +14130,16 @@ void GLContext::flush() {
     impl_->presentPendingWork();
 }
 
+void GLContext::finish() {
+    impl_->finishPendingWork();
+}
+
 void GLContext::swapBuffers() {
     impl_->presentPendingWork();
+}
+
+AppGLCommandSubmissionDebugCounters GLContext::commandSubmissionDebugCounters() const {
+    return impl_->commandSubmissionDebugCounters();
 }
 
 bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void* pixels) {

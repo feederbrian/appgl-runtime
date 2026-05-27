@@ -117,7 +117,9 @@ static void APIENTRY glPolygonMode(GLenum face, GLenum mode) {
 }
 
 static void APIENTRY glFinish(void) {
-
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    context->finish();
 }
 
 static void APIENTRY glLogicOp(GLenum opcode) {
@@ -3017,7 +3019,7 @@ void installGroup8Dispatch(GLDispatchTable& dispatch, CoverageStore& coverage) {
     dispatch.glGetQueryObjectui64v = &glGetQueryObjectui64v;
 
     coverage.markImplemented(FunctionId::glPolygonMode, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
-    coverage.markImplemented(FunctionId::glFinish, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
+    coverage.markImplemented(FunctionId::glFinish, "DCR-2: drains pending Metal work through bounded command-submission lifetime drain.");
     coverage.markImplemented(FunctionId::glLogicOp, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glGetTexImage, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glGetTexLevelParameterfv, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
