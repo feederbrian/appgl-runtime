@@ -210,6 +210,17 @@ target_include_directories(asan_repro
 )
 target_link_libraries(asan_repro PRIVATE "-ldl")
 
+# DCR3 bar-b differential harness. It intentionally dlopens libAppGL.dylib
+# and uses only the public loader surface so the same benchmark binary can
+# be run against current and historical runtime dylibs.
+add_executable(appgl_bar_b_benchmark tests/BarBBenchmarkMain.cpp)
+target_include_directories(appgl_bar_b_benchmark
+  PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+target_compile_definitions(appgl_bar_b_benchmark PRIVATE GL_SILENCE_DEPRECATION=1)
+target_link_libraries(appgl_bar_b_benchmark PRIVATE "-ldl")
+
 if(APPGL_VENDOR_THIRD_PARTY)
   set(BUILD_EXTERNAL OFF CACHE BOOL "" FORCE)
   set(ENABLE_GLSLANG_BINARIES OFF CACHE BOOL "" FORCE)
