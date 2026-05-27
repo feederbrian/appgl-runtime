@@ -1037,7 +1037,11 @@ struct MetalFrameGraph::Impl {
         // eliminating the old separate clear-only render pass (OPT-4).
         endRenderPass();
         if (currentCommandBuffer != nil) {
-            commitCurrentAsync(AppGLCommandReason::FrameCommandBuffer);
+            commitWithFrameSignal(currentCommandBufferLease, AppGLCommandReason::FrameCommandBuffer);
+            currentCommandBuffer = nil;
+            currentDrawable = nil;
+            pendingPresent = false;
+            advanceRingBuffer();
             acquireRingSlot();  // OPT-8: acquire the next slot for this frame
         }
         ensureDrawableResources();
