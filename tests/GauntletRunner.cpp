@@ -10234,6 +10234,139 @@ void setupDCR3CTextureFbo(GLDispatchTable& gl,
                     "dcr3c sentinel framebuffer complete");
 }
 
+TestResult runDCR3CViewportRestoreAbandonmentSentinel() {
+    auto result = runDirectSentinel("dcr3c.viewport-restore-abandonment", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+
+        static constexpr const char* kFullscreenVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() {\n"
+            "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kColorFS =
+            "#version 330 core\n"
+            "uniform vec4 uColor;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    fragColor = uColor;\n"
+            "}\n";
+
+        const GLuint program = buildBenchProgram(kFullscreenVS, kColorFS);
+        GLint linkStatus = GL_FALSE;
+        gl.glGetProgramiv(program, GL_LINK_STATUS, &linkStatus);
+        expectCondition(linkStatus == GL_TRUE,
+                        "dcr3c abandonment program links");
+        const GLint colorLocation = gl.glGetUniformLocation(program, "uColor");
+        expectCondition(colorLocation >= 0,
+                        "dcr3c abandonment color uniform exists");
+
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+
+        GLuint texture = 0;
+        GLuint framebuffer = 0;
+        gl.glGenTextures(1, &texture);
+        setupDCR3CRGBA8Texture(gl, texture, 4, 4);
+        setupDCR3CTextureFbo(gl, framebuffer, texture);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c abandonment setup");
+
+        gl.glViewport(0, 0, 4, 4);
+        gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glFinish();
+
+        const auto beforeDraw = context.commandSubmissionDebugCounters();
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        gl.glViewport(0, 0, 1, 1);
+        gl.glUseProgram(program);
+        gl.glUniform4f(colorLocation, 0.82f, 0.10f, 0.22f, 1.0f);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c abandonment producer draw");
+
+        expectPendingHas(texturePendingBits(context, texture),
+                         kProducerFboColorWrite,
+                         "dcr3c abandonment draw marked texture producer bits");
+
+        const auto afterDraw = context.commandSubmissionDebugCounters();
+        if (afterDraw.submittedCommandBuffers != beforeDraw.submittedCommandBuffers) {
+            recordSentinelFailure(
+                failures,
+                "producer draw submitted before viewport restore",
+                "before{" + countersSummary(beforeDraw) + "} afterDraw{"
+                    + countersSummary(afterDraw) + "}"
+            );
+        }
+
+        gl.glViewport(0, 0, 32, 32);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c abandonment viewport restore");
+
+        const auto afterRestore = context.commandSubmissionDebugCounters();
+        if (afterRestore.submittedCommandBuffers <= afterDraw.submittedCommandBuffers) {
+            recordSentinelFailure(
+                failures,
+                "viewport restore did not submit the pending FBO draw before invalidation",
+                "afterDraw{" + countersSummary(afterDraw) + "} afterRestore{"
+                    + countersSummary(afterRestore) + "}"
+            );
+        }
+        if (afterRestore.currentInFlight != 0
+            || afterRestore.completedCommandBuffers != afterRestore.submittedCommandBuffers) {
+            recordSentinelFailure(
+                failures,
+                "viewport-restore invalidation did not drain submitted work",
+                countersSummary(afterRestore)
+            );
+        }
+        expectPendingHas(texturePendingBits(context, texture),
+                         kProducerFboColorWrite,
+                         "dcr3c abandonment restore preserves producer bits until readback");
+
+        std::array<std::uint8_t, 4> pixel = {};
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        gl.glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel.data());
+        expectGLError(gl, GL_NO_ERROR, "dcr3c abandonment readback");
+
+        if (pixel[0] < 180 || pixel[1] > 60 || pixel[2] > 90 || pixel[3] < 250) {
+            recordSentinelFailure(
+                failures,
+                "viewport-restore readback did not observe the pre-restore FBO draw",
+                "rgba=(" + std::to_string(pixel[0]) + ","
+                    + std::to_string(pixel[1]) + ","
+                    + std::to_string(pixel[2]) + ","
+                    + std::to_string(pixel[3]) + ")"
+            );
+        }
+        expectPendingClear(texturePendingBits(context, texture),
+                           kProducerFboColorWrite,
+                           "dcr3c abandonment readback clears producer bits");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glBindVertexArray(0);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        gl.glDeleteTextures(1, &texture);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteProgram(program);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c abandonment cleanup");
+        gl.glFinish();
+
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "FBO draw survived viewport-restore resize invalidation before readback";
+    }
+    return result;
+}
+
 TestResult runDCR3CProducerInventorySentinel() {
     auto result = runDirectSentinel("dcr3c.producer-inventory-bits", [&] {
         static constexpr GLsizei kSize = 8;
@@ -10995,11 +11128,17 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         return buildJSON(normalizedPhase, tests);
     }
 
+    if (normalizedPhase == "dcr3c-abandonment-sentinel") {
+        tests.push_back(runDCR3CViewportRestoreAbandonmentSentinel());
+        return buildJSON(normalizedPhase, tests);
+    }
+
     if (normalizedPhase == "dcr3c-sentinels") {
         tests.push_back(runDCR3CFboPressureReadbackSentinel());
         tests.push_back(runDCR3CSoakBarBenchmarkSentinel());
         tests.push_back(runDCR3CMSAAResolveReadbackSentinel());
         tests.push_back(runDCR3CMSAAShaderResolveReadbackSentinel());
+        tests.push_back(runDCR3CViewportRestoreAbandonmentSentinel());
         tests.push_back(runDCR3CProducerInventorySentinel());
         tests.push_back(runDCR3CBarBlitCopyMipmapSentinel());
         tests.push_back(runDCR3CBarCopyImageSparseLifecycleSentinel());

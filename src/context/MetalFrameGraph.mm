@@ -1189,6 +1189,30 @@ struct MetalFrameGraph::Impl {
         return commitCurrentAsync(AppGLCommandReason::PressureFlush);
     }
 
+    bool shouldStubCommitBeforeAbandon() const {
+        const char* raw = std::getenv("APPGL_STUB_COMMIT_BEFORE_ABANDON");
+        return raw != nullptr && raw[0] != '\0' && std::strcmp(raw, "0") != 0;
+    }
+
+    bool commitCurrentBeforeTransientInvalidation(AppGLCommandReason reason) {
+        endRenderPass();
+        if (currentCommandBuffer == nil || currentCommandBufferLease.get() == nil) {
+            return false;
+        }
+        if (shouldStubCommitBeforeAbandon()) {
+            return false;
+        }
+        if (!usesOffscreenTarget && currentDrawable != nil && pendingPresent) {
+            [currentCommandBuffer presentDrawable:currentDrawable];
+        }
+        commitWithFrameSignal(currentCommandBufferLease, reason);
+        currentCommandBuffer = nil;
+        currentDrawable = nil;
+        pendingPresent = false;
+        advanceRingBuffer();
+        return true;
+    }
+
     // Flush a deferred clear into a standalone render pass. Called by
     // copyPixels and present when a clear is pending but no draws occurred.
     void flushPendingClear() {
@@ -8761,7 +8785,15 @@ private:
     }
 
     void invalidateTransientState() {
-        // Ensure the render encoder is properly ended before we drop it.
+        const bool submittedBeforeInvalidation =
+            commitCurrentBeforeTransientInvalidation(AppGLCommandReason::FlushForReadback);
+        if (submittedBeforeInvalidation && commandSubmission != nullptr) {
+            commandSubmission->drainAllOutstanding(AppGLCommandReason::LifetimeDrain,
+                                                   submittedBeforeInvalidation);
+        }
+        // Ensure the render encoder is properly ended before we drop it. If
+        // the diagnostic stub disabled the submit path, this intentionally
+        // reaches the legacy abandon behavior for the abandonment sentinel.
         endRenderPass();
         currentCommandBufferLease.abandon("invalidate-transient-state");
         currentCommandBuffer = nil;
