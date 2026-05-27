@@ -855,6 +855,12 @@ struct MetalFrameGraph::Impl {
           device((__bridge id<MTLDevice>)rawDevice),
           commandQueue((__bridge id<MTLCommandQueue>)rawCommandQueue),
           commandSubmission(rawCommandSubmission) {
+        if (commandSubmission != nullptr) {
+            commandSubmission->setPressureFlushCallback(
+                [this](AppGLCommandReason reason) {
+                    return maybeFlushCurrentForPressure(reason);
+                });
+        }
         if (layer != nil && device != nil) {
             layer.device = device;
             layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
@@ -866,6 +872,9 @@ struct MetalFrameGraph::Impl {
     }
 
     ~Impl() {
+        if (commandSubmission != nullptr) {
+            commandSubmission->setPressureFlushCallback({});
+        }
         // End any open render encoder before the autorelease pool reclaims it.
         // Without this, destroying a context with an in-flight render pass
         // triggers "Command encoder released without endEncoding".
@@ -1028,11 +1037,7 @@ struct MetalFrameGraph::Impl {
         // eliminating the old separate clear-only render pass (OPT-4).
         endRenderPass();
         if (currentCommandBuffer != nil) {
-            commitWithFrameSignal(currentCommandBufferLease, AppGLCommandReason::FrameCommandBuffer);  // OPT-8
-            currentCommandBuffer = nil;
-            currentDrawable = nil;
-            pendingPresent = false;
-            advanceRingBuffer();
+            commitCurrentAsync(AppGLCommandReason::FrameCommandBuffer);
             acquireRingSlot();  // OPT-8: acquire the next slot for this frame
         }
         ensureDrawableResources();
@@ -1157,6 +1162,27 @@ struct MetalFrameGraph::Impl {
             activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
             pendingPresent = true;
         }
+    }
+
+    bool commitCurrentAsync(AppGLCommandReason reason) {
+        endRenderPass();
+        if (currentCommandBuffer == nil) {
+            return false;
+        }
+        if (!usesOffscreenTarget && currentDrawable != nil && pendingPresent) {
+            [currentCommandBuffer presentDrawable:currentDrawable];
+        }
+        commitWithFrameSignal(currentCommandBufferLease, reason);
+        invalidateTransientState();
+        advanceRingBuffer();
+        return true;
+    }
+
+    bool maybeFlushCurrentForPressure(AppGLCommandReason) {
+        if (currentCommandBuffer == nil) {
+            return false;
+        }
+        return commitCurrentAsync(AppGLCommandReason::PressureFlush);
     }
 
     // Flush a deferred clear into a standalone render pass. Called by
@@ -5581,14 +5607,7 @@ fragment float4 appgl_immediate_textured_fs(
     void endFrame(GLObjectStore& objects) {
         endRenderPass();
         objects.drainDeferredDeletes();
-        if (currentCommandBuffer != nil) {
-            if (!usesOffscreenTarget && currentDrawable != nil) {
-                [currentCommandBuffer presentDrawable:currentDrawable];
-            }
-            commitWithFrameSignal(currentCommandBufferLease, AppGLCommandReason::EndFrame);  // OPT-8
-            invalidateTransientState();
-            advanceRingBuffer();
-        } else {
+        if (!commitCurrentAsync(AppGLCommandReason::EndFrame)) {
             invalidateTransientState();
         }
     }
@@ -5603,17 +5622,11 @@ fragment float4 appgl_immediate_textured_fs(
         if (!pendingPresent || currentCommandBuffer == nil) {
             return;
         }
-        endRenderPass();
-        if (!usesOffscreenTarget && currentDrawable != nil) {
-            [currentCommandBuffer presentDrawable:currentDrawable];
-        }
         // OPT-8: async commit — the completion handler signals the frame
         // semaphore, allowing the CPU to encode the next frame while the GPU
         // processes this one.  Replaces the old waitUntilCompleted which
         // serialised CPU and GPU completely for offscreen targets.
-        commitWithFrameSignal(currentCommandBufferLease, reason);
-        invalidateTransientState();
-        advanceRingBuffer();
+        commitCurrentAsync(reason);
     }
 
     bool finish() {
@@ -5621,19 +5634,7 @@ fragment float4 appgl_immediate_textured_fs(
             flushPendingClear();
         }
         endRenderPass();
-        bool submittedFinishWork = false;
-        if (currentCommandBuffer != nil) {
-            if (!usesOffscreenTarget && currentDrawable != nil && pendingPresent) {
-                [currentCommandBuffer presentDrawable:currentDrawable];
-            }
-            commitWithFrameSignal(currentCommandBufferLease, AppGLCommandReason::FinishWait);
-            submittedFinishWork = true;
-            invalidateTransientState();
-            advanceRingBuffer();
-            currentCommandBuffer = nil;
-            currentDrawable = nil;
-            pendingPresent = false;
-        }
+        const bool submittedFinishWork = commitCurrentAsync(AppGLCommandReason::FinishWait);
         return commandSubmission == nullptr
             ? true
             : commandSubmission->drainAllOutstanding(AppGLCommandReason::LifetimeDrain,

@@ -226,6 +226,9 @@ struct AppGLCommandSubmissionDebugCounters {
     std::uint64_t pressureFlushCount = 0;
     std::uint32_t currentInFlight = 0;
     std::uint32_t peakInFlight = 0;
+    std::uint32_t inFlightBound = 0;
+    std::uint32_t pressureReserve = 0;
+    std::uint32_t pressureSoftCap = 0;
     std::array<std::uint64_t, static_cast<std::size_t>(AppGLCommandReason::Count)> allocWaitTimeoutsByReason{};
     AppGLCommandReason lastWaitReason = AppGLCommandReason::Legacy;
     AppGLSubmitMode lastWaitMode = AppGLSubmitMode::WaitOnly;

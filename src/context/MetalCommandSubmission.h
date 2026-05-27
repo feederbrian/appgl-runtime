@@ -11,7 +11,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
+#include <limits>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace appgl {
@@ -131,15 +134,24 @@ private:
     }
 
     struct SharedState {
-        explicit SharedState(std::uint32_t bound)
-            : inFlightBound(bound),
-              inFlightSemaphore(dispatch_semaphore_create(static_cast<long>(bound))) {
+        static std::uint32_t computePressureSoftCap(std::uint32_t bound,
+                                                    std::uint32_t reserve) {
+            return bound > reserve ? bound - reserve : 1;
+        }
+
+        explicit SharedState(std::uint32_t bound, std::uint32_t reserve)
+            : inFlightBound(bound == 0 ? 1 : bound),
+              pressureReserve(reserve),
+              pressureSoftCap(computePressureSoftCap(inFlightBound, reserve)),
+              inFlightSemaphore(dispatch_semaphore_create(static_cast<long>(inFlightBound))) {
             for (auto& timeoutCount : allocWaitTimeoutsByReason) {
                 timeoutCount.store(0);
             }
         }
 
         std::uint32_t inFlightBound = 0;
+        std::uint32_t pressureReserve = 0;
+        std::uint32_t pressureSoftCap = 0;
         dispatch_semaphore_t inFlightSemaphore = nullptr;
         bool profileEnabled = std::getenv("APPGL_CB_PROFILE") != nullptr;
         std::atomic<std::uint32_t> inFlightCount{0};
@@ -288,7 +300,9 @@ private:
 class MetalCommandSubmission {
 public:
     static constexpr std::uint32_t kDefaultInFlightBound = 48;
+    static constexpr std::uint32_t kDefaultPressureReserve = 4;
     static constexpr std::uint64_t kDefaultTimeoutMs = 300000;
+    using PressureFlushCallback = std::function<bool(AppGLCommandReason)>;
 
 private:
     enum class WaitKind {
@@ -300,11 +314,45 @@ private:
 
     friend class MetalCommandBufferLease;
 
+    static std::uint32_t parseEnvUInt(const char* name,
+                                      std::uint32_t fallback,
+                                      std::uint32_t minimum = 1) {
+        const char* raw = std::getenv(name);
+        if (raw == nullptr || raw[0] == '\0') {
+            return fallback;
+        }
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(raw, &end, 10);
+        if (end == raw || parsed < minimum) {
+            return fallback;
+        }
+        if (parsed > std::numeric_limits<std::uint32_t>::max()) {
+            return fallback;
+        }
+        return static_cast<std::uint32_t>(parsed);
+    }
+
+    static std::shared_ptr<MetalCommandBufferLease::SharedState>
+    makeSharedState(std::uint32_t requestedBound) {
+        const std::uint32_t fallbackBound = requestedBound == 0 ? kDefaultInFlightBound : requestedBound;
+        const std::uint32_t bound = parseEnvUInt("APPGL_COMMAND_BUFFER_BOUND",
+                                                 fallbackBound,
+                                                 1);
+        const std::uint32_t reserve = parseEnvUInt("APPGL_COMMAND_BUFFER_RESERVE",
+                                                   kDefaultPressureReserve,
+                                                   kDefaultPressureReserve);
+        return std::make_shared<MetalCommandBufferLease::SharedState>(bound, reserve);
+    }
+
 public:
     explicit MetalCommandSubmission(id<MTLCommandQueue> commandQueue,
                                     std::uint32_t inFlightBound = kDefaultInFlightBound)
         : commandQueue_(commandQueue),
-          state_(std::make_shared<MetalCommandBufferLease::SharedState>(inFlightBound)) {}
+          state_(makeSharedState(inFlightBound)) {}
+
+    void setPressureFlushCallback(PressureFlushCallback callback) {
+        pressureFlushCallback_ = std::move(callback);
+    }
 
     MetalCommandBufferLease makeCommandBuffer(NSString* label = nil) {
         return makeCommandBufferImpl(label, AppGLCommandReason::Legacy, false);
@@ -333,6 +381,9 @@ public:
         counters.pressureFlushCount = state_->pressureFlushCount.load();
         counters.currentInFlight = state_->inFlightCount.load();
         counters.peakInFlight = state_->peakInFlight.load();
+        counters.inFlightBound = state_->inFlightBound;
+        counters.pressureReserve = state_->pressureReserve;
+        counters.pressureSoftCap = state_->pressureSoftCap;
         for (std::size_t index = 0; index < counters.allocWaitTimeoutsByReason.size(); ++index) {
             counters.allocWaitTimeoutsByReason[index] =
                 state_->allocWaitTimeoutsByReason[index].load();
@@ -348,6 +399,18 @@ public:
 
     std::uint32_t inFlightCommandBufferCount() const {
         return state_ ? state_->inFlightCount.load() : 0;
+    }
+
+    std::uint32_t inFlightBound() const {
+        return state_ ? state_->inFlightBound : 0;
+    }
+
+    std::uint32_t pressureReserve() const {
+        return state_ ? state_->pressureReserve : 0;
+    }
+
+    std::uint32_t pressureSoftCap() const {
+        return state_ ? state_->pressureSoftCap : 0;
     }
 
     bool hasOutstandingCommandBuffers() const {
@@ -419,10 +482,28 @@ public:
     }
 
 private:
+    bool maybeFlushCurrentForPressure(AppGLCommandReason reason) {
+        if (!state_ || !pressureFlushCallback_) {
+            return false;
+        }
+        if (state_->inFlightCount.load() < state_->pressureSoftCap) {
+            return false;
+        }
+        const bool flushed = pressureFlushCallback_(reason);
+        if (flushed) {
+            recordPressureFlush(AppGLCommandReason::PressureFlush);
+        }
+        return flushed;
+    }
+
     MetalCommandBufferLease makeCommandBufferImpl(NSString* label,
                                                   AppGLCommandReason reason,
                                                   bool drainAutoreleasedCommandBuffer) {
-        if (commandQueue_ == nil || !waitOnSemaphore(state_->inFlightSemaphore, WaitKind::InFlightToken, reason, label)) {
+        if (commandQueue_ == nil || !state_) {
+            return {};
+        }
+        maybeFlushCurrentForPressure(reason);
+        if (!waitOnSemaphore(state_->inFlightSemaphore, WaitKind::InFlightToken, reason, label)) {
             return {};
         }
         const std::uint32_t afterAcquire = state_->inFlightCount.fetch_add(1) + 1;
@@ -616,6 +697,7 @@ public:
 
     id<MTLCommandQueue> commandQueue_ = nil;
     std::shared_ptr<MetalCommandBufferLease::SharedState> state_;
+    PressureFlushCallback pressureFlushCallback_;
 };
 
 inline bool MetalCommandBufferLease::commitAndWait(NSString* label) {

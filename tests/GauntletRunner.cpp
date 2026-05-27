@@ -8734,10 +8734,24 @@ std::string countersSummary(const AppGLCommandSubmissionDebugCounters& counters)
     stream << "submitted=" << counters.submittedCommandBuffers
            << " completed=" << counters.completedCommandBuffers
            << " waitLog=" << counters.waitReasonLogEntries
+           << " pressureFlush=" << counters.pressureFlushCount
+           << " inFlight=" << counters.currentInFlight
+           << " peakInFlight=" << counters.peakInFlight
+           << " bound=" << counters.inFlightBound
+           << " reserve=" << counters.pressureReserve
+           << " softCap=" << counters.pressureSoftCap
            << " lastReason=" << appGLCommandReasonName(counters.lastWaitReason)
            << " lastMode=" << appGLSubmitModeName(counters.lastWaitMode)
            << " lastDependency=" << appGLDependencyClassName(counters.lastWaitDependencyClass);
     return stream.str();
+}
+
+std::uint64_t allocWaitTimeoutTotal(const AppGLCommandSubmissionDebugCounters& counters) {
+    std::uint64_t total = 0;
+    for (std::uint64_t count : counters.allocWaitTimeoutsByReason) {
+        total += count;
+    }
+    return total;
 }
 
 bool sameCommandSubmissionCounters(const AppGLCommandSubmissionDebugCounters& lhs,
@@ -8795,6 +8809,35 @@ public:
 
 private:
     std::unique_ptr<GLContext> context_;
+};
+
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(std::string name, std::string value)
+        : name_(std::move(name)) {
+        const char* previous = std::getenv(name_.c_str());
+        if (previous != nullptr) {
+            hadPrevious_ = true;
+            previous_ = previous;
+        }
+        setenv(name_.c_str(), value.c_str(), 1);
+    }
+
+    ScopedEnvVar(const ScopedEnvVar&) = delete;
+    ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
+
+    ~ScopedEnvVar() {
+        if (hadPrevious_) {
+            setenv(name_.c_str(), previous_.c_str(), 1);
+        } else {
+            unsetenv(name_.c_str());
+        }
+    }
+
+private:
+    std::string name_;
+    std::string previous_;
+    bool hadPrevious_ = false;
 };
 
 template <typename Fn>
@@ -9109,6 +9152,237 @@ TestResult runDCR2DeleteRebindLifetimeSentinel() {
     });
 }
 
+TestResult runDCR3ReducedBoundContendedPressureSentinel() {
+    return runDirectSentinel("dcr3.reduced-bound-contended-pressure", [] {
+        ScopedEnvVar reducedBound("APPGL_COMMAND_BUFFER_BOUND", "5");
+        ScopedEnvVar pressureReserve("APPGL_COMMAND_BUFFER_RESERVE", "4");
+        ScopedEnvVar timeout("APPGL_COMMAND_BUFFER_TIMEOUT_MS", "10000");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+
+        gl.glFinish();
+        const auto initialCounters = context.commandSubmissionDebugCounters();
+        if (initialCounters.inFlightBound != 5 || initialCounters.pressureSoftCap != 1) {
+            recordSentinelFailure(
+                failures,
+                "reduced bound was not applied",
+                countersSummary(initialCounters)
+            );
+        }
+
+        const std::size_t baselineBuffers = context.objects().buffers().size();
+        const std::size_t baselineTextures = context.objects().textures().size();
+        const std::size_t baselineFramebuffers = context.objects().framebuffers().size();
+        const std::size_t baselineVertexArrays = context.objects().vertexArrays().size();
+        const std::size_t baselinePrograms = context.objects().programs().size();
+        const std::size_t baselineShaders = context.objects().shaders().size();
+
+        static constexpr const char* kPressureVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() {\n"
+            "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kPressureFS =
+            "#version 330 core\n"
+            "uniform vec4 uColor;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    fragColor = uColor;\n"
+            "}\n";
+        const GLuint program = buildBenchProgram(kPressureVS, kPressureFS);
+        GLint linkStatus = GL_FALSE;
+        gl.glGetProgramiv(program, GL_LINK_STATUS, &linkStatus);
+        expectCondition(linkStatus == GL_TRUE, "dcr3 pressure sentinel program links");
+        const GLint colorLocation = gl.glGetUniformLocation(program, "uColor");
+        expectCondition(colorLocation >= 0, "dcr3 pressure sentinel color uniform exists");
+
+        const GLfloat vertices[] = {
+            -1.0f, -1.0f,
+             3.0f, -1.0f,
+            -1.0f,  3.0f,
+        };
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        gl.glGenVertexArrays(1, &vao);
+        gl.glBindVertexArray(vao);
+        gl.glGenBuffers(1, &vbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), nullptr);
+
+        GLuint textures[3] = {};
+        gl.glGenTextures(3, textures);
+        const GLuint colorTexture = textures[0];
+        const GLuint copyTexture = textures[1];
+        const GLuint depthUploadTexture = textures[2];
+
+        auto setupRGBA8Texture = [&](GLuint texture) {
+            gl.glBindTexture(GL_TEXTURE_2D, texture);
+            gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            gl.glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 32, 32);
+        };
+        setupRGBA8Texture(colorTexture);
+        setupRGBA8Texture(copyTexture);
+
+        gl.glBindTexture(GL_TEXTURE_2D, depthUploadTexture);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+        GLuint framebuffer = 0;
+        gl.glGenFramebuffers(1, &framebuffer);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_TEXTURE_2D, colorTexture, 0);
+        gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+        expectCondition(gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
+                        "dcr3 pressure sentinel framebuffer is complete");
+        expectGLError(gl, GL_NO_ERROR, "dcr3 pressure sentinel setup");
+
+        std::array<std::uint16_t, 8 * 8> depthPixels = {};
+        std::array<std::uint8_t, 32 * 32 * 4> readback = {};
+        static constexpr int kPressureIterations = 24;
+        for (int iteration = 0; iteration < kPressureIterations; ++iteration) {
+            for (std::size_t index = 0; index < depthPixels.size(); ++index) {
+                depthPixels[index] = static_cast<std::uint16_t>(
+                    0x1000u + ((iteration * 97u + index * 13u) & 0x7fffu));
+            }
+
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            gl.glViewport(0, 0, 32, 32);
+            gl.glClearColor(0.02f * static_cast<float>(iteration % 7),
+                            0.15f,
+                            0.25f,
+                            1.0f);
+            gl.glClear(GL_COLOR_BUFFER_BIT);
+            gl.glUseProgram(program);
+            gl.glUniform4f(colorLocation,
+                           0.10f + 0.01f * static_cast<float>(iteration),
+                           0.35f,
+                           0.65f,
+                           1.0f);
+            gl.glBindVertexArray(vao);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+
+            gl.glBindTexture(GL_TEXTURE_2D, depthUploadTexture);
+            gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT16, 8, 8, 0,
+                            GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, depthPixels.data());
+            expectGLError(gl, GL_NO_ERROR, "dcr3 pressure sentinel depth upload");
+
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+            gl.glViewport(0, 0, 32, 32);
+            gl.glClearColor(0.18f,
+                            0.03f * static_cast<float>(iteration % 5),
+                            0.41f,
+                            1.0f);
+            gl.glClear(GL_COLOR_BUFFER_BIT);
+            gl.glUseProgram(program);
+            gl.glUniform4f(colorLocation,
+                           0.25f,
+                           0.20f + 0.01f * static_cast<float>(iteration),
+                           0.70f,
+                           1.0f);
+            gl.glBindVertexArray(vao);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+
+            gl.glReadPixels(0, 0, 32, 32, GL_RGBA, GL_UNSIGNED_BYTE, readback.data());
+            expectGLError(gl, GL_NO_ERROR, "dcr3 pressure sentinel readback");
+
+            gl.glCopyImageSubData(colorTexture, GL_TEXTURE_2D, 0, 0, 0, 0,
+                                  copyTexture, GL_TEXTURE_2D, 0, 0, 0, 0,
+                                  32, 32, 1);
+            expectGLError(gl, GL_NO_ERROR, "dcr3 pressure sentinel copy");
+        }
+
+        gl.glFinish();
+        const auto afterLoop = context.commandSubmissionDebugCounters();
+        const std::uint64_t pressureFlushDelta =
+            afterLoop.pressureFlushCount - initialCounters.pressureFlushCount;
+        if (pressureFlushDelta < static_cast<std::uint64_t>(kPressureIterations)) {
+            recordSentinelFailure(
+                failures,
+                "pressure path did not protect each held-current allocation",
+                "initial{" + countersSummary(initialCounters) + "} after{" + countersSummary(afterLoop) + "}"
+            );
+        }
+        if (afterLoop.peakInFlight > afterLoop.inFlightBound) {
+            recordSentinelFailure(
+                failures,
+                "peak in-flight exceeded bound",
+                countersSummary(afterLoop)
+            );
+        }
+        if (allocWaitTimeoutTotal(afterLoop) != 0) {
+            recordSentinelFailure(
+                failures,
+                "allocation wait timed out",
+                countersSummary(afterLoop)
+            );
+        }
+        if (afterLoop.currentInFlight != 0
+            || afterLoop.completedCommandBuffers != afterLoop.submittedCommandBuffers) {
+            recordSentinelFailure(
+                failures,
+                "finish left command buffers incomplete",
+                countersSummary(afterLoop)
+            );
+        }
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glBindVertexArray(0);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        gl.glDeleteTextures(3, textures);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteProgram(program);
+        expectGLError(gl, GL_NO_ERROR, "dcr3 pressure sentinel cleanup");
+        gl.glFinish();
+
+        const bool objectCountsRestored =
+            context.objects().buffers().size() == baselineBuffers
+            && context.objects().textures().size() == baselineTextures
+            && context.objects().framebuffers().size() == baselineFramebuffers
+            && context.objects().vertexArrays().size() == baselineVertexArrays
+            && context.objects().programs().size() == baselinePrograms
+            && context.objects().shaders().size() == baselineShaders;
+        if (!objectCountsRestored) {
+            recordSentinelFailure(
+                failures,
+                "cleanup did not restore object store counts",
+                "buffers=" + std::to_string(context.objects().buffers().size())
+                    + " textures=" + std::to_string(context.objects().textures().size())
+                    + " framebuffers=" + std::to_string(context.objects().framebuffers().size())
+                    + " vertexArrays=" + std::to_string(context.objects().vertexArrays().size())
+                    + " programs=" + std::to_string(context.objects().programs().size())
+                    + " shaders=" + std::to_string(context.objects().shaders().size())
+            );
+        }
+
+        const auto finalCounters = context.commandSubmissionDebugCounters();
+        if (finalCounters.currentInFlight != 0
+            || finalCounters.completedCommandBuffers != finalCounters.submittedCommandBuffers
+            || allocWaitTimeoutTotal(finalCounters) != 0) {
+            recordSentinelFailure(
+                failures,
+                "final command-submission counters were not clean",
+                countersSummary(finalCounters)
+            );
+        }
+
+        throwIfSentinelFailed(failures);
+    });
+}
+
 void appendCoverageDelta(TestResult& result, const std::string& phase) {
     // Bootstrap coverage checks only apply to phase-a scenes. Phase-c and later
     // scenes validate their own scenarioCoverage() list; requiring the full
@@ -9292,6 +9566,11 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runDCR2FlushFinishSentinel());
         tests.push_back(runDCR2PresentLifecycleSentinel());
         tests.push_back(runDCR2DeleteRebindLifetimeSentinel());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "dcr3-sentinels") {
+        tests.push_back(runDCR3ReducedBoundContendedPressureSentinel());
         return buildJSON(normalizedPhase, tests);
     }
 
