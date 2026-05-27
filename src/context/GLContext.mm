@@ -3118,6 +3118,207 @@ struct GLContext::Impl {
         markGpuResourceWrites(writes);
     }
 
+    static AppGLSubmissionResourceKind submissionResourceKind(
+        GpuResourceAccess::Kind kind) {
+        switch (kind) {
+            case GpuResourceAccess::Kind::Texture:
+                return AppGLSubmissionResourceKind::Texture;
+            case GpuResourceAccess::Kind::Renderbuffer:
+                return AppGLSubmissionResourceKind::Renderbuffer;
+            case GpuResourceAccess::Kind::Buffer:
+                return AppGLSubmissionResourceKind::Buffer;
+        }
+        return AppGLSubmissionResourceKind::Texture;
+    }
+
+    void appendSubmissionReads(AppGLSubmissionGroup& group,
+                               const GpuResourceReadSet& reads) const {
+        for (const auto& read : reads) {
+            group.addRead(submissionResourceKind(read.kind), read.name, read.bits);
+        }
+    }
+
+    void appendSubmissionWrites(AppGLSubmissionGroup& group,
+                                const GpuResourceWriteSet& writes) const {
+        for (const auto& write : writes) {
+            group.addWrite(submissionResourceKind(write.kind), write.name, write.bits);
+        }
+    }
+
+    void appendBoundDrawFramebufferSubmissionWrites(
+        AppGLSubmissionGroup& group,
+        std::uint32_t extraBits = 0) const {
+        if (state == nullptr || objects == nullptr) return;
+        const GLuint drawFboName = state->boundDrawFramebuffer();
+        if (drawFboName == 0) {
+            group.addWrite(AppGLSubmissionResourceKind::DefaultFramebuffer,
+                           0,
+                           kProducerFboColorWrite |
+                               kProducerFboDepthStencilWrite |
+                               extraBits);
+            return;
+        }
+        const GLFramebufferObject* fbo =
+            objects->framebuffers().get(drawFboName);
+        if (fbo == nullptr) return;
+        GpuResourceWriteSet writes;
+        appendFramebufferAttachmentWrites(writes, *fbo, extraBits);
+        appendSubmissionWrites(group, writes);
+    }
+
+    static bool submissionMslUsesArgumentBuffer(const std::string* msl) {
+        return msl != nullptr &&
+            msl->find("spvDescriptorSetBuffer") != std::string::npos;
+    }
+
+    void declareTranslatedDrawSubmissionGroup(TranslatedDrawInfo& tdi,
+                                              GLuint drawFboName) const {
+        AppGLSubmissionGroup& group = tdi.submissionGroup;
+        group.reset(AppGLSubmissionGroupKind::TranslatedDraw,
+                    AppGLCommandReason::TranslatedDraw);
+        group.addSubgroup(AppGLSubmissionGroupKind::TranslatedDraw,
+                          AppGLCommandReason::TranslatedDraw);
+        const bool forceArgBuf =
+            std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr;
+        group.argumentBuffersEnabled =
+            forceArgBuf ||
+            submissionMslUsesArgumentBuffer(tdi.vertexMSL) ||
+            submissionMslUsesArgumentBuffer(tdi.fragmentMSL);
+        if (group.argumentBuffersEnabled) {
+            group.addSubgroup(AppGLSubmissionGroupKind::ArgumentBinding,
+                              AppGLCommandReason::TranslatedDraw);
+        }
+
+        if (tdi.glVertexBuffer != 0) {
+            group.addRead(AppGLSubmissionResourceKind::Buffer,
+                          tdi.glVertexBuffer, kProducerAll);
+        }
+        if (tdi.glIndexBuffer != 0) {
+            group.addRead(AppGLSubmissionResourceKind::Buffer,
+                          tdi.glIndexBuffer, kProducerAll);
+        }
+        for (const auto& extra : tdi.extraVertexBuffers) {
+            if (extra.glBuffer != 0) {
+                group.addRead(AppGLSubmissionResourceKind::Buffer,
+                              extra.glBuffer, kProducerAll);
+            }
+        }
+        for (const auto& ubo : tdi.uboBindings) {
+            group.addRead(AppGLSubmissionResourceKind::Buffer,
+                          ubo.glBufferName, kProducerAll);
+        }
+        for (GLuint textureName : tdi.sampledTextureNames) {
+            group.addRead(AppGLSubmissionResourceKind::Texture,
+                          textureName, kProducerAll);
+        }
+        for (GLuint textureName : tdi.readImageTextureNames) {
+            group.addRead(AppGLSubmissionResourceKind::Texture,
+                          textureName, kProducerAll);
+        }
+        for (GLuint textureName : tdi.writtenImageTextureNames) {
+            group.addWrite(AppGLSubmissionResourceKind::Texture,
+                           textureName, kProducerStorageImageWrite);
+        }
+        for (const auto& ssbo : tdi.ssboBindings) {
+            group.addRead(AppGLSubmissionResourceKind::Buffer,
+                          ssbo.glBufferName, kProducerAll);
+            group.addWrite(AppGLSubmissionResourceKind::Buffer,
+                           ssbo.glBufferName, kProducerShaderStorageWrite);
+        }
+        for (const auto& atomic : tdi.atomicCounterBindings) {
+            group.addRead(AppGLSubmissionResourceKind::Buffer,
+                          atomic.glBufferName, kProducerAll);
+            group.addWrite(AppGLSubmissionResourceKind::Buffer,
+                           atomic.glBufferName, kProducerAtomicCounterWrite);
+        }
+        if (drawFboName == 0) {
+            group.addWrite(AppGLSubmissionResourceKind::DefaultFramebuffer,
+                           0,
+                           kProducerFboColorWrite |
+                               kProducerFboDepthStencilWrite);
+        } else if (const GLFramebufferObject* fbo =
+                       objects != nullptr
+                           ? objects->framebuffers().get(drawFboName)
+                           : nullptr) {
+            GpuResourceWriteSet writes;
+            appendFramebufferAttachmentWrites(writes, *fbo);
+            appendSubmissionWrites(group, writes);
+        }
+    }
+
+    void declareComputeDispatchSubmissionGroup(
+        ComputeDispatchInfo& info,
+        const GpuResourceReadSet& reads,
+        const GpuResourceWriteSet& writes) const {
+        AppGLSubmissionGroup& group = info.submissionGroup;
+        group.reset(AppGLSubmissionGroupKind::ComputeDispatch,
+                    AppGLCommandReason::ComputeDispatch);
+        group.addSubgroup(AppGLSubmissionGroupKind::ComputeDispatch,
+                          AppGLCommandReason::ComputeDispatch);
+        group.argumentBuffersEnabled =
+            std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr &&
+            info.metalComputeFunction != nullptr;
+        if (group.argumentBuffersEnabled) {
+            group.addSubgroup(AppGLSubmissionGroupKind::ArgumentBinding,
+                              AppGLCommandReason::ComputeDispatch);
+        }
+        appendSubmissionReads(group, reads);
+        appendSubmissionWrites(group, writes);
+        if (info.computeUniformData != nullptr && info.computeUniformSize > 0) {
+            group.addTransient(
+                AppGLSubmissionTransientKind::UniformRingBytes,
+                AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
+                AppGLCommandReason::ComputeDispatch,
+                16,
+                info.computeUniformSize);
+        }
+        if (info.needsSSBOSizeBuffer) {
+            group.addTransient(
+                AppGLSubmissionTransientKind::SsboSizeBuffer,
+                AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
+                AppGLCommandReason::ComputeDispatch,
+                25,
+                0);
+        }
+    }
+
+    void declareMeshGsSubmissionGroup(
+        MetalFrameGraph::MetalMeshGSDrawInfo& info,
+        const std::vector<GLuint>& vertexBufferNames,
+        const TranslatedDrawInfo& textureInfo) const {
+        AppGLSubmissionGroup& group = info.submissionGroup;
+        group.reset(AppGLSubmissionGroupKind::MeshGsDraw,
+                    AppGLCommandReason::MeshDraw);
+        group.addSubgroup(AppGLSubmissionGroupKind::MeshGsPrepass,
+                          AppGLCommandReason::MeshVertexCompute);
+        group.addSubgroup(AppGLSubmissionGroupKind::MeshGsRender,
+                          AppGLCommandReason::MeshDraw);
+        for (GLuint bufferName : vertexBufferNames) {
+            group.addRead(AppGLSubmissionResourceKind::Buffer,
+                          bufferName, kProducerAll);
+        }
+        for (GLuint textureName : textureInfo.sampledTextureNames) {
+            group.addRead(AppGLSubmissionResourceKind::Texture,
+                          textureName, kProducerAll);
+        }
+        for (GLuint textureName : textureInfo.readImageTextureNames) {
+            group.addRead(AppGLSubmissionResourceKind::Texture,
+                          textureName, kProducerAll);
+        }
+        for (GLuint textureName : textureInfo.writtenImageTextureNames) {
+            group.addWrite(AppGLSubmissionResourceKind::Texture,
+                           textureName, kProducerStorageImageWrite);
+        }
+        appendBoundDrawFramebufferSubmissionWrites(group);
+        group.addTransient(
+            AppGLSubmissionTransientKind::MeshVsOutputBuffer,
+            AppGLSubmissionOrderingMechanism::CpuCompletionWait,
+            AppGLCommandReason::MeshVertexCompute,
+            22,
+            static_cast<std::size_t>(info.vertexCount) *
+                static_cast<std::size_t>(info.vsOutputStrideBytes));
+    }
+
     void releaseBufferStorage(GLBufferObject& object) {
         drainPendingGpuProducers(object);
         releaseRetainedMetalObject(object.metalBuffer);
@@ -8366,6 +8567,7 @@ struct GLContext::Impl {
                     ubo.metalSlot = block.metalBinding + static_cast<std::uint32_t>(inst);
                     ubo.data = dataPtr;
                     ubo.size = dataSize;
+                    ubo.glBufferName = binding.buffer;
                     if (resourceNeedsFp64BindingShim(*reflection, block)) {
                         auto* sidecar = ensureFp64TransportSidecar(
                             *bufObj, *reflection, block,
@@ -39279,6 +39481,7 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     }
     void* meshVsComputePipelineState = program.metalGSVsComputePipelineState;
     std::vector<appgl::MetalTessVertexBufferBinding> meshVsBufferBindings;
+    std::vector<GLuint> meshVsBufferNames;
     if ((meshVsComputePipelineState == nullptr &&
          !program.metalGSVsComputeNeedsDescriptor) ||
         program.metalGSMeshFunction == nullptr ||
@@ -39334,6 +39537,7 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
                 ent.offset = 0;
                 ent.metalSlot = binding.metalSlot;
                 meshVsBufferBindings.push_back(ent);
+                meshVsBufferNames.push_back(binding.glBuffer);
             }
         }
         appgl::releaseMetalStageInputOutputDescriptor(buildResult.descriptor);
@@ -39416,6 +39620,7 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     info.fragmentTextures = std::move(textureInfo.fragmentTextures);
     info.fragmentNeedsFragCoordParams =
         (program.fragmentMSL.find("_appgl_FragCoordParams") != std::string::npos);
+    declareMeshGsSubmissionGroup(info, meshVsBufferNames, textureInfo);
 
     // GL render state — mirror encodeTranslatedDraw's tdi setup
     // (GLContext.mm:22172-22217) for the fields the mesh-render
@@ -40435,6 +40640,7 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
         tdi.markColorAttachmentReadbackFlip = true;
     }
 
+    declareTranslatedDrawSubmissionGroup(tdi, drawFboName);
     const bool ok = frameGraph->encodeTranslatedDraw(tdi);
     if (ok) {
         GpuResourceWriteSet producerWrites;
@@ -43231,6 +43437,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         tdi.indices = effectivePtr;
         tdi.indexCount = count;
         tdi.indexType = effectiveType;
+        tdi.glIndexBuffer = elementBufferName;
         if (elementBuffer != nullptr && !elementIndexTypeNeedsExpansion(type) &&
             elementBuffer->metalBuffer != nullptr) {
             tdi.metalIndexBuffer = elementBuffer->metalBuffer;
@@ -43377,6 +43584,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     tdi.indices = effectivePtr;
                     tdi.indexCount = count;
                     tdi.indexType = effectiveType;
+                    tdi.glIndexBuffer = elementBufferName;
                     // OPT-5: pass Metal index buffer when indices weren't
                     // expanded (UINT16/UINT32 pass-through from element VBO).
                     // ADV-10: use the type check instead of the old local vector.
@@ -43775,6 +43983,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     tdi.indices = effectivePtr;
                     tdi.indexCount = count;
                     tdi.indexType = effectiveType;
+                    tdi.glIndexBuffer = elementBufferName;
                     if (!elementIndexTypeNeedsExpansion(type) && elementBuffer->metalBuffer != nullptr) {
                         tdi.metalIndexBuffer = elementBuffer->metalBuffer;
                         tdi.metalIndexBufferOffset = indexOffset;
@@ -44311,6 +44520,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     tdi.indices = effectivePtr;
                     tdi.indexCount = count;
                     tdi.indexType = effectiveType;
+                    tdi.glIndexBuffer = elementBufferName;
                     if (!elementIndexTypeNeedsExpansion(type) && elementBuffer->metalBuffer != nullptr) {
                         tdi.metalIndexBuffer = elementBuffer->metalBuffer;
                         tdi.metalIndexBufferOffset = indexOffset;
@@ -45333,6 +45543,7 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             multisampleStorageImageSampleCountSlotForMSL(programObject->computeMSL);
     }
 
+    impl_->declareComputeDispatchSubmissionGroup(info, computeReads, computeWrites);
     impl_->drainPendingGpuProducers(computeReads);
     const bool encoded = impl_->frameGraph->encodeComputeDispatch(info);
     if (encoded) {
@@ -45861,6 +46072,7 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             multisampleStorageImageSampleCountSlotForMSL(programObject->computeMSL);
     }
 
+    impl_->declareComputeDispatchSubmissionGroup(info, computeReads, computeWrites);
     impl_->drainPendingGpuProducers(computeReads);
     const bool encoded = impl_->frameGraph->encodeComputeDispatch(info);
     if (encoded) {

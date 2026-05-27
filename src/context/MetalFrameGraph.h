@@ -10,6 +10,7 @@
 
 #include "../../include/AppGL/glcorearb.h"
 #include "AppGLCommandReasons.h"
+#include "AppGLSubmissionGroups.h"
 #include "../shader/ShaderTranslator.h"
 #include "../state/MatrixStateMirror.h"
 
@@ -86,6 +87,8 @@ struct MetalDrawInfo {
 
 // Describes a draw call using a translated (GLSL→MSL) shader pipeline.
 struct TranslatedDrawInfo {
+    AppGLSubmissionGroup submissionGroup;
+
     GLenum mode = 0;
     GLsizei vertexCount = 0;
     GLsizei baseVertex = 0;
@@ -166,6 +169,7 @@ struct TranslatedDrawInfo {
     // Direct Metal index buffer binding (OPT-5).
     void* metalIndexBuffer = nullptr;
     std::size_t metalIndexBufferOffset = 0;
+    GLuint glIndexBuffer = 0;
 
     // Per-stage uniform data laid out to match the SPIRV-Cross-generated
     // push-constant struct.  Each stage gets its own buffer because the
@@ -427,6 +431,7 @@ struct TranslatedDrawInfo {
         std::size_t size = 0;
         void* metalBuffer = nullptr;  // raw retained Metal buffer for >4KB UBOs
         std::size_t metalBufferOffset = 0;
+        GLuint glBufferName = 0;
         bool isVertex = false;    // bind to vertex stage
         bool isFragment = false;  // bind to fragment stage
     };
@@ -621,6 +626,8 @@ struct ImmediateDrawInfo {
 // units; consumed by MetalFrameGraph::encodeComputeDispatch which owns
 // the MTLComputeCommandEncoder lifecycle.
 struct ComputeDispatchInfo {
+    AppGLSubmissionGroup submissionGroup;
+
     void* metalComputePipelineState = nullptr; // id<MTLComputePipelineState>
     // Step 7-3 compute follow-up: id<MTLFunction> for the compute
     // entry point, used by `encodeComputeDispatch` to call
@@ -1150,6 +1157,8 @@ public:
     // (rejected at link-time gate, GLContext.mm:19097) and never
     // reach this encoder.
     struct MetalMeshGSDrawInfo {
+        AppGLSubmissionGroup submissionGroup;
+
         // Stage PSOs / functions (retained void* — caller owns the
         // refcount; encoder borrows for the duration of the call).
         void* vertexComputePipelineState = nullptr;
@@ -1272,7 +1281,7 @@ public:
     // shader_bitfield_operation / constant_expressions / SSBO tests
     // all map a subsequent bufferRange on the SSBO and expect the
     // compute writes to be visible).
-    bool encodeComputeDispatch(const ComputeDispatchInfo& info);
+    bool encodeComputeDispatch(ComputeDispatchInfo& info);
     void endFrame(GLObjectStore& objects);
     void present(AppGLCommandReason reason = AppGLCommandReason::PresentPendingWork);
     bool finish();

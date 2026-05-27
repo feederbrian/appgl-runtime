@@ -1594,6 +1594,13 @@ struct MetalFrameGraph::Impl {
         const bool vertexUsesArgBuf = forceArgBufEnv || mslUsesArgBuf(info.vertexMSL);
         const bool fragmentUsesArgBuf = forceArgBufEnv || mslUsesArgBuf(info.fragmentMSL);
         const bool useArgBuf = vertexUsesArgBuf || fragmentUsesArgBuf;
+        if (!info.submissionGroup.declared) {
+            info.submissionGroup.reset(AppGLSubmissionGroupKind::TranslatedDraw,
+                                       AppGLCommandReason::TranslatedDraw);
+            info.submissionGroup.addSubgroup(AppGLSubmissionGroupKind::TranslatedDraw,
+                                             AppGLCommandReason::TranslatedDraw);
+        }
+        info.submissionGroup.argumentBuffersEnabled = useArgBuf;
         const bool vertexNeedsSSBOSizeBuffer =
             vertexUsesArgBuf && info.vertexMSL != nullptr &&
             info.vertexMSL->find("spvBufferSizeConstants") != std::string::npos;
@@ -3447,6 +3454,8 @@ struct MetalFrameGraph::Impl {
         // to the baseline direct-binding path unchanged.
         if (useArgBuf && (fragArgEncoderSet0 != nil || vertArgEncoderSet0 != nil ||
                           fragArgEncoderSet1 != nil || vertArgEncoderSet1 != nil)) {
+            info.submissionGroup.addSubgroup(AppGLSubmissionGroupKind::ArgumentBinding,
+                                             AppGLCommandReason::TranslatedDraw);
             auto encodeTexturesIntoArgBuf = [&](id<MTLArgumentEncoder> encoder,
                                                  const std::vector<TranslatedDrawInfo::TextureBinding>& textures,
                                                  MTLRenderStages stage,
@@ -3471,6 +3480,12 @@ struct MetalFrameGraph::Impl {
                 id<MTLBuffer> argBuf = argBufAlloc.buffer;
                 const NSUInteger argBufOffset = argBufAlloc.offset;
                 if (argBuf == nil) return;
+                info.submissionGroup.addTransient(
+                    AppGLSubmissionTransientKind::ArgumentBufferPayload,
+                    AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
+                    AppGLCommandReason::TranslatedDraw,
+                    24,
+                    static_cast<std::size_t>(len));
                 [encoder setArgumentBuffer:argBuf offset:argBufOffset];
                 // Sprint 18 Item42: graphics-stage SSBO `.length()`
                 // sidecar. The translator rewrites graphics argbuf MSL
@@ -3508,6 +3523,12 @@ struct MetalFrameGraph::Impl {
                             sizes.data(),
                             sizes.size() * sizeof(std::uint32_t));
                         if (sizeAlloc.buffer != nil) {
+                            info.submissionGroup.addTransient(
+                                AppGLSubmissionTransientKind::SsboSizeBuffer,
+                                AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
+                                AppGLCommandReason::TranslatedDraw,
+                                30,
+                                sizes.size() * sizeof(std::uint32_t));
                             [encoder setBuffer:sizeAlloc.buffer
                                         offset:sizeAlloc.offset
                                        atIndex:0];
@@ -3634,12 +3655,24 @@ struct MetalFrameGraph::Impl {
                 id<MTLBuffer> argBuf = argBufAlloc.buffer;
                 const NSUInteger argBufOffset = argBufAlloc.offset;
                 if (argBuf == nil) return;
+                info.submissionGroup.addTransient(
+                    AppGLSubmissionTransientKind::ArgumentBufferPayload,
+                    AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
+                    AppGLCommandReason::TranslatedDraw,
+                    25,
+                    static_cast<std::size_t>(len));
                 [encoder setArgumentBuffer:argBuf offset:argBufOffset];
 
                 // Default uniform block at [[id(16)]].
                 if (uniformData != nullptr && uniformSize > 0) {
                     RingAlloc alloc = ringSuballocate(uniformData, uniformSize);
                     if (alloc.buffer != nil) {
+                        info.submissionGroup.addTransient(
+                            AppGLSubmissionTransientKind::UniformRingBytes,
+                            AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
+                            AppGLCommandReason::TranslatedDraw,
+                            16,
+                            static_cast<std::size_t>(uniformSize));
                         [encoder setBuffer:alloc.buffer
                                     offset:alloc.offset
                                    atIndex:16];
@@ -3664,6 +3697,14 @@ struct MetalFrameGraph::Impl {
                         RingAlloc alloc = ringSuballocate(ubo.data, ubo.size);
                         uboBuf = alloc.buffer;
                         uboOff = alloc.offset;
+                        if (uboBuf != nil) {
+                            info.submissionGroup.addTransient(
+                                AppGLSubmissionTransientKind::UniformRingBytes,
+                                AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
+                                AppGLCommandReason::TranslatedDraw,
+                                static_cast<std::uint32_t>(slot),
+                                ubo.size);
+                        }
                     }
                     if (uboBuf == nil) continue;
                     [encoder setBuffer:uboBuf offset:uboOff atIndex:slot];
@@ -7804,6 +7845,14 @@ fragment float4 appgl_immediate_textured_fs(
     //   (3b) Mesh-render PSO build (or cache hit).
     //   (3c) Render pass: bind vsOutBuf @ 22, drawMeshThreadgroups.
     bool encodeMetalMeshGSDraw(MetalFrameGraph::MetalMeshGSDrawInfo& info) {
+        if (!info.submissionGroup.declared) {
+            info.submissionGroup.reset(AppGLSubmissionGroupKind::MeshGsDraw,
+                                       AppGLCommandReason::MeshDraw);
+            info.submissionGroup.addSubgroup(AppGLSubmissionGroupKind::MeshGsPrepass,
+                                             AppGLCommandReason::MeshVertexCompute);
+            info.submissionGroup.addSubgroup(AppGLSubmissionGroupKind::MeshGsRender,
+                                             AppGLCommandReason::MeshDraw);
+        }
         if (device == nil) {
             info.diagnostic = "no Metal device";
             return false;
@@ -7839,6 +7888,12 @@ fragment float4 appgl_immediate_textured_fs(
             info.diagnostic = "vsOutBuf alloc failed";
             return false;
         }
+        info.submissionGroup.addTransient(
+            AppGLSubmissionTransientKind::MeshVsOutputBuffer,
+            AppGLSubmissionOrderingMechanism::CpuCompletionWait,
+            AppGLCommandReason::MeshVertexCompute,
+            22,
+            static_cast<std::size_t>(vsOutBufSize));
         ScopedOwnedObjCObject vsOutBufRelease(vsOutBuf);
         vsOutBuf.label = @"appgl-mesh-gs-vs-output";
 
@@ -8304,7 +8359,13 @@ fragment float4 appgl_immediate_textured_fs(
     // without it, the map'd bytes are stale compute-shader input
     // rather than post-shader output. Revisit if we ever hit a
     // workload where pipelined compute+graphics is needed.
-    bool encodeComputeDispatch(const ComputeDispatchInfo& info) {
+    bool encodeComputeDispatch(ComputeDispatchInfo& info) {
+        if (!info.submissionGroup.declared) {
+            info.submissionGroup.reset(AppGLSubmissionGroupKind::ComputeDispatch,
+                                       AppGLCommandReason::ComputeDispatch);
+            info.submissionGroup.addSubgroup(AppGLSubmissionGroupKind::ComputeDispatch,
+                                             AppGLCommandReason::ComputeDispatch);
+        }
         if (device == nil || commandQueue == nil) {
             return false;
         }
@@ -8346,9 +8407,12 @@ fragment float4 appgl_immediate_textured_fs(
         // entries whose slot was outside the encoder's valid range).
         const bool useArgBuf =
             (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
+        info.submissionGroup.argumentBuffersEnabled = useArgBuf;
         id<MTLFunction> computeFn = (__bridge id<MTLFunction>)info.metalComputeFunction;
 
         if (useArgBuf && computeFn != nil) {
+            info.submissionGroup.addSubgroup(AppGLSubmissionGroupKind::ArgumentBinding,
+                                             AppGLCommandReason::ComputeDispatch);
             // Desc_set 0: textures (sampled + storage) + SSBOs
             const bool hasTextures = !info.textures.empty();
             const bool hasBuffers  = !info.buffers.empty();
@@ -8379,6 +8443,12 @@ fragment float4 appgl_immediate_textured_fs(
                     id<MTLBuffer> buf0 = alloc0.buffer;
                     const NSUInteger buf0Offset = alloc0.offset;
                     if (buf0 != nil) {
+                        info.submissionGroup.addTransient(
+                            AppGLSubmissionTransientKind::ArgumentBufferPayload,
+                            AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
+                            AppGLCommandReason::ComputeDispatch,
+                            24,
+                            static_cast<std::size_t>(len0));
                         [argEncSet0 setArgumentBuffer:buf0 offset:buf0Offset];
                         for (const auto& tb : info.textures) {
                             id<MTLTexture> tex = (__bridge id<MTLTexture>)tb.metalTexture;
@@ -8428,11 +8498,23 @@ fragment float4 appgl_immediate_textured_fs(
                     id<MTLBuffer> buf1 = alloc1.buffer;
                     const NSUInteger buf1Offset = alloc1.offset;
                     if (buf1 != nil) {
+                        info.submissionGroup.addTransient(
+                            AppGLSubmissionTransientKind::ArgumentBufferPayload,
+                            AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
+                            AppGLCommandReason::ComputeDispatch,
+                            25,
+                            static_cast<std::size_t>(len1));
                         [argEncSet1 setArgumentBuffer:buf1 offset:buf1Offset];
                         if (hasUniformData) {
                             RingAlloc alloc = ringSuballocate(
                                 info.computeUniformData, info.computeUniformSize);
                             if (alloc.buffer != nil) {
+                                info.submissionGroup.addTransient(
+                                    AppGLSubmissionTransientKind::UniformRingBytes,
+                                    AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
+                                    AppGLCommandReason::ComputeDispatch,
+                                    16,
+                                    info.computeUniformSize);
                                 [argEncSet1 setBuffer:alloc.buffer
                                                offset:alloc.offset
                                               atIndex:16];
@@ -8472,6 +8554,12 @@ fragment float4 appgl_immediate_textured_fs(
                            length:static_cast<NSUInteger>(
                                       sizes.size() * sizeof(std::uint32_t))
                           atIndex:25];
+                    info.submissionGroup.addTransient(
+                        AppGLSubmissionTransientKind::SsboSizeBuffer,
+                        AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
+                        AppGLCommandReason::ComputeDispatch,
+                        25,
+                        sizes.size() * sizeof(std::uint32_t));
                 }
             }
 
@@ -9933,7 +10021,7 @@ bool MetalFrameGraph::encodeMetalMeshGSDraw(MetalMeshGSDrawInfo& info) {
     return impl_->encodeMetalMeshGSDraw(info);
 }
 
-bool MetalFrameGraph::encodeComputeDispatch(const ComputeDispatchInfo& info) {
+bool MetalFrameGraph::encodeComputeDispatch(ComputeDispatchInfo& info) {
     return impl_->encodeComputeDispatch(info);
 }
 
