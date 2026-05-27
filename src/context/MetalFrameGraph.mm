@@ -3936,7 +3936,7 @@ struct MetalFrameGraph::Impl {
             activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
             resetCachedEncoderState();
 
-            if (!currentCommandBufferLease.commitAndWait(@"fbo-solid-readback-drain")) {
+            if (!currentCommandBufferLease.commitAndWait(AppGLCommandReason::FlushForReadback)) {
                 return false;
             }
             currentCommandBuffer = nil;
@@ -5620,11 +5620,13 @@ fragment float4 appgl_immediate_textured_fs(
             flushPendingClear();
         }
         endRenderPass();
+        bool submittedFinishWork = false;
         if (currentCommandBuffer != nil) {
             if (!usesOffscreenTarget && currentDrawable != nil && pendingPresent) {
                 [currentCommandBuffer presentDrawable:currentDrawable];
             }
             commitWithFrameSignal(currentCommandBufferLease, AppGLCommandReason::FinishWait);
+            submittedFinishWork = true;
             invalidateTransientState();
             advanceRingBuffer();
             currentCommandBuffer = nil;
@@ -5633,7 +5635,8 @@ fragment float4 appgl_immediate_textured_fs(
         }
         return commandSubmission == nullptr
             ? true
-            : commandSubmission->drainAllOutstanding(AppGLCommandReason::LifetimeDrain);
+            : commandSubmission->drainAllOutstanding(AppGLCommandReason::LifetimeDrain,
+                                                     submittedFinishWork);
     }
 
     bool copyPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* outPixels) {
@@ -5673,17 +5676,17 @@ fragment float4 appgl_immediate_textured_fs(
         ScopedOwnedObjCObject readbackBufferRelease;
 
         const auto waitForQueue = [&]() -> bool {
-            auto fenceLease = makeCommandBuffer(@"copy-pixels-fence");
+            auto fenceLease = makeCommandBuffer(AppGLCommandReason::FlushForReadback);
             id<MTLCommandBuffer> fence = fenceLease.get();
             if (fence == nil) {
                 return false;
             }
-            return fenceLease.commitAndWait(@"copy-pixels-fence");
+            return fenceLease.commitAndWait(AppGLCommandReason::FlushForReadback);
         };
 
         if (sourceTexture.storageMode == MTLStorageModeShared) {
             if (currentCommandBuffer != nil) {
-                if (!currentCommandBufferLease.commitAndWait(@"copy-pixels-shared-drain")) {
+                if (!currentCommandBufferLease.commitAndWait(AppGLCommandReason::FlushForReadback)) {
                     return false;
                 }
                 // OPT-8: GPU finished synchronously — release the ring slot
@@ -5715,7 +5718,7 @@ fragment float4 appgl_immediate_textured_fs(
             MetalCommandBufferLease standaloneLease;
             id<MTLCommandBuffer> commandBuffer = currentCommandBuffer;
             if (commandBuffer == nil) {
-                standaloneLease = makeCommandBuffer(@"copy-pixels-blit");
+                standaloneLease = makeCommandBuffer(AppGLCommandReason::FlushForReadback);
                 commandBuffer = standaloneLease.get();
             }
             if (commandBuffer == nil) {
@@ -5735,9 +5738,9 @@ fragment float4 appgl_immediate_textured_fs(
             const bool consumedCurrentCommandBuffer = commandBuffer == currentCommandBuffer;
             bool completed = false;
             if (consumedCurrentCommandBuffer) {
-                completed = currentCommandBufferLease.commitAndWait(@"copy-pixels-current-blit");
+                completed = currentCommandBufferLease.commitAndWait(AppGLCommandReason::FlushForReadback);
             } else {
-                completed = standaloneLease.commitAndWait(@"copy-pixels-blit");
+                completed = standaloneLease.commitAndWait(AppGLCommandReason::FlushForReadback);
             }
             if (!completed) {
                 return false;
@@ -5797,6 +5800,12 @@ fragment float4 appgl_immediate_textured_fs(
                 ringSlotAcquired = false;
             }
             invalidateTransientState();
+        } else if (commandSubmission != nullptr && commandSubmission->hasOutstandingCommandBuffers()) {
+            auto fenceLease = makeCommandBuffer(AppGLCommandReason::FlushForReadback);
+            id<MTLCommandBuffer> fence = fenceLease.get();
+            if (fence != nil) {
+                fenceLease.commitAndWait(AppGLCommandReason::FlushForReadback);
+            }
         }
     }
 

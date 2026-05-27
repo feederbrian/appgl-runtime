@@ -8729,6 +8729,386 @@ static std::string buildBenchmarkJSON(const std::vector<BenchmarkTierResult>& ti
     return ss.str();
 }
 
+std::string countersSummary(const AppGLCommandSubmissionDebugCounters& counters) {
+    std::ostringstream stream;
+    stream << "submitted=" << counters.submittedCommandBuffers
+           << " completed=" << counters.completedCommandBuffers
+           << " waitLog=" << counters.waitReasonLogEntries
+           << " lastReason=" << appGLCommandReasonName(counters.lastWaitReason)
+           << " lastMode=" << appGLSubmitModeName(counters.lastWaitMode)
+           << " lastDependency=" << appGLDependencyClassName(counters.lastWaitDependencyClass);
+    return stream.str();
+}
+
+bool sameCommandSubmissionCounters(const AppGLCommandSubmissionDebugCounters& lhs,
+                                   const AppGLCommandSubmissionDebugCounters& rhs) {
+    return lhs.submittedCommandBuffers == rhs.submittedCommandBuffers
+        && lhs.completedCommandBuffers == rhs.completedCommandBuffers
+        && lhs.waitReasonLogEntries == rhs.waitReasonLogEntries;
+}
+
+bool sameSubmittedAndWaitLog(const AppGLCommandSubmissionDebugCounters& lhs,
+                             const AppGLCommandSubmissionDebugCounters& rhs) {
+    return lhs.submittedCommandBuffers == rhs.submittedCommandBuffers
+        && lhs.waitReasonLogEntries == rhs.waitReasonLogEntries;
+}
+
+void recordSentinelFailure(std::vector<std::string>& failures,
+                           std::string_view label,
+                           std::string detail) {
+    failures.push_back(std::string(label) + ": " + std::move(detail));
+}
+
+void throwIfSentinelFailed(const std::vector<std::string>& failures) {
+    if (failures.empty()) {
+        return;
+    }
+    std::ostringstream stream;
+    for (std::size_t index = 0; index < failures.size(); ++index) {
+        if (index != 0) {
+            stream << " | ";
+        }
+        stream << failures[index];
+    }
+    throw std::runtime_error(stream.str());
+}
+
+class ScopedSentinelContext {
+public:
+    ScopedSentinelContext(GLsizei width, GLsizei height)
+        : context_(std::make_unique<GLContext>(width, height)) {
+        Runtime::shared().makeCurrent(context_.get());
+        Runtime::shared().noteRenderer(context_->rendererString());
+    }
+
+    ~ScopedSentinelContext() {
+        Runtime::shared().makeCurrent(nullptr);
+    }
+
+    GLContext& context() {
+        return *context_;
+    }
+
+    GLDispatchTable& gl() {
+        return Runtime::shared().dispatch();
+    }
+
+private:
+    std::unique_ptr<GLContext> context_;
+};
+
+template <typename Fn>
+TestResult runDirectSentinel(std::string id, Fn&& fn) {
+    const auto startedAt = std::chrono::steady_clock::now();
+
+    TestResult result;
+    result.id = std::move(id);
+    result.status = "passed";
+
+    try {
+        std::forward<Fn>(fn)();
+    } catch (const std::exception& error) {
+        result.status = "failed";
+        result.message = error.what();
+    }
+
+    Runtime::shared().makeCurrent(nullptr);
+    const auto endedAt = std::chrono::steady_clock::now();
+    result.millis = std::chrono::duration<double, std::milli>(endedAt - startedAt).count();
+    return result;
+}
+
+TestResult runDCR2FlushFinishSentinel() {
+    return runDirectSentinel("dcr2.glflush-vs-glfinish", [] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+
+        gl.glFinish();
+        const auto initial = context.commandSubmissionDebugCounters();
+
+        gl.glFlush();
+        const auto afterNoWorkFlush = context.commandSubmissionDebugCounters();
+        if (!sameCommandSubmissionCounters(initial, afterNoWorkFlush)) {
+            recordSentinelFailure(
+                failures,
+                "no-work glFlush changed counters",
+                "before{" + countersSummary(initial) + "} after{" + countersSummary(afterNoWorkFlush) + "}"
+            );
+        }
+
+        gl.glFinish();
+        const auto afterNoWorkFinish = context.commandSubmissionDebugCounters();
+        if (!sameCommandSubmissionCounters(afterNoWorkFlush, afterNoWorkFinish)) {
+            recordSentinelFailure(
+                failures,
+                "no-work glFinish changed counters",
+                "before{" + countersSummary(afterNoWorkFlush) + "} after{" + countersSummary(afterNoWorkFinish) + "}"
+            );
+        }
+
+        gl.glClearColor(0.18f, 0.23f, 0.31f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glFlush();
+        const auto afterClearFlush = context.commandSubmissionDebugCounters();
+        if (afterClearFlush.submittedCommandBuffers != afterNoWorkFinish.submittedCommandBuffers + 1) {
+            recordSentinelFailure(
+                failures,
+                "clear+glFlush did not submit exactly one command buffer",
+                "before{" + countersSummary(afterNoWorkFinish) + "} after{" + countersSummary(afterClearFlush) + "}"
+            );
+        }
+        if (afterClearFlush.lastWaitMode == AppGLSubmitMode::CommitAndWait
+            || afterClearFlush.lastWaitMode == AppGLSubmitMode::DrainAll
+            || afterClearFlush.lastWaitReason == AppGLCommandReason::FinishWait
+            || afterClearFlush.lastWaitReason == AppGLCommandReason::LifetimeDrain) {
+            recordSentinelFailure(
+                failures,
+                "glFlush used synchronous finish attribution",
+                countersSummary(afterClearFlush)
+            );
+        }
+
+        std::array<std::uint8_t, 32 * 32 * 4> pixels = {};
+        gl.glReadPixels(0, 0, 32, 32, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        expectGLError(gl, GL_NO_ERROR, "dcr2 sentinel glReadPixels");
+        const auto afterReadback = context.commandSubmissionDebugCounters();
+        if (afterReadback.lastWaitReason != AppGLCommandReason::FlushForReadback
+            || afterReadback.lastWaitMode != AppGLSubmitMode::CommitAndWait) {
+            recordSentinelFailure(
+                failures,
+                "glReadPixels wait was not readback-attributed",
+                countersSummary(afterReadback)
+            );
+        }
+
+        gl.glClearColor(0.45f, 0.12f, 0.20f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        const auto beforeFinish = context.commandSubmissionDebugCounters();
+        gl.glFinish();
+        const auto afterFinish = context.commandSubmissionDebugCounters();
+        if (afterFinish.submittedCommandBuffers != beforeFinish.submittedCommandBuffers + 1
+            || afterFinish.completedCommandBuffers != afterFinish.submittedCommandBuffers
+            || afterFinish.lastWaitReason != AppGLCommandReason::LifetimeDrain
+            || afterFinish.lastWaitMode != AppGLSubmitMode::DrainAll) {
+            recordSentinelFailure(
+                failures,
+                "pending glFinish did not drain lifetime work",
+                "before{" + countersSummary(beforeFinish) + "} after{" + countersSummary(afterFinish) + "}"
+            );
+        }
+
+        throwIfSentinelFailed(failures);
+    });
+}
+
+TestResult runDCR2PresentLifecycleSentinel() {
+    return runDirectSentinel("dcr2.present-drawable-lifecycle", [] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+
+        gl.glFinish();
+        const auto initial = context.commandSubmissionDebugCounters();
+
+        gl.glFlush();
+        const auto afterNoWorkFlush = context.commandSubmissionDebugCounters();
+        if (!sameCommandSubmissionCounters(initial, afterNoWorkFlush)) {
+            recordSentinelFailure(
+                failures,
+                "idle present sentinel glFlush changed counters",
+                "before{" + countersSummary(initial) + "} after{" + countersSummary(afterNoWorkFlush) + "}"
+            );
+        }
+
+        gl.glClearColor(0.07f, 0.22f, 0.36f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glFlush();
+        const auto afterClearFlush = context.commandSubmissionDebugCounters();
+        if (afterClearFlush.submittedCommandBuffers != afterNoWorkFlush.submittedCommandBuffers + 1) {
+            recordSentinelFailure(
+                failures,
+                "clear+flush did not submit one command buffer",
+                "before{" + countersSummary(afterNoWorkFlush) + "} after{" + countersSummary(afterClearFlush) + "}"
+            );
+        }
+
+        gl.glFlush();
+        const auto afterSecondFlush = context.commandSubmissionDebugCounters();
+        if (!sameSubmittedAndWaitLog(afterClearFlush, afterSecondFlush)) {
+            recordSentinelFailure(
+                failures,
+                "second glFlush submitted or logged extra work",
+                "before{" + countersSummary(afterClearFlush) + "} after{" + countersSummary(afterSecondFlush) + "}"
+            );
+        }
+
+        gl.glClearColor(0.30f, 0.17f, 0.42f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        const auto beforeSwap = context.commandSubmissionDebugCounters();
+        context.swapBuffers();
+        const auto afterSwap = context.commandSubmissionDebugCounters();
+        if (afterSwap.submittedCommandBuffers != beforeSwap.submittedCommandBuffers + 1) {
+            recordSentinelFailure(
+                failures,
+                "offscreen swapBuffers did not submit pending work once",
+                "before{" + countersSummary(beforeSwap) + "} after{" + countersSummary(afterSwap) + "}"
+            );
+        }
+
+        const auto inventory = context.metalResourceInventory();
+        if (inventory.frameGraphDrawableCount != 0 || inventory.frameGraphDrawableTextureBytes != 0) {
+            recordSentinelFailure(
+                failures,
+                "offscreen present retained drawable resources",
+                "drawableCount=" + std::to_string(inventory.frameGraphDrawableCount)
+                    + " drawableBytes=" + std::to_string(inventory.frameGraphDrawableTextureBytes)
+            );
+        }
+
+        gl.glFinish();
+        const auto afterFinish = context.commandSubmissionDebugCounters();
+        if (afterFinish.completedCommandBuffers != afterFinish.submittedCommandBuffers) {
+            recordSentinelFailure(
+                failures,
+                "present lifecycle finish left incomplete command buffers",
+                countersSummary(afterFinish)
+            );
+        }
+
+        throwIfSentinelFailed(failures);
+    });
+}
+
+TestResult runDCR2DeleteRebindLifetimeSentinel() {
+    return runDirectSentinel("dcr2.delete-rebind-lifetime", [] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+
+        gl.glFinish();
+        const std::size_t baselineBuffers = context.objects().buffers().size();
+        GLuint buffer = 0;
+        gl.glGenBuffers(1, &buffer);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, buffer);
+        const std::uint32_t seedWords[4] = {1, 2, 3, 4};
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(seedWords), seedWords, GL_STATIC_DRAW);
+        expectGLError(gl, GL_NO_ERROR, "dcr2 sentinel buffer create");
+        if (context.objects().buffers().size() != baselineBuffers + 1
+            || gl.glIsBuffer(buffer) != GL_TRUE) {
+            recordSentinelFailure(failures, "buffer create was not visible in object store", "name=" + std::to_string(buffer));
+        }
+
+        gl.glDeleteBuffers(1, &buffer);
+        expectGLError(gl, GL_NO_ERROR, "dcr2 sentinel buffer delete");
+        if (context.objects().buffers().size() != baselineBuffers
+            || gl.glIsBuffer(buffer) != GL_FALSE) {
+            recordSentinelFailure(failures, "buffer delete left a live object", "name=" + std::to_string(buffer));
+        }
+
+        GLuint reboundBuffer = 0;
+        gl.glGenBuffers(1, &reboundBuffer);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, reboundBuffer);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(seedWords), seedWords, GL_DYNAMIC_DRAW);
+        if (reboundBuffer == 0 || reboundBuffer == buffer) {
+            recordSentinelFailure(
+                failures,
+                "buffer rebind reused an invalid/deleted name",
+                "deleted=" + std::to_string(buffer) + " rebound=" + std::to_string(reboundBuffer)
+            );
+        }
+        gl.glDeleteBuffers(1, &reboundBuffer);
+        expectGLError(gl, GL_NO_ERROR, "dcr2 sentinel rebound buffer delete");
+
+        const std::size_t baselineTextures = context.objects().textures().size();
+        const std::size_t baselineFramebuffers = context.objects().framebuffers().size();
+        GLuint texture = 0;
+        GLuint framebuffer = 0;
+        gl.glGenTextures(1, &texture);
+        gl.glBindTexture(GL_TEXTURE_2D, texture);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 16, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+
+        gl.glGenFramebuffers(1, &framebuffer);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+        gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+        expectCondition(gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
+                        "dcr2 sentinel framebuffer is complete");
+        expectGLError(gl, GL_NO_ERROR, "dcr2 sentinel texture framebuffer setup");
+
+        gl.glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "dcr2 sentinel delete attached texture");
+        if (context.objects().textures().size() != baselineTextures
+            || gl.glIsTexture(texture) != GL_FALSE) {
+            recordSentinelFailure(failures, "attached texture delete left a live object", "name=" + std::to_string(texture));
+        }
+
+        gl.glFinish();
+        const auto afterDeleteFinish = context.commandSubmissionDebugCounters();
+        if (afterDeleteFinish.completedCommandBuffers != afterDeleteFinish.submittedCommandBuffers) {
+            recordSentinelFailure(
+                failures,
+                "delete-before-completion finish left incomplete command buffers",
+                countersSummary(afterDeleteFinish)
+            );
+        }
+
+        GLuint reboundTexture = 0;
+        gl.glGenTextures(1, &reboundTexture);
+        if (reboundTexture == 0 || reboundTexture == texture) {
+            recordSentinelFailure(
+                failures,
+                "texture rebind reused an invalid/deleted name",
+                "deleted=" + std::to_string(texture) + " rebound=" + std::to_string(reboundTexture)
+            );
+        }
+
+        std::array<std::uint8_t, 4 * 4 * 4> green = {};
+        for (std::size_t pixel = 0; pixel < 16; ++pixel) {
+            green[pixel * 4 + 0] = 0;
+            green[pixel * 4 + 1] = 255;
+            green[pixel * 4 + 2] = 0;
+            green[pixel * 4 + 3] = 255;
+        }
+        gl.glBindTexture(GL_TEXTURE_2D, reboundTexture);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, green.data());
+        std::array<std::uint8_t, 4 * 4 * 4> readback = {};
+        gl.glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, readback.data());
+        expectGLError(gl, GL_NO_ERROR, "dcr2 sentinel rebound texture readback");
+        if (readback != green) {
+            recordSentinelFailure(failures, "rebound texture readback did not match upload", "expected solid green RGBA8");
+        }
+
+        gl.glDeleteTextures(1, &reboundTexture);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        expectGLError(gl, GL_NO_ERROR, "dcr2 sentinel texture framebuffer cleanup");
+        if (context.objects().textures().size() != baselineTextures
+            || context.objects().framebuffers().size() != baselineFramebuffers) {
+            recordSentinelFailure(
+                failures,
+                "delete/rebind cleanup did not restore object store counts",
+                "textures=" + std::to_string(context.objects().textures().size())
+                    + " framebuffers=" + std::to_string(context.objects().framebuffers().size())
+            );
+        }
+
+        throwIfSentinelFailed(failures);
+    });
+}
+
 void appendCoverageDelta(TestResult& result, const std::string& phase) {
     // Bootstrap coverage checks only apply to phase-a scenes. Phase-c and later
     // scenes validate their own scenarioCoverage() list; requiring the full
@@ -8907,6 +9287,13 @@ std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tes
 std::string runGauntletJSON(std::string_view phaseFilter) {
     const std::string normalizedPhase = phaseFilter.empty() ? "phase-a" : std::string(phaseFilter);
     std::vector<TestResult> tests;
+
+    if (normalizedPhase == "dcr2-sentinels") {
+        tests.push_back(runDCR2FlushFinishSentinel());
+        tests.push_back(runDCR2PresentLifecycleSentinel());
+        tests.push_back(runDCR2DeleteRebindLifetimeSentinel());
+        return buildJSON(normalizedPhase, tests);
+    }
 
     if (normalizedPhase == "all" || normalizedPhase == "phase-a") {
         ClearReadbackScene scene;

@@ -349,8 +349,20 @@ public:
         return counters;
     }
 
-    bool drainAllOutstanding(AppGLCommandReason reason = AppGLCommandReason::LifetimeDrain) {
+    std::uint32_t inFlightCommandBufferCount() const {
+        return state_ ? state_->inFlightCount.load() : 0;
+    }
+
+    bool hasOutstandingCommandBuffers() const {
+        return inFlightCommandBufferCount() != 0;
+    }
+
+    bool drainAllOutstanding(AppGLCommandReason reason = AppGLCommandReason::LifetimeDrain,
+                             bool recordWhenIdle = false) {
         if (!state_ || state_->inFlightSemaphore == nullptr) {
+            return true;
+        }
+        if (!recordWhenIdle && !hasOutstandingCommandBuffers()) {
             return true;
         }
         NSString* label = appGLCommandReasonNSString(reason);
