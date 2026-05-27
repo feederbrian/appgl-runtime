@@ -3178,6 +3178,11 @@ struct GLContext::Impl {
                     AppGLCommandReason::TranslatedDraw);
         group.addSubgroup(AppGLSubmissionGroupKind::TranslatedDraw,
                           AppGLCommandReason::TranslatedDraw);
+        if (tdi.fallbackSubgroupKind != AppGLSubmissionGroupKind::None) {
+            group.approximateFallbackDisallowed = true;
+            group.addSubgroup(tdi.fallbackSubgroupKind,
+                              AppGLCommandReason::TranslatedDraw);
+        }
         const bool forceArgBuf =
             std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr;
         group.argumentBuffersEnabled =
@@ -3289,6 +3294,7 @@ struct GLContext::Impl {
         AppGLSubmissionGroup& group = info.submissionGroup;
         group.reset(AppGLSubmissionGroupKind::MeshGsDraw,
                     AppGLCommandReason::MeshDraw);
+        group.approximateFallbackDisallowed = true;
         group.addSubgroup(AppGLSubmissionGroupKind::MeshGsPrepass,
                           AppGLCommandReason::MeshVertexCompute);
         group.addSubgroup(AppGLSubmissionGroupKind::MeshGsRender,
@@ -3317,6 +3323,14 @@ struct GLContext::Impl {
             22,
             static_cast<std::size_t>(info.vertexCount) *
                 static_cast<std::size_t>(info.vsOutputStrideBytes));
+    }
+
+    void declareMeshGsFallbackSubmissionGroup(AppGLSubmissionGroup& group) const {
+        group.reset(AppGLSubmissionGroupKind::MeshGsDraw,
+                    AppGLCommandReason::MeshDraw);
+        group.approximateFallbackDisallowed = true;
+        group.addSubgroup(AppGLSubmissionGroupKind::FallbackNs,
+                          AppGLCommandReason::TranslatedDraw);
     }
 
     void releaseBufferStorage(GLBufferObject& object) {
@@ -13516,7 +13530,9 @@ struct GLContext::Impl {
     // successful encode; false lets the caller fall back to the
     // legacy no-GS path.
     bool encodeEmulatedGsDraw(GLProgramObject& program, GLuint programName,
-                              const appgl::EmulatedDraw& ed);
+                              const appgl::EmulatedDraw& ed,
+                              AppGLSubmissionGroupKind fallbackSubgroupKind =
+                                  AppGLSubmissionGroupKind::None);
 
     // Sprint 17 Day 7+ Bank-Group-H Path B Component D-γ — render the
     // VS+FS program against a CPU-cull-prepass-filtered original-vertex
@@ -39494,6 +39510,15 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
             programName, mode, count);
         std::fflush(stderr);
     }
+    if (!program.geometryReflection.storageBuffers.empty() ||
+        !program.fragmentReflection.storageBuffers.empty()) {
+        if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
+            std::fprintf(stderr,
+                "[MESH_GS] reject native path: storage-buffer/atomic producers are not wired\n");
+            std::fflush(stderr);
+        }
+        return false;
+    }
 
     if (program.metalGSVsComputeNeedsDescriptor &&
         meshVsComputePipelineState == nullptr) {
@@ -39686,8 +39711,24 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     info.clipOrigin = static_cast<std::uint32_t>(state->clipOrigin());
 
     const bool ok = frameGraph->encodeMetalMeshGSDraw(info);
-    if (ok && state->boundDrawFramebuffer() == 0) {
-        invalidateDefaultFramebufferShadow();
+    if (ok) {
+        GpuResourceWriteSet producerWrites;
+        const GLuint drawFboName = state->boundDrawFramebuffer();
+        if (drawFboName != 0) {
+            if (const GLFramebufferObject* drawFbo =
+                    objects->framebuffers().get(drawFboName)) {
+                appendFramebufferAttachmentWrites(producerWrites, *drawFbo);
+            }
+        }
+        for (GLuint texName : textureInfo.writtenImageTextureNames) {
+            producerWrites.push_back(
+                {GpuResourceAccess::Kind::Texture, texName,
+                 kProducerStorageImageWrite});
+        }
+        markGpuResourceWrites(producerWrites);
+        if (drawFboName == 0) {
+            invalidateDefaultFramebufferShadow();
+        }
     }
     if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
         std::fprintf(stderr,
@@ -39700,7 +39741,8 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
 
 bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                                            GLuint programName,
-                                           const appgl::EmulatedDraw& ed)
+                                           const appgl::EmulatedDraw& ed,
+                                           AppGLSubmissionGroupKind fallbackSubgroupKind)
 {
     // Resolve the FBO's layered-attachment state before we decide
     // whether the synth VS should emit `[[render_target_array_index]]`.
@@ -40153,6 +40195,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     }
 
     TranslatedDrawInfo tdi;
+    tdi.fallbackSubgroupKind = fallbackSubgroupKind;
     tdi.mode = replayDraw.topology;
     tdi.vertexCount = static_cast<GLsizei>(replayDraw.vertexCount);
     tdi.vertexData = replayDraw.expandedVertexData.data();
@@ -41463,15 +41506,24 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     // silently zeros the TF capture. CPU GS-emul has full TF capture
     // support via writeGsXfbAndCheckDiscard. With TF active, fall
     // through to CPU emul.
+    bool meshGsNativeAttempted = false;
     if (emulProgram != nullptr &&
         emulProgram->metalGSTier == GLProgramObject::MetalGSTier::MeshShader &&
         !impl_->transformFeedbackActive) {
+        meshGsNativeAttempted = true;
         if (impl_->tryMetalMeshGSDraw(*emulProgram, emulProgramName,
                                        mode, count, first)) {
             APPGL_LOG(DRAW, @"drawArrays mesh-GS ok: count=%d", count);
             return true;
         }
         APPGL_LOG(SHADER, @"drawArrays mesh-GS encode failed — falling back to CPU emulator");
+        if (!emulProgram->geometryEmulated) {
+            appgl::AppGLSubmissionGroup fallbackGroup;
+            impl_->declareMeshGsFallbackSubmissionGroup(fallbackGroup);
+            APPGL_LOG(SHADER,
+                      @"drawArrays mesh-GS exact fallback unavailable — consuming as unsupported");
+            return true;
+        }
     }
     if (emulProgram != nullptr && emulProgram->geometryEmulated) {
         const GLuint vaoName = impl_->state->boundVertexArray();
@@ -41567,7 +41619,11 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     APPGL_LOG(DRAW, @"drawArrays GS-emul: zero primitives");
                     return true;
                 }
-                if (impl_->encodeEmulatedGsDraw(*emulProgram, emulProgramName, ed)) {
+                if (impl_->encodeEmulatedGsDraw(
+                        *emulProgram, emulProgramName, ed,
+                        meshGsNativeAttempted
+                            ? AppGLSubmissionGroupKind::FallbackNs
+                            : AppGLSubmissionGroupKind::None)) {
                     APPGL_LOG(DRAW, @"drawArrays GS-emul ok: verts=%zu topo=0x%X",
                               ed.vertexCount, ed.topology);
                     return true;

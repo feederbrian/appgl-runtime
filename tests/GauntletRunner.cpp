@@ -8389,6 +8389,81 @@ static GLuint buildBenchProgram(const char* vsSrc, const char* fsSrc) {
     return prog;
 }
 
+static std::string shaderInfoLog(GLDispatchTable& gl, GLuint shader) {
+    GLint length = 0;
+    gl.glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &length);
+    if (length <= 1) {
+        return {};
+    }
+    std::string log(static_cast<std::size_t>(length), '\0');
+    GLsizei written = 0;
+    gl.glGetShaderInfoLog(shader, length, &written, log.data());
+    log.resize(static_cast<std::size_t>(std::max<GLsizei>(written, 0)));
+    return log;
+}
+
+static std::string programInfoLog(GLDispatchTable& gl, GLuint program) {
+    GLint length = 0;
+    gl.glGetProgramiv(program, GL_INFO_LOG_LENGTH, &length);
+    if (length <= 1) {
+        return {};
+    }
+    std::string log(static_cast<std::size_t>(length), '\0');
+    GLsizei written = 0;
+    gl.glGetProgramInfoLog(program, length, &written, log.data());
+    log.resize(static_cast<std::size_t>(std::max<GLsizei>(written, 0)));
+    return log;
+}
+
+static GLuint compileRequiredShader(GLDispatchTable& gl,
+                                    GLenum type,
+                                    const char* source,
+                                    std::string_view label) {
+    GLuint shader = gl.glCreateShader(type);
+    gl.glShaderSource(shader, 1, &source, nullptr);
+    gl.glCompileShader(shader);
+    GLint status = GL_FALSE;
+    gl.glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
+    if (status != GL_TRUE) {
+        const std::string log = shaderInfoLog(gl, shader);
+        gl.glDeleteShader(shader);
+        throw std::runtime_error(
+            "DCR4-C shader compile failed for " + std::string(label) +
+            (log.empty() ? std::string{} : ": " + log));
+    }
+    return shader;
+}
+
+static GLuint buildDCR4CMeshGsProgram(const char* vsSrc,
+                                      const char* gsSrc,
+                                      const char* fsSrc) {
+    auto& gl = Runtime::shared().dispatch();
+    const GLuint vs =
+        compileRequiredShader(gl, GL_VERTEX_SHADER, vsSrc, "vertex");
+    const GLuint gs =
+        compileRequiredShader(gl, GL_GEOMETRY_SHADER, gsSrc, "geometry");
+    const GLuint fs =
+        compileRequiredShader(gl, GL_FRAGMENT_SHADER, fsSrc, "fragment");
+    GLuint program = gl.glCreateProgram();
+    gl.glAttachShader(program, vs);
+    gl.glAttachShader(program, gs);
+    gl.glAttachShader(program, fs);
+    gl.glLinkProgram(program);
+    gl.glDeleteShader(vs);
+    gl.glDeleteShader(gs);
+    gl.glDeleteShader(fs);
+    GLint status = GL_FALSE;
+    gl.glGetProgramiv(program, GL_LINK_STATUS, &status);
+    if (status != GL_TRUE) {
+        const std::string log = programInfoLog(gl, program);
+        gl.glDeleteProgram(program);
+        throw std::runtime_error(
+            "DCR4-C mesh-GS program link failed" +
+            (log.empty() ? std::string{} : ": " + log));
+    }
+    return program;
+}
+
 // Helper: 4×4 matrix multiply (column-major).
 static void mat4Mul(float* out, const float* a, const float* b) {
     for (int c = 0; c < 4; ++c)
@@ -10234,6 +10309,168 @@ void setupDCR3CTextureFbo(GLDispatchTable& gl,
                     "dcr3c sentinel framebuffer complete");
 }
 
+constexpr GLsizei kDCR4CMeshGsSize = 32;
+
+static constexpr const char* kDCR4CMeshGsVS =
+    "#version 410 core\n"
+    "out gl_PerVertex {\n"
+    "    vec4 gl_Position;\n"
+    "    float gl_PointSize;\n"
+    "    float gl_ClipDistance[1];\n"
+    "};\n"
+    "out vec4 vColor;\n"
+    "void main() {\n"
+    "    gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n"
+    "    gl_PointSize = 16.0;\n"
+    "    gl_ClipDistance[0] = 1.0;\n"
+    "    vColor = vec4(0.0, 1.0, 0.0, 1.0);\n"
+    "}\n";
+
+static constexpr const char* kDCR4CMeshGsGS =
+    "#version 410 core\n"
+    "layout(points) in;\n"
+    "layout(points, max_vertices = 1) out;\n"
+    "in vec4 vColor[];\n"
+    "out vec4 gColor;\n"
+    "void main() {\n"
+    "    gl_Position = gl_in[0].gl_Position;\n"
+    "    gl_PointSize = gl_in[0].gl_PointSize;\n"
+    "    gColor = vColor[0];\n"
+    "    EmitVertex();\n"
+    "    EndPrimitive();\n"
+    "}\n";
+
+static constexpr const char* kDCR4CMeshGsFS =
+    "#version 410 core\n"
+    "in vec4 gColor;\n"
+    "out vec4 fragColor;\n"
+    "void main() {\n"
+    "    fragColor = gColor;\n"
+    "}\n";
+
+GLuint buildDCR4CMeshGsSentinelProgram() {
+    return buildDCR4CMeshGsProgram(
+        kDCR4CMeshGsVS, kDCR4CMeshGsGS, kDCR4CMeshGsFS);
+}
+
+void setupDCR4CMeshGsTarget(GLDispatchTable& gl,
+                            GLuint& texture,
+                            GLuint& framebuffer) {
+    gl.glGenTextures(1, &texture);
+    setupDCR3CRGBA8Texture(gl, texture, kDCR4CMeshGsSize, kDCR4CMeshGsSize);
+    setupDCR3CTextureFbo(gl, framebuffer, texture);
+    gl.glViewport(0, 0, kDCR4CMeshGsSize, kDCR4CMeshGsSize);
+    gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    gl.glClear(GL_COLOR_BUFFER_BIT);
+    std::array<std::uint8_t, 4> drainPixel = {};
+    gl.glReadPixels(kDCR4CMeshGsSize / 2, kDCR4CMeshGsSize / 2,
+                    1, 1, GL_RGBA, GL_UNSIGNED_BYTE, drainPixel.data());
+    expectGLError(gl, GL_NO_ERROR, "dcr4c mesh-GS target setup readback drain");
+}
+
+bool isDCR4CMeshGsGreen(const std::array<std::uint8_t, 4>& pixel) {
+    return pixel[0] <= 40 && pixel[1] >= 180 &&
+           pixel[2] <= 40 && pixel[3] >= 240;
+}
+
+std::array<std::uint8_t, 4> readDCR4CMeshGsCenter(GLDispatchTable& gl) {
+    std::array<std::uint8_t, 4> pixel = {};
+    gl.glReadPixels(kDCR4CMeshGsSize / 2, kDCR4CMeshGsSize / 2,
+                    1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel.data());
+    expectGLError(gl, GL_NO_ERROR, "dcr4c mesh-GS center readback");
+    return pixel;
+}
+
+void drawDCR4CMeshGsPoint(GLDispatchTable& gl, GLuint program) {
+    GLuint vao = 0;
+    gl.glGenVertexArrays(1, &vao);
+    gl.glBindVertexArray(vao);
+    gl.glUseProgram(program);
+    gl.glEnable(GL_PROGRAM_POINT_SIZE);
+    gl.glDrawArrays(GL_POINTS, 0, 1);
+    expectGLError(gl, GL_NO_ERROR, "dcr4c mesh-GS point draw");
+    gl.glBindVertexArray(0);
+    gl.glDeleteVertexArrays(1, &vao);
+}
+
+TestResult runDCR4CMeshGsDependencySentinel() {
+    auto result = runDirectSentinel("dcr4c.mesh-gs-vsout-dependency", [&] {
+        ScopedSentinelContext scoped(kDCR4CMeshGsSize, kDCR4CMeshGsSize);
+        auto& gl = scoped.gl();
+        const GLuint program = buildDCR4CMeshGsSentinelProgram();
+
+        GLuint texture = 0;
+        GLuint framebuffer = 0;
+        setupDCR4CMeshGsTarget(gl, texture, framebuffer);
+        drawDCR4CMeshGsPoint(gl, program);
+        auto pixel = readDCR4CMeshGsCenter(gl);
+        expectCondition(isDCR4CMeshGsGreen(pixel),
+                        "dcr4c mesh-GS normal draw produces green center");
+
+        gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        {
+            ScopedEnvVar zeroVsOut("APPGL_DCR4C_MESH_GS_ZERO_VSOUT", "1");
+            drawDCR4CMeshGsPoint(gl, program);
+        }
+        pixel = readDCR4CMeshGsCenter(gl);
+        expectCondition(!isDCR4CMeshGsGreen(pixel),
+                        "dcr4c mesh-GS zeroed VS output changes render result");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        gl.glDeleteTextures(1, &texture);
+        gl.glDeleteProgram(program);
+        expectGLError(gl, GL_NO_ERROR, "dcr4c mesh-GS dependency cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "mesh-GS render consumed the VS-as-compute output buffer";
+    }
+    return result;
+}
+
+TestResult runDCR4CMeshGsFboProducerSentinel() {
+    auto result = runDirectSentinel("dcr4c.mesh-gs-fbo-producer-readback", [&] {
+        ScopedSentinelContext scoped(kDCR4CMeshGsSize, kDCR4CMeshGsSize);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        const GLuint program = buildDCR4CMeshGsSentinelProgram();
+
+        GLuint texture = 0;
+        GLuint framebuffer = 0;
+        setupDCR4CMeshGsTarget(gl, texture, framebuffer);
+        expectPendingClear(texturePendingBits(context, texture),
+                           kProducerFboColorWrite,
+                           "dcr4c mesh-GS setup has no stale FBO producer bits");
+
+        drawDCR4CMeshGsPoint(gl, program);
+        expectPendingHas(texturePendingBits(context, texture),
+                         kProducerFboColorWrite,
+                         "dcr4c mesh-GS FBO draw marks texture producer bits");
+
+        const auto pixel = readDCR4CMeshGsCenter(gl);
+        expectCondition(isDCR4CMeshGsGreen(pixel),
+                        "dcr4c mesh-GS FBO readback observes green center");
+        expectPendingClear(texturePendingBits(context, texture),
+                           kProducerFboColorWrite,
+                           "dcr4c mesh-GS readback clears FBO producer bits");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        gl.glDeleteTextures(1, &texture);
+        gl.glDeleteProgram(program);
+        expectGLError(gl, GL_NO_ERROR, "dcr4c mesh-GS producer cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "native mesh-GS FBO draw marks producer bits and readback drains them";
+    }
+    return result;
+}
+
 TestResult runDCR3CViewportRestoreAbandonmentSentinel() {
     auto result = runDirectSentinel("dcr3c.viewport-restore-abandonment", [&] {
         ScopedSentinelContext scoped(32, 32);
@@ -11143,6 +11380,12 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runDCR3CBarBlitCopyMipmapSentinel());
         tests.push_back(runDCR3CBarCopyImageSparseLifecycleSentinel());
         tests.push_back(runDCR3CBufferRoleSentinel());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "dcr4c-sentinels") {
+        tests.push_back(runDCR4CMeshGsDependencySentinel());
+        tests.push_back(runDCR4CMeshGsFboProducerSentinel());
         return buildJSON(normalizedPhase, tests);
     }
 

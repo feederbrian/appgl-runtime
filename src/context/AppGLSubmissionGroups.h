@@ -17,6 +17,7 @@ enum class AppGLSubmissionGroupKind : std::uint8_t {
     MeshGsDraw,
     MeshGsPrepass,
     MeshGsRender,
+    FallbackNs,
 };
 
 enum class AppGLSubmissionResourceKind : std::uint8_t {
@@ -172,6 +173,7 @@ inline const char* appGLSubmissionGroupKindName(AppGLSubmissionGroupKind kind) {
         case AppGLSubmissionGroupKind::MeshGsDraw: return "MeshGsDrawGroup";
         case AppGLSubmissionGroupKind::MeshGsPrepass: return "MeshGsPrepassGroup";
         case AppGLSubmissionGroupKind::MeshGsRender: return "MeshGsRenderGroup";
+        case AppGLSubmissionGroupKind::FallbackNs: return "FallbackNsGroup";
     }
     return "Unknown";
 }

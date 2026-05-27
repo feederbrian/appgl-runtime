@@ -7848,6 +7848,7 @@ fragment float4 appgl_immediate_textured_fs(
         if (!info.submissionGroup.declared) {
             info.submissionGroup.reset(AppGLSubmissionGroupKind::MeshGsDraw,
                                        AppGLCommandReason::MeshDraw);
+            info.submissionGroup.approximateFallbackDisallowed = true;
             info.submissionGroup.addSubgroup(AppGLSubmissionGroupKind::MeshGsPrepass,
                                              AppGLCommandReason::MeshVertexCompute);
             info.submissionGroup.addSubgroup(AppGLSubmissionGroupKind::MeshGsRender,
@@ -7905,39 +7906,54 @@ fragment float4 appgl_immediate_textured_fs(
                 return false;
             }
             vsCmdBuf.label = @"appgl-mesh-gs-vs-compute";
-            id<MTLComputeCommandEncoder> vsEnc =
-                [vsCmdBuf computeCommandEncoder];
-            if (vsEnc == nil) {
-                info.diagnostic = "vs encoder alloc failed";
-                return false;
-            }
-            id<MTLComputePipelineState> vsPSO =
-                (__bridge id<MTLComputePipelineState>)info.vertexComputePipelineState;
-            [vsEnc setComputePipelineState:vsPSO];
-            [vsEnc setBuffer:vsOutBuf offset:0 atIndex:28];
-            if (info.vsUniformData != nullptr && info.vsUniformSize > 0) {
-                [vsEnc setBytes:info.vsUniformData
-                         length:info.vsUniformSize
-                        atIndex:16];
-            }
-            for (const auto& binding : info.vertexComputeBufferBindings) {
-                if (binding.metalBuffer == nullptr) {
-                    continue;
+            const bool dcr4cZeroVsOut =
+                std::getenv("APPGL_DCR4C_MESH_GS_ZERO_VSOUT") != nullptr;
+            if (dcr4cZeroVsOut) {
+                id<MTLBlitCommandEncoder> fillEnc =
+                    [vsCmdBuf blitCommandEncoder];
+                if (fillEnc == nil) {
+                    info.diagnostic = "vsOutBuf fill encoder alloc failed";
+                    return false;
                 }
-                [vsEnc setBuffer:(__bridge id<MTLBuffer>)binding.metalBuffer
-                          offset:(NSUInteger)binding.offset
-                         atIndex:(NSUInteger)binding.metalSlot];
+                [fillEnc fillBuffer:vsOutBuf
+                               range:NSMakeRange(0, vsOutBufSize)
+                               value:0];
+                [fillEnc endEncoding];
+            } else {
+                id<MTLComputeCommandEncoder> vsEnc =
+                    [vsCmdBuf computeCommandEncoder];
+                if (vsEnc == nil) {
+                    info.diagnostic = "vs encoder alloc failed";
+                    return false;
+                }
+                id<MTLComputePipelineState> vsPSO =
+                    (__bridge id<MTLComputePipelineState>)info.vertexComputePipelineState;
+                [vsEnc setComputePipelineState:vsPSO];
+                [vsEnc setBuffer:vsOutBuf offset:0 atIndex:28];
+                if (info.vsUniformData != nullptr && info.vsUniformSize > 0) {
+                    [vsEnc setBytes:info.vsUniformData
+                             length:info.vsUniformSize
+                            atIndex:16];
+                }
+                for (const auto& binding : info.vertexComputeBufferBindings) {
+                    if (binding.metalBuffer == nullptr) {
+                        continue;
+                    }
+                    [vsEnc setBuffer:(__bridge id<MTLBuffer>)binding.metalBuffer
+                              offset:(NSUInteger)binding.offset
+                             atIndex:(NSUInteger)binding.metalSlot];
+                }
+                [vsEnc setStageInRegion:MTLRegionMake1D(0, info.vertexCount)];
+                const NSUInteger maxPerTg =
+                    vsPSO.maxTotalThreadsPerThreadgroup > 0
+                        ? vsPSO.maxTotalThreadsPerThreadgroup : 32;
+                const NSUInteger tgWidth =
+                    info.vertexCount > 0 && info.vertexCount < maxPerTg
+                        ? info.vertexCount : maxPerTg;
+                [vsEnc dispatchThreads:MTLSizeMake(info.vertexCount, 1, 1)
+                 threadsPerThreadgroup:MTLSizeMake(tgWidth, 1, 1)];
+                [vsEnc endEncoding];
             }
-            [vsEnc setStageInRegion:MTLRegionMake1D(0, info.vertexCount)];
-            const NSUInteger maxPerTg =
-                vsPSO.maxTotalThreadsPerThreadgroup > 0
-                    ? vsPSO.maxTotalThreadsPerThreadgroup : 32;
-            const NSUInteger tgWidth =
-                info.vertexCount > 0 && info.vertexCount < maxPerTg
-                    ? info.vertexCount : maxPerTg;
-            [vsEnc dispatchThreads:MTLSizeMake(info.vertexCount, 1, 1)
-             threadsPerThreadgroup:MTLSizeMake(tgWidth, 1, 1)];
-            [vsEnc endEncoding];
             if (!vsLease.commitAndWait(AppGLCommandReason::MeshVertexCompute)) {
                 info.diagnostic = "vs compute command buffer failed";
                 return false;

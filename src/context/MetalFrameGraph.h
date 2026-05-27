@@ -88,6 +88,8 @@ struct MetalDrawInfo {
 // Describes a draw call using a translated (GLSL→MSL) shader pipeline.
 struct TranslatedDrawInfo {
     AppGLSubmissionGroup submissionGroup;
+    AppGLSubmissionGroupKind fallbackSubgroupKind =
+        AppGLSubmissionGroupKind::None;
 
     GLenum mode = 0;
     GLsizei vertexCount = 0;
