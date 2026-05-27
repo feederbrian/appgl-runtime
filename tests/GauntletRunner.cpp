@@ -9792,6 +9792,150 @@ TestResult runDCR3CSoakBarBenchmarkSentinel() {
     return result;
 }
 
+TestResult runDCR3CMSAAResolveReadbackSentinel() {
+    auto result = runDirectSentinel("dcr3c.msaa-resolve-readback-sync", [&] {
+        static constexpr GLsizei kSize = 32;
+        static constexpr const char* kFullscreenVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() {\n"
+            "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kColorFS =
+            "#version 330 core\n"
+            "uniform vec4 uColor;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    fragColor = uColor;\n"
+            "}\n";
+
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        const GLuint program = buildBenchProgram(kFullscreenVS, kColorFS);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(program, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "dcr3c msaa resolve program links");
+        const GLint colorLocation = gl.glGetUniformLocation(program, "uColor");
+        expectCondition(colorLocation >= 0, "dcr3c msaa resolve color uniform exists");
+
+        const GLfloat vertices[] = {
+            -1.0f, -1.0f,
+             3.0f, -1.0f,
+            -1.0f,  3.0f,
+        };
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        gl.glGenVertexArrays(1, &vao);
+        gl.glBindVertexArray(vao);
+        gl.glGenBuffers(1, &vbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), nullptr);
+
+        GLuint msaaFbo = 0;
+        GLuint msaaColor = 0;
+        gl.glGenFramebuffers(1, &msaaFbo);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, msaaFbo);
+        gl.glGenRenderbuffers(1, &msaaColor);
+        gl.glBindRenderbuffer(GL_RENDERBUFFER, msaaColor);
+        gl.glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_RGBA8, kSize, kSize);
+        gl.glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                     GL_RENDERBUFFER, msaaColor);
+        gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+        expectCondition(gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
+                        "dcr3c MSAA source framebuffer complete");
+
+        GLuint resolveFbo = 0;
+        GLuint resolveTex = 0;
+        gl.glGenFramebuffers(1, &resolveFbo);
+        gl.glGenTextures(1, &resolveTex);
+        gl.glBindTexture(GL_TEXTURE_2D, resolveTex);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, kSize, kSize);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, resolveFbo);
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_TEXTURE_2D, resolveTex, 0);
+        gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+        expectCondition(gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
+                        "dcr3c resolve framebuffer complete");
+        expectGLError(gl, GL_NO_ERROR, "dcr3c msaa resolve setup");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, msaaFbo);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glUseProgram(program);
+        gl.glUniform4f(colorLocation, 0.0f, 1.0f, 0.0f, 1.0f);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c MSAA producer draw");
+
+        const auto afterDraw = context.commandSubmissionDebugCounters();
+        if (afterDraw.lastWaitReason == AppGLCommandReason::FlushForReadback &&
+            afterDraw.lastWaitMode == AppGLSubmitMode::CommitAndWait) {
+            throw std::runtime_error(
+                "MSAA producer draw used eager FlushForReadback wait: "
+                + countersSummary(afterDraw));
+        }
+
+        gl.glBindFramebuffer(GL_READ_FRAMEBUFFER, msaaFbo);
+        gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+        gl.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolveFbo);
+        gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        gl.glBlitFramebuffer(0, 0, kSize, kSize,
+                             0, 0, kSize, kSize,
+                             GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c MSAA resolve blit");
+
+        const auto afterResolve = context.commandSubmissionDebugCounters();
+        if (afterResolve.lastWaitReason != AppGLCommandReason::FlushForReadback ||
+            afterResolve.lastWaitMode != AppGLSubmitMode::CommitAndWait) {
+            throw std::runtime_error(
+                "MSAA resolve readback was not covered by FlushForReadback: "
+                + countersSummary(afterResolve));
+        }
+
+        std::array<std::uint8_t, 4> pixel = {};
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, resolveFbo);
+        gl.glReadPixels(kSize / 2, kSize / 2, 1, 1,
+                        GL_RGBA, GL_UNSIGNED_BYTE, pixel.data());
+        expectGLError(gl, GL_NO_ERROR, "dcr3c resolved FBO readback");
+        if (pixel[0] > 15 || pixel[1] < 240 ||
+            pixel[2] > 15 || pixel[3] < 240) {
+            std::ostringstream message;
+            message << "resolved MSAA pixel was not green: rgba=("
+                    << static_cast<unsigned>(pixel[0]) << ","
+                    << static_cast<unsigned>(pixel[1]) << ","
+                    << static_cast<unsigned>(pixel[2]) << ","
+                    << static_cast<unsigned>(pixel[3]) << ")";
+            throw std::runtime_error(message.str());
+        }
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glBindVertexArray(0);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+        gl.glBindTexture(GL_TEXTURE_2D, 0);
+        gl.glBindRenderbuffer(GL_RENDERBUFFER, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteTextures(1, &resolveTex);
+        gl.glDeleteRenderbuffers(1, &msaaColor);
+        GLuint framebuffers[] = { msaaFbo, resolveFbo };
+        gl.glDeleteFramebuffers(2, framebuffers);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteProgram(program);
+        expectGLError(gl, GL_NO_ERROR, "dcr3c msaa resolve cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "MSAA draw -> blit resolve -> readback stayed coherent without per-draw wait";
+    }
+    return result;
+}
+
 void appendCoverageDelta(TestResult& result, const std::string& phase) {
     // Bootstrap coverage checks only apply to phase-a scenes. Phase-c and later
     // scenes validate their own scenarioCoverage() list; requiring the full
@@ -9986,6 +10130,7 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
     if (normalizedPhase == "dcr3c-sentinels") {
         tests.push_back(runDCR3CFboPressureReadbackSentinel());
         tests.push_back(runDCR3CSoakBarBenchmarkSentinel());
+        tests.push_back(runDCR3CMSAAResolveReadbackSentinel());
         return buildJSON(normalizedPhase, tests);
     }
 

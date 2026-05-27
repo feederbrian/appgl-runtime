@@ -11304,6 +11304,15 @@ struct GLContext::Impl {
             return false;
         }
 
+        // This helper is shared by glReadPixels and the CPU-backed
+        // glBlitFramebuffer path. glReadPixels already flushes before it
+        // gets here, but blit can read an FBO attachment directly. Make the
+        // producer wait local to the Metal read so MSAA resolve/readback is
+        // queued only after the draw that produced the multisample texture.
+        if (frameGraph != nullptr) {
+            frameGraph->flushForReadback();
+        }
+
         // Read from the Metal texture — this has the actual GPU-rendered data.
         // The texture may be RGBA8 or BGRA8; we handle both.
         const bool isBGRA = (metalTex.pixelFormat == MTLPixelFormatBGRA8Unorm);
