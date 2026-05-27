@@ -9320,6 +9320,13 @@ TestResult runDCR3ReducedBoundContendedPressureSentinel() {
                 countersSummary(afterLoop)
             );
         }
+        if (afterLoop.peakInFlight <= afterLoop.pressureSoftCap) {
+            recordSentinelFailure(
+                failures,
+                "reserve region was not exercised",
+                countersSummary(afterLoop)
+            );
+        }
         if (allocWaitTimeoutTotal(afterLoop) != 0) {
             recordSentinelFailure(
                 failures,
