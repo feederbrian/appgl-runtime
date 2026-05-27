@@ -871,7 +871,7 @@ struct MetalFrameGraph::Impl {
         // triggers "Command encoder released without endEncoding".
         endRenderPass();
         if (currentCommandBuffer != nil) {
-            currentCommandBufferLease.commitAndWait(@"framegraph-destruct");
+            currentCommandBufferLease.commitAndWait(AppGLCommandReason::FrameGraphDestruct);
             currentCommandBuffer = nil;
         }
         // OPT-8: Release any acquired ring slot to balance the semaphore.
@@ -5186,7 +5186,8 @@ fragment float4 appgl_immediate_textured_fs(
             if (!usesOffscreenTarget && currentDrawable != nil && pendingPresent) {
                 [currentCommandBuffer presentDrawable:currentDrawable];
             }
-            const bool completed = currentCommandBufferLease.commitAndWait(@"layered-clear-drain-current");
+            const bool completed =
+                currentCommandBufferLease.commitAndWait(AppGLCommandReason::LayeredClearDrainCurrent);
             if (ringSlotAcquired) {
                 signalRingSlotNow();
                 advanceRingBuffer();
@@ -5210,7 +5211,7 @@ fragment float4 appgl_immediate_textured_fs(
             if (clearCommandBuffer != nil) {
                 return true;
             }
-            clearLease = makeCommandBufferDrainingAutorelease(@"layeredClear");
+            clearLease = makeCommandBufferDrainingAutorelease(AppGLCommandReason::LayeredClear);
             clearCommandBuffer = clearLease.get();
             if (clearCommandBuffer == nil) {
                 return false;
@@ -5223,7 +5224,7 @@ fragment float4 appgl_immediate_textured_fs(
             if (clearCommandBuffer == nil) {
                 return true;
             }
-            const bool completed = clearLease.commitAndWait(@"layered-clear-sync");
+            const bool completed = clearLease.commitAndWait(AppGLCommandReason::LayeredClear);
             clearCommandBuffer = nil;
             clearLease = MetalCommandBufferLease{};
             passesInCommandBuffer = 0;
@@ -5956,7 +5957,7 @@ fragment float4 appgl_immediate_textured_fs(
         ScopedOwnedObjCObject outBufRelease(outBuf);
         outBuf.label = @"appgl-vstf-out";
 
-        auto lease = makeCommandBuffer(@"vstf-vs-compute");
+        auto lease = makeCommandBuffer(AppGLCommandReason::VertexTransformFeedbackReadback);
         id<MTLCommandBuffer> cmdBuf = lease.get();
         if (cmdBuf == nil) {
             return false;
@@ -6007,7 +6008,7 @@ fragment float4 appgl_immediate_textured_fs(
         [enc dispatchThreads:MTLSizeMake(vertexCount, 1, 1)
          threadsPerThreadgroup:MTLSizeMake(tgWidth, 1, 1)];
         [enc endEncoding];
-        if (!lease.commitAndWait(@"vstf-vs-compute")) {
+        if (!lease.commitAndWait(AppGLCommandReason::VertexTransformFeedbackReadback)) {
             return false;
         }
 
@@ -6359,7 +6360,7 @@ fragment float4 appgl_immediate_textured_fs(
         // factor-buffer writes.
         endRenderPass();
         if (currentCommandBuffer != nil) {
-            if (!currentCommandBufferLease.commitAndWait(@"tess-drain-current")) {
+            if (!currentCommandBufferLease.commitAndWait(AppGLCommandReason::TessDrainCurrent)) {
                 return false;
             }
             currentCommandBuffer = nil;
@@ -6505,7 +6506,7 @@ fragment float4 appgl_immediate_textured_fs(
         // `spvIn [[buffer(22)]]` (no stage-input descriptor needed with
         // `multi_patch_workgroup = true`).
         if (isPhase3 && info.vertexComputePipelineState != nullptr) {
-            auto vsLease = makeCommandBuffer(@"tess-vs-compute");
+            auto vsLease = makeCommandBuffer(AppGLCommandReason::TessVertexCompute);
             id<MTLCommandBuffer> vsCmdBuf = vsLease.get();
             if (vsCmdBuf == nil) return false;
             vsCmdBuf.label = @"appgl-tess-vs-compute";
@@ -6572,7 +6573,7 @@ fragment float4 appgl_immediate_textured_fs(
                  threadsPerThreadgroup:MTLSizeMake(tgWidth, 1, 1)];
             }
             [vsEnc endEncoding];
-            vsLease.commitAndWait(@"tess-vs-compute");
+            vsLease.commitAndWait(AppGLCommandReason::TessVertexCompute);
             // CKPT137: dump vsOutBuf post-VS-compute when APPGL_TRACE_TESS_BUF.
             // vsOutBuf is allocated Shared above when env-gate is set, so
             // contents are accessible without additional blit.
@@ -6598,7 +6599,7 @@ fragment float4 appgl_immediate_textured_fs(
         }
 
         // (3b) Compute-encode the TCS dispatch.
-        auto computeLease = makeCommandBuffer(@"tess-compute");
+        auto computeLease = makeCommandBuffer(AppGLCommandReason::TessControlCompute);
         id<MTLCommandBuffer> computeCmdBuf = computeLease.get();
         if (computeCmdBuf == nil) return false;
         computeCmdBuf.label = @"appgl-tess-compute";
@@ -6630,7 +6631,7 @@ fragment float4 appgl_immediate_textured_fs(
             (NSUInteger)info.tessControlOutputVertices, 1, 1);
         [cenc dispatchThreadgroups:groups threadsPerThreadgroup:threads];
         [cenc endEncoding];
-        computeLease.commitAndWait(@"tess-compute");
+        computeLease.commitAndWait(AppGLCommandReason::TessControlCompute);
 
         // CKPT137: dump cpOutBuf + spvIndirectParams post-TCS-compute.
         if (std::getenv("APPGL_TRACE_TESS_BUF") != nullptr) {
@@ -6959,7 +6960,7 @@ fragment float4 appgl_immediate_textured_fs(
                         ensureTessFactorClampPipelineState();
                     if (clampPSO != nil) {
                         uint32_t patchCountU = (uint32_t)info.patchCount;
-                        auto clampLease = makeCommandBuffer(@"tess-factor-clamp");
+                        auto clampLease = makeCommandBuffer(AppGLCommandReason::TessFactorClamp);
                         id<MTLCommandBuffer> clampCmd = clampLease.get();
                         clampCmd.label = @"appgl-tess-factor-clamp";
                         id<MTLComputeCommandEncoder> clampEnc =
@@ -6972,7 +6973,7 @@ fragment float4 appgl_immediate_textured_fs(
                         [clampEnc dispatchThreads:MTLSizeMake((NSUInteger)patchCountU, 1, 1)
                           threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
                         [clampEnc endEncoding];
-                        clampLease.commitAndWait(@"tess-factor-clamp");
+                        clampLease.commitAndWait(AppGLCommandReason::TessFactorClamp);
                     }
 
                     MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor new];
@@ -6980,7 +6981,7 @@ fragment float4 appgl_immediate_textured_fs(
                     rpd.renderTargetWidth = 1;
                     rpd.renderTargetHeight = 1;
                     rpd.defaultRasterSampleCount = 1;
-                    auto dgLease = makeCommandBuffer(@"tess-domain-gen-hw");
+                    auto dgLease = makeCommandBuffer(AppGLCommandReason::TessDomainGenerate);
                     id<MTLCommandBuffer> dgCmdBuf = dgLease.get();
                     dgCmdBuf.label = @"appgl-tess-domain-gen-hw";
                     id<MTLRenderCommandEncoder> dgEnc =
@@ -7000,7 +7001,7 @@ fragment float4 appgl_immediate_textured_fs(
                            instanceCount:1
                             baseInstance:0];
                     [dgEnc endEncoding];
-                    dgLease.commitAndWait(@"tess-domain-gen-hw");
+                    dgLease.commitAndWait(AppGLCommandReason::TessDomainGenerate);
                 } else {
                     // Phase 4A [metal-tess-TF]: when
                     // APPGL_TESS_DOMAIN_PORT is set and the genMode is
@@ -7050,7 +7051,7 @@ fragment float4 appgl_immediate_textured_fs(
                                        options:MTLResourceStorageModeShared];
                         ScopedOwnedObjCObject portParamsBufRelease(portParamsBuf);
 
-                        auto dgLease = makeCommandBuffer(@"tess-domain-port");
+                        auto dgLease = makeCommandBuffer(AppGLCommandReason::TessDomainGenerate);
                         id<MTLCommandBuffer> dgCmdBuf = dgLease.get();
                         dgCmdBuf.label = @"appgl-tess-domain-port";
                         id<MTLComputeCommandEncoder> dgEnc =
@@ -7064,7 +7065,7 @@ fragment float4 appgl_immediate_textured_fs(
                         [dgEnc dispatchThreads:MTLSizeMake(1, 1, 1)
                           threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
                         [dgEnc endEncoding];
-                        dgLease.commitAndWait(@"tess-domain-port");
+                        dgLease.commitAndWait(AppGLCommandReason::TessDomainGenerate);
                     } else {
                         // Compute-kernel path (default, and fallback
                         // when port PSO unavailable or flag disabled).
@@ -7074,7 +7075,7 @@ fragment float4 appgl_immediate_textured_fs(
                         // Parallelization revisited once Phase 4/5
                         // stabilize the TF capture protocol — the
                         // atomic cursor then becomes safe.
-                        auto dgLease = makeCommandBuffer(@"tess-domain-gen");
+                        auto dgLease = makeCommandBuffer(AppGLCommandReason::TessDomainGenerate);
                         id<MTLCommandBuffer> dgCmdBuf = dgLease.get();
                         dgCmdBuf.label = @"appgl-tess-domain-gen";
                         id<MTLComputeCommandEncoder> dgEnc =
@@ -7088,7 +7089,7 @@ fragment float4 appgl_immediate_textured_fs(
                         [dgEnc dispatchThreads:MTLSizeMake(1, 1, 1)
                           threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
                         [dgEnc endEncoding];
-                        dgLease.commitAndWait(@"tess-domain-gen");
+                        dgLease.commitAndWait(AppGLCommandReason::TessDomainGenerate);
                     }
                 }
 
@@ -7188,7 +7189,7 @@ fragment float4 appgl_immediate_textured_fs(
                 // just-generated buffers, writes spvOut into
                 // tesComputeOutBuf.
                 if (tessTFGeneratedVerts > 0) {
-                    auto tesLease = makeCommandBuffer(@"tess-tes-compute");
+                    auto tesLease = makeCommandBuffer(AppGLCommandReason::TessEvalCompute);
                     id<MTLCommandBuffer> tesCmdBuf = tesLease.get();
                     tesCmdBuf.label = @"appgl-tess-tes-compute";
                     id<MTLComputeCommandEncoder> tesEnc =
@@ -7255,7 +7256,7 @@ fragment float4 appgl_immediate_textured_fs(
                     [tesEnc dispatchThreads:MTLSizeMake((NSUInteger)tessTFGeneratedVerts, 1, 1)
                       threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
                     [tesEnc endEncoding];
-                    tesLease.commitAndWait(@"tess-tes-compute");
+                    tesLease.commitAndWait(AppGLCommandReason::TessEvalCompute);
 
                     if (std::getenv("APPGL_TRACE_TESS")) {
                         std::fprintf(stderr,
@@ -7755,7 +7756,7 @@ fragment float4 appgl_immediate_textured_fs(
 
         // Commit + wait so subsequent readbacks / copies observe the
         // tess draw's output. Matches compute-dispatch's sync semantics.
-        if (!currentCommandBufferLease.commitAndWait(@"tess-render")) {
+        if (!currentCommandBufferLease.commitAndWait(AppGLCommandReason::TessRender)) {
             return false;
         }
         currentCommandBuffer = nil;
@@ -7820,7 +7821,7 @@ fragment float4 appgl_immediate_textured_fs(
         vsOutBuf.label = @"appgl-mesh-gs-vs-output";
 
         {
-            auto vsLease = makeCommandBuffer(@"mesh-gs-vs-compute");
+            auto vsLease = makeCommandBuffer(AppGLCommandReason::MeshVertexCompute);
             id<MTLCommandBuffer> vsCmdBuf = vsLease.get();
             if (vsCmdBuf == nil) {
                 info.diagnostic = "vs cmdBuf alloc failed";
@@ -7860,7 +7861,7 @@ fragment float4 appgl_immediate_textured_fs(
             [vsEnc dispatchThreads:MTLSizeMake(info.vertexCount, 1, 1)
              threadsPerThreadgroup:MTLSizeMake(tgWidth, 1, 1)];
             [vsEnc endEncoding];
-            if (!vsLease.commitAndWait(@"mesh-gs-vs-compute")) {
+            if (!vsLease.commitAndWait(AppGLCommandReason::MeshVertexCompute)) {
                 info.diagnostic = "vs compute command buffer failed";
                 return false;
             }
@@ -7938,7 +7939,7 @@ fragment float4 appgl_immediate_textured_fs(
             currentRenderEncoder = nil;
             activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
         }
-        auto renderLease = makeCommandBuffer(@"mesh-gs-draw");
+        auto renderLease = makeCommandBuffer(AppGLCommandReason::MeshDraw);
         id<MTLCommandBuffer> rcmd = renderLease.get();
         if (rcmd == nil) {
             info.diagnostic = "render cmdBuf alloc failed";
@@ -8261,7 +8262,7 @@ fragment float4 appgl_immediate_textured_fs(
             threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
               threadsPerMeshThreadgroup:MTLSizeMake(1, 1, 1)];
         [renc endEncoding];
-        renderLease.commitAndWait(@"mesh-gs-draw");
+        renderLease.commitAndWait(AppGLCommandReason::MeshDraw);
 
         // Path D — clear the pending-clear flag now that the pass has
         // consumed it (matches MetalFrameGraph.mm:984's `hasPendingClear
@@ -8295,7 +8296,7 @@ fragment float4 appgl_immediate_textured_fs(
         // flushForReadback plumbing for render paths stays separate.
         endRenderPass();
 
-        auto computeLease = makeCommandBuffer(@"compute-dispatch");
+        auto computeLease = makeCommandBuffer(AppGLCommandReason::ComputeDispatch);
         id<MTLCommandBuffer> cmdBuf = computeLease.get();
         if (cmdBuf == nil) {
             return false;
@@ -8509,7 +8510,7 @@ fragment float4 appgl_immediate_textured_fs(
             [enc dispatchThreadgroups:threadGroups threadsPerThreadgroup:threadsPerGroup];
         }
         [enc endEncoding];
-        computeLease.commitAndWait(@"compute-dispatch");
+        computeLease.commitAndWait(AppGLCommandReason::ComputeDispatch);
         return true;
     }
 
@@ -9483,7 +9484,7 @@ static void phaseAProbeTessDomainPort(id<MTLDevice> device,
                         options:MTLResourceStorageModeShared];
 
         auto lease = commandSubmission != nullptr
-            ? commandSubmission->makeCommandBuffer(@"tess-domain-probe-compute")
+            ? commandSubmission->makeCommandBuffer(AppGLCommandReason::TessProbe)
             : MetalCommandBufferLease{};
         id<MTLCommandBuffer> cb = lease.get();
         id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
@@ -9496,7 +9497,7 @@ static void phaseAProbeTessDomainPort(id<MTLDevice> device,
         [enc dispatchThreads:MTLSizeMake(1, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
         [enc endEncoding];
-        lease.commitAndWait(@"tess-domain-probe-compute");
+        lease.commitAndWait(AppGLCommandReason::TessProbe);
 
         uint32_t gpuVerts = *(const uint32_t*)cursorBuf.contents;
         const float* gpuCoords = (const float*)coordsBuf.contents;
@@ -9710,7 +9711,7 @@ using namespace metal;
         rpd.defaultRasterSampleCount = 1;
 
         auto lease = commandSubmission != nullptr
-            ? commandSubmission->makeCommandBuffer(@"tess-domain-probe-render")
+            ? commandSubmission->makeCommandBuffer(AppGLCommandReason::TessProbe)
             : MetalCommandBufferLease{};
         id<MTLCommandBuffer> cb = lease.get();
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rpd];
@@ -9727,7 +9728,7 @@ using namespace metal;
            instanceCount:1
             baseInstance:0];
         [enc endEncoding];
-        if (!lease.commitAndWait(@"tess-domain-probe-render")) {
+        if (!lease.commitAndWait(AppGLCommandReason::TessProbe)) {
             std::fprintf(stderr, "[APPGL probe] %s cmd failed\n", label);
             return;
         }

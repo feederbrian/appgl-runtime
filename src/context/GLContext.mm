@@ -4952,7 +4952,7 @@ struct GLContext::Impl {
                 auto fpEnsureBlitEnc = [&]() -> bool {
                     if (fpBlitEnc != nil) return true;
                     if (commandQueue == nil) return false;
-                    fpBlitLease = makeCommandBuffer(@"texture-fastpath-blit-upload");
+                    fpBlitLease = makeCommandBuffer(AppGLCommandReason::TextureUpload);
                     fpBlitCmdBuf = fpBlitLease.get();
                     if (fpBlitCmdBuf == nil) return false;
                     fpBlitEnc = [fpBlitCmdBuf blitCommandEncoder];
@@ -5109,7 +5109,7 @@ struct GLContext::Impl {
                 }
                 if (fpBlitEnc != nil) {
                     [fpBlitEnc endEncoding];
-                    fpBlitLease.commitAndWait(@"texture-fastpath-blit-upload");
+                    fpBlitLease.commitAndWait(AppGLCommandReason::TextureUpload);
                 }
                 if (object.metalSwizzledView != nullptr) {
                     object.swizzleDirty = true;
@@ -5303,7 +5303,7 @@ struct GLContext::Impl {
         auto ensureBlitEnc = [&]() -> bool {
             if (blitEnc != nil) return true;
             if (commandQueue == nil) return false;
-            blitLease = makeCommandBuffer(@"texture-blit-upload");
+            blitLease = makeCommandBuffer(AppGLCommandReason::TextureUpload);
             blitCmdBuf = blitLease.get();
             if (blitCmdBuf == nil) return false;
             blitEnc = [blitCmdBuf blitCommandEncoder];
@@ -5497,7 +5497,7 @@ struct GLContext::Impl {
         }
         if (blitEnc != nil) {
             [blitEnc endEncoding];
-            blitLease.commitAndWait(@"texture-blit-upload");
+            blitLease.commitAndWait(AppGLCommandReason::TextureUpload);
         }
         object.metalTexture = transferRetainedMetalObject(texture);
         // Mark the texture as instantiated so consumers (getTextureImage,
@@ -6451,7 +6451,7 @@ struct GLContext::Impl {
                                 options:MTLResourceStorageModeShared];
         if (depthBuf == nil || stencilBuf == nil) return nil;
 
-        auto readLease = makeCommandBuffer(@"depth-stencil-flip-read");
+        auto readLease = makeCommandBuffer(AppGLCommandReason::DepthStencilFlip);
         id<MTLCommandBuffer> readCmd = readLease.get();
         id<MTLBlitCommandEncoder> readBlit = [readCmd blitCommandEncoder];
         if (readCmd == nil || readBlit == nil) return nil;
@@ -6477,7 +6477,7 @@ struct GLContext::Impl {
           destinationBytesPerImage:stencilImageBytes
                            options:MTLBlitOptionStencilFromDepthStencil];
         [readBlit endEncoding];
-        readLease.commitAndWait(@"depth-stencil-flip-read");
+        readLease.commitAndWait(AppGLCommandReason::DepthStencilFlip);
 
         const auto* depthBytes =
             static_cast<const std::uint8_t*>([depthBuf contents]);
@@ -6514,7 +6514,7 @@ struct GLContext::Impl {
         id<MTLTexture> flippedTex = [device newTextureWithDescriptor:desc];
         if (flippedTex == nil) return nil;
 
-        auto uploadLease = makeCommandBuffer(@"depth-stencil-flip-upload");
+        auto uploadLease = makeCommandBuffer(AppGLCommandReason::DepthStencilFlip);
         id<MTLCommandBuffer> uploadCmd = uploadLease.get();
         id<MTLBlitCommandEncoder> uploadBlit = [uploadCmd blitCommandEncoder];
         if (uploadCmd == nil || uploadBlit == nil) return nil;
@@ -6524,7 +6524,7 @@ struct GLContext::Impl {
             static_cast<NSUInteger>(flipped.size()),
             fullRegion, 0, 0, nativeBpp);
         [uploadBlit endEncoding];
-        uploadLease.commitAndWait(@"depth-stencil-flip-upload");
+        uploadLease.commitAndWait(AppGLCommandReason::DepthStencilFlip);
         return uploaded ? flippedTex : nil;
     }
 
@@ -6980,7 +6980,7 @@ struct GLContext::Impl {
                                                     length:depthImageBytes
                                                    options:MTLResourceStorageModeShared];
         if (staging == nil) return false;
-        auto lease = makeCommandBuffer(@"mirror-depth-renderbuffer");
+        auto lease = makeCommandBuffer(AppGLCommandReason::RenderbufferMirror);
         id<MTLCommandBuffer> cmd = lease.get();
         id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
         if (cmd == nil || blit == nil) return false;
@@ -6998,7 +6998,7 @@ struct GLContext::Impl {
            destinationOrigin:MTLOriginMake(static_cast<NSUInteger>(x), metalY, 0)
                      options:MTLBlitOptionDepthFromDepthStencil];
         [blit endEncoding];
-        lease.commitAndWait(@"mirror-depth-renderbuffer");
+        lease.commitAndWait(AppGLCommandReason::RenderbufferMirror);
         renderbuffer.wasMetalDepthRendered = true;
         return true;
     }
@@ -7037,7 +7037,7 @@ struct GLContext::Impl {
                                                     length:stencilImageBytes
                                                    options:MTLResourceStorageModeShared];
         if (staging == nil) return false;
-        auto lease = makeCommandBuffer(@"mirror-stencil-renderbuffer");
+        auto lease = makeCommandBuffer(AppGLCommandReason::RenderbufferMirror);
         id<MTLCommandBuffer> cmd = lease.get();
         id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
         if (cmd == nil || blit == nil) return false;
@@ -7055,7 +7055,7 @@ struct GLContext::Impl {
            destinationOrigin:MTLOriginMake(static_cast<NSUInteger>(x), metalY, 0)
                      options:MTLBlitOptionStencilFromDepthStencil];
         [blit endEncoding];
-        lease.commitAndWait(@"mirror-stencil-renderbuffer");
+        lease.commitAndWait(AppGLCommandReason::RenderbufferMirror);
         return true;
     }
 
@@ -17822,7 +17822,7 @@ bool GLContext::copyTexImage2D(
             pushError(GL_INVALID_OPERATION);
             return false;
         }
-        auto lease = impl_->makeCommandBuffer(@"copy-image-sub-data");
+        auto lease = impl_->makeCommandBuffer(AppGLCommandReason::CopyImageBlit);
         id<MTLCommandBuffer> cmd = lease.get();
         if (cmd == nil) {
             pushError(GL_INVALID_OPERATION);
@@ -17851,7 +17851,7 @@ bool GLContext::copyTexImage2D(
                 destinationOrigin:MTLOriginMake(0, 0, 0)];
         }
         [blit endEncoding];
-        lease.commitAndWait(@"copy-image-sub-data");
+        lease.commitAndWait(AppGLCommandReason::CopyImageBlit);
         return true;
     }
 
@@ -49863,7 +49863,7 @@ bool GLContext::blitReadFBOToTextureSubImage(
     id<MTLDevice> mtlDevice = impl_->device;
     id<MTLCommandQueue> mtlQueue = impl_->commandQueue;
     if (mtlDevice == nil || mtlQueue == nil) return false;
-    auto lease = impl_->makeCommandBuffer(@"copy-texture-sub-image");
+    auto lease = impl_->makeCommandBuffer(AppGLCommandReason::CopyTextureSubImage);
     id<MTLCommandBuffer> cmd = lease.get();
     if (cmd == nil) return false;
     id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
@@ -49894,7 +49894,7 @@ bool GLContext::blitReadFBOToTextureSubImage(
                  static_cast<NSUInteger>(std::max<GLint>(yoffset, 0)),
                  dstZ)];
     [blit endEncoding];
-    lease.commitAndWait(@"copy-texture-sub-image");
+    lease.commitAndWait(AppGLCommandReason::CopyTextureSubImage);
     return true;
 }
 

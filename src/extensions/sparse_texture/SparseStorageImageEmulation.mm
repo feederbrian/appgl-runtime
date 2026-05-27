@@ -572,7 +572,7 @@ bool initializeSidecarFromCommittedRegions(ExtensionContext& ctx,
     }
     MetalCommandSubmission* submission = metalCommandSubmission(ctx);
     auto lease = submission != nullptr
-        ? submission->makeCommandBuffer(@"sparse-storage-sidecar-init")
+        ? submission->makeCommandBuffer(AppGLCommandReason::SparseSidecar)
         : MetalCommandBufferLease{};
     id<MTLCommandBuffer> cmd = lease.get();
     if (cmd == nil) {
@@ -593,7 +593,7 @@ bool initializeSidecarFromCommittedRegions(ExtensionContext& ctx,
         }
     }
     [blit endEncoding];
-    return ok && lease.commitAndWait(@"sparse-storage-sidecar-init");
+    return ok && lease.commitAndWait(AppGLCommandReason::SparseSidecar);
 }
 
 }  // namespace

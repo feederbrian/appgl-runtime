@@ -23,6 +23,16 @@ enum class AppGLDependencyClass : std::uint8_t {
     Present,
     Standalone,
     Lifetime,
+    GpuOnlyOrdering,
+    CpuVisibleBarrier,
+    Upload,
+    Copy,
+    Tessellation,
+    Mesh,
+    Compute,
+    SparseResidency,
+    Sidecar,
+    Probe,
 };
 
 enum class AppGLCommandReason : std::uint8_t {
@@ -41,6 +51,31 @@ enum class AppGLCommandReason : std::uint8_t {
     CompletionWait,
     FinishWait,
     LifetimeDrain,
+    FrameGraphDestruct,
+    LayeredClearDrainCurrent,
+    LayeredClear,
+    VertexTransformFeedbackReadback,
+    TessDrainCurrent,
+    TessVertexCompute,
+    TessControlCompute,
+    TessFactorClamp,
+    TessDomainGenerate,
+    TessEvalCompute,
+    TessRender,
+    TessProbe,
+    MeshVertexCompute,
+    MeshDraw,
+    ComputeDispatch,
+    CopyImageBlit,
+    CopyTextureSubImage,
+    TextureUpload,
+    DepthStencilFlip,
+    RenderbufferMirror,
+    SparseResidency,
+    SparseSidecar,
+    CpuVisibleBarrier,
+    Fp64Sidecar,
+    PressureFlush,
     Count,
 };
 
@@ -85,6 +120,56 @@ inline constexpr std::array<AppGLCommandReasonRecord,
          "FinishWait", "frame-command-buffer"},
         {AppGLCommandReason::LifetimeDrain, AppGLSubmitMode::DrainAll, AppGLDependencyClass::Lifetime,
          "LifetimeDrain", "glFinish-drain-all"},
+        {AppGLCommandReason::FrameGraphDestruct, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::Lifetime,
+         "FrameGraphDestruct", "framegraph-destruct"},
+        {AppGLCommandReason::LayeredClearDrainCurrent, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::GpuOnlyOrdering,
+         "LayeredClearDrainCurrent", "layered-clear-drain-current"},
+        {AppGLCommandReason::LayeredClear, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::GpuOnlyOrdering,
+         "LayeredClear", "layered-clear-sync"},
+        {AppGLCommandReason::VertexTransformFeedbackReadback, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::CpuVisibleBarrier,
+         "VertexTransformFeedbackReadback", "vstf-vs-compute"},
+        {AppGLCommandReason::TessDrainCurrent, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::GpuOnlyOrdering,
+         "TessDrainCurrent", "tess-drain-current"},
+        {AppGLCommandReason::TessVertexCompute, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::Tessellation,
+         "TessVertexCompute", "tess-vs-compute"},
+        {AppGLCommandReason::TessControlCompute, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::Tessellation,
+         "TessControlCompute", "tess-compute"},
+        {AppGLCommandReason::TessFactorClamp, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::Tessellation,
+         "TessFactorClamp", "tess-factor-clamp"},
+        {AppGLCommandReason::TessDomainGenerate, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::Tessellation,
+         "TessDomainGenerate", "tess-domain-gen"},
+        {AppGLCommandReason::TessEvalCompute, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::Tessellation,
+         "TessEvalCompute", "tess-tes-compute"},
+        {AppGLCommandReason::TessRender, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::Tessellation,
+         "TessRender", "tess-render"},
+        {AppGLCommandReason::TessProbe, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::Probe,
+         "TessProbe", "tess-domain-probe"},
+        {AppGLCommandReason::MeshVertexCompute, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::Mesh,
+         "MeshVertexCompute", "mesh-gs-vs-compute"},
+        {AppGLCommandReason::MeshDraw, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::Mesh,
+         "MeshDraw", "mesh-gs-draw"},
+        {AppGLCommandReason::ComputeDispatch, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::Compute,
+         "ComputeDispatch", "compute-dispatch"},
+        {AppGLCommandReason::CopyImageBlit, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::Copy,
+         "CopyImageBlit", "copy-image-sub-data"},
+        {AppGLCommandReason::CopyTextureSubImage, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::Copy,
+         "CopyTextureSubImage", "copy-texture-sub-image"},
+        {AppGLCommandReason::TextureUpload, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::Upload,
+         "TextureUpload", "texture-blit-upload"},
+        {AppGLCommandReason::DepthStencilFlip, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::CpuVisibleBarrier,
+         "DepthStencilFlip", "depth-stencil-flip"},
+        {AppGLCommandReason::RenderbufferMirror, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::Upload,
+         "RenderbufferMirror", "mirror-renderbuffer"},
+        {AppGLCommandReason::SparseResidency, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::SparseResidency,
+         "SparseResidency", "sparse-texture-map"},
+        {AppGLCommandReason::SparseSidecar, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::Sidecar,
+         "SparseSidecar", "sparse-storage-sidecar"},
+        {AppGLCommandReason::CpuVisibleBarrier, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::CpuVisibleBarrier,
+         "CpuVisibleBarrier", "cpu-visible-barrier"},
+        {AppGLCommandReason::Fp64Sidecar, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::Sidecar,
+         "Fp64Sidecar", "fp64-sidecar"},
+        {AppGLCommandReason::PressureFlush, AppGLSubmitMode::AsyncCommit, AppGLDependencyClass::GpuOnlyOrdering,
+         "PressureFlush", "pressure-flush"},
     }};
 
 inline const AppGLCommandReasonRecord& appGLCommandReasonRecord(AppGLCommandReason reason) {
@@ -120,6 +205,16 @@ inline const char* appGLDependencyClassName(AppGLDependencyClass dependencyClass
         case AppGLDependencyClass::Present: return "present";
         case AppGLDependencyClass::Standalone: return "standalone";
         case AppGLDependencyClass::Lifetime: return "lifetime";
+        case AppGLDependencyClass::GpuOnlyOrdering: return "gpu-only-ordering";
+        case AppGLDependencyClass::CpuVisibleBarrier: return "cpu-visible-barrier";
+        case AppGLDependencyClass::Upload: return "upload";
+        case AppGLDependencyClass::Copy: return "copy";
+        case AppGLDependencyClass::Tessellation: return "tessellation";
+        case AppGLDependencyClass::Mesh: return "mesh";
+        case AppGLDependencyClass::Compute: return "compute";
+        case AppGLDependencyClass::SparseResidency: return "sparse-residency";
+        case AppGLDependencyClass::Sidecar: return "sidecar";
+        case AppGLDependencyClass::Probe: return "probe";
     }
     return "unknown";
 }
@@ -128,6 +223,10 @@ struct AppGLCommandSubmissionDebugCounters {
     std::uint64_t submittedCommandBuffers = 0;
     std::uint64_t completedCommandBuffers = 0;
     std::uint64_t waitReasonLogEntries = 0;
+    std::uint64_t pressureFlushCount = 0;
+    std::uint32_t currentInFlight = 0;
+    std::uint32_t peakInFlight = 0;
+    std::array<std::uint64_t, static_cast<std::size_t>(AppGLCommandReason::Count)> allocWaitTimeoutsByReason{};
     AppGLCommandReason lastWaitReason = AppGLCommandReason::Legacy;
     AppGLSubmitMode lastWaitMode = AppGLSubmitMode::WaitOnly;
     AppGLDependencyClass lastWaitDependencyClass = AppGLDependencyClass::Legacy;

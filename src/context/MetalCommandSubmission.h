@@ -5,6 +5,7 @@
 
 #include "AppGLCommandReasons.h"
 
+#include <array>
 #include <cassert>
 #include <atomic>
 #include <cstdint>
@@ -18,26 +19,7 @@ namespace appgl {
 class MetalCommandSubmission;
 
 inline NSString* appGLCommandReasonNSString(AppGLCommandReason reason) {
-    switch (reason) {
-        case AppGLCommandReason::BeginRenderPass: return @"beginRenderPass";
-        case AppGLCommandReason::FlushClear: return @"flushClear";
-        case AppGLCommandReason::SolidColorDraw: return @"solidColorDraw";
-        case AppGLCommandReason::TranslatedDraw: return @"translatedDraw";
-        case AppGLCommandReason::ImmediateModeDraw: return @"immediateModeDraw";
-        case AppGLCommandReason::FrameCommandBuffer: return @"frame-command-buffer";
-        case AppGLCommandReason::PresentPendingWork: return @"frame-command-buffer";
-        case AppGLCommandReason::EndFrame: return @"frame-command-buffer";
-        case AppGLCommandReason::FlushForReadback: return @"flush-for-readback";
-        case AppGLCommandReason::DrainCurrentStandalone: return @"drain-current-standalone";
-        case AppGLCommandReason::FrameRingSlot: return @"frame-ring-slot";
-        case AppGLCommandReason::CompletionWait: return @"completion-wait";
-        case AppGLCommandReason::FinishWait: return @"frame-command-buffer";
-        case AppGLCommandReason::LifetimeDrain: return @"glFinish-drain-all";
-        case AppGLCommandReason::Legacy:
-        case AppGLCommandReason::Count:
-            return @"legacy-command-buffer";
-    }
-    return @"legacy-command-buffer";
+    return [NSString stringWithUTF8String:appGLCommandReasonRecord(reason).legacyLabel];
 }
 
 class MetalCommandBufferLease {
@@ -151,7 +133,11 @@ private:
     struct SharedState {
         explicit SharedState(std::uint32_t bound)
             : inFlightBound(bound),
-              inFlightSemaphore(dispatch_semaphore_create(static_cast<long>(bound))) {}
+              inFlightSemaphore(dispatch_semaphore_create(static_cast<long>(bound))) {
+            for (auto& timeoutCount : allocWaitTimeoutsByReason) {
+                timeoutCount.store(0);
+            }
+        }
 
         std::uint32_t inFlightBound = 0;
         dispatch_semaphore_t inFlightSemaphore = nullptr;
@@ -171,6 +157,10 @@ private:
         std::atomic<std::uint64_t> ringSlotTimeouts{0};
         std::atomic<std::uint64_t> completionTimeouts{0};
         std::atomic<std::uint64_t> drainAllTimeouts{0};
+        std::atomic<std::uint64_t> pressureFlushCount{0};
+        std::array<std::atomic<std::uint64_t>,
+                   static_cast<std::size_t>(AppGLCommandReason::Count)>
+            allocWaitTimeoutsByReason;
     };
 
     struct RetainedObjects {
@@ -340,6 +330,13 @@ public:
         counters.submittedCommandBuffers = state_->submittedCommandBuffers.load();
         counters.completedCommandBuffers = state_->completedCommandBuffers.load();
         counters.waitReasonLogEntries = state_->waitReasonLogEntries.load();
+        counters.pressureFlushCount = state_->pressureFlushCount.load();
+        counters.currentInFlight = state_->inFlightCount.load();
+        counters.peakInFlight = state_->peakInFlight.load();
+        for (std::size_t index = 0; index < counters.allocWaitTimeoutsByReason.size(); ++index) {
+            counters.allocWaitTimeoutsByReason[index] =
+                state_->allocWaitTimeoutsByReason[index].load();
+        }
         counters.lastWaitReason =
             static_cast<AppGLCommandReason>(state_->lastWaitReason.load());
         counters.lastWaitMode =
@@ -398,6 +395,27 @@ public:
             std::fflush(stderr);
         }
         return drained;
+    }
+
+    void recordPressureFlush(AppGLCommandReason reason = AppGLCommandReason::PressureFlush) {
+        if (!state_) {
+            return;
+        }
+        state_->pressureFlushCount.fetch_add(1);
+        if (state_->profileEnabled) {
+            const auto& record = appGLCommandReasonRecord(reason);
+            std::fprintf(stderr,
+                         "[APPGL_CB_PROFILE] pressure_flush reason=%s mode=%s dependency=%s count=%llu submitted=%llu completed=%llu in_flight=%u bound=%u\n",
+                         record.name,
+                         appGLSubmitModeName(record.submitMode),
+                         appGLDependencyClassName(record.dependencyClass),
+                         static_cast<unsigned long long>(state_->pressureFlushCount.load()),
+                         static_cast<unsigned long long>(state_->submittedCommandBuffers.load()),
+                         static_cast<unsigned long long>(state_->completedCommandBuffers.load()),
+                         state_->inFlightCount.load(),
+                         state_->inFlightBound);
+            std::fflush(stderr);
+        }
     }
 
 private:
@@ -564,6 +582,9 @@ public:
             case WaitKind::InFlightToken:
                 kindName = "in-flight-token";
                 count = state_->inFlightTimeouts.fetch_add(1) + 1;
+                if (static_cast<std::size_t>(reason) < state_->allocWaitTimeoutsByReason.size()) {
+                    state_->allocWaitTimeoutsByReason[static_cast<std::size_t>(reason)].fetch_add(1);
+                }
                 break;
             case WaitKind::RingSlot:
                 kindName = "ring-slot";

@@ -344,7 +344,7 @@ bool updateTextureMapping(ExtensionContext& ctx,
 
     MetalCommandSubmission* submission = metalCommandSubmission(ctx);
     auto lease = submission != nullptr
-        ? submission->makeCommandBuffer(@"sparse-texture-map")
+        ? submission->makeCommandBuffer(AppGLCommandReason::SparseResidency)
         : MetalCommandBufferLease{};
     id<MTLCommandBuffer> cmd = lease.get();
     if (cmd == nil) {
@@ -394,7 +394,7 @@ bool updateTextureMapping(ExtensionContext& ctx,
     }
 
     [encoder endEncoding];
-    return lease.commitAndWait(@"sparse-texture-map");
+    return lease.commitAndWait(AppGLCommandReason::SparseResidency);
 }
 
 }  // namespace
@@ -766,7 +766,7 @@ bool uploadCommittedRegions(ExtensionContext& ctx,
     }
     MetalCommandSubmission* submission = metalCommandSubmission(ctx);
     auto blitLease = submission != nullptr
-        ? submission->makeCommandBuffer(@"sparse-texture-upload-committed")
+        ? submission->makeCommandBuffer(AppGLCommandReason::SparseResidency)
         : MetalCommandBufferLease{};
     id<MTLCommandBuffer> blitCmdBuf = blitLease.get();
     if (blitCmdBuf == nil) {
@@ -883,7 +883,7 @@ bool uploadCommittedRegions(ExtensionContext& ctx,
         }
     }
     [blitEnc endEncoding];
-    const bool completed = blitLease.commitAndWait(@"sparse-texture-upload-committed");
+    const bool completed = blitLease.commitAndWait(AppGLCommandReason::SparseResidency);
     textureObject.instantiated = true;
     (void)textureName;
     return ok && completed;
