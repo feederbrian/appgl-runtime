@@ -367,6 +367,7 @@ Known watch items that may look like a fourth leg but are not currently one:
 
 - `docs/dcr3-a/README.md`
 - `docs/dcr3-c/generic-producer-pending-flag-design.md`
+- `docs/dcr4/dcr4-e-design-note.md`
 - `tests/reports/s22-fantastic/FIXED-F1-7129315/FIXED-F1-7129315.meta`
 - `tests/reports/s22-fantastic/b1-argbuf-abi/status/summary.txt`
 - `tests/reports/s22-fantastic/b2-mesh-gs/status/summary.txt`
