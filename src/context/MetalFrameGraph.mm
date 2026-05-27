@@ -3958,18 +3958,11 @@ struct MetalFrameGraph::Impl {
             }
         }
 
-        // RC-A02: for FBO draws, close the render pass immediately, commit,
-        // and wait so the GPU results are available for CPU readback.
         if (isFBODraw) {
             [currentRenderEncoder endEncoding];
             currentRenderEncoder = nil;
             activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
             resetCachedEncoderState();
-
-            if (!currentCommandBufferLease.commitAndWait(AppGLCommandReason::FlushForReadback)) {
-                return false;
-            }
-            currentCommandBuffer = nil;
         }
 
         pendingPresent = true;
