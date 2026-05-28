@@ -3363,6 +3363,94 @@ struct GLContext::Impl {
                           AppGLCommandReason::TranslatedDraw);
     }
 
+    void declareCpuGsFallbackSubmissionGroup(AppGLSubmissionGroup& group) const {
+        group.reset(AppGLSubmissionGroupKind::CpuGsExpansion,
+                    AppGLCommandReason::TranslatedDraw);
+        group.approximateFallbackDisallowed = true;
+        group.addSubgroup(AppGLSubmissionGroupKind::CpuGsExpansion,
+                          AppGLCommandReason::TranslatedDraw);
+        group.addSubgroup(AppGLSubmissionGroupKind::FallbackNs,
+                          AppGLCommandReason::TranslatedDraw);
+    }
+
+    void declareStreamReplaySubmissionGroup(AppGLSubmissionGroup& group,
+                                            GLuint tfName,
+                                            GLuint stream,
+                                            GLsizei vertexCount) const {
+        group.reset(AppGLSubmissionGroupKind::StreamReplay,
+                    AppGLCommandReason::TranslatedDraw);
+        group.approximateFallbackDisallowed = true;
+        group.addSubgroup(AppGLSubmissionGroupKind::StreamReplay,
+                          AppGLCommandReason::TranslatedDraw);
+        group.addSubgroup(AppGLSubmissionGroupKind::TranslatedDraw,
+                          AppGLCommandReason::TranslatedDraw);
+        (void)tfName;
+        (void)stream;
+        (void)vertexCount;
+    }
+
+    void declareTransformFeedbackCaptureSubmissionGroup(
+        AppGLSubmissionGroup& group) const {
+        group.reset(AppGLSubmissionGroupKind::TransformFeedbackCapture,
+                    AppGLCommandReason::TranslatedDraw);
+        group.approximateFallbackDisallowed = true;
+        group.addSubgroup(AppGLSubmissionGroupKind::TransformFeedbackCapture,
+                          AppGLCommandReason::TranslatedDraw);
+        if (state == nullptr) {
+            return;
+        }
+        std::unordered_set<GLuint> seen;
+        for (std::size_t i = 0; i < GLTransformFeedbackObject::kMaxTfBuffers; ++i) {
+            const auto binding = state->indexedBufferBinding(
+                GL_TRANSFORM_FEEDBACK_BUFFER, static_cast<GLuint>(i));
+            if (binding.buffer == 0 || !seen.insert(binding.buffer).second) {
+                continue;
+            }
+            group.addWrite(AppGLSubmissionResourceKind::Buffer,
+                           binding.buffer,
+                           kProducerTransformFeedback);
+        }
+    }
+
+    void markBoundTransformFeedbackBufferWrites() const {
+        if (std::getenv("APPGL_DCR4E_TF_SKIP_PRODUCER_MARK") != nullptr ||
+            state == nullptr || objects == nullptr) {
+            return;
+        }
+        GpuResourceWriteSet writes;
+        std::unordered_set<GLuint> seen;
+        for (std::size_t i = 0; i < GLTransformFeedbackObject::kMaxTfBuffers; ++i) {
+            const auto binding = state->indexedBufferBinding(
+                GL_TRANSFORM_FEEDBACK_BUFFER, static_cast<GLuint>(i));
+            if (binding.buffer == 0 || !seen.insert(binding.buffer).second) {
+                continue;
+            }
+            writes.push_back({GpuResourceAccess::Kind::Buffer,
+                              binding.buffer,
+                              kProducerTransformFeedback});
+        }
+        markGpuResourceWrites(writes);
+    }
+
+    void markCpuInterpreterImageWrites(
+        const std::vector<GLuint>& textureNames) const {
+        if (std::getenv("APPGL_DCR4E_IMAGE_SKIP_PRODUCER_MARK") != nullptr ||
+            textureNames.empty()) {
+            return;
+        }
+        GpuResourceWriteSet writes;
+        std::unordered_set<GLuint> seen;
+        for (GLuint textureName : textureNames) {
+            if (textureName == 0 || !seen.insert(textureName).second) {
+                continue;
+            }
+            writes.push_back({GpuResourceAccess::Kind::Texture,
+                              textureName,
+                              kProducerStorageImageWrite});
+        }
+        markGpuResourceWrites(writes);
+    }
+
     void releaseBufferStorage(GLBufferObject& object) {
         drainPendingGpuProducers(object);
         releaseRetainedMetalObject(object.metalBuffer);
@@ -13551,7 +13639,8 @@ struct GLContext::Impl {
         const ShaderReflection* reflection,
         const std::vector<std::uint32_t>& spirv,
         GLProgramObject& program,
-        GLenum stageFilter = 0);
+        GLenum stageFilter = 0,
+        std::vector<GLuint>* touchedTextures = nullptr);
     // Synthesise a pass-through VS and encode the expanded vertex
     // buffer through the normal translated-draw encoder. Shared by
     // drawArrays and drawElements — the expanded buffer is already
@@ -23256,7 +23345,8 @@ void GLContext::Impl::flushPendingImageWritesForStage(
     const ShaderReflection* reflection,
     const std::vector<std::uint32_t>& spirv,
     GLProgramObject& program,
-    GLenum stageFilter)
+    GLenum stageFilter,
+    std::vector<GLuint>* touchedTextures)
 {
     if (writes.empty() || reflection == nullptr || spirv.empty()) return;
     // Walk SPIR-V vars to map varId -> reflection storage-image entry
@@ -23602,6 +23692,7 @@ void GLContext::Impl::flushPendingImageWritesForStage(
             static_cast<NSUInteger>(pw.coord[0]),
             static_cast<NSUInteger>(pw.coord[1]),
             1, 1);
+        bool flushed = false;
         @try {
             [mtlTex replaceRegion:region
                       mipmapLevel:0
@@ -23609,11 +23700,15 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                         withBytes:buf
                       bytesPerRow:texelBytes
                     bytesPerImage:texelBytes];
+            flushed = true;
         } @catch (NSException* exc) {
             // Private-storage textures or array-target mismatches
             // can throw; ignore — the test will fail value-check at
             // glGetTexImage time, which surfaces a clearer signal
             // than a runtime abort.
+        }
+        if (flushed && touchedTextures != nullptr) {
+            touchedTextures->push_back(ib.texture);
         }
         if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
             std::fprintf(stderr,
@@ -23635,30 +23730,36 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     // (glGetTexImage / FS samples) see the GS-emitted data on either
     // branch.
     if (!ed.pendingImageWrites.empty()) {
+        std::vector<GLuint> cpuImageWriteTextures;
         flushPendingImageWritesForStage(
             ed.pendingImageWrites,
             &program.vertexReflection,
             program.vertexSpirv,
             program,
-            GL_VERTEX_SHADER);
+            GL_VERTEX_SHADER,
+            &cpuImageWriteTextures);
         flushPendingImageWritesForStage(
             ed.pendingImageWrites,
             &program.tessControlReflection,
             program.tessControlSpirv,
             program,
-            GL_TESS_CONTROL_SHADER);
+            GL_TESS_CONTROL_SHADER,
+            &cpuImageWriteTextures);
         flushPendingImageWritesForStage(
             ed.pendingImageWrites,
             &program.tessEvalAsComputeReflection,
             program.tessEvalSpirv,
             program,
-            GL_TESS_EVALUATION_SHADER);
+            GL_TESS_EVALUATION_SHADER,
+            &cpuImageWriteTextures);
         flushPendingImageWritesForStage(
             ed.pendingImageWrites,
             &program.geometryReflection,
             program.geometrySpirv,
             program,
-            GL_GEOMETRY_SHADER);
+            GL_GEOMETRY_SHADER,
+            &cpuImageWriteTextures);
+        markCpuInterpreterImageWrites(cpuImageWriteTextures);
     }
     // Vertices-per-primitive for the emulator's *expanded*
     // topology. Strip outputs were decomposed to list form in
@@ -23711,6 +23812,10 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     // Built-in `gl_Position` captures from the EmulatedVertex
     // position field.
     const bool tfActive = isTfActiveOnBoundImpl() && !isTfPausedOnBoundImpl();
+    if (tfActive &&
+        std::getenv("APPGL_DCR4E_FORCE_TF_CAPTURE_FAIL") != nullptr) {
+        return true;
+    }
     auto capturedVerticesBeforeDraw = [this](std::size_t stream) -> std::size_t {
         if (boundTransformFeedbackId == 0) {
             if (stream < defaultTransformFeedbackCapturedVertexCount.size()) {
@@ -23733,6 +23838,8 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
         const auto& tfNames = program.transformFeedbackVaryingNames;
         const bool interleaved =
             (program.transformFeedbackBufferMode == GL_INTERLEAVED_ATTRIBS);
+        const bool skipCpuTfWriteForSentinel =
+            std::getenv("APPGL_DCR4E_TF_SKIP_CPU_WRITE") != nullptr;
 
         struct TfSource {
             std::size_t offset = 0;
@@ -23898,11 +24005,13 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
             (void)resolveTfSource(tfNames[i], i, sources[i]);
         }
 
-        auto writeToBuffer = [this](GLuint bufferName, std::size_t bufOffset,
+        auto writeToBuffer = [this, skipCpuTfWriteForSentinel](
+                                    GLuint bufferName, std::size_t bufOffset,
                                     const float* src, const double* doubleSrc,
                                     std::size_t count,
                                     std::size_t scalarBytes) {
             if (bufferName == 0 || count == 0) return;
+            if (skipCpuTfWriteForSentinel) return;
             GLBufferObject* buf = objects->buffers().get(bufferName);
             if (buf == nullptr) return;
             const std::size_t bytes = count * scalarBytes;
@@ -23942,11 +24051,13 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                 : static_cast<std::size_t>(std::max<GLsizeiptr>(buf->size, 0));
             return cursor + needBytes <= capacity;
         };
-        auto writeRawBytesToBuffer = [this](GLuint bufferName,
+        auto writeRawBytesToBuffer = [this, skipCpuTfWriteForSentinel](
+                                            GLuint bufferName,
                                             std::size_t bufOffset,
                                             const std::uint8_t* src,
                                             std::size_t bytes) {
             if (bufferName == 0 || bytes == 0) return;
+            if (skipCpuTfWriteForSentinel) return;
             GLBufferObject* buf = objects->buffers().get(bufferName);
             if (buf == nullptr ||
                 bufOffset + bytes > static_cast<std::size_t>(std::max<GLsizeiptr>(buf->size, 0))) {
@@ -24352,6 +24463,11 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
         // emitted" when no buffer constraint applies.
         primsWritten = primsGenerated;
     }
+    if (tfActive && !program.transformFeedbackVaryingNames.empty()) {
+        appgl::AppGLSubmissionGroup tfCaptureGroup;
+        declareTransformFeedbackCaptureSubmissionGroup(tfCaptureGroup);
+        markBoundTransformFeedbackBufferWrites();
+    }
 
     // Accumulate counts into any active occlusion / primitive
     // queries. GL 4.6 §4.2.1 says these counters sum across draw
@@ -24436,61 +24552,63 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
         return (ed.streamVertexCounts[idx] * writtenVerts / totalVerts) / vpp;
     };
 
-    objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
-        if (!q.active) return;
-        const bool tfCapturing = tfActive && !isTfPausedOnBoundImpl();
-        auto streamOverflowed = [&](GLuint stream) {
-            return tfCapturing &&
-                   generatedPrimsForStream(stream) > writtenPrimsForStream(stream);
-        };
-        auto anyStreamOverflowed = [&]() {
-            for (GLuint stream = 0;
-                 stream < GLTransformFeedbackObject::kMaxTransformFeedbackStreams;
-                 ++stream) {
-                if (streamOverflowed(stream)) return true;
+    if (std::getenv("APPGL_DCR4E_SKIP_QUERY_UPDATES") == nullptr) {
+        objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
+            if (!q.active) return;
+            const bool tfCapturing = tfActive && !isTfPausedOnBoundImpl();
+            auto streamOverflowed = [&](GLuint stream) {
+                return tfCapturing &&
+                       generatedPrimsForStream(stream) > writtenPrimsForStream(stream);
+            };
+            auto anyStreamOverflowed = [&]() {
+                for (GLuint stream = 0;
+                     stream < GLTransformFeedbackObject::kMaxTransformFeedbackStreams;
+                     ++stream) {
+                    if (streamOverflowed(stream)) return true;
+                }
+                return false;
+            };
+            switch (q.target) {
+                case GL_PRIMITIVES_GENERATED:
+                    if (program.gsPresent) {
+                        q.result += static_cast<GLuint64>(
+                            generatedPrimsForStream(q.index));
+                    }
+                    break;
+                case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
+                    if (tfActive) {
+                        q.result += static_cast<GLuint64>(
+                            writtenPrimsForStream(q.index));
+                    }
+                    break;
+                case GL_GEOMETRY_SHADER_INVOCATIONS:
+                    // GL 4.6 §22.3 — counts once per GS invocation. CTS
+                    // `pipeline_statistics_query_tests_ARB.functional_
+                    // geometry_shader_queries` uses EQUAL_OR_GREATER ≥ 1.
+                    // The emulator runs the GS once per input primitive,
+                    // so any non-zero output means at least one invocation
+                    // happened. Credit 1 per call — the exact invocation
+                    // count would need input-primitive tracking in
+                    // EmulatedDraw (future win).
+                    if (ed.vertexCount > 0) q.result += 1;
+                    break;
+                case GL_GEOMETRY_SHADER_PRIMITIVES_EMITTED:
+                    // GL 4.6 §22.3 — counts every EmitVertex + EndPrimitive
+                    // pair the GS executed. Maps directly to primsGenerated
+                    // (the emulator's expanded-output primitive count).
+                    q.result += static_cast<GLuint64>(primsGenerated);
+                    break;
+                case GL_TRANSFORM_FEEDBACK_OVERFLOW:
+                    if (anyStreamOverflowed()) q.result = 1;
+                    break;
+                case GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW:
+                    if (streamOverflowed(q.index)) q.result = 1;
+                    break;
+                default:
+                    break;
             }
-            return false;
-        };
-        switch (q.target) {
-            case GL_PRIMITIVES_GENERATED:
-                if (program.gsPresent) {
-                    q.result += static_cast<GLuint64>(
-                        generatedPrimsForStream(q.index));
-                }
-                break;
-            case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
-                if (tfActive) {
-                    q.result += static_cast<GLuint64>(
-                        writtenPrimsForStream(q.index));
-                }
-                break;
-            case GL_GEOMETRY_SHADER_INVOCATIONS:
-                // GL 4.6 §22.3 — counts once per GS invocation. CTS
-                // `pipeline_statistics_query_tests_ARB.functional_
-                // geometry_shader_queries` uses EQUAL_OR_GREATER ≥ 1.
-                // The emulator runs the GS once per input primitive,
-                // so any non-zero output means at least one invocation
-                // happened. Credit 1 per call — the exact invocation
-                // count would need input-primitive tracking in
-                // EmulatedDraw (future win).
-                if (ed.vertexCount > 0) q.result += 1;
-                break;
-            case GL_GEOMETRY_SHADER_PRIMITIVES_EMITTED:
-                // GL 4.6 §22.3 — counts every EmitVertex + EndPrimitive
-                // pair the GS executed. Maps directly to primsGenerated
-                // (the emulator's expanded-output primitive count).
-                q.result += static_cast<GLuint64>(primsGenerated);
-                break;
-            case GL_TRANSFORM_FEEDBACK_OVERFLOW:
-                if (anyStreamOverflowed()) q.result = 1;
-                break;
-            case GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW:
-                if (streamOverflowed(q.index)) q.result = 1;
-                break;
-            default:
-                break;
-        }
-    });
+        });
+    }
 
     // Sprint 8 #9-C (CKPT68): accumulate vertex count on the bound TF
     // object — see writeTessTFAndUpdateCounters for full rationale.
@@ -24511,7 +24629,8 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     // filters writes per-stream; until then the byte payload still
     // carries every emitted vertex through to BO[0]/BO[1] as before
     // and only the per-stream COUNT semantic shifts here).
-    if (isTfActiveOnBoundImpl()) {
+    if (isTfActiveOnBoundImpl() &&
+        std::getenv("APPGL_DCR4E_SKIP_TF_COUNT_UPDATE") == nullptr) {
         const GLuint tfName = boundTransformFeedbackId;
         if (tfName == 0) {
             if (hasMultiStreamOutput && primsWrittenByStreamValid) {
@@ -37957,6 +38076,57 @@ bool isDrawModeCompatibleWithGs(GLenum drawMode, GLenum gsInputTopo) {
             return true;   // unknown GS topology: don't reject
     }
 }
+
+bool dcr4eDrawModeUsesAdjacency(GLenum mode) {
+    switch (mode) {
+        case GL_LINES_ADJACENCY:
+        case GL_LINE_STRIP_ADJACENCY:
+        case GL_TRIANGLES_ADJACENCY:
+        case GL_TRIANGLE_STRIP_ADJACENCY:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool dcr4eGeometrySpirvUsesStreams(const std::vector<std::uint32_t>& spirv) {
+    constexpr std::uint16_t kOpDecorate = 71;
+    constexpr std::uint16_t kOpMemberDecorate = 72;
+    constexpr std::uint16_t kOpEmitStreamVertex = 220;
+    constexpr std::uint16_t kOpEndStreamPrimitive = 221;
+    constexpr std::uint32_t kDecorationStream = 29;
+    for (std::size_t i = spirv.size() >= 5 ? 5u : 0u; i < spirv.size();) {
+        const std::uint32_t word = spirv[i];
+        const std::uint16_t op = static_cast<std::uint16_t>(word & 0xFFFFu);
+        const std::uint16_t wc = static_cast<std::uint16_t>(word >> 16);
+        if (wc == 0 || i + wc > spirv.size()) {
+            break;
+        }
+        if (op == kOpEmitStreamVertex || op == kOpEndStreamPrimitive) {
+            return true;
+        }
+        if (op == kOpDecorate && wc >= 3 && spirv[i + 2] == kDecorationStream) {
+            return true;
+        }
+        if (op == kOpMemberDecorate && wc >= 4 && spirv[i + 3] == kDecorationStream) {
+            return true;
+        }
+        i += wc;
+    }
+    return false;
+}
+
+bool dcr4eRequiresExactCpuGsNoLegacyFallback(
+    const GLProgramObject* program,
+    GLenum mode,
+    bool transformFeedbackActive) {
+    if (program == nullptr || !program->geometryEmulated) {
+        return false;
+    }
+    return transformFeedbackActive ||
+           dcr4eDrawModeUsesAdjacency(mode) ||
+           dcr4eGeometrySpirvUsesStreams(program->geometrySpirv);
+}
 }  // namespace
 
 // Defined after the anonymous namespace with populateTranslatedDraw-
@@ -39807,6 +39977,9 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                                            const appgl::EmulatedDraw& ed,
                                            AppGLSubmissionGroupKind fallbackSubgroupKind)
 {
+    if (std::getenv("APPGL_DCR4E_FORCE_GS_RASTER_ENCODE_FAIL") != nullptr) {
+        return false;
+    }
     // Resolve the FBO's layered-attachment state before we decide
     // whether the synth VS should emit `[[render_target_array_index]]`.
     // A GS that writes gl_Layer but targets a non-layered FBO
@@ -40258,7 +40431,11 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     }
 
     TranslatedDrawInfo tdi;
-    tdi.fallbackSubgroupKind = fallbackSubgroupKind;
+    tdi.fallbackSubgroupKind =
+        fallbackSubgroupKind != AppGLSubmissionGroupKind::None
+            ? fallbackSubgroupKind
+            : (program.gsPresent ? AppGLSubmissionGroupKind::CpuGsExpansion
+                                 : AppGLSubmissionGroupKind::None);
     tdi.mode = replayDraw.topology;
     tdi.vertexCount = static_cast<GLsizei>(replayDraw.vertexCount);
     tdi.vertexData = replayDraw.expandedVertexData.data();
@@ -41605,6 +41782,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
         }
     }
     if (emulProgram != nullptr && emulProgram->geometryEmulated) {
+        const bool dcr4eExactNoLegacy =
+            dcr4eRequiresExactCpuGsNoLegacyFallback(
+                emulProgram, mode, isTransformFeedbackActive());
         const GLuint vaoName = impl_->state->boundVertexArray();
         GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
         if (vao != nullptr) {
@@ -41708,11 +41888,30 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     return true;
                 }
                 APPGL_LOG(SHADER, @"drawArrays GS-emul encode failed");
-                // Fall through to the legacy path if encode fails —
-                // better to render without the GS effect than to
-                // drop the draw entirely.
+                if (dcr4eExactNoLegacy) {
+                    appgl::AppGLSubmissionGroup fallbackGroup;
+                    impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
+                    APPGL_LOG(SHADER,
+                              @"drawArrays GS-emul exact path failed — consuming as unsupported");
+                    return true;
+                }
+                // Fall through to the legacy path if encode fails
+                // for non-B4 draws.
             } else if (!ed.diagnostic.empty()) {
                 APPGL_LOG(SHADER, @"drawArrays GS-emul: %s", ed.diagnostic.c_str());
+                if (dcr4eExactNoLegacy) {
+                    appgl::AppGLSubmissionGroup fallbackGroup;
+                    impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
+                    APPGL_LOG(SHADER,
+                              @"drawArrays GS-emul exact interpreter failed — consuming as unsupported");
+                    return true;
+                }
+            } else if (dcr4eExactNoLegacy) {
+                appgl::AppGLSubmissionGroup fallbackGroup;
+                impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
+                APPGL_LOG(SHADER,
+                          @"drawArrays GS-emul exact interpreter failed — consuming as unsupported");
+                return true;
             }
         }
     }
@@ -42433,6 +42632,9 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
 
     // GS emul hook for instanced draws.
     if (program != nullptr && program->geometryEmulated && count > 0 && instancecount > 0) {
+        const bool dcr4eExactNoLegacy =
+            dcr4eRequiresExactCpuGsNoLegacyFallback(
+                program, mode, isTransformFeedbackActive());
         const GLuint vaoName = impl_->state->boundVertexArray();
         GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
         if (vao != nullptr) {
@@ -42444,6 +42646,15 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) return true;
                 if (ed.vertexCount == 0) return true;
                 if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) return true;
+                if (dcr4eExactNoLegacy) {
+                    appgl::AppGLSubmissionGroup fallbackGroup;
+                    impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
+                    return true;
+                }
+            } else if (dcr4eExactNoLegacy) {
+                appgl::AppGLSubmissionGroup fallbackGroup;
+                impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
+                return true;
             }
         }
     }
@@ -43237,6 +43448,9 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     // primitive_counter tests exercise); a drawElements GS-emul
     // encode path with synthesised pass-through VS is a follow-up.
     if (program != nullptr && program->geometryEmulated && count > 0) {
+        const bool dcr4eExactNoLegacy =
+            dcr4eRequiresExactCpuGsNoLegacyFallback(
+                program, mode, isTransformFeedbackActive());
         // Resolve effectivePtr (uint16 / uint32) into a uint32 vector
         // scoped to this draw. Small allocation cost — CTS draws
         // never exceed a few hundred indices.
@@ -43331,6 +43545,15 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) {
                     return true;
                 }
+                if (dcr4eExactNoLegacy) {
+                    appgl::AppGLSubmissionGroup fallbackGroup;
+                    impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
+                    return true;
+                }
+            } else if (dcr4eExactNoLegacy) {
+                appgl::AppGLSubmissionGroup fallbackGroup;
+                impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
+                return true;
             }
         }
     }
@@ -44033,6 +44256,9 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
     // GS emul hook for base-vertex indexed draws (drawRangeElements
     // funnels here too).
     if (program != nullptr && program->geometryEmulated && count > 0) {
+        const bool dcr4eExactNoLegacy =
+            dcr4eRequiresExactCpuGsNoLegacyFallback(
+                program, mode, isTransformFeedbackActive());
         std::vector<std::uint32_t> idx32(static_cast<std::size_t>(count));
         if (effectiveType == GL_UNSIGNED_INT) {
             const std::uint32_t* src32 = static_cast<const std::uint32_t*>(effectivePtr);
@@ -44055,6 +44281,15 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) return true;
                 if (ed.vertexCount == 0) return true;
                 if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) return true;
+                if (dcr4eExactNoLegacy) {
+                    appgl::AppGLSubmissionGroup fallbackGroup;
+                    impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
+                    return true;
+                }
+            } else if (dcr4eExactNoLegacy) {
+                appgl::AppGLSubmissionGroup fallbackGroup;
+                impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
+                return true;
             }
         }
     }
@@ -44459,6 +44694,9 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
     // GS emul hook for instanced indexed draws. See drawElements
     // and drawArraysInstanced for the sibling paths.
     if (program != nullptr && program->geometryEmulated && count > 0 && instancecount > 0) {
+        const bool dcr4eExactNoLegacy =
+            dcr4eRequiresExactCpuGsNoLegacyFallback(
+                program, mode, isTransformFeedbackActive());
         std::vector<std::uint32_t> idx32(static_cast<std::size_t>(count));
         if (effectiveType == GL_UNSIGNED_INT) {
             const std::uint32_t* src32 = static_cast<const std::uint32_t*>(effectivePtr);
@@ -44484,6 +44722,15 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) return true;
                 if (ed.vertexCount == 0) return true;
                 if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) return true;
+                if (dcr4eExactNoLegacy) {
+                    appgl::AppGLSubmissionGroup fallbackGroup;
+                    impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
+                    return true;
+                }
+            } else if (dcr4eExactNoLegacy) {
+                appgl::AppGLSubmissionGroup fallbackGroup;
+                impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
+                return true;
             }
         }
     }
@@ -48901,7 +49148,12 @@ bool GLContext::drawTransformFeedback(GLenum mode, GLuint id) {
     // completedCount). Keep it separate from the Instanced helper so
     // public DrawTransformFeedbackInstanced(..., 1) continues through
     // the existing drawArraysInstanced path.
-    const GLsizei vertexCount = tfObj->lastCompletedVertexCount[0];
+    GLsizei vertexCount = tfObj->lastCompletedVertexCount[0];
+    if (std::getenv("APPGL_DCR4E_FORCE_STREAM_REPLAY_ZERO_COUNT") != nullptr) {
+        vertexCount = 0;
+    }
+    appgl::AppGLSubmissionGroup replayGroup;
+    impl_->declareStreamReplaySubmissionGroup(replayGroup, id, 0u, vertexCount);
     if (vertexCount <= 0) {
         return true;
     }
@@ -48920,7 +49172,12 @@ bool GLContext::drawTransformFeedbackStream(GLenum mode, GLuint id, GLuint strea
     // Sprint 18 Bank D-2/G Mechanism 3: same non-instanced
     // DrawArrays routing as drawTransformFeedback(), but using the
     // completed count for the requested stream.
-    const GLsizei vertexCount = tfObj->lastCompletedVertexCount[streamIdx];
+    GLsizei vertexCount = tfObj->lastCompletedVertexCount[streamIdx];
+    if (std::getenv("APPGL_DCR4E_FORCE_STREAM_REPLAY_ZERO_COUNT") != nullptr) {
+        vertexCount = 0;
+    }
+    appgl::AppGLSubmissionGroup replayGroup;
+    impl_->declareStreamReplaySubmissionGroup(replayGroup, id, stream, vertexCount);
     if (vertexCount <= 0) {
         return true;
     }
@@ -48953,7 +49210,12 @@ bool GLContext::drawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei i
     // ≥ 4). Non-Stream variant always reads stream 0 per GL 4.6 §10.5 (the
     // non-Stream entry point is implicitly stream 0). Multi-stream
     // accumulators are added Day 23 via GS-emul EmitStreamVertex routing.
-    const GLsizei vertexCount = tfObj->lastCompletedVertexCount[0];
+    GLsizei vertexCount = tfObj->lastCompletedVertexCount[0];
+    if (std::getenv("APPGL_DCR4E_FORCE_STREAM_REPLAY_ZERO_COUNT") != nullptr) {
+        vertexCount = 0;
+    }
+    appgl::AppGLSubmissionGroup replayGroup;
+    impl_->declareStreamReplaySubmissionGroup(replayGroup, id, 0u, vertexCount);
     if (vertexCount <= 0 || instancecount == 0) {
         return true;  // zero-vertex / zero-instance draw is a no-op success
     }
@@ -48983,7 +49245,12 @@ bool GLContext::drawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLu
     const std::size_t streamIdx =
         (stream < GLTransformFeedbackObject::kMaxTransformFeedbackStreams)
             ? static_cast<std::size_t>(stream) : 0u;
-    const GLsizei vertexCount = tfObj->lastCompletedVertexCount[streamIdx];
+    GLsizei vertexCount = tfObj->lastCompletedVertexCount[streamIdx];
+    if (std::getenv("APPGL_DCR4E_FORCE_STREAM_REPLAY_ZERO_COUNT") != nullptr) {
+        vertexCount = 0;
+    }
+    appgl::AppGLSubmissionGroup replayGroup;
+    impl_->declareStreamReplaySubmissionGroup(replayGroup, id, stream, vertexCount);
     if (vertexCount <= 0 || instancecount == 0) {
         return true;
     }

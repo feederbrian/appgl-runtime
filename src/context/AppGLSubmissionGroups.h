@@ -24,6 +24,9 @@ enum class AppGLSubmissionGroupKind : std::uint8_t {
     TessDomain,
     TessEval,
     TessRender,
+    CpuGsExpansion,
+    TransformFeedbackCapture,
+    StreamReplay,
     FallbackNs,
 };
 
@@ -197,6 +200,9 @@ inline const char* appGLSubmissionGroupKindName(AppGLSubmissionGroupKind kind) {
         case AppGLSubmissionGroupKind::TessDomain: return "TessDomainGroup";
         case AppGLSubmissionGroupKind::TessEval: return "TessEvalGroup";
         case AppGLSubmissionGroupKind::TessRender: return "TessRenderGroup";
+        case AppGLSubmissionGroupKind::CpuGsExpansion: return "CpuGsExpansionGroup";
+        case AppGLSubmissionGroupKind::TransformFeedbackCapture: return "TransformFeedbackCaptureGroup";
+        case AppGLSubmissionGroupKind::StreamReplay: return "StreamReplayGroup";
         case AppGLSubmissionGroupKind::FallbackNs: return "FallbackNsGroup";
     }
     return "Unknown";

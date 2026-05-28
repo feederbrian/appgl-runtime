@@ -10897,6 +10897,553 @@ TestResult runDCR4DTessTfExcludeSentinel() {
     return result;
 }
 
+constexpr GLsizei kDCR4ESize = 32;
+
+static constexpr const char* kDCR4EGsPointVS =
+    "#version 430 core\n"
+    "out gl_PerVertex { vec4 gl_Position; float gl_PointSize; };\n"
+    "out vec4 vColor;\n"
+    "out vec4 gColor;\n"
+    "void main() {\n"
+    "    gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n"
+    "    gl_PointSize = 20.0;\n"
+    "    vColor = vec4(1.0, 0.0, 0.0, 1.0);\n"
+    "    gColor = vec4(1.0, 0.0, 0.0, 1.0);\n"
+    "}\n";
+
+static constexpr const char* kDCR4EGsPointGS =
+    "#version 430 core\n"
+    "layout(points) in;\n"
+    "layout(points, max_vertices = 1) out;\n"
+    "in vec4 vColor[];\n"
+    "out vec4 gColor;\n"
+    "out float tfValue;\n"
+    "void main() {\n"
+    "    gl_Position = gl_in[0].gl_Position;\n"
+    "    gl_PointSize = 20.0;\n"
+    "    gColor = vec4(0.0, 1.0, 0.0, 1.0);\n"
+    "    tfValue = 7.0;\n"
+    "    EmitVertex();\n"
+    "    EndPrimitive();\n"
+    "}\n";
+
+static constexpr const char* kDCR4EGsColorFS =
+    "#version 430 core\n"
+    "in vec4 gColor;\n"
+    "out vec4 fragColor;\n"
+    "void main() { fragColor = gColor; }\n";
+
+static constexpr const char* kDCR4EReplayVS =
+    "#version 430 core\n"
+    "out gl_PerVertex { vec4 gl_Position; float gl_PointSize; };\n"
+    "out vec4 gColor;\n"
+    "void main() {\n"
+    "    gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n"
+    "    gl_PointSize = 20.0;\n"
+    "    gColor = vec4(0.0, 1.0, 0.0, 1.0);\n"
+    "}\n";
+
+static constexpr const char* kDCR4EGsImageGS =
+    "#version 430 core\n"
+    "layout(points) in;\n"
+    "layout(points, max_vertices = 1) out;\n"
+    "layout(rgba8, binding = 0) uniform writeonly image2D outImg;\n"
+    "void main() {\n"
+    "    imageStore(outImg, ivec2(0, 0), vec4(1.0, 0.0, 0.0, 1.0));\n"
+    "    gl_Position = gl_in[0].gl_Position;\n"
+    "    gl_PointSize = 1.0;\n"
+    "    EmitVertex();\n"
+    "    EndPrimitive();\n"
+    "}\n";
+
+static constexpr const char* kDCR4EBlackFS =
+    "#version 430 core\n"
+    "out vec4 fragColor;\n"
+    "void main() { fragColor = vec4(0.0, 0.0, 0.0, 1.0); }\n";
+
+GLuint buildDCR4EGsProgram(const char* vsSrc,
+                           const char* gsSrc,
+                           const char* fsSrc,
+                           const char* const* tfVaryings = nullptr,
+                           GLsizei tfVaryingCount = 0) {
+    auto& gl = Runtime::shared().dispatch();
+    const GLuint vs =
+        compileRequiredShader(gl, GL_VERTEX_SHADER, vsSrc, "dcr4e vertex");
+    const GLuint gs =
+        compileRequiredShader(gl, GL_GEOMETRY_SHADER, gsSrc, "dcr4e geometry");
+    const GLuint fs =
+        compileRequiredShader(gl, GL_FRAGMENT_SHADER, fsSrc, "dcr4e fragment");
+    GLuint program = gl.glCreateProgram();
+    gl.glAttachShader(program, vs);
+    gl.glAttachShader(program, gs);
+    gl.glAttachShader(program, fs);
+    if (tfVaryings != nullptr && tfVaryingCount > 0) {
+        gl.glTransformFeedbackVaryings(program, tfVaryingCount, tfVaryings,
+                                       GL_INTERLEAVED_ATTRIBS);
+    }
+    gl.glLinkProgram(program);
+    gl.glDeleteShader(vs);
+    gl.glDeleteShader(gs);
+    gl.glDeleteShader(fs);
+    GLint status = GL_FALSE;
+    gl.glGetProgramiv(program, GL_LINK_STATUS, &status);
+    if (status != GL_TRUE) {
+        const std::string log = programInfoLog(gl, program);
+        gl.glDeleteProgram(program);
+        throw std::runtime_error(
+            "DCR4-E GS program link failed" +
+            (log.empty() ? std::string{} : ": " + log));
+    }
+    return program;
+}
+
+GLuint buildDCR4EReplayProgram() {
+    auto& gl = Runtime::shared().dispatch();
+    const GLuint vs =
+        compileRequiredShader(gl, GL_VERTEX_SHADER, kDCR4EReplayVS,
+                              "dcr4e replay vertex");
+    const GLuint fs =
+        compileRequiredShader(gl, GL_FRAGMENT_SHADER, kDCR4EGsColorFS,
+                              "dcr4e replay fragment");
+    GLuint program = gl.glCreateProgram();
+    gl.glAttachShader(program, vs);
+    gl.glAttachShader(program, fs);
+    gl.glLinkProgram(program);
+    gl.glDeleteShader(vs);
+    gl.glDeleteShader(fs);
+    GLint status = GL_FALSE;
+    gl.glGetProgramiv(program, GL_LINK_STATUS, &status);
+    if (status != GL_TRUE) {
+        const std::string log = programInfoLog(gl, program);
+        gl.glDeleteProgram(program);
+        throw std::runtime_error(
+            "DCR4-E replay program link failed" +
+            (log.empty() ? std::string{} : ": " + log));
+    }
+    return program;
+}
+
+void setupDCR4ETarget(GLDispatchTable& gl,
+                      GLuint& texture,
+                      GLuint& framebuffer) {
+    gl.glGenTextures(1, &texture);
+    setupDCR3CRGBA8Texture(gl, texture, kDCR4ESize, kDCR4ESize);
+    setupDCR3CTextureFbo(gl, framebuffer, texture);
+    gl.glViewport(0, 0, kDCR4ESize, kDCR4ESize);
+    gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    gl.glClear(GL_COLOR_BUFFER_BIT);
+    std::array<std::uint8_t, 4> drainPixel = {};
+    gl.glReadPixels(kDCR4ESize / 2, kDCR4ESize / 2,
+                    1, 1, GL_RGBA, GL_UNSIGNED_BYTE, drainPixel.data());
+    expectGLError(gl, GL_NO_ERROR, "dcr4e target setup readback drain");
+}
+
+void clearDCR4ETarget(GLDispatchTable& gl) {
+    gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    gl.glClear(GL_COLOR_BUFFER_BIT);
+}
+
+std::array<std::uint8_t, 4> readDCR4ECenter(GLDispatchTable& gl) {
+    std::array<std::uint8_t, 4> pixel = {};
+    gl.glReadPixels(kDCR4ESize / 2, kDCR4ESize / 2,
+                    1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel.data());
+    expectGLError(gl, GL_NO_ERROR, "dcr4e center readback");
+    return pixel;
+}
+
+bool isDCR4EGreen(const std::array<std::uint8_t, 4>& pixel) {
+    return pixel[0] <= 40 && pixel[1] >= 180 &&
+           pixel[2] <= 40 && pixel[3] >= 240;
+}
+
+bool isDCR4EBlack(const std::array<std::uint8_t, 4>& pixel) {
+    return pixel[0] <= 35 && pixel[1] <= 35 &&
+           pixel[2] <= 35 && pixel[3] >= 240;
+}
+
+bool isDCR4ERed(const std::array<std::uint8_t, 4>& pixel) {
+    return pixel[0] >= 180 && pixel[1] <= 40 &&
+           pixel[2] <= 40 && pixel[3] >= 240;
+}
+
+GLuint createDCR4ETfBuffer(GLDispatchTable& gl) {
+    GLuint buffer = 0;
+    gl.glGenBuffers(1, &buffer);
+    gl.glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buffer);
+    std::array<float, 16> zeros = {};
+    gl.glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER,
+                    static_cast<GLsizeiptr>(zeros.size() * sizeof(float)),
+                    zeros.data(), GL_DYNAMIC_DRAW);
+    return buffer;
+}
+
+GLuint createDCR4ETransformFeedback(GLDispatchTable& gl, GLuint buffer) {
+    GLuint tf = 0;
+    gl.glGenTransformFeedbacks(1, &tf);
+    gl.glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, tf);
+    gl.glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buffer);
+    return tf;
+}
+
+void resetDCR4ETfBuffer(GLDispatchTable& gl, GLuint buffer) {
+    std::array<float, 16> zeros = {};
+    gl.glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buffer);
+    gl.glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER,
+                    static_cast<GLsizeiptr>(zeros.size() * sizeof(float)),
+                    zeros.data(), GL_DYNAMIC_DRAW);
+    gl.glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buffer);
+}
+
+void drawDCR4EGsPoint(GLDispatchTable& gl, GLuint program) {
+    GLuint vao = 0;
+    gl.glGenVertexArrays(1, &vao);
+    gl.glBindVertexArray(vao);
+    gl.glUseProgram(program);
+    gl.glEnable(GL_PROGRAM_POINT_SIZE);
+    gl.glDrawArrays(GL_POINTS, 0, 1);
+    expectGLError(gl, GL_NO_ERROR, "dcr4e GS point draw");
+    gl.glBindVertexArray(0);
+    gl.glDeleteVertexArrays(1, &vao);
+}
+
+void captureDCR4EGsPoint(GLDispatchTable& gl,
+                         GLuint program,
+                         GLuint tf,
+                         GLuint buffer,
+                         bool rasterDiscard) {
+    GLuint vao = 0;
+    gl.glGenVertexArrays(1, &vao);
+    gl.glBindVertexArray(vao);
+    gl.glUseProgram(program);
+    gl.glEnable(GL_PROGRAM_POINT_SIZE);
+    gl.glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, tf);
+    gl.glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buffer);
+    if (rasterDiscard) {
+        gl.glEnable(GL_RASTERIZER_DISCARD);
+    }
+    gl.glBeginTransformFeedback(GL_POINTS);
+    gl.glDrawArrays(GL_POINTS, 0, 1);
+    gl.glEndTransformFeedback();
+    if (rasterDiscard) {
+        gl.glDisable(GL_RASTERIZER_DISCARD);
+    }
+    expectGLError(gl, GL_NO_ERROR, "dcr4e GS TF capture");
+    gl.glBindVertexArray(0);
+    gl.glDeleteVertexArrays(1, &vao);
+}
+
+bool dcr4eTfBufferSawSeven(GLDispatchTable& gl, GLuint buffer) {
+    std::array<float, 16> values = {};
+    gl.glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buffer);
+    gl.glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0,
+                          static_cast<GLsizeiptr>(values.size() * sizeof(float)),
+                          values.data());
+    expectGLError(gl, GL_NO_ERROR, "dcr4e TF buffer readback");
+    return std::any_of(values.begin(), values.end(),
+                       [](float value) { return std::fabs(value - 7.0f) < 0.01f; });
+}
+
+TestResult runDCR4ETfProducerSentinel() {
+    auto result = runDirectSentinel("dcr4e.tf-buffer-producer-mark", [&] {
+        ScopedSentinelContext scoped(kDCR4ESize, kDCR4ESize);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        const char* tfName = "tfValue";
+        const GLuint program = buildDCR4EGsProgram(
+            kDCR4EGsPointVS, kDCR4EGsPointGS, kDCR4EGsColorFS, &tfName, 1);
+        const GLuint tfBuffer = createDCR4ETfBuffer(gl);
+        const GLuint tf = createDCR4ETransformFeedback(gl, tfBuffer);
+
+        captureDCR4EGsPoint(gl, program, tf, tfBuffer, true);
+        expectPendingHas(bufferPendingBits(context, tfBuffer),
+                         kProducerTransformFeedback,
+                         "dcr4e TF CPU-GS write marks producer bit");
+        expectCondition(dcr4eTfBufferSawSeven(gl, tfBuffer),
+                        "dcr4e TF CPU-GS write stores exact value");
+        expectPendingClear(bufferPendingBits(context, tfBuffer),
+                           kProducerTransformFeedback,
+                           "dcr4e TF readback drains producer bit");
+
+        resetDCR4ETfBuffer(gl, tfBuffer);
+        {
+            ScopedEnvVar skipMark("APPGL_DCR4E_TF_SKIP_PRODUCER_MARK", "1");
+            captureDCR4EGsPoint(gl, program, tf, tfBuffer, true);
+        }
+        expectPendingClear(bufferPendingBits(context, tfBuffer),
+                           kProducerTransformFeedback,
+                           "dcr4e TF producer red-stub suppresses mark");
+        expectCondition(dcr4eTfBufferSawSeven(gl, tfBuffer),
+                        "dcr4e TF write remains non-vacuous when mark is skipped");
+
+        resetDCR4ETfBuffer(gl, tfBuffer);
+        {
+            ScopedEnvVar skipWrite("APPGL_DCR4E_TF_SKIP_CPU_WRITE", "1");
+            captureDCR4EGsPoint(gl, program, tf, tfBuffer, true);
+        }
+        expectCondition(!dcr4eTfBufferSawSeven(gl, tfBuffer),
+                        "dcr4e TF write sentinel fails when CPU payload is skipped");
+
+        gl.glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, 0);
+        gl.glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteTransformFeedbacks(1, &tf);
+        gl.glDeleteBuffers(1, &tfBuffer);
+        gl.glDeleteProgram(program);
+        expectGLError(gl, GL_NO_ERROR, "dcr4e TF producer cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "CPU-GS transform-feedback writes mark kProducerTransformFeedback and red-stubs are non-vacuous";
+    }
+    return result;
+}
+
+TestResult runDCR4ECpuImageProducerSentinel() {
+    auto result = runDirectSentinel("dcr4e.cpu-image-producer-mark", [&] {
+        ScopedSentinelContext scoped(kDCR4ESize, kDCR4ESize);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        const GLuint program = buildDCR4EGsProgram(
+            kDCR4EGsPointVS, kDCR4EGsImageGS, kDCR4EBlackFS);
+
+        auto runImageDraw = [&](bool skipMark) {
+            GLuint imageTex = 0;
+            gl.glGenTextures(1, &imageTex);
+            setupDCR3CRGBA8Texture(gl, imageTex, 4, 4);
+            gl.glBindImageTexture(0, imageTex, 0, GL_FALSE, 0,
+                                  GL_WRITE_ONLY, GL_RGBA8);
+            if (skipMark) {
+                ScopedEnvVar skip("APPGL_DCR4E_IMAGE_SKIP_PRODUCER_MARK", "1");
+                drawDCR4EGsPoint(gl, program);
+            } else {
+                drawDCR4EGsPoint(gl, program);
+            }
+            gl.glMemoryBarrier(GL_ALL_BARRIER_BITS);
+            if (skipMark) {
+                expectPendingClear(texturePendingBits(context, imageTex),
+                                   kProducerStorageImageWrite,
+                                   "dcr4e image producer red-stub suppresses mark");
+            } else {
+                expectPendingHas(texturePendingBits(context, imageTex),
+                                 kProducerStorageImageWrite,
+                                 "dcr4e CPU image write marks storage-image producer");
+            }
+            std::array<std::uint8_t, 4 * 4 * 4> pixels = {};
+            gl.glGetTextureImage(imageTex, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                                 static_cast<GLsizei>(pixels.size()),
+                                 pixels.data());
+            expectGLError(gl, GL_NO_ERROR, "dcr4e image readback");
+            expectCondition(pixels[0] >= 180 && pixels[1] <= 40 &&
+                                pixels[2] <= 40 && pixels[3] >= 240,
+                            "dcr4e CPU image write stores red texel");
+            expectPendingClear(texturePendingBits(context, imageTex),
+                               kProducerStorageImageWrite,
+                               "dcr4e image readback drains producer bit");
+            gl.glBindImageTexture(0, 0, 0, GL_FALSE, 0,
+                                  GL_READ_WRITE, GL_RGBA8);
+            gl.glDeleteTextures(1, &imageTex);
+        };
+
+        runImageDraw(false);
+        runImageDraw(true);
+
+        gl.glUseProgram(0);
+        gl.glDeleteProgram(program);
+        expectGLError(gl, GL_NO_ERROR, "dcr4e image producer cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "CPU interpreter image writes mark storage-image producers by default";
+    }
+    return result;
+}
+
+TestResult runDCR4EQueryCounterSentinel() {
+    auto result = runDirectSentinel("dcr4e.query-counter-readback", [&] {
+        ScopedSentinelContext scoped(kDCR4ESize, kDCR4ESize);
+        auto& gl = scoped.gl();
+        const char* tfName = "tfValue";
+        const GLuint program = buildDCR4EGsProgram(
+            kDCR4EGsPointVS, kDCR4EGsPointGS, kDCR4EGsColorFS, &tfName, 1);
+        const GLuint tfBuffer = createDCR4ETfBuffer(gl);
+        const GLuint tf = createDCR4ETransformFeedback(gl, tfBuffer);
+
+        auto captureWithQueries = [&](bool skipQueries,
+                                      GLuint64& generated,
+                                      GLuint64& written) {
+            GLuint queries[2] = {};
+            gl.glGenQueries(2, queries);
+            gl.glUseProgram(program);
+            gl.glBeginQuery(GL_PRIMITIVES_GENERATED, queries[0]);
+            gl.glBeginQuery(GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN, queries[1]);
+            if (skipQueries) {
+                ScopedEnvVar skip("APPGL_DCR4E_SKIP_QUERY_UPDATES", "1");
+                captureDCR4EGsPoint(gl, program, tf, tfBuffer, true);
+            } else {
+                captureDCR4EGsPoint(gl, program, tf, tfBuffer, true);
+            }
+            gl.glEndQuery(GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN);
+            gl.glEndQuery(GL_PRIMITIVES_GENERATED);
+            gl.glGetQueryObjectui64v(queries[0], GL_QUERY_RESULT, &generated);
+            gl.glGetQueryObjectui64v(queries[1], GL_QUERY_RESULT, &written);
+            gl.glDeleteQueries(2, queries);
+            expectGLError(gl, GL_NO_ERROR, "dcr4e query readback");
+        };
+
+        GLuint64 generated = 0;
+        GLuint64 written = 0;
+        captureWithQueries(false, generated, written);
+        expectCondition(generated >= 1, "dcr4e primitives-generated query advances");
+        expectCondition(written >= 1, "dcr4e TF-written query advances");
+
+        generated = 0;
+        written = 0;
+        captureWithQueries(true, generated, written);
+        expectCondition(generated == 0 && written == 0,
+                        "dcr4e query red-stub proves CPU-side query accounting");
+
+        gl.glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, 0);
+        gl.glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteTransformFeedbacks(1, &tf);
+        gl.glDeleteBuffers(1, &tfBuffer);
+        gl.glDeleteProgram(program);
+        expectGLError(gl, GL_NO_ERROR, "dcr4e query cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "TF queries/counters are CPU-side accounting, with non-vacuous red-stub coverage";
+    }
+    return result;
+}
+
+TestResult runDCR4EStreamReplaySentinel() {
+    auto result = runDirectSentinel("dcr4e.stream-replay-no-slip", [&] {
+        ScopedSentinelContext scoped(kDCR4ESize, kDCR4ESize);
+        auto& gl = scoped.gl();
+        const char* tfName = "tfValue";
+        const GLuint captureProgram = buildDCR4EGsProgram(
+            kDCR4EGsPointVS, kDCR4EGsPointGS, kDCR4EGsColorFS, &tfName, 1);
+        const GLuint replayProgram = buildDCR4EReplayProgram();
+        const GLuint tfBuffer = createDCR4ETfBuffer(gl);
+        const GLuint tf = createDCR4ETransformFeedback(gl, tfBuffer);
+
+        GLuint texture = 0;
+        GLuint framebuffer = 0;
+        setupDCR4ETarget(gl, texture, framebuffer);
+        captureDCR4EGsPoint(gl, captureProgram, tf, tfBuffer, true);
+
+        GLuint replayVao = 0;
+        gl.glGenVertexArrays(1, &replayVao);
+        gl.glBindVertexArray(replayVao);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        gl.glUseProgram(replayProgram);
+        gl.glEnable(GL_PROGRAM_POINT_SIZE);
+        gl.glDrawTransformFeedbackStream(GL_POINTS, tf, 0);
+        expectGLError(gl, GL_NO_ERROR, "dcr4e stream replay draw");
+        auto pixel = readDCR4ECenter(gl);
+        expectCondition(isDCR4EGreen(pixel),
+                        "dcr4e stream replay consumes completed TF count");
+
+        clearDCR4ETarget(gl);
+        {
+            ScopedEnvVar zeroReplay("APPGL_DCR4E_FORCE_STREAM_REPLAY_ZERO_COUNT", "1");
+            gl.glDrawTransformFeedbackStream(GL_POINTS, tf, 0);
+        }
+        pixel = readDCR4ECenter(gl);
+        expectCondition(isDCR4EBlack(pixel),
+                        "dcr4e forced zero replay count draws nothing");
+
+        clearDCR4ETarget(gl);
+        resetDCR4ETfBuffer(gl, tfBuffer);
+        {
+            ScopedEnvVar skipCount("APPGL_DCR4E_SKIP_TF_COUNT_UPDATE", "1");
+            captureDCR4EGsPoint(gl, captureProgram, tf, tfBuffer, true);
+        }
+        gl.glBindVertexArray(replayVao);
+        gl.glUseProgram(replayProgram);
+        gl.glDrawTransformFeedbackStream(GL_POINTS, tf, 0);
+        pixel = readDCR4ECenter(gl);
+        expectCondition(isDCR4EBlack(pixel),
+                        "dcr4e TF count red-stub prevents replay draw");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, 0);
+        gl.glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        gl.glDeleteTextures(1, &texture);
+        gl.glDeleteVertexArrays(1, &replayVao);
+        gl.glDeleteTransformFeedbacks(1, &tf);
+        gl.glDeleteBuffers(1, &tfBuffer);
+        gl.glDeleteProgram(captureProgram);
+        gl.glDeleteProgram(replayProgram);
+        expectGLError(gl, GL_NO_ERROR, "dcr4e stream replay cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "stream replay consumes exact completed counts and zero-count red-stubs do not fall through";
+    }
+    return result;
+}
+
+TestResult runDCR4EExactNoSlipSentinel() {
+    auto result = runDirectSentinel("dcr4e.exact-only-no-slip", [&] {
+        ScopedSentinelContext scoped(kDCR4ESize, kDCR4ESize);
+        auto& gl = scoped.gl();
+        const char* tfName = "tfValue";
+        const GLuint program = buildDCR4EGsProgram(
+            kDCR4EGsPointVS, kDCR4EGsPointGS, kDCR4EGsColorFS, &tfName, 1);
+        const GLuint tfBuffer = createDCR4ETfBuffer(gl);
+        const GLuint tf = createDCR4ETransformFeedback(gl, tfBuffer);
+
+        GLuint texture = 0;
+        GLuint framebuffer = 0;
+        setupDCR4ETarget(gl, texture, framebuffer);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+
+        captureDCR4EGsPoint(gl, program, tf, tfBuffer, false);
+        auto pixel = readDCR4ECenter(gl);
+        expectCondition(isDCR4EGreen(pixel),
+                        "dcr4e normal CPU-GS raster path draws exact green");
+
+        clearDCR4ETarget(gl);
+        {
+            ScopedEnvVar failRaster("APPGL_DCR4E_FORCE_GS_RASTER_ENCODE_FAIL", "1");
+            captureDCR4EGsPoint(gl, program, tf, tfBuffer, false);
+        }
+        pixel = readDCR4ECenter(gl);
+        expectCondition(isDCR4EBlack(pixel) && !isDCR4ERed(pixel),
+                        "dcr4e failed CPU-GS raster encode consumes instead of legacy fallback");
+
+        clearDCR4ETarget(gl);
+        {
+            ScopedEnvVar failTf("APPGL_DCR4E_FORCE_TF_CAPTURE_FAIL", "1");
+            captureDCR4EGsPoint(gl, program, tf, tfBuffer, false);
+        }
+        pixel = readDCR4ECenter(gl);
+        expectCondition(isDCR4EBlack(pixel) && !isDCR4ERed(pixel),
+                        "dcr4e failed TF capture consumes instead of legacy fallback");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, 0);
+        gl.glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        gl.glDeleteTextures(1, &texture);
+        gl.glDeleteTransformFeedbacks(1, &tf);
+        gl.glDeleteBuffers(1, &tfBuffer);
+        gl.glDeleteProgram(program);
+        expectGLError(gl, GL_NO_ERROR, "dcr4e exact no-slip cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "exact-only CPU-GS/TF failure paths consume honestly and never fall through to legacy VS+FS";
+    }
+    return result;
+}
+
 TestResult runDCR3CViewportRestoreAbandonmentSentinel() {
     auto result = runDirectSentinel("dcr3c.viewport-restore-abandonment", [&] {
         ScopedSentinelContext scoped(32, 32);
@@ -11820,6 +12367,15 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runDCR4DTessFboProducerSentinel());
         tests.push_back(runDCR4DTessSideEffectRejectSentinel());
         tests.push_back(runDCR4DTessTfExcludeSentinel());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "dcr4e-sentinels") {
+        tests.push_back(runDCR4ETfProducerSentinel());
+        tests.push_back(runDCR4ECpuImageProducerSentinel());
+        tests.push_back(runDCR4EQueryCounterSentinel());
+        tests.push_back(runDCR4EStreamReplaySentinel());
+        tests.push_back(runDCR4EExactNoSlipSentinel());
         return buildJSON(normalizedPhase, tests);
     }
 
