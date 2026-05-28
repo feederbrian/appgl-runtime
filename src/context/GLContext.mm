@@ -24602,17 +24602,94 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
         const auto& tfNames = program.transformFeedbackVaryingNames;
         const auto& layout = program.tessEvalOutputLayout;
 
-	        // Resolve each TF varying to a (struct-offset, byte-size) pair
-	        // inside the TES output struct. Names must match the SPIRV-
-	        // Cross-emitted member names. `gl_Position` special-cases.
-	        struct TfSource { std::size_t offset = 0; std::size_t bytes = 0; };
-	        auto tfMemberAliasMatches = [](const std::string& candidate,
-	                                       const std::string& requested) -> bool {
-	            const auto dot = requested.rfind('.');
-	            if (dot == std::string::npos || dot + 1 >= requested.size()) {
-	                return false;
-	            }
-	            const std::string tail = requested.substr(dot + 1);
+        // Resolve each TF varying to a (struct-offset, byte-size) pair
+        // inside the TES output struct. Names must match the SPIRV-
+        // Cross-emitted member names. `gl_Position` special-cases.
+        struct TfSource { std::size_t offset = 0; std::size_t bytes = 0; };
+        auto parseArrayElementName = [](const std::string& name,
+                                        std::string& base,
+                                        std::size_t& element) -> bool {
+            const auto bracket = name.rfind('[');
+            if (bracket == std::string::npos || name.empty() || name.back() != ']') {
+                return false;
+            }
+            const std::string idx =
+                name.substr(bracket + 1, name.size() - bracket - 2);
+            if (idx.empty() ||
+                !std::all_of(idx.begin(), idx.end(), [](char c) {
+                    return std::isdigit(static_cast<unsigned char>(c));
+                })) {
+                return false;
+            }
+            std::size_t parsed = 0;
+            for (char c : idx) {
+                parsed = parsed * 10u + static_cast<std::size_t>(c - '0');
+            }
+            base = name.substr(0, bracket);
+            element = parsed;
+            return !base.empty();
+        };
+        auto glTypeScalarCount = [](GLenum t) -> std::size_t {
+            switch (t) {
+                case GL_FLOAT: case GL_INT: case GL_UNSIGNED_INT: case GL_BOOL:
+                case GL_DOUBLE:
+                    return 1;
+                case GL_FLOAT_VEC2: case GL_INT_VEC2: case GL_UNSIGNED_INT_VEC2:
+                case GL_BOOL_VEC2: case GL_DOUBLE_VEC2:
+                    return 2;
+                case GL_FLOAT_VEC3: case GL_INT_VEC3: case GL_UNSIGNED_INT_VEC3:
+                case GL_BOOL_VEC3: case GL_DOUBLE_VEC3:
+                    return 3;
+                case GL_FLOAT_VEC4: case GL_INT_VEC4: case GL_UNSIGNED_INT_VEC4:
+                case GL_BOOL_VEC4: case GL_DOUBLE_VEC4:
+                    return 4;
+                case GL_FLOAT_MAT2: case GL_DOUBLE_MAT2:     return 4;
+                case GL_FLOAT_MAT3: case GL_DOUBLE_MAT3:     return 9;
+                case GL_FLOAT_MAT4: case GL_DOUBLE_MAT4:     return 16;
+                case GL_FLOAT_MAT2x3: case GL_DOUBLE_MAT2x3: return 6;
+                case GL_FLOAT_MAT2x4: case GL_DOUBLE_MAT2x4: return 8;
+                case GL_FLOAT_MAT3x2: case GL_DOUBLE_MAT3x2: return 6;
+                case GL_FLOAT_MAT3x4: case GL_DOUBLE_MAT3x4: return 12;
+                case GL_FLOAT_MAT4x2: case GL_DOUBLE_MAT4x2: return 8;
+                case GL_FLOAT_MAT4x3: case GL_DOUBLE_MAT4x3: return 12;
+                default: return 0;
+            }
+        };
+        auto glTypeScalarBytes = [](GLenum t) -> std::size_t {
+            switch (t) {
+                case GL_DOUBLE:
+                case GL_DOUBLE_VEC2:
+                case GL_DOUBLE_VEC3:
+                case GL_DOUBLE_VEC4:
+                case GL_DOUBLE_MAT2:
+                case GL_DOUBLE_MAT3:
+                case GL_DOUBLE_MAT4:
+                case GL_DOUBLE_MAT2x3:
+                case GL_DOUBLE_MAT2x4:
+                case GL_DOUBLE_MAT3x2:
+                case GL_DOUBLE_MAT3x4:
+                case GL_DOUBLE_MAT4x2:
+                case GL_DOUBLE_MAT4x3:
+                    return sizeof(double);
+                default:
+                    return sizeof(float);
+            }
+        };
+        auto tfResourceByteCount = [&](std::size_t tfIndex) -> std::size_t {
+            if (tfIndex >= program.resourceTransformFeedbackVaryings.size()) {
+                return 0;
+            }
+            const GLenum type =
+                program.resourceTransformFeedbackVaryings[tfIndex].type;
+            return glTypeScalarCount(type) * glTypeScalarBytes(type);
+        };
+        auto tfMemberAliasMatches = [](const std::string& candidate,
+                                       const std::string& requested) -> bool {
+            const auto dot = requested.rfind('.');
+            if (dot == std::string::npos || dot + 1 >= requested.size()) {
+                return false;
+            }
+            const std::string tail = requested.substr(dot + 1);
             if (candidate == tail) {
                 return true;
             }
@@ -24628,32 +24705,53 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
                    candidate.substr(cUnderscore + 1) == tail;
         };
         auto resolveTessTfSource = [&](const std::string& name,
+                                       std::size_t tfIndex,
                                        TfSource& out) -> bool {
-	            for (const auto& m : layout.members) {
-	                if (m.name == name ||
-	                    (name == "gl_Position" && m.isBuiltIn &&
-	                     m.builtIn == spv::BuiltInPosition)) {
-	                    out = {m.offset, m.glPackedBytes > 0 ? m.glPackedBytes : m.size};
-	                    return true;
-	                }
-	            }
-	            std::size_t matches = 0;
-	            TfSource matched{};
-	            for (const auto& m : layout.members) {
-	                if (tfMemberAliasMatches(m.name, name)) {
-	                    matched = {m.offset, m.glPackedBytes > 0 ? m.glPackedBytes : m.size};
-	                    ++matches;
-	                }
-	            }
-	            if (matches == 1) {
-	                out = matched;
-	                return true;
-	            }
-	            return false;
-	        };
-	        std::vector<TfSource> sources(tfNames.size());
+            if (name == "gl_Position") {
+                for (const auto& m : layout.members) {
+                    if (m.isBuiltIn && m.builtIn == spv::BuiltInPosition) {
+                        out = {m.offset, m.glPackedBytes > 0 ? m.glPackedBytes : m.size};
+                        return true;
+                    }
+                }
+            }
+
+            std::string lookupName = name;
+            std::size_t arrayElement = 0;
+            const bool arrayElementCapture =
+                parseArrayElementName(name, lookupName, arrayElement);
+
+            std::size_t matches = 0;
+            TfSource matched{};
+            for (const auto& m : layout.members) {
+                if (m.name == lookupName || tfMemberAliasMatches(m.name, lookupName)) {
+                    const std::size_t memberBytes =
+                        m.glPackedBytes > 0 ? m.glPackedBytes : m.size;
+                    matched = {m.offset, memberBytes};
+                    ++matches;
+                }
+            }
+            if (matches != 1) {
+                return false;
+            }
+            if (arrayElementCapture) {
+                std::size_t elementBytes = tfResourceByteCount(tfIndex);
+                if (elementBytes == 0) {
+                    elementBytes = 4 * sizeof(float);
+                }
+                const std::size_t elementOffset = arrayElement * elementBytes;
+                if (elementOffset + elementBytes > matched.bytes) {
+                    return false;
+                }
+                matched.offset += elementOffset;
+                matched.bytes = elementBytes;
+            }
+            out = matched;
+            return true;
+        };
+        std::vector<TfSource> sources(tfNames.size());
         for (std::size_t i = 0; i < tfNames.size(); ++i) {
-            (void)resolveTessTfSource(tfNames[i], sources[i]);
+            (void)resolveTessTfSource(tfNames[i], i, sources[i]);
         }
 
         auto hasTfName = [&](const char* name) -> bool {
@@ -24663,7 +24761,9 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
                                  std::size_t vertexIndex,
                                  std::int32_t fallback) -> std::int32_t {
             TfSource src{};
-            if (!resolveTessTfSource(name, src) || src.bytes < sizeof(std::int32_t)) {
+            if (!resolveTessTfSource(
+                    name, std::numeric_limits<std::size_t>::max(), src) ||
+                src.bytes < sizeof(std::int32_t)) {
                 return fallback;
             }
             std::int32_t value = fallback;
@@ -32002,12 +32102,17 @@ bool GLContext::linkProgram(GLuint program) {
         }
 
         // (4) Component limit check.
-        // GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS = 64 (our reported value)
-        // GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS = 4
-        // GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS = 4
         if (bufMode == GL_INTERLEAVED_ATTRIBS) {
-            constexpr GLsizei kMaxInterleavedComponents = 64;
-            if (totalComponents > kMaxInterleavedComponents) {
+            GLsizei maxInterleavedComponents = 64;
+            if (impl_->capabilities != nullptr) {
+                GLint cap = 0;
+                if (impl_->capabilities->queryInteger(
+                        GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS, &cap) &&
+                    cap > 0) {
+                    maxInterleavedComponents = static_cast<GLsizei>(cap);
+                }
+            }
+            if (totalComponents > maxInterleavedComponents) {
                 programObject->linkLog = "transform feedback exceeds GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS";
                 programObject->resourceTransformFeedbackVaryings.clear();
                 Runtime::shared().recordShaderTranslation({

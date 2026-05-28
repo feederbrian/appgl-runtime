@@ -1022,7 +1022,7 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_FRAGMENT_UNIFORM_BLOCKS] = std::max<GLint64>(uniformBindings, 14);
 
     // Transform feedback.
-    integerLimits_[GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS] = 64;
+    integerLimits_[GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS] = 128;
     integerLimits_[GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS] = 4;
     integerLimits_[GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS] = 4;
     integerLimits_[GL_MAX_TRANSFORM_FEEDBACK_BUFFERS] = 4;

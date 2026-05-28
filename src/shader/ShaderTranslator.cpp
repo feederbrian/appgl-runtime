@@ -2959,6 +2959,7 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     r.maxClipDistances = 8;
     r.maxCullDistances = 8;
     r.maxCombinedClipAndCullDistances = 8;
+    r.maxTransformFeedbackInterleavedComponents = 128;
     return r;
 }
 
