@@ -29,6 +29,9 @@ option(APPGL_FP64_EMULATION
 option(APPGL_ENABLE_ASAN
   "Build with AddressSanitizer for development/debugging. DO NOT ship."
   OFF)
+option(APPGL_DCR_SENTINEL_HOOKS
+  "Compile DCR red-stub sentinel hooks for test harnesses. DO NOT ship."
+  OFF)
 
 # AddressSanitizer flags applied globally when APPGL_ENABLE_ASAN is on.
 # Apple's clang accepts `-fsanitize=address` for both compile and link.
@@ -173,6 +176,7 @@ foreach(target AppGL AppGL_static AppGLTestsSupport)
   target_compile_definitions(${target} PRIVATE
     GL_SILENCE_DEPRECATION=1
     APPGL_FP64_EMULATION=$<IF:$<BOOL:${APPGL_FP64_EMULATION}>,1,0>
+    APPGL_ENABLE_DCR_SENTINEL_HOOKS=$<IF:$<BOOL:${APPGL_DCR_SENTINEL_HOOKS}>,1,0>
   )
 endforeach()
 

@@ -23,6 +23,16 @@
 #include <unordered_set>
 #include <vector>
 
+#ifndef APPGL_ENABLE_DCR_SENTINEL_HOOKS
+#define APPGL_ENABLE_DCR_SENTINEL_HOOKS 0
+#endif
+
+#if APPGL_ENABLE_DCR_SENTINEL_HOOKS
+#define APPGL_DCR_SENTINEL_HOOK(name) (std::getenv(name) != nullptr)
+#else
+#define APPGL_DCR_SENTINEL_HOOK(name) false
+#endif
+
 // Diagnostic tracing — set to 1 to enable, 0 to silence.
 #define APPGL_TRACE_FRAMEGRAPH 0
 
@@ -1190,8 +1200,12 @@ struct MetalFrameGraph::Impl {
     }
 
     bool shouldStubCommitBeforeAbandon() const {
+#if APPGL_ENABLE_DCR_SENTINEL_HOOKS
         const char* raw = std::getenv("APPGL_STUB_COMMIT_BEFORE_ABANDON");
         return raw != nullptr && raw[0] != '\0' && std::strcmp(raw, "0") != 0;
+#else
+        return false;
+#endif
     }
 
     bool commitCurrentBeforeTransientInvalidation(AppGLCommandReason reason) {
@@ -6716,7 +6730,7 @@ fragment float4 appgl_immediate_textured_fs(
             }
             [vsEnc endEncoding];
             vsLease.commitAndWait(AppGLCommandReason::TessVertexCompute);
-            if (std::getenv("APPGL_DCR4D_TESS_ZERO_VSOUT") != nullptr &&
+            if (APPGL_DCR_SENTINEL_HOOK("APPGL_DCR4D_TESS_ZERO_VSOUT") &&
                 !fillTransientBufferAndWait(vsOutBuf, vsOutBytes,
                                             AppGLCommandReason::TessVertexCompute,
                                             @"appgl-dcr4d-zero-tess-vsout")) {
@@ -6922,7 +6936,7 @@ fragment float4 appgl_immediate_textured_fs(
                 }
             }
         }
-        if (std::getenv("APPGL_DCR4D_TESS_ZERO_FACTORBUF") != nullptr) {
+        if (APPGL_DCR_SENTINEL_HOOK("APPGL_DCR4D_TESS_ZERO_FACTORBUF")) {
             if (!fillTransientBufferAndWait(factorBuf, factorBytes,
                                             AppGLCommandReason::TessControlCompute,
                                             @"appgl-dcr4d-zero-tess-factor")) {
@@ -8050,7 +8064,7 @@ fragment float4 appgl_immediate_textured_fs(
             }
             vsCmdBuf.label = @"appgl-mesh-gs-vs-compute";
             const bool dcr4cZeroVsOut =
-                std::getenv("APPGL_DCR4C_MESH_GS_ZERO_VSOUT") != nullptr;
+                APPGL_DCR_SENTINEL_HOOK("APPGL_DCR4C_MESH_GS_ZERO_VSOUT");
             if (dcr4cZeroVsOut) {
                 id<MTLBlitCommandEncoder> fillEnc =
                     [vsCmdBuf blitCommandEncoder];

@@ -47,6 +47,16 @@
 #include <utility>
 #include <vector>
 
+#ifndef APPGL_ENABLE_DCR_SENTINEL_HOOKS
+#define APPGL_ENABLE_DCR_SENTINEL_HOOKS 0
+#endif
+
+#if APPGL_ENABLE_DCR_SENTINEL_HOOKS
+#define APPGL_DCR_SENTINEL_HOOK(name) (std::getenv(name) != nullptr)
+#else
+#define APPGL_DCR_SENTINEL_HOOK(name) false
+#endif
+
 // Compat-profile upload-format enums removed from the core glcorearb.h
 // surface in GL 3.2. AppGL still accepts them as upload aliases via
 // componentCountForFormat + buildRGBA8Upload; defining them here with
@@ -3413,7 +3423,7 @@ struct GLContext::Impl {
     }
 
     void markBoundTransformFeedbackBufferWrites() const {
-        if (std::getenv("APPGL_DCR4E_TF_SKIP_PRODUCER_MARK") != nullptr ||
+        if (APPGL_DCR_SENTINEL_HOOK("APPGL_DCR4E_TF_SKIP_PRODUCER_MARK") ||
             state == nullptr || objects == nullptr) {
             return;
         }
@@ -3434,7 +3444,7 @@ struct GLContext::Impl {
 
     void markCpuInterpreterImageWrites(
         const std::vector<GLuint>& textureNames) const {
-        if (std::getenv("APPGL_DCR4E_IMAGE_SKIP_PRODUCER_MARK") != nullptr ||
+        if (APPGL_DCR_SENTINEL_HOOK("APPGL_DCR4E_IMAGE_SKIP_PRODUCER_MARK") ||
             textureNames.empty()) {
             return;
         }
@@ -22733,7 +22743,7 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
                       program.tessEvalOutputLayout.structSize > 0;
 
     const bool skipCpuTfWriteForSentinel =
-        std::getenv("APPGL_DCR4D_TF_EXCLUDE_SKIP_CPU_WRITE") != nullptr;
+        APPGL_DCR_SENTINEL_HOOK("APPGL_DCR4D_TF_EXCLUDE_SKIP_CPU_WRITE");
 
     // DCR4-D deliberately excludes transform-feedback writes from GPU
     // producer marking: by the time this function runs, TES-compute has
@@ -23813,7 +23823,7 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     // position field.
     const bool tfActive = isTfActiveOnBoundImpl() && !isTfPausedOnBoundImpl();
     if (tfActive &&
-        std::getenv("APPGL_DCR4E_FORCE_TF_CAPTURE_FAIL") != nullptr) {
+        APPGL_DCR_SENTINEL_HOOK("APPGL_DCR4E_FORCE_TF_CAPTURE_FAIL")) {
         return true;
     }
     auto capturedVerticesBeforeDraw = [this](std::size_t stream) -> std::size_t {
@@ -23839,7 +23849,7 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
         const bool interleaved =
             (program.transformFeedbackBufferMode == GL_INTERLEAVED_ATTRIBS);
         const bool skipCpuTfWriteForSentinel =
-            std::getenv("APPGL_DCR4E_TF_SKIP_CPU_WRITE") != nullptr;
+            APPGL_DCR_SENTINEL_HOOK("APPGL_DCR4E_TF_SKIP_CPU_WRITE");
 
         struct TfSource {
             std::size_t offset = 0;
@@ -24552,7 +24562,7 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
         return (ed.streamVertexCounts[idx] * writtenVerts / totalVerts) / vpp;
     };
 
-    if (std::getenv("APPGL_DCR4E_SKIP_QUERY_UPDATES") == nullptr) {
+    if (!APPGL_DCR_SENTINEL_HOOK("APPGL_DCR4E_SKIP_QUERY_UPDATES")) {
         objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
             if (!q.active) return;
             const bool tfCapturing = tfActive && !isTfPausedOnBoundImpl();
@@ -24630,7 +24640,7 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     // carries every emitted vertex through to BO[0]/BO[1] as before
     // and only the per-stream COUNT semantic shifts here).
     if (isTfActiveOnBoundImpl() &&
-        std::getenv("APPGL_DCR4E_SKIP_TF_COUNT_UPDATE") == nullptr) {
+        !APPGL_DCR_SENTINEL_HOOK("APPGL_DCR4E_SKIP_TF_COUNT_UPDATE")) {
         const GLuint tfName = boundTransformFeedbackId;
         if (tfName == 0) {
             if (hasMultiStreamOutput && primsWrittenByStreamValid) {
@@ -39977,7 +39987,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                                            const appgl::EmulatedDraw& ed,
                                            AppGLSubmissionGroupKind fallbackSubgroupKind)
 {
-    if (std::getenv("APPGL_DCR4E_FORCE_GS_RASTER_ENCODE_FAIL") != nullptr) {
+    if (APPGL_DCR_SENTINEL_HOOK("APPGL_DCR4E_FORCE_GS_RASTER_ENCODE_FAIL")) {
         return false;
     }
     // Resolve the FBO's layered-attachment state before we decide
@@ -49149,7 +49159,7 @@ bool GLContext::drawTransformFeedback(GLenum mode, GLuint id) {
     // public DrawTransformFeedbackInstanced(..., 1) continues through
     // the existing drawArraysInstanced path.
     GLsizei vertexCount = tfObj->lastCompletedVertexCount[0];
-    if (std::getenv("APPGL_DCR4E_FORCE_STREAM_REPLAY_ZERO_COUNT") != nullptr) {
+    if (APPGL_DCR_SENTINEL_HOOK("APPGL_DCR4E_FORCE_STREAM_REPLAY_ZERO_COUNT")) {
         vertexCount = 0;
     }
     appgl::AppGLSubmissionGroup replayGroup;
@@ -49173,7 +49183,7 @@ bool GLContext::drawTransformFeedbackStream(GLenum mode, GLuint id, GLuint strea
     // DrawArrays routing as drawTransformFeedback(), but using the
     // completed count for the requested stream.
     GLsizei vertexCount = tfObj->lastCompletedVertexCount[streamIdx];
-    if (std::getenv("APPGL_DCR4E_FORCE_STREAM_REPLAY_ZERO_COUNT") != nullptr) {
+    if (APPGL_DCR_SENTINEL_HOOK("APPGL_DCR4E_FORCE_STREAM_REPLAY_ZERO_COUNT")) {
         vertexCount = 0;
     }
     appgl::AppGLSubmissionGroup replayGroup;
@@ -49211,7 +49221,7 @@ bool GLContext::drawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei i
     // non-Stream entry point is implicitly stream 0). Multi-stream
     // accumulators are added Day 23 via GS-emul EmitStreamVertex routing.
     GLsizei vertexCount = tfObj->lastCompletedVertexCount[0];
-    if (std::getenv("APPGL_DCR4E_FORCE_STREAM_REPLAY_ZERO_COUNT") != nullptr) {
+    if (APPGL_DCR_SENTINEL_HOOK("APPGL_DCR4E_FORCE_STREAM_REPLAY_ZERO_COUNT")) {
         vertexCount = 0;
     }
     appgl::AppGLSubmissionGroup replayGroup;
@@ -49246,7 +49256,7 @@ bool GLContext::drawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLu
         (stream < GLTransformFeedbackObject::kMaxTransformFeedbackStreams)
             ? static_cast<std::size_t>(stream) : 0u;
     GLsizei vertexCount = tfObj->lastCompletedVertexCount[streamIdx];
-    if (std::getenv("APPGL_DCR4E_FORCE_STREAM_REPLAY_ZERO_COUNT") != nullptr) {
+    if (APPGL_DCR_SENTINEL_HOOK("APPGL_DCR4E_FORCE_STREAM_REPLAY_ZERO_COUNT")) {
         vertexCount = 0;
     }
     appgl::AppGLSubmissionGroup replayGroup;

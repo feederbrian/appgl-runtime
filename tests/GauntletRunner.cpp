@@ -31,6 +31,16 @@
 #include "../src/state/GLStateTracker.h"
 #include "../src/state/IndexExpansion.h"
 
+#ifndef APPGL_ENABLE_DCR_SENTINEL_HOOKS
+#define APPGL_ENABLE_DCR_SENTINEL_HOOKS 0
+#endif
+
+#if APPGL_ENABLE_DCR_SENTINEL_HOOKS
+#define APPGL_DCR_SENTINEL_ENV(name) name
+#else
+#define APPGL_DCR_SENTINEL_ENV(name) ""
+#endif
+
 namespace appgl::tests {
 namespace {
 
@@ -10410,7 +10420,8 @@ TestResult runDCR4CMeshGsDependencySentinel() {
         gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         gl.glClear(GL_COLOR_BUFFER_BIT);
         {
-            ScopedEnvVar zeroVsOut("APPGL_DCR4C_MESH_GS_ZERO_VSOUT", "1");
+            ScopedEnvVar zeroVsOut(
+                APPGL_DCR_SENTINEL_ENV("APPGL_DCR4C_MESH_GS_ZERO_VSOUT"), "1");
             drawDCR4CMeshGsPoint(gl, program);
         }
         pixel = readDCR4CMeshGsCenter(gl);
@@ -10656,7 +10667,8 @@ TestResult runDCR4DTessDependencySentinel() {
         gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         gl.glClear(GL_COLOR_BUFFER_BIT);
         {
-            ScopedEnvVar zeroVsOut("APPGL_DCR4D_TESS_ZERO_VSOUT", "1");
+            ScopedEnvVar zeroVsOut(
+                APPGL_DCR_SENTINEL_ENV("APPGL_DCR4D_TESS_ZERO_VSOUT"), "1");
             drawDCR4DTessPatch(gl, program);
         }
         pixel = readDCR4DTessCenter(gl);
@@ -10666,7 +10678,8 @@ TestResult runDCR4DTessDependencySentinel() {
         gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         gl.glClear(GL_COLOR_BUFFER_BIT);
         {
-            ScopedEnvVar zeroFactor("APPGL_DCR4D_TESS_ZERO_FACTORBUF", "1");
+            ScopedEnvVar zeroFactor(
+                APPGL_DCR_SENTINEL_ENV("APPGL_DCR4D_TESS_ZERO_FACTORBUF"), "1");
             drawDCR4DTessPatch(gl, program);
         }
         pixel = readDCR4DTessCenter(gl);
@@ -10842,7 +10855,8 @@ TestResult runDCR4DTessTfExcludeSentinel() {
             gl.glPatchParameteri(GL_PATCH_VERTICES, 3);
             gl.glEnable(GL_RASTERIZER_DISCARD);
             if (skipCpuWrite) {
-                ScopedEnvVar skip("APPGL_DCR4D_TF_EXCLUDE_SKIP_CPU_WRITE", "1");
+                ScopedEnvVar skip(
+                    APPGL_DCR_SENTINEL_ENV("APPGL_DCR4D_TF_EXCLUDE_SKIP_CPU_WRITE"), "1");
                 gl.glBeginTransformFeedback(GL_TRIANGLES);
                 gl.glDrawArrays(GL_PATCHES, 0, 3);
                 gl.glEndTransformFeedback();
@@ -11166,7 +11180,8 @@ TestResult runDCR4ETfProducerSentinel() {
 
         resetDCR4ETfBuffer(gl, tfBuffer);
         {
-            ScopedEnvVar skipMark("APPGL_DCR4E_TF_SKIP_PRODUCER_MARK", "1");
+            ScopedEnvVar skipMark(
+                APPGL_DCR_SENTINEL_ENV("APPGL_DCR4E_TF_SKIP_PRODUCER_MARK"), "1");
             captureDCR4EGsPoint(gl, program, tf, tfBuffer, true);
         }
         expectPendingClear(bufferPendingBits(context, tfBuffer),
@@ -11177,7 +11192,8 @@ TestResult runDCR4ETfProducerSentinel() {
 
         resetDCR4ETfBuffer(gl, tfBuffer);
         {
-            ScopedEnvVar skipWrite("APPGL_DCR4E_TF_SKIP_CPU_WRITE", "1");
+            ScopedEnvVar skipWrite(
+                APPGL_DCR_SENTINEL_ENV("APPGL_DCR4E_TF_SKIP_CPU_WRITE"), "1");
             captureDCR4EGsPoint(gl, program, tf, tfBuffer, true);
         }
         expectCondition(!dcr4eTfBufferSawSeven(gl, tfBuffer),
@@ -11213,7 +11229,8 @@ TestResult runDCR4ECpuImageProducerSentinel() {
             gl.glBindImageTexture(0, imageTex, 0, GL_FALSE, 0,
                                   GL_WRITE_ONLY, GL_RGBA8);
             if (skipMark) {
-                ScopedEnvVar skip("APPGL_DCR4E_IMAGE_SKIP_PRODUCER_MARK", "1");
+                ScopedEnvVar skip(
+                    APPGL_DCR_SENTINEL_ENV("APPGL_DCR4E_IMAGE_SKIP_PRODUCER_MARK"), "1");
                 drawDCR4EGsPoint(gl, program);
             } else {
                 drawDCR4EGsPoint(gl, program);
@@ -11277,7 +11294,8 @@ TestResult runDCR4EQueryCounterSentinel() {
             gl.glBeginQuery(GL_PRIMITIVES_GENERATED, queries[0]);
             gl.glBeginQuery(GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN, queries[1]);
             if (skipQueries) {
-                ScopedEnvVar skip("APPGL_DCR4E_SKIP_QUERY_UPDATES", "1");
+                ScopedEnvVar skip(
+                    APPGL_DCR_SENTINEL_ENV("APPGL_DCR4E_SKIP_QUERY_UPDATES"), "1");
                 captureDCR4EGsPoint(gl, program, tf, tfBuffer, true);
             } else {
                 captureDCR4EGsPoint(gl, program, tf, tfBuffer, true);
@@ -11347,7 +11365,8 @@ TestResult runDCR4EStreamReplaySentinel() {
 
         clearDCR4ETarget(gl);
         {
-            ScopedEnvVar zeroReplay("APPGL_DCR4E_FORCE_STREAM_REPLAY_ZERO_COUNT", "1");
+            ScopedEnvVar zeroReplay(
+                APPGL_DCR_SENTINEL_ENV("APPGL_DCR4E_FORCE_STREAM_REPLAY_ZERO_COUNT"), "1");
             gl.glDrawTransformFeedbackStream(GL_POINTS, tf, 0);
         }
         pixel = readDCR4ECenter(gl);
@@ -11357,7 +11376,8 @@ TestResult runDCR4EStreamReplaySentinel() {
         clearDCR4ETarget(gl);
         resetDCR4ETfBuffer(gl, tfBuffer);
         {
-            ScopedEnvVar skipCount("APPGL_DCR4E_SKIP_TF_COUNT_UPDATE", "1");
+            ScopedEnvVar skipCount(
+                APPGL_DCR_SENTINEL_ENV("APPGL_DCR4E_SKIP_TF_COUNT_UPDATE"), "1");
             captureDCR4EGsPoint(gl, captureProgram, tf, tfBuffer, true);
         }
         gl.glBindVertexArray(replayVao);
@@ -11410,7 +11430,8 @@ TestResult runDCR4EExactNoSlipSentinel() {
 
         clearDCR4ETarget(gl);
         {
-            ScopedEnvVar failRaster("APPGL_DCR4E_FORCE_GS_RASTER_ENCODE_FAIL", "1");
+            ScopedEnvVar failRaster(
+                APPGL_DCR_SENTINEL_ENV("APPGL_DCR4E_FORCE_GS_RASTER_ENCODE_FAIL"), "1");
             captureDCR4EGsPoint(gl, program, tf, tfBuffer, false);
         }
         pixel = readDCR4ECenter(gl);
@@ -11419,7 +11440,8 @@ TestResult runDCR4EExactNoSlipSentinel() {
 
         clearDCR4ETarget(gl);
         {
-            ScopedEnvVar failTf("APPGL_DCR4E_FORCE_TF_CAPTURE_FAIL", "1");
+            ScopedEnvVar failTf(
+                APPGL_DCR_SENTINEL_ENV("APPGL_DCR4E_FORCE_TF_CAPTURE_FAIL"), "1");
             captureDCR4EGsPoint(gl, program, tf, tfBuffer, false);
         }
         pixel = readDCR4ECenter(gl);
