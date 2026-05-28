@@ -1069,14 +1069,14 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // shader-side built-in constant reports.
     integerLimits_[GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS] = 8;
     integerLimits_[GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE] = 32;
-    integerLimits_[GL_MAX_COMBINED_ATOMIC_COUNTER_BUFFERS] = 1;
-    integerLimits_[GL_MAX_COMBINED_ATOMIC_COUNTERS] = 8;
+    integerLimits_[GL_MAX_COMBINED_ATOMIC_COUNTER_BUFFERS] = 8;
+    integerLimits_[GL_MAX_COMBINED_ATOMIC_COUNTERS] = 10;
     integerLimits_[GL_MAX_VERTEX_ATOMIC_COUNTER_BUFFERS] = 0;
     integerLimits_[GL_MAX_VERTEX_ATOMIC_COUNTERS] = 0;
-    integerLimits_[GL_MAX_FRAGMENT_ATOMIC_COUNTER_BUFFERS] = 1;
+    integerLimits_[GL_MAX_FRAGMENT_ATOMIC_COUNTER_BUFFERS] = 2;
     integerLimits_[GL_MAX_FRAGMENT_ATOMIC_COUNTERS] = 8;
-    integerLimits_[GL_MAX_GEOMETRY_ATOMIC_COUNTER_BUFFERS] = 1;
-    integerLimits_[GL_MAX_GEOMETRY_ATOMIC_COUNTERS] = 1;
+    integerLimits_[GL_MAX_GEOMETRY_ATOMIC_COUNTER_BUFFERS] = 2;
+    integerLimits_[GL_MAX_GEOMETRY_ATOMIC_COUNTERS] = 2;
     integerLimits_[GL_MAX_TESS_CONTROL_ATOMIC_COUNTER_BUFFERS] = 0;
     integerLimits_[GL_MAX_TESS_CONTROL_ATOMIC_COUNTERS] = 0;
     integerLimits_[GL_MAX_TESS_EVALUATION_ATOMIC_COUNTER_BUFFERS] = 0;

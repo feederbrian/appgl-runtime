@@ -32614,10 +32614,8 @@ bool GLContext::linkProgram(GLuint program) {
     // `linking.more_ACs_in_GS_than_supported` +
     // `linking.more_ACBs_in_GS_than_supported` query the GS caps,
     // create a GS that overshoots by one, and assert link failure.
-    // We already advertise `MAX_GEOMETRY_ATOMIC_COUNTERS = 0`,
-    // which simplifies the check to "if the GS source declares
-    // any `atomic_uint` uniform, the link must fail" — but
-    // implement the general form for future when the cap lifts.
+    // Keep this as a general cap check so lifting GS atomic support
+    // does not silently accept shaders above the published limits.
     if (geometryShader != nullptr) {
         std::size_t gsAtomicCounters = 0;
         std::unordered_set<GLint> gsAtomicBindings;

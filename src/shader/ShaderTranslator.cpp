@@ -2914,7 +2914,7 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     r.maxFragmentInputComponents = 128;
     r.maxFragmentInputVectors = 32;
     r.maxFragmentAtomicCounters = 8;
-    r.maxFragmentAtomicCounterBuffers = 1;
+    r.maxFragmentAtomicCounterBuffers = 2;
     r.maxFragmentImageUniforms = 8;
     // Combined / pipeline.
     r.maxTextureImageUnits = 48;            // per-stage fragment tex units
@@ -2931,9 +2931,10 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     r.maxAtomicCounterBufferSize = 32;
     r.maxTessControlAtomicCounters = 0;
     r.maxTessEvaluationAtomicCounters = 0;
-    r.maxGeometryAtomicCounters = 1;
-    r.maxCombinedAtomicCounters = 8;
-    r.maxCombinedAtomicCounterBuffers = 1;
+    r.maxGeometryAtomicCounters = 2;
+    r.maxGeometryAtomicCounterBuffers = 2;
+    r.maxCombinedAtomicCounters = 10;
+    r.maxCombinedAtomicCounterBuffers = 8;
     // Image uniforms per tess / geometry.
     r.maxTessControlImageUniforms = 8;
     r.maxTessEvaluationImageUniforms = 8;
