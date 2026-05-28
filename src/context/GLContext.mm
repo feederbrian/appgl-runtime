@@ -8055,10 +8055,15 @@ struct GLContext::Impl {
             program.fragmentMSL.find("appgl_sparse_sampled_sidecar_") != std::string::npos;
         const bool vertexUsesSparseSampledSidecars =
             program.vertexMSL.find("appgl_sparse_sampled_sidecar_") != std::string::npos;
+        auto mslUsesArgumentBufferSet0 = [](const std::string* msl) -> bool {
+            return msl != nullptr &&
+                msl->find("spvDescriptorSetBuffer0") != std::string::npos;
+        };
 
         auto resolveStage = [&](const char* stageTag,
                                 const ShaderReflection* reflection,
                                 std::vector<TranslatedDrawInfo::TextureBinding>& outBindings,
+                                const std::string* stageMSL,
                                 bool usesSparseSampledSidecars) {
             if (reflection == nullptr || reflection->sampledTextures.empty()) {
                 if (g_lbLog) {
@@ -8069,6 +8074,8 @@ struct GLContext::Impl {
                 }
                 return;
             }
+            static constexpr std::uint32_t kMaxDirectMetalSamplerSlots = 16u;
+            const bool stageUsesArgBuf = mslUsesArgumentBufferSet0(stageMSL);
             if (g_lbLog) {
                 std::fprintf(stderr,
                     "[LB] stage=%s ENTER sampCount=%zu\n",
@@ -8242,6 +8249,12 @@ struct GLContext::Impl {
                             glUnit, arrayElement, samplerArraySize, preferredTarget,
                             samplerGLType, sampledTex.metalBinding);
                     }
+                    const bool collapsedDirectSamplerArray =
+                        !stageUsesArgBuf &&
+                        samplerArraySize > 1 &&
+                        sampledTex.metalBinding +
+                            static_cast<std::uint32_t>(samplerArraySize) >
+                                kMaxDirectMetalSamplerSlots;
                     // Note: GL 4.2 layout(binding=N) default-unit is
                     // baked into `samplerValue->ints[arrayElement]`
                     // at link time (see the samplerExplicitBindings
@@ -8421,7 +8434,13 @@ struct GLContext::Impl {
                 if (binding.metalTexture == nullptr) {
                     binding.metalTexture = resolveSwizzledTexture(*texObject);
                 }
-                binding.metalSamplerState = metalSamplerState;
+                // The direct MSL fallback for oversized sampler arrays uses
+                // one sampler state at the base slot while textures remain
+                // indexed per element.
+                binding.metalSamplerState =
+                    (collapsedDirectSamplerArray && arrayElement > 0)
+                        ? nullptr
+                        : metalSamplerState;
                 if (texObject->target == GL_TEXTURE_BUFFER &&
                     texObject->desc.sourceBuffer != 0) {
                     GLBufferObject* backingBuffer =
@@ -8519,9 +8538,9 @@ struct GLContext::Impl {
         };
 
         resolveStage("frag", info.fragmentReflection, info.fragmentTextures,
-                     fragmentUsesSparseSampledSidecars);
+                     info.fragmentMSL, fragmentUsesSparseSampledSidecars);
         resolveStage("vert", info.vertexReflection, info.vertexTextures,
-                     vertexUsesSparseSampledSidecars);
+                     info.vertexMSL, vertexUsesSparseSampledSidecars);
     }
 
     // Sprint 6 Phase 1 sub-task 3 day 3 (CKPT43): build the

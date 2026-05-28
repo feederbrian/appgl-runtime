@@ -34,6 +34,7 @@ constexpr std::uint32_t kMultisampleStorageImageSampleCountsBufferSlot = 30u;
 constexpr std::uint32_t kClipControlYSignPreferredBufferSlot = 29u;
 constexpr std::uint32_t kTextureReductionModesPreferredBufferSlot = 14u;
 constexpr std::uint32_t kMaxMetalBufferSlot = 30u;
+constexpr std::uint32_t kMaxDirectMetalSamplerSlots = 16u;
 constexpr std::uint32_t kMultisampleSampledSidecarTextureSlotOffset = 64u;
 constexpr std::uint32_t kMultisampleStorageSparseResidencyTextureSlotOffset = 96u;
 
@@ -1754,6 +1755,142 @@ bool findMatchingBracket(const std::string& text,
         }
     }
     return false;
+}
+
+bool parseDecimalUInt(const std::string& text,
+                      std::size_t& cursor,
+                      std::uint32_t& value) {
+    if (cursor >= text.size() ||
+        !std::isdigit(static_cast<unsigned char>(text[cursor]))) {
+        return false;
+    }
+    std::uint32_t parsed = 0;
+    while (cursor < text.size() &&
+           std::isdigit(static_cast<unsigned char>(text[cursor]))) {
+        parsed = parsed * 10u +
+            static_cast<std::uint32_t>(text[cursor] - '0');
+        ++cursor;
+    }
+    value = parsed;
+    return true;
+}
+
+void skipWhitespace(const std::string& text,
+                    std::size_t& cursor,
+                    std::size_t end = std::string::npos) {
+    if (end == std::string::npos || end > text.size()) {
+        end = text.size();
+    }
+    while (cursor < end &&
+           std::isspace(static_cast<unsigned char>(text[cursor]))) {
+        ++cursor;
+    }
+}
+
+bool collapseOversizedDirectSamplerArrays(std::string& msl) {
+    struct SamplerArray {
+        std::string name;
+    };
+    std::vector<SamplerArray> collapsed;
+    bool changed = false;
+    static constexpr const char* kNeedle = "array<sampler,";
+    static constexpr std::size_t kNeedleLen = sizeof("array<sampler,") - 1u;
+
+    std::size_t pos = 0;
+    while ((pos = msl.find(kNeedle, pos)) != std::string::npos) {
+        std::size_t cursor = pos + kNeedleLen;
+        skipWhitespace(msl, cursor);
+        std::uint32_t arraySize = 0;
+        if (!parseDecimalUInt(msl, cursor, arraySize)) {
+            pos += kNeedleLen;
+            continue;
+        }
+        skipWhitespace(msl, cursor);
+        if (cursor >= msl.size() || msl[cursor] != '>') {
+            pos += kNeedleLen;
+            continue;
+        }
+        const std::size_t typeEnd = cursor + 1;
+        std::size_t nameBegin = typeEnd;
+        skipWhitespace(msl, nameBegin);
+        std::size_t nameEnd = nameBegin;
+        while (nameEnd < msl.size() && isIdentifierChar(msl[nameEnd])) {
+            ++nameEnd;
+        }
+        if (nameEnd == nameBegin) {
+            pos = typeEnd;
+            continue;
+        }
+
+        const std::size_t lineEnd = msl.find('\n', nameEnd);
+        const std::size_t searchEnd =
+            lineEnd == std::string::npos ? msl.size() : lineEnd;
+        const std::size_t samplerAttr = msl.find("[[sampler(", nameEnd);
+        if (samplerAttr == std::string::npos || samplerAttr > searchEnd) {
+            pos = typeEnd;
+            continue;
+        }
+        cursor = samplerAttr + std::strlen("[[sampler(");
+        std::uint32_t samplerSlot = 0;
+        if (!parseDecimalUInt(msl, cursor, samplerSlot)) {
+            pos = typeEnd;
+            continue;
+        }
+
+        if (samplerSlot + arraySize <= kMaxDirectMetalSamplerSlots) {
+            pos = typeEnd;
+            continue;
+        }
+
+        const std::string name = msl.substr(nameBegin, nameEnd - nameBegin);
+        msl.replace(pos, typeEnd - pos, "sampler");
+        collapsed.push_back({name});
+        pos += std::strlen("sampler");
+        changed = true;
+    }
+
+    std::sort(collapsed.begin(), collapsed.end(),
+              [](const SamplerArray& a, const SamplerArray& b) {
+                  return a.name < b.name;
+              });
+    collapsed.erase(
+        std::unique(collapsed.begin(), collapsed.end(),
+                    [](const SamplerArray& a, const SamplerArray& b) {
+                        return a.name == b.name;
+                    }),
+        collapsed.end());
+
+    for (const auto& sampler : collapsed) {
+        pos = 0;
+        while ((pos = msl.find(sampler.name, pos)) != std::string::npos) {
+            if (pos > 0 && isIdentifierChar(msl[pos - 1])) {
+                pos += sampler.name.size();
+                continue;
+            }
+            const std::size_t afterName = pos + sampler.name.size();
+            if (afterName < msl.size() && isIdentifierChar(msl[afterName])) {
+                pos = afterName;
+                continue;
+            }
+            std::size_t bracket = afterName;
+            skipWhitespace(msl, bracket);
+            if (bracket >= msl.size() || msl[bracket] != '[' ||
+                (bracket + 1 < msl.size() && msl[bracket + 1] == '[')) {
+                pos = afterName;
+                continue;
+            }
+            std::size_t close = std::string::npos;
+            if (!findMatchingBracket(msl, bracket, close)) {
+                pos = afterName;
+                continue;
+            }
+            msl.erase(afterName, close - afterName + 1);
+            pos = afterName;
+            changed = true;
+        }
+    }
+
+    return changed;
 }
 
 // SPIRV-Cross can lower image1DArray atomics to `atomic_ptr[int2(...)]`.
@@ -4427,6 +4564,12 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
 
         std::string msl = compiler.compile();
 
+        if (!useArgBuf) {
+            // Metal direct bindings expose 16 sampler-state slots. Texture
+            // arrays can span higher slots, so oversized GLSL sampler arrays
+            // keep their per-element texture array and share the first sampler.
+            (void)collapseOversizedDirectSamplerArrays(msl);
+        }
         (void)rewriteVectorImageAtomicBufferSubscripts(msl);
         (void)fixUnsafeArrayDoubleIndex(msl);
 
