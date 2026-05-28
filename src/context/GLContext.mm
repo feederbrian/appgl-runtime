@@ -15711,6 +15711,14 @@ struct GLContext::Impl {
         GLboolean cachedViewLayered = GL_TRUE;
         GLint cachedViewLayer = 0;
         GLenum cachedViewTarget = 0;
+        // Metal cannot view one 3D depth slice as texture2d, so
+        // non-layered image2D bindings of texture3D use a 2D sidecar.
+        void* layer3DSidecarTexture = nullptr;
+        GLuint layer3DSidecarSourceTexture = 0;
+        GLint layer3DSidecarLevel = -1;
+        GLint layer3DSidecarLayer = 0;
+        GLenum layer3DSidecarFormat = 0;
+        bool layer3DSidecarDirty = false;
         void* sparseSidecarLevelView = nullptr;
         GLuint sparseCachedViewTexture = 0;
         GLint sparseCachedViewLevel = -1;
@@ -15727,6 +15735,9 @@ struct GLContext::Impl {
             if (sparseSidecarLevelView != nullptr) {
                 releaseRetainedMetalObject(sparseSidecarLevelView);
             }
+            if (layer3DSidecarTexture != nullptr) {
+                releaseRetainedMetalObject(layer3DSidecarTexture);
+            }
             metalLevelView = nullptr;
             cachedViewTexture = 0;
             cachedViewLevel = -1;
@@ -15734,6 +15745,12 @@ struct GLContext::Impl {
             cachedViewLayered = GL_TRUE;
             cachedViewLayer = 0;
             cachedViewTarget = 0;
+            layer3DSidecarTexture = nullptr;
+            layer3DSidecarSourceTexture = 0;
+            layer3DSidecarLevel = -1;
+            layer3DSidecarLayer = 0;
+            layer3DSidecarFormat = 0;
+            layer3DSidecarDirty = false;
             sparseSidecarLevelView = nullptr;
             sparseCachedViewTexture = 0;
             sparseCachedViewLevel = -1;
@@ -15745,12 +15762,193 @@ struct GLContext::Impl {
         }
     };
 
+    void flushImageBinding3DLayerSidecar(ImageBinding& ib) {
+        if (!ib.layer3DSidecarDirty ||
+            ib.layer3DSidecarTexture == nullptr ||
+            ib.layer3DSidecarSourceTexture == 0 ||
+            objects == nullptr) {
+            return;
+        }
+        if (frameGraph != nullptr) {
+            frameGraph->flushForReadback();
+        }
+        GLTextureObject* texObj =
+            objects->textures().get(ib.layer3DSidecarSourceTexture);
+        id<MTLTexture> srcTex = texObj != nullptr
+            ? (__bridge id<MTLTexture>)texObj->metalTexture
+            : nil;
+        id<MTLTexture> sidecar =
+            (__bridge id<MTLTexture>)ib.layer3DSidecarTexture;
+        if (srcTex == nil || sidecar == nil ||
+            srcTex.textureType != MTLTextureType3D ||
+            ib.layer3DSidecarLevel < 0 ||
+            static_cast<NSUInteger>(ib.layer3DSidecarLevel) >=
+                srcTex.mipmapLevelCount) {
+            ib.layer3DSidecarDirty = false;
+            return;
+        }
+
+        const NSUInteger mip =
+            static_cast<NSUInteger>(ib.layer3DSidecarLevel);
+        const NSUInteger width = std::max<NSUInteger>(srcTex.width >> mip, 1);
+        const NSUInteger height = std::max<NSUInteger>(srcTex.height >> mip, 1);
+        const NSUInteger depth = std::max<NSUInteger>(srcTex.depth >> mip, 1);
+        if (ib.layer3DSidecarLayer < 0 ||
+            static_cast<NSUInteger>(ib.layer3DSidecarLayer) >= depth ||
+            sidecar.width != width ||
+            sidecar.height != height) {
+            ib.layer3DSidecarDirty = false;
+            return;
+        }
+        const auto fmtInfo = nativeFormatInfo(sidecar.pixelFormat);
+        if (fmtInfo.bytesPerPixel <= 0) {
+            ib.layer3DSidecarDirty = false;
+            return;
+        }
+        const NSUInteger bytesPerRow =
+            width * static_cast<NSUInteger>(fmtInfo.bytesPerPixel);
+        const std::size_t imageBytes =
+            static_cast<std::size_t>(bytesPerRow) *
+            static_cast<std::size_t>(height);
+        std::vector<std::uint8_t> bytes(imageBytes);
+        @try {
+            MTLRegion srcRegion = MTLRegionMake2D(0, 0, width, height);
+            [sidecar getBytes:bytes.data()
+                  bytesPerRow:bytesPerRow
+                   fromRegion:srcRegion
+                  mipmapLevel:0];
+            MTLRegion dstRegion = MTLRegionMake3D(
+                0, 0, static_cast<NSUInteger>(ib.layer3DSidecarLayer),
+                width, height, 1);
+            [srcTex replaceRegion:dstRegion
+                       mipmapLevel:mip
+                         withBytes:bytes.data()
+                       bytesPerRow:bytesPerRow];
+            ib.layer3DSidecarDirty = false;
+        } @catch (NSException*) {
+        }
+    }
+
+    void* resolveImage3DLayerSidecarTexture(ImageBinding& ib,
+                                            GLTextureObject* texObj,
+                                            GLenum shaderTarget) {
+        if (texObj == nullptr ||
+            texObj->metalTexture == nullptr ||
+            texObj->target != GL_TEXTURE_3D ||
+            ib.layered != GL_FALSE ||
+            (shaderTarget != GL_TEXTURE_2D &&
+             shaderTarget != GL_TEXTURE_RECTANGLE)) {
+            return nullptr;
+        }
+        id<MTLTexture> srcTex = (__bridge id<MTLTexture>)texObj->metalTexture;
+        if (srcTex == nil ||
+            srcTex.textureType != MTLTextureType3D ||
+            ib.level < 0 ||
+            static_cast<NSUInteger>(ib.level) >= srcTex.mipmapLevelCount) {
+            return nullptr;
+        }
+        const NSUInteger mip = static_cast<NSUInteger>(ib.level);
+        const NSUInteger width = std::max<NSUInteger>(srcTex.width >> mip, 1);
+        const NSUInteger height = std::max<NSUInteger>(srcTex.height >> mip, 1);
+        const NSUInteger depth = std::max<NSUInteger>(srcTex.depth >> mip, 1);
+        if (ib.layer < 0 || static_cast<NSUInteger>(ib.layer) >= depth) {
+            return nullptr;
+        }
+        const MTLPixelFormat imagePixelFormat = metalRenderbufferFormat(ib.format);
+        if (imagePixelFormat == MTLPixelFormatInvalid ||
+            imagePixelFormat != srcTex.pixelFormat) {
+            return nullptr;
+        }
+
+        const bool cacheHit =
+            ib.layer3DSidecarTexture != nullptr &&
+            ib.layer3DSidecarSourceTexture == ib.texture &&
+            ib.layer3DSidecarLevel == ib.level &&
+            ib.layer3DSidecarLayer == ib.layer &&
+            ib.layer3DSidecarFormat == ib.format;
+        if (!cacheHit) {
+            flushImageBinding3DLayerSidecar(ib);
+            if (ib.layer3DSidecarTexture != nullptr) {
+                releaseRetainedMetalObject(ib.layer3DSidecarTexture);
+            }
+            ib.layer3DSidecarTexture = nullptr;
+            ib.layer3DSidecarSourceTexture = 0;
+            ib.layer3DSidecarLevel = -1;
+            ib.layer3DSidecarLayer = 0;
+            ib.layer3DSidecarFormat = 0;
+            ib.layer3DSidecarDirty = false;
+
+            MTLTextureDescriptor* desc =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:imagePixelFormat
+                                                                    width:width
+                                                                   height:height
+                                                                mipmapped:NO];
+            desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+            desc.storageMode = MTLStorageModeShared;
+            id<MTLTexture> sidecar = [device newTextureWithDescriptor:desc];
+            if (sidecar == nil) {
+                return nullptr;
+            }
+
+            const auto fmtInfo = nativeFormatInfo(imagePixelFormat);
+            if (fmtInfo.bytesPerPixel <= 0) {
+                [sidecar release];
+                return nullptr;
+            }
+            const NSUInteger bytesPerRow =
+                width * static_cast<NSUInteger>(fmtInfo.bytesPerPixel);
+            const std::size_t imageBytes =
+                static_cast<std::size_t>(bytesPerRow) *
+                static_cast<std::size_t>(height);
+            std::vector<std::uint8_t> bytes(imageBytes);
+            @try {
+                MTLRegion srcRegion = MTLRegionMake3D(
+                    0, 0, static_cast<NSUInteger>(ib.layer), width, height, 1);
+                [srcTex getBytes:bytes.data()
+                      bytesPerRow:bytesPerRow
+                    bytesPerImage:bytesPerRow * height
+                       fromRegion:srcRegion
+                      mipmapLevel:mip
+                            slice:0];
+                MTLRegion dstRegion = MTLRegionMake2D(0, 0, width, height);
+                [sidecar replaceRegion:dstRegion
+                            mipmapLevel:0
+                              withBytes:bytes.data()
+                            bytesPerRow:bytesPerRow];
+            } @catch (NSException*) {
+                [sidecar release];
+                return nullptr;
+            }
+
+            ib.layer3DSidecarTexture = transferRetainedMetalObject(sidecar);
+            ib.layer3DSidecarSourceTexture = ib.texture;
+            ib.layer3DSidecarLevel = ib.level;
+            ib.layer3DSidecarLayer = ib.layer;
+            ib.layer3DSidecarFormat = ib.format;
+        }
+
+        if (ib.access != GL_READ_ONLY) {
+            ib.layer3DSidecarDirty = true;
+        }
+        return ib.layer3DSidecarTexture;
+    }
+
+    void flushImageBinding3DLayerSidecars() {
+        for (auto& ib : imageBindings) {
+            flushImageBinding3DLayerSidecar(ib);
+        }
+    }
+
     // CKPT119 wrapper: type-aware adapter for resolveImageMetalTextureImpl
     // that takes ImageBinding directly. Defined after ImageBinding so
     // the type is in scope.
     void* resolveImageMetalTexture(ImageBinding& ib,
                                    GLTextureObject* texObj,
                                    GLenum shaderTarget) {
+        if (void* sidecar =
+                resolveImage3DLayerSidecarTexture(ib, texObj, shaderTarget)) {
+            return sidecar;
+        }
         return resolveImageMetalTextureImpl(texObj, ib.texture, ib.level,
                                             ib.format,
                                             ib.layered, ib.layer,
@@ -47117,6 +47315,7 @@ bool GLContext::memoryBarrier(GLbitfield barriers) {
     if (requiresCpuSync && impl_->frameGraph != nullptr) {
         impl_->frameGraph->flushForReadback();
         impl_->flushTextureImageAtomicSidecars();
+        impl_->flushImageBinding3DLayerSidecars();
     }
     // GPU-to-GPU barriers (UNIFORM / TEXTURE_FETCH / SHADER_STORAGE / etc.)
     // are implicit on Metal's command queue — same-queue ordering is
@@ -48431,13 +48630,22 @@ bool GLContext::bindImageTexture(GLuint unit, GLuint texture, GLint level, GLboo
     // the binding identity changes. The image format is part of the
     // identity because native storage images may need a PixelFormatView
     // even when the mip level is zero.
-    if ((binding.metalLevelView != nullptr ||
+    const bool cachedViewChanged =
+        (binding.metalLevelView != nullptr ||
          binding.sparseSidecarLevelView != nullptr) &&
         (binding.cachedViewTexture != texture ||
          binding.cachedViewLevel != level ||
          binding.cachedViewFormat != format ||
          binding.cachedViewLayered != layered ||
-         binding.cachedViewLayer != layer)) {
+         binding.cachedViewLayer != layer);
+    const bool layer3DSidecarChanged =
+        binding.layer3DSidecarTexture != nullptr &&
+        (binding.layer3DSidecarSourceTexture != texture ||
+         binding.layer3DSidecarLevel != level ||
+         binding.layer3DSidecarFormat != format ||
+         binding.layer3DSidecarLayer != layer);
+    if (cachedViewChanged || layer3DSidecarChanged) {
+        impl_->flushImageBinding3DLayerSidecar(binding);
         binding.invalidateMetalView();
     }
     binding.texture = texture;
@@ -51690,6 +51898,7 @@ bool GLContext::bindImageTextures(GLuint first, GLsizei count, const GLuint* tex
         if (unit >= impl_->imageBindings.size()) break;
         auto& binding = impl_->imageBindings[unit];
         if (tex == 0) {
+            impl_->flushImageBinding3DLayerSidecar(binding);
             binding.invalidateMetalView();
             binding.texture = 0;
             binding.level = 0;
@@ -51717,10 +51926,18 @@ bool GLContext::bindImageTextures(GLuint first, GLsizei count, const GLuint* tex
             anyInvalid = true;
             continue;
         }
-        if (binding.metalLevelView != nullptr &&
+        const bool cachedViewChanged =
+            binding.metalLevelView != nullptr &&
             (binding.cachedViewTexture != tex ||
              binding.cachedViewLevel != 0 ||
-             binding.cachedViewFormat != fmt)) {
+             binding.cachedViewFormat != fmt);
+        const bool layer3DSidecarChanged =
+            binding.layer3DSidecarTexture != nullptr &&
+            (binding.layer3DSidecarSourceTexture != tex ||
+             binding.layer3DSidecarLevel != 0 ||
+             binding.layer3DSidecarFormat != fmt);
+        if (cachedViewChanged || layer3DSidecarChanged) {
+            impl_->flushImageBinding3DLayerSidecar(binding);
             binding.invalidateMetalView();
         }
         binding.texture = tex;
