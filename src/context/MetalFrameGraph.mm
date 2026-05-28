@@ -2465,9 +2465,9 @@ struct MetalFrameGraph::Impl {
         // N does not identify an argument buffer" on stages whose
         // compiled MSL lacks the [[buffer(N)]] parameter — gated on
         // the per-stage resource-presence check: desc_set 0 if the
-        // stage has textures (sampled or storage; same list) or any
-        // SSBO; desc_set 1 if the stage has a default uniform block
-        // or any UBO.
+        // stage has textures (sampled or storage; same list), SSBOs,
+        // or atomic counters; desc_set 1 if the stage has a default
+        // uniform block or any UBO.
         if (useArgBuf) {
             bool vertNeedsSet0 = vertexUsesArgBuf && !info.vertexTextures.empty();
             bool fragNeedsSet0 = fragmentUsesArgBuf && !info.fragmentTextures.empty();
@@ -2475,6 +2475,11 @@ struct MetalFrameGraph::Impl {
                 if (ssbo.metalBuffer == nullptr) continue;
                 if (vertexUsesArgBuf && ssbo.isVertex)     vertNeedsSet0 = true;
                 if (fragmentUsesArgBuf && ssbo.isFragment) fragNeedsSet0 = true;
+            }
+            for (const auto& atomic : info.atomicCounterBindings) {
+                if (atomic.metalBuffer == nullptr) continue;
+                if (vertexUsesArgBuf && atomic.isVertex)     vertNeedsSet0 = true;
+                if (fragmentUsesArgBuf && atomic.isFragment) fragNeedsSet0 = true;
             }
             if (cachedVertFn != nil && vertNeedsSet0) {
                 vertArgEncoderSet0 = [cachedVertFn newArgumentEncoderWithBufferIndex:24];
