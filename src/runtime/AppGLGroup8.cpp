@@ -172,7 +172,7 @@ static void APIENTRY glGetTexImage(GLenum target, GLint level, GLenum format, GL
 
     // Delegate to the DSA getTextureImage with bufSize=0 (no size bound for
     // the legacy non-robustness path).
-    context->getTextureImage(texName, level, format, type, 0, pixels);
+    context->getTextureImage(texName, level, format, type, 0, pixels, target);
 }
 
 static void APIENTRY glGetTexLevelParameterfv(GLenum target, GLint level, GLenum pname, GLfloat *params) {

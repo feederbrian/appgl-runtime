@@ -1735,6 +1735,133 @@ bool findMatchingParen(const std::string& text,
     return false;
 }
 
+// Metal accepts cube-array textures for sampling, but storage-image writes are
+// reliable through a 2D-array view. Rewrite SPIRV-Cross's generated accessors
+// from (coord, face, cube) to (coord, cube * 6 + face) for those image params.
+std::string cubeArrayLayerExpression(const std::string& faceExpr,
+                                     const std::string& arrayExpr) {
+    const std::string face = trimCopy(faceExpr);
+    const std::string array = trimCopy(arrayExpr);
+    auto prefixBefore = [](const std::string& s, const char* token) {
+        const std::size_t pos = s.find(token);
+        return pos == std::string::npos
+            ? std::string()
+            : trimCopy(s.substr(0, pos));
+    };
+
+    std::string facePrefix = prefixBefore(face, "% 6u");
+    if (facePrefix.empty()) {
+        facePrefix = prefixBefore(face, "% 6");
+    }
+    std::string arrayPrefix = prefixBefore(array, "/ 6u");
+    if (arrayPrefix.empty()) {
+        arrayPrefix = prefixBefore(array, "/ 6");
+    }
+    if (!facePrefix.empty() && facePrefix == arrayPrefix) {
+        return facePrefix;
+    }
+
+    return "(" + face + " + (" + array + ") * 6u)";
+}
+
+bool retargetCubeArrayStorageImagesAs2DArray(
+    std::string& msl,
+    const std::vector<std::uint32_t>& metalTextureSlots) {
+    std::vector<std::string> variableNames;
+    bool changed = false;
+    auto retargetAtTextureAttr = [&](std::size_t search) {
+        const std::size_t typePos = msl.rfind("texturecube_array<", search);
+        if (typePos == std::string::npos) {
+            return;
+        }
+        const std::size_t typeEnd = msl.find('>', typePos);
+        if (typeEnd == std::string::npos || typeEnd > search) {
+            return;
+        }
+        if (msl.find("access::", typePos) > typeEnd) {
+            return;
+        }
+        std::size_t nameStart = typeEnd + 1;
+        while (nameStart < search &&
+               std::isspace(static_cast<unsigned char>(msl[nameStart]))) {
+            ++nameStart;
+        }
+        std::size_t nameEnd = nameStart;
+        while (nameEnd < search && isIdentifierChar(msl[nameEnd])) {
+            ++nameEnd;
+        }
+        if (nameStart >= search || nameEnd <= nameStart) {
+            return;
+        }
+        variableNames.push_back(msl.substr(nameStart, nameEnd - nameStart));
+        msl.replace(typePos,
+                    std::strlen("texturecube_array"),
+                    "texture2d_array");
+        changed = true;
+    };
+
+    for (std::uint32_t slot : metalTextureSlots) {
+        const std::string attr = "[[texture(" + std::to_string(slot) + ")]]";
+        std::size_t search = 0;
+        while ((search = msl.find(attr, search)) != std::string::npos) {
+            retargetAtTextureAttr(search);
+            search += attr.size();
+        }
+    }
+    if (metalTextureSlots.empty()) {
+        std::size_t typePos = 0;
+        while ((typePos = msl.find("texturecube_array<", typePos)) !=
+               std::string::npos) {
+            const std::size_t attrPos = msl.find("[[texture(", typePos);
+            if (attrPos != std::string::npos) {
+                const std::size_t attrEnd = msl.find(")]]", attrPos);
+                if (attrEnd != std::string::npos) {
+                    retargetAtTextureAttr(attrPos);
+                }
+            }
+            typePos += std::strlen("texturecube_array");
+        }
+    }
+
+    auto rewriteAccessor = [&](const std::string& varName,
+                               const char* accessor,
+                               std::size_t expectedArgs) {
+        const std::string needle = varName + "." + accessor + "(";
+        std::size_t pos = 0;
+        while ((pos = msl.find(needle, pos)) != std::string::npos) {
+            const std::size_t open = pos + needle.size() - 1;
+            std::size_t close = std::string::npos;
+            if (!findMatchingParen(msl, open, close)) {
+                break;
+            }
+            std::vector<std::string> args =
+                splitTopLevelCommas(msl.substr(open + 1, close - open - 1));
+            if (args.size() != expectedArgs) {
+                pos = close + 1;
+                continue;
+            }
+            std::string replacement = varName + "." + accessor + "(";
+            if (expectedArgs == 4) {
+                replacement += args[0] + ", " + args[1] + ", " +
+                    cubeArrayLayerExpression(args[2], args[3]) + ")";
+            } else {
+                replacement += args[0] + ", " +
+                    cubeArrayLayerExpression(args[1], args[2]) + ")";
+            }
+            msl.replace(pos, close + 1 - pos, replacement);
+            pos += replacement.size();
+            changed = true;
+        }
+    };
+
+    for (const auto& name : variableNames) {
+        rewriteAccessor(name, "write", 4);
+        rewriteAccessor(name, "read", 3);
+    }
+
+    return changed;
+}
+
 bool findMatchingBrace(const std::string& text,
                        std::size_t open,
                        std::size_t& close) {
@@ -3934,6 +4061,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             bool nonReadable = false;
         };
         std::vector<StorageImageAccessFixup> storageImageAccessFixups;
+        std::vector<std::uint32_t> cubeArrayStorageImageSlots;
 
         // Remap sampled images (combined image samplers).
         //
@@ -4109,6 +4237,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 std::uint32_t arraySize;
                 bool nonWritable;
                 bool nonReadable;
+                bool cubeArray = false;
             };
             std::vector<StorageImgRef> sortedStorageImages;
             for (auto& img : resources.storage_images) {
@@ -4121,6 +4250,15 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 r.arraySize = imgType.array.empty()
                     ? 1u
                     : (imgType.array[0] > 0 ? imgType.array[0] : 1u);
+                const auto& baseType = compiler.get_type(img.base_type_id);
+                const auto& imageType =
+                    imgType.basetype == spirv_cross::SPIRType::Image
+                        ? imgType : baseType;
+                r.cubeArray =
+                    imageType.basetype == spirv_cross::SPIRType::Image &&
+                    imageType.image.dim == spv::DimCube &&
+                    imageType.image.arrayed &&
+                    !imageType.image.ms;
                 r.nonWritable = compiler.has_decoration(img.id, spv::DecorationNonWritable);
                 r.nonReadable = compiler.has_decoration(img.id, spv::DecorationNonReadable);
                 sortedStorageImages.push_back(r);
@@ -4158,6 +4296,9 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                         storageImageAccessFixups.push_back({
                             binding.msl_texture, true,
                             entry.nonWritable, entry.nonReadable});
+                        if (entry.cubeArray) {
+                            cubeArrayStorageImageSlots.push_back(binding.msl_texture);
+                        }
                     }
                 } else {
                     constexpr std::uint32_t kStorageImageDescSet = 2;
@@ -4186,6 +4327,9 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                         storageImageAccessFixups.push_back({
                             binding.msl_texture, false,
                             entry.nonWritable, entry.nonReadable});
+                        if (entry.cubeArray) {
+                            cubeArrayStorageImageSlots.push_back(binding.msl_texture);
+                        }
                     }
                 }
                 compiler.add_msl_resource_binding(binding);
@@ -4409,6 +4553,11 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                     setTextureAccess(fixup, "write");
                 }
             }
+        }
+
+        if (isGraphicsStage && !resources.storage_images.empty()) {
+            (void)retargetCubeArrayStorageImagesAs2DArray(
+                msl, cubeArrayStorageImageSlots);
         }
 
         (void)injectMultisampleSampledImageSidecars(msl);

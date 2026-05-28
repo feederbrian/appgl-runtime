@@ -442,7 +442,9 @@ public:
     bool getTextureParameterIuiv(GLuint texture, GLenum pname, GLuint* params);
     bool getTextureLevelParameterfv(GLuint texture, GLint level, GLenum pname, GLfloat* params);
     bool getTextureLevelParameteriv(GLuint texture, GLint level, GLenum pname, GLint* params);
-    bool getTextureImage(GLuint texture, GLint level, GLenum format, GLenum type, GLsizei bufSize, void* pixels);
+    bool getTextureImage(GLuint texture, GLint level, GLenum format,
+                         GLenum type, GLsizei bufSize, void* pixels,
+                         GLenum requestTarget = 0);
     bool getTextureSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
                             GLsizei width, GLsizei height, GLsizei depth,
                             GLenum format, GLenum type, GLsizei bufSize, void* pixels);

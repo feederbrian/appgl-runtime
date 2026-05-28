@@ -23819,6 +23819,10 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
         layered == GL_FALSE &&
         shaderWantsSingle2D &&
         sourceHasSliceSpace;
+    const bool cubeArrayStorageAs2DArray =
+        layered == GL_TRUE &&
+        shaderTarget == GL_TEXTURE_CUBE_MAP_ARRAY &&
+        baseTex.textureType == MTLTextureTypeCubeArray;
     if (singleLayerView &&
         (layer < 0 || static_cast<NSUInteger>(layer) >= availableSlices)) {
         if (trace) {
@@ -23829,7 +23833,8 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
         }
         return nullptr;
     }
-    if (!singleLayerView && level == 0 && imagePixelFormat == baseTex.pixelFormat) {
+    if (!cubeArrayStorageAs2DArray &&
+        !singleLayerView && level == 0 && imagePixelFormat == baseTex.pixelFormat) {
         if (trace) {
             std::fprintf(stderr,
                 "[IMG-VIEW] tex=%u level=0 fmt=0x%X layered=%d layer=%d target=0x%X base-pf=%lu use=base\n",
@@ -23869,7 +23874,9 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
         ? NSMakeRange(static_cast<NSUInteger>(layer), 1)
         : NSMakeRange(0, sliceCount);
     const MTLTextureType viewTextureType =
-        singleLayerView ? MTLTextureType2D : baseTex.textureType;
+        cubeArrayStorageAs2DArray
+            ? MTLTextureType2DArray
+            : (singleLayerView ? MTLTextureType2D : baseTex.textureType);
     id<MTLTexture> levelView = [baseTex newTextureViewWithPixelFormat:imagePixelFormat
                                                           textureType:viewTextureType
                                                                levels:levelRange
@@ -53028,7 +53035,9 @@ bool GLContext::getTextureLevelParameterfv(GLuint texture, GLint level, GLenum p
     return true;
 }
 
-bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLenum type, GLsizei bufSize, void* pixels) {
+bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
+                                GLenum type, GLsizei bufSize, void* pixels,
+                                GLenum requestTarget) {
     auto* obj = impl_->objects->textures().get(texture);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
     // GL 4.6 §8.11.4: multisample textures can't be read via GetTextureImage.
@@ -53185,8 +53194,42 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
     NSUInteger mipLevel = static_cast<NSUInteger>(level);
     NSUInteger texWidth  = std::max<NSUInteger>(metalTex.width  >> mipLevel, 1);
     NSUInteger texHeight = std::max<NSUInteger>(metalTex.height >> mipLevel, 1);
+    auto cubeFaceSliceForTarget = [](GLenum target) -> NSInteger {
+        switch (target) {
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_X: return 0;
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_X: return 1;
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_Y: return 2;
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y: return 3;
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_Z: return 4;
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z: return 5;
+            default: return -1;
+        }
+    };
+    const NSInteger requestedCubeFace =
+        cubeFaceSliceForTarget(requestTarget);
+    const NSUInteger sourceSliceStart =
+        requestedCubeFace >= 0 ? static_cast<NSUInteger>(requestedCubeFace) : 0;
+    auto imageSliceCountForTexture = [](id<MTLTexture> tex,
+                                        NSUInteger mip) -> NSUInteger {
+        switch (tex.textureType) {
+            case MTLTextureType3D:
+                return std::max<NSUInteger>(tex.depth >> mip, 1);
+            case MTLTextureType1DArray:
+            case MTLTextureType2DArray:
+            case MTLTextureType2DMultisampleArray:
+                return std::max<NSUInteger>(tex.arrayLength, 1);
+            case MTLTextureTypeCube:
+                return 6;
+            case MTLTextureTypeCubeArray:
+                return 6 * std::max<NSUInteger>(tex.arrayLength, 1);
+            default:
+                return 1;
+        }
+    };
     const NSUInteger imageSliceCount =
-        (metalTex.textureType == MTLTextureType2DArray) ? metalTex.arrayLength : 1;
+        requestedCubeFace >= 0
+            ? 1
+            : imageSliceCountForTexture(metalTex, mipLevel);
     const std::size_t imageOutputBytes =
         static_cast<std::size_t>(texWidth) *
         static_cast<std::size_t>(texHeight) *
@@ -53243,7 +53286,13 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             std::vector<std::uint8_t> raw(bytesPerImage * numSlices);
             if (metalTex.storageMode != MTLStorageModePrivate) {
                 MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
-                if (numSlices == 1 && metalTex.textureType != MTLTextureType2DArray) {
+                const bool sliceAddressedTexture =
+                    metalTex.textureType == MTLTextureType1DArray ||
+                    metalTex.textureType == MTLTextureType2DArray ||
+                    metalTex.textureType == MTLTextureType2DMultisampleArray ||
+                    metalTex.textureType == MTLTextureTypeCube ||
+                    metalTex.textureType == MTLTextureTypeCubeArray;
+                if (numSlices == 1 && !sliceAddressedTexture) {
                     [metalTex getBytes:raw.data()
                            bytesPerRow:bytesPerRow
                             fromRegion:region
@@ -53255,7 +53304,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                              bytesPerImage:bytesPerImage
                                 fromRegion:region
                                mipmapLevel:mipLevel
-                                     slice:slice];
+                                     slice:sourceSliceStart + slice];
                     }
                 }
             } else {
@@ -53278,7 +53327,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                 MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
                 for (NSUInteger slice = 0; slice < numSlices; ++slice) {
                     [blit copyFromTexture:metalTex
-                              sourceSlice:slice
+                              sourceSlice:sourceSliceStart + slice
                               sourceLevel:mipLevel
                              sourceOrigin:region.origin
                                sourceSize:region.size
@@ -53474,13 +53523,17 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
             MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
             for (NSUInteger slice = 0; slice < numSlices; ++slice) {
-                [blit copyFromTexture:metalTex sourceSlice:slice sourceLevel:mipLevel
+                [blit copyFromTexture:metalTex
+                           sourceSlice:sourceSliceStart + slice
+                           sourceLevel:mipLevel
                          sourceOrigin:region.origin sourceSize:region.size
                              toBuffer:depthBuf destinationOffset:slice * depthBytesPerImage
                 destinationBytesPerRow:depthBytesPerRow
               destinationBytesPerImage:depthBytesPerImage
                               options:MTLBlitOptionDepthFromDepthStencil];
-                [blit copyFromTexture:metalTex sourceSlice:slice sourceLevel:mipLevel
+                [blit copyFromTexture:metalTex
+                           sourceSlice:sourceSliceStart + slice
+                           sourceLevel:mipLevel
                          sourceOrigin:region.origin sourceSize:region.size
                              toBuffer:stencilBuf destinationOffset:slice * stencilBytesPerImage
                 destinationBytesPerRow:stencilBytesPerRow
@@ -53765,18 +53818,19 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             (unsigned long)srcComponents);
     }
 
-    // Determine how many slices we need to read — 2D arrays use
-    // arrayLength, 3D textures use depth at this mip. Everything else
-    // is single-slice.
+    // Determine how many slices we need to read. Cube textures expose their
+    // faces through Metal slice indices; cube arrays are 6 slices per cube.
     MTLTextureType textureType = metalTex.textureType;
-    NSUInteger numSlices = 1;
+    NSUInteger numSlices = imageSliceCount;
     bool is3D = false;
     bool isArray = false;
     if (textureType == MTLTextureType3D) {
-        numSlices = std::max<NSUInteger>(metalTex.depth >> mipLevel, 1);
         is3D = true;
-    } else if (textureType == MTLTextureType2DArray) {
-        numSlices = metalTex.arrayLength;
+    } else if (textureType == MTLTextureType1DArray ||
+               textureType == MTLTextureType2DArray ||
+               textureType == MTLTextureType2DMultisampleArray ||
+               textureType == MTLTextureTypeCube ||
+               textureType == MTLTextureTypeCubeArray) {
         isArray = true;
     }
 
@@ -53830,7 +53884,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
             for (NSUInteger s = 0; s < numSlices; ++s) {
                 [blit copyFromTexture:metalTex
-                           sourceSlice:s
+                           sourceSlice:sourceSliceStart + s
                            sourceLevel:mipLevel
                           sourceOrigin:region.origin
                             sourceSize:region.size
@@ -53873,7 +53927,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                  bytesPerImage:bytesPerImage
                     fromRegion:region
                    mipmapLevel:mipLevel
-                         slice:s];
+                         slice:sourceSliceStart + s];
         }
     } else {
         MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
@@ -55527,9 +55581,22 @@ bool GLContext::getnUniformdv(GLuint program, GLint location, GLsizei bufSize, G
 bool GLContext::getnTexImage(GLenum target, GLint level, GLenum format, GLenum type,
                              GLsizei bufSize, void* pixels) {
     if (bufSize < 0) { pushError(GL_INVALID_VALUE); return false; }
-    GLuint texName = impl_->state->boundTexture(target);
+    GLenum bindTarget = target;
+    switch (target) {
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_X:
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_Y:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
+            bindTarget = GL_TEXTURE_CUBE_MAP;
+            break;
+        default:
+            break;
+    }
+    GLuint texName = impl_->state->boundTexture(bindTarget);
     if (texName == 0) { pushError(GL_INVALID_OPERATION); return false; }
-    return getTextureImage(texName, level, format, type, bufSize, pixels);
+    return getTextureImage(texName, level, format, type, bufSize, pixels, target);
 }
 
 bool GLContext::getnCompressedTexImage(GLenum target, GLint lod, GLsizei bufSize, void* pixels) {
