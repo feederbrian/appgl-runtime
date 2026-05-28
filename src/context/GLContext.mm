@@ -30968,95 +30968,103 @@ bool GLContext::linkProgram(GLuint program) {
         GLProgramUniformValue value;
         value.type = uniform.type;
         value.arraySize = uniform.arraySize;
-        switch (uniform.type) {
-            case GL_INT:
-            case GL_INT_VEC2:
-            case GL_INT_VEC3:
-            case GL_INT_VEC4:
-            case GL_BOOL:
-            case GL_BOOL_VEC2:
-            case GL_BOOL_VEC3:
-            case GL_BOOL_VEC4:
-            case GL_SAMPLER_1D:
-            case GL_SAMPLER_2D:
-            case GL_SAMPLER_3D:
-            case GL_SAMPLER_CUBE:
-            case GL_SAMPLER_1D_ARRAY:
-            case GL_SAMPLER_2D_ARRAY:
-            case GL_SAMPLER_1D_SHADOW:
-            case GL_SAMPLER_2D_SHADOW:
-            case GL_SAMPLER_1D_ARRAY_SHADOW:
-            case GL_SAMPLER_2D_ARRAY_SHADOW:
-            case GL_SAMPLER_CUBE_SHADOW:
-            case GL_SAMPLER_2D_RECT:
-            case GL_SAMPLER_2D_RECT_SHADOW:
-            case GL_SAMPLER_BUFFER:
-            case GL_SAMPLER_2D_MULTISAMPLE:
-            case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
-            case GL_SAMPLER_CUBE_MAP_ARRAY:
-            case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
-            case GL_INT_SAMPLER_1D:
-            case GL_INT_SAMPLER_2D:
-            case GL_INT_SAMPLER_3D:
-            case GL_INT_SAMPLER_CUBE:
-            case GL_INT_SAMPLER_1D_ARRAY:
-            case GL_INT_SAMPLER_2D_ARRAY:
-            case GL_INT_SAMPLER_2D_RECT:
-            case GL_INT_SAMPLER_BUFFER:
-            case GL_INT_SAMPLER_2D_MULTISAMPLE:
-            case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
-            case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
-            case GL_UNSIGNED_INT_SAMPLER_1D:
-            case GL_UNSIGNED_INT_SAMPLER_2D:
-            case GL_UNSIGNED_INT_SAMPLER_3D:
-            case GL_UNSIGNED_INT_SAMPLER_CUBE:
-            case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
-            case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
-            case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
-            case GL_UNSIGNED_INT_SAMPLER_BUFFER:
-            case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
-            case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
-            case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
-                if (uniform.defaultInts.size() == componentCount) {
-                    value.ints = uniform.defaultInts;
-                } else {
-                    value.ints.assign(componentCount, 0);
-                }
-                break;
-            case GL_UNSIGNED_INT:
-            case GL_UNSIGNED_INT_VEC2:
-            case GL_UNSIGNED_INT_VEC3:
-            case GL_UNSIGNED_INT_VEC4:
-                if (uniform.defaultUints.size() == componentCount) {
-                    value.uints = uniform.defaultUints;
-                } else {
-                    value.uints.assign(componentCount, 0u);
-                }
-                break;
-            case GL_DOUBLE:
-            case GL_DOUBLE_VEC2:
-            case GL_DOUBLE_VEC3:
-            case GL_DOUBLE_VEC4:
-            case GL_DOUBLE_MAT2:
-            case GL_DOUBLE_MAT3:
-            case GL_DOUBLE_MAT4:
-            case GL_DOUBLE_MAT2x3:
-            case GL_DOUBLE_MAT2x4:
-            case GL_DOUBLE_MAT3x2:
-            case GL_DOUBLE_MAT3x4:
-            case GL_DOUBLE_MAT4x2:
-            case GL_DOUBLE_MAT4x3:
-                value.doubles.assign(componentCount, 0.0);
-                value.floats.assign(componentCount, 0.0f);
-                value.df64TransportWords.assign(componentCount * 2u, 0u);
-                break;
-            default:
-                if (uniform.defaultFloats.size() == componentCount) {
-                    value.floats = uniform.defaultFloats;
-                } else {
+        if (isImageUniformType(uniform.type)) {
+            if (uniform.defaultInts.size() == componentCount) {
+                value.ints = uniform.defaultInts;
+            } else {
+                value.ints.assign(componentCount, 0);
+            }
+        } else {
+            switch (uniform.type) {
+                case GL_INT:
+                case GL_INT_VEC2:
+                case GL_INT_VEC3:
+                case GL_INT_VEC4:
+                case GL_BOOL:
+                case GL_BOOL_VEC2:
+                case GL_BOOL_VEC3:
+                case GL_BOOL_VEC4:
+                case GL_SAMPLER_1D:
+                case GL_SAMPLER_2D:
+                case GL_SAMPLER_3D:
+                case GL_SAMPLER_CUBE:
+                case GL_SAMPLER_1D_ARRAY:
+                case GL_SAMPLER_2D_ARRAY:
+                case GL_SAMPLER_1D_SHADOW:
+                case GL_SAMPLER_2D_SHADOW:
+                case GL_SAMPLER_1D_ARRAY_SHADOW:
+                case GL_SAMPLER_2D_ARRAY_SHADOW:
+                case GL_SAMPLER_CUBE_SHADOW:
+                case GL_SAMPLER_2D_RECT:
+                case GL_SAMPLER_2D_RECT_SHADOW:
+                case GL_SAMPLER_BUFFER:
+                case GL_SAMPLER_2D_MULTISAMPLE:
+                case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                case GL_SAMPLER_CUBE_MAP_ARRAY:
+                case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+                case GL_INT_SAMPLER_1D:
+                case GL_INT_SAMPLER_2D:
+                case GL_INT_SAMPLER_3D:
+                case GL_INT_SAMPLER_CUBE:
+                case GL_INT_SAMPLER_1D_ARRAY:
+                case GL_INT_SAMPLER_2D_ARRAY:
+                case GL_INT_SAMPLER_2D_RECT:
+                case GL_INT_SAMPLER_BUFFER:
+                case GL_INT_SAMPLER_2D_MULTISAMPLE:
+                case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_1D:
+                case GL_UNSIGNED_INT_SAMPLER_2D:
+                case GL_UNSIGNED_INT_SAMPLER_3D:
+                case GL_UNSIGNED_INT_SAMPLER_CUBE:
+                case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+                case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+                case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+                case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+                    if (uniform.defaultInts.size() == componentCount) {
+                        value.ints = uniform.defaultInts;
+                    } else {
+                        value.ints.assign(componentCount, 0);
+                    }
+                    break;
+                case GL_UNSIGNED_INT:
+                case GL_UNSIGNED_INT_VEC2:
+                case GL_UNSIGNED_INT_VEC3:
+                case GL_UNSIGNED_INT_VEC4:
+                    if (uniform.defaultUints.size() == componentCount) {
+                        value.uints = uniform.defaultUints;
+                    } else {
+                        value.uints.assign(componentCount, 0u);
+                    }
+                    break;
+                case GL_DOUBLE:
+                case GL_DOUBLE_VEC2:
+                case GL_DOUBLE_VEC3:
+                case GL_DOUBLE_VEC4:
+                case GL_DOUBLE_MAT2:
+                case GL_DOUBLE_MAT3:
+                case GL_DOUBLE_MAT4:
+                case GL_DOUBLE_MAT2x3:
+                case GL_DOUBLE_MAT2x4:
+                case GL_DOUBLE_MAT3x2:
+                case GL_DOUBLE_MAT3x4:
+                case GL_DOUBLE_MAT4x2:
+                case GL_DOUBLE_MAT4x3:
+                    value.doubles.assign(componentCount, 0.0);
                     value.floats.assign(componentCount, 0.0f);
-                }
-                break;
+                    value.df64TransportWords.assign(componentCount * 2u, 0u);
+                    break;
+                default:
+                    if (uniform.defaultFloats.size() == componentCount) {
+                        value.floats = uniform.defaultFloats;
+                    } else {
+                        value.floats.assign(componentCount, 0.0f);
+                    }
+                    break;
+            }
         }
         // Atomic-counter uniforms have no uniform location and no
         // entry in the `glUniform*`-addressable uniformValues map.
@@ -31129,7 +31137,7 @@ bool GLContext::linkProgram(GLuint program) {
         }
     }
 
-    // GL 4.2 §7.6: for any sampler uniform declared with
+    // GL 4.2 §7.6: for any sampler or image uniform declared with
     // `layout(binding = N)` in the GLSL source, seed its integer value
     // to N. Subsequent glUniform1i calls override this. For arrays,
     // element i gets N+i (spec says consecutive binding points).
@@ -31143,6 +31151,7 @@ bool GLContext::linkProgram(GLuint program) {
             auto valIt = programObject->uniformValues.find(uinfo.location);
             if (valIt == programObject->uniformValues.end()) continue;
             auto& v = valIt->second;
+            if (v.ints.empty()) continue;
             const GLint arraySize = std::max<GLint>(uinfo.arraySize, 1);
             v.ints.assign(static_cast<std::size_t>(arraySize), 0);
             for (GLint i = 0; i < arraySize; ++i) {
