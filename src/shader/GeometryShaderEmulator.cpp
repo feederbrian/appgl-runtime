@@ -10194,7 +10194,10 @@ EmulatedDraw emulateVsOnlyDrawForTf(
         capturedNames.push_back(v.name);
         capturedWidths.push_back(v.width);
     }
-    const std::size_t chunkCount = effectiveVsOnlyTfChunks(d.vertexCount);
+    const bool capturesImageWrites = storageImages != nullptr;
+    const std::size_t chunkCount = capturesImageWrites
+        ? 1u
+        : effectiveVsOnlyTfChunks(d.vertexCount);
     auto configureVsInterpreter = [&](Interpreter& interp) {
         interp.setUniforms(&uniforms);
         if (!vsInputLocOverrides.empty()) {
@@ -10258,6 +10261,9 @@ EmulatedDraw emulateVsOnlyDrawForTf(
             vsInterp.setVsInputs(&vsAttribs,
                                  static_cast<std::int32_t>(vboSlot),
                                  glInstanceID);
+            if (capturesImageWrites) {
+                vsInterp.setPriorImageWrites(&d.pendingImageWrites);
+            }
             if (timing) {
                 addTimingNs(timingCounters.attribFetchNs,
                             vsOnlyTfTimingNowNs() - attribStart);
@@ -10273,6 +10279,18 @@ EmulatedDraw emulateVsOnlyDrawForTf(
                 markFailure();
                 outDiagnostic = vsInterp.diagnostic();
                 return false;
+            }
+            if (capturesImageWrites) {
+                auto writes = vsInterp.takePendingImageWrites();
+                if (!writes.empty()) {
+                    for (auto& write : writes) {
+                        write.stage = GL_VERTEX_SHADER;
+                    }
+                    d.pendingImageWrites.insert(
+                        d.pendingImageWrites.end(),
+                        std::make_move_iterator(writes.begin()),
+                        std::make_move_iterator(writes.end()));
+                }
             }
             const std::uint64_t packStart =
                 timing ? vsOnlyTfTimingNowNs() : 0;

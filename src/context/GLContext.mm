@@ -44196,6 +44196,53 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
         }
     }
 
+    // Side-effect-only VS image programs can translate to `vertex void`
+    // MSL with no position output. Metal may optimize away such render
+    // work, but GL still executes the vertex shader side effects.
+    if (program != nullptr &&
+        program->hasTranslatedPipeline &&
+        !program->vertexSpirv.empty() &&
+        !program->vertexReflection.storageImages.empty() &&
+        program->vertexMSL.find("vertex void ") != std::string::npos &&
+        program->fragmentMSL.find("discard_fragment()") != std::string::npos) {
+        GLVertexArrayObject* vao = impl_->currentVertexArrayOrDefault();
+        if (vao != nullptr) {
+            const auto vsTexMap = impl_->buildSampledTextureMap(
+                program->vertexSpirv,
+                &program->vertexReflection, *program);
+            const auto vsImgMap = impl_->buildStorageImageMap(
+                program->vertexSpirv,
+                &program->vertexReflection, *program);
+            appgl::EmulatedDraw ed = appgl::emulateVsOnlyDrawForTf(
+                *program, *vao, *impl_->objects, *impl_->state,
+                mode, count, first,
+                /*instanceCount=*/1, /*baseInstance=*/0,
+                /*elementIndices=*/nullptr,
+                vsTexMap.empty() ? nullptr : &vsTexMap,
+                vsImgMap.empty() ? nullptr : &vsImgMap);
+            if (ed.ok) {
+                if (!ed.pendingImageWrites.empty()) {
+                    std::vector<GLuint> cpuImageWriteTextures;
+                    impl_->flushPendingImageWritesForStage(
+                        ed.pendingImageWrites,
+                        &program->vertexReflection,
+                        program->vertexSpirv,
+                        *program,
+                        GL_VERTEX_SHADER,
+                        &cpuImageWriteTextures);
+                    impl_->markCpuInterpreterImageWrites(cpuImageWriteTextures);
+                }
+                if (!program->gsPresent) {
+                    impl_->updatePrimitiveCountersForNonGsDraw(mode, count, 1);
+                }
+                return true;
+            } else if (!ed.diagnostic.empty()) {
+                APPGL_LOG(SHADER, @"drawArrays VS-image-side-effects: %s",
+                          ed.diagnostic.c_str());
+            }
+        }
+    }
+
     // Sprint 17 Day 7+ Bank-Group-H Path B Component B (drawArrays):
     // VS+FS programs that write gl_CullDistance get a CPU pre-pass +
     // Metal indexed-draw routing. Phase 2 §1.2 confirmed this is gated
@@ -44360,8 +44407,98 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             // skipping the encodeTranslatedDraw path entirely because the
             // unused attribute 0 has bufferName=0.
             std::size_t primaryIdx = 0;
+            bool foundEnabledAttrib = false;
             for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
-                if (vao->attributes[ai].enabled) { primaryIdx = ai; break; }
+                if (vao->attributes[ai].enabled) {
+                    primaryIdx = ai;
+                    foundEnabledAttrib = true;
+                    break;
+                }
+            }
+            if (!foundEnabledAttrib &&
+                !program->vertexReflection.vertexInputs.empty()) {
+                TranslatedDrawInfo tdi;
+                tdi.mode = mode;
+                tdi.vertexCount = count;
+                tdi.vertexData = nullptr;
+                tdi.vertexDataByteCount = 0;
+                tdi.vertexStride = 0;
+                populateTranslatedDrawFixedFunctionState(
+                    tdi, *impl_->state,
+                    effectiveFragmentShadingRateForProgram(*this, program),
+                    this);
+                tdi.vertexMSL = &program->vertexMSL;
+                tdi.fragmentMSL = &program->fragmentMSL;
+                tdi.vertexReflection = &program->vertexReflection;
+                tdi.fragmentReflection = &program->fragmentReflection;
+                tdi.pipelineStateOut = &program->metalPipelineState;
+                tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
+                tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+                tdi.metalVertexFunction = program->metalVertexFunction;
+                tdi.metalFragmentFunction = program->metalFragmentFunction;
+                tdi.metalVertexFunctionOut = &program->metalVertexFunction;
+                tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
+                tdi.program = programName;
+                appendCurrentGenericVertexAttributes(tdi, vao);
+
+                if (!program->uniformLayoutComputed) {
+                    computeStageUniformLayout(program->vertexUniformLayout,
+                        program->vertexReflection, program->uniforms);
+                    computeStageUniformLayout(program->fragmentUniformLayout,
+                        program->fragmentReflection, program->uniforms);
+                    program->uniformLayoutComputed = true;
+                }
+                thread_local std::vector<std::uint8_t> vtxUniformScratchConst;
+                thread_local std::vector<std::uint8_t> fragUniformScratchConst;
+                pushSynthesizedMatrixUniforms(*program, impl_->matrixState, drawID);
+                buildStageUniformBuffer(vtxUniformScratchConst,
+                    program->vertexReflection, program->uniformValues,
+                    program->vertexUniformLayout);
+                buildStageUniformBuffer(fragUniformScratchConst,
+                    program->fragmentReflection, program->uniformValues,
+                    program->fragmentUniformLayout);
+                tdi.vertexUniformData = vtxUniformScratchConst.data();
+                tdi.vertexUniformSize = vtxUniformScratchConst.size();
+                tdi.fragmentUniformData = fragUniformScratchConst.data();
+                tdi.fragmentUniformSize = fragUniformScratchConst.size();
+
+                impl_->resolveSamplerBindings(*program, tdi);
+                impl_->resolveUBOBindings(*program, tdi);
+                impl_->resolveSSBOBindings(*program, tdi);
+                impl_->resolveImageBindings(*program, tdi);
+
+                {
+                    GLsizei fboW = 0, fboH = 0;
+                    void* fboDSTex = nullptr;
+                    std::array<void*, 7> extraColTex = {};
+                    std::array<std::uint32_t, 8> colSlices = {};
+                    void* fboColTex = impl_->resolveFBOColorTarget(
+                        fboW, fboH, fboDSTex, nullptr,
+                        &extraColTex, &colSlices);
+                    if (fboColTex != nullptr || fboDSTex != nullptr) {
+                        tdi.fboColorTexture = fboColTex;
+                        tdi.fboAdditionalColorTextures = extraColTex;
+                        tdi.fboColorSlices = colSlices;
+                        tdi.fboDepthStencilTexture = fboDSTex;
+                        tdi.fboWidth = fboW;
+                        tdi.fboHeight = fboH;
+                    }
+                }
+
+                thread_local std::string pipelineBuildErrorConst;
+                pipelineBuildErrorConst.clear();
+                tdi.pipelineBuildErrorOut = &pipelineBuildErrorConst;
+
+                const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
+                if (ok) {
+                    return true;
+                }
+                if (reportTranslatedFallbackOnce(program, programName,
+                        TranslatedFallbackGate::EncodeFailed, "drawArrays",
+                        vaoName, vao->attributes.size(), 0, 0)) {
+                    recordPipelineBuildFailureOnce(
+                        program, programName, pipelineBuildErrorConst);
+                }
             }
             const auto& posAttr = vao->attributes[primaryIdx];
             auto resolved = resolveVertexAttrib(posAttr, *vao);
@@ -44508,6 +44645,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                             tdi.extraVertexBuffers[idx].attributes.push_back(layout);
                         }
                     }
+                    appendCurrentGenericVertexAttributes(tdi, vao);
 
                     // OPT-7: compute uniform layout once, reuse every draw.
                     if (!program->uniformLayoutComputed) {

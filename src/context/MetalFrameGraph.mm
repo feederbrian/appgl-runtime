@@ -1473,10 +1473,20 @@ struct MetalFrameGraph::Impl {
         }
         // Attributeless draws (gl_VertexID-driven) have no vertex data.
         // Only reject missing vertex data when attributes are declared.
+        bool hasExtraVertexAttributes = false;
+        for (const auto& evb : info.extraVertexBuffers) {
+            if (!evb.attributes.empty()) {
+                hasExtraVertexAttributes = true;
+                break;
+            }
+        }
+        const bool hasPrimaryVertexAttributes = !info.vertexAttributeLayouts.empty();
         const bool attributelessDraw =
             (info.vertexData == nullptr && info.metalVertexBuffer == nullptr &&
-             info.vertexAttributeLayouts.empty());
-        if (!attributelessDraw && info.vertexData == nullptr && info.metalVertexBuffer == nullptr) {
+             !hasPrimaryVertexAttributes && !hasExtraVertexAttributes);
+        if (hasPrimaryVertexAttributes &&
+            info.vertexData == nullptr &&
+            info.metalVertexBuffer == nullptr) {
             FG_TRACE(@"encodeTranslatedDraw: bad vertex data, returning false");
             return false;
         }
@@ -3080,8 +3090,10 @@ struct MetalFrameGraph::Impl {
         // OPT-5: when the VBO has a pre-uploaded Metal buffer, bind it
         // directly — zero memcpy.  Otherwise fall back to the ring buffer
         // sub-allocation path (OPT-1).
-        if (attributelessDraw) {
-            // No vertex buffers needed — shader uses [[vertex_id]].
+        if (attributelessDraw || info.vertexAttributeLayouts.empty()) {
+            // No primary vertex buffer needed. This covers true
+            // gl_VertexID-driven draws and draws whose shader inputs all
+            // come from current generic attributes in extra constant buffers.
         } else if (info.metalVertexBuffer != nullptr) {
             id<MTLBuffer> mtlBuf = (__bridge id<MTLBuffer>)info.metalVertexBuffer;
             [currentRenderEncoder setVertexBuffer:mtlBuf
