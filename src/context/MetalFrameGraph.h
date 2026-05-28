@@ -493,8 +493,8 @@ struct TranslatedDrawInfo {
     // Phase 8X Group 4d follow-up¹⁴ — map-based pipeline cache.
     // Non-owning pointer to the `GLProgramObject::metalPipelineStateCache`
     // unordered_map. When non-null, `encodeTranslatedDraw` hashes
-    // (colorFormat, blend tuple, per-attribute format tuple) into a
-    // 64-bit key and looks it up here first. On hit the mapped
+    // (shader MSL, colorFormat, blend tuple, per-attribute format
+    // tuple) into a 64-bit key and looks it up here first. On hit the mapped
     // `id<MTLRenderPipelineState>` is used. On miss the new pipeline
     // is built and inserted, with the old `pipelineStateOut` scalar
     // slot also updated so the first-draw-per-program diagnostic

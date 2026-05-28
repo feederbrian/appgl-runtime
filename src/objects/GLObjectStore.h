@@ -1293,9 +1293,11 @@ struct GLProgramObject {
     // could only hold one pipeline per program at a time, which
     // thrashed when spring toggled `GL_BLEND` 15× per frame
     // (followup¹³-verification §Candidate-1). The new cache keys on a
-    // 64-bit hash of (colorFormat, blend tuple, per-attribute format
-    // tuple) so a program that draws both an opaque first pass and an
-    // alpha-blended second pass keeps both pipelines hot.
+    // 64-bit hash of (shader MSL, colorFormat, blend tuple,
+    // per-attribute format tuple) so a program that draws both an
+    // opaque first pass and an alpha-blended second pass keeps both
+    // pipelines hot; separable pipelines with swapped fragment stages
+    // also keep distinct PSOs in the shared VS container cache.
     //
     // Values are `id<MTLRenderPipelineState>` type-erased to `void*`
     // and retained via CFBridgingRetain at insert time. The map is

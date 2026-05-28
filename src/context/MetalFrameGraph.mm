@@ -584,11 +584,11 @@ static MTLBlendOperation glBlendEqToMTL(GLenum eq) {
 }
 
 // Phase 8X Group 4d follow-up¹⁴ — pipeline cache key. A 64-bit hash
-// of the state tuple that drives pipeline creation. The key is
-// stable across draws that share the same compiled program and the
-// same effective pipeline descriptor, so a program that draws both
-// an opaque first pass and an alpha-blended second pass keeps both
-// pipelines hot without thrashing. The 64 bits are laid out as:
+// of the state tuple that drives pipeline creation. The key includes
+// the shader MSL because separable-program pipelines can splice
+// different fragment executables onto one vertex-program container;
+// without the source fingerprint, those PSOs alias in the per-program
+// cache. The state portion starts with this layout:
 //
 //   [63..56] colorFormat low 8 bits  (MTLPixelFormat fits)
 //   [55..55] blend.enabled
@@ -606,11 +606,10 @@ static MTLBlendOperation glBlendEqToMTL(GLenum eq) {
 //            vertexAttributeLayouts + extraVertexBuffers[*].attributes
 //            `glType/glComponentCount/glNormalized/glIsInteger` fields)
 //
-// Collisions are not catastrophic — the worst case is a wrong
-// pipeline gets reused, which shows up as a validation failure from
-// Metal on the next draw and triggers a rebuild. But the hash is
-// structured so the common toggles (opaque ↔ alpha-blended with
-// identical geometry layout) always produce distinct keys.
+// The shader text is mixed in after the structured state bits with a
+// deterministic FNV-1a pass, so common toggles (opaque ↔ alpha-blended
+// with identical geometry layout) and SSO fragment swaps both produce
+// distinct keys.
 static std::uint64_t computePipelineCacheKey(
     const TranslatedDrawInfo& info, MTLPixelFormat colorFormat,
     NSUInteger sampleCount, bool forcePerSampleFS)
@@ -694,7 +693,31 @@ static std::uint64_t computePipelineCacheKey(
         }
     }
     key |= static_cast<std::uint64_t>(hash & 0x0FFFFFFFu);  // 28 bits (bit 28 = rasterizerDiscard)
-    return key;
+
+    std::uint64_t fnv = 1469598103934665603ULL;
+    auto mixByte = [&fnv](std::uint8_t byte) {
+        fnv ^= static_cast<std::uint64_t>(byte);
+        fnv *= 1099511628211ULL;
+    };
+    auto mixWord = [&](std::uint64_t word) {
+        for (unsigned i = 0; i < 8; ++i) {
+            mixByte(static_cast<std::uint8_t>((word >> (i * 8)) & 0xFFu));
+        }
+    };
+    auto mixString = [&](const std::string* source) {
+        if (source == nullptr) {
+            mixWord(0);
+            return;
+        }
+        mixWord(source->size());
+        for (unsigned char c : *source) {
+            mixByte(static_cast<std::uint8_t>(c));
+        }
+    };
+    mixWord(key);
+    mixString(info.vertexMSL);
+    mixString(info.fragmentMSL);
+    return fnv;
 }
 
 // Phase 6-1e / 6-2: transform a SPIRV-Cross fragment MSL source so
