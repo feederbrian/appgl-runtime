@@ -42,7 +42,8 @@ namespace spv {
         OpConstantComposite = 44,
         OpFunction = 54, OpFunctionParameter = 55, OpFunctionEnd = 56,
         OpFunctionCall = 57,
-        OpVariable = 59, OpLoad = 61, OpStore = 62, OpAccessChain = 65,
+        OpVariable = 59, OpImageTexelPointer = 60,
+        OpLoad = 61, OpStore = 62, OpAccessChain = 65,
         OpArrayLength = 68,
         OpSampledImage = 86, OpImageSampleImplicitLod = 87,
         OpImageSampleExplicitLod = 88, OpImageFetch = 95,
@@ -697,6 +698,10 @@ public:
         storageImages_ = m;
     }
 
+    void setPriorImageWrites(const std::vector<PendingImageWrite>* writes) {
+        priorImageWrites_ = writes;
+    }
+
     // CKPT162 (Sprint 14 Day 9): drain captured imageStore() writes
     // accumulated during this interpreter's execution. Caller flushes
     // them to Metal textures via replaceRegion: after GS completes.
@@ -917,6 +922,46 @@ private:
         bool isStorage = false;
     };
     std::unordered_map<std::uint32_t, SampledImageHandle> sampledImages_;
+    static constexpr std::uint32_t kInvalidImageUnit = 0xFFFFFFFFu;
+    struct ImageTexelPointer {
+        SampledImageHandle handle;
+        std::int32_t coord[3] = {0, 0, 0};
+    };
+    struct ImageTexelKey {
+        std::uint32_t imageUnit = kInvalidImageUnit;
+        std::uint32_t arrayVarId = 0;
+        std::uint32_t elementIdx = 0;
+        std::int32_t coord[3] = {0, 0, 0};
+
+        bool operator==(const ImageTexelKey& rhs) const {
+            return imageUnit == rhs.imageUnit &&
+                   arrayVarId == rhs.arrayVarId &&
+                   elementIdx == rhs.elementIdx &&
+                   coord[0] == rhs.coord[0] &&
+                   coord[1] == rhs.coord[1] &&
+                   coord[2] == rhs.coord[2];
+        }
+    };
+    struct ImageTexelKeyHash {
+        std::size_t operator()(const ImageTexelKey& key) const {
+            std::size_t h = 1469598103934665603ull;
+            auto mix = [&](std::uint32_t v) {
+                h ^= static_cast<std::size_t>(v);
+                h *= 1099511628211ull;
+            };
+            mix(key.imageUnit);
+            mix(key.arrayVarId);
+            mix(key.elementIdx);
+            mix(static_cast<std::uint32_t>(key.coord[0]));
+            mix(static_cast<std::uint32_t>(key.coord[1]));
+            mix(static_cast<std::uint32_t>(key.coord[2]));
+            return h;
+        }
+    };
+    std::unordered_map<std::uint32_t, ImageTexelPointer> imageTexelPointers_;
+    std::unordered_map<ImageTexelKey, std::uint32_t, ImageTexelKeyHash>
+        imageAtomicRawOverrides_;
+    const std::vector<PendingImageWrite>* priorImageWrites_ = nullptr;
     struct StorageBufferVarMeta {
         std::uint32_t binding = 0;
         // Optional top-level struct member offsets + inner array
@@ -1150,6 +1195,13 @@ private:
                      const Value& v, std::uint32_t leafTypeId);
     bool loadSSBOScalarRaw(const AccessChainResult& ac, std::uint32_t& raw);
     bool storeSSBOScalarRaw(const AccessChainResult& ac, std::uint32_t raw);
+    bool resolveImageTexelPointer(std::uint32_t imageId,
+                                  std::uint32_t coordId,
+                                  ImageTexelPointer& out);
+    bool loadImageScalarRaw(const ImageTexelPointer& ptr,
+                            std::uint32_t& raw);
+    bool storeImageScalarRaw(const ImageTexelPointer& ptr,
+                             std::uint32_t raw);
     bool executeAtomicLoad(std::uint32_t resultTypeId, std::uint32_t resultId,
                            std::uint32_t ptrId);
     bool executeAtomicStore(std::uint32_t ptrId, std::uint32_t valueId);
@@ -2220,6 +2272,206 @@ bool Interpreter::storeSSBOScalarRaw(const AccessChainResult& ac,
     return true;
 }
 
+bool Interpreter::resolveImageTexelPointer(std::uint32_t imageId,
+                                           std::uint32_t coordId,
+                                           ImageTexelPointer& out)
+{
+    auto sIt = sampledImages_.find(imageId);
+    if (sIt != sampledImages_.end() && sIt->second.isStorage) {
+        out.handle = sIt->second;
+    } else if (storageImages_ != nullptr &&
+               storageImages_->count(imageId) != 0) {
+        out.handle.arrayVarId = imageId;
+        out.handle.elementIdx = 0;
+        out.handle.isStorage = true;
+    } else {
+        bail("OpImageTexelPointer: unresolved storage image");
+        return false;
+    }
+
+    std::int32_t coord[3] = {0, 0, 0};
+    int coordComponents = 1;
+    Value coordV;
+    if (tryGetValue(coordId, coordV)) {
+        coordComponents = std::max(1, coordV.componentCount());
+        auto coordI = [&](int idx) -> std::int32_t {
+            if (idx >= coordV.componentCount()) return 0;
+            if (coordV.isIntKind() ||
+                coordV.kind == Value::Kind::UInt ||
+                coordV.kind == Value::Kind::UInt2 ||
+                coordV.kind == Value::Kind::UInt3 ||
+                coordV.kind == Value::Kind::UInt4) {
+                return coordV.i[idx];
+            }
+            return static_cast<std::int32_t>(coordV.f[idx]);
+        };
+        coord[0] = coordI(0);
+        coord[1] = coordI(1);
+        coord[2] = coordI(2);
+    }
+
+    const SampledTextureSlot* slot = nullptr;
+    if (storageImages_ != nullptr) {
+        auto arrIt = storageImages_->find(out.handle.arrayVarId);
+        if (arrIt != storageImages_->end() &&
+            out.handle.elementIdx < arrIt->second.size()) {
+            slot = &arrIt->second[out.handle.elementIdx];
+        }
+    }
+    if (slot != nullptr && coordComponents == 1 &&
+        slot->width > 0 && slot->height > 1 && coord[0] >= 0) {
+        const std::uint64_t idx = static_cast<std::uint64_t>(coord[0]);
+        const std::uint64_t width = slot->width;
+        const std::uint64_t texels = width * static_cast<std::uint64_t>(slot->height);
+        if (idx < texels) {
+            coord[0] = static_cast<std::int32_t>(idx % width);
+            coord[1] = static_cast<std::int32_t>(idx / width);
+            coord[2] = 0;
+        }
+    }
+
+    out.coord[0] = coord[0];
+    out.coord[1] = coord[1];
+    out.coord[2] = coord[2];
+    return true;
+}
+
+bool Interpreter::loadImageScalarRaw(const ImageTexelPointer& ptr,
+                                     std::uint32_t& raw)
+{
+    raw = 0;
+    if (!ptr.handle.isStorage || storageImages_ == nullptr) return true;
+    auto arrIt = storageImages_->find(ptr.handle.arrayVarId);
+    if (arrIt == storageImages_->end() ||
+        ptr.handle.elementIdx >= arrIt->second.size()) {
+        return true;
+    }
+    const SampledTextureSlot& slot = arrIt->second[ptr.handle.elementIdx];
+    if (slot.width == 0 || slot.height == 0) return true;
+    if (ptr.coord[0] < 0 || ptr.coord[1] < 0 || ptr.coord[2] < 0) {
+        return true;
+    }
+    const std::uint32_t x = static_cast<std::uint32_t>(ptr.coord[0]);
+    const std::uint32_t y = static_cast<std::uint32_t>(ptr.coord[1]);
+    const std::uint32_t z = static_cast<std::uint32_t>(ptr.coord[2]);
+    const std::uint32_t layers =
+        slot.layerFaces != 0 ? slot.layerFaces
+                             : (slot.depth != 0 ? slot.depth : 1u);
+    if (x >= slot.width || y >= slot.height || z >= layers) return true;
+
+    const std::uint32_t bpr =
+        slot.bytesPerRow != 0 ? slot.bytesPerRow : slot.width * 4u;
+    const std::uint32_t bytesPerTexel =
+        (slot.width != 0 && bpr >= slot.width)
+            ? std::max<std::uint32_t>(1u, bpr / slot.width)
+            : 4u;
+    const std::uint32_t bpi =
+        slot.bytesPerImage != 0 ? slot.bytesPerImage : bpr * slot.height;
+    const std::size_t off =
+        static_cast<std::size_t>(z) * bpi +
+        static_cast<std::size_t>(y) * bpr +
+        static_cast<std::size_t>(x) * bytesPerTexel;
+
+    ImageTexelKey key;
+    key.imageUnit = slot.imageUnit;
+    key.arrayVarId = ptr.handle.arrayVarId;
+    key.elementIdx = ptr.handle.elementIdx;
+    key.coord[0] = ptr.coord[0];
+    key.coord[1] = ptr.coord[1];
+    key.coord[2] = ptr.coord[2];
+
+    auto ovIt = imageAtomicRawOverrides_.find(key);
+    if (ovIt != imageAtomicRawOverrides_.end()) {
+        raw = ovIt->second;
+        return true;
+    }
+    auto matches = [&](const PendingImageWrite& pw) -> bool {
+        const bool sameImage =
+            (key.imageUnit != kInvalidImageUnit &&
+             pw.imageUnit != kInvalidImageUnit)
+                ? (pw.imageUnit == key.imageUnit)
+                : (pw.arrayVarId == key.arrayVarId &&
+                   pw.elementIdx == key.elementIdx);
+        return sameImage &&
+               pw.coord[0] == key.coord[0] &&
+               pw.coord[1] == key.coord[1] &&
+               pw.coord[2] == key.coord[2];
+    };
+    for (auto it = pendingImageWrites_.rbegin();
+         it != pendingImageWrites_.rend(); ++it) {
+        if (matches(*it)) {
+            raw = it->value[0];
+            return true;
+        }
+    }
+    if (priorImageWrites_ != nullptr) {
+        for (auto it = priorImageWrites_->rbegin();
+             it != priorImageWrites_->rend(); ++it) {
+            if (matches(*it)) {
+                raw = it->value[0];
+                return true;
+            }
+        }
+    }
+    if (off + sizeof(raw) <= slot.data.size()) {
+        std::memcpy(&raw, slot.data.data() + off, sizeof(raw));
+    }
+    return true;
+}
+
+bool Interpreter::storeImageScalarRaw(const ImageTexelPointer& ptr,
+                                      std::uint32_t raw)
+{
+    if (!ptr.handle.isStorage || storageImages_ == nullptr) return true;
+    auto arrIt = storageImages_->find(ptr.handle.arrayVarId);
+    if (arrIt == storageImages_->end() ||
+        ptr.handle.elementIdx >= arrIt->second.size()) {
+        return true;
+    }
+    const SampledTextureSlot& slot = arrIt->second[ptr.handle.elementIdx];
+    if (slot.width == 0 || slot.height == 0) return true;
+    if (ptr.coord[0] < 0 || ptr.coord[1] < 0 || ptr.coord[2] < 0) {
+        return true;
+    }
+    const std::uint32_t x = static_cast<std::uint32_t>(ptr.coord[0]);
+    const std::uint32_t y = static_cast<std::uint32_t>(ptr.coord[1]);
+    const std::uint32_t z = static_cast<std::uint32_t>(ptr.coord[2]);
+    const std::uint32_t layers =
+        slot.layerFaces != 0 ? slot.layerFaces
+                             : (slot.depth != 0 ? slot.depth : 1u);
+    if (x >= slot.width || y >= slot.height || z >= layers) return true;
+
+    ImageTexelKey key;
+    key.imageUnit = slot.imageUnit;
+    key.arrayVarId = ptr.handle.arrayVarId;
+    key.elementIdx = ptr.handle.elementIdx;
+    key.coord[0] = ptr.coord[0];
+    key.coord[1] = ptr.coord[1];
+    key.coord[2] = ptr.coord[2];
+    imageAtomicRawOverrides_[key] = raw;
+
+    PendingImageWrite pw;
+    pw.arrayVarId = ptr.handle.arrayVarId;
+    pw.elementIdx = ptr.handle.elementIdx;
+    pw.imageUnit = slot.imageUnit;
+    pw.coord[0] = ptr.coord[0];
+    pw.coord[1] = ptr.coord[1];
+    pw.coord[2] = ptr.coord[2];
+    pw.value[0] = raw;
+    pw.internalFormat = slot.internalFormat;
+    pw.valueIsFloat = false;
+    pendingImageWrites_.push_back(pw);
+    if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
+        std::fprintf(stderr,
+            "[GS-img] atomic-store: var=%u elem=%u unit=%u "
+            "coord=(%d,%d,%d) value=0x%X fmt=0x%X\n",
+            pw.arrayVarId, pw.elementIdx, pw.imageUnit,
+            pw.coord[0], pw.coord[1], pw.coord[2],
+            pw.value[0], pw.internalFormat);
+    }
+    return true;
+}
+
 Value Interpreter::atomicResultValue(std::uint32_t resultTypeId,
                                      std::uint32_t raw) const
 {
@@ -2258,13 +2510,19 @@ bool Interpreter::executeAtomicLoad(std::uint32_t resultTypeId,
                                     std::uint32_t resultId,
                                     std::uint32_t ptrId)
 {
-    auto acIt = accessChains_.find(ptrId);
-    if (acIt == accessChains_.end()) {
-        bail("OpAtomicLoad: unresolved pointer");
-        return false;
-    }
     std::uint32_t raw = 0;
-    if (!loadSSBOScalarRaw(acIt->second, raw)) {
+    auto acIt = accessChains_.find(ptrId);
+    if (acIt != accessChains_.end()) {
+        if (!loadSSBOScalarRaw(acIt->second, raw)) {
+            return false;
+        }
+    } else if (auto imgIt = imageTexelPointers_.find(ptrId);
+               imgIt != imageTexelPointers_.end()) {
+        if (!loadImageScalarRaw(imgIt->second, raw)) {
+            return false;
+        }
+    } else {
+        bail("OpAtomicLoad: unresolved pointer");
         return false;
     }
     valueStore_[resultId] = atomicResultValue(resultTypeId, raw);
@@ -2275,15 +2533,19 @@ bool Interpreter::executeAtomicStore(std::uint32_t ptrId,
                                      std::uint32_t valueId)
 {
     auto acIt = accessChains_.find(ptrId);
-    if (acIt == accessChains_.end()) {
-        bail("OpAtomicStore: unresolved pointer");
-        return false;
-    }
     std::uint32_t raw = 0;
     if (!rawScalarFromValue(valueId, raw)) {
         return false;
     }
-    return storeSSBOScalarRaw(acIt->second, raw);
+    if (acIt != accessChains_.end()) {
+        return storeSSBOScalarRaw(acIt->second, raw);
+    }
+    if (auto imgIt = imageTexelPointers_.find(ptrId);
+        imgIt != imageTexelPointers_.end()) {
+        return storeImageScalarRaw(imgIt->second, raw);
+    }
+    bail("OpAtomicStore: unresolved pointer");
+    return false;
 }
 
 bool Interpreter::executeAtomicRMW(std::uint32_t opcode,
@@ -2294,14 +2556,22 @@ bool Interpreter::executeAtomicRMW(std::uint32_t opcode,
                                    std::uint32_t comparatorId)
 {
     auto acIt = accessChains_.find(ptrId);
-    if (acIt == accessChains_.end()) {
+    auto imgIt = imageTexelPointers_.find(ptrId);
+    if (acIt == accessChains_.end() &&
+        imgIt == imageTexelPointers_.end()) {
         bail("atomicSSBO: unresolved pointer");
         return false;
     }
 
     std::uint32_t oldRaw = 0;
-    if (!loadSSBOScalarRaw(acIt->second, oldRaw)) {
-        return false;
+    if (acIt != accessChains_.end()) {
+        if (!loadSSBOScalarRaw(acIt->second, oldRaw)) {
+            return false;
+        }
+    } else {
+        if (!loadImageScalarRaw(imgIt->second, oldRaw)) {
+            return false;
+        }
     }
 
     std::uint32_t valueRaw = 0;
@@ -2369,8 +2639,14 @@ bool Interpreter::executeAtomicRMW(std::uint32_t opcode,
             return false;
     }
 
-    if (!storeSSBOScalarRaw(acIt->second, newRaw)) {
-        return false;
+    if (acIt != accessChains_.end()) {
+        if (!storeSSBOScalarRaw(acIt->second, newRaw)) {
+            return false;
+        }
+    } else {
+        if (!storeImageScalarRaw(imgIt->second, newRaw)) {
+            return false;
+        }
     }
     valueStore_[resultId] = atomicResultValue(resultTypeId, oldRaw);
     return true;
@@ -4180,6 +4456,8 @@ void Interpreter::resetExecutionState() {
     uboVarMeta_.clear();
     ssboVarMeta_.clear();
     sampledImages_.clear();
+    imageTexelPointers_.clear();
+    imageAtomicRawOverrides_.clear();
     pendingImageWrites_.clear();
     currentPosition_ = {0.0f, 0.0f, 0.0f, 1.0f};
     currentOutVaryings_.clear();
@@ -5176,6 +5454,22 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                         bail("OpStore: unresolved pointer");
                     }
                 }
+                pc += wc;
+                break;
+            }
+            case spv::OpImageTexelPointer: {
+                // w[0]=resultType, w[1]=resultId, w[2]=image,
+                // w[3]=coordinate, w[4]=sample. Image atomics lower
+                // through this pointer value before OpAtomic* consumes it.
+                if (wc < 6) {
+                    bail("OpImageTexelPointer: missing operands");
+                    break;
+                }
+                ImageTexelPointer ptr;
+                if (!resolveImageTexelPointer(w[2], w[3], ptr)) {
+                    break;
+                }
+                imageTexelPointers_[w[1]] = ptr;
                 pc += wc;
                 break;
             }
@@ -6369,6 +6663,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 // 4×u32. For float texels, reinterpret-cast.
                 const SampledTextureSlot& slot = arrIt->second[h.elementIdx];
                 pw.internalFormat = slot.internalFormat;
+                pw.imageUnit = slot.imageUnit;
                 const int texelCount = std::min(4, texelV.componentCount());
                 pw.valueIsFloat = texelV.isFloatKind();
                 if (texelV.isFloatKind()) {
@@ -7793,6 +8088,7 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpLabel:
         case spv::OpVariable:
         case spv::OpLoad:
+        case spv::OpImageTexelPointer:
         case spv::OpStore:
         case spv::OpAccessChain:
         case spv::OpCompositeExtract:
@@ -10785,6 +11081,7 @@ EmulatedDraw emulateGeometryDraw(
                 if (vsStorageImages != nullptr) {
                     vsInterp.setStorageImages(vsStorageImages);
                 }
+                vsInterp.setPriorImageWrites(&d.pendingImageWrites);
                 if (gsSsboMapPtr != nullptr) {
                     vsInterp.setStorageBuffers(gsSsboMapPtr);
                 }
@@ -10796,6 +11093,18 @@ EmulatedDraw emulateGeometryDraw(
                 vsOut.position[3] = 1.0f;
                 if (!vsInterp.executeVs(vsOut)) {
                     d.diagnostic = "VS pre-pass failed: " + vsInterp.diagnostic();
+                }
+                {
+                    auto writes = vsInterp.takePendingImageWrites();
+                    if (!writes.empty()) {
+                        for (auto& write : writes) {
+                            write.stage = GL_VERTEX_SHADER;
+                        }
+                        d.pendingImageWrites.insert(
+                            d.pendingImageWrites.end(),
+                            std::make_move_iterator(writes.begin()),
+                            std::make_move_iterator(writes.end()));
+                    }
                 }
                 for (int k = 0; k < 4; ++k) {
                     allVertexInputs[vi].position[k] = vsOut.position[k];
@@ -10881,6 +11190,7 @@ EmulatedDraw emulateGeometryDraw(
                 if (gsStorageImages != nullptr) {
                     interp.setStorageImages(gsStorageImages);
                 }
+                interp.setPriorImageWrites(&d.pendingImageWrites);
                 if (gsSsboMapPtr != nullptr) {
                     interp.setStorageBuffers(gsSsboMapPtr);
                 }
@@ -12114,6 +12424,7 @@ bool runVsForVertex(
     if (storageImages != nullptr) {
         vsInterp.setStorageImages(storageImages);
     }
+    vsInterp.setPriorImageWrites(pendingImageWrites);
     // Sprint 17 Day 4+ BONUS-2 [gpu_shader5 array-indexing]: caller
     // can pass a pre-built UBO array map (per-binding shadow bytes
     // for any `uniform Block { ... } arr[N]` declared in the VS).
@@ -12259,6 +12570,7 @@ bool runTesForVertex(
     if (storageImages != nullptr) {
         tesInterp.setStorageImages(storageImages);
     }
+    tesInterp.setPriorImageWrites(pendingImageWrites);
 
     // Phase 3f-14: wire the patch-varying map. Interpreter's TES
     // initVariables arm pulls Input-Patch-Location varying values
@@ -12420,6 +12732,7 @@ bool runTcsForVertex(
     if (storageImages != nullptr) {
         tcsInterp.setStorageImages(storageImages);
     }
+    tcsInterp.setPriorImageWrites(pendingImageWrites);
 
     // Phase 3f-10: convert per-patch EmulatedVertex inputs (position +
     // clip/cull) into PerVertexInput so the interpreter's gl_in[]

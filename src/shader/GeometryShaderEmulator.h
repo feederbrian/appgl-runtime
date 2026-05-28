@@ -115,6 +115,7 @@ struct EmulatedVertex {
 struct PendingImageWrite {
     std::uint32_t arrayVarId = 0;
     std::uint32_t elementIdx = 0;
+    std::uint32_t imageUnit = 0xFFFFFFFFu;
     std::uint32_t stage = 0;
     std::int32_t coord[3] = {0, 0, 0};
     std::uint32_t value[4] = {0, 0, 0, 0};
@@ -326,6 +327,9 @@ struct SampledTextureSlot {
     std::uint32_t layerFaces = 0;
     std::uint32_t internalFormat = 0;
     std::uint32_t samplerType = 0;
+    // Storage-image maps fill this with the effective GL image unit.
+    // Sampled-texture maps leave it at the sentinel.
+    std::uint32_t imageUnit = 0xFFFFFFFFu;
 };
 
 // Per-sampler-array: vector of slots, one per element. For non-array

@@ -9458,6 +9458,7 @@ struct GLContext::Impl {
                 slot.bytesPerImage = slot.bytesPerRow * slot.height;
                 slot.internalFormat = intFmt;
                 slot.samplerType = 0;  // not applicable for storage images
+                slot.imageUnit = effUnit;
                 const NSUInteger sliceCount = std::max<NSUInteger>(slot.layerFaces, 1);
                 slot.data.assign(
                     static_cast<std::size_t>(slot.bytesPerImage) * sliceCount,
@@ -25620,6 +25621,43 @@ void GLContext::Impl::flushPendingImageWritesForStage(
         }
         if (flushed && touchedTextures != nullptr) {
             touchedTextures->push_back(ib.texture);
+        }
+        if (flushed &&
+            texObj->target != GL_TEXTURE_BUFFER &&
+            texObj->imageAtomicBuffer != nullptr) {
+            id<MTLBuffer> atomicBuffer =
+                (__bridge id<MTLBuffer>)texObj->imageAtomicBuffer;
+            std::uint8_t* atomicBytes =
+                atomicBuffer != nil
+                    ? static_cast<std::uint8_t*>([atomicBuffer contents])
+                    : nullptr;
+            if (atomicBytes != nullptr) {
+                const NSUInteger atomicWidth =
+                    std::max<NSUInteger>(mtlTex.width, 1);
+                const NSUInteger atomicHeight =
+                    std::max<NSUInteger>(mtlTex.height, 1);
+                const NSUInteger atomicSlice =
+                    writeAs3D ? writeZ : (writeWithSlice ? sliceLayer : 0);
+                const NSUInteger atomicSlices =
+                    writeAs3D ? std::max<NSUInteger>(mtlTex.depth, 1)
+                              : imageAtomicSliceCount(mtlTex);
+                if (writeX < atomicWidth &&
+                    writeY < atomicHeight &&
+                    atomicSlice < atomicSlices) {
+                    const std::size_t texelIndex =
+                        (static_cast<std::size_t>(atomicSlice) *
+                             static_cast<std::size_t>(atomicHeight) +
+                         static_cast<std::size_t>(writeY)) *
+                            static_cast<std::size_t>(atomicWidth) +
+                        static_cast<std::size_t>(writeX);
+                    const std::size_t byteOffset = texelIndex * sizeof(std::uint32_t);
+                    if (byteOffset + sizeof(std::uint32_t) <= atomicBuffer.length) {
+                        std::memcpy(atomicBytes + byteOffset,
+                                    &pw.value[0],
+                                    sizeof(std::uint32_t));
+                    }
+                }
+            }
         }
         if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
             std::fprintf(stderr,
@@ -46772,16 +46810,88 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
             idx32.clear();
         }
         if (!idx32.empty()) {
+            const auto vsTexMap = impl_->buildSampledTextureMap(
+                program->vertexSpirv,
+                &program->vertexReflection, *program);
+            const auto gsTexMap = impl_->buildSampledTextureMap(
+                program->geometrySpirv,
+                &program->geometryReflection, *program);
+            const auto vsImgMap = impl_->buildStorageImageMap(
+                program->vertexSpirv,
+                &program->vertexReflection, *program);
+            const auto gsImgMap = impl_->buildStorageImageMap(
+                program->geometrySpirv,
+                &program->geometryReflection, *program);
+
+            appgl::EmulatedDraw priorStage;
+            const bool hasTess = program->tessellationEmulated ||
+                                 program->tessellationInterpreted;
+            if (hasTess) {
+                appgl::SampledTextureMap tcsSamMap, tcsImgMap;
+                appgl::SampledTextureMap tesSamMap, tesImgMap;
+                if (!program->tessControlSpirv.empty()) {
+                    tcsSamMap = impl_->buildSampledTextureMap(
+                        program->tessControlSpirv,
+                        &program->tessControlReflection, *program);
+                    tcsImgMap = impl_->buildStorageImageMap(
+                        program->tessControlSpirv,
+                        &program->tessControlReflection, *program);
+                }
+                if (!program->tessEvalSpirv.empty()) {
+                    tesSamMap = impl_->buildSampledTextureMap(
+                        program->tessEvalSpirv,
+                        &program->tessEvalAsComputeReflection, *program);
+                    tesImgMap = impl_->buildStorageImageMap(
+                        program->tessEvalSpirv,
+                        &program->tessEvalAsComputeReflection, *program);
+                }
+                std::vector<std::uint32_t> tessIdx32 = idx32;
+                impl_->compactRestartIndicesForPatchTess(type, tessIdx32);
+                if (!tessIdx32.empty()) {
+                    if (basevertex != 0) {
+                        for (auto& v : tessIdx32) {
+                            v = static_cast<std::uint32_t>(
+                                static_cast<std::int32_t>(v) + basevertex);
+                        }
+                    }
+                    const GLsizei tessCount =
+                        static_cast<GLsizei>(tessIdx32.size());
+                    priorStage = appgl::emulateTessellationDraw(
+                        *program, *vao, *impl_->objects, *impl_->state,
+                        mode, tessCount, /*first=*/0, tessIdx32.data(),
+                        instancecount, baseinstance,
+                        tcsSamMap.empty() ? nullptr : &tcsSamMap,
+                        tcsImgMap.empty() ? nullptr : &tcsImgMap,
+                        tesSamMap.empty() ? nullptr : &tesSamMap,
+                        tesImgMap.empty() ? nullptr : &tesImgMap,
+                        vsTexMap.empty() ? nullptr : &vsTexMap,
+                        vsImgMap.empty() ? nullptr : &vsImgMap);
+                    if (!priorStage.ok && !priorStage.diagnostic.empty()) {
+                        APPGL_LOG(SHADER,
+                                  @"drawElementsInstancedBaseVertex tess+GS: tess-emul: %s",
+                                  priorStage.diagnostic.c_str());
+                    }
+                }
+            }
+
+            std::vector<std::uint32_t> geomIdx32 = idx32;
             // basevertex applied per GL 4.6 §10.6.3: each element
             // index gets `basevertex` added before VBO fetch.
             if (basevertex != 0) {
-                for (auto& v : idx32) v = static_cast<std::uint32_t>(
-                    static_cast<std::int32_t>(v) + basevertex);
+                for (auto& v : geomIdx32) {
+                    v = static_cast<std::uint32_t>(
+                        static_cast<std::int32_t>(v) + basevertex);
+                }
             }
             appgl::EmulatedDraw ed = appgl::emulateGeometryDraw(
                 *program, *vao, *impl_->objects, *impl_->state,
-                mode, count, /*first=*/0, idx32.data(),
-                instancecount, baseinstance);
+                mode, count, /*first=*/0, geomIdx32.data(),
+                instancecount, baseinstance,
+                vsTexMap.empty() ? nullptr : &vsTexMap,
+                gsTexMap.empty() ? nullptr : &gsTexMap,
+                vsImgMap.empty() ? nullptr : &vsImgMap,
+                gsImgMap.empty() ? nullptr : &gsImgMap,
+                (hasTess && priorStage.ok) ? &priorStage : nullptr);
             if (ed.ok) {
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) return true;
                 if (ed.vertexCount == 0) return true;
