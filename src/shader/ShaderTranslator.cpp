@@ -1735,6 +1735,91 @@ bool findMatchingParen(const std::string& text,
     return false;
 }
 
+bool findMatchingBracket(const std::string& text,
+                         std::size_t open,
+                         std::size_t& close) {
+    if (open >= text.size() || text[open] != '[') {
+        return false;
+    }
+    int depth = 1;
+    for (std::size_t i = open + 1; i < text.size(); ++i) {
+        if (text[i] == '[') {
+            ++depth;
+        } else if (text[i] == ']') {
+            --depth;
+            if (depth == 0) {
+                close = i;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// SPIRV-Cross can lower image1DArray atomics to `atomic_ptr[int2(...)]`.
+// Metal only accepts scalar pointer subscripts, so linearize those vector
+// coordinates through the same helper macros used for 2D/3D image atomics.
+bool rewriteVectorImageAtomicBufferSubscripts(std::string& msl) {
+    bool changed = false;
+    static constexpr const char* kSuffix = "_atomic";
+    static constexpr std::size_t kSuffixLen =
+        sizeof("_atomic") - 1u;
+
+    std::size_t pos = 0;
+    while ((pos = msl.find("_atomic[", pos)) != std::string::npos) {
+        std::size_t nameStart = pos;
+        while (nameStart > 0 && isIdentifierChar(msl[nameStart - 1])) {
+            --nameStart;
+        }
+        const std::size_t nameEnd = pos + kSuffixLen;
+        if (nameStart >= pos || nameEnd >= msl.size() || msl[nameEnd] != '[') {
+            pos = nameEnd + 1;
+            continue;
+        }
+
+        const std::string atomicName =
+            msl.substr(nameStart, nameEnd - nameStart);
+        if (atomicName.size() <= kSuffixLen) {
+            pos = nameEnd + 1;
+            continue;
+        }
+        const std::string imageName =
+            atomicName.substr(0, atomicName.size() - kSuffixLen);
+        if (msl.find(" " + imageName + " [[texture(") == std::string::npos) {
+            pos = nameEnd + 1;
+            continue;
+        }
+
+        std::size_t close = std::string::npos;
+        if (!findMatchingBracket(msl, nameEnd, close)) {
+            pos = nameEnd + 1;
+            continue;
+        }
+        const std::string indexExpr =
+            trimCopy(msl.substr(nameEnd + 1, close - nameEnd - 1));
+        const bool vector2Index =
+            indexExpr.rfind("int2(", 0) == 0 ||
+            indexExpr.rfind("uint2(", 0) == 0;
+        const bool vector3Index =
+            indexExpr.rfind("int3(", 0) == 0 ||
+            indexExpr.rfind("uint3(", 0) == 0;
+        if (!vector2Index && !vector3Index) {
+            pos = close + 1;
+            continue;
+        }
+
+        const char* helper = vector2Index
+            ? "spvImage2DAtomicCoord("
+            : "spvImage3DAtomicCoord(";
+        const std::string replacement =
+            std::string(helper) + indexExpr + ", " + imageName + ")";
+        msl.replace(nameEnd + 1, close - nameEnd - 1, replacement);
+        pos = nameEnd + 1 + replacement.size();
+        changed = true;
+    }
+    return changed;
+}
+
 // Metal accepts cube-array textures for sampling, but storage-image writes are
 // reliable through a 2D-array view. Rewrite SPIRV-Cross's generated accessors
 // from (coord, face, cube) to (coord, cube * 6 + face) for those image params.
@@ -4342,6 +4427,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
 
         std::string msl = compiler.compile();
 
+        (void)rewriteVectorImageAtomicBufferSubscripts(msl);
         (void)fixUnsafeArrayDoubleIndex(msl);
 
         if (isVertex && mslOpts.appgl_fp64_emulation) {
