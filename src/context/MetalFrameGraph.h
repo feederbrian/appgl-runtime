@@ -219,6 +219,9 @@ struct TranslatedDrawInfo {
         void* metalSamplerState = nullptr;  // id<MTLSamplerState>
         // Non-owning backing buffer for buffer-texture MTLTexture views.
         void* textureBufferBackingMetalBuffer = nullptr; // id<MTLBuffer>
+        void* imageAtomicMetalBuffer = nullptr; // id<MTLBuffer>
+        std::size_t imageAtomicBufferOffset = 0;
+        std::uint32_t imageAtomicBufferSlot = 0xFFFFFFFFu;
         std::uint32_t reductionMode = GL_WEIGHTED_AVERAGE_ARB;
     };
     std::vector<TextureBinding> fragmentTextures;

@@ -257,6 +257,14 @@ struct GLTextureObject {
     void* metalSwizzledView = nullptr;
     bool swizzleDirty = true;
 
+    // SPIRV-Cross lowers imageAtomic* on Metal without native texture
+    // atomics to a companion `device atomic_*` buffer. For ordinary
+    // textures this sidecar holds one 32-bit word per texel and is copied
+    // back into the Metal texture at CPU-visible barriers/readbacks.
+    void* imageAtomicBuffer = nullptr;
+    std::size_t imageAtomicBufferSize = 0;
+    bool imageAtomicBufferDirtyToTexture = false;
+
     // Cube-map completeness tracking. For GL_TEXTURE_CUBE_MAP targets,
     // each bit 0..5 corresponds to a face in the enum order
     //   POSITIVE_X, NEGATIVE_X, POSITIVE_Y, NEGATIVE_Y, POSITIVE_Z, NEGATIVE_Z

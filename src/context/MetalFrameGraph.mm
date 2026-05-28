@@ -3811,6 +3811,17 @@ struct MetalFrameGraph::Impl {
                 id<MTLTexture> tex = (__bridge id<MTLTexture>)binding.metalTexture;
                 [currentRenderEncoder setFragmentTexture:tex
                                                  atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+                if (binding.imageAtomicMetalBuffer != nullptr &&
+                    binding.imageAtomicBufferSlot != 0xFFFFFFFFu) {
+                    id<MTLBuffer> buf =
+                        (__bridge id<MTLBuffer>)binding.imageAtomicMetalBuffer;
+                    if (buf != nil) {
+                        [currentRenderEncoder setFragmentBuffer:buf
+                                                         offset:binding.imageAtomicBufferOffset
+                                                        atIndex:static_cast<NSUInteger>(
+                                                            binding.imageAtomicBufferSlot)];
+                    }
+                }
                 if (binding.metalSamplerState != nullptr) {
                     id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)binding.metalSamplerState;
                     [currentRenderEncoder setFragmentSamplerState:smp
@@ -3826,6 +3837,17 @@ struct MetalFrameGraph::Impl {
                 id<MTLTexture> tex = (__bridge id<MTLTexture>)binding.metalTexture;
                 [currentRenderEncoder setVertexTexture:tex
                                                atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+                if (binding.imageAtomicMetalBuffer != nullptr &&
+                    binding.imageAtomicBufferSlot != 0xFFFFFFFFu) {
+                    id<MTLBuffer> buf =
+                        (__bridge id<MTLBuffer>)binding.imageAtomicMetalBuffer;
+                    if (buf != nil) {
+                        [currentRenderEncoder setVertexBuffer:buf
+                                                       offset:binding.imageAtomicBufferOffset
+                                                      atIndex:static_cast<NSUInteger>(
+                                                          binding.imageAtomicBufferSlot)];
+                    }
+                }
                 if (binding.metalSamplerState != nullptr) {
                     id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)binding.metalSamplerState;
                     [currentRenderEncoder setVertexSamplerState:smp
@@ -6443,6 +6465,17 @@ fragment float4 appgl_immediate_textured_fs(
                     const NSUInteger slot =
                         static_cast<NSUInteger>(binding.metalSlot);
                     [encoder setTexture:tex atIndex:slot];
+                    if (binding.imageAtomicMetalBuffer != nullptr &&
+                        binding.imageAtomicBufferSlot != 0xFFFFFFFFu) {
+                        id<MTLBuffer> buf =
+                            (__bridge id<MTLBuffer>)binding.imageAtomicMetalBuffer;
+                        if (buf != nil) {
+                            [encoder setBuffer:buf
+                                        offset:binding.imageAtomicBufferOffset
+                                       atIndex:static_cast<NSUInteger>(
+                                           binding.imageAtomicBufferSlot)];
+                        }
+                    }
                     if (binding.metalSamplerState != nullptr) {
                         id<MTLSamplerState> smp =
                             (__bridge id<MTLSamplerState>)binding.metalSamplerState;
@@ -6462,6 +6495,17 @@ fragment float4 appgl_immediate_textured_fs(
                     const NSUInteger slot =
                         static_cast<NSUInteger>(binding.metalSlot);
                     [encoder setVertexTexture:tex atIndex:slot];
+                    if (binding.imageAtomicMetalBuffer != nullptr &&
+                        binding.imageAtomicBufferSlot != 0xFFFFFFFFu) {
+                        id<MTLBuffer> buf =
+                            (__bridge id<MTLBuffer>)binding.imageAtomicMetalBuffer;
+                        if (buf != nil) {
+                            [encoder setVertexBuffer:buf
+                                              offset:binding.imageAtomicBufferOffset
+                                             atIndex:static_cast<NSUInteger>(
+                                                 binding.imageAtomicBufferSlot)];
+                        }
+                    }
                     if (binding.metalSamplerState != nullptr) {
                         id<MTLSamplerState> smp =
                             (__bridge id<MTLSamplerState>)binding.metalSamplerState;
@@ -6481,6 +6525,17 @@ fragment float4 appgl_immediate_textured_fs(
                     const NSUInteger slot =
                         static_cast<NSUInteger>(binding.metalSlot);
                     [encoder setFragmentTexture:tex atIndex:slot];
+                    if (binding.imageAtomicMetalBuffer != nullptr &&
+                        binding.imageAtomicBufferSlot != 0xFFFFFFFFu) {
+                        id<MTLBuffer> buf =
+                            (__bridge id<MTLBuffer>)binding.imageAtomicMetalBuffer;
+                        if (buf != nil) {
+                            [encoder setFragmentBuffer:buf
+                                                offset:binding.imageAtomicBufferOffset
+                                               atIndex:static_cast<NSUInteger>(
+                                                   binding.imageAtomicBufferSlot)];
+                        }
+                    }
                     if (binding.metalSamplerState != nullptr) {
                         id<MTLSamplerState> smp =
                             (__bridge id<MTLSamplerState>)binding.metalSamplerState;
@@ -8528,6 +8583,17 @@ fragment float4 appgl_immediate_textured_fs(
             }
             [renc setFragmentTexture:tex
                               atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+            if (binding.imageAtomicMetalBuffer != nullptr &&
+                binding.imageAtomicBufferSlot != 0xFFFFFFFFu) {
+                id<MTLBuffer> buf =
+                    (__bridge id<MTLBuffer>)binding.imageAtomicMetalBuffer;
+                if (buf != nil) {
+                    [renc setFragmentBuffer:buf
+                                     offset:binding.imageAtomicBufferOffset
+                                    atIndex:static_cast<NSUInteger>(
+                                        binding.imageAtomicBufferSlot)];
+                }
+            }
             if (binding.metalSamplerState != nullptr) {
                 id<MTLSamplerState> smp =
                     (__bridge id<MTLSamplerState>)binding.metalSamplerState;
@@ -8543,6 +8609,17 @@ fragment float4 appgl_immediate_textured_fs(
             }
             [renc setMeshTexture:tex
                           atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+            if (binding.imageAtomicMetalBuffer != nullptr &&
+                binding.imageAtomicBufferSlot != 0xFFFFFFFFu) {
+                id<MTLBuffer> buf =
+                    (__bridge id<MTLBuffer>)binding.imageAtomicMetalBuffer;
+                if (buf != nil) {
+                    [renc setMeshBuffer:buf
+                                 offset:binding.imageAtomicBufferOffset
+                                atIndex:static_cast<NSUInteger>(
+                                    binding.imageAtomicBufferSlot)];
+                }
+            }
             if (binding.metalSamplerState != nullptr) {
                 id<MTLSamplerState> smp =
                     (__bridge id<MTLSamplerState>)binding.metalSamplerState;

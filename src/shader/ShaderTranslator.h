@@ -20,6 +20,11 @@ struct BindingMap {
     std::uint32_t uniformBufferBase = 16;  // [16..28) — UBOs
     std::uint32_t storageBufferBase = 28;  // [28..30) — SSBOs (GL 4.3+, deferred)
     std::uint32_t multisampleStorageImageSampleBuffer = 30;
+    // SPIRV-Cross emulates image atomics on pre-MSL-3.1 storage images
+    // with a secondary `device atomic_* [[buffer(N)]]` argument. Keep the
+    // small direct-binding CTS path out of vertex-buffer slot 0 and away
+    // from the SSBO tail; active image-atomic users are packed densely.
+    std::uint32_t storageImageAtomicBufferBase = 24;
     std::uint32_t textureBase = 0;         // [ 0..48) — sampled textures (GL_MAX_TEXTURE_IMAGE_UNITS)
     std::uint32_t samplerBase = 0;         // sampler state slots track textureBase 1:1
     // Storage images (imageLoad/imageStore) must live in a Metal
@@ -131,6 +136,7 @@ struct ShaderReflection {
         bool multisampleStorageImage = false;
         bool multisampleStorageImageArray = false;
         GLenum storageImageTarget = 0;
+        std::uint32_t metalAtomicBufferBinding = 0xFFFFFFFFu;
         bool sparseStorageImageRead = false;
         bool sparseStorageImageWrite = false;
         bool containsFp64 = false;

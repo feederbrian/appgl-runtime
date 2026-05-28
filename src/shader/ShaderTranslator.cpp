@@ -4290,6 +4290,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                     binding.desc_set = 0;
                     binding.binding = syntheticBinding;
                     binding.msl_texture = 128 + nextArgBufStorageImageSlot;
+                    binding.msl_buffer =
+                        bindings.storageImageAtomicBufferBase + static_cast<std::uint32_t>(i);
                     nextArgBufStorageImageSlot += std::max<std::uint32_t>(
                         entry.arraySize, 1u);
                     if (isGraphicsStage) {
@@ -4322,6 +4324,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                     // stage), capped at 31 on Apple Silicon outside
                     // argbuf mode. Reflection mirrors below.
                     binding.msl_texture = unifiedNextTextureSlot;
+                    binding.msl_buffer =
+                        bindings.storageImageAtomicBufferBase + static_cast<std::uint32_t>(i);
                     unifiedNextTextureSlot += 1;
                     if (isGraphicsStage) {
                         storageImageAccessFixups.push_back({
@@ -5935,11 +5939,15 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 rb.glBinding = entry.glBinding;
                 if (useArgBufReflection) {
                     rb.metalBinding = 128 + nextArgBufStorageImageSlotR;
+                    rb.metalAtomicBufferBinding =
+                        bindings.storageImageAtomicBufferBase + static_cast<std::uint32_t>(i);
                     nextArgBufStorageImageSlotR += std::max<std::uint32_t>(
                         entry.arraySize, 1u);
                 } else {
                     // CKPT81: shared pool with sampled images.
                     rb.metalBinding = unifiedNextTextureSlotR;
+                    rb.metalAtomicBufferBinding =
+                        bindings.storageImageAtomicBufferBase + static_cast<std::uint32_t>(i);
                     unifiedNextTextureSlotR += 1;
                 }
                 rb.name = entry.res->name;

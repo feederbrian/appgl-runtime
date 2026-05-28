@@ -3664,6 +3664,10 @@ struct GLContext::Impl {
         releaseRetainedMetalObject(object.metalSwizzledView);
         object.metalSwizzledView = nullptr;
         object.swizzleDirty = true;
+        releaseRetainedMetalObject(object.imageAtomicBuffer);
+        object.imageAtomicBuffer = nullptr;
+        object.imageAtomicBufferSize = 0;
+        object.imageAtomicBufferDirtyToTexture = false;
         object.msaaFramebufferWriteNeedsSamplerFlush = false;
         object.colorShadowAuthoritative = false;
         object.depthStencilShadowAuthoritative = false;
@@ -9562,6 +9566,7 @@ struct GLContext::Impl {
             }
         }
         auto resolveStage = [&](const char* stageName, const ShaderReflection* reflection,
+                                const std::string& stageMSL,
                                 std::vector<TranslatedDrawInfo::TextureBinding>& outList) {
             if (reflection == nullptr) return;
             for (const auto& img : reflection->storageImages) {
@@ -9641,13 +9646,45 @@ struct GLContext::Impl {
                     }
                     tb.metalSamplerState = nullptr;  // no sampler for storage images
                     tb.metalSlot = img.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                    if (img.metalAtomicBufferBinding != 0xFFFFFFFFu) {
+                        const std::string atomicNeedle = img.name + "_atomic";
+                        const bool stageUsesImageAtomic =
+                            stageMSL.find(atomicNeedle) != std::string::npos ||
+                            stageMSL.find("_appgl_" + atomicNeedle) != std::string::npos;
+                        if (stageUsesImageAtomic) {
+                            tb.imageAtomicBufferSlot = img.metalAtomicBufferBinding +
+                                static_cast<std::uint32_t>(arrayElement);
+                            if (texObj->target == GL_TEXTURE_BUFFER &&
+                                texObj->desc.sourceBuffer != 0) {
+                                GLBufferObject* backingBuffer =
+                                    objects->buffers().get(texObj->desc.sourceBuffer);
+                                if (backingBuffer != nullptr &&
+                                    backingBuffer->metalBuffer != nullptr) {
+                                    tb.imageAtomicMetalBuffer =
+                                        backingBuffer->metalBuffer;
+                                    tb.imageAtomicBufferOffset =
+                                        static_cast<std::size_t>(
+                                            std::max<GLintptr>(
+                                                texObj->desc.bufferOffset, 0));
+                                }
+                            } else {
+                                tb.imageAtomicMetalBuffer =
+                                    ensureTextureImageAtomicBuffer(*texObj);
+                                tb.imageAtomicBufferOffset = 0;
+                                if (tb.imageAtomicMetalBuffer != nullptr &&
+                                    ib.access != GL_READ_ONLY) {
+                                    texObj->imageAtomicBufferDirtyToTexture = true;
+                                }
+                            }
+                        }
+                    }
                     outList.push_back(tb);
                     if (trace) std::fprintf(stderr, " BOUND tex=%u\n", ib.texture);
                 }
             }
         };
-        resolveStage("VS", info.vertexReflection, info.vertexTextures);
-        resolveStage("FS", info.fragmentReflection, info.fragmentTextures);
+        resolveStage("VS", info.vertexReflection, program.vertexMSL, info.vertexTextures);
+        resolveStage("FS", info.fragmentReflection, program.fragmentMSL, info.fragmentTextures);
     }
 
     bool replaceBufferStorage(GLBufferObject& object, GLsizeiptr size, const void* data, GLenum usage) {
@@ -15725,6 +15762,139 @@ struct GLContext::Impl {
                                             ib.cachedViewLayered,
                                             ib.cachedViewLayer,
                                             ib.cachedViewTarget);
+    }
+
+    static NSUInteger imageAtomicSliceCount(id<MTLTexture> tex) {
+        if (tex == nil) return 1;
+        switch (tex.textureType) {
+            case MTLTextureType1DArray:
+            case MTLTextureType2DArray:
+            case MTLTextureType2DMultisampleArray:
+                return std::max<NSUInteger>(tex.arrayLength, 1);
+            case MTLTextureTypeCube:
+                return 6;
+            case MTLTextureTypeCubeArray:
+                return 6 * std::max<NSUInteger>(tex.arrayLength, 1);
+            default:
+                return 1;
+        }
+    }
+
+    static std::size_t imageAtomicSidecarByteSize(id<MTLTexture> tex) {
+        if (tex == nil || tex.width == 0) return 0;
+        const NSUInteger width = std::max<NSUInteger>(tex.width, 1);
+        const NSUInteger height = std::max<NSUInteger>(tex.height, 1);
+        const NSUInteger depth = tex.textureType == MTLTextureType3D
+            ? std::max<NSUInteger>(tex.depth, 1)
+            : imageAtomicSliceCount(tex);
+        return static_cast<std::size_t>(width * height * depth * 4u);
+    }
+
+    void* ensureTextureImageAtomicBuffer(GLTextureObject& texObj) {
+        if (device == nil || texObj.metalTexture == nullptr) return nullptr;
+        id<MTLTexture> tex = (__bridge id<MTLTexture>)texObj.metalTexture;
+        const std::size_t requiredBytes = imageAtomicSidecarByteSize(tex);
+        if (requiredBytes == 0) return nullptr;
+        if (texObj.imageAtomicBuffer != nullptr &&
+            texObj.imageAtomicBufferSize >= requiredBytes) {
+            return texObj.imageAtomicBuffer;
+        }
+        releaseRetainedMetalObject(texObj.imageAtomicBuffer);
+        texObj.imageAtomicBuffer = nullptr;
+        texObj.imageAtomicBufferSize = 0;
+        texObj.imageAtomicBufferDirtyToTexture = false;
+
+        id<MTLBuffer> buffer =
+            [device newBufferWithLength:requiredBytes
+                                options:MTLResourceStorageModeShared];
+        if (buffer == nil) return nullptr;
+        std::memset([buffer contents], 0, requiredBytes);
+
+        @try {
+            if (tex.storageMode != MTLStorageModePrivate && tex.width > 0) {
+                const NSUInteger width = std::max<NSUInteger>(tex.width, 1);
+                const NSUInteger height = std::max<NSUInteger>(tex.height, 1);
+                const NSUInteger rowBytes = width * 4u;
+                const NSUInteger imageBytes = rowBytes * height;
+                std::uint8_t* dst = static_cast<std::uint8_t*>([buffer contents]);
+                if (tex.textureType == MTLTextureType3D) {
+                    MTLRegion region = MTLRegionMake3D(
+                        0, 0, 0, width, height, std::max<NSUInteger>(tex.depth, 1));
+                    [tex getBytes:dst
+                       bytesPerRow:rowBytes
+                     bytesPerImage:imageBytes
+                        fromRegion:region
+                       mipmapLevel:0
+                             slice:0];
+                } else {
+                    const NSUInteger slices = imageAtomicSliceCount(tex);
+                    MTLRegion region = MTLRegionMake2D(0, 0, width, height);
+                    for (NSUInteger slice = 0; slice < slices; ++slice) {
+                        [tex getBytes:dst + slice * imageBytes
+                           bytesPerRow:rowBytes
+                         bytesPerImage:imageBytes
+                            fromRegion:region
+                           mipmapLevel:0
+                                 slice:slice];
+                    }
+                }
+            }
+        } @catch (NSException*) {
+            std::memset([buffer contents], 0, requiredBytes);
+        }
+
+        texObj.imageAtomicBuffer = transferRetainedMetalObject(buffer);
+        texObj.imageAtomicBufferSize = requiredBytes;
+        return texObj.imageAtomicBuffer;
+    }
+
+    void flushTextureImageAtomicSidecars() {
+        if (objects == nullptr) return;
+        objects->textures().forEach([&](GLuint, GLTextureObject& texObj) {
+            if (!texObj.imageAtomicBufferDirtyToTexture ||
+                texObj.imageAtomicBuffer == nullptr ||
+                texObj.metalTexture == nullptr ||
+                texObj.target == GL_TEXTURE_BUFFER) {
+                return;
+            }
+            id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)texObj.imageAtomicBuffer;
+            id<MTLTexture> tex = (__bridge id<MTLTexture>)texObj.metalTexture;
+            if (buffer == nil || tex == nil || [buffer contents] == nullptr) return;
+            const std::size_t requiredBytes = imageAtomicSidecarByteSize(tex);
+            if (requiredBytes == 0 || buffer.length < requiredBytes) return;
+
+            const NSUInteger width = std::max<NSUInteger>(tex.width, 1);
+            const NSUInteger height = std::max<NSUInteger>(tex.height, 1);
+            const NSUInteger rowBytes = width * 4u;
+            const NSUInteger imageBytes = rowBytes * height;
+            const std::uint8_t* src =
+                static_cast<const std::uint8_t*>([buffer contents]);
+            @try {
+                if (tex.textureType == MTLTextureType3D) {
+                    MTLRegion region = MTLRegionMake3D(
+                        0, 0, 0, width, height, std::max<NSUInteger>(tex.depth, 1));
+                    [tex replaceRegion:region
+                            mipmapLevel:0
+                                  slice:0
+                              withBytes:src
+                            bytesPerRow:rowBytes
+                          bytesPerImage:imageBytes];
+                } else {
+                    const NSUInteger slices = imageAtomicSliceCount(tex);
+                    MTLRegion region = MTLRegionMake2D(0, 0, width, height);
+                    for (NSUInteger slice = 0; slice < slices; ++slice) {
+                        [tex replaceRegion:region
+                                mipmapLevel:0
+                                      slice:slice
+                                  withBytes:src + slice * imageBytes
+                                bytesPerRow:rowBytes
+                              bytesPerImage:imageBytes];
+                    }
+                }
+                texObj.imageAtomicBufferDirtyToTexture = false;
+            } @catch (NSException*) {
+            }
+        });
     }
 
     void* resolveSparseSidecarImageMetalTexture(
@@ -46923,20 +47093,30 @@ bool GLContext::memoryBarrier(GLbitfield barriers) {
     // For CPU-visible barrier bits (BUFFER_UPDATE | TEXTURE_UPDATE |
     // PIXEL_BUFFER | CLIENT_MAPPED_BUFFER) we need to commit + wait so
     // subsequent glMapBuffer* / glGetTexImage / glReadPixels calls see
-    // the GPU writes. Metal handles GPU-to-GPU ordering implicitly but
-    // there's no implicit sync to CPU, and SSBO writes via a VS under
-    // GL_RASTERIZER_DISCARD (CTS shader_storage_buffer_object.*-vs)
-    // are only readable after the draw's command buffer completes.
+    // the GPU writes. Image/texture barriers also need a wait when image
+    // atomics are emulated through sidecar buffers, because the sidecar
+    // contents must be copied back into the texture before later image,
+    // texture, or CPU reads observe them. Metal handles ordinary GPU-to-GPU
+    // ordering implicitly, but there's no implicit sync to CPU, and SSBO
+    // writes via a VS under GL_RASTERIZER_DISCARD (CTS
+    // shader_storage_buffer_object.*-vs) are only readable after the draw's
+    // command buffer completes.
     constexpr GLbitfield kCpuVisibleBarriers =
         GL_BUFFER_UPDATE_BARRIER_BIT |
         GL_TEXTURE_UPDATE_BARRIER_BIT |
         GL_PIXEL_BUFFER_BARRIER_BIT |
         GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT;
+    constexpr GLbitfield kImageAtomicSidecarBarriers =
+        GL_SHADER_IMAGE_ACCESS_BARRIER_BIT |
+        GL_TEXTURE_FETCH_BARRIER_BIT |
+        GL_TEXTURE_UPDATE_BARRIER_BIT |
+        GL_FRAMEBUFFER_BARRIER_BIT;
     const bool requiresCpuSync =
         (barriers == GL_ALL_BARRIER_BITS) ||
-        (barriers & kCpuVisibleBarriers) != 0;
+        (barriers & (kCpuVisibleBarriers | kImageAtomicSidecarBarriers)) != 0;
     if (requiresCpuSync && impl_->frameGraph != nullptr) {
         impl_->frameGraph->flushForReadback();
+        impl_->flushTextureImageAtomicSidecars();
     }
     // GPU-to-GPU barriers (UNIFORM / TEXTURE_FETCH / SHADER_STORAGE / etc.)
     // are implicit on Metal's command queue — same-queue ordering is
