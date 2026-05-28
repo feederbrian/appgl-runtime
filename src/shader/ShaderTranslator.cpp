@@ -2931,7 +2931,7 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     r.maxAtomicCounterBufferSize = 32;
     r.maxTessControlAtomicCounters = 0;
     r.maxTessEvaluationAtomicCounters = 0;
-    r.maxGeometryAtomicCounters = 0;
+    r.maxGeometryAtomicCounters = 1;
     r.maxCombinedAtomicCounters = 8;
     r.maxCombinedAtomicCounterBuffers = 1;
     // Image uniforms per tess / geometry.

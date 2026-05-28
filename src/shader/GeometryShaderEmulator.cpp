@@ -121,6 +121,7 @@ namespace spv {
         StorageClassUniformConstant = 0, StorageClassInput = 1,
         StorageClassUniform = 2, StorageClassOutput = 3,
         StorageClassFunction = 7, StorageClassPrivate = 6,
+        StorageClassAtomicCounter = 10,
         StorageClassStorageBuffer = 12,
     };
     enum BuiltIn : std::uint32_t {
@@ -218,6 +219,18 @@ namespace {
 // can reuse the same parser + lookup tables. Body-dispatching
 // Interpreter class below still lives here until a later refactor.
 using namespace appgl::interp;
+
+constexpr std::uint32_t kSpvStorageClassAtomicCounter = 10;
+constexpr std::uint32_t kAtomicCounterStorageBindingBase = 0x10000000u;
+
+bool spirvTypeNameLooksAtomicCounterBlock(const SpirvModule& mod,
+                                          std::uint32_t typeId) {
+    auto nameIt = mod.names.find(typeId);
+    if (nameIt == mod.names.end()) return false;
+    const std::string& name = nameIt->second;
+    return name.find("AtomicCounterBlock_") != std::string::npos ||
+           name.find("atomicCounter") != std::string::npos;
+}
 
 float imageHalfToFloat(std::uint16_t h) {
     const std::uint32_t sign = (static_cast<std::uint32_t>(h & 0x8000u)) << 16;
@@ -1262,7 +1275,10 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
     // DecorationBinding value on the VARIABLE.
     const auto& varInfo = vIt->second;
     bool rootIsSSBO = false;
+    bool rootIsAtomicCounter =
+        (varInfo.storageClass == kSpvStorageClassAtomicCounter);
     std::uint32_t rootBinding = 0;
+    std::uint32_t rootByteOffset = 0;
     if (varInfo.storageClass == spv::StorageClassStorageBuffer) {
         rootIsSSBO = true;
     } else if (varInfo.storageClass == spv::StorageClassUniform) {
@@ -1270,7 +1286,12 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
         if (pIt != module_.types.end()) {
             auto dIt = module_.decorations.find(tIt->second.pointeeType);
             if (dIt != module_.decorations.end() && dIt->second.isBufferBlock) {
-                rootIsSSBO = true;
+                if (spirvTypeNameLooksAtomicCounterBlock(
+                        module_, tIt->second.pointeeType)) {
+                    rootIsAtomicCounter = true;
+                } else {
+                    rootIsSSBO = true;
+                }
             }
         }
     }
@@ -1278,6 +1299,21 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
         auto dIt = module_.decorations.find(base);
         if (dIt != module_.decorations.end() && dIt->second.hasBinding) {
             rootBinding = dIt->second.binding;
+        }
+    } else if (rootIsAtomicCounter) {
+        auto dIt = module_.decorations.find(base);
+        if (dIt != module_.decorations.end()) {
+            if (dIt->second.hasBinding) {
+                rootBinding = kAtomicCounterStorageBindingBase +
+                              dIt->second.binding;
+            } else {
+                rootBinding = kAtomicCounterStorageBindingBase;
+            }
+            if (dIt->second.hasOffset) {
+                rootByteOffset = dIt->second.offset;
+            }
+        } else {
+            rootBinding = kAtomicCounterStorageBindingBase;
         }
     }
     bool rootIsSSBOArray = false;
@@ -1306,7 +1342,7 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
 
     std::uint32_t curType = tIt->second.pointeeType;   // deref pointer
     std::uint32_t offset = 0;         // scalar offset (non-SSBO path)
-    std::uint32_t byteOffset = 0;     // byte offset (SSBO / UBO path)
+    std::uint32_t byteOffset = rootByteOffset; // byte offset (SSBO / UBO / atomic path)
     std::uint32_t activeMatrixStride = 0;
     std::uint32_t resolvedMatrixStride = 0;
     auto scalarByteWidth = [&](std::uint32_t typeId) -> std::uint32_t {
@@ -1412,7 +1448,7 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
             // SSBO byte offset: use DecorationArrayStride on the array
             // type, else fall back to scalar-width * 4 bytes (covers
             // packed scalar arrays).
-            if (rootIsSSBO || rootIsUboArray || rootIsUBO) {
+            if (rootIsSSBO || rootIsAtomicCounter || rootIsUboArray || rootIsUBO) {
                 std::uint32_t stride = 0;
                 auto dIt = module_.decorations.find(curType);
                 if (dIt != module_.decorations.end() && dIt->second.hasArrayStride) {
@@ -1441,7 +1477,7 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
             // decorations. glslang always emits this for every SSBO /
             // UBO struct member (per spec — required for std140/std430
             // member layouts to be unambiguous).
-            if (rootIsSSBO || rootIsUboArray || rootIsUBO) {
+            if (rootIsSSBO || rootIsAtomicCounter || rootIsUboArray || rootIsUBO) {
                 auto mdIt = module_.memberDecorations.find(curType);
                 activeMatrixStride = 0;
                 if (mdIt != module_.memberDecorations.end()) {
@@ -1461,7 +1497,7 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
         } else if (t.kind == TypeInfo::Kind::Vec2 || t.kind == TypeInfo::Kind::Vec3 ||
                    t.kind == TypeInfo::Kind::Vec4) {
             offset += static_cast<std::uint32_t>(idx);
-            if (rootIsSSBO || rootIsUboArray || rootIsUBO) {
+            if (rootIsSSBO || rootIsAtomicCounter || rootIsUboArray || rootIsUBO) {
                 byteOffset +=
                     static_cast<std::uint32_t>(idx) *
                     scalarByteWidth(t.componentType);
@@ -1470,7 +1506,7 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
         } else if (t.kind == TypeInfo::Kind::Matrix) {
             const std::uint32_t colW = module_.scalarWidth(t.componentType);
             offset += static_cast<std::uint32_t>(idx) * colW;
-            if (rootIsSSBO || rootIsUboArray || rootIsUBO) {
+            if (rootIsSSBO || rootIsAtomicCounter || rootIsUboArray || rootIsUBO) {
                 const std::uint32_t decoratedStride =
                     activeMatrixStride != 0
                         ? activeMatrixStride
@@ -1491,7 +1527,7 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
     r.scalarCount  = module_.scalarWidth(curType);
     r.leafTypeId   = curType;
     r.ok = true;
-    r.isStorageBuffer = rootIsSSBO;
+    r.isStorageBuffer = (rootIsSSBO || rootIsAtomicCounter);
     r.byteOffset = byteOffset;
     r.binding = (rootIsSSBOArray && ssboFirstIndexResolved)
         ? ssboArrayElemBinding : rootBinding;
@@ -2745,6 +2781,17 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
         // OpLoad / OpStore route through the caller's binding map
         // into real buffer memory. Populate ssboVarMeta_ so the
         // access-chain walk can confirm the root binding later.
+        const bool isAtomicCounterBufferBlock = [&]() {
+            if (info.storageClass == kSpvStorageClassAtomicCounter) return true;
+            if (info.storageClass != spv::StorageClassUniform) return false;
+            auto pIt = module_.types.find(tIt->second.pointeeType);
+            if (pIt == module_.types.end()) return false;
+            auto dIt = module_.decorations.find(tIt->second.pointeeType);
+            return dIt != module_.decorations.end() &&
+                   dIt->second.isBufferBlock &&
+                   spirvTypeNameLooksAtomicCounterBlock(
+                       module_, tIt->second.pointeeType);
+        }();
         const bool isSSBO = [&]() {
             if (info.storageClass == spv::StorageClassStorageBuffer) return true;
             if (info.storageClass == spv::StorageClassUniform) {
@@ -2752,7 +2799,7 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                 if (pIt != module_.types.end()) {
                     auto dIt = module_.decorations.find(tIt->second.pointeeType);
                     if (dIt != module_.decorations.end() && dIt->second.isBufferBlock) {
-                        return true;
+                        return !isAtomicCounterBufferBlock;
                     }
                 }
             }
@@ -2766,6 +2813,31 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
             }
             ssboVarMeta_[varId] = meta;
             continue;   // skip uniform seeding + other per-var handlers
+        }
+
+        if (isAtomicCounterBufferBlock) {
+            if (info.storageClass != kSpvStorageClassAtomicCounter) {
+                continue;
+            }
+            AccessChainResult ac;
+            ac.rootVarId = varId;
+            ac.scalarCount = 1;
+            ac.leafTypeId = tIt->second.pointeeType;
+            ac.ok = true;
+            ac.isStorageBuffer = true;
+            ac.binding = kAtomicCounterStorageBindingBase;
+            auto dIt = module_.decorations.find(varId);
+            if (dIt != module_.decorations.end()) {
+                if (dIt->second.hasBinding) {
+                    ac.binding = kAtomicCounterStorageBindingBase +
+                                 dIt->second.binding;
+                }
+                if (dIt->second.hasOffset) {
+                    ac.byteOffset = dIt->second.offset;
+                }
+            }
+            accessChains_[varId] = ac;
+            continue;
         }
 
         // Sprint 17 Day 4+ BONUS-2 [gpu_shader5 array-indexing]: detect
@@ -9045,7 +9117,9 @@ void addStorageBuffersFromModule(const std::vector<std::uint32_t>& spirv,
         } else if (info.storageClass == spv::StorageClassUniform) {
             auto dIt = mod.decorations.find(tIt->second.pointeeType);
             if (dIt != mod.decorations.end() && dIt->second.isBufferBlock) {
-                isSSBO = true;
+                isSSBO =
+                    !spirvTypeNameLooksAtomicCounterBlock(
+                        mod, tIt->second.pointeeType);
             }
         }
         if (!isSSBO) continue;
@@ -10997,7 +11071,9 @@ EmulatedDraw emulateGeometryDraw(
                 if (tIt != sMod.types.end()) {
                     auto dIt = sMod.decorations.find(tIt->second.pointeeType);
                     if (dIt != sMod.decorations.end() && dIt->second.isBufferBlock) {
-                        isSSBO = true;
+                        isSSBO =
+                            !spirvTypeNameLooksAtomicCounterBlock(
+                                sMod, tIt->second.pointeeType);
                     }
                 }
             }
@@ -11027,8 +11103,38 @@ EmulatedDraw emulateGeometryDraw(
             gsSsboMap[binding] = r;
         }
     };
+    auto addAtomicCounterBuffersForGs = [&]() {
+        for (const auto& ac : program.resourceAtomicCounterBuffers) {
+            const std::uint32_t glBinding =
+                static_cast<std::uint32_t>(ac.binding < 0 ? 0 : ac.binding);
+            const std::uint32_t mapBinding =
+                kAtomicCounterStorageBindingBase + glBinding;
+            if (gsSsboMap.find(mapBinding) != gsSsboMap.end()) continue;
+            const GLIndexedBufferBinding bb =
+                state.indexedBufferBinding(GL_ATOMIC_COUNTER_BUFFER, glBinding);
+            if (bb.buffer == 0) continue;
+            GLBufferObject* bufObj = objects.buffers().get(bb.buffer);
+            if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+            void* base = metalBufferContents(bufObj->metalBuffer);
+            if (base == nullptr) continue;
+            const std::size_t totalSize =
+                static_cast<std::size_t>(bufObj->size);
+            const std::size_t off =
+                static_cast<std::size_t>(bb.offset < 0 ? 0 : bb.offset);
+            if (off >= totalSize) continue;
+            const std::size_t span = (bb.size > 0)
+                ? std::min<std::size_t>(static_cast<std::size_t>(bb.size),
+                                        totalSize - off)
+                : (totalSize - off);
+            Interpreter::StorageBufferRegion r;
+            r.ptr = static_cast<std::uint8_t*>(base) + off;
+            r.size = span;
+            gsSsboMap[mapBinding] = r;
+        }
+    };
     addSsbosFromGsModule(program.geometrySpirv);
     addSsbosFromGsModule(program.vertexSpirv);
+    addAtomicCounterBuffersForGs();
     const Interpreter::StorageBufferMap* gsSsboMapPtr =
         gsSsboMap.empty() ? nullptr : &gsSsboMap;
 

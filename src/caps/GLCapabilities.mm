@@ -1075,8 +1075,8 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_VERTEX_ATOMIC_COUNTERS] = 0;
     integerLimits_[GL_MAX_FRAGMENT_ATOMIC_COUNTER_BUFFERS] = 1;
     integerLimits_[GL_MAX_FRAGMENT_ATOMIC_COUNTERS] = 8;
-    integerLimits_[GL_MAX_GEOMETRY_ATOMIC_COUNTER_BUFFERS] = 0;
-    integerLimits_[GL_MAX_GEOMETRY_ATOMIC_COUNTERS] = 0;
+    integerLimits_[GL_MAX_GEOMETRY_ATOMIC_COUNTER_BUFFERS] = 1;
+    integerLimits_[GL_MAX_GEOMETRY_ATOMIC_COUNTERS] = 1;
     integerLimits_[GL_MAX_TESS_CONTROL_ATOMIC_COUNTER_BUFFERS] = 0;
     integerLimits_[GL_MAX_TESS_CONTROL_ATOMIC_COUNTERS] = 0;
     integerLimits_[GL_MAX_TESS_EVALUATION_ATOMIC_COUNTER_BUFFERS] = 0;

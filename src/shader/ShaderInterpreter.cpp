@@ -217,6 +217,9 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                 } else if (deco == spv::DecorationDescriptorSet && wc >= 4) {
                     decorations[target].hasDescriptorSet = true;
                     decorations[target].descriptorSet = w[2];
+                } else if (deco == spv::DecorationOffset && wc >= 4) {
+                    decorations[target].hasOffset = true;
+                    decorations[target].offset = w[2];
                 } else if (deco == spv::DecorationStream && wc >= 4) {
                     // Sprint 8 #9-C (CKPT96): GLSL `layout(stream=N) out`
                     // → DecorationStream on the OpVariable. Used by
