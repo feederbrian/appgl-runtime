@@ -2972,6 +2972,12 @@ struct GLContext::Impl {
         }
     }
 
+    bool legacyMsaaSamplerFlushPending(GLuint textureName) const {
+        if (textureName == 0 || objects == nullptr) return false;
+        const GLTextureObject* tex = objects->textures().get(textureName);
+        return tex != nullptr && tex->msaaFramebufferWriteNeedsSamplerFlush;
+    }
+
     void markGpuResourceWrites(const GpuResourceWriteSet& writes) const {
         for (const auto& write : writes) {
             if (write.name == 0 || write.bits == 0) continue;
@@ -2989,6 +2995,11 @@ struct GLContext::Impl {
             const GLProducerPendingState* state =
                 pendingStateForResource(read.kind, read.name);
             if (state != nullptr && state->hasAny(read.bits)) {
+                needsDrain = true;
+                break;
+            }
+            if (read.kind == GpuResourceAccess::Kind::Texture &&
+                legacyMsaaSamplerFlushPending(read.name)) {
                 needsDrain = true;
                 break;
             }

@@ -4894,9 +4894,17 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             // (per GL spec, MSAA disabled), force gl_SampleMask=UINT_MAX
             // to neutralize Metal's unconditional [[sample_mask]] gating.
             // For samples > 1, preserve the user's mask write.
+            const bool glNumSamplesUsesArgBuf =
+                msl.find("_RESERVED_IDENTIFIER_FIXUP_gl_NumSamples [[id(0)]]") !=
+                    std::string::npos &&
+                msl.find("spvDescriptorSet0") != std::string::npos;
+            const std::string glNumSamplesExpr =
+                glNumSamplesUsesArgBuf
+                    ? "(*spvDescriptorSet0._RESERVED_IDENTIFIER_FIXUP_gl_NumSamples)"
+                    : "_RESERVED_IDENTIFIER_FIXUP_gl_NumSamples";
             const std::string returnPattern = "    return out;";
             const std::string injection =
-                "    if (_RESERVED_IDENTIFIER_FIXUP_gl_NumSamples == 1) "
+                "    if (" + glNumSamplesExpr + " == 1) "
                 "{ out.gl_SampleMask = 0xFFFFFFFFu; }\n";
             std::string out2;
             out2.reserve(msl.size() + 128);

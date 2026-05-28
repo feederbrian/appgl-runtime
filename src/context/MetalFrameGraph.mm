@@ -1624,6 +1624,11 @@ struct MetalFrameGraph::Impl {
         const bool fragmentNeedsFragCoordParams =
             hasFragmentStage && info.fragmentMSL != nullptr &&
             info.fragmentMSL->find("_appgl_FragCoordParams") != std::string::npos;
+        const bool fragmentNeedsGlNumSamplesArgBuf =
+            fragmentUsesArgBuf && info.fragmentMSL != nullptr &&
+            info.fragmentMSL->find(
+                "_RESERVED_IDENTIFIER_FIXUP_gl_NumSamples [[id(0)]]") !=
+                std::string::npos;
         const bool vertexNeedsFragmentShadingRateState =
             info.vertexMSL != nullptr &&
             info.vertexMSL->find("_appgl_FSRState") != std::string::npos;
@@ -2470,7 +2475,8 @@ struct MetalFrameGraph::Impl {
         // uniform block or any UBO.
         if (useArgBuf) {
             bool vertNeedsSet0 = vertexUsesArgBuf && !info.vertexTextures.empty();
-            bool fragNeedsSet0 = fragmentUsesArgBuf && !info.fragmentTextures.empty();
+            bool fragNeedsSet0 = fragmentUsesArgBuf &&
+                (!info.fragmentTextures.empty() || fragmentNeedsGlNumSamplesArgBuf);
             for (const auto& ssbo : info.ssboBindings) {
                 if (ssbo.metalBuffer == nullptr) continue;
                 if (vertexUsesArgBuf && ssbo.isVertex)     vertNeedsSet0 = true;
@@ -3118,7 +3124,7 @@ struct MetalFrameGraph::Impl {
             // sampleCount here so the FS reads a real count.
             // CTS sample_variables.mask.samples_{1,2,4} verify samples >= 1
             // do not get the UINT_MAX neutralization.
-            if (!fragmentUsesArgBuf) {
+            if (!fragmentNeedsGlNumSamplesArgBuf) {
                 const int32_t glNumSamples = static_cast<int32_t>(attachmentSampleCount);
                 [currentRenderEncoder setFragmentBytes:&glNumSamples
                                                 length:sizeof(glNumSamples)
@@ -3479,6 +3485,7 @@ struct MetalFrameGraph::Impl {
                                                  const std::vector<TranslatedDrawInfo::TextureBinding>& textures,
                                                  MTLRenderStages stage,
                                                  bool isFragment,
+                                                 bool needsGlNumSamplesBuffer,
                                                  bool needsSSBOSizeBuffer) {
                 // Step 7-3 follow-up: no early-return on empty textures
                 // — the set-0 argbuf may also hold SSBOs (see the SSBO
@@ -3506,6 +3513,26 @@ struct MetalFrameGraph::Impl {
                     24,
                     static_cast<std::size_t>(len));
                 [encoder setArgumentBuffer:argBuf offset:argBufOffset];
+                if (needsGlNumSamplesBuffer) {
+                    const int32_t glNumSamples =
+                        static_cast<int32_t>(attachmentSampleCount);
+                    RingAlloc sampleCountAlloc =
+                        ringSuballocate(&glNumSamples, sizeof(glNumSamples));
+                    if (sampleCountAlloc.buffer != nil) {
+                        info.submissionGroup.addTransient(
+                            AppGLSubmissionTransientKind::UniformRingBytes,
+                            AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
+                            AppGLCommandReason::TranslatedDraw,
+                            0,
+                            sizeof(glNumSamples));
+                        [encoder setBuffer:sampleCountAlloc.buffer
+                                    offset:sampleCountAlloc.offset
+                                   atIndex:0];
+                        [currentRenderEncoder useResource:sampleCountAlloc.buffer
+                                                    usage:MTLResourceUsageRead
+                                                   stages:stage];
+                    }
+                }
                 // Sprint 18 Item42: graphics-stage SSBO `.length()`
                 // sidecar. The translator rewrites graphics argbuf MSL
                 // to read this table from direct buffer slot 30, keyed
@@ -3655,9 +3682,11 @@ struct MetalFrameGraph::Impl {
             };
             encodeTexturesIntoArgBuf(fragArgEncoderSet0, info.fragmentTextures,
                                       MTLRenderStageFragment, true,
+                                      fragmentNeedsGlNumSamplesArgBuf,
                                       fragmentNeedsSSBOSizeBuffer);
             encodeTexturesIntoArgBuf(vertArgEncoderSet0, info.vertexTextures,
                                       MTLRenderStageVertex, false,
+                                      false,
                                       vertexNeedsSSBOSizeBuffer);
 
             // Step 7-3 UBO follow-up: populate desc_set 1 argbuf with
