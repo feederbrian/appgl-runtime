@@ -4062,8 +4062,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         //      app then call `glUniform1i(locA, 0)` and
         //      `glUniform1i(locB, 1)` to route them to distinct image
         //      units at runtime. Metal requires distinct per-resource
-        //      slot indices, so we allocate SEQUENTIALLY from
-        //      `storageImageBase` in glBinding-sorted order —
+        //      slot indices, so we allocate SEQUENTIALLY from the
+        //      storage-image range in glBinding-sorted order —
         //      mirroring how SSBOs are packed (see above) — and the
         //      reflection-side mirror uses the same ordering so
         //      dispatch-time binding resolution lines up.
@@ -4074,14 +4074,11 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         //       same glBinding, so two writes to the same triple
         //       silently overwrite each other. Fix: reassign storage
         //       images' `DecorationDescriptorSet` to 2 (unused —
-        //       UBOs already sit at set=1) in direct-binding mode,
-        //       and give each image a unique synthetic binding
-        //       number equal to its sequential index. The (stage, 2,
-        //       seq) triple is then globally unique. Argument-buffer
-        //       mode already keeps sampled and storage at distinct
-        //       `[[id(N)]]` ranges inside one argbuf, so we leave
-        //       argbuf-mode at set=0 and the spvDescriptorSetBuffer0
-        //       layout undisturbed.
+        //       UBOs already sit at set=1) in direct-binding mode.
+        //       Argument-buffer mode keeps set=0, but still assigns a
+        //       unique synthetic binding and dense `[[id(N)]]` in the
+        //       storage-image range so same-glBinding image uniforms
+        //       do not collapse to one argument-buffer field.
         //
         // Reflection (in reflect() below) mirrors the sort and the
         // sequential `metalBinding = storageImageBase + seq`
@@ -4109,6 +4106,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             struct StorageImgRef {
                 std::uint32_t glBinding;
                 std::uint32_t id;
+                std::uint32_t arraySize;
                 bool nonWritable;
                 bool nonReadable;
             };
@@ -4119,6 +4117,10 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 StorageImgRef r;
                 r.glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
                 r.id = img.id;
+                const auto& imgType = compiler.get_type(img.type_id);
+                r.arraySize = imgType.array.empty()
+                    ? 1u
+                    : (imgType.array[0] > 0 ? imgType.array[0] : 1u);
                 r.nonWritable = compiler.has_decoration(img.id, spv::DecorationNonWritable);
                 r.nonReadable = compiler.has_decoration(img.id, spv::DecorationNonReadable);
                 sortedStorageImages.push_back(r);
@@ -4128,21 +4130,30 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                           if (a.glBinding != b.glBinding) return a.glBinding < b.glBinding;
                           return a.id < b.id;
                       });
+            std::uint32_t nextArgBufStorageImageSlot = 0;
             for (std::size_t i = 0; i < sortedStorageImages.size(); ++i) {
                 const auto& entry = sortedStorageImages[i];
                 spirv_cross::MSLResourceBinding binding;
                 binding.stage = compiler.get_execution_model();
                 if (useArgBuf) {
-                    // Argument-buffer mode: preserve the existing
-                    // [[id(128+glBinding)]] routing. Multiple images
-                    // at the same glBinding aren't something the
-                    // argbuf path currently hits (the CTS argbuf
-                    // exercises go through distinct explicit
-                    // bindings), so the glBinding-based key still
-                    // gives unique triples here.
-                    binding.desc_set = compiler.get_decoration(entry.id, spv::DecorationDescriptorSet);
-                    binding.binding = entry.glBinding;
-                    binding.msl_texture = 128 + entry.glBinding;
+                    // Argument-buffer mode still shares one set-0
+                    // id-space, but multiple image uniforms can have the
+                    // same original GL binding and be routed later via
+                    // glUniform1i. Give SPIRV-Cross a unique binding key
+                    // and assign a dense id in the storage-image range
+                    // while reflection keeps the original glBinding for
+                    // runtime image-unit lookup.
+                    const std::uint32_t syntheticBinding =
+                        static_cast<std::uint32_t>(i);
+                    compiler.set_decoration(entry.id,
+                        spv::DecorationDescriptorSet, 0);
+                    compiler.set_decoration(entry.id,
+                        spv::DecorationBinding, syntheticBinding);
+                    binding.desc_set = 0;
+                    binding.binding = syntheticBinding;
+                    binding.msl_texture = 128 + nextArgBufStorageImageSlot;
+                    nextArgBufStorageImageSlot += std::max<std::uint32_t>(
+                        entry.arraySize, 1u);
                     if (isGraphicsStage) {
                         storageImageAccessFixups.push_back({
                             binding.msl_texture, true,
@@ -4221,14 +4232,14 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             }
         }
 
-        // Graphics SSBO block arrays are lowered through argument buffers
-        // when storage buffers are present. SPIRV-Cross emits these as
+        // SSBO block arrays are lowered through argument buffers when
+        // storage buffers are present. SPIRV-Cross emits these as
         // `[1] /* unsized array hack */` inside the argument-buffer struct,
         // but GL block arrays bind consecutive SSBO slots and the generated
         // MSL indexes the full declared range. Patch the argument-buffer
         // member declaration to the reflected fixed array size so indices
         // beyond zero reach the slots populated by resolveSSBOBindings().
-        if (useArgBuf && isGraphicsStage) {
+        if (useArgBuf) {
             auto replaceAll = [](std::string& text,
                                  const std::string& needle,
                                  const std::string& replacement) {
@@ -4251,6 +4262,76 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 replaceAll(msl,
                     attr + "[1] /* unsized array hack */",
                     attr + "[" + std::to_string(varType.array[0]) + "]");
+            }
+
+            // Function parameters that take an argument-buffer member array
+            // by reference can keep SPIRV-Cross's `[0]` size even after the
+            // field declaration is widened above. Repair those references by
+            // reading the emitted field name and array size directly.
+            std::size_t pos = 0;
+            while ((pos = msl.find("[[id(", pos)) != std::string::npos) {
+                const std::size_t lineEnd = msl.find('\n', pos);
+                const std::size_t effectiveLineEnd =
+                    lineEnd == std::string::npos ? msl.size() : lineEnd;
+                const std::size_t attrEnd = msl.find("]]", pos);
+                if (attrEnd == std::string::npos ||
+                    attrEnd + 2 >= effectiveLineEnd ||
+                    msl[attrEnd + 2] != '[') {
+                    pos += 5;
+                    continue;
+                }
+
+                const std::size_t arrayOpen = attrEnd + 2;
+                const std::size_t arrayClose =
+                    msl.find(']', arrayOpen + 1);
+                if (arrayClose == std::string::npos ||
+                    arrayClose > effectiveLineEnd) {
+                    pos = arrayOpen + 1;
+                    continue;
+                }
+
+                std::uint32_t arraySize = 0;
+                bool digitsOnly = true;
+                for (std::size_t i = arrayOpen + 1; i < arrayClose; ++i) {
+                    const unsigned char c =
+                        static_cast<unsigned char>(msl[i]);
+                    if (!std::isdigit(c)) {
+                        digitsOnly = false;
+                        break;
+                    }
+                    arraySize = arraySize * 10u +
+                        static_cast<std::uint32_t>(msl[i] - '0');
+                }
+                if (!digitsOnly || arraySize <= 1) {
+                    pos = arrayClose + 1;
+                    continue;
+                }
+
+                std::size_t nameEnd = pos;
+                while (nameEnd > 0) {
+                    const unsigned char c =
+                        static_cast<unsigned char>(msl[nameEnd - 1]);
+                    if (!std::isspace(c)) break;
+                    --nameEnd;
+                }
+                std::size_t nameBegin = nameEnd;
+                while (nameBegin > 0) {
+                    const unsigned char c =
+                        static_cast<unsigned char>(msl[nameBegin - 1]);
+                    if (!(std::isalnum(c) || c == '_')) break;
+                    --nameBegin;
+                }
+                if (nameBegin == nameEnd) {
+                    pos = arrayClose + 1;
+                    continue;
+                }
+
+                const std::string name =
+                    msl.substr(nameBegin, nameEnd - nameBegin);
+                replaceAll(msl,
+                    "(&" + name + ")[0]",
+                    "(&" + name + ")[" + std::to_string(arraySize) + "]");
+                pos = arrayClose + 1;
             }
         }
 
@@ -5638,6 +5719,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             struct StorageImgRef {
                 std::uint32_t glBinding;
                 std::uint32_t id;
+                std::uint32_t arraySize = 1;
                 bool multisample = false;
                 bool multisampleArray = false;
                 GLenum storageTarget = 0;
@@ -5655,6 +5737,9 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 r.id = img.id;
                 const auto& varType = compiler.get_type(img.type_id);
                 const auto& baseType = compiler.get_type(img.base_type_id);
+                r.arraySize = varType.array.empty()
+                    ? 1u
+                    : (varType.array[0] > 0 ? varType.array[0] : 1u);
                 const auto& imageType =
                     varType.basetype == spirv_cross::SPIRType::Image
                         ? varType : baseType;
@@ -5682,6 +5767,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                           if (a.glBinding != b.glBinding) return a.glBinding < b.glBinding;
                           return a.id < b.id;
                       });
+            std::uint32_t nextArgBufStorageImageSlotR = 0;
             for (std::size_t i = 0; i < sortedStorageImages.size(); ++i) {
                 const auto& entry = sortedStorageImages[i];
                 ShaderReflection::ResourceBinding rb;
@@ -5691,7 +5777,9 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 // slot chosen by our sequential allocator.
                 rb.glBinding = entry.glBinding;
                 if (useArgBufReflection) {
-                    rb.metalBinding = 128 + entry.glBinding;
+                    rb.metalBinding = 128 + nextArgBufStorageImageSlotR;
+                    nextArgBufStorageImageSlotR += std::max<std::uint32_t>(
+                        entry.arraySize, 1u);
                 } else {
                     // CKPT81: shared pool with sampled images.
                     rb.metalBinding = unifiedNextTextureSlotR;

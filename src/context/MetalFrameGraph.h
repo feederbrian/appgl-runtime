@@ -651,6 +651,8 @@ struct ComputeDispatchInfo {
         std::size_t offset = 0;
         std::size_t size = 0;
         std::uint32_t metalSlot = 0;
+        // Compute argument-buffer descriptor set: 0 for SSBOs, 1 for UBOs.
+        std::uint32_t descriptorSet = 0;
     };
     // All non-argument buffers to bind: SSBOs at `storageBufferBase+N`,
     // UBOs and the default-uniform push-constant buffer below them.

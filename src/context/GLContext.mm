@@ -45638,6 +45638,7 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             bb.metalBuffer = bufObj->metalBuffer;
             bb.offset = static_cast<std::size_t>(binding.offset);
             bb.metalSlot = ubo.metalBinding + static_cast<std::uint32_t>(inst);
+            bb.descriptorSet = 1;
             if (resourceNeedsFp64BindingShim(programObject->computeReflection, ubo)) {
                 GLsizeiptr rangeSize = binding.size;
                 if (rangeSize <= 0 && binding.offset >= 0 && bufObj->size > binding.offset) {
@@ -46260,6 +46261,7 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             bb.metalBuffer = bufObj->metalBuffer;
             bb.offset = static_cast<std::size_t>(binding.offset);
             bb.metalSlot = ubo.metalBinding + static_cast<std::uint32_t>(inst);
+            bb.descriptorSet = 1;
             if (resourceNeedsFp64BindingShim(programObject->computeReflection, ubo)) {
                 GLsizeiptr rangeSize = binding.size;
                 if (rangeSize <= 0 && binding.offset >= 0 && bufObj->size > binding.offset) {

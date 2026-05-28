@@ -8719,16 +8719,47 @@ fragment float4 appgl_immediate_textured_fs(
             (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
         info.submissionGroup.argumentBuffersEnabled = useArgBuf;
         id<MTLFunction> computeFn = (__bridge id<MTLFunction>)info.metalComputeFunction;
+        auto buildSSBOSizeConstants = [&]() -> std::vector<std::uint32_t> {
+            std::uint32_t maxSlot = 0;
+            bool any = false;
+            for (const auto& bb : info.buffers) {
+                if (bb.size == 0) continue;
+                maxSlot = std::max(maxSlot, bb.metalSlot);
+                any = true;
+            }
+            if (!any) {
+                return {};
+            }
+            std::vector<std::uint32_t> sizes(
+                static_cast<std::size_t>(maxSlot) + 1u, 0u);
+            for (const auto& bb : info.buffers) {
+                if (bb.size == 0 || bb.metalSlot >= sizes.size()) continue;
+                sizes[bb.metalSlot] = static_cast<std::uint32_t>(
+                    std::min<std::size_t>(
+                        bb.size,
+                        static_cast<std::size_t>(
+                            std::numeric_limits<std::uint32_t>::max())));
+            }
+            return sizes;
+        };
 
         if (useArgBuf && computeFn != nil) {
             info.submissionGroup.addSubgroup(AppGLSubmissionGroupKind::ArgumentBinding,
                                              AppGLCommandReason::ComputeDispatch);
             // Desc_set 0: textures (sampled + storage) + SSBOs
             const bool hasTextures = !info.textures.empty();
-            const bool hasBuffers  = !info.buffers.empty();
+            bool hasSet0Buffers = false;
+            bool hasSet1Buffers = false;
+            for (const auto& bb : info.buffers) {
+                if (bb.descriptorSet == 1) {
+                    hasSet1Buffers = true;
+                } else {
+                    hasSet0Buffers = true;
+                }
+            }
             id<MTLArgumentEncoder> argEncSet0 = nil;
             ScopedOwnedObjCObject argEncSet0Release;
-            if (hasTextures || hasBuffers) {
+            if (hasTextures || hasSet0Buffers || info.needsSSBOSizeBuffer) {
                 argEncSet0 = [computeFn newArgumentEncoderWithBufferIndex:24];
                 argEncSet0Release.reset(argEncSet0);
             }
@@ -8740,7 +8771,7 @@ fragment float4 appgl_immediate_textured_fs(
                 (info.computeUniformData != nullptr && info.computeUniformSize > 0);
             id<MTLArgumentEncoder> argEncSet1 = nil;
             ScopedOwnedObjCObject argEncSet1Release;
-            if (hasUniformData) {
+            if (hasUniformData || hasSet1Buffers) {
                 argEncSet1 = [computeFn newArgumentEncoderWithBufferIndex:25];
                 argEncSet1Release.reset(argEncSet1);
             }
@@ -8760,6 +8791,28 @@ fragment float4 appgl_immediate_textured_fs(
                             24,
                             static_cast<std::size_t>(len0));
                         [argEncSet0 setArgumentBuffer:buf0 offset:buf0Offset];
+                        if (info.needsSSBOSizeBuffer) {
+                            const std::vector<std::uint32_t> sizes =
+                                buildSSBOSizeConstants();
+                            if (!sizes.empty()) {
+                                RingAlloc sizeAlloc = ringSuballocate(
+                                    sizes.data(),
+                                    sizes.size() * sizeof(std::uint32_t));
+                                if (sizeAlloc.buffer != nil) {
+                                    info.submissionGroup.addTransient(
+                                        AppGLSubmissionTransientKind::SsboSizeBuffer,
+                                        AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
+                                        AppGLCommandReason::ComputeDispatch,
+                                        0,
+                                        sizes.size() * sizeof(std::uint32_t));
+                                    [argEncSet0 setBuffer:sizeAlloc.buffer
+                                                   offset:sizeAlloc.offset
+                                                  atIndex:0];
+                                    [enc useResource:sizeAlloc.buffer
+                                            usage:MTLResourceUsageRead];
+                                }
+                            }
+                        }
                         for (const auto& tb : info.textures) {
                             id<MTLTexture> tex = (__bridge id<MTLTexture>)tb.metalTexture;
                             if (tex == nil) continue;
@@ -8799,6 +8852,7 @@ fragment float4 appgl_immediate_textured_fs(
                         const std::uint32_t kDefaultUniformSlot =
                             appgl::makeComputeBindingMap().uniformBufferBase;
                         for (const auto& bb : info.buffers) {
+                            if (bb.descriptorSet == 1) continue;
                             id<MTLBuffer> buf = (__bridge id<MTLBuffer>)bb.metalBuffer;
                             if (buf == nil) continue;
                             if (bb.metalSlot == kDefaultUniformSlot) continue;
@@ -8845,6 +8899,15 @@ fragment float4 appgl_immediate_textured_fs(
                                             usage:MTLResourceUsageRead];
                             }
                         }
+                        for (const auto& bb : info.buffers) {
+                            if (bb.descriptorSet != 1) continue;
+                            id<MTLBuffer> buf = (__bridge id<MTLBuffer>)bb.metalBuffer;
+                            if (buf == nil) continue;
+                            [argEncSet1 setBuffer:buf
+                                           offset:static_cast<NSUInteger>(bb.offset)
+                                          atIndex:static_cast<NSUInteger>(bb.metalSlot)];
+                            [enc useResource:buf usage:MTLResourceUsageRead];
+                        }
                         [enc setBuffer:buf1 offset:buf1Offset atIndex:25];
                     }
                 }
@@ -8855,24 +8918,9 @@ fragment float4 appgl_immediate_textured_fs(
             // [[buffer(25)]]`; entries are keyed by the SSBO's reflected
             // Metal buffer slot and contain the effective GL bound range.
             if (info.needsSSBOSizeBuffer) {
-                std::uint32_t maxSlot = 0;
-                bool any = false;
-                for (const auto& bb : info.buffers) {
-                    if (bb.size == 0) continue;
-                    maxSlot = std::max(maxSlot, bb.metalSlot);
-                    any = true;
-                }
-                if (any) {
-                    std::vector<std::uint32_t> sizes(
-                        static_cast<std::size_t>(maxSlot) + 1u, 0u);
-                    for (const auto& bb : info.buffers) {
-                        if (bb.size == 0 || bb.metalSlot >= sizes.size()) continue;
-                        sizes[bb.metalSlot] = static_cast<std::uint32_t>(
-                            std::min<std::size_t>(
-                                bb.size,
-                                static_cast<std::size_t>(
-                                    std::numeric_limits<std::uint32_t>::max())));
-                    }
+                const std::vector<std::uint32_t> sizes =
+                    buildSSBOSizeConstants();
+                if (!sizes.empty()) {
                     [enc setBytes:sizes.data()
                            length:static_cast<NSUInteger>(
                                       sizes.size() * sizeof(std::uint32_t))
