@@ -314,6 +314,15 @@ struct GLTextureObject {
     // copy_image keep texture-image readback on the narrower
     // wasViewportRenderedTo contract above.
     bool wasFramebufferRenderedTo = false;
+    // True when the CPU-side color shadow is the authoritative source for
+    // framebuffer readback/blit. This is needed for scissored MSAA clears:
+    // Metal load-action clears cannot be clipped by scissor, and MSAA
+    // textures cannot be updated with replaceRegion.
+    bool colorShadowAuthoritative = false;
+    // Texture-backed depth/stencil analogue of colorShadowAuthoritative.
+    // Used for scissored depth/stencil clears and CPU blit writes, especially
+    // on multisample textures where the Metal storage cannot be CPU-uploaded.
+    bool depthStencilShadowAuthoritative = false;
     // A multisample texture was written as an FBO color attachment and
     // still needs a producer drain before a sampler2DMS shader resolve
     // samples it. This keeps the DCR3-C wait on the dependent resolve path
@@ -338,6 +347,7 @@ struct GLRenderbufferObject {
     std::vector<std::uint8_t> rgba8;
     bool rgba8ShadowClearPending = false;
     std::array<std::uint8_t, 4> rgba8ShadowClearValue = {0, 0, 0, 0};
+    bool colorShadowAuthoritative = false;
     // CKPT117 (Sprint 11 Phase 1 1a — RB.nativeData refactor): mirror of
     // GLTextureImageLevel::{nativeData,nativeBpp}. Allows RBs to carry a
     // native-precision shadow for non-RGBA8 internal formats (RGB10_A2,

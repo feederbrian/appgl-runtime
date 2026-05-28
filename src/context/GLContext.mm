@@ -3137,6 +3137,36 @@ struct GLContext::Impl {
         GpuResourceWriteSet writes;
         appendFramebufferAttachmentWrites(writes, *fbo, extraBits);
         markGpuResourceWrites(writes);
+        for (const auto& kv : fbo->attachments) {
+            const GLFramebufferAttachment& attachment = kv.second;
+            if (attachment.kind != GLFramebufferAttachment::Kind::Texture ||
+                attachment.object == 0) {
+                continue;
+            }
+            GLTextureObject* texture = objects->textures().get(attachment.object);
+            if (texture == nullptr) {
+                continue;
+            }
+            if (isColorAttachment(kv.first)) {
+                texture->colorShadowAuthoritative = false;
+            } else {
+                texture->depthStencilShadowAuthoritative = false;
+            }
+        }
+        for (const auto& kv : fbo->attachments) {
+            if (!isColorAttachment(kv.first)) {
+                continue;
+            }
+            const GLFramebufferAttachment& attachment = kv.second;
+            if (attachment.kind != GLFramebufferAttachment::Kind::Renderbuffer ||
+                attachment.object == 0) {
+                continue;
+            }
+            if (GLRenderbufferObject* rb =
+                    objects->renderbuffers().get(attachment.object)) {
+                rb->colorShadowAuthoritative = false;
+            }
+        }
     }
 
     static AppGLSubmissionResourceKind submissionResourceKind(
@@ -3519,6 +3549,8 @@ struct GLContext::Impl {
         object.metalSwizzledView = nullptr;
         object.swizzleDirty = true;
         object.msaaFramebufferWriteNeedsSamplerFlush = false;
+        object.colorShadowAuthoritative = false;
+        object.depthStencilShadowAuthoritative = false;
         clearAllPendingGpuProducers(object);
         object.desc = {};
         object.levels.clear();
@@ -3538,8 +3570,15 @@ struct GLContext::Impl {
         object.rgba8.clear();
         object.rgba8ShadowClearPending = false;
         object.rgba8ShadowClearValue = {0, 0, 0, 0};
+        object.colorShadowAuthoritative = false;
+        object.nativeData.clear();
+        object.nativeBpp = 0;
         object.depth32.clear();
+        object.depth32ShadowClearPending = false;
+        object.depth32ShadowClearValue = 1.0f;
         object.stencil8.clear();
+        object.stencil8ShadowClearPending = false;
+        object.stencil8ShadowClearValue = 0;
         object.storageDefined = false;
         object.wasMetalDepthRendered = false;
         object.wasMetalStencilRendered = false;
@@ -5853,6 +5892,21 @@ struct GLContext::Impl {
 
         id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
         if (texture == nil) {
+            const std::size_t baseTexels =
+                static_cast<std::size_t>(std::max<GLsizei>(baseLevel.desc.width, 1)) *
+                static_cast<std::size_t>(std::max<GLsizei>(baseLevel.desc.height, 1)) *
+                static_cast<std::size_t>(std::max<GLsizei>(baseLevel.desc.depth, 1));
+            const bool allowCpuOnlyHugeTexture =
+                !isMSTarget && baseTexels >= 64u * 1024u * 1024u;
+            if (allowCpuOnlyHugeTexture) {
+                releaseRetainedMetalObject(object.metalTexture);
+                object.metalTexture = nullptr;
+                releaseRetainedMetalObject(object.metalSwizzledView);
+                object.metalSwizzledView = nullptr;
+                object.swizzleDirty = true;
+                object.instantiated = true;
+                return true;
+            }
             return false;
         }
 
@@ -6244,6 +6298,10 @@ struct GLContext::Impl {
             return false;
         }
 
+        const std::size_t texelCount =
+            static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+        const bool deferHugeShadow =
+            samples <= 1 && texelCount >= 64u * 1024u * 1024u;
         void* retainedTexture = nullptr;
         if (device != nil && width > 0 && height > 0) {
             const MTLPixelFormat pixelFormat = metalRenderbufferFormat(internalFormat);
@@ -6270,9 +6328,12 @@ struct GLContext::Impl {
 
             id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
             if (texture == nil) {
-                return false;
+                if (!deferHugeShadow) {
+                    return false;
+                }
+            } else {
+                retainedTexture = transferRetainedMetalObject(texture);
             }
-            retainedTexture = transferRetainedMetalObject(texture);
         }
 
         releaseRenderbufferStorage(object);
@@ -6281,11 +6342,12 @@ struct GLContext::Impl {
         object.width = width;
         object.height = height;
         object.samples = samples;
-        const std::size_t texelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
         if (isColorFormat(internalFormat)) {
-            object.rgba8.assign(texelCount * 4u, 0);
             object.rgba8ShadowClearPending = false;
             object.rgba8ShadowClearValue = {0, 0, 0, 0};
+            if (!deferHugeShadow) {
+                object.rgba8.assign(texelCount * 4u, 0);
+            }
             // CKPT117 (Sprint 11 Phase 1 1a): allocate a native-precision
             // shadow alongside rgba8 when the internal format maps to a
             // non-RGBA8 Metal pixel format. This unblocks copy_image
@@ -6296,7 +6358,8 @@ struct GLContext::Impl {
             // for packed 4-byte formats (RGB10A2 / RG11B10F / RGB9E5).
             const MTLPixelFormat nativePixelFmt = metalRenderbufferFormat(internalFormat);
             const auto nativeInfo = nativeFormatInfo(nativePixelFmt);
-            if (nativeInfo.bytesPerPixel > 0
+            if (!deferHugeShadow
+                && nativeInfo.bytesPerPixel > 0
                 && nativePixelFmt != MTLPixelFormatRGBA8Unorm
                 && nativePixelFmt != MTLPixelFormatRGBA8Unorm_sRGB
                 && nativePixelFmt != MTLPixelFormatRGBA8Snorm) {
@@ -6311,10 +6374,18 @@ struct GLContext::Impl {
             }
         }
         if (isDepthFormat(internalFormat)) {
-            object.depth32.assign(texelCount, 1.0f);
+            object.depth32ShadowClearPending = false;
+            object.depth32ShadowClearValue = 1.0f;
+            if (!deferHugeShadow) {
+                object.depth32.assign(texelCount, 1.0f);
+            }
         }
         if (isStencilFormat(internalFormat)) {
-            object.stencil8.assign(texelCount, 0);
+            object.stencil8ShadowClearPending = false;
+            object.stencil8ShadowClearValue = 0;
+            if (!deferHugeShadow) {
+                object.stencil8.assign(texelCount, 0);
+            }
         }
         object.storageDefined = true;
         return true;
@@ -10887,6 +10958,17 @@ struct GLContext::Impl {
             // known below. Full-surface clears need only the framebuffer
             // readback marker above; only scissor clears need the
             // glGetTexImage Y-unflip marker.
+            appgl::GLStateTracker::IndexedScissorEntry scarr[
+                appgl::TranslatedDrawInfo::kMaxDrawViewports];
+            std::size_t scgot = 0;
+            state->getScissorArray(scarr,
+                appgl::TranslatedDrawInfo::kMaxDrawViewports, &scgot);
+            const bool clearScissorActive =
+                scgot > 0 &&
+                (scarr[0].enabled || state->isEnabled(GL_SCISSOR_TEST));
+            const bool isMSColorTexture =
+                texture->target == GL_TEXTURE_2D_MULTISAMPLE ||
+                texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
             // CKPT127 (Sprint 12 Phase 1 Day 1 — β4 root-cause fix): MS
             // textures cannot be cleared via the rgba8-shadow + replaceMetalTexture
             // path because (a) the CPU shadow only stores 1 sample's worth of data
@@ -10906,8 +10988,7 @@ struct GLContext::Impl {
             // and the verifier expects green for the cleared-and-not-overwritten
             // samples. Pre-fix: undefined / red / random. Post-fix: cleared
             // green.
-            if ((texture->target == GL_TEXTURE_2D_MULTISAMPLE ||
-                 texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) &&
+            if (isMSColorTexture && !clearScissorActive &&
                 texture->metalTexture != nullptr && frameGraph != nullptr) {
                 const float rgbaF[4] = { color[0], color[1], color[2], color[3] };
                 std::uint32_t arrayLength = 0;
@@ -10915,6 +10996,7 @@ struct GLContext::Impl {
                     const GLTextureImageLevel& image = level->second;
                     arrayLength = static_cast<std::uint32_t>(std::max<GLsizei>(image.desc.depth, 1));
                 }
+                texture->colorShadowAuthoritative = false;
                 return frameGraph->clearLayeredTextureColor(
                     texture->metalTexture, arrayLength, rgbaF);
             }
@@ -10935,9 +11017,14 @@ struct GLContext::Impl {
                 texture->target == GL_TEXTURE_2D_ARRAY ||
                 texture->target == GL_TEXTURE_1D_ARRAY ||
                 texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
+                texture->target == GL_TEXTURE_CUBE_MAP ||
                 texture->target == GL_TEXTURE_CUBE_MAP_ARRAY;
-            const GLsizei sourceDepth = isLayeredStorage
-                ? std::max<GLsizei>(image.desc.depth, 1) : 1;
+            const GLsizei sourceDepth =
+                texture->target == GL_TEXTURE_CUBE_MAP ? 6 :
+                (texture->target == GL_TEXTURE_1D_ARRAY
+                    ? std::max<GLsizei>(image.desc.height, 1)
+                    : (isLayeredStorage
+                        ? std::max<GLsizei>(image.desc.depth, 1) : 1));
             if (image.rgba8.size() < rgba8ByteCount(sourceWidth, sourceHeight, sourceDepth)) {
                 image.rgba8.assign(rgba8ByteCount(sourceWidth, sourceHeight, sourceDepth), 0);
             }
@@ -10965,14 +11052,6 @@ struct GLContext::Impl {
             // therefore translate scissor (glX, glY, glW, glH) to
             // shadow rows by mapping `glY` (bottom) to
             // `sourceHeight - glY - glH` (top of the band).
-            appgl::GLStateTracker::IndexedScissorEntry scarr[
-                appgl::TranslatedDrawInfo::kMaxDrawViewports];
-            std::size_t scgot = 0;
-            state->getScissorArray(scarr,
-                appgl::TranslatedDrawInfo::kMaxDrawViewports, &scgot);
-            const bool clearScissorActive =
-                scgot > 0 &&
-                (scarr[0].enabled || state->isEnabled(GL_SCISSOR_TEST));
             // Sprint 17 Day 9+/10+ Bank-Group-A-2 narrow-gate sister fix:
             // clear-only viewport_array.scissor_clear writes a GL Y-up
             // scissor rectangle into Metal-storage rows below, so readback
@@ -10988,7 +11067,7 @@ struct GLContext::Impl {
                 const auto& s0 = scarr[0];
                 if (s0.width <= 0 || s0.height <= 0) {
                     // Zero-dim scissor masks every pixel; nothing to write.
-                    return replaceMetalTexture(*texture);
+                    return true;
                 }
                 scissorMinX = std::max<GLsizei>(0, s0.x);
                 scissorMaxX = std::min<GLsizei>(sourceWidth, s0.x + s0.width);
@@ -11001,7 +11080,7 @@ struct GLContext::Impl {
                 scissorMinY = metalMinY;
                 scissorMaxY = metalMaxY;
                 if (scissorMinX >= scissorMaxX || scissorMinY >= scissorMaxY) {
-                    return replaceMetalTexture(*texture);
+                    return true;
                 }
             }
             for (GLsizei z = firstLayer; z < lastLayer; ++z) {
@@ -11017,6 +11096,7 @@ struct GLContext::Impl {
                     }
                 }
             }
+            texture->colorShadowAuthoritative = true;
             // Sprint 16 Day 22 (CKPT231) — also stamp the clear colour
             // into `image.nativeData` for textures whose Metal storage
             // is a non-RGBA8 native format. `replaceMetalTexture`
@@ -11121,7 +11201,40 @@ struct GLContext::Impl {
                         }
                     };
                     const GLenum ifmt = image.desc.internalFormat;
-                    if (isIntegerFmt(ifmt)) {
+                    const MTLPixelFormat mtlFormat =
+                        metalRenderbufferFormat(ifmt);
+                    bool patternReady = false;
+                    if (mtlFormat == MTLPixelFormatRG11B10Float) {
+                        const std::uint32_t packed =
+                            packUF_10F11F11F_REV(color[0], color[1], color[2]);
+                        std::memcpy(pattern.data(), &packed, sizeof(packed));
+                        patternReady = true;
+                    } else if (mtlFormat == MTLPixelFormatRGB9E5Float) {
+                        const std::uint32_t packed =
+                            packUF_5_9_9_9_REV(color[0], color[1], color[2]);
+                        std::memcpy(pattern.data(), &packed, sizeof(packed));
+                        patternReady = true;
+                    } else if (mtlFormat == MTLPixelFormatRGB10A2Unorm ||
+                               mtlFormat == MTLPixelFormatRGB10A2Uint) {
+                        const bool asInteger =
+                            mtlFormat == MTLPixelFormatRGB10A2Uint;
+                        const std::uint32_t r = packReadbackBits(
+                            color[0], 1023u, asInteger);
+                        const std::uint32_t g = packReadbackBits(
+                            color[1], 1023u, asInteger);
+                        const std::uint32_t b = packReadbackBits(
+                            color[2], 1023u, asInteger);
+                        const std::uint32_t a = packReadbackBits(
+                            color[3], 3u, asInteger);
+                        const std::uint32_t packed =
+                            (r & 0x3FFu) |
+                            ((g & 0x3FFu) << 10) |
+                            ((b & 0x3FFu) << 20) |
+                            ((a & 0x003u) << 30);
+                        std::memcpy(pattern.data(), &packed, sizeof(packed));
+                        patternReady = true;
+                    }
+                    if (!patternReady && isIntegerFmt(ifmt)) {
                         // GL 4.6 §17.4.3.1: integer attachments cleared via
                         // glClear take the float clear color cast to
                         // integer. We use round-to-nearest of the clamped
@@ -11131,11 +11244,11 @@ struct GLContext::Impl {
                             encodeI32(c, static_cast<std::int32_t>(
                                 std::lround(color[c])));
                         }
-                    } else if (isFloatFmt(ifmt)) {
+                    } else if (!patternReady && isFloatFmt(ifmt)) {
                         for (std::size_t c = 0; c < components && c < 4; ++c) {
                             encodeF32(c, color[c]);
                         }
-                    } else {
+                    } else if (!patternReady) {
                         // Default: treat as UNorm (matches the rgba8
                         // mirror's normalizedByte() path for canonical
                         // RGBA8 / R8 / RG8 / etc.).
@@ -11168,6 +11281,52 @@ struct GLContext::Impl {
                         }
                     }
                 }
+            }
+            if (texture->target == GL_TEXTURE_CUBE_MAP) {
+                const std::size_t rowBytes =
+                    static_cast<std::size_t>(sourceWidth) * 4u;
+                const std::size_t layerBytes =
+                    rowBytes * static_cast<std::size_t>(sourceHeight);
+                for (GLsizei face = firstLayer; face < lastLayer && face < 6; ++face) {
+                    auto& faceLevels =
+                        texture->cubeFaceLevels[static_cast<std::size_t>(face)];
+                    auto faceIt = faceLevels.find(attachment.level);
+                    if (faceIt == faceLevels.end() || !faceIt->second.defined) {
+                        faceIt = faceLevels.emplace(attachment.level, image).first;
+                    }
+                    GLTextureImageLevel& faceImage = faceIt->second;
+                    if (faceImage.rgba8.size() < layerBytes) {
+                        faceImage.rgba8.assign(layerBytes, 0);
+                    }
+                    const std::size_t srcOffset =
+                        static_cast<std::size_t>(face) * layerBytes;
+                    if (srcOffset + layerBytes <= image.rgba8.size()) {
+                        std::memcpy(faceImage.rgba8.data(),
+                                    image.rgba8.data() + srcOffset,
+                                    layerBytes);
+                    }
+                    if (image.nativeBpp > 0 && !image.nativeData.empty()) {
+                        const std::size_t nativeLayerBytes =
+                            static_cast<std::size_t>(sourceWidth) *
+                            static_cast<std::size_t>(sourceHeight) *
+                            image.nativeBpp;
+                        if (faceImage.nativeData.size() < nativeLayerBytes) {
+                            faceImage.nativeData.assign(nativeLayerBytes, 0);
+                        }
+                        const std::size_t nativeSrcOffset =
+                            static_cast<std::size_t>(face) * nativeLayerBytes;
+                        if (nativeSrcOffset + nativeLayerBytes <=
+                            image.nativeData.size()) {
+                            std::memcpy(faceImage.nativeData.data(),
+                                        image.nativeData.data() + nativeSrcOffset,
+                                        nativeLayerBytes);
+                            faceImage.nativeBpp = image.nativeBpp;
+                        }
+                    }
+                }
+            }
+            if (isMSColorTexture) {
+                return true;
             }
             return replaceMetalTexture(*texture);
         }
@@ -11244,6 +11403,43 @@ struct GLContext::Impl {
                     }
                 }
             }
+            if (clearScissorActive &&
+                fullColorMask &&
+                defaultClipControl &&
+                renderbuffer->rgba8.empty() &&
+                renderbuffer->metalTexture != nullptr) {
+                id<MTLTexture> metalTex =
+                    (__bridge id<MTLTexture>)renderbuffer->metalTexture;
+                const MTLPixelFormat pf = metalTex.pixelFormat;
+                const bool nativeRGBA8Clear =
+                    metalTex.sampleCount <= 1 &&
+                    (pf == MTLPixelFormatRGBA8Unorm ||
+                     pf == MTLPixelFormatRGBA8Unorm_sRGB);
+                if (nativeRGBA8Clear) {
+                    const GLsizei regionWidth = maxX - minX;
+                    const GLsizei regionHeight = maxY - minY;
+                    std::vector<std::uint8_t> region(
+                        static_cast<std::size_t>(regionWidth) *
+                        static_cast<std::size_t>(regionHeight) * 4u);
+                    for (std::size_t offset = 0; offset < region.size();
+                         offset += 4u) {
+                        std::memcpy(region.data() + offset, rgba, 4u);
+                    }
+                    const NSUInteger metalY = static_cast<NSUInteger>(
+                        renderbuffer->height - maxY);
+                    MTLRegion metalRegion = MTLRegionMake2D(
+                        static_cast<NSUInteger>(minX), metalY,
+                        static_cast<NSUInteger>(regionWidth),
+                        static_cast<NSUInteger>(regionHeight));
+                    [metalTex replaceRegion:metalRegion
+                                mipmapLevel:0
+                                  withBytes:region.data()
+                                bytesPerRow:static_cast<NSUInteger>(regionWidth) * 4u];
+                    renderbuffer->rgba8ShadowClearPending = false;
+                    renderbuffer->colorShadowAuthoritative = false;
+                    return true;
+                }
+            }
             if (renderbuffer->rgba8ShadowClearPending) {
                 drainPendingGpuProducers(*renderbuffer);
             }
@@ -11268,6 +11464,7 @@ struct GLContext::Impl {
                 }
             }
             renderbuffer->rgba8ShadowClearPending = false;
+            renderbuffer->colorShadowAuthoritative = true;
             // Also clear the Metal texture so that readPixels — which
             // prefers the Metal texture over the CPU shadow — sees the
             // cleared value at the texture's native precision.
@@ -11732,6 +11929,181 @@ struct GLContext::Impl {
         return true;
     }
 
+    GLsizei textureFramebufferLayerCount(const GLTextureObject& texture,
+                                         const GLTextureImageLevel& image) const {
+        switch (texture.target) {
+            case GL_TEXTURE_3D:
+            case GL_TEXTURE_2D_ARRAY:
+            case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            case GL_TEXTURE_CUBE_MAP_ARRAY:
+                return std::max<GLsizei>(image.desc.depth, 1);
+            case GL_TEXTURE_1D_ARRAY:
+                return std::max<GLsizei>(image.desc.height, 1);
+            case GL_TEXTURE_CUBE_MAP:
+                return 6;
+            default:
+                return 1;
+        }
+    }
+
+    GLsizei textureFramebufferLayerIndex(const GLTextureObject& texture,
+                                         const GLFramebufferAttachment& attachment) const {
+        switch (texture.target) {
+            case GL_TEXTURE_3D:
+            case GL_TEXTURE_2D_ARRAY:
+            case GL_TEXTURE_1D_ARRAY:
+            case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            case GL_TEXTURE_CUBE_MAP:
+            case GL_TEXTURE_CUBE_MAP_ARRAY:
+                return attachment.layer;
+            default:
+                return 0;
+        }
+    }
+
+    std::size_t depthStencilNativeBpp(GLenum internalFormat) const {
+        switch (internalFormat) {
+            case GL_DEPTH32F_STENCIL8:
+                return 8;
+            case GL_DEPTH24_STENCIL8:
+                return 4;
+            case GL_STENCIL_INDEX8:
+                return 1;
+            default:
+                return 4;
+        }
+    }
+
+    bool ensureDepthStencilNativeShadow(GLTextureImageLevel& image,
+                                        GLsizei width,
+                                        GLsizei height,
+                                        GLsizei layers) const {
+        if (width <= 0 || height <= 0 || layers <= 0) {
+            return false;
+        }
+        if (image.nativeBpp == 0) {
+            image.nativeBpp = depthStencilNativeBpp(image.desc.internalFormat);
+        }
+        if (image.nativeBpp == 0) {
+            return false;
+        }
+        const std::size_t required =
+            static_cast<std::size_t>(width) *
+            static_cast<std::size_t>(height) *
+            static_cast<std::size_t>(layers) *
+            image.nativeBpp;
+        if (image.nativeData.size() < required) {
+            image.nativeData.resize(required, 0);
+        }
+        return true;
+    }
+
+    std::size_t nativeShadowOffset(const GLTextureImageLevel& image,
+                                   GLsizei width,
+                                   GLsizei height,
+                                   GLsizei layer,
+                                   GLsizei x,
+                                   GLsizei y) const {
+        return (((static_cast<std::size_t>(layer) *
+                  static_cast<std::size_t>(height) +
+                  static_cast<std::size_t>(y)) *
+                 static_cast<std::size_t>(width)) +
+                static_cast<std::size_t>(x)) * image.nativeBpp;
+    }
+
+    void storeNativeDepth(GLTextureImageLevel& image, std::size_t offset,
+                          GLfloat depth) const {
+        const float d = std::clamp(depth, 0.0f, 1.0f);
+        switch (image.desc.internalFormat) {
+            case GL_DEPTH24_STENCIL8: {
+                std::uint32_t packed = 0;
+                if (offset + sizeof(packed) <= image.nativeData.size()) {
+                    std::memcpy(&packed, image.nativeData.data() + offset,
+                                sizeof(packed));
+                }
+                const std::uint32_t stencil = packed & 0xFF000000u;
+                const std::uint32_t depth24 =
+                    packReadbackBits(static_cast<double>(d), 0x00FFFFFFu, false);
+                packed = (depth24 & 0x00FFFFFFu) | stencil;
+                if (offset + sizeof(packed) <= image.nativeData.size()) {
+                    std::memcpy(image.nativeData.data() + offset, &packed,
+                                sizeof(packed));
+                }
+                break;
+            }
+            case GL_DEPTH32F_STENCIL8:
+                if (offset + sizeof(d) <= image.nativeData.size()) {
+                    std::memcpy(image.nativeData.data() + offset, &d, sizeof(d));
+                }
+                break;
+            default:
+                if (offset + sizeof(d) <= image.nativeData.size()) {
+                    std::memcpy(image.nativeData.data() + offset, &d, sizeof(d));
+                }
+                break;
+        }
+    }
+
+    void storeNativeStencil(GLTextureImageLevel& image, std::size_t offset,
+                            std::uint8_t stencil) const {
+        switch (image.desc.internalFormat) {
+            case GL_DEPTH24_STENCIL8: {
+                if (offset + 4u <= image.nativeData.size()) {
+                    image.nativeData[offset + 3u] = stencil;
+                }
+                break;
+            }
+            case GL_DEPTH32F_STENCIL8:
+                if (offset + 5u <= image.nativeData.size()) {
+                    image.nativeData[offset + 4u] = stencil;
+                }
+                break;
+            default:
+                if (offset < image.nativeData.size()) {
+                    image.nativeData[offset] = stencil;
+                }
+                break;
+        }
+    }
+
+    GLfloat loadNativeDepth(const GLTextureImageLevel& image,
+                            std::size_t offset) const {
+        switch (image.desc.internalFormat) {
+            case GL_DEPTH24_STENCIL8: {
+                std::uint32_t packed = 0;
+                if (offset + sizeof(packed) <= image.nativeData.size()) {
+                    std::memcpy(&packed, image.nativeData.data() + offset,
+                                sizeof(packed));
+                }
+                return static_cast<GLfloat>(packed & 0x00FFFFFFu) /
+                       static_cast<GLfloat>(0x00FFFFFFu);
+            }
+            default: {
+                float depth = 0.0f;
+                if (offset + sizeof(depth) <= image.nativeData.size()) {
+                    std::memcpy(&depth, image.nativeData.data() + offset,
+                                sizeof(depth));
+                }
+                return depth;
+            }
+        }
+    }
+
+    std::uint8_t loadNativeStencil(const GLTextureImageLevel& image,
+                                   std::size_t offset) const {
+        switch (image.desc.internalFormat) {
+            case GL_DEPTH24_STENCIL8:
+                return offset + 3u < image.nativeData.size()
+                    ? image.nativeData[offset + 3u] : 0;
+            case GL_DEPTH32F_STENCIL8:
+                return offset + 4u < image.nativeData.size()
+                    ? image.nativeData[offset + 4u] : 0;
+            default:
+                return offset < image.nativeData.size()
+                    ? image.nativeData[offset] : 0;
+        }
+    }
+
     bool clearDepthAttachment(const GLFramebufferAttachment& attachment, GLdouble value) {
         const auto depth = static_cast<GLfloat>(std::clamp(value, 0.0, 1.0));
         if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
@@ -11776,7 +12148,69 @@ struct GLContext::Impl {
                 }
                 if (layers > 1) arrayLen = static_cast<std::uint32_t>(layers);
             }
+            const bool clearScissorActive = state->isEnabled(GL_SCISSOR_TEST);
+            const bool isMSTexture =
+                texture->target == GL_TEXTURE_2D_MULTISAMPLE ||
+                texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+            if (clearScissorActive || isMSTexture) {
+                GLTextureImageLevel& image = level->second;
+                const GLsizei width = std::max<GLsizei>(image.desc.width, 1);
+                const GLsizei height =
+                    texture->target == GL_TEXTURE_1D ? 1
+                    : std::max<GLsizei>(image.desc.height, 1);
+                const GLsizei layerCount =
+                    textureFramebufferLayerCount(*texture, image);
+                const GLsizei firstLayer = attachment.layered
+                    ? 0 : textureFramebufferLayerIndex(*texture, attachment);
+                const GLsizei lastLayer = attachment.layered
+                    ? layerCount : firstLayer + 1;
+                if (firstLayer < 0 || firstLayer >= layerCount ||
+                    lastLayer > layerCount) {
+                    return false;
+                }
+                if (!ensureDepthStencilNativeShadow(
+                        image, width, height, layerCount)) {
+                    return false;
+                }
+                GLint minX = 0, maxX = width;
+                GLint minY = 0, maxY = height;
+                if (clearScissorActive) {
+                    const GLScissorState& s = state->scissor();
+                    if (s.width <= 0 || s.height <= 0) {
+                        return true;
+                    }
+                    minX = std::max<GLint>(0, s.x);
+                    maxX = std::min<GLint>(width, s.x + s.width);
+                    minY = std::max<GLint>(0, s.y);
+                    maxY = std::min<GLint>(height, s.y + s.height);
+                    if (minX >= maxX || minY >= maxY) {
+                        return true;
+                    }
+                }
+                const bool lowerLeft = state->clipOrigin() != GL_UPPER_LEFT;
+                for (GLsizei layerIndex = firstLayer;
+                     layerIndex < lastLayer; ++layerIndex) {
+                    for (GLint glY = minY; glY < maxY; ++glY) {
+                        const GLint storageY =
+                            lowerLeft ? (height - 1 - glY) : glY;
+                        for (GLint x = minX; x < maxX; ++x) {
+                            const std::size_t offset = nativeShadowOffset(
+                                image, width, height, layerIndex, x, storageY);
+                            storeNativeDepth(image, offset, depth);
+                        }
+                    }
+                }
+                if (lowerLeft) {
+                    texture->wasFramebufferRenderedTo = true;
+                }
+                texture->depthStencilShadowAuthoritative = true;
+                if (isMSTexture) {
+                    return true;
+                }
+                return replaceMetalTexture(*texture);
+            }
             if (frameGraph != nullptr && texture->metalTexture != nullptr) {
+                texture->depthStencilShadowAuthoritative = false;
                 return frameGraph->clearTextureDepth(
                     texture->metalTexture, mipLevel, slice, arrayLen, depth);
             }
@@ -11789,22 +12223,82 @@ struct GLContext::Impl {
         if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isDepthFormat(renderbuffer->internalFormat)) {
             return false;
         }
-        renderbuffer->depth32.assign(static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height), depth);
+        GLint minX = 0, maxX = renderbuffer->width;
+        GLint minY = 0, maxY = renderbuffer->height;
+        const bool clearScissorActive = state->isEnabled(GL_SCISSOR_TEST);
+        if (clearScissorActive) {
+            const GLScissorState& s = state->scissor();
+            if (s.width <= 0 || s.height <= 0) {
+                return true;
+            }
+            minX = std::max<GLint>(0, s.x);
+            maxX = std::min<GLint>(renderbuffer->width, s.x + s.width);
+            minY = std::max<GLint>(0, s.y);
+            maxY = std::min<GLint>(renderbuffer->height, s.y + s.height);
+            if (minX >= maxX || minY >= maxY) {
+                return true;
+            }
+        }
         if (frameGraph != nullptr && renderbuffer->metalTexture != nullptr) {
             id<MTLTexture> metalTex =
                 (__bridge id<MTLTexture>)renderbuffer->metalTexture;
             // Single-sample depth RB clears must reach Metal before a draw:
             // clipped fragments leave the clear value behind. Keep MS RBs on
             // the CPU-shadow path because depth MS readback is not resolved here.
-            if (metalTex.sampleCount <= 1 &&
+            if (!clearScissorActive && metalTex.sampleCount <= 1 &&
                 frameGraph->clearLayeredTextureDepth(renderbuffer->metalTexture, 0, depth)) {
                 renderbuffer->wasMetalDepthRendered = true;
                 return true;
             }
         }
-        (void)mirrorDepthRenderbufferRegionToMetal(
-            *renderbuffer, 0, 0, renderbuffer->width, renderbuffer->height,
-            renderbuffer->depth32.data());
+        const GLsizei regionWidth = maxX - minX;
+        const GLsizei regionHeight = maxY - minY;
+        if (renderbuffer->depth32.empty()) {
+            std::vector<GLfloat> region(
+                static_cast<std::size_t>(regionWidth) *
+                static_cast<std::size_t>(regionHeight), depth);
+            if (mirrorDepthRenderbufferRegionToMetal(
+                    *renderbuffer, minX, minY, regionWidth, regionHeight,
+                    region.data())) {
+                return true;
+            }
+        }
+        const std::size_t depthPixels =
+            static_cast<std::size_t>(renderbuffer->width) *
+            static_cast<std::size_t>(renderbuffer->height);
+        if (renderbuffer->depth32.size() < depthPixels) {
+            renderbuffer->depth32.assign(depthPixels, 0.0f);
+        }
+        for (GLint y = minY; y < maxY; ++y) {
+            for (GLint x = minX; x < maxX; ++x) {
+                renderbuffer->depth32[
+                    static_cast<std::size_t>(y) *
+                    static_cast<std::size_t>(renderbuffer->width) +
+                    static_cast<std::size_t>(x)] = depth;
+            }
+        }
+        std::vector<GLfloat> region(
+            static_cast<std::size_t>(regionWidth) *
+            static_cast<std::size_t>(regionHeight));
+        for (GLsizei row = 0; row < regionHeight; ++row) {
+            const GLfloat* src =
+                renderbuffer->depth32.data() +
+                static_cast<std::size_t>(minY + row) *
+                static_cast<std::size_t>(renderbuffer->width) +
+                static_cast<std::size_t>(minX);
+            std::memcpy(region.data() +
+                        static_cast<std::size_t>(row) *
+                        static_cast<std::size_t>(regionWidth),
+                        src,
+                        static_cast<std::size_t>(regionWidth) *
+                        sizeof(GLfloat));
+        }
+        const bool mirroredDepth = mirrorDepthRenderbufferRegionToMetal(
+            *renderbuffer, minX, minY, regionWidth, regionHeight,
+            region.data());
+        if (!mirroredDepth) {
+            renderbuffer->wasMetalDepthRendered = false;
+        }
         return true;
     }
 
@@ -11843,7 +12337,71 @@ struct GLContext::Impl {
                 }
                 if (layers > 1) arrayLen = static_cast<std::uint32_t>(layers);
             }
+            const bool clearScissorActive = state->isEnabled(GL_SCISSOR_TEST);
+            const bool isMSTexture =
+                texture->target == GL_TEXTURE_2D_MULTISAMPLE ||
+                texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+            if (clearScissorActive || isMSTexture) {
+                GLTextureImageLevel& image = level->second;
+                const GLsizei width = std::max<GLsizei>(image.desc.width, 1);
+                const GLsizei height =
+                    texture->target == GL_TEXTURE_1D ? 1
+                    : std::max<GLsizei>(image.desc.height, 1);
+                const GLsizei layerCount =
+                    textureFramebufferLayerCount(*texture, image);
+                const GLsizei firstLayer = attachment.layered
+                    ? 0 : textureFramebufferLayerIndex(*texture, attachment);
+                const GLsizei lastLayer = attachment.layered
+                    ? layerCount : firstLayer + 1;
+                if (firstLayer < 0 || firstLayer >= layerCount ||
+                    lastLayer > layerCount) {
+                    return false;
+                }
+                if (!ensureDepthStencilNativeShadow(
+                        image, width, height, layerCount)) {
+                    return false;
+                }
+                GLint minX = 0, maxX = width;
+                GLint minY = 0, maxY = height;
+                if (clearScissorActive) {
+                    const GLScissorState& s = state->scissor();
+                    if (s.width <= 0 || s.height <= 0) {
+                        return true;
+                    }
+                    minX = std::max<GLint>(0, s.x);
+                    maxX = std::min<GLint>(width, s.x + s.width);
+                    minY = std::max<GLint>(0, s.y);
+                    maxY = std::min<GLint>(height, s.y + s.height);
+                    if (minX >= maxX || minY >= maxY) {
+                        return true;
+                    }
+                }
+                const bool lowerLeft = state->clipOrigin() != GL_UPPER_LEFT;
+                const std::uint8_t stencil =
+                    static_cast<std::uint8_t>(value & 0xff);
+                for (GLsizei layerIndex = firstLayer;
+                     layerIndex < lastLayer; ++layerIndex) {
+                    for (GLint glY = minY; glY < maxY; ++glY) {
+                        const GLint storageY =
+                            lowerLeft ? (height - 1 - glY) : glY;
+                        for (GLint x = minX; x < maxX; ++x) {
+                            const std::size_t offset = nativeShadowOffset(
+                                image, width, height, layerIndex, x, storageY);
+                            storeNativeStencil(image, offset, stencil);
+                        }
+                    }
+                }
+                if (lowerLeft) {
+                    texture->wasFramebufferRenderedTo = true;
+                }
+                texture->depthStencilShadowAuthoritative = true;
+                if (isMSTexture) {
+                    return true;
+                }
+                return replaceMetalTexture(*texture);
+            }
             if (frameGraph != nullptr && texture->metalTexture != nullptr) {
+                texture->depthStencilShadowAuthoritative = false;
                 return frameGraph->clearTextureStencil(
                     texture->metalTexture, mipLevel, slice, arrayLen,
                     static_cast<std::uint32_t>(value));
@@ -11857,13 +12415,70 @@ struct GLContext::Impl {
         if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isStencilFormat(renderbuffer->internalFormat)) {
             return false;
         }
-        renderbuffer->stencil8.assign(
-            static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height),
-            static_cast<std::uint8_t>(value & 0xff)
-        );
-        (void)mirrorStencilRenderbufferRegionToMetal(
-            *renderbuffer, 0, 0, renderbuffer->width, renderbuffer->height,
-            renderbuffer->stencil8.data());
+        GLint minX = 0, maxX = renderbuffer->width;
+        GLint minY = 0, maxY = renderbuffer->height;
+        if (state->isEnabled(GL_SCISSOR_TEST)) {
+            const GLScissorState& s = state->scissor();
+            if (s.width <= 0 || s.height <= 0) {
+                return true;
+            }
+            minX = std::max<GLint>(0, s.x);
+            maxX = std::min<GLint>(renderbuffer->width, s.x + s.width);
+            minY = std::max<GLint>(0, s.y);
+            maxY = std::min<GLint>(renderbuffer->height, s.y + s.height);
+            if (minX >= maxX || minY >= maxY) {
+                return true;
+            }
+        }
+        const std::uint8_t stencilValue =
+            static_cast<std::uint8_t>(value & 0xff);
+        const GLsizei regionWidth = maxX - minX;
+        const GLsizei regionHeight = maxY - minY;
+        if (renderbuffer->stencil8.empty()) {
+            std::vector<std::uint8_t> region(
+                static_cast<std::size_t>(regionWidth) *
+                static_cast<std::size_t>(regionHeight),
+                stencilValue);
+            if (mirrorStencilRenderbufferRegionToMetal(
+                    *renderbuffer, minX, minY, regionWidth, regionHeight,
+                    region.data())) {
+                renderbuffer->wasMetalStencilRendered = true;
+                return true;
+            }
+        }
+        const std::size_t stencilPixels =
+            static_cast<std::size_t>(renderbuffer->width) *
+            static_cast<std::size_t>(renderbuffer->height);
+        if (renderbuffer->stencil8.size() < stencilPixels) {
+            renderbuffer->stencil8.assign(stencilPixels, 0);
+        }
+        for (GLint y = minY; y < maxY; ++y) {
+            for (GLint x = minX; x < maxX; ++x) {
+                renderbuffer->stencil8[
+                    static_cast<std::size_t>(y) *
+                    static_cast<std::size_t>(renderbuffer->width) +
+                    static_cast<std::size_t>(x)] = stencilValue;
+            }
+        }
+        std::vector<std::uint8_t> region(
+            static_cast<std::size_t>(regionWidth) *
+            static_cast<std::size_t>(regionHeight));
+        for (GLsizei row = 0; row < regionHeight; ++row) {
+            const std::uint8_t* src =
+                renderbuffer->stencil8.data() +
+                static_cast<std::size_t>(minY + row) *
+                static_cast<std::size_t>(renderbuffer->width) +
+                static_cast<std::size_t>(minX);
+            std::memcpy(region.data() +
+                        static_cast<std::size_t>(row) *
+                        static_cast<std::size_t>(regionWidth),
+                        src,
+                        static_cast<std::size_t>(regionWidth));
+        }
+        const bool mirroredStencil = mirrorStencilRenderbufferRegionToMetal(
+            *renderbuffer, minX, minY, regionWidth, regionHeight,
+            region.data());
+        renderbuffer->wasMetalStencilRendered = mirroredStencil;
         return true;
     }
 
@@ -11961,11 +12576,27 @@ struct GLContext::Impl {
                 texture->wasFramebufferRenderedTo ||
                 texture->wasViewportRenderedTo;
             // If no Metal texture, try CPU shadow
-            if (metalTex == nil) {
+            const bool preferTextureShadow =
+                texture->colorShadowAuthoritative &&
+                !level->second.rgba8.empty();
+            if (metalTex == nil || preferTextureShadow) {
                 if (level->second.rgba8.empty()) return false;
                 const std::uint8_t* source = level->second.rgba8.data();
-                GLsizei sourceLayer = texture->target == GL_TEXTURE_3D ? attachment.layer : 0;
-                if (sourceLayer < 0 || sourceLayer >= std::max<GLsizei>(level->second.desc.depth, 1))
+                GLsizei sourceLayer = 0;
+                GLsizei sourceLayers = 1;
+                if (texture->target == GL_TEXTURE_3D ||
+                    texture->target == GL_TEXTURE_2D_ARRAY ||
+                    texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
+                    texture->target == GL_TEXTURE_CUBE_MAP ||
+                    texture->target == GL_TEXTURE_CUBE_MAP_ARRAY) {
+                    sourceLayer = attachment.layer;
+                    sourceLayers = texture->target == GL_TEXTURE_CUBE_MAP
+                        ? 6 : std::max<GLsizei>(level->second.desc.depth, 1);
+                } else if (texture->target == GL_TEXTURE_1D_ARRAY) {
+                    sourceLayer = attachment.layer;
+                    sourceLayers = std::max<GLsizei>(level->second.desc.height, 1);
+                }
+                if (sourceLayer < 0 || sourceLayer >= sourceLayers)
                     return false;
                 const bool yFlipCpuReadback =
                     sourceNeedsFboYFlip &&
@@ -12002,14 +12633,22 @@ struct GLContext::Impl {
                 metalTex = (__bridge id<MTLTexture>)rb->metalTexture;
             }
             sourceNeedsFboYFlip = rb->framebufferReadbackYFlip;
-            if (metalTex == nil) {
+            const bool preferRenderbufferShadow =
+                metalTex != nil && metalTex.sampleCount > 1 &&
+                rb->colorShadowAuthoritative;
+            if (metalTex == nil || preferRenderbufferShadow) {
                 if (rb->rgba8.empty()) return false;
                 const std::uint8_t* source = rb->rgba8.data();
+                const bool yFlipCpuReadback =
+                    sourceNeedsFboYFlip &&
+                    state->clipOrigin() != GL_UPPER_LEFT;
                 auto* out = static_cast<std::uint8_t*>(pixels);
                 for (GLsizei row = 0; row < height; ++row) {
                     for (GLsizei col = 0; col < width; ++col) {
                         const GLint srcX = x + col;
-                        const GLint srcY = y + row;
+                        const GLint glY = y + row;
+                        const GLint srcY = yFlipCpuReadback
+                            ? (sourceHeight - 1 - glY) : glY;
                         const std::size_t dstOffset = static_cast<std::size_t>(row * width + col) * 4u;
                         if (srcX < 0 || srcY < 0 || srcX >= sourceWidth || srcY >= sourceHeight) {
                             std::memset(out + dstOffset, 0, 4);
@@ -12245,8 +12884,22 @@ struct GLContext::Impl {
                 // rather than returning garbage bytes.
                 return false;
         }
-        const NSUInteger bytesPerRow = texWidth * srcBpp;
-        std::vector<std::uint8_t> raw(bytesPerRow * texHeight);
+        NSUInteger readX = 0;
+        NSUInteger readY = 0;
+        NSUInteger readWidth = texWidth;
+        NSUInteger readHeight = texHeight;
+        if (x >= 0 && y >= 0 && width > 0 && height > 0 &&
+            static_cast<NSUInteger>(x) + static_cast<NSUInteger>(width) <= texWidth &&
+            static_cast<NSUInteger>(y) + static_cast<NSUInteger>(height) <= texHeight) {
+            readX = static_cast<NSUInteger>(x);
+            readY = yFlipDepthReadback
+                ? texHeight - static_cast<NSUInteger>(y + height)
+                : static_cast<NSUInteger>(y);
+            readWidth = static_cast<NSUInteger>(width);
+            readHeight = static_cast<NSUInteger>(height);
+        }
+        const NSUInteger bytesPerRow = readWidth * srcBpp;
+        std::vector<std::uint8_t> raw(bytesPerRow * readHeight);
         const bool requiresDepthPlaneBlit = (depthStencilBlitOptions != 0);
         // Two read paths depending on the Metal storage mode:
         //   - Shared/Managed: direct `getBytes:` works.
@@ -12257,7 +12910,8 @@ struct GLContext::Impl {
         //   Private, so the blit path is the common one here.)
         if (metalTex.storageMode != MTLStorageModePrivate &&
             !requiresDepthPlaneBlit) {
-            MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
+            MTLRegion region = MTLRegionMake2D(readX, readY,
+                                                readWidth, readHeight);
             if (sourceSlice == 0 &&
                 metalTex.textureType != MTLTextureType2DArray &&
                 metalTex.textureType != MTLTextureType2DMultisampleArray) {
@@ -12268,7 +12922,7 @@ struct GLContext::Impl {
             } else {
                 [metalTex getBytes:raw.data()
                        bytesPerRow:bytesPerRow
-                     bytesPerImage:bytesPerRow * texHeight
+                     bytesPerImage:bytesPerRow * readHeight
                         fromRegion:region
                        mipmapLevel:mipLevel
                              slice:sourceSlice];
@@ -12279,7 +12933,7 @@ struct GLContext::Impl {
             if (mtlDevice == nil || mtlQueue == nil) {
                 return false;
             }
-            const NSUInteger stagingSize = bytesPerRow * texHeight;
+            const NSUInteger stagingSize = bytesPerRow * readHeight;
             id<MTLBuffer> staging = [mtlDevice newBufferWithLength:stagingSize
                                                           options:MTLResourceStorageModeShared];
             if (staging == nil) return false;
@@ -12288,7 +12942,8 @@ struct GLContext::Impl {
             if (cmd == nil) return false;
             id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
             if (blit == nil) return false;
-            MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
+            MTLRegion region = MTLRegionMake2D(readX, readY,
+                                                readWidth, readHeight);
             [blit copyFromTexture:metalTex
                       sourceSlice:sourceSlice
                       sourceLevel:mipLevel
@@ -12304,7 +12959,15 @@ struct GLContext::Impl {
             std::memcpy(raw.data(), [staging contents], stagingSize);
         }
         auto readDepth = [&](NSUInteger srcX, NSUInteger srcY) -> float {
-            const std::uint8_t* srcPixel = raw.data() + (srcY * texWidth + srcX) * srcBpp;
+            if (srcX < readX || srcY < readY ||
+                srcX >= readX + readWidth ||
+                srcY >= readY + readHeight) {
+                return 0.0f;
+            }
+            const NSUInteger localX = srcX - readX;
+            const NSUInteger localY = srcY - readY;
+            const std::uint8_t* srcPixel =
+                raw.data() + (localY * readWidth + localX) * srcBpp;
             switch (pf) {
                 case MTLPixelFormatDepth32Float: {
                     float v; std::memcpy(&v, srcPixel, 4); return v;
@@ -12344,6 +13007,113 @@ struct GLContext::Impl {
                 }
                 out[dstOffset] = readDepth(static_cast<NSUInteger>(srcX),
                                            static_cast<NSUInteger>(srcY));
+            }
+        }
+        return true;
+    }
+
+    bool readStencilFromMetalTexture(id<MTLTexture> metalTex,
+                                     NSUInteger mipLevel,
+                                     NSUInteger sourceSlice,
+                                     GLint x, GLint y,
+                                     GLsizei width, GLsizei height,
+                                     void* pixels,
+                                     bool yFlipStencilReadback) const {
+        if (metalTex == nil || metalTex.sampleCount > 1) {
+            return false;
+        }
+        const MTLPixelFormat pf = metalTex.pixelFormat;
+        MTLBlitOption stencilOption = 0;
+        if (pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
+            pf == MTLPixelFormatDepth32Float_Stencil8) {
+            stencilOption = MTLBlitOptionStencilFromDepthStencil;
+        } else if (pf != MTLPixelFormatStencil8) {
+            return false;
+        }
+        id<MTLDevice> mtlDevice = device;
+        id<MTLCommandQueue> mtlQueue = commandQueue;
+        if (mtlDevice == nil || mtlQueue == nil) {
+            return false;
+        }
+        const NSUInteger texWidth =
+            std::max<NSUInteger>(metalTex.width >> mipLevel, 1);
+        const NSUInteger texHeight =
+            std::max<NSUInteger>(metalTex.height >> mipLevel, 1);
+        NSUInteger readX = 0;
+        NSUInteger readY = 0;
+        NSUInteger readWidth = texWidth;
+        NSUInteger readHeight = texHeight;
+        if (x >= 0 && y >= 0 && width > 0 && height > 0 &&
+            static_cast<NSUInteger>(x) + static_cast<NSUInteger>(width) <= texWidth &&
+            static_cast<NSUInteger>(y) + static_cast<NSUInteger>(height) <= texHeight) {
+            readX = static_cast<NSUInteger>(x);
+            readY = yFlipStencilReadback
+                ? texHeight - static_cast<NSUInteger>(y + height)
+                : static_cast<NSUInteger>(y);
+            readWidth = static_cast<NSUInteger>(width);
+            readHeight = static_cast<NSUInteger>(height);
+        }
+        const NSUInteger bytesPerRow = readWidth;
+        const NSUInteger stagingSize = bytesPerRow * readHeight;
+        id<MTLBuffer> staging =
+            [mtlDevice newBufferWithLength:stagingSize
+                                   options:MTLResourceStorageModeShared];
+        if (staging == nil) {
+            return false;
+        }
+        auto readbackLease = makeCommandBuffer(AppGLCommandReason::FlushForReadback);
+        id<MTLCommandBuffer> cmd = readbackLease.get();
+        if (cmd == nil) {
+            return false;
+        }
+        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+        if (blit == nil) {
+            return false;
+        }
+        MTLRegion region = MTLRegionMake2D(readX, readY, readWidth, readHeight);
+        [blit copyFromTexture:metalTex
+                  sourceSlice:sourceSlice
+                  sourceLevel:mipLevel
+                 sourceOrigin:region.origin
+                   sourceSize:region.size
+                     toBuffer:staging
+            destinationOffset:0
+       destinationBytesPerRow:bytesPerRow
+     destinationBytesPerImage:stagingSize
+                      options:stencilOption];
+        [blit endEncoding];
+        readbackLease.commitAndWait(AppGLCommandReason::FlushForReadback);
+        std::vector<std::uint8_t> raw(stagingSize);
+        std::memcpy(raw.data(), [staging contents], stagingSize);
+
+        auto readStencil = [&](NSUInteger srcX, NSUInteger srcY) -> std::uint8_t {
+            if (srcX < readX || srcY < readY ||
+                srcX >= readX + readWidth ||
+                srcY >= readY + readHeight) {
+                return 0;
+            }
+            const NSUInteger localX = srcX - readX;
+            const NSUInteger localY = srcY - readY;
+            return raw[localY * readWidth + localX];
+        };
+        auto* out = static_cast<std::uint8_t*>(pixels);
+        for (GLsizei row = 0; row < height; ++row) {
+            for (GLsizei col = 0; col < width; ++col) {
+                const GLint srcX = x + col;
+                const GLint glY = y + row;
+                const GLint srcY = yFlipStencilReadback
+                    ? (static_cast<GLint>(texHeight) - 1 - glY)
+                    : glY;
+                const std::size_t dstOffset =
+                    static_cast<std::size_t>(row * width + col);
+                if (srcX < 0 || srcY < 0 ||
+                    static_cast<NSUInteger>(srcX) >= texWidth ||
+                    static_cast<NSUInteger>(srcY) >= texHeight) {
+                    out[dstOffset] = 0;
+                    continue;
+                }
+                out[dstOffset] = readStencil(static_cast<NSUInteger>(srcX),
+                                             static_cast<NSUInteger>(srcY));
             }
         }
         return true;
@@ -12429,7 +13199,53 @@ struct GLContext::Impl {
         // surfaced as `GL_INVALID_FRAMEBUFFER_OPERATION`.
         if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
             const GLTextureObject* tex = objects->textures().get(attachment.object);
-            if (tex == nullptr || tex->metalTexture == nullptr) return false;
+            if (tex == nullptr) return false;
+            const auto levelIt = tex->levels.find(attachment.level);
+            if (levelIt == tex->levels.end() || !levelIt->second.defined) {
+                return false;
+            }
+            const GLTextureImageLevel& image = levelIt->second;
+            if (tex->depthStencilShadowAuthoritative &&
+                image.nativeBpp > 0 && !image.nativeData.empty()) {
+                const GLsizei sourceWidth =
+                    std::max<GLsizei>(image.desc.width, 1);
+                const GLsizei sourceHeight =
+                    tex->target == GL_TEXTURE_1D ? 1 :
+                    std::max<GLsizei>(image.desc.height, 1);
+                const GLsizei sourceLayers =
+                    textureFramebufferLayerCount(*tex, image);
+                const GLsizei sourceLayer =
+                    textureFramebufferLayerIndex(*tex, attachment);
+                if (sourceLayer < 0 || sourceLayer >= sourceLayers) {
+                    return false;
+                }
+                const bool yFlipDepthReadback =
+                    (tex->wasFramebufferRenderedTo ||
+                     tex->wasViewportRenderedTo) &&
+                    state->clipOrigin() != GL_UPPER_LEFT;
+                auto* out = static_cast<GLfloat*>(pixels);
+                for (GLsizei row = 0; row < height; ++row) {
+                    for (GLsizei col = 0; col < width; ++col) {
+                        const GLint srcX = x + col;
+                        const GLint glY = y + row;
+                        const GLint srcY = yFlipDepthReadback
+                            ? (sourceHeight - 1 - glY) : glY;
+                        const std::size_t dstOffset =
+                            static_cast<std::size_t>(row * width + col);
+                        if (srcX < 0 || srcY < 0 ||
+                            srcX >= sourceWidth || srcY >= sourceHeight) {
+                            out[dstOffset] = 0.0f;
+                            continue;
+                        }
+                        const std::size_t nativeOffset = nativeShadowOffset(
+                            image, sourceWidth, sourceHeight, sourceLayer,
+                            srcX, srcY);
+                        out[dstOffset] = loadNativeDepth(image, nativeOffset);
+                    }
+                }
+                return true;
+            }
+            if (tex->metalTexture == nullptr) return false;
             id<MTLTexture> metalTex = (__bridge id<MTLTexture>)tex->metalTexture;
             const NSUInteger mipLevel = static_cast<NSUInteger>(std::max<GLint>(attachment.level, 0));
             const MTLTextureType texType = metalTex.textureType;
@@ -12455,76 +13271,24 @@ struct GLContext::Impl {
 
         if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
             const GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
-            if (renderbuffer == nullptr || !renderbuffer->storageDefined || renderbuffer->stencil8.empty()) {
+            if (renderbuffer == nullptr || !renderbuffer->storageDefined) {
                 return false;
             }
             if (renderbuffer->metalTexture != nullptr &&
                 renderbuffer->wasMetalStencilRendered &&
                 device != nil && commandQueue != nil) {
                 id<MTLTexture> metalTex = (__bridge id<MTLTexture>)renderbuffer->metalTexture;
-                const MTLPixelFormat pf = metalTex.pixelFormat;
-                if (metalTex.sampleCount <= 1 &&
-                    (pf == MTLPixelFormatStencil8 ||
-                     pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
-                     pf == MTLPixelFormatDepth32Float_Stencil8)) {
-                    const NSUInteger texW = static_cast<NSUInteger>(renderbuffer->width);
-                    const NSUInteger texH = static_cast<NSUInteger>(renderbuffer->height);
-                    const NSUInteger stencilBytesPerRow = texW;
-                    const NSUInteger stencilBytesPerImage = stencilBytesPerRow * texH;
-                    id<MTLBuffer> stencilBuf =
-                        [device newBufferWithLength:stencilBytesPerImage
-                                            options:MTLResourceStorageModeShared];
-                    if (stencilBuf != nil) {
-                        auto lease = makeCommandBuffer(AppGLCommandReason::FlushForReadback);
-                        id<MTLCommandBuffer> cmd = lease.get();
-                        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
-                        if (cmd != nil && blit != nil) {
-                            MTLRegion region = MTLRegionMake2D(0, 0, texW, texH);
-                            MTLBlitOption stencilOption =
-                                (pf == MTLPixelFormatStencil8)
-                                    ? 0
-                                    : MTLBlitOptionStencilFromDepthStencil;
-                            [blit copyFromTexture:metalTex
-                                      sourceSlice:0
-                                      sourceLevel:0
-                                     sourceOrigin:region.origin
-                                       sourceSize:region.size
-                                         toBuffer:stencilBuf
-                                destinationOffset:0
-                           destinationBytesPerRow:stencilBytesPerRow
-                         destinationBytesPerImage:stencilBytesPerImage
-                                          options:stencilOption];
-                            [blit endEncoding];
-                            lease.commitAndWait(AppGLCommandReason::FlushForReadback);
-                            const auto* stencilBytes =
-                                static_cast<const std::uint8_t*>([stencilBuf contents]);
-                            const bool yFlipStencilReadback =
-                                state->clipOrigin() != GL_UPPER_LEFT;
-                            auto* out = static_cast<std::uint8_t*>(pixels);
-                            for (GLsizei row = 0; row < height; ++row) {
-                                for (GLsizei col = 0; col < width; ++col) {
-                                    const GLint srcX = x + col;
-                                    const GLint glY = y + row;
-                                    const GLint srcY = yFlipStencilReadback
-                                        ? (renderbuffer->height - 1 - glY)
-                                        : glY;
-                                    const std::size_t dstOffset =
-                                        static_cast<std::size_t>(row * width + col);
-                                    if (srcX < 0 || srcY < 0 ||
-                                        srcX >= renderbuffer->width ||
-                                        srcY >= renderbuffer->height) {
-                                        out[dstOffset] = 0;
-                                        continue;
-                                    }
-                                    out[dstOffset] = stencilBytes[
-                                        static_cast<std::size_t>(srcY) * texW +
-                                        static_cast<std::size_t>(srcX)];
-                                }
-                            }
-                            return true;
-                        }
-                    }
+                const bool yFlipStencilReadback =
+                    state->clipOrigin() != GL_UPPER_LEFT;
+                if (readStencilFromMetalTexture(metalTex, /*mipLevel*/0,
+                                                /*sourceSlice*/0,
+                                                x, y, width, height, pixels,
+                                                yFlipStencilReadback)) {
+                    return true;
                 }
+            }
+            if (renderbuffer->stencil8.empty()) {
+                return false;
             }
             auto* out = static_cast<std::uint8_t*>(pixels);
             for (GLsizei row = 0; row < height; ++row) {
@@ -12554,21 +13318,56 @@ struct GLContext::Impl {
         // [GL_STENCIL_INDEX, *].
         if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
             const GLTextureObject* tex = objects->textures().get(attachment.object);
-            if (tex == nullptr || tex->metalTexture == nullptr) return false;
-            id<MTLTexture> metalTex = (__bridge id<MTLTexture>)tex->metalTexture;
-            const MTLPixelFormat pf = metalTex.pixelFormat;
-            if (pf != MTLPixelFormatStencil8 &&
-                pf != MTLPixelFormatDepth24Unorm_Stencil8 &&
-                pf != MTLPixelFormatDepth32Float_Stencil8) {
+            if (tex == nullptr) return false;
+            const auto levelIt = tex->levels.find(attachment.level);
+            if (levelIt == tex->levels.end() || !levelIt->second.defined) {
                 return false;
             }
-            if (device == nil || commandQueue == nil) return false;
+            const GLTextureImageLevel& image = levelIt->second;
+            if (tex->depthStencilShadowAuthoritative &&
+                image.nativeBpp > 0 && !image.nativeData.empty()) {
+                const GLsizei sourceWidth =
+                    std::max<GLsizei>(image.desc.width, 1);
+                const GLsizei sourceHeight =
+                    tex->target == GL_TEXTURE_1D ? 1 :
+                    std::max<GLsizei>(image.desc.height, 1);
+                const GLsizei sourceLayers =
+                    textureFramebufferLayerCount(*tex, image);
+                const GLsizei sourceLayer =
+                    textureFramebufferLayerIndex(*tex, attachment);
+                if (sourceLayer < 0 || sourceLayer >= sourceLayers) {
+                    return false;
+                }
+                const bool yFlipStencilReadback =
+                    (tex->wasFramebufferRenderedTo ||
+                     tex->wasViewportRenderedTo) &&
+                    state->clipOrigin() != GL_UPPER_LEFT;
+                auto* out = static_cast<std::uint8_t*>(pixels);
+                for (GLsizei row = 0; row < height; ++row) {
+                    for (GLsizei col = 0; col < width; ++col) {
+                        const GLint srcX = x + col;
+                        const GLint glY = y + row;
+                        const GLint srcY = yFlipStencilReadback
+                            ? (sourceHeight - 1 - glY) : glY;
+                        const std::size_t dstOffset =
+                            static_cast<std::size_t>(row * width + col);
+                        if (srcX < 0 || srcY < 0 ||
+                            srcX >= sourceWidth || srcY >= sourceHeight) {
+                            out[dstOffset] = 0;
+                            continue;
+                        }
+                        const std::size_t nativeOffset = nativeShadowOffset(
+                            image, sourceWidth, sourceHeight, sourceLayer,
+                            srcX, srcY);
+                        out[dstOffset] = loadNativeStencil(image, nativeOffset);
+                    }
+                }
+                return true;
+            }
+            if (tex->metalTexture == nullptr) return false;
+            id<MTLTexture> metalTex = (__bridge id<MTLTexture>)tex->metalTexture;
             const NSUInteger metalMipLevel =
                 static_cast<NSUInteger>(attachment.level);
-            const NSUInteger texW =
-                std::max<NSUInteger>(metalTex.width >> metalMipLevel, 1);
-            const NSUInteger texH =
-                std::max<NSUInteger>(metalTex.height >> metalMipLevel, 1);
             const MTLTextureType texType = metalTex.textureType;
             const NSUInteger sourceSlice =
                 (texType == MTLTextureType2DArray ||
@@ -12577,55 +13376,13 @@ struct GLContext::Impl {
                  texType == MTLTextureTypeCubeArray)
                     ? static_cast<NSUInteger>(std::max<GLint>(attachment.layer, 0))
                     : 0;
-            const NSUInteger stencilBytesPerRow = texW;
-            const NSUInteger stencilBytesPerImage = stencilBytesPerRow * texH;
-            id<MTLBuffer> stencilBuf =
-                [device newBufferWithLength:stencilBytesPerImage
-                                    options:MTLResourceStorageModeShared];
-            if (stencilBuf == nil) return false;
-            auto lease = makeCommandBuffer(AppGLCommandReason::FlushForReadback);
-            id<MTLCommandBuffer> cmd = lease.get();
-            id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
-            MTLRegion region = MTLRegionMake2D(0, 0, texW, texH);
-            const MTLBlitOption stencilOption =
-                (pf == MTLPixelFormatStencil8)
-                    ? 0
-                    : MTLBlitOptionStencilFromDepthStencil;
-            [blit copyFromTexture:metalTex sourceSlice:sourceSlice sourceLevel:metalMipLevel
-                     sourceOrigin:region.origin sourceSize:region.size
-                         toBuffer:stencilBuf destinationOffset:0
-            destinationBytesPerRow:stencilBytesPerRow
-          destinationBytesPerImage:stencilBytesPerImage
-                          options:stencilOption];
-            [blit endEncoding];
-            lease.commitAndWait(AppGLCommandReason::FlushForReadback);
-            const std::uint8_t* stencilBytes =
-                static_cast<const std::uint8_t*>([stencilBuf contents]);
             const bool yFlipStencilReadback =
                 (tex->wasFramebufferRenderedTo || tex->wasViewportRenderedTo) &&
                 state->clipOrigin() != GL_UPPER_LEFT;
-            auto* out = static_cast<std::uint8_t*>(pixels);
-            for (GLsizei row = 0; row < height; ++row) {
-                for (GLsizei col = 0; col < width; ++col) {
-                    const GLint srcX = x + col;
-                    const GLint glY = y + row;
-                    const GLint srcY = yFlipStencilReadback
-                        ? (static_cast<GLint>(texH) - 1 - glY)
-                        : glY;
-                    const std::size_t dstOffset =
-                        static_cast<std::size_t>(row * width + col);
-                    if (srcX < 0 || srcY < 0 ||
-                        srcX >= static_cast<GLint>(texW) ||
-                        srcY >= static_cast<GLint>(texH)) {
-                        out[dstOffset] = 0;
-                        continue;
-                    }
-                    out[dstOffset] = stencilBytes[
-                        static_cast<std::size_t>(srcY) * texW +
-                        static_cast<std::size_t>(srcX)];
-                }
-            }
-            return true;
+            return readStencilFromMetalTexture(metalTex, metalMipLevel,
+                                               sourceSlice, x, y, width,
+                                               height, pixels,
+                                               yFlipStencilReadback);
         }
         return false;
     }
@@ -12633,6 +13390,112 @@ struct GLContext::Impl {
     // Write helpers for blitFramebuffer. They mirror readXxxAttachmentPixels and
     // commit pixels into the attachment's CPU shadow store (and re-upload to Metal
     // for color textures so subsequent samples see the blitted pixels).
+    bool encodeColorNativePixelFromRGBA8(MTLPixelFormat mtlFormat,
+                                         const std::uint8_t rgba[4],
+                                         std::uint8_t* dst,
+                                         std::size_t dstBytes) {
+        const NativeFormatInfo info = nativeFormatInfo(mtlFormat);
+        if (info.bytesPerPixel <= 0 ||
+            dstBytes < static_cast<std::size_t>(info.bytesPerPixel)) {
+            return false;
+        }
+        std::memset(dst, 0, static_cast<std::size_t>(info.bytesPerPixel));
+        if (info.channels <= 0) {
+            const double r = static_cast<double>(rgba[0]) / 255.0;
+            const double g = static_cast<double>(rgba[1]) / 255.0;
+            const double b = static_cast<double>(rgba[2]) / 255.0;
+            const double a = static_cast<double>(rgba[3]) / 255.0;
+            std::uint32_t packed = 0;
+            if (mtlFormat == MTLPixelFormatRG11B10Float) {
+                packed = packUF_10F11F11F_REV(r, g, b);
+            } else if (mtlFormat == MTLPixelFormatRGB9E5Float) {
+                packed = packUF_5_9_9_9_REV(r, g, b);
+            } else if (mtlFormat == MTLPixelFormatRGB10A2Unorm ||
+                       mtlFormat == MTLPixelFormatRGB10A2Uint) {
+                const bool asInteger =
+                    mtlFormat == MTLPixelFormatRGB10A2Uint;
+                const std::uint32_t pr = packReadbackBits(r, 1023u, asInteger);
+                const std::uint32_t pg = packReadbackBits(g, 1023u, asInteger);
+                const std::uint32_t pb = packReadbackBits(b, 1023u, asInteger);
+                const std::uint32_t pa = packReadbackBits(a, 3u, asInteger);
+                packed = (pr & 0x3FFu) |
+                         ((pg & 0x3FFu) << 10) |
+                         ((pb & 0x3FFu) << 20) |
+                         ((pa & 0x003u) << 30);
+            } else {
+                return false;
+            }
+            std::memcpy(dst, &packed, sizeof(packed));
+            return true;
+        }
+        for (int c = 0; c < info.channels && c < 4; ++c) {
+            const double value =
+                (info.compType == NativeFormatInfo::UInt ||
+                 info.compType == NativeFormatInfo::SInt)
+                    ? static_cast<double>(rgba[c])
+                    : static_cast<double>(rgba[c]) / 255.0;
+            writeNativeComponent(
+                dst + static_cast<std::size_t>(c * info.bytesPerChannel),
+                info.compType,
+                info.bytesPerChannel,
+                value);
+        }
+        return true;
+    }
+
+    bool storeColorNativePixelFromRGBA8(GLTextureImageLevel& image,
+                                        GLsizei width,
+                                        GLsizei height,
+                                        GLsizei layer,
+                                        GLsizei x,
+                                        GLsizei y,
+                                        const std::uint8_t rgba[4]) {
+        if (image.nativeBpp == 0) {
+            const MTLPixelFormat mtlFormat =
+                metalRenderbufferFormat(image.desc.internalFormat);
+            const NativeFormatInfo info = nativeFormatInfo(mtlFormat);
+            if (info.bytesPerPixel <= 0) {
+                return false;
+            }
+            image.nativeBpp = static_cast<std::size_t>(info.bytesPerPixel);
+        }
+        if (image.nativeData.empty()) {
+            const std::size_t required =
+                static_cast<std::size_t>(width) *
+                static_cast<std::size_t>(height) *
+                static_cast<std::size_t>(std::max<GLsizei>(layer + 1, 1)) *
+                image.nativeBpp;
+            image.nativeData.assign(required, 0);
+        }
+        const MTLPixelFormat mtlFormat =
+            metalRenderbufferFormat(image.desc.internalFormat);
+        const NativeFormatInfo info = nativeFormatInfo(mtlFormat);
+        if (info.bytesPerPixel <= 0 ||
+            image.nativeBpp != static_cast<std::size_t>(info.bytesPerPixel)) {
+            return false;
+        }
+        const std::size_t required =
+            static_cast<std::size_t>(width) *
+            static_cast<std::size_t>(height) *
+            static_cast<std::size_t>(std::max<GLsizei>(layer + 1, 1)) *
+            image.nativeBpp;
+        if (image.nativeData.size() < required) {
+            image.nativeData.resize(required, 0);
+        }
+        const std::size_t nativeOffset =
+            (((static_cast<std::size_t>(layer) *
+               static_cast<std::size_t>(height) +
+               static_cast<std::size_t>(y)) *
+              static_cast<std::size_t>(width)) +
+             static_cast<std::size_t>(x)) * image.nativeBpp;
+        if (nativeOffset + image.nativeBpp > image.nativeData.size()) {
+            return false;
+        }
+        return encodeColorNativePixelFromRGBA8(
+            mtlFormat, rgba, image.nativeData.data() + nativeOffset,
+            image.nativeBpp);
+    }
+
     bool writeColorAttachmentPixels(const GLFramebufferAttachment& attachment, GLint x, GLint y, GLsizei width, GLsizei height, const std::uint8_t* pixels) {
         std::uint8_t* dest = nullptr;
         GLsizei destWidth = 0;
@@ -12652,22 +13515,77 @@ struct GLContext::Impl {
             }
             const GLsizei sourceWidth = std::max<GLsizei>(level->second.desc.width, 1);
             const GLsizei sourceHeight = writableTexture->target == GL_TEXTURE_1D ? 1 : std::max<GLsizei>(level->second.desc.height, 1);
-            const GLsizei sourceDepth = writableTexture->target == GL_TEXTURE_3D ? std::max<GLsizei>(level->second.desc.depth, 1) : 1;
+            const GLsizei sourceDepth =
+                (writableTexture->target == GL_TEXTURE_3D ||
+                 writableTexture->target == GL_TEXTURE_2D_ARRAY ||
+                 writableTexture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
+                 writableTexture->target == GL_TEXTURE_CUBE_MAP_ARRAY)
+                    ? std::max<GLsizei>(level->second.desc.depth, 1)
+                    : (writableTexture->target == GL_TEXTURE_1D_ARRAY
+                        ? std::max<GLsizei>(level->second.desc.height, 1)
+                        : (writableTexture->target == GL_TEXTURE_CUBE_MAP ? 6 : 1));
             if (level->second.rgba8.size() < rgba8ByteCount(sourceWidth, sourceHeight, sourceDepth)) {
                 level->second.rgba8.assign(rgba8ByteCount(sourceWidth, sourceHeight, sourceDepth), 0);
             }
             writableImage = &level->second;
-            destLayer = writableTexture->target == GL_TEXTURE_3D ? attachment.layer : 0;
+            destLayer =
+                (writableTexture->target == GL_TEXTURE_3D ||
+                 writableTexture->target == GL_TEXTURE_2D_ARRAY ||
+                 writableTexture->target == GL_TEXTURE_1D_ARRAY ||
+                 writableTexture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
+                 writableTexture->target == GL_TEXTURE_CUBE_MAP ||
+                 writableTexture->target == GL_TEXTURE_CUBE_MAP_ARRAY)
+                    ? attachment.layer : 0;
             if (destLayer < 0 || destLayer >= sourceDepth) {
                 return false;
             }
             dest = level->second.rgba8.data();
             destWidth = sourceWidth;
             destHeight = sourceHeight;
+            if (state->clipOrigin() == GL_LOWER_LEFT) {
+                writableTexture->wasFramebufferRenderedTo = true;
+            }
         } else if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
             GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
             if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isColorFormat(renderbuffer->internalFormat)) {
                 return false;
+            }
+            if (renderbuffer->rgba8.empty() &&
+                renderbuffer->metalTexture != nullptr) {
+                id<MTLTexture> metalTex =
+                    (__bridge id<MTLTexture>)renderbuffer->metalTexture;
+                const MTLPixelFormat pf = metalTex.pixelFormat;
+                if (metalTex.sampleCount <= 1 &&
+                    (pf == MTLPixelFormatRGBA8Unorm ||
+                     pf == MTLPixelFormatRGBA8Unorm_sRGB)) {
+                    std::vector<std::uint8_t> flipped(
+                        static_cast<std::size_t>(width) *
+                        static_cast<std::size_t>(height) * 4u);
+                    for (GLsizei row = 0; row < height; ++row) {
+                        const std::size_t srcOff =
+                            static_cast<std::size_t>(row) *
+                            static_cast<std::size_t>(width) * 4u;
+                        const std::size_t dstOff =
+                            static_cast<std::size_t>(height - 1 - row) *
+                            static_cast<std::size_t>(width) * 4u;
+                        std::memcpy(flipped.data() + dstOff, pixels + srcOff,
+                                    static_cast<std::size_t>(width) * 4u);
+                    }
+                    const NSUInteger metalY = static_cast<NSUInteger>(
+                        renderbuffer->height - (y + height));
+                    MTLRegion region = MTLRegionMake2D(
+                        static_cast<NSUInteger>(x),
+                        metalY,
+                        static_cast<NSUInteger>(width),
+                        static_cast<NSUInteger>(height));
+                    [metalTex replaceRegion:region
+                                mipmapLevel:0
+                                  withBytes:flipped.data()
+                                bytesPerRow:static_cast<NSUInteger>(width) * 4u];
+                    renderbuffer->rgba8ShadowClearPending = false;
+                    renderbuffer->colorShadowAuthoritative = false;
+                    return true;
+                }
             }
             materializeRenderbufferRGBA8Clear(*renderbuffer);
             if (renderbuffer->rgba8.empty()) {
@@ -12738,25 +13656,67 @@ struct GLContext::Impl {
                                     mipmapLevel:0
                                       withBytes:flipped.data()
                                     bytesPerRow:bytesPerRow];
+                    } else {
+                        const NativeFormatInfo nativeInfo =
+                            nativeFormatInfo(pf);
+                        if (nativeInfo.bytesPerPixel > 0) {
+                            const std::size_t nativeBpp =
+                                static_cast<std::size_t>(
+                                    nativeInfo.bytesPerPixel);
+                            constexpr GLsizei kRowsPerUpload = 32;
+                            for (GLsizei chunkY = 0; chunkY < height;
+                                 chunkY += kRowsPerUpload) {
+                                const GLsizei chunkRows =
+                                    std::min<GLsizei>(
+                                        kRowsPerUpload, height - chunkY);
+                                std::vector<std::uint8_t> nativeChunk(
+                                    static_cast<std::size_t>(width) *
+                                    static_cast<std::size_t>(chunkRows) *
+                                    nativeBpp);
+                                for (GLsizei row = 0; row < chunkRows; ++row) {
+                                    const GLsizei srcRow = chunkY + row;
+                                    const GLsizei uploadRow =
+                                        chunkRows - 1 - row;
+                                    for (GLsizei col = 0; col < width; ++col) {
+                                        const std::size_t srcOff =
+                                            (static_cast<std::size_t>(srcRow) *
+                                             static_cast<std::size_t>(width) +
+                                             static_cast<std::size_t>(col)) * 4u;
+                                        const std::size_t dstOff =
+                                            (static_cast<std::size_t>(uploadRow) *
+                                             static_cast<std::size_t>(width) +
+                                             static_cast<std::size_t>(col)) *
+                                            nativeBpp;
+                                        (void)encodeColorNativePixelFromRGBA8(
+                                            pf, pixels + srcOff,
+                                            nativeChunk.data() + dstOff,
+                                            nativeBpp);
+                                    }
+                                }
+                                const NSUInteger metalY =
+                                    static_cast<NSUInteger>(
+                                        destHeight - (y + chunkY + chunkRows));
+                                MTLRegion region = MTLRegionMake2D(
+                                    static_cast<NSUInteger>(x),
+                                    metalY,
+                                    static_cast<NSUInteger>(width),
+                                    static_cast<NSUInteger>(chunkRows));
+                                [metalTex replaceRegion:region
+                                            mipmapLevel:0
+                                              withBytes:nativeChunk.data()
+                                            bytesPerRow:static_cast<NSUInteger>(width) *
+                                                        nativeBpp];
+                            }
+                        }
                     }
                 }
             }
+            renderbuffer->colorShadowAuthoritative = true;
             return true;
         } else {
             return false;
         }
 
-        if (writableImage != nullptr &&
-            writableImage->desc.internalFormat == GL_R8 &&
-            writableImage->nativeBpp == 1) {
-            const std::size_t nativeBytes =
-                static_cast<std::size_t>(destWidth) *
-                static_cast<std::size_t>(destHeight) *
-                static_cast<std::size_t>(std::max<GLsizei>(destLayer + 1, 1));
-            if (writableImage->nativeData.size() < nativeBytes) {
-                writableImage->nativeData.resize(nativeBytes, 0);
-            }
-        }
         for (GLsizei row = 0; row < height; ++row) {
             for (GLsizei col = 0; col < width; ++col) {
                 const GLint dstX = x + col;
@@ -12764,90 +13724,204 @@ struct GLContext::Impl {
                 if (dstX < 0 || dstY < 0 || dstX >= destWidth || dstY >= destHeight) {
                     continue;
                 }
+                const GLint storageY = state->clipOrigin() == GL_UPPER_LEFT
+                    ? dstY : (destHeight - 1 - dstY);
                 const std::size_t srcOffset = static_cast<std::size_t>(row * width + col) * 4u;
                 const std::size_t dstOffset =
                     ((static_cast<std::size_t>(destLayer) * static_cast<std::size_t>(destHeight)
-                        + static_cast<std::size_t>(dstY))
+                        + static_cast<std::size_t>(storageY))
                         * static_cast<std::size_t>(destWidth)
                         + static_cast<std::size_t>(dstX))
                     * 4u;
                 std::memcpy(dest + dstOffset, pixels + srcOffset, 4);
-                if (writableImage != nullptr &&
-                    writableImage->desc.internalFormat == GL_R8 &&
-                    writableImage->nativeBpp == 1 &&
-                    !writableImage->nativeData.empty()) {
-                    const std::size_t nativeOffset =
-                        (static_cast<std::size_t>(destLayer) *
-                         static_cast<std::size_t>(destHeight) *
-                         static_cast<std::size_t>(destWidth)) +
-                        (static_cast<std::size_t>(dstY) *
-                         static_cast<std::size_t>(destWidth)) +
-                        static_cast<std::size_t>(dstX);
-                    if (nativeOffset < writableImage->nativeData.size()) {
-                        writableImage->nativeData[nativeOffset] = pixels[srcOffset];
-                    }
+                if (writableImage != nullptr && writableImage->nativeBpp > 0) {
+                    (void)storeColorNativePixelFromRGBA8(
+                        *writableImage, destWidth, destHeight, destLayer,
+                        dstX, storageY, pixels + srcOffset);
                 }
             }
         }
 
         if (writableTexture != nullptr) {
+            writableTexture->colorShadowAuthoritative = true;
             return replaceMetalTexture(*writableTexture);
         }
         return true;
     }
 
     bool writeDepthAttachmentPixels(const GLFramebufferAttachment& attachment, GLint x, GLint y, GLsizei width, GLsizei height, const GLfloat* pixels) {
-        if (attachment.kind != GLFramebufferAttachment::Kind::Renderbuffer) {
-            return false;
-        }
-        GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
-        if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isDepthFormat(renderbuffer->internalFormat)) {
-            return false;
-        }
-        if (renderbuffer->depth32.empty()) {
-            renderbuffer->depth32.assign(static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height), 0.0f);
-        }
-        for (GLsizei row = 0; row < height; ++row) {
-            for (GLsizei col = 0; col < width; ++col) {
-                const GLint dstX = x + col;
-                const GLint dstY = y + row;
-                if (dstX < 0 || dstY < 0 || dstX >= renderbuffer->width || dstY >= renderbuffer->height) {
-                    continue;
-                }
-                renderbuffer->depth32[
-                    static_cast<std::size_t>(dstY) * static_cast<std::size_t>(renderbuffer->width) + static_cast<std::size_t>(dstX)
-                ] = pixels[static_cast<std::size_t>(row * width + col)];
+        if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
+            GLTextureObject* texture = objects->textures().get(attachment.object);
+            if (texture == nullptr) {
+                return false;
             }
+            auto levelIt = texture->levels.find(attachment.level);
+            if (levelIt == texture->levels.end() || !levelIt->second.defined ||
+                !isDepthFormat(levelIt->second.desc.internalFormat)) {
+                return false;
+            }
+            GLTextureImageLevel& image = levelIt->second;
+            const GLsizei destWidth = std::max<GLsizei>(image.desc.width, 1);
+            const GLsizei destHeight = texture->target == GL_TEXTURE_1D
+                ? 1 : std::max<GLsizei>(image.desc.height, 1);
+            const GLsizei layerCount =
+                textureFramebufferLayerCount(*texture, image);
+            const GLsizei destLayer =
+                textureFramebufferLayerIndex(*texture, attachment);
+            if (destLayer < 0 || destLayer >= layerCount ||
+                !ensureDepthStencilNativeShadow(
+                    image, destWidth, destHeight, layerCount)) {
+                return false;
+            }
+            const bool lowerLeft = state->clipOrigin() != GL_UPPER_LEFT;
+            for (GLsizei row = 0; row < height; ++row) {
+                for (GLsizei col = 0; col < width; ++col) {
+                    const GLint dstX = x + col;
+                    const GLint dstY = y + row;
+                    if (dstX < 0 || dstY < 0 ||
+                        dstX >= destWidth || dstY >= destHeight) {
+                        continue;
+                    }
+                    const GLint storageY =
+                        lowerLeft ? (destHeight - 1 - dstY) : dstY;
+                    const std::size_t nativeOffset = nativeShadowOffset(
+                        image, destWidth, destHeight, destLayer, dstX, storageY);
+                    storeNativeDepth(
+                        image, nativeOffset,
+                        pixels[static_cast<std::size_t>(row * width + col)]);
+                }
+            }
+            if (lowerLeft) {
+                texture->wasFramebufferRenderedTo = true;
+            }
+            texture->depthStencilShadowAuthoritative = true;
+            if (texture->target == GL_TEXTURE_2D_MULTISAMPLE ||
+                texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
+                return true;
+            }
+            return replaceMetalTexture(*texture) || texture->depthStencilShadowAuthoritative;
         }
-        (void)mirrorDepthRenderbufferRegionToMetal(*renderbuffer, x, y, width, height, pixels);
-        return true;
+        if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+            GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
+            if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isDepthFormat(renderbuffer->internalFormat)) {
+                return false;
+            }
+            if (renderbuffer->depth32.empty() &&
+                mirrorDepthRenderbufferRegionToMetal(
+                    *renderbuffer, x, y, width, height, pixels)) {
+                return true;
+            }
+            if (renderbuffer->depth32.empty()) {
+                renderbuffer->depth32.assign(static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height), 0.0f);
+            }
+            for (GLsizei row = 0; row < height; ++row) {
+                for (GLsizei col = 0; col < width; ++col) {
+                    const GLint dstX = x + col;
+                    const GLint dstY = y + row;
+                    if (dstX < 0 || dstY < 0 || dstX >= renderbuffer->width || dstY >= renderbuffer->height) {
+                        continue;
+                    }
+                    renderbuffer->depth32[
+                        static_cast<std::size_t>(dstY) * static_cast<std::size_t>(renderbuffer->width) + static_cast<std::size_t>(dstX)
+                    ] = pixels[static_cast<std::size_t>(row * width + col)];
+                }
+            }
+            const bool mirroredDepth =
+                mirrorDepthRenderbufferRegionToMetal(*renderbuffer, x, y,
+                                                     width, height, pixels);
+            if (!mirroredDepth) {
+                renderbuffer->wasMetalDepthRendered = false;
+            }
+            return true;
+        }
+        return false;
     }
 
     bool writeStencilAttachmentPixels(const GLFramebufferAttachment& attachment, GLint x, GLint y, GLsizei width, GLsizei height, const std::uint8_t* pixels) {
-        if (attachment.kind != GLFramebufferAttachment::Kind::Renderbuffer) {
-            return false;
-        }
-        GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
-        if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isStencilFormat(renderbuffer->internalFormat)) {
-            return false;
-        }
-        if (renderbuffer->stencil8.empty()) {
-            renderbuffer->stencil8.assign(static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height), 0);
-        }
-        for (GLsizei row = 0; row < height; ++row) {
-            for (GLsizei col = 0; col < width; ++col) {
-                const GLint dstX = x + col;
-                const GLint dstY = y + row;
-                if (dstX < 0 || dstY < 0 || dstX >= renderbuffer->width || dstY >= renderbuffer->height) {
-                    continue;
-                }
-                renderbuffer->stencil8[
-                    static_cast<std::size_t>(dstY) * static_cast<std::size_t>(renderbuffer->width) + static_cast<std::size_t>(dstX)
-                ] = pixels[static_cast<std::size_t>(row * width + col)];
+        if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
+            GLTextureObject* texture = objects->textures().get(attachment.object);
+            if (texture == nullptr) {
+                return false;
             }
+            auto levelIt = texture->levels.find(attachment.level);
+            if (levelIt == texture->levels.end() || !levelIt->second.defined ||
+                !isStencilFormat(levelIt->second.desc.internalFormat)) {
+                return false;
+            }
+            GLTextureImageLevel& image = levelIt->second;
+            const GLsizei destWidth = std::max<GLsizei>(image.desc.width, 1);
+            const GLsizei destHeight = texture->target == GL_TEXTURE_1D
+                ? 1 : std::max<GLsizei>(image.desc.height, 1);
+            const GLsizei layerCount =
+                textureFramebufferLayerCount(*texture, image);
+            const GLsizei destLayer =
+                textureFramebufferLayerIndex(*texture, attachment);
+            if (destLayer < 0 || destLayer >= layerCount ||
+                !ensureDepthStencilNativeShadow(
+                    image, destWidth, destHeight, layerCount)) {
+                return false;
+            }
+            const bool lowerLeft = state->clipOrigin() != GL_UPPER_LEFT;
+            for (GLsizei row = 0; row < height; ++row) {
+                for (GLsizei col = 0; col < width; ++col) {
+                    const GLint dstX = x + col;
+                    const GLint dstY = y + row;
+                    if (dstX < 0 || dstY < 0 ||
+                        dstX >= destWidth || dstY >= destHeight) {
+                        continue;
+                    }
+                    const GLint storageY =
+                        lowerLeft ? (destHeight - 1 - dstY) : dstY;
+                    const std::size_t nativeOffset = nativeShadowOffset(
+                        image, destWidth, destHeight, destLayer, dstX, storageY);
+                    storeNativeStencil(
+                        image, nativeOffset,
+                        pixels[static_cast<std::size_t>(row * width + col)]);
+                }
+            }
+            if (lowerLeft) {
+                texture->wasFramebufferRenderedTo = true;
+            }
+            texture->depthStencilShadowAuthoritative = true;
+            if (texture->target == GL_TEXTURE_2D_MULTISAMPLE ||
+                texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
+                return true;
+            }
+            return replaceMetalTexture(*texture) || texture->depthStencilShadowAuthoritative;
         }
-        (void)mirrorStencilRenderbufferRegionToMetal(*renderbuffer, x, y, width, height, pixels);
-        return true;
+        if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+            GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
+            if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isStencilFormat(renderbuffer->internalFormat)) {
+                return false;
+            }
+            if (renderbuffer->stencil8.empty() &&
+                mirrorStencilRenderbufferRegionToMetal(
+                    *renderbuffer, x, y, width, height, pixels)) {
+                renderbuffer->wasMetalStencilRendered = true;
+                return true;
+            }
+            if (renderbuffer->stencil8.empty()) {
+                renderbuffer->stencil8.assign(static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height), 0);
+            }
+            for (GLsizei row = 0; row < height; ++row) {
+                for (GLsizei col = 0; col < width; ++col) {
+                    const GLint dstX = x + col;
+                    const GLint dstY = y + row;
+                    if (dstX < 0 || dstY < 0 || dstX >= renderbuffer->width || dstY >= renderbuffer->height) {
+                        continue;
+                    }
+                    renderbuffer->stencil8[
+                        static_cast<std::size_t>(dstY) * static_cast<std::size_t>(renderbuffer->width) + static_cast<std::size_t>(dstX)
+                    ] = pixels[static_cast<std::size_t>(row * width + col)];
+                }
+            }
+            const bool mirroredStencil =
+                mirrorStencilRenderbufferRegionToMetal(*renderbuffer, x, y,
+                                                       width, height, pixels);
+            renderbuffer->wasMetalStencilRendered = mirroredStencil;
+            return true;
+        }
+        return false;
     }
 
     // Phase A blit: nearest-only, integer-clamped CPU copy between attached images.
@@ -12912,58 +13986,184 @@ struct GLContext::Impl {
             if (sx < 0) sx = 0;
             if (sy < 0) sy = 0;
         };
+        struct BlitWriteWindow {
+            GLint x = 0;
+            GLint y = 0;
+            GLsizei width = 0;
+            GLsizei height = 0;
+            GLsizei srcOffsetX = 0;
+            GLsizei srcOffsetY = 0;
+            bool empty = false;
+        };
+        auto computeWriteWindow = [&]() {
+            BlitWriteWindow window;
+            window.x = dstX;
+            window.y = dstY;
+            window.width = dstWidth;
+            window.height = dstHeight;
+            if (state->isEnabled(GL_SCISSOR_TEST)) {
+                const GLScissorState& s = state->scissor();
+                const GLint clipMinX = std::max<GLint>(dstX, s.x);
+                const GLint clipMinY = std::max<GLint>(dstY, s.y);
+                const GLint clipMaxX = std::min<GLint>(dstX + dstWidth,
+                                                       s.x + s.width);
+                const GLint clipMaxY = std::min<GLint>(dstY + dstHeight,
+                                                       s.y + s.height);
+                if (s.width <= 0 || s.height <= 0 ||
+                    clipMinX >= clipMaxX || clipMinY >= clipMaxY) {
+                    window.empty = true;
+                    window.width = 0;
+                    window.height = 0;
+                    return window;
+                }
+                window.x = clipMinX;
+                window.y = clipMinY;
+                window.width = static_cast<GLsizei>(clipMaxX - clipMinX);
+                window.height = static_cast<GLsizei>(clipMaxY - clipMinY);
+                window.srcOffsetX =
+                    static_cast<GLsizei>(clipMinX - dstX);
+                window.srcOffsetY =
+                    static_cast<GLsizei>(clipMinY - dstY);
+            }
+            return window;
+        };
+        const BlitWriteWindow writeWindow = computeWriteWindow();
+        auto copyColorWindow = [&](const std::uint8_t* src,
+                                   std::vector<std::uint8_t>& clipped)
+            -> const std::uint8_t* {
+            if (writeWindow.empty ||
+                (writeWindow.x == dstX && writeWindow.y == dstY &&
+                 writeWindow.width == dstWidth &&
+                 writeWindow.height == dstHeight)) {
+                return src;
+            }
+            clipped.resize(static_cast<std::size_t>(writeWindow.width) *
+                           static_cast<std::size_t>(writeWindow.height) * 4u);
+            for (GLsizei row = 0; row < writeWindow.height; ++row) {
+                const std::size_t srcOffset =
+                    (static_cast<std::size_t>(writeWindow.srcOffsetY + row) *
+                     static_cast<std::size_t>(dstWidth) +
+                     static_cast<std::size_t>(writeWindow.srcOffsetX)) * 4u;
+                const std::size_t dstOffset =
+                    static_cast<std::size_t>(row) *
+                    static_cast<std::size_t>(writeWindow.width) * 4u;
+                std::memcpy(clipped.data() + dstOffset, src + srcOffset,
+                            static_cast<std::size_t>(writeWindow.width) * 4u);
+            }
+            return clipped.data();
+        };
+        auto copyDepthWindow = [&](const GLfloat* src,
+                                   std::vector<GLfloat>& clipped)
+            -> const GLfloat* {
+            if (writeWindow.empty ||
+                (writeWindow.x == dstX && writeWindow.y == dstY &&
+                 writeWindow.width == dstWidth &&
+                 writeWindow.height == dstHeight)) {
+                return src;
+            }
+            clipped.resize(static_cast<std::size_t>(writeWindow.width) *
+                           static_cast<std::size_t>(writeWindow.height));
+            for (GLsizei row = 0; row < writeWindow.height; ++row) {
+                const std::size_t srcOffset =
+                    static_cast<std::size_t>(writeWindow.srcOffsetY + row) *
+                    static_cast<std::size_t>(dstWidth) +
+                    static_cast<std::size_t>(writeWindow.srcOffsetX);
+                const std::size_t dstOffset =
+                    static_cast<std::size_t>(row) *
+                    static_cast<std::size_t>(writeWindow.width);
+                std::memcpy(clipped.data() + dstOffset, src + srcOffset,
+                            static_cast<std::size_t>(writeWindow.width) *
+                            sizeof(GLfloat));
+            }
+            return clipped.data();
+        };
+        auto copyStencilWindow = [&](const std::uint8_t* src,
+                                     std::vector<std::uint8_t>& clipped)
+            -> const std::uint8_t* {
+            if (writeWindow.empty ||
+                (writeWindow.x == dstX && writeWindow.y == dstY &&
+                 writeWindow.width == dstWidth &&
+                 writeWindow.height == dstHeight)) {
+                return src;
+            }
+            clipped.resize(static_cast<std::size_t>(writeWindow.width) *
+                           static_cast<std::size_t>(writeWindow.height));
+            for (GLsizei row = 0; row < writeWindow.height; ++row) {
+                const std::size_t srcOffset =
+                    static_cast<std::size_t>(writeWindow.srcOffsetY + row) *
+                    static_cast<std::size_t>(dstWidth) +
+                    static_cast<std::size_t>(writeWindow.srcOffsetX);
+                const std::size_t dstOffset =
+                    static_cast<std::size_t>(row) *
+                    static_cast<std::size_t>(writeWindow.width);
+                std::memcpy(clipped.data() + dstOffset, src + srcOffset,
+                            static_cast<std::size_t>(writeWindow.width));
+            }
+            return clipped.data();
+        };
 
         if ((mask & GL_COLOR_BUFFER_BIT) != 0) {
             const GLFramebufferAttachment* srcAttachment = framebufferAttachment(*readFb, readFb->readBuffer);
-            if (srcAttachment == nullptr) {
-                return false;
-            }
-            // Read src region at src resolution.
-            std::vector<std::uint8_t> srcStage(
-                static_cast<std::size_t>(copyWidth) *
-                static_cast<std::size_t>(copyHeight) * 4u);
-            if (!readColorAttachmentPixels(*srcAttachment, srcX, srcY,
-                                           copyWidth, copyHeight, srcStage.data())) {
-                return false;
-            }
-            // Scale to dst size (nearest for non-linear filter or equal size).
-            const std::uint8_t* copySrc = srcStage.data();
-            std::vector<std::uint8_t> dstStage;
-            if (needsScale) {
-                dstStage.resize(static_cast<std::size_t>(dstWidth) *
-                                static_cast<std::size_t>(dstHeight) * 4u);
-                for (GLsizei dy = 0; dy < dstHeight; ++dy) {
-                    for (GLsizei dx = 0; dx < dstWidth; ++dx) {
-                        GLsizei sx = 0, sy = 0;
-                        sampleSrcIndex(dx, dy, sx, sy);
-                        const std::size_t srcIdx =
-                            (static_cast<std::size_t>(sy) *
-                             static_cast<std::size_t>(copyWidth) +
-                             static_cast<std::size_t>(sx)) * 4u;
-                        const std::size_t dstIdx =
-                            (static_cast<std::size_t>(dy) *
-                             static_cast<std::size_t>(dstWidth) +
-                             static_cast<std::size_t>(dx)) * 4u;
-                        std::memcpy(&dstStage[dstIdx], &srcStage[srcIdx], 4u);
-                    }
-                }
-                copySrc = dstStage.data();
-            }
-            for (GLenum buffer : drawFb->drawBuffers) {
-                if (buffer == GL_NONE) {
-                    continue;
-                }
-                const GLFramebufferAttachment* dstAttachment = framebufferAttachment(*drawFb, buffer);
-                if (dstAttachment == nullptr) {
-                    continue;
-                }
-                if (!writeColorAttachmentPixels(*dstAttachment, dstX, dstY,
-                                                dstWidth, dstHeight, copySrc)) {
+            // Depth/stencil CTS cases pass an all-bits blit mask against
+            // depth-only FBOs. Treat a missing color attachment as a color
+            // no-op, matching the depth/stencil branches below.
+            if (srcAttachment != nullptr) {
+                // Read src region at src resolution.
+                std::vector<std::uint8_t> srcStage(
+                    static_cast<std::size_t>(copyWidth) *
+                    static_cast<std::size_t>(copyHeight) * 4u);
+                if (!readColorAttachmentPixels(*srcAttachment, srcX, srcY,
+                                               copyWidth, copyHeight, srcStage.data())) {
                     return false;
                 }
-                markFramebufferAttachmentWrite(*dstAttachment,
-                                               kProducerCopyWrite |
-                                               kProducerFboColorWrite);
+                // Scale to dst size (nearest for non-linear filter or equal size).
+                const std::uint8_t* copySrc = srcStage.data();
+                std::vector<std::uint8_t> dstStage;
+                if (needsScale) {
+                    dstStage.resize(static_cast<std::size_t>(dstWidth) *
+                                    static_cast<std::size_t>(dstHeight) * 4u);
+                    for (GLsizei dy = 0; dy < dstHeight; ++dy) {
+                        for (GLsizei dx = 0; dx < dstWidth; ++dx) {
+                            GLsizei sx = 0, sy = 0;
+                            sampleSrcIndex(dx, dy, sx, sy);
+                            const std::size_t srcIdx =
+                                (static_cast<std::size_t>(sy) *
+                                 static_cast<std::size_t>(copyWidth) +
+                                 static_cast<std::size_t>(sx)) * 4u;
+                            const std::size_t dstIdx =
+                                (static_cast<std::size_t>(dy) *
+                                 static_cast<std::size_t>(dstWidth) +
+                                 static_cast<std::size_t>(dx)) * 4u;
+                            std::memcpy(&dstStage[dstIdx], &srcStage[srcIdx], 4u);
+                        }
+                    }
+                    copySrc = dstStage.data();
+                }
+                for (GLenum buffer : drawFb->drawBuffers) {
+                    if (buffer == GL_NONE) {
+                        continue;
+                    }
+                    if (writeWindow.empty) {
+                        continue;
+                    }
+                    const GLFramebufferAttachment* dstAttachment = framebufferAttachment(*drawFb, buffer);
+                    if (dstAttachment == nullptr) {
+                        continue;
+                    }
+                    std::vector<std::uint8_t> clippedColor;
+                    const std::uint8_t* writeSrc =
+                        copyColorWindow(copySrc, clippedColor);
+                    if (!writeColorAttachmentPixels(*dstAttachment,
+                                                    writeWindow.x, writeWindow.y,
+                                                    writeWindow.width,
+                                                    writeWindow.height,
+                                                    writeSrc)) {
+                        return false;
+                    }
+                    markFramebufferAttachmentWrite(*dstAttachment,
+                                                   kProducerCopyWrite |
+                                                   kProducerFboColorWrite);
+                }
             }
         }
 
@@ -12998,13 +14198,21 @@ struct GLContext::Impl {
                     }
                     stagePtr = dstStage.data();
                 }
-                if (!writeDepthAttachmentPixels(*dstAttachment, dstX, dstY,
-                                                 dstWidth, dstHeight, stagePtr)) {
-                    return false;
+                if (!writeWindow.empty) {
+                    std::vector<GLfloat> clippedDepth;
+                    const GLfloat* writeDepth =
+                        copyDepthWindow(stagePtr, clippedDepth);
+                    if (!writeDepthAttachmentPixels(*dstAttachment,
+                                                     writeWindow.x, writeWindow.y,
+                                                     writeWindow.width,
+                                                     writeWindow.height,
+                                                     writeDepth)) {
+                        return false;
+                    }
+                    markFramebufferAttachmentWrite(*dstAttachment,
+                                                   kProducerCopyWrite |
+                                                   kProducerFboDepthStencilWrite);
                 }
-                markFramebufferAttachmentWrite(*dstAttachment,
-                                               kProducerCopyWrite |
-                                               kProducerFboDepthStencilWrite);
             }
         }
 
@@ -13039,13 +14247,21 @@ struct GLContext::Impl {
                     }
                     stagePtr = dstStage.data();
                 }
-                if (!writeStencilAttachmentPixels(*dstAttachment, dstX, dstY,
-                                                   dstWidth, dstHeight, stagePtr)) {
-                    return false;
+                if (!writeWindow.empty) {
+                    std::vector<std::uint8_t> clippedStencil;
+                    const std::uint8_t* writeStencil =
+                        copyStencilWindow(stagePtr, clippedStencil);
+                    if (!writeStencilAttachmentPixels(*dstAttachment,
+                                                       writeWindow.x, writeWindow.y,
+                                                       writeWindow.width,
+                                                       writeWindow.height,
+                                                       writeStencil)) {
+                        return false;
+                    }
+                    markFramebufferAttachmentWrite(*dstAttachment,
+                                                   kProducerCopyWrite |
+                                                   kProducerFboDepthStencilWrite);
                 }
-                markFramebufferAttachmentWrite(*dstAttachment,
-                                               kProducerCopyWrite |
-                                               kProducerFboDepthStencilWrite);
             }
         }
 
