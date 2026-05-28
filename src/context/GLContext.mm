@@ -357,6 +357,122 @@ inline bool isImageUniformType(GLenum t) {
     }
 }
 
+const char* shaderStageName(GLenum stage) {
+    switch (stage) {
+        case GL_VERTEX_SHADER:          return "vertex";
+        case GL_FRAGMENT_SHADER:        return "fragment";
+        case GL_GEOMETRY_SHADER:        return "geometry";
+        case GL_TESS_CONTROL_SHADER:    return "tess-control";
+        case GL_TESS_EVALUATION_SHADER: return "tess-evaluation";
+        case GL_COMPUTE_SHADER:         return "compute";
+        default:                        return "unknown";
+    }
+}
+
+GLenum imageUniformLimitPnameForShaderStage(GLenum stage) {
+    switch (stage) {
+        case GL_VERTEX_SHADER:          return GL_MAX_VERTEX_IMAGE_UNIFORMS;
+        case GL_FRAGMENT_SHADER:        return GL_MAX_FRAGMENT_IMAGE_UNIFORMS;
+        case GL_GEOMETRY_SHADER:        return GL_MAX_GEOMETRY_IMAGE_UNIFORMS;
+        case GL_TESS_CONTROL_SHADER:    return GL_MAX_TESS_CONTROL_IMAGE_UNIFORMS;
+        case GL_TESS_EVALUATION_SHADER: return GL_MAX_TESS_EVALUATION_IMAGE_UNIFORMS;
+        case GL_COMPUTE_SHADER:         return GL_MAX_COMPUTE_IMAGE_UNIFORMS;
+        default:                        return 0;
+    }
+}
+
+const char* imageUniformLimitNameForShaderStage(GLenum stage) {
+    switch (stage) {
+        case GL_VERTEX_SHADER:          return "GL_MAX_VERTEX_IMAGE_UNIFORMS";
+        case GL_FRAGMENT_SHADER:        return "GL_MAX_FRAGMENT_IMAGE_UNIFORMS";
+        case GL_GEOMETRY_SHADER:        return "GL_MAX_GEOMETRY_IMAGE_UNIFORMS";
+        case GL_TESS_CONTROL_SHADER:    return "GL_MAX_TESS_CONTROL_IMAGE_UNIFORMS";
+        case GL_TESS_EVALUATION_SHADER: return "GL_MAX_TESS_EVALUATION_IMAGE_UNIFORMS";
+        case GL_COMPUTE_SHADER:         return "GL_MAX_COMPUTE_IMAGE_UNIFORMS";
+        default:                        return "GL_MAX_IMAGE_UNIFORMS";
+    }
+}
+
+std::size_t declaredImageUniformCountFallback(const GLShaderObject& shader) {
+    std::size_t count = 0;
+    for (const auto& decl : shader.declaredUniforms) {
+        if (!isImageUniformType(decl.type)) continue;
+        count += static_cast<std::size_t>(std::max<GLint>(decl.arraySize, 1));
+    }
+    return count;
+}
+
+std::size_t activeImageUniformCountFromSpirv(const GLShaderObject& shader) {
+    if (shader.spirv.empty()) {
+        return declaredImageUniformCountFallback(shader);
+    }
+    try {
+        spirv_cross::Compiler compiler(shader.spirv.data(), shader.spirv.size());
+        const spirv_cross::ShaderResources resources = compiler.get_shader_resources();
+        const auto active = compiler.get_active_interface_variables();
+        std::size_t count = 0;
+        for (const auto& image : resources.storage_images) {
+            if (!active.empty() && active.find(image.id) == active.end()) {
+                continue;
+            }
+            const auto& varType = compiler.get_type(image.type_id);
+            std::size_t arrayCount = 1;
+            for (const auto dim : varType.array) {
+                arrayCount *= static_cast<std::size_t>(dim > 0 ? dim : 1);
+            }
+            count += arrayCount;
+        }
+        return count;
+    } catch (const std::exception&) {
+        return declaredImageUniformCountFallback(shader);
+    } catch (...) {
+        return declaredImageUniformCountFallback(shader);
+    }
+}
+
+bool validateLinkedImageUniformLimits(const std::vector<GLShaderObject*>& shaders,
+                                      const GLCapabilities* capabilities,
+                                      std::string& error) {
+    if (capabilities == nullptr) {
+        return true;
+    }
+
+    std::size_t combinedCount = 0;
+    for (const GLShaderObject* shader : shaders) {
+        if (shader == nullptr) continue;
+        const std::size_t stageCount = activeImageUniformCountFromSpirv(*shader);
+        combinedCount += stageCount;
+        if (stageCount == 0) continue;
+
+        const GLenum limitPname = imageUniformLimitPnameForShaderStage(shader->stage);
+        if (limitPname == 0) continue;
+        GLint limit = 0;
+        if (capabilities->queryInteger(limitPname, &limit) &&
+            limit >= 0 &&
+            stageCount > static_cast<std::size_t>(limit)) {
+            error = std::string(shaderStageName(shader->stage)) +
+                " shader active image uniform count " +
+                std::to_string(stageCount) + " exceeds " +
+                imageUniformLimitNameForShaderStage(shader->stage) + "=" +
+                std::to_string(limit);
+            return false;
+        }
+    }
+
+    GLint combinedLimit = 0;
+    if (capabilities->queryInteger(GL_MAX_COMBINED_IMAGE_UNIFORMS, &combinedLimit) &&
+        combinedLimit >= 0 &&
+        combinedCount > static_cast<std::size_t>(combinedLimit)) {
+        error = "combined active image uniform count " +
+            std::to_string(combinedCount) +
+            " exceeds GL_MAX_COMBINED_IMAGE_UNIFORMS=" +
+            std::to_string(combinedLimit);
+        return false;
+    }
+
+    return true;
+}
+
 // Phase 8X Group 4d follow-up¹¹ — §Tertiary chokepoint-bypass warning
 // helper for DSA / copy entry points that currently drop data.
 // Mirrors AppGLGroup8.cpp's `warnDataDroppedOnce`; duplicated here
@@ -30399,6 +30515,21 @@ bool GLContext::linkProgram(GLuint program) {
     {
         std::string validationError;
         if (!validateLinkedShaderStorageBlocks(attachedShaderObjects, validationError)) {
+            programObject->linkLog = std::move(validationError);
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+    }
+
+    {
+        std::string validationError;
+        if (!validateLinkedImageUniformLimits(
+                attachedShaderObjects,
+                impl_->capabilities.get(),
+                validationError)) {
             programObject->linkLog = std::move(validationError);
             programObject->linked = false;
             Runtime::shared().recordShaderTranslation({
