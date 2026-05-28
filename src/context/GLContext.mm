@@ -8220,6 +8220,15 @@ struct GLContext::Impl {
                     binding.metalTexture = resolveSwizzledTexture(*texObject);
                 }
                 binding.metalSamplerState = metalSamplerState;
+                if (texObject->target == GL_TEXTURE_BUFFER &&
+                    texObject->desc.sourceBuffer != 0) {
+                    GLBufferObject* backingBuffer =
+                        objects->buffers().get(texObject->desc.sourceBuffer);
+                    if (backingBuffer != nullptr) {
+                        binding.textureBufferBackingMetalBuffer =
+                            backingBuffer->metalBuffer;
+                    }
+                }
                 binding.reductionMode = static_cast<std::uint32_t>(effectiveReductionMode);
                 outBindings.push_back(binding);
                 const GLenum sparseSidecarTarget =
@@ -8416,6 +8425,28 @@ struct GLContext::Impl {
                     return 0;
             }
         };
+        auto bufferTextureBytesPerTexelForSamplerMap = [](GLenum fmt) -> std::uint32_t {
+            switch (fmt) {
+                case GL_R8: case GL_R8I: case GL_R8UI:
+                    return 1;
+                case GL_R16: case GL_R16I: case GL_R16UI: case GL_R16F:
+                case GL_RG8: case GL_RG8I: case GL_RG8UI:
+                    return 2;
+                case GL_R32I: case GL_R32UI: case GL_R32F:
+                case GL_RG16: case GL_RG16I: case GL_RG16UI: case GL_RG16F:
+                case GL_RGBA8: case GL_RGBA8I: case GL_RGBA8UI:
+                    return 4;
+                case GL_RG32I: case GL_RG32UI: case GL_RG32F:
+                case GL_RGBA16: case GL_RGBA16I: case GL_RGBA16UI: case GL_RGBA16F:
+                    return 8;
+                case GL_RGB32I: case GL_RGB32UI: case GL_RGB32F:
+                    return 12;
+                case GL_RGBA32I: case GL_RGBA32UI: case GL_RGBA32F:
+                    return 16;
+                default:
+                    return 0;
+            }
+        };
         for (const auto& v : vars) {
             // Match SPIR-V variable name to a reflection sampler entry
             // by name (handle CompatShaderRewrite's `_appgl_` prefix).
@@ -8525,10 +8556,76 @@ struct GLContext::Impl {
                 }
                 if (texName == 0) continue;
                 GLTextureObject* texObject = objects->textures().get(texName);
-                if (texObject == nullptr ||
-                    texObject->metalTexture == nullptr) {
+                if (texObject == nullptr) {
                     continue;
                 }
+                if (texObject->target == GL_TEXTURE_BUFFER) {
+                    const GLuint sourceBuffer = texObject->desc.sourceBuffer;
+                    GLBufferObject* bufferObject =
+                        sourceBuffer != 0 ? objects->buffers().get(sourceBuffer) : nullptr;
+                    const std::uint32_t bpp =
+                        bufferTextureBytesPerTexelForSamplerMap(
+                            texObject->desc.internalFormat);
+                    if (bufferObject == nullptr || bpp == 0) continue;
+
+                    drainPendingGpuProducers({
+                        {GpuResourceAccess::Kind::Buffer,
+                         sourceBuffer,
+                         kProducerAll}
+                    });
+
+                    const std::uint8_t* sourceBytes = nullptr;
+                    std::size_t sourceSize = 0;
+                    if (!bufferObject->shadowBytes.empty()) {
+                        sourceBytes = bufferObject->shadowBytes.data();
+                        sourceSize = bufferObject->shadowBytes.size();
+                    } else if (bufferObject->metalBuffer != nullptr) {
+                        void* contents = metalBufferContents(bufferObject->metalBuffer);
+                        if (contents != nullptr) {
+                            sourceBytes =
+                                static_cast<const std::uint8_t*>(contents);
+                            sourceSize = static_cast<std::size_t>(
+                                std::max<GLsizeiptr>(bufferObject->size, 0));
+                        }
+                    }
+                    if (sourceBytes == nullptr || sourceSize == 0) continue;
+
+                    const std::size_t rangeOffset = static_cast<std::size_t>(
+                        std::max<GLintptr>(texObject->desc.bufferOffset, 0));
+                    if (rangeOffset >= sourceSize) continue;
+                    const std::size_t declaredRangeSize = static_cast<std::size_t>(
+                        std::max<GLsizeiptr>(texObject->desc.bufferSize, 0));
+                    const std::size_t availableRangeSize =
+                        std::min<std::size_t>(declaredRangeSize,
+                                              sourceSize - rangeOffset);
+                    const std::uint32_t texelCount = static_cast<std::uint32_t>(
+                        availableRangeSize / bpp);
+                    if (texelCount == 0) continue;
+
+                    appgl::SampledTextureSlot& slot = slots[i];
+                    slot.width = texelCount;
+                    slot.height = 1;
+                    slot.depth = 0;
+                    slot.bytesPerRow = texelCount * bpp;
+                    slot.bytesPerImage = slot.bytesPerRow;
+                    slot.internalFormat = static_cast<std::uint32_t>(
+                        texObject->desc.internalFormat);
+                    slot.samplerType = samplerGLType;
+                    const std::size_t packedBytes =
+                        static_cast<std::size_t>(texelCount) * bpp;
+                    slot.data.assign(sourceBytes + rangeOffset,
+                                     sourceBytes + rangeOffset + packedBytes);
+                    if (trace) {
+                        std::fprintf(stderr,
+                            "[GS-tex]   texture-buffer snapshot tex=%u buf=%u "
+                            "fmt=0x%X offset=%zu bytes=%zu texels=%u\n",
+                            texName, sourceBuffer,
+                            texObject->desc.internalFormat,
+                            rangeOffset, packedBytes, texelCount);
+                    }
+                    continue;
+                }
+                if (texObject->metalTexture == nullptr) continue;
                 if (texObject->viewSourceTexture != 0) {
                     // Texture views require exact byte reinterpretation.
                     // Metal getBytes on a pixel-format view can expose
@@ -45763,6 +45860,15 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             ComputeDispatchInfo::TextureBinding tb;
             tb.metalTexture = texObj->metalTexture;
             tb.metalSamplerState = texObj->metalSampler;
+            if (texObj->target == GL_TEXTURE_BUFFER &&
+                texObj->desc.sourceBuffer != 0) {
+                GLBufferObject* backingBuffer =
+                    impl_->objects->buffers().get(texObj->desc.sourceBuffer);
+                if (backingBuffer != nullptr) {
+                    tb.textureBufferBackingMetalBuffer =
+                        backingBuffer->metalBuffer;
+                }
+            }
             tb.metalSlot = samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
             info.textures.push_back(tb);
             if (usesMSSampledSidecars &&
@@ -46309,6 +46415,15 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             ComputeDispatchInfo::TextureBinding tb;
             tb.metalTexture = texObj->metalTexture;
             tb.metalSamplerState = texObj->metalSampler;
+            if (texObj->target == GL_TEXTURE_BUFFER &&
+                texObj->desc.sourceBuffer != 0) {
+                GLBufferObject* backingBuffer =
+                    impl_->objects->buffers().get(texObj->desc.sourceBuffer);
+                if (backingBuffer != nullptr) {
+                    tb.textureBufferBackingMetalBuffer =
+                        backingBuffer->metalBuffer;
+                }
+            }
             tb.metalSlot = samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
             info.textures.push_back(tb);
             if (usesMSSampledSidecarsIndirect &&

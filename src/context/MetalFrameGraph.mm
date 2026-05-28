@@ -3577,11 +3577,19 @@ struct MetalFrameGraph::Impl {
                     const NSUInteger idIdx = static_cast<NSUInteger>(binding.metalSlot);
                     [encoder setTexture:tex atIndex:idIdx];
                     MTLResourceUsage usage = MTLResourceUsageRead;
-                    if (binding.metalSamplerState != nullptr) {
+                    // SPIRV-Cross lowers samplerBuffer to a texel-fetch
+                    // texture2d member only. There is no sampler member in
+                    // the argument-buffer struct, unlike ordinary sampled
+                    // textures, so do not write metalSlot+1 for buffer
+                    // textures.
+                    const bool usesSamplerArgument =
+                        binding.metalSamplerState != nullptr &&
+                        binding.textureBufferBackingMetalBuffer == nullptr;
+                    if (usesSamplerArgument) {
                         id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)binding.metalSamplerState;
                         [encoder setSamplerState:smp atIndex:idIdx + 1];
                         usage |= MTLResourceUsageSample;
-                    } else {
+                    } else if (binding.metalSamplerState == nullptr) {
                         // Storage image — add write usage since imageStore
                         // may fire. Direct-binding's path set ShaderWrite
                         // via MTLTextureUsage when the texture was created;
@@ -3596,6 +3604,15 @@ struct MetalFrameGraph::Impl {
                     [currentRenderEncoder useResource:tex
                                                 usage:usage
                                                stages:stage];
+                    if (binding.textureBufferBackingMetalBuffer != nullptr) {
+                        id<MTLBuffer> backingBuffer =
+                            (__bridge id<MTLBuffer>)binding.textureBufferBackingMetalBuffer;
+                        if (backingBuffer != nil) {
+                            [currentRenderEncoder useResource:backingBuffer
+                                                        usage:MTLResourceUsageRead
+                                                       stages:stage];
+                        }
+                    }
                 }
                 // SSBOs (graphics stage) — `info.ssboBindings` stage-
                 // filtered. Under argbuf reflection SSBOs live at
@@ -8629,15 +8646,28 @@ fragment float4 appgl_immediate_textured_fs(
                             [argEncSet0 setTexture:tex
                                            atIndex:static_cast<NSUInteger>(tb.metalSlot)];
                             MTLResourceUsage usage = MTLResourceUsageRead;
-                            if (tb.metalSamplerState != nullptr) {
+                            // samplerBuffer mirrors the graphics argbuf
+                            // path: texture member only, no sampler slot.
+                            const bool usesSamplerArgument =
+                                tb.metalSamplerState != nullptr &&
+                                tb.textureBufferBackingMetalBuffer == nullptr;
+                            if (usesSamplerArgument) {
                                 id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)tb.metalSamplerState;
                                 [argEncSet0 setSamplerState:smp
                                                     atIndex:static_cast<NSUInteger>(tb.metalSlot) + 1];
                                 usage |= MTLResourceUsageSample;
-                            } else {
+                            } else if (tb.metalSamplerState == nullptr) {
                                 usage |= MTLResourceUsageWrite;
                             }
                             [enc useResource:tex usage:usage];
+                            if (tb.textureBufferBackingMetalBuffer != nullptr) {
+                                id<MTLBuffer> backingBuffer =
+                                    (__bridge id<MTLBuffer>)tb.textureBufferBackingMetalBuffer;
+                                if (backingBuffer != nil) {
+                                    [enc useResource:backingBuffer
+                                              usage:MTLResourceUsageRead];
+                                }
+                            }
                         }
                         // The GL default-uniform block lives at Metal slot
                         // `makeComputeBindingMap().uniformBufferBase` in both

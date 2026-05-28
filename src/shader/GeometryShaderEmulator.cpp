@@ -279,6 +279,300 @@ float imageSnorm16(std::int16_t v) {
     return std::max(static_cast<float>(v) / 32767.0f, -1.0f);
 }
 
+std::uint32_t sampledTextureBytesPerTexel(std::uint32_t fmt) {
+    switch (fmt) {
+        case GL_R8: case GL_R8I: case GL_R8UI:
+            return 1;
+        case GL_R16: case GL_R16I: case GL_R16UI: case GL_R16F:
+        case GL_RG8: case GL_RG8I: case GL_RG8UI:
+            return 2;
+        case GL_R32I: case GL_R32UI: case GL_R32F:
+        case GL_RG16: case GL_RG16I: case GL_RG16UI: case GL_RG16F:
+        case GL_RGBA8: case GL_RGBA8I: case GL_RGBA8UI:
+        case GL_R11F_G11F_B10F: case GL_RGB10_A2: case GL_RGB10_A2UI:
+        case GL_RGB9_E5:
+            return 4;
+        case GL_RG32I: case GL_RG32UI: case GL_RG32F:
+        case GL_RGBA16: case GL_RGBA16I: case GL_RGBA16UI:
+        case GL_RGBA16F:
+            return 8;
+        case GL_RGB32I: case GL_RGB32UI: case GL_RGB32F:
+            return 12;
+        case GL_RGBA32I: case GL_RGBA32UI: case GL_RGBA32F:
+            return 16;
+        default:
+            return 4;
+    }
+}
+
+Value decodeSampledTextureTexel(const SampledTextureSlot& slot,
+                                const std::uint8_t* p,
+                                std::size_t available) {
+    Value out{};
+    if (p == nullptr || available == 0) {
+        out.kind = Value::Kind::UInt4;
+        return out;
+    }
+    std::uint32_t raw = 0;
+    std::memcpy(&raw, p, std::min<std::size_t>(sizeof(raw), available));
+    auto have = [&](std::size_t bytes) -> bool {
+        return bytes <= available;
+    };
+    auto readU8 = [&](int component) -> std::uint8_t {
+        const std::size_t off = static_cast<std::size_t>(component);
+        return have(off + 1u) ? p[off] : 0u;
+    };
+    auto readI8 = [&](int component) -> std::int8_t {
+        return static_cast<std::int8_t>(readU8(component));
+    };
+    auto readU16 = [&](int component) -> std::uint16_t {
+        std::uint16_t v16 = 0;
+        const std::size_t off = static_cast<std::size_t>(component) * 2u;
+        if (have(off + sizeof(v16))) {
+            std::memcpy(&v16, p + off, sizeof(v16));
+        }
+        return v16;
+    };
+    auto readI16 = [&](int component) -> std::int16_t {
+        return static_cast<std::int16_t>(readU16(component));
+    };
+    auto readU32 = [&](int component) -> std::uint32_t {
+        std::uint32_t v32 = 0;
+        const std::size_t off = static_cast<std::size_t>(component) * 4u;
+        if (have(off + sizeof(v32))) {
+            std::memcpy(&v32, p + off, sizeof(v32));
+        }
+        return v32;
+    };
+    auto readI32 = [&](int component) -> std::int32_t {
+        return static_cast<std::int32_t>(readU32(component));
+    };
+    auto readF32 = [&](int component) -> float {
+        float f = 0.0f;
+        const std::uint32_t bits = readU32(component);
+        std::memcpy(&f, &bits, sizeof(f));
+        return f;
+    };
+
+    switch (slot.internalFormat) {
+        case GL_R8:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = static_cast<float>(readU8(0)) / 255.0f;
+            out.f[1] = 0.0f; out.f[2] = 0.0f; out.f[3] = 1.0f;
+            break;
+        case GL_RG8:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = static_cast<float>(readU8(0)) / 255.0f;
+            out.f[1] = static_cast<float>(readU8(1)) / 255.0f;
+            out.f[2] = 0.0f; out.f[3] = 1.0f;
+            break;
+        case GL_RGBA8:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = static_cast<float>(readU8(0)) / 255.0f;
+            out.f[1] = static_cast<float>(readU8(1)) / 255.0f;
+            out.f[2] = static_cast<float>(readU8(2)) / 255.0f;
+            out.f[3] = static_cast<float>(readU8(3)) / 255.0f;
+            break;
+        case GL_R16:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = static_cast<float>(readU16(0)) / 65535.0f;
+            out.f[1] = 0.0f; out.f[2] = 0.0f; out.f[3] = 1.0f;
+            break;
+        case GL_RG16:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = static_cast<float>(readU16(0)) / 65535.0f;
+            out.f[1] = static_cast<float>(readU16(1)) / 65535.0f;
+            out.f[2] = 0.0f; out.f[3] = 1.0f;
+            break;
+        case GL_RGBA16:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = static_cast<float>(readU16(0)) / 65535.0f;
+            out.f[1] = static_cast<float>(readU16(1)) / 65535.0f;
+            out.f[2] = static_cast<float>(readU16(2)) / 65535.0f;
+            out.f[3] = static_cast<float>(readU16(3)) / 65535.0f;
+            break;
+        case GL_R16F:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = imageHalfToFloat(readU16(0));
+            out.f[1] = 0.0f; out.f[2] = 0.0f; out.f[3] = 1.0f;
+            break;
+        case GL_RG16F:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = imageHalfToFloat(readU16(0));
+            out.f[1] = imageHalfToFloat(readU16(1));
+            out.f[2] = 0.0f; out.f[3] = 1.0f;
+            break;
+        case GL_RGBA16F:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = imageHalfToFloat(readU16(0));
+            out.f[1] = imageHalfToFloat(readU16(1));
+            out.f[2] = imageHalfToFloat(readU16(2));
+            out.f[3] = imageHalfToFloat(readU16(3));
+            break;
+        case GL_R32F:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = readF32(0);
+            out.f[1] = 0.0f; out.f[2] = 0.0f; out.f[3] = 1.0f;
+            break;
+        case GL_RG32F:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = readF32(0); out.f[1] = readF32(1);
+            out.f[2] = 0.0f; out.f[3] = 1.0f;
+            break;
+        case GL_RGB32F:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = readF32(0); out.f[1] = readF32(1);
+            out.f[2] = readF32(2); out.f[3] = 1.0f;
+            break;
+        case GL_RGBA32F:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = readF32(0); out.f[1] = readF32(1);
+            out.f[2] = readF32(2); out.f[3] = readF32(3);
+            break;
+        case GL_R8I:
+            out.kind = Value::Kind::Int4;
+            out.i[0] = readI8(0);
+            out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
+            break;
+        case GL_RG8I:
+            out.kind = Value::Kind::Int4;
+            out.i[0] = readI8(0); out.i[1] = readI8(1);
+            out.i[2] = 0; out.i[3] = 1;
+            break;
+        case GL_RGBA8I:
+            out.kind = Value::Kind::Int4;
+            out.i[0] = readI8(0); out.i[1] = readI8(1);
+            out.i[2] = readI8(2); out.i[3] = readI8(3);
+            break;
+        case GL_R16I:
+            out.kind = Value::Kind::Int4;
+            out.i[0] = readI16(0);
+            out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
+            break;
+        case GL_RG16I:
+            out.kind = Value::Kind::Int4;
+            out.i[0] = readI16(0); out.i[1] = readI16(1);
+            out.i[2] = 0; out.i[3] = 1;
+            break;
+        case GL_RGBA16I:
+            out.kind = Value::Kind::Int4;
+            out.i[0] = readI16(0); out.i[1] = readI16(1);
+            out.i[2] = readI16(2); out.i[3] = readI16(3);
+            break;
+        case GL_R32I:
+            out.kind = Value::Kind::Int4;
+            out.i[0] = readI32(0);
+            out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
+            break;
+        case GL_RG32I:
+            out.kind = Value::Kind::Int4;
+            out.i[0] = readI32(0); out.i[1] = readI32(1);
+            out.i[2] = 0; out.i[3] = 1;
+            break;
+        case GL_RGB32I:
+            out.kind = Value::Kind::Int4;
+            out.i[0] = readI32(0); out.i[1] = readI32(1);
+            out.i[2] = readI32(2); out.i[3] = 1;
+            break;
+        case GL_RGBA32I:
+            out.kind = Value::Kind::Int4;
+            out.i[0] = readI32(0); out.i[1] = readI32(1);
+            out.i[2] = readI32(2); out.i[3] = readI32(3);
+            break;
+        case GL_R8UI:
+            out.kind = Value::Kind::UInt4;
+            out.i[0] = readU8(0);
+            out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
+            break;
+        case GL_RG8UI:
+            out.kind = Value::Kind::UInt4;
+            out.i[0] = readU8(0); out.i[1] = readU8(1);
+            out.i[2] = 0; out.i[3] = 1;
+            break;
+        case GL_RGBA8UI:
+            out.kind = Value::Kind::UInt4;
+            out.i[0] = readU8(0); out.i[1] = readU8(1);
+            out.i[2] = readU8(2); out.i[3] = readU8(3);
+            break;
+        case GL_R16UI:
+            out.kind = Value::Kind::UInt4;
+            out.i[0] = readU16(0);
+            out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
+            break;
+        case GL_RG16UI:
+            out.kind = Value::Kind::UInt4;
+            out.i[0] = readU16(0); out.i[1] = readU16(1);
+            out.i[2] = 0; out.i[3] = 1;
+            break;
+        case GL_RGBA16UI:
+            out.kind = Value::Kind::UInt4;
+            out.i[0] = readU16(0); out.i[1] = readU16(1);
+            out.i[2] = readU16(2); out.i[3] = readU16(3);
+            break;
+        case GL_R32UI:
+            out.kind = Value::Kind::UInt4;
+            out.i[0] = static_cast<std::int32_t>(readU32(0));
+            out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
+            break;
+        case GL_RG32UI:
+            out.kind = Value::Kind::UInt4;
+            out.i[0] = static_cast<std::int32_t>(readU32(0));
+            out.i[1] = static_cast<std::int32_t>(readU32(1));
+            out.i[2] = 0; out.i[3] = 1;
+            break;
+        case GL_RGB32UI:
+            out.kind = Value::Kind::UInt4;
+            out.i[0] = static_cast<std::int32_t>(readU32(0));
+            out.i[1] = static_cast<std::int32_t>(readU32(1));
+            out.i[2] = static_cast<std::int32_t>(readU32(2));
+            out.i[3] = 1;
+            break;
+        case GL_RGBA32UI:
+            out.kind = Value::Kind::UInt4;
+            out.i[0] = static_cast<std::int32_t>(readU32(0));
+            out.i[1] = static_cast<std::int32_t>(readU32(1));
+            out.i[2] = static_cast<std::int32_t>(readU32(2));
+            out.i[3] = static_cast<std::int32_t>(readU32(3));
+            break;
+        case GL_R11F_G11F_B10F:
+            out.kind = Value::Kind::Float4;
+            decodeImageRG11B10F(raw, out.f[0], out.f[1], out.f[2]);
+            out.f[3] = 1.0f;
+            break;
+        case GL_RGB9_E5: {
+            out.kind = Value::Kind::Float4;
+            const std::uint32_t exp = (raw >> 27) & 0x1Fu;
+            const float scale =
+                std::ldexp(1.0f, static_cast<int>(exp) - 24);
+            out.f[0] = static_cast<float>((raw >> 0) & 0x1FFu) * scale;
+            out.f[1] = static_cast<float>((raw >> 9) & 0x1FFu) * scale;
+            out.f[2] = static_cast<float>((raw >> 18) & 0x1FFu) * scale;
+            out.f[3] = 1.0f;
+            break;
+        }
+        case GL_RGB10_A2:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = static_cast<float>((raw >> 0) & 0x3FFu) / 1023.0f;
+            out.f[1] = static_cast<float>((raw >> 10) & 0x3FFu) / 1023.0f;
+            out.f[2] = static_cast<float>((raw >> 20) & 0x3FFu) / 1023.0f;
+            out.f[3] = static_cast<float>((raw >> 30) & 0x3u) / 3.0f;
+            break;
+        case GL_RGB10_A2UI:
+            out.kind = Value::Kind::UInt4;
+            out.i[0] = static_cast<std::int32_t>((raw >> 0) & 0x3FFu);
+            out.i[1] = static_cast<std::int32_t>((raw >> 10) & 0x3FFu);
+            out.i[2] = static_cast<std::int32_t>((raw >> 20) & 0x3FFu);
+            out.i[3] = static_cast<std::int32_t>((raw >> 30) & 0x3u);
+            break;
+        default:
+            out.kind = Value::Kind::UInt4;
+            out.i[0] = static_cast<std::int32_t>(raw);
+            out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
+            break;
+    }
+    return out;
+}
+
 // ─── Interpreter ────────────────────────────────────────────────────
 
 class Interpreter {
@@ -5435,66 +5729,35 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     ix = pickI(0);
                     iy = pickI(1);
                 }
-                std::uint32_t u = 0;
-                std::uint32_t v = 0;
                 const bool isBufferSampler =
                     slot.samplerType == GL_SAMPLER_BUFFER ||
                     slot.samplerType == GL_INT_SAMPLER_BUFFER ||
                     slot.samplerType == GL_UNSIGNED_INT_SAMPLER_BUFFER;
-                if (isBufferSampler) {
-                    const std::uint32_t idx = ix < 0 ? 0u : static_cast<std::uint32_t>(ix);
-                    u = idx % 8192u;
-                    v = idx / 8192u;
-                } else {
-                    u = ix < 0 ? 0u : static_cast<std::uint32_t>(ix);
-                    v = iy < 0 ? 0u : static_cast<std::uint32_t>(iy);
-                }
+                const std::uint32_t texelBytes =
+                    sampledTextureBytesPerTexel(slot.internalFormat);
                 Value out{};
-                const std::uint32_t bpr =
-                    slot.bytesPerRow != 0 ? slot.bytesPerRow : slot.width * 4u;
-                const std::size_t off =
-                    static_cast<std::size_t>(v) * bpr +
-                    static_cast<std::size_t>(u) * 4u;
-                if (off + 4 <= slot.data.size()) {
-                    std::uint32_t raw = 0;
-                    std::memcpy(&raw, slot.data.data() + off, 4);
-                    switch (slot.internalFormat) {
-                        case 0x8236: { // GL_R32UI
-                            out.kind = Value::Kind::UInt4;
-                            out.i[0] = static_cast<std::int32_t>(raw);
-                            out.i[1] = 0; out.i[2] = 0;
-                            out.i[3] = static_cast<std::int32_t>(1u);
-                            break;
-                        }
-                        case 0x8235: { // GL_R32I
-                            out.kind = Value::Kind::Int4;
-                            out.i[0] = static_cast<std::int32_t>(raw);
-                            out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
-                            break;
-                        }
-                        case 0x822E: { // GL_R32F
-                            out.kind = Value::Kind::Float4;
-                            std::memcpy(&out.f[0], &raw, 4);
-                            out.f[1] = 0.0f; out.f[2] = 0.0f;
-                            out.f[3] = 1.0f;
-                            break;
-                        }
-                        case 0x8058: { // GL_RGBA8
-                            const std::uint8_t* p = slot.data.data() + off;
-                            out.kind = Value::Kind::Float4;
-                            out.f[0] = p[0] / 255.0f;
-                            out.f[1] = p[1] / 255.0f;
-                            out.f[2] = p[2] / 255.0f;
-                            out.f[3] = p[3] / 255.0f;
-                            break;
-                        }
-                        default: {
-                            out.kind = Value::Kind::UInt4;
-                            out.i[0] = static_cast<std::int32_t>(raw);
-                            out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
-                            break;
-                        }
-                    }
+                std::size_t off = 0;
+                if (isBufferSampler) {
+                    const std::uint32_t idx =
+                        ix < 0 ? 0u : static_cast<std::uint32_t>(ix);
+                    off = static_cast<std::size_t>(idx) * texelBytes;
+                } else {
+                    const std::uint32_t u =
+                        ix < 0 ? 0u : static_cast<std::uint32_t>(ix);
+                    const std::uint32_t v =
+                        iy < 0 ? 0u : static_cast<std::uint32_t>(iy);
+                    const std::uint32_t bpr = slot.bytesPerRow != 0
+                        ? slot.bytesPerRow
+                        : slot.width * texelBytes;
+                    off = static_cast<std::size_t>(v) * bpr +
+                          static_cast<std::size_t>(u) * texelBytes;
+                }
+                if (texelBytes != 0 && off < slot.data.size()) {
+                    const std::size_t available =
+                        std::min<std::size_t>(texelBytes,
+                                              slot.data.size() - off);
+                    out = decodeSampledTextureTexel(
+                        slot, slot.data.data() + off, available);
                 } else {
                     out.kind = Value::Kind::UInt4;
                 }
