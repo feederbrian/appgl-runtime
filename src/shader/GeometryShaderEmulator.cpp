@@ -3297,8 +3297,16 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                                         // don't seed (avoids the gl_PerVertex
                                         // implicit-copy interference that CKPT71
                                         // observed for non-pointsize sub-runs).
+                                        //
+                                        // E1: Geometry gl_in[] needs the same VS
+                                        // point-size seed for
+                                        // geometry_shader.input.gl_pointsize_value;
+                                        // otherwise a GS that scales the incoming
+                                        // point size writes 0 and the replay VS falls
+                                        // back to the fixed 1px size.
                                         if (memW > 0 && base + runningOff < storage.size() &&
-                                            (stage_ == Stage::TessEvaluation ||
+                                            (stage_ == Stage::Geometry ||
+                                             stage_ == Stage::TessEvaluation ||
                                              stage_ == Stage::TessControl)) {
                                             storage[base + runningOff] = inputs[vi].pointSize;
                                         }
@@ -11145,6 +11153,11 @@ EmulatedDraw emulateGeometryDraw(
                 // arrays so a passthrough GS can copy them through.
                 allVertexInputs[vi].clipDistance = std::move(vsOut.clipDistance);
                 allVertexInputs[vi].cullDistance = std::move(vsOut.cullDistance);
+                // Same handoff for gl_PointSize: the GS gl_in[] seeding
+                // path consumes PerVertexInput.pointSize, so preserve the
+                // value captured by the VS pre-pass instead of leaving the
+                // default 1.0 in place.
+                allVertexInputs[vi].pointSize = vsOut.pointSize;
             }
         }
 
