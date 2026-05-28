@@ -232,6 +232,41 @@ bool spirvTypeNameLooksAtomicCounterBlock(const SpirvModule& mod,
            name.find("atomicCounter") != std::string::npos;
 }
 
+bool parseAtomicCounterBlockBindingName(const std::string& name,
+                                        std::uint32_t& binding) {
+    const char* needle = "AtomicCounterBlock_";
+    const std::size_t pos = name.find(needle);
+    if (pos == std::string::npos) return false;
+    const std::size_t start = pos + std::strlen(needle);
+    if (start >= name.size() ||
+        !std::isdigit(static_cast<unsigned char>(name[start]))) {
+        return false;
+    }
+    char* end = nullptr;
+    const unsigned long value = std::strtoul(name.c_str() + start, &end, 10);
+    if (end == name.c_str() + start) return false;
+    binding = static_cast<std::uint32_t>(value);
+    return true;
+}
+
+// glslang's OpenGL atomic-counter lowering can expose every
+// gl_AtomicCounterBlock_N variable with DecorationBinding=0 while encoding
+// the original GL binding in the block name. The CPU interpreter must recover
+// that N so separate counter/calls buffers do not alias in GS emulation.
+bool atomicCounterBlockBindingFromSpirvName(const SpirvModule& mod,
+                                           std::uint32_t varId,
+                                           std::uint32_t pointeeTypeId,
+                                           std::uint32_t& binding) {
+    auto varNameIt = mod.names.find(varId);
+    if (varNameIt != mod.names.end() &&
+        parseAtomicCounterBlockBindingName(varNameIt->second, binding)) {
+        return true;
+    }
+    auto typeNameIt = mod.names.find(pointeeTypeId);
+    return typeNameIt != mod.names.end() &&
+           parseAtomicCounterBlockBindingName(typeNameIt->second, binding);
+}
+
 float imageHalfToFloat(std::uint16_t h) {
     const std::uint32_t sign = (static_cast<std::uint32_t>(h & 0x8000u)) << 16;
     int exp = static_cast<int>((h >> 10) & 0x1Fu);
@@ -1301,18 +1336,26 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
             rootBinding = dIt->second.binding;
         }
     } else if (rootIsAtomicCounter) {
+        std::uint32_t parsedBinding = 0;
+        const bool parsedBindingKnown = atomicCounterBlockBindingFromSpirvName(
+            module_, base, tIt->second.pointeeType, parsedBinding);
+        if (parsedBindingKnown) {
+            rootBinding = kAtomicCounterStorageBindingBase + parsedBinding;
+        }
         auto dIt = module_.decorations.find(base);
         if (dIt != module_.decorations.end()) {
             if (dIt->second.hasBinding) {
-                rootBinding = kAtomicCounterStorageBindingBase +
-                              dIt->second.binding;
-            } else {
+                if (!parsedBindingKnown) {
+                    rootBinding = kAtomicCounterStorageBindingBase +
+                                  dIt->second.binding;
+                }
+            } else if (rootBinding == 0) {
                 rootBinding = kAtomicCounterStorageBindingBase;
             }
             if (dIt->second.hasOffset) {
                 rootByteOffset = dIt->second.offset;
             }
-        } else {
+        } else if (rootBinding == 0) {
             rootBinding = kAtomicCounterStorageBindingBase;
         }
     }
