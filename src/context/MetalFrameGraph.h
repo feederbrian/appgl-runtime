@@ -769,6 +769,9 @@ struct MetalTessDrawInfo {
 
     // Cached MSL sources for rebuilding the render pipeline on FBO
     // format changes. Non-owning; must outlive the encode call.
+    const std::string* tessControlMSL = nullptr;
+    const std::string* tessVertexAsComputeMSL = nullptr;
+    const std::string* tessEvalAsComputeMSL = nullptr;
     const std::string* tessEvalMSL = nullptr;
     const std::string* fragmentMSL = nullptr;
 

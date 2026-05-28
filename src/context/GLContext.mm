@@ -39336,6 +39336,9 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     // slot is ignored and the render path runs unchanged.
     info.tessEvalComputePipelineState =
         program.metalTessEvalComputePipelineState;
+    info.tessControlMSL = &program.tessControlMSL;
+    info.tessVertexAsComputeMSL = &program.tessVertexAsComputeMSL;
+    info.tessEvalAsComputeMSL = &program.tessEvalAsComputeMSL;
     info.tessEvalMSL = &program.tessEvalMSL;
     info.fragmentMSL = &program.fragmentMSL;
     info.patchCount = patchCount;

@@ -6459,6 +6459,101 @@ fragment float4 appgl_immediate_textured_fs(
                     }
                 }
             };
+        auto mslUsesArgumentBufferSet =
+            [](const std::string* msl, unsigned set) -> bool {
+                if (msl == nullptr) {
+                    return false;
+                }
+                char needle[64];
+                std::snprintf(needle, sizeof(needle),
+                              "spvDescriptorSetBuffer%u", set);
+                return msl->find(needle) != std::string::npos;
+            };
+        auto bindComputeUniformSet1ArgBuffer =
+            [&](id<MTLComputeCommandEncoder> encoder,
+                const std::string* msl,
+                const void* uniformData,
+                std::size_t uniformSize,
+                AppGLCommandReason reason) -> bool {
+                if (!mslUsesArgumentBufferSet(msl, 1)) {
+                    return true;
+                }
+                if (encoder == nil || msl == nullptr || msl->empty()) {
+                    return false;
+                }
+                if (uniformData == nullptr || uniformSize == 0) {
+                    return true;
+                }
+
+                id<MTLLibrary> lib = getOrCompileLibrary(*msl);
+                if (lib == nil) {
+                    return false;
+                }
+                MTLFunctionConstantValues* emptyConstants =
+                    [[MTLFunctionConstantValues alloc] init];
+                ScopedOwnedObjCObject emptyConstantsRelease(emptyConstants);
+                NSError* fnErr = nil;
+                id<MTLFunction> fn = [lib newFunctionWithName:@"main0"
+                                                constantValues:emptyConstants
+                                                         error:&fnErr];
+                if (fn == nil) {
+                    if (std::getenv("APPGL_TRACE_SHADER_BUILD")) {
+                        std::fprintf(stderr,
+                            "[APPGL] tess compute function build failed: %s\n",
+                            fnErr ? fnErr.localizedDescription.UTF8String : "(no err)");
+                    }
+                    return false;
+                }
+                ScopedOwnedObjCObject fnRelease(fn);
+                id<MTLArgumentEncoder> argEnc =
+                    [fn newArgumentEncoderWithBufferIndex:25];
+                if (argEnc == nil) {
+                    return false;
+                }
+                ScopedOwnedObjCObject argEncRelease(argEnc);
+                const NSUInteger len = [argEnc encodedLength];
+                if (len == 0) {
+                    return true;
+                }
+
+                RingAlloc argBufAlloc = ringAllocRaw(len);
+                id<MTLBuffer> argBuf = argBufAlloc.buffer;
+                const NSUInteger argBufOffset = argBufAlloc.offset;
+                if (argBuf == nil) {
+                    return false;
+                }
+                info.submissionGroup.addTransient(
+                    AppGLSubmissionTransientKind::ArgumentBufferPayload,
+                    AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
+                    reason,
+                    25,
+                    static_cast<std::size_t>(len));
+                [argEnc setArgumentBuffer:argBuf offset:argBufOffset];
+
+                RingAlloc uniformAlloc =
+                    ringSuballocate(uniformData, uniformSize);
+                if (uniformAlloc.buffer == nil) {
+                    return false;
+                }
+                info.submissionGroup.addTransient(
+                    AppGLSubmissionTransientKind::UniformRingBytes,
+                    AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
+                    reason,
+                    16,
+                    static_cast<std::size_t>(uniformSize));
+                [argEnc setBuffer:uniformAlloc.buffer
+                            offset:uniformAlloc.offset
+                           atIndex:16];
+                [encoder setBuffer:argBuf offset:argBufOffset atIndex:25];
+                [encoder useResource:uniformAlloc.buffer
+                                usage:MTLResourceUsageRead];
+                return true;
+            };
+        info.submissionGroup.argumentBuffersEnabled =
+            info.submissionGroup.argumentBuffersEnabled ||
+            mslUsesArgumentBufferSet(info.tessControlMSL, 1) ||
+            mslUsesArgumentBufferSet(info.tessVertexAsComputeMSL, 1) ||
+            mslUsesArgumentBufferSet(info.tessEvalAsComputeMSL, 1);
 
         // (1) Drain any prior state so compute runs against a clean
         // command buffer and subsequent render-pass reads see the
@@ -6695,8 +6790,18 @@ fragment float4 appgl_immediate_textured_fs(
                 (__bridge id<MTLComputePipelineState>)info.vertexComputePipelineState;
             [vsEnc setComputePipelineState:vsPSO];
             [vsEnc setBuffer:vsOutBuf offset:0 atIndex:28];
+            const bool vsUniformUsesArgBuf =
+                mslUsesArgumentBufferSet(info.tessVertexAsComputeMSL, 1);
+            if (!bindComputeUniformSet1ArgBuffer(
+                    vsEnc, info.tessVertexAsComputeMSL,
+                    info.tessVertexAsComputeUniformData,
+                    info.tessVertexAsComputeUniformSize,
+                    AppGLCommandReason::TessVertexCompute)) {
+                return false;
+            }
             if (info.tessVertexAsComputeUniformData != nullptr &&
-                info.tessVertexAsComputeUniformSize > 0) {
+                info.tessVertexAsComputeUniformSize > 0 &&
+                !vsUniformUsesArgBuf) {
                 [vsEnc setBytes:info.tessVertexAsComputeUniformData
                          length:info.tessVertexAsComputeUniformSize
                         atIndex:16];
@@ -6800,8 +6905,18 @@ fragment float4 appgl_immediate_textured_fs(
         // buffer at slot 23. TCS-compute dual-writes (half + full).
         [cenc setBuffer:factorBufFull offset:0 atIndex:23];
         [cenc setBuffer:indirectBuf offset:0 atIndex:29];
+        const bool tcsUniformUsesArgBuf =
+            mslUsesArgumentBufferSet(info.tessControlMSL, 1);
+        if (!bindComputeUniformSet1ArgBuffer(
+                cenc, info.tessControlMSL,
+                info.tessControlUniformData,
+                info.tessControlUniformSize,
+                AppGLCommandReason::TessControlCompute)) {
+            return false;
+        }
         if (info.tessControlUniformData != nullptr &&
-            info.tessControlUniformSize > 0) {
+            info.tessControlUniformSize > 0 &&
+            !tcsUniformUsesArgBuf) {
             [cenc setBytes:info.tessControlUniformData
                     length:info.tessControlUniformSize
                    atIndex:16];
