@@ -9460,7 +9460,19 @@ struct GLContext::Impl {
                     0u);
                 MTLRegion region = MTLRegionMake2D(0, 0, slot.width, slot.height);
                 @try {
-                    if (sliceCount > 1) {
+                    if (mtlTex.textureType == MTLTextureType3D) {
+                        MTLRegion region3D =
+                            MTLRegionMake3D(0, 0, 0,
+                                            slot.width,
+                                            slot.height,
+                                            sliceCount);
+                        [mtlTex getBytes:slot.data.data()
+                             bytesPerRow:slot.bytesPerRow
+                           bytesPerImage:slot.bytesPerImage
+                              fromRegion:region3D
+                             mipmapLevel:static_cast<NSUInteger>(boundLevel)
+                                   slice:0];
+                    } else if (sliceCount > 1) {
                         for (NSUInteger slice = 0; slice < sliceCount; ++slice) {
                             [mtlTex getBytes:slot.data.data() +
                                               static_cast<std::size_t>(slice) *
@@ -24822,6 +24834,7 @@ void GLContext::Impl::flushPendingImageWritesForStage(
         if (matchingVar == nullptr) continue;
         // Find reflection storage-image entry by name.
         const ShaderReflection::ResourceBinding* imgRefl = nullptr;
+        ShaderReflection::ResourceBinding fallbackRefl;
         for (const auto& si : reflection->storageImages) {
             if (si.name == matchingVar->name) {
                 imgRefl = &si;
@@ -24835,21 +24848,37 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                 break;
             }
         }
-        if (imgRefl == nullptr) continue;
-        // Resolve effective unit: layout binding default + element index,
-        // optionally overridden by glUniform1i (mirror of
-        // buildStorageImageMap's logic).
         std::string lookupName = matchingVar->name;
         constexpr const char* kPrefix = "_appgl_";
         constexpr std::size_t kPrefixLen = 7;
         if (lookupName.compare(0, kPrefixLen, kPrefix) == 0) {
             lookupName = lookupName.substr(kPrefixLen);
         }
+        const GLProgramUniformInfo* uniformInfo = nullptr;
+        for (const auto& uinfo : program.uniforms) {
+            if (uinfo.name == lookupName) {
+                uniformInfo = &uinfo;
+                break;
+            }
+        }
+        if (imgRefl == nullptr &&
+            uniformInfo != nullptr &&
+            isImageUniformType(uniformInfo->type)) {
+            fallbackRefl.name = lookupName;
+            fallbackRefl.glBinding =
+                uniformInfo->explicitBinding >= 0
+                    ? static_cast<GLuint>(uniformInfo->explicitBinding)
+                    : 0u;
+            imgRefl = &fallbackRefl;
+        }
+        if (imgRefl == nullptr) continue;
+        // Resolve effective unit: layout binding default + element index,
+        // optionally overridden by glUniform1i (mirror of
+        // buildStorageImageMap's logic).
         GLuint effUnit = imgRefl->glBinding +
                           static_cast<GLuint>(pw.elementIdx);
-        for (const auto& uinfo : program.uniforms) {
-            if (uinfo.name != lookupName) continue;
-            auto uvIt = program.uniformValues.find(uinfo.location);
+        if (uniformInfo != nullptr) {
+            auto uvIt = program.uniformValues.find(uniformInfo->location);
             if (uvIt != program.uniformValues.end() &&
                 pw.elementIdx <
                     static_cast<std::uint32_t>(uvIt->second.ints.size())) {
@@ -24858,7 +24887,6 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                         uvIt->second.ints[pw.elementIdx]);
                 }
             }
-            break;
         }
         if (effUnit >= kMaxImageUnits) continue;
         const auto& ib = imageBindings[effUnit];
@@ -25139,24 +25167,82 @@ void GLContext::Impl::flushPendingImageWritesForStage(
         if (texelBytes == 0) continue;
         // Bound the coord to the texture extent. Defensive — shaders
         // that compute out-of-range coords spec-wise no-op the store.
-        if (pw.coord[0] < 0 ||
-            static_cast<NSUInteger>(pw.coord[0]) >= mtlTex.width) continue;
-        if (pw.coord[1] < 0 ||
-            static_cast<NSUInteger>(pw.coord[1]) >= mtlTex.height) continue;
-        const NSUInteger sliceLayer =
-            static_cast<NSUInteger>(std::max(0, pw.coord[2]));
-        MTLRegion region = MTLRegionMake2D(
-            static_cast<NSUInteger>(pw.coord[0]),
-            static_cast<NSUInteger>(pw.coord[1]),
-            1, 1);
+        if (pw.coord[0] < 0) continue;
+        NSUInteger writeX = static_cast<NSUInteger>(pw.coord[0]);
+        NSUInteger writeY = pw.coord[1] >= 0
+            ? static_cast<NSUInteger>(pw.coord[1])
+            : 0;
+        NSUInteger writeZ = pw.coord[2] >= 0
+            ? static_cast<NSUInteger>(pw.coord[2])
+            : 0;
+        NSUInteger sliceLayer = 0;
+        bool writeAs3D = false;
+        bool writeWithSlice = false;
+        switch (texObj->target) {
+            case GL_TEXTURE_1D:
+                writeY = 0;
+                break;
+            case GL_TEXTURE_1D_ARRAY:
+                sliceLayer = writeY;
+                writeY = 0;
+                writeWithSlice = true;
+                break;
+            case GL_TEXTURE_3D:
+                writeAs3D = true;
+                break;
+            case GL_TEXTURE_2D_ARRAY:
+            case GL_TEXTURE_CUBE_MAP:
+            case GL_TEXTURE_CUBE_MAP_ARRAY:
+                sliceLayer = writeZ;
+                writeWithSlice = true;
+                break;
+            default:
+                break;
+        }
+        auto totalSlices = [&]() -> NSUInteger {
+            switch (mtlTex.textureType) {
+                case MTLTextureType1DArray:
+                case MTLTextureType2DArray:
+                case MTLTextureType2DMultisampleArray:
+                    return std::max<NSUInteger>(mtlTex.arrayLength, 1);
+                case MTLTextureTypeCube:
+                    return 6;
+                case MTLTextureTypeCubeArray:
+                    return 6 * std::max<NSUInteger>(mtlTex.arrayLength, 1);
+                default:
+                    return 1;
+            }
+        };
+        if (writeX >= mtlTex.width || writeY >= mtlTex.height) continue;
+        if (writeAs3D) {
+            if (writeZ >= mtlTex.depth) continue;
+        } else if (writeWithSlice && sliceLayer >= totalSlices()) {
+            continue;
+        }
         bool flushed = false;
         @try {
-            [mtlTex replaceRegion:region
-                      mipmapLevel:0
-                            slice:sliceLayer
-                        withBytes:buf
-                      bytesPerRow:texelBytes
-                    bytesPerImage:texelBytes];
+            if (writeAs3D) {
+                MTLRegion region = MTLRegionMake3D(writeX, writeY, writeZ,
+                                                   1, 1, 1);
+                [mtlTex replaceRegion:region
+                          mipmapLevel:0
+                            withBytes:buf
+                          bytesPerRow:texelBytes];
+            } else if (writeWithSlice) {
+                MTLRegion region = MTLRegionMake2D(writeX, writeY, 1, 1);
+                [mtlTex replaceRegion:region
+                          mipmapLevel:0
+                                slice:sliceLayer
+                            withBytes:buf
+                          bytesPerRow:texelBytes
+                        bytesPerImage:texelBytes];
+            } else {
+                MTLRegion region = MTLRegionMake2D(writeX, writeY, 1, 1);
+                [mtlTex replaceRegion:region
+                          mipmapLevel:0
+                            withBytes:buf
+                          bytesPerRow:texelBytes];
+            }
             flushed = true;
         } @catch (NSException* exc) {
             // Private-storage textures or array-target mismatches
@@ -25170,9 +25256,11 @@ void GLContext::Impl::flushPendingImageWritesForStage(
         if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
             std::fprintf(stderr,
                 "[GS-img] flush: var=%u elem=%u unit=%u tex=%u "
-                "coord=(%d,%d,%d) bytes=%zu fmt=0x%X\n",
+                "coord=(%d,%d,%d) slice=%lu bytes=%zu fmt=0x%X\n",
                 pw.arrayVarId, pw.elementIdx, effUnit, ib.texture,
-                pw.coord[0], pw.coord[1], pw.coord[2], texelBytes,
+                pw.coord[0], pw.coord[1], pw.coord[2],
+                static_cast<unsigned long>(writeAs3D ? writeZ : sliceLayer),
+                texelBytes,
                 pw.internalFormat);
         }
     }
@@ -30670,6 +30758,11 @@ bool GLContext::linkProgram(GLuint program) {
         // and communicates through storage images, so this can share the
         // existing CPU tessellation -> CPU GS path once link accepts it.
         VertexTessellationGeometry,
+        // VS+TES or VS+TCS+TES with no fragment shader. CTS SILS
+        // TCS/TES loadStore cases enable GL_RASTERIZER_DISCARD and use
+        // storage-image side effects only, so link the program and route
+        // draw-time work through the CPU tessellation interpreter.
+        VertexTessellation,
         // Separable multi-stage combination that doesn't match any
         // of the above — accepted only when GL_PROGRAM_SEPARABLE is
         // set. The program is linked for introspection; the actual
@@ -30702,6 +30795,10 @@ bool GLContext::linkProgram(GLuint program) {
                tessControlShader != nullptr && tessEvalShader != nullptr &&
                fragmentShader == nullptr && computeShader == nullptr) {
         kind = ProgramKind::VertexTessellationGeometry;
+    } else if (vertexShader != nullptr && tessEvalShader != nullptr &&
+               fragmentShader == nullptr && geometryShader == nullptr &&
+               computeShader == nullptr) {
+        kind = ProgramKind::VertexTessellation;
     } else if (vertexShader != nullptr && geometryShader != nullptr &&
                fragmentShader == nullptr && computeShader == nullptr &&
                tessControlShader == nullptr && tessEvalShader == nullptr) {
@@ -35098,6 +35195,121 @@ bool GLContext::linkProgram(GLuint program) {
                 programObject->metalGSTier =
                     GLProgramObject::MetalGSTier::CPUInterpreter;
             }
+            if (vsOk) {
+                programObject->vertexReflection = std::move(vsRefl);
+                programObject->fragmentMSL.clear();
+                programObject->hasTranslatedPipeline = true;
+                rasterTranslationOk = true;
+            }
+            break;
+        }
+        case ProgramKind::VertexTessellation: {
+            ShaderReflection vsRefl;
+            appgl::TranslatorOptions vsOptionsVt;
+            if (vertexShader != nullptr) {
+                vsOptionsVt.forceArgumentBuffers = spirvUsesStorageBuffers(
+                    vertexShader->spirv.data(), vertexShader->spirv.size());
+            }
+            const bool vsOk = translateCachedStage(
+                "vertex", vertexShader, programObject->vertexMSL, vsRefl,
+                vsOptionsVt);
+
+            auto reflectOnlyTess = [&](GLShaderObject* shader,
+                                       const appgl::TranslatorOptions& options)
+                -> ShaderReflection {
+                ShaderReflection refl;
+                if (shader == nullptr || shader->spirv.empty()) {
+                    return refl;
+                }
+                appgl::TranslatorOptions stageOptions = options;
+                stageOptions.fp64EmulationAvailable = fp64EmulationAvailable;
+                try {
+                    refl = translator.reflect(shader->spirv.data(),
+                                              shader->spirv.size(),
+                                              bindings, nullptr,
+                                              stageOptions);
+                } catch (...) {
+                    // CPU tessellation can still run with empty reflection;
+                    // image resolution has a uniform-scanner fallback.
+                }
+                return refl;
+            };
+            auto reflectionHasResources = [](const ShaderReflection& refl) {
+                return !refl.uniformBlocks.empty() ||
+                       !refl.storageBuffers.empty() ||
+                       !refl.sampledTextures.empty() ||
+                       !refl.storageImages.empty();
+            };
+
+            appgl::TranslatorOptions tessOpts;
+            tessOpts.forceTessellation = true;
+            tessOpts.useFullPrecisionTessLevelBuffer = true;
+            if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                tessOpts.siblingTesInputSpirv = tessEvalShader->spirv.data();
+                tessOpts.siblingTesInputWordCount = tessEvalShader->spirv.size();
+            }
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                tessOpts.siblingTcsOutputSpirv = tessControlShader->spirv.data();
+                tessOpts.siblingTcsOutputWordCount = tessControlShader->spirv.size();
+                auto tcModes = extractTessellationModes(
+                    tessControlShader->spirv.data(),
+                    tessControlShader->spirv.size());
+                programObject->tessControlOutputVertices =
+                    static_cast<GLint>(tcModes.outputVertices);
+                tessOpts.tesePatchVertices = tcModes.outputVertices;
+            }
+            if (tessControlShader != nullptr) {
+                ShaderReflection tcRefl;
+                (void)translateCachedStage("tess-control", tessControlShader,
+                                           programObject->tessControlMSL, tcRefl,
+                                           tessOpts);
+                if (!reflectionHasResources(tcRefl)) {
+                    tcRefl = reflectOnlyTess(tessControlShader, tessOpts);
+                }
+                programObject->tessControlReflection = tcRefl;
+            }
+
+            appgl::TranslatorOptions tesComputeOpts;
+            tesComputeOpts.forceTessellation = true;
+            tesComputeOpts.forceTessEvalAsCompute = true;
+            tesComputeOpts.tesePatchVertices = tessOpts.tesePatchVertices;
+            tesComputeOpts.useFullPrecisionTessLevelBuffer = true;
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                tesComputeOpts.siblingTcsOutputSpirv =
+                    tessControlShader->spirv.data();
+                tesComputeOpts.siblingTcsOutputWordCount =
+                    tessControlShader->spirv.size();
+            }
+            ShaderReflection teRefl;
+            (void)translateCachedStage("tess-eval-as-compute", tessEvalShader,
+                                       programObject->tessEvalAsComputeMSL,
+                                       teRefl, tesComputeOpts);
+            if (!reflectionHasResources(teRefl)) {
+                teRefl = reflectOnlyTess(tessEvalShader, tesComputeOpts);
+            }
+            programObject->tessEvalAsComputeReflection = teRefl;
+
+            programObject->hasTessellation = true;
+            if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
+                programObject->vertexSpirv = vertexShader->spirv;
+            }
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                programObject->tessControlSpirv = tessControlShader->spirv;
+                programObject->tessControlParsedModule.reset();
+            }
+            if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                programObject->tessEvalSpirv = tessEvalShader->spirv;
+                programObject->tessEvalParsedModule.reset();
+                auto teModes = extractTessellationModes(
+                    tessEvalShader->spirv.data(),
+                    tessEvalShader->spirv.size());
+                programObject->tessGenMode = teModes.genMode;
+                programObject->tessGenSpacing = teModes.genSpacing;
+                programObject->tessGenVertexOrder = teModes.genVertexOrder;
+                programObject->tessGenPointMode =
+                    teModes.pointMode ? GL_TRUE : GL_FALSE;
+            }
+            (void)appgl::detectTessellationEmulatable(*programObject);
             if (vsOk) {
                 programObject->vertexReflection = std::move(vsRefl);
                 programObject->fragmentMSL.clear();
