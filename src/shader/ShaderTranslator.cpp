@@ -4901,7 +4901,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             std::sort(sortedSSBOs.begin(), sortedSSBOs.end(),
                       [](const SSBORef& a, const SSBORef& b) { return a.glBinding < b.glBinding; });
             std::uint32_t nextSSBOSlot = bindings.storageBufferBase;
-            for (auto& entry : sortedSSBOs) {
+            for (std::size_t i = 0; i < sortedSSBOs.size(); ++i) {
+                auto& entry = sortedSSBOs[i];
                 std::uint32_t slotSpan = 1;
                 const auto& varType = compiler.get_type(entry.res->type_id);
                 if (!varType.array.empty() && varType.array[0] > 0) {
@@ -4909,17 +4910,31 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 }
                 spirv_cross::MSLResourceBinding binding;
                 binding.stage = compiler.get_execution_model();
-                binding.desc_set = compiler.get_decoration(entry.res->id, spv::DecorationDescriptorSet);
-                binding.binding = entry.glBinding;
                 // Step 7-2 consolidation (c) — SSBO msl_buffer offset to
                 // 192+ under argument_buffers mode to avoid colliding
                 // with sampled-image ids (2*n) and storage-image ids
                 // (128+n) within the same spvDescriptorSetBuffer0.
                 // Direct-binding path unchanged (sequential from
-                // storageBufferBase=28).
+                // storageBufferBase=28), but uses a private descriptor
+                // set/key so sampled-image synthetic bindings 0..N do
+                // not overwrite SSBO remaps that share GL binding
+                // numbers.
                 if (useArgBuf) {
+                    binding.desc_set =
+                        compiler.get_decoration(entry.res->id,
+                                                spv::DecorationDescriptorSet);
+                    binding.binding = entry.glBinding;
                     binding.msl_buffer = 192 + entry.glBinding;
                 } else {
+                    constexpr std::uint32_t kDirectSSBODescSet = 3;
+                    const std::uint32_t syntheticBinding =
+                        static_cast<std::uint32_t>(i);
+                    compiler.set_decoration(entry.res->id,
+                        spv::DecorationDescriptorSet, kDirectSSBODescSet);
+                    compiler.set_decoration(entry.res->id,
+                        spv::DecorationBinding, syntheticBinding);
+                    binding.desc_set = kDirectSSBODescSet;
+                    binding.binding = syntheticBinding;
                     binding.msl_buffer = nextSSBOSlot;
                     nextSSBOSlot += slotSpan;
                 }

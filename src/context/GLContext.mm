@@ -39446,6 +39446,11 @@ bool GLContext::linkProgram(GLuint program) {
                 const auto parsedIt = parsedBlocks.find(block.name);
                 const ParsedInterfaceBlockForValidation* parsedBlock =
                     parsedIt != parsedBlocks.end() ? &parsedIt->second : nullptr;
+                if (parsedBlock == nullptr &&
+                    parsedBlocks.size() == 1 &&
+                    blocks.size() == 1) {
+                    parsedBlock = &parsedBlocks.begin()->second;
+                }
                 const bool hasInstance =
                     parsedBlock != nullptr
                         ? parsedBlock->hasInstance
@@ -39484,11 +39489,14 @@ bool GLContext::linkProgram(GLuint program) {
                         ? parsedBlock->instanceIsArray
                         : (block.blockArraySize > 0);
                 const bool hasExplicitBinding =
-                    (parsedBlock != nullptr && parsedBlock->hasExplicitBinding) ||
-                    block.hasExplicitBinding;
+                    parsedBlock != nullptr
+                        ? parsedBlock->hasExplicitBinding
+                        : block.hasExplicitBinding;
                 const GLint baseBinding =
-                    parsedBlock != nullptr && parsedBlock->hasExplicitBinding
-                        ? static_cast<GLint>(parsedBlock->explicitBinding)
+                    parsedBlock != nullptr
+                        ? (parsedBlock->hasExplicitBinding
+                            ? static_cast<GLint>(parsedBlock->explicitBinding)
+                            : 0)
                         : static_cast<GLint>(block.glBinding);
 
                 // Create block entries for each instance.
@@ -39736,6 +39744,11 @@ bool GLContext::linkProgram(GLuint program) {
                 const auto parsedIt = parsedBlocks.find(block.name);
                 const ParsedInterfaceBlockForValidation* parsedBlock =
                     parsedIt != parsedBlocks.end() ? &parsedIt->second : nullptr;
+                if (parsedBlock == nullptr &&
+                    parsedBlocks.size() == 1 &&
+                    blocks.size() == 1) {
+                    parsedBlock = &parsedBlocks.begin()->second;
+                }
                 const bool hasInstance =
                     parsedBlock != nullptr
                         ? parsedBlock->hasInstance
@@ -39761,11 +39774,14 @@ bool GLContext::linkProgram(GLuint program) {
                         ? parsedBlock->instanceIsArray
                         : (block.blockArraySize > 0);
                 const bool hasExplicitBinding =
-                    (parsedBlock != nullptr && parsedBlock->hasExplicitBinding) ||
-                    block.hasExplicitBinding;
+                    parsedBlock != nullptr
+                        ? parsedBlock->hasExplicitBinding
+                        : block.hasExplicitBinding;
                 const GLint baseBinding =
-                    parsedBlock != nullptr && parsedBlock->hasExplicitBinding
-                        ? static_cast<GLint>(parsedBlock->explicitBinding)
+                    parsedBlock != nullptr
+                        ? (parsedBlock->hasExplicitBinding
+                            ? static_cast<GLint>(parsedBlock->explicitBinding)
+                            : 0)
                         : static_cast<GLint>(block.glBinding);
 
                 // Create one block entry per array instance. For
@@ -39814,6 +39830,7 @@ bool GLContext::linkProgram(GLuint program) {
                         instanceBinding += inst;
                     }
                     entry.location = instanceBinding;
+                    entry.binding = hasExplicitBinding ? instanceBinding : -1;
                     entry.offset = static_cast<GLint>(block.byteSize);
                     entry.arraySize = 1;
                     entry.referencedBy = effStageBit;
@@ -46035,6 +46052,17 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             }
             if (ed.ok) {
                 if (impl_->state->isEnabled(GL_RASTERIZER_DISCARD)) {
+                    if (!ed.pendingImageWrites.empty()) {
+                        std::vector<GLuint> cpuImageWriteTextures;
+                        impl_->flushPendingImageWritesForStage(
+                            ed.pendingImageWrites,
+                            &program->vertexReflection,
+                            program->vertexSpirv,
+                            *program,
+                            GL_VERTEX_SHADER,
+                            &cpuImageWriteTextures);
+                        impl_->markCpuInterpreterImageWrites(cpuImageWriteTextures);
+                    }
                     return true;
                 }
                 if (program->vertexSsboEmulatedDraw &&
