@@ -7272,7 +7272,6 @@ struct GLContext::Impl {
             if (levelData.empty()) {
                 continue;
             }
-
             const NSUInteger mipLevel = static_cast<NSUInteger>(levelIndex);
             const NSUInteger sourceRowStride =
                 static_cast<NSUInteger>(safeDimension(image.desc.width) * proxyBpp);
@@ -9541,6 +9540,82 @@ struct GLContext::Impl {
                         sourceObject->desc.internalFormat != texObject->desc.internalFormat) {
                         return {};
                     }
+                }
+                if (isPackedDepthStencilInternalFormat(texObject->desc.internalFormat)) {
+                    auto levelIt = texObject->levels.find(0);
+                    if (levelIt == texObject->levels.end() ||
+                        !levelIt->second.defined ||
+                        levelIt->second.nativeData.empty() ||
+                        levelIt->second.nativeBpp == 0) {
+                        continue;
+                    }
+                    const GLTextureImageLevel& image = levelIt->second;
+                    const bool stencilMode =
+                        texObject->params.depthStencilTextureMode == GL_STENCIL_INDEX;
+                    const std::uint32_t proxyFormat =
+                        stencilMode ? GL_R8UI : GL_R32F;
+                    const std::uint32_t bpp = stencilMode ? 1u : 4u;
+                    const std::uint32_t width =
+                        static_cast<std::uint32_t>(safeDimension(image.desc.width));
+                    const std::uint32_t height =
+                        static_cast<std::uint32_t>(
+                            texObject->target == GL_TEXTURE_1D
+                                ? 1 : safeDimension(image.desc.height));
+                    const std::uint32_t layers =
+                        static_cast<std::uint32_t>(
+                            std::max<GLsizei>(image.desc.depth, 1));
+                    if (width == 0 || height == 0 || layers == 0) {
+                        continue;
+                    }
+
+                    appgl::SampledTextureSlot& slot = slots[i];
+                    slot.width = width;
+                    slot.height = height;
+                    slot.depth = layers > 1 ? layers : 0;
+                    slot.layerFaces = layers;
+                    slot.internalFormat = proxyFormat;
+                    slot.samplerType = samplerGLType;
+                    slot.bytesPerRow = width * bpp;
+                    slot.bytesPerImage = slot.bytesPerRow * height;
+                    slot.mipOffsets = {0u};
+                    slot.mipWidths = {width};
+                    slot.mipHeights = {height};
+                    slot.mipBytesPerRow = {slot.bytesPerRow};
+                    slot.mipBytesPerImage = {slot.bytesPerImage};
+                    slot.mipLayerFaces = {layers};
+                    slot.data.assign(
+                        static_cast<std::size_t>(slot.bytesPerImage) *
+                            static_cast<std::size_t>(layers),
+                        0u);
+                    const std::size_t pixelCount =
+                        static_cast<std::size_t>(width) *
+                        static_cast<std::size_t>(height) *
+                        static_cast<std::size_t>(layers);
+                    if (stencilMode) {
+                        for (std::size_t p = 0; p < pixelCount; ++p) {
+                            slot.data[p] = stencilSampleProxyValue(image, p);
+                        }
+                    } else {
+                        for (std::size_t p = 0; p < pixelCount; ++p) {
+                            const float value = depthSampleProxyValue(image, p);
+                            std::memcpy(slot.data.data() + p * sizeof(float),
+                                        &value, sizeof(value));
+                        }
+                    }
+                    if (trace) {
+                        std::fprintf(stderr,
+                            "[GS-tex]   depth-stencil snapshot tex=%u "
+                            "srcFmt=0x%X proxyFmt=0x%X mode=0x%X "
+                            "nativeBpp=%zu bytes=%zu first=%02X\n",
+                            texName, texObject->desc.internalFormat,
+                            proxyFormat,
+                            static_cast<unsigned>(
+                                texObject->params.depthStencilTextureMode),
+                            image.nativeBpp,
+                            slot.data.size(),
+                            slot.data.empty() ? 0u : slot.data[0]);
+                    }
+                    continue;
                 }
                 drainPendingGpuProducers({
                     {GpuResourceAccess::Kind::Texture,
@@ -44075,8 +44150,16 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     // The CPU GS path replays GS output through a synthetic VS/FS pair.
     // Keep that replay at the GL default rate so FSR state from a prior
     // suite cannot attach a Metal rate map to the emulated GS render pass.
+    // CPU tess/GS emulation replays GL clip-space vertices through a synthetic
+    // Metal VS. Under LOWER_LEFT, the render target rows need the same texture
+    // readback unflip as viewport-routed GS outputs.
+    const bool cpuExpandedDomain =
+        program.gsPresent ||
+        program.hasTessellation ||
+        replayDraw.tessOutputVerticesPerPatch != 0;
     tdi.markColorAttachmentReadbackFlip =
-        routeViewportIndex && tdi.clipOrigin == GL_LOWER_LEFT;
+        tdi.clipOrigin == GL_LOWER_LEFT &&
+        (routeViewportIndex || cpuExpandedDomain);
     tdi.vertexMSL = &program.gsPassThroughVertexMSL;
     // Post-process the FS MSL for GS-emulation replay. PrimitiveID needs
     // a user-varying redirect; fp64 stage inputs need float transport

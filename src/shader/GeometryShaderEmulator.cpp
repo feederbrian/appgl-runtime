@@ -5995,9 +5995,11 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     static_cast<std::size_t>(layer) * bpi +
                     static_cast<std::size_t>(v) * bpr +
                     static_cast<std::size_t>(u) * bytesPerTexel;
-                if (off + 4 <= slot.data.size()) {
+                if (off + bytesPerTexel <= slot.data.size()) {
                     std::uint32_t raw = 0;
-                    std::memcpy(&raw, slot.data.data() + off, 4);
+                    std::memcpy(&raw, slot.data.data() + off,
+                                std::min<std::size_t>(bytesPerTexel,
+                                                       sizeof(raw)));
                     const std::uint8_t* p = slot.data.data() + off;
                     auto have = [&](std::size_t bytes) -> bool {
                         return off + bytes <= slot.data.size();
@@ -6101,6 +6103,13 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                         case 0x8236: { // GL_R32UI
                             out.kind = Value::Kind::UInt4;
                             out.i[0] = static_cast<std::int32_t>(raw);
+                            out.i[1] = 0; out.i[2] = 0;
+                            out.i[3] = static_cast<std::int32_t>(1u);
+                            break;
+                        }
+                        case 0x8232: { // GL_R8UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(readU8(0));
                             out.i[1] = 0; out.i[2] = 0;
                             out.i[3] = static_cast<std::int32_t>(1u);
                             break;
