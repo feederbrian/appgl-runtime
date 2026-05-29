@@ -29,6 +29,27 @@ namespace spv {
         OpTypeFunction = 33,
         OpConstant = 43, OpConstantTrue = 41, OpConstantFalse = 42,
         OpConstantComposite = 44,
+        OpSpecConstantTrue = 48, OpSpecConstantFalse = 49,
+        OpSpecConstant = 50, OpSpecConstantComposite = 51,
+        OpSpecConstantOp = 52,
+        OpSNegate = 126,
+        OpIAdd = 128, OpISub = 130, OpIMul = 132,
+        OpUDiv = 134, OpSDiv = 135,
+        OpUMod = 137, OpSRem = 138, OpSMod = 139,
+        OpBitwiseAnd = 199, OpBitwiseOr = 197, OpBitwiseXor = 198,
+        OpLogicalAnd = 167, OpLogicalOr = 166, OpLogicalNot = 168,
+        OpLogicalEqual = 164, OpLogicalNotEqual = 165,
+        OpSelect = 169,
+        OpIEqual = 170, OpINotEqual = 171,
+        OpUGreaterThan = 172, OpSGreaterThan = 173,
+        OpUGreaterThanEqual = 174, OpSGreaterThanEqual = 175,
+        OpULessThan = 176, OpSLessThan = 177,
+        OpULessThanEqual = 178, OpSLessThanEqual = 179,
+        OpFNegate = 127, OpFAdd = 129, OpFSub = 131,
+        OpFMul = 133, OpFDiv = 136,
+        OpFOrdEqual = 180, OpFOrdNotEqual = 182,
+        OpFOrdLessThan = 184, OpFOrdGreaterThan = 186,
+        OpFOrdLessThanEqual = 188, OpFOrdGreaterThanEqual = 190,
         OpFunction = 54, OpFunctionParameter = 55, OpFunctionEnd = 56,
         OpVariable = 59,
     };
@@ -42,6 +63,7 @@ namespace spv {
         DecorationPatch = 15,
         DecorationCentroid = 16, DecorationOffset = 35,
         DecorationDescriptorSet = 34, DecorationBinding = 33,
+        DecorationSpecId = 1,
         // Sprint 8 #9-C (CKPT96) — GLSL `layout(stream=N) out` decoration.
         DecorationStream = 29,
     };
@@ -106,11 +128,295 @@ std::uint32_t SpirvModule::scalarWidth(std::uint32_t typeId) const {
     }
 }
 
-bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
+bool specializationOverride(
+    const std::unordered_map<std::uint32_t, DecorationSet>& decorations,
+    const std::unordered_map<std::uint32_t, std::uint32_t>* specializationConstants,
+    std::uint32_t resultId,
+    std::uint32_t& value) {
+    if (specializationConstants == nullptr) return false;
+    auto decoIt = decorations.find(resultId);
+    if (decoIt == decorations.end() || !decoIt->second.hasSpecId) {
+        return false;
+    }
+    auto valueIt = specializationConstants->find(decoIt->second.specId);
+    if (valueIt == specializationConstants->end()) return false;
+    value = valueIt->second;
+    return true;
+}
+
+Value makeScalarConstantValue(
+    const std::unordered_map<std::uint32_t, TypeInfo>& types,
+    std::uint32_t typeId,
+    const std::uint32_t* words,
+    std::size_t wordCount) {
+    auto typeIt = types.find(typeId);
+    Value v;
+    if (typeIt == types.end()) return v;
+    const TypeInfo& t = typeIt->second;
+    if (t.kind == TypeInfo::Kind::Float) {
+        if (t.elementScalarWidth == 8 && wordCount >= 2) {
+            std::uint64_t bits =
+                static_cast<std::uint64_t>(words[0]) |
+                (static_cast<std::uint64_t>(words[1]) << 32u);
+            double d = 0.0;
+            std::memcpy(&d, &bits, sizeof(d));
+            return Value::makeFloat(static_cast<float>(d));
+        }
+        float f = 0.0f;
+        if (wordCount >= 1) {
+            std::memcpy(&f, &words[0], sizeof(float));
+        }
+        return Value::makeFloat(f);
+    }
+    if (t.kind == TypeInfo::Kind::Int) {
+        return Value::makeInt(wordCount >= 1 ? static_cast<std::int32_t>(words[0]) : 0);
+    }
+    if (t.kind == TypeInfo::Kind::UInt) {
+        return Value::makeUInt(wordCount >= 1 ? words[0] : 0u);
+    }
+    if (t.kind == TypeInfo::Kind::Bool) {
+        return Value::makeBool(wordCount >= 1 && words[0] != 0);
+    }
+    return v;
+}
+
+std::int32_t valueAsInt(const Value& v) {
+    if (v.kind == Value::Kind::Bool) return v.bval ? 1 : 0;
+    if (v.isFloatKind()) return static_cast<std::int32_t>(v.f[0]);
+    return v.i[0];
+}
+
+std::uint32_t valueAsUInt(const Value& v) {
+    return static_cast<std::uint32_t>(valueAsInt(v));
+}
+
+float valueAsFloat(const Value& v) {
+    if (v.kind == Value::Kind::Bool) return v.bval ? 1.0f : 0.0f;
+    if (v.isFloatKind()) return v.f[0];
+    return static_cast<float>(v.i[0]);
+}
+
+bool valueAsBool(const Value& v) {
+    if (v.kind == Value::Kind::Bool) return v.bval;
+    if (v.isFloatKind()) return v.f[0] != 0.0f;
+    return v.i[0] != 0;
+}
+
+Value typedScalarValue(const SpirvModule& module, std::uint32_t typeId,
+                       std::int32_t i, std::uint32_t u, float f, bool b) {
+    auto typeIt = module.types.find(typeId);
+    if (typeIt == module.types.end()) return {};
+    switch (typeIt->second.kind) {
+        case TypeInfo::Kind::Bool:  return Value::makeBool(b);
+        case TypeInfo::Kind::UInt:  return Value::makeUInt(u);
+        case TypeInfo::Kind::Float: return Value::makeFloat(f);
+        case TypeInfo::Kind::Int:   return Value::makeInt(i);
+        default: return {};
+    }
+}
+
+Value evalSpecConstantOp(const SpirvModule& module,
+                         std::uint32_t resultTypeId,
+                         std::uint32_t opcode,
+                         const std::uint32_t* operands,
+                         std::size_t operandCount) {
+    auto constantAt = [&](std::size_t idx, Value& out) -> bool {
+        if (idx >= operandCount) return false;
+        auto it = module.constants.find(operands[idx]);
+        if (it == module.constants.end()) return false;
+        out = it->second;
+        return true;
+    };
+    Value a, b, c;
+    const bool haveA = constantAt(0, a);
+    const bool haveB = constantAt(1, b);
+    const bool haveC = constantAt(2, c);
+    (void)haveC;
+    if (!haveA) return {};
+
+    switch (opcode) {
+        case spv::OpSNegate:
+            return typedScalarValue(module, resultTypeId, -valueAsInt(a),
+                                    static_cast<std::uint32_t>(-valueAsInt(a)),
+                                    -valueAsFloat(a), false);
+        case spv::OpIAdd:
+            if (!haveB) return {};
+            return typedScalarValue(module, resultTypeId,
+                                    valueAsInt(a) + valueAsInt(b),
+                                    valueAsUInt(a) + valueAsUInt(b),
+                                    valueAsFloat(a) + valueAsFloat(b), false);
+        case spv::OpISub:
+            if (!haveB) return {};
+            return typedScalarValue(module, resultTypeId,
+                                    valueAsInt(a) - valueAsInt(b),
+                                    valueAsUInt(a) - valueAsUInt(b),
+                                    valueAsFloat(a) - valueAsFloat(b), false);
+        case spv::OpIMul:
+            if (!haveB) return {};
+            return typedScalarValue(module, resultTypeId,
+                                    valueAsInt(a) * valueAsInt(b),
+                                    valueAsUInt(a) * valueAsUInt(b),
+                                    valueAsFloat(a) * valueAsFloat(b), false);
+        case spv::OpUDiv:
+            if (!haveB || valueAsUInt(b) == 0u) return {};
+            return typedScalarValue(module, resultTypeId, 0,
+                                    valueAsUInt(a) / valueAsUInt(b),
+                                    0.0f, false);
+        case spv::OpSDiv:
+            if (!haveB || valueAsInt(b) == 0) return {};
+            return typedScalarValue(module, resultTypeId,
+                                    valueAsInt(a) / valueAsInt(b),
+                                    0, 0.0f, false);
+        case spv::OpUMod:
+            if (!haveB || valueAsUInt(b) == 0u) return {};
+            return typedScalarValue(module, resultTypeId, 0,
+                                    valueAsUInt(a) % valueAsUInt(b),
+                                    0.0f, false);
+        case spv::OpSRem:
+        case spv::OpSMod:
+            if (!haveB || valueAsInt(b) == 0) return {};
+            return typedScalarValue(module, resultTypeId,
+                                    valueAsInt(a) % valueAsInt(b),
+                                    0, 0.0f, false);
+        case spv::OpBitwiseAnd:
+            if (!haveB) return {};
+            return typedScalarValue(module, resultTypeId,
+                                    valueAsInt(a) & valueAsInt(b),
+                                    valueAsUInt(a) & valueAsUInt(b),
+                                    0.0f, false);
+        case spv::OpBitwiseOr:
+            if (!haveB) return {};
+            return typedScalarValue(module, resultTypeId,
+                                    valueAsInt(a) | valueAsInt(b),
+                                    valueAsUInt(a) | valueAsUInt(b),
+                                    0.0f, false);
+        case spv::OpBitwiseXor:
+            if (!haveB) return {};
+            return typedScalarValue(module, resultTypeId,
+                                    valueAsInt(a) ^ valueAsInt(b),
+                                    valueAsUInt(a) ^ valueAsUInt(b),
+                                    0.0f, false);
+        case spv::OpFNegate:
+            return typedScalarValue(module, resultTypeId, 0, 0u,
+                                    -valueAsFloat(a), false);
+        case spv::OpFAdd:
+            if (!haveB) return {};
+            return typedScalarValue(module, resultTypeId, 0, 0u,
+                                    valueAsFloat(a) + valueAsFloat(b), false);
+        case spv::OpFSub:
+            if (!haveB) return {};
+            return typedScalarValue(module, resultTypeId, 0, 0u,
+                                    valueAsFloat(a) - valueAsFloat(b), false);
+        case spv::OpFMul:
+            if (!haveB) return {};
+            return typedScalarValue(module, resultTypeId, 0, 0u,
+                                    valueAsFloat(a) * valueAsFloat(b), false);
+        case spv::OpFDiv:
+            if (!haveB || valueAsFloat(b) == 0.0f) return {};
+            return typedScalarValue(module, resultTypeId, 0, 0u,
+                                    valueAsFloat(a) / valueAsFloat(b), false);
+        case spv::OpLogicalAnd:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsBool(a) && valueAsBool(b));
+        case spv::OpLogicalOr:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsBool(a) || valueAsBool(b));
+        case spv::OpLogicalNot:
+            return Value::makeBool(!valueAsBool(a));
+        case spv::OpLogicalEqual:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsBool(a) == valueAsBool(b));
+        case spv::OpLogicalNotEqual:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsBool(a) != valueAsBool(b));
+        case spv::OpIEqual:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsInt(a) == valueAsInt(b));
+        case spv::OpINotEqual:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsInt(a) != valueAsInt(b));
+        case spv::OpUGreaterThan:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsUInt(a) > valueAsUInt(b));
+        case spv::OpUGreaterThanEqual:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsUInt(a) >= valueAsUInt(b));
+        case spv::OpULessThan:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsUInt(a) < valueAsUInt(b));
+        case spv::OpULessThanEqual:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsUInt(a) <= valueAsUInt(b));
+        case spv::OpSGreaterThan:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsInt(a) > valueAsInt(b));
+        case spv::OpSGreaterThanEqual:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsInt(a) >= valueAsInt(b));
+        case spv::OpSLessThan:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsInt(a) < valueAsInt(b));
+        case spv::OpSLessThanEqual:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsInt(a) <= valueAsInt(b));
+        case spv::OpFOrdEqual:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsFloat(a) == valueAsFloat(b));
+        case spv::OpFOrdNotEqual:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsFloat(a) != valueAsFloat(b));
+        case spv::OpFOrdLessThan:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsFloat(a) < valueAsFloat(b));
+        case spv::OpFOrdGreaterThan:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsFloat(a) > valueAsFloat(b));
+        case spv::OpFOrdLessThanEqual:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsFloat(a) <= valueAsFloat(b));
+        case spv::OpFOrdGreaterThanEqual:
+            if (!haveB) return {};
+            return Value::makeBool(valueAsFloat(a) >= valueAsFloat(b));
+        case spv::OpSelect:
+            if (!haveB || !haveC) return {};
+            return valueAsBool(a) ? b : c;
+        default:
+            return {};
+    }
+}
+
+bool SpirvModule::parse(
+    const std::uint32_t* data,
+    std::size_t count,
+    const std::string* entryPointName,
+    const std::unordered_map<std::uint32_t, std::uint32_t>* specializationConstants) {
     if (count < 5 || data[0] != spv::MagicNumber) {
+        parseError.clear();
         parseError = "bad SPIR-V magic";
         return false;
     }
+    bound = 0;
+    words.clear();
+    types.clear();
+    constants.clear();
+    matrixConstants.clear();
+    constantComposites.clear();
+    variables.clear();
+    decorations.clear();
+    memberDecorations.clear();
+    names.clear();
+    memberNames0.clear();
+    memberNames.clear();
+    extInstImports.clear();
+    entryPoint = 0;
+    entryInterface.clear();
+    executionModes.clear();
+    functions.clear();
+    funcBodyStart = 0;
+    funcBodyEnd = 0;
+    haveFuncBody = false;
+    parseError.clear();
+
     bound = data[3];
     words.assign(data, data + count);
 
@@ -119,6 +425,18 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
     std::size_t currentFuncStart = 0;
     std::uint32_t currentFuncId = 0;
     FunctionInfo currentFunc;
+    const bool wantsEntryPoint =
+        entryPointName != nullptr && !entryPointName->empty();
+    bool haveSelectedEntryPoint = false;
+    bool haveFallbackEntryPoint = false;
+    std::uint32_t fallbackEntryPoint = 0;
+    std::vector<std::uint32_t> fallbackEntryInterface;
+    struct PendingExecutionMode {
+        std::uint32_t entryPointId = 0;
+        std::uint32_t mode = 0;
+        std::vector<std::uint32_t> operands;
+    };
+    std::vector<PendingExecutionMode> pendingExecutionModes;
     while (i < count) {
         const std::uint32_t inst = data[i];
         const std::uint16_t opcode = inst & 0xFFFF;
@@ -142,21 +460,36 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
             }
             case spv::OpEntryPoint: {
                 if (wc >= 3) {
-                    entryPoint = w[1];
+                    const std::uint32_t candidateEntryPoint = w[1];
                     std::size_t j = i + 3;
-                    (void)readLiteralString(data, j, count);
-                    while (j < i + wc) entryInterface.push_back(data[j++]);
+                    std::string candidateName = readLiteralString(data, j, count);
+                    std::vector<std::uint32_t> candidateInterface;
+                    while (j < i + wc) candidateInterface.push_back(data[j++]);
+                    if (!haveFallbackEntryPoint) {
+                        fallbackEntryPoint = candidateEntryPoint;
+                        fallbackEntryInterface = candidateInterface;
+                        haveFallbackEntryPoint = true;
+                    }
+                    const bool selectCandidate =
+                        (!wantsEntryPoint && !haveSelectedEntryPoint) ||
+                        (wantsEntryPoint && candidateName == *entryPointName);
+                    if (selectCandidate) {
+                        entryPoint = candidateEntryPoint;
+                        entryInterface = std::move(candidateInterface);
+                        haveSelectedEntryPoint = true;
+                    }
                 }
                 break;
             }
             case spv::OpExecutionMode: {
                 if (wc >= 3) {
-                    const std::uint32_t mode = w[1];
-                    std::vector<std::uint32_t> operands;
+                    PendingExecutionMode pending;
+                    pending.entryPointId = w[0];
+                    pending.mode = w[1];
                     for (std::uint32_t k = 2; k < static_cast<std::uint32_t>(wc - 1); ++k) {
-                        operands.push_back(w[k]);
+                        pending.operands.push_back(w[k]);
                     }
-                    executionModes[mode] = std::move(operands);
+                    pendingExecutionModes.push_back(std::move(pending));
                 }
                 break;
             }
@@ -217,6 +550,9 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                 } else if (deco == spv::DecorationDescriptorSet && wc >= 4) {
                     decorations[target].hasDescriptorSet = true;
                     decorations[target].descriptorSet = w[2];
+                } else if (deco == spv::DecorationSpecId && wc >= 4) {
+                    decorations[target].hasSpecId = true;
+                    decorations[target].specId = w[2];
                 } else if (deco == spv::DecorationOffset && wc >= 4) {
                     decorations[target].hasOffset = true;
                     decorations[target].offset = w[2];
@@ -341,39 +677,45 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                 break;
             }
             case spv::OpConstant: {
-                auto typeIt = types.find(w[0]);
-                Value v;
-                if (typeIt != types.end()) {
-                    const TypeInfo& t = typeIt->second;
-                    if (t.kind == TypeInfo::Kind::Float) {
-                        if (t.elementScalarWidth == 8 && wc >= 4) {
-                            std::uint64_t bits =
-                                static_cast<std::uint64_t>(w[2]) |
-                                (static_cast<std::uint64_t>(w[3]) << 32u);
-                            double d = 0.0;
-                            std::memcpy(&d, &bits, sizeof(d));
-                            v = Value::makeFloat(static_cast<float>(d));
-                        } else {
-                            float f = 0;
-                            std::memcpy(&f, &w[2], sizeof(float));
-                            v = Value::makeFloat(f);
-                        }
-                    } else if (t.kind == TypeInfo::Kind::Int) {
-                        v = Value::makeInt(static_cast<std::int32_t>(w[2]));
-                    } else if (t.kind == TypeInfo::Kind::UInt) {
-                        v = Value::makeUInt(w[2]);
-                    }
-                }
-                constants[w[1]] = v;
+                const std::size_t literalWords = wc > 3 ? static_cast<std::size_t>(wc - 3) : 0;
+                constants[w[1]] = makeScalarConstantValue(types, w[0], w + 2, literalWords);
                 break;
             }
             case spv::OpConstantTrue:  constants[w[1]] = Value::makeBool(true);  break;
             case spv::OpConstantFalse: constants[w[1]] = Value::makeBool(false); break;
+            case spv::OpSpecConstant: {
+                std::uint32_t overrideValue = 0;
+                if (specializationOverride(
+                        decorations, specializationConstants, w[1], overrideValue)) {
+                    constants[w[1]] = makeScalarConstantValue(types, w[0], &overrideValue, 1);
+                } else {
+                    const std::size_t literalWords = wc > 3 ? static_cast<std::size_t>(wc - 3) : 0;
+                    constants[w[1]] = makeScalarConstantValue(types, w[0], w + 2, literalWords);
+                }
+                break;
+            }
+            case spv::OpSpecConstantTrue: {
+                std::uint32_t overrideValue = 0;
+                constants[w[1]] = Value::makeBool(
+                    specializationOverride(decorations, specializationConstants, w[1], overrideValue)
+                        ? overrideValue != 0
+                        : true);
+                break;
+            }
+            case spv::OpSpecConstantFalse: {
+                std::uint32_t overrideValue = 0;
+                constants[w[1]] = Value::makeBool(
+                    specializationOverride(decorations, specializationConstants, w[1], overrideValue)
+                        ? overrideValue != 0
+                        : false);
+                break;
+            }
             case spv::OpConstantComposite: {
                 ConstantCompositeInfo compositeInfo;
                 compositeInfo.typeId = w[0];
-                if (wc > 3) {
-                    compositeInfo.constituents.assign(w + 2, w + wc - 1);
+                const std::size_t operandCount = wc > 0 ? static_cast<std::size_t>(wc - 1) : 0;
+                if (operandCount > 2) {
+                    compositeInfo.constituents.assign(w + 2, w + operandCount);
                 }
                 constantComposites[w[1]] = std::move(compositeInfo);
                 auto typeIt = types.find(w[0]);
@@ -387,7 +729,7 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                         if (isFloat) {
                             v.kind = (t.count == 2) ? Value::Kind::Float2 :
                                      (t.count == 3) ? Value::Kind::Float3 : Value::Kind::Float4;
-                            for (std::uint32_t k = 0; k < t.count && (2 + k) < wc; ++k) {
+                            for (std::uint32_t k = 0; k < t.count && (2 + k) < operandCount; ++k) {
                                 auto cIt = constants.find(w[2 + k]);
                                 if (cIt != constants.end()) v.f[k] = cIt->second.f[0];
                             }
@@ -395,7 +737,7 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                             v.kind = (t.count == 2) ? Value::Kind::Int2 :
                                      (t.count == 3) ? Value::Kind::Int3 : Value::Kind::Int4;
                             const bool isBool = (compT.kind == TypeInfo::Kind::Bool);
-                            for (std::uint32_t k = 0; k < t.count && (2 + k) < wc; ++k) {
+                            for (std::uint32_t k = 0; k < t.count && (2 + k) < operandCount; ++k) {
                                 auto cIt = constants.find(w[2 + k]);
                                 if (cIt != constants.end()) {
                                     v.i[k] = isBool
@@ -406,8 +748,8 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                         }
                     } else if (t.kind == TypeInfo::Kind::Matrix) {
                         std::vector<Value> columns;
-                        columns.reserve(wc > 2 ? wc - 2 : 0);
-                        for (std::uint32_t k = 2; k < wc; ++k) {
+                        columns.reserve(operandCount > 2 ? operandCount - 2 : 0);
+                        for (std::uint32_t k = 2; k < operandCount; ++k) {
                             auto cIt = constants.find(w[k]);
                             if (cIt != constants.end()) {
                                 columns.push_back(cIt->second);
@@ -419,6 +761,53 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                     }
                 }
                 constants[w[1]] = v;
+                break;
+            }
+            case spv::OpSpecConstantComposite: {
+                ConstantCompositeInfo compositeInfo;
+                compositeInfo.typeId = w[0];
+                const std::size_t operandCount = wc > 0 ? static_cast<std::size_t>(wc - 1) : 0;
+                if (operandCount > 2) {
+                    compositeInfo.constituents.assign(w + 2, w + operandCount);
+                }
+                constantComposites[w[1]] = std::move(compositeInfo);
+                auto typeIt = types.find(w[0]);
+                Value v;
+                if (typeIt != types.end()) {
+                    const TypeInfo& t = typeIt->second;
+                    if (t.kind == TypeInfo::Kind::Vec2 || t.kind == TypeInfo::Kind::Vec3 ||
+                        t.kind == TypeInfo::Kind::Vec4) {
+                        const auto& compT = types[t.componentType];
+                        const bool isFloat = (compT.kind == TypeInfo::Kind::Float);
+                        if (isFloat) {
+                            v.kind = (t.count == 2) ? Value::Kind::Float2 :
+                                     (t.count == 3) ? Value::Kind::Float3 : Value::Kind::Float4;
+                            for (std::uint32_t k = 0; k < t.count && (2 + k) < operandCount; ++k) {
+                                auto cIt = constants.find(w[2 + k]);
+                                if (cIt != constants.end()) v.f[k] = cIt->second.f[0];
+                            }
+                        } else {
+                            v.kind = (t.count == 2) ? Value::Kind::Int2 :
+                                     (t.count == 3) ? Value::Kind::Int3 : Value::Kind::Int4;
+                            const bool isBool = (compT.kind == TypeInfo::Kind::Bool);
+                            for (std::uint32_t k = 0; k < t.count && (2 + k) < operandCount; ++k) {
+                                auto cIt = constants.find(w[2 + k]);
+                                if (cIt != constants.end()) {
+                                    v.i[k] = isBool
+                                        ? (cIt->second.bval ? 1 : 0)
+                                        : cIt->second.i[0];
+                                }
+                            }
+                        }
+                    }
+                }
+                constants[w[1]] = v;
+                break;
+            }
+            case spv::OpSpecConstantOp: {
+                const std::size_t operandCount = wc > 4 ? static_cast<std::size_t>(wc - 4) : 0;
+                constants[w[1]] = evalSpecConstantOp(
+                    *this, w[0], w[2], w + 3, operandCount);
                 break;
             }
             case spv::OpVariable: {
@@ -474,6 +863,15 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                 break;
         }
         i += wc;
+    }
+    if (!haveSelectedEntryPoint && haveFallbackEntryPoint) {
+        entryPoint = fallbackEntryPoint;
+        entryInterface = std::move(fallbackEntryInterface);
+    }
+    for (auto& pending : pendingExecutionModes) {
+        if (pending.entryPointId == entryPoint) {
+            executionModes[pending.mode] = std::move(pending.operands);
+        }
     }
     auto entryIt = functions.find(entryPoint);
     if (entryIt != functions.end()) {

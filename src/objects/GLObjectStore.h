@@ -986,6 +986,9 @@ struct GLProgramObject {
     // so detach/delete of the shader doesn't pull the blob out from
     // under a subsequent draw.
     std::vector<std::uint32_t> vertexSpirv;
+    std::string vertexSpirvEntryPoint;
+    std::unordered_map<std::uint32_t, std::uint32_t>
+        vertexSpirvSpecializationConstants;
     // GS input / output topology from the SPIR-V execution modes —
     // OutputPoints / OutputLineStrip / OutputTriangleStrip, and
     // InputPoints / InputLines / InputTrianglesAdjacency etc.

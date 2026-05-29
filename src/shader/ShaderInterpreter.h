@@ -133,6 +133,8 @@ struct DecorationSet {
     // `gl_MaxTransformFeedbackStreams` floor is 4 (GL 4.0).
     bool hasStream = false;
     std::uint32_t stream = 0;
+    bool hasSpecId = false;
+    std::uint32_t specId = 0;
 };
 
 struct MemberDecorations {
@@ -182,7 +184,11 @@ struct SpirvModule {
 
     std::string parseError;
 
-    bool parse(const std::uint32_t* data, std::size_t count);
+    bool parse(
+        const std::uint32_t* data,
+        std::size_t count,
+        const std::string* entryPointName = nullptr,
+        const std::unordered_map<std::uint32_t, std::uint32_t>* specializationConstants = nullptr);
     std::uint32_t scalarWidth(std::uint32_t typeId) const;
 };
 

@@ -428,7 +428,11 @@ void recordVsOnlyTfWriteDurationNs(std::uint64_t ns);
 // time on VS+FS-only programs (`!gsPresent && !hasTessellation`) to set
 // `GLProgramObject::needsCullDistancePrepass`. Internally reuses the
 // existing `scanClipCullWrites` SPIR-V walk (sister-pattern leverage).
-bool vsSpirvWritesCullDistance(const std::uint32_t* spirv, std::size_t wordCount);
+bool vsSpirvWritesCullDistance(
+    const std::uint32_t* spirv,
+    std::size_t wordCount,
+    const std::string* entryPointName = nullptr,
+    const std::unordered_map<std::uint32_t, std::uint32_t>* specializationConstants = nullptr);
 
 // Sprint 17 Day 7+ Bank-Group-H Path B Component C — CPU cull pre-pass
 // for VS+FS programs writing gl_CullDistance. Implements GL §14.6.3

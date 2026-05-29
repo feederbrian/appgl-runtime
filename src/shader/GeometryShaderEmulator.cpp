@@ -9239,10 +9239,12 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     // the rendering semantics land.
     auto programStoresBuiltIn =
         [&](const std::vector<std::uint32_t>& spirv,
-            const std::unordered_set<std::uint32_t>& builtIns) -> bool {
+            const std::unordered_set<std::uint32_t>& builtIns,
+            const std::string* entryPointName = nullptr,
+            const std::unordered_map<std::uint32_t, std::uint32_t>* specializationConstants = nullptr) -> bool {
         if (spirv.empty()) return false;
         SpirvModule m;
-        if (!m.parse(spirv.data(), spirv.size())) return false;
+        if (!m.parse(spirv.data(), spirv.size(), entryPointName, specializationConstants)) return false;
         if (!m.haveFuncBody) return false;
         std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> builtInMembers;
         for (const auto& [structId, mdSet] : m.memberDecorations) {
@@ -9309,9 +9311,17 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
         return false;
     };
     auto programStoresClipOrCull = [&]() -> bool {
+        const std::string* entryPointName = program.vertexSpirvEntryPoint.empty()
+            ? nullptr
+            : &program.vertexSpirvEntryPoint;
+        const auto* specializationConstants =
+            program.vertexSpirvSpecializationConstants.empty()
+                ? nullptr
+                : &program.vertexSpirvSpecializationConstants;
         return programStoresBuiltIn(
             program.vertexSpirv,
-            {spv::BuiltInClipDistance, spv::BuiltInCullDistance});
+            {spv::BuiltInClipDistance, spv::BuiltInCullDistance},
+            entryPointName, specializationConstants);
     };
     auto geometryStoresLayerOrViewport = [&]() -> bool {
         return programStoresBuiltIn(
@@ -9763,10 +9773,12 @@ void addUniformBuffersFromModule(const std::vector<std::uint32_t>& spirv,
                                  GLObjectStore& objects,
                                  const GLStateTracker& state,
                                  const GLProgramObject& program,
-                                 Interpreter::UniformBufferMap& out) {
+                                 Interpreter::UniformBufferMap& out,
+                                 const std::string* entryPointName = nullptr,
+                                 const std::unordered_map<std::uint32_t, std::uint32_t>* specializationConstants = nullptr) {
     if (spirv.empty()) return;
     SpirvModule mod;
-    if (!mod.parse(spirv.data(), spirv.size())) return;
+    if (!mod.parse(spirv.data(), spirv.size(), entryPointName, specializationConstants)) return;
 
     // Interpreter access chains still carry the SPIR-V binding, even when
     // glUniformBlockBinding redirects the buffer slot at runtime.
@@ -9877,10 +9889,12 @@ void addStorageBuffersFromModule(const std::vector<std::uint32_t>& spirv,
                                  GLObjectStore& objects,
                                  const GLStateTracker& state,
                                  const GLProgramObject& program,
-                                 Interpreter::StorageBufferMap& out) {
+                                 Interpreter::StorageBufferMap& out,
+                                 const std::string* entryPointName = nullptr,
+                                 const std::unordered_map<std::uint32_t, std::uint32_t>* specializationConstants = nullptr) {
     if (spirv.empty()) return;
     SpirvModule mod;
-    if (!mod.parse(spirv.data(), spirv.size())) return;
+    if (!mod.parse(spirv.data(), spirv.size(), entryPointName, specializationConstants)) return;
 
     auto addBinding = [&](std::uint32_t mapBinding, std::uint32_t boundBinding) {
         if (out.count(mapBinding) != 0) return;
@@ -10694,9 +10708,31 @@ std::unordered_map<std::string, std::uint32_t> buildVsInputLocationOverrides(
     for (const auto& attrib : program.attributes) {
         if (attrib.location < 0 || attrib.name.empty()) continue;
         std::string base = attrib.name;
+        std::uint32_t baseLocation = static_cast<std::uint32_t>(attrib.location);
         const std::size_t bracket = base.find('[');
-        if (bracket != std::string::npos) base.resize(bracket);
-        overrides[base] = static_cast<std::uint32_t>(attrib.location);
+        if (bracket != std::string::npos) {
+            const std::size_t close = base.find(']', bracket + 1);
+            std::uint32_t elementIndex = 0;
+            if (close != std::string::npos && close > bracket + 1) {
+                bool validIndex = true;
+                for (std::size_t i = bracket + 1; i < close; ++i) {
+                    if (!std::isdigit(static_cast<unsigned char>(base[i]))) {
+                        validIndex = false;
+                        break;
+                    }
+                    elementIndex = elementIndex * 10u +
+                                   static_cast<std::uint32_t>(base[i] - '0');
+                }
+                if (validIndex && elementIndex <= baseLocation) {
+                    baseLocation -= elementIndex;
+                }
+            }
+            base.resize(bracket);
+        }
+        auto it = overrides.find(base);
+        if (it == overrides.end() || it->second > baseLocation) {
+            overrides[base] = baseLocation;
+        }
     }
     return overrides;
 }
@@ -10814,10 +10850,14 @@ void recordVsOnlyTfWriteDurationNs(std::uint64_t ns) {
 // (in the anon namespace above) behind a stable signature so callers
 // (GLContext.mm linkProgram) don't need access to the internal
 // SpirvModule type.
-bool vsSpirvWritesCullDistance(const std::uint32_t* spirv, std::size_t wordCount) {
+bool vsSpirvWritesCullDistance(
+    const std::uint32_t* spirv,
+    std::size_t wordCount,
+    const std::string* entryPointName,
+    const std::unordered_map<std::uint32_t, std::uint32_t>* specializationConstants) {
     if (spirv == nullptr || wordCount < 5) return false;
     SpirvModule mod;
-    if (!mod.parse(spirv, wordCount)) return false;
+    if (!mod.parse(spirv, wordCount, entryPointName, specializationConstants)) return false;
     return scanClipCullWrites(mod).second;
 }
 
@@ -10943,7 +10983,15 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     }
     const std::uint64_t parseStart = timing ? vsOnlyTfTimingNowNs() : 0;
     SpirvModule vsMod;
-    if (!vsMod.parse(program.vertexSpirv.data(), program.vertexSpirv.size())) {
+    const std::string* entryPointName = program.vertexSpirvEntryPoint.empty()
+        ? nullptr
+        : &program.vertexSpirvEntryPoint;
+    const auto* specializationConstants =
+        program.vertexSpirvSpecializationConstants.empty()
+            ? nullptr
+            : &program.vertexSpirvSpecializationConstants;
+    if (!vsMod.parse(program.vertexSpirv.data(), program.vertexSpirv.size(),
+                     entryPointName, specializationConstants)) {
         if (timing) {
             addTimingNs(timingCounters.parseNs, vsOnlyTfTimingNowNs() - parseStart);
         }
@@ -11098,11 +11146,13 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     // UBO roots as well as UBO arrays now that broader bool-op
     // support lets more tess/GS shaders take the CPU interpreter path.
     Interpreter::UniformBufferMap vsUboMap;
-    addUniformBuffersFromModule(program.vertexSpirv, objects, state, program, vsUboMap);
+    addUniformBuffersFromModule(program.vertexSpirv, objects, state, program,
+                                vsUboMap, entryPointName, specializationConstants);
     const Interpreter::UniformBufferMap* vsUboMapPtr =
         vsUboMap.empty() ? nullptr : &vsUboMap;
     Interpreter::StorageBufferMap vsSsboMap;
-    addStorageBuffersFromModule(program.vertexSpirv, objects, state, program, vsSsboMap);
+    addStorageBuffersFromModule(program.vertexSpirv, objects, state, program,
+                                vsSsboMap, entryPointName, specializationConstants);
     const Interpreter::StorageBufferMap* vsSsboMapPtr =
         vsSsboMap.empty() ? nullptr : &vsSsboMap;
 
@@ -11842,8 +11892,16 @@ EmulatedDraw emulateGeometryDraw(
     // the program object only matters if CTS workloads show draw-call
     // hot spots, which they don't at this scale.
     SpirvModule vsMod;
+    const std::string* vsEntryPointName = program.vertexSpirvEntryPoint.empty()
+        ? nullptr
+        : &program.vertexSpirvEntryPoint;
+    const auto* vsSpecializationConstants =
+        program.vertexSpirvSpecializationConstants.empty()
+            ? nullptr
+            : &program.vertexSpirvSpecializationConstants;
     const bool haveVs = !program.vertexSpirv.empty() &&
-                        vsMod.parse(program.vertexSpirv.data(), program.vertexSpirv.size()) &&
+                        vsMod.parse(program.vertexSpirv.data(), program.vertexSpirv.size(),
+                                    vsEntryPointName, vsSpecializationConstants) &&
                         vsMod.haveFuncBody;
     if (haveVs) {
         augmentUniformMapWithUBOBlocks(vsUniforms, vsMod, state, objects);
@@ -11901,10 +11959,13 @@ EmulatedDraw emulateGeometryDraw(
     // bindings can't change mid-draw (glBindBuffer* handlers are
     // never called while a draw is in flight).
     Interpreter::StorageBufferMap gsSsboMap;
-    auto addSsbosFromGsModule = [&](const std::vector<std::uint32_t>& spirv) {
+    auto addSsbosFromGsModule = [&](
+        const std::vector<std::uint32_t>& spirv,
+        const std::string* entryPointName = nullptr,
+        const std::unordered_map<std::uint32_t, std::uint32_t>* specializationConstants = nullptr) {
         if (spirv.empty()) return;
         SpirvModule sMod;
-        if (!sMod.parse(spirv.data(), spirv.size())) return;
+        if (!sMod.parse(spirv.data(), spirv.size(), entryPointName, specializationConstants)) return;
         for (const auto& [varId, info] : sMod.variables) {
             bool isSSBO = false;
             if (info.storageClass == spv::StorageClassStorageBuffer) {
@@ -11976,7 +12037,8 @@ EmulatedDraw emulateGeometryDraw(
         }
     };
     addSsbosFromGsModule(program.geometrySpirv);
-    addSsbosFromGsModule(program.vertexSpirv);
+    addSsbosFromGsModule(program.vertexSpirv,
+                         vsEntryPointName, vsSpecializationConstants);
     addAtomicCounterBuffersForGs();
     const Interpreter::StorageBufferMap* gsSsboMapPtr =
         gsSsboMap.empty() ? nullptr : &gsSsboMap;
@@ -11985,7 +12047,8 @@ EmulatedDraw emulateGeometryDraw(
     // ordinary block roots; `binding_uniform_blocks` uses the latter.
     Interpreter::UniformBufferMap gsUboMap;
     addUniformBuffersFromModule(program.geometrySpirv, objects, state, program, gsUboMap);
-    addUniformBuffersFromModule(program.vertexSpirv, objects, state, program, gsUboMap);
+    addUniformBuffersFromModule(program.vertexSpirv, objects, state, program,
+                                gsUboMap, vsEntryPointName, vsSpecializationConstants);
     const Interpreter::UniformBufferMap* gsUboMapPtr =
         gsUboMap.empty() ? nullptr : &gsUboMap;
 
@@ -13341,7 +13404,14 @@ bool runVsForVertex(
         return false;
     }
     SpirvModule vsMod;
-    if (!vsMod.parse(vsSpirv, vsWordCount)) {
+    const std::string* entryPointName = program.vertexSpirvEntryPoint.empty()
+        ? nullptr
+        : &program.vertexSpirvEntryPoint;
+    const auto* specializationConstants =
+        program.vertexSpirvSpecializationConstants.empty()
+            ? nullptr
+            : &program.vertexSpirvSpecializationConstants;
+    if (!vsMod.parse(vsSpirv, vsWordCount, entryPointName, specializationConstants)) {
         if (diagnostic) *diagnostic = "runVsForVertex: SpirvModule parse: " + vsMod.parseError;
         return false;
     }

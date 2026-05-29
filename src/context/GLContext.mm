@@ -37123,6 +37123,8 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->geometryEmulated = false;
     programObject->geometrySpirv.clear();
     programObject->vertexSpirv.clear();
+    programObject->vertexSpirvEntryPoint.clear();
+    programObject->vertexSpirvSpecializationConstants.clear();
     programObject->gsPresent = false;
     programObject->gsInputTopology = 0;
     programObject->gsOutputTopology = 0;
@@ -37322,6 +37324,39 @@ bool GLContext::linkProgram(GLuint program) {
         options.specializationConstants = stage->spirvSpecializationConstants;
     };
 
+    auto spirvEntryPointNameFor = [](const GLShaderObject* stage)
+        -> const std::string* {
+        if (stage == nullptr || !stage->isSpirvBinary ||
+            stage->spirvEntryPoint.empty()) {
+            return nullptr;
+        }
+        return &stage->spirvEntryPoint;
+    };
+
+    auto spirvSpecializationConstantsFor = [](const GLShaderObject* stage)
+        -> const std::unordered_map<std::uint32_t, std::uint32_t>* {
+        if (stage == nullptr || !stage->isSpirvBinary ||
+            stage->spirvSpecializationConstants.empty()) {
+            return nullptr;
+        }
+        return &stage->spirvSpecializationConstants;
+    };
+
+    auto stashVertexSpirv = [&](const GLShaderObject* stage) {
+        if (stage == nullptr || stage->spirv.empty()) {
+            return;
+        }
+        programObject->vertexSpirv = stage->spirv;
+        if (stage->isSpirvBinary) {
+            programObject->vertexSpirvEntryPoint = stage->spirvEntryPoint;
+            programObject->vertexSpirvSpecializationConstants =
+                stage->spirvSpecializationConstants;
+        } else {
+            programObject->vertexSpirvEntryPoint.clear();
+            programObject->vertexSpirvSpecializationConstants.clear();
+        }
+    };
+
     auto translateCachedStage = [&](const char* stageName,
                                     GLShaderObject* stage,
                                     std::string& mslOut,
@@ -37500,7 +37535,10 @@ bool GLContext::linkProgram(GLuint program) {
             // performs §14.6.3 culling instead. Phase 2 §1.1 confirmed
             // Option β (keep routing) refutation.
             const bool vsCullPrepass =
-                appgl::vsSpirvWritesCullDistance(vsSpirvData, vsSpirvWords);
+                appgl::vsSpirvWritesCullDistance(
+                    vsSpirvData, vsSpirvWords,
+                    spirvEntryPointNameFor(vertexShader),
+                    spirvSpecializationConstantsFor(vertexShader));
             // Sprint 18 Item42: graphics SSBOs use Metal argument buffers
             // to avoid direct buffer-index overflow when slot expansion
             // reaches past Metal's 0..30 range. Apply per-program so VS
@@ -37548,7 +37586,7 @@ bool GLContext::linkProgram(GLuint program) {
             // buffer stays at zero-init, breaking
             // `transform_feedback.{capture,query,discard}_vertex_*`.
             if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
-                programObject->vertexSpirv = vertexShader->spirv;
+                stashVertexSpirv(vertexShader);
             }
             // Sprint 17 Day 7+ Bank-Group-H Path B Component A1: commit
             // the VS cull-distance flag detected above (pre-translation)
@@ -37776,7 +37814,7 @@ bool GLContext::linkProgram(GLuint program) {
             // a TCS will eventually consume this VS, so it can't emit
             // the compute form alone; the orchestrator does it later.
             if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
-                programObject->vertexSpirv = vertexShader->spirv;
+                stashVertexSpirv(vertexShader);
             }
             break;
         }
@@ -37981,7 +38019,10 @@ bool GLContext::linkProgram(GLuint program) {
             // flow through GS unchanged); non-passthrough GS that
             // modifies cull values is rare and falls outside this gate.
             const bool vsCullPrepassVgf =
-                appgl::vsSpirvWritesCullDistance(vsSpirvData, vsSpirvWords);
+                appgl::vsSpirvWritesCullDistance(
+                    vsSpirvData, vsSpirvWords,
+                    spirvEntryPointNameFor(vertexShader),
+                    spirvSpecializationConstantsFor(vertexShader));
             const bool forceRasterArgBufVgf =
                 spirvUsesStorageBuffers(vsSpirvData, vsSpirvWords) ||
                 spirvUsesStorageBuffers(fsSpirvData, fsSpirvWords);
@@ -38059,7 +38100,7 @@ bool GLContext::linkProgram(GLuint program) {
                 // (runs on every draw) has a stable copy independent
                 // of the shader's lifetime.
                 if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
-                    programObject->vertexSpirv = vertexShader->spirv;
+                    stashVertexSpirv(vertexShader);
                 }
                 // Sprint 8 #8 β.3 (CKPT97): for 5-stage programs
                 // (VS+TCS+TES+GS+FS) the kind is VertexGeometryFragment
@@ -38652,7 +38693,7 @@ bool GLContext::linkProgram(GLuint program) {
             if (geometryShader != nullptr && !geometryShader->spirv.empty()) {
                 programObject->geometrySpirv = geometryShader->spirv;
                 if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
-                    programObject->vertexSpirv = vertexShader->spirv;
+                    stashVertexSpirv(vertexShader);
                 }
                 (void)appgl::detectGeometryEmulatable(*programObject);
             }
@@ -38764,7 +38805,7 @@ bool GLContext::linkProgram(GLuint program) {
 
             programObject->hasTessellation = true;
             if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
-                programObject->vertexSpirv = vertexShader->spirv;
+                stashVertexSpirv(vertexShader);
             }
             if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
                 programObject->tessControlSpirv = tessControlShader->spirv;
@@ -38888,7 +38929,7 @@ bool GLContext::linkProgram(GLuint program) {
 
             programObject->hasTessellation = true;
             if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
-                programObject->vertexSpirv = vertexShader->spirv;
+                stashVertexSpirv(vertexShader);
             }
             if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
                 programObject->tessControlSpirv = tessControlShader->spirv;
@@ -39284,7 +39325,7 @@ bool GLContext::linkProgram(GLuint program) {
             // stays false through iter 162 — subsequent iters flip it
             // on once the draw-time logic lands.
             if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
-                programObject->vertexSpirv = vertexShader->spirv;
+                stashVertexSpirv(vertexShader);
             }
             if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
                 programObject->tessControlSpirv = tessControlShader->spirv;
@@ -43830,6 +43871,9 @@ GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
         vsProg = objects->programs().get(ppo->vertexProgram);
         if (vsProg != nullptr) {
             gsProg->vertexSpirv = vsProg->vertexSpirv;
+            gsProg->vertexSpirvEntryPoint = vsProg->vertexSpirvEntryPoint;
+            gsProg->vertexSpirvSpecializationConstants =
+                vsProg->vertexSpirvSpecializationConstants;
             gsProg->vertexReflection = vsProg->vertexReflection;
             // Carry the VS reflection so the GS/tess CPU emulators
             // see the pipeline vertex stage's actual resource layout.
@@ -44333,6 +44377,11 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
     // CPU TF writer counter formulas) can find it without reaching
     // back across separable program boundaries.
     synth->vertexSpirv = vsProg ? vsProg->vertexSpirv : std::vector<std::uint32_t>{};
+    synth->vertexSpirvEntryPoint =
+        vsProg ? vsProg->vertexSpirvEntryPoint : std::string{};
+    synth->vertexSpirvSpecializationConstants =
+        vsProg ? vsProg->vertexSpirvSpecializationConstants
+               : std::unordered_map<std::uint32_t, std::uint32_t>{};
     synth->tessControlSpirv = tcsProg->tessControlSpirv;
     synth->tessEvalSpirv = tesProg->tessEvalSpirv;
     synth->tessellationEmulated = tesProg->tessellationEmulated;
