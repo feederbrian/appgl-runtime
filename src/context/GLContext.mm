@@ -28808,6 +28808,44 @@ void copyStringToBuffer(const std::string& source, GLsizei bufSize, GLsizei* len
     }
 }
 
+bool glslSourceUsesEsProfile(std::string_view source) {
+    const std::size_t version = source.find("#version");
+    if (version == std::string_view::npos) {
+        return false;
+    }
+
+    std::size_t pos = version + std::strlen("#version");
+    while (pos < source.size() &&
+           std::isspace(static_cast<unsigned char>(source[pos]))) {
+        ++pos;
+    }
+    if (pos >= source.size() ||
+        !std::isdigit(static_cast<unsigned char>(source[pos]))) {
+        return false;
+    }
+    while (pos < source.size() &&
+           std::isdigit(static_cast<unsigned char>(source[pos]))) {
+        ++pos;
+    }
+    while (pos < source.size() &&
+           std::isspace(static_cast<unsigned char>(source[pos]))) {
+        ++pos;
+    }
+    const char kEs[] = "es";
+    if (pos + 2 > source.size() ||
+        std::strncmp(source.data() + pos, kEs, 2) != 0) {
+        return false;
+    }
+    const bool leftOk = (pos == 0) ||
+        !(std::isalnum(static_cast<unsigned char>(source[pos - 1])) ||
+          source[pos - 1] == '_');
+    const std::size_t end = pos + 2;
+    const bool rightOk = (end >= source.size()) ||
+        !(std::isalnum(static_cast<unsigned char>(source[end])) ||
+          source[end] == '_');
+    return leftOk && rightOk;
+}
+
 void appendDeclarationsAsUniforms(
     std::vector<GLProgramUniformInfo>& out,
     const std::vector<GLShaderDeclaration>& decls
@@ -28843,6 +28881,9 @@ void appendDeclarationsAsUniforms(
             if (existing->explicitOffset < 0 && decl.explicitOffset >= 0) {
                 existing->explicitOffset = decl.explicitOffset;
             }
+            if (decl.declaredInEsProfile) {
+                existing->declaredInEsProfile = true;
+            }
             // GS max-combined texture-unit path: the same sampler uniform
             // array can be declared with independently computed sizes across
             // stages. The linked program must cover queries through the
@@ -28867,6 +28908,7 @@ void appendDeclarationsAsUniforms(
         info.explicitLocation = decl.explicitLocation;
         info.explicitBinding = decl.explicitBinding;
         info.explicitOffset = decl.explicitOffset;
+        info.declaredInEsProfile = decl.declaredInEsProfile;
         info.defaultFloats = decl.defaultFloats;
         info.defaultInts = decl.defaultInts;
         info.defaultUints = decl.defaultUints;
@@ -31316,6 +31358,12 @@ bool GLContext::compileShader(GLuint shader) {
     //    directly so interface blocks are visible even though the scanner
     //    ignores them.
     GLSLReflectionResult reflection = reflectGLSL(compileSource, object->stage);
+    const bool sourceUsesEsProfile = glslSourceUsesEsProfile(compileSource);
+    if (sourceUsesEsProfile) {
+        for (auto& decl : reflection.uniforms) {
+            decl.declaredInEsProfile = true;
+        }
+    }
 
     // Reverse-map compat shader renames so GL queries report original names.
     // The shader source uses `_appgl_sampler` (so glslang accepts it), but
@@ -40573,12 +40621,29 @@ struct UniformSlotRef {
     GLint elementIndex = 0;
     GLint arraySize = 1;
     GLenum type = 0;
+    bool rejectEsImageUnitUpdate = false;
 };
 
 UniformSlotRef resolveUniformSlot(GLProgramObject* program, GLint location) {
     UniformSlotRef r;
     if (program == nullptr || location < 0) {
         return r;
+    }
+    for (const auto& u : program->uniforms) {
+        const GLint slots = std::max<GLint>(u.arraySize, 1);
+        if (u.location >= 0 && location >= u.location &&
+            location < u.location + slots) {
+            auto base = program->uniformValues.find(u.location);
+            if (base != program->uniformValues.end()) {
+                r.slot = &base->second;
+                r.elementIndex = location - u.location;
+                r.arraySize = u.arraySize;
+                r.type = u.type;
+                r.rejectEsImageUnitUpdate =
+                    u.declaredInEsProfile && isImageUniformType(u.type);
+            }
+            return r;
+        }
     }
     auto it = program->uniformValues.find(location);
     if (it != program->uniformValues.end()) {
@@ -40809,7 +40874,7 @@ bool GLContext::getUniformuiv(GLuint program, GLint location, GLuint* params) {
 // are checked against the uniform's declared `utype`.
 static bool sampleOrImageUniformValidationFailed(
     GLContext* ctx, GLenum utype, GLContext::UniformElementType element,
-    GLint vectorSize, const void* values)
+    GLint vectorSize, const void* values, bool rejectImageUnitUpdate)
 {
     auto isSamplerOrImage = [](GLenum t) {
         switch (t) {
@@ -40871,15 +40936,6 @@ static bool sampleOrImageUniformValidationFailed(
         }
     };
     if (!isSamplerOrImage(utype)) return false;
-    if (element != GLContext::UniformElementType::Int || vectorSize != 1) {
-        ctx->pushError(GL_INVALID_OPERATION);
-        return true;
-    }
-    const GLint v = *static_cast<const GLint*>(values);
-    if (v < 0) {
-        ctx->pushError(GL_INVALID_VALUE);
-        return true;
-    }
     auto isImageType = [](GLenum t) {
         switch (t) {
             case GL_IMAGE_1D: case GL_IMAGE_2D: case GL_IMAGE_3D:
@@ -40911,8 +40967,22 @@ static bool sampleOrImageUniformValidationFailed(
                 return false;
         }
     };
+    const bool isImage = isImageType(utype);
+    if (isImage && rejectImageUnitUpdate) {
+        ctx->pushError(GL_INVALID_OPERATION);
+        return true;
+    }
+    if (element != GLContext::UniformElementType::Int || vectorSize != 1) {
+        ctx->pushError(GL_INVALID_OPERATION);
+        return true;
+    }
+    const GLint v = *static_cast<const GLint*>(values);
+    if (v < 0) {
+        ctx->pushError(GL_INVALID_VALUE);
+        return true;
+    }
     GLint maxUnit = 0;
-    if (isImageType(utype)) {
+    if (isImage) {
         ctx->capabilities().queryInteger(GL_MAX_IMAGE_UNITS, &maxUnit);
     } else {
         ctx->capabilities().queryInteger(
@@ -40960,7 +41030,7 @@ bool GLContext::setUniformScalarVector(GLint location, UniformElementType elemen
     GLProgramUniformValue* slot = ref.slot;
 
     if (sampleOrImageUniformValidationFailed(this, ref.type,
-            element, vectorSize, values)) {
+            element, vectorSize, values, ref.rejectEsImageUnitUpdate)) {
         return false;
     }
 
@@ -41260,7 +41330,7 @@ bool GLContext::setUniformScalarVectorForProgram(GLuint program, GLint location,
     UniformSlotRef ref = resolveUniformSlot(object, location);
     if (ref.slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
     if (sampleOrImageUniformValidationFailed(this, ref.type,
-            element, vectorSize, values)) {
+            element, vectorSize, values, ref.rejectEsImageUnitUpdate)) {
         return false;
     }
     GLProgramUniformValue* slot = ref.slot;

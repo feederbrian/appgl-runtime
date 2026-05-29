@@ -134,6 +134,213 @@ int parseVersionNumber(std::string_view versionLine) {
     return value;
 }
 
+std::string_view trimAscii(std::string_view text) {
+    while (!text.empty() &&
+           std::isspace(static_cast<unsigned char>(text.front()))) {
+        text.remove_prefix(1);
+    }
+    while (!text.empty() &&
+           std::isspace(static_cast<unsigned char>(text.back()))) {
+        text.remove_suffix(1);
+    }
+    return text;
+}
+
+std::size_t lineEndAfter(std::string_view source, std::size_t lineStart) {
+    const std::size_t eol = source.find('\n', lineStart);
+    return eol == std::string_view::npos ? source.size() : eol + 1;
+}
+
+bool readIdentifier(std::string_view source,
+                    std::size_t& pos,
+                    std::string_view* out = nullptr) {
+    if (pos >= source.size() || !isIdentChar(source[pos])) {
+        return false;
+    }
+    const std::size_t begin = pos;
+    while (pos < source.size() && isIdentChar(source[pos])) {
+        ++pos;
+    }
+    if (out != nullptr) {
+        *out = source.substr(begin, pos - begin);
+    }
+    return true;
+}
+
+bool skipWhitespaceAndComments(std::string_view source, std::size_t& pos) {
+    while (pos < source.size()) {
+        if (std::isspace(static_cast<unsigned char>(source[pos]))) {
+            ++pos;
+            continue;
+        }
+        if (pos + 1 < source.size() && source[pos] == '/' && source[pos + 1] == '/') {
+            pos += 2;
+            while (pos < source.size() && source[pos] != '\n') {
+                ++pos;
+            }
+            continue;
+        }
+        if (pos + 1 < source.size() && source[pos] == '/' && source[pos + 1] == '*') {
+            const std::size_t close = source.find("*/", pos + 2);
+            if (close == std::string_view::npos) {
+                return false;
+            }
+            pos = close + 2;
+            continue;
+        }
+        break;
+    }
+    return true;
+}
+
+bool sourceHasWordAt(std::string_view source,
+                     std::size_t pos,
+                     std::string_view word) {
+    if (pos + word.size() > source.size() ||
+        source.compare(pos, word.size(), word) != 0) {
+        return false;
+    }
+    const bool leftOk = (pos == 0) || !isIdentChar(source[pos - 1]);
+    const std::size_t end = pos + word.size();
+    const bool rightOk = (end >= source.size()) || !isIdentChar(source[end]);
+    return leftOk && rightOk;
+}
+
+bool consumeExtensionLine(std::string_view source, std::size_t& pos) {
+    if (pos >= source.size() || source[pos] != '#') {
+        return false;
+    }
+    std::size_t p = pos + 1;
+    while (p < source.size() &&
+           (source[p] == ' ' || source[p] == '\t')) {
+        ++p;
+    }
+    if (!sourceHasWordAt(source, p, "extension")) {
+        return false;
+    }
+    pos = lineEndAfter(source, pos);
+    return true;
+}
+
+bool consumePrecisionDeclaration(std::string_view source, std::size_t& pos) {
+    if (!sourceHasWordAt(source, pos, "precision")) {
+        return false;
+    }
+    pos += std::strlen("precision");
+    if (!skipWhitespaceAndComments(source, pos)) {
+        return false;
+    }
+    std::string_view qualifier;
+    if (!readIdentifier(source, pos, &qualifier) ||
+        (qualifier != "lowp" && qualifier != "mediump" && qualifier != "highp")) {
+        return false;
+    }
+    if (!skipWhitespaceAndComments(source, pos)) {
+        return false;
+    }
+    std::string_view typeName;
+    if (!readIdentifier(source, pos, &typeName)) {
+        return false;
+    }
+    if (!skipWhitespaceAndComments(source, pos)) {
+        return false;
+    }
+    if (pos >= source.size() || source[pos] != ';') {
+        return false;
+    }
+    ++pos;
+    return true;
+}
+
+bool isOnlyEsPrecisionPreamble(std::string_view source) {
+    std::size_t pos = 0;
+    bool sawPreambleItem = false;
+    while (true) {
+        if (!skipWhitespaceAndComments(source, pos)) {
+            return false;
+        }
+        if (pos >= source.size()) {
+            return sawPreambleItem;
+        }
+        if (consumeExtensionLine(source, pos)) {
+            sawPreambleItem = true;
+            continue;
+        }
+        if (consumePrecisionDeclaration(source, pos)) {
+            sawPreambleItem = true;
+            continue;
+        }
+        return false;
+    }
+}
+
+bool isEsVersionLine(std::string_view versionLine) {
+    if (parseVersionNumber(versionLine) < 300) {
+        return false;
+    }
+    const std::string_view trimmed = trimAscii(versionLine);
+    std::size_t pos = trimmed.find("#version");
+    if (pos == std::string_view::npos) {
+        return false;
+    }
+    pos += std::strlen("#version");
+    while (pos < trimmed.size() &&
+           std::isspace(static_cast<unsigned char>(trimmed[pos]))) {
+        ++pos;
+    }
+    while (pos < trimmed.size() &&
+           std::isdigit(static_cast<unsigned char>(trimmed[pos]))) {
+        ++pos;
+    }
+    while (pos < trimmed.size() &&
+           std::isspace(static_cast<unsigned char>(trimmed[pos]))) {
+        ++pos;
+    }
+    return sourceHasWordAt(trimmed, pos, "es");
+}
+
+void normalizeDuplicatedEsVersionPreamble(std::string& source) {
+    const std::size_t firstVersion = source.find("#version");
+    if (firstVersion == std::string::npos) {
+        return;
+    }
+
+    std::size_t firstLineEnd = lineEndAfter(source, firstVersion);
+    const std::string_view firstLine =
+        trimAscii(std::string_view(source).substr(firstVersion,
+                                                  firstLineEnd - firstVersion));
+    if (!isEsVersionLine(firstLine)) {
+        return;
+    }
+
+    std::size_t search = firstVersion + std::strlen("#version");
+    while (true) {
+        const std::size_t secondVersion = source.find("#version", search);
+        if (secondVersion == std::string::npos) {
+            return;
+        }
+
+        const std::size_t secondLineEnd = lineEndAfter(source, secondVersion);
+        const std::string_view secondLine =
+            trimAscii(std::string_view(source).substr(
+                secondVersion, secondLineEnd - secondVersion));
+        if (secondLine == firstLine) {
+            const std::string_view between =
+                std::string_view(source).substr(firstLineEnd,
+                                                secondVersion - firstLineEnd);
+            if (isOnlyEsPrecisionPreamble(between)) {
+                source.replace(secondVersion,
+                               secondLineEnd - secondVersion,
+                               "\n");
+                firstLineEnd = lineEndAfter(source, firstVersion);
+                search = firstLineEnd;
+                continue;
+            }
+        }
+        search = secondVersion + std::strlen("#version");
+    }
+}
+
 // Scan for every literal subscript `gl_MultiTexCoord<N>` (N in 0..7)
 // and record usage. The `[i]` subscript form is not used by
 // `gl_MultiTexCoord` in legacy GLSL — each slot is its own named
@@ -489,6 +696,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
                                               GLenum stage) {
     CompatShaderRewriteResult result;
     result.source.assign(source.begin(), source.end());
+    normalizeDuplicatedEsVersionPreamble(result.source);
 
     // Preprocessor-level rewrite: `#define NAME defined(OTHER)` is a
     // glslang-error ("'defined' : cannot use in preprocessor expression

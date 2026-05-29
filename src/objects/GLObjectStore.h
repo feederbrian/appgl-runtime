@@ -526,6 +526,11 @@ struct GLShaderDeclaration {
     // the same image with different format qualifiers in different
     // stages fails link correctly (GL 4.6 §7.4.1 + §4.4.8.2).
     GLenum imageFormat = 0;
+    // True when the declaration came from an ES-profile shader source
+    // (`#version NNN es`). ES image uniforms reject glUniform*/DSA
+    // unit updates, while desktop core image uniforms keep the GL 4.x
+    // unit-setting behavior exercised by the core CTS image tests.
+    bool declaredInEsProfile = false;
     // Phase 8X Group 4d follow-up¹⁵ — GLSL 4.20 / ARB_shading_language_420pack
     // lets uniform declarations carry a default-value initializer, e.g.
     //   uniform vec4 ucolor   = vec4(1.0);
@@ -603,6 +608,8 @@ struct GLProgramUniformInfo {
     // Byte offset from `layout(offset=N)` on an `atomic_uint`
     // uniform (parallel to GLShaderDeclaration::explicitOffset).
     GLint explicitOffset = -1;
+    // Propagated from GLShaderDeclaration::declaredInEsProfile.
+    bool declaredInEsProfile = false;
     // Phase 8X Group 4d follow-up¹⁵ — parallel to GLShaderDeclaration.
     // linkProgram (appendDeclarationsAsUniforms) forwards these from the
     // shader-stage declarations into the program-level uniform table so
