@@ -9050,8 +9050,25 @@ struct GLContext::Impl {
                 // consecutive Metal slot starting at metalBinding.
                 TranslatedDrawInfo::TextureBinding binding;
                 binding.metalSlot = sampledTex.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                if (samplerParamsForCompleteness->wrapS == GL_CLAMP_TO_BORDER) {
+                    binding.borderClampMask |= 0x1u;
+                }
+                if (samplerParamsForCompleteness->wrapT == GL_CLAMP_TO_BORDER) {
+                    binding.borderClampMask |= 0x2u;
+                }
+                if (samplerParamsForCompleteness->wrapR == GL_CLAMP_TO_BORDER) {
+                    binding.borderClampMask |= 0x4u;
+                }
+                for (std::size_t component = 0; component < binding.borderColor.size(); ++component) {
+                    binding.borderColor[component] =
+                        static_cast<std::int32_t>(
+                            samplerParamsForCompleteness->borderColor[component]);
+                }
                 const GLenum resolvedTarget =
                     preferredTarget != 0 ? preferredTarget : discoveredTarget;
+                if (resolvedTarget == GL_TEXTURE_RECTANGLE) {
+                    binding.borderClampMask |= 0x8u;
+                }
                 const bool sampledComplete =
                     sampledTextureCompleteForSampler(*texObject,
                                                      *samplerParamsForCompleteness);

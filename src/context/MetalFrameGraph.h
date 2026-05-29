@@ -225,6 +225,8 @@ struct TranslatedDrawInfo {
         std::uint32_t imageAtomicBufferSlot = 0xFFFFFFFFu;
         std::uint32_t reductionMode = GL_WEIGHTED_AVERAGE_ARB;
         float lodBias = 0.0f;
+        std::uint32_t borderClampMask = 0;
+        std::array<std::int32_t, 4> borderColor = {0, 0, 0, 0};
     };
     std::vector<TextureBinding> fragmentTextures;
     std::vector<TextureBinding> vertexTextures;

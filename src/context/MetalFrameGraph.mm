@@ -181,6 +181,50 @@ static NSInteger textureLodBiasesBufferSlot(const std::string* msl) {
     return haveDigit ? slot : -1;
 }
 
+static NSInteger textureBorderClampModesBufferSlot(const std::string* msl) {
+    if (msl == nullptr) {
+        return -1;
+    }
+    static constexpr const char* kNeedle =
+        "_appgl_TextureBorderClampModes [[buffer(";
+    const std::size_t pos = msl->find(kNeedle);
+    if (pos == std::string::npos) {
+        return -1;
+    }
+    std::size_t cursor = pos + std::strlen(kNeedle);
+    NSInteger slot = 0;
+    bool haveDigit = false;
+    while (cursor < msl->size() &&
+           std::isdigit(static_cast<unsigned char>((*msl)[cursor]))) {
+        haveDigit = true;
+        slot = slot * 10 + static_cast<NSInteger>((*msl)[cursor] - '0');
+        ++cursor;
+    }
+    return haveDigit ? slot : -1;
+}
+
+static NSInteger textureBorderClampColorsBufferSlot(const std::string* msl) {
+    if (msl == nullptr) {
+        return -1;
+    }
+    static constexpr const char* kNeedle =
+        "_appgl_TextureBorderClampColors [[buffer(";
+    const std::size_t pos = msl->find(kNeedle);
+    if (pos == std::string::npos) {
+        return -1;
+    }
+    std::size_t cursor = pos + std::strlen(kNeedle);
+    NSInteger slot = 0;
+    bool haveDigit = false;
+    while (cursor < msl->size() &&
+           std::isdigit(static_cast<unsigned char>((*msl)[cursor]))) {
+        haveDigit = true;
+        slot = slot * 10 + static_cast<NSInteger>((*msl)[cursor] - '0');
+        ++cursor;
+    }
+    return haveDigit ? slot : -1;
+}
+
 static NSInteger implicitLodBiasCorrectionBufferSlot(const std::string* msl) {
     if (msl == nullptr) {
         return -1;
@@ -247,6 +291,54 @@ static std::vector<float> buildTextureLodBiases(
         biases[binding.metalSlot] = binding.lodBias;
     }
     return biases;
+}
+
+static std::vector<std::uint32_t> buildTextureBorderClampModes(
+    const std::vector<TranslatedDrawInfo::TextureBinding>& textures) {
+    std::uint32_t maxSlot = 127;
+    for (const auto& binding : textures) {
+        if (binding.metalTexture == nullptr || binding.metalSamplerState == nullptr) {
+            continue;
+        }
+        maxSlot = std::max(maxSlot, binding.metalSlot);
+    }
+    std::vector<std::uint32_t> modes(
+        static_cast<std::size_t>(maxSlot) + 1u,
+        0u);
+    for (const auto& binding : textures) {
+        if (binding.metalTexture == nullptr || binding.metalSamplerState == nullptr) {
+            continue;
+        }
+        if (binding.metalSlot >= modes.size()) {
+            continue;
+        }
+        modes[binding.metalSlot] = binding.borderClampMask;
+    }
+    return modes;
+}
+
+static std::vector<std::array<std::int32_t, 4>> buildTextureBorderClampColors(
+    const std::vector<TranslatedDrawInfo::TextureBinding>& textures) {
+    std::uint32_t maxSlot = 127;
+    for (const auto& binding : textures) {
+        if (binding.metalTexture == nullptr || binding.metalSamplerState == nullptr) {
+            continue;
+        }
+        maxSlot = std::max(maxSlot, binding.metalSlot);
+    }
+    std::vector<std::array<std::int32_t, 4>> colors(
+        static_cast<std::size_t>(maxSlot) + 1u,
+        {0, 0, 0, 0});
+    for (const auto& binding : textures) {
+        if (binding.metalTexture == nullptr || binding.metalSamplerState == nullptr) {
+            continue;
+        }
+        if (binding.metalSlot >= colors.size()) {
+            continue;
+        }
+        colors[binding.metalSlot] = binding.borderColor;
+    }
+    return colors;
 }
 
 static float implicitLodViewportBiasCorrection(const TranslatedDrawInfo& info,
@@ -3344,6 +3436,24 @@ struct MetalFrameGraph::Impl {
                                               length:biases.size() * sizeof(float)
                                              atIndex:static_cast<NSUInteger>(vertexLodBiasesSlot)];
             }
+            const NSInteger vertexBorderClampModesSlot =
+                textureBorderClampModesBufferSlot(info.vertexMSL);
+            const NSInteger vertexBorderClampColorsSlot =
+                textureBorderClampColorsBufferSlot(info.vertexMSL);
+            if (vertexBorderClampModesSlot >= 0) {
+                std::vector<std::uint32_t> modes =
+                    buildTextureBorderClampModes(info.vertexTextures);
+                [currentRenderEncoder setVertexBytes:modes.data()
+                                              length:modes.size() * sizeof(std::uint32_t)
+                                             atIndex:static_cast<NSUInteger>(vertexBorderClampModesSlot)];
+            }
+            if (vertexBorderClampColorsSlot >= 0) {
+                std::vector<std::array<std::int32_t, 4>> colors =
+                    buildTextureBorderClampColors(info.vertexTextures);
+                [currentRenderEncoder setVertexBytes:colors.data()
+                                              length:colors.size() * sizeof(std::array<std::int32_t, 4>)
+                                             atIndex:static_cast<NSUInteger>(vertexBorderClampColorsSlot)];
+            }
             const NSInteger vertexImplicitLodBiasCorrectionSlot =
                 implicitLodBiasCorrectionBufferSlot(info.vertexMSL);
             if (vertexImplicitLodBiasCorrectionSlot >= 0) {
@@ -3377,6 +3487,24 @@ struct MetalFrameGraph::Impl {
                 [currentRenderEncoder setFragmentBytes:biases.data()
                                                 length:biases.size() * sizeof(float)
                                                atIndex:static_cast<NSUInteger>(fragmentLodBiasesSlot)];
+            }
+            const NSInteger fragmentBorderClampModesSlot =
+                textureBorderClampModesBufferSlot(info.fragmentMSL);
+            const NSInteger fragmentBorderClampColorsSlot =
+                textureBorderClampColorsBufferSlot(info.fragmentMSL);
+            if (fragmentBorderClampModesSlot >= 0) {
+                std::vector<std::uint32_t> modes =
+                    buildTextureBorderClampModes(info.fragmentTextures);
+                [currentRenderEncoder setFragmentBytes:modes.data()
+                                                length:modes.size() * sizeof(std::uint32_t)
+                                               atIndex:static_cast<NSUInteger>(fragmentBorderClampModesSlot)];
+            }
+            if (fragmentBorderClampColorsSlot >= 0) {
+                std::vector<std::array<std::int32_t, 4>> colors =
+                    buildTextureBorderClampColors(info.fragmentTextures);
+                [currentRenderEncoder setFragmentBytes:colors.data()
+                                                length:colors.size() * sizeof(std::array<std::int32_t, 4>)
+                                               atIndex:static_cast<NSUInteger>(fragmentBorderClampColorsSlot)];
             }
             const NSInteger fragmentImplicitLodBiasCorrectionSlot =
                 implicitLodBiasCorrectionBufferSlot(info.fragmentMSL);

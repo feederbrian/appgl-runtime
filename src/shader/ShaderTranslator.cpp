@@ -35,6 +35,8 @@ constexpr std::uint32_t kClipControlYSignPreferredBufferSlot = 29u;
 constexpr std::uint32_t kTextureReductionModesPreferredBufferSlot = 14u;
 constexpr std::uint32_t kTextureLodBiasesPreferredBufferSlot = 13u;
 constexpr std::uint32_t kImplicitLodBiasCorrectionPreferredBufferSlot = 12u;
+constexpr std::uint32_t kTextureBorderClampModesPreferredBufferSlot = 11u;
+constexpr std::uint32_t kTextureBorderClampColorsPreferredBufferSlot = 10u;
 constexpr std::uint32_t kMaxMetalBufferSlot = 30u;
 constexpr std::uint32_t kMaxDirectMetalSamplerSlots = 16u;
 constexpr std::uint32_t kMultisampleSampledSidecarTextureSlotOffset = 64u;
@@ -2470,6 +2472,491 @@ std::vector<TextureReductionParam> textureReductionParams(const std::string& msl
         }
     }
     return result;
+}
+
+enum class IntegerBorderTextureKind {
+    Unsupported,
+    Int1D,
+    UInt1D,
+    Int1DArray,
+    UInt1DArray,
+    Int2D,
+    UInt2D,
+    Int2DArray,
+    UInt2DArray,
+    Int3D,
+    UInt3D,
+};
+
+struct IntegerBorderTextureParam {
+    std::string name;
+    IntegerBorderTextureKind kind = IntegerBorderTextureKind::Unsupported;
+    std::uint32_t slot = 0;
+};
+
+bool mslTextureTypeMatches(const std::string& type,
+                           const char* textureName,
+                           const char* scalarName) {
+    const std::string needle =
+        std::string(textureName) + "<" + scalarName;
+    const std::size_t pos = type.find(needle);
+    if (pos == std::string::npos) {
+        return false;
+    }
+    const std::size_t after = pos + needle.size();
+    return after < type.size() && (type[after] == '>' || type[after] == ',');
+}
+
+IntegerBorderTextureKind integerBorderKindForType(const std::string& type) {
+    if (mslTextureTypeMatches(type, "texture1d_array", "int")) {
+        return IntegerBorderTextureKind::Int1DArray;
+    }
+    if (mslTextureTypeMatches(type, "texture1d_array", "uint")) {
+        return IntegerBorderTextureKind::UInt1DArray;
+    }
+    if (mslTextureTypeMatches(type, "texture1d", "int")) {
+        return IntegerBorderTextureKind::Int1D;
+    }
+    if (mslTextureTypeMatches(type, "texture1d", "uint")) {
+        return IntegerBorderTextureKind::UInt1D;
+    }
+    if (mslTextureTypeMatches(type, "texture2d_array", "int")) {
+        return IntegerBorderTextureKind::Int2DArray;
+    }
+    if (mslTextureTypeMatches(type, "texture2d_array", "uint")) {
+        return IntegerBorderTextureKind::UInt2DArray;
+    }
+    if (mslTextureTypeMatches(type, "texture2d", "int")) {
+        return IntegerBorderTextureKind::Int2D;
+    }
+    if (mslTextureTypeMatches(type, "texture2d", "uint")) {
+        return IntegerBorderTextureKind::UInt2D;
+    }
+    if (mslTextureTypeMatches(type, "texture3d", "int")) {
+        return IntegerBorderTextureKind::Int3D;
+    }
+    if (mslTextureTypeMatches(type, "texture3d", "uint")) {
+        return IntegerBorderTextureKind::UInt3D;
+    }
+    return IntegerBorderTextureKind::Unsupported;
+}
+
+std::vector<IntegerBorderTextureParam> integerBorderTextureParams(
+    const std::string& msl) {
+    std::size_t paramEnd = 0;
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return {};
+    }
+    const std::size_t mainPos = msl.find("main0(");
+    if (mainPos == std::string::npos) {
+        return {};
+    }
+    const std::size_t paramStart = mainPos + std::strlen("main0");
+    const std::vector<std::string> params =
+        splitTopLevelCommas(msl.substr(paramStart + 1, paramEnd - paramStart - 1));
+
+    std::vector<IntegerBorderTextureParam> result;
+    for (const std::string& param : params) {
+        const std::size_t textureAttr = param.find("[[texture(");
+        if (textureAttr == std::string::npos) {
+            continue;
+        }
+        std::uint32_t slot = 0;
+        std::size_t afterSlot = 0;
+        if (!parseUnsignedAfter(param,
+                                textureAttr + std::strlen("[[texture("),
+                                slot,
+                                &afterSlot)) {
+            continue;
+        }
+
+        std::string prefix = trimCopy(param.substr(0, textureAttr));
+        if (prefix.empty()) {
+            continue;
+        }
+        std::size_t nameEnd = prefix.size();
+        while (nameEnd > 0 &&
+               std::isspace(static_cast<unsigned char>(prefix[nameEnd - 1]))) {
+            --nameEnd;
+        }
+        std::size_t nameBegin = nameEnd;
+        while (nameBegin > 0 && isIdentifierChar(prefix[nameBegin - 1])) {
+            --nameBegin;
+        }
+        if (nameBegin == nameEnd) {
+            continue;
+        }
+
+        IntegerBorderTextureParam parsed;
+        parsed.name = prefix.substr(nameBegin, nameEnd - nameBegin);
+        parsed.kind = integerBorderKindForType(prefix.substr(0, nameBegin));
+        parsed.slot = slot;
+        if (parsed.kind != IntegerBorderTextureKind::Unsupported) {
+            result.push_back(std::move(parsed));
+        }
+    }
+    return result;
+}
+
+const char* integerTextureBorderClampHelperSource() {
+    return R"APPGL(
+
+static inline bool appgl_integer_border_oob_1d(float coord, constant uint* modes, uint slot) {
+    uint mask = modes[slot];
+    return ((mask & 0x1u) != 0u) && (coord < 0.0f || coord >= 1.0f);
+}
+
+static inline bool appgl_integer_border_oob_2d(float2 coord, constant uint* modes, uint slot) {
+    uint mask = modes[slot];
+    return (((mask & 0x1u) != 0u) && (coord.x < 0.0f || coord.x >= 1.0f)) ||
+           (((mask & 0x2u) != 0u) && (coord.y < 0.0f || coord.y >= 1.0f));
+}
+
+static inline bool appgl_integer_border_oob_2d_size(float2 coord, constant uint* modes, uint slot, uint width, uint height) {
+    uint mask = modes[slot];
+    bool rectCoords = (mask & 0x8u) != 0u;
+    float maxX = rectCoords ? float(width) : 1.0f;
+    float maxY = rectCoords ? float(height) : 1.0f;
+    return (((mask & 0x1u) != 0u) && (coord.x < 0.0f || coord.x >= maxX)) ||
+           (((mask & 0x2u) != 0u) && (coord.y < 0.0f || coord.y >= maxY));
+}
+
+static inline bool appgl_integer_border_oob_3d(float3 coord, constant uint* modes, uint slot) {
+    uint mask = modes[slot];
+    return (((mask & 0x1u) != 0u) && (coord.x < 0.0f || coord.x >= 1.0f)) ||
+           (((mask & 0x2u) != 0u) && (coord.y < 0.0f || coord.y >= 1.0f)) ||
+           (((mask & 0x4u) != 0u) && (coord.z < 0.0f || coord.z >= 1.0f));
+}
+
+static inline int4 appgl_texture_border_i_1d(texture1d<int> tex, sampler smp, float coord, constant uint* modes, constant int4* colors, uint slot) {
+    if (appgl_integer_border_oob_1d(coord, modes, slot)) return colors[slot];
+    return tex.sample(smp, coord);
+}
+
+static inline uint4 appgl_texture_border_u_1d(texture1d<uint> tex, sampler smp, float coord, constant uint* modes, constant int4* colors, uint slot) {
+    if (appgl_integer_border_oob_1d(coord, modes, slot)) return as_type<uint4>(colors[slot]);
+    return tex.sample(smp, coord);
+}
+
+static inline int4 appgl_texture_border_i_1d_array(texture1d_array<int> tex, sampler smp, float coord, uint layer, constant uint* modes, constant int4* colors, uint slot) {
+    if (appgl_integer_border_oob_1d(coord, modes, slot)) return colors[slot];
+    return tex.sample(smp, coord, layer);
+}
+
+static inline uint4 appgl_texture_border_u_1d_array(texture1d_array<uint> tex, sampler smp, float coord, uint layer, constant uint* modes, constant int4* colors, uint slot) {
+    if (appgl_integer_border_oob_1d(coord, modes, slot)) return as_type<uint4>(colors[slot]);
+    return tex.sample(smp, coord, layer);
+}
+
+static inline int4 appgl_texture_border_i_2d(texture2d<int> tex, sampler smp, float2 coord, constant uint* modes, constant int4* colors, uint slot) {
+    if (appgl_integer_border_oob_2d_size(coord, modes, slot, tex.get_width(), tex.get_height())) return colors[slot];
+    return tex.sample(smp, coord);
+}
+
+static inline uint4 appgl_texture_border_u_2d(texture2d<uint> tex, sampler smp, float2 coord, constant uint* modes, constant int4* colors, uint slot) {
+    if (appgl_integer_border_oob_2d_size(coord, modes, slot, tex.get_width(), tex.get_height())) return as_type<uint4>(colors[slot]);
+    return tex.sample(smp, coord);
+}
+
+static inline int4 appgl_texture_border_i_2d_array(texture2d_array<int> tex, sampler smp, float2 coord, uint layer, constant uint* modes, constant int4* colors, uint slot) {
+    if (appgl_integer_border_oob_2d(coord, modes, slot)) return colors[slot];
+    return tex.sample(smp, coord, layer);
+}
+
+static inline uint4 appgl_texture_border_u_2d_array(texture2d_array<uint> tex, sampler smp, float2 coord, uint layer, constant uint* modes, constant int4* colors, uint slot) {
+    if (appgl_integer_border_oob_2d(coord, modes, slot)) return as_type<uint4>(colors[slot]);
+    return tex.sample(smp, coord, layer);
+}
+
+static inline int4 appgl_texture_border_i_3d(texture3d<int> tex, sampler smp, float3 coord, constant uint* modes, constant int4* colors, uint slot) {
+    if (appgl_integer_border_oob_3d(coord, modes, slot)) return colors[slot];
+    return tex.sample(smp, coord);
+}
+
+static inline uint4 appgl_texture_border_u_3d(texture3d<uint> tex, sampler smp, float3 coord, constant uint* modes, constant int4* colors, uint slot) {
+    if (appgl_integer_border_oob_3d(coord, modes, slot)) return as_type<uint4>(colors[slot]);
+    return tex.sample(smp, coord);
+}
+)APPGL";
+}
+
+void threadIntegerTextureBorderClampParamsThroughHelpers(
+    std::string& msl,
+    const std::string& modesName,
+    const std::string& colorsName) {
+    const std::vector<MslFunctionDefinition> functions =
+        findTopLevelFunctionDefinitions(msl);
+    if (functions.empty()) {
+        return;
+    }
+
+    std::unordered_set<std::string> needsParams;
+    for (const auto& fn : functions) {
+        const std::string body =
+            msl.substr(fn.bodyOpen + 1, fn.bodyClose - fn.bodyOpen - 1);
+        if (body.find(modesName) != std::string::npos ||
+            body.find(colorsName) != std::string::npos) {
+            needsParams.insert(fn.name);
+        }
+    }
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto& fn : functions) {
+            if (needsParams.find(fn.name) != needsParams.end()) {
+                continue;
+            }
+            for (const auto& callee : needsParams) {
+                if (containsFunctionCallInRange(
+                        msl, fn.bodyOpen + 1, fn.bodyClose, callee)) {
+                    needsParams.insert(fn.name);
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (needsParams.empty()) {
+        return;
+    }
+
+    struct Insertion {
+        std::size_t pos = 0;
+        std::string text;
+    };
+    std::vector<Insertion> insertions;
+    const std::string helperParams =
+        "constant uint* " + modesName +
+        ", constant int4* " + colorsName;
+    const std::string callParams = ", " + modesName + ", " + colorsName;
+    for (const auto& fn : functions) {
+        for (const auto& callee : needsParams) {
+            if (callee == fn.name && callee != "main0") {
+                continue;
+            }
+            std::size_t pos = fn.bodyOpen + 1;
+            while ((pos = msl.find(callee, pos)) != std::string::npos &&
+                   pos < fn.bodyClose) {
+                const std::size_t afterName = pos + callee.size();
+                if ((pos > 0 && isIdentifierChar(msl[pos - 1])) ||
+                    (afterName < msl.size() && isIdentifierChar(msl[afterName]))) {
+                    pos = afterName;
+                    continue;
+                }
+                std::size_t open = afterName;
+                while (open < fn.bodyClose &&
+                       std::isspace(static_cast<unsigned char>(msl[open]))) {
+                    ++open;
+                }
+                if (open >= fn.bodyClose || msl[open] != '(') {
+                    pos = afterName;
+                    continue;
+                }
+                std::size_t close = 0;
+                if (!findMatchingParen(msl, open, close) || close > fn.bodyClose) {
+                    break;
+                }
+                const std::string args = msl.substr(open + 1, close - open - 1);
+                if (args.find(modesName) == std::string::npos &&
+                    args.find(colorsName) == std::string::npos) {
+                    const std::string trimmed = trimCopy(args);
+                    insertions.push_back({
+                        close,
+                        trimmed.empty() ? modesName + ", " + colorsName : callParams});
+                }
+                pos = close + 1;
+            }
+        }
+
+        if (fn.name == "main0" ||
+            needsParams.find(fn.name) == needsParams.end()) {
+            continue;
+        }
+        const std::string params =
+            msl.substr(fn.paramOpen + 1, fn.paramClose - fn.paramOpen - 1);
+        if (params.find(modesName) != std::string::npos ||
+            params.find(colorsName) != std::string::npos) {
+            continue;
+        }
+        insertions.push_back({
+            fn.paramClose,
+            trimCopy(params).empty() ? helperParams : ", " + helperParams});
+    }
+
+    std::sort(insertions.begin(), insertions.end(),
+              [](const Insertion& a, const Insertion& b) {
+                  return a.pos > b.pos;
+              });
+    for (const auto& insertion : insertions) {
+        msl.insert(insertion.pos, insertion.text);
+    }
+}
+
+bool injectIntegerTextureBorderClamp(std::string& msl) {
+    static constexpr const char* kModesName =
+        "_appgl_TextureBorderClampModes";
+    static constexpr const char* kColorsName =
+        "_appgl_TextureBorderClampColors";
+    if (msl.find(kModesName) != std::string::npos ||
+        msl.find(".sample(") == std::string::npos) {
+        return false;
+    }
+    const std::vector<IntegerBorderTextureParam> params =
+        integerBorderTextureParams(msl);
+    if (params.empty()) {
+        return false;
+    }
+
+    struct Replacement {
+        std::size_t begin = 0;
+        std::size_t end = 0;
+        std::string text;
+    };
+    std::vector<Replacement> replacements;
+    for (const IntegerBorderTextureParam& param : params) {
+        const std::string needle = param.name + ".sample(";
+        std::size_t pos = 0;
+        while ((pos = msl.find(needle, pos)) != std::string::npos) {
+            if (pos > 0 && isIdentifierChar(msl[pos - 1])) {
+                pos += needle.size();
+                continue;
+            }
+            const std::size_t open =
+                pos + param.name.size() + std::strlen(".sample");
+            std::size_t close = 0;
+            if (!findMatchingParen(msl, open, close)) {
+                pos += needle.size();
+                continue;
+            }
+            const std::vector<std::string> args =
+                splitTopLevelCommas(msl.substr(open + 1, close - open - 1));
+            const std::string slot = std::to_string(param.slot) + "u";
+            std::string helper;
+            std::vector<std::string> helperArgs;
+            switch (param.kind) {
+                case IntegerBorderTextureKind::Int1D:
+                    if (args.size() == 2) {
+                        helper = "appgl_texture_border_i_1d";
+                        helperArgs = {args[0], args[1]};
+                    }
+                    break;
+                case IntegerBorderTextureKind::UInt1D:
+                    if (args.size() == 2) {
+                        helper = "appgl_texture_border_u_1d";
+                        helperArgs = {args[0], args[1]};
+                    }
+                    break;
+                case IntegerBorderTextureKind::Int1DArray:
+                    if (args.size() == 3) {
+                        helper = "appgl_texture_border_i_1d_array";
+                        helperArgs = {args[0], args[1], args[2]};
+                    }
+                    break;
+                case IntegerBorderTextureKind::UInt1DArray:
+                    if (args.size() == 3) {
+                        helper = "appgl_texture_border_u_1d_array";
+                        helperArgs = {args[0], args[1], args[2]};
+                    }
+                    break;
+                case IntegerBorderTextureKind::Int2D:
+                    if (args.size() == 2) {
+                        helper = "appgl_texture_border_i_2d";
+                        helperArgs = {args[0], args[1]};
+                    }
+                    break;
+                case IntegerBorderTextureKind::UInt2D:
+                    if (args.size() == 2) {
+                        helper = "appgl_texture_border_u_2d";
+                        helperArgs = {args[0], args[1]};
+                    }
+                    break;
+                case IntegerBorderTextureKind::Int2DArray:
+                    if (args.size() == 3) {
+                        helper = "appgl_texture_border_i_2d_array";
+                        helperArgs = {args[0], args[1], args[2]};
+                    }
+                    break;
+                case IntegerBorderTextureKind::UInt2DArray:
+                    if (args.size() == 3) {
+                        helper = "appgl_texture_border_u_2d_array";
+                        helperArgs = {args[0], args[1], args[2]};
+                    }
+                    break;
+                case IntegerBorderTextureKind::Int3D:
+                    if (args.size() == 2) {
+                        helper = "appgl_texture_border_i_3d";
+                        helperArgs = {args[0], args[1]};
+                    }
+                    break;
+                case IntegerBorderTextureKind::UInt3D:
+                    if (args.size() == 2) {
+                        helper = "appgl_texture_border_u_3d";
+                        helperArgs = {args[0], args[1]};
+                    }
+                    break;
+                case IntegerBorderTextureKind::Unsupported:
+                    break;
+            }
+
+            if (!helper.empty()) {
+                std::string replacement = helper + "(" + param.name;
+                for (const std::string& arg : helperArgs) {
+                    replacement += ", " + trimCopy(arg);
+                }
+                replacement += ", " + std::string(kModesName) +
+                    ", " + std::string(kColorsName) +
+                    ", " + slot + ")";
+                replacements.push_back({pos, close + 1, std::move(replacement)});
+            }
+            pos = close + 1;
+        }
+    }
+    if (replacements.empty()) {
+        return false;
+    }
+
+    std::sort(replacements.begin(), replacements.end(),
+              [](const Replacement& a, const Replacement& b) {
+                  return a.begin > b.begin;
+              });
+    for (const Replacement& replacement : replacements) {
+        msl.replace(replacement.begin,
+                    replacement.end - replacement.begin,
+                    replacement.text);
+    }
+
+    std::size_t paramEnd = 0;
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return false;
+    }
+    const std::uint32_t modesSlot =
+        chooseFreeBufferSlot(msl, kTextureBorderClampModesPreferredBufferSlot);
+    std::string withModesParam = msl;
+    const std::string modesParam =
+        ", constant uint* " + std::string(kModesName) +
+        " [[buffer(" + std::to_string(modesSlot) + ")]]";
+    withModesParam.insert(paramEnd, modesParam);
+    const std::uint32_t colorsSlot =
+        chooseFreeBufferSlot(withModesParam,
+                             kTextureBorderClampColorsPreferredBufferSlot);
+    const std::string paramsText =
+        modesParam +
+        ", constant int4* " + std::string(kColorsName) +
+        " [[buffer(" + std::to_string(colorsSlot) + ")]]";
+    msl.insert(paramEnd, paramsText);
+    threadIntegerTextureBorderClampParamsThroughHelpers(
+        msl, kModesName, kColorsName);
+
+    const std::string usingNeedle = "using namespace metal;\n";
+    const std::size_t usingPos = msl.find(usingNeedle);
+    if (usingPos != std::string::npos) {
+        msl.insert(usingPos + usingNeedle.size(),
+                   integerTextureBorderClampHelperSource());
+    } else {
+        msl.insert(0, std::string(integerTextureBorderClampHelperSource()) + "\n");
+    }
+    return true;
 }
 
 const char* textureReductionHelperSource() {
@@ -5534,6 +6021,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             execModel == spv::ExecutionModelVertex) {
             injectTextureReductionMinmax(msl);
             injectTextureLodBiases(msl);
+            injectIntegerTextureBorderClamp(msl);
         }
 
         if ((execModel == spv::ExecutionModelFragment ||
