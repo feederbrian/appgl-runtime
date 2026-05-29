@@ -299,6 +299,15 @@ bool isEsVersionLine(std::string_view versionLine) {
     return sourceHasWordAt(trimmed, pos, "es");
 }
 
+bool sourceUsesEsProfile(std::string_view source) {
+    const std::size_t version = source.find("#version");
+    if (version == std::string_view::npos) {
+        return false;
+    }
+    const std::size_t versionEnd = lineEndAfter(source, version);
+    return isEsVersionLine(trimAscii(source.substr(version, versionEnd - version)));
+}
+
 void normalizeDuplicatedEsVersionPreamble(std::string& source) {
     const std::size_t firstVersion = source.find("#version");
     if (firstVersion == std::string::npos) {
@@ -338,6 +347,120 @@ void normalizeDuplicatedEsVersionPreamble(std::string& source) {
             }
         }
         search = secondVersion + std::strlen("#version");
+    }
+}
+
+bool isOpaquePrecisionType(std::string_view word) {
+    return
+        word == "sampler1D" || word == "sampler2D" ||
+        word == "sampler3D" || word == "samplerCube" ||
+        word == "sampler1DArray" || word == "sampler2DArray" ||
+        word == "sampler1DShadow" || word == "sampler2DShadow" ||
+        word == "sampler1DArrayShadow" ||
+        word == "sampler2DArrayShadow" ||
+        word == "samplerCubeShadow" ||
+        word == "sampler2DRect" || word == "sampler2DRectShadow" ||
+        word == "samplerBuffer" ||
+        word == "sampler2DMS" || word == "sampler2DMSArray" ||
+        word == "samplerCubeArray" ||
+        word == "samplerCubeArrayShadow" ||
+        word == "isampler1D" || word == "isampler2D" ||
+        word == "isampler3D" || word == "isamplerCube" ||
+        word == "isampler1DArray" || word == "isampler2DArray" ||
+        word == "isampler2DRect" || word == "isamplerBuffer" ||
+        word == "isampler2DMS" || word == "isampler2DMSArray" ||
+        word == "isamplerCubeArray" ||
+        word == "usampler1D" || word == "usampler2D" ||
+        word == "usampler3D" || word == "usamplerCube" ||
+        word == "usampler1DArray" || word == "usampler2DArray" ||
+        word == "usampler2DRect" || word == "usamplerBuffer" ||
+        word == "usampler2DMS" || word == "usampler2DMSArray" ||
+        word == "usamplerCubeArray" ||
+        word == "image1D" || word == "image2D" ||
+        word == "image3D" || word == "image2DRect" ||
+        word == "imageCube" || word == "imageBuffer" ||
+        word == "image1DArray" || word == "image2DArray" ||
+        word == "imageCubeArray" ||
+        word == "image2DMS" || word == "image2DMSArray" ||
+        word == "iimage1D" || word == "iimage2D" ||
+        word == "iimage3D" || word == "iimage2DRect" ||
+        word == "iimageCube" || word == "iimageBuffer" ||
+        word == "iimage1DArray" || word == "iimage2DArray" ||
+        word == "iimageCubeArray" ||
+        word == "iimage2DMS" || word == "iimage2DMSArray" ||
+        word == "uimage1D" || word == "uimage2D" ||
+        word == "uimage3D" || word == "uimage2DRect" ||
+        word == "uimageCube" || word == "uimageBuffer" ||
+        word == "uimage1DArray" || word == "uimage2DArray" ||
+        word == "uimageCubeArray" ||
+        word == "uimage2DMS" || word == "uimage2DMSArray";
+}
+
+void qualifyEsOpaqueUniforms(std::string& source) {
+    if (!sourceUsesEsProfile(source)) {
+        return;
+    }
+
+    bool lineComment = false;
+    bool blockComment = false;
+    std::size_t pos = 0;
+    while (pos < source.size()) {
+        if (lineComment) {
+            if (source[pos] == '\n') {
+                lineComment = false;
+            }
+            ++pos;
+            continue;
+        }
+        if (blockComment) {
+            if (pos + 1 < source.size() &&
+                source[pos] == '*' && source[pos + 1] == '/') {
+                pos += 2;
+                blockComment = false;
+            } else {
+                ++pos;
+            }
+            continue;
+        }
+        if (pos + 1 < source.size() &&
+            source[pos] == '/' && source[pos + 1] == '/') {
+            pos += 2;
+            lineComment = true;
+            continue;
+        }
+        if (pos + 1 < source.size() &&
+            source[pos] == '/' && source[pos + 1] == '*') {
+            pos += 2;
+            blockComment = true;
+            continue;
+        }
+        if (!sourceHasWordAt(source, pos, "uniform")) {
+            ++pos;
+            continue;
+        }
+
+        std::size_t probe = pos + std::strlen("uniform");
+        if (!skipWhitespaceAndComments(source, probe)) {
+            pos = probe;
+            continue;
+        }
+
+        std::string_view word;
+        const std::size_t wordStart = probe;
+        if (!readIdentifier(source, probe, &word)) {
+            pos = probe;
+            continue;
+        }
+        if (word == "lowp" || word == "mediump" || word == "highp") {
+            pos = probe;
+            continue;
+        }
+        if (isOpaquePrecisionType(word)) {
+            source.insert(wordStart, "highp ");
+            pos = wordStart + std::strlen("highp ") + word.size();
+            continue;
+        }
+        pos = probe;
     }
 }
 
@@ -697,6 +820,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     CompatShaderRewriteResult result;
     result.source.assign(source.begin(), source.end());
     normalizeDuplicatedEsVersionPreamble(result.source);
+    qualifyEsOpaqueUniforms(result.source);
 
     // Preprocessor-level rewrite: `#define NAME defined(OTHER)` is a
     // glslang-error ("'defined' : cannot use in preprocessor expression
