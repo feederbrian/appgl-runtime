@@ -3009,8 +3009,10 @@ bool defaultUniformBlockContainsFp64(const ShaderReflection& reflection);
 
 struct GLContext::Impl {
     ~Impl() {
-        releaseRetainedMetalObject(incompleteSampledColorTexture);
-        incompleteSampledColorTexture = nullptr;
+        for (auto& entry : incompleteSampledColorTextures) {
+            releaseRetainedMetalObject(entry.second);
+        }
+        incompleteSampledColorTextures.clear();
         if (objects == nullptr) {
             return;
         }
@@ -7994,34 +7996,117 @@ struct GLContext::Impl {
     static bool supportsIncompleteSampledColorFallback(GLenum samplerGLType,
                                                        GLenum target,
                                                        const GLTextureObject& texObj) {
-        return samplerGLType == GL_SAMPLER_2D &&
-               target == GL_TEXTURE_2D &&
-               !isDepthFormat(texObj.desc.internalFormat) &&
-               !isStencilFormat(texObj.desc.internalFormat);
+        if (isDepthFormat(texObj.desc.internalFormat) ||
+            isStencilFormat(texObj.desc.internalFormat)) {
+            return false;
+        }
+        switch (samplerGLType) {
+            case GL_SAMPLER_1D:
+                return target == GL_TEXTURE_1D;
+            case GL_SAMPLER_2D:
+                return target == GL_TEXTURE_2D;
+            case GL_SAMPLER_3D:
+                return target == GL_TEXTURE_3D;
+            case GL_SAMPLER_CUBE:
+                return target == GL_TEXTURE_CUBE_MAP;
+            case GL_SAMPLER_2D_RECT:
+                return target == GL_TEXTURE_RECTANGLE;
+            case GL_SAMPLER_1D_ARRAY:
+                return target == GL_TEXTURE_1D_ARRAY;
+            case GL_SAMPLER_2D_ARRAY:
+                return target == GL_TEXTURE_2D_ARRAY;
+            case GL_SAMPLER_CUBE_MAP_ARRAY:
+                return target == GL_TEXTURE_CUBE_MAP_ARRAY;
+            default:
+                return false;
+        }
     }
 
-    void* resolveIncompleteSampledColorFallbackTexture() {
-        if (incompleteSampledColorTexture != nullptr || device == nil) {
-            return incompleteSampledColorTexture;
+    void* resolveIncompleteSampledColorFallbackTexture(GLenum target) {
+        if (device == nil) {
+            return nullptr;
+        }
+        // Incomplete non-shadow sampler fetches return (0,0,0,1).
+        // The fallback texture must match the translated MSL texture type.
+        const MTLTextureType textureType = metalTextureTypeForTarget(target);
+        const NSUInteger cacheKey = static_cast<NSUInteger>(textureType);
+        auto cacheIt = incompleteSampledColorTextures.find(cacheKey);
+        if (cacheIt != incompleteSampledColorTextures.end()) {
+            return cacheIt->second;
         }
 
-        MTLTextureDescriptor* desc =
-            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
-                                                               width:1
-                                                              height:1
-                                                           mipmapped:NO];
+        MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+        desc.textureType = textureType;
+        desc.pixelFormat = MTLPixelFormatRGBA32Float;
+        desc.width = 1;
+        desc.height = 1;
+        desc.depth = 1;
+        if (textureType == MTLTextureType1DArray ||
+            textureType == MTLTextureType2DArray ||
+            textureType == MTLTextureTypeCubeArray) {
+            desc.arrayLength = 1;
+        }
         desc.usage = MTLTextureUsageShaderRead;
         id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
         if (texture == nil) {
             return nullptr;
         }
         const float rgba[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-        [texture replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
-                    mipmapLevel:0
-                      withBytes:rgba
-                    bytesPerRow:sizeof(rgba)];
-        incompleteSampledColorTexture = transferRetainedMetalObject(texture);
-        return incompleteSampledColorTexture;
+        const NSUInteger bytesPerRow =
+            textureType == MTLTextureType1D ? 0u : sizeof(rgba);
+        switch (textureType) {
+            case MTLTextureType1D:
+                [texture replaceRegion:MTLRegionMake1D(0, 1)
+                            mipmapLevel:0
+                              withBytes:rgba
+                            bytesPerRow:bytesPerRow];
+                break;
+            case MTLTextureType1DArray:
+                [texture replaceRegion:MTLRegionMake1D(0, 1)
+                            mipmapLevel:0
+                                  slice:0
+                              withBytes:rgba
+                            bytesPerRow:0u
+                          bytesPerImage:0u];
+                break;
+            case MTLTextureType3D:
+                [texture replaceRegion:MTLRegionMake3D(0, 0, 0, 1, 1, 1)
+                            mipmapLevel:0
+                              withBytes:rgba
+                            bytesPerRow:sizeof(rgba)];
+                break;
+            case MTLTextureType2DArray:
+                [texture replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
+                            mipmapLevel:0
+                                  slice:0
+                              withBytes:rgba
+                            bytesPerRow:sizeof(rgba)
+                          bytesPerImage:sizeof(rgba)];
+                break;
+            case MTLTextureTypeCube:
+            case MTLTextureTypeCubeArray: {
+                const NSUInteger slices =
+                    textureType == MTLTextureTypeCube ? 6u : 6u * texture.arrayLength;
+                for (NSUInteger slice = 0; slice < slices; ++slice) {
+                    [texture replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
+                                mipmapLevel:0
+                                      slice:slice
+                                  withBytes:rgba
+                                bytesPerRow:sizeof(rgba)
+                              bytesPerImage:sizeof(rgba)];
+                }
+                break;
+            }
+            default:
+                [texture replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
+                            mipmapLevel:0
+                              withBytes:rgba
+                            bytesPerRow:sizeof(rgba)];
+                break;
+        }
+        void* retained = transferRetainedMetalObject(texture);
+        incompleteSampledColorTextures[cacheKey] = retained;
+        return retained;
     }
 
     // Phase 8X Group 4d follow-up⁷ — walk a program's fragment/vertex
@@ -8895,8 +8980,7 @@ struct GLContext::Impl {
                 if (texObject != nullptr && texObject->viewSourceTexture != 0) {
                     (void)materializeTextureView(*texObject);
                 }
-                if (texObject == nullptr || !texObject->instantiated ||
-                    texObject->metalTexture == nullptr) {
+                if (texObject == nullptr) {
                     if (logThisCall) {
                         APPGL_LOG(TEXTURE, @"[GL]   %s sampler='%s' metalSlot=%u"
                               @" SKIP reason=tex-not-ready glUnit=%d texName=%u"
@@ -8907,8 +8991,10 @@ struct GLContext::Impl {
                               texObject && texObject->instantiated ? 1 : 0,
                               texObject && texObject->metalTexture ? 1 : 0);
                     }
-                    continue;  // texture not yet populated with storage
+                    continue;  // malformed object store
                 }
+                const bool textureStorageReady =
+                    texObject->instantiated && texObject->metalTexture != nullptr;
 
                 // Step 4: determine sampler state — stand-alone
                 // sampler object if one is attached, otherwise fall
@@ -8991,10 +9077,23 @@ struct GLContext::Impl {
                     supportsIncompleteSampledColorFallback(samplerGLType,
                                                            resolvedTarget,
                                                            *texObject)) {
-                    binding.metalTexture = resolveIncompleteSampledColorFallbackTexture();
+                    binding.metalTexture =
+                        resolveIncompleteSampledColorFallbackTexture(resolvedTarget);
+                }
+                if (binding.metalTexture == nullptr && textureStorageReady) {
+                    binding.metalTexture = resolveSwizzledTexture(*texObject);
                 }
                 if (binding.metalTexture == nullptr) {
-                    binding.metalTexture = resolveSwizzledTexture(*texObject);
+                    if (logThisCall) {
+                        APPGL_LOG(TEXTURE, @"[GL]   %s sampler='%s' metalSlot=%u"
+                              @" SKIP reason=tex-not-ready glUnit=%d texName=%u"
+                              @" hasObject=1 instantiated=%d hasMetalTex=%d",
+                              stageTag, sampledTex.name.c_str(),
+                              sampledTex.metalBinding, glUnit, texName,
+                              texObject->instantiated ? 1 : 0,
+                              texObject->metalTexture ? 1 : 0);
+                    }
+                    continue;  // texture not yet populated with storage
                 }
                 // The direct MSL fallback for oversized sampler arrays uses
                 // one sampler state at the base slot while textures remain
@@ -16251,7 +16350,7 @@ struct GLContext::Impl {
     std::unique_ptr<GLCapabilities> capabilities;
     std::unique_ptr<GLObjectStore> objects;
     std::unique_ptr<GLStateTracker> state;
-    void* incompleteSampledColorTexture = nullptr;
+    std::unordered_map<NSUInteger, void*> incompleteSampledColorTextures;
 
     // Phase 8X Group 4d follow-up⁸ — one-shot-per-key dedup sets for the
     // sampler-resolution / sampler-build diagnostic logs. Both fire at
