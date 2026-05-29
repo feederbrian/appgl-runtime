@@ -7428,7 +7428,8 @@ struct GLContext::Impl {
                     offset = pixelIndex * image.nativeBpp;
                     break;
                 case GL_DEPTH24_STENCIL8:
-                    offset = pixelIndex * image.nativeBpp + 3u;
+                    offset = pixelIndex * image.nativeBpp +
+                        (image.nativeBpp > 4u ? 4u : 3u);
                     break;
                 case GL_DEPTH32F_STENCIL8:
                     offset = pixelIndex * image.nativeBpp + 4u;
@@ -53374,7 +53375,14 @@ GLint getResourceProperty(const GLProgramResourceEntry& entry, GLenum prop) {
         case GL_REFERENCED_BY_TESS_CONTROL_SHADER: return (entry.referencedBy & 0x08) ? GL_TRUE : GL_FALSE;
         case GL_REFERENCED_BY_TESS_EVALUATION_SHADER: return (entry.referencedBy & 0x10) ? GL_TRUE : GL_FALSE;
         case GL_REFERENCED_BY_COMPUTE_SHADER:  return (entry.referencedBy & 0x20) ? GL_TRUE : GL_FALSE;
-        case GL_BUFFER_BINDING:    return entry.binding >= 0 ? entry.binding : entry.location;
+        case GL_BUFFER_BINDING:
+            // Block-resource bindings are mutable after link:
+            // glUniformBlockBinding/glShaderStorageBlockBinding update
+            // `location`, while `binding` preserves the shader's explicit
+            // layout(binding=N) value. Report the effective binding first;
+            // entries without a mutable location (for example atomic
+            // counter buffers) fall back to `binding`.
+            return entry.location >= 0 ? entry.location : entry.binding;
         case GL_BUFFER_DATA_SIZE:
             // Only valid on block interfaces. For UBOs it's the
             // std140/std430 byte size; we stored it in `offset`.

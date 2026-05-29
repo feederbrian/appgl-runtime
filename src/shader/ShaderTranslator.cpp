@@ -1679,6 +1679,7 @@ bool injectFixedFunctionSampleMask(std::string& msl) {
     if (!findMain0ParameterEnd(msl, paramEnd)) {
         return false;
     }
+    const std::uint32_t sampleMaskSlot = chooseFreeBufferSlot(msl, 21u);
     const std::size_t paramBegin = msl.rfind('(', paramEnd);
     bool hasExistingParam = false;
     if (paramBegin != std::string::npos) {
@@ -1691,7 +1692,8 @@ bool injectFixedFunctionSampleMask(std::string& msl) {
     }
     msl.insert(paramEnd,
                std::string(hasExistingParam ? ", " : "") +
-               "constant uint& appgl_SampleMask [[buffer(21)]]");
+               "constant uint& appgl_SampleMask [[buffer(" +
+               std::to_string(sampleMaskSlot) + ")]]");
 
     const std::string assignment =
         "    out.appgl_SampleMask = appgl_SampleMask;\n";

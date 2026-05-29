@@ -247,6 +247,28 @@ static NSInteger implicitLodBiasCorrectionBufferSlot(const std::string* msl) {
     return haveDigit ? slot : -1;
 }
 
+static NSInteger fixedFunctionSampleMaskBufferSlot(const std::string* msl) {
+    if (msl == nullptr) {
+        return 21;
+    }
+    static constexpr const char* kNeedle =
+        "appgl_SampleMask [[buffer(";
+    const std::size_t pos = msl->find(kNeedle);
+    if (pos == std::string::npos) {
+        return 21;
+    }
+    std::size_t cursor = pos + std::strlen(kNeedle);
+    NSInteger slot = 0;
+    bool haveDigit = false;
+    while (cursor < msl->size() &&
+           std::isdigit(static_cast<unsigned char>((*msl)[cursor]))) {
+        haveDigit = true;
+        slot = slot * 10 + static_cast<NSInteger>((*msl)[cursor] - '0');
+        ++cursor;
+    }
+    return haveDigit ? slot : 21;
+}
+
 static std::vector<std::uint32_t> buildTextureReductionModes(
     const std::vector<TranslatedDrawInfo::TextureBinding>& textures) {
     std::uint32_t maxSlot = 127;
@@ -3127,9 +3149,11 @@ struct MetalFrameGraph::Impl {
             const std::uint32_t sampleMask = attachmentSampleCount > 1
                 ? info.sampleMask
                 : 0xFFFFFFFFu;
+            const NSInteger sampleMaskSlot =
+                fixedFunctionSampleMaskBufferSlot(info.fragmentMSL);
             [currentRenderEncoder setFragmentBytes:&sampleMask
                                            length:sizeof(sampleMask)
-                                           atIndex:21];
+                                           atIndex:static_cast<NSUInteger>(sampleMaskSlot)];
         }
 
         // GL 4.6 §14.6.5 / GL_ARB_polygon_offset_clamp — apply depth
