@@ -3855,11 +3855,11 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     r.maxVertexUniformComponents = 4096;
     r.maxVertexUniformVectors = 1024;        // components / 4
     // Per-stage texture-image-unit limits must match
-    // GLCapabilities.mm's GL_MAX_*_TEXTURE_IMAGE_UNITS = 48 (bumped
-    // in 4245d6b). CTS KHR-GL46.limits.max_*_texture_image_units
-    // cross-checks the GLSL built-in gl_MaxVertex/Tess/Geom/Compute/-
-    // TextureImageUnits against the GL advertised value; they must
-    // agree. Previously 16 vs advertised-48 made 6 tests fail.
+    // GLCapabilities.mm's GL_MAX_*_TEXTURE_IMAGE_UNITS values. Graphics
+    // stages advertise 48; compute intentionally stays at 16 because
+    // the direct Metal compute sampler path is limited to that range.
+    // CTS cross-checks the GLSL gl_Max*TextureImageUnits constants
+    // against the GL-advertised values, so both tables must agree.
     r.maxVertexTextureImageUnits = 48;
     r.maxVertexOutputComponents = 128;
     r.maxVertexOutputVectors = 32;
@@ -3905,8 +3905,8 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     // Compute stage.
     r.maxComputeAtomicCounterBuffers = 8;
     r.maxComputeAtomicCounters = 8;
-    r.maxComputeImageUniforms = 8;
-    r.maxComputeTextureImageUnits = 48;
+    r.maxComputeImageUniforms = 16;
+    r.maxComputeTextureImageUnits = 16;
     // Clip / cull distances (GL 4.6 Table 23.53 — minimums 8/8, combined 8).
     // CTS `clip_distance.coverage` compiles a VS that writes
     // `gl_MaxClipDistances` to a transform-feedback output and

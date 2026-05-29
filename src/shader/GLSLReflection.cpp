@@ -211,7 +211,7 @@ std::string stripComments(std::string_view source) {
 }
 
 // Tokenize a single statement (already split on `;`). Returns whitespace-separated
-// tokens, treating `(`, `)`, `[`, `]`, `,`, `=` as their own tokens.
+// tokens, treating `(`, `)`, `[`, `]`, `{`, `}`, `,`, `=` as their own tokens.
 std::vector<std::string> tokenize(std::string_view stmt) {
     std::vector<std::string> tokens;
     std::string current;
@@ -224,7 +224,8 @@ std::vector<std::string> tokenize(std::string_view stmt) {
     for (char c : stmt) {
         if (std::isspace(static_cast<unsigned char>(c))) {
             flush();
-        } else if (c == '(' || c == ')' || c == '[' || c == ']' || c == ',' || c == '=') {
+        } else if (c == '(' || c == ')' || c == '[' || c == ']' ||
+                   c == '{' || c == '}' || c == ',' || c == '=') {
             flush();
             tokens.emplace_back(1, c);
         } else {
@@ -466,6 +467,110 @@ bool parseNumericDefaultLiteral(const std::string& tok, double& outValue) {
     return false;
 }
 
+bool findMatchingToken(const std::vector<std::string>& tokens,
+                       std::size_t openIndex,
+                       const char* openToken,
+                       const char* closeToken,
+                       std::size_t limit,
+                       std::size_t& closeIndex) {
+    if (openIndex >= tokens.size() || tokens[openIndex] != openToken) {
+        return false;
+    }
+    std::size_t depth = 1;
+    closeIndex = openIndex + 1;
+    while (closeIndex < limit && closeIndex < tokens.size()) {
+        if (tokens[closeIndex] == openToken) {
+            ++depth;
+        } else if (tokens[closeIndex] == closeToken) {
+            --depth;
+            if (depth == 0) {
+                return true;
+            }
+        }
+        ++closeIndex;
+    }
+    return false;
+}
+
+bool parseArraySuffix(const std::vector<std::string>& tokens,
+                      std::size_t openIndex,
+                      std::size_t& closeIndex,
+                      GLint& arraySize) {
+    if (!findMatchingToken(tokens, openIndex, "[", "]", tokens.size(), closeIndex)) {
+        return false;
+    }
+    arraySize = 0;
+    if (closeIndex == openIndex + 1) {
+        return true;
+    }
+    if (closeIndex == openIndex + 2) {
+        char* endp = nullptr;
+        const long value = std::strtol(tokens[openIndex + 1].c_str(), &endp, 10);
+        if (endp != tokens[openIndex + 1].c_str() && *endp == '\0' && value > 0) {
+            arraySize = static_cast<GLint>(value);
+        }
+    }
+    return true;
+}
+
+bool collectInitializerValues(const std::vector<std::string>& tokens,
+                              std::size_t begin,
+                              std::size_t end,
+                              std::vector<double>& outValues) {
+    for (std::size_t i = begin; i < end && i < tokens.size();) {
+        const std::string& tok = tokens[i];
+        if (tok.empty() || tok == "," || tok == "(" || tok == ")" ||
+            tok == "[" || tok == "]" || tok == "{" || tok == "}") {
+            ++i;
+            continue;
+        }
+
+        const TypeEntry* ctorType = lookupType(tok);
+        if (ctorType != nullptr) {
+            std::size_t callIndex = i + 1;
+            if (callIndex < end && tokens[callIndex] == "[") {
+                std::size_t closeBracket = callIndex;
+                GLint ignoredArraySize = 0;
+                if (!parseArraySuffix(tokens, callIndex, closeBracket, ignoredArraySize)) {
+                    return false;
+                }
+                callIndex = closeBracket + 1;
+            }
+            if (callIndex < end && tokens[callIndex] == "(") {
+                std::size_t closeParen = callIndex;
+                if (!findMatchingToken(tokens, callIndex, "(", ")", end, closeParen)) {
+                    return false;
+                }
+                std::vector<double> nested;
+                if (!collectInitializerValues(tokens, callIndex + 1, closeParen, nested) ||
+                    nested.empty()) {
+                    return false;
+                }
+                if (nested.size() == 1u && ctorType->components > 1) {
+                    outValues.insert(outValues.end(),
+                                     static_cast<std::size_t>(ctorType->components),
+                                     nested[0]);
+                } else if (nested.size() == static_cast<std::size_t>(ctorType->components)) {
+                    outValues.insert(outValues.end(), nested.begin(), nested.end());
+                } else {
+                    return false;
+                }
+                i = closeParen + 1;
+                continue;
+            }
+            return false;
+        }
+
+        double value = 0.0;
+        if (!parseNumericDefaultLiteral(tok, value)) {
+            return false;
+        }
+        outValues.push_back(value);
+        ++i;
+    }
+    return true;
+}
+
 void parseDefaultInitializer(
     const std::vector<std::string>& tokens,
     std::size_t exprStart,
@@ -529,20 +634,13 @@ void parseDefaultInitializer(
     }
 
     // Collect numeric literals from the argument range, skipping punctuation.
+    // Constructor calls nested inside array constructors are flattened, with
+    // scalar vector constructors broadcast to the declared component width.
     std::vector<double> values;
     values.reserve(static_cast<std::size_t>(components) *
                    static_cast<std::size_t>(std::max<GLint>(out.arraySize, 1)));
-    for (std::size_t i = argBegin; i < argEnd; ++i) {
-        const std::string& tok = tokens[i];
-        if (tok.empty() || tok == "," || tok == "(" || tok == ")" ||
-            tok == "[" || tok == "]") {
-            continue;
-        }
-        double v = 0.0;
-        if (!parseNumericDefaultLiteral(tok, v)) {
-            return;
-        }
-        values.push_back(v);
+    if (!collectInitializerValues(tokens, argBegin, argEnd, values)) {
+        return;
     }
     if (values.empty()) {
         return;
@@ -625,13 +723,27 @@ bool parseDeclTail(std::vector<std::string>& tokens, GLShaderDeclaration& out) {
         return false;
     }
     out.type = entry->type;
-    out.name = tokens[1];
     out.arraySize = 1;
     out.isArray = false;
+    std::size_t nameIdx = 1;
+    if (nameIdx < tokens.size() && tokens[nameIdx] == "[") {
+        std::size_t closeBracket = nameIdx;
+        GLint arraySize = 0;
+        if (!parseArraySuffix(tokens, nameIdx, closeBracket, arraySize)) {
+            return false;
+        }
+        out.arraySize = arraySize;
+        out.isArray = true;
+        nameIdx = closeBracket + 1;
+    }
+    if (nameIdx >= tokens.size()) {
+        return false;
+    }
+    out.name = tokens[nameIdx];
     // Strip trailing `[N]` baked into the name token (rare) or the next tokens.
     // `postNameIdx` is the first token after the name (and its optional [N]
     // suffix) — the default-initializer scan below picks up from here.
-    std::size_t postNameIdx = 2;
+    std::size_t postNameIdx = nameIdx + 1;
     auto bracket = out.name.find('[');
     if (bracket != std::string::npos) {
         const auto end = out.name.find(']', bracket);
@@ -643,20 +755,24 @@ bool parseDeclTail(std::vector<std::string>& tokens, GLShaderDeclaration& out) {
         }
         out.name.erase(bracket);
         out.isArray = true;
-    } else if (tokens.size() >= 4 && tokens[2] == "[") {
+    } else if (postNameIdx < tokens.size() && tokens[postNameIdx] == "[") {
         // GL 4.6 §4.3: `T name [N]` is a sized array; `T name []`
         // is an unsized array (arraySize stays 0, allowed for
         // SSBO trailing members and runtime-sized arrays). The
         // distinction lets the atomic_uint rejection at link/
         // compile time fire on `atomic_uint ac[];`.
-        if (tokens.size() >= 5 && tokens[3] != "]") {
-            out.arraySize = static_cast<GLint>(std::strtol(tokens[3].c_str(), nullptr, 10));
-            postNameIdx = 5;
+        std::size_t closeBracket = postNameIdx;
+        GLint suffixArraySize = 0;
+        if (!parseArraySuffix(tokens, postNameIdx, closeBracket, suffixArraySize)) {
+            return false;
+        }
+        if (out.isArray && out.arraySize > 0 && suffixArraySize > 0) {
+            out.arraySize *= suffixArraySize;
         } else {
-            out.arraySize = 0;
-            postNameIdx = 4;  // past `[ ]`
+            out.arraySize = suffixArraySize;
         }
         out.isArray = true;
+        postNameIdx = closeBracket + 1;
     }
     if (out.name.empty()) {
         return false;
@@ -800,8 +916,30 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
     }
 
     std::size_t braceDepth = 0;
+    std::size_t initializerBraceDepth = 0;
     std::size_t parenDepth = 0;
     std::string statement;
+    auto statementLooksLikeUniformInitializer = [](const std::string& text) {
+        if (text.find('=') == std::string::npos) {
+            return false;
+        }
+        constexpr const char* kUniform = "uniform";
+        std::size_t pos = 0;
+        while ((pos = text.find(kUniform, pos)) != std::string::npos) {
+            const bool leftOk = (pos == 0) ||
+                !(std::isalnum(static_cast<unsigned char>(text[pos - 1])) ||
+                  text[pos - 1] == '_');
+            const std::size_t end = pos + 7;
+            const bool rightOk = (end >= text.size()) ||
+                !(std::isalnum(static_cast<unsigned char>(text[end])) ||
+                  text[end] == '_');
+            if (leftOk && rightOk) {
+                return true;
+            }
+            pos = end;
+        }
+        return false;
+    };
     auto processStatement = [&](std::string raw) {
         std::vector<std::string> tokens = tokenize(raw);
         if (tokens.empty()) {
@@ -1038,7 +1176,21 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
     };
 
     for (char c : cleaned) {
+        if (initializerBraceDepth > 0) {
+            statement.push_back(c);
+            if (c == '{') {
+                ++initializerBraceDepth;
+            } else if (c == '}') {
+                --initializerBraceDepth;
+            }
+            continue;
+        }
         if (c == '{') {
+            if (braceDepth == 0 && statementLooksLikeUniformInitializer(statement)) {
+                initializerBraceDepth = 1;
+                statement.push_back(c);
+                continue;
+            }
             ++braceDepth;
             statement.clear();
             continue;
