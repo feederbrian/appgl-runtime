@@ -1,6 +1,7 @@
 #include "AppGLRuntime.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <csignal>
 #include <cstdio>
@@ -12,6 +13,7 @@
 #include <sstream>
 #include <unistd.h>
 #include <unordered_set>
+#include <utility>
 
 #include "../../include/AppGL/AppGL.h"
 #include "../caps/GLCapabilities.h"
@@ -6794,6 +6796,69 @@ static void appglResetProgramSubroutineSelections(GLProgramObject& programObject
 static void appglResetPipelineSubroutineSelections(GLContext* ctx,
                                                    const GLProgramPipelineObject& ppo);
 
+namespace {
+
+constexpr GLbitfield kAppGLPipelineStageMask =
+    GL_VERTEX_SHADER_BIT |
+    GL_TESS_CONTROL_SHADER_BIT |
+    GL_TESS_EVALUATION_SHADER_BIT |
+    GL_GEOMETRY_SHADER_BIT |
+    GL_FRAGMENT_SHADER_BIT |
+    GL_COMPUTE_SHADER_BIT;
+
+bool appglPipelineStageSelectionsMatchExecutables(
+    GLContext* ctx,
+    const GLProgramPipelineObject& ppo,
+    bool requireLinkedSeparable) {
+    if (ctx == nullptr) {
+        return false;
+    }
+    std::array<std::pair<GLuint, GLbitfield>, 6> assigned{};
+    std::size_t assignedCount = 0;
+    auto addStage = [&](GLuint program, GLbitfield stageBit) {
+        if (program == 0) {
+            return;
+        }
+        for (std::size_t i = 0; i < assignedCount; ++i) {
+            if (assigned[i].first == program) {
+                assigned[i].second |= stageBit;
+                return;
+            }
+        }
+        if (assignedCount < assigned.size()) {
+            assigned[assignedCount++] = {program, stageBit};
+        }
+    };
+
+    addStage(ppo.vertexProgram, GL_VERTEX_SHADER_BIT);
+    addStage(ppo.tessControlProgram, GL_TESS_CONTROL_SHADER_BIT);
+    addStage(ppo.tessEvalProgram, GL_TESS_EVALUATION_SHADER_BIT);
+    addStage(ppo.geometryProgram, GL_GEOMETRY_SHADER_BIT);
+    addStage(ppo.fragmentProgram, GL_FRAGMENT_SHADER_BIT);
+    addStage(ppo.computeProgram, GL_COMPUTE_SHADER_BIT);
+
+    for (std::size_t i = 0; i < assignedCount; ++i) {
+        const GLuint programName = assigned[i].first;
+        const GLbitfield assignedStages = assigned[i].second;
+        const GLProgramObject* program =
+            ctx->objects().programs().get(programName);
+        if (program == nullptr) {
+            return false;
+        }
+        if (requireLinkedSeparable && (!program->linked || !program->separableLinked)) {
+            return false;
+        }
+        const GLbitfield executableStages =
+            program->linkedStageBits & kAppGLPipelineStageMask;
+        if ((executableStages & ~assignedStages) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
 void APIENTRY glGenProgramPipelines(GLsizei n, GLuint* pipelines) {
     auto* ctx = requireCurrentContext("glGenProgramPipelines");
     if (!ctx) return;
@@ -6908,19 +6973,41 @@ void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint prog
         }
     }
     // Track stage assignments on CPU.
-    if (stages & GL_VERTEX_SHADER_BIT)          ppo->vertexProgram = program;
-    if (stages & GL_FRAGMENT_SHADER_BIT)        ppo->fragmentProgram = program;
-    if (stages & GL_GEOMETRY_SHADER_BIT)        ppo->geometryProgram = program;
-    if (stages & GL_TESS_CONTROL_SHADER_BIT)    ppo->tessControlProgram = program;
-    if (stages & GL_TESS_EVALUATION_SHADER_BIT) ppo->tessEvalProgram = program;
-    if (stages & GL_COMPUTE_SHADER_BIT)         ppo->computeProgram = program;
+    std::array<GLuint, 6> replacedPrograms{};
+    std::size_t replacedProgramCount = 0;
+    auto rememberReplacedProgram = [&](GLuint oldProgram) {
+        if (oldProgram == 0 || oldProgram == program) {
+            return;
+        }
+        for (std::size_t i = 0; i < replacedProgramCount; ++i) {
+            if (replacedPrograms[i] == oldProgram) {
+                return;
+            }
+        }
+        if (replacedProgramCount < replacedPrograms.size()) {
+            replacedPrograms[replacedProgramCount++] = oldProgram;
+        }
+    };
+    auto replaceStage = [&](GLuint& stageProgram) {
+        rememberReplacedProgram(stageProgram);
+        stageProgram = program;
+    };
+    if (stages & GL_VERTEX_SHADER_BIT)          replaceStage(ppo->vertexProgram);
+    if (stages & GL_FRAGMENT_SHADER_BIT)        replaceStage(ppo->fragmentProgram);
+    if (stages & GL_GEOMETRY_SHADER_BIT)        replaceStage(ppo->geometryProgram);
+    if (stages & GL_TESS_CONTROL_SHADER_BIT)    replaceStage(ppo->tessControlProgram);
+    if (stages & GL_TESS_EVALUATION_SHADER_BIT) replaceStage(ppo->tessEvalProgram);
+    if (stages & GL_COMPUTE_SHADER_BIT)         replaceStage(ppo->computeProgram);
     if (stages == GL_ALL_SHADER_BITS) {
-        ppo->vertexProgram = program;
-        ppo->fragmentProgram = program;
-        ppo->geometryProgram = program;
-        ppo->tessControlProgram = program;
-        ppo->tessEvalProgram = program;
-        ppo->computeProgram = program;
+        replaceStage(ppo->vertexProgram);
+        replaceStage(ppo->fragmentProgram);
+        replaceStage(ppo->geometryProgram);
+        replaceStage(ppo->tessControlProgram);
+        replaceStage(ppo->tessEvalProgram);
+        replaceStage(ppo->computeProgram);
+    }
+    for (std::size_t i = 0; i < replacedProgramCount; ++i) {
+        ctx->finalizeDeletedProgramIfUnused(replacedPrograms[i]);
     }
     if (program != 0 &&
         ctx->state().currentProgram() == 0 &&
@@ -6954,7 +7041,11 @@ void APIENTRY glActiveShaderProgram(GLuint pipeline, GLuint program) {
             return;
         }
     }
+    const GLuint oldProgram = ppo->activeShaderProgram;
     ppo->activeShaderProgram = program;
+    if (oldProgram != 0 && oldProgram != program) {
+        ctx->finalizeDeletedProgramIfUnused(oldProgram);
+    }
     markProgramFunction(FunctionId::glActiveShaderProgram, "ActiveShaderProgram sets default uniform target.");
     Runtime::shared().recordBootstrapTrace("glActiveShaderProgram(pipeline=" + std::to_string(pipeline) + ", program=" + std::to_string(program) + ")");
 }
@@ -7046,6 +7137,9 @@ void APIENTRY glValidateProgramPipeline(GLuint pipeline) {
     } else if (!allSeparable) {
         ppo->validated = false;
         ppo->infoLog = "One or more stage programs are not separable or not linked.";
+    } else if (!appglPipelineStageSelectionsMatchExecutables(ctx, *ppo, true)) {
+        ppo->validated = false;
+        ppo->infoLog = "One or more stage programs contain executable stages not active in the pipeline.";
     } else {
         ppo->validated = true;
         ppo->infoLog = "Validation successful (AppGL stub).";

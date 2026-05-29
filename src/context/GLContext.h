@@ -231,6 +231,7 @@ public:
 
     GLuint createProgram();
     bool deleteProgram(GLuint program);
+    void finalizeDeletedProgramIfUnused(GLuint program);
     bool isProgram(GLuint program) const;
     bool attachShader(GLuint program, GLuint shader);
     bool detachShader(GLuint program, GLuint shader);

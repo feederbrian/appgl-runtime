@@ -3981,6 +3981,44 @@ struct GLContext::Impl {
         pipeline.syntheticTessFsSnapshot = 0;
     }
 
+    bool programPipelineReferencesProgram(GLuint program) {
+        if (program == 0 || objects == nullptr) {
+            return false;
+        }
+        bool referenced = false;
+        objects->programPipelines().forEach([&](GLuint, GLProgramPipelineObject& pipeline) {
+            if (referenced) {
+                return;
+            }
+            referenced =
+                pipeline.vertexProgram == program ||
+                pipeline.fragmentProgram == program ||
+                pipeline.geometryProgram == program ||
+                pipeline.tessControlProgram == program ||
+                pipeline.tessEvalProgram == program ||
+                pipeline.computeProgram == program ||
+                pipeline.activeShaderProgram == program;
+        });
+        return referenced;
+    }
+
+    void finalizeDeletedProgramIfUnused(GLuint program) {
+        if (program == 0 || objects == nullptr) {
+            return;
+        }
+        GLProgramObject* object = objects->programs().get(program);
+        if (object == nullptr || !object->deleteRequested) {
+            return;
+        }
+        if (state != nullptr && state->currentProgram() == program) {
+            return;
+        }
+        if (programPipelineReferencesProgram(program)) {
+            return;
+        }
+        finalizeProgramDeletion(program);
+    }
+
     void finalizeProgramDeletion(GLuint program) {
         GLProgramObject* object = objects->programs().get(program);
         if (object == nullptr) {
@@ -17285,6 +17323,8 @@ struct GLContext::Impl {
     // Returns nullptr when no program/pipeline is active, or when the
     // pipeline's VS is missing or unlinked.
     GLProgramObject* resolveDrawProgram(GLuint& programName);
+
+    bool validateCurrentProgramPipelineForDraw() const;
 
     void encodePendingWork() {
         if (!pendingClear || frameGraph == nullptr) {
@@ -32497,7 +32537,8 @@ bool GLContext::deleteProgram(GLuint program) {
     // immediately. It stays alive (and in use) until it is no longer
     // part of any context's current state. The actual erase happens
     // when the currently-bound program changes (via glUseProgram of a
-    // different name, including 0).
+    // different name, including 0), or when the last program pipeline
+    // reference is replaced/deleted.
     //
     // This matters because CTS helper classes (e.g. ClipDistance::
     // Utility::Program, CullDistance::Utility::Program) wrap GL
@@ -32515,13 +32556,18 @@ bool GLContext::deleteProgram(GLuint program) {
     // Defer both the state-clear and the object-store erase. When a
     // different program takes over in `useProgram`, that call finishes
     // the deletion for any delete-requested predecessor.
-    if (impl_->state->currentProgram() == program) {
+    if (impl_->state->currentProgram() == program ||
+        impl_->programPipelineReferencesProgram(program)) {
         // Live — defer actual erase until a different program becomes
-        // current. `useProgram` finalises the deletion at that point.
+        // current and until all program pipeline references are gone.
         return true;
     }
     impl_->finalizeProgramDeletion(program);
     return true;
+}
+
+void GLContext::finalizeDeletedProgramIfUnused(GLuint program) {
+    impl_->finalizeDeletedProgramIfUnused(program);
 }
 
 bool GLContext::isProgram(GLuint program) const {
@@ -33815,6 +33861,67 @@ bool GLContext::linkProgram(GLuint program) {
     APPGL_LOG(SHADER, @"[GL] linkProgram-begin program=%u", program);
     fflush(stderr);
 
+    const bool hadPriorExecutable = programObject->linked;
+    const auto priorUniforms = programObject->uniforms;
+    const auto priorAttributes = programObject->attributes;
+    const auto priorUniformValues = programObject->uniformValues;
+    const auto priorPipelineEmulationStageUniforms =
+        programObject->pipelineEmulationStageUniforms;
+    const auto priorPipelineEmulationStageUniformValues =
+        programObject->pipelineEmulationStageUniformValues;
+    const auto priorPipelineEmulationStageUniformsValid =
+        programObject->pipelineEmulationStageUniformsValid;
+    const GLbitfield priorLinkedStageBits = programObject->linkedStageBits;
+    const std::uint32_t priorAdvancedBlendSupportMask =
+        programObject->advancedBlendSupportMask;
+    const bool priorAdvancedBlendSupportAll = programObject->advancedBlendSupportAll;
+    const auto priorResourceUniforms = programObject->resourceUniforms;
+    const auto priorResourceUniformBlocks = programObject->resourceUniformBlocks;
+    const auto priorResourceInputs = programObject->resourceInputs;
+    const auto priorResourceOutputs = programObject->resourceOutputs;
+    const auto priorResourceStorageBlocks = programObject->resourceStorageBlocks;
+    const auto priorResourceAtomicCounterBuffers =
+        programObject->resourceAtomicCounterBuffers;
+    const auto priorResourceBufferVariables = programObject->resourceBufferVariables;
+    const auto priorResourceTransformFeedbackVaryings =
+        programObject->resourceTransformFeedbackVaryings;
+    const auto priorResourceTransformFeedbackBuffers =
+        programObject->resourceTransformFeedbackBuffers;
+    const auto priorSsboBindingRemap = programObject->ssboBindingRemap;
+    const auto priorSamplerExplicitBindings = programObject->samplerExplicitBindings;
+    auto restorePriorExecutableForFailedRelink = [&]() {
+        if (!hadPriorExecutable) {
+            return;
+        }
+        programObject->uniforms = priorUniforms;
+        programObject->attributes = priorAttributes;
+        programObject->uniformValues = priorUniformValues;
+        programObject->pipelineEmulationStageUniforms =
+            priorPipelineEmulationStageUniforms;
+        programObject->pipelineEmulationStageUniformValues =
+            priorPipelineEmulationStageUniformValues;
+        programObject->pipelineEmulationStageUniformsValid =
+            priorPipelineEmulationStageUniformsValid;
+        programObject->linkedStageBits = priorLinkedStageBits;
+        programObject->advancedBlendSupportMask = priorAdvancedBlendSupportMask;
+        programObject->advancedBlendSupportAll = priorAdvancedBlendSupportAll;
+        programObject->resourceUniforms = priorResourceUniforms;
+        programObject->resourceUniformBlocks = priorResourceUniformBlocks;
+        programObject->resourceInputs = priorResourceInputs;
+        programObject->resourceOutputs = priorResourceOutputs;
+        programObject->resourceStorageBlocks = priorResourceStorageBlocks;
+        programObject->resourceAtomicCounterBuffers =
+            priorResourceAtomicCounterBuffers;
+        programObject->resourceBufferVariables = priorResourceBufferVariables;
+        programObject->resourceTransformFeedbackVaryings =
+            priorResourceTransformFeedbackVaryings;
+        programObject->resourceTransformFeedbackBuffers =
+            priorResourceTransformFeedbackBuffers;
+        programObject->ssboBindingRemap = priorSsboBindingRemap;
+        programObject->samplerExplicitBindings = priorSamplerExplicitBindings;
+        programObject->linked = false;
+    };
+
     programObject->uniforms.clear();
     programObject->attributes.clear();
     programObject->uniformValues.clear();
@@ -33857,6 +33964,7 @@ bool GLContext::linkProgram(GLuint program) {
         Runtime::shared().recordShaderTranslation({
             programTag, "link", "", "", "", programObject->linkLog, "", false
         });
+        restorePriorExecutableForFailedRelink();
         return false;
     }
 
@@ -33895,6 +34003,7 @@ bool GLContext::linkProgram(GLuint program) {
             Runtime::shared().recordShaderTranslation({
                 programTag, "link", "", "", "", log, "", false
             });
+            restorePriorExecutableForFailedRelink();
             return false;
         }
         attachedShaderObjects.push_back(shaderObject);
@@ -40988,7 +41097,7 @@ bool GLContext::useProgram(GLuint program) {
     if (outgoing != 0 && outgoing != program) {
         GLProgramObject* outgoingObj = impl_->objects->programs().get(outgoing);
         if (outgoingObj != nullptr && outgoingObj->deleteRequested) {
-            impl_->finalizeProgramDeletion(outgoing);
+            impl_->finalizeDeletedProgramIfUnused(outgoing);
         }
     }
     impl_->state->useProgram(program);
@@ -43815,6 +43924,87 @@ GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
     return gsProg;
 }
 
+namespace {
+
+constexpr GLbitfield kAppGLPipelineStageMask =
+    GL_VERTEX_SHADER_BIT |
+    GL_TESS_CONTROL_SHADER_BIT |
+    GL_TESS_EVALUATION_SHADER_BIT |
+    GL_GEOMETRY_SHADER_BIT |
+    GL_FRAGMENT_SHADER_BIT |
+    GL_COMPUTE_SHADER_BIT;
+
+bool pipelineStageSelectionsMatchExecutables(
+    GLObjectStore& objects,
+    const GLProgramPipelineObject& ppo,
+    bool requireLinkedSeparable) {
+    std::array<std::pair<GLuint, GLbitfield>, 6> assigned{};
+    std::size_t assignedCount = 0;
+    auto addStage = [&](GLuint program, GLbitfield stageBit) {
+        if (program == 0) {
+            return;
+        }
+        for (std::size_t i = 0; i < assignedCount; ++i) {
+            if (assigned[i].first == program) {
+                assigned[i].second |= stageBit;
+                return;
+            }
+        }
+        if (assignedCount < assigned.size()) {
+            assigned[assignedCount++] = {program, stageBit};
+        }
+    };
+
+    addStage(ppo.vertexProgram, GL_VERTEX_SHADER_BIT);
+    addStage(ppo.tessControlProgram, GL_TESS_CONTROL_SHADER_BIT);
+    addStage(ppo.tessEvalProgram, GL_TESS_EVALUATION_SHADER_BIT);
+    addStage(ppo.geometryProgram, GL_GEOMETRY_SHADER_BIT);
+    addStage(ppo.fragmentProgram, GL_FRAGMENT_SHADER_BIT);
+    addStage(ppo.computeProgram, GL_COMPUTE_SHADER_BIT);
+
+    for (std::size_t i = 0; i < assignedCount; ++i) {
+        const GLuint programName = assigned[i].first;
+        const GLbitfield assignedStages = assigned[i].second;
+        const GLProgramObject* program = objects.programs().get(programName);
+        if (program == nullptr) {
+            return false;
+        }
+        if (requireLinkedSeparable && (!program->linked || !program->separableLinked)) {
+            return false;
+        }
+        const GLbitfield executableStages =
+            program->linkedStageBits & kAppGLPipelineStageMask;
+        if ((executableStages & ~assignedStages) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+bool GLContext::Impl::validateCurrentProgramPipelineForDraw() const {
+    if (state == nullptr || objects == nullptr || state->currentProgram() != 0) {
+        return true;
+    }
+    const GLuint pipelineName = state->currentProgramPipeline();
+    if (pipelineName == 0) {
+        return true;
+    }
+    const GLProgramPipelineObject* ppo =
+        objects->programPipelines().get(pipelineName);
+    if (ppo == nullptr) {
+        return true;
+    }
+    if (!pipelineStageSelectionsMatchExecutables(*objects, *ppo, false)) {
+        if (owner != nullptr) {
+            owner->pushError(GL_INVALID_OPERATION);
+        }
+        return false;
+    }
+    return true;
+}
+
 GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
     // Fast path: a current program is bound (glUseProgram), use it
     // directly. GL 4.6 §7.3 says current program shadows any pipeline.
@@ -43850,6 +44040,8 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
         GLProgramObject* fsProg = objects->programs().get(ppo->fragmentProgram);
         if (fsProg != nullptr) {
             vsProg->fragmentMSL = fsProg->fragmentMSL;
+            rewriteMslOutputLocationsForFragmentInputs(
+                vsProg->vertexMSL, vsProg->fragmentMSL);
             vsProg->fragmentReflection = fsProg->fragmentReflection;
             for (const auto& fsUniform : fsProg->uniforms) {
                 auto existing = std::find_if(
@@ -44350,10 +44542,20 @@ static void rewriteMslOutputLocationsForFragmentInputs(
         collectMslUserLocationsByName(fragmentMSL, "main0_in");
     if (fsInputs.empty()) return;
 
+    std::unordered_set<std::uint32_t> fsInputLocations;
     std::uint32_t nextFree = 0;
     for (const auto& kv : fsInputs) {
+        fsInputLocations.insert(kv.second);
         nextFree = std::max(nextFree, kv.second + 1u);
     }
+    std::unordered_set<std::uint32_t> assignedLocations;
+    auto allocateFreeLocation = [&]() {
+        while (fsInputLocations.find(nextFree) != fsInputLocations.end() ||
+               assignedLocations.find(nextFree) != assignedLocations.end()) {
+            ++nextFree;
+        }
+        return nextFree++;
+    };
 
     const std::size_t structPos = vertexMSL.find("struct main0_out");
     if (structPos == std::string::npos) return;
@@ -44382,6 +44584,8 @@ static void rewriteMslOutputLocationsForFragmentInputs(
             cursor = semi + 1;
             continue;
         }
+        const std::uint32_t oldLoc = static_cast<std::uint32_t>(
+            std::strtoul(vertexMSL.c_str() + locBegin, nullptr, 10));
 
         std::size_t nameEnd = userPos;
         while (nameEnd > cursor &&
@@ -44402,8 +44606,18 @@ static void rewriteMslOutputLocationsForFragmentInputs(
 
         const std::string name = vertexMSL.substr(nameBegin, nameEnd - nameBegin);
         const auto locIt = fsInputs.find(name);
-        const std::uint32_t newLoc =
-            locIt != fsInputs.end() ? locIt->second : nextFree++;
+        std::uint32_t newLoc = 0;
+        if (locIt != fsInputs.end()) {
+            newLoc = locIt->second;
+        } else if (fsInputLocations.find(oldLoc) != fsInputLocations.end() &&
+                   assignedLocations.find(oldLoc) == assignedLocations.end()) {
+            // Preserve explicit-location interfaces whose VS/FS names differ
+            // (for example layout(location=3) out o; / in i;).
+            newLoc = oldLoc;
+        } else {
+            newLoc = allocateFreeLocation();
+        }
+        assignedLocations.insert(newLoc);
         const std::string replacement = std::to_string(newLoc);
         vertexMSL.replace(locBegin, locEnd - locBegin, replacement);
         const std::ptrdiff_t delta =
@@ -46892,6 +47106,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     if (impl_->shouldSkipDrawForConditionalRender()) {
         return true;
     }
+    if (!impl_->validateCurrentProgramPipelineForDraw()) {
+        return false;
+    }
 
     // GL 4.6 §11.3.1 — GS input topology / draw mode compatibility.
     // When the linked program has a GS, rejecting mismatched draw
@@ -49221,6 +49438,9 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     // GL 4.6 §2.3.3 — conditional render predicate.
     if (impl_->shouldSkipDrawForConditionalRender()) {
         return true;
+    }
+    if (!impl_->validateCurrentProgramPipelineForDraw()) {
+        return false;
     }
     // GL 4.6 §22.1 / §22.3 — pipeline-stats counter update for non-GS
     // indexed draws. GS path is handled by writeGsXfbAndCheckDiscard.
@@ -56679,14 +56899,27 @@ bool GLContext::deleteProgramPipelines(GLsizei n, const GLuint* pipelines) {
         if (name == 0) {
             continue;
         }
+        std::array<GLuint, 7> referencedPrograms{};
         if (name == boundPipeline) {
             impl_->state->setCurrentProgramPipeline(0);
         }
         if (GLProgramPipelineObject* pipeline = impl_->objects->programPipelines().get(name);
             pipeline != nullptr) {
+            referencedPrograms = {
+                pipeline->vertexProgram,
+                pipeline->fragmentProgram,
+                pipeline->geometryProgram,
+                pipeline->tessControlProgram,
+                pipeline->tessEvalProgram,
+                pipeline->computeProgram,
+                pipeline->activeShaderProgram,
+            };
             impl_->releaseProgramPipelineResources(*pipeline);
         }
         impl_->objects->programPipelines().erase(name);
+        for (GLuint program : referencedPrograms) {
+            impl_->finalizeDeletedProgramIfUnused(program);
+        }
     }
     return true;
 }
