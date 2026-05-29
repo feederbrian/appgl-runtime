@@ -28378,6 +28378,284 @@ bool validateUniformBlockBindings(const std::string& source,
     return true;
 }
 
+std::string trimGlslValidationText(std::string_view text) {
+    std::size_t first = 0;
+    while (first < text.size() &&
+           std::isspace(static_cast<unsigned char>(text[first]))) {
+        ++first;
+    }
+    std::size_t last = text.size();
+    while (last > first &&
+           std::isspace(static_cast<unsigned char>(text[last - 1]))) {
+        --last;
+    }
+    return std::string(text.substr(first, last - first));
+}
+
+std::vector<std::string> splitGlslTopLevelArguments(std::string_view text) {
+    std::vector<std::string> args;
+    int parenDepth = 0;
+    int bracketDepth = 0;
+    int braceDepth = 0;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (c == '(') {
+            ++parenDepth;
+        } else if (c == ')') {
+            parenDepth = std::max(0, parenDepth - 1);
+        } else if (c == '[') {
+            ++bracketDepth;
+        } else if (c == ']') {
+            bracketDepth = std::max(0, bracketDepth - 1);
+        } else if (c == '{') {
+            ++braceDepth;
+        } else if (c == '}') {
+            braceDepth = std::max(0, braceDepth - 1);
+        } else if (c == ',' && parenDepth == 0 &&
+                   bracketDepth == 0 && braceDepth == 0) {
+            args.push_back(trimGlslValidationText(text.substr(start, i - start)));
+            start = i + 1;
+        }
+    }
+    const std::string tail =
+        trimGlslValidationText(text.substr(start, text.size() - start));
+    if (!tail.empty() || !args.empty()) {
+        args.push_back(tail);
+    }
+    return args;
+}
+
+std::string removeGlslLayoutQualifiersForValidation(std::string stmt) {
+    std::size_t p = 0;
+    while ((p = stmt.find("layout", p)) != std::string::npos) {
+        if (!tokenAt(stmt, p, "layout")) {
+            p += 6;
+            continue;
+        }
+        std::size_t q = p + 6;
+        skipGlslWs(stmt, q);
+        if (q >= stmt.size() || stmt[q] != '(') {
+            p += 6;
+            continue;
+        }
+        const std::size_t close = findMatchingDelimiter(stmt, q, '(', ')');
+        if (close == std::string::npos) {
+            break;
+        }
+        for (std::size_t i = p; i <= close; ++i) {
+            stmt[i] = ' ';
+        }
+        p = close + 1;
+    }
+    return stmt;
+}
+
+struct GlslValidationToken {
+    std::string text;
+    std::size_t end = 0;
+};
+
+std::vector<GlslValidationToken> tokenizeGlslIdentifiersForValidation(
+    const std::string& text)
+{
+    std::vector<GlslValidationToken> tokens;
+    for (std::size_t p = 0; p < text.size();) {
+        const unsigned char c = static_cast<unsigned char>(text[p]);
+        if (!(std::isalpha(c) || c == '_')) {
+            ++p;
+            continue;
+        }
+        const std::size_t start = p++;
+        while (p < text.size() && isGlslIdentChar(text[p])) {
+            ++p;
+        }
+        tokens.push_back({text.substr(start, p - start), p});
+    }
+    return tokens;
+}
+
+bool isSamplerTypeNameForValidation(const std::string& token) {
+    return token.rfind("sampler", 0) == 0 ||
+           token.rfind("isampler", 0) == 0 ||
+           token.rfind("usampler", 0) == 0;
+}
+
+std::unordered_map<std::string, std::string>
+parseSamplerUniformTypesForValidation(const std::string& rawSource) {
+    const std::string source = stripGlslCommentsForAppglValidation(rawSource);
+    std::unordered_map<std::string, std::string> samplers;
+    std::size_t statementStart = 0;
+    while (statementStart < source.size()) {
+        const std::size_t statementEnd = source.find(';', statementStart);
+        if (statementEnd == std::string::npos) {
+            break;
+        }
+        std::string stmt = removeGlslLayoutQualifiersForValidation(
+            source.substr(statementStart, statementEnd - statementStart));
+        const auto tokens = tokenizeGlslIdentifiersForValidation(stmt);
+        std::size_t uniformToken = tokens.size();
+        for (std::size_t i = 0; i < tokens.size(); ++i) {
+            if (tokens[i].text == "uniform") {
+                uniformToken = i;
+                break;
+            }
+        }
+        if (uniformToken < tokens.size()) {
+            std::size_t typeToken = tokens.size();
+            for (std::size_t i = uniformToken + 1; i < tokens.size(); ++i) {
+                if (isSamplerTypeNameForValidation(tokens[i].text)) {
+                    typeToken = i;
+                    break;
+                }
+            }
+            if (typeToken < tokens.size()) {
+                const std::string samplerType = tokens[typeToken].text;
+                const std::string declarators =
+                    stmt.substr(tokens[typeToken].end);
+                for (const std::string& declarator :
+                     splitGlslTopLevelArguments(declarators)) {
+                    std::size_t p = 0;
+                    const std::string name = readGlslIdent(declarator, p);
+                    if (!name.empty()) {
+                        samplers[name] = samplerType;
+                    }
+                }
+            }
+        }
+        statementStart = statementEnd + 1;
+    }
+    return samplers;
+}
+
+std::string readFirstGlslIdentifierForValidation(std::string_view text) {
+    std::size_t p = 0;
+    while (p < text.size() &&
+           std::isspace(static_cast<unsigned char>(text[p]))) {
+        ++p;
+    }
+    while (p < text.size() && text[p] == '(') {
+        ++p;
+        while (p < text.size() &&
+               std::isspace(static_cast<unsigned char>(text[p]))) {
+            ++p;
+        }
+    }
+    if (p >= text.size()) {
+        return {};
+    }
+    const unsigned char first = static_cast<unsigned char>(text[p]);
+    if (!(std::isalpha(first) || first == '_')) {
+        return {};
+    }
+    const std::size_t start = p++;
+    while (p < text.size() && isGlslIdentChar(text[p])) {
+        ++p;
+    }
+    return std::string(text.substr(start, p - start));
+}
+
+bool isCubeArrayShadowSamplerType(const std::string& samplerType) {
+    return samplerType == "samplerCubeArrayShadow";
+}
+
+int textureLookupBaseArgumentCountForValidation(
+    const std::string& functionName,
+    const std::string& samplerType)
+{
+    if (functionName == "texture") {
+        return isCubeArrayShadowSamplerType(samplerType) ? 3 : 2;
+    }
+    if (functionName == "textureOffset" ||
+        functionName == "textureProjOffset") {
+        return 3;
+    }
+    if (functionName == "sparseTextureARB") {
+        return isCubeArrayShadowSamplerType(samplerType) ? 4 : 3;
+    }
+    if (functionName == "sparseTextureOffsetARB") {
+        return isCubeArrayShadowSamplerType(samplerType) ? 5 : 4;
+    }
+    return 2;
+}
+
+bool validateTextureLookupBiasStageRestrictions(const std::string& rawSource,
+                                                GLenum stage,
+                                                std::string& error) {
+    if (stage == GL_FRAGMENT_SHADER) {
+        return true;
+    }
+
+    const auto samplerTypes = parseSamplerUniformTypesForValidation(rawSource);
+    if (samplerTypes.empty()) {
+        return true;
+    }
+
+    static const char* kTextureFunctions[] = {
+        "texture",
+        "textureProj",
+        "textureOffset",
+        "textureProjOffset",
+        "texture1D",
+        "texture1DProj",
+        "texture2D",
+        "texture2DProj",
+        "texture3D",
+        "texture3DProj",
+        "textureCube",
+        "shadow1D",
+        "shadow1DProj",
+        "shadow2D",
+        "shadow2DProj",
+        "sparseTextureARB",
+        "sparseTextureOffsetARB",
+    };
+
+    const std::string source = stripGlslCommentsForAppglValidation(rawSource);
+    for (const char* fn : kTextureFunctions) {
+        const std::string functionName(fn);
+        std::size_t pos = 0;
+        while ((pos = source.find(functionName, pos)) != std::string::npos) {
+            if (!tokenAt(source, pos, fn)) {
+                pos += functionName.size();
+                continue;
+            }
+            std::size_t open = pos + functionName.size();
+            skipGlslWs(source, open);
+            if (open >= source.size() || source[open] != '(') {
+                pos += functionName.size();
+                continue;
+            }
+            const std::size_t close =
+                findMatchingDelimiter(source, open, '(', ')');
+            if (close == std::string::npos) {
+                break;
+            }
+            const auto args = splitGlslTopLevelArguments(
+                std::string_view(source).substr(open + 1, close - open - 1));
+            if (!args.empty()) {
+                const std::string samplerName =
+                    readFirstGlslIdentifierForValidation(args[0]);
+                const auto samplerIt = samplerTypes.find(samplerName);
+                if (samplerIt != samplerTypes.end()) {
+                    const int baseArgCount =
+                        textureLookupBaseArgumentCountForValidation(
+                            functionName, samplerIt->second);
+                    if (static_cast<int>(args.size()) == baseArgCount + 1) {
+                        error = "ERROR: texture lookup function '" +
+                                functionName +
+                                "' uses a bias argument outside the "
+                                "fragment shader (GLSL texture functions).";
+                        return false;
+                    }
+                }
+            }
+            pos = close + 1;
+        }
+    }
+    return true;
+}
+
 bool validateLinkedShaderStorageBlocks(const std::vector<GLShaderObject*>& shaders,
                                        std::string& error) {
     std::unordered_map<std::string, ParsedInterfaceBlockForValidation> firstByName;
@@ -30008,6 +30286,23 @@ bool GLContext::compileShader(GLuint shader) {
         (afterSsboRuntimeArrayRewrite != sourceAfterUnsizedUniformArrayRewrite)
             ? afterSsboRuntimeArrayRewrite
             : sourceAfterUnsizedUniformArrayRewrite;
+
+    // GLSL texture lookup bias arguments are fragment-stage only. Glslang's
+    // relaxed Vulkan path accepts some GL_EXT_texture_shadow_lod shadow-sampler
+    // overloads in vertex shaders, so reject the source here before reflection.
+    {
+        std::string validationError;
+        if (!validateTextureLookupBiasStageRestrictions(
+                compileSource, object->stage, validationError)) {
+            object->compileLog = std::move(validationError);
+            object->compiled = false;
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", object->compileLog, "", false
+            });
+            return true;
+        }
+    }
 
     // 2. Lightweight scanner pass. Still needed for declared attribute inputs
     //    so the vertex-input binding path (glBindAttribLocation /
