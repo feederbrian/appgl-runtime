@@ -3012,6 +3012,14 @@ struct MetalFrameGraph::Impl {
             [currentRenderEncoder setTriangleFillMode:desiredFill];
             cachedFillMode = desiredFill;
         }
+        {
+            const std::uint32_t sampleMask = attachmentSampleCount > 1
+                ? info.sampleMask
+                : 0xFFFFFFFFu;
+            [currentRenderEncoder setFragmentBytes:&sampleMask
+                                           length:sizeof(sampleMask)
+                                           atIndex:21];
+        }
 
         // GL 4.6 §14.6.5 / GL_ARB_polygon_offset_clamp — apply depth
         // bias. Metal's setDepthBias takes (bias, slopeScale, clamp):
@@ -8329,6 +8337,12 @@ fragment float4 appgl_immediate_textured_fs(
         [enc setFrontFacingWinding:
             (info.frontFace == GL_CW) ? MTLWindingClockwise
                                        : MTLWindingCounterClockwise];
+        {
+            const std::uint32_t sampleMask = info.sampleMask;
+            [enc setFragmentBytes:&sampleMask
+                            length:sizeof(sampleMask)
+                           atIndex:21];
+        }
 
         // Depth/stencil state. Sprint 7 Phase 1 #11 (CKPT57) widened
         // this from depth-only to full per-face stencil plumbing —
@@ -8902,6 +8916,12 @@ fragment float4 appgl_immediate_textured_fs(
             ? MTLWindingClockwise : MTLWindingCounterClockwise];
         [renc setTriangleFillMode:info.wireframe
             ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
+        {
+            const std::uint32_t sampleMask = info.sampleMask;
+            [renc setFragmentBytes:&sampleMask
+                             length:sizeof(sampleMask)
+                            atIndex:21];
+        }
         {
             const float bias = info.polygonOffsetEnabled
                 ? info.polygonOffsetUnits : 0.0f;

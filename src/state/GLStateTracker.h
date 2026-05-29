@@ -239,6 +239,8 @@ public:
     void setColorMaski(GLuint index, GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha);
     void setMinSampleShading(GLfloat value);
     const GLBlendState& blendState() const;
+    void setSampleMask(GLuint index, GLbitfield mask);
+    GLbitfield sampleMask(GLuint index) const;
 
     void setDepthFunc(GLenum func);
     void setDepthMask(GLboolean flag);
@@ -383,6 +385,7 @@ private:
     // casts of that value.
     GLuint maxShaderCompilerThreads_ = 0;
     GLBlendState blend_;
+    std::array<GLbitfield, 1> sampleMasks_ = {~0u};
     GLDepthState depth_;
     GLStencilState stencil_;
     GLRasterState raster_;

@@ -13444,16 +13444,19 @@ struct GLContext::Impl {
                 return true;
             }
         }
+        bool metalClearApplied = false;
         if (frameGraph != nullptr && renderbuffer->metalTexture != nullptr) {
             id<MTLTexture> metalTex =
                 (__bridge id<MTLTexture>)renderbuffer->metalTexture;
-            // Single-sample depth RB clears must reach Metal before a draw:
-            // clipped fragments leave the clear value behind. Keep MS RBs on
-            // the CPU-shadow path because depth MS readback is not resolved here.
-            if (!clearScissorActive && metalTex.sampleCount <= 1 &&
+            // Depth RB clears must reach Metal before a draw; for MS
+            // renderbuffers this is the only legal way to seed every sample.
+            if (!clearScissorActive &&
                 frameGraph->clearLayeredTextureDepth(renderbuffer->metalTexture, 0, depth)) {
                 renderbuffer->wasMetalDepthRendered = true;
-                return true;
+                metalClearApplied = true;
+                if (metalTex.sampleCount <= 1) {
+                    return true;
+                }
             }
         }
         const GLsizei regionWidth = maxX - minX;
@@ -13498,9 +13501,10 @@ struct GLContext::Impl {
                         static_cast<std::size_t>(regionWidth) *
                         sizeof(GLfloat));
         }
-        const bool mirroredDepth = mirrorDepthRenderbufferRegionToMetal(
-            *renderbuffer, minX, minY, regionWidth, regionHeight,
-            region.data());
+        const bool mirroredDepth = metalClearApplied ||
+            mirrorDepthRenderbufferRegionToMetal(
+                *renderbuffer, minX, minY, regionWidth, regionHeight,
+                region.data());
         if (!mirroredDepth) {
             renderbuffer->wasMetalDepthRendered = false;
         }
@@ -13639,6 +13643,20 @@ struct GLContext::Impl {
             static_cast<std::uint8_t>(value & 0xff);
         const GLsizei regionWidth = maxX - minX;
         const GLsizei regionHeight = maxY - minY;
+        bool metalClearApplied = false;
+        if (frameGraph != nullptr && renderbuffer->metalTexture != nullptr &&
+            !state->isEnabled(GL_SCISSOR_TEST) &&
+            frameGraph->clearLayeredTextureStencil(
+                renderbuffer->metalTexture, 0,
+                static_cast<std::uint32_t>(stencilValue))) {
+            renderbuffer->wasMetalStencilRendered = true;
+            metalClearApplied = true;
+            id<MTLTexture> metalTex =
+                (__bridge id<MTLTexture>)renderbuffer->metalTexture;
+            if (metalTex.sampleCount <= 1) {
+                return true;
+            }
+        }
         if (renderbuffer->stencil8.empty()) {
             std::vector<std::uint8_t> region(
                 static_cast<std::size_t>(regionWidth) *
@@ -13680,9 +13698,10 @@ struct GLContext::Impl {
                         src,
                         static_cast<std::size_t>(regionWidth));
         }
-        const bool mirroredStencil = mirrorStencilRenderbufferRegionToMetal(
-            *renderbuffer, minX, minY, regionWidth, regionHeight,
-            region.data());
+        const bool mirroredStencil = metalClearApplied ||
+            mirrorStencilRenderbufferRegionToMetal(
+                *renderbuffer, minX, minY, regionWidth, regionHeight,
+                region.data());
         renderbuffer->wasMetalStencilRendered = mirroredStencil;
         return true;
     }
@@ -14226,7 +14245,7 @@ struct GLContext::Impl {
                                      GLsizei width, GLsizei height,
                                      void* pixels,
                                      bool yFlipStencilReadback) const {
-        if (metalTex == nil || metalTex.sampleCount > 1) {
+        if (metalTex == nil) {
             return false;
         }
         const MTLPixelFormat pf = metalTex.pixelFormat;
@@ -15312,6 +15331,225 @@ struct GLContext::Impl {
             }
             return clipped.data();
         };
+        struct MetalAttachmentBlitView {
+            id<MTLTexture> texture = nil;
+            GLTextureObject* textureObject = nullptr;
+            GLRenderbufferObject* renderbufferObject = nullptr;
+            NSUInteger level = 0;
+            NSUInteger slice = 0;
+            GLsizei width = 0;
+            GLsizei height = 0;
+            bool yFlip = false;
+        };
+        auto resolveMetalAttachmentBlitView =
+            [&](const GLFramebufferAttachment& attachment)
+                -> MetalAttachmentBlitView {
+            MetalAttachmentBlitView view;
+            if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
+                const ResolvedTextureAttachment resolved =
+                    resolveTextureAttachmentStorage(attachment);
+                GLTextureObject* texture = resolved.storageTexture;
+                if (!resolved.valid || texture == nullptr ||
+                    texture->metalTexture == nullptr) {
+                    return view;
+                }
+                auto levelIt = texture->levels.find(resolved.level);
+                if (levelIt == texture->levels.end() ||
+                    !levelIt->second.defined) {
+                    return view;
+                }
+                view.texture = (__bridge id<MTLTexture>)texture->metalTexture;
+                view.textureObject = texture;
+                view.level =
+                    static_cast<NSUInteger>(std::max<GLint>(resolved.level, 0));
+                view.width = std::max<GLsizei>(levelIt->second.desc.width, 1);
+                view.height = texture->target == GL_TEXTURE_1D
+                    ? 1 : std::max<GLsizei>(levelIt->second.desc.height, 1);
+                const MTLTextureType texType = view.texture.textureType;
+                if (texType == MTLTextureType2DArray ||
+                    texType == MTLTextureType2DMultisampleArray ||
+                    texType == MTLTextureTypeCube ||
+                    texType == MTLTextureTypeCubeArray) {
+                    view.slice = static_cast<NSUInteger>(
+                        std::max<GLint>(resolved.layer, 0));
+                }
+                view.yFlip =
+                    (texture->wasFramebufferRenderedTo ||
+                     texture->wasViewportRenderedTo) &&
+                    state->clipOrigin() != GL_UPPER_LEFT;
+                return view;
+            }
+            if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+                GLRenderbufferObject* renderbuffer =
+                    objects->renderbuffers().get(attachment.object);
+                if (renderbuffer == nullptr || !renderbuffer->storageDefined ||
+                    renderbuffer->metalTexture == nullptr) {
+                    return view;
+                }
+                view.texture =
+                    (__bridge id<MTLTexture>)renderbuffer->metalTexture;
+                view.renderbufferObject = renderbuffer;
+                view.width = renderbuffer->width;
+                view.height = renderbuffer->height;
+                view.yFlip = renderbuffer->framebufferReadbackYFlip &&
+                    state->clipOrigin() != GL_UPPER_LEFT;
+                return view;
+            }
+            return view;
+        };
+        auto metalFormatCoversAspects =
+            [](MTLPixelFormat format, GLbitfield aspects) {
+            const bool wantsDepth =
+                (aspects & GL_DEPTH_BUFFER_BIT) != 0;
+            const bool wantsStencil =
+                (aspects & GL_STENCIL_BUFFER_BIT) != 0;
+            switch (format) {
+                case MTLPixelFormatDepth16Unorm:
+                case MTLPixelFormatDepth32Float:
+                    return wantsDepth && !wantsStencil;
+                case MTLPixelFormatStencil8:
+                    return wantsStencil && !wantsDepth;
+                case MTLPixelFormatDepth24Unorm_Stencil8:
+                case MTLPixelFormatDepth32Float_Stencil8:
+                    return wantsDepth && wantsStencil;
+                default:
+                    return false;
+            }
+        };
+        auto sameFramebufferImage =
+            [](const GLFramebufferAttachment& a,
+               const GLFramebufferAttachment& b) {
+            return a.kind == b.kind && a.object == b.object &&
+                a.level == b.level && a.layer == b.layer;
+        };
+        auto markMetalAttachmentBlitDestination =
+            [&](const GLFramebufferAttachment& attachment,
+                GLbitfield aspects,
+                const MetalAttachmentBlitView& dstView) {
+            if (dstView.textureObject != nullptr) {
+                dstView.textureObject->depthStencilShadowAuthoritative = false;
+                if (state->clipOrigin() != GL_UPPER_LEFT) {
+                    dstView.textureObject->wasFramebufferRenderedTo = true;
+                }
+                dstView.textureObject->swizzleDirty = true;
+            }
+            if (dstView.renderbufferObject != nullptr) {
+                if ((aspects & GL_DEPTH_BUFFER_BIT) != 0) {
+                    dstView.renderbufferObject->wasMetalDepthRendered = true;
+                }
+                if ((aspects & GL_STENCIL_BUFFER_BIT) != 0) {
+                    dstView.renderbufferObject->wasMetalStencilRendered = true;
+                }
+            }
+            markFramebufferAttachmentWrite(
+                attachment,
+                kProducerCopyWrite | kProducerFboDepthStencilWrite);
+        };
+        auto tryMetalExactDepthStencilBlit =
+            [&](const GLFramebufferAttachment& srcAttachment,
+                const GLFramebufferAttachment& dstAttachment,
+                GLbitfield aspects) {
+            if (device == nil || commandQueue == nil || needsScale ||
+                writeWindow.empty) {
+                return false;
+            }
+            const MetalAttachmentBlitView srcView =
+                resolveMetalAttachmentBlitView(srcAttachment);
+            const MetalAttachmentBlitView dstView =
+                resolveMetalAttachmentBlitView(dstAttachment);
+            if (srcView.texture == nil || dstView.texture == nil ||
+                srcView.texture.pixelFormat != dstView.texture.pixelFormat ||
+                srcView.texture.sampleCount != dstView.texture.sampleCount ||
+                !metalFormatCoversAspects(srcView.texture.pixelFormat, aspects)) {
+                return false;
+            }
+            if (srcView.texture == dstView.texture &&
+                srcView.level == dstView.level &&
+                srcView.slice == dstView.slice) {
+                return false;
+            }
+            const GLint srcCopyX =
+                srcX + static_cast<GLint>(writeWindow.srcOffsetX);
+            const GLint srcCopyY =
+                srcY + static_cast<GLint>(writeWindow.srcOffsetY);
+            const GLint dstCopyX = writeWindow.x;
+            const GLint dstCopyY = writeWindow.y;
+            if (srcCopyX < 0 || srcCopyY < 0 ||
+                dstCopyX < 0 || dstCopyY < 0 ||
+                srcCopyX + writeWindow.width > srcView.width ||
+                srcCopyY + writeWindow.height > srcView.height ||
+                dstCopyX + writeWindow.width > dstView.width ||
+                dstCopyY + writeWindow.height > dstView.height) {
+                return false;
+            }
+            const NSUInteger srcMetalY = srcView.yFlip
+                ? static_cast<NSUInteger>(
+                    srcView.height - srcCopyY - writeWindow.height)
+                : static_cast<NSUInteger>(srcCopyY);
+            const NSUInteger dstMetalY = dstView.yFlip
+                ? static_cast<NSUInteger>(
+                    dstView.height - dstCopyY - writeWindow.height)
+                : static_cast<NSUInteger>(dstCopyY);
+            drainFramebufferAttachmentProducer(srcAttachment,
+                                               kProducerFboDepthStencilWrite |
+                                               kProducerCopyWrite);
+            auto lease = makeCommandBuffer(AppGLCommandReason::CopyImageBlit);
+            id<MTLCommandBuffer> cmd = lease.get();
+            if (cmd == nil) {
+                return false;
+            }
+            id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+            if (blit == nil) {
+                return false;
+            }
+            [blit copyFromTexture:srcView.texture
+                      sourceSlice:srcView.slice
+                      sourceLevel:srcView.level
+                     sourceOrigin:MTLOriginMake(
+                         static_cast<NSUInteger>(srcCopyX),
+                         srcMetalY,
+                         0)
+                       sourceSize:MTLSizeMake(
+                         static_cast<NSUInteger>(writeWindow.width),
+                         static_cast<NSUInteger>(writeWindow.height),
+                         1)
+                        toTexture:dstView.texture
+                 destinationSlice:dstView.slice
+                 destinationLevel:dstView.level
+                destinationOrigin:MTLOriginMake(
+                         static_cast<NSUInteger>(dstCopyX),
+                         dstMetalY,
+                         0)];
+            [blit endEncoding];
+            if (!lease.commitAndWait(AppGLCommandReason::CopyImageBlit)) {
+                return false;
+            }
+            markMetalAttachmentBlitDestination(dstAttachment, aspects, dstView);
+            return true;
+        };
+        bool metalCopiedDepth = false;
+        bool metalCopiedStencil = false;
+        if ((mask & GL_DEPTH_BUFFER_BIT) != 0 &&
+            (mask & GL_STENCIL_BUFFER_BIT) != 0) {
+            const GLFramebufferAttachment* srcDepth =
+                framebufferAttachment(*readFb, GL_DEPTH_ATTACHMENT);
+            const GLFramebufferAttachment* dstDepth =
+                framebufferAttachment(*drawFb, GL_DEPTH_ATTACHMENT);
+            const GLFramebufferAttachment* srcStencil =
+                framebufferAttachment(*readFb, GL_STENCIL_ATTACHMENT);
+            const GLFramebufferAttachment* dstStencil =
+                framebufferAttachment(*drawFb, GL_STENCIL_ATTACHMENT);
+            if (srcDepth != nullptr && dstDepth != nullptr &&
+                srcStencil != nullptr && dstStencil != nullptr &&
+                sameFramebufferImage(*srcDepth, *srcStencil) &&
+                sameFramebufferImage(*dstDepth, *dstStencil) &&
+                tryMetalExactDepthStencilBlit(
+                    *srcDepth, *dstDepth,
+                    GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) {
+                metalCopiedDepth = true;
+                metalCopiedStencil = true;
+            }
+        }
 
         if ((mask & GL_COLOR_BUFFER_BIT) != 0) {
             const GLFramebufferAttachment* srcAttachment = framebufferAttachment(*readFb, readFb->readBuffer);
@@ -15378,10 +15616,18 @@ struct GLContext::Impl {
             }
         }
 
-        if ((mask & GL_DEPTH_BUFFER_BIT) != 0) {
+        if ((mask & GL_DEPTH_BUFFER_BIT) != 0 && !metalCopiedDepth) {
             const GLFramebufferAttachment* srcAttachment = framebufferAttachment(*readFb, GL_DEPTH_ATTACHMENT);
             const GLFramebufferAttachment* dstAttachment = framebufferAttachment(*drawFb, GL_DEPTH_ATTACHMENT);
             if (srcAttachment != nullptr && dstAttachment != nullptr) {
+                if (tryMetalExactDepthStencilBlit(
+                        *srcAttachment, *dstAttachment,
+                        GL_DEPTH_BUFFER_BIT)) {
+                    metalCopiedDepth = true;
+                }
+            }
+            if (srcAttachment != nullptr && dstAttachment != nullptr &&
+                !metalCopiedDepth) {
                 std::vector<GLfloat> srcStage(
                     static_cast<std::size_t>(copyWidth) *
                     static_cast<std::size_t>(copyHeight));
@@ -15427,10 +15673,18 @@ struct GLContext::Impl {
             }
         }
 
-        if ((mask & GL_STENCIL_BUFFER_BIT) != 0) {
+        if ((mask & GL_STENCIL_BUFFER_BIT) != 0 && !metalCopiedStencil) {
             const GLFramebufferAttachment* srcAttachment = framebufferAttachment(*readFb, GL_STENCIL_ATTACHMENT);
             const GLFramebufferAttachment* dstAttachment = framebufferAttachment(*drawFb, GL_STENCIL_ATTACHMENT);
             if (srcAttachment != nullptr && dstAttachment != nullptr) {
+                if (tryMetalExactDepthStencilBlit(
+                        *srcAttachment, *dstAttachment,
+                        GL_STENCIL_BUFFER_BIT)) {
+                    metalCopiedStencil = true;
+                }
+            }
+            if (srcAttachment != nullptr && dstAttachment != nullptr &&
+                !metalCopiedStencil) {
                 std::vector<std::uint8_t> srcStage(
                     static_cast<std::size_t>(copyWidth) *
                     static_cast<std::size_t>(copyHeight));
@@ -18902,6 +19156,13 @@ bool GLContext::queryIntegerIndexed(GLenum pname, GLuint index, GLint* data) {
             else                                        *data = static_cast<GLint>(ib.format);
             return true;
         }
+        case GL_SAMPLE_MASK_VALUE:
+            if (index != 0) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            *data = static_cast<GLint>(impl_->state->sampleMask(index));
+            return true;
         // GL 4.4+ per-texture-unit bindings for all sampler targets.
         // Indexed by texture-unit number in [0, MAX_COMBINED_TEXTURE_IMAGE_UNITS).
         // The non-indexed form of these queries returns the binding on
@@ -41263,6 +41524,10 @@ static void populateTranslatedDrawFixedFunctionState(
     tdi.cullFaceMode = state.rasterState().cullFaceMode;
     tdi.frontFace = state.rasterState().frontFace;
     tdi.wireframe = (state.rasterState().polygonFillMode == GL_LINE);
+    tdi.sampleMask =
+        state.isEnabled(GL_SAMPLE_MASK)
+            ? static_cast<std::uint32_t>(state.sampleMask(0))
+            : 0xFFFFFFFFu;
     tdi.rasterizerDiscard = state.isEnabled(GL_RASTERIZER_DISCARD);
     // Phase 6-1d: sample-shading snapshot. The Metal side uses this
     // to force per-sample FS invocation when the bound attachment
@@ -41644,6 +41909,10 @@ SolidColorDrawSetup buildSolidColorDrawSetup(GLStateTracker& state,
     setup.info.cullFaceMode = state.rasterState().cullFaceMode;
     setup.info.frontFace = state.rasterState().frontFace;
     setup.info.wireframe = (state.rasterState().polygonFillMode == GL_LINE);
+    setup.info.sampleMask =
+        state.isEnabled(GL_SAMPLE_MASK)
+            ? static_cast<std::uint32_t>(state.sampleMask(0))
+            : 0xFFFFFFFFu;
     setup.info.fragmentShadingRate = fragmentShadingRate;
     // Sprint 7 Phase 1 #11 (CKPT57): stencil state for solid-color path.
     {
@@ -42996,6 +43265,10 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     info.cullFaceEnabled = state->isEnabled(GL_CULL_FACE);
     info.cullFaceMode = state->rasterState().cullFaceMode;
     info.frontFace = state->rasterState().frontFace;
+    info.sampleMask =
+        state->isEnabled(GL_SAMPLE_MASK)
+            ? static_cast<std::uint32_t>(state->sampleMask(0))
+            : 0xFFFFFFFFu;
     // Sprint 7 Phase 1 #11 (CKPT57): tess Phase-2 render encoder
     // stencil state — required for primitive_coverage's two-phase
     // stencil-replace + stencil-notequal pattern. Same shape as the
@@ -43539,6 +43812,10 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     info.cullFaceMode = state->rasterState().cullFaceMode;
     info.frontFace = state->rasterState().frontFace;
     info.wireframe = (state->rasterState().polygonFillMode == GL_LINE);
+    info.sampleMask =
+        state->isEnabled(GL_SAMPLE_MASK)
+            ? static_cast<std::uint32_t>(state->sampleMask(0))
+            : 0xFFFFFFFFu;
     info.polygonOffsetEnabled =
         state->isEnabled(GL_POLYGON_OFFSET_FILL) ||
         state->isEnabled(GL_POLYGON_OFFSET_LINE) ||
@@ -44715,6 +44992,7 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                             GLFramebufferAttachment::Kind::Texture) return;
                     if (GLTextureObject* tex =
                             objects->textures().get(it->second.object)) {
+                        tex->depthStencilShadowAuthoritative = false;
                         if (tdi.clipOrigin == GL_LOWER_LEFT ||
                             clipControlShaderYFixup) {
                             tex->wasFramebufferRenderedTo = true;

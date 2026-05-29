@@ -1477,6 +1477,65 @@ bool injectMultisampleSampledImageSidecars(std::string& msl) {
     return true;
 }
 
+bool injectFixedFunctionSampleMask(std::string& msl) {
+    if (msl.find("[[sample_mask]]") != std::string::npos) {
+        return false;
+    }
+    const std::string structNeedle = "struct main0_out";
+    const std::size_t structPos = msl.find(structNeedle);
+    if (structPos == std::string::npos) {
+        return false;
+    }
+    const std::size_t bracePos = msl.find('{', structPos);
+    const std::size_t structEnd = msl.find("};", bracePos);
+    if (bracePos == std::string::npos || structEnd == std::string::npos) {
+        return false;
+    }
+    const std::string returnPattern = "    return out;";
+    if (msl.find(returnPattern) == std::string::npos) {
+        return false;
+    }
+
+    msl.insert(structEnd, "    uint appgl_SampleMask [[sample_mask]];\n");
+
+    std::size_t paramEnd = 0;
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return false;
+    }
+    const std::size_t paramBegin = msl.rfind('(', paramEnd);
+    bool hasExistingParam = false;
+    if (paramBegin != std::string::npos) {
+        for (std::size_t i = paramBegin + 1; i < paramEnd; ++i) {
+            if (!std::isspace(static_cast<unsigned char>(msl[i]))) {
+                hasExistingParam = true;
+                break;
+            }
+        }
+    }
+    msl.insert(paramEnd,
+               std::string(hasExistingParam ? ", " : "") +
+               "constant uint& appgl_SampleMask [[buffer(21)]]");
+
+    const std::string assignment =
+        "    out.appgl_SampleMask = appgl_SampleMask;\n";
+    std::string out;
+    out.reserve(msl.size() + assignment.size());
+    std::size_t pos = 0;
+    while (pos < msl.size()) {
+        const std::size_t idx = msl.find(returnPattern, pos);
+        if (idx == std::string::npos) {
+            out.append(msl, pos, std::string::npos);
+            break;
+        }
+        out.append(msl, pos, idx - pos);
+        out.append(assignment);
+        out.append(returnPattern);
+        pos = idx + returnPattern.size();
+    }
+    msl = std::move(out);
+    return true;
+}
+
 bool injectSparseSampledImageSidecars(std::string& msl) {
     static constexpr const char* kSidecarPrefix =
         "appgl_sparse_sampled_sidecar_";
@@ -5466,6 +5525,9 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 pos = idx + returnPattern.size();
             }
             msl = std::move(out2);
+        }
+        if (execModel == spv::ExecutionModelFragment) {
+            (void)injectFixedFunctionSampleMask(msl);
         }
 
         if (execModel == spv::ExecutionModelFragment ||

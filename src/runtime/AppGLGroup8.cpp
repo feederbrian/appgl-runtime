@@ -2198,8 +2198,13 @@ static void APIENTRY glGetMultisamplefv(GLenum pname, GLuint index, GLfloat *val
 }
 
 static void APIENTRY glSampleMaski(GLuint maskNumber, GLbitfield mask) {
-    (void)maskNumber;
-    (void)mask;
+    auto* ctx = appgl::Runtime::shared().currentContext();
+    if (ctx == nullptr) return;
+    if (maskNumber != 0) {
+        ctx->pushError(GL_INVALID_VALUE);
+        return;
+    }
+    ctx->state().setSampleMask(maskNumber, mask);
 }
 
 static void APIENTRY glBindFragDataLocationIndexed(GLuint program, GLuint colorNumber, GLuint index, const GLchar *name) {

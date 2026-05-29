@@ -102,6 +102,7 @@ bool queryValue(
     const GLDepthRangeState& depthRange,
     const GLClearState& clear,
     const GLBlendState& blend,
+    const std::array<GLbitfield, 1>& sampleMasks,
     const GLDepthState& depth,
     const GLStencilState& stencil,
     const GLRasterState& raster,
@@ -206,6 +207,9 @@ bool queryValue(
             return true;
         case GL_BLEND_COLOR:
             writeFloat4(out, blend.color);
+            return true;
+        case GL_SAMPLE_MASK_VALUE:
+            writeScalar(out, sampleMasks[0]);
             return true;
         case GL_COLOR_WRITEMASK:
             writeBoolean4(out, blend.colorMask);
@@ -856,6 +860,20 @@ const GLBlendState& GLStateTracker::blendState() const {
     return blend_;
 }
 
+void GLStateTracker::setSampleMask(GLuint index, GLbitfield mask) {
+    if (index >= sampleMasks_.size()) {
+        return;
+    }
+    sampleMasks_[index] = mask;
+}
+
+GLbitfield GLStateTracker::sampleMask(GLuint index) const {
+    if (index >= sampleMasks_.size()) {
+        return ~0u;
+    }
+    return sampleMasks_[index];
+}
+
 void GLStateTracker::setDepthFunc(GLenum func) {
     depth_.func = func;
     markDirty(DirtyBit::DepthStencilState);
@@ -1097,6 +1115,7 @@ bool GLStateTracker::queryBoolean(GLenum pname, GLboolean* out) const {
         depthRange_,
         clear_,
         blend_,
+        sampleMasks_,
         depth_,
         stencil_,
         raster_,
@@ -1161,6 +1180,7 @@ bool GLStateTracker::queryInteger(GLenum pname, GLint* out) const {
         depthRange_,
         clear_,
         blend_,
+        sampleMasks_,
         depth_,
         stencil_,
         raster_,
@@ -1218,6 +1238,7 @@ bool GLStateTracker::queryInteger64(GLenum pname, GLint64* out) const {
         depthRange_,
         clear_,
         blend_,
+        sampleMasks_,
         depth_,
         stencil_,
         raster_,
@@ -1278,6 +1299,7 @@ bool GLStateTracker::queryFloat(GLenum pname, GLfloat* out) const {
         depthRange_,
         clear_,
         blend_,
+        sampleMasks_,
         depth_,
         stencil_,
         raster_,
@@ -1335,6 +1357,7 @@ bool GLStateTracker::queryDouble(GLenum pname, GLdouble* out) const {
         depthRange_,
         clear_,
         blend_,
+        sampleMasks_,
         depth_,
         stencil_,
         raster_,

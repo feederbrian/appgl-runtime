@@ -55,6 +55,7 @@ struct MetalDrawInfo {
     GLenum cullFaceMode = GL_BACK;
     GLenum frontFace = GL_CCW;
     bool wireframe = false;
+    std::uint32_t sampleMask = 0xFFFFFFFFu;
     GLenum fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
     // Sprint 7 Phase 1 #11 (CKPT57): GL_STENCIL_TEST + glStencilFunc /
     // glStencilOp / glStencilMask plumb-through. Default state matches
@@ -246,6 +247,9 @@ struct TranslatedDrawInfo {
     GLenum cullFaceMode = GL_BACK;
     GLenum frontFace = GL_CCW;
     bool wireframe = false;
+    // GL_SAMPLE_MASK dynamic raster state. When GL_SAMPLE_MASK is disabled
+    // this stays all-ones; otherwise GLContext snapshots glSampleMaski(0).
+    std::uint32_t sampleMask = 0xFFFFFFFFu;
     // Sprint 7 Phase 1 #11 (CKPT57): per-draw stencil state mirroring
     // GL_STENCIL_TEST + glStencil[Func|Op|Mask][Separate]. Threaded
     // through populateTranslatedDrawFixedFunctionState and consumed by
@@ -826,6 +830,7 @@ struct MetalTessDrawInfo {
     bool cullFaceEnabled = false;
     GLenum cullFaceMode = GL_BACK;
     GLenum frontFace = GL_CCW;
+    std::uint32_t sampleMask = 0xFFFFFFFFu;
 
     bool depthTestEnabled = false;
     GLenum depthFunc = GL_LESS;
@@ -1272,6 +1277,7 @@ public:
         std::uint32_t cullFaceMode = 0;     // GLenum (GL_BACK default)
         std::uint32_t frontFace = 0;        // GLenum (GL_CCW default)
         bool wireframe = false;
+        std::uint32_t sampleMask = 0xFFFFFFFFu;
         bool polygonOffsetEnabled = false;
         float polygonOffsetFactor = 0.0f;
         float polygonOffsetUnits = 0.0f;
