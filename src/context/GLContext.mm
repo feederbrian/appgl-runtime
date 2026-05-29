@@ -21757,10 +21757,8 @@ bool GLContext::deleteTextures(GLsizei count, const GLuint* textures) {
             // glDeleteTextures for the previously-bound name.
             for (auto& ib : impl_->imageBindings) {
                 if (ib.texture == name) {
-                    ib.texture = 0;
-                    ib.level = 0;
-                    ib.layered = GL_FALSE;
-                    ib.layer = 0;
+                    ib.invalidateMetalView();
+                    ib = Impl::ImageBinding{};
                 }
             }
             impl_->objects->deferDelete("texture " + std::to_string(name));
@@ -51273,6 +51271,14 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
 
 bool GLContext::bindImageTexture(GLuint unit, GLuint texture, GLint level, GLboolean layered, GLint layer, GLenum access, GLenum format) {
     if (unit >= Impl::kMaxImageUnits) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (texture != 0 && impl_->objects->textures().get(texture) == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (level < 0 || layer < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
