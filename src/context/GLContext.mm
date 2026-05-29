@@ -37320,11 +37320,8 @@ bool GLContext::linkProgram(GLuint program) {
                 "fragment", fsSpirvData, fsSpirvWords, fragmentShader->source,
                 programObject->fragmentMSL, fsRefl, fsOptions);
             if (vsOk && fsOk) {
-                if (mslWritesViewportArrayIndex(&programObject->vertexMSL) ||
-                    mslWritesRenderTargetArrayIndex(&programObject->vertexMSL)) {
-                    rewriteMslOutputLocationsForFragmentInputs(
-                        programObject->vertexMSL, programObject->fragmentMSL);
-                }
+                rewriteMslOutputLocationsForFragmentInputs(
+                    programObject->vertexMSL, programObject->fragmentMSL);
                 programObject->vertexReflection = std::move(vsRefl);
                 programObject->fragmentReflection = std::move(fsRefl);
                 programObject->hasTranslatedPipeline = true;
