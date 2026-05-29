@@ -789,11 +789,13 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // log — the engine walks several MAX_* variants and the *first one that
     // comes back false stops the probe, so the two that do answer (COMBINED
     // + fragment) get reported.
-    // Per-stage texture image units matched to MAX_TEXTURE_IMAGE_UNITS
-    // above (48). Apple Silicon argument-table limit is 128/stage.
+    // Graphics-stage texture image units match MAX_TEXTURE_IMAGE_UNITS
+    // above (48). Compute stays at the GL 4.6 floor because direct Metal
+    // compute sampler slots are limited to [0..15]; advertising 48 lets
+    // legal compute shaders emit sampler(16+) and fail MSL compilation.
     integerLimits_[GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS] = 48;
     integerLimits_[GL_MAX_GEOMETRY_TEXTURE_IMAGE_UNITS] = 48;
-    integerLimits_[GL_MAX_COMPUTE_TEXTURE_IMAGE_UNITS] = 48;
+    integerLimits_[GL_MAX_COMPUTE_TEXTURE_IMAGE_UNITS] = 16;
     integerLimits_[GL_MAX_TESS_CONTROL_TEXTURE_IMAGE_UNITS] = 48;
     integerLimits_[GL_MAX_TESS_EVALUATION_TEXTURE_IMAGE_UNITS] = 48;
 

@@ -50509,14 +50509,28 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
                     {Impl::GpuResourceAccess::Kind::Buffer,
                      texObj->desc.sourceBuffer, kProducerAll});
             }
-            // Build the sampler state if dirty.
-            if (texObj->samplerDirty) {
-                impl_->rebuildTextureSamplerState(texName, *texObj);
+            void* metalSamplerState = nullptr;
+            const GLuint samplerName = impl_->state->boundSampler(unit);
+            if (samplerName != 0) {
+                GLSamplerObject* samplerObj =
+                    impl_->objects->samplers().get(samplerName);
+                if (samplerObj != nullptr) {
+                    if (samplerObj->dirty || samplerObj->metalSampler == nullptr) {
+                        (void)impl_->rebuildSamplerState(*samplerObj);
+                    }
+                    metalSamplerState = samplerObj->metalSampler;
+                }
+            }
+            if (metalSamplerState == nullptr) {
+                if (texObj->samplerDirty || texObj->metalSampler == nullptr) {
+                    (void)impl_->rebuildTextureSamplerState(texName, *texObj);
+                }
+                metalSamplerState = texObj->metalSampler;
             }
 
             ComputeDispatchInfo::TextureBinding tb;
             tb.metalTexture = texObj->metalTexture;
-            tb.metalSamplerState = texObj->metalSampler;
+            tb.metalSamplerState = metalSamplerState;
             if (texObj->target == GL_TEXTURE_BUFFER &&
                 texObj->desc.sourceBuffer != 0) {
                 GLBufferObject* backingBuffer =
