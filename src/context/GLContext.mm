@@ -32703,10 +32703,10 @@ static std::string stripGlslComments(const std::string& source) {
 
 // Parse `layout(binding = N) ... uniform <sampler|image>Type <name>[...];`
 // declarations out of the comment-stripped GLSL source. Returns a map
-// from sampler uniform name to its explicit binding index.
+// from opaque uniform name to its explicit binding index and kind.
 //
 // This is the source-of-truth for "did the user write layout(binding)"
-// because glslang auto-assigns DecorationBinding on every sampler
+// because glslang auto-assigns DecorationBinding on every opaque
 // variable regardless of whether the GLSL had an explicit qualifier —
 // see bd73acc / 9c496f4 where the previous attempts relied on
 // SPIRV-Cross's `has_decoration(id, DecorationBinding)` and that
@@ -32721,12 +32721,24 @@ static std::string stripGlslComments(const std::string& source) {
 //   layout(binding = 5, location = 2) uniform sampler2D foo;
 //   layout(location = 2, binding = 5) uniform highp sampler2D foo;
 //   layout(binding=5) uniform sampler2D foo[3];
+//   layout(binding=5, rgba8) readonly uniform image2D img;
 // Does NOT handle macro-expanded names, preprocessor conditionals that
 // leave declarations out, or GLSL #version gates — if those ever matter
 // we add them in a follow-up.
-static std::unordered_map<std::string, GLuint>
-parseExplicitSamplerBindings(const std::string& rawSource) {
-    std::unordered_map<std::string, GLuint> result;
+enum class ExplicitOpaqueBindingKind {
+    Sampler,
+    Image,
+    AtomicCounter,
+};
+
+struct ExplicitOpaqueBinding {
+    GLuint binding = 0;
+    ExplicitOpaqueBindingKind kind = ExplicitOpaqueBindingKind::Sampler;
+};
+
+static std::unordered_map<std::string, ExplicitOpaqueBinding>
+parseExplicitOpaqueBindings(const std::string& rawSource) {
+    std::unordered_map<std::string, ExplicitOpaqueBinding> result;
     const std::string s = stripGlslComments(rawSource);
 
     auto isIdentChar = [](char c) -> bool {
@@ -32890,8 +32902,8 @@ parseExplicitSamplerBindings(const std::string& rawSource) {
                     }
                 }
             }
-            // Read the type name (must contain "sampler" / "image" /
-            // case-insensitive `Sampler`).
+            // Read the type name (must contain "sampler" / "image" or
+            // the compat-rewrite capitalized variants).
             const std::size_t typeStart = cur;
             while (cur < s.size() && isIdentChar(s[cur])) ++cur;
             const std::string typeName = s.substr(typeStart, cur - typeStart);
@@ -32901,19 +32913,27 @@ parseExplicitSamplerBindings(const std::string& rawSource) {
             // `layout(binding=N) uniform atomic_uint cnt;` which the
             // GL 4.2 §7.6 spec puts in the same `layout(binding=N)`
             // family as samplers and images.
-            const bool isOpaqueType =
+            const bool isSamplerType =
                 typeName.find("sampler") != std::string::npos ||
-                typeName.find("Sampler") != std::string::npos ||
+                typeName.find("Sampler") != std::string::npos;
+            const bool isImageType =
                 typeName.find("image") != std::string::npos ||
-                typeName.find("Image") != std::string::npos ||
-                typeName == "atomic_uint";
-            if (isOpaqueType) {
+                typeName.find("Image") != std::string::npos;
+            const bool isAtomicCounterType = typeName == "atomic_uint";
+            if (isSamplerType || isImageType || isAtomicCounterType) {
                 skipWhitespace(cur);
                 const std::size_t nameStart = cur;
                 while (cur < s.size() && isIdentChar(s[cur])) ++cur;
                 if (cur > nameStart) {
                     std::string name = s.substr(nameStart, cur - nameStart);
-                    result[std::move(name)] = static_cast<GLuint>(binding);
+                    ExplicitOpaqueBinding parsed;
+                    parsed.binding = static_cast<GLuint>(binding);
+                    if (isImageType) {
+                        parsed.kind = ExplicitOpaqueBindingKind::Image;
+                    } else if (isAtomicCounterType) {
+                        parsed.kind = ExplicitOpaqueBindingKind::AtomicCounter;
+                    }
+                    result[std::move(name)] = parsed;
                 }
             }
         }
@@ -33889,6 +33909,7 @@ bool GLContext::linkProgram(GLuint program) {
         programObject->resourceTransformFeedbackBuffers;
     const auto priorSsboBindingRemap = programObject->ssboBindingRemap;
     const auto priorSamplerExplicitBindings = programObject->samplerExplicitBindings;
+    const auto priorImageExplicitBindings = programObject->imageExplicitBindings;
     auto restorePriorExecutableForFailedRelink = [&]() {
         if (!hadPriorExecutable) {
             return;
@@ -33919,6 +33940,7 @@ bool GLContext::linkProgram(GLuint program) {
             priorResourceTransformFeedbackBuffers;
         programObject->ssboBindingRemap = priorSsboBindingRemap;
         programObject->samplerExplicitBindings = priorSamplerExplicitBindings;
+        programObject->imageExplicitBindings = priorImageExplicitBindings;
         programObject->linked = false;
     };
 
@@ -33949,6 +33971,7 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->resourceTransformFeedbackBuffers.clear();
     programObject->ssboBindingRemap.clear();
     programObject->samplerExplicitBindings.clear();
+    programObject->imageExplicitBindings.clear();
 
     // Small helper used in several diagnostic-recording sites below.
     const std::string programTag = "program-" + std::to_string(program);
@@ -34046,15 +34069,24 @@ bool GLContext::linkProgram(GLuint program) {
 
         // GL 4.2 §7.6: harvest `layout(binding = N)` from the original
         // GLSL source across every attached shader. The map is used at
-        // draw-time to substitute the declared unit for any sampler
+        // draw-time to substitute the declared unit for any sampler/image
         // uniform the application hasn't explicitly glUniform1i'd.
         // Later-stage declarations override earlier ones if names
-        // collide — safe in practice because the same sampler name in
+        // collide — safe in practice because the same opaque name in
         // multiple stages must refer to the same resource by GL's
         // cross-stage interface rules.
-        auto stageBindings = parseExplicitSamplerBindings(shaderObject->source);
-        for (auto& [name, binding] : stageBindings) {
-            programObject->samplerExplicitBindings[name] = binding;
+        auto stageBindings = parseExplicitOpaqueBindings(shaderObject->source);
+        for (auto& [name, parsed] : stageBindings) {
+            switch (parsed.kind) {
+                case ExplicitOpaqueBindingKind::Sampler:
+                    programObject->samplerExplicitBindings[name] = parsed.binding;
+                    break;
+                case ExplicitOpaqueBindingKind::Image:
+                    programObject->imageExplicitBindings[name] = parsed.binding;
+                    break;
+                case ExplicitOpaqueBindingKind::AtomicCounter:
+                    break;
+            }
         }
     }
 
@@ -34638,12 +34670,13 @@ bool GLContext::linkProgram(GLuint program) {
     // to N. Subsequent glUniform1i calls override this. For arrays,
     // element i gets N+i (spec says consecutive binding points).
     // Populated after the main uniform-init loop so all uniformValues
-    // entries exist and we only need to overwrite the sampler ones.
+    // entries exist and we only need to overwrite the opaque integer values.
     // Harmless on programs with no explicit bindings — the map is empty.
-    if (!programObject->samplerExplicitBindings.empty()) {
+    auto seedExplicitOpaqueUniformValues =
+        [&](const std::unordered_map<std::string, GLuint>& explicitBindings) {
         for (const auto& uinfo : programObject->uniforms) {
-            auto it = programObject->samplerExplicitBindings.find(uinfo.name);
-            if (it == programObject->samplerExplicitBindings.end()) continue;
+            auto it = explicitBindings.find(uinfo.name);
+            if (it == explicitBindings.end()) continue;
             auto valIt = programObject->uniformValues.find(uinfo.location);
             if (valIt == programObject->uniformValues.end()) continue;
             auto& v = valIt->second;
@@ -34655,6 +34688,12 @@ bool GLContext::linkProgram(GLuint program) {
                     static_cast<GLint>(it->second) + i;
             }
         }
+    };
+    if (!programObject->samplerExplicitBindings.empty()) {
+        seedExplicitOpaqueUniformValues(programObject->samplerExplicitBindings);
+    }
+    if (!programObject->imageExplicitBindings.empty()) {
+        seedExplicitOpaqueUniformValues(programObject->imageExplicitBindings);
     }
 
     // Cache synthesized fixed-function matrix uniform locations. The
@@ -40235,7 +40274,8 @@ bool GLContext::linkProgram(GLuint program) {
         auto supplementOpaqueUniforms = [&](const ShaderReflection& refl,
                                             GLbitfield stageBit) {
             auto addBinding = [&](const ShaderReflection::ResourceBinding& binding,
-                                  GLenum fallbackType) {
+                                  GLenum fallbackType,
+                                  const std::unordered_map<std::string, GLuint>& explicitBindings) {
                 const GLenum glType = binding.glType != 0 ? binding.glType : fallbackType;
                 if (glType == 0) {
                     return;
@@ -40256,17 +40296,16 @@ bool GLContext::linkProgram(GLuint program) {
                             name.compare(name.size() - 3, 3, "[0]") == 0) {
                             name.resize(name.size() - 3);
                         }
-                        auto it = programObject->samplerExplicitBindings.find(name);
-                        if (it != programObject->samplerExplicitBindings.end()) {
+                        auto it = explicitBindings.find(name);
+                        if (it != explicitBindings.end()) {
                             explicitSourceBinding = it->second;
                             return true;
                         }
                         static constexpr const char* kAppglPrefix = "_appgl_";
                         static constexpr std::size_t kAppglPrefixLen = 7;
                         if (name.compare(0, kAppglPrefixLen, kAppglPrefix) == 0) {
-                            it = programObject->samplerExplicitBindings.find(
-                                name.substr(kAppglPrefixLen));
-                            if (it != programObject->samplerExplicitBindings.end()) {
+                            it = explicitBindings.find(name.substr(kAppglPrefixLen));
+                            if (it != explicitBindings.end()) {
                                 explicitSourceBinding = it->second;
                                 return true;
                             }
@@ -40373,10 +40412,12 @@ bool GLContext::linkProgram(GLuint program) {
             };
 
             for (const auto& binding : refl.sampledTextures) {
-                addBinding(binding, GL_SAMPLER_2D);
+                addBinding(binding, GL_SAMPLER_2D,
+                           programObject->samplerExplicitBindings);
             }
             for (const auto& binding : refl.storageImages) {
-                addBinding(binding, GL_IMAGE_2D);
+                addBinding(binding, GL_IMAGE_2D,
+                           programObject->imageExplicitBindings);
             }
         };
         supplementOpaqueUniforms(programObject->vertexReflection, 0x01);

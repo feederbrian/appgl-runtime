@@ -3899,7 +3899,7 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     r.maxVertexOutputVectors = 32;
     r.maxVertexAtomicCounters = 0;
     r.maxVertexAtomicCounterBuffers = 0;
-    r.maxVertexImageUniforms = 8;
+    r.maxVertexImageUniforms = 16;
     // Fragment stage.
     r.maxFragmentUniformComponents = 4096;
     r.maxFragmentUniformVectors = 1024;
@@ -3907,14 +3907,16 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     r.maxFragmentInputVectors = 32;
     r.maxFragmentAtomicCounters = 8;
     r.maxFragmentAtomicCounterBuffers = 2;
-    r.maxFragmentImageUniforms = 8;
+    r.maxFragmentImageUniforms = 16;
     // Combined / pipeline.
     r.maxTextureImageUnits = 48;            // per-stage fragment tex units
     r.maxCombinedTextureImageUnits = 144;
     r.maxDrawBuffers = 8;
     r.maxVaryingComponents = 128;
     r.maxVaryingVectors = 32;
+    r.maxImageUnits = 16;
     r.maxCombinedImageUniforms = 48;
+    r.maxCombinedImageUnitsAndFragmentOutputs = 48;
     r.maxCombinedShaderOutputResources = 48;
     // Atomic counters. CTS gl4cLimitsTests.cpp:236 insists on at least
     // 4 bindings; we advertise 8 to match GL_MAX_ATOMIC_COUNTER_BUFFER_
@@ -3928,9 +3930,9 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     r.maxCombinedAtomicCounters = 10;
     r.maxCombinedAtomicCounterBuffers = 8;
     // Image uniforms per tess / geometry.
-    r.maxTessControlImageUniforms = 8;
-    r.maxTessEvaluationImageUniforms = 8;
-    r.maxGeometryImageUniforms = 8;
+    r.maxTessControlImageUniforms = 16;
+    r.maxTessEvaluationImageUniforms = 16;
+    r.maxGeometryImageUniforms = 16;
     // Per-stage tess / geometry texture image units (match GL advert
     // per 4245d6b).
     r.maxTessControlTextureImageUnits = 48;

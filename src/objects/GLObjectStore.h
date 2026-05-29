@@ -1418,6 +1418,11 @@ struct GLProgramObject {
     // is the unambiguous source of truth since it runs before glslang.
     std::unordered_map<std::string, GLuint> samplerExplicitBindings;
 
+    // GL 4.2 `layout(binding = N)` image default unit (§7.6). Kept
+    // separate from samplerExplicitBindings because image uniforms use
+    // GL image units (`glBindImageTexture`) rather than texture units.
+    std::unordered_map<std::string, GLuint> imageExplicitBindings;
+
     // ── Precomputed uniform layout (OPT-7) ──
     // Maps push-constant struct members to GL uniform locations, eliminating
     // O(N*M) string comparisons from the per-draw uniform packing path.

@@ -1,0 +1,14 @@
+KHR-GL46.layout_binding.image2D_layout_binding_imageLoad_ComputeShader
+KHR-GL46.layout_binding.image2D_layout_binding_imageLoad_FragmentShader
+KHR-GL46.layout_binding.image2D_layout_binding_imageLoad_VertexShader
+KHR-GL46.limits.max_vertex_image_uniforms
+KHR-GL46.limits.max_fragment_image_uniforms
+KHR-GL46.limits.max_geometry_image_uniforms
+KHR-GL46.limits.max_tess_control_image_uniforms
+KHR-GL46.limits.max_tess_evaluation_image_uniforms
+KHR-GL46.limits.max_compute_image_uniforms
+KHR-GL46.limits.max_combined_image_uniforms
+KHR-GL46.shader_image_load_store.basic-glsl-const
+KHR-GL46.shader_image_load_store.uniform-limits
+KHR-GL46.layout_binding.sampler2D_layout_binding_texture_FragmentShader
+KHR-GL46.pixelstoragemodes.teximage2d.r8.0_0
