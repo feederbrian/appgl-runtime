@@ -46645,6 +46645,213 @@ static bool buildSequentialTfCaptureIndices(GLenum mode, GLint first, GLsizei co
     }
 }
 
+static bool primitiveRestartValueForIndexedDraw(const GLStateTracker& state,
+                                                GLenum originalIndexType,
+                                                std::uint32_t& restartValue) {
+    const bool fixedRestart = state.isEnabled(GL_PRIMITIVE_RESTART_FIXED_INDEX);
+    const bool programmableRestart = state.isEnabled(GL_PRIMITIVE_RESTART);
+    if (!fixedRestart && !programmableRestart) {
+        return false;
+    }
+    if (!fixedRestart) {
+        restartValue = state.primitiveRestartIndex();
+        return true;
+    }
+    switch (originalIndexType) {
+        case GL_UNSIGNED_BYTE:
+            restartValue = 0xFFu;
+            return true;
+        case GL_UNSIGNED_SHORT:
+            restartValue = 0xFFFFu;
+            return true;
+        case GL_UNSIGNED_INT:
+            restartValue = 0xFFFFFFFFu;
+            return true;
+        default:
+            return false;
+    }
+}
+
+static std::uint32_t readElementIndexU32(const void* indices, GLenum type,
+                                         GLsizei index) {
+    switch (type) {
+        case GL_UNSIGNED_BYTE:
+            return static_cast<std::uint32_t>(
+                reinterpret_cast<const std::uint8_t*>(indices)[index]);
+        case GL_UNSIGNED_SHORT:
+            return static_cast<std::uint32_t>(
+                reinterpret_cast<const std::uint16_t*>(indices)[index]);
+        case GL_UNSIGNED_INT:
+        default:
+            return reinterpret_cast<const std::uint32_t*>(indices)[index];
+    }
+}
+
+static bool appendPrimitiveRestartSegment(GLenum mode,
+                                          const std::vector<std::uint32_t>& segment,
+                                          std::vector<std::uint32_t>& out,
+                                          GLenum& outMode) {
+    const std::size_t n = segment.size();
+    switch (mode) {
+        case GL_POINTS:
+            outMode = GL_POINTS;
+            out.insert(out.end(), segment.begin(), segment.end());
+            return true;
+        case GL_LINES:
+            outMode = GL_LINES;
+            for (std::size_t i = 0; i + 1 < n; i += 2) {
+                out.push_back(segment[i]);
+                out.push_back(segment[i + 1]);
+            }
+            return true;
+        case GL_LINE_STRIP:
+            outMode = GL_LINES;
+            for (std::size_t i = 0; i + 1 < n; ++i) {
+                out.push_back(segment[i]);
+                out.push_back(segment[i + 1]);
+            }
+            return true;
+        case GL_LINE_LOOP:
+            outMode = GL_LINES;
+            if (n >= 2) {
+                for (std::size_t i = 0; i + 1 < n; ++i) {
+                    out.push_back(segment[i]);
+                    out.push_back(segment[i + 1]);
+                }
+                out.push_back(segment[n - 1]);
+                out.push_back(segment[0]);
+            }
+            return true;
+        case GL_TRIANGLES:
+            outMode = GL_TRIANGLES;
+            for (std::size_t i = 0; i + 2 < n; i += 3) {
+                out.push_back(segment[i]);
+                out.push_back(segment[i + 1]);
+                out.push_back(segment[i + 2]);
+            }
+            return true;
+        case GL_TRIANGLE_STRIP:
+            outMode = GL_TRIANGLES;
+            for (std::size_t i = 0; i + 2 < n; ++i) {
+                if ((i & 1u) == 0u) {
+                    out.push_back(segment[i]);
+                    out.push_back(segment[i + 1]);
+                    out.push_back(segment[i + 2]);
+                } else {
+                    out.push_back(segment[i + 1]);
+                    out.push_back(segment[i]);
+                    out.push_back(segment[i + 2]);
+                }
+            }
+            return true;
+        case GL_TRIANGLE_FAN:
+            outMode = GL_TRIANGLES;
+            for (std::size_t i = 1; i + 1 < n; ++i) {
+                out.push_back(segment[0]);
+                out.push_back(segment[i]);
+                out.push_back(segment[i + 1]);
+            }
+            return true;
+        case GL_LINES_ADJACENCY:
+            outMode = GL_LINES;
+            for (std::size_t i = 0; i + 3 < n; i += 4) {
+                out.push_back(segment[i + 1]);
+                out.push_back(segment[i + 2]);
+            }
+            return true;
+        case GL_LINE_STRIP_ADJACENCY:
+            outMode = GL_LINES;
+            for (std::size_t i = 0; i + 3 < n; ++i) {
+                out.push_back(segment[i + 1]);
+                out.push_back(segment[i + 2]);
+            }
+            return true;
+        case GL_TRIANGLES_ADJACENCY:
+            outMode = GL_TRIANGLES;
+            for (std::size_t i = 0; i + 5 < n; i += 6) {
+                out.push_back(segment[i]);
+                out.push_back(segment[i + 2]);
+                out.push_back(segment[i + 4]);
+            }
+            return true;
+        case GL_TRIANGLE_STRIP_ADJACENCY: {
+            outMode = GL_TRIANGLES;
+            const std::size_t triCount = (n >= 6) ? ((n - 4) / 2) : 0;
+            for (std::size_t p = 0; p < triCount; ++p) {
+                const std::size_t a = 2 * p + 0;
+                const std::size_t b = 2 * p + 2;
+                const std::size_t c = 2 * p + 4;
+                if ((p & 1u) == 0u) {
+                    out.push_back(segment[a]);
+                    out.push_back(segment[b]);
+                    out.push_back(segment[c]);
+                } else {
+                    out.push_back(segment[b]);
+                    out.push_back(segment[a]);
+                    out.push_back(segment[c]);
+                }
+            }
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+static bool buildPrimitiveRestartExpandedElements(GLenum mode,
+                                                  GLenum originalIndexType,
+                                                  GLenum effectiveIndexType,
+                                                  const void* indices,
+                                                  GLsizei count,
+                                                  const GLStateTracker& state,
+                                                  std::vector<std::uint32_t>& out,
+                                                  GLenum& outMode) {
+    out.clear();
+    outMode = mode;
+    if (indices == nullptr || count <= 0) {
+        return false;
+    }
+
+    std::uint32_t restartValue = 0;
+    if (!primitiveRestartValueForIndexedDraw(state, originalIndexType, restartValue)) {
+        return false;
+    }
+
+    bool sawRestart = false;
+    bool supported = true;
+    std::vector<std::uint32_t> segment;
+    segment.reserve(static_cast<std::size_t>(count));
+    for (GLsizei i = 0; i < count; ++i) {
+        const std::uint32_t value = readElementIndexU32(indices, effectiveIndexType, i);
+        if (value == restartValue) {
+            sawRestart = true;
+            if (!segment.empty()) {
+                supported = appendPrimitiveRestartSegment(mode, segment, out, outMode);
+                segment.clear();
+                if (!supported) {
+                    out.clear();
+                    outMode = mode;
+                    return false;
+                }
+            }
+        } else {
+            segment.push_back(value);
+        }
+    }
+    if (!sawRestart) {
+        return false;
+    }
+    if (!segment.empty()) {
+        supported = appendPrimitiveRestartSegment(mode, segment, out, outMode);
+        if (!supported) {
+            out.clear();
+            outMode = mode;
+            return false;
+        }
+    }
+    return true;
+}
+
 bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawID) {
     if (!isValidDrawMode(mode)) {
         pushError(GL_INVALID_ENUM);
@@ -49138,6 +49345,25 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         impl_->invalidateDefaultFramebufferShadow();
     }
 
+    std::vector<std::uint32_t> primitiveRestartIndices;
+    GLenum drawElementsMode = mode;
+    GLsizei drawElementsCount = count;
+    GLenum drawElementsIndexType = effectiveType;
+    const void* drawElementsIndexPtr = effectivePtr;
+    const bool usePrimitiveRestartIndices = buildPrimitiveRestartExpandedElements(
+        mode, type, effectiveType, effectivePtr, count, *impl_->state,
+        primitiveRestartIndices, drawElementsMode);
+    if (usePrimitiveRestartIndices) {
+        drawElementsCount = static_cast<GLsizei>(primitiveRestartIndices.size());
+        drawElementsIndexType = GL_UNSIGNED_INT;
+        drawElementsIndexPtr = primitiveRestartIndices.empty()
+            ? nullptr
+            : primitiveRestartIndices.data();
+        if (drawElementsCount == 0) {
+            return true;
+        }
+    }
+
     // Phase 3f-16: CPU TES emulation hook for drawElements. Mirrors
     // the drawArrays block but feeds the resolved index buffer into
     // emulateTessellationDraw so the VS pre-pass reads the indexed
@@ -49516,8 +49742,8 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         program->vertexReflection.vertexInputs.empty() &&
         count > 0 && effectivePtr != nullptr) {
         TranslatedDrawInfo tdi;
-        tdi.mode = mode;
-        tdi.vertexCount = count;
+        tdi.mode = drawElementsMode;
+        tdi.vertexCount = drawElementsCount;
         tdi.vertexData = nullptr;
         tdi.vertexDataByteCount = 0;
         tdi.vertexStride = 0;
@@ -49525,11 +49751,12 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         // OR shadow-bytes from bound element buffer. encodeTranslated
         // Draw's `info.indices != nullptr && info.indexCount > 0`
         // gate stages it into a Metal ring buffer.
-        tdi.indices = effectivePtr;
-        tdi.indexCount = count;
-        tdi.indexType = effectiveType;
+        tdi.indices = drawElementsIndexPtr;
+        tdi.indexCount = drawElementsCount;
+        tdi.indexType = drawElementsIndexType;
         tdi.glIndexBuffer = elementBufferName;
-        if (elementBuffer != nullptr && !elementIndexTypeNeedsExpansion(type) &&
+        if (!usePrimitiveRestartIndices &&
+            elementBuffer != nullptr && !elementIndexTypeNeedsExpansion(type) &&
             elementBuffer->metalBuffer != nullptr) {
             tdi.metalIndexBuffer = elementBuffer->metalBuffer;
             tdi.metalIndexBufferOffset = indexOffset;
@@ -49667,8 +49894,8 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 }
                 if (startOff <= vbo->shadowBytes.size()) {
                     TranslatedDrawInfo tdi;
-                    tdi.mode = mode;
-                    tdi.vertexCount = count;
+                    tdi.mode = drawElementsMode;
+                    tdi.vertexCount = drawElementsCount;
                     tdi.vertexData = vbo->shadowBytes.data() + startOff;
                     tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
                     tdi.vertexStride = posStride;
@@ -49676,14 +49903,17 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     tdi.metalVertexBuffer = vbo->metalBuffer;
                     tdi.metalVertexBufferOffset = startOff;
                     tdi.glVertexBuffer = resolved.bufferName;
-                    tdi.indices = effectivePtr;
-                    tdi.indexCount = count;
-                    tdi.indexType = effectiveType;
+                    tdi.indices = drawElementsIndexPtr;
+                    tdi.indexCount = drawElementsCount;
+                    tdi.indexType = drawElementsIndexType;
                     tdi.glIndexBuffer = elementBufferName;
                     // OPT-5: pass Metal index buffer when indices weren't
                     // expanded (UINT16/UINT32 pass-through from element VBO).
                     // ADV-10: use the type check instead of the old local vector.
-                    if (!elementIndexTypeNeedsExpansion(type) && elementBuffer->metalBuffer != nullptr) {
+                    if (!usePrimitiveRestartIndices &&
+                        elementBuffer != nullptr &&
+                        !elementIndexTypeNeedsExpansion(type) &&
+                        elementBuffer->metalBuffer != nullptr) {
                         tdi.metalIndexBuffer = elementBuffer->metalBuffer;
                         tdi.metalIndexBufferOffset = indexOffset;
                     }
@@ -49864,11 +50094,11 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         return false;
     }
 
-    setup.info.vertexCount = count;
+    setup.info.vertexCount = drawElementsCount;
     setup.info.baseVertex = 0;
-    setup.info.indices = effectivePtr;
-    setup.info.indexCount = count;
-    setup.info.indexType = effectiveType;
+    setup.info.indices = drawElementsIndexPtr;
+    setup.info.indexCount = drawElementsCount;
+    setup.info.indexType = drawElementsIndexType;
 
     const bool ok = impl_->frameGraph->encodeSolidColorDraw(setup.info);
     if (ok) {
