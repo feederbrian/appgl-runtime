@@ -1297,6 +1297,18 @@ CompressedBlockInfo compressedBlockInfoForInternalFormat(GLenum internalFormat) 
         case GL_COMPRESSED_RGBA_ASTC_12x12_KHR:
         case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR:
             return {12, 12, 1, 16};
+        case GL_COMPRESSED_RGB8_ETC2:
+        case GL_COMPRESSED_SRGB8_ETC2:
+        case GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2:
+        case GL_COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2:
+        case GL_COMPRESSED_R11_EAC:
+        case GL_COMPRESSED_SIGNED_R11_EAC:
+            return {4, 4, 1, 8};
+        case GL_COMPRESSED_RGBA8_ETC2_EAC:
+        case GL_COMPRESSED_SRGB8_ALPHA8_ETC2_EAC:
+        case GL_COMPRESSED_RG11_EAC:
+        case GL_COMPRESSED_SIGNED_RG11_EAC:
+            return {4, 4, 1, 16};
         default:
             return {};
     }
@@ -4167,6 +4179,9 @@ struct GLContext::Impl {
             // KHR-GL46.layout_location.sampler_*_shadow.
             case MTLPixelFormatDepth16Unorm:  return {1, 2, 2, NativeFormatInfo::UNorm};
             case MTLPixelFormatDepth32Float:  return {1, 4, 4, NativeFormatInfo::Float};
+            case MTLPixelFormatDepth32Float_Stencil8:
+                return {0, 0, 8, NativeFormatInfo::Float};
+            case MTLPixelFormatStencil8:      return {1, 1, 1, NativeFormatInfo::UInt};
             default: return {0, 0, 0, NativeFormatInfo::UNorm};
         }
     }
@@ -4507,6 +4522,52 @@ struct GLContext::Impl {
     ) {
         MTLPixelFormat mtlFmt = metalRenderbufferFormat(internalFormat);
         if (mtlFmt == MTLPixelFormatInvalid) return false;
+
+        if ((internalFormat == GL_STENCIL_INDEX ||
+             internalFormat == GL_STENCIL_INDEX8) &&
+            format == GL_STENCIL_INDEX &&
+            type == GL_UNSIGNED_BYTE &&
+            mtlFmt == MTLPixelFormatStencil8) {
+            outBpp = 1u;
+            const std::size_t totalPixels = static_cast<std::size_t>(width)
+                                          * static_cast<std::size_t>(height)
+                                          * static_cast<std::size_t>(depth);
+            nativeData.assign(totalPixels, 0);
+            if (pixels == nullptr || totalPixels == 0) return true;
+
+            const auto& store = state->pixelStore();
+            constexpr std::size_t srcPixelBytes = 1u;
+            const std::size_t sourceWidth =
+                static_cast<std::size_t>(store.unpackRowLength > 0
+                    ? store.unpackRowLength : width);
+            const std::size_t sourceHeight =
+                static_cast<std::size_t>(store.unpackImageHeight > 0
+                    ? store.unpackImageHeight : height);
+            const std::size_t rowBytes =
+                alignByteCount(sourceWidth * srcPixelBytes,
+                               store.unpackAlignment);
+            const std::size_t imageBytes = rowBytes * sourceHeight;
+            const std::size_t sourceOffset =
+                static_cast<std::size_t>(store.unpackSkipImages) * imageBytes
+                + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
+                + static_cast<std::size_t>(store.unpackSkipPixels) * srcPixelBytes;
+            const auto* source =
+                static_cast<const std::uint8_t*>(pixels) + sourceOffset;
+
+            for (GLsizei z = 0; z < depth; ++z) {
+                for (GLsizei y = 0; y < height; ++y) {
+                    const std::uint8_t* srcRow =
+                        source + static_cast<std::size_t>(z) * imageBytes
+                               + static_cast<std::size_t>(y) * rowBytes;
+                    std::uint8_t* dstRow = nativeData.data()
+                        + (static_cast<std::size_t>(z) * static_cast<std::size_t>(height)
+                           + static_cast<std::size_t>(y))
+                          * static_cast<std::size_t>(width);
+                    std::memcpy(dstRow, srcRow, static_cast<std::size_t>(width));
+                }
+            }
+            return true;
+        }
 
         // Sprint 18 texture_repeat_mode.depth24_stencil8: D24S8 native
         // upload, sister to the existing Depth16/Depth32 native depth
@@ -5916,14 +5977,41 @@ struct GLContext::Impl {
                         const MTLRegion r = MTLRegionMake2D(0, 0,
                             static_cast<NSUInteger>(safeDimension(image.desc.width)),
                             static_cast<NSUInteger>(safeDimension(image.desc.height)));
+                        const bool flipPackedDepthStencilCubeArrayRows =
+                            object.target == GL_TEXTURE_CUBE_MAP_ARRAY &&
+                            useNativePath &&
+                            (image.desc.internalFormat == GL_DEPTH24_STENCIL8 ||
+                             image.desc.internalFormat == GL_DEPTH32F_STENCIL8) &&
+                            state != nullptr &&
+                            state->clipOrigin() != GL_UPPER_LEFT;
                         for (NSUInteger layer = 0; layer < layers; ++layer) {
+                            const std::uint8_t* layerBytes =
+                                bytes + layer * imageStride;
+                            std::vector<std::uint8_t> flippedLayerBytes;
+                            const std::uint8_t* layerUploadBytes = layerBytes;
+                            if (flipPackedDepthStencilCubeArrayRows &&
+                                rowStride > 0 && imageStride > 0) {
+                                flippedLayerBytes.resize(
+                                    static_cast<std::size_t>(imageStride), 0u);
+                                for (NSUInteger row = 0; row < r.size.height; ++row) {
+                                    const NSUInteger srcRow =
+                                        r.size.height - 1u - row;
+                                    std::memcpy(
+                                        flippedLayerBytes.data() +
+                                            static_cast<std::size_t>(row * rowStride),
+                                        layerBytes +
+                                            static_cast<std::size_t>(srcRow * rowStride),
+                                        static_cast<std::size_t>(rowStride));
+                                }
+                                layerUploadBytes = flippedLayerBytes.data();
+                            }
                             if (fastPathNeedsBlit) {
-                                fpBlitUpload2D(bytes + layer * imageStride,
+                                fpBlitUpload2D(layerUploadBytes,
                                                rowStride, imageStride, r,
                                                mipLevel, layer, bpp);
                             } else {
                                 [existing replaceRegion:r mipmapLevel:mipLevel slice:layer
-                                              withBytes:bytes + layer * imageStride
+                                              withBytes:layerUploadBytes
                                             bytesPerRow:rowStride
                                           bytesPerImage:imageStride];
                             }
@@ -6324,16 +6412,40 @@ struct GLContext::Impl {
                 // Each array layer is a separate Metal slice.
                 const NSUInteger layers = static_cast<NSUInteger>(safeDimension(image.desc.depth));
                 const MTLRegion layerRegion = MTLRegionMake2D(0, 0, region.size.width, region.size.height);
+                const bool flipPackedDepthStencilCubeArrayRows =
+                    object.target == GL_TEXTURE_CUBE_MAP_ARRAY &&
+                    useNativePath &&
+                    (image.desc.internalFormat == GL_DEPTH24_STENCIL8 ||
+                     image.desc.internalFormat == GL_DEPTH32F_STENCIL8) &&
+                    state != nullptr &&
+                    state->clipOrigin() != GL_UPPER_LEFT;
                 for (NSUInteger layer = 0; layer < layers; ++layer) {
                     const auto* layerBytes = uploadBytes + static_cast<std::size_t>(layer * bytesPerImage);
+                    std::vector<std::uint8_t> flippedLayerBytes;
+                    const std::uint8_t* layerUploadBytes = layerBytes;
+                    if (flipPackedDepthStencilCubeArrayRows &&
+                        bytesPerRow > 0 && bytesPerImage > 0) {
+                        flippedLayerBytes.resize(static_cast<std::size_t>(bytesPerImage), 0u);
+                        const NSUInteger rowCount = region.size.height;
+                        for (NSUInteger row = 0; row < rowCount; ++row) {
+                            const NSUInteger srcRow = rowCount - 1u - row;
+                            std::memcpy(
+                                flippedLayerBytes.data() +
+                                    static_cast<std::size_t>(row * bytesPerRow),
+                                layerBytes +
+                                    static_cast<std::size_t>(srcRow * bytesPerRow),
+                                static_cast<std::size_t>(bytesPerRow));
+                        }
+                        layerUploadBytes = flippedLayerBytes.data();
+                    }
                     if (needsBlitUpload) {
-                        blitUpload2D(layerBytes, bytesPerRow, bytesPerImage,
+                        blitUpload2D(layerUploadBytes, bytesPerRow, bytesPerImage,
                                      layerRegion, mipLevel, layer, bpp);
                     } else {
                         [texture replaceRegion:layerRegion
                                    mipmapLevel:mipLevel
                                          slice:layer
-                                     withBytes:layerBytes
+                                     withBytes:layerUploadBytes
                                    bytesPerRow:bytesPerRow
                                  bytesPerImage:bytesPerImage];
                     }
@@ -7143,10 +7255,15 @@ struct GLContext::Impl {
         return target == GL_TEXTURE_1D ||
                target == GL_TEXTURE_2D ||
                target == GL_TEXTURE_1D_ARRAY ||
-               target == GL_TEXTURE_2D_ARRAY;
+               target == GL_TEXTURE_2D_ARRAY ||
+               target == GL_TEXTURE_CUBE_MAP_ARRAY;
     }
 
     static MTLPixelFormat depthStencilSwizzleProxyFormat(const GLTextureObject& texObj) {
+        if (texObj.desc.internalFormat == GL_STENCIL_INDEX ||
+            texObj.desc.internalFormat == GL_STENCIL_INDEX8) {
+            return MTLPixelFormatR8Uint;
+        }
         if (texObj.params.depthStencilTextureMode == GL_STENCIL_INDEX &&
             isPackedDepthStencilInternalFormat(texObj.desc.internalFormat)) {
             return MTLPixelFormatR8Uint;
@@ -7192,9 +7309,24 @@ struct GLContext::Impl {
 
     static std::uint8_t stencilSampleProxyValue(const GLTextureImageLevel& image,
                                                 std::size_t pixelIndex) {
-        if (image.nativeBpp >= 5 && !image.nativeData.empty()) {
-            const std::size_t offset = pixelIndex * image.nativeBpp + 4u;
-            if (offset < image.nativeData.size()) {
+        if (!image.nativeData.empty()) {
+            std::size_t offset = 0;
+            switch (image.desc.internalFormat) {
+                case GL_STENCIL_INDEX:
+                case GL_STENCIL_INDEX8:
+                    offset = pixelIndex * image.nativeBpp;
+                    break;
+                case GL_DEPTH24_STENCIL8:
+                    offset = pixelIndex * image.nativeBpp + 3u;
+                    break;
+                case GL_DEPTH32F_STENCIL8:
+                    offset = pixelIndex * image.nativeBpp + 4u;
+                    break;
+                default:
+                    offset = pixelIndex * image.nativeBpp;
+                    break;
+            }
+            if (image.nativeBpp > 0 && offset < image.nativeData.size()) {
                 return image.nativeData[offset];
             }
         }
@@ -7292,10 +7424,15 @@ struct GLContext::Impl {
                 1
             );
 
-            if (texObj.target == GL_TEXTURE_2D_ARRAY) {
+            if (texObj.target == GL_TEXTURE_2D_ARRAY ||
+                texObj.target == GL_TEXTURE_CUBE_MAP_ARRAY) {
                 const NSUInteger layers = static_cast<NSUInteger>(safeDimension(image.desc.depth));
+                const NSUInteger proxySlices =
+                    texObj.target == GL_TEXTURE_CUBE_MAP_ARRAY
+                        ? 6u * std::max<NSUInteger>(proxy.arrayLength, 1u)
+                        : proxy.arrayLength;
                 const MTLRegion layerRegion = MTLRegionMake2D(0, 0, region.size.width, region.size.height);
-                for (NSUInteger layer = 0; layer < layers && layer < proxy.arrayLength; ++layer) {
+                for (NSUInteger layer = 0; layer < layers && layer < proxySlices; ++layer) {
                     const auto* layerBytes = levelData.data() + static_cast<std::size_t>(layer * bytesPerImage);
                     [proxy replaceRegion:layerRegion
                               mipmapLevel:mipLevel
@@ -9588,6 +9725,117 @@ struct GLContext::Impl {
                         sourceObject->desc.internalFormat != texObject->desc.internalFormat) {
                         return {};
                     }
+                }
+                if (texObject->desc.internalFormat == GL_STENCIL_INDEX ||
+                    texObject->desc.internalFormat == GL_STENCIL_INDEX8) {
+                    auto baseIt = texObject->levels.find(0);
+                    if (baseIt == texObject->levels.end() ||
+                        !baseIt->second.defined) {
+                        continue;
+                    }
+                    const GLTextureImageLevel& baseImage = baseIt->second;
+                    const std::uint32_t baseWidth =
+                        static_cast<std::uint32_t>(
+                            safeDimension(baseImage.desc.width));
+                    const std::uint32_t baseHeight =
+                        static_cast<std::uint32_t>(
+                            texObject->target == GL_TEXTURE_1D
+                                ? 1 : safeDimension(baseImage.desc.height));
+                    const std::uint32_t baseLayers =
+                        static_cast<std::uint32_t>(
+                            std::max<GLsizei>(baseImage.desc.depth, 1));
+                    if (baseWidth == 0 || baseHeight == 0 ||
+                        baseLayers == 0) {
+                        continue;
+                    }
+
+                    appgl::SampledTextureSlot& slot = slots[i];
+                    slot.width = baseWidth;
+                    slot.height = baseHeight;
+                    slot.depth = baseLayers > 1 ? baseLayers : 0;
+                    slot.layerFaces = baseLayers;
+                    slot.internalFormat =
+                        static_cast<std::uint32_t>(GL_STENCIL_INDEX8);
+                    slot.samplerType = samplerGLType;
+                    applySamplingState(slot);
+                    slot.bytesPerRow = baseWidth;
+                    slot.bytesPerImage = baseWidth * baseHeight;
+                    slot.mipOffsets.clear();
+                    slot.mipWidths.clear();
+                    slot.mipHeights.clear();
+                    slot.mipBytesPerRow.clear();
+                    slot.mipBytesPerImage.clear();
+                    slot.mipLayerFaces.clear();
+                    slot.data.clear();
+
+                    GLint maxLevel = 0;
+                    for (const auto& [levelIndex, image] : texObject->levels) {
+                        if (levelIndex >= 0 && image.defined) {
+                            maxLevel = std::max(maxLevel, levelIndex);
+                        }
+                    }
+                    for (GLint level = 0; level <= maxLevel; ++level) {
+                        auto levelIt = texObject->levels.find(level);
+                        if (levelIt == texObject->levels.end() ||
+                            !levelIt->second.defined) {
+                            break;
+                        }
+                        const GLTextureImageLevel& image = levelIt->second;
+                        const std::uint32_t mipWidth =
+                            static_cast<std::uint32_t>(
+                                safeDimension(image.desc.width));
+                        const std::uint32_t mipHeight =
+                            static_cast<std::uint32_t>(
+                                texObject->target == GL_TEXTURE_1D
+                                    ? 1 : safeDimension(image.desc.height));
+                        const std::uint32_t mipLayers =
+                            static_cast<std::uint32_t>(
+                                std::max<GLsizei>(image.desc.depth, 1));
+                        if (mipWidth == 0 || mipHeight == 0 ||
+                            mipLayers == 0) {
+                            break;
+                        }
+                        const std::uint32_t mipBytesPerRow = mipWidth;
+                        const std::uint32_t mipBytesPerImage =
+                            mipBytesPerRow * mipHeight;
+                        const std::size_t byteCount =
+                            static_cast<std::size_t>(mipBytesPerImage) *
+                            static_cast<std::size_t>(mipLayers);
+                        const std::size_t offset = slot.data.size();
+                        slot.mipOffsets.push_back(
+                            static_cast<std::uint32_t>(offset));
+                        slot.mipWidths.push_back(mipWidth);
+                        slot.mipHeights.push_back(mipHeight);
+                        slot.mipBytesPerRow.push_back(mipBytesPerRow);
+                        slot.mipBytesPerImage.push_back(mipBytesPerImage);
+                        slot.mipLayerFaces.push_back(mipLayers);
+                        slot.data.resize(offset + byteCount, 0u);
+                        if (image.nativeBpp == 1 &&
+                            image.nativeData.size() >= byteCount) {
+                            std::memcpy(slot.data.data() + offset,
+                                        image.nativeData.data(),
+                                        byteCount);
+                        } else if (!image.rgba8.empty()) {
+                            const std::size_t pixelCount = byteCount;
+                            for (std::size_t p = 0; p < pixelCount; ++p) {
+                                const std::size_t rgbaOffset = p * 4u;
+                                if (rgbaOffset < image.rgba8.size()) {
+                                    slot.data[offset + p] =
+                                        image.rgba8[rgbaOffset];
+                                }
+                            }
+                        }
+                    }
+                    if (trace) {
+                        std::fprintf(stderr,
+                            "[GS-tex]   stencil snapshot tex=%u fmt=0x%X "
+                            "mips=%zu bytes=%zu first=%02X\n",
+                            texName, texObject->desc.internalFormat,
+                            slot.mipOffsets.size(),
+                            slot.data.size(),
+                            slot.data.empty() ? 0u : slot.data[0]);
+                    }
+                    continue;
                 }
                 if (isPackedDepthStencilInternalFormat(texObject->desc.internalFormat)) {
                     auto levelIt = texObject->levels.find(0);
@@ -11899,11 +12147,15 @@ struct GLContext::Impl {
                                 std::uint32_t* outColorArrayLength = nullptr,
                                 std::array<void*, 7>* outExtraColorTextures = nullptr,
                                 std::array<std::uint32_t, 8>* outColorSlices = nullptr,
-                                std::array<std::uint32_t, 8>* outColorLevels = nullptr) {
+                                std::array<std::uint32_t, 8>* outColorLevels = nullptr,
+                                std::uint32_t* outDepthStencilSlice = nullptr,
+                                std::uint32_t* outDepthStencilLevel = nullptr) {
         if (outColorArrayLength != nullptr) *outColorArrayLength = 0;
         if (outExtraColorTextures != nullptr) outExtraColorTextures->fill(nullptr);
         if (outColorSlices != nullptr) outColorSlices->fill(0);
         if (outColorLevels != nullptr) outColorLevels->fill(0);
+        if (outDepthStencilSlice != nullptr) *outDepthStencilSlice = 0;
+        if (outDepthStencilLevel != nullptr) *outDepthStencilLevel = 0;
         const GLuint fboName = state->boundDrawFramebuffer();
         if (fboName == 0) {
             return nullptr;
@@ -11986,7 +12238,8 @@ struct GLContext::Impl {
                     //   GL_TEXTURE_3D            → desc.depth (z slices)
                     //   GL_TEXTURE_CUBE_MAP      → 6 (faces)
                     //   GL_TEXTURE_1D_ARRAY      → desc.height
-                    //   GL_TEXTURE_CUBE_MAP_ARRAY→ 6 × desc.layers
+                    //   GL_TEXTURE_CUBE_MAP_ARRAY→ desc.depth/desc.layers
+                    //                                  (GL depth is layer-faces)
                     //   GL_TEXTURE_2D_ARRAY etc. → desc.layers
                     //
                     // The cubemap path was previously falling through to
@@ -12012,7 +12265,9 @@ struct GLContext::Impl {
                         } else if (texObj->target == GL_TEXTURE_CUBE_MAP) {
                             layers = 6;
                         } else if (texObj->target == GL_TEXTURE_CUBE_MAP_ARRAY) {
-                            layers = 6 * std::max<GLsizei>(texObj->desc.layers, 1);
+                            layers = std::max<GLsizei>(
+                                std::max<GLsizei>(texObj->desc.depth, 1),
+                                std::max<GLsizei>(texObj->desc.layers, 1));
                         }
                         if (att->multiview) {
                             layers = std::max<GLsizei>(att->numViews, 1);
@@ -12117,6 +12372,16 @@ struct GLContext::Impl {
                         outHeight = sizeTexture->target == GL_TEXTURE_1D ? 1 : lvl->second.desc.height;
                         primarySet = true;
                     }
+                }
+                if (outDepthStencilSlice != nullptr) {
+                    *outDepthStencilSlice = !att->layered
+                        ? static_cast<std::uint32_t>(
+                              std::max<GLint>(att->layer, 0))
+                        : 0u;
+                }
+                if (outDepthStencilLevel != nullptr) {
+                    *outDepthStencilLevel = static_cast<std::uint32_t>(
+                        std::max<GLint>(att->level, 0));
                 }
                 return tex->metalTexture;
             }
@@ -22156,7 +22421,12 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
         // dimension-recording path until their uploads get native backing.
         return true;
     }
-    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_2D_ARRAY) {
+    if (target == GL_TEXTURE_CUBE_MAP_ARRAY) {
+        if (width != height || (depth % 6) != 0) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    } else if (target != GL_TEXTURE_2D && target != GL_TEXTURE_2D_ARRAY) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
@@ -22175,7 +22445,8 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
     object->desc.width = width;
     object->desc.height = (target == GL_TEXTURE_1D) ? 1 : height;
     object->desc.depth = depth;
-    object->desc.layers = (target == GL_TEXTURE_2D_ARRAY) ? depth : 1;
+    object->desc.layers = (target == GL_TEXTURE_2D_ARRAY ||
+                           target == GL_TEXTURE_CUBE_MAP_ARRAY) ? depth : 1;
     object->desc.internalFormat = internalformat;
     object->desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
 
@@ -22184,7 +22455,8 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
     image.desc.width = width;
     image.desc.height = (target == GL_TEXTURE_1D) ? 1 : height;
     image.desc.depth = depth;
-    image.desc.layers = (target == GL_TEXTURE_2D_ARRAY) ? depth : 1;
+    image.desc.layers = (target == GL_TEXTURE_2D_ARRAY ||
+                         target == GL_TEXTURE_CUBE_MAP_ARRAY) ? depth : 1;
     image.desc.levels = object->desc.levels;
     image.defined = true;
     object->levels[level] = std::move(image);
@@ -22192,15 +22464,24 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
     // Allocate Metal texture if missing OR if format/size changed.
     id<MTLTexture> existing = (__bridge id<MTLTexture>)object->metalTexture;
     const bool arrayTexture = target == GL_TEXTURE_2D_ARRAY;
-    const NSUInteger arrayLength = arrayTexture ? static_cast<NSUInteger>(depth) : 1u;
+    const bool cubeArrayTexture = target == GL_TEXTURE_CUBE_MAP_ARRAY;
+    const bool slicedTexture = arrayTexture || cubeArrayTexture;
+    const NSUInteger uploadSlices = slicedTexture ? static_cast<NSUInteger>(depth) : 1u;
+    const NSUInteger arrayLength = cubeArrayTexture
+        ? static_cast<NSUInteger>(std::max<GLsizei>(depth, 6) / 6)
+        : (arrayTexture ? static_cast<NSUInteger>(depth) : 1u);
+    const MTLTextureType textureType = cubeArrayTexture
+        ? MTLTextureTypeCubeArray
+        : (arrayTexture ? MTLTextureType2DArray : MTLTextureType2D);
     bool needAlloc = (existing == nil) ||
+                     existing.textureType != textureType ||
                      existing.pixelFormat != pf ||
                      existing.width != static_cast<NSUInteger>(width) ||
                      existing.height != static_cast<NSUInteger>(height) ||
                      existing.arrayLength != arrayLength;
     if (needAlloc) {
         MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
-        desc.textureType = arrayTexture ? MTLTextureType2DArray : MTLTextureType2D;
+        desc.textureType = textureType;
         desc.pixelFormat = pf;
         desc.width = static_cast<NSUInteger>(width);
         desc.height = static_cast<NSUInteger>(height);
@@ -22260,8 +22541,8 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
             static_cast<NSUInteger>(width),
             static_cast<NSUInteger>(height));
         const NSUInteger mipLevel = static_cast<NSUInteger>(level);
-        if (arrayTexture) {
-            for (NSUInteger slice = 0; slice < arrayLength; ++slice) {
+        if (slicedTexture) {
+            for (NSUInteger slice = 0; slice < uploadSlices; ++slice) {
                 const std::uint8_t* sliceBytes = baseBytes + slice * srcImageBytes;
                 [existing replaceRegion:region
                              mipmapLevel:mipLevel
@@ -44004,12 +44285,15 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     GLsizei preFboW = 0, preFboH = 0;
     void* preFboDSTex = nullptr;
     std::uint32_t preFboArrayLen = 0;
+    std::uint32_t preFboDSSlice = 0;
+    std::uint32_t preFboDSLevel = 0;
     std::array<void*, 7> preExtraColTex = {};
     std::array<std::uint32_t, 8> preColorSlices = {};
     std::array<std::uint32_t, 8> preColorLevels = {};
     void* preFboColTex = resolveFBOColorTarget(
         preFboW, preFboH, preFboDSTex, &preFboArrayLen,
-        &preExtraColTex, &preColorSlices, &preColorLevels);
+        &preExtraColTex, &preColorSlices, &preColorLevels,
+        &preFboDSSlice, &preFboDSLevel);
     const GLuint preDrawFboName = state->boundDrawFramebuffer();
     const GLFramebufferObject* preDrawFbo =
         preDrawFboName != 0 ? objects->framebuffers().get(preDrawFboName) : nullptr;
@@ -44632,6 +44916,8 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         tdi.fboColorSlices = preColorSlices;
         tdi.fboColorLevels = preColorLevels;
         tdi.fboDepthStencilTexture = preFboDSTex;
+        tdi.fboDepthStencilSlice = preFboDSSlice;
+        tdi.fboDepthStencilLevel = preFboDSLevel;
         tdi.fboWidth = preAttachmentlessFbo ? preDrawFbo->defaultWidth : preFboW;
         tdi.fboHeight = preAttachmentlessFbo ? preDrawFbo->defaultHeight : preFboH;
         tdi.fboAttachmentless = preAttachmentlessFbo &&
@@ -44834,18 +45120,23 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
     {
         GLsizei fboW = 0, fboH = 0;
         void* fboDSTex = nullptr;
+        std::uint32_t fboDSSlice = 0;
+        std::uint32_t fboDSLevel = 0;
         std::array<void*, 7> extraColTex = {};
         std::array<std::uint32_t, 8> colSlices = {};
         std::array<std::uint32_t, 8> colLevels = {};
         void* fboColTex = resolveFBOColorTarget(
             fboW, fboH, fboDSTex, nullptr,
-            &extraColTex, &colSlices, &colLevels);
+            &extraColTex, &colSlices, &colLevels,
+            &fboDSSlice, &fboDSLevel);
         if (fboColTex != nullptr || fboDSTex != nullptr) {
             tdi.fboColorTexture = fboColTex;
             tdi.fboAdditionalColorTextures = extraColTex;
             tdi.fboColorSlices = colSlices;
             tdi.fboColorLevels = colLevels;
             tdi.fboDepthStencilTexture = fboDSTex;
+            tdi.fboDepthStencilSlice = fboDSSlice;
+            tdi.fboDepthStencilLevel = fboDSLevel;
             tdi.fboWidth = fboW;
             tdi.fboHeight = fboH;
         }
@@ -44925,18 +45216,23 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
             GLsizei fboW = 0, fboH = 0;
             void* fboDSTex = nullptr;
             std::uint32_t fboArrayLen = 0;
+            std::uint32_t fboDSSlice = 0;
+            std::uint32_t fboDSLevel = 0;
             std::array<void*, 7> extraColTex = {};
             std::array<std::uint32_t, 8> colSlices = {};
             std::array<std::uint32_t, 8> colLevels = {};
             void* fboColTex = resolveFBOColorTarget(
                 fboW, fboH, fboDSTex, &fboArrayLen,
-                &extraColTex, &colSlices, &colLevels);
+                &extraColTex, &colSlices, &colLevels,
+                &fboDSSlice, &fboDSLevel);
             if (fboColTex != nullptr || fboDSTex != nullptr) {
                 tdi.fboColorTexture = fboColTex;
                 tdi.fboAdditionalColorTextures = extraColTex;
                 tdi.fboColorSlices = colSlices;
                 tdi.fboColorLevels = colLevels;
                 tdi.fboDepthStencilTexture = fboDSTex;
+                tdi.fboDepthStencilSlice = fboDSSlice;
+                tdi.fboDepthStencilLevel = fboDSLevel;
                 tdi.fboWidth = fboW;
                 tdi.fboHeight = fboH;
                 if (fboColTex != nullptr) {
@@ -49962,12 +50258,23 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
         GLint uniformLoc = -1;
         GLenum samplerGLType = 0;
         GLint samplerArraySize = 1;
-        for (const auto& u : programObject->uniforms) {
-            if (u.name == samp.name) {
+        auto matchComputeSamplerUniform = [&](const std::string& name) -> bool {
+            for (const auto& u : programObject->uniforms) {
+                if (u.name != name) {
+                    continue;
+                }
                 uniformLoc = u.location;
                 samplerGLType = u.type;
                 samplerArraySize = std::max<GLint>(u.arraySize, 1);
-                break;
+                return true;
+            }
+            return false;
+        };
+        if (!matchComputeSamplerUniform(samp.name)) {
+            constexpr const char* kAppglPrefix = "_appgl_";
+            constexpr std::size_t kAppglPrefixLen = 7;
+            if (samp.name.compare(0, kAppglPrefixLen, kAppglPrefix) == 0) {
+                matchComputeSamplerUniform(samp.name.substr(kAppglPrefixLen));
             }
         }
         if (uniformLoc < 0) {
@@ -57326,7 +57633,9 @@ static bool validateGetTextureSubImageCommon(GLContext* ctx,
             texD = 6;
             break;
         case GL_TEXTURE_CUBE_MAP_ARRAY:
-            texD = 6 * std::max<GLsizei>(obj.desc.layers, 1);
+            texD = std::max<GLsizei>(
+                std::max<GLsizei>(obj.desc.depth, 1),
+                std::max<GLsizei>(obj.desc.layers, 1));
             break;
         case GL_TEXTURE_3D:
             // texD already from desc.depth.

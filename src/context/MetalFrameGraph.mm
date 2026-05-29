@@ -2980,6 +2980,12 @@ struct MetalFrameGraph::Impl {
                     dsFormat == MTLPixelFormatX24_Stencil8;
                 if (fmtHasDepth) {
                     pass.depthAttachment.texture = passDepthStencil;
+                    if (isFBODraw) {
+                        pass.depthAttachment.level =
+                            static_cast<NSUInteger>(info.fboDepthStencilLevel);
+                        pass.depthAttachment.slice =
+                            static_cast<NSUInteger>(info.fboDepthStencilSlice);
+                    }
                     pass.depthAttachment.storeAction = MTLStoreActionStore;
                     if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_DEPTH_BUFFER_BIT)) {
                         pass.depthAttachment.loadAction = MTLLoadActionClear;
@@ -2990,6 +2996,12 @@ struct MetalFrameGraph::Impl {
                 }
                 if (fmtHasStencil) {
                     pass.stencilAttachment.texture = passDepthStencil;
+                    if (isFBODraw) {
+                        pass.stencilAttachment.level =
+                            static_cast<NSUInteger>(info.fboDepthStencilLevel);
+                        pass.stencilAttachment.slice =
+                            static_cast<NSUInteger>(info.fboDepthStencilSlice);
+                    }
                     pass.stencilAttachment.storeAction = MTLStoreActionStore;
                     if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_STENCIL_BUFFER_BIT)) {
                         pass.stencilAttachment.loadAction = MTLLoadActionClear;

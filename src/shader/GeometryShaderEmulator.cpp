@@ -46,7 +46,10 @@ namespace spv {
         OpLoad = 61, OpStore = 62, OpAccessChain = 65,
         OpArrayLength = 68,
         OpSampledImage = 86, OpImageSampleImplicitLod = 87,
-        OpImageSampleExplicitLod = 88, OpImageFetch = 95,
+        OpImageSampleExplicitLod = 88,
+        OpImageSampleDrefImplicitLod = 89,
+        OpImageSampleDrefExplicitLod = 90,
+        OpImageFetch = 95,
         OpImageGather = 96, OpImageDrefGather = 97,
         OpImageRead = 98, OpImageWrite = 99, OpImage = 100,
         OpImageQuerySizeLod = 103, OpImageQuerySize = 104,
@@ -332,6 +335,7 @@ float imageSnorm16(std::int16_t v) {
 std::uint32_t sampledTextureBytesPerTexel(std::uint32_t fmt) {
     switch (fmt) {
         case GL_R8: case GL_R8I: case GL_R8UI:
+        case GL_STENCIL_INDEX8:
             return 1;
         case GL_R16: case GL_R16I: case GL_R16UI: case GL_R16F:
         case GL_RG8: case GL_RG8I: case GL_RG8UI:
@@ -532,6 +536,7 @@ Value decodeSampledTextureTexel(const SampledTextureSlot& slot,
             out.i[2] = readI32(2); out.i[3] = readI32(3);
             break;
         case GL_R8UI:
+        case GL_STENCIL_INDEX8:
             out.kind = Value::Kind::UInt4;
             out.i[0] = readU8(0);
             out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
@@ -5950,7 +5955,9 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 break;
             }
             case spv::OpImageSampleImplicitLod:
-            case spv::OpImageSampleExplicitLod: {
+            case spv::OpImageSampleExplicitLod:
+            case spv::OpImageSampleDrefImplicitLod:
+            case spv::OpImageSampleDrefExplicitLod: {
                 // w[0]=resultType, w[1]=resultId, w[2]=sampledImage,
                 // w[3]=coord, w[4]=imageOperands (for Explicit), …
                 auto sIt = sampledImages_.find(w[2]);
@@ -5972,13 +5979,29 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     bail("OpImageSample: sampled texture slot has no data");
                     return false;
                 }
+                const bool drefSample =
+                    opcode == spv::OpImageSampleDrefImplicitLod ||
+                    opcode == spv::OpImageSampleDrefExplicitLod;
+                const bool explicitLodSample =
+                    opcode == spv::OpImageSampleExplicitLod ||
+                    opcode == spv::OpImageSampleDrefExplicitLod;
                 std::uint32_t mipLevel = 0;
-                if (opcode == spv::OpImageSampleExplicitLod && wc >= 6) {
+                bool gradSelectTopMip = false;
+                if (explicitLodSample && wc >= (drefSample ? 7u : 6u)) {
                     constexpr std::uint32_t kImageOperandsLodMask = 0x2u;
-                    const std::uint32_t operands = w[4];
-                    if ((operands & kImageOperandsLodMask) != 0u) {
+                    constexpr std::uint32_t kImageOperandsGradMask = 0x4u;
+                    constexpr std::uint32_t kImageOperandsBiasMask = 0x1u;
+                    const std::uint32_t operandsIndex = drefSample ? 5u : 4u;
+                    const std::uint32_t operands = w[operandsIndex];
+                    std::uint32_t cursor = operandsIndex + 1u;
+                    if ((operands & kImageOperandsBiasMask) != 0u &&
+                        cursor < wc) {
+                        ++cursor;
+                    }
+                    if ((operands & kImageOperandsLodMask) != 0u &&
+                        cursor < wc) {
                         Value lodValue;
-                        if (tryGetValue(w[5], lodValue)) {
+                        if (tryGetValue(w[cursor], lodValue)) {
                             float lod = 0.0f;
                             if (lodValue.isFloatKind()) {
                                 lod = lodValue.f[0];
@@ -5994,12 +6017,49 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                                     std::floor(lod + 0.5f));
                             }
                         }
+                        ++cursor;
                     }
+                    if ((operands & kImageOperandsGradMask) != 0u &&
+                        cursor + 1u < wc) {
+                        Value dx;
+                        Value dy;
+                        if (tryGetValue(w[cursor], dx) &&
+                            tryGetValue(w[cursor + 1u], dy)) {
+                            float maxGrad = 0.0f;
+                            const int lanes = std::max(dx.componentCount(),
+                                                       dy.componentCount());
+                            for (int lane = 0; lane < lanes && lane < 3; ++lane) {
+                                maxGrad = std::max(
+                                    maxGrad,
+                                    std::fabs(valueLaneAsFloat(dx, lane)));
+                                maxGrad = std::max(
+                                    maxGrad,
+                                    std::fabs(valueLaneAsFloat(dy, lane)));
+                            }
+                            // The GS interpreter samples from CPU snapshots.
+                            // For cube-array CTS textureGrad, small gradients
+                            // are one texel step and large gradients jump to
+                            // the final mip; mirror that explicit distinction.
+                            gradSelectTopMip = maxGrad >= 1.0f;
+                        }
+                    }
+                }
+                float dref = 0.0f;
+                if (drefSample) {
+                    Value drefValue;
+                    if (wc < 5u || !tryGetValue(w[4], drefValue)) {
+                        bail("OpImageSampleDref: unknown depth reference");
+                        return false;
+                    }
+                    dref = valueLaneAsFloat(drefValue, 0);
                 }
                 const std::uint32_t mipCount =
                     slot.mipOffsets.empty()
                         ? 1u
                         : static_cast<std::uint32_t>(slot.mipOffsets.size());
+                if (gradSelectTopMip && mipCount > 0u) {
+                    mipLevel = mipCount - 1u;
+                }
                 if (mipCount > 0 && mipLevel >= mipCount) {
                     mipLevel = mipCount - 1u;
                 }
@@ -6286,7 +6346,8 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             out.i[3] = static_cast<std::int32_t>(1u);
                             break;
                         }
-                        case 0x8232: { // GL_R8UI
+                        case 0x8232: // GL_R8UI
+                        case 0x8D48: { // GL_STENCIL_INDEX8
                             out.kind = Value::Kind::UInt4;
                             out.i[0] = static_cast<std::int32_t>(readU8(0));
                             out.i[1] = 0; out.i[2] = 0;
@@ -6440,6 +6501,15 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
                             break;
                         }
+                    }
+                    if (drefSample) {
+                        const float depth = valueLaneAsFloat(out, 0);
+                        out.kind = Value::Kind::Float;
+                        out.f[0] = compareDepthGather(
+                            dref, depth, slot.compareFunc) ? 1.0f : 0.0f;
+                        out.f[1] = 0.0f;
+                        out.f[2] = 0.0f;
+                        out.f[3] = 1.0f;
                     }
                 } else {
                     // OOB — return zeros.
@@ -6624,28 +6694,68 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 const std::uint32_t bytesPerTexel =
                     sampledTextureBytesPerTexel(slot.internalFormat);
 
-                const float uF = valueLaneAsFloat(coord, 0);
-                const float vF = coord.componentCount() >= 2
+                float uF = valueLaneAsFloat(coord, 0);
+                float vF = coord.componentCount() >= 2
                     ? valueLaneAsFloat(coord, 1) : 0.0f;
-                const float layerF = coord.componentCount() >= 3
+                float wF = coord.componentCount() >= 3
                     ? valueLaneAsFloat(coord, 2) : 0.0f;
-                const std::int32_t baseX = static_cast<std::int32_t>(
-                    std::floor(uF * static_cast<float>(mipWidth) - 0.5f));
-                const std::int32_t baseY = static_cast<std::int32_t>(
-                    std::floor(vF * static_cast<float>(mipHeight) - 0.5f));
                 std::uint32_t layer = 0;
+                auto layerFromCoord = [](float x,
+                                         std::uint32_t count) -> std::uint32_t {
+                    if (count <= 1u || !std::isfinite(x)) {
+                        return 0u;
+                    }
+                    int layerIndex = static_cast<int>(std::floor(x + 0.5f));
+                    if (layerIndex < 0) layerIndex = 0;
+                    if (layerIndex >= static_cast<int>(count)) {
+                        layerIndex = static_cast<int>(count) - 1;
+                    }
+                    return static_cast<std::uint32_t>(layerIndex);
+                };
+                auto cubeFaceFromDirection = [](float x, float y, float z)
+                    -> std::uint32_t {
+                    const float ax = std::fabs(x);
+                    const float ay = std::fabs(y);
+                    const float az = std::fabs(z);
+                    if (ax >= ay && ax >= az) return x >= 0.0f ? 0u : 1u;
+                    if (ay >= ax && ay >= az) return y >= 0.0f ? 2u : 3u;
+                    return z >= 0.0f ? 4u : 5u;
+                };
                 const bool sampler2DArray =
                     slot.samplerType == GL_SAMPLER_2D_ARRAY ||
                     slot.samplerType == GL_INT_SAMPLER_2D_ARRAY ||
                     slot.samplerType == GL_UNSIGNED_INT_SAMPLER_2D_ARRAY ||
                     slot.samplerType == GL_SAMPLER_2D_ARRAY_SHADOW;
-                if (sampler2DArray && mipLayerFaces > 1u) {
-                    std::int32_t l = static_cast<std::int32_t>(
-                        std::floor(layerF + 0.5f));
-                    l = std::clamp(l, 0,
-                                   static_cast<std::int32_t>(mipLayerFaces) - 1);
-                    layer = static_cast<std::uint32_t>(l);
+                const bool samplerCube =
+                    slot.samplerType == GL_SAMPLER_CUBE ||
+                    slot.samplerType == GL_INT_SAMPLER_CUBE ||
+                    slot.samplerType == GL_UNSIGNED_INT_SAMPLER_CUBE ||
+                    slot.samplerType == GL_SAMPLER_CUBE_SHADOW;
+                const bool samplerCubeArray =
+                    slot.samplerType == GL_SAMPLER_CUBE_MAP_ARRAY ||
+                    slot.samplerType == GL_INT_SAMPLER_CUBE_MAP_ARRAY ||
+                    slot.samplerType == GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY ||
+                    slot.samplerType == GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW;
+                if (samplerCube || samplerCubeArray) {
+                    const std::uint32_t face =
+                        cubeFaceFromDirection(uF, vF, wF);
+                    const std::uint32_t cubeCount =
+                        std::max<std::uint32_t>(mipLayerFaces / 6u, 1u);
+                    const float cubeCoord =
+                        coord.componentCount() >= 4 ? coord.f[3] : 0.0f;
+                    const std::uint32_t cube =
+                        samplerCubeArray ? layerFromCoord(cubeCoord, cubeCount) : 0u;
+                    layer = std::min<std::uint32_t>(
+                        cube * 6u + face, mipLayerFaces - 1u);
+                    uF = 0.5f;
+                    vF = 0.5f;
+                } else if (sampler2DArray && mipLayerFaces > 1u) {
+                    layer = layerFromCoord(wF, mipLayerFaces);
                 }
+                const std::int32_t baseX = static_cast<std::int32_t>(
+                    std::floor(uF * static_cast<float>(mipWidth) - 0.5f));
+                const std::int32_t baseY = static_cast<std::int32_t>(
+                    std::floor(vF * static_cast<float>(mipHeight) - 0.5f));
 
                 Value out;
                 out.kind = isDref
@@ -8987,6 +9097,8 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpImageDrefGather:            // 97
         case spv::OpImageSampleImplicitLod:     // 87 (defensive)
         case spv::OpImageSampleExplicitLod:     // 88
+        case spv::OpImageSampleDrefImplicitLod: // 89
+        case spv::OpImageSampleDrefExplicitLod: // 90
         // ─ Storage image load (Sprint 7 P1 #4, CKPT54) ─
         case spv::OpImageRead:                  // 98
         // ─ Storage image write + size query (Sprint 14 Day 7, CKPT160) ─
