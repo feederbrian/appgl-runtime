@@ -6772,6 +6772,9 @@ struct GLContext::Impl {
         // collapses to [0, 1000], which is still effectively unbounded.
         descriptor.lodMinClamp = std::max(0.0f, object.params.minLod);
         descriptor.lodMaxClamp = std::max(descriptor.lodMinClamp, object.params.maxLod);
+        if (@available(macOS 26.0, *)) {
+            descriptor.lodBias = object.params.lodBias;
+        }
         descriptor.compareFunction = object.params.compareMode == GL_COMPARE_REF_TO_TEXTURE
             ? metalCompareFunction(object.params.compareFunc)
             : MTLCompareFunctionNever;
@@ -6847,6 +6850,9 @@ struct GLContext::Impl {
         // collapses to [0, 1000], which is still effectively unbounded.
         descriptor.lodMinClamp = std::max(0.0f, object.params.minLod);
         descriptor.lodMaxClamp = std::max(descriptor.lodMinClamp, object.params.maxLod);
+        if (@available(macOS 26.0, *)) {
+            descriptor.lodBias = object.params.lodBias;
+        }
         descriptor.compareFunction = object.params.compareMode == GL_COMPARE_REF_TO_TEXTURE
             ? metalCompareFunction(object.params.compareFunc)
             : MTLCompareFunctionNever;
@@ -6973,6 +6979,9 @@ struct GLContext::Impl {
             }
             descriptor.lodMinClamp = 0.0f;
             descriptor.lodMaxClamp = 0.25f;
+            if (@available(macOS 26.0, *)) {
+                descriptor.lodBias = 0.0f;
+            }
             descriptor.compareFunction = MTLCompareFunctionNever;
         }
         // Step 7-3: argument-buffer compatibility (see
@@ -9004,6 +9013,7 @@ struct GLContext::Impl {
                     }
                 }
                 binding.reductionMode = static_cast<std::uint32_t>(effectiveReductionMode);
+                binding.lodBias = samplerParamsForCompleteness->lodBias;
                 outBindings.push_back(binding);
                 const GLenum sparseSidecarTarget =
                     resolvedTarget;
@@ -9032,12 +9042,16 @@ struct GLContext::Impl {
                     std::fprintf(stderr,
                         "[LB-BOUND] stage=%s sampler='%s' glUnit=%d metalSlot=%u "
                         "texName=%u metalTex=%p mtlSampler=%p samplerName=%u "
+                        "lodBias=%f texLodBias=%f samplerLodBias=%f "
                         "target=0x%X viewSrc=%u viewLevel=%d+%d viewLayer=%d+%d "
                         "mtlType=%lu mtlFmt=%lu mtlSize=%lux%lu mtlMips=%lu\n",
                         stageTag, sampledTex.name.c_str(),
                         glUnit, binding.metalSlot, texName,
                         binding.metalTexture, binding.metalSamplerState,
                         samplerName,
+                        static_cast<double>(binding.lodBias),
+                        static_cast<double>(texObject->params.lodBias),
+                        static_cast<double>(samplerParamsForCompleteness->lodBias),
                         texObject->target,
                         texObject->viewSourceTexture,
                         texObject->viewMinLevel,

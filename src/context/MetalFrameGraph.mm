@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <limits>
 #include <unordered_map>
 #include <unordered_set>
@@ -158,6 +159,50 @@ static NSInteger textureReductionModesBufferSlot(const std::string* msl) {
     return haveDigit ? slot : -1;
 }
 
+static NSInteger textureLodBiasesBufferSlot(const std::string* msl) {
+    if (msl == nullptr) {
+        return -1;
+    }
+    static constexpr const char* kNeedle =
+        "_appgl_TextureLodBiases [[buffer(";
+    const std::size_t pos = msl->find(kNeedle);
+    if (pos == std::string::npos) {
+        return -1;
+    }
+    std::size_t cursor = pos + std::strlen(kNeedle);
+    NSInteger slot = 0;
+    bool haveDigit = false;
+    while (cursor < msl->size() &&
+           std::isdigit(static_cast<unsigned char>((*msl)[cursor]))) {
+        haveDigit = true;
+        slot = slot * 10 + static_cast<NSInteger>((*msl)[cursor] - '0');
+        ++cursor;
+    }
+    return haveDigit ? slot : -1;
+}
+
+static NSInteger implicitLodBiasCorrectionBufferSlot(const std::string* msl) {
+    if (msl == nullptr) {
+        return -1;
+    }
+    static constexpr const char* kNeedle =
+        "_appgl_ImplicitLodBiasCorrection [[buffer(";
+    const std::size_t pos = msl->find(kNeedle);
+    if (pos == std::string::npos) {
+        return -1;
+    }
+    std::size_t cursor = pos + std::strlen(kNeedle);
+    NSInteger slot = 0;
+    bool haveDigit = false;
+    while (cursor < msl->size() &&
+           std::isdigit(static_cast<unsigned char>((*msl)[cursor]))) {
+        haveDigit = true;
+        slot = slot * 10 + static_cast<NSInteger>((*msl)[cursor] - '0');
+        ++cursor;
+    }
+    return haveDigit ? slot : -1;
+}
+
 static std::vector<std::uint32_t> buildTextureReductionModes(
     const std::vector<TranslatedDrawInfo::TextureBinding>& textures) {
     std::uint32_t maxSlot = 127;
@@ -180,6 +225,66 @@ static std::vector<std::uint32_t> buildTextureReductionModes(
         modes[binding.metalSlot] = binding.reductionMode;
     }
     return modes;
+}
+
+static std::vector<float> buildTextureLodBiases(
+    const std::vector<TranslatedDrawInfo::TextureBinding>& textures) {
+    std::uint32_t maxSlot = 127;
+    for (const auto& binding : textures) {
+        if (binding.metalTexture == nullptr || binding.metalSamplerState == nullptr) {
+            continue;
+        }
+        maxSlot = std::max(maxSlot, binding.metalSlot);
+    }
+    std::vector<float> biases(static_cast<std::size_t>(maxSlot) + 1u, 0.0f);
+    for (const auto& binding : textures) {
+        if (binding.metalTexture == nullptr || binding.metalSamplerState == nullptr) {
+            continue;
+        }
+        if (binding.metalSlot >= biases.size()) {
+            continue;
+        }
+        biases[binding.metalSlot] = binding.lodBias;
+    }
+    return biases;
+}
+
+static float implicitLodViewportBiasCorrection(const TranslatedDrawInfo& info,
+                                               bool isFBODraw,
+                                               id<MTLTexture> colorTexture) {
+    if (info.viewportWidth <= 0 || info.viewportHeight <= 0) {
+        return 0.0f;
+    }
+    const GLint rtW = (isFBODraw && info.fboWidth > 0)
+        ? info.fboWidth
+        : static_cast<GLint>(colorTexture != nil ? colorTexture.width : 0);
+    const GLint rtH = (isFBODraw && info.fboHeight > 0)
+        ? info.fboHeight
+        : static_cast<GLint>(colorTexture != nil ? colorTexture.height : 0);
+    if (rtW <= 0 || rtH <= 0) {
+        return 0.0f;
+    }
+
+    const GLint glX = std::max<GLint>(0, info.viewportX);
+    const GLint glY = std::max<GLint>(0, info.viewportY);
+    const GLsizei availW =
+        static_cast<GLsizei>(std::max<GLint>(0, rtW - glX));
+    const GLsizei availH =
+        static_cast<GLsizei>(std::max<GLint>(0, rtH - glY));
+    const GLsizei clampedW =
+        std::min<GLsizei>(info.viewportWidth, availW);
+    const GLsizei clampedH =
+        std::min<GLsizei>(info.viewportHeight, availH);
+    if (clampedW <= 0 || clampedH <= 0) {
+        return 0.0f;
+    }
+
+    const float scaleX =
+        static_cast<float>(info.viewportWidth) / static_cast<float>(clampedW);
+    const float scaleY =
+        static_cast<float>(info.viewportHeight) / static_cast<float>(clampedH);
+    const float scale = std::max(scaleX, scaleY);
+    return scale > 1.0f ? -std::log2(scale) : 0.0f;
 }
 
 static MTLWinding frontFacingWindingForClipControl(GLenum frontFace,
@@ -3214,6 +3319,31 @@ struct MetalFrameGraph::Impl {
                                               length:modes.size() * sizeof(std::uint32_t)
                                              atIndex:static_cast<NSUInteger>(vertexReductionModesSlot)];
             }
+            const NSInteger vertexLodBiasesSlot =
+                textureLodBiasesBufferSlot(info.vertexMSL);
+            if (vertexLodBiasesSlot >= 0) {
+                std::vector<float> biases =
+                    buildTextureLodBiases(info.vertexTextures);
+                if (std::getenv("APPGL_LOG_LB") != nullptr) {
+                    std::fprintf(stderr,
+                        "[LB-LOD-BUFFER] stage=vert bufferSlot=%ld count=%zu bias0=%f texBindings=%zu\n",
+                        static_cast<long>(vertexLodBiasesSlot),
+                        biases.size(),
+                        biases.empty() ? 0.0 : static_cast<double>(biases[0]),
+                        info.vertexTextures.size());
+                }
+                [currentRenderEncoder setVertexBytes:biases.data()
+                                              length:biases.size() * sizeof(float)
+                                             atIndex:static_cast<NSUInteger>(vertexLodBiasesSlot)];
+            }
+            const NSInteger vertexImplicitLodBiasCorrectionSlot =
+                implicitLodBiasCorrectionBufferSlot(info.vertexMSL);
+            if (vertexImplicitLodBiasCorrectionSlot >= 0) {
+                const float correction = 0.0f;
+                [currentRenderEncoder setVertexBytes:&correction
+                                              length:sizeof(correction)
+                                             atIndex:static_cast<NSUInteger>(vertexImplicitLodBiasCorrectionSlot)];
+            }
             const NSInteger fragmentReductionModesSlot =
                 textureReductionModesBufferSlot(info.fragmentMSL);
             if (fragmentReductionModesSlot >= 0) {
@@ -3222,6 +3352,42 @@ struct MetalFrameGraph::Impl {
                 [currentRenderEncoder setFragmentBytes:modes.data()
                                                 length:modes.size() * sizeof(std::uint32_t)
                                                atIndex:static_cast<NSUInteger>(fragmentReductionModesSlot)];
+            }
+            const NSInteger fragmentLodBiasesSlot =
+                textureLodBiasesBufferSlot(info.fragmentMSL);
+            if (fragmentLodBiasesSlot >= 0) {
+                std::vector<float> biases =
+                    buildTextureLodBiases(info.fragmentTextures);
+                if (std::getenv("APPGL_LOG_LB") != nullptr) {
+                    std::fprintf(stderr,
+                        "[LB-LOD-BUFFER] stage=frag bufferSlot=%ld count=%zu bias0=%f texBindings=%zu\n",
+                        static_cast<long>(fragmentLodBiasesSlot),
+                        biases.size(),
+                        biases.empty() ? 0.0 : static_cast<double>(biases[0]),
+                        info.fragmentTextures.size());
+                }
+                [currentRenderEncoder setFragmentBytes:biases.data()
+                                                length:biases.size() * sizeof(float)
+                                               atIndex:static_cast<NSUInteger>(fragmentLodBiasesSlot)];
+            }
+            const NSInteger fragmentImplicitLodBiasCorrectionSlot =
+                implicitLodBiasCorrectionBufferSlot(info.fragmentMSL);
+            if (fragmentImplicitLodBiasCorrectionSlot >= 0) {
+                const float correction =
+                    implicitLodViewportBiasCorrection(info, isFBODraw, colorTexture);
+                if (std::getenv("APPGL_LOG_LB") != nullptr) {
+                    std::fprintf(stderr,
+                        "[LB-LOD-CORRECTION] stage=frag bufferSlot=%ld correction=%f viewport=%dx%d fbo=%dx%d\n",
+                        static_cast<long>(fragmentImplicitLodBiasCorrectionSlot),
+                        static_cast<double>(correction),
+                        info.viewportWidth,
+                        info.viewportHeight,
+                        info.fboWidth,
+                        info.fboHeight);
+                }
+                [currentRenderEncoder setFragmentBytes:&correction
+                                                length:sizeof(correction)
+                                               atIndex:static_cast<NSUInteger>(fragmentImplicitLodBiasCorrectionSlot)];
             }
             if (fragmentNeedsFragCoordParams) {
                 const float renderTargetHeight = colorTexture != nil

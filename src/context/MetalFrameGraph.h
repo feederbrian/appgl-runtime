@@ -223,6 +223,7 @@ struct TranslatedDrawInfo {
         std::size_t imageAtomicBufferOffset = 0;
         std::uint32_t imageAtomicBufferSlot = 0xFFFFFFFFu;
         std::uint32_t reductionMode = GL_WEIGHTED_AVERAGE_ARB;
+        float lodBias = 0.0f;
     };
     std::vector<TextureBinding> fragmentTextures;
     std::vector<TextureBinding> vertexTextures;
