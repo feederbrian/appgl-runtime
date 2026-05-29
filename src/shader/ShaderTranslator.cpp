@@ -2338,8 +2338,10 @@ bool retargetCubeArrayStorageImagesAs2DArray(
     std::string& msl,
     const std::vector<std::uint32_t>& metalTextureSlots) {
     std::vector<std::string> variableNames;
+    std::unordered_set<std::string> variableNameSet;
     bool changed = false;
-    auto retargetAtTextureAttr = [&](std::size_t search) {
+    auto retargetAtTextureAttr = [&](std::size_t search,
+                                     bool requireAccessQualifier) {
         const std::size_t typePos = msl.rfind("texturecube_array<", search);
         if (typePos == std::string::npos) {
             return;
@@ -2348,7 +2350,8 @@ bool retargetCubeArrayStorageImagesAs2DArray(
         if (typeEnd == std::string::npos || typeEnd > search) {
             return;
         }
-        if (msl.find("access::", typePos) > typeEnd) {
+        const bool hasAccessQualifier = msl.find("access::", typePos) < typeEnd;
+        if (requireAccessQualifier && !hasAccessQualifier) {
             return;
         }
         std::size_t nameStart = typeEnd + 1;
@@ -2363,7 +2366,11 @@ bool retargetCubeArrayStorageImagesAs2DArray(
         if (nameStart >= search || nameEnd <= nameStart) {
             return;
         }
-        variableNames.push_back(msl.substr(nameStart, nameEnd - nameStart));
+        const std::string variableName =
+            msl.substr(nameStart, nameEnd - nameStart);
+        if (variableNameSet.insert(variableName).second) {
+            variableNames.push_back(variableName);
+        }
         msl.replace(typePos,
                     std::strlen("texturecube_array"),
                     "texture2d_array");
@@ -2374,7 +2381,7 @@ bool retargetCubeArrayStorageImagesAs2DArray(
         const std::string attr = "[[texture(" + std::to_string(slot) + ")]]";
         std::size_t search = 0;
         while ((search = msl.find(attr, search)) != std::string::npos) {
-            retargetAtTextureAttr(search);
+            retargetAtTextureAttr(search, false);
             search += attr.size();
         }
     }
@@ -2386,13 +2393,40 @@ bool retargetCubeArrayStorageImagesAs2DArray(
             if (attrPos != std::string::npos) {
                 const std::size_t attrEnd = msl.find(")]]", attrPos);
                 if (attrEnd != std::string::npos) {
-                    retargetAtTextureAttr(attrPos);
+                    retargetAtTextureAttr(attrPos, true);
                 }
             }
             typePos += std::strlen("texturecube_array");
         }
     }
 
+    auto retargetVariableDeclarations = [&](const std::string& varName) {
+        std::size_t typePos = 0;
+        while ((typePos = msl.find("texturecube_array<", typePos)) !=
+               std::string::npos) {
+            const std::size_t typeEnd = msl.find('>', typePos);
+            if (typeEnd == std::string::npos) {
+                break;
+            }
+            std::size_t nameStart = typeEnd + 1;
+            while (nameStart < msl.size() &&
+                   std::isspace(static_cast<unsigned char>(msl[nameStart]))) {
+                ++nameStart;
+            }
+            const std::size_t nameEnd = nameStart + varName.size();
+            if (nameEnd <= msl.size() &&
+                msl.compare(nameStart, varName.size(), varName) == 0 &&
+                (nameEnd == msl.size() || !isIdentifierChar(msl[nameEnd]))) {
+                msl.replace(typePos,
+                            std::strlen("texturecube_array"),
+                            "texture2d_array");
+                typePos += std::strlen("texture2d_array");
+                changed = true;
+            } else {
+                typePos += std::strlen("texturecube_array");
+            }
+        }
+    };
     auto rewriteAccessor = [&](const std::string& varName,
                                const char* accessor,
                                std::size_t expectedArgs) {
@@ -2423,10 +2457,42 @@ bool retargetCubeArrayStorageImagesAs2DArray(
             changed = true;
         }
     };
+    auto rewriteArraySize = [&](const std::string& varName) {
+        const std::string needle = varName + ".get_array_size()";
+        std::size_t pos = 0;
+        while ((pos = msl.find(needle, pos)) != std::string::npos) {
+            if (pos > 0 && isIdentifierChar(msl[pos - 1])) {
+                pos += needle.size();
+                continue;
+            }
+            std::size_t suffix = pos + needle.size();
+            while (suffix < msl.size() &&
+                   std::isspace(static_cast<unsigned char>(msl[suffix]))) {
+                ++suffix;
+            }
+            if (suffix < msl.size() && msl[suffix] == ')') {
+                ++suffix;
+                while (suffix < msl.size() &&
+                       std::isspace(static_cast<unsigned char>(msl[suffix]))) {
+                    ++suffix;
+                }
+            }
+            if (msl.compare(suffix, 4, "/ 6") == 0) {
+                pos += needle.size();
+                continue;
+            }
+            const std::string replacement = "(" + needle + " / 6u)";
+            msl.replace(pos, needle.size(), replacement);
+            pos += replacement.size();
+            changed = true;
+        }
+    };
 
     for (const auto& name : variableNames) {
+        retargetVariableDeclarations(name);
         rewriteAccessor(name, "write", 4);
         rewriteAccessor(name, "read", 3);
+        rewriteArraySize(name);
     }
 
     return changed;
@@ -5656,9 +5722,9 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                         storageImageAccessFixups.push_back({
                             binding.msl_texture, true,
                             entry.nonWritable, entry.nonReadable});
-                        if (entry.cubeArray) {
-                            cubeArrayStorageImageSlots.push_back(binding.msl_texture);
-                        }
+                    }
+                    if (entry.cubeArray) {
+                        cubeArrayStorageImageSlots.push_back(binding.msl_texture);
                     }
                 } else {
                     constexpr std::uint32_t kStorageImageDescSet = 2;
@@ -5689,9 +5755,9 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                         storageImageAccessFixups.push_back({
                             binding.msl_texture, false,
                             entry.nonWritable, entry.nonReadable});
-                        if (entry.cubeArray) {
-                            cubeArrayStorageImageSlots.push_back(binding.msl_texture);
-                        }
+                    }
+                    if (entry.cubeArray) {
+                        cubeArrayStorageImageSlots.push_back(binding.msl_texture);
                     }
                 }
                 compiler.add_msl_resource_binding(binding);
@@ -5926,7 +5992,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             }
         }
 
-        if (isGraphicsStage && !resources.storage_images.empty()) {
+        if (!resources.storage_images.empty()) {
             (void)retargetCubeArrayStorageImagesAs2DArray(
                 msl, cubeArrayStorageImageSlots);
         }
