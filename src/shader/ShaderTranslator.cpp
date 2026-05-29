@@ -68,6 +68,8 @@ GLenum storageImageTargetForType(const spirv_cross::SPIRType& imageType) {
                 : GL_TEXTURE_CUBE_MAP;
         case spv::DimRect:
             return imageType.image.ms ? 0 : GL_TEXTURE_RECTANGLE;
+        case spv::DimBuffer:
+            return imageType.image.ms ? 0 : GL_TEXTURE_BUFFER;
         default:
             return 0;
     }
@@ -2015,6 +2017,92 @@ bool rewriteVectorImageAtomicBufferSubscripts(std::string& msl) {
             std::string(helper) + indexExpr + ", " + imageName + ")";
         msl.replace(nameEnd + 1, close - nameEnd - 1, replacement);
         pos = nameEnd + 1 + replacement.size();
+        changed = true;
+    }
+    return changed;
+}
+
+// Texel-buffer storage images with atomics are backed by one MTLBuffer.
+// Keep imageLoad coherent with imageAtomic* by reading that buffer sidecar,
+// not Metal's texture view alias, inside the same dispatch.
+bool rewriteTexelBufferImageAtomicReads(std::string& msl) {
+    bool changed = false;
+    static constexpr const char* kReadNeedle =
+        ".read(spvTexelBufferCoord(";
+    static constexpr const char* kCoordFn = "spvTexelBufferCoord";
+
+    auto atomicTypeForName = [&](const std::string& atomicName) -> std::string {
+        std::size_t pos = 0;
+        while ((pos = msl.find(atomicName + " [[buffer(", pos)) !=
+               std::string::npos) {
+            const std::size_t lineStart =
+                msl.rfind('\n', pos) == std::string::npos
+                    ? 0
+                    : msl.rfind('\n', pos) + 1;
+            const std::string line = msl.substr(lineStart, pos - lineStart);
+            if (line.find("atomic_uint") != std::string::npos) {
+                return "atomic_uint";
+            }
+            if (line.find("atomic_int") != std::string::npos) {
+                return "atomic_int";
+            }
+            pos += atomicName.size();
+        }
+        return {};
+    };
+
+    std::size_t pos = 0;
+    while ((pos = msl.find(kReadNeedle, pos)) != std::string::npos) {
+        std::size_t nameStart = pos;
+        while (nameStart > 0 && isIdentifierChar(msl[nameStart - 1])) {
+            --nameStart;
+        }
+        if (nameStart == pos) {
+            pos += std::strlen(kReadNeedle);
+            continue;
+        }
+        const std::string imageName = msl.substr(nameStart, pos - nameStart);
+        const std::string atomicName = imageName + "_atomic";
+        const std::string atomicType = atomicTypeForName(atomicName);
+        if (atomicType.empty()) {
+            pos += std::strlen(kReadNeedle);
+            continue;
+        }
+
+        const std::size_t readOpen = pos + std::strlen(".read");
+        std::size_t readClose = std::string::npos;
+        if (!findMatchingParen(msl, readOpen, readClose)) {
+            pos += std::strlen(kReadNeedle);
+            continue;
+        }
+        const std::size_t coordFn = msl.find(kCoordFn, readOpen);
+        if (coordFn == std::string::npos || coordFn > readClose) {
+            pos = readClose + 1;
+            continue;
+        }
+        const std::size_t coordOpen = coordFn + std::strlen(kCoordFn);
+        std::size_t coordClose = std::string::npos;
+        if (!findMatchingParen(msl, coordOpen, coordClose) ||
+            coordClose > readClose) {
+            pos = readClose + 1;
+            continue;
+        }
+        std::size_t component = readClose + 1;
+        skipWhitespace(msl, component);
+        if (component + 2 > msl.size() ||
+            msl[component] != '.' || msl[component + 1] != 'x') {
+            pos = readClose + 1;
+            continue;
+        }
+
+        const std::string indexExpr =
+            trimCopy(msl.substr(coordOpen + 1, coordClose - coordOpen - 1));
+        const std::string replacement =
+            "atomic_load_explicit((volatile device " + atomicType + "*)&" +
+            atomicName + "[" + indexExpr + "], memory_order_relaxed)";
+        const std::size_t replaceEnd = component + 2;
+        msl.replace(nameStart, replaceEnd - nameStart, replacement);
+        pos = nameStart + replacement.size();
         changed = true;
     }
     return changed;
@@ -5295,6 +5383,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             (void)collapseOversizedDirectSamplerArrays(msl);
         }
         (void)rewriteVectorImageAtomicBufferSubscripts(msl);
+        (void)rewriteTexelBufferImageAtomicReads(msl);
         (void)fixUnsafeArrayDoubleIndex(msl);
 
         if (isVertex && mslOpts.appgl_fp64_emulation) {

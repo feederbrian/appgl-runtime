@@ -50730,15 +50730,29 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             GLTextureObject* texObj = impl_->objects->textures().get(ib.texture);
             if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
             if (!impl_->imageBindingLevelAvailable(ib, texObj)) continue;
+            const bool textureBufferImage =
+                texObj->target == GL_TEXTURE_BUFFER &&
+                texObj->desc.sourceBuffer != 0;
             if (ib.access != GL_WRITE_ONLY) {
                 computeReads.push_back({Impl::GpuResourceAccess::Kind::Texture,
                                         ib.texture, kProducerAll});
+                if (textureBufferImage) {
+                    computeReads.push_back({Impl::GpuResourceAccess::Kind::Buffer,
+                                            texObj->desc.sourceBuffer,
+                                            kProducerAll});
+                }
             }
             if (ib.access != GL_READ_ONLY) {
                 computeWrites.push_back(
                     {Impl::GpuResourceAccess::Kind::Texture,
                      ib.texture,
                      kProducerComputeWrite | kProducerStorageImageWrite});
+                if (textureBufferImage) {
+                    computeWrites.push_back(
+                        {Impl::GpuResourceAccess::Kind::Buffer,
+                         texObj->desc.sourceBuffer,
+                         kProducerComputeWrite | kProducerStorageImageWrite});
+                }
             }
             ComputeDispatchInfo::TextureBinding tb;
             if (img.multisampleStorageImage) {
@@ -51302,15 +51316,29 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             GLTextureObject* texObj = impl_->objects->textures().get(ib.texture);
             if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
             if (!impl_->imageBindingLevelAvailable(ib, texObj)) continue;
+            const bool textureBufferImage =
+                texObj->target == GL_TEXTURE_BUFFER &&
+                texObj->desc.sourceBuffer != 0;
             if (ib.access != GL_WRITE_ONLY) {
                 computeReads.push_back({Impl::GpuResourceAccess::Kind::Texture,
                                         ib.texture, kProducerAll});
+                if (textureBufferImage) {
+                    computeReads.push_back({Impl::GpuResourceAccess::Kind::Buffer,
+                                            texObj->desc.sourceBuffer,
+                                            kProducerAll});
+                }
             }
             if (ib.access != GL_READ_ONLY) {
                 computeWrites.push_back(
                     {Impl::GpuResourceAccess::Kind::Texture,
                      ib.texture,
                      kProducerComputeWrite | kProducerStorageImageWrite});
+                if (textureBufferImage) {
+                    computeWrites.push_back(
+                        {Impl::GpuResourceAccess::Kind::Buffer,
+                         texObj->desc.sourceBuffer,
+                         kProducerComputeWrite | kProducerStorageImageWrite});
+                }
             }
             ComputeDispatchInfo::TextureBinding tb;
             if (img.multisampleStorageImage) {
