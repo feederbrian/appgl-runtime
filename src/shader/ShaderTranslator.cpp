@@ -899,6 +899,39 @@ inline appgl_df64x4 appgl_df64_from_packed(packed_appgl_df64x4 v)
     return true;
 }
 
+bool injectFp64FractOverloads(std::string& msl) {
+    if (msl.find("struct appgl_df64") == std::string::npos ||
+        msl.find("appgl_df64_fract") != std::string::npos) {
+        return false;
+    }
+
+    static constexpr const char* kTruncHelper =
+        "inline appgl_df64 appgl_df64_trunc(appgl_df64 value) { "
+        "return appgl_df64_from_float(trunc(appgl_df64_to_float(value))); }";
+    const std::size_t helperPos = msl.find(kTruncHelper);
+    if (helperPos == std::string::npos) {
+        return false;
+    }
+
+    const std::size_t insertPos = msl.find('\n', helperPos);
+    if (insertPos == std::string::npos) {
+        return false;
+    }
+
+    static constexpr const char* kFractOverloads = R"MSL(
+inline appgl_df64 appgl_df64_fract(appgl_df64 value) { return appgl_df64_sub(value, appgl_df64_floor(value)); }
+inline appgl_df64x2 appgl_df64_fract(appgl_df64x2 value) { return appgl_df64x2(appgl_df64_fract(value.x), appgl_df64_fract(value.y)); }
+inline appgl_df64x3 appgl_df64_fract(appgl_df64x3 value) { return appgl_df64x3(appgl_df64_fract(value.x), appgl_df64_fract(value.y), appgl_df64_fract(value.z)); }
+inline appgl_df64x4 appgl_df64_fract(appgl_df64x4 value) { return appgl_df64x4(appgl_df64_fract(value.x), appgl_df64_fract(value.y), appgl_df64_fract(value.z), appgl_df64_fract(value.w)); }
+inline appgl_df64 fract(appgl_df64 value) { return appgl_df64_fract(value); }
+inline appgl_df64x2 fract(appgl_df64x2 value) { return appgl_df64_fract(value); }
+inline appgl_df64x3 fract(appgl_df64x3 value) { return appgl_df64_fract(value); }
+inline appgl_df64x4 fract(appgl_df64x4 value) { return appgl_df64_fract(value); }
+)MSL";
+    msl.insert(insertPos + 1, kFractOverloads);
+    return true;
+}
+
 void fixStorageImageSignedCoordinateCasts(std::string& msl) {
     struct CoordVar {
         std::string name;
@@ -5691,6 +5724,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         }
         if (mslOpts.appgl_fp64_emulation) {
             (void)rewritePackedFp64DefaultUniforms(msl);
+            (void)injectFp64FractOverloads(msl);
         }
         if (isFragment) {
             // Sprint 18 Bank D-3 (`textures_bind_unit`): SPIRV-Cross
