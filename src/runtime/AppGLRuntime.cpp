@@ -6661,6 +6661,8 @@ void APIENTRY glShaderBinary(GLsizei count, const GLuint* shaders, GLenum binary
         obj->compiled = false;
         obj->compileLog.clear();
         obj->isSpirvBinary = true;
+        obj->spirvEntryPoint.clear();
+        obj->spirvSpecializationConstants.clear();
     }
     markProgramFunction(FunctionId::glShaderBinary, "ShaderBinary SPIR-V accepted.");
 }

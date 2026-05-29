@@ -75,6 +75,145 @@ GLenum storageImageTargetForType(const spirv_cross::SPIRType& imageType) {
     }
 }
 
+GLenum sampledImageUniformTypeForType(spirv_cross::Compiler& compiler,
+                                      const spirv_cross::SPIRType& sampledType) {
+    if (sampledType.basetype != spirv_cross::SPIRType::SampledImage &&
+        sampledType.basetype != spirv_cross::SPIRType::Image) {
+        return GL_SAMPLER_2D;
+    }
+    const spirv_cross::SPIRType& imageType = sampledType;
+    spirv_cross::SPIRType::BaseType scalarBase = spirv_cross::SPIRType::Float;
+    try {
+        scalarBase = compiler.get_type(imageType.image.type).basetype;
+    } catch (...) {
+    }
+    auto choose = [&](GLenum floatType, GLenum intType, GLenum uintType) {
+        if (scalarBase == spirv_cross::SPIRType::Int) return intType;
+        if (scalarBase == spirv_cross::SPIRType::UInt) return uintType;
+        return floatType;
+    };
+    switch (imageType.image.dim) {
+        case spv::Dim1D:
+            return imageType.image.arrayed
+                ? choose(GL_SAMPLER_1D_ARRAY, GL_INT_SAMPLER_1D_ARRAY, GL_UNSIGNED_INT_SAMPLER_1D_ARRAY)
+                : choose(GL_SAMPLER_1D, GL_INT_SAMPLER_1D, GL_UNSIGNED_INT_SAMPLER_1D);
+        case spv::Dim2D:
+            if (imageType.image.ms) {
+                return imageType.image.arrayed
+                    ? choose(GL_SAMPLER_2D_MULTISAMPLE_ARRAY, GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY, GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY)
+                    : choose(GL_SAMPLER_2D_MULTISAMPLE, GL_INT_SAMPLER_2D_MULTISAMPLE, GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE);
+            }
+            return imageType.image.arrayed
+                ? choose(GL_SAMPLER_2D_ARRAY, GL_INT_SAMPLER_2D_ARRAY, GL_UNSIGNED_INT_SAMPLER_2D_ARRAY)
+                : choose(GL_SAMPLER_2D, GL_INT_SAMPLER_2D, GL_UNSIGNED_INT_SAMPLER_2D);
+        case spv::Dim3D:
+            return choose(GL_SAMPLER_3D, GL_INT_SAMPLER_3D, GL_UNSIGNED_INT_SAMPLER_3D);
+        case spv::DimCube:
+            return imageType.image.arrayed
+                ? choose(GL_SAMPLER_CUBE_MAP_ARRAY, GL_INT_SAMPLER_CUBE_MAP_ARRAY, GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY)
+                : choose(GL_SAMPLER_CUBE, GL_INT_SAMPLER_CUBE, GL_UNSIGNED_INT_SAMPLER_CUBE);
+        case spv::DimRect:
+            return choose(GL_SAMPLER_2D_RECT, GL_INT_SAMPLER_2D_RECT, GL_UNSIGNED_INT_SAMPLER_2D_RECT);
+        case spv::DimBuffer:
+            return choose(GL_SAMPLER_BUFFER, GL_INT_SAMPLER_BUFFER, GL_UNSIGNED_INT_SAMPLER_BUFFER);
+        default:
+            return GL_SAMPLER_2D;
+    }
+}
+
+GLenum storageImageUniformTypeForType(spirv_cross::Compiler& compiler,
+                                      const spirv_cross::SPIRType& imageType) {
+    if (imageType.basetype != spirv_cross::SPIRType::Image) {
+        return GL_IMAGE_2D;
+    }
+    spirv_cross::SPIRType::BaseType scalarBase = spirv_cross::SPIRType::Float;
+    try {
+        scalarBase = compiler.get_type(imageType.image.type).basetype;
+    } catch (...) {
+    }
+    auto choose = [&](GLenum floatType, GLenum intType, GLenum uintType) {
+        if (scalarBase == spirv_cross::SPIRType::Int) return intType;
+        if (scalarBase == spirv_cross::SPIRType::UInt) return uintType;
+        return floatType;
+    };
+    switch (imageType.image.dim) {
+        case spv::Dim1D:
+            return imageType.image.arrayed
+                ? choose(GL_IMAGE_1D_ARRAY, GL_INT_IMAGE_1D_ARRAY, GL_UNSIGNED_INT_IMAGE_1D_ARRAY)
+                : choose(GL_IMAGE_1D, GL_INT_IMAGE_1D, GL_UNSIGNED_INT_IMAGE_1D);
+        case spv::Dim2D:
+            if (imageType.image.ms) {
+                return imageType.image.arrayed
+                    ? choose(GL_IMAGE_2D_MULTISAMPLE_ARRAY, GL_INT_IMAGE_2D_MULTISAMPLE_ARRAY, GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE_ARRAY)
+                    : choose(GL_IMAGE_2D_MULTISAMPLE, GL_INT_IMAGE_2D_MULTISAMPLE, GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE);
+            }
+            return imageType.image.arrayed
+                ? choose(GL_IMAGE_2D_ARRAY, GL_INT_IMAGE_2D_ARRAY, GL_UNSIGNED_INT_IMAGE_2D_ARRAY)
+                : choose(GL_IMAGE_2D, GL_INT_IMAGE_2D, GL_UNSIGNED_INT_IMAGE_2D);
+        case spv::Dim3D:
+            return choose(GL_IMAGE_3D, GL_INT_IMAGE_3D, GL_UNSIGNED_INT_IMAGE_3D);
+        case spv::DimCube:
+            return imageType.image.arrayed
+                ? choose(GL_IMAGE_CUBE_MAP_ARRAY, GL_INT_IMAGE_CUBE_MAP_ARRAY, GL_UNSIGNED_INT_IMAGE_CUBE_MAP_ARRAY)
+                : choose(GL_IMAGE_CUBE, GL_INT_IMAGE_CUBE, GL_UNSIGNED_INT_IMAGE_CUBE);
+        case spv::DimRect:
+            return choose(GL_IMAGE_2D_RECT, GL_INT_IMAGE_2D_RECT, GL_UNSIGNED_INT_IMAGE_2D_RECT);
+        case spv::DimBuffer:
+            return choose(GL_IMAGE_BUFFER, GL_INT_IMAGE_BUFFER, GL_UNSIGNED_INT_IMAGE_BUFFER);
+        default:
+            return GL_IMAGE_2D;
+    }
+}
+
+template <typename CompilerT>
+void applySpirvModuleOptions(CompilerT& compiler,
+                             const TranslatorOptions& options) {
+    if (!options.spirvEntryPointName.empty()) {
+        const auto entries = compiler.get_entry_points_and_stages();
+        for (const auto& entry : entries) {
+            if (entry.name == options.spirvEntryPointName) {
+                compiler.rename_entry_point(entry.name, "main0", entry.execution_model);
+                compiler.set_entry_point("main0", entry.execution_model);
+                break;
+            }
+        }
+    }
+    if (options.specializationConstants.empty()) {
+        return;
+    }
+    for (const auto& sc : compiler.get_specialization_constants()) {
+        const auto valueIt = options.specializationConstants.find(sc.constant_id);
+        if (valueIt == options.specializationConstants.end()) {
+            continue;
+        }
+        auto& constant = compiler.get_constant(sc.id);
+        const auto& type = compiler.get_type(constant.constant_type);
+        switch (type.basetype) {
+            case spirv_cross::SPIRType::Boolean:
+                constant.m.c[0].r[0].u32 = valueIt->second != 0 ? 1u : 0u;
+                break;
+            case spirv_cross::SPIRType::Int:
+                constant.m.c[0].r[0].i32 =
+                    static_cast<std::int32_t>(valueIt->second);
+                break;
+            case spirv_cross::SPIRType::UInt:
+                constant.m.c[0].r[0].u32 = valueIt->second;
+                break;
+            case spirv_cross::SPIRType::Float:
+                static_assert(sizeof(constant.m.c[0].r[0].f32) == sizeof(valueIt->second),
+                              "SPIR-V float specialization constants are 32-bit");
+                std::memcpy(&constant.m.c[0].r[0].f32,
+                            &valueIt->second,
+                            sizeof(valueIt->second));
+                break;
+            default:
+                constant.m.c[0].r[0].u32 = valueIt->second;
+                break;
+        }
+        constant.specialization = false;
+    }
+}
+
 bool sparseStorageImageSidecarTarget(GLenum target) {
     switch (target) {
         case GL_TEXTURE_2D:
@@ -1537,6 +1676,30 @@ bool injectFixedFunctionSampleMask(std::string& msl) {
         pos = idx + returnPattern.size();
     }
     msl = std::move(out);
+    return true;
+}
+
+bool injectGlNumSamplesParameter(std::string& msl) {
+    if (msl.find("_RESERVED_IDENTIFIER_FIXUP_gl_NumSamples") != std::string::npos) {
+        return false;
+    }
+    std::size_t paramEnd = 0;
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return false;
+    }
+    const std::size_t paramBegin = msl.rfind('(', paramEnd);
+    bool hasExistingParam = false;
+    if (paramBegin != std::string::npos) {
+        for (std::size_t i = paramBegin + 1; i < paramEnd; ++i) {
+            if (!std::isspace(static_cast<unsigned char>(msl[i]))) {
+                hasExistingParam = true;
+                break;
+            }
+        }
+    }
+    msl.insert(paramEnd,
+               std::string(hasExistingParam ? ", " : "") +
+               "constant int& _RESERVED_IDENTIFIER_FIXUP_gl_NumSamples [[buffer(0)]]");
     return true;
 }
 
@@ -4064,6 +4227,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
     }
     try {
         spirv_cross::CompilerMSL compiler(spirv, wordCount);
+        applySpirvModuleOptions(compiler, options);
         const auto execModel = compiler.get_execution_model();
         const bool isTessControl = (execModel == spv::ExecutionModelTessellationControl);
         const bool isTessEval = (execModel == spv::ExecutionModelTessellationEvaluation);
@@ -6080,6 +6244,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // keeping the samples_0 fix from Day 5.
         if (execModel == spv::ExecutionModelFragment
             && msl.find("[[sample_mask]]") != std::string::npos) {
+            (void)injectGlNumSamplesParameter(msl);
             // Gate on `_RESERVED_IDENTIFIER_FIXUP_gl_NumSamples == 1`.
             // The MSL keeps SPIRV-Cross's `[[buffer(0)]]` parameter for
             // gl_NumSamples; the runtime (MetalFrameGraph) writes the
@@ -6209,6 +6374,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
     ShaderReflection result;
     try {
         spirv_cross::Compiler compiler(spirv, wordCount);
+        applySpirvModuleOptions(compiler, options);
         auto resources = compiler.get_shader_resources();
         auto isAtomicCounterStorageBuffer = [&](const spirv_cross::Resource& res) {
             auto hasAtomicCounterName = [](const std::string& name) {
@@ -6878,6 +7044,13 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             for (auto& entry : sortedSampled) {
                 ShaderReflection::ResourceBinding rb;
                 rb.glBinding = entry.glBinding;
+                rb.uniformLocation =
+                    compiler.has_decoration(entry.res->id, spv::DecorationLocation)
+                        ? static_cast<GLint>(compiler.get_decoration(entry.res->id, spv::DecorationLocation))
+                        : -1;
+                rb.arraySize = entry.arraySize;
+                const auto& sampledType = compiler.get_type(entry.res->type_id);
+                rb.glType = sampledImageUniformTypeForType(compiler, sampledType);
                 if (useArgBufReflection) {
                     rb.metalBinding = 2 * entry.glBinding;
                 } else {
@@ -6931,6 +7104,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 bool multisample = false;
                 bool multisampleArray = false;
                 GLenum storageTarget = 0;
+                GLenum glType = GL_IMAGE_2D;
                 bool sparseRead = false;
                 bool sparseWrite = false;
                 bool containsFp64 = false;
@@ -6958,6 +7132,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                     imageType.image.sampled == 2;
                 r.multisampleArray = r.multisample && imageType.image.arrayed;
                 r.storageTarget = storageImageTargetForType(imageType);
+                r.glType = storageImageUniformTypeForType(compiler, imageType);
                 r.containsFp64 = spirvTypeUsesFp64(compiler, imageType);
                 r.sparseRead =
                     storageImageAccesses.reads.find(img.id) !=
@@ -6984,6 +7159,12 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 // image unit. metalBinding is the synthetic Metal
                 // slot chosen by our sequential allocator.
                 rb.glBinding = entry.glBinding;
+                rb.uniformLocation =
+                    compiler.has_decoration(entry.res->id, spv::DecorationLocation)
+                        ? static_cast<GLint>(compiler.get_decoration(entry.res->id, spv::DecorationLocation))
+                        : -1;
+                rb.glType = entry.glType;
+                rb.arraySize = entry.arraySize;
                 if (useArgBufReflection) {
                     rb.metalBinding = 128 + nextArgBufStorageImageSlotR;
                     rb.metalAtomicBufferBinding =
@@ -7412,6 +7593,7 @@ StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
     if (spirv == nullptr || wordCount < 5) return out;
     try {
         spirv_cross::CompilerMSL compiler(spirv, wordCount);
+        applySpirvModuleOptions(compiler, options);
         // Mirror the MSL options the TES-as-compute translation uses,
         // so the helper reports the exact layout the kernel writes.
         spirv_cross::CompilerMSL::Options mslOpts = compiler.get_msl_options();

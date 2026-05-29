@@ -9213,32 +9213,32 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     // the scaffolding for later — `cull_distance.functional_test
     // _item_5_primitive_mode_*` remains a targeted follow-up when
     // the rendering semantics land.
-    auto programStoresClipOrCull = [&](const std::vector<std::uint32_t>& spirv) -> bool {
+    auto programStoresBuiltIn =
+        [&](const std::vector<std::uint32_t>& spirv,
+            const std::unordered_set<std::uint32_t>& builtIns) -> bool {
         if (spirv.empty()) return false;
         SpirvModule m;
         if (!m.parse(spirv.data(), spirv.size())) return false;
         if (!m.haveFuncBody) return false;
-        std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> clipCullMembers;
+        std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> builtInMembers;
         for (const auto& [structId, mdSet] : m.memberDecorations) {
             for (const auto& [memberIdx, memberDeco] : mdSet.perMember) {
                 if (memberDeco.hasBuiltIn &&
-                    (memberDeco.builtIn == spv::BuiltInClipDistance ||
-                     memberDeco.builtIn == spv::BuiltInCullDistance)) {
-                    clipCullMembers[structId].push_back(memberIdx);
+                    builtIns.count(memberDeco.builtIn) != 0) {
+                    builtInMembers[structId].push_back(memberIdx);
                 }
             }
         }
-        std::unordered_set<std::uint32_t> clipCullVars;
+        std::unordered_set<std::uint32_t> builtInVars;
         for (const auto& [varId, info] : m.variables) {
             if (info.storageClass != spv::StorageClassOutput) continue;
             auto dIt = m.decorations.find(varId);
             if (dIt != m.decorations.end() && dIt->second.hasBuiltIn &&
-                (dIt->second.builtIn == spv::BuiltInClipDistance ||
-                 dIt->second.builtIn == spv::BuiltInCullDistance)) {
-                clipCullVars.insert(varId);
+                builtIns.count(dIt->second.builtIn) != 0) {
+                builtInVars.insert(varId);
             }
         }
-        std::unordered_set<std::uint32_t> clipCullAccessChains;
+        std::unordered_set<std::uint32_t> builtInAccessChains;
         std::size_t pc = m.funcBodyStart;
         while (pc < m.funcBodyEnd) {
             const std::uint32_t inst = m.words[pc];
@@ -9248,8 +9248,8 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
             if (opcode == spv::OpAccessChain && wc >= 4) {
                 const std::uint32_t resultId = m.words[pc + 2];
                 const std::uint32_t base = m.words[pc + 3];
-                if (clipCullVars.count(base) != 0) {
-                    clipCullAccessChains.insert(resultId);
+                if (builtInVars.count(base) != 0) {
+                    builtInAccessChains.insert(resultId);
                 } else {
                     auto vIt = m.variables.find(base);
                     if (vIt != m.variables.end() && wc >= 5) {
@@ -9260,11 +9260,11 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
                             auto tIt = m.types.find(vIt->second.typeId);
                             if (tIt != m.types.end()) {
                                 const std::uint32_t pointeeType = tIt->second.pointeeType;
-                                auto cm = clipCullMembers.find(pointeeType);
-                                if (cm != clipCullMembers.end()) {
+                                auto cm = builtInMembers.find(pointeeType);
+                                if (cm != builtInMembers.end()) {
                                     for (std::uint32_t mi : cm->second) {
                                         if (static_cast<std::uint32_t>(idx) == mi) {
-                                            clipCullAccessChains.insert(resultId);
+                                            builtInAccessChains.insert(resultId);
                                             break;
                                         }
                                     }
@@ -9275,14 +9275,24 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
                 }
             } else if (opcode == spv::OpStore && wc >= 3) {
                 const std::uint32_t ptr = m.words[pc + 1];
-                if (clipCullVars.count(ptr) != 0 ||
-                    clipCullAccessChains.count(ptr) != 0) {
+                if (builtInVars.count(ptr) != 0 ||
+                    builtInAccessChains.count(ptr) != 0) {
                     return true;
                 }
             }
             pc += wc;
         }
         return false;
+    };
+    auto programStoresClipOrCull = [&]() -> bool {
+        return programStoresBuiltIn(
+            program.vertexSpirv,
+            {spv::BuiltInClipDistance, spv::BuiltInCullDistance});
+    };
+    auto geometryStoresLayerOrViewport = [&]() -> bool {
+        return programStoresBuiltIn(
+            program.geometrySpirv,
+            {spv::BuiltInLayer, spv::BuiltInViewportIndex});
     };
     // Session 16 stopgap (narrowed in session 16b Phase 6): the
     // original `programStoresClipOrCull` rejected whenever the VS
@@ -9296,7 +9306,7 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     // routings (e.g. disabling combined clip/cull slice on the
     // synth VS when the cull count is ambiguous, or
     // reflecting the FS input layout).
-    if (programStoresClipOrCull(program.vertexSpirv)) {
+    if (programStoresClipOrCull() && !geometryStoresLayerOrViewport()) {
         if (std::getenv("APPGL_TRACE_GS_EMUL") != nullptr) {
             std::fprintf(stderr, "[GS-emul] reject: VS stores gl_Clip/CullDistance — "
                          "emulator path still has pixel-coverage gaps for CTS cull_distance.*\n");

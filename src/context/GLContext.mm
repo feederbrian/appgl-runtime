@@ -402,12 +402,80 @@ std::size_t declaredImageUniformCountFallback(const GLShaderObject& shader) {
     return count;
 }
 
+template <typename CompilerT>
+void selectShaderSpirvEntryPoint(CompilerT& compiler,
+                                 const GLShaderObject& shader) {
+    if (shader.spirvEntryPoint.empty()) {
+        return;
+    }
+    const auto entries = compiler.get_entry_points_and_stages();
+    for (const auto& entry : entries) {
+        if (entry.name == shader.spirvEntryPoint) {
+            compiler.set_entry_point(entry.name, entry.execution_model);
+            break;
+        }
+    }
+}
+
+bool spirvModuleHasDebugNames(const std::vector<std::uint32_t>& spirv) {
+    if (spirv.size() < 5) {
+        return false;
+    }
+    for (std::size_t cursor = 5; cursor < spirv.size();) {
+        const std::uint32_t word = spirv[cursor];
+        const std::uint16_t op = static_cast<std::uint16_t>(word & 0xffffu);
+        const std::uint16_t wc = static_cast<std::uint16_t>(word >> 16u);
+        if (wc == 0 || cursor + wc > spirv.size()) {
+            break;
+        }
+        if (op == static_cast<std::uint16_t>(spv::OpName) ||
+            op == static_cast<std::uint16_t>(spv::OpMemberName)) {
+            return true;
+        }
+        cursor += wc;
+    }
+    return false;
+}
+
+bool programUsesNamelessSpirvBinaries(const GLProgramObject& program,
+                                      GLObjectStore& objects) {
+    bool sawSpirvBinary = false;
+    for (GLuint shaderId : program.attachedShaders) {
+        const GLShaderObject* shader = objects.shaders().get(shaderId);
+        if (shader == nullptr || !shader->isSpirvBinary) {
+            continue;
+        }
+        sawSpirvBinary = true;
+        if (spirvModuleHasDebugNames(shader->spirv)) {
+            return false;
+        }
+    }
+    return sawSpirvBinary;
+}
+
+bool tessEvalSpirvHasPrimitiveMode(const GLShaderObject& shader) {
+    if (shader.spirv.empty()) {
+        return false;
+    }
+    try {
+        spirv_cross::Compiler compiler(shader.spirv.data(), shader.spirv.size());
+        selectShaderSpirvEntryPoint(compiler, shader);
+        const auto& bitset = compiler.get_execution_mode_bitset();
+        return bitset.get(spv::ExecutionModeTriangles) ||
+               bitset.get(spv::ExecutionModeQuads) ||
+               bitset.get(spv::ExecutionModeIsolines);
+    } catch (...) {
+        return false;
+    }
+}
+
 std::size_t activeImageUniformCountFromSpirv(const GLShaderObject& shader) {
     if (shader.spirv.empty()) {
         return declaredImageUniformCountFallback(shader);
     }
     try {
         spirv_cross::Compiler compiler(shader.spirv.data(), shader.spirv.size());
+        selectShaderSpirvEntryPoint(compiler, shader);
         const spirv_cross::ShaderResources resources = compiler.get_shader_resources();
         const auto active = compiler.get_active_interface_variables();
         std::size_t count = 0;
@@ -15564,11 +15632,20 @@ struct GLContext::Impl {
         const GLuint readName = state->boundReadFramebuffer();
         const GLuint drawName = state->boundDrawFramebuffer();
         const GLFramebufferObject* readFb = objects->framebuffers().get(readName);
-        GLFramebufferObject* drawFb = objects->framebuffers().get(drawName);
-        if (readName == 0 || drawName == 0 || readFb == nullptr || drawFb == nullptr) {
+        GLFramebufferObject* drawFb =
+            drawName == 0 ? nullptr : objects->framebuffers().get(drawName);
+        const bool drawDefaultFramebuffer = (drawName == 0);
+        if (readName == 0 || readFb == nullptr ||
+            (!drawDefaultFramebuffer && drawFb == nullptr)) {
             return false;
         }
-        if (framebufferStatus(*readFb) != GL_FRAMEBUFFER_COMPLETE || framebufferStatus(*drawFb) != GL_FRAMEBUFFER_COMPLETE) {
+        if (drawDefaultFramebuffer &&
+            (mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0) {
+            return false;
+        }
+        if (framebufferStatus(*readFb) != GL_FRAMEBUFFER_COMPLETE ||
+            (!drawDefaultFramebuffer &&
+             framebufferStatus(*drawFb) != GL_FRAMEBUFFER_COMPLETE)) {
             return false;
         }
 
@@ -15725,6 +15802,74 @@ struct GLContext::Impl {
             }
             return clipped.data();
         };
+        if (drawDefaultFramebuffer) {
+            if ((mask & GL_COLOR_BUFFER_BIT) == 0) {
+                return true;
+            }
+            const GLFramebufferAttachment* srcAttachment =
+                framebufferAttachment(*readFb, readFb->readBuffer);
+            if (srcAttachment == nullptr || writeWindow.empty) {
+                return true;
+            }
+            std::vector<std::uint8_t> srcStage(
+                static_cast<std::size_t>(copyWidth) *
+                static_cast<std::size_t>(copyHeight) * 4u);
+            if (!readColorAttachmentPixels(*srcAttachment, srcX, srcY,
+                                           copyWidth, copyHeight,
+                                           srcStage.data())) {
+                return false;
+            }
+            const std::uint8_t* copySrc = srcStage.data();
+            std::vector<std::uint8_t> dstStage;
+            if (needsScale) {
+                dstStage.resize(static_cast<std::size_t>(dstWidth) *
+                                static_cast<std::size_t>(dstHeight) * 4u);
+                for (GLsizei dy = 0; dy < dstHeight; ++dy) {
+                    for (GLsizei dx = 0; dx < dstWidth; ++dx) {
+                        GLsizei sx = 0, sy = 0;
+                        sampleSrcIndex(dx, dy, sx, sy);
+                        const std::size_t srcIdx =
+                            (static_cast<std::size_t>(sy) *
+                             static_cast<std::size_t>(copyWidth) +
+                             static_cast<std::size_t>(sx)) * 4u;
+                        const std::size_t dstIdx =
+                            (static_cast<std::size_t>(dy) *
+                             static_cast<std::size_t>(dstWidth) +
+                             static_cast<std::size_t>(dx)) * 4u;
+                        std::memcpy(&dstStage[dstIdx], &srcStage[srcIdx], 4u);
+                    }
+                }
+                copySrc = dstStage.data();
+            }
+
+            std::vector<std::uint8_t> clippedColor;
+            const std::uint8_t* writeSrc =
+                copyColorWindow(copySrc, clippedColor);
+            ensureDefaultFramebufferShadow();
+            for (GLsizei row = 0; row < writeWindow.height; ++row) {
+                const GLint dstRow = writeWindow.y + row;
+                if (dstRow < 0 || dstRow >= defaultFramebufferShadowHeight) {
+                    continue;
+                }
+                for (GLsizei col = 0; col < writeWindow.width; ++col) {
+                    const GLint dstCol = writeWindow.x + col;
+                    if (dstCol < 0 || dstCol >= defaultFramebufferShadowWidth) {
+                        continue;
+                    }
+                    const std::size_t srcOffset =
+                        (static_cast<std::size_t>(row) *
+                         static_cast<std::size_t>(writeWindow.width) +
+                         static_cast<std::size_t>(col)) * 4u;
+                    const std::size_t dstOffset =
+                        (static_cast<std::size_t>(dstRow) *
+                         static_cast<std::size_t>(defaultFramebufferShadowWidth) +
+                         static_cast<std::size_t>(dstCol)) * 4u;
+                    std::memcpy(defaultFramebufferRGBA8.data() + dstOffset,
+                                writeSrc + srcOffset, 4u);
+                }
+            }
+            return true;
+        }
         struct MetalAttachmentBlitView {
             id<MTLTexture> texture = nil;
             GLTextureObject* textureObject = nullptr;
@@ -17995,7 +18140,7 @@ struct GLContext::Impl {
         return baseTex != nil &&
                static_cast<NSUInteger>(ib.level) < baseTex.mipmapLevelCount;
     }
-    static constexpr std::size_t kMaxImageUnits = 8;
+    static constexpr std::size_t kMaxImageUnits = 16;
     std::array<ImageBinding, kMaxImageUnits> imageBindings{};
 
     GLContext* owner = nullptr;
@@ -29923,6 +30068,8 @@ bool GLContext::shaderSource(GLuint shader, GLsizei count, const GLchar* const* 
     // loaded SPIR-V binary so the glslang path takes over cleanly.
     object->isSpirvBinary = false;
     object->spirv.clear();
+    object->spirvEntryPoint.clear();
+    object->spirvSpecializationConstants.clear();
     return true;
 }
 
@@ -29950,6 +30097,8 @@ bool GLContext::compileShader(GLuint shader) {
     object->compiled = false;
     object->compileLog.clear();
     object->spirv.clear();
+    object->spirvEntryPoint.clear();
+    object->spirvSpecializationConstants.clear();
     object->declaredUniforms.clear();
     object->declaredInputs.clear();
     object->declaredOutputs.clear();
@@ -33353,6 +33502,23 @@ bool GLContext::linkProgram(GLuint program) {
         }
     }
 
+    if (!attachedShaderObjects.empty()) {
+        const bool firstIsSpirvBinary = attachedShaderObjects.front()->isSpirvBinary;
+        for (const GLShaderObject* shader : attachedShaderObjects) {
+            if (shader != nullptr &&
+                shader->isSpirvBinary != firstIsSpirvBinary) {
+                programObject->linkLog =
+                    "attached shaders mix SPIR_V_BINARY_ARB states";
+                programObject->linked = false;
+                Runtime::shared().recordShaderTranslation({
+                    programTag, "link", "", "", "",
+                    programObject->linkLog, "", false
+                });
+                return false;
+            }
+        }
+    }
+
     {
         GLint maxAtomicBindings = 0;
         GLint maxAtomicBufferSize = 0;
@@ -34575,6 +34741,10 @@ bool GLContext::linkProgram(GLuint program) {
     // rule here at actual program link time.
     if (tessEvalShader != nullptr) {
         const std::string& src = tessEvalShader->source;
+        bool ok = false;
+        if (src.empty() && !tessEvalShader->spirv.empty()) {
+            ok = tessEvalSpirvHasPrimitiveMode(*tessEvalShader);
+        } else {
         // Strip comments so `// layout(triangles)` doesn't satisfy
         // the check. Reuse a lightweight copy here — the scan is
         // per-link, so cost is negligible.
@@ -34638,9 +34808,10 @@ bool GLContext::linkProgram(GLuint program) {
             }
             return false;
         };
-        const bool ok = hasPrimMode("triangles") ||
-                        hasPrimMode("quads") ||
-                        hasPrimMode("isolines");
+        ok = hasPrimMode("triangles") ||
+             hasPrimMode("quads") ||
+             hasPrimMode("isolines");
+        }
         if (!ok) {
             programObject->linkLog =
                 "ERROR: Linking tessellation evaluation stage: "
@@ -36586,6 +36757,15 @@ bool GLContext::linkProgram(GLuint program) {
     // Helper: invoke translateStage against a per-stage cached SPIR-V blob
     // on a GLShaderObject. Used by every case below other than VS+FS, where
     // the VS+FS cross-stage-linked path takes over.
+    auto applyShaderSpirvOptions = [&](appgl::TranslatorOptions& options,
+                                       const GLShaderObject* stage) {
+        if (stage == nullptr || !stage->isSpirvBinary) {
+            return;
+        }
+        options.spirvEntryPointName = stage->spirvEntryPoint;
+        options.specializationConstants = stage->spirvSpecializationConstants;
+    };
+
     auto translateCachedStage = [&](const char* stageName,
                                     GLShaderObject* stage,
                                     std::string& mslOut,
@@ -36594,9 +36774,11 @@ bool GLContext::linkProgram(GLuint program) {
         if (stage == nullptr) {
             return false;
         }
+        appgl::TranslatorOptions stageOptions = options;
+        applyShaderSpirvOptions(stageOptions, stage);
         return translateStage(stageName,
                               stage->spirv.data(), stage->spirv.size(),
-                              stage->source, mslOut, reflectionOut, options);
+                              stage->source, mslOut, reflectionOut, stageOptions);
     };
 
     // Phase 8X Group 4d follow-up⁵ — VS+FS cross-stage-linked SPIR-V path.
@@ -36702,7 +36884,12 @@ bool GLContext::linkProgram(GLuint program) {
             // can't recover from (cross-stage binding/location mismatch,
             // type mismatch on shared uniforms, etc.). For those, fail
             // glLinkProgram outright per GL 4.6 §7.3.
-            LinkedProgramSpirv linked = compileLinkedVsFs(vertexShader, fragmentShader);
+            const bool canLinkGlslSources =
+                vertexShader != nullptr && fragmentShader != nullptr &&
+                !vertexShader->isSpirvBinary && !fragmentShader->isSpirvBinary;
+            LinkedProgramSpirv linked = canLinkGlslSources
+                ? compileLinkedVsFs(vertexShader, fragmentShader)
+                : LinkedProgramSpirv{};
             // Sprint 8 B Cluster F F1 Day 7 (CKPT79): cross-stage link-
             // validation gating. When glslang's link() rejects with a
             // GL-spec qualifier mismatch, propagate as a real
@@ -36770,6 +36957,8 @@ bool GLContext::linkProgram(GLuint program) {
             vsOptions.forceArgumentBuffers = forceRasterArgBuf;
             appgl::TranslatorOptions fsOptions;
             fsOptions.forceArgumentBuffers = forceRasterArgBuf;
+            applyShaderSpirvOptions(vsOptions, vertexShader);
+            applyShaderSpirvOptions(fsOptions, fragmentShader);
 
             ShaderReflection vsRefl, fsRefl;
             const bool vsOk = translateStage(
@@ -36851,6 +37040,7 @@ bool GLContext::linkProgram(GLuint program) {
                 std::getenv("APPGL_ENABLE_METAL_TF_VS") != nullptr) {
                 appgl::TranslatorOptions vsTfOpts;
                 vsTfOpts.forceVertexForTessellation = true;
+                applyShaderSpirvOptions(vsTfOpts, vertexShader);
                 ShaderReflection vsTfRefl;
                 std::string vsTfMSL;
                 const bool vsTfTrOk = translateStage(
@@ -37144,7 +37334,12 @@ bool GLContext::linkProgram(GLuint program) {
             // cross-stage-linked path even when a GS is present, because
             // the VS→FS varying interface is what Metal's pipeline-state
             // validator inspects. The GS emulation gap is unaffected.
-            LinkedProgramSpirv linked = compileLinkedVsFs(vertexShader, fragmentShader);
+            const bool canLinkGlslSources =
+                vertexShader != nullptr && fragmentShader != nullptr &&
+                !vertexShader->isSpirvBinary && !fragmentShader->isSpirvBinary;
+            LinkedProgramSpirv linked = canLinkGlslSources
+                ? compileLinkedVsFs(vertexShader, fragmentShader)
+                : LinkedProgramSpirv{};
             const std::uint32_t* vsSpirvData;
             std::size_t vsSpirvWords;
             const std::uint32_t* fsSpirvData;
@@ -37183,6 +37378,8 @@ bool GLContext::linkProgram(GLuint program) {
             vsOptionsVgf.forceArgumentBuffers = forceRasterArgBufVgf;
             appgl::TranslatorOptions fsOptionsVgf;
             fsOptionsVgf.forceArgumentBuffers = forceRasterArgBufVgf;
+            applyShaderSpirvOptions(vsOptionsVgf, vertexShader);
+            applyShaderSpirvOptions(fsOptionsVgf, fragmentShader);
             ShaderReflection vsRefl, fsRefl, gsRefl;
             const bool vsOk = translateStage(
                 "vertex", vsSpirvData, vsSpirvWords, vertexShader->source,
@@ -37211,6 +37408,7 @@ bool GLContext::linkProgram(GLuint program) {
                 }
                 appgl::TranslatorOptions stageOptions = options;
                 stageOptions.fp64EmulationAvailable = fp64EmulationAvailable;
+                applyShaderSpirvOptions(stageOptions, shader);
                 try {
                     appgl::BindingMap reflectBindings;
                     refl = translator.reflect(shader->spirv.data(),
@@ -37569,6 +37767,7 @@ bool GLContext::linkProgram(GLuint program) {
                 if (shapeOK) {
                     appgl::TranslatorOptions gsMeshOpts;
                     gsMeshOpts.forceGeometryShaderAsMesh = true;
+                    applyShaderSpirvOptions(gsMeshOpts, geometryShader);
                     appgl::ShaderReflection meshGsRefl;
                     std::string meshGsMSL;
                     const bool meshOk = translateStage(
@@ -37689,6 +37888,7 @@ bool GLContext::linkProgram(GLuint program) {
                     // record + optional defense-in-depth, but kept
                     // OFF here — Path G alone is sufficient.
                     vsComputeOpts.forceThreadsPerGridForStageInputSize = true;
+                    applyShaderSpirvOptions(vsComputeOpts, vertexShader);
                     appgl::ShaderReflection vsComputeRefl;
                     std::string vsComputeMSL;
                     const bool vsTrOk = translateStage(
@@ -37900,6 +38100,7 @@ bool GLContext::linkProgram(GLuint program) {
                 }
                 appgl::TranslatorOptions stageOptions = options;
                 stageOptions.fp64EmulationAvailable = fp64EmulationAvailable;
+                applyShaderSpirvOptions(stageOptions, shader);
                 try {
                     refl = translator.reflect(shader->spirv.data(),
                                               shader->spirv.size(),
@@ -38006,6 +38207,7 @@ bool GLContext::linkProgram(GLuint program) {
                 }
                 appgl::TranslatorOptions stageOptions = options;
                 stageOptions.fp64EmulationAvailable = fp64EmulationAvailable;
+                applyShaderSpirvOptions(stageOptions, shader);
                 try {
                     refl = translator.reflect(shader->spirv.data(),
                                               shader->spirv.size(),
@@ -38108,7 +38310,12 @@ bool GLContext::linkProgram(GLuint program) {
             //
             // Phase 8X Group 4d follow-up⁵ — VS+FS use the cross-stage
             // linked path here too, for the same reason as VGF above.
-            LinkedProgramSpirv linked = compileLinkedVsFs(vertexShader, fragmentShader);
+            const bool canLinkGlslSources =
+                vertexShader != nullptr && fragmentShader != nullptr &&
+                !vertexShader->isSpirvBinary && !fragmentShader->isSpirvBinary;
+            LinkedProgramSpirv linked = canLinkGlslSources
+                ? compileLinkedVsFs(vertexShader, fragmentShader)
+                : LinkedProgramSpirv{};
             const std::uint32_t* vsSpirvData;
             std::size_t vsSpirvWords;
             const std::uint32_t* fsSpirvData;
@@ -38132,6 +38339,8 @@ bool GLContext::linkProgram(GLuint program) {
             vsOptionsVtf.forceArgumentBuffers = forceRasterArgBufVtf;
             appgl::TranslatorOptions fsOptionsVtf;
             fsOptionsVtf.forceArgumentBuffers = forceRasterArgBufVtf;
+            applyShaderSpirvOptions(vsOptionsVtf, vertexShader);
+            applyShaderSpirvOptions(fsOptionsVtf, fragmentShader);
             const bool vsOk = translateStage(
                 "vertex", vsSpirvData, vsSpirvWords, vertexShader->source,
                 programObject->vertexMSL, vsRefl, vsOptionsVtf);
@@ -38307,6 +38516,7 @@ bool GLContext::linkProgram(GLuint program) {
             // `vertexMSL` (the Phase-2 render path) untouched.
             appgl::TranslatorOptions vsComputeOpts;
             vsComputeOpts.forceVertexForTessellation = true;
+            applyShaderSpirvOptions(vsComputeOpts, vertexShader);
             ShaderReflection vsComputeRefl;
             (void)translateStage(
                 "vertex-for-tess", vsSpirvData, vsSpirvWords,
@@ -38828,6 +39038,7 @@ bool GLContext::linkProgram(GLuint program) {
                 stageOptions.fp64EmulationAvailable = fp64EmulationAvailable;
                 stageOptions.forceArgumentBuffers = spirvUsesStorageBuffers(
                     sh->spirv.data(), sh->spirv.size());
+                applyShaderSpirvOptions(stageOptions, sh);
                 if (stageEnum == GL_FRAGMENT_SHADER) {
                     stageOptions.fragmentCoordOriginUpperLeft =
                         sourceDeclaresFragCoordOriginUpperLeft(sh->source);
@@ -38869,6 +39080,54 @@ bool GLContext::linkProgram(GLuint program) {
     // glUniform* work for struct members (e.g. "s.a"), array-of-struct
     // elements ("s[0].a"), and any other uniform type the scanner can't parse.
     if (rasterTranslationOk || kind == ProgramKind::Compute) {
+        auto addReflectionVertexInputs = [&]() {
+            if (programObject->vertexReflection.vertexInputs.empty()) {
+                return;
+            }
+            for (const auto& input : programObject->vertexReflection.vertexInputs) {
+                const auto attrExists = std::find_if(
+                    programObject->attributes.begin(),
+                    programObject->attributes.end(),
+                    [&](const GLProgramAttributeInfo& attr) {
+                        if (!input.name.empty() && attr.name == input.name) {
+                            return true;
+                        }
+                        return attr.location == static_cast<GLint>(input.sourceLocation);
+                    });
+                if (attrExists == programObject->attributes.end()) {
+                    GLProgramAttributeInfo attr;
+                    attr.name = input.name;
+                    attr.type = input.type;
+                    attr.location = static_cast<GLint>(input.sourceLocation);
+                    attr.arraySize = 1;
+                    attr.isArray = false;
+                    programObject->attributes.push_back(std::move(attr));
+                }
+
+                const auto resourceExists = std::find_if(
+                    programObject->resourceInputs.begin(),
+                    programObject->resourceInputs.end(),
+                    [&](const GLProgramResourceEntry& entry) {
+                        if (!input.name.empty() && entry.name == input.name) {
+                            return true;
+                        }
+                        return entry.location == static_cast<GLint>(input.sourceLocation) &&
+                               entry.referencedBy == kBitVertex;
+                    });
+                if (resourceExists != programObject->resourceInputs.end()) {
+                    continue;
+                }
+                GLProgramResourceEntry entry;
+                entry.name = input.name;
+                entry.type = input.type;
+                entry.location = static_cast<GLint>(input.sourceLocation);
+                entry.arraySize = 1;
+                entry.referencedBy = kBitVertex;
+                programObject->resourceInputs.push_back(std::move(entry));
+            }
+        };
+        addReflectionVertexInputs();
+
         // Build a set of names the scanner already discovered.
         std::unordered_set<std::string> knownUniformNames;
         for (const auto& u : programObject->uniforms) {
@@ -39316,6 +39575,116 @@ bool GLContext::linkProgram(GLuint program) {
         supplementFromReflection(programObject->tessControlReflection, 0x08, tcsSrc2);
         supplementFromReflection(programObject->tessEvalAsComputeReflection, 0x10, tesSrc2);
         supplementFromReflection(programObject->computeReflection, 0x20, csSrc2);
+
+        auto supplementOpaqueUniforms = [&](const ShaderReflection& refl,
+                                            GLbitfield stageBit) {
+            auto addBinding = [&](const ShaderReflection::ResourceBinding& binding,
+                                  GLenum fallbackType) {
+                const GLenum glType = binding.glType != 0 ? binding.glType : fallbackType;
+                if (glType == 0) {
+                    return;
+                }
+                const GLint arraySize =
+                    static_cast<GLint>(std::max<std::uint32_t>(binding.arraySize, 1u));
+                const std::string canonicalName =
+                    (!binding.name.empty() && arraySize > 1)
+                        ? (binding.name + "[0]")
+                        : binding.name;
+                auto uniformIt = std::find_if(
+                    programObject->uniforms.begin(),
+                    programObject->uniforms.end(),
+                    [&](const GLProgramUniformInfo& info) {
+                        if (!binding.name.empty() && info.name == binding.name) {
+                            return true;
+                        }
+                        return binding.uniformLocation >= 0 &&
+                               info.location == binding.uniformLocation &&
+                               info.type == glType;
+                    });
+                if (uniformIt != programObject->uniforms.end()) {
+                    for (auto& resource : programObject->resourceUniforms) {
+                        const bool sameNamed =
+                            !canonicalName.empty() &&
+                            (resource.name == canonicalName ||
+                             resource.name == binding.name);
+                        const bool sameLocation =
+                            resource.location == uniformIt->location &&
+                            resource.type == glType;
+                        if (sameNamed || sameLocation) {
+                            resource.referencedBy |= stageBit;
+                            if (resource.binding < 0) {
+                                resource.binding =
+                                    static_cast<GLint>(binding.glBinding);
+                            }
+                            break;
+                        }
+                    }
+                    return;
+                }
+
+                if (!canonicalName.empty() &&
+                    (knownUniformNames.count(canonicalName) ||
+                     knownUniformNames.count(binding.name))) {
+                    return;
+                }
+
+                GLProgramUniformInfo info;
+                info.name = binding.name;
+                info.type = glType;
+                info.arraySize = arraySize;
+                info.isArray = arraySize > 1;
+                info.explicitLocation = binding.uniformLocation;
+                info.explicitBinding = static_cast<GLint>(binding.glBinding);
+                info.location = binding.uniformLocation >= 0
+                    ? binding.uniformLocation
+                    : supplementNextLoc;
+
+                const GLint consumed = std::max<GLint>(info.arraySize, 1);
+                if (binding.uniformLocation < 0 ||
+                    supplementNextLoc < info.location + consumed) {
+                    supplementNextLoc = info.location + consumed;
+                }
+
+                GLProgramUniformValue value;
+                value.type = info.type;
+                value.arraySize = info.arraySize;
+                value.ints.resize(static_cast<std::size_t>(consumed));
+                for (GLint i = 0; i < consumed; ++i) {
+                    value.ints[static_cast<std::size_t>(i)] =
+                        static_cast<GLint>(binding.glBinding) + i;
+                }
+                programObject->uniformValues[info.location] = std::move(value);
+
+                GLProgramResourceEntry entry;
+                entry.name = canonicalName;
+                entry.type = info.type;
+                entry.location = info.location;
+                entry.binding = static_cast<GLint>(binding.glBinding);
+                entry.arraySize = info.arraySize;
+                entry.isArray = info.isArray;
+                entry.referencedBy = stageBit;
+                programObject->resourceUniforms.push_back(std::move(entry));
+
+                if (!canonicalName.empty()) {
+                    knownUniformNames.insert(canonicalName);
+                    knownUniformNames.insert(binding.name);
+                }
+                programObject->uniforms.push_back(std::move(info));
+            };
+
+            for (const auto& binding : refl.sampledTextures) {
+                addBinding(binding, GL_SAMPLER_2D);
+            }
+            for (const auto& binding : refl.storageImages) {
+                addBinding(binding, GL_IMAGE_2D);
+            }
+        };
+        supplementOpaqueUniforms(programObject->vertexReflection, 0x01);
+        supplementOpaqueUniforms(programObject->fragmentReflection, 0x02);
+        supplementOpaqueUniforms(programObject->geometryReflection, 0x04);
+        supplementOpaqueUniforms(programObject->tessControlReflection, 0x08);
+        supplementOpaqueUniforms(programObject->tessEvalAsComputeReflection, 0x10);
+        supplementOpaqueUniforms(programObject->computeReflection, 0x20);
 
         // ── Sprint 17 Day 7+ Bank-Group-C: synthetic dispatch uniforms ──
         //
@@ -40178,6 +40547,10 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
                     : object->resourceUniforms.size());
             return true;
         case GL_ACTIVE_UNIFORM_MAX_LENGTH: {
+            if (programUsesNamelessSpirvBinaries(*object, *impl_->objects)) {
+                *params = 1;
+                return true;
+            }
             std::size_t maxLen = 0;
             if (!object->resourceUniforms.empty()) {
                 for (const auto& u : object->resourceUniforms) {
@@ -40195,6 +40568,10 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
             *params = static_cast<GLint>(object->attributes.size());
             return true;
         case GL_ACTIVE_ATTRIBUTE_MAX_LENGTH: {
+            if (programUsesNamelessSpirvBinaries(*object, *impl_->objects)) {
+                *params = 1;
+                return true;
+            }
             std::size_t maxLen = 0;
             for (const auto& a : object->attributes) {
                 maxLen = std::max(maxLen, a.name.size() + 1);
@@ -40223,6 +40600,10 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
             *params = static_cast<GLint>(object->resourceUniformBlocks.size());
             return true;
         case GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH: {
+            if (programUsesNamelessSpirvBinaries(*object, *impl_->objects)) {
+                *params = 1;
+                return true;
+            }
             std::size_t maxLen = 0;
             for (const auto& block : object->resourceUniformBlocks) {
                 maxLen = std::max(maxLen, block.name.size() + 1);
@@ -40264,6 +40645,10 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
             *params = static_cast<GLint>(object->transformFeedbackVaryingNames.size());
             return true;
         case GL_TRANSFORM_FEEDBACK_VARYING_MAX_LENGTH: {
+            if (programUsesNamelessSpirvBinaries(*object, *impl_->objects)) {
+                *params = 1;
+                return true;
+            }
             std::size_t maxLen = 0;
             for (const auto& v : object->transformFeedbackVaryingNames) {
                 maxLen = std::max(maxLen, v.size() + 1);
@@ -59578,6 +59963,7 @@ bool GLContext::specializeShader(GLuint shader, const GLchar* pEntryPoint,
     // points and declared spec-constant IDs without a backend. We
     // construct one temporarily here; the real MSL translation
     // (link-time) builds its own CompilerMSL anyway.
+    std::unordered_map<std::uint32_t, std::uint32_t> specializationValues;
     try {
         spirv_cross::Compiler introspect(object->spirv.data(), object->spirv.size());
         const auto entries = introspect.get_entry_points_and_stages();
@@ -59612,14 +59998,8 @@ bool GLContext::specializeShader(GLuint shader, const GLchar* pEntryPoint,
                     pushError(GL_INVALID_VALUE);
                     return false;
                 }
+                specializationValues[pConstantIndex[i]] = pConstantValue[i];
             }
-            // TODO: hand the (index, value) pairs through to the
-            // translator via a side-channel on GLShaderObject so
-            // CompilerMSL::set_constant can apply them before emit.
-            // Currently we accept the values but don't yet forward
-            // them — tests that rely on specialization-constant
-            // substitution will see default values. Commits that
-            // wire this up can land separately.
         }
     } catch (const spirv_cross::CompilerError& e) {
         object->compileLog = std::string("glSpecializeShader: SPIR-V parse failed: ")
@@ -59627,6 +60007,8 @@ bool GLContext::specializeShader(GLuint shader, const GLchar* pEntryPoint,
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    object->spirvEntryPoint = entry;
+    object->spirvSpecializationConstants = std::move(specializationValues);
     object->compiled = true;
     object->compileLog.clear();
     return true;

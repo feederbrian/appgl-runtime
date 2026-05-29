@@ -110,6 +110,9 @@ struct ShaderReflection {
 
     struct ResourceBinding {
         GLuint glBinding = 0;
+        GLint uniformLocation = -1;
+        GLenum glType = 0;
+        std::uint32_t arraySize = 1;
         std::uint32_t metalBinding = 0;
         std::size_t byteSize = 0;
         std::string name;               // block type name (always)
@@ -431,6 +434,8 @@ struct TranslatorOptions {
     // framebuffer programs keep the legacy viewport/readback contract.
     bool enableClipControlYSignFixup = false;
     GLenum clipDepthMode = GL_NEGATIVE_ONE_TO_ONE;
+    std::string spirvEntryPointName;
+    std::unordered_map<std::uint32_t, std::uint32_t> specializationConstants;
 };
 
 // Phase 3B.5 [metal-tess-TF]: stage-output struct layout. Populated for

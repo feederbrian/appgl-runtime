@@ -579,6 +579,8 @@ struct GLShaderObject {
     // binary (user of `glSpecializeShader`) vs objects whose spirv
     // came from our in-tree glslang path.
     bool isSpirvBinary = false;
+    std::string spirvEntryPoint;
+    std::unordered_map<std::uint32_t, std::uint32_t> spirvSpecializationConstants;
     std::vector<GLShaderDeclaration> declaredUniforms;
     std::vector<GLShaderDeclaration> declaredInputs;
     std::vector<GLShaderDeclaration> declaredOutputs;
