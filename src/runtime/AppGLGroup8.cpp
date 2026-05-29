@@ -2445,6 +2445,7 @@ static void APIENTRY glBeginQuery(GLenum target, GLuint id) {
     query->index = 0;
     query->active = true;
     query->result = 0;
+    query->samplesPassedResolved = false;
     // GL 4.6 §22.2 — record CPU-side start-time for GL_TIME_ELAPSED.
     // Stored on every Begin so CTS queries_functional's less(0, v)
     // check on TIME_ELAPSED passes with the elapsed interval in ns.
@@ -2537,7 +2538,9 @@ static void APIENTRY glEndQuery(GLenum target) {
                 case GL_ANY_SAMPLES_PASSED:
                 case GL_ANY_SAMPLES_PASSED_CONSERVATIVE:
                 default:
-                    query.result = 1;
+                    if (!query.samplesPassedResolved) {
+                        query.result = 1;
+                    }
                     break;
             }
         }

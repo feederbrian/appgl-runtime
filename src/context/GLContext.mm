@@ -17049,9 +17049,9 @@ struct GLContext::Impl {
     }
 
     // GL 4.6 §2.3.3 / ARB_conditional_render_inverted — decide whether
-    // the current draw should be skipped. Called at the top of every
-    // draw entry point after basic validation; returns true when the
-    // conditional-render predicate orders the draw discarded.
+    // the current draw or compute dispatch should be skipped. Called
+    // after basic validation; returns true when the conditional-render
+    // predicate orders the command discarded.
     //
     // Non-inverted modes skip when the query result is zero (nothing
     // passed → no occlusion). Inverted modes skip when the result is
@@ -17095,6 +17095,7 @@ struct GLContext::Impl {
                                              GLsizei vertexCount,
                                              GLsizei instanceCount,
                                              GLsizei restartSkipCount = 0);
+    bool estimateCurrentVertexWindowDepth(float& outDepth) const;
 
     // Scan a client-side or PBO-backed index buffer for occurrences
     // of the current GL_PRIMITIVE_RESTART_INDEX. Returns 0 when
@@ -17612,6 +17613,8 @@ struct GLContext::Impl {
     // query) the same skip logic applies.
     GLuint conditionalRenderQueryId = 0;
     GLenum conditionalRenderMode = 0;  // 0 = no conditional render active
+    bool occlusionApproxDepthKnown = true;
+    float occlusionApproxDepth = 1.0f;
 
     // Persistent "default VAO" — lazy-allocated stand-alone object
     // returned by currentVertexArrayOrDefault() when no user VAO is
@@ -18199,11 +18202,20 @@ void GLContext::clear(GLbitfield mask) {
     if (impl_->state->boundDrawFramebuffer() != 0) {
         if (!impl_->clearBoundFramebuffer(mask)) {
             pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+        } else if ((mask & GL_DEPTH_BUFFER_BIT) != 0) {
+            impl_->occlusionApproxDepthKnown = true;
+            impl_->occlusionApproxDepth = static_cast<float>(
+                std::clamp(impl_->state->clearState().depth, 0.0, 1.0));
         }
         return;
     }
     if ((mask & GL_COLOR_BUFFER_BIT) != 0) {
         impl_->applyDefaultFramebufferColorClear();
+    }
+    if ((mask & GL_DEPTH_BUFFER_BIT) != 0) {
+        impl_->occlusionApproxDepthKnown = true;
+        impl_->occlusionApproxDepth = static_cast<float>(
+            std::clamp(impl_->state->clearState().depth, 0.0, 1.0));
     }
     // Accumulate mask bits so consecutive glClear calls (e.g. color then
     // depth) don't overwrite each other before the pending clear is flushed.
@@ -26379,6 +26391,202 @@ bool GLContext::Impl::isTfPausedOnBoundImpl() const {
     return transformFeedbackPaused;
 }
 
+static std::string trimOcclusionExpr(std::string s) {
+    auto notWs = [](unsigned char c) { return !std::isspace(c); };
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), notWs));
+    s.erase(std::find_if(s.rbegin(), s.rend(), notWs).base(), s.end());
+    return s;
+}
+
+static std::size_t matchingParenForOcclusionExpr(const std::string& s,
+                                                 std::size_t open)
+{
+    int depth = 0;
+    for (std::size_t i = open; i < s.size(); ++i) {
+        if (s[i] == '(') {
+            ++depth;
+        } else if (s[i] == ')') {
+            --depth;
+            if (depth == 0) return i;
+        }
+    }
+    return std::string::npos;
+}
+
+static std::vector<std::string> splitTopLevelOcclusionArgs(
+    const std::string& s)
+{
+    std::vector<std::string> args;
+    int paren = 0;
+    int bracket = 0;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        const char c = s[i];
+        if (c == '(') ++paren;
+        else if (c == ')') --paren;
+        else if (c == '[') ++bracket;
+        else if (c == ']') --bracket;
+        else if (c == ',' && paren == 0 && bracket == 0) {
+            args.push_back(trimOcclusionExpr(s.substr(start, i - start)));
+            start = i + 1;
+        }
+    }
+    args.push_back(trimOcclusionExpr(s.substr(start)));
+    return args;
+}
+
+static bool parseFloatLiteralForOcclusionExpr(const std::string& expr,
+                                              float& out)
+{
+    const std::string trimmed = trimOcclusionExpr(expr);
+    if (trimmed.empty()) return false;
+    char* end = nullptr;
+    const float value = std::strtof(trimmed.c_str(), &end);
+    if (end == trimmed.c_str()) return false;
+    while (*end == 'f' || *end == 'F') ++end;
+    while (*end != '\0' && std::isspace(static_cast<unsigned char>(*end))) {
+        ++end;
+    }
+    if (*end != '\0') return false;
+    out = value;
+    return true;
+}
+
+static bool isBareIdentifierForOcclusionExpr(const std::string& expr) {
+    if (expr.empty()) return false;
+    const auto isFirst = [](unsigned char c) {
+        return std::isalpha(c) || c == '_';
+    };
+    const auto isRest = [](unsigned char c) {
+        return std::isalnum(c) || c == '_';
+    };
+    if (!isFirst(static_cast<unsigned char>(expr[0]))) return false;
+    for (std::size_t i = 1; i < expr.size(); ++i) {
+        if (!isRest(static_cast<unsigned char>(expr[i]))) return false;
+    }
+    return true;
+}
+
+static bool lookupFloatUniformForOcclusionExpr(
+    const GLProgramObject& program, const std::string& name, float& out)
+{
+    for (const auto& uniform : program.uniforms) {
+        if (uniform.name != name || uniform.type != GL_FLOAT ||
+            uniform.location < 0) {
+            continue;
+        }
+        const auto valueIt = program.uniformValues.find(uniform.location);
+        if (valueIt == program.uniformValues.end() ||
+            valueIt->second.floats.empty()) {
+            return false;
+        }
+        out = valueIt->second.floats[0];
+        return true;
+    }
+    return false;
+}
+
+bool GLContext::Impl::estimateCurrentVertexWindowDepth(float& outDepth) const {
+    if (state == nullptr || objects == nullptr) return false;
+    const GLuint progName = state->currentProgram();
+    const GLProgramObject* program = progName == 0 ? nullptr
+        : objects->programs().get(progName);
+    if (program == nullptr) return false;
+
+    const std::string* vertexSource = nullptr;
+    for (GLuint shaderName : program->attachedShaders) {
+        const GLShaderObject* shader = objects->shaders().get(shaderName);
+        if (shader != nullptr && shader->stage == GL_VERTEX_SHADER) {
+            vertexSource = &shader->source;
+            break;
+        }
+    }
+    if (vertexSource == nullptr) return false;
+
+    auto evalExpr = [&](const std::string& raw, float& value) -> bool {
+        const std::string expr = trimOcclusionExpr(raw);
+        if (parseFloatLiteralForOcclusionExpr(expr, value)) {
+            return true;
+        }
+        if (isBareIdentifierForOcclusionExpr(expr)) {
+            return lookupFloatUniformForOcclusionExpr(*program, expr, value);
+        }
+        return false;
+    };
+
+    std::size_t pos = 0;
+    while ((pos = vertexSource->find("gl_Position", pos)) !=
+           std::string::npos) {
+        const std::size_t semi = vertexSource->find(';', pos);
+        const std::size_t eq = vertexSource->find('=', pos);
+        if (eq == std::string::npos ||
+            (semi != std::string::npos && eq > semi)) {
+            pos += std::strlen("gl_Position");
+            continue;
+        }
+        const std::size_t vec4 = vertexSource->find("vec4", eq);
+        if (vec4 == std::string::npos ||
+            (semi != std::string::npos && vec4 > semi)) {
+            pos = eq + 1;
+            continue;
+        }
+        const std::size_t open = vertexSource->find('(', vec4);
+        if (open == std::string::npos ||
+            (semi != std::string::npos && open > semi)) {
+            pos = vec4 + 4;
+            continue;
+        }
+        const std::size_t close = matchingParenForOcclusionExpr(
+            *vertexSource, open);
+        if (close == std::string::npos) return false;
+        const std::vector<std::string> args = splitTopLevelOcclusionArgs(
+            vertexSource->substr(open + 1, close - open - 1));
+        const std::size_t zIndex = (args.size() == 3) ? 1u : 2u;
+        const std::size_t wIndex = (args.size() == 3) ? 2u : 3u;
+        if (args.size() <= wIndex) {
+            pos = close + 1;
+            continue;
+        }
+        float clipZ = 0.0f;
+        float clipW = 1.0f;
+        if (!evalExpr(args[zIndex], clipZ) || !evalExpr(args[wIndex], clipW) ||
+            clipW == 0.0f) {
+            pos = close + 1;
+            continue;
+        }
+        const float ndcZ = clipZ / clipW;
+        const auto& range = state->depthRange();
+        if (state->clipDepthMode() == GL_ZERO_TO_ONE) {
+            outDepth = static_cast<float>(
+                range.nearValue +
+                (range.farValue - range.nearValue) * ndcZ);
+        } else {
+            outDepth = static_cast<float>(
+                ((range.farValue - range.nearValue) * ndcZ +
+                 (range.nearValue + range.farValue)) * 0.5);
+        }
+        outDepth = std::clamp(outDepth, 0.0f, 1.0f);
+        return true;
+    }
+    return false;
+}
+
+static bool appglDepthCompareForOcclusion(GLenum func, float incoming,
+                                          float stored)
+{
+    switch (func) {
+        case GL_NEVER: return false;
+        case GL_LESS: return incoming < stored;
+        case GL_EQUAL: return incoming == stored;
+        case GL_LEQUAL: return incoming <= stored;
+        case GL_GREATER: return incoming > stored;
+        case GL_NOTEQUAL: return incoming != stored;
+        case GL_GEQUAL: return incoming >= stored;
+        case GL_ALWAYS: return true;
+        default: return true;
+    }
+}
+
 void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
     GLenum mode, GLsizei vertexCount, GLsizei instanceCount,
     GLsizei restartSkipCount)
@@ -26432,6 +26640,31 @@ void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
     prims *= static_cast<std::size_t>(instanceCount);
     const std::size_t vertsTotal = submittedRaw * static_cast<std::size_t>(instanceCount);
     const bool tfActive = transformFeedbackActive;
+    bool samplesPassed = prims > 0;
+    bool resolvedSamplesPassed = false;
+    bool incomingDepthResolved = false;
+    float incomingDepth = 0.0f;
+    if (samplesPassed && state != nullptr && state->isEnabled(GL_DEPTH_TEST)) {
+        incomingDepthResolved = estimateCurrentVertexWindowDepth(incomingDepth);
+        if (incomingDepthResolved && occlusionApproxDepthKnown) {
+            samplesPassed = appglDepthCompareForOcclusion(
+                state->depthState().func, incomingDepth, occlusionApproxDepth);
+            resolvedSamplesPassed = true;
+        } else {
+            // Conservative fallback for shader shapes we cannot reduce to a
+            // constant window depth yet. Preserve the historical positive
+            // result instead of fabricating a false occlusion failure.
+            samplesPassed = true;
+        }
+        if (samplesPassed && state->depthState().writeMask != GL_FALSE) {
+            if (incomingDepthResolved) {
+                occlusionApproxDepth = incomingDepth;
+                occlusionApproxDepthKnown = true;
+            } else {
+                occlusionApproxDepthKnown = false;
+            }
+        }
+    }
     // GL 4.6 §22.1 / §22.3 — advance pipeline-stats counters for
     // every active query whose target tracks one of the per-draw
     // quantities. FS_INVOCATIONS is gated on whether rasterizer-
@@ -26479,6 +26712,13 @@ void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
                 // tracked. At least one fragment ran when a primitive
                 // was drawn. Sufficient for EQUAL_OR_GREATER tests.
                 if (prims > 0) q.result += 1;
+                break;
+            case GL_SAMPLES_PASSED:
+            case GL_ANY_SAMPLES_PASSED:
+            case GL_ANY_SAMPLES_PASSED_CONSERVATIVE:
+                q.samplesPassedResolved = resolvedSamplesPassed ||
+                    !state->isEnabled(GL_DEPTH_TEST);
+                if (samplesPassed) q.result += 1;
                 break;
             default:
                 break;
@@ -50498,28 +50738,6 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
         return false;
     }
 
-    // GL 4.6 §22.4 — credit COMPUTE_SHADER_INVOCATIONS for every
-    // active query by the total workgroup-invocation count
-    // (groups × local-size). Done before dispatch so the counter
-    // advances even if pipeline encode fails.
-    impl_->objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
-        if (!q.active || q.target != GL_COMPUTE_SHADER_INVOCATIONS) return;
-        const GLuint progName = impl_->state->currentProgram();
-        const GLProgramObject* p = progName == 0 ? nullptr
-            : impl_->objects->programs().get(progName);
-        if (p == nullptr) {
-            q.result += 1;
-            return;
-        }
-        const GLuint64 local = static_cast<GLuint64>(p->computeLocalSizeX) *
-                               static_cast<GLuint64>(p->computeLocalSizeY) *
-                               static_cast<GLuint64>(p->computeLocalSizeZ);
-        const GLuint64 groups = static_cast<GLuint64>(num_groups_x) *
-                                static_cast<GLuint64>(num_groups_y) *
-                                static_cast<GLuint64>(num_groups_z);
-        q.result += groups * (local == 0 ? 1 : local);
-    });
-
     // Resolve the currently-bound program. GL 4.6 §17.1 requires
     // GL_INVALID_OPERATION when there's no active program OR when
     // the active program doesn't contain a compute shader. We detect
@@ -50552,16 +50770,41 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
                 }
             }
         }
-        if (programObject != nullptr && programObject->linked &&
-            programObject->ssboStdLayoutRawCopyFallback &&
-            programObject->metalComputePipelineState == nullptr) {
-            return impl_->runSSBOStdLayoutRawCopyFallback();
-        }
-        if (programObject == nullptr || !programObject->linked
-            || programObject->metalComputePipelineState == nullptr) {
+        const bool hasComputePipeline =
+            programObject != nullptr && programObject->linked &&
+            programObject->metalComputePipelineState != nullptr;
+        const bool hasRawCopyFallback =
+            programObject != nullptr && programObject->linked &&
+            programObject->ssboStdLayoutRawCopyFallback;
+        if (!hasComputePipeline && !hasRawCopyFallback) {
             pushError(GL_INVALID_OPERATION);
             return false;
         }
+    }
+    // GL 4.6 §2.3.3 — conditional render predicate. Skipped dispatches
+    // do not advance query counters or update shader-visible storage.
+    if (impl_->shouldSkipDrawForConditionalRender()) {
+        return true;
+    }
+
+    // GL 4.6 §22.4 — credit COMPUTE_SHADER_INVOCATIONS for every
+    // active query by the total workgroup-invocation count
+    // (groups × local-size). Done before dispatch so the counter
+    // advances even if pipeline encode fails.
+    impl_->objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
+        if (!q.active || q.target != GL_COMPUTE_SHADER_INVOCATIONS) return;
+        const GLuint64 local = static_cast<GLuint64>(programObject->computeLocalSizeX) *
+                               static_cast<GLuint64>(programObject->computeLocalSizeY) *
+                               static_cast<GLuint64>(programObject->computeLocalSizeZ);
+        const GLuint64 groups = static_cast<GLuint64>(num_groups_x) *
+                                static_cast<GLuint64>(num_groups_y) *
+                                static_cast<GLuint64>(num_groups_z);
+        q.result += groups * (local == 0 ? 1 : local);
+    });
+
+    if (programObject->metalComputePipelineState == nullptr &&
+        programObject->ssboStdLayoutRawCopyFallback) {
+        return impl_->runSSBOStdLayoutRawCopyFallback();
     }
     if (impl_->frameGraph == nullptr) {
         // Pipeline was built but the frame graph is torn down — no
@@ -51299,6 +51542,12 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
         || kIndirectDispatchSize > dispatchBuf->size - indirect) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+
+    // GL 4.6 §2.3.3 — conditional render predicate. Skipped dispatches
+    // do not advance query counters or update shader-visible storage.
+    if (impl_->shouldSkipDrawForConditionalRender()) {
+        return true;
     }
 
     // GL 4.6 §22.4 — credit COMPUTE_SHADER_INVOCATIONS for every

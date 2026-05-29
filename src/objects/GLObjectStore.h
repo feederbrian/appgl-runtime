@@ -1484,6 +1484,11 @@ struct GLQueryObject {
     // bound via `glBeginQuery`. `glCreateQueries` (GL 4.5 DSA)
     // creates the object fully. Track the distinction here.
     bool instantiated = false;
+    // True when draw-time query hooks have produced a concrete
+    // SAMPLES_PASSED / ANY_SAMPLES_PASSED result for the active scope.
+    // EndQuery keeps the legacy synthetic-positive fallback only when
+    // this remains false.
+    bool samplesPassedResolved = false;
     // GL 4.6 §22.2 — GL_TIME_ELAPSED / GL_TIMESTAMP record CPU clock
     // nanoseconds between BeginQuery and EndQuery. CTS
     // `direct_state_access.queries_functional` expects EndQuery on a

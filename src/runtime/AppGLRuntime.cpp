@@ -6109,6 +6109,7 @@ void APIENTRY glBeginQueryIndexed(GLenum target, GLuint index, GLuint id) {
     query->index = index;
     query->active = true;
     query->result = 0;
+    query->samplesPassedResolved = false;
     markStateFunction(FunctionId::glBeginQueryIndexed, "Indexed query begin tracks per-(target,index).");
     Runtime::shared().recordBootstrapTrace("glBeginQueryIndexed(target=" + std::to_string(target) + ", index=" + std::to_string(index) + ", id=" + std::to_string(id) + ")");
 }
@@ -6143,6 +6144,13 @@ void APIENTRY glEndQueryIndexed(GLenum target, GLuint index) {
                     case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
                     case GL_TRANSFORM_FEEDBACK_OVERFLOW:
                     case GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW:
+                        break;
+                    case GL_SAMPLES_PASSED:
+                    case GL_ANY_SAMPLES_PASSED:
+                    case GL_ANY_SAMPLES_PASSED_CONSERVATIVE:
+                        if (!q.samplesPassedResolved) {
+                            q.result = 1;
+                        }
                         break;
                     default:
                         q.result = 1;
