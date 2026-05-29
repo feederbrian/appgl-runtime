@@ -34074,6 +34074,9 @@ bool GLContext::linkProgram(GLuint program) {
             }
         }
     }
+    const bool linkedFromSpirvBinary =
+        !attachedShaderObjects.empty() &&
+        attachedShaderObjects.front()->isSpirvBinary;
 
     {
         GLint maxAtomicBindings = 0;
@@ -40243,6 +40246,40 @@ bool GLContext::linkProgram(GLuint program) {
                     (!binding.name.empty() && arraySize > 1)
                         ? (binding.name + "[0]")
                         : binding.name;
+                GLuint explicitSourceBinding = 0;
+                auto hasExplicitSourceBinding = [&]() {
+                    auto probe = [&](std::string name) -> bool {
+                        if (name.empty()) {
+                            return false;
+                        }
+                        if (name.size() > 3 &&
+                            name.compare(name.size() - 3, 3, "[0]") == 0) {
+                            name.resize(name.size() - 3);
+                        }
+                        auto it = programObject->samplerExplicitBindings.find(name);
+                        if (it != programObject->samplerExplicitBindings.end()) {
+                            explicitSourceBinding = it->second;
+                            return true;
+                        }
+                        static constexpr const char* kAppglPrefix = "_appgl_";
+                        static constexpr std::size_t kAppglPrefixLen = 7;
+                        if (name.compare(0, kAppglPrefixLen, kAppglPrefix) == 0) {
+                            it = programObject->samplerExplicitBindings.find(
+                                name.substr(kAppglPrefixLen));
+                            if (it != programObject->samplerExplicitBindings.end()) {
+                                explicitSourceBinding = it->second;
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+                    return probe(binding.name) || probe(canonicalName);
+                }();
+                const bool hasOpaqueDefaultBinding =
+                    hasExplicitSourceBinding || linkedFromSpirvBinary;
+                const GLuint opaqueDefaultBinding = hasExplicitSourceBinding
+                    ? explicitSourceBinding
+                    : binding.glBinding;
                 auto uniformIt = std::find_if(
                     programObject->uniforms.begin(),
                     programObject->uniforms.end(),
@@ -40265,12 +40302,16 @@ bool GLContext::linkProgram(GLuint program) {
                             resource.type == glType;
                         if (sameNamed || sameLocation) {
                             resource.referencedBy |= stageBit;
-                            if (resource.binding < 0) {
+                            if (resource.binding < 0 && hasOpaqueDefaultBinding) {
                                 resource.binding =
-                                    static_cast<GLint>(binding.glBinding);
+                                    static_cast<GLint>(opaqueDefaultBinding);
                             }
                             break;
                         }
+                    }
+                    if (uniformIt->explicitBinding < 0 && hasOpaqueDefaultBinding) {
+                        uniformIt->explicitBinding =
+                            static_cast<GLint>(opaqueDefaultBinding);
                     }
                     return;
                 }
@@ -40287,7 +40328,9 @@ bool GLContext::linkProgram(GLuint program) {
                 info.arraySize = arraySize;
                 info.isArray = arraySize > 1;
                 info.explicitLocation = binding.uniformLocation;
-                info.explicitBinding = static_cast<GLint>(binding.glBinding);
+                info.explicitBinding = hasOpaqueDefaultBinding
+                    ? static_cast<GLint>(opaqueDefaultBinding)
+                    : -1;
                 info.location = binding.uniformLocation >= 0
                     ? binding.uniformLocation
                     : supplementNextLoc;
@@ -40304,7 +40347,9 @@ bool GLContext::linkProgram(GLuint program) {
                 value.ints.resize(static_cast<std::size_t>(consumed));
                 for (GLint i = 0; i < consumed; ++i) {
                     value.ints[static_cast<std::size_t>(i)] =
-                        static_cast<GLint>(binding.glBinding) + i;
+                        hasOpaqueDefaultBinding
+                            ? static_cast<GLint>(opaqueDefaultBinding) + i
+                            : 0;
                 }
                 programObject->uniformValues[info.location] = std::move(value);
 
@@ -40312,7 +40357,9 @@ bool GLContext::linkProgram(GLuint program) {
                 entry.name = canonicalName;
                 entry.type = info.type;
                 entry.location = info.location;
-                entry.binding = static_cast<GLint>(binding.glBinding);
+                entry.binding = hasOpaqueDefaultBinding
+                    ? static_cast<GLint>(opaqueDefaultBinding)
+                    : -1;
                 entry.arraySize = info.arraySize;
                 entry.isArray = info.isArray;
                 entry.referencedBy = stageBit;
