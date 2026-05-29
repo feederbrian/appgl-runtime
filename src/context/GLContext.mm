@@ -17100,6 +17100,10 @@ struct GLContext::Impl {
                                              GLsizei vertexCount,
                                              GLsizei instanceCount,
                                              GLsizei restartSkipCount = 0);
+    void updateSubmittedPipelineStatsForNonGsDraw(GLenum mode,
+                                                  GLsizei vertexCount,
+                                                  GLsizei instanceCount,
+                                                  GLsizei restartSkipCount = 0);
     bool estimateCurrentVertexWindowDepth(float& outDepth) const;
 
     // Scan a client-side or PBO-backed index buffer for occurrences
@@ -26724,6 +26728,56 @@ void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
                 q.samplesPassedResolved = resolvedSamplesPassed ||
                     !state->isEnabled(GL_DEPTH_TEST);
                 if (samplesPassed) q.result += 1;
+                break;
+            default:
+                break;
+        }
+    });
+}
+
+void GLContext::Impl::updateSubmittedPipelineStatsForNonGsDraw(
+    GLenum mode, GLsizei vertexCount, GLsizei instanceCount,
+    GLsizei restartSkipCount)
+{
+    if (vertexCount <= 0 || instanceCount <= 0) return;
+
+    std::size_t prims = 0;
+    const std::size_t n = static_cast<std::size_t>(vertexCount);
+    const std::size_t submittedRaw = (n > static_cast<std::size_t>(restartSkipCount))
+        ? (n - static_cast<std::size_t>(restartSkipCount)) : 0;
+    switch (mode) {
+        case GL_POINTS:                   prims = submittedRaw; break;
+        case GL_LINES:                    prims = submittedRaw / 2; break;
+        case GL_LINE_STRIP:               prims = (submittedRaw >= 2) ? submittedRaw - 1 : 0; break;
+        case GL_LINE_LOOP:                prims = (submittedRaw >= 2) ? submittedRaw : 0; break;
+        case GL_TRIANGLES:                prims = submittedRaw / 3; break;
+        case GL_TRIANGLE_STRIP:
+        case GL_TRIANGLE_FAN:             prims = (submittedRaw >= 3) ? submittedRaw - 2 : 0; break;
+        case GL_LINES_ADJACENCY:          prims = submittedRaw / 4; break;
+        case GL_LINE_STRIP_ADJACENCY:     prims = (submittedRaw >= 4) ? submittedRaw - 3 : 0; break;
+        case GL_TRIANGLES_ADJACENCY:      prims = submittedRaw / 6; break;
+        case GL_TRIANGLE_STRIP_ADJACENCY: prims = (submittedRaw >= 6) ? (submittedRaw - 4) / 2 : 0; break;
+        case GL_PATCHES: {
+            const GLint pv = state ? state->tessellationState().patchVertices : 3;
+            prims = (pv > 0) ? (submittedRaw / static_cast<std::size_t>(pv)) : 0;
+            break;
+        }
+        default: break;
+    }
+
+    prims *= static_cast<std::size_t>(instanceCount);
+    const std::size_t vertsTotal = submittedRaw * static_cast<std::size_t>(instanceCount);
+    objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
+        if (!q.active) return;
+        switch (q.target) {
+            case GL_PRIMITIVES_SUBMITTED:
+            case GL_CLIPPING_INPUT_PRIMITIVES:
+            case GL_CLIPPING_OUTPUT_PRIMITIVES:
+                q.result += static_cast<GLuint64>(prims);
+                break;
+            case GL_VERTICES_SUBMITTED:
+            case GL_VERTEX_SHADER_INVOCATIONS:
+                q.result += static_cast<GLuint64>(vertsTotal);
                 break;
             default:
                 break;
@@ -47008,6 +47062,10 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     *tessProgram, tessProgramName, mode, count, first)) {
                 APPGL_LOG(DRAW, @"drawArrays metal-tess ok: count=%d first=%d",
                           count, first);
+                if (!tessProgram->gsPresent) {
+                    impl_->updateSubmittedPipelineStatsForNonGsDraw(
+                        mode, count, 1);
+                }
                 return true;
             }
             APPGL_LOG(SHADER, @"drawArrays metal-tess encode failed — falling back to CPU interpreter");
