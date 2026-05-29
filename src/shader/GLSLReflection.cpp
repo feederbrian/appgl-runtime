@@ -378,6 +378,58 @@ LayoutQualifiers extractLayoutQualifiers(std::vector<std::string>& tokens) {
 // sampler uniforms in practice.
 enum class UniformScalarKind { Float, Int, UInt };
 
+bool matrixShape(GLenum type, GLint& cols, GLint& rows) {
+    switch (type) {
+        case GL_FLOAT_MAT2:
+        case GL_DOUBLE_MAT2:
+            cols = 2;
+            rows = 2;
+            return true;
+        case GL_FLOAT_MAT3:
+        case GL_DOUBLE_MAT3:
+            cols = 3;
+            rows = 3;
+            return true;
+        case GL_FLOAT_MAT4:
+        case GL_DOUBLE_MAT4:
+            cols = 4;
+            rows = 4;
+            return true;
+        case GL_FLOAT_MAT2x3:
+        case GL_DOUBLE_MAT2x3:
+            cols = 2;
+            rows = 3;
+            return true;
+        case GL_FLOAT_MAT2x4:
+        case GL_DOUBLE_MAT2x4:
+            cols = 2;
+            rows = 4;
+            return true;
+        case GL_FLOAT_MAT3x2:
+        case GL_DOUBLE_MAT3x2:
+            cols = 3;
+            rows = 2;
+            return true;
+        case GL_FLOAT_MAT3x4:
+        case GL_DOUBLE_MAT3x4:
+            cols = 3;
+            rows = 4;
+            return true;
+        case GL_FLOAT_MAT4x2:
+        case GL_DOUBLE_MAT4x2:
+            cols = 4;
+            rows = 2;
+            return true;
+        case GL_FLOAT_MAT4x3:
+        case GL_DOUBLE_MAT4x3:
+            cols = 4;
+            rows = 3;
+            return true;
+        default:
+            return false;
+    }
+}
+
 UniformScalarKind scalarKindForType(GLenum type) {
     switch (type) {
         case GL_FLOAT:
@@ -387,6 +439,12 @@ UniformScalarKind scalarKindForType(GLenum type) {
         case GL_FLOAT_MAT2:
         case GL_FLOAT_MAT3:
         case GL_FLOAT_MAT4:
+        case GL_FLOAT_MAT2x3:
+        case GL_FLOAT_MAT2x4:
+        case GL_FLOAT_MAT3x2:
+        case GL_FLOAT_MAT3x4:
+        case GL_FLOAT_MAT4x2:
+        case GL_FLOAT_MAT4x3:
             return UniformScalarKind::Float;
         case GL_UNSIGNED_INT:
         case GL_UNSIGNED_INT_VEC2:
@@ -413,11 +471,6 @@ UniformScalarKind scalarKindForType(GLenum type) {
 // function bails out silently, leaving the default vectors empty so
 // linkProgram falls back to zero-seeding.
 //
-// Matrix types (mat2/mat3/mat4) are intentionally skipped: in GLSL
-// `mat4(1.0)` constructs an identity matrix, not a component-broadcast
-// vector, and AppGL's compat-profile path already seeds synthesized matrix
-// uniforms through its own channel. Spring/BAR does not use matrix default
-// initializers in any shader we've seen.
 bool parseNumericDefaultLiteral(const std::string& tok, double& outValue) {
     if (tok.empty()) {
         return false;
@@ -547,9 +600,24 @@ bool collectInitializerValues(const std::vector<std::string>& tokens,
                     return false;
                 }
                 if (nested.size() == 1u && ctorType->components > 1) {
-                    outValues.insert(outValues.end(),
-                                     static_cast<std::size_t>(ctorType->components),
-                                     nested[0]);
+                    GLint matrixCols = 0;
+                    GLint matrixRows = 0;
+                    if (matrixShape(ctorType->type, matrixCols, matrixRows)) {
+                        std::vector<double> diagonalMatrix(
+                            static_cast<std::size_t>(ctorType->components), 0.0);
+                        const GLint diagonalCount = std::min(matrixCols, matrixRows);
+                        for (GLint diagonal = 0; diagonal < diagonalCount; ++diagonal) {
+                            diagonalMatrix[static_cast<std::size_t>(
+                                diagonal * matrixRows + diagonal)] = nested[0];
+                        }
+                        outValues.insert(outValues.end(),
+                                         diagonalMatrix.begin(),
+                                         diagonalMatrix.end());
+                    } else {
+                        outValues.insert(outValues.end(),
+                                         static_cast<std::size_t>(ctorType->components),
+                                         nested[0]);
+                    }
                 } else if (nested.size() == static_cast<std::size_t>(ctorType->components)) {
                     outValues.insert(outValues.end(), nested.begin(), nested.end());
                 } else {
@@ -577,12 +645,6 @@ void parseDefaultInitializer(
     const TypeEntry& varEntry,
     GLShaderDeclaration& out
 ) {
-    // Matrices: bail. See comment block above.
-    if (varEntry.type == GL_FLOAT_MAT2 ||
-        varEntry.type == GL_FLOAT_MAT3 ||
-        varEntry.type == GL_FLOAT_MAT4) {
-        return;
-    }
     const GLint components = varEntry.components;
     if (components <= 0) {
         return;
