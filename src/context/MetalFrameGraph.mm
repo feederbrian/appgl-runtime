@@ -9616,6 +9616,21 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                                               usage:MTLResourceUsageRead];
                                 }
                             }
+                            if (tb.imageAtomicMetalBuffer != nullptr &&
+                                tb.imageAtomicBufferSlot != 0xFFFFFFFFu) {
+                                id<MTLBuffer> atomicBuffer =
+                                    (__bridge id<MTLBuffer>)tb.imageAtomicMetalBuffer;
+                                if (atomicBuffer != nil) {
+                                    [argEncSet0 setBuffer:atomicBuffer
+                                                   offset:static_cast<NSUInteger>(
+                                                              tb.imageAtomicBufferOffset)
+                                                  atIndex:static_cast<NSUInteger>(
+                                                              tb.imageAtomicBufferSlot)];
+                                    [enc useResource:atomicBuffer
+                                              usage:MTLResourceUsageRead |
+                                                    MTLResourceUsageWrite];
+                                }
+                            }
                         }
                         // The GL default-uniform block lives at Metal slot
                         // `makeComputeBindingMap().uniformBufferBase` in both
@@ -9733,6 +9748,18 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 }
                 if (smp != nil) {
                     [enc setSamplerState:smp atIndex:static_cast<NSUInteger>(tb.metalSlot)];
+                }
+                if (tb.imageAtomicMetalBuffer != nullptr &&
+                    tb.imageAtomicBufferSlot != 0xFFFFFFFFu) {
+                    id<MTLBuffer> atomicBuffer =
+                        (__bridge id<MTLBuffer>)tb.imageAtomicMetalBuffer;
+                    if (atomicBuffer != nil) {
+                        [enc setBuffer:atomicBuffer
+                                offset:static_cast<NSUInteger>(
+                                           tb.imageAtomicBufferOffset)
+                               atIndex:static_cast<NSUInteger>(
+                                           tb.imageAtomicBufferSlot)];
+                    }
                 }
             }
         }

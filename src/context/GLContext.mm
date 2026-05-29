@@ -50797,6 +50797,40 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             }
             tb.metalSamplerState = nullptr;  // no sampler for storage images
             tb.metalSlot = img.metalBinding + static_cast<std::uint32_t>(arrayElement);
+            if (img.metalAtomicBufferBinding != 0xFFFFFFFFu) {
+                const std::string atomicNeedle = img.name + "_atomic";
+                const bool usesImageAtomic =
+                    programObject->computeMSL.find(atomicNeedle) != std::string::npos ||
+                    programObject->computeMSL.find("_appgl_" + atomicNeedle) !=
+                        std::string::npos;
+                if (usesImageAtomic) {
+                    tb.imageAtomicBufferSlot =
+                        img.metalAtomicBufferBinding +
+                        static_cast<std::uint32_t>(arrayElement);
+                    if (texObj->target == GL_TEXTURE_BUFFER &&
+                        texObj->desc.sourceBuffer != 0) {
+                        GLBufferObject* backingBuffer =
+                            impl_->objects->buffers().get(texObj->desc.sourceBuffer);
+                        if (backingBuffer != nullptr &&
+                            backingBuffer->metalBuffer != nullptr) {
+                            tb.imageAtomicMetalBuffer =
+                                backingBuffer->metalBuffer;
+                            tb.imageAtomicBufferOffset =
+                                static_cast<std::size_t>(
+                                    std::max<GLintptr>(
+                                        texObj->desc.bufferOffset, 0));
+                        }
+                    } else {
+                        tb.imageAtomicMetalBuffer =
+                            impl_->ensureTextureImageAtomicBuffer(*texObj);
+                        tb.imageAtomicBufferOffset = 0;
+                        if (tb.imageAtomicMetalBuffer != nullptr &&
+                            ib.access != GL_READ_ONLY) {
+                            texObj->imageAtomicBufferDirtyToTexture = true;
+                        }
+                    }
+                }
+            }
             info.textures.push_back(tb);
         }
     }
@@ -51336,6 +51370,40 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             }
             tb.metalSamplerState = nullptr;
             tb.metalSlot = img.metalBinding + static_cast<std::uint32_t>(arrayElement);
+            if (img.metalAtomicBufferBinding != 0xFFFFFFFFu) {
+                const std::string atomicNeedle = img.name + "_atomic";
+                const bool usesImageAtomic =
+                    programObject->computeMSL.find(atomicNeedle) != std::string::npos ||
+                    programObject->computeMSL.find("_appgl_" + atomicNeedle) !=
+                        std::string::npos;
+                if (usesImageAtomic) {
+                    tb.imageAtomicBufferSlot =
+                        img.metalAtomicBufferBinding +
+                        static_cast<std::uint32_t>(arrayElement);
+                    if (texObj->target == GL_TEXTURE_BUFFER &&
+                        texObj->desc.sourceBuffer != 0) {
+                        GLBufferObject* backingBuffer =
+                            impl_->objects->buffers().get(texObj->desc.sourceBuffer);
+                        if (backingBuffer != nullptr &&
+                            backingBuffer->metalBuffer != nullptr) {
+                            tb.imageAtomicMetalBuffer =
+                                backingBuffer->metalBuffer;
+                            tb.imageAtomicBufferOffset =
+                                static_cast<std::size_t>(
+                                    std::max<GLintptr>(
+                                        texObj->desc.bufferOffset, 0));
+                        }
+                    } else {
+                        tb.imageAtomicMetalBuffer =
+                            impl_->ensureTextureImageAtomicBuffer(*texObj);
+                        tb.imageAtomicBufferOffset = 0;
+                        if (tb.imageAtomicMetalBuffer != nullptr &&
+                            ib.access != GL_READ_ONLY) {
+                            texObj->imageAtomicBufferDirtyToTexture = true;
+                        }
+                    }
+                }
+            }
             info.textures.push_back(tb);
         }
     }
