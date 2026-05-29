@@ -2676,6 +2676,10 @@ struct MetalFrameGraph::Impl {
                 pass.colorAttachments[0].slice =
                     static_cast<NSUInteger>(info.fboColorSlices[0]);
             }
+            if (isFBODraw && info.fboColorLevels[0] > 0) {
+                pass.colorAttachments[0].level =
+                    static_cast<NSUInteger>(info.fboColorLevels[0]);
+            }
             if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
                 pass.colorAttachments[0].loadAction = MTLLoadActionClear;
                 pass.colorAttachments[0].clearColor = pendingClearColor;
@@ -2702,6 +2706,11 @@ struct MetalFrameGraph::Impl {
                     info.fboColorSlices[sliceIdx] > 0) {
                     pass.colorAttachments[ei + 1].slice =
                         static_cast<NSUInteger>(info.fboColorSlices[sliceIdx]);
+                }
+                if (sliceIdx < info.fboColorLevels.size() &&
+                    info.fboColorLevels[sliceIdx] > 0) {
+                    pass.colorAttachments[ei + 1].level =
+                        static_cast<NSUInteger>(info.fboColorLevels[sliceIdx]);
                 }
             }
             // Layered rendering — GS-emul path only. When the
@@ -2925,7 +2934,11 @@ struct MetalFrameGraph::Impl {
         // the common case to keep behavior bit-identical to pre-Day-8
         // baselines on tests that don't exercise viewport_array.
         if (info.viewportArrayCount > 1) {
-            const double rtHeight = static_cast<double>(colorTexture.height);
+            const NSUInteger rtHeightPx =
+                (isFBODraw && info.fboHeight > 0)
+                    ? static_cast<NSUInteger>(info.fboHeight)
+                    : colorTexture.height;
+            const double rtHeight = static_cast<double>(rtHeightPx);
             // Sprint 21 A-2 [clip_control.viewport_bounds]: match the
             // single-viewport path. Shaders with the injected Y-sign keep
             // each viewport rectangle fixed; legacy paths keep the
@@ -2963,9 +2976,17 @@ struct MetalFrameGraph::Impl {
             // Clamp the GL viewport rect to the render target before
             // computing the Metal-flipped origin so the bound rect is
             // always non-negative and within bounds.
-            const double rtHeight = static_cast<double>(colorTexture.height);
-            const GLint rtW = static_cast<GLint>(colorTexture.width);
-            const GLint rtH = static_cast<GLint>(colorTexture.height);
+            const NSUInteger rtWidthPx =
+                (isFBODraw && info.fboWidth > 0)
+                    ? static_cast<NSUInteger>(info.fboWidth)
+                    : colorTexture.width;
+            const NSUInteger rtHeightPx =
+                (isFBODraw && info.fboHeight > 0)
+                    ? static_cast<NSUInteger>(info.fboHeight)
+                    : colorTexture.height;
+            const double rtHeight = static_cast<double>(rtHeightPx);
+            const GLint rtW = static_cast<GLint>(rtWidthPx);
+            const GLint rtH = static_cast<GLint>(rtHeightPx);
             // GL viewport (bottom-up coords). Clamp x/y to [0, rt) and
             // width/height so the resulting rect fits in the RT.
             const GLint glX = std::max<GLint>(0, info.viewportX);
@@ -3015,8 +3036,14 @@ struct MetalFrameGraph::Impl {
         // implementation-defined state that drops fragments at any
         // viewport > 0. Symmetric N-count is required.
         {
-            const NSUInteger rtW = colorTexture.width;
-            const NSUInteger rtH = colorTexture.height;
+            const NSUInteger rtW =
+                (isFBODraw && info.fboWidth > 0)
+                    ? static_cast<NSUInteger>(info.fboWidth)
+                    : colorTexture.width;
+            const NSUInteger rtH =
+                (isFBODraw && info.fboHeight > 0)
+                    ? static_cast<NSUInteger>(info.fboHeight)
+                    : colorTexture.height;
             // Helper that converts a single GL scissor rect (bottom-up,
             // RT-relative) plus an enabled flag into a Metal scissor
             // rect (top-down, clamped). When disabled, returns the

@@ -599,6 +599,9 @@ struct TranslatedDrawInfo {
     // Non-layered attachments (FramebufferTexture / FramebufferTexture2D)
     // leave their slot at 0.
     std::array<std::uint32_t, 8> fboColorSlices = {};
+    // Per-attachment mip level. OpenGL framebufferTexture* attaches a
+    // specific texture level; Metal defaults color attachments to level 0.
+    std::array<std::uint32_t, 8> fboColorLevels = {};
 };
 
 // Phase 8X Group 4d follow-up¹⁷ — describes a single immediate-mode

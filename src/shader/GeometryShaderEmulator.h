@@ -321,6 +321,14 @@ struct SampledTextureSlot {
     // Byte stride between array/cube layer-faces in data. When zero,
     // readers fall back to bytesPerRow * height.
     std::uint32_t bytesPerImage = 0;
+    // Optional mip chain metadata for sampled-texture snapshots. When
+    // empty, readers treat data as a single level using width/height.
+    std::vector<std::uint32_t> mipOffsets;
+    std::vector<std::uint32_t> mipWidths;
+    std::vector<std::uint32_t> mipHeights;
+    std::vector<std::uint32_t> mipBytesPerRow;
+    std::vector<std::uint32_t> mipBytesPerImage;
+    std::vector<std::uint32_t> mipLayerFaces;
     // Number of addressable storage-image layer-faces. For cube arrays
     // imageSize() reports cube count in depth, while imageLoad/store
     // coordinates address the six faces per cube via coord.z.

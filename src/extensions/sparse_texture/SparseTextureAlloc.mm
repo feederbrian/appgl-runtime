@@ -690,6 +690,8 @@ bool allocateStorage(ExtensionContext& ctx, GLTextureObject& textureObject) {
     releaseRetainedMetalObject(textureObject.metalSwizzledView);
     textureObject.metalSwizzledView = nullptr;
     textureObject.swizzleDirty = true;
+    releaseRetainedMetalObject(textureObject.metalSamplingProxy);
+    textureObject.metalSamplingProxy = nullptr;
     replaceSparseHeap(ctx, textureObject, transferRetainedMetalObject(heap));
     textureObject.metalTexture = transferRetainedMetalObject(texture);
     if (texture.firstMipmapInTail > 0) {

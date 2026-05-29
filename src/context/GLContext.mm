@@ -1642,6 +1642,68 @@ GLsizei textureViewSourceLayerCount(const GLTextureObject& object) {
     }
 }
 
+GLsizei textureViewEffectiveLevelCount(const GLTextureObject& object) {
+    if (object.viewNumLevels > 0) {
+        return object.viewNumLevels;
+    }
+    return object.desc.immutable
+        ? std::max<GLsizei>(object.desc.levels, 0)
+        : 0;
+}
+
+GLsizei textureViewEffectiveLayerCount(const GLTextureObject& object) {
+    if (object.viewNumLayers > 0) {
+        return object.viewNumLayers;
+    }
+    if (!object.desc.immutable) {
+        return 0;
+    }
+    const GLenum target = object.desc.target != 0 ? object.desc.target : object.target;
+    switch (target) {
+        case GL_TEXTURE_1D_ARRAY:
+            return std::max<GLsizei>(
+                std::max<GLsizei>(object.desc.layers, 1),
+                std::max<GLsizei>(object.desc.height, 1));
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            return std::max<GLsizei>(object.desc.layers, 1);
+        case GL_TEXTURE_CUBE_MAP:
+            return 6;
+        default:
+            return 1;
+    }
+}
+
+GLsizei textureViewAvailableLayerCount(const GLTextureObject& object) {
+    if (object.viewNumLayers > 0) {
+        return object.viewNumLayers;
+    }
+    return object.desc.immutable ? textureViewSourceLayerCount(object) : 0;
+}
+
+GLsizei textureImmutableLevelCountForQuery(GLObjectStore* objects,
+                                           const GLTextureObject& object) {
+    if (!object.desc.immutable) {
+        return 0;
+    }
+    const GLTextureObject* cursor = &object;
+    std::unordered_set<GLuint> visited;
+    for (int depth = 0; depth < 64 && cursor != nullptr; ++depth) {
+        const GLuint sourceName = cursor->viewSourceTexture;
+        if (sourceName == 0) {
+            return cursor->desc.immutable
+                ? std::max<GLsizei>(cursor->desc.levels, 0)
+                : 0;
+        }
+        if (!visited.insert(sourceName).second || objects == nullptr) {
+            break;
+        }
+        cursor = objects->textures().get(sourceName);
+    }
+    return std::max<GLsizei>(object.desc.levels, 0);
+}
+
 bool textureViewTargetLayerCountValid(GLenum target, GLuint numlayers) {
     switch (target) {
         case GL_TEXTURE_CUBE_MAP:
@@ -3081,6 +3143,34 @@ struct GLContext::Impl {
         return nullptr;
     }
 
+    std::vector<GLuint> textureStorageAliasNames(GLuint textureName) const {
+        std::vector<GLuint> names;
+        if (textureName == 0) {
+            return names;
+        }
+        names.push_back(textureName);
+        if (objects == nullptr) {
+            return names;
+        }
+
+        std::unordered_set<GLuint> visited;
+        visited.insert(textureName);
+        GLuint cursorName = textureName;
+        for (int depth = 0; depth < 64; ++depth) {
+            const GLTextureObject* texture = objects->textures().get(cursorName);
+            if (texture == nullptr || texture->viewSourceTexture == 0) {
+                break;
+            }
+            const GLuint sourceName = texture->viewSourceTexture;
+            if (sourceName == 0 || !visited.insert(sourceName).second) {
+                break;
+            }
+            names.push_back(sourceName);
+            cursorName = sourceName;
+        }
+        return names;
+    }
+
     void clearLegacyMsaaSamplerFlushIfTexture(GLuint textureName) const {
         if (textureName == 0 || objects == nullptr) return;
         if (GLTextureObject* tex = objects->textures().get(textureName)) {
@@ -3095,30 +3185,51 @@ struct GLContext::Impl {
     }
 
     void markGpuResourceWrites(const GpuResourceWriteSet& writes) const {
+        auto markOne = [&](GpuResourceAccess::Kind kind,
+                           GLuint name,
+                           std::uint32_t bits) {
+            GLProducerPendingState* state =
+                pendingStateForResource(kind, name);
+            if (state == nullptr) return;
+            GLProducerPendingAccess::mark(*state, bits);
+        };
         for (const auto& write : writes) {
             if (write.name == 0 || write.bits == 0) continue;
-            GLProducerPendingState* state =
-                pendingStateForResource(write.kind, write.name);
-            if (state == nullptr) continue;
-            GLProducerPendingAccess::mark(*state, write.bits);
+            if (write.kind == GpuResourceAccess::Kind::Texture) {
+                for (GLuint name : textureStorageAliasNames(write.name)) {
+                    markOne(write.kind, name, write.bits);
+                }
+            } else {
+                markOne(write.kind, write.name, write.bits);
+            }
         }
     }
 
     void drainPendingGpuProducers(const GpuResourceReadSet& reads) const {
+        auto textureNamesForRead = [&](const GpuResourceAccess& read) {
+            return read.kind == GpuResourceAccess::Kind::Texture
+                ? textureStorageAliasNames(read.name)
+                : std::vector<GLuint>{read.name};
+        };
+
         bool needsDrain = false;
         for (const auto& read : reads) {
             if (read.name == 0 || read.bits == 0) continue;
-            const GLProducerPendingState* state =
-                pendingStateForResource(read.kind, read.name);
-            if (state != nullptr && state->hasAny(read.bits)) {
-                needsDrain = true;
-                break;
+            for (GLuint name : textureNamesForRead(read)) {
+                if (name == 0) continue;
+                const GLProducerPendingState* state =
+                    pendingStateForResource(read.kind, name);
+                if (state != nullptr && state->hasAny(read.bits)) {
+                    needsDrain = true;
+                    break;
+                }
+                if (read.kind == GpuResourceAccess::Kind::Texture &&
+                    legacyMsaaSamplerFlushPending(name)) {
+                    needsDrain = true;
+                    break;
+                }
             }
-            if (read.kind == GpuResourceAccess::Kind::Texture &&
-                legacyMsaaSamplerFlushPending(read.name)) {
-                needsDrain = true;
-                break;
-            }
+            if (needsDrain) break;
         }
         if (!needsDrain) {
             return;
@@ -3128,12 +3239,15 @@ struct GLContext::Impl {
         }
         for (const auto& read : reads) {
             if (read.name == 0 || read.bits == 0) continue;
-            GLProducerPendingState* state =
-                pendingStateForResource(read.kind, read.name);
-            if (state == nullptr) continue;
-            GLProducerPendingAccess::clear(*state, read.bits);
-            if (read.kind == GpuResourceAccess::Kind::Texture) {
-                clearLegacyMsaaSamplerFlushIfTexture(read.name);
+            for (GLuint name : textureNamesForRead(read)) {
+                if (name == 0) continue;
+                GLProducerPendingState* state =
+                    pendingStateForResource(read.kind, name);
+                if (state == nullptr) continue;
+                GLProducerPendingAccess::clear(*state, read.bits);
+                if (read.kind == GpuResourceAccess::Kind::Texture) {
+                    clearLegacyMsaaSamplerFlushIfTexture(name);
+                }
             }
         }
     }
@@ -3664,6 +3778,8 @@ struct GLContext::Impl {
         releaseRetainedMetalObject(object.metalSwizzledView);
         object.metalSwizzledView = nullptr;
         object.swizzleDirty = true;
+        releaseRetainedMetalObject(object.metalSamplingProxy);
+        object.metalSamplingProxy = nullptr;
         releaseRetainedMetalObject(object.imageAtomicBuffer);
         object.imageAtomicBuffer = nullptr;
         object.imageAtomicBufferSize = 0;
@@ -5400,6 +5516,11 @@ struct GLContext::Impl {
         if (baseIt == object.levels.end()) {
             releaseRetainedMetalObject(object.metalTexture);
             object.metalTexture = nullptr;
+            releaseRetainedMetalObject(object.metalSwizzledView);
+            object.metalSwizzledView = nullptr;
+            object.swizzleDirty = true;
+            releaseRetainedMetalObject(object.metalSamplingProxy);
+            object.metalSamplingProxy = nullptr;
             if (owner != nullptr) {
                 ExtensionContext extensionContext(*owner);
                 extensions::sparse_texture::resetStorage(extensionContext, object);
@@ -5474,6 +5595,8 @@ struct GLContext::Impl {
             releaseRetainedMetalObject(object.metalSwizzledView);
             object.metalSwizzledView = nullptr;
             object.swizzleDirty = true;
+            releaseRetainedMetalObject(object.metalSamplingProxy);
+            object.metalSamplingProxy = nullptr;
 
             // MS textures only accept renderable formats — use the same
             // mapping the renderbuffer path uses. Fall back to RGBA8Unorm
@@ -5881,6 +6004,8 @@ struct GLContext::Impl {
         releaseRetainedMetalObject(object.metalSwizzledView);
         object.metalSwizzledView = nullptr;
         object.swizzleDirty = true;
+        releaseRetainedMetalObject(object.metalSamplingProxy);
+        object.metalSamplingProxy = nullptr;
 
         // Choose the native Metal pixel format. Three cases (mirror of
         // the fast-path above):
@@ -6024,6 +6149,8 @@ struct GLContext::Impl {
                 releaseRetainedMetalObject(object.metalSwizzledView);
                 object.metalSwizzledView = nullptr;
                 object.swizzleDirty = true;
+                releaseRetainedMetalObject(object.metalSamplingProxy);
+                object.metalSamplingProxy = nullptr;
                 object.instantiated = true;
                 return true;
             }
@@ -7297,15 +7424,293 @@ struct GLContext::Impl {
         return uploaded ? flippedTex : nil;
     }
 
+    static bool isCubeFamilyTextureTarget(GLenum target) {
+        return target == GL_TEXTURE_CUBE_MAP ||
+               target == GL_TEXTURE_CUBE_MAP_ARRAY;
+    }
+
+    static NSUInteger metalTextureSliceCount(id<MTLTexture> tex) {
+        if (tex == nil) {
+            return 0;
+        }
+        switch (tex.textureType) {
+            case MTLTextureType3D:
+                return std::max<NSUInteger>(tex.depth, 1u);
+            case MTLTextureTypeCube:
+                return 6u;
+            case MTLTextureTypeCubeArray:
+                return 6u * std::max<NSUInteger>(tex.arrayLength, 1u);
+            case MTLTextureType1DArray:
+            case MTLTextureType2DArray:
+            case MTLTextureType2DMultisampleArray:
+                return std::max<NSUInteger>(tex.arrayLength, 1u);
+            default:
+                return 1u;
+        }
+    }
+
+    id<MTLTexture> buildTextureViewSamplingProxy(GLTextureObject& viewObj) {
+        if (viewObj.viewSourceTexture == 0 ||
+            !isCubeFamilyTextureTarget(viewObj.target) ||
+            objects == nullptr ||
+            device == nil) {
+            return nil;
+        }
+
+        GLuint rootName = viewObj.viewSourceTexture;
+        GLTextureObject* rootObj = objects->textures().get(rootName);
+        std::unordered_set<GLuint> visited;
+        while (rootObj != nullptr && rootObj->viewSourceTexture != 0) {
+            if (!visited.insert(rootName).second) {
+                return nil;
+            }
+            rootName = rootObj->viewSourceTexture;
+            rootObj = objects->textures().get(rootName);
+        }
+        if (rootObj == nullptr || rootObj->target == viewObj.target) {
+            return nil;
+        }
+
+        if ((rootObj->metalTexture == nullptr || !rootObj->instantiated) &&
+            !rootObj->levels.empty()) {
+            (void)replaceMetalTexture(*rootObj, rootName);
+        }
+        id<MTLTexture> sourceTex = metalTextureFromRaw(rootObj->metalTexture);
+        if (sourceTex == nil) {
+            return nil;
+        }
+        switch (sourceTex.textureType) {
+            case MTLTextureType2DArray:
+            case MTLTextureTypeCube:
+            case MTLTextureTypeCubeArray:
+                break;
+            default:
+                return nil;
+        }
+
+        const NSUInteger levelStart =
+            static_cast<NSUInteger>(std::max<GLint>(viewObj.viewMinLevel, 0));
+        const NSUInteger levelCount = static_cast<NSUInteger>(
+            std::max<GLint>(
+                viewObj.viewNumLevels > 0 ? viewObj.viewNumLevels : viewObj.desc.levels,
+                1));
+        const NSUInteger sourceLevels =
+            std::max<NSUInteger>(sourceTex.mipmapLevelCount, 1u);
+        if (levelStart >= sourceLevels ||
+            levelCount > sourceLevels - levelStart) {
+            return nil;
+        }
+
+        const NSUInteger sliceStart =
+            static_cast<NSUInteger>(std::max<GLint>(viewObj.viewMinLayer, 0));
+        const NSUInteger sliceCount = static_cast<NSUInteger>(
+            std::max<GLint>(
+                viewObj.viewNumLayers > 0 ? viewObj.viewNumLayers : viewObj.desc.layers,
+                1));
+        const NSUInteger sourceSlices = metalTextureSliceCount(sourceTex);
+        if (sliceStart >= sourceSlices ||
+            sliceCount > sourceSlices - sliceStart ||
+            sliceCount == 0 ||
+            sliceCount % 6u != 0) {
+            return nil;
+        }
+
+        const NSUInteger baseWidth =
+            std::max<NSUInteger>(sourceTex.width >> levelStart, 1u);
+        const NSUInteger baseHeight =
+            std::max<NSUInteger>(sourceTex.height >> levelStart, 1u);
+        if (baseWidth != baseHeight) {
+            return nil;
+        }
+
+        MTLPixelFormat proxyFormat = metalRenderbufferFormat(viewObj.desc.internalFormat);
+        if (proxyFormat == MTLPixelFormatInvalid) {
+            proxyFormat = sourceTex.pixelFormat;
+        }
+        MTLTextureDescriptor* descriptor = [[MTLTextureDescriptor alloc] init];
+        descriptor.textureType = metalTextureTypeForTarget(viewObj.target);
+        descriptor.pixelFormat = proxyFormat;
+        descriptor.width = baseWidth;
+        descriptor.height = baseHeight;
+        descriptor.depth = 1u;
+        descriptor.mipmapLevelCount = levelCount;
+        descriptor.arrayLength =
+            viewObj.target == GL_TEXTURE_CUBE_MAP_ARRAY
+                ? std::max<NSUInteger>(sliceCount / 6u, 1u)
+                : 1u;
+        descriptor.usage = MTLTextureUsageShaderRead |
+                           MTLTextureUsagePixelFormatView;
+        descriptor.storageMode = MTLStorageModeShared;
+
+        id<MTLTexture> proxy = [device newTextureWithDescriptor:descriptor];
+        if (proxy == nil) {
+            return nil;
+        }
+
+        auto lease = makeCommandBuffer(AppGLCommandReason::TextureUpload);
+        id<MTLCommandBuffer> commandBuffer = lease.get();
+        if (commandBuffer == nil) {
+            return nil;
+        }
+        id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
+        if (blit == nil) {
+            return nil;
+        }
+
+        for (NSUInteger mip = 0; mip < levelCount; ++mip) {
+            const NSUInteger sourceLevel = levelStart + mip;
+            const NSUInteger mipWidth =
+                std::max<NSUInteger>(sourceTex.width >> sourceLevel, 1u);
+            const NSUInteger mipHeight =
+                std::max<NSUInteger>(sourceTex.height >> sourceLevel, 1u);
+            const MTLSize sourceSize = MTLSizeMake(mipWidth, mipHeight, 1u);
+            for (NSUInteger slice = 0; slice < sliceCount; ++slice) {
+                [blit copyFromTexture:sourceTex
+                           sourceSlice:(sliceStart + slice)
+                           sourceLevel:sourceLevel
+                          sourceOrigin:MTLOriginMake(0, 0, 0)
+                            sourceSize:sourceSize
+                             toTexture:proxy
+                      destinationSlice:slice
+                      destinationLevel:mip
+                     destinationOrigin:MTLOriginMake(0, 0, 0)];
+            }
+        }
+        [blit endEncoding];
+        if (!lease.commitAndWait(AppGLCommandReason::TextureUpload)) {
+            return nil;
+        }
+        return proxy;
+    }
+
+    bool materializeTextureView(GLTextureObject& viewObj) {
+        if (viewObj.viewSourceTexture == 0) {
+            return viewObj.metalTexture != nullptr;
+        }
+        if (objects == nullptr) {
+            return viewObj.metalTexture != nullptr;
+        }
+
+        GLuint rootName = viewObj.viewSourceTexture;
+        GLTextureObject* rootObj = objects->textures().get(rootName);
+        std::unordered_set<GLuint> visited;
+        while (rootObj != nullptr && rootObj->viewSourceTexture != 0) {
+            if (!visited.insert(rootName).second) {
+                return false;
+            }
+            rootName = rootObj->viewSourceTexture;
+            rootObj = objects->textures().get(rootName);
+        }
+        if (rootObj == nullptr) {
+            return viewObj.metalTexture != nullptr;
+        }
+        if ((rootObj->metalTexture == nullptr || !rootObj->instantiated) &&
+            !rootObj->levels.empty()) {
+            (void)replaceMetalTexture(*rootObj, rootName);
+        }
+        id<MTLTexture> baseTex = (__bridge id<MTLTexture>)rootObj->metalTexture;
+        if (baseTex == nil) {
+            return false;
+        }
+
+        const MTLPixelFormat viewPixelFormat =
+            metalRenderbufferFormat(viewObj.desc.internalFormat);
+        if (viewPixelFormat == MTLPixelFormatInvalid) {
+            return false;
+        }
+
+        const NSUInteger levelStart =
+            static_cast<NSUInteger>(std::max<GLint>(viewObj.viewMinLevel, 0));
+        const NSUInteger levelCount = static_cast<NSUInteger>(
+            std::max<GLint>(
+                viewObj.viewNumLevels > 0 ? viewObj.viewNumLevels : viewObj.desc.levels,
+                1));
+        const NSUInteger sourceLevels =
+            std::max<NSUInteger>(baseTex.mipmapLevelCount, 1u);
+        if (levelStart >= sourceLevels ||
+            levelCount > sourceLevels - levelStart) {
+            return false;
+        }
+
+        auto textureSliceCount = [](id<MTLTexture> tex) -> NSUInteger {
+            switch (tex.textureType) {
+                case MTLTextureType3D:
+                    return std::max<NSUInteger>(tex.depth, 1u);
+                case MTLTextureTypeCube:
+                    return 6u;
+                case MTLTextureTypeCubeArray:
+                    return 6u * std::max<NSUInteger>(tex.arrayLength, 1u);
+                case MTLTextureType1DArray:
+                case MTLTextureType2DArray:
+                case MTLTextureType2DMultisampleArray:
+                    return std::max<NSUInteger>(tex.arrayLength, 1u);
+                default:
+                    return 1u;
+            }
+        };
+
+        const NSUInteger sliceStart =
+            static_cast<NSUInteger>(std::max<GLint>(viewObj.viewMinLayer, 0));
+        const NSUInteger sliceCount = static_cast<NSUInteger>(
+            std::max<GLint>(
+                viewObj.viewNumLayers > 0 ? viewObj.viewNumLayers : viewObj.desc.layers,
+                1));
+        const NSUInteger sourceSlices = textureSliceCount(baseTex);
+        if (sliceStart >= sourceSlices ||
+            sliceCount > sourceSlices - sliceStart) {
+            return false;
+        }
+
+        id<MTLTexture> viewTex =
+            [baseTex newTextureViewWithPixelFormat:viewPixelFormat
+                                       textureType:metalTextureTypeForTarget(viewObj.target)
+                                            levels:NSMakeRange(levelStart, levelCount)
+                                            slices:NSMakeRange(sliceStart, sliceCount)];
+        if (viewTex == nil) {
+            return false;
+        }
+
+        releaseRetainedMetalObject(viewObj.metalTexture);
+        viewObj.metalTexture = transferRetainedMetalObject(viewTex);
+        viewObj.instantiated = true;
+        releaseRetainedMetalObject(viewObj.metalSwizzledView);
+        viewObj.metalSwizzledView = nullptr;
+        viewObj.swizzleDirty = true;
+        releaseRetainedMetalObject(viewObj.metalSamplingProxy);
+        viewObj.metalSamplingProxy = nullptr;
+        return true;
+    }
+
     // Returns the texture to bind — either the swizzled view (if
     // non-default swizzle) or the base metalTexture. Lazily rebuilds
     // the swizzled view when `swizzleDirty` is set.
     void* resolveSwizzledTexture(GLTextureObject& texObj) {
+        if (texObj.viewSourceTexture != 0) {
+            (void)materializeTextureView(texObj);
+        }
         const auto& sw = texObj.params.swizzle;
-        id<MTLTexture> baseTex = (__bridge id<MTLTexture>)texObj.metalTexture;
+        void* baseTextureRaw = texObj.metalTexture;
+        id<MTLTexture> baseTex = metalTextureFromRaw(baseTextureRaw);
         if (baseTex == nil) {
             texObj.swizzleDirty = false;
             return texObj.metalTexture;
+        }
+        if (texObj.viewSourceTexture != 0) {
+            id<MTLTexture> samplingProxy = buildTextureViewSamplingProxy(texObj);
+            if (samplingProxy != nil) {
+                releaseRetainedMetalObject(texObj.metalSamplingProxy);
+                texObj.metalSamplingProxy = transferRetainedMetalObject(samplingProxy);
+                releaseRetainedMetalObject(texObj.metalSwizzledView);
+                texObj.metalSwizzledView = nullptr;
+                texObj.swizzleDirty = true;
+                baseTextureRaw = texObj.metalSamplingProxy;
+                baseTex = samplingProxy;
+            } else {
+                releaseRetainedMetalObject(texObj.metalSamplingProxy);
+                texObj.metalSamplingProxy = nullptr;
+                baseTextureRaw = texObj.metalTexture;
+                baseTex = metalTextureFromRaw(baseTextureRaw);
+            }
         }
 
         const bool isMSTarget =
@@ -7363,7 +7768,7 @@ struct GLContext::Impl {
                 texObj.metalSwizzledView = nullptr;
             }
             texObj.swizzleDirty = false;
-            return texObj.metalTexture;
+            return baseTextureRaw;
         }
 
         if (depthStencilNeedsSamplingFlip) {
@@ -7379,7 +7784,7 @@ struct GLContext::Impl {
             texObj.swizzleDirty = false;
             return texObj.metalSwizzledView != nullptr
                 ? texObj.metalSwizzledView
-                : texObj.metalTexture;
+                : baseTextureRaw;
         }
 
         // Non-default swizzle — rebuild view if dirty.
@@ -7442,7 +7847,7 @@ struct GLContext::Impl {
             texObj.swizzleDirty = false;
             return texObj.metalSwizzledView != nullptr
                 ? texObj.metalSwizzledView
-                : texObj.metalTexture;
+                : baseTextureRaw;
         }
 
         // Mode 2: MS sRGB textures are allocated with linear storage so
@@ -7462,7 +7867,7 @@ struct GLContext::Impl {
         texObj.swizzleDirty = false;
         return texObj.metalSwizzledView != nullptr
             ? texObj.metalSwizzledView
-            : texObj.metalTexture;
+            : baseTextureRaw;
     }
 
     static bool samplerMinFilterRequiresMipChain(GLint minFilter) {
@@ -7482,6 +7887,26 @@ struct GLContext::Impl {
         const GLenum target = texObj.desc.target != 0 ? texObj.desc.target : texObj.target;
         if (target == GL_TEXTURE_BUFFER) {
             return texObj.metalTexture != nullptr;
+        }
+        if (texObj.viewSourceTexture != 0) {
+            if (texObj.metalTexture == nullptr ||
+                !texObj.desc.immutable ||
+                texObj.params.maxLevel < texObj.params.baseLevel) {
+                return false;
+            }
+            const GLint baseLevel = std::max<GLint>(texObj.params.baseLevel, 0);
+            const GLint viewLevels = std::max<GLint>(
+                texObj.viewNumLevels > 0 ? texObj.viewNumLevels : texObj.desc.levels,
+                1);
+            if (baseLevel >= viewLevels) {
+                return false;
+            }
+            if (samplerMinFilterRequiresMipChain(samplerParams.minFilter)) {
+                const GLint effectiveMax =
+                    std::min<GLint>(texObj.params.maxLevel, viewLevels - 1);
+                return effectiveMax >= baseLevel;
+            }
+            return true;
         }
         if (target == GL_TEXTURE_2D_MULTISAMPLE ||
             target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
@@ -8059,13 +8484,138 @@ struct GLContext::Impl {
             return msl != nullptr &&
                 msl->find("spvDescriptorSetBuffer0") != std::string::npos;
         };
+        auto isSamplerUniformType = [](GLenum type) {
+            switch (type) {
+                case GL_SAMPLER_1D:
+                case GL_INT_SAMPLER_1D:
+                case GL_UNSIGNED_INT_SAMPLER_1D:
+                case GL_SAMPLER_1D_SHADOW:
+                case GL_SAMPLER_2D:
+                case GL_INT_SAMPLER_2D:
+                case GL_UNSIGNED_INT_SAMPLER_2D:
+                case GL_SAMPLER_2D_SHADOW:
+                case GL_SAMPLER_3D:
+                case GL_INT_SAMPLER_3D:
+                case GL_UNSIGNED_INT_SAMPLER_3D:
+                case GL_SAMPLER_CUBE:
+                case GL_INT_SAMPLER_CUBE:
+                case GL_UNSIGNED_INT_SAMPLER_CUBE:
+                case GL_SAMPLER_CUBE_SHADOW:
+                case GL_SAMPLER_1D_ARRAY:
+                case GL_INT_SAMPLER_1D_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+                case GL_SAMPLER_1D_ARRAY_SHADOW:
+                case GL_SAMPLER_2D_ARRAY:
+                case GL_INT_SAMPLER_2D_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+                case GL_SAMPLER_2D_ARRAY_SHADOW:
+                case GL_SAMPLER_CUBE_MAP_ARRAY:
+                case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+                case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+                case GL_SAMPLER_2D_RECT:
+                case GL_INT_SAMPLER_2D_RECT:
+                case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+                case GL_SAMPLER_2D_RECT_SHADOW:
+                case GL_SAMPLER_BUFFER:
+                case GL_INT_SAMPLER_BUFFER:
+                case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+                case GL_SAMPLER_2D_MULTISAMPLE:
+                case GL_INT_SAMPLER_2D_MULTISAMPLE:
+                case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+                case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                    return true;
+                default:
+                    return false;
+            }
+        };
+        auto findTextureSlotInMSL =
+            [](const std::string* msl,
+               const std::string& name,
+               std::uint32_t fallback) -> std::uint32_t {
+            if (msl == nullptr || name.empty()) return fallback;
+            auto isIdentChar = [](char c) {
+                return c == '_' ||
+                    (c >= '0' && c <= '9') ||
+                    (c >= 'A' && c <= 'Z') ||
+                    (c >= 'a' && c <= 'z');
+            };
+            std::size_t pos = 0;
+            const std::string attrNeedle = "[[texture(";
+            while ((pos = msl->find(name, pos)) != std::string::npos) {
+                const std::size_t end = pos + name.size();
+                const bool leftOk = pos == 0 || !isIdentChar((*msl)[pos - 1]);
+                const bool rightOk = end >= msl->size() || !isIdentChar((*msl)[end]);
+                if (leftOk && rightOk) {
+                    const std::size_t attr = msl->find(attrNeedle, end);
+                    const std::size_t stop = msl->find_first_of(",)", end);
+                    if (attr != std::string::npos &&
+                        (stop == std::string::npos || attr < stop)) {
+                        const std::size_t valueStart = attr + attrNeedle.size();
+                        const std::size_t valueEnd = msl->find(")]]", valueStart);
+                        if (valueEnd != std::string::npos) {
+                            try {
+                                return static_cast<std::uint32_t>(
+                                    std::stoul(msl->substr(
+                                        valueStart, valueEnd - valueStart)));
+                            } catch (...) {
+                                return fallback;
+                            }
+                        }
+                    }
+                }
+                pos = end;
+            }
+            return fallback;
+        };
+        auto synthesizeSamplerBindings =
+            [&](const std::string* stageMSL) {
+            std::vector<ShaderReflection::ResourceBinding> bindings;
+            if (stageMSL == nullptr ||
+                stageMSL->find("[[texture(") == std::string::npos) {
+                return bindings;
+            }
+            std::uint32_t fallbackSlot = 0;
+            for (const auto& uniform : program.uniforms) {
+                if (!isSamplerUniformType(uniform.type)) {
+                    continue;
+                }
+                ShaderReflection::ResourceBinding binding;
+                binding.name = uniform.name;
+                binding.glBinding = uniform.explicitBinding >= 0
+                    ? static_cast<GLuint>(uniform.explicitBinding)
+                    : 0u;
+                const std::string appglName = "_appgl_" + uniform.name;
+                const std::uint32_t slot = findTextureSlotInMSL(
+                    stageMSL,
+                    appglName,
+                    findTextureSlotInMSL(stageMSL, uniform.name, fallbackSlot));
+                binding.metalBinding = slot;
+                bindings.push_back(std::move(binding));
+                fallbackSlot = slot + std::max<GLint>(uniform.arraySize, 1);
+            }
+            return bindings;
+        };
 
         auto resolveStage = [&](const char* stageTag,
                                 const ShaderReflection* reflection,
                                 std::vector<TranslatedDrawInfo::TextureBinding>& outBindings,
                                 const std::string* stageMSL,
                                 bool usesSparseSampledSidecars) {
-            if (reflection == nullptr || reflection->sampledTextures.empty()) {
+            std::vector<ShaderReflection::ResourceBinding> synthesizedBindings;
+            const std::vector<ShaderReflection::ResourceBinding>* sampledTextures =
+                (reflection != nullptr && !reflection->sampledTextures.empty())
+                    ? &reflection->sampledTextures
+                    : nullptr;
+            if (sampledTextures == nullptr) {
+                synthesizedBindings = synthesizeSamplerBindings(stageMSL);
+                if (!synthesizedBindings.empty()) {
+                    sampledTextures = &synthesizedBindings;
+                }
+            }
+            if (sampledTextures == nullptr || sampledTextures->empty()) {
                 if (g_lbLog) {
                     std::fprintf(stderr,
                         "[LB] stage=%s SKIP reason=no-sampled-textures (refl=%p sampCount=%zu)\n",
@@ -8079,9 +8629,9 @@ struct GLContext::Impl {
             if (g_lbLog) {
                 std::fprintf(stderr,
                     "[LB] stage=%s ENTER sampCount=%zu\n",
-                    stageTag, reflection->sampledTextures.size());
+                    stageTag, sampledTextures->size());
             }
-            for (const auto& sampledTex : reflection->sampledTextures) {
+            for (const auto& sampledTex : *sampledTextures) {
                 // Step 1: find the GL sampler uniform by name. For sampler
                 // arrays (`uniform sampler2D samp[N]`), SPIRV-Cross emits a
                 // single sampledTextures entry whose metalBinding spans N
@@ -8333,6 +8883,9 @@ struct GLContext::Impl {
                     continue;  // no texture bound to the unit
                 }
                 GLTextureObject* texObject = objects->textures().get(texName);
+                if (texObject != nullptr && texObject->viewSourceTexture != 0) {
+                    (void)materializeTextureView(*texObject);
+                }
                 if (texObject == nullptr || !texObject->instantiated ||
                     texObject->metalTexture == nullptr) {
                     if (logThisCall) {
@@ -8474,13 +9027,28 @@ struct GLContext::Impl {
                     }
                 }
                 if (g_lbLog) {
+                    id<MTLTexture> boundMtlTex =
+                        (__bridge id<MTLTexture>)binding.metalTexture;
                     std::fprintf(stderr,
                         "[LB-BOUND] stage=%s sampler='%s' glUnit=%d metalSlot=%u "
-                        "texName=%u metalTex=%p mtlSampler=%p samplerName=%u\n",
+                        "texName=%u metalTex=%p mtlSampler=%p samplerName=%u "
+                        "target=0x%X viewSrc=%u viewLevel=%d+%d viewLayer=%d+%d "
+                        "mtlType=%lu mtlFmt=%lu mtlSize=%lux%lu mtlMips=%lu\n",
                         stageTag, sampledTex.name.c_str(),
                         glUnit, binding.metalSlot, texName,
                         binding.metalTexture, binding.metalSamplerState,
-                        samplerName);
+                        samplerName,
+                        texObject->target,
+                        texObject->viewSourceTexture,
+                        texObject->viewMinLevel,
+                        texObject->viewNumLevels,
+                        texObject->viewMinLayer,
+                        texObject->viewNumLayers,
+                        boundMtlTex != nil ? static_cast<unsigned long>(boundMtlTex.textureType) : 0ul,
+                        boundMtlTex != nil ? static_cast<unsigned long>(boundMtlTex.pixelFormat) : 0ul,
+                        boundMtlTex != nil ? static_cast<unsigned long>(boundMtlTex.width) : 0ul,
+                        boundMtlTex != nil ? static_cast<unsigned long>(boundMtlTex.height) : 0ul,
+                        boundMtlTex != nil ? static_cast<unsigned long>(boundMtlTex.mipmapLevelCount) : 0ul);
                 }
 
                 if (logThisCall) {
@@ -8846,17 +9414,42 @@ struct GLContext::Impl {
                     }
                     continue;
                 }
-                if (texObject->metalTexture == nullptr) continue;
                 if (texObject->viewSourceTexture != 0) {
+                    (void)materializeTextureView(*texObject);
                     // Texture views require exact byte reinterpretation.
-                    // Metal getBytes on a pixel-format view can expose
-                    // converted/expanded values, so let the draw fall back
-                    // to the non-CPU sampled path instead of feeding the
-                    // VS/GS interpreter lossy data.
-                    return {};
+                    // Metal getBytes on a different-format view can expose
+                    // converted/expanded values, so keep rejecting those.
+                    // Same-format views, however, are byte-identical and CTS
+                    // texture_view samples them from VS/TCS/TES/GS paths that
+                    // currently use this CPU snapshot.
+                    GLTextureObject* sourceObject =
+                        objects->textures().get(texObject->viewSourceTexture);
+                    if (sourceObject == nullptr ||
+                        sourceObject->desc.internalFormat != texObject->desc.internalFormat) {
+                        return {};
+                    }
                 }
+                drainPendingGpuProducers({
+                    {GpuResourceAccess::Kind::Texture,
+                     texName,
+                     kProducerAll},
+                });
+                if (texObject->metalTexture == nullptr) continue;
                 id<MTLTexture> mtlTex =
                     (__bridge id<MTLTexture>)texObject->metalTexture;
+                if (texObject->viewSourceTexture != 0) {
+                    const bool cpuReadableViewType =
+                        mtlTex.textureType == MTLTextureType1D ||
+                        mtlTex.textureType == MTLTextureType1DArray ||
+                        mtlTex.textureType == MTLTextureType2D ||
+                        mtlTex.textureType == MTLTextureType2DArray ||
+                        mtlTex.textureType == MTLTextureType3D ||
+                        mtlTex.textureType == MTLTextureTypeCube ||
+                        mtlTex.textureType == MTLTextureTypeCubeArray;
+                    if (!cpuReadableViewType || mtlTex.sampleCount > 1) {
+                        return {};
+                    }
+                }
                 if (mtlTex.width == 0 || mtlTex.height == 0) continue;
                 appgl::SampledTextureSlot& slot = slots[i];
                 slot.width = static_cast<std::uint32_t>(mtlTex.width);
@@ -8864,14 +9457,32 @@ struct GLContext::Impl {
                     texObject->target == GL_TEXTURE_1D_ARRAY
                         ? std::max<NSUInteger>(mtlTex.arrayLength, 1u)
                         : mtlTex.height);
-                if (mtlTex.depth > 1) {
-                    slot.depth = static_cast<std::uint32_t>(mtlTex.depth);
+                if (mtlTex.textureType == MTLTextureType3D) {
+                    slot.depth = static_cast<std::uint32_t>(
+                        std::max<NSUInteger>(mtlTex.depth, 1u));
+                    slot.layerFaces = slot.depth;
+                } else if (mtlTex.textureType == MTLTextureTypeCubeArray ||
+                           texObject->target == GL_TEXTURE_CUBE_MAP_ARRAY) {
+                    const std::uint32_t cubes = static_cast<std::uint32_t>(
+                        std::max<NSUInteger>(mtlTex.arrayLength, 1u));
+                    slot.depth = cubes;
+                    slot.layerFaces = 6u * cubes;
+                } else if (mtlTex.textureType == MTLTextureTypeCube ||
+                           texObject->target == GL_TEXTURE_CUBE_MAP) {
+                    slot.depth = 1;
+                    slot.layerFaces = 6;
                 } else if (texObject->target == GL_TEXTURE_1D_ARRAY ||
                            texObject->target == GL_TEXTURE_2D_ARRAY ||
-                           texObject->target == GL_TEXTURE_CUBE_MAP_ARRAY ||
-                           texObject->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
+                           texObject->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
+                           mtlTex.textureType == MTLTextureType1DArray ||
+                           mtlTex.textureType == MTLTextureType2DArray ||
+                           mtlTex.textureType == MTLTextureType2DMultisampleArray) {
                     slot.depth = static_cast<std::uint32_t>(
                         std::max<NSUInteger>(mtlTex.arrayLength, 1u));
+                    slot.layerFaces = slot.depth;
+                } else {
+                    slot.depth = 0;
+                    slot.layerFaces = 1;
                 }
                 slot.internalFormat = static_cast<std::uint32_t>(
                     texObject->desc.internalFormat);
@@ -8920,29 +9531,109 @@ struct GLContext::Impl {
                 }
                 if (bpp == 0) continue;
                 slot.bytesPerRow = slot.width * bpp;
-                slot.bytesPerImage = slot.bytesPerRow * slot.height;
-                if (mtlTex.arrayLength > 1) {
-                    slot.layerFaces = static_cast<std::uint32_t>(
-                        std::max<NSUInteger>(mtlTex.arrayLength, 1u));
-                } else {
-                    slot.layerFaces = 1;
-                }
-                const std::uint32_t readbackHeight =
-                    static_cast<std::uint32_t>(mtlTex.height);
-                slot.data.assign(slot.bytesPerRow * readbackHeight, 0u);
-                MTLRegion region = MTLRegionMake2D(0, 0, slot.width,
-                                                   readbackHeight);
+                const std::uint32_t storageHeight =
+                    static_cast<std::uint32_t>(
+                        std::max<NSUInteger>(mtlTex.height, 1u));
+                slot.bytesPerImage = slot.bytesPerRow * storageHeight;
+                const NSUInteger mipCount =
+                    std::max<NSUInteger>(mtlTex.mipmapLevelCount, 1u);
+                slot.mipOffsets.clear();
+                slot.mipWidths.clear();
+                slot.mipHeights.clear();
+                slot.mipBytesPerRow.clear();
+                slot.mipBytesPerImage.clear();
+                slot.mipLayerFaces.clear();
+                slot.mipOffsets.reserve(mipCount);
+                slot.mipWidths.reserve(mipCount);
+                slot.mipHeights.reserve(mipCount);
+                slot.mipBytesPerRow.reserve(mipCount);
+                slot.mipBytesPerImage.reserve(mipCount);
+                slot.mipLayerFaces.reserve(mipCount);
+                slot.data.clear();
                 @try {
-                    [mtlTex getBytes:slot.data.data()
-                         bytesPerRow:slot.bytesPerRow
-                          fromRegion:region
-                         mipmapLevel:0];
+                    for (NSUInteger level = 0; level < mipCount; ++level) {
+                        const std::uint32_t mipWidth =
+                            static_cast<std::uint32_t>(
+                                std::max<NSUInteger>(mtlTex.width >> level, 1u));
+                        const std::uint32_t mipHeight =
+                            static_cast<std::uint32_t>(
+                                std::max<NSUInteger>(mtlTex.height >> level, 1u));
+                        const std::uint32_t mipBytesPerRow = mipWidth * bpp;
+                        const std::uint32_t mipBytesPerImage =
+                            mipBytesPerRow * mipHeight;
+                        std::uint32_t mipLayerFaces = slot.layerFaces != 0
+                            ? slot.layerFaces
+                            : 1u;
+                        if (mtlTex.textureType == MTLTextureType3D) {
+                            mipLayerFaces = static_cast<std::uint32_t>(
+                                std::max<NSUInteger>(mtlTex.depth >> level, 1u));
+                        }
+                        const std::size_t offset = slot.data.size();
+                        const std::size_t byteCount =
+                            static_cast<std::size_t>(mipBytesPerImage) *
+                            static_cast<std::size_t>(
+                                std::max<std::uint32_t>(mipLayerFaces, 1u));
+                        slot.mipOffsets.push_back(
+                            static_cast<std::uint32_t>(offset));
+                        slot.mipWidths.push_back(mipWidth);
+                        slot.mipHeights.push_back(mipHeight);
+                        slot.mipBytesPerRow.push_back(mipBytesPerRow);
+                        slot.mipBytesPerImage.push_back(mipBytesPerImage);
+                        slot.mipLayerFaces.push_back(mipLayerFaces);
+                        slot.data.resize(offset + byteCount, 0u);
+                        MTLRegion region =
+                            MTLRegionMake2D(0, 0, mipWidth, mipHeight);
+                        const bool native1D =
+                            mtlTex.textureType == MTLTextureType1D ||
+                            mtlTex.textureType == MTLTextureType1DArray;
+                        const NSUInteger metalBytesPerRow =
+                            native1D ? 0u : mipBytesPerRow;
+                        const NSUInteger metalBytesPerImage =
+                            native1D ? 0u : mipBytesPerImage;
+                        if (mtlTex.textureType == MTLTextureType3D) {
+                            MTLRegion region3D =
+                                MTLRegionMake3D(0, 0, 0,
+                                                mipWidth,
+                                                mipHeight,
+                                                mipLayerFaces);
+                            [mtlTex getBytes:slot.data.data() + offset
+                                 bytesPerRow:mipBytesPerRow
+                               bytesPerImage:mipBytesPerImage
+                                  fromRegion:region3D
+                                 mipmapLevel:level
+                                       slice:0];
+                        } else if (mipLayerFaces > 1) {
+                            for (NSUInteger slice = 0;
+                                 slice < static_cast<NSUInteger>(mipLayerFaces);
+                                 ++slice) {
+                                [mtlTex getBytes:slot.data.data() + offset +
+                                                  static_cast<std::size_t>(slice) *
+                                                      mipBytesPerImage
+                                     bytesPerRow:metalBytesPerRow
+                                   bytesPerImage:metalBytesPerImage
+                                      fromRegion:region
+                                     mipmapLevel:level
+                                           slice:slice];
+                            }
+                        } else {
+                            [mtlTex getBytes:slot.data.data() + offset
+                                 bytesPerRow:metalBytesPerRow
+                                  fromRegion:region
+                                 mipmapLevel:level];
+                        }
+                    }
                 } @catch (NSException* exc) {
                     // Private storage textures don't support getBytes.
                     // Keep descriptor dimensions for textureSize();
                     // sampling/fetching from an empty data vector still
                     // returns zero.
                     slot.data.clear();
+                    slot.mipOffsets.clear();
+                    slot.mipWidths.clear();
+                    slot.mipHeights.clear();
+                    slot.mipBytesPerRow.clear();
+                    slot.mipBytesPerImage.clear();
+                    slot.mipLayerFaces.clear();
                 }
             }
             result[v.varId] = std::move(slots);
@@ -10573,6 +11264,76 @@ struct GLContext::Impl {
         GLenum internalFormat = 0;
     };
 
+    struct ResolvedTextureAttachment {
+        bool valid = false;
+        GLTextureObject* attachedTexture = nullptr;
+        GLTextureObject* storageTexture = nullptr;
+        GLuint storageName = 0;
+        GLint level = 0;
+        GLint layer = 0;
+        bool throughView = false;
+    };
+
+    ResolvedTextureAttachment resolveTextureAttachmentStorage(
+        const GLFramebufferAttachment& attachment) const {
+        ResolvedTextureAttachment resolved;
+        if (attachment.kind != GLFramebufferAttachment::Kind::Texture ||
+            attachment.object == 0 ||
+            attachment.level < 0 ||
+            attachment.layer < 0) {
+            return resolved;
+        }
+        GLTextureObject* texture = objects->textures().get(attachment.object);
+        if (texture == nullptr || !texture->instantiated) {
+            return resolved;
+        }
+        resolved.valid = true;
+        resolved.attachedTexture = texture;
+        resolved.storageTexture = texture;
+        resolved.storageName = attachment.object;
+        resolved.level = attachment.level;
+        resolved.layer = attachment.layer;
+        if (texture->viewSourceTexture == 0) {
+            return resolved;
+        }
+
+        const GLint viewLevels = std::max<GLint>(
+            texture->viewNumLevels > 0 ? texture->viewNumLevels
+                                       : texture->desc.levels,
+            1);
+        const GLint viewLayers = std::max<GLint>(
+            texture->viewNumLayers > 0 ? texture->viewNumLayers
+                                       : texture->desc.layers,
+            1);
+        if (attachment.level >= viewLevels ||
+            attachment.layer >= viewLayers) {
+            resolved.valid = false;
+            return resolved;
+        }
+
+        GLuint rootName = texture->viewSourceTexture;
+        GLTextureObject* rootTexture = objects->textures().get(rootName);
+        std::unordered_set<GLuint> visited;
+        while (rootTexture != nullptr && rootTexture->viewSourceTexture != 0) {
+            if (!visited.insert(rootName).second) {
+                resolved.valid = false;
+                return resolved;
+            }
+            rootName = rootTexture->viewSourceTexture;
+            rootTexture = objects->textures().get(rootName);
+        }
+        if (rootTexture == nullptr) {
+            resolved.valid = false;
+            return resolved;
+        }
+        resolved.storageTexture = rootTexture;
+        resolved.storageName = rootName;
+        resolved.level = texture->viewMinLevel + attachment.level;
+        resolved.layer = texture->viewMinLayer + attachment.layer;
+        resolved.throughView = true;
+        return resolved;
+    }
+
     AttachmentInfo framebufferAttachmentInfo(const GLFramebufferAttachment& attachment) const {
         AttachmentInfo info;
         if (attachment.kind == GLFramebufferAttachment::Kind::None || attachment.object == 0) {
@@ -10580,19 +11341,38 @@ struct GLContext::Impl {
         }
         info.present = true;
         if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
-            const GLTextureObject* texture = objects->textures().get(attachment.object);
-            if (texture == nullptr || !texture->instantiated || attachment.level < 0) {
+            const ResolvedTextureAttachment resolved =
+                resolveTextureAttachmentStorage(attachment);
+            const GLTextureObject* texture = resolved.storageTexture;
+            const GLTextureObject* attachedTexture = resolved.attachedTexture;
+            if (!resolved.valid || texture == nullptr ||
+                attachedTexture == nullptr) {
                 return info;
             }
-            const auto level = texture->levels.find(attachment.level);
+            const auto level = texture->levels.find(resolved.level);
             if (level == texture->levels.end() || !level->second.defined) {
                 return info;
             }
-            info.complete = level->second.desc.width > 0 && level->second.desc.height > 0 && level->second.desc.depth > 0;
+            const GLsizei layerCount =
+                textureFramebufferLayerCount(*texture, level->second);
+            const GLsizei layer =
+                (texture->target == GL_TEXTURE_3D ||
+                 texture->target == GL_TEXTURE_2D_ARRAY ||
+                 texture->target == GL_TEXTURE_1D_ARRAY ||
+                 texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
+                 texture->target == GL_TEXTURE_CUBE_MAP ||
+                 texture->target == GL_TEXTURE_CUBE_MAP_ARRAY)
+                    ? resolved.layer : 0;
+            info.complete = level->second.desc.width > 0 &&
+                level->second.desc.height > 0 &&
+                level->second.desc.depth > 0 &&
+                layer >= 0 && layer < layerCount;
             info.width = level->second.desc.width;
             info.height = texture->target == GL_TEXTURE_1D ? 1 : level->second.desc.height;
             info.samples = level->second.desc.samples;
-            info.internalFormat = level->second.desc.internalFormat;
+            info.internalFormat = attachedTexture->desc.internalFormat != 0
+                ? attachedTexture->desc.internalFormat
+                : level->second.desc.internalFormat;
             return info;
         }
         if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
@@ -10821,10 +11601,12 @@ struct GLContext::Impl {
                                 void*& outDepthStencil,
                                 std::uint32_t* outColorArrayLength = nullptr,
                                 std::array<void*, 7>* outExtraColorTextures = nullptr,
-                                std::array<std::uint32_t, 8>* outColorSlices = nullptr) const {
+                                std::array<std::uint32_t, 8>* outColorSlices = nullptr,
+                                std::array<std::uint32_t, 8>* outColorLevels = nullptr) {
         if (outColorArrayLength != nullptr) *outColorArrayLength = 0;
         if (outExtraColorTextures != nullptr) outExtraColorTextures->fill(nullptr);
         if (outColorSlices != nullptr) outColorSlices->fill(0);
+        if (outColorLevels != nullptr) outColorLevels->fill(0);
         const GLuint fboName = state->boundDrawFramebuffer();
         if (fboName == 0) {
             return nullptr;
@@ -10861,13 +11643,39 @@ struct GLContext::Impl {
             GLsizei w = 0, h = 0;
             bool hasSize = false;
             if (att->kind == GLFramebufferAttachment::Kind::Texture) {
-                const GLTextureObject* texObj = objects->textures().get(att->object);
+                GLTextureObject* texObj = objects->textures().get(att->object);
+                if (texObj != nullptr && texObj->viewSourceTexture != 0) {
+                    (void)materializeTextureView(*texObj);
+                }
                 if (texObj != nullptr && texObj->metalTexture != nullptr) {
                     tex = texObj->metalTexture;
-                    const auto lvl = texObj->levels.find(att->level);
-                    if (lvl != texObj->levels.end()) {
+                    const ResolvedTextureAttachment resolved =
+                        resolveTextureAttachmentStorage(*att);
+                    const GLTextureObject* sizeTexture =
+                        (resolved.valid && resolved.storageTexture != nullptr)
+                            ? resolved.storageTexture
+                            : texObj;
+                    const GLint sizeLevel =
+                        resolved.valid ? resolved.level : att->level;
+                    const auto lvl = sizeTexture->levels.find(sizeLevel);
+                    if (lvl != sizeTexture->levels.end()) {
                         w = lvl->second.desc.width;
                         h = lvl->second.desc.height;
+                        hasSize = true;
+                    }
+                    if (!hasSize && texObj->desc.width > 0) {
+                        const GLint mipLevel = std::max<GLint>(att->level, 0);
+                        auto mipDim = [mipLevel](GLsizei base) -> GLsizei {
+                            if (base <= 0) return 1;
+                            if (mipLevel <= 0) return std::max<GLsizei>(base, 1);
+                            if (mipLevel >= 31) return 1;
+                            return std::max<GLsizei>(base >> mipLevel, 1);
+                        };
+                        w = mipDim(texObj->desc.width);
+                        h = (texObj->target == GL_TEXTURE_1D ||
+                             texObj->target == GL_TEXTURE_1D_ARRAY)
+                            ? 1
+                            : mipDim(texObj->desc.height);
                         hasSize = true;
                     }
                     // Layered attachment routing: FramebufferTexture
@@ -10880,6 +11688,7 @@ struct GLContext::Impl {
                     // Per-target layer counts (Metal "slice" terminology):
                     //   GL_TEXTURE_3D            → desc.depth (z slices)
                     //   GL_TEXTURE_CUBE_MAP      → 6 (faces)
+                    //   GL_TEXTURE_1D_ARRAY      → desc.height
                     //   GL_TEXTURE_CUBE_MAP_ARRAY→ 6 × desc.layers
                     //   GL_TEXTURE_2D_ARRAY etc. → desc.layers
                     //
@@ -10899,6 +11708,10 @@ struct GLContext::Impl {
                         GLsizei layers = std::max<GLsizei>(texObj->desc.layers, 1);
                         if (texObj->target == GL_TEXTURE_3D) {
                             layers = std::max<GLsizei>(texObj->desc.depth, 1);
+                        } else if (texObj->target == GL_TEXTURE_1D_ARRAY) {
+                            layers = std::max<GLsizei>(
+                                std::max<GLsizei>(texObj->desc.height, 1),
+                                std::max<GLsizei>(texObj->desc.layers, 1));
                         } else if (texObj->target == GL_TEXTURE_CUBE_MAP) {
                             layers = 6;
                         } else if (texObj->target == GL_TEXTURE_CUBE_MAP_ARRAY) {
@@ -10932,6 +11745,10 @@ struct GLContext::Impl {
                 (att->kind == GLFramebufferAttachment::Kind::Texture && !att->layered)
                 ? static_cast<std::uint32_t>(std::max<GLint>(att->layer, 0))
                 : 0;
+            const std::uint32_t slotLevel =
+                (att->kind == GLFramebufferAttachment::Kind::Texture)
+                ? static_cast<std::uint32_t>(std::max<GLint>(att->level, 0))
+                : 0;
             if (bi == 0) {
                 colorTex = tex;
                 primarySet = true;
@@ -10940,11 +11757,15 @@ struct GLContext::Impl {
                     outHeight = h;
                 }
                 if (outColorSlices != nullptr) (*outColorSlices)[0] = slotSlice;
+                if (outColorLevels != nullptr) (*outColorLevels)[0] = slotLevel;
             } else if (outExtraColorTextures != nullptr) {
                 // bi - 1 is the extras index for Metal slot bi.
                 (*outExtraColorTextures)[bi - 1] = tex;
                 if (outColorSlices != nullptr && bi < outColorSlices->size()) {
                     (*outColorSlices)[bi] = slotSlice;
+                }
+                if (outColorLevels != nullptr && bi < outColorLevels->size()) {
+                    (*outColorLevels)[bi] = slotLevel;
                 }
                 // Fall back to this attachment for outWidth/Height
                 // when slot 0 is GL_NONE (rare but GL allows it).
@@ -10979,13 +11800,24 @@ struct GLContext::Impl {
                 return rb->metalTexture;
             }
             if (att->kind == GLFramebufferAttachment::Kind::Texture) {
-                const GLTextureObject* tex = objects->textures().get(att->object);
+                GLTextureObject* tex = objects->textures().get(att->object);
+                if (tex != nullptr && tex->viewSourceTexture != 0) {
+                    (void)materializeTextureView(*tex);
+                }
                 if (tex == nullptr || tex->metalTexture == nullptr) return nullptr;
                 if (!primarySet) {
-                    const auto lvl = tex->levels.find(att->level);
-                    if (lvl != tex->levels.end()) {
+                    const ResolvedTextureAttachment resolved =
+                        resolveTextureAttachmentStorage(*att);
+                    const GLTextureObject* sizeTexture =
+                        (resolved.valid && resolved.storageTexture != nullptr)
+                            ? resolved.storageTexture
+                            : tex;
+                    const GLint sizeLevel =
+                        resolved.valid ? resolved.level : att->level;
+                    const auto lvl = sizeTexture->levels.find(sizeLevel);
+                    if (lvl != sizeTexture->levels.end()) {
                         outWidth = lvl->second.desc.width;
-                        outHeight = tex->target == GL_TEXTURE_1D ? 1 : lvl->second.desc.height;
+                        outHeight = sizeTexture->target == GL_TEXTURE_1D ? 1 : lvl->second.desc.height;
                         primarySet = true;
                     }
                 }
@@ -12738,21 +13570,23 @@ struct GLContext::Impl {
         bool is3DTexture = false;
         NSUInteger depthSlice = 0;
         if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
-            const GLTextureObject* texture = objects->textures().get(attachment.object);
-            if (texture == nullptr) return false;
-            const auto level = texture->levels.find(attachment.level);
+            const ResolvedTextureAttachment resolved =
+                resolveTextureAttachmentStorage(attachment);
+            const GLTextureObject* texture = resolved.storageTexture;
+            if (!resolved.valid || texture == nullptr) return false;
+            const auto level = texture->levels.find(resolved.level);
             if (level == texture->levels.end() || !level->second.defined) return false;
             sourceWidth = std::max<GLsizei>(level->second.desc.width, 1);
             sourceHeight = texture->target == GL_TEXTURE_1D ? 1 : std::max<GLsizei>(level->second.desc.height, 1);
-            metalMipLevel = static_cast<NSUInteger>(attachment.level);
+            metalMipLevel = static_cast<NSUInteger>(resolved.level);
             if (texture->target == GL_TEXTURE_3D) {
                 // 3D texture: Metal has a single slice; depth-layer
                 // goes into the region's Z coordinate.
                 is3DTexture = true;
-                depthSlice = static_cast<NSUInteger>(std::max<GLint>(attachment.layer, 0));
+                depthSlice = static_cast<NSUInteger>(std::max<GLint>(resolved.layer, 0));
                 metalSlice = 0;
             } else {
-                metalSlice = static_cast<NSUInteger>(attachment.layer);
+                metalSlice = static_cast<NSUInteger>(std::max<GLint>(resolved.layer, 0));
             }
             if (texture->metalTexture != nullptr) {
                 metalTex = (__bridge id<MTLTexture>)texture->metalTexture;
@@ -12774,11 +13608,11 @@ struct GLContext::Impl {
                     texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
                     texture->target == GL_TEXTURE_CUBE_MAP ||
                     texture->target == GL_TEXTURE_CUBE_MAP_ARRAY) {
-                    sourceLayer = attachment.layer;
+                    sourceLayer = resolved.layer;
                     sourceLayers = texture->target == GL_TEXTURE_CUBE_MAP
                         ? 6 : std::max<GLsizei>(level->second.desc.depth, 1);
                 } else if (texture->target == GL_TEXTURE_1D_ARRAY) {
-                    sourceLayer = attachment.layer;
+                    sourceLayer = resolved.layer;
                     sourceLayers = std::max<GLsizei>(level->second.desc.height, 1);
                 }
                 if (sourceLayer < 0 || sourceLayer >= sourceLayers)
@@ -13688,13 +14522,17 @@ struct GLContext::Impl {
         GLsizei destLayer = 0;
         GLTextureObject* writableTexture = nullptr;
         GLTextureImageLevel* writableImage = nullptr;
+        GLuint writableTextureName = 0;
 
         if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
-            writableTexture = objects->textures().get(attachment.object);
-            if (writableTexture == nullptr) {
+            const ResolvedTextureAttachment resolved =
+                resolveTextureAttachmentStorage(attachment);
+            writableTexture = resolved.storageTexture;
+            if (!resolved.valid || writableTexture == nullptr) {
                 return false;
             }
-            auto level = writableTexture->levels.find(attachment.level);
+            writableTextureName = resolved.storageName;
+            auto level = writableTexture->levels.find(resolved.level);
             if (level == writableTexture->levels.end() || !level->second.defined) {
                 return false;
             }
@@ -13720,7 +14558,7 @@ struct GLContext::Impl {
                  writableTexture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
                  writableTexture->target == GL_TEXTURE_CUBE_MAP ||
                  writableTexture->target == GL_TEXTURE_CUBE_MAP_ARRAY)
-                    ? attachment.layer : 0;
+                    ? resolved.layer : 0;
             if (destLayer < 0 || destLayer >= sourceDepth) {
                 return false;
             }
@@ -13929,7 +14767,7 @@ struct GLContext::Impl {
 
         if (writableTexture != nullptr) {
             writableTexture->colorShadowAuthoritative = true;
-            return replaceMetalTexture(*writableTexture);
+            return replaceMetalTexture(*writableTexture, writableTextureName);
         }
         return true;
     }
@@ -20416,6 +21254,9 @@ bool GLContext::texSubImage(
         return false;
     }
 
+    const GLenum bindingTarget = Impl::normalizeTextureBindingTarget(target);
+    const GLuint boundTextureName =
+        impl_->state->boundTexture(bindingTarget);
     GLTextureObject* object = impl_->currentTexture(target);
     if (object == nullptr || !object->instantiated) {
         pushError(GL_INVALID_OPERATION);
@@ -20438,29 +21279,92 @@ bool GLContext::texSubImage(
             }
         }
     }
-    auto levelIt = object->levels.find(level);
-    if (levelIt == object->levels.end() || !levelIt->second.defined) {
+    GLTextureObject* storageObject = object;
+    GLuint storageTextureName = boundTextureName;
+    GLint storageLevel = level;
+    GLint storageLayerBase = 0;
+    const bool writeThroughView = object->viewSourceTexture != 0;
+    if (writeThroughView) {
+        const GLint viewLevels = std::max<GLint>(
+            object->viewNumLevels > 0 ? object->viewNumLevels
+                                      : object->desc.levels,
+            1);
+        if (level >= viewLevels) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        const GLint viewLayers = std::max<GLint>(
+            object->viewNumLayers > 0 ? object->viewNumLayers
+                                      : object->desc.layers,
+            1);
+        if (zoffset > viewLayers || depth > viewLayers - zoffset) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+
+        storageLevel = object->viewMinLevel + level;
+        storageLayerBase = object->viewMinLayer;
+        GLuint rootName = object->viewSourceTexture;
+        GLTextureObject* rootObject = impl_->objects->textures().get(rootName);
+        std::unordered_set<GLuint> visited;
+        while (rootObject != nullptr && rootObject->viewSourceTexture != 0) {
+            if (!visited.insert(rootName).second) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            rootName = rootObject->viewSourceTexture;
+            rootObject = impl_->objects->textures().get(rootName);
+        }
+        if (rootObject == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        storageObject = rootObject;
+        storageTextureName = rootName;
+    }
+
+    auto levelIt = storageObject->levels.find(storageLevel);
+    if (levelIt == storageObject->levels.end() || !levelIt->second.defined) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
     ExtensionContext extensionContext(*this);
     const int cubeFaceForSubImage = Impl::cubeFaceIndexForTarget(target);
+    int storageCubeFaceForSubImage = cubeFaceForSubImage;
+    const GLenum storageTarget =
+        storageObject->desc.target != 0 ? storageObject->desc.target
+                                        : storageObject->target;
+    if (writeThroughView && storageTarget == GL_TEXTURE_CUBE_MAP) {
+        if (cubeFaceForSubImage >= 0) {
+            storageCubeFaceForSubImage =
+                storageLayerBase + cubeFaceForSubImage;
+        } else {
+            storageCubeFaceForSubImage = storageLayerBase + zoffset;
+        }
+        if (storageCubeFaceForSubImage < 0 ||
+            storageCubeFaceForSubImage >= 6) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
     const int sparseCubeFace =
-        (extensions::sparse_texture::textureSparse(extensionContext, object) == GL_TRUE &&
-         object->target == GL_TEXTURE_CUBE_MAP &&
+        (extensions::sparse_texture::textureSparse(extensionContext, storageObject) == GL_TRUE &&
+         storageTarget == GL_TEXTURE_CUBE_MAP &&
          levelIt->second.desc.depth >= 6)
-            ? cubeFaceForSubImage
+            ? storageCubeFaceForSubImage
             : -1;
     GLTextureImageLevel* imagePtr = &levelIt->second;
-    if (cubeFaceForSubImage >= 0 && sparseCubeFace < 0) {
-        auto& faceLevels = object->cubeFaceLevels[static_cast<std::size_t>(cubeFaceForSubImage)];
-        auto [faceIt, _inserted] = faceLevels.try_emplace(level, levelIt->second);
+    if (storageCubeFaceForSubImage >= 0 && sparseCubeFace < 0) {
+        auto& faceLevels = storageObject->cubeFaceLevels[static_cast<std::size_t>(storageCubeFaceForSubImage)];
+        auto [faceIt, _inserted] = faceLevels.try_emplace(storageLevel, levelIt->second);
         imagePtr = &faceIt->second;
     }
     GLTextureImageLevel& image = *imagePtr;
     GLint effectiveZoffset = zoffset;
     if (sparseCubeFace >= 0) {
         effectiveZoffset = sparseCubeFace;
+    } else if (writeThroughView && storageCubeFaceForSubImage < 0) {
+        effectiveZoffset += storageLayerBase;
     }
     if (xoffset > image.desc.width || width > image.desc.width - xoffset
         || yoffset > image.desc.height || height > image.desc.height - yoffset
@@ -20569,7 +21473,7 @@ bool GLContext::texSubImage(
     // point the object pointer is valid and we know the bound
     // texture name is non-zero (currentTexture returned a concrete
     // object).
-    const GLuint subTexName = impl_->state->boundTexture(target);
+    const GLuint subTexName = boundTextureName;
     if (subTexName != 0 && depth == 1) {
         Impl::SubImageRegionKey key{subTexName, xoffset, yoffset, width, height};
         if (impl_->loggedSubImageRegions.insert(key).second) {
@@ -20611,11 +21515,11 @@ bool GLContext::texSubImage(
         }
     }
 
-    if (cubeFaceForSubImage >= 0 && sparseCubeFace < 0) {
-        object->levels[level] = image;
+    if (storageCubeFaceForSubImage >= 0 && sparseCubeFace < 0) {
+        storageObject->levels[storageLevel] = image;
     }
 
-    if (!impl_->replaceMetalTexture(*object, impl_->state->boundTexture(target))) {
+    if (!impl_->replaceMetalTexture(*storageObject, storageTextureName)) {
         pushError(GL_OUT_OF_MEMORY);
         return false;
     }
@@ -21865,7 +22769,9 @@ bool GLContext::getTexParameterInteger(GLenum target, GLenum pname, GLint* param
             if (params) *params = object->desc.immutable ? GL_TRUE : GL_FALSE;
             return true;
         case GL_TEXTURE_IMMUTABLE_LEVELS:
-            if (params) *params = object->desc.levels;
+            if (params) {
+                *params = textureImmutableLevelCountForQuery(impl_->objects.get(), *object);
+            }
             return true;
         case GL_TEXTURE_VIEW_MIN_LEVEL:
             if (params) *params = object->viewMinLevel;
@@ -21874,18 +22780,10 @@ bool GLContext::getTexParameterInteger(GLenum target, GLenum pname, GLint* param
             if (params) *params = object->viewMinLayer;
             return true;
         case GL_TEXTURE_VIEW_NUM_LEVELS:
-            if (params) {
-                *params = object->viewNumLevels > 0
-                    ? object->viewNumLevels
-                    : object->desc.levels;
-            }
+            if (params) *params = textureViewEffectiveLevelCount(*object);
             return true;
         case GL_TEXTURE_VIEW_NUM_LAYERS:
-            if (params) {
-                *params = object->viewNumLayers > 0
-                    ? object->viewNumLayers
-                    : (object->desc.layers > 0 ? object->desc.layers : 1);
-            }
+            if (params) *params = textureViewEffectiveLayerCount(*object);
             return true;
         case GL_NUM_SPARSE_LEVELS_ARB:
             {
@@ -24091,6 +24989,7 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             addTexture(texture.metalTexture);
         }
         addTextureView(texture.metalSwizzledView);
+        addTexture(texture.metalSamplingProxy);
         addSampler(texture.metalSampler);
     });
     store->renderbuffers().forEach([&](GLuint, GLRenderbufferObject& renderbuffer) {
@@ -39319,6 +40218,29 @@ static std::size_t uniformComponentCountForPacking(GLenum type) {
     return uniformTypeComponentCount(type);
 }
 
+static bool uniformLayoutNamesMatch(const std::string& uniformName,
+                                    const std::string& memberName) {
+    if (uniformName == memberName) return true;
+    constexpr std::size_t kArrayZeroSuffixLen = 3;
+    auto hasArrayZeroSuffix = [](const std::string& name) {
+        return name.size() >= kArrayZeroSuffixLen &&
+            name.compare(name.size() - kArrayZeroSuffixLen,
+                         kArrayZeroSuffixLen,
+                         "[0]") == 0;
+    };
+    if (hasArrayZeroSuffix(uniformName) &&
+        uniformName.size() == memberName.size() + kArrayZeroSuffixLen &&
+        uniformName.compare(0, memberName.size(), memberName) == 0) {
+        return true;
+    }
+    if (hasArrayZeroSuffix(memberName) &&
+        memberName.size() == uniformName.size() + kArrayZeroSuffixLen &&
+        memberName.compare(0, uniformName.size(), uniformName) == 0) {
+        return true;
+    }
+    return false;
+}
+
 static void hashCombine(std::size_t& seed, std::size_t value) {
     seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6u) + (seed >> 2u);
 }
@@ -39510,7 +40432,7 @@ static void computeStageUniformLayout(
 
         // One-time name lookup: find the GL uniform location for this member.
         for (const auto& u : uniforms) {
-            if (u.name == member.name) {
+            if (uniformLayoutNamesMatch(u.name, member.name)) {
                 entry.location = u.location;
                 break;
             }
@@ -42215,9 +43137,10 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     std::uint32_t preFboArrayLen = 0;
     std::array<void*, 7> preExtraColTex = {};
     std::array<std::uint32_t, 8> preColorSlices = {};
+    std::array<std::uint32_t, 8> preColorLevels = {};
     void* preFboColTex = resolveFBOColorTarget(
         preFboW, preFboH, preFboDSTex, &preFboArrayLen,
-        &preExtraColTex, &preColorSlices);
+        &preExtraColTex, &preColorSlices, &preColorLevels);
     const GLuint preDrawFboName = state->boundDrawFramebuffer();
     const GLFramebufferObject* preDrawFbo =
         preDrawFboName != 0 ? objects->framebuffers().get(preDrawFboName) : nullptr;
@@ -42830,6 +43753,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         tdi.fboColorTexture = preFboColTex;
         tdi.fboAdditionalColorTextures = preExtraColTex;
         tdi.fboColorSlices = preColorSlices;
+        tdi.fboColorLevels = preColorLevels;
         tdi.fboDepthStencilTexture = preFboDSTex;
         tdi.fboWidth = preAttachmentlessFbo ? preDrawFbo->defaultWidth : preFboW;
         tdi.fboHeight = preAttachmentlessFbo ? preDrawFbo->defaultHeight : preFboH;
@@ -43035,12 +43959,15 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
         void* fboDSTex = nullptr;
         std::array<void*, 7> extraColTex = {};
         std::array<std::uint32_t, 8> colSlices = {};
+        std::array<std::uint32_t, 8> colLevels = {};
         void* fboColTex = resolveFBOColorTarget(
-            fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
+            fboW, fboH, fboDSTex, nullptr,
+            &extraColTex, &colSlices, &colLevels);
         if (fboColTex != nullptr || fboDSTex != nullptr) {
             tdi.fboColorTexture = fboColTex;
             tdi.fboAdditionalColorTextures = extraColTex;
             tdi.fboColorSlices = colSlices;
+            tdi.fboColorLevels = colLevels;
             tdi.fboDepthStencilTexture = fboDSTex;
             tdi.fboWidth = fboW;
             tdi.fboHeight = fboH;
@@ -43123,13 +44050,15 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
             std::uint32_t fboArrayLen = 0;
             std::array<void*, 7> extraColTex = {};
             std::array<std::uint32_t, 8> colSlices = {};
+            std::array<std::uint32_t, 8> colLevels = {};
             void* fboColTex = resolveFBOColorTarget(
                 fboW, fboH, fboDSTex, &fboArrayLen,
-                &extraColTex, &colSlices);
+                &extraColTex, &colSlices, &colLevels);
             if (fboColTex != nullptr || fboDSTex != nullptr) {
                 tdi.fboColorTexture = fboColTex;
                 tdi.fboAdditionalColorTextures = extraColTex;
                 tdi.fboColorSlices = colSlices;
+                tdi.fboColorLevels = colLevels;
                 tdi.fboDepthStencilTexture = fboDSTex;
                 tdi.fboWidth = fboW;
                 tdi.fboHeight = fboH;
@@ -44495,11 +45424,15 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 void* fboDSTex = nullptr;
                 std::array<void*, 7> extraColTex = {};
                 std::array<std::uint32_t, 8> colSlices = {};
-                void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
+                std::array<std::uint32_t, 8> colLevels = {};
+                void* fboColTex = impl_->resolveFBOColorTarget(
+                    fboW, fboH, fboDSTex, nullptr,
+                    &extraColTex, &colSlices, &colLevels);
                 if (fboColTex != nullptr || fboDSTex != nullptr) {
                     tdi.fboColorTexture = fboColTex;
                     tdi.fboAdditionalColorTextures = extraColTex;
                     tdi.fboColorSlices = colSlices;
+                    tdi.fboColorLevels = colLevels;
                     tdi.fboDepthStencilTexture = fboDSTex;
                     tdi.fboWidth = fboW;
                     tdi.fboHeight = fboH;
@@ -44594,13 +45527,15 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     void* fboDSTex = nullptr;
                     std::array<void*, 7> extraColTex = {};
                     std::array<std::uint32_t, 8> colSlices = {};
+                    std::array<std::uint32_t, 8> colLevels = {};
                     void* fboColTex = impl_->resolveFBOColorTarget(
                         fboW, fboH, fboDSTex, nullptr,
-                        &extraColTex, &colSlices);
+                        &extraColTex, &colSlices, &colLevels);
                     if (fboColTex != nullptr || fboDSTex != nullptr) {
                         tdi.fboColorTexture = fboColTex;
                         tdi.fboAdditionalColorTextures = extraColTex;
                         tdi.fboColorSlices = colSlices;
+                        tdi.fboColorLevels = colLevels;
                         tdi.fboDepthStencilTexture = fboDSTex;
                         tdi.fboWidth = fboW;
                         tdi.fboHeight = fboH;
@@ -44820,11 +45755,15 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                         void* fboDSTex = nullptr;
                         std::array<void*, 7> extraColTex = {};
                         std::array<std::uint32_t, 8> colSlices = {};
-                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
+                        std::array<std::uint32_t, 8> colLevels = {};
+                        void* fboColTex = impl_->resolveFBOColorTarget(
+                            fboW, fboH, fboDSTex, nullptr,
+                            &extraColTex, &colSlices, &colLevels);
                         if (fboColTex != nullptr || fboDSTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
                             tdi.fboAdditionalColorTextures = extraColTex;
                             tdi.fboColorSlices = colSlices;
+                            tdi.fboColorLevels = colLevels;
                             tdi.fboDepthStencilTexture = fboDSTex;
                             tdi.fboWidth = fboW;
                             tdi.fboHeight = fboH;
@@ -45327,11 +46266,15 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                 void* fboDSTex = nullptr;
                 std::array<void*, 7> extraColTex = {};
                 std::array<std::uint32_t, 8> colSlices = {};
-                void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
+                std::array<std::uint32_t, 8> colLevels = {};
+                void* fboColTex = impl_->resolveFBOColorTarget(
+                    fboW, fboH, fboDSTex, nullptr,
+                    &extraColTex, &colSlices, &colLevels);
                 if (fboColTex != nullptr || fboDSTex != nullptr) {
                     tdi.fboColorTexture = fboColTex;
                     tdi.fboAdditionalColorTextures = extraColTex;
                     tdi.fboColorSlices = colSlices;
+                    tdi.fboColorLevels = colLevels;
                     tdi.fboDepthStencilTexture = fboDSTex;
                     tdi.fboWidth = fboW;
                     tdi.fboHeight = fboH;
@@ -45557,11 +46500,15 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                         void* fboDSTex = nullptr;
                         std::array<void*, 7> extraColTex = {};
                         std::array<std::uint32_t, 8> colSlices = {};
-                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
+                        std::array<std::uint32_t, 8> colLevels = {};
+                        void* fboColTex = impl_->resolveFBOColorTarget(
+                            fboW, fboH, fboDSTex, nullptr,
+                            &extraColTex, &colSlices, &colLevels);
                         if (fboColTex != nullptr || fboDSTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
                             tdi.fboAdditionalColorTextures = extraColTex;
                             tdi.fboColorSlices = colSlices;
+                            tdi.fboColorLevels = colLevels;
                             tdi.fboDepthStencilTexture = fboDSTex;
                             tdi.fboWidth = fboW;
                             tdi.fboHeight = fboH;
@@ -46211,11 +47158,15 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             void* fboDSTex = nullptr;
             std::array<void*, 7> extraColTex = {};
             std::array<std::uint32_t, 8> colSlices = {};
-            void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
+            std::array<std::uint32_t, 8> colLevels = {};
+            void* fboColTex = impl_->resolveFBOColorTarget(
+                fboW, fboH, fboDSTex, nullptr,
+                &extraColTex, &colSlices, &colLevels);
             if (fboColTex != nullptr || fboDSTex != nullptr) {
                 tdi.fboColorTexture = fboColTex;
                 tdi.fboAdditionalColorTextures = extraColTex;
                 tdi.fboColorSlices = colSlices;
+                tdi.fboColorLevels = colLevels;
                 tdi.fboDepthStencilTexture = fboDSTex;
                 tdi.fboWidth = fboW;
                 tdi.fboHeight = fboH;
@@ -46432,11 +47383,15 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                         void* fboDSTex = nullptr;
                         std::array<void*, 7> extraColTex = {};
                         std::array<std::uint32_t, 8> colSlices = {};
-                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
+                        std::array<std::uint32_t, 8> colLevels = {};
+                        void* fboColTex = impl_->resolveFBOColorTarget(
+                            fboW, fboH, fboDSTex, nullptr,
+                            &extraColTex, &colSlices, &colLevels);
                         if (fboColTex != nullptr || fboDSTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
                             tdi.fboAdditionalColorTextures = extraColTex;
                             tdi.fboColorSlices = colSlices;
+                            tdi.fboColorLevels = colLevels;
                             tdi.fboDepthStencilTexture = fboDSTex;
                             tdi.fboWidth = fboW;
                             tdi.fboHeight = fboH;
@@ -46820,11 +47775,15 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                         void* fboDSTex = nullptr;
                         std::array<void*, 7> extraColTex = {};
                         std::array<std::uint32_t, 8> colSlices = {};
-                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
+                        std::array<std::uint32_t, 8> colLevels = {};
+                        void* fboColTex = impl_->resolveFBOColorTarget(
+                            fboW, fboH, fboDSTex, nullptr,
+                            &extraColTex, &colSlices, &colLevels);
                         if (fboColTex != nullptr || fboDSTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
                             tdi.fboAdditionalColorTextures = extraColTex;
                             tdi.fboColorSlices = colSlices;
+                            tdi.fboColorLevels = colLevels;
                             tdi.fboDepthStencilTexture = fboDSTex;
                             tdi.fboWidth = fboW;
                             tdi.fboHeight = fboH;
@@ -47460,11 +48419,15 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                         void* fboDSTex = nullptr;
                         std::array<void*, 7> extraColTex = {};
                         std::array<std::uint32_t, 8> colSlices = {};
-                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
+                        std::array<std::uint32_t, 8> colLevels = {};
+                        void* fboColTex = impl_->resolveFBOColorTarget(
+                            fboW, fboH, fboDSTex, nullptr,
+                            &extraColTex, &colSlices, &colLevels);
                         if (fboColTex != nullptr || fboDSTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
                             tdi.fboAdditionalColorTextures = extraColTex;
                             tdi.fboColorSlices = colSlices;
+                            tdi.fboColorLevels = colLevels;
                             tdi.fboDepthStencilTexture = fboDSTex;
                             tdi.fboWidth = fboW;
                             tdi.fboHeight = fboH;
@@ -51509,12 +52472,14 @@ bool GLContext::textureView(GLuint texture, GLenum target, GLuint origtexture, G
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    if (minlevel >= static_cast<GLuint>(std::max<GLsizei>(origObj->desc.levels, 1))) {
+    const GLsizei parentViewLevels = textureViewEffectiveLevelCount(*origObj);
+    const GLsizei parentViewLayers = textureViewAvailableLayerCount(*origObj);
+    if (minlevel >= static_cast<GLuint>(std::max<GLsizei>(parentViewLevels, 1))) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
     const GLuint sourceLayers =
-        static_cast<GLuint>(textureViewSourceLayerCount(*origObj));
+        static_cast<GLuint>(std::max<GLsizei>(parentViewLayers, 1));
     if (minlayer >= sourceLayers) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -51531,17 +52496,25 @@ bool GLContext::textureView(GLuint texture, GLenum target, GLuint origtexture, G
     // Record the view relationship. Actual Metal texture view
     // (newTextureViewWithPixelFormat:) will be created when the Metal texture
     // is first needed for rendering.
+    const GLsizei effectiveNumLevels = std::min<GLsizei>(
+        static_cast<GLsizei>(numlevels),
+        std::max<GLsizei>(parentViewLevels - static_cast<GLsizei>(minlevel), 1));
+    const GLsizei effectiveNumLayers = std::min<GLsizei>(
+        static_cast<GLsizei>(numlayers),
+        std::max<GLsizei>(parentViewLayers - static_cast<GLsizei>(minlayer), 1));
     viewObj->target = target;
     viewObj->desc.target = target;
     viewObj->desc.internalFormat = internalformat;
-    viewObj->desc.levels = static_cast<GLsizei>(numlevels);
-    viewObj->desc.layers = static_cast<GLsizei>(numlayers);
+    viewObj->desc.levels = effectiveNumLevels;
+    viewObj->desc.layers = effectiveNumLayers;
     viewObj->desc.immutable = true;
     viewObj->viewSourceTexture = origtexture;
-    viewObj->viewMinLevel = static_cast<GLint>(minlevel);
-    viewObj->viewNumLevels = static_cast<GLint>(numlevels);
-    viewObj->viewMinLayer = static_cast<GLint>(minlayer);
-    viewObj->viewNumLayers = static_cast<GLint>(numlayers);
+    viewObj->viewMinLevel = origObj->viewMinLevel + static_cast<GLint>(minlevel);
+    viewObj->viewNumLevels = static_cast<GLint>(effectiveNumLevels);
+    viewObj->viewMinLayer = origObj->viewMinLayer + static_cast<GLint>(minlayer);
+    viewObj->viewNumLayers = static_cast<GLint>(effectiveNumLayers);
+    viewObj->params = origObj->params;
+    viewObj->samplerDirty = true;
 
     releaseRetainedMetalObject(viewObj->metalTexture);
     viewObj->metalTexture = nullptr;
@@ -51549,6 +52522,8 @@ bool GLContext::textureView(GLuint texture, GLenum target, GLuint origtexture, G
     releaseRetainedMetalObject(viewObj->metalSwizzledView);
     viewObj->metalSwizzledView = nullptr;
     viewObj->swizzleDirty = true;
+    releaseRetainedMetalObject(viewObj->metalSamplingProxy);
+    viewObj->metalSamplingProxy = nullptr;
 
     if ((origObj->metalTexture == nullptr || !origObj->instantiated) &&
         !origObj->levels.empty()) {
@@ -51562,10 +52537,10 @@ bool GLContext::textureView(GLuint texture, GLenum target, GLuint origtexture, G
         const MTLTextureType viewTextureType = metalTextureTypeForTarget(target);
         const NSRange levelRange =
             NSMakeRange(static_cast<NSUInteger>(minlevel),
-                        static_cast<NSUInteger>(numlevels));
+                        static_cast<NSUInteger>(effectiveNumLevels));
         const NSRange sliceRange =
             NSMakeRange(static_cast<NSUInteger>(minlayer),
-                        static_cast<NSUInteger>(numlayers));
+                        static_cast<NSUInteger>(effectiveNumLayers));
         const NSUInteger sourceLevels = baseTex.mipmapLevelCount;
         const bool levelRangeFits =
             levelRange.location < sourceLevels &&
@@ -54116,6 +55091,9 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (obj->viewSourceTexture != 0) {
+        (void)impl_->materializeTextureView(*obj);
+    }
     if (!obj->instantiated || obj->metalTexture == nullptr) {
         // Re-upload shadow data to Metal texture (e.g. after copyImageSubData).
         if (!obj->levels.empty()) {
@@ -54176,7 +55154,11 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
         return false;
     }
 
-    impl_->drainPendingGpuProducers(*obj);
+    impl_->drainPendingGpuProducers({
+        {Impl::GpuResourceAccess::Kind::Texture,
+         texture,
+         kProducerAll},
+    });
 
     id<MTLTexture> metalTex = (__bridge id<MTLTexture>)obj->metalTexture;
     NSUInteger mipLevel = static_cast<NSUInteger>(level);

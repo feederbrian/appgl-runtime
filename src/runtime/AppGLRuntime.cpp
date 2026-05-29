@@ -4186,6 +4186,7 @@ void APIENTRY glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum te
     if (!isValidFramebufferAttachment(attachment) ||
         (textarget != GL_TEXTURE_2D &&
          textarget != GL_TEXTURE_2D_MULTISAMPLE &&
+         textarget != GL_TEXTURE_RECTANGLE &&
          textarget != GL_TEXTURE_CUBE_MAP_POSITIVE_X &&
          textarget != GL_TEXTURE_CUBE_MAP_NEGATIVE_X &&
          textarget != GL_TEXTURE_CUBE_MAP_POSITIVE_Y &&

@@ -5515,17 +5515,65 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     bail("OpStore: invalid value id=" + std::to_string(w[1]));
                     break;
                 }
+                auto mirrorBuiltinPositionStore =
+                    [&](std::uint32_t rootVarId, std::uint32_t scalarOffset,
+                        const Value& value) {
+                        std::uint32_t positionOffset = 0xFFFFFFFFu;
+                        auto rootVar = module_.variables.find(rootVarId);
+                        if (rootVar == module_.variables.end()) return;
+
+                        auto dIt = module_.decorations.find(rootVarId);
+                        if (dIt != module_.decorations.end() &&
+                            dIt->second.hasBuiltIn &&
+                            dIt->second.builtIn == spv::BuiltInPosition) {
+                            positionOffset = 0;
+                        } else if (rootVar->second.storageClass == spv::StorageClassOutput) {
+                            auto ptrIt = module_.types.find(rootVar->second.typeId);
+                            if (ptrIt != module_.types.end() &&
+                                ptrIt->second.kind == TypeInfo::Kind::Pointer) {
+                                const std::uint32_t pointeeType =
+                                    ptrIt->second.pointeeType;
+                                auto pointeeIt = module_.types.find(pointeeType);
+                                auto md = module_.memberDecorations.find(pointeeType);
+                                if (pointeeIt != module_.types.end() &&
+                                    pointeeIt->second.kind == TypeInfo::Kind::Struct &&
+                                    md != module_.memberDecorations.end()) {
+                                    std::uint32_t off = 0;
+                                    for (std::size_t m = 0;
+                                         m < pointeeIt->second.memberTypes.size(); ++m) {
+                                        auto mm = md->second.perMember.find(
+                                            static_cast<std::uint32_t>(m));
+                                        if (mm != md->second.perMember.end() &&
+                                            mm->second.hasBuiltIn &&
+                                            mm->second.builtIn == spv::BuiltInPosition) {
+                                            positionOffset = off;
+                                            break;
+                                        }
+                                        off += module_.scalarWidth(
+                                            pointeeIt->second.memberTypes[m]);
+                                    }
+                                }
+                            }
+                        }
+                        if (positionOffset == 0xFFFFFFFFu) return;
+                        if (scalarOffset < positionOffset ||
+                            scalarOffset >= positionOffset + 4) {
+                            return;
+                        }
+                        const std::uint32_t dstBase =
+                            scalarOffset - positionOffset;
+                        const int n = value.componentCount();
+                        for (int k = 0;
+                             k < n && dstBase + static_cast<std::uint32_t>(k) < 4;
+                             ++k) {
+                            currentPosition_[dstBase + static_cast<std::uint32_t>(k)] =
+                                value.f[k];
+                        }
+                    };
                 auto vIt = module_.variables.find(ptrId);
                 if (vIt != module_.variables.end()) {
                     storeToVar(ptrId, 0, v);
-                    // Built-in: gl_Position scalar mirror.
-                    auto dIt = module_.decorations.find(ptrId);
-                    if (dIt != module_.decorations.end() && dIt->second.hasBuiltIn
-                        && dIt->second.builtIn == spv::BuiltInPosition) {
-                        for (int k = 0; k < 4 && k < v.componentCount(); ++k) {
-                            currentPosition_[k] = v.f[k];
-                        }
-                    }
+                    mirrorBuiltinPositionStore(ptrId, 0, v);
                 } else {
                     auto acIt = accessChains_.find(ptrId);
                     if (acIt != accessChains_.end()) {
@@ -5537,42 +5585,9 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             break;
                         }
                         storeToVar(acIt->second.rootVarId, acIt->second.scalarOffset, v);
-                        // Built-in position via struct member.
-                        auto mdIt = module_.memberDecorations.find(0);   // stub — expand
-                        (void)mdIt;
-                        // Heuristic for the common "Out.gl_Position = x"
-                        // pattern via access chain member 0 of an Output
-                        // struct decorated BuiltIn Position.
-                        auto rootVar = module_.variables.find(acIt->second.rootVarId);
-                        if (rootVar != module_.variables.end() &&
-                            rootVar->second.storageClass == spv::StorageClassOutput) {
-                            // If leafType is vec4 and the chain went
-                            // through a struct member decorated
-                            // BuiltIn Position, mirror into
-                            // currentPosition_.
-                            auto& pointee = module_.types.at(module_.types.at(rootVar->second.typeId).pointeeType);
-                            if (pointee.kind == TypeInfo::Kind::Struct) {
-                                auto md = module_.memberDecorations.find(module_.types.at(rootVar->second.typeId).pointeeType);
-                                if (md != module_.memberDecorations.end()) {
-                                    // Scan members for BuiltInPosition
-                                    // and compute its scalar offset.
-                                    std::uint32_t off = 0;
-                                    for (std::size_t m = 0; m < pointee.memberTypes.size(); ++m) {
-                                        auto mm = md->second.perMember.find(m);
-                                        if (mm != md->second.perMember.end() && mm->second.hasBuiltIn
-                                            && mm->second.builtIn == spv::BuiltInPosition) {
-                                            if (off == acIt->second.scalarOffset) {
-                                                for (int k = 0; k < 4 && k < v.componentCount(); ++k) {
-                                                    currentPosition_[k] = v.f[k];
-                                                }
-                                            }
-                                            break;
-                                        }
-                                        off += module_.scalarWidth(pointee.memberTypes[m]);
-                                    }
-                                }
-                            }
-                        }
+                        mirrorBuiltinPositionStore(acIt->second.rootVarId,
+                                                   acIt->second.scalarOffset,
+                                                   v);
                     } else {
                         bail("OpStore: unresolved pointer");
                     }
@@ -5778,15 +5793,63 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     bail("OpImageSample: sampled texture slot has no data");
                     return false;
                 }
+                std::uint32_t mipLevel = 0;
+                if (opcode == spv::OpImageSampleExplicitLod && wc >= 6) {
+                    constexpr std::uint32_t kImageOperandsLodMask = 0x2u;
+                    const std::uint32_t operands = w[4];
+                    if ((operands & kImageOperandsLodMask) != 0u) {
+                        Value lodValue;
+                        if (tryGetValue(w[5], lodValue)) {
+                            float lod = 0.0f;
+                            if (lodValue.isFloatKind()) {
+                                lod = lodValue.f[0];
+                            } else if (lodValue.isIntKind() ||
+                                       lodValue.kind == Value::Kind::UInt ||
+                                       lodValue.kind == Value::Kind::UInt2 ||
+                                       lodValue.kind == Value::Kind::UInt3 ||
+                                       lodValue.kind == Value::Kind::UInt4) {
+                                lod = static_cast<float>(lodValue.i[0]);
+                            }
+                            if (std::isfinite(lod) && lod > 0.0f) {
+                                mipLevel = static_cast<std::uint32_t>(
+                                    std::floor(lod + 0.5f));
+                            }
+                        }
+                    }
+                }
+                const std::uint32_t mipCount =
+                    slot.mipOffsets.empty()
+                        ? 1u
+                        : static_cast<std::uint32_t>(slot.mipOffsets.size());
+                if (mipCount > 0 && mipLevel >= mipCount) {
+                    mipLevel = mipCount - 1u;
+                }
+                const std::uint32_t mipWidth =
+                    (!slot.mipWidths.empty() &&
+                     mipLevel < slot.mipWidths.size())
+                        ? slot.mipWidths[mipLevel]
+                        : slot.width;
+                const std::uint32_t mipHeight =
+                    (!slot.mipHeights.empty() &&
+                     mipLevel < slot.mipHeights.size())
+                        ? slot.mipHeights[mipLevel]
+                        : slot.height;
+                const std::uint32_t mipBase =
+                    (!slot.mipOffsets.empty() &&
+                     mipLevel < slot.mipOffsets.size())
+                        ? slot.mipOffsets[mipLevel]
+                        : 0u;
                 // Resolve coord → texel (NEAREST). For 2D, multiply
                 // normalized uv by dim and clamp. Coord can be vec2
                 // (regular sampler2D) or vec3 (cubeArr / 2DArr — we
                 // only handle 2D so trailing components are ignored).
                 Value coord;
                 std::uint32_t u = 0, v = 0;
+                std::uint32_t layer = 0;
                 if (tryGetValue(w[3], coord)) {
                     float uF = coord.f[0];
                     float vF = coord.componentCount() >= 2 ? coord.f[1] : 0.0f;
+                    float wF = coord.componentCount() >= 3 ? coord.f[2] : 0.0f;
                     // Wrap with REPEAT (default GL_TEXTURE_WRAP_*).
                     auto wrap = [](float x) {
                         x = x - std::floor(x);
@@ -5794,20 +5857,99 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                         if (x >= 1.0f) x -= 1.0f;
                         return x;
                     };
+                    const std::uint32_t mipLayerFaces =
+                        (!slot.mipLayerFaces.empty() &&
+                         mipLevel < slot.mipLayerFaces.size())
+                            ? std::max<std::uint32_t>(
+                                  slot.mipLayerFaces[mipLevel], 1u)
+                            : std::max<std::uint32_t>(
+                                  slot.layerFaces != 0 ? slot.layerFaces
+                                                       : (slot.depth != 0 ? slot.depth : 1u),
+                                  1u);
+                    auto layerFromCoord = [](float x,
+                                             std::uint32_t count) -> std::uint32_t {
+                        if (count <= 1u || !std::isfinite(x)) {
+                            return 0u;
+                        }
+                        int layerIndex = static_cast<int>(std::floor(x + 0.5f));
+                        if (layerIndex < 0) layerIndex = 0;
+                        if (layerIndex >= static_cast<int>(count)) {
+                            layerIndex = static_cast<int>(count) - 1;
+                        }
+                        return static_cast<std::uint32_t>(layerIndex);
+                    };
+                    auto cubeFaceFromDirection = [](float x, float y, float z)
+                        -> std::uint32_t {
+                        const float ax = std::fabs(x);
+                        const float ay = std::fabs(y);
+                        const float az = std::fabs(z);
+                        if (ax >= ay && ax >= az) return x >= 0.0f ? 0u : 1u;
+                        if (ay >= ax && ay >= az) return y >= 0.0f ? 2u : 3u;
+                        return z >= 0.0f ? 4u : 5u;
+                    };
+                    const bool sampler1DArray =
+                        slot.samplerType == GL_SAMPLER_1D_ARRAY ||
+                        slot.samplerType == GL_INT_SAMPLER_1D_ARRAY ||
+                        slot.samplerType == GL_UNSIGNED_INT_SAMPLER_1D_ARRAY ||
+                        slot.samplerType == GL_SAMPLER_1D_ARRAY_SHADOW;
+                    const bool sampler2DArray =
+                        slot.samplerType == GL_SAMPLER_2D_ARRAY ||
+                        slot.samplerType == GL_INT_SAMPLER_2D_ARRAY ||
+                        slot.samplerType == GL_UNSIGNED_INT_SAMPLER_2D_ARRAY ||
+                        slot.samplerType == GL_SAMPLER_2D_ARRAY_SHADOW;
+                    const bool sampler3D =
+                        slot.samplerType == GL_SAMPLER_3D ||
+                        slot.samplerType == GL_INT_SAMPLER_3D ||
+                        slot.samplerType == GL_UNSIGNED_INT_SAMPLER_3D;
+                    const bool samplerCube =
+                        slot.samplerType == GL_SAMPLER_CUBE ||
+                        slot.samplerType == GL_INT_SAMPLER_CUBE ||
+                        slot.samplerType == GL_UNSIGNED_INT_SAMPLER_CUBE ||
+                        slot.samplerType == GL_SAMPLER_CUBE_SHADOW;
+                    const bool samplerCubeArray =
+                        slot.samplerType == GL_SAMPLER_CUBE_MAP_ARRAY ||
+                        slot.samplerType == GL_INT_SAMPLER_CUBE_MAP_ARRAY ||
+                        slot.samplerType == GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY ||
+                        slot.samplerType == GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW;
+                    if (samplerCube || samplerCubeArray) {
+                        const std::uint32_t face =
+                            cubeFaceFromDirection(uF, vF, wF);
+                        const std::uint32_t cubeCount =
+                            std::max<std::uint32_t>(mipLayerFaces / 6u, 1u);
+                        const float cubeCoord =
+                            coord.componentCount() >= 4 ? coord.f[3] : 0.0f;
+                        const std::uint32_t cube =
+                            samplerCubeArray ? layerFromCoord(cubeCoord, cubeCount) : 0u;
+                        layer = std::min<std::uint32_t>(
+                            cube * 6u + face, mipLayerFaces - 1u);
+                        uF = 0.5f;
+                        vF = 0.5f;
+                    } else if (sampler1DArray) {
+                        layer = layerFromCoord(vF, mipLayerFaces);
+                        vF = 0.0f;
+                    } else if (sampler2DArray) {
+                        layer = layerFromCoord(wF, mipLayerFaces);
+                    } else if (sampler3D) {
+                        const float zWrapped = wrap(wF);
+                        layer = std::min<std::uint32_t>(
+                            static_cast<std::uint32_t>(
+                                zWrapped * static_cast<float>(mipLayerFaces)),
+                            mipLayerFaces - 1u);
+                    }
                     uF = wrap(uF);
                     vF = wrap(vF);
-                    if (slot.width > 0) {
-                        int iu = static_cast<int>(uF * slot.width);
+                    if (mipWidth > 0) {
+                        int iu = static_cast<int>(uF * mipWidth);
                         if (iu < 0) iu = 0;
-                        if (iu >= static_cast<int>(slot.width))
-                            iu = static_cast<int>(slot.width) - 1;
+                        if (iu >= static_cast<int>(mipWidth))
+                            iu = static_cast<int>(mipWidth) - 1;
                         u = static_cast<std::uint32_t>(iu);
                     }
-                    if (slot.height > 0) {
-                        int iv = static_cast<int>(vF * slot.height);
+                    if (mipHeight > 0) {
+                        int iv = static_cast<int>(vF * mipHeight);
                         if (iv < 0) iv = 0;
-                        if (iv >= static_cast<int>(slot.height))
-                            iv = static_cast<int>(slot.height) - 1;
+                        if (iv >= static_cast<int>(mipHeight))
+                            iv = static_cast<int>(mipHeight) - 1;
                         v = static_cast<std::uint32_t>(iv);
                     }
                 }
@@ -5816,15 +5958,19 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 Value out{};
                 if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
                     std::fprintf(stderr,
-                        "[GS-tex] sample: var=%u elem=%u uv=(%u,%u) "
+                        "[GS-tex] sample: var=%u elem=%u uvw=(%u,%u,%u) lod=%u "
                         "fmt=0x%X dim=%ux%u datasz=%zu\n",
-                        h.arrayVarId, h.elementIdx, u, v,
-                        slot.internalFormat, slot.width, slot.height,
+                        h.arrayVarId, h.elementIdx, u, v, layer,
+                        mipLevel,
+                        slot.internalFormat, mipWidth, mipHeight,
                         slot.data.size());
                 }
                 const std::uint32_t bpr =
-                    slot.bytesPerRow != 0 ? slot.bytesPerRow
-                                          : slot.width *
+                    (!slot.mipBytesPerRow.empty() &&
+                     mipLevel < slot.mipBytesPerRow.size())
+                        ? slot.mipBytesPerRow[mipLevel]
+                        : (slot.bytesPerRow != 0 ? slot.bytesPerRow
+                                          : mipWidth *
                                                 (slot.internalFormat ==
                                                          /*GL_R32UI*/ 0x8236 ||
                                                  slot.internalFormat ==
@@ -5835,12 +5981,18 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                                                      : slot.internalFormat ==
                                                                        /*GL_RGBA8*/ 0x8058
                                                            ? 4u
-                                                           : 4u);
+                                                           : 4u));
                 const std::uint32_t bytesPerTexel =
-                    (slot.width != 0 && bpr >= slot.width)
-                        ? std::max<std::uint32_t>(1u, bpr / slot.width)
-                        : 4u;
+                    sampledTextureBytesPerTexel(slot.internalFormat);
+                const std::uint32_t bpi =
+                    (!slot.mipBytesPerImage.empty() &&
+                     mipLevel < slot.mipBytesPerImage.size())
+                        ? slot.mipBytesPerImage[mipLevel]
+                        : (slot.bytesPerImage != 0 ? slot.bytesPerImage
+                                                   : bpr * mipHeight);
                 const std::size_t off =
+                    static_cast<std::size_t>(mipBase) +
+                    static_cast<std::size_t>(layer) * bpi +
                     static_cast<std::size_t>(v) * bpr +
                     static_cast<std::size_t>(u) * bytesPerTexel;
                 if (off + 4 <= slot.data.size()) {
@@ -6661,8 +6813,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             // dimensions resolved through `storageImages_` (built from
             // imageBindings unit at draw time).
             //   OpImageQuerySize: w[0]=resultType, w[1]=resultId, w[2]=image
-            //   OpImageQuerySizeLod: same plus w[3]=lod (we ignore — slot is
-            //                        always level 0 in our shadow).
+            //   OpImageQuerySizeLod: same plus w[3]=lod.
             case spv::OpImageQuerySize:
             case spv::OpImageQuerySizeLod: {
                 auto sIt = sampledImages_.find(w[2]);
@@ -6687,13 +6838,57 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 }
                 auto arrIt = mapPtr->find(h.arrayVarId);
                 std::uint32_t qw = 0, qh = 0, qd = 0;
+                std::uint32_t lodLevel = 0;
                 if (arrIt != mapPtr->end() &&
                     h.elementIdx < arrIt->second.size()) {
                     const SampledTextureSlot& slot =
                         arrIt->second[h.elementIdx];
-                    qw = slot.width;
-                    qh = slot.height;
-                    qd = slot.depth;
+                    if (opcode == spv::OpImageQuerySizeLod && wc >= 4) {
+                        Value lodValue;
+                        if (tryGetValue(w[3], lodValue)) {
+                            std::int32_t lod = 0;
+                            if (lodValue.isFloatKind()) {
+                                const float lodFloat = lodValue.f[0];
+                                if (std::isfinite(lodFloat)) {
+                                    lod = static_cast<std::int32_t>(
+                                        std::floor(lodFloat));
+                                }
+                            } else if (lodValue.isIntKind()) {
+                                lod = lodValue.i[0];
+                            }
+                            if (lod > 0) {
+                                lodLevel = static_cast<std::uint32_t>(lod);
+                            }
+                        }
+                    }
+                    const std::uint32_t mipCount =
+                        slot.mipWidths.empty()
+                            ? 1u
+                            : static_cast<std::uint32_t>(
+                                  slot.mipWidths.size());
+                    if (mipCount > 0 && lodLevel >= mipCount) {
+                        lodLevel = mipCount - 1u;
+                    }
+                    auto fallbackMipDim = [lodLevel](std::uint32_t base)
+                        -> std::uint32_t {
+                        if (base == 0u) return 0u;
+                        if (lodLevel == 0u) return base;
+                        if (lodLevel >= 31u) return 1u;
+                        return std::max<std::uint32_t>(
+                            base >> lodLevel, 1u);
+                    };
+                    qw = (!slot.mipWidths.empty() &&
+                          lodLevel < slot.mipWidths.size())
+                        ? slot.mipWidths[lodLevel]
+                        : fallbackMipDim(slot.width);
+                    qh = (!slot.mipHeights.empty() &&
+                          lodLevel < slot.mipHeights.size())
+                        ? slot.mipHeights[lodLevel]
+                        : fallbackMipDim(slot.height);
+                    qd = (!slot.mipLayerFaces.empty() &&
+                          lodLevel < slot.mipLayerFaces.size())
+                        ? slot.mipLayerFaces[lodLevel]
+                        : slot.depth;
                 }
                 // Result component count from SPIR-V resultType. Vector
                 // kinds Vec2/Vec3/Vec4 carry the count via their kind
@@ -6733,8 +6928,8 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
                     std::fprintf(stderr,
                         "[GS-img] querysize: var=%u elem=%u → "
-                        "(%u,%u,%u) compCount=%u\n",
-                        h.arrayVarId, h.elementIdx, qw, qh, qd,
+                        "(%u,%u,%u) lod=%u compCount=%u\n",
+                        h.arrayVarId, h.elementIdx, qw, qh, qd, lodLevel,
                         componentCount);
                 }
                 valueStore_[w[1]] = out;

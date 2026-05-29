@@ -257,6 +257,13 @@ struct GLTextureObject {
     void* metalSwizzledView = nullptr;
     bool swizzleDirty = true;
 
+    // Sampling-only proxy used when a GL texture view has cube-family
+    // semantics that Metal does not reproduce through a direct texture
+    // view over the source storage. The render/FBO path still uses
+    // metalTexture so writes alias the source; sampler binding may use
+    // this copied texture instead.
+    void* metalSamplingProxy = nullptr;
+
     // SPIRV-Cross lowers imageAtomic* on Metal without native texture
     // atomics to a companion `device atomic_*` buffer. For ordinary
     // textures this sidecar holds one 32-bit word per texel and is copied
