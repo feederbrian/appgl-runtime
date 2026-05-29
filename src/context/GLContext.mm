@@ -42218,18 +42218,37 @@ bool GLContext::setUniformDoubleMatrix(GLint location, GLint rows, GLint cols, G
 
 // --- GL 4.1: glProgramUniform* family — explicit program handle variants ---
 
+GLProgramObject* GLContext::validateProgramUniformTarget(GLuint program) {
+    auto pushTargetError = [&](GLenum error) {
+        if (std::find(impl_->errors.begin(), impl_->errors.end(), error) ==
+            impl_->errors.end()) {
+            pushError(error);
+        }
+    };
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr || object->deleteRequested) {
+        pushTargetError(GL_INVALID_VALUE);
+        return nullptr;
+    }
+    if (!object->linked) {
+        pushTargetError(GL_INVALID_OPERATION);
+        return nullptr;
+    }
+    return object;
+}
+
 bool GLContext::setUniformScalarVectorForProgram(GLuint program, GLint location, UniformElementType element, GLint vectorSize, GLsizei count, const void* values) {
     // GL 4.6 §7.6.1 — error codes for glProgramUniform*. Validate the
     // PROGRAM argument BEFORE checking location, because "not a valid
     // program" and "not linked" fire regardless of location (including
     // location=-1 which would otherwise be a silent no-op).
     //   - program not a program name returned from glCreateProgram → INVALID_VALUE
+    //   - program marked for deletion → INVALID_VALUE
     //   - program not linked → INVALID_OPERATION
     // CTS `sepshaderobjs.ProgUniformAPI` exercises both paths with a
     // cached location=-1 from an unlinked-program glGetUniformLocation.
-    GLProgramObject* object = impl_->objects->programs().get(program);
-    if (object == nullptr) { pushError(GL_INVALID_VALUE); return false; }
-    if (!object->linked) { pushError(GL_INVALID_OPERATION); return false; }
+    GLProgramObject* object = validateProgramUniformTarget(program);
+    if (object == nullptr) return false;
     if (location < 0) return true;
     if (count < 0 || vectorSize < 1 || vectorSize > 4) { pushError(GL_INVALID_VALUE); return false; }
     UniformSlotRef ref = resolveUniformSlot(object, location);
@@ -42265,10 +42284,10 @@ bool GLContext::setUniformScalarVectorForProgram(GLuint program, GLint location,
 }
 
 bool GLContext::setUniformMatrixForProgram(GLuint program, GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLfloat* values) {
+    GLProgramObject* object = validateProgramUniformTarget(program);
+    if (object == nullptr) return false;
     if (location < 0) return true;
     if (count < 0 || rows < 2 || rows > 4 || cols < 2 || cols > 4 || values == nullptr) { pushError(GL_INVALID_VALUE); return false; }
-    GLProgramObject* object = impl_->objects->programs().get(program);
-    if (object == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
     GLProgramUniformValue* slot = lookupUniformValue(object, location);
     if (slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
     const std::size_t elements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols) * static_cast<std::size_t>(std::max<GLsizei>(count, 1));
@@ -42293,10 +42312,10 @@ bool GLContext::setUniformMatrixForProgram(GLuint program, GLint location, GLint
 }
 
 bool GLContext::setUniformDoubleForProgram(GLuint program, GLint location, GLint vectorSize, GLsizei count, const GLdouble* values) {
+    GLProgramObject* object = validateProgramUniformTarget(program);
+    if (object == nullptr) return false;
     if (location < 0) return true;
     if (count < 0 || vectorSize < 1 || vectorSize > 4 || values == nullptr) { pushError(GL_INVALID_VALUE); return false; }
-    GLProgramObject* object = impl_->objects->programs().get(program);
-    if (object == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
     UniformSlotRef ref = resolveUniformSlot(object, location);
     if (ref.slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
     if (doubleUniformVectorWidth(ref.type) != vectorSize ||
@@ -42314,10 +42333,10 @@ bool GLContext::setUniformDoubleForProgram(GLuint program, GLint location, GLint
 }
 
 bool GLContext::setUniformDoubleMatrixForProgram(GLuint program, GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLdouble* values) {
+    GLProgramObject* object = validateProgramUniformTarget(program);
+    if (object == nullptr) return false;
     if (location < 0) return true;
     if (count < 0 || rows < 2 || rows > 4 || cols < 2 || cols > 4 || values == nullptr) { pushError(GL_INVALID_VALUE); return false; }
-    GLProgramObject* object = impl_->objects->programs().get(program);
-    if (object == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
     UniformSlotRef ref = resolveUniformSlot(object, location);
     if (ref.slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
     GLint expectedCols = 0;

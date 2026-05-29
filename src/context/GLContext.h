@@ -17,6 +17,7 @@ class GLCapabilities;
 class GLObjectStore;
 class GLStateTracker;
 class MatrixStateMirror;
+struct GLProgramObject;
 struct GLTextureObject;
 
 class GLContext {
@@ -694,6 +695,8 @@ public:
     GLuint boundDrawFramebuffer() const;
 
 private:
+    GLProgramObject* validateProgramUniformTarget(GLuint program);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
