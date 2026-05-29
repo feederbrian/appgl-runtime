@@ -19,6 +19,9 @@ struct BindingMap {
     std::uint32_t vertexBufferBase = 0;    // [ 0..16) — VBOs
     std::uint32_t uniformBufferBase = 16;  // [16..28) — UBOs
     std::uint32_t storageBufferBase = 28;  // [28..30) — SSBOs (GL 4.3+, deferred)
+    // Direct Metal buffer slot for GL atomic counter binding 0. Graphics
+    // keeps the legacy range, while compute repacks it around SSBO/UBO use.
+    std::uint32_t atomicCounterBufferBase = 22;
     std::uint32_t multisampleStorageImageSampleBuffer = 30;
     // SPIRV-Cross emulates image atomics on pre-MSL-3.1 storage images
     // with a secondary `device atomic_* [[buffer(N)]]` argument. Keep the
@@ -42,16 +45,16 @@ struct BindingMap {
     std::uint32_t storageImageBase = 48;
 };
 
-// Compute pipelines have no vertex inputs, so the low 16 Metal buffer
-// slots (normally reserved for VBOs on graphics pipelines) are free.
-// This lets us give compute SSBOs 16 slots — comfortably above the GL
-// 4.3 spec floor of GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS ≥ 8. The
-// default-uniform push-constant stays at slot 16 to match the
-// hardcoded `atIndex:16` in MetalFrameGraph::encodeComputeDispatch,
-// and user UBOs stack above it at [17..30).
+// Compute pipelines have no vertex inputs, so the low Metal buffer slots
+// (normally reserved for VBOs on graphics pipelines) are free. SSBOs still
+// allocate sequentially from slot 0; the CTS max-resource path pairs the GL
+// minimum of 8 SSBOs with 8 atomic counter buffers, so compute reserves
+// atomics at [8..16), the default-uniform push constant at 16, and UBOs
+// above it at [17..30).
 inline BindingMap makeComputeBindingMap() {
     BindingMap m;
-    m.storageBufferBase = 0;   // [ 0..16) — SSBOs: 16 slots (spec floor 8)
+    m.storageBufferBase = 0;   // SSBOs start at the low compute slots
+    m.atomicCounterBufferBase = 8;  // [ 8..16) — atomic counter buffers
     m.uniformBufferBase = 16;  // [16..31) — default uniform (16) + UBOs (17..30)
     m.vertexBufferBase = 0;    // unused for compute
     m.multisampleStorageImageSampleBuffer = 30;

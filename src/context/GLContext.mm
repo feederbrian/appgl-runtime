@@ -316,6 +316,11 @@ std::uint32_t multisampleStorageImageSampleCountSlotForMSL(
     return makeComputeBindingMap().multisampleStorageImageSampleBuffer;
 }
 
+std::uint32_t computeAtomicCounterMetalSlot(GLuint glBinding) {
+    return makeComputeBindingMap().atomicCounterBufferBase +
+        static_cast<std::uint32_t>(glBinding);
+}
+
 inline bool isImageUniformType(GLenum t) {
     switch (t) {
         case GL_IMAGE_1D:
@@ -51050,9 +51055,9 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
         ComputeDispatchInfo::BufferBinding bb;
         bb.metalBuffer = bufObj->metalBuffer;
         bb.offset = static_cast<std::size_t>(binding.offset);
-        // Atomic counters are emitted into a dedicated direct-buffer slot
-        // range so compute SSBO binding 0 cannot alias atomic binding 0.
-        bb.metalSlot = 22u + glBinding;
+        // Atomic counters are emitted after the compute SSBO spec-floor
+        // range so they cannot alias SSBOs or the high UBO slots.
+        bb.metalSlot = computeAtomicCounterMetalSlot(glBinding);
         info.buffers.push_back(bb);
     }
 
@@ -51744,7 +51749,7 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
         ComputeDispatchInfo::BufferBinding bb;
         bb.metalBuffer = bufObj->metalBuffer;
         bb.offset = static_cast<std::size_t>(binding.offset);
-        bb.metalSlot = 22u + glBinding;
+        bb.metalSlot = computeAtomicCounterMetalSlot(glBinding);
         info.buffers.push_back(bb);
     }
     thread_local std::vector<std::uint8_t> computeUniformScratchIndirect;

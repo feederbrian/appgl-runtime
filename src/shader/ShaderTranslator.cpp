@@ -4821,7 +4821,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         auto resources = compiler.get_shader_resources();
         auto activeVars = compiler.get_active_interface_variables();
         constexpr std::uint32_t kAtomicCounterSyntheticBindingBase = 64;
-        constexpr std::uint32_t kAtomicCounterDirectBufferBase = 22;
+        const std::uint32_t atomicCounterDirectBufferBase =
+            bindings.atomicCounterBufferBase;
         auto isAtomicCounterStorageBuffer = [&](const spirv_cross::Resource& res) {
             auto hasAtomicCounterName = [](const std::string& name) {
                 return name.find("AtomicCounter") != std::string::npos ||
@@ -5212,7 +5213,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             binding.binding = syntheticBinding;
             binding.msl_buffer = useArgBuf
                 ? (256 + glBinding)
-                : (kAtomicCounterDirectBufferBase + glBinding);
+                : (atomicCounterDirectBufferBase + glBinding);
             compiler.add_msl_resource_binding(binding);
         }
         for (auto& atomicCounter : resources.storage_buffers) {
@@ -5229,7 +5230,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             binding.binding = syntheticBinding;
             binding.msl_buffer = useArgBuf
                 ? (256 + glBinding)
-                : (kAtomicCounterDirectBufferBase + glBinding);
+                : (atomicCounterDirectBufferBase + glBinding);
             compiler.add_msl_resource_binding(binding);
         }
 
