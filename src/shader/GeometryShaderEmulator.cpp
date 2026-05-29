@@ -152,7 +152,9 @@ enum GLSLstd450 : std::uint32_t {
     GLSLstd450InverseSqrt = 32,
     GLSLstd450Determinant = 33, GLSLstd450MatrixInverse = 34,
     GLSLstd450Modf = 35, GLSLstd450ModfStruct = 36,
-    GLSLstd450FMin = 37, GLSLstd450FMax = 40, GLSLstd450FClamp = 43,
+    GLSLstd450FMin = 37, GLSLstd450UMin = 38, GLSLstd450SMin = 39,
+    GLSLstd450FMax = 40, GLSLstd450UMax = 41, GLSLstd450SMax = 42,
+    GLSLstd450FClamp = 43,
     GLSLstd450FMix = 46, GLSLstd450Step = 48, GLSLstd450SmoothStep = 49,
     GLSLstd450Fma = 50, GLSLstd450Frexp = 51,
     GLSLstd450FrexpStruct = 52, GLSLstd450Ldexp = 53,
@@ -4449,6 +4451,24 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
         const int idx = std::min(lane, v.componentCount() - 1);
         return v.isIntKind() ? v.i[idx] : static_cast<std::int32_t>(v.f[idx]);
     };
+    auto uintLane = [&](const Value& v, int lane) {
+        return static_cast<std::uint32_t>(intLane(v, lane));
+    };
+    auto signedBinaryMap = [&](std::int32_t (*fn)(std::int32_t, std::int32_t)) {
+        Value r = a;
+        for (int k = 0; k < a.componentCount(); ++k) {
+            r.i[k] = fn(intLane(a, k), intLane(b, k));
+        }
+        return r;
+    };
+    auto unsignedBinaryMap = [&](std::uint32_t (*fn)(std::uint32_t, std::uint32_t)) {
+        Value r = a;
+        for (int k = 0; k < a.componentCount(); ++k) {
+            r.i[k] = static_cast<std::int32_t>(
+                fn(uintLane(a, k), uintLane(b, k)));
+        }
+        return r;
+    };
     switch (glslOp) {
         // ─ Unary transcendentals / sign / rounding ─
         case ::GLSLstd450Radians: return scalarMap([](float x) { return x * 0.017453292519943295f; });
@@ -4492,6 +4512,10 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
         case ::GLSLstd450Atan2:   return binaryMap([](float y, float x) { return std::atan2(y, x); });
         case ::GLSLstd450FMin:    return binaryMap([](float x, float y) { return std::fmin(x, y); });
         case ::GLSLstd450FMax:    return binaryMap([](float x, float y) { return std::fmax(x, y); });
+        case ::GLSLstd450SMin:    return signedBinaryMap([](std::int32_t x, std::int32_t y) { return std::min(x, y); });
+        case ::GLSLstd450UMin:    return unsignedBinaryMap([](std::uint32_t x, std::uint32_t y) { return std::min(x, y); });
+        case ::GLSLstd450SMax:    return signedBinaryMap([](std::int32_t x, std::int32_t y) { return std::max(x, y); });
+        case ::GLSLstd450UMax:    return unsignedBinaryMap([](std::uint32_t x, std::uint32_t y) { return std::max(x, y); });
         case ::GLSLstd450Ldexp: {
             Value r = a;
             r.hasDouble = true;
