@@ -53661,19 +53661,86 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     const std::uint8_t* srcPixels = nullptr;
     GLsizei srcImgW = 0, srcImgH = 0, srcImgD = 1;
     std::size_t srcBpp = 4; // RGBA8 default
+    const bool srcCubeMap = srcIsTex && srcTarget == GL_TEXTURE_CUBE_MAP;
+    const bool dstCubeMap = dstIsTex && dstTarget == GL_TEXTURE_CUBE_MAP;
+    auto textureLevelForCopyLayer = [](GLTextureObject* tex,
+                                       GLenum target,
+                                       GLint level,
+                                       GLint z) -> GLTextureImageLevel* {
+        if (tex == nullptr) {
+            return nullptr;
+        }
+        if (target == GL_TEXTURE_CUBE_MAP) {
+            if (z < 0 || z >= 6) {
+                return nullptr;
+            }
+            auto& faceLevels = tex->cubeFaceLevels[static_cast<std::size_t>(z)];
+            auto faceIt = faceLevels.find(level);
+            if (faceIt != faceLevels.end() && faceIt->second.defined) {
+                return &faceIt->second;
+            }
+        }
+        auto it = tex->levels.find(level);
+        if (it != tex->levels.end() && it->second.defined) {
+            return &it->second;
+        }
+        return nullptr;
+    };
+    auto selectTextureReadPixels = [](const GLTextureImageLevel& image,
+                                      const std::uint8_t*& pixels,
+                                      std::size_t& bpp) -> bool {
+        if (image.nativeBpp > 0 && !image.nativeData.empty()) {
+            pixels = image.nativeData.data();
+            bpp = image.nativeBpp;
+            return true;
+        }
+        if (!image.rgba8.empty()) {
+            pixels = image.rgba8.data();
+            bpp = 4;
+            return true;
+        }
+        return false;
+    };
+    auto selectTextureWritePixels = [](GLTextureImageLevel& image,
+                                       std::uint8_t*& pixels,
+                                       std::size_t& bpp) -> bool {
+        if (image.nativeBpp > 0 && !image.nativeData.empty()) {
+            pixels = image.nativeData.data();
+            bpp = image.nativeBpp;
+            return true;
+        }
+        const std::size_t totalPixels =
+            static_cast<std::size_t>(std::max<GLsizei>(image.desc.width, 1)) *
+            static_cast<std::size_t>(std::max<GLsizei>(image.desc.height, 1)) *
+            static_cast<std::size_t>(std::max<GLsizei>(image.desc.depth, 1));
+        if (image.rgba8.size() < totalPixels * 4u) {
+            image.rgba8.resize(totalPixels * 4u, 0);
+        }
+        pixels = image.rgba8.data();
+        bpp = 4;
+        return true;
+    };
 
+    GLTextureObject* srcTex = nullptr;
     if (srcIsTex) {
-        GLTextureObject* srcTex = impl_->objects->textures().get(srcName);
+        srcTex = impl_->objects->textures().get(srcName);
         if (!srcTex) { pushError(GL_INVALID_VALUE); return false; }
         auto it = srcTex->levels.find(srcLevel);
         if (it == srcTex->levels.end() || !it->second.defined) {
             pushError(GL_INVALID_VALUE);
             return false;
         }
-        const GLTextureImageLevel& srcImg = it->second;
+        const GLTextureImageLevel* srcImgPtr = &it->second;
+        if (srcCubeMap && srcZ >= 0 && srcZ < 6) {
+            if (GLTextureImageLevel* faceImg =
+                    textureLevelForCopyLayer(srcTex, srcTarget, srcLevel, srcZ)) {
+                srcImgPtr = faceImg;
+            }
+        }
+        const GLTextureImageLevel& srcImg = *srcImgPtr;
         srcImgW = srcImg.desc.width;
         srcImgH = srcImg.desc.height;
-        srcImgD = srcImg.desc.depth;
+        srcImgD = srcCubeMap ? 6 : srcImg.desc.depth;
         // Per GL 4.6 §18.2.3 Table 18.1 — copyImageSubData per-target axis
         // mapping. For TEXTURE_1D_ARRAY, the second axis (srcY/dstY) is the
         // layer index (0..layers-1) while the height dimension proper is
@@ -53763,9 +53830,17 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
             // Allocate matching storage if level was created by texStorage but not yet texImage'd.
             dstImg->defined = true;
         }
+        if (dstCubeMap && dstZ >= 0 && dstZ < 6) {
+            auto& faceLevels = dstTex->cubeFaceLevels[static_cast<std::size_t>(dstZ)];
+            auto [faceIt, _inserted] = faceLevels.try_emplace(dstLevel, *dstImg);
+            if (!faceIt->second.defined) {
+                faceIt->second.defined = true;
+            }
+            dstImg = &faceIt->second;
+        }
         dstImgW = dstImg->desc.width;
         dstImgH = dstImg->desc.height;
-        dstImgD = dstImg->desc.depth;
+        dstImgD = dstCubeMap ? 6 : dstImg->desc.depth;
         // CKPT116: 1D_ARRAY layer-count-on-Y axis (mirror src logic).
         if (dstTarget == GL_TEXTURE_1D_ARRAY) {
             dstImgH = std::max<GLsizei>(dstTex->desc.depth, dstImg->desc.depth);
@@ -53820,7 +53895,81 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     // When bpp matches between source and destination, do a direct memcpy per row.
     // When bpp differs (e.g. native R8 → RGBA8), we need to convert; for now,
     // use the rgba8 path as the common denominator.
-    if (srcBpp == dstBpp) {
+    if ((srcCubeMap || dstCubeMap) && srcBpp == dstBpp) {
+        for (GLsizei z = 0; z < srcDepth; ++z) {
+            const std::uint8_t* sliceSrcPixels = srcPixels;
+            std::uint8_t* sliceDstPixels = dstPixels;
+            std::size_t sliceSrcBpp = srcBpp;
+            std::size_t sliceDstBpp = dstBpp;
+            GLsizei sliceSrcW = srcImgW;
+            GLsizei sliceSrcH = srcImgH;
+            GLsizei sliceDstW = dstImgW;
+            GLsizei sliceDstH = dstImgH;
+            GLint srcSlice = srcZ + z;
+            GLint dstSlice = dstZ + z;
+
+            if (srcCubeMap) {
+                const GLTextureImageLevel* faceImg =
+                    textureLevelForCopyLayer(srcTex, srcTarget, srcLevel, srcSlice);
+                if (faceImg == nullptr ||
+                    !selectTextureReadPixels(*faceImg, sliceSrcPixels, sliceSrcBpp)) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
+                sliceSrcW = faceImg->desc.width;
+                sliceSrcH = faceImg->desc.height;
+                srcSlice = 0;
+            }
+            if (dstCubeMap) {
+                if (dstSlice < 0 || dstSlice >= 6) {
+                    pushError(GL_INVALID_VALUE);
+                    return false;
+                }
+                auto& faceLevels =
+                    dstTex->cubeFaceLevels[static_cast<std::size_t>(dstSlice)];
+                auto faceIt = faceLevels.find(dstLevel);
+                if (faceIt == faceLevels.end()) {
+                    auto baseIt = dstTex->levels.find(dstLevel);
+                    if (baseIt == dstTex->levels.end() || !baseIt->second.defined) {
+                        pushError(GL_INVALID_OPERATION);
+                        return false;
+                    }
+                    faceIt = faceLevels.emplace(dstLevel, baseIt->second).first;
+                }
+                GLTextureImageLevel* faceImg = &faceIt->second;
+                if (faceImg == nullptr ||
+                    !selectTextureWritePixels(*faceImg, sliceDstPixels, sliceDstBpp)) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
+                sliceDstW = faceImg->desc.width;
+                sliceDstH = faceImg->desc.height;
+                dstTex->cubeFacesDefined |= static_cast<std::uint8_t>(1u << dstSlice);
+                dstSlice = 0;
+            }
+            if (sliceSrcBpp != sliceDstBpp) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+
+            const std::size_t srcRowBytes = static_cast<std::size_t>(sliceSrcW) * sliceSrcBpp;
+            const std::size_t dstRowBytes = static_cast<std::size_t>(sliceDstW) * sliceDstBpp;
+            const std::size_t srcSliceBytes = srcRowBytes * static_cast<std::size_t>(sliceSrcH);
+            const std::size_t dstSliceBytes = dstRowBytes * static_cast<std::size_t>(sliceDstH);
+            const std::size_t copyRowBytes = static_cast<std::size_t>(srcWidth) * sliceSrcBpp;
+            const std::size_t srcSliceOff = static_cast<std::size_t>(srcSlice) * srcSliceBytes;
+            const std::size_t dstSliceOff = static_cast<std::size_t>(dstSlice) * dstSliceBytes;
+            for (GLsizei row = 0; row < srcHeight; ++row) {
+                const std::size_t srcOff = srcSliceOff
+                                         + static_cast<std::size_t>(srcY + row) * srcRowBytes
+                                         + static_cast<std::size_t>(srcX) * sliceSrcBpp;
+                const std::size_t dstOff = dstSliceOff
+                                         + static_cast<std::size_t>(dstY + row) * dstRowBytes
+                                         + static_cast<std::size_t>(dstX) * sliceDstBpp;
+                std::memcpy(sliceDstPixels + dstOff, sliceSrcPixels + srcOff, copyRowBytes);
+            }
+        }
+    } else if (srcBpp == dstBpp) {
         const std::size_t srcRowBytes = static_cast<std::size_t>(srcImgW) * srcBpp;
         const std::size_t dstRowBytes = static_cast<std::size_t>(dstImgW) * dstBpp;
         const std::size_t srcSliceBytes = srcRowBytes * static_cast<std::size_t>(srcImgH);
