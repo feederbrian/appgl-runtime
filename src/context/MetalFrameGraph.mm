@@ -3582,7 +3582,7 @@ struct MetalFrameGraph::Impl {
                 const bool flipToLowerLeft =
                     (info.clipOrigin != GL_UPPER_LEFT) &&
                     !fragmentSamplesColorAttachment;
-                const auto storageImageLowerLeftBase = [&]() -> float {
+                const auto viewportLowerLeftBase = [&]() -> float {
                     if (colorTexture == nil) {
                         return static_cast<float>(
                             std::max<GLsizei>(info.viewportHeight, 1));
@@ -3596,9 +3596,12 @@ struct MetalFrameGraph::Impl {
                         info.viewportHeight, availH);
                     return static_cast<float>(glY + glH);
                 }();
+                // When the vertex shader handles LOWER_LEFT Y fixup, the
+                // Metal viewport stays in GL coordinates, so fragment
+                // gl_FragCoord must use the clamped viewport as its base.
                 const float lowerLeftBase =
-                    fragmentUsesStorageImage
-                        ? storageImageLowerLeftBase
+                    (fragmentUsesStorageImage || clipControlShaderYFixup)
+                        ? viewportLowerLeftBase
                         : renderTargetHeight;
                 const float fragCoordParams[4] = {
                     flipToLowerLeft ? lowerLeftBase : 0.0f,
