@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <unordered_map>
@@ -4070,6 +4071,129 @@ std::vector<std::uint32_t> ShaderTranslator::compileGLSL(std::string_view source
     return std::vector<std::uint32_t>(spirv.begin(), spirv.end());
 }
 
+std::vector<std::uint32_t> ShaderTranslator::compileGLSLStageProgram(
+    const std::vector<std::string>& sources, GLenum stage, int version,
+    std::string* log) const {
+    if (sources.empty()) {
+        if (log != nullptr) {
+            *log = "no GLSL sources supplied";
+        }
+        return {};
+    }
+
+    ensureGlslangInit();
+
+    const EShLanguage eshStage = glStageToEsh(stage);
+    std::vector<const char*> sourcePtrs(sources.size());
+    std::vector<int> sourceLens(sources.size());
+    std::vector<std::string> preambles(sources.size());
+    std::vector<std::unique_ptr<glslang::TShader>> shaders;
+    shaders.reserve(sources.size());
+
+    auto makePreamble = [&](std::string_view source) {
+        const bool usesAtomicCounters =
+            source.find("atomic_uint") != std::string_view::npos ||
+            source.find("atomicCounter") != std::string_view::npos;
+        const bool usesShaderStorageBuffers =
+            source.find("shader_storage_buffer_object") != std::string_view::npos ||
+            source.find(" buffer ") != std::string_view::npos ||
+            source.find(") buffer") != std::string_view::npos ||
+            source.find("\nbuffer ") != std::string_view::npos;
+        const bool redeclaresPerVertexBlock =
+            source.find("gl_PerVertex") != std::string_view::npos &&
+            source.find("gl_Position") != std::string_view::npos &&
+            source.find('{') != std::string_view::npos;
+
+        std::string preamble;
+        if (usesAtomicCounters) {
+            preamble += "#extension GL_ARB_shader_atomic_counters : enable\n";
+            preamble += "#extension GL_ARB_shader_atomic_counter_ops : enable\n";
+        }
+        if (usesAtomicCounters || usesShaderStorageBuffers) {
+            preamble += "#extension GL_ARB_shading_language_420pack : enable\n";
+            preamble += "#extension GL_ARB_shader_storage_buffer_object : enable\n";
+        }
+        if (redeclaresPerVertexBlock) {
+            preamble += "#extension GL_ARB_separate_shader_objects : enable\n";
+        }
+        if (eshStage == EShLangFragment) {
+            preamble += "#extension GL_ARB_sample_shading : enable\n";
+            preamble += "#extension GL_OES_sample_variables : enable\n";
+            preamble += "#extension GL_OES_shader_multisample_interpolation : enable\n";
+        }
+        return preamble;
+    };
+
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        sourcePtrs[i] = sources[i].data();
+        sourceLens[i] = static_cast<int>(sources[i].size());
+        preambles[i] = makePreamble(sources[i]);
+
+        auto shader = std::make_unique<glslang::TShader>(eshStage);
+        shader->setStringsWithLengths(&sourcePtrs[i], &sourceLens[i], 1);
+        if (!preambles[i].empty()) {
+            shader->setPreamble(preambles[i].c_str());
+        }
+        shader->setEnvInput(glslang::EShSourceGlsl, eshStage,
+                            glslang::EShClientVulkan,
+                            glslang::EShTargetVulkan_1_0);
+        shader->setEnvClient(glslang::EShClientVulkan,
+                             glslang::EShTargetVulkan_1_0);
+        shader->setEnvTarget(glslang::EShTargetSpv,
+                             glslang::EShTargetSpv_1_0);
+        shader->setEnvInputVulkanRulesRelaxed();
+        shader->setAutoMapLocations(true);
+        shader->setAutoMapBindings(true);
+        shader->setGlobalUniformBlockName("_DefaultUniforms");
+        shader->setGlobalUniformSet(0);
+        shader->setGlobalUniformBinding(0);
+        shaders.push_back(std::move(shader));
+    }
+
+    static const TBuiltInResource appglResources = makeAppGLBuiltInResources();
+    const TBuiltInResource* resources = &appglResources;
+    const EShMessages messages =
+        static_cast<EShMessages>(EShMsgSpvRules | EShMsgVulkanRules);
+
+    glslang::TProgram program;
+    for (std::size_t i = 0; i < shaders.size(); ++i) {
+        if (!shaders[i]->parse(resources, version, false, messages)) {
+            if (log != nullptr) {
+                *log = std::string("source ") + std::to_string(i) +
+                    " parse: " + shaders[i]->getInfoLog();
+            }
+            return {};
+        }
+        program.addShader(shaders[i].get());
+    }
+
+    if (!program.link(messages)) {
+        if (log != nullptr) {
+            *log = std::string("link: ") + program.getInfoLog();
+        }
+        return {};
+    }
+
+    glslang::SpvOptions spvOptions;
+    spvOptions.disableOptimizer = false;
+    spvOptions.optimizeSize = true;
+
+    std::vector<unsigned int> spirv;
+    glslang::GlslangToSpv(*program.getIntermediate(eshStage), spirv,
+                          &spvOptions);
+    if (spirv.empty()) {
+        if (log != nullptr) {
+            *log = "GlslangToSpv produced empty output";
+        }
+        return {};
+    }
+
+    if (log != nullptr) {
+        *log = "ok";
+    }
+    return std::vector<std::uint32_t>(spirv.begin(), spirv.end());
+}
+
 LinkedProgramSpirv ShaderTranslator::compileGLSLProgram(
     std::string_view vertexSource, std::string_view fragmentSource,
     int version, std::string* log) const {
@@ -7708,6 +7832,18 @@ std::vector<std::uint32_t> ShaderTranslator::compileGLSL(std::string_view source
     (void)version;
     if (log != nullptr) {
         *log = "Shader translator dependencies are vendored; GLSL compilation is not enabled in the bootstrap build yet.";
+    }
+    return {};
+}
+
+std::vector<std::uint32_t> ShaderTranslator::compileGLSLStageProgram(
+    const std::vector<std::string>& sources, GLenum stage, int version,
+    std::string* log) const {
+    (void)sources;
+    (void)stage;
+    (void)version;
+    if (log != nullptr) {
+        *log = "Same-stage GLSL linking is not enabled in the bootstrap build yet.";
     }
     return {};
 }

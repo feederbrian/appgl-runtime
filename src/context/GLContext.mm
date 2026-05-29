@@ -29659,6 +29659,95 @@ bool parseLayoutIntegerQualifier(const std::string& prefix,
     return false;
 }
 
+struct ComputeLocalSizeDecl {
+    int x = 1;
+    int y = 1;
+    int z = 1;
+};
+
+bool validateLinkedComputeLocalSizes(
+    const std::vector<GLShaderObject*>& shaders,
+    std::string& error)
+{
+    bool haveDecl = false;
+    ComputeLocalSizeDecl firstDecl;
+    for (const GLShaderObject* shader : shaders) {
+        if (shader == nullptr) {
+            continue;
+        }
+        const std::string source =
+            stripGlslCommentsForAppglValidation(shader->source);
+        const auto defines = parseGlslIntegerDefines(source);
+        std::size_t layout = 0;
+        while ((layout = source.find("layout", layout)) != std::string::npos) {
+            if (!tokenAt(source, layout, "layout")) {
+                layout += 6;
+                continue;
+            }
+            std::size_t open = layout + 6;
+            skipGlslWs(source, open);
+            if (open >= source.size() || source[open] != '(') {
+                layout += 6;
+                continue;
+            }
+            const std::size_t close =
+                findMatchingDelimiter(source, open, '(', ')');
+            if (close == std::string::npos) {
+                break;
+            }
+            std::size_t after = close + 1;
+            skipGlslWs(source, after);
+            if (!tokenAt(source, after, "in")) {
+                layout = close + 1;
+                continue;
+            }
+
+            const std::string inner =
+                source.substr(open + 1, close - open - 1);
+            if (inner.find("local_size_") == std::string::npos) {
+                layout = close + 1;
+                continue;
+            }
+
+            ComputeLocalSizeDecl decl;
+            int parsed = 0;
+            if (parseLayoutIntegerQualifier(
+                    source.substr(layout, close + 1 - layout),
+                    "local_size_x", defines, parsed)) {
+                decl.x = parsed;
+            }
+            if (parseLayoutIntegerQualifier(
+                    source.substr(layout, close + 1 - layout),
+                    "local_size_y", defines, parsed)) {
+                decl.y = parsed;
+            }
+            if (parseLayoutIntegerQualifier(
+                    source.substr(layout, close + 1 - layout),
+                    "local_size_z", defines, parsed)) {
+                decl.z = parsed;
+            }
+
+            if (!haveDecl) {
+                firstDecl = decl;
+                haveDecl = true;
+            } else if (decl.x != firstDecl.x ||
+                       decl.y != firstDecl.y ||
+                       decl.z != firstDecl.z) {
+                error = "compute shader local_size declarations differ "
+                        "between attached shader objects";
+                return false;
+            }
+            layout = close + 1;
+        }
+    }
+
+    if (!haveDecl) {
+        error = "compute shader link failed: missing local_size layout declaration";
+        return false;
+    }
+    return true;
+}
+
 bool parseLayoutBinding(const std::string& prefix,
                         const std::unordered_map<std::string, int>& defines,
                         int& binding) {
@@ -32169,6 +32258,20 @@ bool GLContext::compileShader(GLuint shader) {
 
     object->compileLog = std::move(compileLog);
     if (spirv.empty()) {
+        const bool computeSameStageLinkOnlyFailure =
+            object->stage == GL_COMPUTE_SHADER &&
+            (object->compileLog.find("Missing entry point") != std::string::npos ||
+             object->compileLog.find("Each stage requires one entry point") != std::string::npos ||
+             object->compileLog.find("No function definition") != std::string::npos);
+        if (computeSameStageLinkOnlyFailure) {
+            object->compiled = true;
+            object->compileLog.clear();
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", "", "", true
+            });
+            return true;
+        }
         if (object->stage == GL_FRAGMENT_SHADER &&
             (compileSource.find("void Run();") != std::string::npos ||
              compileSource.find("void Run()") != std::string::npos) &&
@@ -33672,7 +33775,9 @@ bool GLContext::linkProgram(GLuint program) {
     GLShaderObject* tessControlShader = nullptr;
     GLShaderObject* tessEvalShader = nullptr;
     int shaderCount = 0;
+    int computeShaderCount = 0;
     std::vector<GLShaderObject*> attachedShaderObjects;
+    std::vector<GLShaderObject*> computeShaderObjects;
 
     for (GLuint shaderId : programObject->attachedShaders) {
         GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
@@ -33715,6 +33820,8 @@ bool GLContext::linkProgram(GLuint program) {
                 break;
             case GL_COMPUTE_SHADER:
                 computeShader = shaderObject;
+                ++computeShaderCount;
+                computeShaderObjects.push_back(shaderObject);
                 programObject->linkedStageBits |= GL_COMPUTE_SHADER_BIT;
                 break;
             case GL_GEOMETRY_SHADER:
@@ -33904,7 +34011,7 @@ bool GLContext::linkProgram(GLuint program) {
     }
 
     // Stage combination must be one of:
-    //   - Compute-only                          (1x GL_COMPUTE_SHADER)
+    //   - Compute-only                          (one or more GL_COMPUTE_SHADER objects)
     //   - Vertex + Fragment                     (standard raster pipeline)
     //   - Vertex + Geometry + Fragment          (geometry path; emulation gap
     //                                            flagged in translator block)
@@ -33964,7 +34071,7 @@ bool GLContext::linkProgram(GLuint program) {
     }
 
     ProgramKind kind = ProgramKind::Unknown;
-    if (computeShader != nullptr && shaderCount == 1) {
+    if (computeShader != nullptr && shaderCount == computeShaderCount) {
         kind = ProgramKind::Compute;
     } else if (vertexShader != nullptr && fragmentShader != nullptr &&
                tessControlShader == nullptr && tessEvalShader == nullptr &&
@@ -37501,18 +37608,77 @@ bool GLContext::linkProgram(GLuint program) {
             // doesn't share the binding map with any other stage.
             const BindingMap savedBindings = bindings;
             bindings = makeComputeBindingMap();
+            std::vector<std::uint32_t> linkedComputeSpirv;
+            std::string linkedComputeSource;
+            std::string linkedComputeLog;
+            const std::uint32_t* computeSpirvData =
+                (computeShader != nullptr && !computeShader->spirv.empty())
+                    ? computeShader->spirv.data() : nullptr;
+            std::size_t computeSpirvWords =
+                (computeShader != nullptr) ? computeShader->spirv.size() : 0;
+            const std::string* computeSourceForTranslation =
+                computeShader != nullptr ? &computeShader->source : nullptr;
+            if (computeShaderObjects.size() > 1 ||
+                computeSpirvData == nullptr || computeSpirvWords == 0) {
+                if (!validateLinkedComputeLocalSizes(
+                        computeShaderObjects, linkedComputeLog)) {
+                    bindings = savedBindings;
+                    programObject->linkLog = linkedComputeLog;
+                    programObject->linked = false;
+                    Runtime::shared().recordShaderTranslation({
+                        programTag + "-compute-link", "compute",
+                        quickHash(computeShader != nullptr
+                            ? computeShader->source : std::string()),
+                        linkVertexHash, linkFragmentHash,
+                        programObject->linkLog, "", false
+                    });
+                    return false;
+                }
+                std::vector<std::string> computeSources;
+                computeSources.reserve(computeShaderObjects.size());
+                for (const GLShaderObject* shader : computeShaderObjects) {
+                    if (shader != nullptr) {
+                        computeSources.push_back(shader->source);
+                        if (!linkedComputeSource.empty()) {
+                            linkedComputeSource += "\n";
+                        }
+                        linkedComputeSource += shader->source;
+                    }
+                }
+                linkedComputeSpirv = translator.compileGLSLStageProgram(
+                    computeSources, GL_COMPUTE_SHADER, 330, &linkedComputeLog);
+                if (linkedComputeSpirv.empty()) {
+                    bindings = savedBindings;
+                    programObject->linkLog = linkedComputeLog.empty()
+                        ? "compute same-stage link failed"
+                        : linkedComputeLog;
+                    programObject->linked = false;
+                    Runtime::shared().recordShaderTranslation({
+                        programTag + "-compute-link", "compute",
+                        quickHash(linkedComputeSource),
+                        linkVertexHash, linkFragmentHash,
+                        programObject->linkLog, "", false
+                    });
+                    return false;
+                }
+                computeSpirvData = linkedComputeSpirv.data();
+                computeSpirvWords = linkedComputeSpirv.size();
+                computeSourceForTranslation = &linkedComputeSource;
+            }
             ShaderReflection csRefl;
-            const bool csOk = translateCachedStage(
-                "compute", computeShader, programObject->computeMSL, csRefl);
+            const bool csOk = translateStage(
+                "compute", computeSpirvData, computeSpirvWords,
+                computeSourceForTranslation != nullptr
+                    ? *computeSourceForTranslation : std::string(),
+                programObject->computeMSL, csRefl);
             bindings = savedBindings;
             if (csOk) {
                 programObject->computeReflection = std::move(csRefl);
                 // Extract local_size_{x,y,z} so dispatch knows the
                 // threads-per-threadgroup dimensions.
-                if (computeShader && !computeShader->spirv.empty()) {
-                    auto modes = extractComputeModes(
-                        computeShader->spirv.data(),
-                        computeShader->spirv.size());
+                if (computeSpirvData != nullptr && computeSpirvWords > 0) {
+                    auto modes = extractComputeModes(computeSpirvData,
+                                                     computeSpirvWords);
                     programObject->computeLocalSizeX = modes.localSizeX;
                     programObject->computeLocalSizeY = modes.localSizeY;
                     programObject->computeLocalSizeZ = modes.localSizeZ;

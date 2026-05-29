@@ -476,6 +476,7 @@ struct StageOutputLayout {
 class ShaderTranslator {
 public:
     std::vector<std::uint32_t> compileGLSL(std::string_view source, GLenum stage, int version, std::string* log) const;
+    std::vector<std::uint32_t> compileGLSLStageProgram(const std::vector<std::string>& sources, GLenum stage, int version, std::string* log) const;
     std::string spirvToMSL(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log) const;
     std::string spirvToMSL(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log, const TranslatorOptions& options) const;
     ShaderReflection reflect(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log) const;
