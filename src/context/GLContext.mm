@@ -26495,6 +26495,36 @@ static bool lookupFloatUniformForOcclusionExpr(
     return false;
 }
 
+static bool uniformNameHasTail(const std::string& name, const char* tail) {
+    const std::size_t tailLen = std::strlen(tail);
+    if (name == tail) return true;
+    if (name.size() <= tailLen) return false;
+    const std::size_t start = name.size() - tailLen;
+    return name.compare(start, tailLen, tail) == 0 &&
+           (start == 0 || name[start - 1] == '.' || name[start - 1] == '_');
+}
+
+static bool fragmentDiscardUniformSuppressesAllSamples(
+    const GLProgramObject& program)
+{
+    if (program.fragmentMSL.find("discard_fragment") == std::string::npos) {
+        return false;
+    }
+    for (const auto& uniform : program.uniforms) {
+        if (!uniformNameHasTail(uniform.name, "shall_pass") ||
+            uniform.location < 0) {
+            continue;
+        }
+        const auto valueIt = program.uniformValues.find(uniform.location);
+        if (valueIt == program.uniformValues.end() ||
+            valueIt->second.ints.empty()) {
+            return false;
+        }
+        return valueIt->second.ints[0] == 0;
+    }
+    return false;
+}
+
 bool GLContext::Impl::estimateCurrentVertexWindowDepth(float& outDepth) const {
     if (state == nullptr || objects == nullptr) return false;
     const GLuint progName = state->currentProgram();
@@ -26672,6 +26702,17 @@ void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
             } else {
                 occlusionApproxDepthKnown = false;
             }
+        }
+    }
+    if (samplesPassed && state != nullptr && objects != nullptr) {
+        const GLuint progName = state->currentProgram();
+        const GLProgramObject* program = progName == 0
+            ? nullptr
+            : objects->programs().get(progName);
+        if (program != nullptr &&
+            fragmentDiscardUniformSuppressesAllSamples(*program)) {
+            samplesPassed = false;
+            resolvedSamplesPassed = true;
         }
     }
     // GL 4.6 §22.1 / §22.3 — advance pipeline-stats counters for
@@ -46541,6 +46582,69 @@ static bool isValidDrawMode(GLenum mode) {
     }
 }
 
+static bool buildSequentialTfCaptureIndices(GLenum mode, GLint first, GLsizei count,
+                                            std::vector<std::uint32_t>& indices,
+                                            GLenum& captureTopology) {
+    indices.clear();
+    captureTopology = mode;
+    if (first < 0 || count <= 0) {
+        return false;
+    }
+    const std::size_t n = static_cast<std::size_t>(count);
+    auto vertex = [first](std::size_t i) -> std::uint32_t {
+        return static_cast<std::uint32_t>(
+            static_cast<std::int64_t>(first) + static_cast<std::int64_t>(i));
+    };
+    switch (mode) {
+        case GL_LINE_STRIP:
+            if (n < 2) return false;
+            captureTopology = GL_LINES;
+            indices.reserve(2 * (n - 1));
+            for (std::size_t i = 0; i + 1 < n; ++i) {
+                indices.push_back(vertex(i));
+                indices.push_back(vertex(i + 1));
+            }
+            return true;
+        case GL_LINE_LOOP:
+            if (n < 2) return false;
+            captureTopology = GL_LINES;
+            indices.reserve(2 * n);
+            for (std::size_t i = 0; i < n; ++i) {
+                indices.push_back(vertex(i));
+                indices.push_back(vertex((i + 1) % n));
+            }
+            return true;
+        case GL_TRIANGLE_STRIP:
+            if (n < 3) return false;
+            captureTopology = GL_TRIANGLES;
+            indices.reserve(3 * (n - 2));
+            for (std::size_t i = 0; i + 2 < n; ++i) {
+                if ((i & 1u) == 0u) {
+                    indices.push_back(vertex(i));
+                    indices.push_back(vertex(i + 1));
+                    indices.push_back(vertex(i + 2));
+                } else {
+                    indices.push_back(vertex(i + 1));
+                    indices.push_back(vertex(i));
+                    indices.push_back(vertex(i + 2));
+                }
+            }
+            return true;
+        case GL_TRIANGLE_FAN:
+            if (n < 3) return false;
+            captureTopology = GL_TRIANGLES;
+            indices.reserve(3 * (n - 2));
+            for (std::size_t i = 1; i + 1 < n; ++i) {
+                indices.push_back(vertex(0));
+                indices.push_back(vertex(i));
+                indices.push_back(vertex(i + 1));
+            }
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawID) {
     if (!isValidDrawMode(mode)) {
         pushError(GL_INVALID_ENUM);
@@ -47391,6 +47495,11 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
         const GLuint vaoName2 = impl_->state->boundVertexArray();
         GLVertexArrayObject* vao = (vaoName2 != 0) ? impl_->objects->vertexArrays().get(vaoName2) : nullptr;
         if (vao != nullptr && !program->vertexSpirv.empty()) {
+            std::vector<std::uint32_t> tfCaptureIndices;
+            GLenum tfCaptureTopology = mode;
+            const bool useTfCaptureIndices =
+                buildSequentialTfCaptureIndices(
+                    mode, first, count, tfCaptureIndices, tfCaptureTopology);
             // Sprint 15 Q3-Option-B Phase 3a [metal-tf-vs]: GPU
             // compute-dispatch path. Replaces the CPU
             // `emulateVsOnlyDrawForTf` SPIR-V interpreter with a Metal
@@ -47433,6 +47542,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             // packing the byte buffer per draw is cheap.
             bool gpuTfHandled = false;
             if (dispatchGateOn &&
+                !useTfCaptureIndices &&
                 program->metalVsTfTier ==
                     GLProgramObject::MetalVsTfTier::VsAsCompute &&
                 program->metalVsTfComputePipelineState != nullptr &&
@@ -47506,11 +47616,20 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 const auto vsImgMap = impl_->buildStorageImageMap(
                     program->vertexSpirv,
                     &program->vertexReflection, *program);
+                const GLenum vsTfMode =
+                    useTfCaptureIndices ? tfCaptureTopology : mode;
+                const GLsizei vsTfCount = useTfCaptureIndices
+                    ? static_cast<GLsizei>(tfCaptureIndices.size())
+                    : count;
+                const GLint vsTfFirst = useTfCaptureIndices ? 0 : first;
+                const std::uint32_t* vsTfIndices = useTfCaptureIndices
+                    ? tfCaptureIndices.data()
+                    : nullptr;
                 appgl::EmulatedDraw ed = appgl::emulateVsOnlyDrawForTf(
                     *program, *vao, *impl_->objects, *impl_->state,
-                    mode, count, first,
+                    vsTfMode, vsTfCount, vsTfFirst,
                     /*instanceCount=*/1, /*baseInstance=*/0,
-                    /*elementIndices=*/nullptr,
+                    vsTfIndices,
                     vsTexMap.empty() ? nullptr : &vsTexMap,
                     vsImgMap.empty() ? nullptr : &vsImgMap);
                 if (ed.ok) {
@@ -48262,16 +48381,30 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
         GLVertexArrayObject* vao = (vaoName != 0)
             ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
         if (vao != nullptr && !program->vertexSpirv.empty()) {
+            std::vector<std::uint32_t> tfCaptureIndices;
+            GLenum tfCaptureTopology = mode;
+            const bool useTfCaptureIndices =
+                buildSequentialTfCaptureIndices(
+                    mode, first, count, tfCaptureIndices, tfCaptureTopology);
             const auto vsTexMap = impl_->buildSampledTextureMap(
                 program->vertexSpirv,
                 &program->vertexReflection, *program);
             const auto vsImgMap = impl_->buildStorageImageMap(
                 program->vertexSpirv,
                 &program->vertexReflection, *program);
+            const GLenum vsTfMode =
+                useTfCaptureIndices ? tfCaptureTopology : mode;
+            const GLsizei vsTfCount = useTfCaptureIndices
+                ? static_cast<GLsizei>(tfCaptureIndices.size())
+                : count;
+            const GLint vsTfFirst = useTfCaptureIndices ? 0 : first;
+            const std::uint32_t* vsTfIndices = useTfCaptureIndices
+                ? tfCaptureIndices.data()
+                : nullptr;
             appgl::EmulatedDraw ed = appgl::emulateVsOnlyDrawForTf(
                 *program, *vao, *impl_->objects, *impl_->state,
-                mode, count, first, instancecount, baseinstance,
-                /*elementIndices=*/nullptr,
+                vsTfMode, vsTfCount, vsTfFirst, instancecount, baseinstance,
+                vsTfIndices,
                 vsTexMap.empty() ? nullptr : &vsTexMap,
                 vsImgMap.empty() ? nullptr : &vsImgMap);
             if (ed.ok) {
