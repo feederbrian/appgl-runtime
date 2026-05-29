@@ -1161,6 +1161,13 @@ struct MetalFrameGraph::Impl {
         releaseOwnedObjCObject(immediateModeColorPipelineState);
         releaseOwnedObjCObject(immediateModeTexturedPipelineState);
         releaseOwnedObjCObject(immediateModeSamplerState);
+        releaseOwnedObjCObject(depthStencilUploadLibrary);
+        releaseOwnedObjCObject(depthStencilUploadVertexFn);
+        releaseOwnedObjCObject(depthStencilUploadFragmentFn);
+        for (auto& entry : depthStencilUploadPSOCache) {
+            releaseOwnedObjCObject(entry.second);
+        }
+        depthStencilUploadPSOCache.clear();
         releaseOwnedObjCObject(reusablePassDescriptor);
         releaseOwnedObjCObject(pipelineArchive);
     }
@@ -5867,6 +5874,280 @@ fragment float4 appgl_immediate_textured_fs(
             false, false, true, nullptr, 0.0f, stencil);
     }
 
+    bool ensureDepthStencilUploadLibrary() {
+        if (depthStencilUploadLibrary != nil) {
+            return true;
+        }
+        NSString* source = @R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct AppGLDSUploadParams {
+    uint originX;
+    uint originY;
+    uint width;
+    uint height;
+    uint writeDepth;
+    float fallbackDepth;
+};
+
+struct AppGLDSUploadVSOut {
+    float4 position [[position]];
+};
+
+struct AppGLDSUploadFSOut {
+    float4 color [[color(0)]];
+    float depth [[depth(any)]];
+};
+
+vertex AppGLDSUploadVSOut appgl_ds_upload_vs(uint vertexID [[vertex_id]]) {
+    constexpr float2 positions[3] = {
+        float2(-1.0, -1.0),
+        float2( 3.0, -1.0),
+        float2(-1.0,  3.0)
+    };
+    AppGLDSUploadVSOut out;
+    out.position = float4(positions[vertexID], 0.0, 1.0);
+    return out;
+}
+
+fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
+    AppGLDSUploadVSOut in [[stage_in]],
+    constant float* depthPixels [[buffer(0)]],
+    constant AppGLDSUploadParams& params [[buffer(1)]])
+{
+    AppGLDSUploadFSOut out;
+    out.color = float4(0.0, 0.0, 0.0, 0.0);
+    out.depth = params.fallbackDepth;
+    if (params.writeDepth != 0) {
+        const uint px = uint(in.position.x);
+        const uint py = uint(in.position.y);
+        const uint localX = px - params.originX;
+        const uint localY = py - params.originY;
+        if (localX < params.width && localY < params.height) {
+            const uint sourceRow = params.height - 1u - localY;
+            out.depth = clamp(depthPixels[sourceRow * params.width + localX],
+                              0.0f, 1.0f);
+        }
+    }
+    return out;
+}
+)MSL";
+        NSError* error = nil;
+        depthStencilUploadLibrary =
+            [device newLibraryWithSource:source options:nil error:&error];
+        if (depthStencilUploadLibrary == nil) {
+            NSLog(@"[AppGL] depth/stencil upload library build failed: %@", error);
+            return false;
+        }
+        depthStencilUploadVertexFn =
+            [depthStencilUploadLibrary newFunctionWithName:@"appgl_ds_upload_vs"];
+        depthStencilUploadFragmentFn =
+            [depthStencilUploadLibrary newFunctionWithName:@"appgl_ds_upload_fs"];
+        return depthStencilUploadVertexFn != nil &&
+               depthStencilUploadFragmentFn != nil;
+    }
+
+    id<MTLRenderPipelineState> depthStencilUploadPipelineState(
+        MTLPixelFormat format,
+        NSUInteger sampleCount) {
+        if (!ensureDepthStencilUploadLibrary()) {
+            return nil;
+        }
+        const std::uint64_t key =
+            static_cast<std::uint64_t>(format) |
+            (static_cast<std::uint64_t>(sampleCount) << 32);
+        auto it = depthStencilUploadPSOCache.find(key);
+        if (it != depthStencilUploadPSOCache.end()) {
+            return it->second;
+        }
+
+        MTLRenderPipelineDescriptor* desc =
+            [[MTLRenderPipelineDescriptor alloc] init];
+        ScopedOwnedObjCObject descRelease(desc);
+        desc.vertexFunction = depthStencilUploadVertexFn;
+        desc.fragmentFunction = depthStencilUploadFragmentFn;
+        desc.rasterSampleCount = sampleCount;
+        desc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        desc.depthAttachmentPixelFormat = format;
+        desc.stencilAttachmentPixelFormat = format;
+
+        NSError* error = nil;
+        id<MTLRenderPipelineState> state =
+            [device newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (state == nil) {
+            NSLog(@"[AppGL] depth/stencil upload PSO build failed: %@", error);
+            return nil;
+        }
+        depthStencilUploadPSOCache[key] = state;
+        return state;
+    }
+
+    id<MTLDepthStencilState> makeDepthStencilUploadState(bool writeDepth,
+                                                         bool writeStencil) {
+        MTLDepthStencilDescriptor* desc =
+            [[MTLDepthStencilDescriptor alloc] init];
+        ScopedOwnedObjCObject descRelease(desc);
+        desc.depthCompareFunction = MTLCompareFunctionAlways;
+        desc.depthWriteEnabled = writeDepth ? YES : NO;
+        if (writeStencil) {
+            MTLStencilDescriptor* face = [[MTLStencilDescriptor alloc] init];
+            ScopedOwnedObjCObject faceRelease(face);
+            face.stencilCompareFunction = MTLCompareFunctionAlways;
+            face.readMask = 0xFF;
+            face.writeMask = 0xFF;
+            face.stencilFailureOperation = MTLStencilOperationReplace;
+            face.depthFailureOperation = MTLStencilOperationReplace;
+            face.depthStencilPassOperation = MTLStencilOperationReplace;
+            desc.frontFaceStencil = face;
+            desc.backFaceStencil = face;
+        }
+        return [device newDepthStencilStateWithDescriptor:desc];
+    }
+
+    bool writeMultisampleDepthStencilRegion(void* texVoid, GLint x, GLint y,
+                                            GLsizei width, GLsizei height,
+                                            const GLfloat* depthPixels,
+                                            bool writeDepth,
+                                            std::uint8_t stencilValue,
+                                            bool writeStencil) {
+        if (texVoid == nullptr || device == nil || commandQueue == nil ||
+            width <= 0 || height <= 0 || x < 0 || y < 0 ||
+            (!writeDepth && !writeStencil) ||
+            (writeDepth && depthPixels == nullptr)) {
+            return false;
+        }
+        id<MTLTexture> tex = (__bridge id<MTLTexture>)texVoid;
+        if (tex == nil || tex.sampleCount <= 1 ||
+            x + width > static_cast<GLint>(tex.width) ||
+            y + height > static_cast<GLint>(tex.height)) {
+            return false;
+        }
+        const MTLPixelFormat format = tex.pixelFormat;
+        if (format != MTLPixelFormatDepth24Unorm_Stencil8 &&
+            format != MTLPixelFormatDepth32Float_Stencil8) {
+            return false;
+        }
+
+        id<MTLRenderPipelineState> pso =
+            depthStencilUploadPipelineState(format, tex.sampleCount);
+        if (pso == nil) {
+            return false;
+        }
+        id<MTLDepthStencilState> dsState =
+            makeDepthStencilUploadState(writeDepth, writeStencil);
+        if (dsState == nil) {
+            return false;
+        }
+        ScopedOwnedObjCObject dsStateRelease(dsState);
+
+        const float fallbackDepth = 1.0f;
+        const void* depthSource = writeDepth ? depthPixels : &fallbackDepth;
+        const NSUInteger depthByteCount = writeDepth
+            ? static_cast<NSUInteger>(width) *
+                  static_cast<NSUInteger>(height) * sizeof(GLfloat)
+            : sizeof(GLfloat);
+        id<MTLBuffer> depthBuffer =
+            [device newBufferWithBytes:depthSource
+                                length:depthByteCount
+                               options:MTLResourceStorageModeShared];
+        if (depthBuffer == nil) {
+            return false;
+        }
+        ScopedOwnedObjCObject depthBufferRelease(depthBuffer);
+
+        struct UploadParams {
+            std::uint32_t originX;
+            std::uint32_t originY;
+            std::uint32_t width;
+            std::uint32_t height;
+            std::uint32_t writeDepth;
+            float fallbackDepth;
+        };
+        const NSUInteger metalY = tex.height -
+            static_cast<NSUInteger>(y + height);
+        const UploadParams params = {
+            static_cast<std::uint32_t>(x),
+            static_cast<std::uint32_t>(metalY),
+            static_cast<std::uint32_t>(width),
+            static_cast<std::uint32_t>(height),
+            writeDepth ? 1u : 0u,
+            fallbackDepth
+        };
+
+        MTLTextureDescriptor* dummyDesc =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                               width:tex.width
+                                                              height:tex.height
+                                                           mipmapped:NO];
+        dummyDesc.textureType = MTLTextureType2DMultisample;
+        dummyDesc.sampleCount = tex.sampleCount;
+        dummyDesc.storageMode = MTLStorageModePrivate;
+        dummyDesc.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> dummyColor = [device newTextureWithDescriptor:dummyDesc];
+        if (dummyColor == nil) {
+            return false;
+        }
+        ScopedOwnedObjCObject dummyColorRelease(dummyColor);
+
+        flushForReadback();
+        auto lease = makeCommandBufferDrainingAutorelease(
+            AppGLCommandReason::RenderbufferMirror);
+        id<MTLCommandBuffer> cmd = lease.get();
+        if (cmd == nil) {
+            return false;
+        }
+        attachErrorHandler(cmd, @"depthStencilUpload");
+
+        MTLRenderPassDescriptor* pass =
+            [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = dummyColor;
+        pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        pass.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+        pass.depthAttachment.texture = tex;
+        pass.depthAttachment.loadAction = MTLLoadActionLoad;
+        pass.depthAttachment.storeAction = MTLStoreActionStore;
+        pass.stencilAttachment.texture = tex;
+        pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+        pass.stencilAttachment.storeAction = MTLStoreActionStore;
+
+        id<MTLRenderCommandEncoder> enc =
+            [cmd renderCommandEncoderWithDescriptor:pass];
+        if (enc == nil) {
+            return false;
+        }
+
+        [enc setRenderPipelineState:pso];
+        [enc setDepthStencilState:dsState];
+        [enc setViewport:(MTLViewport){
+            0.0, 0.0,
+            static_cast<double>(tex.width),
+            static_cast<double>(tex.height),
+            0.0, 1.0
+        }];
+        [enc setScissorRect:(MTLScissorRect){
+            static_cast<NSUInteger>(x),
+            metalY,
+            static_cast<NSUInteger>(width),
+            static_cast<NSUInteger>(height)
+        }];
+        if (writeStencil) {
+            [enc setStencilReferenceValue:stencilValue];
+        }
+        [enc setFragmentBuffer:depthBuffer offset:0 atIndex:0];
+        [enc setFragmentBytes:&params length:sizeof(params) atIndex:1];
+        [enc setCullMode:MTLCullModeNone];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle
+                vertexStart:0
+                vertexCount:3];
+        [enc endEncoding];
+
+        const bool completed =
+            lease.commitAndWait(AppGLCommandReason::RenderbufferMirror);
+        resetCachedEncoderState();
+        return completed;
+    }
+
     bool encodeImmediateModeDraw(const ImmediateDrawInfo& info) {
         FG_TRACE(@"encodeImmediateModeDraw: enter mode=0x%X verts=%zu tex=%p",
                  info.mode, info.vertexCount, info.metalTexture);
@@ -9575,6 +9856,12 @@ fragment float4 appgl_immediate_textured_fs(
         addRenderPipeline(immediateModeColorPipelineState);
         addRenderPipeline(immediateModeTexturedPipelineState);
         addSampler(immediateModeSamplerState);
+        addLibrary(depthStencilUploadLibrary);
+        addFunction(depthStencilUploadVertexFn);
+        addFunction(depthStencilUploadFragmentFn);
+        for (const auto& entry : depthStencilUploadPSOCache) {
+            addRenderPipeline(entry.second);
+        }
         for (const auto& entry : mslLibraryCache) {
             addLibrary(entry.second);
         }
@@ -9828,6 +10115,11 @@ private:
     id<MTLRenderPipelineState> immediateModeTexturedPipelineState = nil;
     MTLPixelFormat immediateModePipelineColorFormat = MTLPixelFormatInvalid;
     id<MTLSamplerState> immediateModeSamplerState = nil;
+    id<MTLLibrary> depthStencilUploadLibrary = nil;
+    id<MTLFunction> depthStencilUploadVertexFn = nil;
+    id<MTLFunction> depthStencilUploadFragmentFn = nil;
+    std::unordered_map<std::uint64_t, id<MTLRenderPipelineState>>
+        depthStencilUploadPSOCache;
     std::vector<std::uint8_t> headlessReadbackRGBA;
     GLsizei drawableWidth = 1;
     GLsizei drawableHeight = 1;
@@ -10835,6 +11127,21 @@ bool MetalFrameGraph::clearTextureDepth(void* tex, std::uint32_t level, std::uin
 bool MetalFrameGraph::clearTextureStencil(void* tex, std::uint32_t level, std::uint32_t slice,
                                           std::uint32_t arrayLength, std::uint32_t stencil) {
     return impl_->clearTextureStencil(tex, level, slice, arrayLength, stencil);
+}
+
+bool MetalFrameGraph::writeMultisampleDepthStencilRegion(
+    void* tex,
+    GLint x,
+    GLint y,
+    GLsizei width,
+    GLsizei height,
+    const GLfloat* depthPixels,
+    bool writeDepth,
+    std::uint8_t stencilValue,
+    bool writeStencil) {
+    return impl_->writeMultisampleDepthStencilRegion(
+        tex, x, y, width, height, depthPixels, writeDepth,
+        stencilValue, writeStencil);
 }
 
 void* MetalFrameGraph::buildComputePipelineState(const std::string& msl, std::string* outError,

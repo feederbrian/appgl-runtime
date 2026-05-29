@@ -12944,6 +12944,26 @@ struct GLContext::Impl {
                 state->clipDepthMode() == GL_NEGATIVE_ONE_TO_ONE;
             const bool blackColorClear =
                 rgba[0] == 0 && rgba[1] == 0 && rgba[2] == 0;
+            // Multisample renderbuffers cannot be updated with replaceRegion;
+            // clear through Metal so later MS resolves see the clear value.
+            if (!clearScissorActive &&
+                fullColorMask &&
+                frameGraph != nullptr &&
+                renderbuffer->metalTexture != nullptr) {
+                id<MTLTexture> metalTex =
+                    (__bridge id<MTLTexture>)renderbuffer->metalTexture;
+                if (metalTex.sampleCount > 1) {
+                    const float rgbaF[4] = {
+                        color[0], color[1], color[2], color[3]
+                    };
+                    if (frameGraph->clearLayeredTextureColor(
+                            renderbuffer->metalTexture, 0, rgbaF)) {
+                        renderbuffer->rgba8ShadowClearPending = false;
+                        renderbuffer->colorShadowAuthoritative = false;
+                        return true;
+                    }
+                }
+            }
             // Keep native clears to the CTS cleanup pattern that motivated
             // this fast path. Nonzero-background clip_control cases read
             // partial draw results back from max-size FBOs and stay on the
@@ -15819,6 +15839,47 @@ struct GLContext::Impl {
                 attachment,
                 kProducerCopyWrite | kProducerFboDepthStencilWrite);
         };
+        auto multisamplePackedRenderbufferForAttachment =
+            [&](const GLFramebufferAttachment* attachment)
+                -> GLRenderbufferObject* {
+            if (attachment == nullptr ||
+                attachment->kind != GLFramebufferAttachment::Kind::Renderbuffer) {
+                return nullptr;
+            }
+            GLRenderbufferObject* renderbuffer =
+                objects->renderbuffers().get(attachment->object);
+            if (renderbuffer == nullptr || !renderbuffer->storageDefined ||
+                renderbuffer->metalTexture == nullptr ||
+                !isDepthFormat(renderbuffer->internalFormat) ||
+                !isStencilFormat(renderbuffer->internalFormat)) {
+                return nullptr;
+            }
+            id<MTLTexture> metalTex =
+                (__bridge id<MTLTexture>)renderbuffer->metalTexture;
+            if (metalTex == nil || metalTex.sampleCount <= 1) {
+                return nullptr;
+            }
+            return renderbuffer;
+        };
+        auto uniformStencilValue =
+            [](const std::uint8_t* pixels,
+               GLsizei width,
+               GLsizei height,
+               std::uint8_t& value) {
+            if (pixels == nullptr || width <= 0 || height <= 0) {
+                return false;
+            }
+            const std::size_t count =
+                static_cast<std::size_t>(width) *
+                static_cast<std::size_t>(height);
+            value = pixels[0];
+            for (std::size_t i = 1; i < count; ++i) {
+                if (pixels[i] != value) {
+                    return false;
+                }
+            }
+            return true;
+        };
         auto tryMetalExactDepthStencilBlit =
             [&](const GLFramebufferAttachment& srcAttachment,
                 const GLFramebufferAttachment& dstAttachment,
@@ -15922,6 +15983,112 @@ struct GLContext::Impl {
                     GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) {
                 metalCopiedDepth = true;
                 metalCopiedStencil = true;
+            }
+        }
+
+        // Metal blit encoders cannot replicate single-sample packed D/S into a
+        // multisample target. For the common packed-renderbuffer path, mirror
+        // the CPU blit result back to every MS sample with a draw pass.
+        if ((mask & GL_DEPTH_BUFFER_BIT) != 0 &&
+            (mask & GL_STENCIL_BUFFER_BIT) != 0 &&
+            !metalCopiedDepth && !metalCopiedStencil &&
+            !writeWindow.empty && frameGraph != nullptr) {
+            const GLFramebufferAttachment* srcDepth =
+                framebufferAttachment(*readFb, GL_DEPTH_ATTACHMENT);
+            const GLFramebufferAttachment* dstDepth =
+                framebufferAttachment(*drawFb, GL_DEPTH_ATTACHMENT);
+            const GLFramebufferAttachment* srcStencil =
+                framebufferAttachment(*readFb, GL_STENCIL_ATTACHMENT);
+            const GLFramebufferAttachment* dstStencil =
+                framebufferAttachment(*drawFb, GL_STENCIL_ATTACHMENT);
+            GLRenderbufferObject* dstRenderbuffer =
+                multisamplePackedRenderbufferForAttachment(dstDepth);
+            if (srcDepth != nullptr && dstDepth != nullptr &&
+                srcStencil != nullptr && dstStencil != nullptr &&
+                dstRenderbuffer != nullptr &&
+                sameFramebufferImage(*srcDepth, *srcStencil) &&
+                sameFramebufferImage(*dstDepth, *dstStencil)) {
+                std::vector<GLfloat> srcDepthStage(
+                    static_cast<std::size_t>(copyWidth) *
+                    static_cast<std::size_t>(copyHeight));
+                std::vector<std::uint8_t> srcStencilStage(
+                    static_cast<std::size_t>(copyWidth) *
+                    static_cast<std::size_t>(copyHeight));
+                if (!readDepthAttachmentPixels(*srcDepth, srcX, srcY,
+                                                copyWidth, copyHeight,
+                                                srcDepthStage.data()) ||
+                    !readStencilAttachmentPixels(*srcStencil, srcX, srcY,
+                                                  copyWidth, copyHeight,
+                                                  srcStencilStage.data())) {
+                    return false;
+                }
+
+                const GLfloat* depthStagePtr = srcDepthStage.data();
+                const std::uint8_t* stencilStagePtr = srcStencilStage.data();
+                std::vector<GLfloat> scaledDepth;
+                std::vector<std::uint8_t> scaledStencil;
+                if (needsScale) {
+                    scaledDepth.resize(static_cast<std::size_t>(dstWidth) *
+                                       static_cast<std::size_t>(dstHeight));
+                    scaledStencil.resize(static_cast<std::size_t>(dstWidth) *
+                                         static_cast<std::size_t>(dstHeight));
+                    for (GLsizei dy = 0; dy < dstHeight; ++dy) {
+                        for (GLsizei dx = 0; dx < dstWidth; ++dx) {
+                            GLsizei sx = 0, sy = 0;
+                            sampleSrcIndex(dx, dy, sx, sy);
+                            const std::size_t srcIdx =
+                                static_cast<std::size_t>(sy) *
+                                static_cast<std::size_t>(copyWidth) +
+                                static_cast<std::size_t>(sx);
+                            const std::size_t dstIdx =
+                                static_cast<std::size_t>(dy) *
+                                static_cast<std::size_t>(dstWidth) +
+                                static_cast<std::size_t>(dx);
+                            scaledDepth[dstIdx] = srcDepthStage[srcIdx];
+                            scaledStencil[dstIdx] = srcStencilStage[srcIdx];
+                        }
+                    }
+                    depthStagePtr = scaledDepth.data();
+                    stencilStagePtr = scaledStencil.data();
+                }
+
+                std::vector<GLfloat> clippedDepth;
+                std::vector<std::uint8_t> clippedStencil;
+                const GLfloat* writeDepth =
+                    copyDepthWindow(depthStagePtr, clippedDepth);
+                const std::uint8_t* writeStencil =
+                    copyStencilWindow(stencilStagePtr, clippedStencil);
+                std::uint8_t stencilValue = 0;
+                const bool stencilUniform = uniformStencilValue(
+                    writeStencil, writeWindow.width, writeWindow.height,
+                    stencilValue);
+                const bool wroteDepthShadow = stencilUniform &&
+                    writeDepthAttachmentPixels(*dstDepth,
+                                               writeWindow.x, writeWindow.y,
+                                               writeWindow.width,
+                                               writeWindow.height,
+                                               writeDepth);
+                const bool wroteStencilShadow = wroteDepthShadow &&
+                    writeStencilAttachmentPixels(*dstStencil,
+                                                 writeWindow.x, writeWindow.y,
+                                                 writeWindow.width,
+                                                 writeWindow.height,
+                                                 writeStencil);
+                const bool wroteMetal = wroteStencilShadow &&
+                    frameGraph->writeMultisampleDepthStencilRegion(
+                        dstRenderbuffer->metalTexture,
+                        writeWindow.x, writeWindow.y,
+                        writeWindow.width, writeWindow.height,
+                        writeDepth, true, stencilValue, true);
+                if (wroteMetal) {
+                    dstRenderbuffer->wasMetalDepthRendered = true;
+                    dstRenderbuffer->wasMetalStencilRendered = true;
+                    markFramebufferAttachmentWrite(
+                        *dstDepth,
+                        kProducerCopyWrite | kProducerFboDepthStencilWrite);
+                    metalCopiedDepth = true;
+                    metalCopiedStencil = true;
+                }
             }
         }
 
@@ -45296,6 +45463,7 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                             GLFramebufferAttachment::Kind::Renderbuffer) continue;
                     if (GLRenderbufferObject* rb =
                             objects->renderbuffers().get(kv.second.object)) {
+                        rb->colorShadowAuthoritative = false;
                         rb->rgba8ShadowClearPending = false;
                     }
                 }
@@ -45305,7 +45473,9 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                             GLFramebufferAttachment::Kind::Texture) continue;
                     GLTextureObject* tex =
                         objects->textures().get(kv.second.object);
-                    if (tex == nullptr || tex->metalTexture == nullptr) continue;
+                    if (tex == nullptr) continue;
+                    tex->colorShadowAuthoritative = false;
+                    if (tex->metalTexture == nullptr) continue;
                     id<MTLTexture> metalTex =
                         metalTextureFromRaw(tex->metalTexture);
                     if (metalTex.sampleCount > 1) {
