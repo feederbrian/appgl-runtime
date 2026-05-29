@@ -335,6 +335,12 @@ struct SampledTextureSlot {
     std::uint32_t layerFaces = 0;
     std::uint32_t internalFormat = 0;
     std::uint32_t samplerType = 0;
+    std::uint32_t wrapS = 0x2901; // GL_REPEAT
+    std::uint32_t wrapT = 0x2901; // GL_REPEAT
+    std::uint32_t wrapR = 0x2901; // GL_REPEAT
+    std::uint32_t compareMode = 0;
+    std::uint32_t compareFunc = 0x0203; // GL_LEQUAL
+    std::array<float, 4> borderColor = {0.0f, 0.0f, 0.0f, 0.0f};
     // Storage-image maps fill this with the effective GL image unit.
     // Sampled-texture maps leave it at the sentinel.
     std::uint32_t imageUnit = 0xFFFFFFFFu;

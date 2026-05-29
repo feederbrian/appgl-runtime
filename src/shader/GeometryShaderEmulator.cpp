@@ -47,6 +47,7 @@ namespace spv {
         OpArrayLength = 68,
         OpSampledImage = 86, OpImageSampleImplicitLod = 87,
         OpImageSampleExplicitLod = 88, OpImageFetch = 95,
+        OpImageGather = 96, OpImageDrefGather = 97,
         OpImageRead = 98, OpImageWrite = 99, OpImage = 100,
         OpImageQuerySizeLod = 103, OpImageQuerySize = 104,
         OpCompositeExtract = 81, OpCompositeConstruct = 80,
@@ -336,6 +337,7 @@ std::uint32_t sampledTextureBytesPerTexel(std::uint32_t fmt) {
         case GL_RG8: case GL_RG8I: case GL_RG8UI:
             return 2;
         case GL_R32I: case GL_R32UI: case GL_R32F:
+        case 0x8CAC: // GL_DEPTH_COMPONENT32F
         case GL_RG16: case GL_RG16I: case GL_RG16UI: case GL_RG16F:
         case GL_RGBA8: case GL_RGBA8I: case GL_RGBA8UI:
         case GL_R11F_G11F_B10F: case GL_RGB10_A2: case GL_RGB10_A2UI:
@@ -459,6 +461,7 @@ Value decodeSampledTextureTexel(const SampledTextureSlot& slot,
             out.f[3] = imageHalfToFloat(readU16(3));
             break;
         case GL_R32F:
+        case 0x8CAC: // GL_DEPTH_COMPONENT32F
             out.kind = Value::Kind::Float4;
             out.f[0] = readF32(0);
             out.f[1] = 0.0f; out.f[2] = 0.0f; out.f[3] = 1.0f;
@@ -620,6 +623,182 @@ Value decodeSampledTextureTexel(const SampledTextureSlot& slot,
             break;
     }
     return out;
+}
+
+constexpr std::uint32_t kGLNever = 0x0200;
+constexpr std::uint32_t kGLLess = 0x0201;
+constexpr std::uint32_t kGLEqual = 0x0202;
+constexpr std::uint32_t kGLLequal = 0x0203;
+constexpr std::uint32_t kGLGreater = 0x0204;
+constexpr std::uint32_t kGLNotequal = 0x0205;
+constexpr std::uint32_t kGLGequal = 0x0206;
+constexpr std::uint32_t kGLAlways = 0x0207;
+constexpr std::uint32_t kGLRepeat = 0x2901;
+constexpr std::uint32_t kGLClampToBorder = 0x812D;
+constexpr std::uint32_t kGLClampToEdge = 0x812F;
+constexpr std::uint32_t kGLMirroredRepeat = 0x8370;
+
+std::int32_t valueLaneAsInt(const Value& v, int lane) {
+    const int idx = std::clamp(lane, 0, v.componentCount() - 1);
+    if (v.isIntKind()) {
+        return v.i[idx];
+    }
+    if (v.kind == Value::Kind::Bool) {
+        return v.bval ? 1 : 0;
+    }
+    return static_cast<std::int32_t>(v.f[idx]);
+}
+
+float valueLaneAsFloat(const Value& v, int lane) {
+    const int idx = std::clamp(lane, 0, v.componentCount() - 1);
+    if (v.isFloatKind()) {
+        return v.f[idx];
+    }
+    if (v.kind == Value::Kind::Bool) {
+        return v.bval ? 1.0f : 0.0f;
+    }
+    return static_cast<float>(v.i[idx]);
+}
+
+Value::Kind vec4KindForResultType(const SpirvModule& module,
+                                  std::uint32_t resultTypeId) {
+    auto typeIt = module.types.find(resultTypeId);
+    if (typeIt == module.types.end()) {
+        return Value::Kind::Float4;
+    }
+    const TypeInfo& t = typeIt->second;
+    if (t.kind != TypeInfo::Kind::Vec2 &&
+        t.kind != TypeInfo::Kind::Vec3 &&
+        t.kind != TypeInfo::Kind::Vec4) {
+        return Value::Kind::Float4;
+    }
+    auto compIt = module.types.find(t.componentType);
+    if (compIt == module.types.end()) {
+        return Value::Kind::Float4;
+    }
+    if (compIt->second.kind == TypeInfo::Kind::UInt) {
+        return Value::Kind::UInt4;
+    }
+    if (compIt->second.kind == TypeInfo::Kind::Int ||
+        compIt->second.kind == TypeInfo::Kind::Bool) {
+        return Value::Kind::Int4;
+    }
+    return Value::Kind::Float4;
+}
+
+bool constantVec2AsInt(const SpirvModule& module,
+                       std::uint32_t valueId,
+                       std::int32_t& x,
+                       std::int32_t& y) {
+    auto cIt = module.constants.find(valueId);
+    if (cIt != module.constants.end()) {
+        x = valueLaneAsInt(cIt->second, 0);
+        y = valueLaneAsInt(cIt->second, 1);
+        return true;
+    }
+    auto ccIt = module.constantComposites.find(valueId);
+    if (ccIt == module.constantComposites.end()) {
+        return false;
+    }
+    const ConstantCompositeInfo& cc = ccIt->second;
+    if (cc.constituents.empty()) {
+        return false;
+    }
+    auto readScalar = [&](std::size_t index, std::int32_t& out) -> bool {
+        if (index >= cc.constituents.size()) {
+            return false;
+        }
+        auto scalarIt = module.constants.find(cc.constituents[index]);
+        if (scalarIt == module.constants.end()) {
+            return false;
+        }
+        out = valueLaneAsInt(scalarIt->second, 0);
+        return true;
+    };
+    if (cc.constituents.size() >= 2 &&
+        readScalar(0, x) &&
+        readScalar(1, y)) {
+        return true;
+    }
+    auto vecIt = module.constants.find(cc.constituents[0]);
+    if (vecIt != module.constants.end()) {
+        x = valueLaneAsInt(vecIt->second, 0);
+        y = valueLaneAsInt(vecIt->second, 1);
+        return true;
+    }
+    return false;
+}
+
+bool constantOffsets4AsInt(const SpirvModule& module,
+                           std::uint32_t valueId,
+                           std::array<std::array<std::int32_t, 2>, 4>& offsets) {
+    auto ccIt = module.constantComposites.find(valueId);
+    if (ccIt == module.constantComposites.end()) {
+        std::int32_t x = 0;
+        std::int32_t y = 0;
+        if (!constantVec2AsInt(module, valueId, x, y)) {
+            return false;
+        }
+        for (auto& off : offsets) {
+            off = {x, y};
+        }
+        return true;
+    }
+    const ConstantCompositeInfo& cc = ccIt->second;
+    for (std::size_t i = 0; i < offsets.size() && i < cc.constituents.size(); ++i) {
+        std::int32_t x = 0;
+        std::int32_t y = 0;
+        if (!constantVec2AsInt(module, cc.constituents[i], x, y)) {
+            return false;
+        }
+        offsets[i] = {x, y};
+    }
+    return true;
+}
+
+std::int32_t wrapGatherCoord(std::int32_t coord,
+                             std::uint32_t size,
+                             std::uint32_t wrap,
+                             bool& border) {
+    border = false;
+    if (size == 0) {
+        border = true;
+        return 0;
+    }
+    const std::int32_t dim = static_cast<std::int32_t>(size);
+    if (wrap == kGLClampToBorder) {
+        if (coord < 0 || coord >= dim) {
+            border = true;
+            return 0;
+        }
+        return coord;
+    }
+    if (wrap == kGLClampToEdge) {
+        return std::clamp(coord, 0, dim - 1);
+    }
+    if (wrap == kGLMirroredRepeat) {
+        const std::int32_t period = dim * 2;
+        std::int32_t m = coord % period;
+        if (m < 0) m += period;
+        return m < dim ? m : (period - 1 - m);
+    }
+    std::int32_t m = coord % dim;
+    if (m < 0) m += dim;
+    return m;
+}
+
+bool compareDepthGather(float ref, float texel, std::uint32_t func) {
+    switch (func) {
+        case kGLNever: return false;
+        case kGLLess: return ref < texel;
+        case kGLEqual: return ref == texel;
+        case kGLLequal: return ref <= texel;
+        case kGLGreater: return ref > texel;
+        case kGLNotequal: return ref != texel;
+        case kGLGequal: return ref >= texel;
+        case kGLAlways: return true;
+        default: return ref <= texel;
+    }
 }
 
 // ─── Interpreter ────────────────────────────────────────────────────
@@ -6132,7 +6311,8 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
                             break;
                         }
-                        case 0x822E: { // GL_R32F
+                        case 0x822E: // GL_R32F
+                        case 0x8CAC: { // GL_DEPTH_COMPONENT32F
                             out.kind = Value::Kind::Float4;
                             std::memcpy(&out.f[0], &raw, 4);
                             out.f[1] = 0.0f; out.f[2] = 0.0f;
@@ -6265,6 +6445,273 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     // OOB — return zeros.
                     out.kind = Value::Kind::UInt4;
                 }
+                valueStore_[w[1]] = out;
+                pc += wc;
+                break;
+            }
+            case spv::OpImageGather:
+            case spv::OpImageDrefGather: {
+                // w[0]=resultType, w[1]=resultId, w[2]=sampledImage,
+                // w[3]=coord, w[4]=component-or-dref,
+                // optional w[5]=imageOperands, w[6..]=operand ids.
+                if (wc < 6) {
+                    bail("OpImageGather: malformed");
+                    return false;
+                }
+                auto sIt = sampledImages_.find(w[2]);
+                if (sIt == sampledImages_.end() ||
+                    sampledTextures_ == nullptr) {
+                    bail("OpImageGather: sampled texture data unavailable");
+                    return false;
+                }
+                const SampledImageHandle& h = sIt->second;
+                auto arrIt = sampledTextures_->find(h.arrayVarId);
+                if (arrIt == sampledTextures_->end() ||
+                    h.elementIdx >= arrIt->second.size()) {
+                    bail("OpImageGather: sampled texture slot unavailable");
+                    return false;
+                }
+                const SampledTextureSlot& slot =
+                    arrIt->second[h.elementIdx];
+                if (slot.data.empty()) {
+                    bail("OpImageGather: sampled texture slot has no data");
+                    return false;
+                }
+
+                Value coord;
+                if (!tryGetValue(w[3], coord)) {
+                    bail("OpImageGather: unknown coordinate");
+                    return false;
+                }
+                const bool isDref = opcode == spv::OpImageDrefGather;
+                std::int32_t component = 0;
+                float dref = 0.0f;
+                if (isDref) {
+                    Value drefValue;
+                    if (!tryGetValue(w[4], drefValue)) {
+                        bail("OpImageDrefGather: unknown depth reference");
+                        return false;
+                    }
+                    dref = valueLaneAsFloat(drefValue, 0);
+                } else {
+                    Value componentValue;
+                    if (!tryGetValue(w[4], componentValue)) {
+                        bail("OpImageGather: unknown component");
+                        return false;
+                    }
+                    component = std::clamp(
+                        valueLaneAsInt(componentValue, 0), 0, 3);
+                }
+
+                std::array<std::array<std::int32_t, 2>, 4> gatherOffsets = {
+                    std::array<std::int32_t, 2>{0, 0},
+                    std::array<std::int32_t, 2>{0, 0},
+                    std::array<std::int32_t, 2>{0, 0},
+                    std::array<std::int32_t, 2>{0, 0},
+                };
+                bool usesOffsetArray = false;
+                if (wc > 6) {
+                    constexpr std::uint32_t kBiasMask = 0x00000001u;
+                    constexpr std::uint32_t kLodMask = 0x00000002u;
+                    constexpr std::uint32_t kGradMask = 0x00000004u;
+                    constexpr std::uint32_t kConstOffsetMask = 0x00000008u;
+                    constexpr std::uint32_t kOffsetMask = 0x00000010u;
+                    constexpr std::uint32_t kConstOffsetsMask = 0x00000020u;
+                    constexpr std::uint32_t kSampleMask = 0x00000040u;
+                    constexpr std::uint32_t kMinLodMask = 0x00000080u;
+                    constexpr std::uint32_t kOffsetsMask = 0x00010000u;
+                    const std::uint32_t operands = w[5];
+                    std::uint32_t cursor = 6;
+                    auto skipOperand = [&]() {
+                        if (cursor < wc - 1) {
+                            ++cursor;
+                        }
+                    };
+                    if ((operands & kBiasMask) != 0u) skipOperand();
+                    if ((operands & kLodMask) != 0u) skipOperand();
+                    if ((operands & kGradMask) != 0u) {
+                        skipOperand();
+                        skipOperand();
+                    }
+                    if ((operands & kConstOffsetMask) != 0u) {
+                        if (cursor < wc - 1) {
+                            std::int32_t x = 0;
+                            std::int32_t y = 0;
+                            if (constantVec2AsInt(module_, w[cursor], x, y)) {
+                                for (auto& off : gatherOffsets) {
+                                    off = {x, y};
+                                }
+                            }
+                            ++cursor;
+                        }
+                    }
+                    if ((operands & kOffsetMask) != 0u) {
+                        if (cursor < wc - 1) {
+                            Value offsetValue;
+                            if (tryGetValue(w[cursor], offsetValue)) {
+                                const std::int32_t x =
+                                    valueLaneAsInt(offsetValue, 0);
+                                const std::int32_t y =
+                                    valueLaneAsInt(offsetValue, 1);
+                                for (auto& off : gatherOffsets) {
+                                    off = {x, y};
+                                }
+                            }
+                            ++cursor;
+                        }
+                    }
+                    if ((operands & kConstOffsetsMask) != 0u) {
+                        if (cursor < wc - 1) {
+                            (void)constantOffsets4AsInt(
+                                module_, w[cursor], gatherOffsets);
+                            usesOffsetArray = true;
+                            ++cursor;
+                        }
+                    }
+                    if ((operands & kSampleMask) != 0u) skipOperand();
+                    if ((operands & kMinLodMask) != 0u) skipOperand();
+                    if ((operands & kOffsetsMask) != 0u) {
+                        if (cursor < wc - 1) {
+                            (void)constantOffsets4AsInt(
+                                module_, w[cursor], gatherOffsets);
+                            usesOffsetArray = true;
+                            ++cursor;
+                        }
+                    }
+                }
+
+                const std::uint32_t mipLevel = 0;
+                const std::uint32_t mipWidth =
+                    (!slot.mipWidths.empty() &&
+                     mipLevel < slot.mipWidths.size())
+                        ? slot.mipWidths[mipLevel]
+                        : slot.width;
+                const std::uint32_t mipHeight =
+                    (!slot.mipHeights.empty() &&
+                     mipLevel < slot.mipHeights.size())
+                        ? slot.mipHeights[mipLevel]
+                        : slot.height;
+                const std::uint32_t mipBase =
+                    (!slot.mipOffsets.empty() &&
+                     mipLevel < slot.mipOffsets.size())
+                        ? slot.mipOffsets[mipLevel]
+                        : 0u;
+                const std::uint32_t mipLayerFaces =
+                    (!slot.mipLayerFaces.empty() &&
+                     mipLevel < slot.mipLayerFaces.size())
+                        ? std::max<std::uint32_t>(
+                              slot.mipLayerFaces[mipLevel], 1u)
+                        : std::max<std::uint32_t>(
+                              slot.layerFaces != 0 ? slot.layerFaces
+                                                   : (slot.depth != 0 ? slot.depth : 1u),
+                              1u);
+                const std::uint32_t bpr =
+                    (!slot.mipBytesPerRow.empty() &&
+                     mipLevel < slot.mipBytesPerRow.size())
+                        ? slot.mipBytesPerRow[mipLevel]
+                        : (slot.bytesPerRow != 0
+                               ? slot.bytesPerRow
+                               : mipWidth *
+                                     sampledTextureBytesPerTexel(
+                                         slot.internalFormat));
+                const std::uint32_t bpi =
+                    (!slot.mipBytesPerImage.empty() &&
+                     mipLevel < slot.mipBytesPerImage.size())
+                        ? slot.mipBytesPerImage[mipLevel]
+                        : (slot.bytesPerImage != 0
+                               ? slot.bytesPerImage
+                               : bpr * std::max<std::uint32_t>(mipHeight, 1u));
+                const std::uint32_t bytesPerTexel =
+                    sampledTextureBytesPerTexel(slot.internalFormat);
+
+                const float uF = valueLaneAsFloat(coord, 0);
+                const float vF = coord.componentCount() >= 2
+                    ? valueLaneAsFloat(coord, 1) : 0.0f;
+                const float layerF = coord.componentCount() >= 3
+                    ? valueLaneAsFloat(coord, 2) : 0.0f;
+                const std::int32_t baseX = static_cast<std::int32_t>(
+                    std::floor(uF * static_cast<float>(mipWidth) - 0.5f));
+                const std::int32_t baseY = static_cast<std::int32_t>(
+                    std::floor(vF * static_cast<float>(mipHeight) - 0.5f));
+                std::uint32_t layer = 0;
+                const bool sampler2DArray =
+                    slot.samplerType == GL_SAMPLER_2D_ARRAY ||
+                    slot.samplerType == GL_INT_SAMPLER_2D_ARRAY ||
+                    slot.samplerType == GL_UNSIGNED_INT_SAMPLER_2D_ARRAY ||
+                    slot.samplerType == GL_SAMPLER_2D_ARRAY_SHADOW;
+                if (sampler2DArray && mipLayerFaces > 1u) {
+                    std::int32_t l = static_cast<std::int32_t>(
+                        std::floor(layerF + 0.5f));
+                    l = std::clamp(l, 0,
+                                   static_cast<std::int32_t>(mipLayerFaces) - 1);
+                    layer = static_cast<std::uint32_t>(l);
+                }
+
+                Value out;
+                out.kind = isDref
+                    ? Value::Kind::Float4
+                    : vec4KindForResultType(module_, w[0]);
+
+                const std::int32_t sampleDx[4] = {0, 1, 1, 0};
+                const std::int32_t sampleDy[4] = {1, 1, 0, 0};
+                for (int lane = 0; lane < 4; ++lane) {
+                    const std::int32_t tx =
+                        baseX + (usesOffsetArray ? 0 : sampleDx[lane]) +
+                        gatherOffsets[lane][0];
+                    const std::int32_t ty =
+                        baseY + (usesOffsetArray ? 0 : sampleDy[lane]) +
+                        gatherOffsets[lane][1];
+                    bool borderX = false;
+                    bool borderY = false;
+                    const std::int32_t sx =
+                        wrapGatherCoord(tx, mipWidth, slot.wrapS, borderX);
+                    const std::int32_t sy =
+                        wrapGatherCoord(ty, mipHeight, slot.wrapT, borderY);
+                    const bool border = borderX || borderY;
+
+                    Value texel;
+                    if (border) {
+                        texel.kind =
+                            (out.kind == Value::Kind::Int4 ||
+                             out.kind == Value::Kind::UInt4)
+                                ? out.kind
+                                : Value::Kind::Float4;
+                        for (int c = 0; c < 4; ++c) {
+                            if (texel.isFloatKind()) {
+                                texel.f[c] = slot.borderColor[c];
+                            } else {
+                                texel.i[c] = static_cast<std::int32_t>(
+                                    slot.borderColor[c]);
+                            }
+                        }
+                    } else {
+                        const std::size_t off =
+                            static_cast<std::size_t>(mipBase) +
+                            static_cast<std::size_t>(layer) * bpi +
+                            static_cast<std::size_t>(sy) * bpr +
+                            static_cast<std::size_t>(sx) * bytesPerTexel;
+                        if (off + bytesPerTexel <= slot.data.size()) {
+                            texel = decodeSampledTextureTexel(
+                                slot, slot.data.data() + off, bytesPerTexel);
+                        } else {
+                            texel.kind = out.kind;
+                        }
+                    }
+
+                    if (isDref) {
+                        const float depth = texel.isFloatKind()
+                            ? texel.f[0]
+                            : static_cast<float>(texel.i[0]);
+                        out.f[lane] = compareDepthGather(
+                            dref, depth, slot.compareFunc) ? 1.0f : 0.0f;
+                    } else if (out.kind == Value::Kind::Int4 ||
+                               out.kind == Value::Kind::UInt4) {
+                        out.i[lane] = valueLaneAsInt(texel, component);
+                    } else {
+                        out.f[lane] = valueLaneAsFloat(texel, component);
+                    }
+                }
+
                 valueStore_[w[1]] = out;
                 pc += wc;
                 break;
@@ -6594,7 +7041,8 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
                             break;
                         }
-                        case 0x822E: { // GL_R32F
+                        case 0x822E: // GL_R32F
+                        case 0x8CAC: { // GL_DEPTH_COMPONENT32F
                             out.kind = Value::Kind::Float4;
                             std::memcpy(&out.f[0], &raw, 4);
                             out.f[1] = 0.0f; out.f[2] = 0.0f;
@@ -8535,6 +8983,8 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpImage:                      // 100
         case spv::OpSampledImage:               // 86
         case spv::OpImageFetch:                 // 95
+        case spv::OpImageGather:                // 96
+        case spv::OpImageDrefGather:            // 97
         case spv::OpImageSampleImplicitLod:     // 87 (defensive)
         case spv::OpImageSampleExplicitLod:     // 88
         // ─ Storage image load (Sprint 7 P1 #4, CKPT54) ─

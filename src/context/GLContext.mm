@@ -9477,6 +9477,36 @@ struct GLContext::Impl {
                 if (texObject == nullptr) {
                     continue;
                 }
+                const GLTextureParameters* effectiveSamplerParams =
+                    &texObject->params;
+                const GLuint samplerName =
+                    state->boundSampler(static_cast<GLuint>(unit));
+                if (samplerName != 0) {
+                    GLSamplerObject* samplerObj =
+                        objects->samplers().get(samplerName);
+                    if (samplerObj != nullptr) {
+                        effectiveSamplerParams = &samplerObj->params;
+                    }
+                }
+                auto applySamplingState =
+                    [&](appgl::SampledTextureSlot& slot) {
+                        slot.wrapS = static_cast<std::uint32_t>(
+                            effectiveSamplerParams->wrapS);
+                        slot.wrapT = static_cast<std::uint32_t>(
+                            effectiveSamplerParams->wrapT);
+                        slot.wrapR = static_cast<std::uint32_t>(
+                            effectiveSamplerParams->wrapR);
+                        slot.compareMode = static_cast<std::uint32_t>(
+                            effectiveSamplerParams->compareMode);
+                        slot.compareFunc = static_cast<std::uint32_t>(
+                            effectiveSamplerParams->compareFunc);
+                        for (std::size_t component = 0;
+                             component < slot.borderColor.size();
+                             ++component) {
+                            slot.borderColor[component] =
+                                effectiveSamplerParams->borderColor[component];
+                        }
+                    };
                 if (texObject->target == GL_TEXTURE_BUFFER) {
                     const GLuint sourceBuffer = texObject->desc.sourceBuffer;
                     GLBufferObject* bufferObject =
@@ -9529,6 +9559,7 @@ struct GLContext::Impl {
                     slot.internalFormat = static_cast<std::uint32_t>(
                         texObject->desc.internalFormat);
                     slot.samplerType = samplerGLType;
+                    applySamplingState(slot);
                     const std::size_t packedBytes =
                         static_cast<std::size_t>(texelCount) * bpp;
                     slot.data.assign(sourceBytes + rangeOffset,
@@ -9592,6 +9623,7 @@ struct GLContext::Impl {
                     slot.layerFaces = layers;
                     slot.internalFormat = proxyFormat;
                     slot.samplerType = samplerGLType;
+                    applySamplingState(slot);
                     slot.bytesPerRow = width * bpp;
                     slot.bytesPerImage = slot.bytesPerRow * height;
                     slot.mipOffsets = {0u};
@@ -9628,6 +9660,64 @@ struct GLContext::Impl {
                             proxyFormat,
                             static_cast<unsigned>(
                                 texObject->params.depthStencilTextureMode),
+                            image.nativeBpp,
+                            slot.data.size(),
+                            slot.data.empty() ? 0u : slot.data[0]);
+                    }
+                    continue;
+                }
+                if (texObject->desc.internalFormat == GL_DEPTH_COMPONENT32F) {
+                    auto levelIt = texObject->levels.find(0);
+                    if (levelIt == texObject->levels.end() ||
+                        !levelIt->second.defined) {
+                        continue;
+                    }
+                    const GLTextureImageLevel& image = levelIt->second;
+                    const std::uint32_t width =
+                        static_cast<std::uint32_t>(safeDimension(image.desc.width));
+                    const std::uint32_t height =
+                        static_cast<std::uint32_t>(
+                            texObject->target == GL_TEXTURE_1D
+                                ? 1 : safeDimension(image.desc.height));
+                    const std::uint32_t layers =
+                        static_cast<std::uint32_t>(
+                            std::max<GLsizei>(image.desc.depth, 1));
+                    if (width == 0 || height == 0 || layers == 0) {
+                        continue;
+                    }
+
+                    appgl::SampledTextureSlot& slot = slots[i];
+                    slot.width = width;
+                    slot.height = height;
+                    slot.depth = layers > 1 ? layers : 0;
+                    slot.layerFaces = layers;
+                    slot.internalFormat =
+                        static_cast<std::uint32_t>(GL_DEPTH_COMPONENT32F);
+                    slot.samplerType = samplerGLType;
+                    applySamplingState(slot);
+                    slot.bytesPerRow = width * sizeof(float);
+                    slot.bytesPerImage = slot.bytesPerRow * height;
+                    slot.mipOffsets = {0u};
+                    slot.mipWidths = {width};
+                    slot.mipHeights = {height};
+                    slot.mipBytesPerRow = {slot.bytesPerRow};
+                    slot.mipBytesPerImage = {slot.bytesPerImage};
+                    slot.mipLayerFaces = {layers};
+                    const std::size_t pixelCount =
+                        static_cast<std::size_t>(width) *
+                        static_cast<std::size_t>(height) *
+                        static_cast<std::size_t>(layers);
+                    slot.data.assign(pixelCount * sizeof(float), 0u);
+                    for (std::size_t p = 0; p < pixelCount; ++p) {
+                        const float value = depthSampleProxyValue(image, p);
+                        std::memcpy(slot.data.data() + p * sizeof(float),
+                                    &value, sizeof(value));
+                    }
+                    if (trace) {
+                        std::fprintf(stderr,
+                            "[GS-tex]   depth snapshot tex=%u fmt=0x%X "
+                            "nativeBpp=%zu bytes=%zu first=%02X\n",
+                            texName, texObject->desc.internalFormat,
                             image.nativeBpp,
                             slot.data.size(),
                             slot.data.empty() ? 0u : slot.data[0]);
@@ -9692,6 +9782,7 @@ struct GLContext::Impl {
                 slot.internalFormat = static_cast<std::uint32_t>(
                     texObject->desc.internalFormat);
                 slot.samplerType = samplerGLType;
+                applySamplingState(slot);
                 // Format gating — minimal initial set.
                 const std::uint32_t intFmt =
                     static_cast<std::uint32_t>(texObject->desc.internalFormat);
@@ -9700,6 +9791,7 @@ struct GLContext::Impl {
                     case GL_R32UI:
                     case GL_R32I:
                     case GL_R32F:
+                    case GL_DEPTH_COMPONENT32F:
                     case GL_RGBA8:
                     case GL_RG16F:
                     case GL_RG16:
