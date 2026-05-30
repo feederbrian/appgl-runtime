@@ -3244,18 +3244,25 @@ struct GLContext::Impl {
         return nullptr;
     }
 
-    std::vector<GLuint> textureStorageAliasNames(GLuint textureName) const {
-        std::vector<GLuint> names;
-        if (textureName == 0) {
-            return names;
-        }
-        names.push_back(textureName);
-        if (objects == nullptr) {
-            return names;
-        }
+    template <typename Fn>
+    bool forEachTextureStorageAliasName(GLuint textureName, Fn&& fn) const {
+        if (textureName == 0) return true;
+        std::array<GLuint, 65> visited{};
+        std::size_t visitedCount = 0;
+        auto visit = [&](GLuint name) -> bool {
+            if (name == 0) return false;
+            for (std::size_t i = 0; i < visitedCount; ++i) {
+                if (visited[i] == name) {
+                    return false;
+                }
+            }
+            if (visitedCount >= visited.size()) return false;
+            visited[visitedCount++] = name;
+            return fn(name);
+        };
+        if (!visit(textureName)) return false;
+        if (objects == nullptr) return true;
 
-        std::unordered_set<GLuint> visited;
-        visited.insert(textureName);
         GLuint cursorName = textureName;
         for (int depth = 0; depth < 64; ++depth) {
             const GLTextureObject* texture = objects->textures().get(cursorName);
@@ -3263,12 +3270,20 @@ struct GLContext::Impl {
                 break;
             }
             const GLuint sourceName = texture->viewSourceTexture;
-            if (sourceName == 0 || !visited.insert(sourceName).second) {
-                break;
+            if (!visit(sourceName)) {
+                return false;
             }
-            names.push_back(sourceName);
             cursorName = sourceName;
         }
+        return true;
+    }
+
+    std::vector<GLuint> textureStorageAliasNames(GLuint textureName) const {
+        std::vector<GLuint> names;
+        forEachTextureStorageAliasName(textureName, [&](GLuint name) {
+            names.push_back(name);
+            return true;
+        });
         return names;
     }
 
@@ -3297,9 +3312,10 @@ struct GLContext::Impl {
         for (const auto& write : writes) {
             if (write.name == 0 || write.bits == 0) continue;
             if (write.kind == GpuResourceAccess::Kind::Texture) {
-                for (GLuint name : textureStorageAliasNames(write.name)) {
+                forEachTextureStorageAliasName(write.name, [&](GLuint name) {
                     markOne(write.kind, name, write.bits);
-                }
+                    return true;
+                });
             } else {
                 markOne(write.kind, write.name, write.bits);
             }
@@ -3307,29 +3323,34 @@ struct GLContext::Impl {
     }
 
     void drainPendingGpuProducers(const GpuResourceReadSet& reads) const {
-        auto textureNamesForRead = [&](const GpuResourceAccess& read) {
-            return read.kind == GpuResourceAccess::Kind::Texture
-                ? textureStorageAliasNames(read.name)
-                : std::vector<GLuint>{read.name};
+        auto forEachReadName = [&](const GpuResourceAccess& read, auto&& fn) {
+            if (read.kind == GpuResourceAccess::Kind::Texture) {
+                return forEachTextureStorageAliasName(
+                    read.name, std::forward<decltype(fn)>(fn));
+            } else if (read.name != 0) {
+                return fn(read.name);
+            }
+            return true;
         };
 
         bool needsDrain = false;
         for (const auto& read : reads) {
             if (read.name == 0 || read.bits == 0) continue;
-            for (GLuint name : textureNamesForRead(read)) {
-                if (name == 0) continue;
+            forEachReadName(read, [&](GLuint name) {
+                if (name == 0) return true;
                 const GLProducerPendingState* state =
                     pendingStateForResource(read.kind, name);
                 if (state != nullptr && state->hasAny(read.bits)) {
                     needsDrain = true;
-                    break;
+                    return false;
                 }
                 if (read.kind == GpuResourceAccess::Kind::Texture &&
                     legacyMsaaSamplerFlushPending(name)) {
                     needsDrain = true;
-                    break;
+                    return false;
                 }
-            }
+                return true;
+            });
             if (needsDrain) break;
         }
         if (!needsDrain) {
@@ -3340,16 +3361,17 @@ struct GLContext::Impl {
         }
         for (const auto& read : reads) {
             if (read.name == 0 || read.bits == 0) continue;
-            for (GLuint name : textureNamesForRead(read)) {
-                if (name == 0) continue;
+            forEachReadName(read, [&](GLuint name) {
+                if (name == 0) return true;
                 GLProducerPendingState* state =
                     pendingStateForResource(read.kind, name);
-                if (state == nullptr) continue;
+                if (state == nullptr) return true;
                 GLProducerPendingAccess::clear(*state, read.bits);
                 if (read.kind == GpuResourceAccess::Kind::Texture) {
                     clearLegacyMsaaSamplerFlushIfTexture(name);
                 }
-            }
+                return true;
+            });
         }
     }
 
