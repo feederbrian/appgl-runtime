@@ -197,3 +197,5 @@ KHR-GL46.texture_swizzle.functional_format_idx_70_target_idx_5
 KHR-GL46.texture_swizzle.functional_format_idx_70_target_idx_6
 KHR-GL46.texture_swizzle.functional_format_idx_70_target_idx_7
 KHR-GL46.texture_swizzle.functional_format_idx_70_target_idx_8
+# SHADER-INTEGER-MIX-CTS-GLSL330-CORE-VERSION-GATE status-confirmed-deferred-on-cts-version-gate
+KHR-GL46.shaders.shader_integer_mix.prototypes
