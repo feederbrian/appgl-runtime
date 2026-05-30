@@ -40,6 +40,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <set>
 #include <unordered_map>
@@ -2775,6 +2776,8 @@ void resetBufferMapping(GLBufferObject& object) {
 void markVertexDescriptorDirty(GLVertexArrayObject& vertexArray) {
     vertexArray.vertexDescriptorDirty = true;
     vertexArray.vertexDescriptorError.clear();
+    ++vertexArray.attribGeneration;
+    vertexArray.cachedLayouts = {};
 }
 
 // GL 4.6 §8.10 enum-valued pname → accepted constant check. When the
@@ -43529,16 +43532,19 @@ static void logStateResolveCostClass(const char* path,
                                      GLuint programName,
                                      GLuint vaoName,
                                      const TranslatedDrawInfo& tdi,
-                                     std::size_t vaoAttributeCount)
+                                     std::size_t vaoAttributeCount,
+                                     bool vaoLayoutCacheHit = false)
 {
     APPGL_LOG(DRAW, @"[GL:state-resolve] path=%s program=%u vao=%u"
-                    @" vaoAttrs=%zu primaryAttrs=%zu extraBuffers=%zu",
+                    @" vaoAttrs=%zu primaryAttrs=%zu extraBuffers=%zu"
+                    @" vaoLayoutCacheHit=%d",
               path,
               programName,
               vaoName,
               vaoAttributeCount,
               tdi.vertexAttributeLayouts.size(),
-              tdi.extraVertexBuffers.size());
+              tdi.extraVertexBuffers.size(),
+              vaoLayoutCacheHit ? 1 : 0);
 }
 
 static void logIndexExpansionCostClass(const char* path,
@@ -43839,25 +43845,213 @@ static void populateTranslatedDrawFixedFunctionState(
     tdi.scissorHeight = sc.height;
 }
 
-// Phase 8X Group 4d follow-up¹⁴ — VAO → VertexAttributeLayout field
-// copy. The GL `glVertexAttribPointer` (and `glVertexAttribIPointer` /
-// `glVertexAttribFormat`) parameters are the *source of truth* for the
-// MTLVertexFormat of each attribute, not `ShaderReflection::vertexInputs
-// [i].type`. Prior to follow-up¹⁴ the vertex descriptor derived
-// attribute formats from the shader-reflected scalar type, which
-// produced `Float4` for any `in vec4 color` input even when the VBO
-// layout stored 4×UBYTE normalized colors (see followup¹³-verification
-// §Smoking-Gun). Capturing these four fields end-to-end lets
-// `encodeTranslatedDraw` call `vaoTypeToMTLFormat` with the real VBO
-// layout instead of the shader-reflected placeholder.
-static void populateVertexAttributeLayoutVAOFields(
-    TranslatedDrawInfo::VertexAttributeLayout& layout,
-    const GLVertexAttributeState& attr)
+static constexpr std::size_t kPlainVaoLayoutCacheIndex = 0;
+static constexpr std::size_t kDivisorAwareVaoLayoutCacheIndex = 1;
+static constexpr std::size_t kIndexedDivisorAwareVaoLayoutCacheIndex = 2;
+static constexpr std::size_t kPlainNoMinVaoLayoutCacheIndex = 3;
+
+static GLuint effectiveVertexAttribDivisor(
+    const GLVertexAttributeState& attr,
+    const GLVertexArrayObject& vao)
 {
+    return attr.useSeparatedFormat
+        ? (attr.bindingIndex < vao.bindingPoints.size()
+            ? vao.bindingPoints[attr.bindingIndex].divisor
+            : attr.divisor)
+        : attr.divisor;
+}
+
+static GLVertexArrayCachedAttributeLayout makeCachedVertexAttributeLayout(
+    GLuint location,
+    const GLVertexAttributeState& attr,
+    const ResolvedVertexAttrib& resolved,
+    GLuint divisor)
+{
+    GLVertexArrayCachedAttributeLayout layout;
+    layout.location = location;
+    layout.bufferName = resolved.bufferName;
+    layout.stride = resolved.stride;
+    layout.offset = resolved.offset;
+    layout.divisor = divisor;
     layout.glType = attr.type;
     layout.glComponentCount = attr.size;
     layout.glNormalized = attr.normalized;
     layout.glIsInteger = attr.integer;
+    return layout;
+}
+
+static GLVertexArrayCachedLayout buildVertexArrayCachedLayout(
+    const GLVertexArrayObject& vao,
+    bool divisorAware,
+    bool forceAttributeZeroPrimary,
+    bool minimizePrimaryBaseOffset)
+{
+    GLVertexArrayCachedLayout cache;
+    cache.valid = true;
+    cache.generation = vao.attribGeneration;
+    if (vao.attributes.empty()) {
+        return cache;
+    }
+
+    std::size_t primaryIdx = 0;
+    bool foundEnabledAttrib = false;
+    for (std::size_t ai = 0; ai < vao.attributes.size(); ++ai) {
+        if (vao.attributes[ai].enabled) {
+            if (!forceAttributeZeroPrimary) {
+                primaryIdx = ai;
+            }
+            foundEnabledAttrib = true;
+            break;
+        }
+    }
+
+    const auto& primaryAttr = vao.attributes[primaryIdx];
+    const auto primaryResolved = resolveVertexAttrib(primaryAttr, vao);
+    cache.hasEnabledAttributes = foundEnabledAttrib;
+    cache.primaryAttributeIndex = primaryIdx;
+    cache.primaryBufferName = primaryResolved.bufferName;
+    cache.primaryStride = primaryResolved.stride;
+    cache.primaryBaseOffset = primaryResolved.offset;
+
+    if (!foundEnabledAttrib) {
+        return cache;
+    }
+
+    if (minimizePrimaryBaseOffset) {
+        for (std::size_t ai = 0; ai < vao.attributes.size(); ++ai) {
+            const auto& attr = vao.attributes[ai];
+            if (!attr.enabled) continue;
+            const auto attrRes = resolveVertexAttrib(attr, vao);
+            const GLuint attrDivisor = effectiveVertexAttribDivisor(attr, vao);
+            if (attrRes.bufferName == cache.primaryBufferName &&
+                attrRes.stride == cache.primaryStride &&
+                (!divisorAware || attrDivisor == 0)) {
+                cache.primaryBaseOffset =
+                    std::min(cache.primaryBaseOffset, attrRes.offset);
+            }
+        }
+    }
+
+    for (std::size_t ai = 0; ai < vao.attributes.size(); ++ai) {
+        const auto& attr = vao.attributes[ai];
+        if (!attr.enabled) continue;
+
+        const auto attrRes = resolveVertexAttrib(attr, vao);
+        const GLuint attrDivisor = effectiveVertexAttribDivisor(attr, vao);
+        auto layout = makeCachedVertexAttributeLayout(
+            static_cast<GLuint>(ai), attr, attrRes, attrDivisor);
+
+        if (attrRes.bufferName == cache.primaryBufferName &&
+            attrRes.stride == cache.primaryStride &&
+            (!divisorAware || attrDivisor == 0)) {
+            cache.primaryAttributes.push_back(layout);
+            continue;
+        }
+
+        const GLuint groupDivisor = divisorAware ? attrDivisor : 0;
+        auto groupIt = std::find_if(
+            cache.extraGroups.begin(), cache.extraGroups.end(),
+            [&](const GLVertexArrayCachedLayoutGroup& group) {
+                return group.bufferName == attrRes.bufferName &&
+                       group.stride == attrRes.stride &&
+                       group.divisor == groupDivisor;
+            });
+        if (groupIt == cache.extraGroups.end()) {
+            GLVertexArrayCachedLayoutGroup group;
+            group.bufferName = attrRes.bufferName;
+            group.stride = attrRes.stride;
+            group.divisor = groupDivisor;
+            cache.extraGroups.push_back(std::move(group));
+            groupIt = std::prev(cache.extraGroups.end());
+        }
+        groupIt->attributes.push_back(std::move(layout));
+    }
+
+    return cache;
+}
+
+static const GLVertexArrayCachedLayout& cachedVertexArrayLayout(
+    GLVertexArrayObject& vao,
+    bool divisorAware,
+    bool* cacheHit = nullptr,
+    bool forceAttributeZeroPrimary = false,
+    bool minimizePrimaryBaseOffset = true)
+{
+    std::size_t index = kPlainVaoLayoutCacheIndex;
+    if (divisorAware && forceAttributeZeroPrimary) {
+        index = kIndexedDivisorAwareVaoLayoutCacheIndex;
+    } else if (!divisorAware && !minimizePrimaryBaseOffset) {
+        index = kPlainNoMinVaoLayoutCacheIndex;
+    } else if (divisorAware) {
+        index = kDivisorAwareVaoLayoutCacheIndex;
+    }
+    auto& cache = vao.cachedLayouts[index];
+    const bool hit = cache.valid && cache.generation == vao.attribGeneration;
+    if (!hit) {
+        cache = buildVertexArrayCachedLayout(
+            vao, divisorAware, forceAttributeZeroPrimary,
+            minimizePrimaryBaseOffset);
+    }
+    if (cacheHit != nullptr) {
+        *cacheHit = hit;
+    }
+    return cache;
+}
+
+static TranslatedDrawInfo::VertexAttributeLayout makeTranslatedLayout(
+    const GLVertexArrayCachedAttributeLayout& cached)
+{
+    TranslatedDrawInfo::VertexAttributeLayout layout;
+    layout.location = cached.location;
+    layout.offset = cached.offset;
+    layout.glType = cached.glType;
+    layout.glComponentCount = cached.glComponentCount;
+    layout.glNormalized = cached.glNormalized;
+    layout.glIsInteger = cached.glIsInteger;
+    return layout;
+}
+
+static void applyCachedVertexArrayLayout(
+    const GLVertexArrayCachedLayout& cache,
+    GLObjectStore& objects,
+    TranslatedDrawInfo& tdi,
+    GLint first,
+    bool offsetExtraBuffersByFirst,
+    bool keepEmptyExtraBufferGroups)
+{
+    for (const auto& cached : cache.primaryAttributes) {
+        auto layout = makeTranslatedLayout(cached);
+        layout.offset = cached.offset - cache.primaryBaseOffset;
+        tdi.vertexAttributeLayouts.push_back(layout);
+    }
+
+    for (const auto& group : cache.extraGroups) {
+        GLBufferObject* extraVbo = group.bufferName != 0
+            ? objects.buffers().get(group.bufferName)
+            : nullptr;
+        const bool hasExtraBytes =
+            extraVbo != nullptr && !extraVbo->shadowBytes.empty();
+        if (!keepEmptyExtraBufferGroups && !hasExtraBytes) {
+            continue;
+        }
+
+        TranslatedDrawInfo::ExtraVertexBuffer evb;
+        evb.stride = group.stride;
+        evb.divisor = group.divisor;
+        if (hasExtraBytes) {
+            evb.data = extraVbo->shadowBytes.data();
+            evb.byteCount = extraVbo->shadowBytes.size();
+            evb.metalBuffer = extraVbo->metalBuffer;
+            evb.metalBufferOffset = offsetExtraBuffersByFirst
+                ? static_cast<std::size_t>(first) * group.stride
+                : 0;
+            evb.glBuffer = group.bufferName;
+        }
+        for (const auto& cachedAttr : group.attributes) {
+            evb.attributes.push_back(makeTranslatedLayout(cachedAttr));
+        }
+        tdi.extraVertexBuffers.push_back(std::move(evb));
+    }
 }
 
 static GLint shaderVertexInputComponentCount(GLenum type) {
@@ -46906,30 +47100,22 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
         return false;
     }
 
-    // Find primary enabled attribute for primary-VBO detection. Mirror
-    // of the drawArrays primaryIdx scan — cull_distance CTS tests use
-    // attribute 0 unused with bindings at locations 1..9.
-    std::size_t primaryIdx = 0;
-    bool foundEnabled = false;
-    for (std::size_t ai = 0; ai < vao.attributes.size(); ++ai) {
-        if (vao.attributes[ai].enabled) {
-            primaryIdx = ai;
-            foundEnabled = true;
-            break;
-        }
-    }
-    if (!foundEnabled) {
+    bool vaoLayoutCacheHit = false;
+    const auto& vaoLayout =
+        cachedVertexArrayLayout(
+            vao, false, &vaoLayoutCacheHit,
+            false, false);
+    if (!vaoLayout.hasEnabledAttributes) {
         return false;
     }
-    const auto& posAttr = vao.attributes[primaryIdx];
-    auto resolved = resolveVertexAttrib(posAttr, vao);
-    GLBufferObject* vbo = (resolved.bufferName != 0)
-        ? objects->buffers().get(resolved.bufferName) : nullptr;
+    GLBufferObject* vbo = (vaoLayout.primaryBufferName != 0)
+        ? objects->buffers().get(vaoLayout.primaryBufferName)
+        : nullptr;
     if (vbo == nullptr || vbo->shadowBytes.empty()) {
         return false;
     }
-    const std::size_t posStride = resolved.stride;
-    const std::size_t startOff = resolved.offset;
+    const std::size_t posStride = vaoLayout.primaryStride;
+    const std::size_t startOff = vaoLayout.primaryBaseOffset;
     if (startOff > vbo->shadowBytes.size()) {
         return false;
     }
@@ -46942,7 +47128,7 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
     tdi.vertexStride = posStride;
     tdi.metalVertexBuffer = vbo->metalBuffer;
     tdi.metalVertexBufferOffset = startOff;
-    tdi.glVertexBuffer = resolved.bufferName;
+    tdi.glVertexBuffer = vaoLayout.primaryBufferName;
     // Filtered indices fed as UINT32 client-side index array;
     // encodeTranslatedDraw stages them into a Metal ring buffer.
     tdi.indices = filteredIndices.data();
@@ -46966,63 +47152,13 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
     tdi.metalFragmentFunctionOut = &program.metalFragmentFunction;
     tdi.program = programName;
 
-    // VAO-grouped attribute layout — mirror of drawElements grouping.
-    {
-        struct CPGroupKey {
-            GLuint bufferName;
-            std::size_t stride;
-            bool operator==(const CPGroupKey& o) const {
-                return bufferName == o.bufferName && stride == o.stride;
-            }
-        };
-        struct CPGroupKeyHash {
-            std::size_t operator()(const CPGroupKey& k) const {
-                return std::hash<GLuint>()(k.bufferName)
-                     ^ (std::hash<std::size_t>()(k.stride) << 16);
-            }
-        };
-        std::unordered_map<CPGroupKey, std::size_t, CPGroupKeyHash> cpExtraMap;
-        for (std::size_t ai = 0; ai < vao.attributes.size(); ++ai) {
-            const auto& attr = vao.attributes[ai];
-            if (!attr.enabled) continue;
-            auto attrRes = resolveVertexAttrib(attr, vao);
-            TranslatedDrawInfo::VertexAttributeLayout layout;
-            layout.location = static_cast<GLuint>(ai);
-            populateVertexAttributeLayoutVAOFields(layout, attr);
-            if (attrRes.bufferName == resolved.bufferName
-                && attrRes.stride == posStride) {
-                layout.offset = attrRes.offset - resolved.offset;
-                tdi.vertexAttributeLayouts.push_back(layout);
-            } else {
-                GLBufferObject* extraVbo =
-                    objects->buffers().get(attrRes.bufferName);
-                if (extraVbo == nullptr || extraVbo->shadowBytes.empty()) continue;
-                CPGroupKey key{attrRes.bufferName, attrRes.stride};
-                auto it = cpExtraMap.find(key);
-                std::size_t idx;
-                if (it == cpExtraMap.end()) {
-                    idx = tdi.extraVertexBuffers.size();
-                    cpExtraMap[key] = idx;
-                    TranslatedDrawInfo::ExtraVertexBuffer evb;
-                    evb.data = extraVbo->shadowBytes.data();
-                    evb.byteCount = extraVbo->shadowBytes.size();
-                    evb.stride = attrRes.stride;
-                    evb.divisor = 0;
-                    evb.metalBuffer = extraVbo->metalBuffer;
-                    evb.metalBufferOffset = 0;
-                    evb.glBuffer = attrRes.bufferName;
-                    tdi.extraVertexBuffers.push_back(std::move(evb));
-                } else {
-                    idx = it->second;
-                }
-                layout.offset = attrRes.offset;
-                tdi.extraVertexBuffers[idx].attributes.push_back(layout);
-            }
-        }
-    }
+    applyCachedVertexArrayLayout(
+        vaoLayout, *objects, tdi, 0,
+        false, false);
 
     logStateResolveCostClass(
-        "cull-filtered-draw", programName, 0, tdi, vao.attributes.size());
+        "cull-filtered-draw", programName, 0, tdi, vao.attributes.size(),
+        vaoLayoutCacheHit);
     prepareTranslatedDrawUniformBuffers(
         program, programName, matrixState, 0, tdi, "cull-filtered-draw");
 
@@ -48834,21 +48970,10 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 vaoName, 0, 0, 0);
         }
         if (vao != nullptr && !vao->attributes.empty()) {
-            // Find the first ENABLED attribute for primary-VBO detection.
-            // Shaders that bind via `layout(location=N)` with N > 0 leave
-            // attribute 0 disabled — cull_distance CTS tests (9 attributes
-            // at locations 1..9, attribute 0 unused) were silently
-            // skipping the encodeTranslatedDraw path entirely because the
-            // unused attribute 0 has bufferName=0.
-            std::size_t primaryIdx = 0;
-            bool foundEnabledAttrib = false;
-            for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
-                if (vao->attributes[ai].enabled) {
-                    primaryIdx = ai;
-                    foundEnabledAttrib = true;
-                    break;
-                }
-            }
+            bool vaoLayoutCacheHit = false;
+            const auto& vaoLayout =
+                cachedVertexArrayLayout(*vao, false, &vaoLayoutCacheHit);
+            const bool foundEnabledAttrib = vaoLayout.hasEnabledAttributes;
             if (!foundEnabledAttrib &&
                 !program->vertexReflection.vertexInputs.empty()) {
                 TranslatedDrawInfo tdi;
@@ -48922,39 +49047,28 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                         program, programName, pipelineBuildErrorConst);
                 }
             }
-            const auto& posAttr = vao->attributes[primaryIdx];
-            auto resolved = resolveVertexAttrib(posAttr, *vao);
-            GLBufferObject* vbo = (resolved.bufferName != 0)
-                ? impl_->objects->buffers().get(resolved.bufferName) : nullptr;
+            GLBufferObject* vbo = (vaoLayout.primaryBufferName != 0)
+                ? impl_->objects->buffers().get(vaoLayout.primaryBufferName)
+                : nullptr;
             if (vbo == nullptr) {
                 reportTranslatedFallbackOnce(program, programName,
                     TranslatedFallbackGate::NullVBO, "drawArrays",
-                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+                    vaoName, vao->attributes.size(), vaoLayout.primaryBufferName, 0);
             } else if (vbo->shadowBytes.empty()) {
                 reportTranslatedFallbackOnce(program, programName,
                     TranslatedFallbackGate::ShadowBytesEmpty, "drawArrays",
-                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+                    vaoName, vao->attributes.size(), vaoLayout.primaryBufferName, 0);
             }
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
-                const std::size_t posStride = resolved.stride;
+                const std::size_t posStride = vaoLayout.primaryStride;
                 const std::size_t firstOff = static_cast<std::size_t>(first) * posStride;
-                std::size_t primaryBaseOffset = resolved.offset;
-                for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
-                    const auto& attr = vao->attributes[ai];
-                    if (!attr.enabled) continue;
-                    auto attrRes = resolveVertexAttrib(attr, *vao);
-                    if (attrRes.bufferName == resolved.bufferName &&
-                        attrRes.stride == posStride) {
-                        primaryBaseOffset =
-                            std::min(primaryBaseOffset, attrRes.offset);
-                    }
-                }
-                const std::size_t startOff = primaryBaseOffset + firstOff;
+                const std::size_t startOff =
+                    vaoLayout.primaryBaseOffset + firstOff;
 
                 if (startOff > vbo->shadowBytes.size()) {
                     reportTranslatedFallbackOnce(program, programName,
                         TranslatedFallbackGate::OffsetOverflow, "drawArrays",
-                        vaoName, vao->attributes.size(), resolved.bufferName,
+                        vaoName, vao->attributes.size(), vaoLayout.primaryBufferName,
                         vbo->shadowBytes.size());
                 }
                 if (startOff <= vbo->shadowBytes.size()) {
@@ -48967,7 +49081,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     // OPT-5: pass pre-uploaded Metal buffer for direct bind.
                     tdi.metalVertexBuffer = vbo->metalBuffer;
                     tdi.metalVertexBufferOffset = startOff;
-                    tdi.glVertexBuffer = resolved.bufferName;
+                    tdi.glVertexBuffer = vaoLayout.primaryBufferName;
                     // Phase 8X Group 4d follow-up¹⁴ — centralised fixed-
                     // function state snapshot (depth/cull/front-face/
                     // wireframe/blend). Replaces the prior inline reads
@@ -48995,83 +49109,14 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     // correctness impact; zero is a valid placeholder.
                     tdi.program = programName;
 
-                    // Collect per-attribute layout from the VAO.  Attributes
-                    // sharing the primary VBO AND the primary stride go into
-                    // vertexAttributeLayouts (Metal buffer 0).  Attributes in a
-                    // different VBO or with a different effective stride are
-                    // placed into extraVertexBuffers (Metal buffer 1+) so each
-                    // group gets its own MTLVertexDescriptor layout stride.
-                    //
-                    // Phase 8X Group 4d follow-up¹⁴ — the VAO fields
-                    // (`glType/glComponentCount/glNormalized/glIsInteger`)
-                    // are now carried end-to-end so encodeTranslatedDraw
-                    // can derive the real MTLVertexFormat from the VBO
-                    // layout rather than the shader-reflected scalar type.
-                    //
-                    // The extra-buffer grouping key is (bufferName, stride).
-                    // A helper map collects non-primary groups; after the loop
-                    // each group becomes one ExtraVertexBuffer entry.
-                    struct ExtraGroupKey {
-                        GLuint bufferName;
-                        std::size_t stride;
-                        bool operator==(const ExtraGroupKey& o) const {
-                            return bufferName == o.bufferName && stride == o.stride;
-                        }
-                    };
-                    struct ExtraGroupKeyHash {
-                        std::size_t operator()(const ExtraGroupKey& k) const {
-                            return std::hash<GLuint>()(k.bufferName) ^ (std::hash<std::size_t>()(k.stride) << 16);
-                        }
-                    };
-                    std::unordered_map<ExtraGroupKey, std::size_t, ExtraGroupKeyHash> extraGroupIndex;
-                    for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
-                        const auto& attr = vao->attributes[ai];
-                        if (!attr.enabled) continue;
-                        auto attrRes = resolveVertexAttrib(attr, *vao);
-                        TranslatedDrawInfo::VertexAttributeLayout layout;
-                        layout.location = static_cast<GLuint>(ai);
-                        populateVertexAttributeLayoutVAOFields(layout, attr);
-
-                        if (attrRes.bufferName == resolved.bufferName &&
-                            attrRes.stride == posStride) {
-                            // Primary group: same VBO + same stride → buffer 0.
-                            layout.offset = attrRes.offset - primaryBaseOffset;
-                            tdi.vertexAttributeLayouts.push_back(layout);
-                        } else {
-                            // Different VBO or different stride → extra buffer.
-                            ExtraGroupKey key{attrRes.bufferName, attrRes.stride};
-                            auto it = extraGroupIndex.find(key);
-                            std::size_t idx;
-                            if (it == extraGroupIndex.end()) {
-                                idx = tdi.extraVertexBuffers.size();
-                                extraGroupIndex[key] = idx;
-                                GLBufferObject* extraVbo =
-                                    impl_->objects->buffers().get(attrRes.bufferName);
-                                TranslatedDrawInfo::ExtraVertexBuffer evb;
-                                evb.stride = attrRes.stride;
-                                evb.divisor = 0;
-                                if (extraVbo != nullptr && !extraVbo->shadowBytes.empty()) {
-                                    const std::size_t extraFirstOff =
-                                        static_cast<std::size_t>(first) * attrRes.stride;
-                                    evb.data = extraVbo->shadowBytes.data();
-                                    evb.byteCount = extraVbo->shadowBytes.size();
-                                    evb.metalBuffer = extraVbo->metalBuffer;
-                                    evb.metalBufferOffset = extraFirstOff;
-                                    evb.glBuffer = attrRes.bufferName;
-                                }
-                                tdi.extraVertexBuffers.push_back(std::move(evb));
-                            } else {
-                                idx = it->second;
-                            }
-                            layout.offset = attrRes.offset;
-                            tdi.extraVertexBuffers[idx].attributes.push_back(layout);
-                        }
-                    }
+                    applyCachedVertexArrayLayout(
+                        vaoLayout, *impl_->objects, tdi, first,
+                        true, true);
                     appendCurrentGenericVertexAttributes(tdi, vao);
 
                     logStateResolveCostClass(
                         "drawArrays", programName, vaoName,
-                        tdi, vao->attributes.size());
+                        tdi, vao->attributes.size(), vaoLayoutCacheHit);
                     prepareTranslatedDrawUniformBuffers(
                         *program, programName, impl_->matrixState, drawID, tdi,
                         "drawArrays");
@@ -49128,7 +49173,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     }
                     if (reportTranslatedFallbackOnce(program, programName,
                             TranslatedFallbackGate::EncodeFailed, "drawArrays",
-                            vaoName, vao->attributes.size(), resolved.bufferName,
+                            vaoName, vao->attributes.size(), vaoLayout.primaryBufferName,
                             vbo->shadowBytes.size())) {
                         recordPipelineBuildFailureOnce(program, programName, pipelineBuildError);
                     }
@@ -49637,55 +49682,31 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                 vaoName, 0, 0, 0);
         }
         if (vao != nullptr && !vao->attributes.empty()) {
-            // Find the first ENABLED attribute for primary-VBO detection.
-            // Shaders that bind via `layout(location=N)` with N > 0 leave
-            // attribute 0 disabled — cull_distance CTS tests (9 attributes
-            // at locations 1..9, attribute 0 unused) were silently
-            // skipping the encodeTranslatedDraw path entirely because the
-            // unused attribute 0 has bufferName=0.
-            std::size_t primaryIdx = 0;
-            for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
-                if (vao->attributes[ai].enabled) { primaryIdx = ai; break; }
-            }
-            const auto& posAttr = vao->attributes[primaryIdx];
-            auto resolved = resolveVertexAttrib(posAttr, *vao);
-            GLBufferObject* vbo = (resolved.bufferName != 0)
-                ? impl_->objects->buffers().get(resolved.bufferName) : nullptr;
+            bool vaoLayoutCacheHit = false;
+            const auto& vaoLayout =
+                cachedVertexArrayLayout(*vao, true, &vaoLayoutCacheHit);
+            GLBufferObject* vbo = (vaoLayout.primaryBufferName != 0)
+                ? impl_->objects->buffers().get(vaoLayout.primaryBufferName)
+                : nullptr;
             if (vbo == nullptr) {
                 reportTranslatedFallbackOnce(program, programName,
                     TranslatedFallbackGate::NullVBO, "drawArraysInstanced",
-                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+                    vaoName, vao->attributes.size(), vaoLayout.primaryBufferName, 0);
             } else if (vbo->shadowBytes.empty()) {
                 reportTranslatedFallbackOnce(program, programName,
                     TranslatedFallbackGate::ShadowBytesEmpty, "drawArraysInstanced",
-                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+                    vaoName, vao->attributes.size(), vaoLayout.primaryBufferName, 0);
             }
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
-                const std::size_t posStride = resolved.stride;
+                const std::size_t posStride = vaoLayout.primaryStride;
                 const std::size_t firstOff = static_cast<std::size_t>(first) * posStride;
-                std::size_t primaryBaseOffset = resolved.offset;
-                for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
-                    const auto& attr = vao->attributes[ai];
-                    if (!attr.enabled) continue;
-                    auto attrRes = resolveVertexAttrib(attr, *vao);
-                    GLuint attrDivisor = attr.useSeparatedFormat
-                        ? (attr.bindingIndex < vao->bindingPoints.size()
-                            ? vao->bindingPoints[attr.bindingIndex].divisor
-                            : attr.divisor)
-                        : attr.divisor;
-                    if (attrRes.bufferName == resolved.bufferName &&
-                        attrRes.stride == posStride &&
-                        attrDivisor == 0) {
-                        primaryBaseOffset =
-                            std::min(primaryBaseOffset, attrRes.offset);
-                    }
-                }
-                const std::size_t startOff = primaryBaseOffset + firstOff;
+                const std::size_t startOff =
+                    vaoLayout.primaryBaseOffset + firstOff;
 
                 if (startOff > vbo->shadowBytes.size()) {
                     reportTranslatedFallbackOnce(program, programName,
                         TranslatedFallbackGate::OffsetOverflow, "drawArraysInstanced",
-                        vaoName, vao->attributes.size(), resolved.bufferName,
+                        vaoName, vao->attributes.size(), vaoLayout.primaryBufferName,
                         vbo->shadowBytes.size());
                 }
                 if (startOff <= vbo->shadowBytes.size()) {
@@ -49700,7 +49721,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     // OPT-5: pass pre-uploaded Metal buffer for direct bind.
                     tdi.metalVertexBuffer = vbo->metalBuffer;
                     tdi.metalVertexBufferOffset = startOff;
-                    tdi.glVertexBuffer = resolved.bufferName;
+                    tdi.glVertexBuffer = vaoLayout.primaryBufferName;
                     // Phase 8X Group 4d follow-up¹⁴ — centralised fixed-
                     // function state snapshot. See drawArrays.
                     populateTranslatedDrawFixedFunctionState(
@@ -49725,88 +49746,13 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     // correctness impact; zero is a valid placeholder.
                     tdi.program = programName;
 
-                    // Gather vertex attributes — group by (VBO, stride, divisor).
-                    // Primary group: same VBO + same stride + divisor=0 → buffer 0.
-                    // Everything else → extraVertexBuffers (buffer 1+).
-                    //
-                    // Phase 8X Group 4d follow-up¹⁴ — propagate VAO format
-                    // fields (`glType/glComponentCount/glNormalized/
-                    // glIsInteger`) for both the primary-buffer path and
-                    // the extra-buffer path so encodeTranslatedDraw can
-                    // derive the real MTLVertexFormat.
-                    struct InstGroupKey {
-                        GLuint bufferName;
-                        std::size_t stride;
-                        GLuint divisor;
-                        bool operator==(const InstGroupKey& o) const {
-                            return bufferName == o.bufferName
-                                && stride == o.stride
-                                && divisor == o.divisor;
-                        }
-                    };
-                    struct InstGroupKeyHash {
-                        std::size_t operator()(const InstGroupKey& k) const {
-                            return std::hash<GLuint>()(k.bufferName)
-                                 ^ (std::hash<std::size_t>()(k.stride) << 16)
-                                 ^ (std::hash<GLuint>()(k.divisor) << 24);
-                        }
-                    };
-                    std::unordered_map<InstGroupKey, std::size_t, InstGroupKeyHash> extraBufferMap;
-
-                    for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
-                        const auto& attr = vao->attributes[ai];
-                        if (!attr.enabled) continue;
-
-                        auto attrRes = resolveVertexAttrib(attr, *vao);
-                        GLuint attrDivisor = attr.useSeparatedFormat
-                            ? (attr.bindingIndex < vao->bindingPoints.size()
-                                ? vao->bindingPoints[attr.bindingIndex].divisor
-                                : attr.divisor)
-                            : attr.divisor;
-
-                        TranslatedDrawInfo::VertexAttributeLayout layout;
-                        layout.location = static_cast<GLuint>(ai);
-                        populateVertexAttributeLayoutVAOFields(layout, attr);
-
-                        if (attrRes.bufferName == resolved.bufferName
-                            && attrRes.stride == posStride
-                            && attrDivisor == 0) {
-                            // Same VBO + same stride + per-vertex → buffer 0.
-                            layout.offset = attrRes.offset - primaryBaseOffset;
-                            tdi.vertexAttributeLayouts.push_back(layout);
-                        } else {
-                            GLBufferObject* extraVbo = impl_->objects->buffers().get(attrRes.bufferName);
-                            if (extraVbo == nullptr || extraVbo->shadowBytes.empty()) continue;
-
-                            InstGroupKey key{attrRes.bufferName, attrRes.stride, attrDivisor};
-                            auto it = extraBufferMap.find(key);
-                            std::size_t idx;
-                            if (it == extraBufferMap.end()) {
-                                idx = tdi.extraVertexBuffers.size();
-                                extraBufferMap[key] = idx;
-
-                                TranslatedDrawInfo::ExtraVertexBuffer evb;
-                                evb.data = extraVbo->shadowBytes.data();
-                                evb.byteCount = extraVbo->shadowBytes.size();
-                                evb.stride = attrRes.stride;
-                                evb.divisor = attrDivisor;
-                                evb.metalBuffer = extraVbo->metalBuffer;
-                                evb.metalBufferOffset =
-                                    static_cast<std::size_t>(first) * attrRes.stride;
-                                evb.glBuffer = attrRes.bufferName;
-                                tdi.extraVertexBuffers.push_back(std::move(evb));
-                            } else {
-                                idx = it->second;
-                            }
-
-                            layout.offset = attrRes.offset;
-                            tdi.extraVertexBuffers[idx].attributes.push_back(layout);
-                        }
-                    }
+                    applyCachedVertexArrayLayout(
+                        vaoLayout, *impl_->objects, tdi, first,
+                        true, false);
 
                     logStateResolveCostClass(
                         "drawArraysInstanced", programName, vaoName,
-                        tdi, vao->attributes.size());
+                        tdi, vao->attributes.size(), vaoLayoutCacheHit);
                     prepareTranslatedDrawUniformBuffers(
                         *program, programName, impl_->matrixState, drawID, tdi,
                         "drawArraysInstanced");
@@ -49853,7 +49799,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     }
                     if (reportTranslatedFallbackOnce(program, programName,
                             TranslatedFallbackGate::EncodeFailed, "drawArraysInstanced",
-                            vaoName, vao->attributes.size(), resolved.bufferName,
+                            vaoName, vao->attributes.size(), vaoLayout.primaryBufferName,
                             vbo->shadowBytes.size())) {
                         recordPipelineBuildFailureOnce(program, programName, pipelineBuildError);
                     }
@@ -50548,42 +50494,29 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 vaoName, 0, 0, 0);
         }
         if (!vao->attributes.empty()) {
-            std::size_t primaryIdx = 0;
-            for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
-                if (vao->attributes[ai].enabled) { primaryIdx = ai; break; }
-            }
-            const auto& primaryAttr = vao->attributes[primaryIdx];
-            auto resolved = resolveVertexAttrib(primaryAttr, *vao);
-            GLBufferObject* vbo = (resolved.bufferName != 0)
-                ? impl_->objects->buffers().get(resolved.bufferName) : nullptr;
+            bool vaoLayoutCacheHit = false;
+            const auto& vaoLayout =
+                cachedVertexArrayLayout(*vao, false, &vaoLayoutCacheHit);
+            GLBufferObject* vbo = (vaoLayout.primaryBufferName != 0)
+                ? impl_->objects->buffers().get(vaoLayout.primaryBufferName)
+                : nullptr;
             if (vbo == nullptr) {
                 reportTranslatedFallbackOnce(program, programName,
                     TranslatedFallbackGate::NullVBO, "drawElements",
-                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+                    vaoName, vao->attributes.size(), vaoLayout.primaryBufferName, 0);
             } else if (vbo->shadowBytes.empty()) {
                 reportTranslatedFallbackOnce(program, programName,
                     TranslatedFallbackGate::ShadowBytesEmpty, "drawElements",
-                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+                    vaoName, vao->attributes.size(), vaoLayout.primaryBufferName, 0);
             }
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
-                const std::size_t posStride = resolved.stride;
-                std::size_t primaryBaseOffset = resolved.offset;
-                for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
-                    const auto& attr = vao->attributes[ai];
-                    if (!attr.enabled) continue;
-                    auto attrRes = resolveVertexAttrib(attr, *vao);
-                    if (attrRes.bufferName == resolved.bufferName &&
-                        attrRes.stride == posStride) {
-                        primaryBaseOffset =
-                            std::min(primaryBaseOffset, attrRes.offset);
-                    }
-                }
-                const std::size_t startOff = primaryBaseOffset;
+                const std::size_t posStride = vaoLayout.primaryStride;
+                const std::size_t startOff = vaoLayout.primaryBaseOffset;
 
                 if (startOff > vbo->shadowBytes.size()) {
                     reportTranslatedFallbackOnce(program, programName,
                         TranslatedFallbackGate::OffsetOverflow, "drawElements",
-                        vaoName, vao->attributes.size(), resolved.bufferName,
+                        vaoName, vao->attributes.size(), vaoLayout.primaryBufferName,
                         vbo->shadowBytes.size());
                 }
                 if (startOff <= vbo->shadowBytes.size()) {
@@ -50596,7 +50529,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     // OPT-5: pass pre-uploaded Metal buffer for direct bind.
                     tdi.metalVertexBuffer = vbo->metalBuffer;
                     tdi.metalVertexBufferOffset = startOff;
-                    tdi.glVertexBuffer = resolved.bufferName;
+                    tdi.glVertexBuffer = vaoLayout.primaryBufferName;
                     tdi.indices = drawElementsIndexPtr;
                     tdi.indexCount = drawElementsCount;
                     tdi.indexType = drawElementsIndexType;
@@ -50635,71 +50568,13 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     // correctness impact; zero is a valid placeholder.
                     tdi.program = programName;
 
-                    // Collect per-attribute layout from the VAO — group
-                    // by (VBO, stride) so attributes with different strides
-                    // get separate Metal buffer indices.
-                    //
-                    // Phase 8X Group 4d follow-up¹⁴ — propagate VAO
-                    // format fields so encodeTranslatedDraw derives
-                    // the real MTLVertexFormat from the VBO layout.
-                    {
-                        struct DEGroupKey {
-                            GLuint bufferName;
-                            std::size_t stride;
-                            bool operator==(const DEGroupKey& o) const {
-                                return bufferName == o.bufferName && stride == o.stride;
-                            }
-                        };
-                        struct DEGroupKeyHash {
-                            std::size_t operator()(const DEGroupKey& k) const {
-                                return std::hash<GLuint>()(k.bufferName)
-                                     ^ (std::hash<std::size_t>()(k.stride) << 16);
-                            }
-                        };
-                        std::unordered_map<DEGroupKey, std::size_t, DEGroupKeyHash> deExtraMap;
-                        for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
-                            const auto& attr = vao->attributes[ai];
-                            if (!attr.enabled) continue;
-                            auto attrRes = resolveVertexAttrib(attr, *vao);
-                            TranslatedDrawInfo::VertexAttributeLayout layout;
-                            layout.location = static_cast<GLuint>(ai);
-                            populateVertexAttributeLayoutVAOFields(layout, attr);
-                            if (attrRes.bufferName == resolved.bufferName
-                                && attrRes.stride == posStride) {
-                                layout.offset = attrRes.offset - primaryBaseOffset;
-                                tdi.vertexAttributeLayouts.push_back(layout);
-                            } else {
-                                GLBufferObject* extraVbo =
-                                    impl_->objects->buffers().get(attrRes.bufferName);
-                                if (extraVbo == nullptr || extraVbo->shadowBytes.empty())
-                                    continue;
-                                DEGroupKey key{attrRes.bufferName, attrRes.stride};
-                                auto it = deExtraMap.find(key);
-                                std::size_t idx;
-                                if (it == deExtraMap.end()) {
-                                    idx = tdi.extraVertexBuffers.size();
-                                    deExtraMap[key] = idx;
-                                    TranslatedDrawInfo::ExtraVertexBuffer evb;
-                                    evb.data = extraVbo->shadowBytes.data();
-                                    evb.byteCount = extraVbo->shadowBytes.size();
-                                    evb.stride = attrRes.stride;
-                                    evb.divisor = 0;
-                                    evb.metalBuffer = extraVbo->metalBuffer;
-                                    evb.metalBufferOffset = 0;
-                                    evb.glBuffer = attrRes.bufferName;
-                                    tdi.extraVertexBuffers.push_back(std::move(evb));
-                                } else {
-                                    idx = it->second;
-                                }
-                                layout.offset = attrRes.offset;
-                                tdi.extraVertexBuffers[idx].attributes.push_back(layout);
-                            }
-                        }
-                    }
+                    applyCachedVertexArrayLayout(
+                        vaoLayout, *impl_->objects, tdi, 0,
+                        false, false);
 
                     logStateResolveCostClass(
                         "drawElements", programName, vaoName,
-                        tdi, vao->attributes.size());
+                        tdi, vao->attributes.size(), vaoLayoutCacheHit);
                     prepareTranslatedDrawUniformBuffers(
                         *program, programName, impl_->matrixState, drawID, tdi,
                         "drawElements");
@@ -50743,7 +50618,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     }
                     if (reportTranslatedFallbackOnce(program, programName,
                             TranslatedFallbackGate::EncodeFailed, "drawElements",
-                            vaoName, vao->attributes.size(), resolved.bufferName,
+                            vaoName, vao->attributes.size(), vaoLayout.primaryBufferName,
                             vbo->shadowBytes.size())) {
                         recordPipelineBuildFailureOnce(program, programName, pipelineBuildError);
                     }
@@ -50957,42 +50832,29 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                 vaoName, 0, 0, 0);
         }
         if (!vao->attributes.empty()) {
-            std::size_t primaryIdx = 0;
-            for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
-                if (vao->attributes[ai].enabled) { primaryIdx = ai; break; }
-            }
-            const auto& primaryAttr = vao->attributes[primaryIdx];
-            auto resolved = resolveVertexAttrib(primaryAttr, *vao);
-            GLBufferObject* vbo = (resolved.bufferName != 0)
-                ? impl_->objects->buffers().get(resolved.bufferName) : nullptr;
+            bool vaoLayoutCacheHit = false;
+            const auto& vaoLayout =
+                cachedVertexArrayLayout(*vao, false, &vaoLayoutCacheHit);
+            GLBufferObject* vbo = (vaoLayout.primaryBufferName != 0)
+                ? impl_->objects->buffers().get(vaoLayout.primaryBufferName)
+                : nullptr;
             if (vbo == nullptr) {
                 reportTranslatedFallbackOnce(program, programName,
                     TranslatedFallbackGate::NullVBO, "drawElementsBaseVertex",
-                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+                    vaoName, vao->attributes.size(), vaoLayout.primaryBufferName, 0);
             } else if (vbo->shadowBytes.empty()) {
                 reportTranslatedFallbackOnce(program, programName,
                     TranslatedFallbackGate::ShadowBytesEmpty, "drawElementsBaseVertex",
-                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+                    vaoName, vao->attributes.size(), vaoLayout.primaryBufferName, 0);
             }
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
-                const std::size_t posStride = resolved.stride;
-                std::size_t primaryBaseOffset = resolved.offset;
-                for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
-                    const auto& attr = vao->attributes[ai];
-                    if (!attr.enabled) continue;
-                    auto attrRes = resolveVertexAttrib(attr, *vao);
-                    if (attrRes.bufferName == resolved.bufferName &&
-                        attrRes.stride == posStride) {
-                        primaryBaseOffset =
-                            std::min(primaryBaseOffset, attrRes.offset);
-                    }
-                }
-                const std::size_t startOff = primaryBaseOffset;
+                const std::size_t posStride = vaoLayout.primaryStride;
+                const std::size_t startOff = vaoLayout.primaryBaseOffset;
 
                 if (startOff > vbo->shadowBytes.size()) {
                     reportTranslatedFallbackOnce(program, programName,
                         TranslatedFallbackGate::OffsetOverflow, "drawElementsBaseVertex",
-                        vaoName, vao->attributes.size(), resolved.bufferName,
+                        vaoName, vao->attributes.size(), vaoLayout.primaryBufferName,
                         vbo->shadowBytes.size());
                 }
                 if (startOff <= vbo->shadowBytes.size()) {
@@ -51005,7 +50867,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     tdi.vertexStride = posStride;
                     tdi.metalVertexBuffer = vbo->metalBuffer;
                     tdi.metalVertexBufferOffset = startOff;
-                    tdi.glVertexBuffer = resolved.bufferName;
+                    tdi.glVertexBuffer = vaoLayout.primaryBufferName;
                     tdi.indices = effectivePtr;
                     tdi.indexCount = count;
                     tdi.indexType = effectiveType;
@@ -51029,61 +50891,13 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
                     tdi.program = programName;
 
-                    struct DEBVGroupKey {
-                        GLuint bufferName;
-                        std::size_t stride;
-                        bool operator==(const DEBVGroupKey& o) const {
-                            return bufferName == o.bufferName && stride == o.stride;
-                        }
-                    };
-                    struct DEBVGroupKeyHash {
-                        std::size_t operator()(const DEBVGroupKey& k) const {
-                            return std::hash<GLuint>()(k.bufferName)
-                                 ^ (std::hash<std::size_t>()(k.stride) << 16);
-                        }
-                    };
-                    std::unordered_map<DEBVGroupKey, std::size_t, DEBVGroupKeyHash> debvExtraMap;
-                    for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
-                        const auto& attr = vao->attributes[ai];
-                        if (!attr.enabled) continue;
-                        auto attrRes = resolveVertexAttrib(attr, *vao);
-                        TranslatedDrawInfo::VertexAttributeLayout layout;
-                        layout.location = static_cast<GLuint>(ai);
-                        populateVertexAttributeLayoutVAOFields(layout, attr);
-                        if (attrRes.bufferName == resolved.bufferName
-                            && attrRes.stride == posStride) {
-                            layout.offset = attrRes.offset - primaryBaseOffset;
-                            tdi.vertexAttributeLayouts.push_back(layout);
-                        } else {
-                            GLBufferObject* extraVbo =
-                                impl_->objects->buffers().get(attrRes.bufferName);
-                            if (extraVbo == nullptr || extraVbo->shadowBytes.empty()) continue;
-                            DEBVGroupKey key{attrRes.bufferName, attrRes.stride};
-                            auto it = debvExtraMap.find(key);
-                            std::size_t idx;
-                            if (it == debvExtraMap.end()) {
-                                idx = tdi.extraVertexBuffers.size();
-                                debvExtraMap[key] = idx;
-                                TranslatedDrawInfo::ExtraVertexBuffer evb;
-                                evb.data = extraVbo->shadowBytes.data();
-                                evb.byteCount = extraVbo->shadowBytes.size();
-                                evb.stride = attrRes.stride;
-                                evb.divisor = 0;
-                                evb.metalBuffer = extraVbo->metalBuffer;
-                                evb.metalBufferOffset = 0;
-                                evb.glBuffer = attrRes.bufferName;
-                                tdi.extraVertexBuffers.push_back(std::move(evb));
-                            } else {
-                                idx = it->second;
-                            }
-                            layout.offset = attrRes.offset;
-                            tdi.extraVertexBuffers[idx].attributes.push_back(layout);
-                        }
-                    }
+                    applyCachedVertexArrayLayout(
+                        vaoLayout, *impl_->objects, tdi, 0,
+                        false, false);
 
                     logStateResolveCostClass(
                         "drawElementsBaseVertex", programName, vaoName,
-                        tdi, vao->attributes.size());
+                        tdi, vao->attributes.size(), vaoLayoutCacheHit);
                     prepareTranslatedDrawUniformBuffers(
                         *program, programName, impl_->matrixState, drawID, tdi,
                         "drawElementsBaseVertex");
@@ -51124,7 +50938,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     }
                     if (reportTranslatedFallbackOnce(program, programName,
                             TranslatedFallbackGate::EncodeFailed, "drawElementsBaseVertex",
-                            vaoName, vao->attributes.size(), resolved.bufferName,
+                            vaoName, vao->attributes.size(), vaoLayout.primaryBufferName,
                             vbo->shadowBytes.size())) {
                         recordPipelineBuildFailureOnce(program, programName, pipelineBuildError);
                     }
@@ -51588,27 +51402,31 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                 vaoName, 0, 0, 0);
         }
         if (!vao->attributes.empty()) {
-            const auto& posAttr = vao->attributes[0];
-            auto resolved = resolveVertexAttrib(posAttr, *vao);
-            GLBufferObject* vbo = (resolved.bufferName != 0)
-                ? impl_->objects->buffers().get(resolved.bufferName) : nullptr;
+            bool vaoLayoutCacheHit = false;
+            const auto& vaoLayout =
+                cachedVertexArrayLayout(
+                    *vao, true, &vaoLayoutCacheHit,
+                    true, false);
+            GLBufferObject* vbo = (vaoLayout.primaryBufferName != 0)
+                ? impl_->objects->buffers().get(vaoLayout.primaryBufferName)
+                : nullptr;
             if (vbo == nullptr) {
                 reportTranslatedFallbackOnce(program, programName,
                     TranslatedFallbackGate::NullVBO, "drawElementsInstancedBaseVertex",
-                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+                    vaoName, vao->attributes.size(), vaoLayout.primaryBufferName, 0);
             } else if (vbo->shadowBytes.empty()) {
                 reportTranslatedFallbackOnce(program, programName,
                     TranslatedFallbackGate::ShadowBytesEmpty, "drawElementsInstancedBaseVertex",
-                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+                    vaoName, vao->attributes.size(), vaoLayout.primaryBufferName, 0);
             }
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
-                const std::size_t posStride = resolved.stride;
-                const std::size_t startOff = resolved.offset;
+                const std::size_t posStride = vaoLayout.primaryStride;
+                const std::size_t startOff = vaoLayout.primaryBaseOffset;
 
                 if (startOff > vbo->shadowBytes.size()) {
                     reportTranslatedFallbackOnce(program, programName,
                         TranslatedFallbackGate::OffsetOverflow, "drawElementsInstancedBaseVertex",
-                        vaoName, vao->attributes.size(), resolved.bufferName,
+                        vaoName, vao->attributes.size(), vaoLayout.primaryBufferName,
                         vbo->shadowBytes.size());
                 }
                 if (startOff <= vbo->shadowBytes.size()) {
@@ -51623,7 +51441,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     tdi.vertexStride = posStride;
                     tdi.metalVertexBuffer = vbo->metalBuffer;
                     tdi.metalVertexBufferOffset = startOff;
-                    tdi.glVertexBuffer = resolved.bufferName;
+                    tdi.glVertexBuffer = vaoLayout.primaryBufferName;
                     tdi.indices = effectivePtr;
                     tdi.indexCount = count;
                     tdi.indexType = effectiveType;
@@ -51647,80 +51465,13 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
                     tdi.program = programName;
 
-                    // Gather vertex attributes — group by (VBO, stride, divisor).
-                    // Primary group: same VBO + same stride + divisor=0 → buffer 0.
-                    // Everything else → extraVertexBuffers (buffer 1+).
-                    struct DrawElemGroupKey {
-                        GLuint bufferName;
-                        std::size_t stride;
-                        GLuint divisor;
-                        bool operator==(const DrawElemGroupKey& o) const {
-                            return bufferName == o.bufferName
-                                && stride == o.stride
-                                && divisor == o.divisor;
-                        }
-                    };
-                    struct DrawElemGroupKeyHash {
-                        std::size_t operator()(const DrawElemGroupKey& k) const {
-                            return std::hash<GLuint>()(k.bufferName)
-                                 ^ (std::hash<std::size_t>()(k.stride) << 16)
-                                 ^ (std::hash<GLuint>()(k.divisor) << 24);
-                        }
-                    };
-                    std::unordered_map<DrawElemGroupKey, std::size_t, DrawElemGroupKeyHash> extraBufferMap;
-
-                    for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
-                        const auto& attr = vao->attributes[ai];
-                        if (!attr.enabled) continue;
-
-                        auto attrRes = resolveVertexAttrib(attr, *vao);
-                        GLuint attrDivisor = attr.useSeparatedFormat
-                            ? (attr.bindingIndex < vao->bindingPoints.size()
-                                ? vao->bindingPoints[attr.bindingIndex].divisor
-                                : attr.divisor)
-                            : attr.divisor;
-
-                        TranslatedDrawInfo::VertexAttributeLayout layout;
-                        layout.location = static_cast<GLuint>(ai);
-                        populateVertexAttributeLayoutVAOFields(layout, attr);
-
-                        if (attrRes.bufferName == resolved.bufferName
-                            && attrRes.stride == posStride
-                            && attrDivisor == 0) {
-                            layout.offset = attrRes.offset - resolved.offset;
-                            tdi.vertexAttributeLayouts.push_back(layout);
-                        } else {
-                            GLBufferObject* extraVbo = impl_->objects->buffers().get(attrRes.bufferName);
-                            if (extraVbo == nullptr || extraVbo->shadowBytes.empty()) continue;
-
-                            DrawElemGroupKey key{attrRes.bufferName, attrRes.stride, attrDivisor};
-                            auto it = extraBufferMap.find(key);
-                            std::size_t idx;
-                            if (it == extraBufferMap.end()) {
-                                idx = tdi.extraVertexBuffers.size();
-                                extraBufferMap[key] = idx;
-
-                                TranslatedDrawInfo::ExtraVertexBuffer evb;
-                                evb.data = extraVbo->shadowBytes.data();
-                                evb.byteCount = extraVbo->shadowBytes.size();
-                                evb.stride = attrRes.stride;
-                                evb.divisor = attrDivisor;
-                                evb.metalBuffer = extraVbo->metalBuffer;
-                                evb.metalBufferOffset = 0;
-                                evb.glBuffer = attrRes.bufferName;
-                                tdi.extraVertexBuffers.push_back(std::move(evb));
-                            } else {
-                                idx = it->second;
-                            }
-
-                            layout.offset = attrRes.offset;
-                            tdi.extraVertexBuffers[idx].attributes.push_back(layout);
-                        }
-                    }
+                    applyCachedVertexArrayLayout(
+                        vaoLayout, *impl_->objects, tdi, 0,
+                        false, false);
 
                     logStateResolveCostClass(
                         "drawElementsInstancedBaseVertex", programName, vaoName,
-                        tdi, vao->attributes.size());
+                        tdi, vao->attributes.size(), vaoLayoutCacheHit);
                     prepareTranslatedDrawUniformBuffers(
                         *program, programName, impl_->matrixState, drawID, tdi,
                         "drawElementsInstancedBaseVertex");
@@ -51761,7 +51512,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     }
                     if (reportTranslatedFallbackOnce(program, programName,
                             TranslatedFallbackGate::EncodeFailed, "drawElementsInstancedBaseVertex",
-                            vaoName, vao->attributes.size(), resolved.bufferName,
+                            vaoName, vao->attributes.size(), vaoLayout.primaryBufferName,
                             vbo->shadowBytes.size())) {
                         recordPipelineBuildFailureOnce(program, programName, pipelineBuildError);
                     }

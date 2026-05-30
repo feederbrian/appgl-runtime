@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -487,6 +488,37 @@ struct GLVertexArrayBufferBinding {
     std::uint32_t stride = 0;
 };
 
+struct GLVertexArrayCachedAttributeLayout {
+    GLuint location = 0;
+    GLuint bufferName = 0;
+    std::size_t stride = 0;
+    std::size_t offset = 0;
+    GLuint divisor = 0;
+    GLenum glType = GL_FLOAT;
+    GLint glComponentCount = 4;
+    GLboolean glNormalized = GL_FALSE;
+    bool glIsInteger = false;
+};
+
+struct GLVertexArrayCachedLayoutGroup {
+    GLuint bufferName = 0;
+    std::size_t stride = 0;
+    GLuint divisor = 0;
+    std::vector<GLVertexArrayCachedAttributeLayout> attributes;
+};
+
+struct GLVertexArrayCachedLayout {
+    bool valid = false;
+    std::uint32_t generation = 0;
+    bool hasEnabledAttributes = false;
+    std::size_t primaryAttributeIndex = 0;
+    GLuint primaryBufferName = 0;
+    std::size_t primaryStride = 0;
+    std::size_t primaryBaseOffset = 0;
+    std::vector<GLVertexArrayCachedAttributeLayout> primaryAttributes;
+    std::vector<GLVertexArrayCachedLayoutGroup> extraGroups;
+};
+
 struct GLVertexArrayObject {
     std::vector<GLVertexAttributeState> attributes;
     std::vector<GLVertexBindingPoint> bindingPoints;  // GL 4.3 separated format binding points
@@ -497,6 +529,8 @@ struct GLVertexArrayObject {
     GLuint elementArrayBuffer = 0;
     bool instantiated = false;
     bool vertexDescriptorDirty = true;
+    std::uint32_t attribGeneration = 1;
+    std::array<GLVertexArrayCachedLayout, 4> cachedLayouts;
 };
 
 struct GLShaderDeclaration {

@@ -90,6 +90,9 @@ void GLObjectStore::initializeVertexArray(GLVertexArrayObject& vertexArray) cons
     const auto count = static_cast<std::size_t>(maxVertexAttribs_);
     vertexArray.attributes.resize(count);
     vertexArray.bindingPoints.resize(count);
+    vertexArray.vertexDescriptorDirty = true;
+    ++vertexArray.attribGeneration;
+    vertexArray.cachedLayouts = {};
     // GL 4.3 spec defaults:
     //   - attribute.bindingIndex = attribute index (equivalent to
     //     `glVertexAttribBinding(N, N)`)
