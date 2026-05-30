@@ -1004,6 +1004,17 @@ MTLResourceOptions metalBufferOptionsForUsage(GLenum usage) {
     return options;
 }
 
+bool textureBufferFormatNeedsRGB32Expansion(GLenum internalFormat) {
+    switch (internalFormat) {
+        case GL_RGB32F:
+        case GL_RGB32I:
+        case GL_RGB32UI:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool uses2DBackingFor1DTextures() {
     return extensions::ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture_clamp") ||
            extensions::ExtensionRegistry::isExtensionActive("GL_ARB_texture_query_levels");
@@ -3845,10 +3856,21 @@ struct GLContext::Impl {
         vertexArray.vertexDescriptorDirty = true;
     }
 
+    void releaseTextureBufferExpansion(GLTextureObject& object) {
+        releaseRetainedMetalObject(object.textureBufferExpandedMetalBuffer);
+        object.textureBufferExpandedMetalBuffer = nullptr;
+        object.textureBufferExpandedSourceBuffer = 0;
+        object.textureBufferExpandedSourceGeneration = 0;
+        object.textureBufferExpandedOffset = 0;
+        object.textureBufferExpandedSize = 0;
+        object.textureBufferExpandedInternalFormat = 0;
+    }
+
     void releaseTextureStorage(GLTextureObject& object) {
         drainPendingGpuProducers(object);
         releaseRetainedMetalObject(object.metalTexture);
         object.metalTexture = nullptr;
+        releaseTextureBufferExpansion(object);
         if (owner != nullptr) {
             ExtensionContext extensionContext(*owner);
             extensions::sparse_texture::resetStorage(extensionContext, object);
@@ -5686,6 +5708,7 @@ struct GLContext::Impl {
     // uploaded data, not the initial upload from Recoil we want to
     // fingerprint.
     bool replaceMetalTexture(GLTextureObject& object, GLuint texName = 0) {
+        releaseTextureBufferExpansion(object);
         const auto baseIt = object.levels.find(0);
         if (baseIt == object.levels.end()) {
             releaseRetainedMetalObject(object.metalTexture);
@@ -9241,7 +9264,7 @@ struct GLContext::Impl {
                     }
                     continue;  // malformed object store
                 }
-                const bool textureStorageReady =
+                bool textureStorageReady =
                     texObject->instantiated && texObject->metalTexture != nullptr;
 
                 // Step 4: determine sampler state — stand-alone
@@ -9292,6 +9315,12 @@ struct GLContext::Impl {
                          texObject->desc.sourceBuffer, kProducerAll});
                 }
                 drainPendingGpuProducers(samplerReads);
+                if (texObject->target == GL_TEXTURE_BUFFER &&
+                    texObject->desc.sourceBuffer != 0) {
+                    (void)refreshRGB32BufferTextureView(*texObject);
+                    textureStorageReady =
+                        texObject->instantiated && texObject->metalTexture != nullptr;
+                }
                 info.sampledTextureNames.push_back(texName);
 
                 // Step 5: push the binding at the reflected Metal slot.
@@ -9369,11 +9398,16 @@ struct GLContext::Impl {
                         : metalSamplerState;
                 if (texObject->target == GL_TEXTURE_BUFFER &&
                     texObject->desc.sourceBuffer != 0) {
-                    GLBufferObject* backingBuffer =
-                        objects->buffers().get(texObject->desc.sourceBuffer);
-                    if (backingBuffer != nullptr) {
+                    if (texObject->textureBufferExpandedMetalBuffer != nullptr) {
                         binding.textureBufferBackingMetalBuffer =
-                            backingBuffer->metalBuffer;
+                            texObject->textureBufferExpandedMetalBuffer;
+                    } else {
+                        GLBufferObject* backingBuffer =
+                            objects->buffers().get(texObject->desc.sourceBuffer);
+                        if (backingBuffer != nullptr) {
+                            binding.textureBufferBackingMetalBuffer =
+                                backingBuffer->metalBuffer;
+                        }
                     }
                 }
                 binding.reductionMode = static_cast<std::uint32_t>(effectiveReductionMode);
@@ -11467,6 +11501,162 @@ struct GLContext::Impl {
         );
     }
 
+    bool refreshRGB32BufferTextureView(GLTextureObject& object) {
+        if (object.target != GL_TEXTURE_BUFFER ||
+            !textureBufferFormatNeedsRGB32Expansion(object.desc.internalFormat)) {
+            releaseTextureBufferExpansion(object);
+            return false;
+        }
+        if (device == nil || object.desc.sourceBuffer == 0 ||
+            object.desc.bufferOffset < 0 || object.desc.bufferSize <= 0) {
+            releaseTextureBufferExpansion(object);
+            return false;
+        }
+
+        GLBufferObject* sourceBuffer =
+            objects != nullptr ? objects->buffers().get(object.desc.sourceBuffer) : nullptr;
+        if (sourceBuffer == nullptr ||
+            object.desc.bufferOffset > sourceBuffer->size ||
+            object.desc.bufferSize > sourceBuffer->size - object.desc.bufferOffset) {
+            releaseTextureBufferExpansion(object);
+            return false;
+        }
+
+        const std::uint8_t* sourceBytes = readableBufferContents(*sourceBuffer);
+        if (sourceBytes == nullptr) {
+            releaseTextureBufferExpansion(object);
+            return false;
+        }
+
+        const std::uint32_t sourceGeneration = sourceBuffer->indexExpansionGeneration;
+        const bool cached =
+            object.textureBufferExpandedMetalBuffer != nullptr &&
+            object.metalTexture != nullptr &&
+            object.textureBufferExpandedSourceBuffer == object.desc.sourceBuffer &&
+            object.textureBufferExpandedSourceGeneration == sourceGeneration &&
+            object.textureBufferExpandedOffset == object.desc.bufferOffset &&
+            object.textureBufferExpandedSize == object.desc.bufferSize &&
+            object.textureBufferExpandedInternalFormat == object.desc.internalFormat;
+        if (cached) {
+            return true;
+        }
+
+        constexpr NSUInteger kGLRGB32BytesPerTexel = 12;
+        constexpr NSUInteger kMetalRGBA32BytesPerTexel = 16;
+        const NSUInteger sourceTexelCount =
+            static_cast<NSUInteger>(object.desc.bufferSize) / kGLRGB32BytesPerTexel;
+        if (sourceTexelCount == 0) {
+            releaseRetainedMetalObject(object.metalTexture);
+            object.metalTexture = nullptr;
+            releaseTextureBufferExpansion(object);
+            return false;
+        }
+
+        constexpr NSUInteger kTexelBufferRowTexels = 8192;
+        GLint64 maxTextureHeight = 16384;
+        if (capabilities != nullptr) {
+            capabilities->queryInteger64(GL_MAX_TEXTURE_SIZE, &maxTextureHeight);
+        }
+        const NSUInteger maxRows = static_cast<NSUInteger>(
+            std::max<GLint64>(maxTextureHeight, 1));
+        const NSUInteger visibleTexelCount = std::min<NSUInteger>(
+            sourceTexelCount,
+            kTexelBufferRowTexels * maxRows);
+        const NSUInteger rowTexels = std::min<NSUInteger>(
+            visibleTexelCount,
+            kTexelBufferRowTexels);
+        const NSUInteger rowCount =
+            rowTexels > 0 ? (visibleTexelCount + rowTexels - 1u) / rowTexels : 0;
+        if (rowTexels == 0 || rowCount == 0) {
+            releaseRetainedMetalObject(object.metalTexture);
+            object.metalTexture = nullptr;
+            releaseTextureBufferExpansion(object);
+            return false;
+        }
+
+        releaseRetainedMetalObject(object.metalTexture);
+        object.metalTexture = nullptr;
+        releaseRetainedMetalObject(object.metalSwizzledView);
+        object.metalSwizzledView = nullptr;
+        object.swizzleDirty = true;
+        releaseRetainedMetalObject(object.metalSamplingProxy);
+        object.metalSamplingProxy = nullptr;
+
+        const NSUInteger rowBytes = rowTexels * kMetalRGBA32BytesPerTexel;
+        const NSUInteger expandedBytes = rowBytes * rowCount;
+        id<MTLBuffer> expandedBuffer =
+            metalBufferFromRaw(object.textureBufferExpandedMetalBuffer);
+        if (expandedBuffer == nil || [expandedBuffer length] < expandedBytes) {
+            releaseTextureBufferExpansion(object);
+            expandedBuffer = [device newBufferWithLength:expandedBytes
+                                                 options:MTLResourceStorageModeShared];
+            if (expandedBuffer == nil) {
+                return false;
+            }
+            object.textureBufferExpandedMetalBuffer =
+                transferRetainedMetalObject(expandedBuffer);
+        }
+
+        std::uint8_t* expandedBytesPtr =
+            static_cast<std::uint8_t*>([expandedBuffer contents]);
+        if (expandedBytesPtr == nullptr) {
+            return false;
+        }
+        std::memset(expandedBytesPtr, 0, expandedBytes);
+
+        std::uint32_t alphaBits = 1u;
+        if (object.desc.internalFormat == GL_RGB32F) {
+            const float one = 1.0f;
+            std::memcpy(&alphaBits, &one, sizeof(alphaBits));
+        }
+        const std::size_t sourceOffset =
+            static_cast<std::size_t>(object.desc.bufferOffset);
+        for (NSUInteger texel = 0; texel < visibleTexelCount; ++texel) {
+            const NSUInteger row = texel / rowTexels;
+            const NSUInteger column = texel - row * rowTexels;
+            const std::size_t sourceByte =
+                sourceOffset + static_cast<std::size_t>(texel * kGLRGB32BytesPerTexel);
+            const std::size_t destByte =
+                static_cast<std::size_t>(row * rowBytes +
+                                         column * kMetalRGBA32BytesPerTexel);
+            std::memcpy(expandedBytesPtr + destByte,
+                        sourceBytes + sourceByte,
+                        kGLRGB32BytesPerTexel);
+            std::memcpy(expandedBytesPtr + destByte + kGLRGB32BytesPerTexel,
+                        &alphaBits,
+                        sizeof(alphaBits));
+        }
+
+        MTLPixelFormat pf = metalRenderbufferFormat(object.desc.internalFormat);
+        if (pf == MTLPixelFormatInvalid) {
+            return false;
+        }
+        MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+        desc.textureType = MTLTextureType2D;
+        desc.pixelFormat = pf;
+        desc.width = rowTexels;
+        desc.height = rowCount;
+        desc.depth = 1;
+        desc.mipmapLevelCount = 1;
+        desc.arrayLength = 1;
+        desc.resourceOptions = expandedBuffer.resourceOptions;
+        desc.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> texture = [expandedBuffer newTextureWithDescriptor:desc
+                                                                    offset:0
+                                                               bytesPerRow:rowBytes];
+        if (texture == nil) {
+            return false;
+        }
+
+        object.metalTexture = transferRetainedMetalObject(texture);
+        object.textureBufferExpandedSourceBuffer = object.desc.sourceBuffer;
+        object.textureBufferExpandedSourceGeneration = sourceGeneration;
+        object.textureBufferExpandedOffset = object.desc.bufferOffset;
+        object.textureBufferExpandedSize = object.desc.bufferSize;
+        object.textureBufferExpandedInternalFormat = object.desc.internalFormat;
+        return true;
+    }
+
     GLBufferObject::Fp64TransportSidecar* ensureFp64TransportSidecar(
         GLBufferObject& object,
         const ShaderReflection& reflection,
@@ -12112,39 +12302,6 @@ struct GLContext::Impl {
 
         if (!hasAttachment) {
             return GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
-        }
-
-        // GL 4.6 Table 8.11 / §9.4 — a framebuffer is
-        // GL_FRAMEBUFFER_UNSUPPORTED when any color attachment uses a
-        // format that is not required to be color-renderable on this
-        // implementation. On Metal the 3-component 32-bit formats
-        // (GL_RGB32F / GL_RGB32I / GL_RGB32UI) have no matching
-        // MTLPixelFormat; we'd need a 4/3-expansion shim on the
-        // render target, and — more importantly — `glReadPixels` with
-        // GL_RGB_INTEGER+GL_INT can't unambiguously unpack the
-        // RGBA32Sint target back to the raw RGB32I source because the
-        // FS writes 4 channels. The 3-component RGB32 formats are NOT
-        // in GL 4.6 Table 8.11 (required renderable) so declaring them
-        // unsupported is spec-legal. CTS
-        // `direct_state_access.textures_buffer_rgb32{i,ui,f}` catches
-        // `GL_FRAMEBUFFER_UNSUPPORTED` specifically and marks the case
-        // as NotSupported rather than Fail.
-        for (const auto& [pt, atch] : framebuffer.attachments) {
-            if (!isColorAttachment(pt)) {
-                continue;
-            }
-            const AttachmentInfo info = framebufferAttachmentInfo(atch);
-            if (!info.present) {
-                continue;
-            }
-            switch (info.internalFormat) {
-                case GL_RGB32F:
-                case GL_RGB32I:
-                case GL_RGB32UI:
-                    return GL_FRAMEBUFFER_UNSUPPORTED;
-                default:
-                    break;
-            }
         }
 
         // Spec: if separate depth and stencil attachments are present, they must
@@ -23576,6 +23733,12 @@ bool GLContext::texBufferRange(
         object->desc.depth = 1;
     }
     object->target = target;
+
+    if (textureBufferFormatNeedsRGB32Expansion(internalformat)) {
+        (void)impl_->refreshRGB32BufferTextureView(*object);
+        return true;
+    }
+    impl_->releaseTextureBufferExpansion(*object);
 
     // SPIRV-Cross lowers GL samplerBuffer to a synthetic texture2d<T>
     // with texel coordinates (index % 8192, index / 8192). Build the
@@ -52277,6 +52440,11 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             }
 
             GLTextureObject* texObj = impl_->objects->textures().get(texName);
+            if (texObj != nullptr &&
+                texObj->target == GL_TEXTURE_BUFFER &&
+                texObj->desc.sourceBuffer != 0) {
+                (void)impl_->refreshRGB32BufferTextureView(*texObj);
+            }
             if (texObj == nullptr || texObj->metalTexture == nullptr) {
                 if (traceCompSamp) std::fprintf(stderr, " SKIP=null_metalTexture\n");
                 continue;
@@ -52313,11 +52481,16 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             tb.metalSamplerState = metalSamplerState;
             if (texObj->target == GL_TEXTURE_BUFFER &&
                 texObj->desc.sourceBuffer != 0) {
-                GLBufferObject* backingBuffer =
-                    impl_->objects->buffers().get(texObj->desc.sourceBuffer);
-                if (backingBuffer != nullptr) {
+                if (texObj->textureBufferExpandedMetalBuffer != nullptr) {
                     tb.textureBufferBackingMetalBuffer =
-                        backingBuffer->metalBuffer;
+                        texObj->textureBufferExpandedMetalBuffer;
+                } else {
+                    GLBufferObject* backingBuffer =
+                        impl_->objects->buffers().get(texObj->desc.sourceBuffer);
+                    if (backingBuffer != nullptr) {
+                        tb.textureBufferBackingMetalBuffer =
+                            backingBuffer->metalBuffer;
+                    }
                 }
             }
             tb.metalSlot = samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
@@ -52907,6 +53080,11 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             }
             if (texName == 0) continue;
             GLTextureObject* texObj = impl_->objects->textures().get(texName);
+            if (texObj != nullptr &&
+                texObj->target == GL_TEXTURE_BUFFER &&
+                texObj->desc.sourceBuffer != 0) {
+                (void)impl_->refreshRGB32BufferTextureView(*texObj);
+            }
             if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
             computeReads.push_back({Impl::GpuResourceAccess::Kind::Texture,
                                     texName, kProducerAll});
@@ -52924,11 +53102,16 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             tb.metalSamplerState = texObj->metalSampler;
             if (texObj->target == GL_TEXTURE_BUFFER &&
                 texObj->desc.sourceBuffer != 0) {
-                GLBufferObject* backingBuffer =
-                    impl_->objects->buffers().get(texObj->desc.sourceBuffer);
-                if (backingBuffer != nullptr) {
+                if (texObj->textureBufferExpandedMetalBuffer != nullptr) {
                     tb.textureBufferBackingMetalBuffer =
-                        backingBuffer->metalBuffer;
+                        texObj->textureBufferExpandedMetalBuffer;
+                } else {
+                    GLBufferObject* backingBuffer =
+                        impl_->objects->buffers().get(texObj->desc.sourceBuffer);
+                    if (backingBuffer != nullptr) {
+                        tb.textureBufferBackingMetalBuffer =
+                            backingBuffer->metalBuffer;
+                    }
                 }
             }
             tb.metalSlot = samp.metalBinding + static_cast<std::uint32_t>(arrayElement);

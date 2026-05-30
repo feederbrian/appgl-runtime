@@ -264,6 +264,16 @@ struct GLTextureObject {
     // this copied texture instead.
     void* metalSamplingProxy = nullptr;
 
+    // GL_TEXTURE_BUFFER RGB32* uses 12-byte GL texels, while Metal only
+    // exposes these through 16-byte RGBA32 texture views. This scratch
+    // buffer owns the expanded RGBA32 backing for metalTexture when needed.
+    void* textureBufferExpandedMetalBuffer = nullptr;
+    GLuint textureBufferExpandedSourceBuffer = 0;
+    std::uint32_t textureBufferExpandedSourceGeneration = 0;
+    GLintptr textureBufferExpandedOffset = 0;
+    GLsizeiptr textureBufferExpandedSize = 0;
+    GLenum textureBufferExpandedInternalFormat = 0;
+
     // SPIRV-Cross lowers imageAtomic* on Metal without native texture
     // atomics to a companion `device atomic_*` buffer. For ordinary
     // textures this sidecar holds one 32-bit word per texel and is copied
