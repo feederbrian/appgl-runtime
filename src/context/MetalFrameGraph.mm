@@ -4031,8 +4031,8 @@ struct MetalFrameGraph::Impl {
                         anySizedSSBO = true;
                     }
                     if (anySizedSSBO) {
-                        std::vector<std::uint32_t> sizes(
-                            static_cast<std::size_t>(maxSlot) + 1u, 0u);
+                        static thread_local std::vector<std::uint32_t> sizes;
+                        sizes.assign(static_cast<std::size_t>(maxSlot) + 1u, 0u);
                         for (const auto& ssbo : info.ssboBindings) {
                             if (ssbo.metalBuffer == nullptr || ssbo.size == 0) continue;
                             if (isFragment && !ssbo.isFragment) continue;
@@ -9598,7 +9598,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
         info.submissionGroup.argumentBuffersEnabled = useArgBuf;
         id<MTLFunction> computeFn = (__bridge id<MTLFunction>)info.metalComputeFunction;
-        auto buildSSBOSizeConstants = [&]() -> std::vector<std::uint32_t> {
+        auto populateSSBOSizeConstants = [&](std::vector<std::uint32_t>& sizes) -> bool {
+            sizes.clear();
             std::uint32_t maxSlot = 0;
             bool any = false;
             for (const auto& bb : info.buffers) {
@@ -9607,10 +9608,9 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 any = true;
             }
             if (!any) {
-                return {};
+                return false;
             }
-            std::vector<std::uint32_t> sizes(
-                static_cast<std::size_t>(maxSlot) + 1u, 0u);
+            sizes.assign(static_cast<std::size_t>(maxSlot) + 1u, 0u);
             for (const auto& bb : info.buffers) {
                 if (bb.size == 0 || bb.metalSlot >= sizes.size()) continue;
                 sizes[bb.metalSlot] = static_cast<std::uint32_t>(
@@ -9619,8 +9619,9 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                         static_cast<std::size_t>(
                             std::numeric_limits<std::uint32_t>::max())));
             }
-            return sizes;
+            return true;
         };
+        static thread_local std::vector<std::uint32_t> ssboSizeScratch;
 
         if (useArgBuf && computeFn != nil) {
             info.submissionGroup.addSubgroup(AppGLSubmissionGroupKind::ArgumentBinding,
@@ -9671,19 +9672,17 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                             static_cast<std::size_t>(len0));
                         [argEncSet0 setArgumentBuffer:buf0 offset:buf0Offset];
                         if (info.needsSSBOSizeBuffer) {
-                            const std::vector<std::uint32_t> sizes =
-                                buildSSBOSizeConstants();
-                            if (!sizes.empty()) {
+                            if (populateSSBOSizeConstants(ssboSizeScratch)) {
                                 RingAlloc sizeAlloc = ringSuballocate(
-                                    sizes.data(),
-                                    sizes.size() * sizeof(std::uint32_t));
+                                    ssboSizeScratch.data(),
+                                    ssboSizeScratch.size() * sizeof(std::uint32_t));
                                 if (sizeAlloc.buffer != nil) {
                                     info.submissionGroup.addTransient(
                                         AppGLSubmissionTransientKind::SsboSizeBuffer,
                                         AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
                                         AppGLCommandReason::ComputeDispatch,
                                         0,
-                                        sizes.size() * sizeof(std::uint32_t));
+                                        ssboSizeScratch.size() * sizeof(std::uint32_t));
                                     [argEncSet0 setBuffer:sizeAlloc.buffer
                                                    offset:sizeAlloc.offset
                                                   atIndex:0];
@@ -9812,19 +9811,17 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             // [[buffer(25)]]`; entries are keyed by the SSBO's reflected
             // Metal buffer slot and contain the effective GL bound range.
             if (info.needsSSBOSizeBuffer) {
-                const std::vector<std::uint32_t> sizes =
-                    buildSSBOSizeConstants();
-                if (!sizes.empty()) {
-                    [enc setBytes:sizes.data()
+                if (populateSSBOSizeConstants(ssboSizeScratch)) {
+                    [enc setBytes:ssboSizeScratch.data()
                            length:static_cast<NSUInteger>(
-                                      sizes.size() * sizeof(std::uint32_t))
+                                      ssboSizeScratch.size() * sizeof(std::uint32_t))
                           atIndex:25];
                     info.submissionGroup.addTransient(
                         AppGLSubmissionTransientKind::SsboSizeBuffer,
                         AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
                         AppGLCommandReason::ComputeDispatch,
                         25,
-                        sizes.size() * sizeof(std::uint32_t));
+                        ssboSizeScratch.size() * sizeof(std::uint32_t));
                 }
             }
 
