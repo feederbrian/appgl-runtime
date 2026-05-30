@@ -8699,6 +8699,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
 
         id<MTLTexture> colorTex = nil;
         id<MTLTexture> depthTex = nil;
+        const bool isDefaultTarget = info.fboColorTexture == nullptr;
         if (info.fboColorTexture != nullptr) {
             colorTex = (__bridge id<MTLTexture>)info.fboColorTexture;
             depthTex = (__bridge id<MTLTexture>)info.fboDepthStencilTexture;
@@ -8713,11 +8714,14 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
 
         MTLRenderPassDescriptor* pass = getReusablePassDescriptor();  // ADV-4
         pass.colorAttachments[0].texture = colorTex;
-        if (info.pendingClearColor) {
+        const bool consumeDefaultClear = isDefaultTarget && hasPendingClear;
+        if (info.pendingClearColor ||
+            (consumeDefaultClear && (pendingClearMask & GL_COLOR_BUFFER_BIT))) {
             pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-            pass.colorAttachments[0].clearColor = MTLClearColorMake(
-                info.clearColor[0], info.clearColor[1],
-                info.clearColor[2], info.clearColor[3]);
+            pass.colorAttachments[0].clearColor = info.pendingClearColor
+                ? MTLClearColorMake(info.clearColor[0], info.clearColor[1],
+                                    info.clearColor[2], info.clearColor[3])
+                : pendingClearColor;
         } else {
             pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
         }
@@ -8728,9 +8732,12 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         }
         if (depthTex != nil && fmtHasDepth) {
             pass.depthAttachment.texture = depthTex;
-            if (info.pendingClearDepth) {
+            if (info.pendingClearDepth ||
+                (consumeDefaultClear && (pendingClearMask & GL_DEPTH_BUFFER_BIT))) {
                 pass.depthAttachment.loadAction = MTLLoadActionClear;
-                pass.depthAttachment.clearDepth = info.clearDepth;
+                pass.depthAttachment.clearDepth = info.pendingClearDepth
+                    ? info.clearDepth
+                    : pendingClearDepth;
             } else {
                 pass.depthAttachment.loadAction = MTLLoadActionLoad;
             }
@@ -8738,14 +8745,20 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         }
         if (depthTex != nil && fmtHasStencil) {
             pass.stencilAttachment.texture = depthTex;
-            if (info.pendingClearStencil) {
+            if (info.pendingClearStencil ||
+                (consumeDefaultClear && (pendingClearMask & GL_STENCIL_BUFFER_BIT))) {
                 pass.stencilAttachment.loadAction = MTLLoadActionClear;
                 pass.stencilAttachment.clearStencil =
-                    (uint32_t)info.clearStencil;
+                    (uint32_t)(info.pendingClearStencil
+                        ? info.clearStencil
+                        : pendingClearStencil);
             } else {
                 pass.stencilAttachment.loadAction = MTLLoadActionLoad;
             }
             pass.stencilAttachment.storeAction = MTLStoreActionStore;
+        }
+        if (consumeDefaultClear) {
+            hasPendingClear = false;
         }
 
         id<MTLRenderCommandEncoder> enc =
@@ -8960,13 +8973,28 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
            instanceCount:(NSUInteger)std::max(info.instanceCount, 1)
             baseInstance:(NSUInteger)info.baseInstance];
         [enc endEncoding];
+        if (isDefaultTarget) {
+            readbackSourceTexture = colorTex;
+            readbackSourceIsBGRA = colorTex.pixelFormat == MTLPixelFormatBGRA8Unorm;
+            if (!usesOffscreenTarget && currentDrawable != nil) {
+                [currentCommandBuffer presentDrawable:currentDrawable];
+            }
+        }
 
         // Commit + wait so subsequent readbacks / copies observe the
         // tess draw's output. Matches compute-dispatch's sync semantics.
         if (!currentCommandBufferLease.commitAndWait(AppGLCommandReason::TessRender)) {
             return false;
         }
+        if (ringSlotAcquired) {
+            signalRingSlotNow();
+            advanceRingBuffer();
+        }
         currentCommandBuffer = nil;
+        if (isDefaultTarget) {
+            currentDrawable = nil;
+            pendingPresent = false;
+        }
         info.didRender = true;
 
         if (std::getenv("APPGL_TRACE_TESS")) {
