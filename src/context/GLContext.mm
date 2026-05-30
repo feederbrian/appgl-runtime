@@ -44703,46 +44703,85 @@ static void rewriteMslOutputLocationsForFragmentInputs(
         return;
     }
 
-    std::size_t cursor = bodyBegin + 1;
-    while (cursor < bodyEnd) {
-        const std::size_t semi = vertexMSL.find(';', cursor);
-        if (semi == std::string::npos || semi > bodyEnd) break;
-        const std::size_t userPos = vertexMSL.find("[[user(locn", cursor);
+    auto parseUserLocationField = [](const std::string& text,
+                                     std::size_t cursor,
+                                     std::size_t semi,
+                                     std::string& name,
+                                     std::size_t& locBegin,
+                                     std::size_t& locEnd,
+                                     std::uint32_t& loc) -> bool {
+        const std::size_t userPos = text.find("[[user(locn", cursor);
         if (userPos == std::string::npos || userPos > semi) {
-            cursor = semi + 1;
-            continue;
+            return false;
         }
-        const std::size_t locBegin = userPos + std::strlen("[[user(locn");
-        std::size_t locEnd = locBegin;
-        while (locEnd < vertexMSL.size() &&
-               std::isdigit(static_cast<unsigned char>(vertexMSL[locEnd]))) {
+        locBegin = userPos + std::strlen("[[user(locn");
+        locEnd = locBegin;
+        while (locEnd < text.size() &&
+               std::isdigit(static_cast<unsigned char>(text[locEnd]))) {
             ++locEnd;
         }
         if (locEnd == locBegin) {
-            cursor = semi + 1;
-            continue;
+            return false;
         }
-        const std::uint32_t oldLoc = static_cast<std::uint32_t>(
-            std::strtoul(vertexMSL.c_str() + locBegin, nullptr, 10));
 
         std::size_t nameEnd = userPos;
         while (nameEnd > cursor &&
-               std::isspace(static_cast<unsigned char>(vertexMSL[nameEnd - 1]))) {
+               std::isspace(static_cast<unsigned char>(text[nameEnd - 1]))) {
             --nameEnd;
         }
         std::size_t nameBegin = nameEnd;
         while (nameBegin > cursor) {
             const unsigned char ch =
-                static_cast<unsigned char>(vertexMSL[nameBegin - 1]);
+                static_cast<unsigned char>(text[nameBegin - 1]);
             if (!(std::isalnum(ch) || ch == '_')) break;
             --nameBegin;
         }
         if (nameBegin == nameEnd) {
+            return false;
+        }
+
+        name = text.substr(nameBegin, nameEnd - nameBegin);
+        loc = static_cast<std::uint32_t>(
+            std::strtoul(text.c_str() + locBegin, nullptr, 10));
+        return true;
+    };
+
+    // Reserve exact VS->FS matches before relocating unmatched outputs.
+    // Otherwise an earlier helper varying at the same old location can
+    // steal the FS input's slot and create duplicate [[user(locnN)]]
+    // attributes after the matched varying is rewritten later.
+    std::size_t reserveCursor = bodyBegin + 1;
+    while (reserveCursor < bodyEnd) {
+        const std::size_t semi = vertexMSL.find(';', reserveCursor);
+        if (semi == std::string::npos || semi > bodyEnd) break;
+        std::string name;
+        std::size_t locBegin = 0;
+        std::size_t locEnd = 0;
+        std::uint32_t oldLoc = 0;
+        if (parseUserLocationField(vertexMSL, reserveCursor, semi,
+                                   name, locBegin, locEnd, oldLoc)) {
+            const auto locIt = fsInputs.find(name);
+            if (locIt != fsInputs.end()) {
+                assignedLocations.insert(locIt->second);
+            }
+        }
+        reserveCursor = semi + 1;
+    }
+
+    std::size_t cursor = bodyBegin + 1;
+    while (cursor < bodyEnd) {
+        const std::size_t semi = vertexMSL.find(';', cursor);
+        if (semi == std::string::npos || semi > bodyEnd) break;
+        std::string name;
+        std::size_t locBegin = 0;
+        std::size_t locEnd = 0;
+        std::uint32_t oldLoc = 0;
+        if (!parseUserLocationField(vertexMSL, cursor, semi,
+                                    name, locBegin, locEnd, oldLoc)) {
             cursor = semi + 1;
             continue;
         }
 
-        const std::string name = vertexMSL.substr(nameBegin, nameEnd - nameBegin);
         const auto locIt = fsInputs.find(name);
         std::uint32_t newLoc = 0;
         if (locIt != fsInputs.end()) {

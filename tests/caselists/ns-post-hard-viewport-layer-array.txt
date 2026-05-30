@@ -1,0 +1,3 @@
+KHR-GL46.shader_viewport_layer_array.ShaderViewportIndexTestCase
+KHR-GL46.shader_viewport_layer_array.ShaderLayerFramebufferLayeredTestCase
+KHR-GL46.shader_viewport_layer_array.ShaderLayerFramebufferNonLayeredTestCase
