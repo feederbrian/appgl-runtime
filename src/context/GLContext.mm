@@ -52300,22 +52300,23 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             if (usesMSSampledSidecars &&
                 extensions::sparse_texture::isMultisampleStorageImageTarget(preferredTarget)) {
                 extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
-                if (extensions::sparse_texture::ensureMultisampleStorageImageSidecar(
-                        extensionContext, *texObj, &sidecarInfo)) {
-                    const std::uint32_t slot =
-                        samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                const std::uint32_t slot =
+                    samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                if (slot >= msImageSampleCounts.size()) {
+                    msImageSampleCounts.resize(static_cast<std::size_t>(slot) + 1u, 0u);
+                }
+                hasMSImageSampleCounts = true;
+                msImageSampleCounts[slot] = 0u;
+                if (extensions::sparse_texture::getMultisampleStorageImageSidecar(
+                        extensionContext, *texObj, sidecarInfo)) {
                     ComputeDispatchInfo::TextureBinding sidecarBinding;
                     sidecarBinding.metalTexture = sidecarInfo.metalTexture;
                     sidecarBinding.metalSamplerState = nullptr;
                     sidecarBinding.metalSlot =
                         slot + kMultisampleSampledSidecarTextureSlotOffset;
                     info.textures.push_back(sidecarBinding);
-                    if (slot >= msImageSampleCounts.size()) {
-                        msImageSampleCounts.resize(static_cast<std::size_t>(slot) + 1u, 1u);
-                    }
                     msImageSampleCounts[slot] =
                         static_cast<std::uint32_t>(std::max<GLsizei>(sidecarInfo.samples, 1));
-                    hasMSImageSampleCounts = true;
                 }
             }
             const GLenum sparseSidecarTarget =
@@ -52910,23 +52911,24 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             if (usesMSSampledSidecarsIndirect &&
                 extensions::sparse_texture::isMultisampleStorageImageTarget(preferredTarget)) {
                 extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
-                if (extensions::sparse_texture::ensureMultisampleStorageImageSidecar(
-                        extensionContext, *texObj, &sidecarInfo)) {
-                    const std::uint32_t slot =
-                        samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                const std::uint32_t slot =
+                    samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                if (slot >= msImageSampleCountsIndirect.size()) {
+                    msImageSampleCountsIndirect.resize(
+                        static_cast<std::size_t>(slot) + 1u, 0u);
+                }
+                hasMSImageSampleCountsIndirect = true;
+                msImageSampleCountsIndirect[slot] = 0u;
+                if (extensions::sparse_texture::getMultisampleStorageImageSidecar(
+                        extensionContext, *texObj, sidecarInfo)) {
                     ComputeDispatchInfo::TextureBinding sidecarBinding;
                     sidecarBinding.metalTexture = sidecarInfo.metalTexture;
                     sidecarBinding.metalSamplerState = nullptr;
                     sidecarBinding.metalSlot =
                         slot + kMultisampleSampledSidecarTextureSlotOffset;
                     info.textures.push_back(sidecarBinding);
-                    if (slot >= msImageSampleCountsIndirect.size()) {
-                        msImageSampleCountsIndirect.resize(
-                            static_cast<std::size_t>(slot) + 1u, 1u);
-                    }
                     msImageSampleCountsIndirect[slot] =
                         static_cast<std::uint32_t>(std::max<GLsizei>(sidecarInfo.samples, 1));
-                    hasMSImageSampleCountsIndirect = true;
                 }
             }
             const GLenum sparseSidecarTarget =

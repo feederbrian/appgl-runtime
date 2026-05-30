@@ -1,2 +1,1 @@
 KHR-GL46.shader_image_load_store.basic-allTargets-store
-KHR-GL46.multi_bind.dispatch_bind_textures

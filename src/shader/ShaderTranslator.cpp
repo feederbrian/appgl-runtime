@@ -1615,8 +1615,19 @@ bool injectMultisampleSampledImageSidecars(std::string& msl) {
             continue;
         }
 
-        std::size_t typeStart = msl.rfind("texture2d_ms", attrPos);
-        if (typeStart == std::string::npos) {
+        const std::size_t lineStart = msl.rfind('\n', attrPos);
+        std::size_t segmentBegin =
+            (lineStart == std::string::npos) ? 0 : lineStart + 1u;
+        const std::size_t comma = msl.rfind(',', attrPos);
+        if (comma != std::string::npos && comma >= segmentBegin) {
+            segmentBegin = comma + 1u;
+        }
+        const std::size_t paren = msl.rfind('(', attrPos);
+        if (paren != std::string::npos && paren >= segmentBegin) {
+            segmentBegin = paren + 1u;
+        }
+        std::size_t typeStart = msl.find("texture2d_ms", segmentBegin);
+        if (typeStart == std::string::npos || typeStart > attrPos) {
             pos = afterSlot;
             continue;
         }
@@ -1998,6 +2009,133 @@ bool findMatchingParen(const std::string& text,
         }
     }
     return false;
+}
+
+struct MultisampleTextureVar {
+    std::string name;
+    std::uint32_t metalSlot = 0;
+    bool arrayed = false;
+};
+
+std::vector<MultisampleTextureVar> collectMultisampleSampledTextureVars(
+    const std::string& msl) {
+    std::vector<MultisampleTextureVar> vars;
+    std::set<std::pair<std::string, std::uint32_t>> seen;
+
+    std::size_t attrPos = 0;
+    while ((attrPos = msl.find("[[texture(", attrPos)) != std::string::npos) {
+        std::size_t cursor = attrPos + std::strlen("[[texture(");
+        std::uint32_t slot = 0;
+        if (!parseUnsignedAfter(msl, cursor, slot, &cursor)) {
+            attrPos += std::strlen("[[texture(");
+            continue;
+        }
+
+        const std::size_t lineStart = msl.rfind('\n', attrPos);
+        std::size_t segmentBegin =
+            (lineStart == std::string::npos) ? 0 : lineStart + 1u;
+        const std::size_t comma = msl.rfind(',', attrPos);
+        if (comma != std::string::npos && comma >= segmentBegin) {
+            segmentBegin = comma + 1u;
+        }
+        const std::size_t paren = msl.rfind('(', attrPos);
+        if (paren != std::string::npos && paren >= segmentBegin) {
+            segmentBegin = paren + 1u;
+        }
+        const std::size_t typeStart = msl.find("texture2d_ms", segmentBegin);
+        if (typeStart == std::string::npos || typeStart > attrPos) {
+            attrPos += std::strlen("[[texture(");
+            continue;
+        }
+
+        const bool arrayed =
+            msl.compare(typeStart,
+                        std::strlen("texture2d_ms_array"),
+                        "texture2d_ms_array") == 0;
+        const std::size_t templateStart = msl.find('<', typeStart);
+        const std::size_t templateEnd = msl.find('>', templateStart);
+        if (templateStart == std::string::npos ||
+            templateEnd == std::string::npos ||
+            templateEnd > attrPos) {
+            attrPos += std::strlen("[[texture(");
+            continue;
+        }
+
+        const std::string templateArgs =
+            msl.substr(templateStart + 1, templateEnd - templateStart - 1);
+        if (templateArgs.find("access::") != std::string::npos) {
+            attrPos += std::strlen("[[texture(");
+            continue;
+        }
+
+        std::size_t nameStart = templateEnd + 1;
+        while (nameStart < attrPos &&
+               std::isspace(static_cast<unsigned char>(msl[nameStart]))) {
+            ++nameStart;
+        }
+        std::size_t nameEnd = nameStart;
+        while (nameEnd < attrPos && isIdentifierChar(msl[nameEnd])) {
+            ++nameEnd;
+        }
+        if (nameEnd > nameStart) {
+            std::string name = msl.substr(nameStart, nameEnd - nameStart);
+            if (seen.insert({name, slot}).second) {
+                vars.push_back({std::move(name), slot, arrayed});
+            }
+        }
+        attrPos += std::strlen("[[texture(");
+    }
+
+    return vars;
+}
+
+bool rewriteMultisampleSampledImageReads(std::string& msl) {
+    bool changed = false;
+    const auto vars = collectMultisampleSampledTextureVars(msl);
+
+    for (const auto& var : vars) {
+        const std::string sidecarName =
+            "appgl_ms_sampled_sidecar_" + std::to_string(var.metalSlot);
+        const std::string sampleCount =
+            "appgl_ms_storage_image_samples[" +
+            std::to_string(var.metalSlot) + "]";
+        const std::string needle = var.name + ".read(";
+        std::size_t pos = 0;
+        while ((pos = msl.find(needle, pos)) != std::string::npos) {
+            const std::size_t open = pos + needle.size() - 1u;
+            std::size_t close = std::string::npos;
+            if (!findMatchingParen(msl, open, close)) {
+                break;
+            }
+
+            const std::string original = msl.substr(pos, close - pos + 1u);
+            const auto args =
+                splitTopLevelCommas(msl.substr(open + 1u, close - open - 1u));
+            std::string sidecarRead;
+            if (!var.arrayed && args.size() >= 2u) {
+                sidecarRead =
+                    sidecarName + ".read(" + args[0] + ", uint(" +
+                    args[1] + "))";
+            } else if (var.arrayed && args.size() >= 3u) {
+                sidecarRead =
+                    sidecarName + ".read(" + args[0] + ", (uint(" +
+                    args[1] + ") * max(" + sampleCount +
+                    ", 1u) + uint(" + args[2] + ")))";
+            } else {
+                pos = close + 1u;
+                continue;
+            }
+
+            const std::string replacement =
+                "((" + sampleCount + " == 0u) ? " +
+                original + " : " + sidecarRead + ")";
+            msl.replace(pos, original.size(), replacement);
+            pos += replacement.size();
+            changed = true;
+        }
+    }
+
+    return changed;
 }
 
 bool findMatchingBracket(const std::string& text,
@@ -6199,6 +6337,9 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 msl, multisampleStorageImageArraySlots);
         }
 
+        if (execModel == spv::ExecutionModelGLCompute) {
+            (void)rewriteMultisampleSampledImageReads(msl);
+        }
         (void)injectMultisampleSampledImageSidecars(msl);
         (void)injectSparseSampledImageSidecars(msl);
         (void)injectMultisampleStorageImageSampleCounts(msl);
