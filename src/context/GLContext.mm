@@ -8822,6 +8822,10 @@ struct GLContext::Impl {
             program.fragmentMSL.find("appgl_sparse_sampled_sidecar_") != std::string::npos;
         const bool vertexUsesSparseSampledSidecars =
             program.vertexMSL.find("appgl_sparse_sampled_sidecar_") != std::string::npos;
+        const bool fragmentUsesMSSampledSidecars =
+            program.fragmentMSL.find("appgl_ms_sampled_sidecar_") != std::string::npos;
+        const bool vertexUsesMSSampledSidecars =
+            program.vertexMSL.find("appgl_ms_sampled_sidecar_") != std::string::npos;
         auto mslUsesArgumentBufferSet0 = [](const std::string* msl) -> bool {
             return msl != nullptr &&
                 msl->find("spvDescriptorSetBuffer0") != std::string::npos;
@@ -8945,7 +8949,9 @@ struct GLContext::Impl {
                                 const ShaderReflection* reflection,
                                 std::vector<TranslatedDrawInfo::TextureBinding>& outBindings,
                                 const std::string* stageMSL,
-                                bool usesSparseSampledSidecars) {
+                                bool usesSparseSampledSidecars,
+                                bool usesMSSampledSidecars,
+                                std::vector<std::uint32_t>& msImageSampleCounts) {
             std::vector<ShaderReflection::ResourceBinding> synthesizedBindings;
             const std::vector<ShaderReflection::ResourceBinding>* sampledTextures =
                 (reflection != nullptr && !reflection->sampledTextures.empty())
@@ -9379,6 +9385,33 @@ struct GLContext::Impl {
                 binding.reductionMode = static_cast<std::uint32_t>(effectiveReductionMode);
                 binding.lodBias = samplerParamsForCompleteness->lodBias;
                 outBindings.push_back(binding);
+                const GLenum msSidecarTarget =
+                    resolvedTarget != 0 ? resolvedTarget : texObject->target;
+                if (owner != nullptr && usesMSSampledSidecars &&
+                    extensions::sparse_texture::isMultisampleStorageImageTarget(
+                        msSidecarTarget)) {
+                    ExtensionContext extensionContext(*owner);
+                    extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
+                    if (msImageSampleCounts.empty()) {
+                        msImageSampleCounts.assign(128, 0u);
+                    }
+                    if (binding.metalSlot >= msImageSampleCounts.size()) {
+                        msImageSampleCounts.resize(
+                            static_cast<std::size_t>(binding.metalSlot) + 1u, 0u);
+                    }
+                    if (extensions::sparse_texture::getMultisampleStorageImageSidecar(
+                            extensionContext, *texObject, sidecarInfo)) {
+                        TranslatedDrawInfo::TextureBinding sidecarBinding;
+                        sidecarBinding.metalSamplerState = nullptr;
+                        sidecarBinding.metalSlot =
+                            binding.metalSlot + kMultisampleSampledSidecarTextureSlotOffset;
+                        sidecarBinding.metalTexture = sidecarInfo.metalTexture;
+                        outBindings.push_back(sidecarBinding);
+                        msImageSampleCounts[binding.metalSlot] =
+                            static_cast<std::uint32_t>(
+                                std::max<GLsizei>(sidecarInfo.samples, 1));
+                    }
+                }
                 const GLenum sparseSidecarTarget =
                     resolvedTarget;
                 if (sparseSampledFeedback) {
@@ -9484,9 +9517,13 @@ struct GLContext::Impl {
         };
 
         resolveStage("frag", info.fragmentReflection, info.fragmentTextures,
-                     info.fragmentMSL, fragmentUsesSparseSampledSidecars);
+                     info.fragmentMSL, fragmentUsesSparseSampledSidecars,
+                     fragmentUsesMSSampledSidecars,
+                     info.fragmentMultisampleStorageImageSampleCounts);
         resolveStage("vert", info.vertexReflection, info.vertexTextures,
-                     info.vertexMSL, vertexUsesSparseSampledSidecars);
+                     info.vertexMSL, vertexUsesSparseSampledSidecars,
+                     vertexUsesMSSampledSidecars,
+                     info.vertexMultisampleStorageImageSampleCounts);
     }
 
     // Sprint 6 Phase 1 sub-task 3 day 3 (CKPT43): build the
@@ -10804,10 +10841,6 @@ struct GLContext::Impl {
                 if (mtlTex.depth > 1) {
                     slot.depth = levelDim(mtlTex.depth);
                     slot.layerFaces = slot.depth;
-                } else if (texObj->target == GL_TEXTURE_1D_ARRAY) {
-                    slot.depth = static_cast<std::uint32_t>(
-                        std::max<GLsizei>(texObj->desc.height, 1));
-                    slot.layerFaces = slot.depth;
                 } else if (texObj->target == GL_TEXTURE_CUBE_MAP_ARRAY ||
                            mtlTex.textureType == MTLTextureTypeCubeArray) {
                     const std::uint32_t cubes = static_cast<std::uint32_t>(
@@ -10835,9 +10868,8 @@ struct GLContext::Impl {
                     mtlTex.textureType == MTLTextureType2DMultisample ||
                     mtlTex.textureType == MTLTextureType2DMultisampleArray;
                 if (nativeMultisampleTexture) {
-                    // CPU shader emulation only needs dimensions for
-                    // imageSize(); Metal does not safely expose native MS
-                    // texture bytes through getBytes.
+                    // CPU shader emulation only needs dimensions for imageSize();
+                    // Metal does not expose native MS texture bytes through getBytes.
                     if (trace) std::fprintf(stderr,
                         "[GS-img]   element %d unit=%u tex=%u fmt=0x%X "
                         "dim=%ux%ux%u layerFaces=%u datasz=0 native-ms\n",
@@ -10952,9 +10984,11 @@ struct GLContext::Impl {
                     info.fragmentReflection->sampledTextures.size());
             }
         }
+        ExtensionContext extensionContext(*owner);
         auto resolveStage = [&](const char* stageName, const ShaderReflection* reflection,
                                 const std::string& stageMSL,
-                                std::vector<TranslatedDrawInfo::TextureBinding>& outList) {
+                                std::vector<TranslatedDrawInfo::TextureBinding>& outList,
+                                std::vector<std::uint32_t>& msImageSampleCounts) {
             if (reflection == nullptr) return;
             for (const auto& img : reflection->storageImages) {
                 // GL 4.6 §7.6: the effective image unit is the value the
@@ -11021,10 +11055,46 @@ struct GLContext::Impl {
                         info.writtenImageTextureNames.push_back(ib.texture);
                     }
                     TranslatedDrawInfo::TextureBinding tb;
-                    // CKPT119: prefer level-restricted view when ib.level > 0
-                    // so imageSize() returns LEVEL-N dimensions.
-                    tb.metalTexture = resolveImageMetalTexture(
-                        ib, texObj, img.storageImageTarget);
+                    if (img.multisampleStorageImage) {
+                        id<MTLTexture> mtlTex =
+                            (__bridge id<MTLTexture>)texObj->metalTexture;
+                        const std::uint32_t slot =
+                            img.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                        if (msImageSampleCounts.empty()) {
+                            msImageSampleCounts.assign(128, 1u);
+                        }
+                        if (slot >= msImageSampleCounts.size()) {
+                            msImageSampleCounts.resize(
+                                static_cast<std::size_t>(slot) + 1u, 1u);
+                        }
+                        msImageSampleCounts[slot] =
+                            mtlTex != nil
+                                ? static_cast<std::uint32_t>(
+                                      std::max<NSUInteger>(mtlTex.sampleCount, 1u))
+                                : 1u;
+                        if (ib.access != GL_READ_ONLY) {
+                            extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
+                            if (!extensions::sparse_texture::ensureMultisampleStorageImageSidecar(
+                                    extensionContext, *texObj, &sidecarInfo)) {
+                                if (trace) std::fprintf(stderr,
+                                    " SKIP=ms_sidecar_unavailable tex=%u\n",
+                                    ib.texture);
+                                continue;
+                            }
+                            tb.metalTexture = sidecarInfo.metalTexture;
+                            msImageSampleCounts[slot] =
+                                static_cast<std::uint32_t>(
+                                    std::max<GLsizei>(sidecarInfo.samples, 1));
+                        } else {
+                            tb.metalTexture = resolveImageMetalTexture(
+                                ib, texObj, img.storageImageTarget);
+                        }
+                    } else {
+                        // CKPT119: prefer level-restricted view when ib.level > 0
+                        // so imageSize() returns LEVEL-N dimensions.
+                        tb.metalTexture = resolveImageMetalTexture(
+                            ib, texObj, img.storageImageTarget);
+                    }
                     if (tb.metalTexture == nullptr) {
                         if (trace) std::fprintf(stderr,
                             " SKIP=image_view_nil tex=%u fmt=0x%X\n",
@@ -11070,8 +11140,12 @@ struct GLContext::Impl {
                 }
             }
         };
-        resolveStage("VS", info.vertexReflection, program.vertexMSL, info.vertexTextures);
-        resolveStage("FS", info.fragmentReflection, program.fragmentMSL, info.fragmentTextures);
+        resolveStage("VS", info.vertexReflection, program.vertexMSL,
+                     info.vertexTextures,
+                     info.vertexMultisampleStorageImageSampleCounts);
+        resolveStage("FS", info.fragmentReflection, program.fragmentMSL,
+                     info.fragmentTextures,
+                     info.fragmentMultisampleStorageImageSampleCounts);
     }
 
     bool replaceBufferStorage(GLBufferObject& object, GLsizeiptr size, const void* data, GLenum usage) {
@@ -52300,22 +52374,23 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             if (usesMSSampledSidecars &&
                 extensions::sparse_texture::isMultisampleStorageImageTarget(preferredTarget)) {
                 extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
-                if (extensions::sparse_texture::ensureMultisampleStorageImageSidecar(
-                        extensionContext, *texObj, &sidecarInfo)) {
-                    const std::uint32_t slot =
-                        samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                const std::uint32_t slot =
+                    samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                if (slot >= msImageSampleCounts.size()) {
+                    msImageSampleCounts.resize(static_cast<std::size_t>(slot) + 1u, 0u);
+                }
+                hasMSImageSampleCounts = true;
+                msImageSampleCounts[slot] = 0u;
+                if (extensions::sparse_texture::getMultisampleStorageImageSidecar(
+                        extensionContext, *texObj, sidecarInfo)) {
                     ComputeDispatchInfo::TextureBinding sidecarBinding;
                     sidecarBinding.metalTexture = sidecarInfo.metalTexture;
                     sidecarBinding.metalSamplerState = nullptr;
                     sidecarBinding.metalSlot =
                         slot + kMultisampleSampledSidecarTextureSlotOffset;
                     info.textures.push_back(sidecarBinding);
-                    if (slot >= msImageSampleCounts.size()) {
-                        msImageSampleCounts.resize(static_cast<std::size_t>(slot) + 1u, 1u);
-                    }
                     msImageSampleCounts[slot] =
                         static_cast<std::uint32_t>(std::max<GLsizei>(sidecarInfo.samples, 1));
-                    hasMSImageSampleCounts = true;
                 }
             }
             const GLenum sparseSidecarTarget =
@@ -52415,20 +52490,36 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             }
             ComputeDispatchInfo::TextureBinding tb;
             if (img.multisampleStorageImage) {
-                extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
-                if (!extensions::sparse_texture::ensureMultisampleStorageImageSidecar(
-                        extensionContext, *texObj, &sidecarInfo)) {
-                    continue;
-                }
-                tb.metalTexture = sidecarInfo.metalTexture;
+                id<MTLTexture> mtlTex =
+                    (__bridge id<MTLTexture>)texObj->metalTexture;
                 const std::uint32_t slot =
                     img.metalBinding + static_cast<std::uint32_t>(arrayElement);
                 if (slot >= msImageSampleCounts.size()) {
                     msImageSampleCounts.resize(static_cast<std::size_t>(slot) + 1u, 1u);
                 }
                 msImageSampleCounts[slot] =
-                    static_cast<std::uint32_t>(std::max<GLsizei>(sidecarInfo.samples, 1));
+                    mtlTex != nil
+                        ? static_cast<std::uint32_t>(
+                              std::max<NSUInteger>(mtlTex.sampleCount, 1u))
+                        : 1u;
                 hasMSImageSampleCounts = true;
+                const bool mslReadsImage =
+                    programObject->computeMSL.find(img.name + ".read(") !=
+                    std::string::npos;
+                if (ib.access != GL_READ_ONLY || !mslReadsImage) {
+                    extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
+                    if (!extensions::sparse_texture::ensureMultisampleStorageImageSidecar(
+                            extensionContext, *texObj, &sidecarInfo)) {
+                        continue;
+                    }
+                    tb.metalTexture = sidecarInfo.metalTexture;
+                    msImageSampleCounts[slot] =
+                        static_cast<std::uint32_t>(
+                            std::max<GLsizei>(sidecarInfo.samples, 1));
+                } else {
+                    tb.metalTexture = impl_->resolveImageMetalTexture(
+                        ib, texObj, img.storageImageTarget);
+                }
                 if (usesMSStorageSparseResidency && texObj->metalTexture != nullptr) {
                     ComputeDispatchInfo::TextureBinding sparseResidencyBinding;
                     sparseResidencyBinding.metalTexture = texObj->metalTexture;
@@ -52910,23 +53001,24 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             if (usesMSSampledSidecarsIndirect &&
                 extensions::sparse_texture::isMultisampleStorageImageTarget(preferredTarget)) {
                 extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
-                if (extensions::sparse_texture::ensureMultisampleStorageImageSidecar(
-                        extensionContext, *texObj, &sidecarInfo)) {
-                    const std::uint32_t slot =
-                        samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                const std::uint32_t slot =
+                    samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                if (slot >= msImageSampleCountsIndirect.size()) {
+                    msImageSampleCountsIndirect.resize(
+                        static_cast<std::size_t>(slot) + 1u, 0u);
+                }
+                msImageSampleCountsIndirect[slot] = 0u;
+                hasMSImageSampleCountsIndirect = true;
+                if (extensions::sparse_texture::getMultisampleStorageImageSidecar(
+                        extensionContext, *texObj, sidecarInfo)) {
                     ComputeDispatchInfo::TextureBinding sidecarBinding;
                     sidecarBinding.metalTexture = sidecarInfo.metalTexture;
                     sidecarBinding.metalSamplerState = nullptr;
                     sidecarBinding.metalSlot =
                         slot + kMultisampleSampledSidecarTextureSlotOffset;
                     info.textures.push_back(sidecarBinding);
-                    if (slot >= msImageSampleCountsIndirect.size()) {
-                        msImageSampleCountsIndirect.resize(
-                            static_cast<std::size_t>(slot) + 1u, 1u);
-                    }
                     msImageSampleCountsIndirect[slot] =
                         static_cast<std::uint32_t>(std::max<GLsizei>(sidecarInfo.samples, 1));
-                    hasMSImageSampleCountsIndirect = true;
                 }
             }
             const GLenum sparseSidecarTarget =
@@ -53007,12 +53099,8 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             }
             ComputeDispatchInfo::TextureBinding tb;
             if (img.multisampleStorageImage) {
-                extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
-                if (!extensions::sparse_texture::ensureMultisampleStorageImageSidecar(
-                        extensionContext, *texObj, &sidecarInfo)) {
-                    continue;
-                }
-                tb.metalTexture = sidecarInfo.metalTexture;
+                id<MTLTexture> mtlTex =
+                    (__bridge id<MTLTexture>)texObj->metalTexture;
                 const std::uint32_t slot =
                     img.metalBinding + static_cast<std::uint32_t>(arrayElement);
                 if (slot >= msImageSampleCountsIndirect.size()) {
@@ -53020,8 +53108,28 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
                         static_cast<std::size_t>(slot) + 1u, 1u);
                 }
                 msImageSampleCountsIndirect[slot] =
-                    static_cast<std::uint32_t>(std::max<GLsizei>(sidecarInfo.samples, 1));
+                    mtlTex != nil
+                        ? static_cast<std::uint32_t>(
+                              std::max<NSUInteger>(mtlTex.sampleCount, 1u))
+                        : 1u;
                 hasMSImageSampleCountsIndirect = true;
+                const bool mslReadsImage =
+                    programObject->computeMSL.find(img.name + ".read(") !=
+                    std::string::npos;
+                if (ib.access != GL_READ_ONLY || !mslReadsImage) {
+                    extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
+                    if (!extensions::sparse_texture::ensureMultisampleStorageImageSidecar(
+                            extensionContext, *texObj, &sidecarInfo)) {
+                        continue;
+                    }
+                    tb.metalTexture = sidecarInfo.metalTexture;
+                    msImageSampleCountsIndirect[slot] =
+                        static_cast<std::uint32_t>(
+                            std::max<GLsizei>(sidecarInfo.samples, 1));
+                } else {
+                    tb.metalTexture = impl_->resolveImageMetalTexture(
+                        ib, texObj, img.storageImageTarget);
+                }
                 if (usesMSStorageSparseResidencyIndirect && texObj->metalTexture != nullptr) {
                     ComputeDispatchInfo::TextureBinding sparseResidencyBinding;
                     sparseResidencyBinding.metalTexture = texObj->metalTexture;
