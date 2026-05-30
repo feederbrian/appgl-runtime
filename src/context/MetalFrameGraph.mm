@@ -5886,8 +5886,9 @@ fragment float4 appgl_immediate_textured_fs(
         return clearLayeredTextureImpl(tex, arrayLength, 0, 0, false, false, true,
             nullptr, 0.0f, stencil);
     }
-    bool clearLayeredTextureColor(void* tex, std::uint32_t arrayLength, const float rgba[4]) {
-        return clearLayeredTextureImpl(tex, arrayLength, 0, 0, true, false, false,
+    bool clearLayeredTextureColor(void* tex, std::uint32_t arrayLength, const float rgba[4],
+                                  std::uint32_t level = 0, std::uint32_t slice = 0) {
+        return clearLayeredTextureImpl(tex, arrayLength, level, slice, true, false, false,
             rgba, 0.0f, 0);
     }
     bool clearTextureDepth(void* tex, std::uint32_t level, std::uint32_t slice,
@@ -11169,8 +11170,11 @@ bool MetalFrameGraph::clearLayeredTextureStencil(void* tex, std::uint32_t arrayL
     return impl_->clearLayeredTextureStencil(tex, arrayLength, stencil);
 }
 
-bool MetalFrameGraph::clearLayeredTextureColor(void* tex, std::uint32_t arrayLength, const float rgba[4]) {
-    return impl_->clearLayeredTextureColor(tex, arrayLength, rgba);
+bool MetalFrameGraph::clearLayeredTextureColor(void* tex, std::uint32_t arrayLength,
+                                               const float rgba[4],
+                                               std::uint32_t level,
+                                               std::uint32_t slice) {
+    return impl_->clearLayeredTextureColor(tex, arrayLength, rgba, level, slice);
 }
 
 bool MetalFrameGraph::clearTextureDepth(void* tex, std::uint32_t level, std::uint32_t slice,

@@ -10804,6 +10804,10 @@ struct GLContext::Impl {
                 if (mtlTex.depth > 1) {
                     slot.depth = levelDim(mtlTex.depth);
                     slot.layerFaces = slot.depth;
+                } else if (texObj->target == GL_TEXTURE_1D_ARRAY) {
+                    slot.depth = static_cast<std::uint32_t>(
+                        std::max<GLsizei>(texObj->desc.height, 1));
+                    slot.layerFaces = slot.depth;
                 } else if (texObj->target == GL_TEXTURE_CUBE_MAP_ARRAY ||
                            mtlTex.textureType == MTLTextureTypeCubeArray) {
                     const std::uint32_t cubes = static_cast<std::uint32_t>(
@@ -10825,7 +10829,22 @@ struct GLContext::Impl {
                 slot.bytesPerImage = slot.bytesPerRow * slot.height;
                 slot.internalFormat = intFmt;
                 slot.samplerType = 0;  // not applicable for storage images
+                slot.textureTarget = texObj->target;
                 slot.imageUnit = effUnit;
+                const bool nativeMultisampleTexture =
+                    mtlTex.textureType == MTLTextureType2DMultisample ||
+                    mtlTex.textureType == MTLTextureType2DMultisampleArray;
+                if (nativeMultisampleTexture) {
+                    // CPU shader emulation only needs dimensions for
+                    // imageSize(); Metal does not safely expose native MS
+                    // texture bytes through getBytes.
+                    if (trace) std::fprintf(stderr,
+                        "[GS-img]   element %d unit=%u tex=%u fmt=0x%X "
+                        "dim=%ux%ux%u layerFaces=%u datasz=0 native-ms\n",
+                        i, effUnit, ib.texture, intFmt, slot.width,
+                        slot.height, slot.depth, slot.layerFaces);
+                    continue;
+                }
                 const NSUInteger sliceCount = std::max<NSUInteger>(slot.layerFaces, 1);
                 slot.data.assign(
                     static_cast<std::size_t>(slot.bytesPerImage) * sliceCount,
@@ -12683,13 +12702,20 @@ struct GLContext::Impl {
                 texture->metalTexture != nullptr && frameGraph != nullptr) {
                 const float rgbaF[4] = { color[0], color[1], color[2], color[3] };
                 std::uint32_t arrayLength = 0;
-                if (texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY && attachment.layered) {
-                    const GLTextureImageLevel& image = level->second;
-                    arrayLength = static_cast<std::uint32_t>(std::max<GLsizei>(image.desc.depth, 1));
+                std::uint32_t clearSlice = 0;
+                if (texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
+                    if (attachment.layered) {
+                        const GLTextureImageLevel& image = level->second;
+                        arrayLength = static_cast<std::uint32_t>(std::max<GLsizei>(image.desc.depth, 1));
+                    } else {
+                        clearSlice = static_cast<std::uint32_t>(std::max<GLint>(attachment.layer, 0));
+                    }
                 }
                 texture->colorShadowAuthoritative = false;
                 return frameGraph->clearLayeredTextureColor(
-                    texture->metalTexture, arrayLength, rgbaF);
+                    texture->metalTexture, arrayLength, rgbaF,
+                    static_cast<std::uint32_t>(std::max<GLint>(attachment.level, 0)),
+                    clearSlice);
             }
             GLTextureImageLevel& image = level->second;
             const GLsizei sourceWidth = std::max<GLsizei>(image.desc.width, 1);

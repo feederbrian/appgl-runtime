@@ -228,6 +228,7 @@ using namespace appgl::interp;
 
 constexpr std::uint32_t kSpvStorageClassAtomicCounter = 10;
 constexpr std::uint32_t kAtomicCounterStorageBindingBase = 0x10000000u;
+constexpr std::uint32_t kGLTexture1DArray = 0x8C18u;
 
 bool spirvTypeNameLooksAtomicCounterBlock(const SpirvModule& mod,
                                           std::uint32_t typeId) {
@@ -7480,6 +7481,10 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                           lodLevel < slot.mipLayerFaces.size())
                         ? slot.mipLayerFaces[lodLevel]
                         : slot.depth;
+                    if (h.isStorage &&
+                        slot.textureTarget == kGLTexture1DArray) {
+                        qh = qd;
+                    }
                 }
                 // Result component count from SPIR-V resultType. Vector
                 // kinds Vec2/Vec3/Vec4 carry the count via their kind

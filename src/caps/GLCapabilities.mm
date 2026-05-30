@@ -1060,7 +1060,7 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // which no longer happens for integer formats.
     integerLimits_[GL_MAX_INTEGER_SAMPLES] = maxSamples;
     integerLimits_[GL_MAX_DUAL_SOURCE_DRAW_BUFFERS] = 1;
-    integerLimits_[GL_MAX_IMAGE_SAMPLES] = 0;
+    integerLimits_[GL_MAX_IMAGE_SAMPLES] = maxSamples;
 
     // Atomic counters — per-stage and combined.
     // GL 4.6 §20.4 lists MAX_ATOMIC_COUNTER_BUFFER_BINDINGS minimum as

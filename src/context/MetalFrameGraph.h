@@ -970,7 +970,8 @@ public:
     // stencil uses the low byte of `stencil`.
     bool clearLayeredTextureDepth(void* tex, std::uint32_t arrayLength, float depth);
     bool clearLayeredTextureStencil(void* tex, std::uint32_t arrayLength, std::uint32_t stencil);
-    bool clearLayeredTextureColor(void* tex, std::uint32_t arrayLength, const float rgba[4]);
+    bool clearLayeredTextureColor(void* tex, std::uint32_t arrayLength, const float rgba[4],
+                                  std::uint32_t level = 0, std::uint32_t slice = 0);
     bool clearTextureDepth(void* tex, std::uint32_t level, std::uint32_t slice,
                            std::uint32_t arrayLength, float depth);
     bool clearTextureStencil(void* tex, std::uint32_t level, std::uint32_t slice,

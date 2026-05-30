@@ -335,6 +335,7 @@ struct SampledTextureSlot {
     std::uint32_t layerFaces = 0;
     std::uint32_t internalFormat = 0;
     std::uint32_t samplerType = 0;
+    std::uint32_t textureTarget = 0;
     std::uint32_t wrapS = 0x2901; // GL_REPEAT
     std::uint32_t wrapT = 0x2901; // GL_REPEAT
     std::uint32_t wrapR = 0x2901; // GL_REPEAT

@@ -2500,6 +2500,176 @@ bool retargetCubeArrayStorageImagesAs2DArray(
     return changed;
 }
 
+std::vector<std::pair<std::string, std::uint32_t>>
+collectTextureVariableSlotsForMetalSlots(
+    const std::string& msl,
+    const std::vector<std::uint32_t>& metalTextureSlots,
+    const char* typePrefix) {
+    std::vector<std::pair<std::string, std::uint32_t>> variableSlots;
+    std::set<std::pair<std::string, std::uint32_t>> seen;
+
+    auto collectAtAttr = [&](const std::string& attr,
+                             std::uint32_t metalSlot) {
+        std::size_t search = 0;
+        while ((search = msl.find(attr, search)) != std::string::npos) {
+            const std::size_t lineStart = msl.rfind('\n', search);
+            const std::size_t lineBegin =
+                (lineStart == std::string::npos) ? 0 : lineStart + 1u;
+            std::size_t segmentBegin = lineBegin;
+            const std::size_t comma = msl.rfind(',', search);
+            if (comma != std::string::npos && comma >= segmentBegin) {
+                segmentBegin = comma + 1u;
+            }
+            const std::size_t paren = msl.rfind('(', search);
+            if (paren != std::string::npos && paren >= segmentBegin) {
+                segmentBegin = paren + 1u;
+            }
+            const std::size_t typePos = msl.find(typePrefix, segmentBegin);
+            if (typePos == std::string::npos || typePos > search) {
+                search += attr.size();
+                continue;
+            }
+            if (typePos > 0 && isIdentifierChar(msl[typePos - 1])) {
+                search += attr.size();
+                continue;
+            }
+            const std::size_t typeTemplate = msl.find('<', typePos);
+            if (typeTemplate == std::string::npos || typeTemplate > search) {
+                search += attr.size();
+                continue;
+            }
+            const std::size_t typeEnd = msl.find('>', typeTemplate);
+            if (typeEnd == std::string::npos || typeEnd > search) {
+                search += attr.size();
+                continue;
+            }
+            std::size_t nameStart = typeEnd + 1;
+            while (nameStart < search &&
+                   std::isspace(static_cast<unsigned char>(msl[nameStart]))) {
+                ++nameStart;
+            }
+            std::size_t nameEnd = nameStart;
+            while (nameEnd < search && isIdentifierChar(msl[nameEnd])) {
+                ++nameEnd;
+            }
+            if (nameEnd > nameStart) {
+                std::string name = msl.substr(nameStart, nameEnd - nameStart);
+                if (seen.insert({name, metalSlot}).second) {
+                    variableSlots.push_back({std::move(name), metalSlot});
+                }
+            }
+            search += attr.size();
+        }
+    };
+
+    for (std::uint32_t slot : metalTextureSlots) {
+        collectAtAttr("[[texture(" + std::to_string(slot) + ")]]", slot);
+        collectAtAttr("[[id(" + std::to_string(slot) + ")]]", slot);
+    }
+
+    return variableSlots;
+}
+
+bool rewriteMultisampleStorageImageArraySizes(
+    std::string& msl,
+    const std::vector<std::uint32_t>& metalTextureSlots) {
+    bool changed = false;
+    const auto variableSlots = collectTextureVariableSlotsForMetalSlots(
+        msl, metalTextureSlots, "texture2d_array");
+
+    for (const auto& entry : variableSlots) {
+        const std::string& varName = entry.first;
+        const std::uint32_t metalSlot = entry.second;
+        const std::string bareNeedle = varName + ".get_array_size()";
+        std::size_t pos = 0;
+        while ((pos = msl.find(bareNeedle, pos)) != std::string::npos) {
+            std::size_t exprStart = pos;
+            const std::size_t exprEnd = pos + bareNeedle.size();
+
+            if (pos > 0 && isIdentifierChar(msl[pos - 1])) {
+                pos += bareNeedle.size();
+                continue;
+            }
+            if (pos > 0 && msl[pos - 1] == '.') {
+                std::size_t prefixStart = pos - 1;
+                while (prefixStart > 0 &&
+                       isIdentifierChar(msl[prefixStart - 1])) {
+                    --prefixStart;
+                }
+                if (prefixStart == pos - 1) {
+                    pos += bareNeedle.size();
+                    continue;
+                }
+                exprStart = prefixStart;
+            }
+
+            const std::string expr = msl.substr(exprStart, exprEnd - exprStart);
+            if (expr.find("appgl_ms_storage_image_samples") != std::string::npos) {
+                pos = exprEnd;
+                continue;
+            }
+            const std::string replacement =
+                "(" + expr + " / max(appgl_ms_storage_image_samples[" +
+                std::to_string(metalSlot) + "], 1u))";
+            msl.replace(exprStart, exprEnd - exprStart, replacement);
+            pos = exprStart + replacement.size();
+            changed = true;
+        }
+    }
+
+    return changed;
+}
+
+bool rewriteMultisampleStorageImageSampleQueries(
+    std::string& msl,
+    const std::vector<std::uint32_t>& metalTextureSlots) {
+    bool changed = false;
+    const auto variableSlots = collectTextureVariableSlotsForMetalSlots(
+        msl, metalTextureSlots, "texture2d");
+
+    for (const auto& entry : variableSlots) {
+        const std::string& varName = entry.first;
+        const std::uint32_t metalSlot = entry.second;
+        const std::string bareNeedle = varName + ".get_num_samples()";
+        std::size_t pos = 0;
+        while ((pos = msl.find(bareNeedle, pos)) != std::string::npos) {
+            std::size_t exprStart = pos;
+            const std::size_t exprEnd = pos + bareNeedle.size();
+
+            if (pos > 0 && isIdentifierChar(msl[pos - 1])) {
+                pos += bareNeedle.size();
+                continue;
+            }
+            if (pos > 0 && msl[pos - 1] == '.') {
+                std::size_t prefixStart = pos - 1;
+                while (prefixStart > 0 &&
+                       isIdentifierChar(msl[prefixStart - 1])) {
+                    --prefixStart;
+                }
+                if (prefixStart == pos - 1) {
+                    pos += bareNeedle.size();
+                    continue;
+                }
+                exprStart = prefixStart;
+            }
+
+            const std::string expr = msl.substr(exprStart, exprEnd - exprStart);
+            if (expr.find("appgl_ms_storage_image_samples") != std::string::npos) {
+                pos = exprEnd;
+                continue;
+            }
+            const std::string replacement =
+                "appgl_ms_storage_image_samples[" +
+                std::to_string(metalSlot) + "]";
+            msl.replace(exprStart, exprEnd - exprStart, replacement);
+            pos = exprStart + replacement.size();
+            changed = true;
+        }
+    }
+
+    return changed;
+}
+
 bool findMatchingBrace(const std::string& text,
                        std::size_t open,
                        std::size_t& close) {
@@ -3983,6 +4153,7 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     r.maxVaryingComponents = 128;
     r.maxVaryingVectors = 32;
     r.maxImageUnits = 16;
+    r.maxImageSamples = 4;
     r.maxCombinedImageUniforms = 48;
     r.maxCombinedImageUnitsAndFragmentOutputs = 48;
     r.maxCombinedShaderOutputResources = 48;
@@ -5488,6 +5659,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         };
         std::vector<StorageImageAccessFixup> storageImageAccessFixups;
         std::vector<std::uint32_t> cubeArrayStorageImageSlots;
+        std::vector<std::uint32_t> multisampleStorageImageSlots;
+        std::vector<std::uint32_t> multisampleStorageImageArraySlots;
 
         // Remap sampled images (combined image samplers).
         //
@@ -5664,6 +5837,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 bool nonWritable;
                 bool nonReadable;
                 bool cubeArray = false;
+                bool multisample = false;
+                bool multisampleArray = false;
             };
             std::vector<StorageImgRef> sortedStorageImages;
             for (auto& img : resources.storage_images) {
@@ -5685,6 +5860,15 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                     imageType.image.dim == spv::DimCube &&
                     imageType.image.arrayed &&
                     !imageType.image.ms;
+                r.multisampleArray =
+                    imageType.basetype == spirv_cross::SPIRType::Image &&
+                    imageType.image.dim == spv::Dim2D &&
+                    imageType.image.ms &&
+                    imageType.image.arrayed;
+                r.multisample =
+                    imageType.basetype == spirv_cross::SPIRType::Image &&
+                    imageType.image.dim == spv::Dim2D &&
+                    imageType.image.ms;
                 r.nonWritable = compiler.has_decoration(img.id, spv::DecorationNonWritable);
                 r.nonReadable = compiler.has_decoration(img.id, spv::DecorationNonReadable);
                 sortedStorageImages.push_back(r);
@@ -5728,6 +5912,12 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                     if (entry.cubeArray) {
                         cubeArrayStorageImageSlots.push_back(binding.msl_texture);
                     }
+                    if (entry.multisample) {
+                        multisampleStorageImageSlots.push_back(binding.msl_texture);
+                    }
+                    if (entry.multisampleArray) {
+                        multisampleStorageImageArraySlots.push_back(binding.msl_texture);
+                    }
                 } else {
                     constexpr std::uint32_t kStorageImageDescSet = 2;
                     // Override both the descriptor-set AND the
@@ -5760,6 +5950,12 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                     }
                     if (entry.cubeArray) {
                         cubeArrayStorageImageSlots.push_back(binding.msl_texture);
+                    }
+                    if (entry.multisample) {
+                        multisampleStorageImageSlots.push_back(binding.msl_texture);
+                    }
+                    if (entry.multisampleArray) {
+                        multisampleStorageImageArraySlots.push_back(binding.msl_texture);
                     }
                 }
                 compiler.add_msl_resource_binding(binding);
@@ -5997,11 +6193,17 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         if (!resources.storage_images.empty()) {
             (void)retargetCubeArrayStorageImagesAs2DArray(
                 msl, cubeArrayStorageImageSlots);
+            (void)rewriteMultisampleStorageImageSampleQueries(
+                msl, multisampleStorageImageSlots);
+            (void)rewriteMultisampleStorageImageArraySizes(
+                msl, multisampleStorageImageArraySlots);
         }
 
         (void)injectMultisampleSampledImageSidecars(msl);
         (void)injectSparseSampledImageSidecars(msl);
         (void)injectMultisampleStorageImageSampleCounts(msl);
+        threadTextureReductionModesThroughHelpers(
+            msl, "appgl_ms_storage_image_samples");
         (void)injectMultisampleStorageSparseResidencyTextures(msl);
 
         // SPIRV-Cross lowers GLSL image coordinates as signed integer
