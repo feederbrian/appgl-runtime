@@ -8992,6 +8992,9 @@ struct GLContext::Impl {
                 }
                 return;
             }
+            outBindings.reserve(outBindings.size() + sampledTextures->size());
+            info.sampledTextureNames.reserve(
+                info.sampledTextureNames.size() + sampledTextures->size());
             static constexpr std::uint32_t kMaxDirectMetalSamplerSlots = 16u;
             const bool stageUsesArgBuf = mslUsesArgumentBufferSet0(stageMSL);
             if (g_lbLog) {
@@ -10343,6 +10346,13 @@ struct GLContext::Impl {
         TranslatedDrawInfo& info)
     {
         info.uboBindings.clear();
+        const std::size_t vertexBlockCount = info.vertexReflection != nullptr
+            ? info.vertexReflection->uniformBlocks.size()
+            : 0;
+        const std::size_t fragmentBlockCount = info.fragmentReflection != nullptr
+            ? info.fragmentReflection->uniformBlocks.size()
+            : 0;
+        info.uboBindings.reserve(vertexBlockCount + fragmentBlockCount);
 
         auto resolveBlocks = [&](const ShaderReflection* reflection,
                                  bool isVertex, bool isFragment) {
@@ -10459,6 +10469,16 @@ struct GLContext::Impl {
         info.ssboBindings.clear();
         info.atomicCounterBindings.clear();
         pendingFp64GraphicsSsboSidecars.clear();
+        const std::size_t vertexStorageBufferCount = info.vertexReflection != nullptr
+            ? info.vertexReflection->storageBuffers.size()
+            : 0;
+        const std::size_t fragmentStorageBufferCount = info.fragmentReflection != nullptr
+            ? info.fragmentReflection->storageBuffers.size()
+            : 0;
+        info.ssboBindings.reserve(
+            vertexStorageBufferCount + fragmentStorageBufferCount);
+        info.atomicCounterBindings.reserve(
+            program.resourceAtomicCounterBuffers.size() * 2);
 
         auto resolveStage = [&](const ShaderReflection* reflection,
                                 bool isVertex, bool isFragment) {
@@ -10989,6 +11009,18 @@ struct GLContext::Impl {
                     info.fragmentReflection->sampledTextures.size());
             }
         }
+        const std::size_t vertexImageCount = info.vertexReflection != nullptr
+            ? info.vertexReflection->storageImages.size()
+            : 0;
+        const std::size_t fragmentImageCount = info.fragmentReflection != nullptr
+            ? info.fragmentReflection->storageImages.size()
+            : 0;
+        info.vertexTextures.reserve(info.vertexTextures.size() + vertexImageCount);
+        info.fragmentTextures.reserve(info.fragmentTextures.size() + fragmentImageCount);
+        info.readImageTextureNames.reserve(
+            info.readImageTextureNames.size() + vertexImageCount + fragmentImageCount);
+        info.writtenImageTextureNames.reserve(
+            info.writtenImageTextureNames.size() + vertexImageCount + fragmentImageCount);
         auto resolveStage = [&](const char* stageName, const ShaderReflection* reflection,
                                 const std::string& stageMSL,
                                 std::vector<TranslatedDrawInfo::TextureBinding>& outList) {
@@ -43569,6 +43601,50 @@ static void logIndexExpansionCostClass(const char* path,
               generation);
 }
 
+static void resetReusableTranslatedDrawInfo(TranslatedDrawInfo& tdi)
+{
+    auto vertexAttributeLayouts = std::move(tdi.vertexAttributeLayouts);
+    auto extraVertexBuffers = std::move(tdi.extraVertexBuffers);
+    auto fragmentTextures = std::move(tdi.fragmentTextures);
+    auto vertexTextures = std::move(tdi.vertexTextures);
+    auto uboBindings = std::move(tdi.uboBindings);
+    auto ssboBindings = std::move(tdi.ssboBindings);
+    auto atomicCounterBindings = std::move(tdi.atomicCounterBindings);
+    auto sampledTextureNames = std::move(tdi.sampledTextureNames);
+    auto readImageTextureNames = std::move(tdi.readImageTextureNames);
+    auto writtenImageTextureNames = std::move(tdi.writtenImageTextureNames);
+
+    vertexAttributeLayouts.clear();
+    extraVertexBuffers.clear();
+    fragmentTextures.clear();
+    vertexTextures.clear();
+    uboBindings.clear();
+    ssboBindings.clear();
+    atomicCounterBindings.clear();
+    sampledTextureNames.clear();
+    readImageTextureNames.clear();
+    writtenImageTextureNames.clear();
+
+    tdi = TranslatedDrawInfo{};
+    tdi.vertexAttributeLayouts = std::move(vertexAttributeLayouts);
+    tdi.extraVertexBuffers = std::move(extraVertexBuffers);
+    tdi.fragmentTextures = std::move(fragmentTextures);
+    tdi.vertexTextures = std::move(vertexTextures);
+    tdi.uboBindings = std::move(uboBindings);
+    tdi.ssboBindings = std::move(ssboBindings);
+    tdi.atomicCounterBindings = std::move(atomicCounterBindings);
+    tdi.sampledTextureNames = std::move(sampledTextureNames);
+    tdi.readImageTextureNames = std::move(readImageTextureNames);
+    tdi.writtenImageTextureNames = std::move(writtenImageTextureNames);
+}
+
+static TranslatedDrawInfo& reusableTranslatedDrawInfo()
+{
+    thread_local TranslatedDrawInfo tdi;
+    resetReusableTranslatedDrawInfo(tdi);
+    return tdi;
+}
+
 // Phase A Group 7 — MVP draw path. Until the GLSL→MSL translator is wired up,
 // the runtime supports one hand-written "solid color" pipeline: a single
 // vec3 position attribute at location 0 plus a vec4 uniform named "uColor".
@@ -44019,6 +44095,11 @@ static void applyCachedVertexArrayLayout(
     bool offsetExtraBuffersByFirst,
     bool keepEmptyExtraBufferGroups)
 {
+    tdi.vertexAttributeLayouts.reserve(
+        tdi.vertexAttributeLayouts.size() + cache.primaryAttributes.size());
+    tdi.extraVertexBuffers.reserve(
+        tdi.extraVertexBuffers.size() + cache.extraGroups.size());
+
     for (const auto& cached : cache.primaryAttributes) {
         auto layout = makeTranslatedLayout(cached);
         layout.offset = cached.offset - cache.primaryBaseOffset;
@@ -44047,6 +44128,7 @@ static void applyCachedVertexArrayLayout(
                 : 0;
             evb.glBuffer = group.bufferName;
         }
+        evb.attributes.reserve(group.attributes.size());
         for (const auto& cachedAttr : group.attributes) {
             evb.attributes.push_back(makeTranslatedLayout(cachedAttr));
         }
@@ -46854,7 +46936,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         (void)cullBaseLoc;
     }
 
-    TranslatedDrawInfo tdi;
+    TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
     tdi.fallbackSubgroupKind =
         fallbackSubgroupKind != AppGLSubmissionGroupKind::None
             ? fallbackSubgroupKind
@@ -47120,7 +47202,7 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
         return false;
     }
 
-    TranslatedDrawInfo tdi;
+    TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
     tdi.mode = mode;
     tdi.vertexCount = static_cast<GLsizei>(filteredIndices.size());
     tdi.vertexData = vbo->shadowBytes.data() + startOff;
@@ -48899,7 +48981,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
         const bool attributelessDraw = (vao != nullptr &&
             program->vertexReflection.vertexInputs.empty());
         if (attributelessDraw) {
-            TranslatedDrawInfo tdi;
+            TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
             tdi.mode = mode;
             tdi.vertexCount = count;
             // No vertex data — shader uses gl_VertexID / [[vertex_id]].
@@ -48976,7 +49058,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             const bool foundEnabledAttrib = vaoLayout.hasEnabledAttributes;
             if (!foundEnabledAttrib &&
                 !program->vertexReflection.vertexInputs.empty()) {
-                TranslatedDrawInfo tdi;
+                TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
                 tdi.mode = mode;
                 tdi.vertexCount = count;
                 tdi.vertexData = nullptr;
@@ -49072,7 +49154,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                         vbo->shadowBytes.size());
                 }
                 if (startOff <= vbo->shadowBytes.size()) {
-                    TranslatedDrawInfo tdi;
+                    TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
                     tdi.mode = mode;
                     tdi.vertexCount = count;
                     tdi.vertexData = vbo->shadowBytes.data() + startOff;
@@ -49617,7 +49699,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
         const bool attributelessInstDraw = (vao != nullptr &&
             program->vertexReflection.vertexInputs.empty());
         if (attributelessInstDraw) {
-            TranslatedDrawInfo tdi;
+            TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
             tdi.mode = mode;
             tdi.vertexCount = count;
             tdi.instanceCount = instancecount;
@@ -49710,7 +49792,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                         vbo->shadowBytes.size());
                 }
                 if (startOff <= vbo->shadowBytes.size()) {
-                    TranslatedDrawInfo tdi;
+                    TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
                     tdi.mode = mode;
                     tdi.vertexCount = count;
                     tdi.instanceCount = instancecount;
@@ -50396,7 +50478,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         vao != nullptr &&
         program->vertexReflection.vertexInputs.empty() &&
         count > 0 && effectivePtr != nullptr) {
-        TranslatedDrawInfo tdi;
+        TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
         tdi.mode = drawElementsMode;
         tdi.vertexCount = drawElementsCount;
         tdi.vertexData = nullptr;
@@ -50520,7 +50602,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                         vbo->shadowBytes.size());
                 }
                 if (startOff <= vbo->shadowBytes.size()) {
-                    TranslatedDrawInfo tdi;
+                    TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
                     tdi.mode = drawElementsMode;
                     tdi.vertexCount = drawElementsCount;
                     tdi.vertexData = vbo->shadowBytes.data() + startOff;
@@ -50858,7 +50940,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                         vbo->shadowBytes.size());
                 }
                 if (startOff <= vbo->shadowBytes.size()) {
-                    TranslatedDrawInfo tdi;
+                    TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
                     tdi.mode = mode;
                     tdi.vertexCount = count;
                     tdi.baseVertex = basevertex;
@@ -51430,7 +51512,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                         vbo->shadowBytes.size());
                 }
                 if (startOff <= vbo->shadowBytes.size()) {
-                    TranslatedDrawInfo tdi;
+                    TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
                     tdi.mode = mode;
                     tdi.vertexCount = count;
                     tdi.baseVertex = basevertex;
