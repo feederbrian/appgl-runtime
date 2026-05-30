@@ -34166,6 +34166,15 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->uniforms.clear();
     programObject->attributes.clear();
     programObject->uniformValues.clear();
+    programObject->vertexUniformLayout.clear();
+    programObject->fragmentUniformLayout.clear();
+    programObject->computeUniformLayout.clear();
+    programObject->tessControlUniformLayout.clear();
+    programObject->tessVertexAsComputeUniformLayout.clear();
+    programObject->tessEvalAsComputeUniformLayout.clear();
+    programObject->vsTfAsComputeUniformLayout.clear();
+    programObject->uniformLayoutComputed = false;
+    programObject->invalidateUniformBufferCache();
     for (std::size_t stage = 0; stage < programObject->pipelineEmulationStageUniforms.size(); ++stage) {
         programObject->pipelineEmulationStageUniforms[stage].clear();
         programObject->pipelineEmulationStageUniformValues[stage].clear();
@@ -42430,6 +42439,7 @@ bool GLContext::setUniformScalarVector(GLint location, UniformElementType elemen
     }
     slot->doubles.clear();
     slot->df64TransportWords.clear();
+    object->markUniformsDirty();
     return true;
 }
 
@@ -42485,6 +42495,7 @@ bool GLContext::setUniformMatrix(GLint location, GLint rows, GLint cols, GLsizei
     slot->uints.clear();
     slot->doubles.clear();
     slot->df64TransportWords.clear();
+    object->markUniformsDirty();
     return true;
 }
 
@@ -42596,6 +42607,7 @@ bool GLContext::setUniformDouble(GLint location, GLint vectorSize, GLsizei count
                            vectorSize,
                            count,
                            values);
+    object->markUniformsDirty();
     return true;
 }
 
@@ -42670,6 +42682,7 @@ bool GLContext::setUniformDoubleMatrix(GLint location, GLint rows, GLint cols, G
     assignDf64TransportWords(*slot, slot->doubles.data(), slot->doubles.size());
     slot->ints.clear();
     slot->uints.clear();
+    object->markUniformsDirty();
     return true;
 }
 
@@ -42737,6 +42750,7 @@ bool GLContext::setUniformScalarVectorForProgram(GLuint program, GLint location,
     }
     slot->doubles.clear();
     slot->df64TransportWords.clear();
+    object->markUniformsDirty();
     return true;
 }
 
@@ -42765,6 +42779,7 @@ bool GLContext::setUniformMatrixForProgram(GLuint program, GLint location, GLint
     }
     slot->ints.clear(); slot->uints.clear();
     slot->doubles.clear(); slot->df64TransportWords.clear();
+    object->markUniformsDirty();
     return true;
 }
 
@@ -42786,6 +42801,7 @@ bool GLContext::setUniformDoubleForProgram(GLuint program, GLint location, GLint
                            vectorSize,
                            count,
                            values);
+    object->markUniformsDirty();
     return true;
 }
 
@@ -42831,6 +42847,7 @@ bool GLContext::setUniformDoubleMatrixForProgram(GLuint program, GLint location,
     for (std::size_t i = 0; i < fullCount; ++i) { slot->floats[i] = static_cast<GLfloat>(slot->doubles[i]); }
     assignDf64TransportWords(*slot, slot->doubles.data(), slot->doubles.size());
     slot->ints.clear(); slot->uints.clear();
+    object->markUniformsDirty();
     return true;
 }
 
@@ -43228,46 +43245,100 @@ static const std::unordered_map<GLint, GLProgramUniformValue>& uniformValuesForE
 // gl_* identifier stay at -1 and get skipped. When no slots are set
 // at all (the typical case for core-profile programs), this returns
 // in O(1) and the per-draw cost is a single bool check.
-static void pushSynthesizedMatrixUniforms(
+template <typename T>
+static bool replaceVectorIfChanged(std::vector<T>& dst,
+                                   const T* src,
+                                   std::size_t count) {
+    if (dst.size() == count && (count == 0 || std::equal(dst.begin(), dst.end(), src))) {
+        return false;
+    }
+    dst.assign(src, src + count);
+    return true;
+}
+
+static bool assignSynthesizedUniformFloats(GLProgramUniformValue& value,
+                                           GLenum type,
+                                           GLint arraySize,
+                                           const GLfloat* data,
+                                           std::size_t count) {
+    bool changed = value.type != type ||
+                   value.arraySize != arraySize ||
+                   !value.ints.empty() ||
+                   !value.uints.empty() ||
+                   !value.doubles.empty() ||
+                   !value.df64TransportWords.empty();
+    changed |= replaceVectorIfChanged(value.floats, data, count);
+    value.type = type;
+    value.arraySize = arraySize;
+    value.ints.clear();
+    value.uints.clear();
+    value.doubles.clear();
+    value.df64TransportWords.clear();
+    return changed;
+}
+
+static bool assignSynthesizedUniformInts(GLProgramUniformValue& value,
+                                         GLenum type,
+                                         GLint arraySize,
+                                         const GLint* data,
+                                         std::size_t count) {
+    bool changed = value.type != type ||
+                   value.arraySize != arraySize ||
+                   !value.floats.empty() ||
+                   !value.uints.empty() ||
+                   !value.doubles.empty() ||
+                   !value.df64TransportWords.empty();
+    changed |= replaceVectorIfChanged(value.ints, data, count);
+    value.type = type;
+    value.arraySize = arraySize;
+    value.floats.clear();
+    value.uints.clear();
+    value.doubles.clear();
+    value.df64TransportWords.clear();
+    return changed;
+}
+
+static bool pushSynthesizedMatrixUniforms(
     GLProgramObject& program,
     const MatrixStateMirror& matrixState,
     GLuint drawID = 0)
 {
+    bool changed = false;
     if (program.shaderDrawIDUniformLocation >= 0) {
         auto& value = program.uniformValues[program.shaderDrawIDUniformLocation];
-        value.type = GL_INT;
-        value.arraySize = 1;
-        value.ints.assign(1, static_cast<GLint>(drawID));
+        const GLint drawIDValue = static_cast<GLint>(drawID);
+        changed |= assignSynthesizedUniformInts(
+            value, GL_INT, 1, &drawIDValue, 1);
     }
 
     const auto& slots = program.synthesizedMatrixSlots;
     if (!slots.hasAny()) {
-        return;
+        return changed;
     }
 
     auto storeMat4 = [&](GLint loc, const Matrix4& matrix) {
         if (loc < 0) return;
         auto& value = program.uniformValues[loc];
-        value.type = GL_FLOAT_MAT4;
-        value.arraySize = 1;
-        value.floats.assign(matrix.m.begin(), matrix.m.end());
+        changed |= assignSynthesizedUniformFloats(
+            value, GL_FLOAT_MAT4, 1, matrix.m.data(), matrix.m.size());
     };
     auto storeMat3 = [&](GLint loc, const Matrix4& matrix) {
         if (loc < 0) return;
-        auto& value = program.uniformValues[loc];
-        value.type = GL_FLOAT_MAT3;
-        value.arraySize = 1;
         // GL stores mat3 as 9 packed floats (3 columns × 3 rows). The
         // GPU side uses 3 vec4 columns; buildStageUniformBuffer's
         // matrix-column-padding path (matPaddedCols / matPaddedRows)
         // repacks 9 → 12 floats when the layout entry is flagged. We
         // store the 9-float canonical form here.
-        value.floats.assign(9, 0.0f);
+        std::array<GLfloat, 9> packed = {};
         for (int col = 0; col < 3; ++col) {
             for (int row = 0; row < 3; ++row) {
-                value.floats[col * 3 + row] = matrix.m[col * 4 + row];
+                packed[static_cast<std::size_t>(col * 3 + row)] =
+                    matrix.m[static_cast<std::size_t>(col * 4 + row)];
             }
         }
+        auto& value = program.uniformValues[loc];
+        changed |= assignSynthesizedUniformFloats(
+            value, GL_FLOAT_MAT3, 1, packed.data(), packed.size());
     };
 
     if (slots.modelView >= 0) {
@@ -43299,18 +43370,22 @@ static void pushSynthesizedMatrixUniforms(
         // texture stack tops; unused units come back as identity from
         // MatrixStateMirror::textureMatrix() so the GPU-side array is
         // always fully populated.
-        auto& value = program.uniformValues[slots.texture];
-        value.type = GL_FLOAT_MAT4;
-        value.arraySize = static_cast<GLint>(kSynthesizedTextureMatrixCount);
-        value.floats.assign(
-            static_cast<std::size_t>(kSynthesizedTextureMatrixCount) * 16, 0.0f);
+        std::array<GLfloat, kSynthesizedTextureMatrixCount * 16> packed = {};
         for (unsigned int i = 0; i < kSynthesizedTextureMatrixCount; ++i) {
             const Matrix4 m = matrixState.textureMatrix(i);
-            std::memcpy(value.floats.data() + i * 16,
+            std::memcpy(packed.data() + i * 16,
                         m.m.data(),
                         16 * sizeof(float));
         }
+        auto& value = program.uniformValues[slots.texture];
+        changed |= assignSynthesizedUniformFloats(
+            value,
+            GL_FLOAT_MAT4,
+            static_cast<GLint>(kSynthesizedTextureMatrixCount),
+            packed.data(),
+            packed.size());
     }
+    return changed;
 }
 
 static void buildStageUniformBuffer(
@@ -43401,6 +43476,91 @@ static void buildStageUniformBuffer(
 
         std::memcpy(dst, srcData, std::min(srcBytes, entry.copyBytes));
     }
+}
+
+static void prepareTranslatedDrawUniformBuffers(
+    GLProgramObject& program,
+    GLuint programName,
+    const MatrixStateMirror& matrixState,
+    GLuint drawID,
+    TranslatedDrawInfo& tdi,
+    const char* path)
+{
+    if (!program.uniformLayoutComputed) {
+        computeStageUniformLayout(program.vertexUniformLayout,
+            program.vertexReflection, program.uniforms);
+        computeStageUniformLayout(program.fragmentUniformLayout,
+            program.fragmentReflection, program.uniforms);
+        program.uniformLayoutComputed = true;
+        program.invalidateUniformBufferCache();
+    }
+
+    if (pushSynthesizedMatrixUniforms(program, matrixState, drawID)) {
+        program.markUniformsDirty();
+    }
+
+    const bool rebuilt = program.isUniformBufferDirty();
+    if (rebuilt) {
+        buildStageUniformBuffer(program.cachedVertexUniformBuffer,
+            program.vertexReflection, program.uniformValues,
+            program.vertexUniformLayout);
+        buildStageUniformBuffer(program.cachedFragmentUniformBuffer,
+            program.fragmentReflection, program.uniformValues,
+            program.fragmentUniformLayout);
+        program.markUniformBufferClean();
+    }
+
+    tdi.vertexUniformData = program.cachedVertexUniformBuffer.data();
+    tdi.vertexUniformSize = program.cachedVertexUniformBuffer.size();
+    tdi.fragmentUniformData = program.cachedFragmentUniformBuffer.data();
+    tdi.fragmentUniformSize = program.cachedFragmentUniformBuffer.size();
+
+    APPGL_LOG(DRAW, @"[GL:uniform-rebuild] path=%s program=%u rebuilt=%d gen=%llu"
+                    @" vertexBytes=%zu fragmentBytes=%zu",
+              path,
+              programName,
+              rebuilt ? 1 : 0,
+              static_cast<unsigned long long>(program.uniformValueGeneration),
+              program.cachedVertexUniformBuffer.size(),
+              program.cachedFragmentUniformBuffer.size());
+}
+
+static void logStateResolveCostClass(const char* path,
+                                     GLuint programName,
+                                     GLuint vaoName,
+                                     const TranslatedDrawInfo& tdi,
+                                     std::size_t vaoAttributeCount)
+{
+    APPGL_LOG(DRAW, @"[GL:state-resolve] path=%s program=%u vao=%u"
+                    @" vaoAttrs=%zu primaryAttrs=%zu extraBuffers=%zu",
+              path,
+              programName,
+              vaoName,
+              vaoAttributeCount,
+              tdi.vertexAttributeLayouts.size(),
+              tdi.extraVertexBuffers.size());
+}
+
+static void logIndexExpansionCostClass(const char* path,
+                                       GLuint elementBufferName,
+                                       GLenum inputType,
+                                       GLenum outputType,
+                                       GLsizei count,
+                                       std::size_t expandedBytes,
+                                       bool cacheHit,
+                                       std::uint32_t generation)
+{
+    APPGL_LOG(DRAW, @"[GL:expansion] path=%s elementBuffer=%u"
+                    @" inputType=0x%x outputType=0x%x count=%d"
+                    @" expandedBytes=%zu cacheHit=%d generation=%u",
+              path,
+              elementBufferName,
+              inputType,
+              outputType,
+              count,
+              expandedBytes,
+              cacheHit ? 1 : 0,
+              generation);
 }
 
 // Phase A Group 7 — MVP draw path. Until the GLSL→MSL translator is wired up,
@@ -45909,7 +46069,9 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     thread_local std::vector<std::uint8_t> meshGsFragUniformScratch;
     thread_local std::vector<std::uint8_t> meshGsGeomUniformScratch;
     thread_local std::vector<GLProgramObject::UniformLayoutEntry> meshGsGeomUniformLayout;
-    pushSynthesizedMatrixUniforms(program, matrixState);
+    if (pushSynthesizedMatrixUniforms(program, matrixState)) {
+        program.markUniformsDirty();
+    }
     computeStageUniformLayout(meshGsGeomUniformLayout,
         program.geometryReflection, program.uniforms);
     buildStageUniformBuffer(meshGsVtxUniformScratch,
@@ -46859,26 +47021,10 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
         }
     }
 
-    if (!program.uniformLayoutComputed) {
-        computeStageUniformLayout(program.vertexUniformLayout,
-            program.vertexReflection, program.uniforms);
-        computeStageUniformLayout(program.fragmentUniformLayout,
-            program.fragmentReflection, program.uniforms);
-        program.uniformLayoutComputed = true;
-    }
-    thread_local std::vector<std::uint8_t> cpVtxUniform;
-    thread_local std::vector<std::uint8_t> cpFragUniform;
-    pushSynthesizedMatrixUniforms(program, matrixState);
-    buildStageUniformBuffer(cpVtxUniform,
-        program.vertexReflection, program.uniformValues,
-        program.vertexUniformLayout);
-    buildStageUniformBuffer(cpFragUniform,
-        program.fragmentReflection, program.uniformValues,
-        program.fragmentUniformLayout);
-    tdi.vertexUniformData = cpVtxUniform.data();
-    tdi.vertexUniformSize = cpVtxUniform.size();
-    tdi.fragmentUniformData = cpFragUniform.data();
-    tdi.fragmentUniformSize = cpFragUniform.size();
+    logStateResolveCostClass(
+        "cull-filtered-draw", programName, 0, tdi, vao.attributes.size());
+    prepareTranslatedDrawUniformBuffers(
+        program, programName, matrixState, 0, tdi, "cull-filtered-draw");
 
     resolveSamplerBindings(program, tdi);
     resolveUBOBindings(program, tdi);
@@ -48639,27 +48785,12 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
             tdi.program = programName;
 
-            // Uniform layout (cached).
-            if (!program->uniformLayoutComputed) {
-                computeStageUniformLayout(program->vertexUniformLayout,
-                    program->vertexReflection, program->uniforms);
-                computeStageUniformLayout(program->fragmentUniformLayout,
-                    program->fragmentReflection, program->uniforms);
-                program->uniformLayoutComputed = true;
-            }
-            thread_local std::vector<std::uint8_t> vtxUniformScratch;
-            thread_local std::vector<std::uint8_t> fragUniformScratch;
-            pushSynthesizedMatrixUniforms(*program, impl_->matrixState, drawID);
-            buildStageUniformBuffer(vtxUniformScratch,
-                program->vertexReflection, program->uniformValues,
-                program->vertexUniformLayout);
-            buildStageUniformBuffer(fragUniformScratch,
-                program->fragmentReflection, program->uniformValues,
-                program->fragmentUniformLayout);
-            tdi.vertexUniformData = vtxUniformScratch.data();
-            tdi.vertexUniformSize = vtxUniformScratch.size();
-            tdi.fragmentUniformData = fragUniformScratch.data();
-            tdi.fragmentUniformSize = fragUniformScratch.size();
+            logStateResolveCostClass(
+                "drawArrays-attributeless", programName, vaoName,
+                tdi, vao->attributes.size());
+            prepareTranslatedDrawUniformBuffers(
+                *program, programName, impl_->matrixState, drawID, tdi,
+                "drawArrays-attributeless");
 
             impl_->resolveSamplerBindings(*program, tdi);
             impl_->resolveUBOBindings(*program, tdi);
@@ -48744,26 +48875,12 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 tdi.program = programName;
                 appendCurrentGenericVertexAttributes(tdi, vao);
 
-                if (!program->uniformLayoutComputed) {
-                    computeStageUniformLayout(program->vertexUniformLayout,
-                        program->vertexReflection, program->uniforms);
-                    computeStageUniformLayout(program->fragmentUniformLayout,
-                        program->fragmentReflection, program->uniforms);
-                    program->uniformLayoutComputed = true;
-                }
-                thread_local std::vector<std::uint8_t> vtxUniformScratchConst;
-                thread_local std::vector<std::uint8_t> fragUniformScratchConst;
-                pushSynthesizedMatrixUniforms(*program, impl_->matrixState, drawID);
-                buildStageUniformBuffer(vtxUniformScratchConst,
-                    program->vertexReflection, program->uniformValues,
-                    program->vertexUniformLayout);
-                buildStageUniformBuffer(fragUniformScratchConst,
-                    program->fragmentReflection, program->uniformValues,
-                    program->fragmentUniformLayout);
-                tdi.vertexUniformData = vtxUniformScratchConst.data();
-                tdi.vertexUniformSize = vtxUniformScratchConst.size();
-                tdi.fragmentUniformData = fragUniformScratchConst.data();
-                tdi.fragmentUniformSize = fragUniformScratchConst.size();
+                logStateResolveCostClass(
+                    "drawArrays-generic-attrs", programName, vaoName,
+                    tdi, vao->attributes.size());
+                prepareTranslatedDrawUniformBuffers(
+                    *program, programName, impl_->matrixState, drawID, tdi,
+                    "drawArrays-generic-attrs");
 
                 impl_->resolveSamplerBindings(*program, tdi);
                 impl_->resolveUBOBindings(*program, tdi);
@@ -48952,34 +49069,12 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     }
                     appendCurrentGenericVertexAttributes(tdi, vao);
 
-                    // OPT-7: compute uniform layout once, reuse every draw.
-                    if (!program->uniformLayoutComputed) {
-                        computeStageUniformLayout(program->vertexUniformLayout,
-                            program->vertexReflection, program->uniforms);
-                        computeStageUniformLayout(program->fragmentUniformLayout,
-                            program->fragmentReflection, program->uniforms);
-                        program->uniformLayoutComputed = true;
-                    }
-
-                    // Build per-stage uniform buffers using the cached layout.
-                    // Thread-local scratch buffers retain their allocation
-                    // across draw calls — zero heap allocs after warmup.
-                    thread_local std::vector<std::uint8_t> vtxUniformScratch;
-                    thread_local std::vector<std::uint8_t> fragUniformScratch;
-                    // Push synthesized fixed-function matrix uniforms into
-                    // program->uniformValues for compat-rewritten shaders.
-                    // Early-out for the common (core-profile) case.
-                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState, drawID);
-                    buildStageUniformBuffer(vtxUniformScratch,
-                        program->vertexReflection, program->uniformValues,
-                        program->vertexUniformLayout);
-                    buildStageUniformBuffer(fragUniformScratch,
-                        program->fragmentReflection, program->uniformValues,
-                        program->fragmentUniformLayout);
-                    tdi.vertexUniformData = vtxUniformScratch.data();
-                    tdi.vertexUniformSize = vtxUniformScratch.size();
-                    tdi.fragmentUniformData = fragUniformScratch.data();
-                    tdi.fragmentUniformSize = fragUniformScratch.size();
+                    logStateResolveCostClass(
+                        "drawArrays", programName, vaoName,
+                        tdi, vao->attributes.size());
+                    prepareTranslatedDrawUniformBuffers(
+                        *program, programName, impl_->matrixState, drawID, tdi,
+                        "drawArrays");
 
                     // Phase 8X Group 4d follow-up⁷ — resolve each sampler
                     // uniform in the program to the Metal texture + sampler
@@ -49499,26 +49594,12 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             tdi.metalVertexFunctionOut = &program->metalVertexFunction;
             tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
             tdi.program = programName;
-            if (!program->uniformLayoutComputed) {
-                computeStageUniformLayout(program->vertexUniformLayout,
-                    program->vertexReflection, program->uniforms);
-                computeStageUniformLayout(program->fragmentUniformLayout,
-                    program->fragmentReflection, program->uniforms);
-                program->uniformLayoutComputed = true;
-            }
-            thread_local std::vector<std::uint8_t> vtxUniformScratch;
-            thread_local std::vector<std::uint8_t> fragUniformScratch;
-            pushSynthesizedMatrixUniforms(*program, impl_->matrixState, drawID);
-            buildStageUniformBuffer(vtxUniformScratch,
-                program->vertexReflection, program->uniformValues,
-                program->vertexUniformLayout);
-            buildStageUniformBuffer(fragUniformScratch,
-                program->fragmentReflection, program->uniformValues,
-                program->fragmentUniformLayout);
-            tdi.vertexUniformData = vtxUniformScratch.data();
-            tdi.vertexUniformSize = vtxUniformScratch.size();
-            tdi.fragmentUniformData = fragUniformScratch.data();
-            tdi.fragmentUniformSize = fragUniformScratch.size();
+            logStateResolveCostClass(
+                "drawArraysInstanced-attributeless", programName, vaoName,
+                tdi, vao->attributes.size());
+            prepareTranslatedDrawUniformBuffers(
+                *program, programName, impl_->matrixState, drawID, tdi,
+                "drawArraysInstanced-attributeless");
             impl_->resolveSamplerBindings(*program, tdi);
             impl_->resolveUBOBindings(*program, tdi);
             impl_->resolveSSBOBindings(*program, tdi);
@@ -49723,30 +49804,12 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                         }
                     }
 
-                    // OPT-7: compute uniform layout once, reuse every draw.
-                    if (!program->uniformLayoutComputed) {
-                        computeStageUniformLayout(program->vertexUniformLayout,
-                            program->vertexReflection, program->uniforms);
-                        computeStageUniformLayout(program->fragmentUniformLayout,
-                            program->fragmentReflection, program->uniforms);
-                        program->uniformLayoutComputed = true;
-                    }
-
-                    thread_local std::vector<std::uint8_t> vtxUniformScratch;
-                    thread_local std::vector<std::uint8_t> fragUniformScratch;
-                    // Push synthesized fixed-function matrix uniforms (compat
-                    // shader path). Early-out for the common core-profile case.
-                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState, drawID);
-                    buildStageUniformBuffer(vtxUniformScratch,
-                        program->vertexReflection, program->uniformValues,
-                        program->vertexUniformLayout);
-                    buildStageUniformBuffer(fragUniformScratch,
-                        program->fragmentReflection, program->uniformValues,
-                        program->fragmentUniformLayout);
-                    tdi.vertexUniformData = vtxUniformScratch.data();
-                    tdi.vertexUniformSize = vtxUniformScratch.size();
-                    tdi.fragmentUniformData = fragUniformScratch.data();
-                    tdi.fragmentUniformSize = fragUniformScratch.size();
+                    logStateResolveCostClass(
+                        "drawArraysInstanced", programName, vaoName,
+                        tdi, vao->attributes.size());
+                    prepareTranslatedDrawUniformBuffers(
+                        *program, programName, impl_->matrixState, drawID, tdi,
+                        "drawArraysInstanced");
 
                     // Phase 8X Group 4d follow-up⁷ — see matching comment in
                     // drawArrays for rationale; the instanced draw path
@@ -49909,6 +49972,11 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             clientIndexScratch = std::move(result.bytes);
             effectivePtr = clientIndexScratch.data();
             effectiveType = result.outputType;
+            if (elementIndexTypeNeedsExpansion(type)) {
+                logIndexExpansionCostClass(
+                    "drawElements-client", 0, type, effectiveType, count,
+                    clientIndexScratch.size(), false, 0);
+            }
         }
         // elementBuffer stays nullptr; indexOffset stays 0. Downstream
         // Metal-buffer-pass-through gates on `elementBuffer != nullptr`
@@ -49939,9 +50007,11 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         // glBufferSubData (generation counter bump).
         effectivePtr = indexPtr;
         if (elementIndexTypeNeedsExpansion(type)) {
+            const bool expansionCacheHit =
+                elementBuffer->cachedExpansionGeneration == elementBuffer->indexExpansionGeneration &&
+                !elementBuffer->cachedExpandedIndices.empty();
             // Rebuild cache if stale or absent.
-            if (elementBuffer->cachedExpansionGeneration != elementBuffer->indexExpansionGeneration
-                || elementBuffer->cachedExpandedIndices.empty()) {
+            if (!expansionCacheHit) {
                 const GLsizei totalIndices = static_cast<GLsizei>(elementBuffer->shadowBytes.size());
                 IndexExpansionResult result = expandElementIndices(
                     totalIndices, type, elementBuffer->shadowBytes.data());
@@ -49956,6 +50026,11 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             // Recompute offset: each source byte becomes 2 bytes (uint16).
             const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
             effectivePtr = elementBuffer->cachedExpandedIndices.data() + expandedOffset;
+            logIndexExpansionCostClass(
+                "drawElements", elementBufferName, type, effectiveType,
+                static_cast<GLsizei>(elementBuffer->shadowBytes.size()),
+                elementBuffer->cachedExpandedIndices.size(), expansionCacheHit,
+                elementBuffer->cachedExpansionGeneration);
         }
     }
 
@@ -50410,27 +50485,12 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
         tdi.program = programName;
 
-        // Uniform layout (cached).
-        if (!program->uniformLayoutComputed) {
-            computeStageUniformLayout(program->vertexUniformLayout,
-                program->vertexReflection, program->uniforms);
-            computeStageUniformLayout(program->fragmentUniformLayout,
-                program->fragmentReflection, program->uniforms);
-            program->uniformLayoutComputed = true;
-        }
-        thread_local std::vector<std::uint8_t> vtxUniformScratchDE;
-        thread_local std::vector<std::uint8_t> fragUniformScratchDE;
-        pushSynthesizedMatrixUniforms(*program, impl_->matrixState, drawID);
-        buildStageUniformBuffer(vtxUniformScratchDE,
-            program->vertexReflection, program->uniformValues,
-            program->vertexUniformLayout);
-        buildStageUniformBuffer(fragUniformScratchDE,
-            program->fragmentReflection, program->uniformValues,
-            program->fragmentUniformLayout);
-        tdi.vertexUniformData = vtxUniformScratchDE.data();
-        tdi.vertexUniformSize = vtxUniformScratchDE.size();
-        tdi.fragmentUniformData = fragUniformScratchDE.data();
-        tdi.fragmentUniformSize = fragUniformScratchDE.size();
+        logStateResolveCostClass(
+            "drawElements-attributeless", programName, vaoName,
+            tdi, vao->attributes.size());
+        prepareTranslatedDrawUniformBuffers(
+            *program, programName, impl_->matrixState, drawID, tdi,
+            "drawElements-attributeless");
 
         impl_->resolveSamplerBindings(*program, tdi);
         impl_->resolveUBOBindings(*program, tdi);
@@ -50637,28 +50697,12 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                         }
                     }
 
-                    // OPT-7: compute uniform layout once, reuse every draw.
-                    if (!program->uniformLayoutComputed) {
-                        computeStageUniformLayout(program->vertexUniformLayout,
-                            program->vertexReflection, program->uniforms);
-                        computeStageUniformLayout(program->fragmentUniformLayout,
-                            program->fragmentReflection, program->uniforms);
-                        program->uniformLayoutComputed = true;
-                    }
-
-                    thread_local std::vector<std::uint8_t> vtxUniformScratch;
-                    thread_local std::vector<std::uint8_t> fragUniformScratch;
-                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState, drawID);
-                    buildStageUniformBuffer(vtxUniformScratch,
-                        program->vertexReflection, program->uniformValues,
-                        program->vertexUniformLayout);
-                    buildStageUniformBuffer(fragUniformScratch,
-                        program->fragmentReflection, program->uniformValues,
-                        program->fragmentUniformLayout);
-                    tdi.vertexUniformData = vtxUniformScratch.data();
-                    tdi.vertexUniformSize = vtxUniformScratch.size();
-                    tdi.fragmentUniformData = fragUniformScratch.data();
-                    tdi.fragmentUniformSize = fragUniformScratch.size();
+                    logStateResolveCostClass(
+                        "drawElements", programName, vaoName,
+                        tdi, vao->attributes.size());
+                    prepareTranslatedDrawUniformBuffers(
+                        *program, programName, impl_->matrixState, drawID, tdi,
+                        "drawElements");
 
                     impl_->resolveSamplerBindings(*program, tdi);
                     impl_->resolveUBOBindings(*program, tdi);
@@ -50832,8 +50876,10 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
     GLenum effectiveType = type;
     const void* effectivePtr = indexPtr;
     if (elementIndexTypeNeedsExpansion(type)) {
-        if (elementBuffer->cachedExpansionGeneration != elementBuffer->indexExpansionGeneration
-            || elementBuffer->cachedExpandedIndices.empty()) {
+        const bool expansionCacheHit =
+            elementBuffer->cachedExpansionGeneration == elementBuffer->indexExpansionGeneration &&
+            !elementBuffer->cachedExpandedIndices.empty();
+        if (!expansionCacheHit) {
             const GLsizei totalIndices = static_cast<GLsizei>(elementBuffer->shadowBytes.size());
             IndexExpansionResult result = expandElementIndices(
                 totalIndices, type, elementBuffer->shadowBytes.data());
@@ -50847,6 +50893,11 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
         effectiveType = GL_UNSIGNED_SHORT;
         const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
         effectivePtr = elementBuffer->cachedExpandedIndices.data() + expandedOffset;
+        logIndexExpansionCostClass(
+            "drawElementsBaseVertex", elementBufferName, type, effectiveType,
+            static_cast<GLsizei>(elementBuffer->shadowBytes.size()),
+            elementBuffer->cachedExpandedIndices.size(), expansionCacheHit,
+            elementBuffer->cachedExpansionGeneration);
     }
 
     // Try translated shader pipeline first.
@@ -51030,27 +51081,12 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                         }
                     }
 
-                    if (!program->uniformLayoutComputed) {
-                        computeStageUniformLayout(program->vertexUniformLayout,
-                            program->vertexReflection, program->uniforms);
-                        computeStageUniformLayout(program->fragmentUniformLayout,
-                            program->fragmentReflection, program->uniforms);
-                        program->uniformLayoutComputed = true;
-                    }
-
-                    thread_local std::vector<std::uint8_t> vtxUniformScratch;
-                    thread_local std::vector<std::uint8_t> fragUniformScratch;
-                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState, drawID);
-                    buildStageUniformBuffer(vtxUniformScratch,
-                        program->vertexReflection, program->uniformValues,
-                        program->vertexUniformLayout);
-                    buildStageUniformBuffer(fragUniformScratch,
-                        program->fragmentReflection, program->uniformValues,
-                        program->fragmentUniformLayout);
-                    tdi.vertexUniformData = vtxUniformScratch.data();
-                    tdi.vertexUniformSize = vtxUniformScratch.size();
-                    tdi.fragmentUniformData = fragUniformScratch.data();
-                    tdi.fragmentUniformSize = fragUniformScratch.size();
+                    logStateResolveCostClass(
+                        "drawElementsBaseVertex", programName, vaoName,
+                        tdi, vao->attributes.size());
+                    prepareTranslatedDrawUniformBuffers(
+                        *program, programName, impl_->matrixState, drawID, tdi,
+                        "drawElementsBaseVertex");
 
                     impl_->resolveSamplerBindings(*program, tdi);
                     impl_->resolveUBOBindings(*program, tdi);
@@ -51237,8 +51273,10 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
     GLenum effectiveType = type;
     const void* effectivePtr = indexPtr;
     if (elementIndexTypeNeedsExpansion(type)) {
-        if (elementBuffer->cachedExpansionGeneration != elementBuffer->indexExpansionGeneration
-            || elementBuffer->cachedExpandedIndices.empty()) {
+        const bool expansionCacheHit =
+            elementBuffer->cachedExpansionGeneration == elementBuffer->indexExpansionGeneration &&
+            !elementBuffer->cachedExpandedIndices.empty();
+        if (!expansionCacheHit) {
             const GLsizei totalIndices = static_cast<GLsizei>(elementBuffer->shadowBytes.size());
             IndexExpansionResult result = expandElementIndices(
                 totalIndices, type, elementBuffer->shadowBytes.data());
@@ -51252,6 +51290,12 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
         effectiveType = GL_UNSIGNED_SHORT;
         const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
         effectivePtr = elementBuffer->cachedExpandedIndices.data() + expandedOffset;
+        logIndexExpansionCostClass(
+            "drawElementsInstancedBaseVertex", elementBufferName,
+            type, effectiveType,
+            static_cast<GLsizei>(elementBuffer->shadowBytes.size()),
+            elementBuffer->cachedExpandedIndices.size(), expansionCacheHit,
+            elementBuffer->cachedExpansionGeneration);
     }
 
     // Try translated shader pipeline first.
@@ -51674,27 +51718,12 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                         }
                     }
 
-                    if (!program->uniformLayoutComputed) {
-                        computeStageUniformLayout(program->vertexUniformLayout,
-                            program->vertexReflection, program->uniforms);
-                        computeStageUniformLayout(program->fragmentUniformLayout,
-                            program->fragmentReflection, program->uniforms);
-                        program->uniformLayoutComputed = true;
-                    }
-
-                    thread_local std::vector<std::uint8_t> vtxUniformScratch;
-                    thread_local std::vector<std::uint8_t> fragUniformScratch;
-                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState, drawID);
-                    buildStageUniformBuffer(vtxUniformScratch,
-                        program->vertexReflection, program->uniformValues,
-                        program->vertexUniformLayout);
-                    buildStageUniformBuffer(fragUniformScratch,
-                        program->fragmentReflection, program->uniformValues,
-                        program->fragmentUniformLayout);
-                    tdi.vertexUniformData = vtxUniformScratch.data();
-                    tdi.vertexUniformSize = vtxUniformScratch.size();
-                    tdi.fragmentUniformData = fragUniformScratch.data();
-                    tdi.fragmentUniformSize = fragUniformScratch.size();
+                    logStateResolveCostClass(
+                        "drawElementsInstancedBaseVertex", programName, vaoName,
+                        tdi, vao->attributes.size());
+                    prepareTranslatedDrawUniformBuffers(
+                        *program, programName, impl_->matrixState, drawID, tdi,
+                        "drawElementsInstancedBaseVertex");
 
                     impl_->resolveSamplerBindings(*program, tdi);
                     impl_->resolveUBOBindings(*program, tdi);
@@ -52074,7 +52103,9 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             programObject->computeReflection, programObject->uniforms);
         programObject->uniformLayoutComputed = true;
     }
-    pushSynthesizedMatrixUniforms(*programObject, impl_->matrixState);
+    if (pushSynthesizedMatrixUniforms(*programObject, impl_->matrixState)) {
+        programObject->markUniformsDirty();
+    }
     buildStageUniformBuffer(computeUniformScratch,
         programObject->computeReflection, programObject->uniformValues,
         programObject->computeUniformLayout);
@@ -52988,7 +53019,9 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             programObject->computeReflection, programObject->uniforms);
         programObject->uniformLayoutComputed = true;
     }
-    pushSynthesizedMatrixUniforms(*programObject, impl_->matrixState);
+    if (pushSynthesizedMatrixUniforms(*programObject, impl_->matrixState)) {
+        programObject->markUniformsDirty();
+    }
     buildStageUniformBuffer(computeUniformScratchIndirect,
         programObject->computeReflection, programObject->uniformValues,
         programObject->computeUniformLayout);

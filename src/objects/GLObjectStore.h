@@ -1482,6 +1482,39 @@ struct GLProgramObject {
     // to the VS-as-compute encoder at slot 16.
     std::vector<UniformLayoutEntry> vsTfAsComputeUniformLayout;
     bool uniformLayoutComputed = false;
+
+    // ADV-8: dirty-generation API for packed default-uniform buffers.
+    // `glUniform*` / `glProgramUniform*` call markUniformsDirty(), while
+    // translated draws reuse the cached packed vertex/fragment byte buffers
+    // until the generation changes. This keeps the public mechanism visible
+    // on GLProgramObject without exposing the cache storage details.
+    std::uint64_t uniformValueGeneration = 1;
+    std::uint64_t packedUniformGeneration = 0;
+    std::vector<std::uint8_t> cachedVertexUniformBuffer;
+    std::vector<std::uint8_t> cachedFragmentUniformBuffer;
+
+    bool isUniformBufferDirty() const {
+        return packedUniformGeneration != uniformValueGeneration;
+    }
+
+    void markUniformsDirty() {
+        ++uniformValueGeneration;
+        if (uniformValueGeneration == 0) {
+            uniformValueGeneration = 1;
+            packedUniformGeneration = 0;
+        }
+    }
+
+    void markUniformBufferClean() {
+        packedUniformGeneration = uniformValueGeneration;
+    }
+
+    void invalidateUniformBufferCache() {
+        cachedVertexUniformBuffer.clear();
+        cachedFragmentUniformBuffer.clear();
+        packedUniformGeneration = 0;
+        markUniformsDirty();
+    }
 };
 
 struct GLQueryObject {
