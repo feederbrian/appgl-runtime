@@ -22388,11 +22388,13 @@ bool GLContext::copyTexImage2D(
         !isDepthStencilCopy &&
         (internalformat == GL_STENCIL_INDEX ||
          internalformat == GL_STENCIL_INDEX8);
+    const bool isRGB10A2UintCopy =
+        internalformat == GL_RGB10_A2UI;
     const bool isRGB10A2Copy =
-        internalformat == GL_RGB10_A2;
+        internalformat == GL_RGB10_A2 || isRGB10A2UintCopy;
 
     if (isRGB10A2Copy) {
-        uploadFormat = GL_RGBA;
+        uploadFormat = isRGB10A2UintCopy ? GL_RGBA_INTEGER : GL_RGBA;
         uploadType = GL_UNSIGNED_INT_2_10_10_10_REV;
         uploadPixelBytes = sizeof(std::uint32_t);
     } else if (isDepthStencilCopy) {

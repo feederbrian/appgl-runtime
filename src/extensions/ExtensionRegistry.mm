@@ -13,7 +13,7 @@ namespace appgl::extensions {
 
 namespace {
 
-constexpr std::array<const char*, 65> kBaseExtensions = {
+constexpr std::array<const char*, 67> kBaseExtensions = {
     "GL_KHR_debug",
     "GL_ARB_debug_output",
     "GL_ARB_multitexture",
@@ -27,6 +27,8 @@ constexpr std::array<const char*, 65> kBaseExtensions = {
     "GL_ARB_texture_query_levels",
     "GL_ARB_texture_filter_minmax",
     "GL_ARB_texture_barrier",
+    "GL_ARB_depth_texture",
+    "GL_ARB_texture_rgb10_a2ui",
     "GL_ARB_shader_texture_image_samples",
     "GL_ARB_shader_viewport_layer_array",
     "GL_EXT_texture_shadow_lod",
