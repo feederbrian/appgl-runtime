@@ -4,7 +4,7 @@
 
 **Audience:** AppGL project maintainer (review at each macOS/Xcode/Metal major release).
 
-**Last updated:** 2026-05-11 (Sprint 19 in-flight; Decision I β adopted)
+**Last updated:** 2026-05-30 (Sprint 22 conformance close, HEAD `093a6bd`; S22-close empirical refinement to Constraint 1 — §75-B FIRMLY CONFIRMED specific MS-store endpoint per §2.1.1 below)
 
 **Cross-references:**
 - `specs-worker-docs/canonical/CANONICAL-OPERATIONAL-CONTEXT.md` Item 32 LIVE-MAXIMAL (platform-blocked classification) + Item 38 LIVE (TIME-LIMITED vs TIME-PERMANENT classification framework)
@@ -110,6 +110,43 @@ Default Sprint 19+ inventory:
 **Reclassification trigger:**
 - If Metal compiler accepts writable MS texture access at some future version → AppGL emulation layer can be deprecated; native path adopted
 - Document update: move to "Constraint resolved Sprint N (Metal X.Y)" section + retire emulation per Decision-I-2 (reverse)
+
+### Constraint 1.1 (S22-close empirical refinement): MS-store specific endpoint structurally incomplete — `basic-allTargets-store`
+
+**Status:** §75-B-LATENT-IMPLEMENTATION-GAP FIRMLY CONFIRMED (S22 close 2026-05-30; structural implementation work pending)
+**First observed:** Sprint 22 NS-POST Phase 1 + Path X bidirectional-side-effect investigation
+**Apple Metal version observed:** Metal 3.2 (macOS 26.x / Xcode 17) — runtime-side gap, not Metal-compiler-side
+
+**Technical detail:**
+- `KHR-GL46.shader_image_load_store.basic-allTargets-store` test exercises the MS storage-image *store* path when `GL_MAX_IMAGE_SAMPLES > 0` is advertised (which Sprint 22 step (2) `e0391674` enabled).
+- The store branch executes (no Metal compiler reject — the sidecar accepts the path) but the written texel does not land in the GPU texture; the verifier read-back returns the default-cleared state (`First bad color: [1, 0, 0, 0.301961]` / black/cleared signal).
+- Distinct from Constraint 1 (which is the COMPILE-TIME `texture2d_ms<float, access::write>` Metal compiler reject) — this is the RUNTIME-PIPELINE endpoint where the sidecar emulation routes the store but the write does not reach the texture for this specific test surface.
+- The sidecar architectural commitment from Constraint 1 / Constraint 8 (β2 sidecar) is partial; the `basic-allTargets-store` endpoint specifically requires further implementation work on the storage-image MS-write reach-the-texture path.
+
+**Empirical persistence evidence base** (S22 close — strongest empirical confirmation case in S22):
+- 6-commit-lineage attempt axis: 2 direct attempts (Path X full-scope + Path Z surgical) + 4 indirect-coincidental attempts (IE-roots + DSA RGB32 + internalformat + shader_integer_mix) — all preserved `Fail`
+- 4-gate-event axis: Path R baseline + MED-tier-completion gate-of-record + Sweep #2.6 PERFECT focused validation + FINAL CROWN #3 — all confirmed `Fail/Fail`
+
+**CTS impact:**
+- `KHR-GL46.shader_image_load_store.basic-allTargets-store` — 1 test (currently the only confirmed §75-B-FIRMLY-CONFIRMED instance)
+- Adjacent surface verified at full-sweep: `basic-allTargets-load-ms` PASS; non-MS variants of `basic-allTargets-store` PASS — the gap is specific to the MS-store endpoint
+
+**AppGL approach:**
+- Deferred to a future implementation pass; not addressable via narrow-fix or shared-code-path narrowing (empirically proven across 6 attempts)
+- Tracked in `tests/caselists/ns-post-phase1-deep-inspection-pending.txt` with class-tag `§75-B-LATENT-IMPLEMENTATION-GAP-OUR`
+- Resolution requires routing the MS store-image write through a path that reaches the GPU texture end-to-end (likely via the same sidecar lineage as Constraint 1 / 8 but extended to the store-image-write reach axis)
+
+**Monitoring criteria:**
+- If a future Apple Metal toolchain advance resolves Constraint 1 (writable `texture2d_ms` accepted natively), this latent endpoint likely resolves with it
+- If AppGL completes the sidecar storage-image-write extension internally, this resolves without Apple version-advance
+
+**Reclassification trigger:**
+- Constraint 1 resolved via Apple toolchain → both resolve together; remove this entry
+- AppGL sidecar storage-image-write extension lands internally → reclassify to RESOLVED with cross-reference to the sprint that closed it
+
+**Cross-references:**
+- See [conformance-status.md](conformance-status.md) §75-B description
+- See `tests/caselists/ns-post-phase1-deep-inspection-pending.txt` for the canonical pending caselist with class-tag annotations
 
 ---
 
@@ -391,6 +428,11 @@ Default Sprint 19+ inventory:
 1. Check Item 32 LIVE-MAXIMAL ledger for new constraint additions
 2. Cross-reference with this document; add new Section 2 entries as needed
 3. Reclassification audit if Apple toolchain update occurred mid-Sprint
+
+#### S22 close audit (2026-05-30)
+1. **New empirical refinement to Constraint 1**: §75-B-FIRMLY-CONFIRMED specific MS-store endpoint surfaced during S22 NS-POST Phase 1 deep-inspection (see new §2 Constraint 1.1 entry above). Strongest single-arc persistence evidence (6-attempt + 4-gate-event axes) for a runtime-pipeline endpoint gap. Tracked as latent-implementation-gap; resolution path likely joint with Constraint 1 Apple-toolchain advance OR internal sidecar extension.
+2. **No new TIME-LIMITED → RESOLVED transitions this sprint.** Constraint 2 RESOLVED at Sprint 20 remains the only empirical transition; Constraints 1, 3-10 unchanged at S22 close.
+3. **No new constraints added.** S22 NS-POST inventory work confirmed the existing 10-constraint inventory remains complete; the §75-B refinement at §2.1.1 is a sub-endpoint of Constraint 1 not a net-new constraint.
 
 ### Per quarter (low cadence)
 1. Apple Developer documentation review for sparse texture / MS / FP64 / VRS feature evolution
