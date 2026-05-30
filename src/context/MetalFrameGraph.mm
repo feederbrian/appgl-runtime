@@ -364,6 +364,82 @@ static std::vector<std::array<std::int32_t, 4>>& textureBorderColorScratch() {
     return scratch;
 }
 
+struct TranslatedDrawMSLSlots {
+    bool vertexMslUsesArgBuf = false;
+    bool fragmentMslUsesArgBuf = false;
+    bool vertexHasSSBOSizeBuffer = false;
+    bool fragmentHasSSBOSizeBuffer = false;
+    bool fragmentNeedsFragCoordParams = false;
+    bool fragmentNeedsGlNumSamplesArgBuf = false;
+    bool vertexNeedsFragmentShadingRateState = false;
+    bool vertexUsesMultiviewViewMask = false;
+    bool fragmentUsesMultiviewViewMask = false;
+    NSInteger vertexClipControlYSignSlot = -1;
+    NSInteger vertexReductionModesSlot = -1;
+    NSInteger vertexLodBiasesSlot = -1;
+    NSInteger vertexBorderClampModesSlot = -1;
+    NSInteger vertexBorderClampColorsSlot = -1;
+    NSInteger vertexImplicitLodBiasCorrectionSlot = -1;
+    NSInteger fragmentReductionModesSlot = -1;
+    NSInteger fragmentLodBiasesSlot = -1;
+    NSInteger fragmentBorderClampModesSlot = -1;
+    NSInteger fragmentBorderClampColorsSlot = -1;
+    NSInteger fragmentImplicitLodBiasCorrectionSlot = -1;
+};
+
+static bool mslContains(const std::string* msl, const char* needle) {
+    return msl != nullptr && msl->find(needle) != std::string::npos;
+}
+
+static TranslatedDrawMSLSlots buildTranslatedDrawMSLSlots(
+    const TranslatedDrawInfo& info,
+    bool hasFragmentStage) {
+    TranslatedDrawMSLSlots slots;
+    slots.vertexMslUsesArgBuf =
+        mslContains(info.vertexMSL, "spvDescriptorSetBuffer");
+    slots.fragmentMslUsesArgBuf =
+        mslContains(info.fragmentMSL, "spvDescriptorSetBuffer");
+    slots.vertexHasSSBOSizeBuffer =
+        mslContains(info.vertexMSL, "spvBufferSizeConstants");
+    slots.fragmentHasSSBOSizeBuffer =
+        mslContains(info.fragmentMSL, "spvBufferSizeConstants");
+    slots.fragmentNeedsFragCoordParams =
+        hasFragmentStage &&
+        mslContains(info.fragmentMSL, "_appgl_FragCoordParams");
+    slots.fragmentNeedsGlNumSamplesArgBuf =
+        mslContains(info.fragmentMSL,
+                    "_RESERVED_IDENTIFIER_FIXUP_gl_NumSamples [[id(0)]]");
+    slots.vertexNeedsFragmentShadingRateState =
+        mslContains(info.vertexMSL, "_appgl_FSRState");
+    slots.vertexUsesMultiviewViewMask =
+        mslContains(info.vertexMSL, "spvViewMask");
+    slots.fragmentUsesMultiviewViewMask =
+        mslContains(info.fragmentMSL, "spvViewMask");
+    slots.vertexClipControlYSignSlot =
+        clipControlYSignBufferSlot(info.vertexMSL);
+    slots.vertexReductionModesSlot =
+        textureReductionModesBufferSlot(info.vertexMSL);
+    slots.vertexLodBiasesSlot =
+        textureLodBiasesBufferSlot(info.vertexMSL);
+    slots.vertexBorderClampModesSlot =
+        textureBorderClampModesBufferSlot(info.vertexMSL);
+    slots.vertexBorderClampColorsSlot =
+        textureBorderClampColorsBufferSlot(info.vertexMSL);
+    slots.vertexImplicitLodBiasCorrectionSlot =
+        implicitLodBiasCorrectionBufferSlot(info.vertexMSL);
+    slots.fragmentReductionModesSlot =
+        textureReductionModesBufferSlot(info.fragmentMSL);
+    slots.fragmentLodBiasesSlot =
+        textureLodBiasesBufferSlot(info.fragmentMSL);
+    slots.fragmentBorderClampModesSlot =
+        textureBorderClampModesBufferSlot(info.fragmentMSL);
+    slots.fragmentBorderClampColorsSlot =
+        textureBorderClampColorsBufferSlot(info.fragmentMSL);
+    slots.fragmentImplicitLodBiasCorrectionSlot =
+        implicitLodBiasCorrectionBufferSlot(info.fragmentMSL);
+    return slots;
+}
+
 static float implicitLodViewportBiasCorrection(const TranslatedDrawInfo& info,
                                                bool isFBODraw,
                                                id<MTLTexture> colorTexture) {
@@ -1844,6 +1920,8 @@ struct MetalFrameGraph::Impl {
         const std::uint64_t pipelineCacheKey =
             computePipelineCacheKey(info, colorFormat, attachmentSampleCount,
                                      forcePerSampleFS);
+        const TranslatedDrawMSLSlots& shaderSlots =
+            translatedDrawMSLSlots(info, pipelineCacheKey, hasFragmentStage);
 
         // Step 7-3: argument-buffer mode. When APPGL_ENABLE_ARGUMENT_BUFFERS
         // is set, the fragment/vertex shader was compiled to read resources
@@ -1859,14 +1937,12 @@ struct MetalFrameGraph::Impl {
         // MTLFunction on the GLProgramObject; subsequent draws reuse the
         // cache and skip the pipeline-rebuild cost. This undoes the pre-7-4
         // pipeline-cache-miss forcing we used to keep MTLFunctions in scope.
-        auto mslUsesArgBuf = [](const std::string* msl) -> bool {
-            return msl != nullptr &&
-                msl->find("spvDescriptorSetBuffer") != std::string::npos;
-        };
         const bool forceArgBufEnv =
             (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
-        const bool vertexUsesArgBuf = forceArgBufEnv || mslUsesArgBuf(info.vertexMSL);
-        const bool fragmentUsesArgBuf = forceArgBufEnv || mslUsesArgBuf(info.fragmentMSL);
+        const bool vertexUsesArgBuf =
+            forceArgBufEnv || shaderSlots.vertexMslUsesArgBuf;
+        const bool fragmentUsesArgBuf =
+            forceArgBufEnv || shaderSlots.fragmentMslUsesArgBuf;
         const bool useArgBuf = vertexUsesArgBuf || fragmentUsesArgBuf;
         if (!info.submissionGroup.declared) {
             info.submissionGroup.reset(AppGLSubmissionGroupKind::TranslatedDraw,
@@ -1876,38 +1952,27 @@ struct MetalFrameGraph::Impl {
         }
         info.submissionGroup.argumentBuffersEnabled = useArgBuf;
         const bool vertexNeedsSSBOSizeBuffer =
-            vertexUsesArgBuf && info.vertexMSL != nullptr &&
-            info.vertexMSL->find("spvBufferSizeConstants") != std::string::npos;
+            vertexUsesArgBuf && shaderSlots.vertexHasSSBOSizeBuffer;
         const bool fragmentNeedsSSBOSizeBuffer =
-            fragmentUsesArgBuf && info.fragmentMSL != nullptr &&
-            info.fragmentMSL->find("spvBufferSizeConstants") != std::string::npos;
+            fragmentUsesArgBuf && shaderSlots.fragmentHasSSBOSizeBuffer;
         const bool fragmentNeedsFragCoordParams =
-            hasFragmentStage && info.fragmentMSL != nullptr &&
-            info.fragmentMSL->find("_appgl_FragCoordParams") != std::string::npos;
+            shaderSlots.fragmentNeedsFragCoordParams;
         const bool fragmentNeedsGlNumSamplesArgBuf =
-            fragmentUsesArgBuf && info.fragmentMSL != nullptr &&
-            info.fragmentMSL->find(
-                "_RESERVED_IDENTIFIER_FIXUP_gl_NumSamples [[id(0)]]") !=
-                std::string::npos;
+            fragmentUsesArgBuf && shaderSlots.fragmentNeedsGlNumSamplesArgBuf;
         const bool vertexNeedsFragmentShadingRateState =
-            info.vertexMSL != nullptr &&
-            info.vertexMSL->find("_appgl_FSRState") != std::string::npos;
+            shaderSlots.vertexNeedsFragmentShadingRateState;
         const NSInteger vertexClipControlYSignSlot =
-            clipControlYSignBufferSlot(info.vertexMSL);
+            shaderSlots.vertexClipControlYSignSlot;
         const bool clipControlShaderYFixup =
             vertexClipControlYSignSlot >= 0 &&
             info.clipControlYSignFixupEnabled &&
             !info.stencilTestEnabled;
         const bool clipControlInvertsWinding =
             clipControlShaderYFixup && info.clipOrigin != GL_UPPER_LEFT;
-        auto mslUsesMultiviewViewMask = [](const std::string* msl) -> bool {
-            return msl != nullptr &&
-                msl->find("spvViewMask") != std::string::npos;
-        };
         const bool vertexUsesMultiviewViewMask =
-            mslUsesMultiviewViewMask(info.vertexMSL);
+            shaderSlots.vertexUsesMultiviewViewMask;
         const bool fragmentUsesMultiviewViewMask =
-            mslUsesMultiviewViewMask(info.fragmentMSL);
+            shaderSlots.fragmentUsesMultiviewViewMask;
         constexpr std::uint32_t kOVRMultiviewViewCount = 2;
         const std::uint32_t ovrViewMask[2] = {0u, kOVRMultiviewViewCount};
         const GLsizei effectiveInstanceCount =
@@ -3454,8 +3519,9 @@ struct MetalFrameGraph::Impl {
                                               length:sizeof(clipControlYSign)
                                              atIndex:static_cast<NSUInteger>(vertexClipControlYSignSlot)];
             }
+            const bool logLodBias = std::getenv("APPGL_LOG_LB") != nullptr;
             const NSInteger vertexReductionModesSlot =
-                textureReductionModesBufferSlot(info.vertexMSL);
+                shaderSlots.vertexReductionModesSlot;
             if (vertexReductionModesSlot >= 0) {
                 std::vector<std::uint32_t>& modes = textureUIntScratch();
                 buildTextureReductionModes(info.vertexTextures, modes);
@@ -3464,11 +3530,11 @@ struct MetalFrameGraph::Impl {
                                              atIndex:static_cast<NSUInteger>(vertexReductionModesSlot)];
             }
             const NSInteger vertexLodBiasesSlot =
-                textureLodBiasesBufferSlot(info.vertexMSL);
+                shaderSlots.vertexLodBiasesSlot;
             if (vertexLodBiasesSlot >= 0) {
                 std::vector<float>& biases = textureFloatScratch();
                 buildTextureLodBiases(info.vertexTextures, biases);
-                if (std::getenv("APPGL_LOG_LB") != nullptr) {
+                if (logLodBias) {
                     std::fprintf(stderr,
                         "[LB-LOD-BUFFER] stage=vert bufferSlot=%ld count=%zu bias0=%f texBindings=%zu\n",
                         static_cast<long>(vertexLodBiasesSlot),
@@ -3481,9 +3547,9 @@ struct MetalFrameGraph::Impl {
                                              atIndex:static_cast<NSUInteger>(vertexLodBiasesSlot)];
             }
             const NSInteger vertexBorderClampModesSlot =
-                textureBorderClampModesBufferSlot(info.vertexMSL);
+                shaderSlots.vertexBorderClampModesSlot;
             const NSInteger vertexBorderClampColorsSlot =
-                textureBorderClampColorsBufferSlot(info.vertexMSL);
+                shaderSlots.vertexBorderClampColorsSlot;
             if (vertexBorderClampModesSlot >= 0) {
                 std::vector<std::uint32_t>& modes = textureUIntScratch();
                 buildTextureBorderClampModes(info.vertexTextures, modes);
@@ -3500,7 +3566,7 @@ struct MetalFrameGraph::Impl {
                                              atIndex:static_cast<NSUInteger>(vertexBorderClampColorsSlot)];
             }
             const NSInteger vertexImplicitLodBiasCorrectionSlot =
-                implicitLodBiasCorrectionBufferSlot(info.vertexMSL);
+                shaderSlots.vertexImplicitLodBiasCorrectionSlot;
             if (vertexImplicitLodBiasCorrectionSlot >= 0) {
                 const float correction = 0.0f;
                 [currentRenderEncoder setVertexBytes:&correction
@@ -3508,7 +3574,7 @@ struct MetalFrameGraph::Impl {
                                              atIndex:static_cast<NSUInteger>(vertexImplicitLodBiasCorrectionSlot)];
             }
             const NSInteger fragmentReductionModesSlot =
-                textureReductionModesBufferSlot(info.fragmentMSL);
+                shaderSlots.fragmentReductionModesSlot;
             if (fragmentReductionModesSlot >= 0) {
                 std::vector<std::uint32_t>& modes = textureUIntScratch();
                 buildTextureReductionModes(info.fragmentTextures, modes);
@@ -3517,11 +3583,11 @@ struct MetalFrameGraph::Impl {
                                                atIndex:static_cast<NSUInteger>(fragmentReductionModesSlot)];
             }
             const NSInteger fragmentLodBiasesSlot =
-                textureLodBiasesBufferSlot(info.fragmentMSL);
+                shaderSlots.fragmentLodBiasesSlot;
             if (fragmentLodBiasesSlot >= 0) {
                 std::vector<float>& biases = textureFloatScratch();
                 buildTextureLodBiases(info.fragmentTextures, biases);
-                if (std::getenv("APPGL_LOG_LB") != nullptr) {
+                if (logLodBias) {
                     std::fprintf(stderr,
                         "[LB-LOD-BUFFER] stage=frag bufferSlot=%ld count=%zu bias0=%f texBindings=%zu\n",
                         static_cast<long>(fragmentLodBiasesSlot),
@@ -3534,9 +3600,9 @@ struct MetalFrameGraph::Impl {
                                                atIndex:static_cast<NSUInteger>(fragmentLodBiasesSlot)];
             }
             const NSInteger fragmentBorderClampModesSlot =
-                textureBorderClampModesBufferSlot(info.fragmentMSL);
+                shaderSlots.fragmentBorderClampModesSlot;
             const NSInteger fragmentBorderClampColorsSlot =
-                textureBorderClampColorsBufferSlot(info.fragmentMSL);
+                shaderSlots.fragmentBorderClampColorsSlot;
             if (fragmentBorderClampModesSlot >= 0) {
                 std::vector<std::uint32_t>& modes = textureUIntScratch();
                 buildTextureBorderClampModes(info.fragmentTextures, modes);
@@ -3553,11 +3619,11 @@ struct MetalFrameGraph::Impl {
                                                atIndex:static_cast<NSUInteger>(fragmentBorderClampColorsSlot)];
             }
             const NSInteger fragmentImplicitLodBiasCorrectionSlot =
-                implicitLodBiasCorrectionBufferSlot(info.fragmentMSL);
+                shaderSlots.fragmentImplicitLodBiasCorrectionSlot;
             if (fragmentImplicitLodBiasCorrectionSlot >= 0) {
                 const float correction =
                     implicitLodViewportBiasCorrection(info, isFBODraw, colorTexture);
-                if (std::getenv("APPGL_LOG_LB") != nullptr) {
+                if (logLodBias) {
                     std::fprintf(stderr,
                         "[LB-LOD-CORRECTION] stage=frag bufferSlot=%ld correction=%f viewport=%dx%d fbo=%dx%d\n",
                         static_cast<long>(fragmentImplicitLodBiasCorrectionSlot),
@@ -10212,6 +10278,12 @@ private:
     std::unordered_map<std::size_t, id<MTLLibrary>> mslLibraryCache;
     std::vector<std::size_t> mslLibraryCacheOrder;
 
+    // Per-pipeline cache for fixed helper parameter slots discovered in
+    // translated MSL. The pipeline key already fingerprints shader text, so
+    // repeated draws skip rescanning the same source for helper buffers.
+    std::unordered_map<std::uint64_t, TranslatedDrawMSLSlots>
+        translatedDrawMSLSlotCache;
+
     // ADV-4: reusable render pass descriptor. Avoids allocating a fresh
     // autoreleased ObjC object at each render-pass setup site.
     MTLRenderPassDescriptor* reusablePassDescriptor = nil;
@@ -10267,6 +10339,20 @@ private:
         if (currentDrawable != nil) return true;
         currentDrawable = [layer nextDrawable];
         return currentDrawable != nil;
+    }
+
+    const TranslatedDrawMSLSlots& translatedDrawMSLSlots(
+        const TranslatedDrawInfo& info,
+        std::uint64_t pipelineCacheKey,
+        bool hasFragmentStage) {
+        auto it = translatedDrawMSLSlotCache.find(pipelineCacheKey);
+        if (it != translatedDrawMSLSlotCache.end()) {
+            return it->second;
+        }
+        auto inserted = translatedDrawMSLSlotCache.emplace(
+            pipelineCacheKey,
+            buildTranslatedDrawMSLSlots(info, hasFragmentStage));
+        return inserted.first->second;
     }
 
     // ADV-2: get-or-compile a Metal library from MSL source text,
