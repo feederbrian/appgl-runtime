@@ -54513,16 +54513,11 @@ bool GLContext::multiDrawArraysIndirect(GLenum mode, const void* indirect, GLsiz
         if (cmd.count == 0 || cmd.instanceCount == 0) {
             continue;  // valid no-op for this sub-draw
         }
-        const bool ok = (cmd.instanceCount == 1 && cmd.baseInstance == 0)
-            ? drawArrays(mode,
-                         static_cast<GLint>(cmd.first),
-                         static_cast<GLsizei>(cmd.count),
-                         static_cast<GLuint>(i))
-            : drawArraysInstancedBaseInstance(mode, static_cast<GLint>(cmd.first),
-                                              static_cast<GLsizei>(cmd.count),
-                                              static_cast<GLsizei>(cmd.instanceCount),
-                                              cmd.baseInstance,
-                                              static_cast<GLuint>(i));
+        const bool ok = drawArraysInstancedBaseInstance(mode, static_cast<GLint>(cmd.first),
+                                                        static_cast<GLsizei>(cmd.count),
+                                                        static_cast<GLsizei>(cmd.instanceCount),
+                                                        cmd.baseInstance,
+                                                        static_cast<GLuint>(i));
         if (!ok) {
             return false;
         }
@@ -54605,19 +54600,12 @@ bool GLContext::multiDrawElementsIndirect(GLenum mode, GLenum type, const void* 
         }
         const void* indexOffset = reinterpret_cast<const void*>(
             static_cast<uintptr_t>(cmd.firstIndex) * static_cast<uintptr_t>(indexSize));
-        const bool ok = (cmd.instanceCount == 1 && cmd.baseInstance == 0)
-            ? drawElementsBaseVertex(mode,
-                                     static_cast<GLsizei>(cmd.count),
-                                     type,
-                                     indexOffset,
-                                     static_cast<GLint>(cmd.baseVertex),
-                                     static_cast<GLuint>(i))
-            : drawElementsInstancedBaseVertexBaseInstance(mode,
-                static_cast<GLsizei>(cmd.count), type, indexOffset,
-                static_cast<GLsizei>(cmd.instanceCount),
-                static_cast<GLint>(cmd.baseVertex),
-                cmd.baseInstance,
-                static_cast<GLuint>(i));
+        const bool ok = drawElementsInstancedBaseVertexBaseInstance(mode,
+            static_cast<GLsizei>(cmd.count), type, indexOffset,
+            static_cast<GLsizei>(cmd.instanceCount),
+            static_cast<GLint>(cmd.baseVertex),
+            cmd.baseInstance,
+            static_cast<GLuint>(i));
         if (!ok) {
             return false;
         }
