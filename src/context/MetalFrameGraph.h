@@ -782,6 +782,11 @@ struct MetalTessDrawInfo {
     std::size_t tessVertexAsComputeUniformSize = 0;
     const void* tessEvalAsComputeUniformData = nullptr;
     std::size_t tessEvalAsComputeUniformSize = 0;
+    // Fragment-stage default-uniform block for the tess render pass.
+    // SPIRV-Cross emits bare FS uniforms as `_DefaultUniforms` at
+    // [[buffer(16)]], the same convention used by translated draws.
+    const void* fragmentUniformData = nullptr;
+    std::size_t fragmentUniformSize = 0;
 
     // Sampled texture/sampler bindings for tessellation stages. Slots
     // match SPIRV-Cross's [[texture(N)]] / [[sampler(N)]] arguments.

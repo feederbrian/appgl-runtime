@@ -45787,6 +45787,22 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     thread_local std::vector<std::uint8_t> tcsUniformScratch;
     thread_local std::vector<std::uint8_t> vsComputeUniformScratch;
     thread_local std::vector<std::uint8_t> tesComputeUniformScratch;
+    thread_local std::vector<std::uint8_t> fragUniformScratch;
+    if (program.fragmentUniformLayout.empty() &&
+        !program.fragmentReflection.uniformBlocks.empty()) {
+        computeStageUniformLayout(program.fragmentUniformLayout,
+            program.fragmentReflection, program.uniforms);
+    }
+    if (!program.fragmentUniformLayout.empty()) {
+        if (pushSynthesizedMatrixUniforms(program, matrixState)) {
+            program.markUniformsDirty();
+        }
+        buildStageUniformBuffer(fragUniformScratch,
+            program.fragmentReflection, program.uniformValues,
+            program.fragmentUniformLayout);
+        info.fragmentUniformData = fragUniformScratch.data();
+        info.fragmentUniformSize = fragUniformScratch.size();
+    }
     // Phase 5 probe: pack uniforms for ANY Metal-routed tess draw
     // when the uniform guard is enabled, not just TF-active ones. The CTS counter
     // probe is non-TF but still needs accurate tess factors or its

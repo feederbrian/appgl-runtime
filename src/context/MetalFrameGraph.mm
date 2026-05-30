@@ -8793,6 +8793,12 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                             length:sizeof(sampleMask)
                            atIndex:21];
         }
+        if (info.fragmentUniformData != nullptr &&
+            info.fragmentUniformSize > 0) {
+            [enc setFragmentBytes:info.fragmentUniformData
+                            length:info.fragmentUniformSize
+                           atIndex:16];
+        }
 
         // Depth/stencil state. Sprint 7 Phase 1 #11 (CKPT57) widened
         // this from depth-only to full per-face stencil plumbing —
