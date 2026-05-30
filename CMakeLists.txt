@@ -77,6 +77,7 @@ add_custom_target(appgl-codegen
 set(APPGL_SOURCES
   src/runtime/AppGLRuntime.cpp
   src/runtime/AppGLGroup8.cpp
+  src/runtime/AppGLFeatureFlags.mm
   src/runtime/AppGLMatrixOverrides.cpp
   src/runtime/AppGLImmediateMode.cpp
   src/caps/GLCapabilities.mm
@@ -236,6 +237,16 @@ target_include_directories(appgl_bar_b_benchmark
 )
 target_compile_definitions(appgl_bar_b_benchmark PRIVATE GL_SILENCE_DEPRECATION=1)
 target_link_libraries(appgl_bar_b_benchmark PRIVATE "-ldl")
+
+add_executable(appgl_feature_flags_probe tests/FeatureFlagsProbe.cpp)
+add_dependencies(appgl_feature_flags_probe appgl-codegen)
+target_include_directories(appgl_feature_flags_probe
+  PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_compile_definitions(appgl_feature_flags_probe PRIVATE GL_SILENCE_DEPRECATION=1)
+target_link_libraries(appgl_feature_flags_probe PRIVATE AppGL_static)
 
 if(APPGL_VENDOR_THIRD_PARTY)
   set(BUILD_EXTERNAL OFF CACHE BOOL "" FORCE)

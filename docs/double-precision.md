@@ -44,18 +44,24 @@ will see the same artifacts they saw on the native driver.
 The FP64 extension surface is gated at runtime. AppGL resolves the
 gate in this order:
 
-1. User-editable JSON override.
+1. Command-line flag on the host process.
 2. Porter/runtime environment flag.
-3. CMake default (`APPGL_FP64_EMULATION`).
+3. User-editable JSON config.
+4. CMake default (`APPGL_FP64_EMULATION`).
 
 The default build has `APPGL_FP64_EMULATION=OFF`, so FP64 CTS cases
 that check `GL_ARB_gpu_shader_fp64` or `GL_ARB_vertex_attrib_64bit`
-must report `NotSupported` unless a JSON or environment override
+must report `NotSupported` unless a command-line, environment, or JSON override
 enables the feature. The CTS `gpu_shader_fp64.fp64.state_query` case
 intentionally bypasses the extension check, so it is not a valid
-default-off advertising probe. A shipped port can enable the same
-default-build runtime by setting one of these environment flags before
-loading AppGL:
+default-off advertising probe. A shipped port can enable the same default-build
+runtime with a command-line flag:
+
+```bash
+--appgl-f64-emulation=1
+```
+
+or by setting one of these environment flags before loading AppGL:
 
 ```bash
 APPGL_ENABLE_FP64_EMULATION=1
@@ -67,11 +73,11 @@ Accepted aliases are `APPGL_ENABLE_GPU_SHADER_FP64=1` and
 `APPGL_DF64_FORCE_ADVERTISE=1` is still measurement-only and only
 relaxes the Metal-family probe; it does not enable FP64 by itself.
 
-### JSON override
+### JSON config
 
 AppGL also looks for an `appgl-options.json` file. This is intended
-for end users and overrides porter flags, including a porter-provided
-enable flag.
+for end-user-facing launch configuration. Command-line and environment
+settings take precedence over JSON.
 
 Search order:
 
@@ -81,9 +87,10 @@ Search order:
 4. `appgl-options.json` in the app bundle resources.
 
 Accepted keys may be top-level or nested under `appgl` or `features`:
-`fp64_emulation`, `f64_emulation`, `gpu_shader_fp64`, and
-`vertex_attrib_64bit`. Values may be booleans, boolean strings, or an
-object containing `enabled`, `force`, or `value`.
+`f64_emulation`, `fp64_emulation`, `gpu_shader_fp64`, and
+`vertex_attrib_64bit`. Hyphenated forms are also accepted. Values may be
+booleans, boolean strings, numbers, or an object containing `enabled`, `force`,
+or `value`.
 
 ```json
 {
