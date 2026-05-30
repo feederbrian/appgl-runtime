@@ -1333,7 +1333,7 @@ struct MetalFrameGraph::Impl {
             return;
         }
 
-        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];  // ADV-4
+        MTLRenderPassDescriptor* pass = getReusablePassDescriptor();  // ADV-4
         id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
         pass.colorAttachments[0].texture = colorTexture;
         pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
@@ -1493,7 +1493,7 @@ struct MetalFrameGraph::Impl {
         id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
         if (colorTexture == nil) { hasPendingClear = false; return; }
 
-        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];  // ADV-4
+        MTLRenderPassDescriptor* pass = getReusablePassDescriptor();  // ADV-4
         pass.colorAttachments[0].texture = colorTexture;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         pass.colorAttachments[0].loadAction = (pendingClearMask & GL_COLOR_BUFFER_BIT) ? MTLLoadActionClear : MTLLoadActionLoad;
@@ -1572,7 +1572,7 @@ struct MetalFrameGraph::Impl {
         }
 
         // Merge any pending clear into this render pass's load action (OPT-4).
-        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];  // ADV-4
+        MTLRenderPassDescriptor* pass = getReusablePassDescriptor();  // ADV-4
         pass.colorAttachments[0].texture = colorTexture;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         if (hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
@@ -2884,7 +2884,7 @@ struct MetalFrameGraph::Impl {
 
             // Build the render pass, merging any pending clear into the load
             // action so clear+draws share a single render pass (OPT-4).
-            MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];  // ADV-4
+            MTLRenderPassDescriptor* pass = getReusablePassDescriptor();  // ADV-4
             NSUInteger rateMapLayerCount = 1;
             pass.colorAttachments[0].texture = colorTexture;
             pass.colorAttachments[0].storeAction = MTLStoreActionStore;
@@ -5822,7 +5822,7 @@ fragment float4 appgl_immediate_textured_fs(
                 return false;
             }
             @autoreleasepool {
-                MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+                MTLRenderPassDescriptor* pass = getReusablePassDescriptor();  // ADV-4
                 if (isColor) {
                     pass.colorAttachments[0].texture = tex;
                     pass.colorAttachments[0].level = level;
@@ -6127,8 +6127,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         }
         attachErrorHandler(cmd, @"depthStencilUpload");
 
-        MTLRenderPassDescriptor* pass =
-            [MTLRenderPassDescriptor renderPassDescriptor];
+        MTLRenderPassDescriptor* pass = getReusablePassDescriptor();  // ADV-4
         pass.colorAttachments[0].texture = dummyColor;
         pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
         pass.colorAttachments[0].storeAction = MTLStoreActionDontCare;
@@ -6232,7 +6231,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             return false;
         }
 
-        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];  // ADV-4
+        MTLRenderPassDescriptor* pass = getReusablePassDescriptor();  // ADV-4
         pass.colorAttachments[0].texture = colorTexture;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         if (hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
@@ -8640,8 +8639,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         }
         if (colorTex == nil) return false;
 
-        MTLRenderPassDescriptor* pass =
-            [MTLRenderPassDescriptor renderPassDescriptor];
+        MTLRenderPassDescriptor* pass = getReusablePassDescriptor();  // ADV-4
         pass.colorAttachments[0].texture = colorTex;
         if (info.pendingClearColor) {
             pass.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -9140,7 +9138,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             std::fflush(stderr);
         }
 
-        MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+        MTLRenderPassDescriptor* rpd = getReusablePassDescriptor();  // ADV-4
         rpd.colorAttachments[0].texture =
             (__bridge id<MTLTexture>)info.fboColorTexture;
         rpd.colorAttachments[0].loadAction =
@@ -10202,25 +10200,51 @@ private:
     std::unordered_map<std::size_t, id<MTLLibrary>> mslLibraryCache;
     std::vector<std::size_t> mslLibraryCacheOrder;
 
-    // ADV-4: reusable render pass descriptor.  Avoids allocating a
-    // fresh autoreleased ObjC object at each of the five call sites.
-    // Reset fields before each use (attachments overwrite previous).
+    // ADV-4: reusable render pass descriptor. Avoids allocating a fresh
+    // autoreleased ObjC object at each render-pass setup site.
     MTLRenderPassDescriptor* reusablePassDescriptor = nil;
+
+    void resetReusablePassAttachment(MTLRenderPassAttachmentDescriptor* attachment) {
+        attachment.texture = nil;
+        attachment.level = 0;
+        attachment.slice = 0;
+        attachment.depthPlane = 0;
+        attachment.resolveTexture = nil;
+        attachment.resolveLevel = 0;
+        attachment.resolveSlice = 0;
+        attachment.resolveDepthPlane = 0;
+        attachment.loadAction = MTLLoadActionDontCare;
+        attachment.storeAction = MTLStoreActionDontCare;
+        attachment.storeActionOptions = MTLStoreActionOptionNone;
+    }
+
     MTLRenderPassDescriptor* getReusablePassDescriptor() {
+        bool created = false;
         if (reusablePassDescriptor == nil) {
             reusablePassDescriptor = [MTLRenderPassDescriptor new];
+            created = true;
         }
-        // Reset to defaults so callers don't inherit stale state.
-        reusablePassDescriptor.colorAttachments[0].texture = nil;
-        reusablePassDescriptor.colorAttachments[0].loadAction = MTLLoadActionDontCare;
-        reusablePassDescriptor.colorAttachments[0].storeAction = MTLStoreActionDontCare;
-        reusablePassDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
-        reusablePassDescriptor.depthAttachment.texture = nil;
-        reusablePassDescriptor.depthAttachment.loadAction = MTLLoadActionDontCare;
-        reusablePassDescriptor.depthAttachment.storeAction = MTLStoreActionDontCare;
-        reusablePassDescriptor.stencilAttachment.texture = nil;
-        reusablePassDescriptor.stencilAttachment.loadAction = MTLLoadActionDontCare;
-        reusablePassDescriptor.stencilAttachment.storeAction = MTLStoreActionDontCare;
+        for (NSUInteger i = 0; i < 8; ++i) {
+            MTLRenderPassColorAttachmentDescriptor* color =
+                reusablePassDescriptor.colorAttachments[i];
+            resetReusablePassAttachment(color);
+            color.clearColor = MTLClearColorMake(0, 0, 0, 0);
+        }
+        resetReusablePassAttachment(reusablePassDescriptor.depthAttachment);
+        reusablePassDescriptor.depthAttachment.clearDepth = 1.0;
+        resetReusablePassAttachment(reusablePassDescriptor.stencilAttachment);
+        reusablePassDescriptor.stencilAttachment.clearStencil = 0;
+        reusablePassDescriptor.visibilityResultBuffer = nil;
+        reusablePassDescriptor.renderTargetArrayLength = 0;
+        if (@available(macOS 10.15.4, *)) {
+            reusablePassDescriptor.rasterizationRateMap = nil;
+        }
+#ifdef APPGL_LOG_DRAW
+        APPGL_LOG(DRAW, @"ADV-4 renderPassDescriptor cache-%@ pass=%p",
+                  created ? @"miss" : @"hit", reusablePassDescriptor);
+#else
+        (void)created;
+#endif
         return reusablePassDescriptor;
     }
 

@@ -32,6 +32,12 @@ option(APPGL_ENABLE_ASAN
 option(APPGL_DCR_SENTINEL_HOOKS
   "Compile DCR red-stub sentinel hooks for test harnesses. DO NOT ship."
   OFF)
+option(APPGL_LOG_ALL "Compile all AppGL structured logging channels." OFF)
+option(APPGL_LOG_DRAW "Compile AppGL draw-channel structured logging." OFF)
+option(APPGL_LOG_SHADER "Compile AppGL shader-channel structured logging." OFF)
+option(APPGL_LOG_TEXTURE "Compile AppGL texture-channel structured logging." OFF)
+option(APPGL_LOG_BUFFER "Compile AppGL buffer-channel structured logging." OFF)
+option(APPGL_LOG_PIPELINE "Compile AppGL pipeline-channel structured logging." OFF)
 
 # AddressSanitizer flags applied globally when APPGL_ENABLE_ASAN is on.
 # Apple's clang accepts `-fsanitize=address` for both compile and link.
@@ -177,6 +183,12 @@ foreach(target AppGL AppGL_static AppGLTestsSupport)
     GL_SILENCE_DEPRECATION=1
     APPGL_FP64_EMULATION=$<IF:$<BOOL:${APPGL_FP64_EMULATION}>,1,0>
     APPGL_ENABLE_DCR_SENTINEL_HOOKS=$<IF:$<BOOL:${APPGL_DCR_SENTINEL_HOOKS}>,1,0>
+    $<$<BOOL:${APPGL_LOG_ALL}>:APPGL_LOG_ALL=1>
+    $<$<BOOL:${APPGL_LOG_DRAW}>:APPGL_LOG_DRAW=1>
+    $<$<BOOL:${APPGL_LOG_SHADER}>:APPGL_LOG_SHADER=1>
+    $<$<BOOL:${APPGL_LOG_TEXTURE}>:APPGL_LOG_TEXTURE=1>
+    $<$<BOOL:${APPGL_LOG_BUFFER}>:APPGL_LOG_BUFFER=1>
+    $<$<BOOL:${APPGL_LOG_PIPELINE}>:APPGL_LOG_PIPELINE=1>
   )
 endforeach()
 

@@ -1,0 +1,10 @@
+# ADV-4 render-pass descriptor reuse guard.
+# Covers default/FBO color, depth/stencil, MRT/layered descriptor state,
+# and framebuffer attachment paths where stale descriptor fields would leak.
+KHR-GL46.direct_state_access.framebuffers_texture_attachment
+KHR-GL46.framebuffer_blit.multisampled_to_singlesampled_blit_color_config_test
+KHR-GL46.framebuffer_blit.multisampled_to_singlesampled_blit_depth_config_test
+KHR-GL46.internalformat.renderbuffer.depth_component24
+KHR-GL46.shader_viewport_layer_array.ShaderViewportIndexTestCase
+KHR-GL46.shader_viewport_layer_array.ShaderLayerFramebufferLayeredTestCase
+KHR-GL46.shader_viewport_layer_array.ShaderLayerFramebufferNonLayeredTestCase
