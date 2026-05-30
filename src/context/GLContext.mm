@@ -40,6 +40,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <functional>
+#include <initializer_list>
 #include <iterator>
 #include <limits>
 #include <set>
@@ -3300,7 +3301,8 @@ struct GLContext::Impl {
         return tex != nullptr && tex->msaaFramebufferWriteNeedsSamplerFlush;
     }
 
-    void markGpuResourceWrites(const GpuResourceWriteSet& writes) const {
+    template <typename Writes>
+    void markGpuResourceWritesRange(const Writes& writes) const {
         auto markOne = [&](GpuResourceAccess::Kind kind,
                            GLuint name,
                            std::uint32_t bits) {
@@ -3322,7 +3324,17 @@ struct GLContext::Impl {
         }
     }
 
-    void drainPendingGpuProducers(const GpuResourceReadSet& reads) const {
+    void markGpuResourceWrites(const GpuResourceWriteSet& writes) const {
+        markGpuResourceWritesRange(writes);
+    }
+
+    void markGpuResourceWrites(
+        std::initializer_list<GpuResourceAccess> writes) const {
+        markGpuResourceWritesRange(writes);
+    }
+
+    template <typename Reads>
+    void drainPendingGpuProducersRange(const Reads& reads) const {
         auto forEachReadName = [&](const GpuResourceAccess& read, auto&& fn) {
             if (read.kind == GpuResourceAccess::Kind::Texture) {
                 return forEachTextureStorageAliasName(
@@ -3373,6 +3385,15 @@ struct GLContext::Impl {
                 return true;
             });
         }
+    }
+
+    void drainPendingGpuProducers(const GpuResourceReadSet& reads) const {
+        drainPendingGpuProducersRange(reads);
+    }
+
+    void drainPendingGpuProducers(
+        std::initializer_list<GpuResourceAccess> reads) const {
+        drainPendingGpuProducersRange(reads);
     }
 
     void drainPendingGpuProducers(GLBufferObject& object,
