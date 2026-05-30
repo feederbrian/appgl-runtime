@@ -22788,6 +22788,8 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
         // Synthesise one here so the caller path stays defensive.
         object->instantiated = true;
     }
+    const int cubeFace = Impl::cubeFaceIndexForTarget(target);
+    const GLenum effectiveTarget = cubeFace >= 0 ? GL_TEXTURE_CUBE_MAP : target;
     // Sprint 17 Day 9+ Bank-Group-E narrow-gate (regression-debt #3):
     // record dimensions UNCONDITIONALLY for any valid level/width/
     // height before format-specific dispatch. Pre-narrow `dcba5cd`
@@ -22798,11 +22800,11 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
     // `xoffset+width > texW=0` and pushing GL_INVALID_VALUE — CTS
     // `get_texture_sub_image.errors_test` uses GL_COMPRESSED_RGB8_ETC2
     // and expected GL_INVALID_OPERATION on bufSize-too-small.
-    object->target = target;
-    object->desc.target = target;
+    object->target = effectiveTarget;
+    object->desc.target = effectiveTarget;
     object->desc.width = width;
-    object->desc.height = (target == GL_TEXTURE_1D) ? 1 : height;
-    object->desc.depth = depth;
+    object->desc.height = (effectiveTarget == GL_TEXTURE_1D) ? 1 : height;
+    object->desc.depth = (effectiveTarget == GL_TEXTURE_CUBE_MAP) ? 6 : depth;
     object->desc.internalFormat = internalformat;
     if (impl_->capabilities == nullptr) {
         pushError(GL_INVALID_OPERATION);
@@ -22819,12 +22821,18 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
         // dimension-recording path until their uploads get native backing.
         return true;
     }
-    if (target == GL_TEXTURE_CUBE_MAP_ARRAY) {
+    if (effectiveTarget == GL_TEXTURE_CUBE_MAP_ARRAY) {
         if (width != height || (depth % 6) != 0) {
             pushError(GL_INVALID_VALUE);
             return false;
         }
-    } else if (target != GL_TEXTURE_2D && target != GL_TEXTURE_2D_ARRAY) {
+    } else if (effectiveTarget == GL_TEXTURE_CUBE_MAP) {
+        if (cubeFace < 0 || width != height) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    } else if (effectiveTarget != GL_TEXTURE_2D &&
+               effectiveTarget != GL_TEXTURE_2D_ARRAY) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
@@ -22838,31 +22846,40 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
     // Record dimensions on the GL texture object so subsequent queries
     // (glGetCompressedTextureSubImage bounds, glGetTexLevelParameter)
     // see the right values.
-    object->target = target;
-    object->desc.target = target;
+    object->target = effectiveTarget;
+    object->desc.target = effectiveTarget;
     object->desc.width = width;
-    object->desc.height = (target == GL_TEXTURE_1D) ? 1 : height;
-    object->desc.depth = depth;
-    object->desc.layers = (target == GL_TEXTURE_2D_ARRAY ||
-                           target == GL_TEXTURE_CUBE_MAP_ARRAY) ? depth : 1;
+    object->desc.height = (effectiveTarget == GL_TEXTURE_1D) ? 1 : height;
+    object->desc.depth = (effectiveTarget == GL_TEXTURE_CUBE_MAP) ? 6 : depth;
+    object->desc.layers = (effectiveTarget == GL_TEXTURE_2D_ARRAY ||
+                           effectiveTarget == GL_TEXTURE_CUBE_MAP_ARRAY ||
+                           effectiveTarget == GL_TEXTURE_CUBE_MAP) ? object->desc.depth : 1;
     object->desc.internalFormat = internalformat;
     object->desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
 
     GLTextureImageLevel image;
     image.desc = object->desc;
     image.desc.width = width;
-    image.desc.height = (target == GL_TEXTURE_1D) ? 1 : height;
-    image.desc.depth = depth;
-    image.desc.layers = (target == GL_TEXTURE_2D_ARRAY ||
-                         target == GL_TEXTURE_CUBE_MAP_ARRAY) ? depth : 1;
+    image.desc.height = (effectiveTarget == GL_TEXTURE_1D) ? 1 : height;
+    image.desc.depth = (effectiveTarget == GL_TEXTURE_CUBE_MAP) ? 1 : depth;
+    image.desc.layers = (effectiveTarget == GL_TEXTURE_2D_ARRAY ||
+                         effectiveTarget == GL_TEXTURE_CUBE_MAP_ARRAY) ? depth : 1;
     image.desc.levels = object->desc.levels;
     image.defined = true;
+    if (cubeFace >= 0) {
+        object->cubeFaceLevels[static_cast<std::size_t>(cubeFace)][level] = image;
+        object->levels[level] = image;
+        if (level == 0) {
+            object->cubeFacesDefined |= static_cast<std::uint8_t>(1u << cubeFace);
+        }
+        return true;
+    }
     object->levels[level] = std::move(image);
 
     // Allocate Metal texture if missing OR if format/size changed.
     id<MTLTexture> existing = (__bridge id<MTLTexture>)object->metalTexture;
-    const bool arrayTexture = target == GL_TEXTURE_2D_ARRAY;
-    const bool cubeArrayTexture = target == GL_TEXTURE_CUBE_MAP_ARRAY;
+    const bool arrayTexture = effectiveTarget == GL_TEXTURE_2D_ARRAY;
+    const bool cubeArrayTexture = effectiveTarget == GL_TEXTURE_CUBE_MAP_ARRAY;
     const bool slicedTexture = arrayTexture || cubeArrayTexture;
     const NSUInteger uploadSlices = slicedTexture ? static_cast<NSUInteger>(depth) : 1u;
     const NSUInteger arrayLength = cubeArrayTexture
@@ -23240,9 +23257,21 @@ bool GLContext::texStorageMultisample(
     // Metal requires sampleCount > 1 for multisample texture types; GL
     // permits samples=1 on MS targets and allows implementations to choose
     // an actual count >= requested, so use 2 as the minimum storage count.
-    GLsizei clampedSamples = std::min<GLsizei>(samples, 4);
-    if (clampedSamples < 2) {
-        clampedSamples = 2;
+    if (impl_->capabilities != nullptr) {
+        GLint maxSamples = 0;
+        impl_->capabilities->queryInteger(GL_MAX_SAMPLES, &maxSamples);
+        if (maxSamples > 0 && samples > maxSamples) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
+    GLsizei clampedSamples = 2;
+    if (samples > 8) {
+        clampedSamples = samples;
+    } else if (samples > 4) {
+        clampedSamples = 8;
+    } else if (samples > 2) {
+        clampedSamples = 4;
     }
 
     // Metal only supports specific sample counts (typically 1, 2, 4, 8).
@@ -23250,10 +23279,6 @@ bool GLContext::texStorageMultisample(
     // we pass them through. Check via MTLDevice.supportsTextureSampleCount.
     {
         id<MTLDevice> mtlDevice = impl_->device;
-        if (mtlDevice != nil && samples > 1 && ![mtlDevice supportsTextureSampleCount:static_cast<NSUInteger>(samples)]) {
-            pushError(GL_INVALID_OPERATION);
-            return false;
-        }
         if (mtlDevice != nil &&
             ![mtlDevice supportsTextureSampleCount:static_cast<NSUInteger>(clampedSamples)]) {
             pushError(GL_INVALID_OPERATION);
@@ -56775,6 +56800,130 @@ static bool clearTexFormatCompatible(GLenum internalFormat, GLenum format) {
 
 }  // namespace
 
+static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
+                                         const GLTextureImageLevel& image,
+                                         GLenum format,
+                                         GLenum type,
+                                         GLsizei bufSize,
+                                         const GLPixelStoreState& packStore,
+                                         void* pixels) {
+    if (pixels == nullptr || !image.defined) {
+        return false;
+    }
+    if (isPackedPixelType(type)) {
+        return false;
+    }
+
+    const std::size_t dstPixelBytes = bytesPerPixel(format, type);
+    const std::size_t dstBpc = bytesPerComponent(type);
+    const std::size_t dstComponents = componentCountForFormat(format);
+    if (dstPixelBytes == 0 || dstBpc == 0 || dstComponents == 0) {
+        return false;
+    }
+
+    const std::uint8_t* sourceBytes = nullptr;
+    std::size_t sourceBpp = 0;
+    std::size_t sourceByteCount = 0;
+    if (format == GL_RGBA && type == GL_UNSIGNED_BYTE && !image.rgba8.empty()) {
+        sourceBytes = image.rgba8.data();
+        sourceBpp = 4;
+        sourceByteCount = image.rgba8.size();
+    } else if ((format == GL_RGBA || format == GL_RGB || format == GL_DEPTH_COMPONENT) &&
+               image.nativeBpp >= dstPixelBytes &&
+               !image.nativeData.empty()) {
+        sourceBytes = image.nativeData.data();
+        sourceBpp = image.nativeBpp;
+        sourceByteCount = image.nativeData.size();
+    } else {
+        return false;
+    }
+
+    const GLsizei texW = std::max<GLsizei>(image.desc.width, 1);
+    GLsizei texH = std::max<GLsizei>(image.desc.height, 1);
+    GLsizei texD = 1;
+    switch (object.target) {
+        case GL_TEXTURE_1D:
+            texH = 1;
+            texD = 1;
+            break;
+        case GL_TEXTURE_1D_ARRAY:
+            texH = std::max<GLsizei>(
+                std::max<GLsizei>(image.desc.height, image.desc.layers), 1);
+            texD = 1;
+            break;
+        case GL_TEXTURE_3D:
+            texD = std::max<GLsizei>(image.desc.depth, 1);
+            break;
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+            texD = std::max<GLsizei>(
+                std::max<GLsizei>(image.desc.depth, image.desc.layers), 1);
+            break;
+        default:
+            texD = 1;
+            break;
+    }
+
+    const std::size_t texelCount =
+        static_cast<std::size_t>(texW) *
+        static_cast<std::size_t>(texH) *
+        static_cast<std::size_t>(texD);
+    if (sourceByteCount < texelCount * sourceBpp) {
+        return false;
+    }
+
+    const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+        ? static_cast<std::size_t>(packStore.packRowLength)
+        : static_cast<std::size_t>(texW);
+    const std::size_t dstRowBytes = alignByteCount(
+        dstRowStridePixels * dstPixelBytes, packStore.packAlignment);
+    const std::size_t dstImageHeight = packStore.packImageHeight > 0
+        ? static_cast<std::size_t>(packStore.packImageHeight)
+        : static_cast<std::size_t>(texH);
+    const std::size_t dstSliceBytes = dstRowBytes * dstImageHeight;
+    const std::size_t dstSkipBytes =
+        static_cast<std::size_t>(packStore.packSkipImages) * dstSliceBytes +
+        static_cast<std::size_t>(packStore.packSkipRows) * dstRowBytes +
+        static_cast<std::size_t>(packStore.packSkipPixels) * dstPixelBytes;
+    const std::size_t lastByte =
+        dstSkipBytes +
+        (static_cast<std::size_t>(texD) - 1u) * dstSliceBytes +
+        (static_cast<std::size_t>(texH) - 1u) * dstRowBytes +
+        static_cast<std::size_t>(texW) * dstPixelBytes;
+    if (bufSize > 0 && static_cast<std::size_t>(bufSize) < lastByte) {
+        return false;
+    }
+
+    auto* dstBase = static_cast<std::uint8_t*>(pixels) + dstSkipBytes;
+    const bool packSwapBytes = (packStore.packSwapBytes == GL_TRUE);
+    for (GLsizei z = 0; z < texD; ++z) {
+        for (GLsizei y = 0; y < texH; ++y) {
+            const std::uint8_t* srcRow = sourceBytes +
+                ((static_cast<std::size_t>(z) * static_cast<std::size_t>(texH) +
+                  static_cast<std::size_t>(y)) *
+                 static_cast<std::size_t>(texW)) * sourceBpp;
+            std::uint8_t* dstRow = dstBase +
+                static_cast<std::size_t>(z) * dstSliceBytes +
+                static_cast<std::size_t>(y) * dstRowBytes;
+            if (sourceBpp == dstPixelBytes && !packSwapBytes) {
+                std::memcpy(dstRow, srcRow, static_cast<std::size_t>(texW) * dstPixelBytes);
+                continue;
+            }
+            for (GLsizei x = 0; x < texW; ++x) {
+                const std::uint8_t* srcPixel = srcRow + static_cast<std::size_t>(x) * sourceBpp;
+                std::uint8_t* dstPixel = dstRow + static_cast<std::size_t>(x) * dstPixelBytes;
+                std::memcpy(dstPixel, srcPixel, dstPixelBytes);
+                if (packSwapBytes && dstBpc > 1) {
+                    for (std::size_t c = 0; c < dstComponents; ++c) {
+                        std::reverse(dstPixel + c * dstBpc, dstPixel + (c + 1u) * dstBpc);
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
 // Helper: fill an existing level's rgba8 + native-format buffers with
 // a single `data` texel (or zeros). `data==nullptr` means GL-spec-zero
 // (RGBA8 {0,0,0,0}, native zero-fill; alpha defaults to 1 for formats
@@ -58496,19 +58645,6 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    if (obj->viewSourceTexture != 0) {
-        (void)impl_->materializeTextureView(*obj);
-    }
-    if (!obj->instantiated || obj->metalTexture == nullptr) {
-        // Re-upload shadow data to Metal texture (e.g. after copyImageSubData).
-        if (!obj->levels.empty()) {
-            impl_->replaceMetalTexture(*obj, texture);
-        }
-        if (!obj->instantiated || obj->metalTexture == nullptr) {
-            pushError(GL_INVALID_OPERATION);
-            return false;
-        }
-    }
     // GL 4.6 §8.11.4: negative level is INVALID_VALUE. Must run BEFORE
     // the `static_cast<NSUInteger>(level)` below or the wrap-to-huge will
     // both mis-compute texture extents AND crash AGX inside `getBytes`.
@@ -58535,20 +58671,51 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
     // win path.
     const bool packPBOBound =
         impl_->state->boundBuffer(GL_PIXEL_PACK_BUFFER) != 0;
+    // Null-pixel early-out only when no PBO is bound — otherwise null
+    // (== offset 0) is a valid PBO destination.
+    if (pixels == nullptr && !packPBOBound) return true;
+
+    if (obj->viewSourceTexture != 0) {
+        (void)impl_->materializeTextureView(*obj);
+    }
+    if (!obj->instantiated || obj->metalTexture == nullptr) {
+        // Some CTS clear-tex-image paths define only the queried mip level.
+        // In that shape replaceMetalTexture cannot build a full Metal chain
+        // from level 0, but the CPU shadow for the requested level is valid.
+        if (!packPBOBound) {
+            const auto levelIt = obj->levels.find(level);
+            if (levelIt != obj->levels.end() && levelIt->second.defined &&
+                copySimpleTextureLevelShadow(*obj,
+                                             levelIt->second,
+                                             format,
+                                             type,
+                                             bufSize,
+                                             impl_->state->pixelStore(),
+                                             pixels)) {
+                return true;
+            }
+        }
+        // Re-upload shadow data to Metal texture (e.g. after copyImageSubData).
+        if (!obj->levels.empty()) {
+            impl_->replaceMetalTexture(*obj, texture);
+        }
+        if (!obj->instantiated || obj->metalTexture == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
     // Level must be in-range relative to the texture's mipmap count.
     // CTS `textures_image_query_errors` passes level = MAX_TEXTURE_SIZE
     // (typically 16384) — without this guard the `getBytes:mipmapLevel:`
     // call below crashes inside AGX with "Specified mipmap level OOB".
     if (pixels != nullptr || packPBOBound) {
         id<MTLTexture> probeTex = (__bridge id<MTLTexture>)obj->metalTexture;
-        if (static_cast<NSUInteger>(level) >= probeTex.mipmapLevelCount) {
+        if (probeTex == nil ||
+            static_cast<NSUInteger>(level) >= probeTex.mipmapLevelCount) {
             pushError(GL_INVALID_VALUE);
             return false;
         }
     }
-    // Null-pixel early-out only when no PBO is bound — otherwise null
-    // (== offset 0) is a valid PBO destination.
-    if (pixels == nullptr && !packPBOBound) return true;
 
     const std::size_t dstComponents = componentCountForFormat(format);
     const bool typeIsPacked = isPackedPixelType(type);
@@ -59835,7 +60002,8 @@ static bool validateGetTextureSubImageCommon(GLContext* ctx,
                 return false;
             }
             // For 1D_ARRAY the second dimension is the layer index.
-            texH = std::max<GLsizei>(obj.desc.layers, 1);
+            texH = std::max<GLsizei>(
+                std::max<GLsizei>(obj.desc.height, obj.desc.layers), 1);
             texD = 1;
             break;
         case GL_TEXTURE_2D:
@@ -59921,6 +60089,121 @@ static GLsizei getTextureSubImagePixelBytes(GLenum format, GLenum type) {
     return components * bpc;
 }
 
+static bool copyRGBA8TextureSubImageShadow(const GLTextureObject& obj,
+                                           GLint level,
+                                           GLint xoffset,
+                                           GLint yoffset,
+                                           GLint zoffset,
+                                           GLsizei width,
+                                           GLsizei height,
+                                           GLsizei depth,
+                                           const GLPixelStoreState& packStore,
+                                           void* pixels) {
+    if (pixels == nullptr) {
+        return true;
+    }
+    if (width == 0 || height == 0 || depth == 0) {
+        return true;
+    }
+
+    const std::size_t dstPixelBytes = 4;
+    const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+        ? static_cast<std::size_t>(packStore.packRowLength)
+        : static_cast<std::size_t>(width);
+    const std::size_t dstRowBytes = alignByteCount(
+        dstRowStridePixels * dstPixelBytes, packStore.packAlignment);
+    const std::size_t dstImageHeight = packStore.packImageHeight > 0
+        ? static_cast<std::size_t>(packStore.packImageHeight)
+        : static_cast<std::size_t>(height);
+    const std::size_t dstSliceBytes = dstRowBytes * dstImageHeight;
+    auto* dstBase = static_cast<std::uint8_t*>(pixels) +
+        static_cast<std::size_t>(packStore.packSkipImages) * dstSliceBytes +
+        static_cast<std::size_t>(packStore.packSkipRows) * dstRowBytes +
+        static_cast<std::size_t>(packStore.packSkipPixels) * dstPixelBytes;
+
+    auto copyFromImage = [&](const GLTextureImageLevel& image,
+                             GLsizei srcZ,
+                             GLsizei dstZ) -> bool {
+        if (!image.defined || image.rgba8.empty()) {
+            return false;
+        }
+        const GLsizei srcW = std::max<GLsizei>(image.desc.width, 1);
+        GLsizei srcH = std::max<GLsizei>(image.desc.height, 1);
+        GLsizei srcD = std::max<GLsizei>(image.desc.depth, 1);
+        if (obj.target == GL_TEXTURE_1D) {
+            srcH = 1;
+            srcD = 1;
+        } else if (obj.target == GL_TEXTURE_1D_ARRAY) {
+            srcH = std::max<GLsizei>(
+                std::max<GLsizei>(image.desc.height, image.desc.layers), 1);
+            srcD = 1;
+        } else if (obj.target == GL_TEXTURE_2D ||
+                   obj.target == GL_TEXTURE_RECTANGLE ||
+                   obj.target == GL_TEXTURE_CUBE_MAP) {
+            srcD = 1;
+        } else if (obj.target == GL_TEXTURE_2D_ARRAY ||
+                   obj.target == GL_TEXTURE_CUBE_MAP_ARRAY) {
+            srcD = std::max<GLsizei>(
+                std::max<GLsizei>(image.desc.depth, image.desc.layers), 1);
+        }
+        if (xoffset < 0 || yoffset < 0 || srcZ < 0 ||
+            xoffset + width > srcW ||
+            yoffset + height > srcH ||
+            srcZ >= srcD) {
+            return false;
+        }
+        const std::size_t required =
+            static_cast<std::size_t>(srcW) *
+            static_cast<std::size_t>(srcH) *
+            static_cast<std::size_t>(srcD) * dstPixelBytes;
+        if (image.rgba8.size() < required) {
+            return false;
+        }
+        for (GLsizei row = 0; row < height; ++row) {
+            const std::size_t srcOffset =
+                ((static_cast<std::size_t>(srcZ) * static_cast<std::size_t>(srcH) +
+                  static_cast<std::size_t>(yoffset + row)) *
+                 static_cast<std::size_t>(srcW) +
+                 static_cast<std::size_t>(xoffset)) * dstPixelBytes;
+            std::uint8_t* dstRow = dstBase +
+                static_cast<std::size_t>(dstZ) * dstSliceBytes +
+                static_cast<std::size_t>(row) * dstRowBytes;
+            std::memcpy(dstRow,
+                        image.rgba8.data() + srcOffset,
+                        static_cast<std::size_t>(width) * dstPixelBytes);
+        }
+        return true;
+    };
+
+    if (obj.target == GL_TEXTURE_CUBE_MAP) {
+        for (GLsizei slice = 0; slice < depth; ++slice) {
+            const GLint face = zoffset + slice;
+            if (face < 0 || face >= 6) {
+                return false;
+            }
+            const auto& faceLevels = obj.cubeFaceLevels[static_cast<std::size_t>(face)];
+            const auto faceIt = faceLevels.find(level);
+            if (faceIt == faceLevels.end() ||
+                !copyFromImage(faceIt->second, 0, slice)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    const auto levelIt = obj.levels.find(level);
+    if (levelIt == obj.levels.end()) {
+        return false;
+    }
+    for (GLsizei slice = 0; slice < depth; ++slice) {
+        const GLsizei srcZ = (obj.target == GL_TEXTURE_1D_ARRAY) ? 0 : (zoffset + slice);
+        if (!copyFromImage(levelIt->second, srcZ, slice)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool GLContext::getTextureSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
                                     GLsizei width, GLsizei height, GLsizei depth,
                                     GLenum format, GLenum type, GLsizei bufSize, void* pixels) {
@@ -59936,6 +60219,19 @@ bool GLContext::getTextureSubImage(GLuint texture, GLint level, GLint xoffset, G
     if (bufSize < required) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+    if (format == GL_RGBA && type == GL_UNSIGNED_BYTE &&
+        copyRGBA8TextureSubImageShadow(*obj,
+                                       level,
+                                       xoffset,
+                                       yoffset,
+                                       zoffset,
+                                       width,
+                                       height,
+                                       depth,
+                                       impl_->state->pixelStore(),
+                                       pixels)) {
+        return true;
     }
     (void)pixels;
     // Sub-region readback accepted — full implementation deferred to Metal readback path.
