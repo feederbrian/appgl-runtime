@@ -1585,143 +1585,6 @@ bool appendUnique(std::vector<std::string>& values, std::string value) {
     return true;
 }
 
-std::vector<std::string> splitTopLevelCommas(const std::string& text);
-bool findMatchingParen(const std::string& text,
-                       std::size_t open,
-                       std::size_t& close);
-
-struct MultisampleTextureVar {
-    std::string name;
-    std::uint32_t metalSlot = 0;
-    bool arrayed = false;
-};
-
-std::vector<MultisampleTextureVar> collectMultisampleTextureVars(
-    const std::string& msl,
-    const std::vector<std::uint32_t>* metalTextureSlots,
-    bool requireAccess,
-    bool requireWritableAccess) {
-    std::vector<MultisampleTextureVar> vars;
-    std::set<std::pair<std::string, std::uint32_t>> seen;
-
-    auto slotAllowed = [&](std::uint32_t slot) {
-        return metalTextureSlots == nullptr ||
-               std::find(metalTextureSlots->begin(),
-                         metalTextureSlots->end(),
-                         slot) != metalTextureSlots->end();
-    };
-
-    std::size_t attrPos = 0;
-    while ((attrPos = msl.find("[[texture(", attrPos)) != std::string::npos) {
-        std::size_t cursor = attrPos + std::strlen("[[texture(");
-        std::uint32_t slot = 0;
-        if (!parseUnsignedAfter(msl, cursor, slot, &cursor) ||
-            !slotAllowed(slot)) {
-            attrPos += std::strlen("[[texture(");
-            continue;
-        }
-        const std::size_t lineStart = msl.rfind('\n', attrPos);
-        const std::size_t lineBegin =
-            (lineStart == std::string::npos) ? 0 : lineStart + 1u;
-        const std::size_t typeStart = msl.rfind("texture2d_ms", attrPos);
-        if (typeStart == std::string::npos || typeStart < lineBegin) {
-            attrPos += std::strlen("[[texture(");
-            continue;
-        }
-        const bool arrayed =
-            msl.compare(typeStart,
-                        std::strlen("texture2d_ms_array"),
-                        "texture2d_ms_array") == 0;
-        const std::size_t templateStart = msl.find('<', typeStart);
-        const std::size_t templateEnd = msl.find('>', templateStart);
-        if (templateStart == std::string::npos ||
-            templateEnd == std::string::npos ||
-            templateEnd > attrPos) {
-            attrPos += std::strlen("[[texture(");
-            continue;
-        }
-        const std::string templateArgs =
-            msl.substr(templateStart + 1, templateEnd - templateStart - 1);
-        const bool hasAccess =
-            templateArgs.find("access::") != std::string::npos;
-        const bool writable =
-            templateArgs.find("access::write") != std::string::npos ||
-            templateArgs.find("access::read_write") != std::string::npos;
-        if ((requireAccess && !hasAccess) ||
-            (!requireAccess && hasAccess) ||
-            (requireWritableAccess && !writable)) {
-            attrPos += std::strlen("[[texture(");
-            continue;
-        }
-        std::size_t nameStart = templateEnd + 1;
-        while (nameStart < attrPos &&
-               std::isspace(static_cast<unsigned char>(msl[nameStart]))) {
-            ++nameStart;
-        }
-        std::size_t nameEnd = nameStart;
-        while (nameEnd < attrPos && isIdentifierChar(msl[nameEnd])) {
-            ++nameEnd;
-        }
-        if (nameEnd > nameStart) {
-            std::string name = msl.substr(nameStart, nameEnd - nameStart);
-            if (seen.insert({name, slot}).second) {
-                vars.push_back({std::move(name), slot, arrayed});
-            }
-        }
-        attrPos += std::strlen("[[texture(");
-    }
-
-    return vars;
-}
-
-bool rewriteMultisampleSampledImageReads(std::string& msl) {
-    bool changed = false;
-    const auto vars = collectMultisampleTextureVars(
-        msl, nullptr, false, false);
-
-    for (const auto& var : vars) {
-        const std::string sidecarName =
-            "appgl_ms_sampled_sidecar_" + std::to_string(var.metalSlot);
-        const std::string sampleCount =
-            "appgl_ms_storage_image_samples[" +
-            std::to_string(var.metalSlot) + "]";
-        const std::string needle = var.name + ".read(";
-        std::size_t pos = 0;
-        while ((pos = msl.find(needle, pos)) != std::string::npos) {
-            const std::size_t open = pos + needle.size() - 1u;
-            std::size_t close = std::string::npos;
-            if (!findMatchingParen(msl, open, close)) {
-                break;
-            }
-            const std::string original = msl.substr(pos, close - pos + 1u);
-            const auto args =
-                splitTopLevelCommas(msl.substr(open + 1u, close - open - 1u));
-            std::string sidecarRead;
-            if (!var.arrayed && args.size() >= 2u) {
-                sidecarRead =
-                    sidecarName + ".read(" + args[0] + ", uint(" +
-                    args[1] + "))";
-            } else if (var.arrayed && args.size() >= 3u) {
-                sidecarRead =
-                    sidecarName + ".read(" + args[0] + ", (uint(" +
-                    args[1] + ") * max(" + sampleCount +
-                    ", 1u) + uint(" + args[2] + ")))";
-            } else {
-                pos = close + 1u;
-                continue;
-            }
-            const std::string replacement =
-                "((" + sampleCount + " == 0u) ? " +
-                original + " : " + sidecarRead + ")";
-            msl.replace(pos, original.size(), replacement);
-            pos += replacement.size();
-            changed = true;
-        }
-    }
-
-    return changed;
-}
-
 bool injectMultisampleSampledImageSidecars(std::string& msl) {
     static constexpr const char* kSidecarPrefix = "appgl_ms_sampled_sidecar_";
     static constexpr std::size_t kSidecarPrefixLen = 25;
@@ -2711,7 +2574,7 @@ bool rewriteMultisampleStorageImageArraySizes(
     std::string& msl,
     const std::vector<std::uint32_t>& metalTextureSlots) {
     bool changed = false;
-    auto variableSlots = collectTextureVariableSlotsForMetalSlots(
+    const auto variableSlots = collectTextureVariableSlotsForMetalSlots(
         msl, metalTextureSlots, "texture2d_array");
 
     for (const auto& entry : variableSlots) {
@@ -2750,80 +2613,6 @@ bool rewriteMultisampleStorageImageArraySizes(
                 std::to_string(metalSlot) + "], 1u))";
             msl.replace(exprStart, exprEnd - exprStart, replacement);
             pos = exprStart + replacement.size();
-            changed = true;
-        }
-    }
-
-    return changed;
-}
-
-bool rewriteMultisampleStorageImageSidecarWrites(
-    std::string& msl,
-    const std::vector<std::uint32_t>& metalTextureSlots) {
-    bool changed = false;
-    const auto vars = collectMultisampleTextureVars(
-        msl, &metalTextureSlots, true, true);
-
-    for (const auto& var : vars) {
-        const std::string attr =
-            "[[texture(" + std::to_string(var.metalSlot) + ")]]";
-        std::size_t search = 0;
-        while ((search = msl.find(attr, search)) != std::string::npos) {
-            const std::size_t lineStart = msl.rfind('\n', search);
-            const std::size_t lineBegin =
-                (lineStart == std::string::npos) ? 0 : lineStart + 1u;
-            const std::size_t typeStart = msl.rfind("texture2d_ms", search);
-            if (typeStart == std::string::npos || typeStart < lineBegin) {
-                search += attr.size();
-                continue;
-            }
-            const char* oldType =
-                var.arrayed ? "texture2d_ms_array" : "texture2d_ms";
-            if (msl.compare(typeStart, std::strlen(oldType), oldType) == 0) {
-                msl.replace(typeStart, std::strlen(oldType), "texture2d_array");
-                changed = true;
-                search = typeStart + std::strlen("texture2d_array");
-            } else {
-                search += attr.size();
-            }
-        }
-
-        const std::string sampleCount =
-            "appgl_ms_storage_image_samples[" +
-            std::to_string(var.metalSlot) + "]";
-        const std::string safeSamples =
-            "max(" + sampleCount + ", 1u)";
-        const std::string needle = var.name + ".write(";
-        std::size_t pos = 0;
-        std::uint32_t writeOrdinal = 0;
-        while ((pos = msl.find(needle, pos)) != std::string::npos) {
-            const std::size_t open = pos + needle.size() - 1u;
-            std::size_t close = std::string::npos;
-            if (!findMatchingParen(msl, open, close)) {
-                break;
-            }
-            const auto args =
-                splitTopLevelCommas(msl.substr(open + 1u, close - open - 1u));
-            std::string sliceExpr;
-            if (!var.arrayed && args.size() >= 2u) {
-                sliceExpr =
-                    "(uint(" + std::to_string(writeOrdinal) +
-                    ") % " + safeSamples + ")";
-            } else if (var.arrayed && args.size() >= 3u) {
-                sliceExpr =
-                    "(uint(" + args[2] + ") * " + safeSamples +
-                    " + (uint(" + std::to_string(writeOrdinal) +
-                    ") % " + safeSamples + "))";
-            } else {
-                pos = close + 1u;
-                continue;
-            }
-            const std::string replacement =
-                var.name + ".write(" + args[0] + ", " + args[1] +
-                ", " + sliceExpr + ")";
-            msl.replace(pos, close - pos + 1u, replacement);
-            pos += replacement.size();
-            ++writeOrdinal;
             changed = true;
         }
     }
@@ -4364,6 +4153,7 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     r.maxVaryingComponents = 128;
     r.maxVaryingVectors = 32;
     r.maxImageUnits = 16;
+    r.maxImageSamples = 4;
     r.maxCombinedImageUniforms = 48;
     r.maxCombinedImageUnitsAndFragmentOutputs = 48;
     r.maxCombinedShaderOutputResources = 48;
@@ -4404,7 +4194,6 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     r.maxCullDistances = 8;
     r.maxCombinedClipAndCullDistances = 8;
     r.maxTransformFeedbackInterleavedComponents = 128;
-    r.maxImageSamples = 4;
     return r;
 }
 
@@ -6408,17 +6197,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 msl, multisampleStorageImageSlots);
             (void)rewriteMultisampleStorageImageArraySizes(
                 msl, multisampleStorageImageArraySlots);
-            std::vector<std::uint32_t> multisampleStorageImageAllSlots =
-                multisampleStorageImageSlots;
-            multisampleStorageImageAllSlots.insert(
-                multisampleStorageImageAllSlots.end(),
-                multisampleStorageImageArraySlots.begin(),
-                multisampleStorageImageArraySlots.end());
-            (void)rewriteMultisampleStorageImageSidecarWrites(
-                msl, multisampleStorageImageAllSlots);
         }
 
-        (void)rewriteMultisampleSampledImageReads(msl);
         (void)injectMultisampleSampledImageSidecars(msl);
         (void)injectSparseSampledImageSidecars(msl);
         (void)injectMultisampleStorageImageSampleCounts(msl);

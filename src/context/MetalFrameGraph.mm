@@ -159,28 +159,6 @@ static NSInteger textureReductionModesBufferSlot(const std::string* msl) {
     return haveDigit ? slot : -1;
 }
 
-static NSInteger multisampleStorageImageSamplesBufferSlot(const std::string* msl) {
-    if (msl == nullptr) {
-        return -1;
-    }
-    static constexpr const char* kNeedle =
-        "appgl_ms_storage_image_samples [[buffer(";
-    const std::size_t pos = msl->find(kNeedle);
-    if (pos == std::string::npos) {
-        return -1;
-    }
-    std::size_t cursor = pos + std::strlen(kNeedle);
-    NSInteger slot = 0;
-    bool haveDigit = false;
-    while (cursor < msl->size() &&
-           std::isdigit(static_cast<unsigned char>((*msl)[cursor]))) {
-        haveDigit = true;
-        slot = slot * 10 + static_cast<NSInteger>((*msl)[cursor] - '0');
-        ++cursor;
-    }
-    return haveDigit ? slot : -1;
-}
-
 static NSInteger textureLodBiasesBufferSlot(const std::string* msl) {
     if (msl == nullptr) {
         return -1;
@@ -3484,15 +3462,6 @@ struct MetalFrameGraph::Impl {
                                               length:modes.size() * sizeof(std::uint32_t)
                                              atIndex:static_cast<NSUInteger>(vertexReductionModesSlot)];
             }
-            const NSInteger vertexMSImageSamplesSlot =
-                multisampleStorageImageSamplesBufferSlot(info.vertexMSL);
-            if (vertexMSImageSamplesSlot >= 0 &&
-                !info.vertexMultisampleStorageImageSampleCounts.empty()) {
-                [currentRenderEncoder setVertexBytes:info.vertexMultisampleStorageImageSampleCounts.data()
-                                              length:info.vertexMultisampleStorageImageSampleCounts.size() *
-                                                  sizeof(std::uint32_t)
-                                             atIndex:static_cast<NSUInteger>(vertexMSImageSamplesSlot)];
-            }
             const NSInteger vertexLodBiasesSlot =
                 textureLodBiasesBufferSlot(info.vertexMSL);
             if (vertexLodBiasesSlot >= 0) {
@@ -3544,15 +3513,6 @@ struct MetalFrameGraph::Impl {
                 [currentRenderEncoder setFragmentBytes:modes.data()
                                                 length:modes.size() * sizeof(std::uint32_t)
                                                atIndex:static_cast<NSUInteger>(fragmentReductionModesSlot)];
-            }
-            const NSInteger fragmentMSImageSamplesSlot =
-                multisampleStorageImageSamplesBufferSlot(info.fragmentMSL);
-            if (fragmentMSImageSamplesSlot >= 0 &&
-                !info.fragmentMultisampleStorageImageSampleCounts.empty()) {
-                [currentRenderEncoder setFragmentBytes:info.fragmentMultisampleStorageImageSampleCounts.data()
-                                                length:info.fragmentMultisampleStorageImageSampleCounts.size() *
-                                                    sizeof(std::uint32_t)
-                                               atIndex:static_cast<NSUInteger>(fragmentMSImageSamplesSlot)];
             }
             const NSInteger fragmentLodBiasesSlot =
                 textureLodBiasesBufferSlot(info.fragmentMSL);
@@ -5926,10 +5886,8 @@ fragment float4 appgl_immediate_textured_fs(
         return clearLayeredTextureImpl(tex, arrayLength, 0, 0, false, false, true,
             nullptr, 0.0f, stencil);
     }
-    bool clearLayeredTextureColor(void* tex, std::uint32_t arrayLength,
-                                  const float rgba[4],
-                                  std::uint32_t level = 0,
-                                  std::uint32_t slice = 0) {
+    bool clearLayeredTextureColor(void* tex, std::uint32_t arrayLength, const float rgba[4],
+                                  std::uint32_t level = 0, std::uint32_t slice = 0) {
         return clearLayeredTextureImpl(tex, arrayLength, level, slice, true, false, false,
             rgba, 0.0f, 0);
     }

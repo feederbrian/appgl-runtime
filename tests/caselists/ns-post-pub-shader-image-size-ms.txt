@@ -40,4 +40,3 @@ KHR-GL46.limits.max_image_samples
 KHR-GL46.shader_texture_image_samples_tests.texture_functional_test
 KHR-GL46.shader_texture_image_samples_tests.glsl_extension_enable
 KHR-GL46.shader_texture_image_samples_tests.glsl_extension_require
-KHR-GL46.multi_bind.dispatch_bind_textures
