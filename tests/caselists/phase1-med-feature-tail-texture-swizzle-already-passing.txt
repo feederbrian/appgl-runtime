@@ -1,0 +1,6 @@
+KHR-GL46.texture_swizzle.functional_format_idx_35_target_idx_7
+KHR-GL46.texture_swizzle.functional_format_idx_35_target_idx_8
+KHR-GL46.texture_swizzle.functional_format_idx_55_target_idx_7
+KHR-GL46.texture_swizzle.functional_format_idx_55_target_idx_8
+KHR-GL46.texture_swizzle.functional_format_idx_56_target_idx_7
+KHR-GL46.texture_swizzle.functional_format_idx_56_target_idx_8
