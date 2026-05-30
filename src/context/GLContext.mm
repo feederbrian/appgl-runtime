@@ -23420,7 +23420,9 @@ bool GLContext::texStorageMultisample(
         GLint maxSamples = 0;
         impl_->capabilities->queryInteger(GL_MAX_SAMPLES, &maxSamples);
         if (maxSamples > 0 && samples > maxSamples) {
-            pushError(GL_INVALID_VALUE);
+            // GL 4.6 §8.19: samples greater than MAX_SAMPLES is
+            // INVALID_OPERATION for TextureStorage*Multisample.
+            pushError(GL_INVALID_OPERATION);
             return false;
         }
     }
