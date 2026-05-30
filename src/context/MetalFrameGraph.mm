@@ -7076,7 +7076,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         desc.tessellationOutputWindingOrder =
             (genVertexOrder == GL_CW) ? MTLWindingClockwise : MTLWindingCounterClockwise;
         desc.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
-        desc.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionConstant;
+        desc.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatch;
         desc.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
         desc.maxTessellationFactor = 64;  // GL_MAX_TESS_GEN_LEVEL
         (void)genMode;
@@ -8595,8 +8595,11 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             }
         }
         pipeDesc.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
+        // The TCS compute pass writes one Metal tess-factor record for each
+        // GL patch; debug validation rejects treating this buffer as a single
+        // constant record when drawPatches emits multiple patches.
         pipeDesc.tessellationFactorStepFunction =
-            MTLTessellationFactorStepFunctionConstant;
+            MTLTessellationFactorStepFunctionPerPatch;
         pipeDesc.tessellationControlPointIndexType =
             MTLTessellationControlPointIndexTypeNone;
         pipeDesc.maxTessellationFactor = 64;
