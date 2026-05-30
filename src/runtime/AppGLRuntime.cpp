@@ -8198,11 +8198,18 @@ void APIENTRY glDrawArraysIndirect(GLenum mode, const void* indirect) {
         markDrawFunction(FunctionId::glDrawArraysIndirect, "DrawArraysIndirect: zero count/instanceCount, no-op.");
         return;
     }
-    ctx->drawArraysInstancedBaseInstance(mode, static_cast<GLint>(cmd.first),
-                                         static_cast<GLsizei>(cmd.count),
-                                         static_cast<GLsizei>(cmd.instanceCount),
-                                         cmd.baseInstance);
-    markDrawFunction(FunctionId::glDrawArraysIndirect, "DrawArraysIndirect decomposed to drawArraysInstancedBaseInstance.");
+    const bool ok = (cmd.instanceCount == 1 && cmd.baseInstance == 0)
+        ? ctx->drawArrays(mode,
+                          static_cast<GLint>(cmd.first),
+                          static_cast<GLsizei>(cmd.count))
+        : ctx->drawArraysInstancedBaseInstance(mode, static_cast<GLint>(cmd.first),
+                                               static_cast<GLsizei>(cmd.count),
+                                               static_cast<GLsizei>(cmd.instanceCount),
+                                               cmd.baseInstance);
+    if (!ok) {
+        return;
+    }
+    markDrawFunction(FunctionId::glDrawArraysIndirect, "DrawArraysIndirect decomposed to drawArrays or drawArraysInstancedBaseInstance.");
     Runtime::shared().recordBootstrapTrace(
         "glDrawArraysIndirect(mode=" + std::to_string(mode)
         + ", count=" + std::to_string(cmd.count)
@@ -8253,12 +8260,21 @@ void APIENTRY glDrawElementsIndirect(GLenum mode, GLenum type, const void* indir
     GLsizei indexSize = (type == GL_UNSIGNED_INT) ? 4 : (type == GL_UNSIGNED_SHORT) ? 2 : 1;
     const void* indexOffset = reinterpret_cast<const void*>(
         static_cast<uintptr_t>(cmd.firstIndex) * static_cast<uintptr_t>(indexSize));
-    ctx->drawElementsInstancedBaseVertexBaseInstance(mode,
-        static_cast<GLsizei>(cmd.count), type, indexOffset,
-        static_cast<GLsizei>(cmd.instanceCount),
-        static_cast<GLint>(cmd.baseVertex),
-        cmd.baseInstance);
-    markDrawFunction(FunctionId::glDrawElementsIndirect, "DrawElementsIndirect decomposed to drawElementsInstancedBaseVertexBaseInstance.");
+    const bool ok = (cmd.instanceCount == 1 && cmd.baseInstance == 0)
+        ? ctx->drawElementsBaseVertex(mode,
+                                      static_cast<GLsizei>(cmd.count),
+                                      type,
+                                      indexOffset,
+                                      static_cast<GLint>(cmd.baseVertex))
+        : ctx->drawElementsInstancedBaseVertexBaseInstance(mode,
+            static_cast<GLsizei>(cmd.count), type, indexOffset,
+            static_cast<GLsizei>(cmd.instanceCount),
+            static_cast<GLint>(cmd.baseVertex),
+            cmd.baseInstance);
+    if (!ok) {
+        return;
+    }
+    markDrawFunction(FunctionId::glDrawElementsIndirect, "DrawElementsIndirect decomposed to drawElementsBaseVertex or drawElementsInstancedBaseVertexBaseInstance.");
     Runtime::shared().recordBootstrapTrace(
         "glDrawElementsIndirect(mode=" + std::to_string(mode)
         + ", type=" + std::to_string(type)
@@ -8450,7 +8466,7 @@ void APIENTRY glMultiDrawArraysIndirect(GLenum mode, const void* indirect, GLsiz
     if (!ctx->multiDrawArraysIndirect(mode, indirect, drawcount, stride)) {
         return;
     }
-    markDrawFunction(FunctionId::glMultiDrawArraysIndirect, "MultiDrawArraysIndirect decomposed to per-command drawArraysInstancedBaseInstance.");
+    markDrawFunction(FunctionId::glMultiDrawArraysIndirect, "MultiDrawArraysIndirect decomposed to per-command drawArrays or drawArraysInstancedBaseInstance.");
 }
 
 void APIENTRY glMultiDrawElementsIndirect(GLenum mode, GLenum type, const void* indirect, GLsizei drawcount, GLsizei stride) {
@@ -8459,7 +8475,7 @@ void APIENTRY glMultiDrawElementsIndirect(GLenum mode, GLenum type, const void* 
     if (!ctx->multiDrawElementsIndirect(mode, type, indirect, drawcount, stride)) {
         return;
     }
-    markDrawFunction(FunctionId::glMultiDrawElementsIndirect, "MultiDrawElementsIndirect decomposed to per-command drawElementsInstancedBaseVertexBaseInstance.");
+    markDrawFunction(FunctionId::glMultiDrawElementsIndirect, "MultiDrawElementsIndirect decomposed to per-command drawElementsBaseVertex or drawElementsInstancedBaseVertexBaseInstance.");
 }
 
 // --- GL 4.3: Buffer Clear ---

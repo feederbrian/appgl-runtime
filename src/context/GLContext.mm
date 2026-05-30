@@ -54442,10 +54442,18 @@ bool GLContext::multiDrawArraysIndirect(GLenum mode, const void* indirect, GLsiz
         if (indirectBuf != 0) {
             GLBufferObject* bo = impl_->objects->buffers().get(indirectBuf);
             if (bo != nullptr) {
-                const uintptr_t endOffset =
-                    reinterpret_cast<uintptr_t>(indirect) +
-                    static_cast<uintptr_t>(drawcount) * static_cast<uintptr_t>(effectiveStride);
-                if (endOffset > static_cast<uintptr_t>(bo->size)) {
+                const uintptr_t offset = reinterpret_cast<uintptr_t>(indirect);
+                const uintptr_t strideBytes = static_cast<uintptr_t>(effectiveStride);
+                const uintptr_t commandBytes = static_cast<uintptr_t>(sizeof(DrawArraysIndirectCommand));
+                const uintptr_t lastCommandIndex = static_cast<uintptr_t>(drawcount - 1);
+                if (lastCommandIndex > (std::numeric_limits<uintptr_t>::max() - offset) / strideBytes) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
+                const uintptr_t lastCommandOffset = offset + lastCommandIndex * strideBytes;
+                const uintptr_t bufferSize = static_cast<uintptr_t>(bo->size);
+                if (lastCommandOffset > bufferSize ||
+                    commandBytes > bufferSize - lastCommandOffset) {
                     pushError(GL_INVALID_OPERATION);
                     return false;
                 }
@@ -54462,11 +54470,19 @@ bool GLContext::multiDrawArraysIndirect(GLenum mode, const void* indirect, GLsiz
         if (cmd.count == 0 || cmd.instanceCount == 0) {
             continue;  // valid no-op for this sub-draw
         }
-        drawArraysInstancedBaseInstance(mode, static_cast<GLint>(cmd.first),
-                                        static_cast<GLsizei>(cmd.count),
-                                        static_cast<GLsizei>(cmd.instanceCount),
-                                        cmd.baseInstance,
-                                        static_cast<GLuint>(i));
+        const bool ok = (cmd.instanceCount == 1 && cmd.baseInstance == 0)
+            ? drawArrays(mode,
+                         static_cast<GLint>(cmd.first),
+                         static_cast<GLsizei>(cmd.count),
+                         static_cast<GLuint>(i))
+            : drawArraysInstancedBaseInstance(mode, static_cast<GLint>(cmd.first),
+                                              static_cast<GLsizei>(cmd.count),
+                                              static_cast<GLsizei>(cmd.instanceCount),
+                                              cmd.baseInstance,
+                                              static_cast<GLuint>(i));
+        if (!ok) {
+            return false;
+        }
     }
     return true;
 }
@@ -54516,10 +54532,18 @@ bool GLContext::multiDrawElementsIndirect(GLenum mode, GLenum type, const void* 
         if (indirectBuf != 0) {
             GLBufferObject* bo = impl_->objects->buffers().get(indirectBuf);
             if (bo != nullptr) {
-                const uintptr_t endOffset =
-                    reinterpret_cast<uintptr_t>(indirect) +
-                    static_cast<uintptr_t>(drawcount) * static_cast<uintptr_t>(effectiveStride);
-                if (endOffset > static_cast<uintptr_t>(bo->size)) {
+                const uintptr_t offset = reinterpret_cast<uintptr_t>(indirect);
+                const uintptr_t strideBytes = static_cast<uintptr_t>(effectiveStride);
+                const uintptr_t commandBytes = static_cast<uintptr_t>(sizeof(DrawElementsIndirectCommand));
+                const uintptr_t lastCommandIndex = static_cast<uintptr_t>(drawcount - 1);
+                if (lastCommandIndex > (std::numeric_limits<uintptr_t>::max() - offset) / strideBytes) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
+                const uintptr_t lastCommandOffset = offset + lastCommandIndex * strideBytes;
+                const uintptr_t bufferSize = static_cast<uintptr_t>(bo->size);
+                if (lastCommandOffset > bufferSize ||
+                    commandBytes > bufferSize - lastCommandOffset) {
                     pushError(GL_INVALID_OPERATION);
                     return false;
                 }
@@ -54538,12 +54562,22 @@ bool GLContext::multiDrawElementsIndirect(GLenum mode, GLenum type, const void* 
         }
         const void* indexOffset = reinterpret_cast<const void*>(
             static_cast<uintptr_t>(cmd.firstIndex) * static_cast<uintptr_t>(indexSize));
-        drawElementsInstancedBaseVertexBaseInstance(mode,
-            static_cast<GLsizei>(cmd.count), type, indexOffset,
-            static_cast<GLsizei>(cmd.instanceCount),
-            static_cast<GLint>(cmd.baseVertex),
-            cmd.baseInstance,
-            static_cast<GLuint>(i));
+        const bool ok = (cmd.instanceCount == 1 && cmd.baseInstance == 0)
+            ? drawElementsBaseVertex(mode,
+                                     static_cast<GLsizei>(cmd.count),
+                                     type,
+                                     indexOffset,
+                                     static_cast<GLint>(cmd.baseVertex),
+                                     static_cast<GLuint>(i))
+            : drawElementsInstancedBaseVertexBaseInstance(mode,
+                static_cast<GLsizei>(cmd.count), type, indexOffset,
+                static_cast<GLsizei>(cmd.instanceCount),
+                static_cast<GLint>(cmd.baseVertex),
+                cmd.baseInstance,
+                static_cast<GLuint>(i));
+        if (!ok) {
+            return false;
+        }
     }
     return true;
 }
