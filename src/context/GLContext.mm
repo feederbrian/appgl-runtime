@@ -3966,6 +3966,17 @@ struct GLContext::Impl {
                 pendingStateForResource(kind, name);
             if (state == nullptr) return;
             GLProducerPendingAccess::mark(*state, bits);
+            if (kind == GpuResourceAccess::Kind::Buffer && objects != nullptr) {
+                if (GLBufferObject* buf = objects->buffers().get(name)) {
+                    buf->gpuAuthoredSinceCpuWrite = true;
+                    if (std::getenv("APPGL_TRACE_MDI_PRODUCER")) {
+                        std::fprintf(stderr,
+                            "[APPGL] producer-mark buffer=%u bits=0x%08x "
+                            "pending=0x%08x recentGpuWrite=1\n",
+                            name, bits, buf->producerPending.bits());
+                    }
+                }
+            }
         };
         for (const auto& write : writes) {
             if (write.name == 0 || write.bits == 0) continue;
@@ -4546,6 +4557,7 @@ struct GLContext::Impl {
         object.sparseStorage = false;
         object.sparsePageSize = 0;
         object.sparseCommittedPages.clear();
+        object.gpuAuthoredSinceCpuWrite = false;
         clearAllPendingGpuProducers(object);
         resetBufferMapping(object);
     }
@@ -12088,6 +12100,7 @@ struct GLContext::Impl {
                 }
             }
             ++object.indexExpansionGeneration;
+            object.gpuAuthoredSinceCpuWrite = false;
             return true;
         }
         if (object.shadowBytes.size() < static_cast<std::size_t>(offset + size)) {
@@ -12099,6 +12112,7 @@ struct GLContext::Impl {
             static_cast<std::size_t>(size));
         syncMetalFromShadow(object, offset, size);
         ++object.indexExpansionGeneration;
+        object.gpuAuthoredSinceCpuWrite = false;
         return true;
     }
 
@@ -12188,6 +12202,7 @@ struct GLContext::Impl {
                 }
             }
             ++object.indexExpansionGeneration;
+            object.gpuAuthoredSinceCpuWrite = false;
             return true;
         }
         if (object.shadowBytes.size() < static_cast<std::size_t>(offset + size)) {
@@ -12200,6 +12215,7 @@ struct GLContext::Impl {
             patternBytes);
         syncMetalFromShadow(object, offset, size);
         ++object.indexExpansionGeneration;
+        object.gpuAuthoredSinceCpuWrite = false;
         return true;
     }
 
@@ -21884,6 +21900,7 @@ GLboolean GLContext::unmapBuffer(GLenum target) {
     if (mapAccessWrites(object->mapAccessFlags)) {
         impl_->syncShadowFromMetal(*object, object->mapOffset, object->mapLength);
         ++object->indexExpansionGeneration;
+        object->gpuAuthoredSinceCpuWrite = false;
     }
     resetBufferMapping(*object);
     return GL_TRUE;
@@ -21908,6 +21925,7 @@ bool GLContext::flushMappedBufferRange(GLenum target, GLintptr offset, GLsizeipt
     if (mapAccessWrites(object->mapAccessFlags)) {
         impl_->syncShadowFromMetal(*object, object->mapOffset + offset, length);
         ++object->indexExpansionGeneration;
+        object->gpuAuthoredSinceCpuWrite = false;
     }
     return true;
 }
@@ -50670,6 +50688,11 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     instancecount == 1 &&
                     baseinstance == 0 &&
                     !programUsesDrawArrayVertexBaseBuiltins(*program);
+                const std::uint32_t primaryProducerBits =
+                    vbo->producerPending.bits();
+                const bool primaryVboGpuAuthored =
+                    vbo->producerPending.hasAny(kProducerAll) ||
+                    vbo->gpuAuthoredSinceCpuWrite;
                 const std::size_t firstOff = canRebaseSingleArrayDraw
                     ? static_cast<std::size_t>(first) * posStride
                     : 0u;
@@ -50693,7 +50716,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
                     tdi.vertexStride = posStride;
                     // OPT-5: pass pre-uploaded Metal buffer for direct bind.
-                    if (canRebaseSingleArrayDraw) {
+                    if (canRebaseSingleArrayDraw && !primaryVboGpuAuthored) {
                         tdi.metalVertexBuffer = nullptr;
                         tdi.metalVertexBufferOffset = 0;
                         tdi.glVertexBuffer = 0;
@@ -50701,6 +50724,18 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                         tdi.metalVertexBuffer = vbo->metalBuffer;
                         tdi.metalVertexBufferOffset = startOff;
                         tdi.glVertexBuffer = vaoLayout.primaryBufferName;
+                    }
+                    if (std::getenv("APPGL_TRACE_MDI_PRODUCER")) {
+                        std::fprintf(stderr,
+                            "[APPGL] drawArraysInstanced primaryVbo=%u "
+                            "pending=0x%08x recentGpuWrite=%d rebase=%d "
+                            "directMetal=%d startOff=%zu\n",
+                            vaoLayout.primaryBufferName,
+                            primaryProducerBits,
+                            vbo->gpuAuthoredSinceCpuWrite ? 1 : 0,
+                            canRebaseSingleArrayDraw ? 1 : 0,
+                            tdi.metalVertexBuffer != nullptr ? 1 : 0,
+                            startOff);
                     }
                     // Phase 8X Group 4d follow-up¹⁴ — centralised fixed-
                     // function state snapshot. See drawArrays.
@@ -55340,9 +55375,20 @@ bool GLContext::multiDrawArraysIndirect(GLenum mode, const void* indirect, GLsiz
     const GLuint indirectBuf = impl_->state->boundBuffer(GL_DRAW_INDIRECT_BUFFER);
     GLBufferObject* indirectObject =
         indirectBuf != 0 ? impl_->objects->buffers().get(indirectBuf) : nullptr;
+    const std::uint32_t indirectProducerBits =
+        indirectObject != nullptr ? indirectObject->producerPending.bits() : 0u;
     const bool indirectBufferHasGpuProducer =
         indirectObject != nullptr &&
-        indirectObject->producerPending.hasAny(kProducerAll);
+        (indirectObject->producerPending.hasAny(kProducerAll) ||
+         indirectObject->gpuAuthoredSinceCpuWrite);
+    if (std::getenv("APPGL_TRACE_MDI_PRODUCER")) {
+        std::fprintf(stderr,
+            "[APPGL] mdi-arrays indirectBuf=%u drawcount=%d stride=%d "
+            "pending=0x%08x recentGpuWrite=%d guard=%d\n",
+            indirectBuf, drawcount, stride, indirectProducerBits,
+            indirectObject != nullptr && indirectObject->gpuAuthoredSinceCpuWrite ? 1 : 0,
+            indirectBufferHasGpuProducer ? 1 : 0);
+    }
 
     // GL 4.6 §10.5: pre-validate the indirect-buffer range. See
     // multiDrawElementsIndirect for the full rationale — the check
@@ -55410,9 +55456,20 @@ bool GLContext::multiDrawArraysIndirect(GLenum mode, const void* indirect, GLsiz
     // GPU-produced indirect buffer must take the per-command path: the first
     // read below drains the producer token, so sampling the pending state before
     // the reads preserves the hazard-aware exclusion.
-    if (canCoalesceContiguous &&
+    const bool canUseCoalescedPath =
+        canCoalesceContiguous &&
         !indirectBufferHasGpuProducer &&
-        isCoalescibleArrayPrimitiveMode(mode)) {
+        isCoalescibleArrayPrimitiveMode(mode);
+    if (std::getenv("APPGL_TRACE_MDI_PRODUCER")) {
+        std::fprintf(stderr,
+            "[APPGL] mdi-arrays coalesce canContiguous=%d "
+            "gpuGuard=%d primitiveMode=%d use=%d\n",
+            canCoalesceContiguous ? 1 : 0,
+            indirectBufferHasGpuProducer ? 1 : 0,
+            isCoalescibleArrayPrimitiveMode(mode) ? 1 : 0,
+            canUseCoalescedPath ? 1 : 0);
+    }
+    if (canUseCoalescedPath) {
         GLuint programName = impl_->state->currentProgram();
         GLProgramObject* program = impl_->resolveDrawProgram(programName);
         const GLuint coalescedCount = coalescedEnd - coalescedFirst;

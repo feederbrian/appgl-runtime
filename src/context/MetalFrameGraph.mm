@@ -854,14 +854,15 @@ static NSUInteger appglEstimateTessDomainVertexCapacity(
 }
 
 static NSUInteger appglOptionalTessEvalComputeByteLimit() {
+    constexpr std::uint64_t kDefaultLimit = 2ull * 1024ull * 1024ull * 1024ull;
     const char* raw = std::getenv("APPGL_OPTIONAL_TESS_COMPUTE_BYTE_LIMIT");
     if (raw == nullptr || raw[0] == '\0') {
-        return 0;
+        return static_cast<NSUInteger>(kDefaultLimit);
     }
     char* end = nullptr;
     const unsigned long long parsed = std::strtoull(raw, &end, 0);
     if (end == raw) {
-        return 0;
+        return static_cast<NSUInteger>(kDefaultLimit);
     }
     return static_cast<NSUInteger>(parsed);
 }
@@ -8668,8 +8669,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         // (3c) Phase 3B.4 [metal-tess-TF]: optional domain-generator +
         // TES-as-compute dispatch chain. Buffers are sized from the current
         // draw's estimated emitted vertex count and reflected TES stride.
-        // APPGL_OPTIONAL_TESS_COMPUTE_BYTE_LIMIT is an opt-in diagnostic cap;
-        // by default large-but-valid scenes such as Fur are allowed to fit.
+        // Bound optional TES-compute sidecars by default. Fur16's emitted
+        // buffer is about 1.125 GiB and remains below this ceiling; Fur128's
+        // optional sidecar would otherwise allocate tens of GiB before the
+        // fixed-function tessellation render path runs.
         const bool isTessTF = isTessEvalComputeRequested;
         id<MTLBuffer> domainCoordBuf = nil;
         id<MTLBuffer> domainPrimIDBuf = nil;

@@ -8180,38 +8180,13 @@ void APIENTRY glDrawArraysIndirect(GLenum mode, const void* indirect) {
         recordValidationError(ctx, "glDrawArraysIndirect", GL_INVALID_VALUE, "indirect offset not aligned to 4 bytes");
         return;
     }
-    // GL spec: if GL_DRAW_INDIRECT_BUFFER is bound, `indirect` is a byte offset
-    // into that buffer; otherwise it is a client pointer to the command struct.
-    // Decompose into a regular drawArraysInstancedBaseInstance call.
-    struct DrawArraysIndirectCommand {
-        GLuint count;
-        GLuint instanceCount;
-        GLuint first;
-        GLuint baseInstance;
-    };
-    DrawArraysIndirectCommand cmd{};
-    if (!ctx->readIndirectBuffer(GL_DRAW_INDIRECT_BUFFER, indirect, sizeof(cmd), &cmd)) {
-        return;  // error already recorded by readIndirectBuffer
-    }
-    if (cmd.count == 0 || cmd.instanceCount == 0) {
-        // Valid no-op per spec.
-        markDrawFunction(FunctionId::glDrawArraysIndirect, "DrawArraysIndirect: zero count/instanceCount, no-op.");
-        return;
-    }
-    const bool ok = ctx->drawArraysInstancedBaseInstance(mode, static_cast<GLint>(cmd.first),
-                                                         static_cast<GLsizei>(cmd.count),
-                                                         static_cast<GLsizei>(cmd.instanceCount),
-                                                         cmd.baseInstance);
+    const bool ok = ctx->multiDrawArraysIndirect(mode, indirect, 1, 0);
     if (!ok) {
         return;
     }
-    markDrawFunction(FunctionId::glDrawArraysIndirect, "DrawArraysIndirect decomposed to drawArraysInstancedBaseInstance.");
+    markDrawFunction(FunctionId::glDrawArraysIndirect, "DrawArraysIndirect delegated to guarded single-command MDI path.");
     Runtime::shared().recordBootstrapTrace(
-        "glDrawArraysIndirect(mode=" + std::to_string(mode)
-        + ", count=" + std::to_string(cmd.count)
-        + ", instanceCount=" + std::to_string(cmd.instanceCount)
-        + ", first=" + std::to_string(cmd.first)
-        + ", baseInstance=" + std::to_string(cmd.baseInstance) + ")");
+        "glDrawArraysIndirect(mode=" + std::to_string(mode) + ")");
 }
 
 void APIENTRY glDrawElementsIndirect(GLenum mode, GLenum type, const void* indirect) {
@@ -8235,44 +8210,14 @@ void APIENTRY glDrawElementsIndirect(GLenum mode, GLenum type, const void* indir
         recordValidationError(ctx, "glDrawElementsIndirect", GL_INVALID_VALUE, "indirect offset not aligned to 4 bytes");
         return;
     }
-    // GL spec: if GL_DRAW_INDIRECT_BUFFER is bound, `indirect` is a byte offset
-    // into that buffer; otherwise it is a client pointer to the command struct.
-    struct DrawElementsIndirectCommand {
-        GLuint count;
-        GLuint instanceCount;
-        GLuint firstIndex;
-        GLuint baseVertex;
-        GLuint baseInstance;
-    };
-    DrawElementsIndirectCommand cmd{};
-    if (!ctx->readIndirectBuffer(GL_DRAW_INDIRECT_BUFFER, indirect, sizeof(cmd), &cmd)) {
-        return;
-    }
-    if (cmd.count == 0 || cmd.instanceCount == 0) {
-        markDrawFunction(FunctionId::glDrawElementsIndirect, "DrawElementsIndirect: zero count/instanceCount, no-op.");
-        return;
-    }
-    // Compute the byte offset for firstIndex: firstIndex * sizeof(index_type).
-    GLsizei indexSize = (type == GL_UNSIGNED_INT) ? 4 : (type == GL_UNSIGNED_SHORT) ? 2 : 1;
-    const void* indexOffset = reinterpret_cast<const void*>(
-        static_cast<uintptr_t>(cmd.firstIndex) * static_cast<uintptr_t>(indexSize));
-    const bool ok = ctx->drawElementsInstancedBaseVertexBaseInstance(mode,
-        static_cast<GLsizei>(cmd.count), type, indexOffset,
-        static_cast<GLsizei>(cmd.instanceCount),
-        static_cast<GLint>(cmd.baseVertex),
-        cmd.baseInstance);
+    const bool ok = ctx->multiDrawElementsIndirect(mode, type, indirect, 1, 0);
     if (!ok) {
         return;
     }
-    markDrawFunction(FunctionId::glDrawElementsIndirect, "DrawElementsIndirect decomposed to drawElementsInstancedBaseVertexBaseInstance.");
+    markDrawFunction(FunctionId::glDrawElementsIndirect, "DrawElementsIndirect delegated to guarded single-command MDI path.");
     Runtime::shared().recordBootstrapTrace(
         "glDrawElementsIndirect(mode=" + std::to_string(mode)
-        + ", type=" + std::to_string(type)
-        + ", count=" + std::to_string(cmd.count)
-        + ", instanceCount=" + std::to_string(cmd.instanceCount)
-        + ", firstIndex=" + std::to_string(cmd.firstIndex)
-        + ", baseVertex=" + std::to_string(cmd.baseVertex)
-        + ", baseInstance=" + std::to_string(cmd.baseInstance) + ")");
+        + ", type=" + std::to_string(type) + ")");
 }
 
 // --- GL 4.2: Memory Barriers ---

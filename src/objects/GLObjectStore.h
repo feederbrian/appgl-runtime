@@ -138,6 +138,7 @@ struct GLBufferObject {
     uint32_t indexExpansionGeneration = 0;   // bumped on data change
     uint32_t cachedExpansionGeneration = 0;  // generation when cache was built
     GLProducerPendingState producerPending;
+    bool gpuAuthoredSinceCpuWrite = false;
 };
 
 struct GLTextureDesc {
