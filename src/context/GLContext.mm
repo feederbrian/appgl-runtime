@@ -49774,6 +49774,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
             tdi.mode = mode;
             tdi.vertexCount = count;
+            tdi.baseVertex = first;
             // No vertex data — shader uses gl_VertexID / [[vertex_id]].
             tdi.vertexData = nullptr;
             tdi.vertexDataByteCount = 0;
@@ -49852,6 +49853,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
                 tdi.mode = mode;
                 tdi.vertexCount = count;
+                tdi.baseVertex = first;
                 tdi.vertexData = nullptr;
                 tdi.vertexDataByteCount = 0;
                 tdi.vertexStride = 0;

@@ -12169,6 +12169,231 @@ TestResult runDCR3CBufferRoleSentinel() {
     return result;
 }
 
+constexpr GLsizei kS22FirstRangeTileSize = 8;
+constexpr GLsizei kS22FirstRangeColumns = 16;
+constexpr GLsizei kS22FirstRangeRows = 8;
+constexpr GLsizei kS22FirstRangeDraws =
+    kS22FirstRangeColumns * kS22FirstRangeRows;
+constexpr GLsizei kS22FirstRangeCanvas =
+    kS22FirstRangeColumns * kS22FirstRangeTileSize;
+constexpr GLsizei kS22FirstRangeVerticesPerDraw = 6;
+
+static constexpr const char* kS22FirstRangeVS =
+    "#version 330 core\n"
+    "void main() {\n"
+    "    vec2 corners[6] = vec2[6](\n"
+    "        vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),\n"
+    "        vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0));\n"
+    "    int tile = gl_VertexID / 6;\n"
+    "    int corner = gl_VertexID - tile * 6;\n"
+    "    int tileX = tile % 16;\n"
+    "    int tileY = tile / 16;\n"
+    "    vec2 uv = (vec2(tileX, tileY) + corners[corner]) / vec2(16.0, 8.0);\n"
+    "    gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);\n"
+    "}\n";
+
+static constexpr const char* kS22FirstRangeFS =
+    "#version 330 core\n"
+    "out vec4 fragColor;\n"
+    "void main() {\n"
+    "    fragColor = vec4(1.0, 0.0, 0.0, 1.0);\n"
+    "}\n";
+
+struct S22FirstRangeIndirectCommand {
+    GLuint count;
+    GLuint instanceCount;
+    GLuint first;
+    GLuint baseInstance;
+};
+
+GLuint buildS22FirstRangeProgram(GLDispatchTable& gl) {
+    const GLuint program = buildBenchProgram(kS22FirstRangeVS, kS22FirstRangeFS);
+    GLint linked = GL_FALSE;
+    gl.glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    if (linked != GL_TRUE) {
+        const std::string log = programInfoLog(gl, program);
+        gl.glDeleteProgram(program);
+        throw std::runtime_error(
+            "s22 first-range program link failed" +
+            (log.empty() ? std::string{} : ": " + log));
+    }
+    return program;
+}
+
+bool isS22FirstRangeRed(const std::array<std::uint8_t, 4>& pixel) {
+    return pixel[0] >= 200 && pixel[1] <= 60 &&
+           pixel[2] <= 60 && pixel[3] >= 200;
+}
+
+int countS22FirstRangeTiles(GLDispatchTable& gl, bool offscreen) {
+    int redTiles = 0;
+    gl.glReadBuffer(offscreen ? GL_COLOR_ATTACHMENT0 : GL_BACK);
+    for (GLsizei y = 0; y < kS22FirstRangeRows; ++y) {
+        for (GLsizei x = 0; x < kS22FirstRangeColumns; ++x) {
+            std::array<std::uint8_t, 4> pixel = {};
+            gl.glReadPixels(x * kS22FirstRangeTileSize + kS22FirstRangeTileSize / 2,
+                            y * kS22FirstRangeTileSize + kS22FirstRangeTileSize / 2,
+                            1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel.data());
+            if (isS22FirstRangeRed(pixel)) {
+                ++redTiles;
+            }
+        }
+    }
+    return redTiles;
+}
+
+void prepareS22FirstRangeDraw(GLDispatchTable& gl,
+                              GLuint program,
+                              GLuint vao,
+                              GLuint framebuffer) {
+    gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    if (framebuffer != 0) {
+        gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+    }
+    gl.glViewport(0, 0, kS22FirstRangeCanvas, kS22FirstRangeCanvas);
+    gl.glDisable(GL_BLEND);
+    gl.glDisable(GL_CULL_FACE);
+    gl.glDisable(GL_DEPTH_TEST);
+    gl.glDisable(GL_SCISSOR_TEST);
+    gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    gl.glClear(GL_COLOR_BUFFER_BIT);
+    gl.glUseProgram(program);
+    gl.glBindVertexArray(vao);
+}
+
+template <typename DrawFn>
+void runS22FirstRangeCase(GLContext& context,
+                          GLDispatchTable& gl,
+                          GLuint program,
+                          GLuint vao,
+                          GLuint framebuffer,
+                          std::string_view label,
+                          DrawFn&& drawFn) {
+    prepareS22FirstRangeDraw(gl, program, vao, framebuffer);
+    std::forward<DrawFn>(drawFn)();
+    expectGLError(gl, GL_NO_ERROR, label);
+    gl.glFinish();
+    expectGLError(gl, GL_NO_ERROR, std::string(label) + " finish");
+    const int redTiles = countS22FirstRangeTiles(gl, framebuffer != 0);
+    if (redTiles != kS22FirstRangeDraws) {
+        std::ostringstream stream;
+        stream << label << " rendered " << redTiles
+               << " tiles, expected " << kS22FirstRangeDraws;
+        throw std::runtime_error(stream.str());
+    }
+    if (framebuffer == 0) {
+        context.swapBuffers();
+    }
+}
+
+void setupS22FirstRangeFramebuffer(GLDispatchTable& gl,
+                                   GLuint& texture,
+                                   GLuint& framebuffer) {
+    gl.glGenTextures(1, &texture);
+    gl.glBindTexture(GL_TEXTURE_2D, texture);
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+                    kS22FirstRangeCanvas, kS22FirstRangeCanvas, 0,
+                    GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    gl.glGenFramebuffers(1, &framebuffer);
+    gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                              GL_TEXTURE_2D, texture, 0);
+    gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+    expectCondition(gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
+                        GL_FRAMEBUFFER_COMPLETE,
+                    "s22 first-range offscreen framebuffer complete");
+}
+
+TestResult runS22FirstRangeSentinel() {
+    auto result = runDirectSentinel("s22.present-first-range-viewport-wall", [&] {
+        ScopedSentinelContext scoped(kS22FirstRangeCanvas, kS22FirstRangeCanvas);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        const GLuint program = buildS22FirstRangeProgram(gl);
+        GLuint vao = 0;
+        gl.glGenVertexArrays(1, &vao);
+        gl.glBindVertexArray(vao);
+        GLuint offscreenTexture = 0;
+        GLuint offscreenFramebuffer = 0;
+        setupS22FirstRangeFramebuffer(gl, offscreenTexture, offscreenFramebuffer);
+
+        std::vector<GLint> firsts(kS22FirstRangeDraws);
+        std::vector<GLsizei> counts(kS22FirstRangeDraws,
+                                    kS22FirstRangeVerticesPerDraw);
+        std::vector<S22FirstRangeIndirectCommand> commands(kS22FirstRangeDraws);
+        for (GLsizei draw = 0; draw < kS22FirstRangeDraws; ++draw) {
+            const GLuint first =
+                static_cast<GLuint>(draw * kS22FirstRangeVerticesPerDraw);
+            firsts[draw] = static_cast<GLint>(first);
+            commands[draw] = {
+                static_cast<GLuint>(kS22FirstRangeVerticesPerDraw),
+                1u,
+                first,
+                0u,
+            };
+        }
+
+        runS22FirstRangeCase(context, gl, program, vao,
+                             0,
+                             "s22 direct glDrawArrays(first)", [&] {
+            for (GLsizei draw = 0; draw < kS22FirstRangeDraws; ++draw) {
+                gl.glDrawArrays(GL_TRIANGLES, firsts[draw],
+                                kS22FirstRangeVerticesPerDraw);
+            }
+        });
+
+        runS22FirstRangeCase(context, gl, program, vao,
+                             0,
+                             "s22 glMultiDrawArrays wall", [&] {
+            gl.glMultiDrawArrays(GL_TRIANGLES, firsts.data(),
+                                 counts.data(), kS22FirstRangeDraws);
+        });
+
+        GLuint indirectBuffer = 0;
+        gl.glGenBuffers(1, &indirectBuffer);
+        gl.glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirectBuffer);
+        gl.glBufferData(GL_DRAW_INDIRECT_BUFFER,
+                        static_cast<GLsizeiptr>(
+                            commands.size() *
+                            sizeof(S22FirstRangeIndirectCommand)),
+                        commands.data(), GL_STATIC_DRAW);
+
+        runS22FirstRangeCase(context, gl, program, vao,
+                             0,
+                             "s22 glMultiDrawArraysIndirect wall", [&] {
+            gl.glMultiDrawArraysIndirect(GL_TRIANGLES, nullptr,
+                                         kS22FirstRangeDraws, 0);
+        });
+
+        runS22FirstRangeCase(context, gl, program, vao,
+                             offscreenFramebuffer,
+                             "s22 offscreen glMultiDrawArraysIndirect wall", [&] {
+            gl.glMultiDrawArraysIndirect(GL_TRIANGLES, nullptr,
+                                         kS22FirstRangeDraws, 0);
+        });
+
+        gl.glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteBuffers(1, &indirectBuffer);
+        gl.glDeleteFramebuffers(1, &offscreenFramebuffer);
+        gl.glDeleteTextures(1, &offscreenTexture);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteProgram(program);
+        expectGLError(gl, GL_NO_ERROR, "s22 first-range cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "default-framebuffer and offscreen drawArrays first/baseVertex range reached all 128 tiles";
+    }
+    return result;
+}
+
 void appendCoverageDelta(TestResult& result, const std::string& phase) {
     // Bootstrap coverage checks only apply to phase-a scenes. Phase-c and later
     // scenes validate their own scenarioCoverage() list; requiring the full
@@ -12375,6 +12600,11 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runDCR3CBarBlitCopyMipmapSentinel());
         tests.push_back(runDCR3CBarCopyImageSparseLifecycleSentinel());
         tests.push_back(runDCR3CBufferRoleSentinel());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "s22-first-range-sentinel") {
+        tests.push_back(runS22FirstRangeSentinel());
         return buildJSON(normalizedPhase, tests);
     }
 
