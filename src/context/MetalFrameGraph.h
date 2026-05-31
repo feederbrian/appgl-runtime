@@ -291,6 +291,11 @@ struct TranslatedDrawInfo {
     // distinguish same-container/different-fragment-program recipes without
     // hashing shader source text on every draw.
     GLuint pipelineEmulationFragmentProgram = 0;
+    // True when the draw is fed by SSO program-pipeline state or by active
+    // subroutine-uniform state. Until those hidden inputs are part of the
+    // structural key, the Phase-2 plan cache routes the draw through the
+    // direct encoder path.
+    bool pipelineOrSubroutinePlanCacheUnsafe = false;
 
     // Pipeline state toggles.
     bool depthTestEnabled = false;

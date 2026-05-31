@@ -7371,8 +7371,11 @@ static std::string appglSubroutineDispatchKey(
 
 static void appglResetProgramSubroutineSelections(GLProgramObject& programObject,
                                                   bool markDirty) {
+    bool hasSubroutineUniformState = false;
     for (int stage = 0; stage < 6; ++stage) {
         const auto& uniforms = programObject.resourceSubroutineUniforms[stage];
+        hasSubroutineUniformState =
+            hasSubroutineUniformState || !uniforms.empty();
         const GLint activeLocations =
             appglSubroutineUniformLocationCount(uniforms);
         auto& selections = programObject.currentSubroutineSelections[stage];
@@ -7406,6 +7409,9 @@ static void appglResetProgramSubroutineSelections(GLProgramObject& programObject
         }
     }
     programObject.subroutineSelectionsDirty = markDirty;
+    if (markDirty && hasSubroutineUniformState) {
+        programObject.markUniformsDirty();
+    }
 }
 
 static void appglResetPipelineSubroutineSelections(GLContext* ctx,
@@ -7829,6 +7835,9 @@ void APIENTRY glUniformSubroutinesuiv(GLenum shadertype, GLsizei count, const GL
             }
             valIt->second.uints[0] = static_cast<GLuint>(typeLocal);
         }
+    }
+    if (activeLocations > 0) {
+        prog->markUniformsDirty();
     }
 
     markProgramFunction(FunctionId::glUniformSubroutinesuiv,

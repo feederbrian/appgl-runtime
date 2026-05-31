@@ -336,6 +336,7 @@ enum class Phase2PlanRejectReason : std::size_t {
     MissingProgram,
     MissingShader,
     MissingReflection,
+    ProgramPipelineOrSubroutineState,
     SideEffect,
     KeyCapacity,
     Count,
@@ -346,6 +347,7 @@ static const char* phase2PlanRejectReasonName(Phase2PlanRejectReason reason) {
         case Phase2PlanRejectReason::MissingProgram: return "missing_program";
         case Phase2PlanRejectReason::MissingShader: return "missing_shader";
         case Phase2PlanRejectReason::MissingReflection: return "missing_reflection";
+        case Phase2PlanRejectReason::ProgramPipelineOrSubroutineState: return "program_pipeline_or_subroutine_state";
         case Phase2PlanRejectReason::SideEffect: return "side_effect";
         case Phase2PlanRejectReason::KeyCapacity: return "key_capacity";
         case Phase2PlanRejectReason::Count: break;
@@ -733,6 +735,10 @@ static bool phase2PlanCandidateKeyForDraw(const TranslatedDrawInfo& tdi,
     if (tdi.vertexReflection == nullptr ||
         (needsFragmentStage && tdi.fragmentReflection == nullptr)) {
         outReject = Phase2PlanRejectReason::MissingReflection;
+        return false;
+    }
+    if (tdi.pipelineOrSubroutinePlanCacheUnsafe) {
+        outReject = Phase2PlanRejectReason::ProgramPipelineOrSubroutineState;
         return false;
     }
     if (phase2PlanHasSideEffect(tdi)) {
@@ -34683,8 +34689,11 @@ static std::string subroutineDispatchKeyForReset(
 
 static void resetProgramSubroutineSelections(GLProgramObject& programObject,
                                              bool markDirty) {
+    bool hasSubroutineUniformState = false;
     for (int stage = 0; stage < 6; ++stage) {
         const auto& uniforms = programObject.resourceSubroutineUniforms[stage];
+        hasSubroutineUniformState =
+            hasSubroutineUniformState || !uniforms.empty();
         const GLint activeLocations = subroutineUniformLocationCountForReset(uniforms);
         auto& selections = programObject.currentSubroutineSelections[stage];
         selections.assign(static_cast<std::size_t>(activeLocations), 0u);
@@ -34720,6 +34729,9 @@ static void resetProgramSubroutineSelections(GLProgramObject& programObject,
         }
     }
     programObject.subroutineSelectionsDirty = markDirty;
+    if (markDirty && hasSubroutineUniformState) {
+        programObject.markUniformsDirty();
+    }
 }
 
 // Search a code region for "boolType name" where boolType is bool/bvec2/3/4.
@@ -48182,6 +48194,48 @@ static bool translatedDrawUsesFragCoordParams(const TranslatedDrawInfo& tdi) {
         tdi.fragmentMSL->find("_appgl_FragCoordParams") != std::string::npos;
 }
 
+static bool programHasSubroutineUniformStateForStage(
+    const GLProgramObject* program,
+    std::size_t stage)
+{
+    if (program == nullptr || stage >= 6) {
+        return false;
+    }
+    return !program->resourceSubroutineUniforms[stage].empty();
+}
+
+static bool programHasSubroutineUniformState(const GLProgramObject* program)
+{
+    if (program == nullptr) {
+        return false;
+    }
+    for (std::size_t stage = 0; stage < 6; ++stage) {
+        if (programHasSubroutineUniformStateForStage(program, stage)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool currentDrawHasProgramPipelineOrSubroutinePlanCacheHazard(
+    const GLStateTracker* state,
+    GLObjectStore* objects)
+{
+    if (state == nullptr || objects == nullptr) {
+        return false;
+    }
+    const GLuint currentProgram = state->currentProgram();
+    if (currentProgram != 0) {
+        return programHasSubroutineUniformState(
+            objects->programs().get(currentProgram));
+    }
+    const GLuint pipelineName = state->currentProgramPipeline();
+    if (pipelineName == 0) {
+        return false;
+    }
+    return true;
+}
+
 // Sprint 17 Day 7+ Bank-Group-H Path B Phase 3 day 4 — see header
 // comment at the Impl method declaration. Item 26 LIVE 19th-instance
 // candidate: sister-pattern leverage at the call-site-wrapper level.
@@ -48281,6 +48335,9 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
     const GLuint planVaoName = state->boundVertexArray();
     const std::uint32_t planVaoGeneration =
         currentVao != nullptr ? currentVao->attribGeneration : 0u;
+    tdi.pipelineOrSubroutinePlanCacheUnsafe =
+        currentDrawHasProgramPipelineOrSubroutinePlanCacheHazard(
+            state.get(), objects.get());
     phase2PlanKeyProfile.record(
         tdi,
         planVaoName,
