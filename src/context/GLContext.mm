@@ -174,6 +174,7 @@ enum class GLDrawProfileBucket : std::size_t {
     VertexLayout,
     Diagnostics,
     UniformBuffers,
+    SamplerBindingsTotal,
     SamplerSynthesize,
     SamplerProducerDrain,
     UboBindings,
@@ -183,6 +184,7 @@ enum class GLDrawProfileBucket : std::size_t {
     EncodePrep,
     WrapperPrep,
     SubmissionGroup,
+    Phase2PlanLookup,
     FramegraphEncode,
     PostMarkWrites,
     SolidFallback,
@@ -209,6 +211,7 @@ static const char* glDrawProfileBucketName(GLDrawProfileBucket bucket) {
         case GLDrawProfileBucket::VertexLayout: return "vertex_layout";
         case GLDrawProfileBucket::Diagnostics: return "diagnostics";
         case GLDrawProfileBucket::UniformBuffers: return "uniform_buffers";
+        case GLDrawProfileBucket::SamplerBindingsTotal: return "sampler_bindings_total";
         case GLDrawProfileBucket::SamplerSynthesize: return "sampler_synthesize";
         case GLDrawProfileBucket::SamplerProducerDrain: return "sampler_producer_drain";
         case GLDrawProfileBucket::UboBindings: return "ubo_bindings";
@@ -218,12 +221,18 @@ static const char* glDrawProfileBucketName(GLDrawProfileBucket bucket) {
         case GLDrawProfileBucket::EncodePrep: return "encode_prep";
         case GLDrawProfileBucket::WrapperPrep: return "wrapper_prep";
         case GLDrawProfileBucket::SubmissionGroup: return "submission_group";
+        case GLDrawProfileBucket::Phase2PlanLookup: return "phase2_plan_lookup";
         case GLDrawProfileBucket::FramegraphEncode: return "framegraph_encode";
         case GLDrawProfileBucket::PostMarkWrites: return "post_mark_writes";
         case GLDrawProfileBucket::SolidFallback: return "solid_fallback";
         case GLDrawProfileBucket::Count: break;
     }
     return "unknown";
+}
+
+static bool glDrawProfileBucketNestedInSamplerTotal(GLDrawProfileBucket bucket) {
+    return bucket == GLDrawProfileBucket::SamplerSynthesize ||
+        bucket == GLDrawProfileBucket::SamplerProducerDrain;
 }
 
 struct GLDrawPathProfile {
@@ -261,8 +270,16 @@ struct GLDrawPathProfile {
             return;
         }
         double accountedUs = 0.0;
-        for (const auto& bucket : buckets) {
-            accountedUs += bucket.totalUs;
+        const bool hasSamplerTotal =
+            buckets[static_cast<std::size_t>(
+                GLDrawProfileBucket::SamplerBindingsTotal)].count != 0;
+        for (std::size_t i = 0; i < static_cast<std::size_t>(GLDrawProfileBucket::Count); ++i) {
+            const auto bucketId = static_cast<GLDrawProfileBucket>(i);
+            if (hasSamplerTotal &&
+                glDrawProfileBucketNestedInSamplerTotal(bucketId)) {
+                continue;
+            }
+            accountedUs += buckets[i].totalUs;
         }
         const double denom = totalUs > 0.0 ? totalUs : 1.0;
         std::fprintf(stderr,
@@ -9373,6 +9390,9 @@ struct GLContext::Impl {
         GLProgramObject& program,
         TranslatedDrawInfo& info)
     {
+        const bool profileSamplerBindings = drawPathProfile.enabled;
+        const auto samplerBindingsStart =
+            profileSamplerBindings ? glDrawProfileNow() : GLDrawProfileTimePoint{};
         // Phase 8X Group 4d follow-up⁸ — diagnostic one-shot-per-program
         // trace so BAR can distinguish "reflection empty", "uniform
         // missing", "unit empty", "texture not instantiated", and
@@ -10289,6 +10309,11 @@ struct GLContext::Impl {
                      info.fragmentMSL, fragmentUsesSparseSampledSidecars);
         resolveStage("vert", info.vertexReflection, info.vertexTextures,
                      info.vertexMSL, vertexUsesSparseSampledSidecars);
+        if (profileSamplerBindings) {
+            drawPathProfile.record(GLDrawProfileBucket::SamplerBindingsTotal,
+                                   samplerBindingsStart,
+                                   glDrawProfileNow());
+        }
     }
 
     // Sprint 6 Phase 1 sub-task 3 day 3 (CKPT43): build the
@@ -48332,6 +48357,8 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                                submissionGroupStart,
                                glDrawProfileNow());
     }
+    const auto phase2PlanLookupStart =
+        drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
     const GLuint planVaoName = state->boundVertexArray();
     const std::uint32_t planVaoGeneration =
         currentVao != nullptr ? currentVao->attribGeneration : 0u;
@@ -48396,6 +48423,11 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                 translatedPlanOut = &stagedTranslatedPlan;
             }
         }
+    }
+    if (drawPathProfile.enabled) {
+        drawPathProfile.record(GLDrawProfileBucket::Phase2PlanLookup,
+                               phase2PlanLookupStart,
+                               glDrawProfileNow());
     }
     tdi.translatedPlan = translatedPlanIn;
     tdi.translatedPlanOut = translatedPlanOut;
