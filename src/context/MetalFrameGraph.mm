@@ -9864,6 +9864,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         [enc setFrontFacingWinding:
             (info.frontFace == GL_CW) ? MTLWindingClockwise
                                        : MTLWindingCounterClockwise];
+        [enc setTriangleFillMode:
+            info.wireframe ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
         {
             const std::uint32_t sampleMask = info.sampleMask;
             [enc setFragmentBytes:&sampleMask

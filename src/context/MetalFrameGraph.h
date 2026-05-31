@@ -919,6 +919,7 @@ struct MetalTessDrawInfo {
     bool cullFaceEnabled = false;
     GLenum cullFaceMode = GL_BACK;
     GLenum frontFace = GL_CCW;
+    bool wireframe = false;
     std::uint32_t sampleMask = 0xFFFFFFFFu;
 
     bool depthTestEnabled = false;

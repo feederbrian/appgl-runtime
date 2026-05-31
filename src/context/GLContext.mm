@@ -46812,6 +46812,7 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     info.cullFaceEnabled = state->isEnabled(GL_CULL_FACE);
     info.cullFaceMode = state->rasterState().cullFaceMode;
     info.frontFace = state->rasterState().frontFace;
+    info.wireframe = (state->rasterState().polygonFillMode == GL_LINE);
     info.sampleMask =
         state->isEnabled(GL_SAMPLE_MASK)
             ? static_cast<std::uint32_t>(state->sampleMask(0))
