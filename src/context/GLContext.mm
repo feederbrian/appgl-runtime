@@ -55895,14 +55895,11 @@ bool GLContext::multiDrawArraysIndirect(GLenum mode, const void* indirect, GLsiz
         if (cmd.count == 0 || cmd.instanceCount == 0) {
             continue;  // valid no-op for this sub-draw
         }
-        const bool ok = drawArraysInstancedBaseInstance(mode, static_cast<GLint>(cmd.first),
-                                                        static_cast<GLsizei>(cmd.count),
-                                                        static_cast<GLsizei>(cmd.instanceCount),
-                                                        cmd.baseInstance,
-                                                        static_cast<GLuint>(i));
-        if (!ok) {
-            return false;
-        }
+        drawArraysInstancedBaseInstance(mode, static_cast<GLint>(cmd.first),
+                                        static_cast<GLsizei>(cmd.count),
+                                        static_cast<GLsizei>(cmd.instanceCount),
+                                        cmd.baseInstance,
+                                        static_cast<GLuint>(i));
     }
     return true;
 }
@@ -55989,6 +55986,8 @@ bool GLContext::multiDrawElementsIndirect(GLenum mode, GLenum type, const void* 
         std::fprintf(stderr,
             "[APPGL] mdi-elements sampler-recipe bypass reason=sparse-buffer\n");
     }
+    std::vector<DrawElementsIndirectCommand> commands;
+    commands.reserve(static_cast<std::size_t>(drawcount));
     for (GLsizei i = 0; i < drawcount; ++i) {
         const void* cmdPtr = reinterpret_cast<const void*>(
             reinterpret_cast<uintptr_t>(indirect) + static_cast<uintptr_t>(i) * static_cast<uintptr_t>(effectiveStride));
@@ -55996,20 +55995,21 @@ bool GLContext::multiDrawElementsIndirect(GLenum mode, GLenum type, const void* 
         if (!readIndirectBuffer(GL_DRAW_INDIRECT_BUFFER, cmdPtr, sizeof(cmd), &cmd)) {
             return false;
         }
+        commands.push_back(cmd);
+    }
+    for (GLsizei i = 0; i < drawcount; ++i) {
+        const auto& cmd = commands[static_cast<std::size_t>(i)];
         if (cmd.count == 0 || cmd.instanceCount == 0) {
             continue;
         }
         const void* indexOffset = reinterpret_cast<const void*>(
             static_cast<uintptr_t>(cmd.firstIndex) * static_cast<uintptr_t>(indexSize));
-        const bool ok = drawElementsInstancedBaseVertexBaseInstance(mode,
+        drawElementsInstancedBaseVertexBaseInstance(mode,
             static_cast<GLsizei>(cmd.count), type, indexOffset,
             static_cast<GLsizei>(cmd.instanceCount),
             static_cast<GLint>(cmd.baseVertex),
             cmd.baseInstance,
             static_cast<GLuint>(i));
-        if (!ok) {
-            return false;
-        }
     }
     return true;
 }
