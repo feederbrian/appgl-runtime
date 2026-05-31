@@ -55337,31 +55337,33 @@ bool GLContext::multiDrawArraysIndirect(GLenum mode, const void* indirect, GLsiz
         GLuint baseInstance;
     };
     const GLsizei effectiveStride = (stride == 0) ? static_cast<GLsizei>(sizeof(DrawArraysIndirectCommand)) : stride;
+    const GLuint indirectBuf = impl_->state->boundBuffer(GL_DRAW_INDIRECT_BUFFER);
+    GLBufferObject* indirectObject =
+        indirectBuf != 0 ? impl_->objects->buffers().get(indirectBuf) : nullptr;
+    const bool indirectBufferHasGpuProducer =
+        indirectObject != nullptr &&
+        indirectObject->producerPending.hasAny(kProducerAll);
 
     // GL 4.6 §10.5: pre-validate the indirect-buffer range. See
     // multiDrawElementsIndirect for the full rationale — the check
     // must fire BEFORE any sub-draw so we don't push a cascade of
     // per-draw errors when the buffer has stack-garbage trailer bytes.
     if (drawcount > 0) {
-        const GLuint indirectBuf = impl_->state->boundBuffer(GL_DRAW_INDIRECT_BUFFER);
-        if (indirectBuf != 0) {
-            GLBufferObject* bo = impl_->objects->buffers().get(indirectBuf);
-            if (bo != nullptr) {
-                const uintptr_t offset = reinterpret_cast<uintptr_t>(indirect);
-                const uintptr_t strideBytes = static_cast<uintptr_t>(effectiveStride);
-                const uintptr_t commandBytes = static_cast<uintptr_t>(sizeof(DrawArraysIndirectCommand));
-                const uintptr_t lastCommandIndex = static_cast<uintptr_t>(drawcount - 1);
-                if (lastCommandIndex > (std::numeric_limits<uintptr_t>::max() - offset) / strideBytes) {
-                    pushError(GL_INVALID_OPERATION);
-                    return false;
-                }
-                const uintptr_t lastCommandOffset = offset + lastCommandIndex * strideBytes;
-                const uintptr_t bufferSize = static_cast<uintptr_t>(bo->size);
-                if (lastCommandOffset > bufferSize ||
-                    commandBytes > bufferSize - lastCommandOffset) {
-                    pushError(GL_INVALID_OPERATION);
-                    return false;
-                }
+        if (indirectObject != nullptr) {
+            const uintptr_t offset = reinterpret_cast<uintptr_t>(indirect);
+            const uintptr_t strideBytes = static_cast<uintptr_t>(effectiveStride);
+            const uintptr_t commandBytes = static_cast<uintptr_t>(sizeof(DrawArraysIndirectCommand));
+            const uintptr_t lastCommandIndex = static_cast<uintptr_t>(drawcount - 1);
+            if (lastCommandIndex > (std::numeric_limits<uintptr_t>::max() - offset) / strideBytes) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            const uintptr_t lastCommandOffset = offset + lastCommandIndex * strideBytes;
+            const uintptr_t bufferSize = static_cast<uintptr_t>(indirectObject->size);
+            if (lastCommandOffset > bufferSize ||
+                commandBytes > bufferSize - lastCommandOffset) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
             }
         }
     }
@@ -55401,11 +55403,16 @@ bool GLContext::multiDrawArraysIndirect(GLenum mode, const void* indirect, GLsiz
     // Live layer-backed presents reuse one render encoder for the full
     // frame. On that path, Apple AGX currently fails to make per-subdraw
     // vertex range rebinding observable for VBO-backed MDI walls. When the
-    // commands are exactly one contiguous, non-instanced independent-primitive
-    // array range and the shader has no draw/primitive ID dependency, the
-    // GL-visible result is identical to one drawArrays over the combined range
-    // and avoids the fragile per-command encoder state.
-    if (canCoalesceContiguous && isCoalescibleArrayPrimitiveMode(mode)) {
+    // commands are exactly one CPU-authored contiguous, non-instanced
+    // independent-primitive array range and the shader has no draw/primitive
+    // ID dependency, the GL-visible result is identical to one drawArrays over
+    // the combined range and avoids the fragile per-command encoder state. A
+    // GPU-produced indirect buffer must take the per-command path: the first
+    // read below drains the producer token, so sampling the pending state before
+    // the reads preserves the hazard-aware exclusion.
+    if (canCoalesceContiguous &&
+        !indirectBufferHasGpuProducer &&
+        isCoalescibleArrayPrimitiveMode(mode)) {
         GLuint programName = impl_->state->currentProgram();
         GLProgramObject* program = impl_->resolveDrawProgram(programName);
         const GLuint coalescedCount = coalescedEnd - coalescedFirst;

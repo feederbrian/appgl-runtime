@@ -12411,6 +12411,22 @@ TestResult runS22LivePresentPathSentinel() {
     return result;
 }
 
+TestResult runS22LivePresentTessFurPathSentinel() {
+    auto result = runDirectSentinel("s22.live-present-tess-fur-scale-switch", [&] {
+        std::string message;
+        if (!runS22LivePresentTessFurSentinel(message)) {
+            throw std::runtime_error(message.empty()
+                ? "live-present tess fur sentinel failed"
+                : message);
+        }
+    });
+    if (result.status == "passed") {
+        result.message =
+            "layer-backed present Fur-scale tess switch remained stable";
+    }
+    return result;
+}
+
 void appendCoverageDelta(TestResult& result, const std::string& phase) {
     // Bootstrap coverage checks only apply to phase-a scenes. Phase-c and later
     // scenes validate their own scenarioCoverage() list; requiring the full
@@ -12627,6 +12643,7 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
 
     if (normalizedPhase == "s22-live-present-sentinel") {
         tests.push_back(runS22LivePresentPathSentinel());
+        tests.push_back(runS22LivePresentTessFurPathSentinel());
         return buildJSON(normalizedPhase, tests);
     }
 
