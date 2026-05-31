@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -145,6 +146,190 @@ bool metalTessTFEnabled() {
 bool liftTessUniformGuardEnabled() {
     return appglEnvEnabledDefaultOn("APPGL_LIFT_TESS_UNIFORM_GUARD");
 }
+
+using GLDrawProfileClock = std::chrono::steady_clock;
+using GLDrawProfileTimePoint = GLDrawProfileClock::time_point;
+
+static GLDrawProfileTimePoint glDrawProfileNow() {
+    return GLDrawProfileClock::now();
+}
+
+static double glDrawProfileElapsedUs(GLDrawProfileTimePoint start,
+                                     GLDrawProfileTimePoint end) {
+    return std::chrono::duration<double, std::micro>(end - start).count();
+}
+
+enum class GLDrawProfileBucket : std::size_t {
+    Validation,
+    DrawablePrep,
+    ProgramResolve,
+    SpecialPathChecks,
+    TranslatedPreflight,
+    VaoLayout,
+    VboResolve,
+    InfoInit,
+    FixedFunctionState,
+    ShaderState,
+    VertexLayout,
+    Diagnostics,
+    UniformBuffers,
+    SamplerSynthesize,
+    SamplerProducerDrain,
+    UboBindings,
+    SsboBindings,
+    ImageBindings,
+    FboResolve,
+    EncodePrep,
+    WrapperPrep,
+    SubmissionGroup,
+    FramegraphEncode,
+    PostMarkWrites,
+    SolidFallback,
+    Count,
+};
+
+struct GLDrawProfileBucketStats {
+    std::uint64_t count = 0;
+    double totalUs = 0.0;
+};
+
+static const char* glDrawProfileBucketName(GLDrawProfileBucket bucket) {
+    switch (bucket) {
+        case GLDrawProfileBucket::Validation: return "validation";
+        case GLDrawProfileBucket::DrawablePrep: return "drawable_prep";
+        case GLDrawProfileBucket::ProgramResolve: return "program_resolve";
+        case GLDrawProfileBucket::SpecialPathChecks: return "special_path_checks";
+        case GLDrawProfileBucket::TranslatedPreflight: return "translated_preflight";
+        case GLDrawProfileBucket::VaoLayout: return "vao_layout";
+        case GLDrawProfileBucket::VboResolve: return "vbo_resolve";
+        case GLDrawProfileBucket::InfoInit: return "info_init";
+        case GLDrawProfileBucket::FixedFunctionState: return "fixed_function_state";
+        case GLDrawProfileBucket::ShaderState: return "shader_state";
+        case GLDrawProfileBucket::VertexLayout: return "vertex_layout";
+        case GLDrawProfileBucket::Diagnostics: return "diagnostics";
+        case GLDrawProfileBucket::UniformBuffers: return "uniform_buffers";
+        case GLDrawProfileBucket::SamplerSynthesize: return "sampler_synthesize";
+        case GLDrawProfileBucket::SamplerProducerDrain: return "sampler_producer_drain";
+        case GLDrawProfileBucket::UboBindings: return "ubo_bindings";
+        case GLDrawProfileBucket::SsboBindings: return "ssbo_bindings";
+        case GLDrawProfileBucket::ImageBindings: return "image_bindings";
+        case GLDrawProfileBucket::FboResolve: return "fbo_resolve";
+        case GLDrawProfileBucket::EncodePrep: return "encode_prep";
+        case GLDrawProfileBucket::WrapperPrep: return "wrapper_prep";
+        case GLDrawProfileBucket::SubmissionGroup: return "submission_group";
+        case GLDrawProfileBucket::FramegraphEncode: return "framegraph_encode";
+        case GLDrawProfileBucket::PostMarkWrites: return "post_mark_writes";
+        case GLDrawProfileBucket::SolidFallback: return "solid_fallback";
+        case GLDrawProfileBucket::Count: break;
+    }
+    return "unknown";
+}
+
+struct GLDrawPathProfile {
+    bool enabled = std::getenv("APPGL_GL_DRAW_PROFILE") != nullptr;
+    std::uint64_t draws = 0;
+    double totalUs = 0.0;
+    std::array<GLDrawProfileBucketStats,
+               static_cast<std::size_t>(GLDrawProfileBucket::Count)> buckets{};
+
+    void record(GLDrawProfileBucket bucket, double us) {
+        if (!enabled) {
+            return;
+        }
+        auto& stats = buckets[static_cast<std::size_t>(bucket)];
+        ++stats.count;
+        stats.totalUs += us;
+    }
+
+    void record(GLDrawProfileBucket bucket,
+                GLDrawProfileTimePoint start,
+                GLDrawProfileTimePoint end) {
+        record(bucket, glDrawProfileElapsedUs(start, end));
+    }
+
+    void recordTotal(double us) {
+        if (!enabled) {
+            return;
+        }
+        ++draws;
+        totalUs += us;
+    }
+
+    void dump() const {
+        if (!enabled || draws == 0) {
+            return;
+        }
+        double accountedUs = 0.0;
+        for (const auto& bucket : buckets) {
+            accountedUs += bucket.totalUs;
+        }
+        const double denom = totalUs > 0.0 ? totalUs : 1.0;
+        std::fprintf(stderr,
+            "[APPGL_GL_DRAW_PROFILE] summary draws=%llu avg_us=%.3f "
+            "total_us=%.3f accounted_us=%.3f unattributed_us=%.3f\n",
+            static_cast<unsigned long long>(draws),
+            totalUs / static_cast<double>(draws),
+            totalUs,
+            accountedUs,
+            std::max(0.0, totalUs - accountedUs));
+        for (std::size_t i = 0; i < static_cast<std::size_t>(GLDrawProfileBucket::Count); ++i) {
+            const auto& bucket = buckets[i];
+            if (bucket.count == 0) {
+                continue;
+            }
+            const auto bucketId = static_cast<GLDrawProfileBucket>(i);
+            std::fprintf(stderr,
+                "[APPGL_GL_DRAW_PROFILE] component=%s count=%llu total_us=%.3f "
+                "avg_us=%.3f avg_per_draw_us=%.3f pct=%.2f\n",
+                glDrawProfileBucketName(bucketId),
+                static_cast<unsigned long long>(bucket.count),
+                bucket.totalUs,
+                bucket.totalUs / static_cast<double>(bucket.count),
+                bucket.totalUs / static_cast<double>(draws),
+                (bucket.totalUs * 100.0) / denom);
+        }
+        std::fflush(stderr);
+    }
+};
+
+class GLDrawProfileScope {
+public:
+    explicit GLDrawProfileScope(GLDrawPathProfile& profile)
+        : profile_(profile), enabled_(profile.enabled) {
+        if (enabled_) {
+            start_ = glDrawProfileNow();
+            cursor_ = start_;
+        }
+    }
+
+    ~GLDrawProfileScope() {
+        if (!enabled_) {
+            return;
+        }
+        profile_.recordTotal(glDrawProfileElapsedUs(start_, glDrawProfileNow()));
+    }
+
+    void mark(GLDrawProfileBucket bucket) {
+        if (!enabled_) {
+            return;
+        }
+        const auto now = glDrawProfileNow();
+        profile_.record(bucket, cursor_, now);
+        cursor_ = now;
+    }
+
+    void resetCursor() {
+        if (enabled_) {
+            cursor_ = glDrawProfileNow();
+        }
+    }
+
+private:
+    GLDrawPathProfile& profile_;
+    bool enabled_ = false;
+    GLDrawProfileTimePoint start_{};
+    GLDrawProfileTimePoint cursor_{};
+};
 
 bool sourceDeclaresFragCoordOriginUpperLeft(const std::string& source) {
     std::string clean;
@@ -3109,6 +3294,7 @@ bool defaultUniformBlockContainsFp64(const ShaderReflection& reflection);
 
 struct GLContext::Impl {
     ~Impl() {
+        drawPathProfile.dump();
         for (auto& entry : incompleteSampledColorTextures) {
             releaseRetainedMetalObject(entry.second);
         }
@@ -9021,7 +9207,14 @@ struct GLContext::Impl {
                     ? &reflection->sampledTextures
                     : nullptr;
             if (sampledTextures == nullptr) {
+                const auto synthesizeStart =
+                    drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
                 synthesizedBindings = synthesizeSamplerBindings(stageMSL);
+                if (drawPathProfile.enabled) {
+                    drawPathProfile.record(GLDrawProfileBucket::SamplerSynthesize,
+                                           synthesizeStart,
+                                           glDrawProfileNow());
+                }
                 if (!synthesizedBindings.empty()) {
                     sampledTextures = &synthesizedBindings;
                 }
@@ -9363,7 +9556,14 @@ struct GLContext::Impl {
                         {GpuResourceAccess::Kind::Buffer,
                          texObject->desc.sourceBuffer, kProducerAll});
                 }
+                const auto producerDrainStart =
+                    drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
                 drainPendingGpuProducers(samplerReads);
+                if (drawPathProfile.enabled) {
+                    drawPathProfile.record(GLDrawProfileBucket::SamplerProducerDrain,
+                                           producerDrainStart,
+                                           glDrawProfileNow());
+                }
                 if (texObject->target == GL_TEXTURE_BUFFER &&
                     texObject->desc.sourceBuffer != 0) {
                     (void)refreshRGB32BufferTextureView(*texObject);
@@ -17677,6 +17877,7 @@ struct GLContext::Impl {
     std::unique_ptr<GLCapabilities> capabilities;
     std::unique_ptr<GLObjectStore> objects;
     std::unique_ptr<GLStateTracker> state;
+    GLDrawPathProfile drawPathProfile;
     std::unordered_map<NSUInteger, void*> incompleteSampledColorTextures;
 
     // Phase 8X Group 4d follow-up⁸ — one-shot-per-key dedup sets for the
@@ -47362,6 +47563,7 @@ static bool translatedDrawUsesFragCoordParams(const TranslatedDrawInfo& tdi) {
 // comment at the Impl method declaration. Item 26 LIVE 19th-instance
 // candidate: sister-pattern leverage at the call-site-wrapper level.
 bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
+    const auto wrapperPrepStart = drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
     prepareFp64VertexSidecars(tdi);
     appendCurrentGenericVertexAttributes(tdi, currentVertexArrayOrDefault());
     const GLuint drawFboName = state->boundDrawFramebuffer();
@@ -47440,8 +47642,26 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
         tdi.markColorAttachmentReadbackFlip = true;
     }
 
+    if (drawPathProfile.enabled) {
+        drawPathProfile.record(GLDrawProfileBucket::WrapperPrep,
+                               wrapperPrepStart,
+                               glDrawProfileNow());
+    }
+    const auto submissionGroupStart = drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
     declareTranslatedDrawSubmissionGroup(tdi, drawFboName);
+    if (drawPathProfile.enabled) {
+        drawPathProfile.record(GLDrawProfileBucket::SubmissionGroup,
+                               submissionGroupStart,
+                               glDrawProfileNow());
+    }
+    const auto framegraphEncodeStart = drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
     const bool ok = frameGraph->encodeTranslatedDraw(tdi);
+    if (drawPathProfile.enabled) {
+        drawPathProfile.record(GLDrawProfileBucket::FramegraphEncode,
+                               framegraphEncodeStart,
+                               glDrawProfileNow());
+    }
+    const auto postMarkStart = drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
     if (ok) {
         GpuResourceWriteSet producerWrites;
         if (drawFboName != 0) {
@@ -47607,6 +47827,11 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
         }
     }
     pendingFp64GraphicsSsboSidecars.clear();
+    if (drawPathProfile.enabled) {
+        drawPathProfile.record(GLDrawProfileBucket::PostMarkWrites,
+                               postMarkStart,
+                               glDrawProfileNow());
+    }
     return ok;
 }
 
@@ -47904,6 +48129,7 @@ static bool buildPrimitiveRestartExpandedElements(GLenum mode,
 }
 
 bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawID) {
+    GLDrawProfileScope drawProfile(impl_->drawPathProfile);
     if (!isValidDrawMode(mode)) {
         pushError(GL_INVALID_ENUM);
         return false;
@@ -48001,6 +48227,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             }
         }
     }
+    drawProfile.mark(GLDrawProfileBucket::Validation);
 
     if (impl_->frameGraph == nullptr) {
         return false;
@@ -48013,6 +48240,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     // Flush any pending clear before we start the draw render pass; otherwise
     // the draw would run against an uncleared default attachment.
     impl_->encodePendingWork();
+    drawProfile.mark(GLDrawProfileBucket::DrawablePrep);
 
     // Try the translated shader pipeline first (GPU-side vertex processing).
     // GL 4.6 §7.4 — prefer glUseProgram's program; fall back to the
@@ -48035,6 +48263,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     if (impl_->state->boundDrawFramebuffer() == 0) {
         impl_->invalidateDefaultFramebufferShadow();
     }
+    drawProfile.mark(GLDrawProfileBucket::ProgramResolve);
     if (program != nullptr && program->ssboStdLayoutRawCopyFallback &&
         impl_->state->isEnabled(GL_RASTERIZER_DISCARD)) {
         return impl_->runSSBOStdLayoutRawCopyFallback();
@@ -49021,6 +49250,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
         }
     }
 
+    drawProfile.mark(GLDrawProfileBucket::SpecialPathChecks);
     if (program != nullptr && program->hasTranslatedPipeline) {
         // GL 4.6 §22.1 / §22.3 — non-GS draws credit the
         // PRIMITIVES_GENERATED and TRANSFORM_FEEDBACK_PRIMITIVES_-
@@ -49039,6 +49269,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
         // (generates its own vertices via gl_VertexID / [[vertex_id]]).
         const bool attributelessDraw = (vao != nullptr &&
             program->vertexReflection.vertexInputs.empty());
+        drawProfile.mark(GLDrawProfileBucket::TranslatedPreflight);
         if (attributelessDraw) {
             TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
             tdi.mode = mode;
@@ -49114,6 +49345,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             bool vaoLayoutCacheHit = false;
             const auto& vaoLayout =
                 cachedVertexArrayLayout(*vao, false, &vaoLayoutCacheHit);
+            drawProfile.mark(GLDrawProfileBucket::VaoLayout);
             const bool foundEnabledAttrib = vaoLayout.hasEnabledAttributes;
             if (!foundEnabledAttrib &&
                 !program->vertexReflection.vertexInputs.empty()) {
@@ -49200,6 +49432,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     TranslatedFallbackGate::ShadowBytesEmpty, "drawArrays",
                     vaoName, vao->attributes.size(), vaoLayout.primaryBufferName, 0);
             }
+            drawProfile.mark(GLDrawProfileBucket::VboResolve);
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
                 const std::size_t posStride = vaoLayout.primaryStride;
                 const std::size_t firstOff = static_cast<std::size_t>(first) * posStride;
@@ -49223,6 +49456,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     tdi.metalVertexBuffer = vbo->metalBuffer;
                     tdi.metalVertexBufferOffset = startOff;
                     tdi.glVertexBuffer = vaoLayout.primaryBufferName;
+                    drawProfile.mark(GLDrawProfileBucket::InfoInit);
                     // Phase 8X Group 4d follow-up¹⁴ — centralised fixed-
                     // function state snapshot (depth/cull/front-face/
                     // wireframe/blend). Replaces the prior inline reads
@@ -49230,6 +49464,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     // all capture identical state.
                     populateTranslatedDrawFixedFunctionState(
                         tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program), this);
+                    drawProfile.mark(GLDrawProfileBucket::FixedFunctionState);
                     tdi.vertexMSL = &program->vertexMSL;
                     tdi.fragmentMSL = &program->fragmentMSL;
                     tdi.vertexReflection = &program->vertexReflection;
@@ -49249,18 +49484,22 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     // first-draw-per-program NSLog. Non-owning, no
                     // correctness impact; zero is a valid placeholder.
                     tdi.program = programName;
+                    drawProfile.mark(GLDrawProfileBucket::ShaderState);
 
                     applyCachedVertexArrayLayout(
                         vaoLayout, *impl_->objects, tdi, first,
                         true, true);
                     appendCurrentGenericVertexAttributes(tdi, vao);
+                    drawProfile.mark(GLDrawProfileBucket::VertexLayout);
 
                     logStateResolveCostClass(
                         "drawArrays", programName, vaoName,
                         tdi, vao->attributes.size(), vaoLayoutCacheHit);
+                    drawProfile.mark(GLDrawProfileBucket::Diagnostics);
                     prepareTranslatedDrawUniformBuffers(
                         *program, programName, impl_->matrixState, drawID, tdi,
                         "drawArrays");
+                    drawProfile.mark(GLDrawProfileBucket::UniformBuffers);
 
                     // Phase 8X Group 4d follow-up⁷ — resolve each sampler
                     // uniform in the program to the Metal texture + sampler
@@ -49274,9 +49513,13 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     // and the fragment shader sampled from an unbound
                     // slot.
                     impl_->resolveSamplerBindings(*program, tdi);
+                    drawProfile.resetCursor();
                     impl_->resolveUBOBindings(*program, tdi);
+                    drawProfile.mark(GLDrawProfileBucket::UboBindings);
                     impl_->resolveSSBOBindings(*program, tdi);
+                    drawProfile.mark(GLDrawProfileBucket::SsboBindings);
                     impl_->resolveImageBindings(*program, tdi);
+                    drawProfile.mark(GLDrawProfileBucket::ImageBindings);
 
                     // RC-A02: resolve FBO render target when a user FBO is bound.
                     {
@@ -49298,6 +49541,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                             tdi.fboHeight = fboH;
                         }
                     }
+                    drawProfile.mark(GLDrawProfileBucket::FboResolve);
 
                     // Phase 8X Group 4d follow-up⁴ — scratch buffer for the
                     // pipeline-build error text plumbed out of the encode-failed
@@ -49307,8 +49551,10 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     thread_local std::string pipelineBuildError;
                     pipelineBuildError.clear();
                     tdi.pipelineBuildErrorOut = &pipelineBuildError;
+                    drawProfile.mark(GLDrawProfileBucket::EncodePrep);
 
                     const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
+                    drawProfile.resetCursor();
                     if (ok) {
                         return true;
                     }
@@ -49340,6 +49586,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             GL_DEBUG_SEVERITY_LOW,
             "glDrawArrays: draw skipped (no translated pipeline and solid-color path unsupported)"
         );
+        drawProfile.mark(GLDrawProfileBucket::SolidFallback);
         return false;
     }
 
@@ -49350,6 +49597,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     const std::size_t startOffset = static_cast<std::size_t>(setup.vertexArray->attributes[0].pointer) + firstOffset;
     if (startOffset > setup.positionShadowSize) {
         pushError(GL_INVALID_OPERATION);
+        drawProfile.mark(GLDrawProfileBucket::SolidFallback);
         return false;
     }
     setup.info.positions = setup.positionShadow + startOffset;
@@ -49371,6 +49619,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             "glDrawArrays: MetalFrameGraph failed to encode draw"
         );
     }
+    drawProfile.mark(GLDrawProfileBucket::SolidFallback);
     return ok;
 }
 
