@@ -358,6 +358,18 @@ static bool phase2PlanProfileEnabled() {
            std::getenv("APPGL_PHASE2_PLAN_KEY_PROFILE") != nullptr;
 }
 
+static bool phase2TranslatedDrawPlanCacheEnabled() {
+    return std::getenv("APPGL_PHASE2_PLAN_DISABLE") == nullptr;
+}
+
+static bool phase2TranslatedDrawPlanForceMiss() {
+    return std::getenv("APPGL_PHASE2_PLAN_FORCE_MISS") != nullptr;
+}
+
+static bool phase2TranslatedDrawPlanTraceEnabled() {
+    return std::getenv("APPGL_PHASE2_PLAN_TRACE") != nullptr;
+}
+
 static constexpr std::uint64_t kPhase2PlanHashOffset = 1469598103934665603ull;
 static constexpr std::uint64_t kPhase2PlanHashPrime = 1099511628211ull;
 
@@ -547,6 +559,7 @@ static std::uint64_t phase2PlanKeyForDraw(const TranslatedDrawInfo& tdi,
     phase2PlanHashU64(hash, 0x4150474C50324B31ull); // "APGLP2K1"
 
     phase2PlanHashU64(hash, tdi.program);
+    phase2PlanHashU64(hash, tdi.pipelineEmulationFragmentProgram);
     phase2PlanHashShaderIdentity(hash, tdi.vertexMSL);
     phase2PlanHashShaderIdentity(hash, tdi.fragmentMSL);
     phase2PlanHashReflectionShape(hash, tdi.vertexReflection);
@@ -699,6 +712,37 @@ static std::uint64_t phase2PlanKeyForDraw(const TranslatedDrawInfo& tdi,
     return hash;
 }
 
+static bool phase2PlanCandidateKeyForDraw(const TranslatedDrawInfo& tdi,
+                                          GLuint vaoName,
+                                          std::uint32_t vaoGeneration,
+                                          GLuint drawFboName,
+                                          std::uint64_t& outKey,
+                                          Phase2PlanRejectReason& outReject)
+{
+    if (tdi.program == 0) {
+        outReject = Phase2PlanRejectReason::MissingProgram;
+        return false;
+    }
+    const bool needsFragmentStage = !tdi.rasterizerDiscard;
+    if (tdi.vertexMSL == nullptr || tdi.vertexMSL->empty() ||
+        (needsFragmentStage &&
+         (tdi.fragmentMSL == nullptr || tdi.fragmentMSL->empty()))) {
+        outReject = Phase2PlanRejectReason::MissingShader;
+        return false;
+    }
+    if (tdi.vertexReflection == nullptr ||
+        (needsFragmentStage && tdi.fragmentReflection == nullptr)) {
+        outReject = Phase2PlanRejectReason::MissingReflection;
+        return false;
+    }
+    if (phase2PlanHasSideEffect(tdi)) {
+        outReject = Phase2PlanRejectReason::SideEffect;
+        return false;
+    }
+    outKey = phase2PlanKeyForDraw(tdi, vaoName, vaoGeneration, drawFboName);
+    return true;
+}
+
 struct Phase2PlanKeyProfile {
     bool enabled = phase2PlanProfileEnabled();
     std::uint64_t lookups = 0;
@@ -745,28 +789,14 @@ struct Phase2PlanKeyProfile {
         if (!enabled) {
             return;
         }
-        if (tdi.program == 0) {
-            recordReject(Phase2PlanRejectReason::MissingProgram);
+        std::uint64_t key = 0;
+        Phase2PlanRejectReason reject = Phase2PlanRejectReason::Count;
+        if (!phase2PlanCandidateKeyForDraw(
+                tdi, vaoName, vaoGeneration, drawFboName, key, reject)) {
+            recordReject(reject);
             return;
         }
-        const bool needsFragmentStage = !tdi.rasterizerDiscard;
-        if (tdi.vertexMSL == nullptr || tdi.vertexMSL->empty() ||
-            (needsFragmentStage &&
-             (tdi.fragmentMSL == nullptr || tdi.fragmentMSL->empty()))) {
-            recordReject(Phase2PlanRejectReason::MissingShader);
-            return;
-        }
-        if (tdi.vertexReflection == nullptr ||
-            (needsFragmentStage && tdi.fragmentReflection == nullptr)) {
-            recordReject(Phase2PlanRejectReason::MissingReflection);
-            return;
-        }
-        if (phase2PlanHasSideEffect(tdi)) {
-            recordReject(Phase2PlanRejectReason::SideEffect);
-            return;
-        }
-        recordCandidate(
-            phase2PlanKeyForDraw(tdi, vaoName, vaoGeneration, drawFboName));
+        recordCandidate(key);
     }
 
     void dump() const {
@@ -4685,6 +4715,7 @@ struct GLContext::Impl {
         object.metalPipelineState = nullptr;
         releaseMap(object.metalPipelineStateCache);
         object.metalPipelineColorFormat = 0;
+        translatedDrawPlanCache.clear();
         releaseRetainedMetalObject(object.gsPassThroughPipelineState);
         object.gsPassThroughPipelineState = nullptr;
         releaseMap(object.gsPassThroughPipelineStateCache);
@@ -18365,6 +18396,8 @@ struct GLContext::Impl {
     std::unique_ptr<GLStateTracker> state;
     GLDrawPathProfile drawPathProfile;
     Phase2PlanKeyProfile phase2PlanKeyProfile;
+    std::unordered_map<std::uint64_t, TranslatedDrawPlan> translatedDrawPlanCache;
+    std::uint64_t translatedDrawPlanGeneration = 0;
     std::unordered_map<NSUInteger, void*> incompleteSampledColorTextures;
 
     // Phase 8X Group 4d follow-up⁸ — one-shot-per-key dedup sets for the
@@ -47940,6 +47973,8 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     tdi.metalVertexFunctionOut = &program.gsPassThroughVertexFunction;
     tdi.metalFragmentFunctionOut = &program.gsPassThroughFragmentFunction;
     tdi.program = programName;
+    tdi.pipelineEmulationFragmentProgram =
+        program.pipelineEmulationFragmentProgram;
 
     if (!program.uniformLayoutComputed) {
         computeStageUniformLayout(program.vertexUniformLayout,
@@ -48079,6 +48114,8 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
     tdi.metalVertexFunctionOut = &program.metalVertexFunction;
     tdi.metalFragmentFunctionOut = &program.metalFragmentFunction;
     tdi.program = programName;
+    tdi.pipelineEmulationFragmentProgram =
+        program.pipelineEmulationFragmentProgram;
 
     applyCachedVertexArrayLayout(
         vaoLayout, *objects, tdi, 0,
@@ -48241,13 +48278,107 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                                submissionGroupStart,
                                glDrawProfileNow());
     }
+    const GLuint planVaoName = state->boundVertexArray();
+    const std::uint32_t planVaoGeneration =
+        currentVao != nullptr ? currentVao->attribGeneration : 0u;
     phase2PlanKeyProfile.record(
         tdi,
-        state->boundVertexArray(),
-        currentVao != nullptr ? currentVao->attribGeneration : 0u,
+        planVaoName,
+        planVaoGeneration,
         drawFboName);
+    TranslatedDrawPlan stagedTranslatedPlan;
+    std::string translatedPlanRejectReason;
+    std::uint64_t translatedPlanKey = 0;
+    Phase2PlanRejectReason translatedPlanCandidateReject =
+        Phase2PlanRejectReason::Count;
+    const bool translatedPlanCacheEnabled =
+        phase2TranslatedDrawPlanCacheEnabled();
+    const bool translatedPlanForceMiss =
+        phase2TranslatedDrawPlanForceMiss();
+    const bool translatedPlanTrace =
+        phase2TranslatedDrawPlanTraceEnabled();
+    const TranslatedDrawPlan* translatedPlanIn = nullptr;
+    TranslatedDrawPlan* translatedPlanOut = nullptr;
+    bool translatedPlanCandidate = false;
+    const char* translatedPlanDecision =
+        translatedPlanCacheEnabled ? "reject" : "disabled";
+    const char* translatedPlanReason =
+        translatedPlanCacheEnabled ? "not_candidate" : "disabled";
+    std::uint64_t translatedPlanTraceGeneration = 0;
+    if (translatedPlanCacheEnabled) {
+        translatedPlanCandidate = phase2PlanCandidateKeyForDraw(
+            tdi,
+            planVaoName,
+            planVaoGeneration,
+            drawFboName,
+            translatedPlanKey,
+            translatedPlanCandidateReject);
+        if (!translatedPlanCandidate) {
+            translatedPlanReason =
+                phase2PlanRejectReasonName(translatedPlanCandidateReject);
+        } else if (translatedPlanForceMiss) {
+            translatedPlanDecision = "miss";
+            translatedPlanReason = "force_miss";
+            translatedPlanOut = &stagedTranslatedPlan;
+        } else {
+            auto planIt = translatedDrawPlanCache.find(translatedPlanKey);
+            if (planIt != translatedDrawPlanCache.end()) {
+                translatedPlanDecision = "hit";
+                translatedPlanReason = "cache";
+                translatedPlanIn = &planIt->second;
+                translatedPlanTraceGeneration = planIt->second.generation;
+            } else if (translatedDrawPlanCache.size() >=
+                       Phase2PlanKeyProfile::kMaxTrackedKeys) {
+                translatedPlanDecision = "reject";
+                translatedPlanReason =
+                    phase2PlanRejectReasonName(
+                        Phase2PlanRejectReason::KeyCapacity);
+            } else {
+                translatedPlanDecision = "miss";
+                translatedPlanReason = "cold";
+                translatedPlanOut = &stagedTranslatedPlan;
+            }
+        }
+    }
+    tdi.translatedPlan = translatedPlanIn;
+    tdi.translatedPlanOut = translatedPlanOut;
+    tdi.translatedPlanRejectReasonOut = &translatedPlanRejectReason;
     const auto framegraphEncodeStart = drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
     const bool ok = frameGraph->encodeTranslatedDraw(tdi);
+    tdi.translatedPlan = nullptr;
+    tdi.translatedPlanOut = nullptr;
+    tdi.translatedPlanRejectReasonOut = nullptr;
+    if (translatedPlanCacheEnabled && translatedPlanCandidate) {
+        if (!translatedPlanRejectReason.empty()) {
+            translatedPlanDecision = "reject";
+            translatedPlanReason = translatedPlanRejectReason.c_str();
+            if (translatedPlanIn != nullptr) {
+                translatedDrawPlanCache.erase(translatedPlanKey);
+                translatedPlanTraceGeneration = 0;
+            }
+        } else if (ok && translatedPlanOut != nullptr &&
+                   stagedTranslatedPlan.valid &&
+                   !translatedPlanForceMiss) {
+            stagedTranslatedPlan.generation = ++translatedDrawPlanGeneration;
+            translatedPlanTraceGeneration = stagedTranslatedPlan.generation;
+            translatedDrawPlanCache[translatedPlanKey] = stagedTranslatedPlan;
+        }
+    }
+    if (translatedPlanTrace) {
+        std::fprintf(stderr,
+            "[APPGL_PHASE2_PLAN] key=0x%016llx vao=%u vao_gen=%u "
+            "draw_fbo=%u decision=%s reason=%s plan_gen=%llu "
+            "cache_entries=%zu\n",
+            static_cast<unsigned long long>(translatedPlanKey),
+            static_cast<unsigned>(planVaoName),
+            static_cast<unsigned>(planVaoGeneration),
+            static_cast<unsigned>(drawFboName),
+            translatedPlanDecision,
+            translatedPlanReason,
+            static_cast<unsigned long long>(translatedPlanTraceGeneration),
+            translatedDrawPlanCache.size());
+        std::fflush(stderr);
+    }
     if (drawPathProfile.enabled) {
         drawPathProfile.record(GLDrawProfileBucket::FramegraphEncode,
                                framegraphEncodeStart,
@@ -49885,6 +50016,8 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             tdi.metalVertexFunctionOut = &program->metalVertexFunction;
             tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
             tdi.program = programName;
+            tdi.pipelineEmulationFragmentProgram =
+                program->pipelineEmulationFragmentProgram;
 
             logStateResolveCostClass(
                 "drawArrays-attributeless", programName, vaoName,
@@ -49965,6 +50098,8 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 tdi.metalVertexFunctionOut = &program->metalVertexFunction;
                 tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
                 tdi.program = programName;
+                tdi.pipelineEmulationFragmentProgram =
+                    program->pipelineEmulationFragmentProgram;
                 appendCurrentGenericVertexAttributes(tdi, vao);
 
                 logStateResolveCostClass(
@@ -50078,6 +50213,8 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     // first-draw-per-program NSLog. Non-owning, no
                     // correctness impact; zero is a valid placeholder.
                     tdi.program = programName;
+                    tdi.pipelineEmulationFragmentProgram =
+                        program->pipelineEmulationFragmentProgram;
                     drawProfile.mark(GLDrawProfileBucket::ShaderState);
 
                     applyCachedVertexArrayLayout(
@@ -50624,6 +50761,8 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             tdi.metalVertexFunctionOut = &program->metalVertexFunction;
             tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
             tdi.program = programName;
+            tdi.pipelineEmulationFragmentProgram =
+                program->pipelineEmulationFragmentProgram;
             logStateResolveCostClass(
                 "drawArraysInstanced-attributeless", programName, vaoName,
                 tdi, vao->attributes.size());
@@ -50760,6 +50899,8 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     // first-draw-per-program NSLog. Non-owning, no
                     // correctness impact; zero is a valid placeholder.
                     tdi.program = programName;
+                    tdi.pipelineEmulationFragmentProgram =
+                        program->pipelineEmulationFragmentProgram;
 
                     applyCachedVertexArrayLayout(
                         vaoLayout, *impl_->objects, tdi, first,
@@ -51449,6 +51590,8 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         tdi.metalVertexFunctionOut = &program->metalVertexFunction;
         tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
         tdi.program = programName;
+        tdi.pipelineEmulationFragmentProgram =
+            program->pipelineEmulationFragmentProgram;
 
         logStateResolveCostClass(
             "drawElements-attributeless", programName, vaoName,
@@ -51592,6 +51735,8 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     // first-draw-per-program NSLog. Non-owning, no
                     // correctness impact; zero is a valid placeholder.
                     tdi.program = programName;
+                    tdi.pipelineEmulationFragmentProgram =
+                        program->pipelineEmulationFragmentProgram;
                     drawProfile.mark(GLDrawProfileBucket::ShaderState);
 
                     applyCachedVertexArrayLayout(
@@ -51928,6 +52073,8 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     tdi.metalVertexFunctionOut = &program->metalVertexFunction;
                     tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
                     tdi.program = programName;
+                    tdi.pipelineEmulationFragmentProgram =
+                        program->pipelineEmulationFragmentProgram;
 
                     applyCachedVertexArrayLayout(
                         vaoLayout, *impl_->objects, tdi, 0,
@@ -52502,6 +52649,8 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     tdi.metalVertexFunctionOut = &program->metalVertexFunction;
                     tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
                     tdi.program = programName;
+                    tdi.pipelineEmulationFragmentProgram =
+                        program->pipelineEmulationFragmentProgram;
 
                     applyCachedVertexArrayLayout(
                         vaoLayout, *impl_->objects, tdi, 0,

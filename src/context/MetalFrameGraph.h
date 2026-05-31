@@ -86,6 +86,52 @@ struct MetalDrawInfo {
     std::string debugLabel;
 };
 
+struct TranslatedDrawPlanShaderSlots {
+    bool vertexMslUsesArgBuf = false;
+    bool fragmentMslUsesArgBuf = false;
+    bool vertexHasSSBOSizeBuffer = false;
+    bool fragmentHasSSBOSizeBuffer = false;
+    bool fragmentNeedsFragCoordParams = false;
+    bool fragmentNeedsGlNumSamplesArgBuf = false;
+    bool vertexNeedsFragmentShadingRateState = false;
+    bool vertexUsesMultiviewViewMask = false;
+    bool fragmentUsesMultiviewViewMask = false;
+    std::int32_t vertexClipControlYSignSlot = -1;
+    std::int32_t vertexReductionModesSlot = -1;
+    std::int32_t vertexLodBiasesSlot = -1;
+    std::int32_t vertexBorderClampModesSlot = -1;
+    std::int32_t vertexBorderClampColorsSlot = -1;
+    std::int32_t vertexImplicitLodBiasCorrectionSlot = -1;
+    std::int32_t fragmentReductionModesSlot = -1;
+    std::int32_t fragmentLodBiasesSlot = -1;
+    std::int32_t fragmentBorderClampModesSlot = -1;
+    std::int32_t fragmentBorderClampColorsSlot = -1;
+    std::int32_t fragmentImplicitLodBiasCorrectionSlot = -1;
+};
+
+struct TranslatedDrawPlan {
+    bool valid = false;
+    std::uint64_t generation = 0;
+    std::uint64_t pipelineCacheKey = 0;
+    std::uint32_t colorFormat = 0;
+    std::uint32_t attachmentSampleCount = 1;
+    bool forcePerSampleFS = false;
+    bool hasFragmentStage = false;
+    bool vertexUsesArgumentBuffer = false;
+    bool fragmentUsesArgumentBuffer = false;
+    bool useArgumentBuffers = false;
+    bool vertexNeedsSSBOSizeBuffer = false;
+    bool fragmentNeedsSSBOSizeBuffer = false;
+    bool fragmentNeedsFragCoordParams = false;
+    bool fragmentNeedsGlNumSamplesArgBuf = false;
+    bool vertexNeedsFragmentShadingRateState = false;
+    bool clipControlShaderYFixup = false;
+    bool clipControlInvertsWinding = false;
+    bool vertexUsesMultiviewViewMask = false;
+    bool fragmentUsesMultiviewViewMask = false;
+    TranslatedDrawPlanShaderSlots shaderSlots;
+};
+
 // Describes a draw call using a translated (GLSL→MSL) shader pipeline.
 struct TranslatedDrawInfo {
     AppGLSubmissionGroup submissionGroup;
@@ -240,6 +286,11 @@ struct TranslatedDrawInfo {
     // Not used for any correctness decision — leaving it at 0 is safe
     // (the log will read "program=0" for that draw). Non-owning.
     GLuint program = 0;
+    // Non-zero when a separable program pipeline spliced a fragment stage
+    // onto this program container. The Phase-2 structural key uses this to
+    // distinguish same-container/different-fragment-program recipes without
+    // hashing shader source text on every draw.
+    GLuint pipelineEmulationFragmentProgram = 0;
 
     // Pipeline state toggles.
     bool depthTestEnabled = false;
@@ -507,6 +558,15 @@ struct TranslatedDrawInfo {
     // slot also updated so the first-draw-per-program diagnostic
     // bookkeeping keeps working.
     std::unordered_map<std::uint64_t, void*>* pipelineStateCacheOut = nullptr;
+
+    // Phase 2 / Lever A Slice 2: optional structural state-resolve recipe.
+    // On a plan hit, encodeTranslatedDraw uses this payload to skip
+    // re-deriving the pipeline cache key and translated-MSL helper slots.
+    // Dynamic resource pointers, uniform bytes, hazard tracking, and command
+    // emission still come from this draw's live TranslatedDrawInfo.
+    const TranslatedDrawPlan* translatedPlan = nullptr;
+    TranslatedDrawPlan* translatedPlanOut = nullptr;
+    std::string* translatedPlanRejectReasonOut = nullptr;
 
     // Step 7-4: MTLFunction cache slots. Under APPGL_ENABLE_ARGUMENT_BUFFERS
     // the argbuf-encoder path needs the MTLFunction for

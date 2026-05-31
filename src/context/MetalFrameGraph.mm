@@ -502,6 +502,100 @@ struct TranslatedDrawMSLSlots {
     NSInteger fragmentImplicitLodBiasCorrectionSlot = -1;
 };
 
+static std::int32_t phase2PlanSlotFromNSInteger(NSInteger slot) {
+    return slot >= 0 ? static_cast<std::int32_t>(slot) : -1;
+}
+
+static NSInteger phase2PlanSlotToNSInteger(std::int32_t slot) {
+    return slot >= 0 ? static_cast<NSInteger>(slot) : -1;
+}
+
+static TranslatedDrawPlanShaderSlots phase2PlanShaderSlotsFromMSLSlots(
+    const TranslatedDrawMSLSlots& slots)
+{
+    TranslatedDrawPlanShaderSlots planSlots;
+    planSlots.vertexMslUsesArgBuf = slots.vertexMslUsesArgBuf;
+    planSlots.fragmentMslUsesArgBuf = slots.fragmentMslUsesArgBuf;
+    planSlots.vertexHasSSBOSizeBuffer = slots.vertexHasSSBOSizeBuffer;
+    planSlots.fragmentHasSSBOSizeBuffer = slots.fragmentHasSSBOSizeBuffer;
+    planSlots.fragmentNeedsFragCoordParams = slots.fragmentNeedsFragCoordParams;
+    planSlots.fragmentNeedsGlNumSamplesArgBuf =
+        slots.fragmentNeedsGlNumSamplesArgBuf;
+    planSlots.vertexNeedsFragmentShadingRateState =
+        slots.vertexNeedsFragmentShadingRateState;
+    planSlots.vertexUsesMultiviewViewMask = slots.vertexUsesMultiviewViewMask;
+    planSlots.fragmentUsesMultiviewViewMask =
+        slots.fragmentUsesMultiviewViewMask;
+    planSlots.vertexClipControlYSignSlot =
+        phase2PlanSlotFromNSInteger(slots.vertexClipControlYSignSlot);
+    planSlots.vertexReductionModesSlot =
+        phase2PlanSlotFromNSInteger(slots.vertexReductionModesSlot);
+    planSlots.vertexLodBiasesSlot =
+        phase2PlanSlotFromNSInteger(slots.vertexLodBiasesSlot);
+    planSlots.vertexBorderClampModesSlot =
+        phase2PlanSlotFromNSInteger(slots.vertexBorderClampModesSlot);
+    planSlots.vertexBorderClampColorsSlot =
+        phase2PlanSlotFromNSInteger(slots.vertexBorderClampColorsSlot);
+    planSlots.vertexImplicitLodBiasCorrectionSlot =
+        phase2PlanSlotFromNSInteger(slots.vertexImplicitLodBiasCorrectionSlot);
+    planSlots.fragmentReductionModesSlot =
+        phase2PlanSlotFromNSInteger(slots.fragmentReductionModesSlot);
+    planSlots.fragmentLodBiasesSlot =
+        phase2PlanSlotFromNSInteger(slots.fragmentLodBiasesSlot);
+    planSlots.fragmentBorderClampModesSlot =
+        phase2PlanSlotFromNSInteger(slots.fragmentBorderClampModesSlot);
+    planSlots.fragmentBorderClampColorsSlot =
+        phase2PlanSlotFromNSInteger(slots.fragmentBorderClampColorsSlot);
+    planSlots.fragmentImplicitLodBiasCorrectionSlot =
+        phase2PlanSlotFromNSInteger(slots.fragmentImplicitLodBiasCorrectionSlot);
+    return planSlots;
+}
+
+static TranslatedDrawMSLSlots phase2PlanMSLSlotsFromShaderSlots(
+    const TranslatedDrawPlanShaderSlots& planSlots)
+{
+    TranslatedDrawMSLSlots slots;
+    slots.vertexMslUsesArgBuf = planSlots.vertexMslUsesArgBuf;
+    slots.fragmentMslUsesArgBuf = planSlots.fragmentMslUsesArgBuf;
+    slots.vertexHasSSBOSizeBuffer = planSlots.vertexHasSSBOSizeBuffer;
+    slots.fragmentHasSSBOSizeBuffer = planSlots.fragmentHasSSBOSizeBuffer;
+    slots.fragmentNeedsFragCoordParams =
+        planSlots.fragmentNeedsFragCoordParams;
+    slots.fragmentNeedsGlNumSamplesArgBuf =
+        planSlots.fragmentNeedsGlNumSamplesArgBuf;
+    slots.vertexNeedsFragmentShadingRateState =
+        planSlots.vertexNeedsFragmentShadingRateState;
+    slots.vertexUsesMultiviewViewMask =
+        planSlots.vertexUsesMultiviewViewMask;
+    slots.fragmentUsesMultiviewViewMask =
+        planSlots.fragmentUsesMultiviewViewMask;
+    slots.vertexClipControlYSignSlot =
+        phase2PlanSlotToNSInteger(planSlots.vertexClipControlYSignSlot);
+    slots.vertexReductionModesSlot =
+        phase2PlanSlotToNSInteger(planSlots.vertexReductionModesSlot);
+    slots.vertexLodBiasesSlot =
+        phase2PlanSlotToNSInteger(planSlots.vertexLodBiasesSlot);
+    slots.vertexBorderClampModesSlot =
+        phase2PlanSlotToNSInteger(planSlots.vertexBorderClampModesSlot);
+    slots.vertexBorderClampColorsSlot =
+        phase2PlanSlotToNSInteger(planSlots.vertexBorderClampColorsSlot);
+    slots.vertexImplicitLodBiasCorrectionSlot =
+        phase2PlanSlotToNSInteger(
+            planSlots.vertexImplicitLodBiasCorrectionSlot);
+    slots.fragmentReductionModesSlot =
+        phase2PlanSlotToNSInteger(planSlots.fragmentReductionModesSlot);
+    slots.fragmentLodBiasesSlot =
+        phase2PlanSlotToNSInteger(planSlots.fragmentLodBiasesSlot);
+    slots.fragmentBorderClampModesSlot =
+        phase2PlanSlotToNSInteger(planSlots.fragmentBorderClampModesSlot);
+    slots.fragmentBorderClampColorsSlot =
+        phase2PlanSlotToNSInteger(planSlots.fragmentBorderClampColorsSlot);
+    slots.fragmentImplicitLodBiasCorrectionSlot =
+        phase2PlanSlotToNSInteger(
+            planSlots.fragmentImplicitLodBiasCorrectionSlot);
+    return slots;
+}
+
 static bool mslContains(const std::string* msl, const char* needle) {
     return msl != nullptr && msl->find(needle) != std::string::npos;
 }
@@ -2501,11 +2595,6 @@ struct MetalFrameGraph::Impl {
         const bool forcePerSampleFS =
             info.sampleShadingEnabled && info.minSampleShading > 0.0f &&
             attachmentSampleCount > 1;
-        const std::uint64_t pipelineCacheKey =
-            computePipelineCacheKey(info, colorFormat, attachmentSampleCount,
-                                     forcePerSampleFS);
-        const TranslatedDrawMSLSlots& shaderSlots =
-            translatedDrawMSLSlots(info, pipelineCacheKey, hasFragmentStage);
 
         // Step 7-3: argument-buffer mode. When APPGL_ENABLE_ARGUMENT_BUFFERS
         // is set, the fragment/vertex shader was compiled to read resources
@@ -2523,11 +2612,156 @@ struct MetalFrameGraph::Impl {
         // pipeline-cache-miss forcing we used to keep MTLFunctions in scope.
         const bool forceArgBufEnv =
             (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
-        const bool vertexUsesArgBuf =
-            forceArgBufEnv || shaderSlots.vertexMslUsesArgBuf;
-        const bool fragmentUsesArgBuf =
-            forceArgBufEnv || shaderSlots.fragmentMslUsesArgBuf;
-        const bool useArgBuf = vertexUsesArgBuf || fragmentUsesArgBuf;
+        if (info.translatedPlanRejectReasonOut != nullptr) {
+            info.translatedPlanRejectReasonOut->clear();
+        }
+        auto rejectTranslatedPlan = [&info](const char* reason) {
+            if (info.translatedPlanRejectReasonOut != nullptr) {
+                info.translatedPlanRejectReasonOut->assign(reason);
+            }
+        };
+
+        std::uint64_t pipelineCacheKey = 0;
+        TranslatedDrawMSLSlots shaderSlots;
+        bool vertexUsesArgBuf = false;
+        bool fragmentUsesArgBuf = false;
+        bool useArgBuf = false;
+        bool vertexNeedsSSBOSizeBuffer = false;
+        bool fragmentNeedsSSBOSizeBuffer = false;
+        bool fragmentNeedsFragCoordParams = false;
+        bool fragmentNeedsGlNumSamplesArgBuf = false;
+        bool vertexNeedsFragmentShadingRateState = false;
+        NSInteger vertexClipControlYSignSlot = -1;
+        bool clipControlShaderYFixup = false;
+        bool clipControlInvertsWinding = false;
+        bool vertexUsesMultiviewViewMask = false;
+        bool fragmentUsesMultiviewViewMask = false;
+        bool usedTranslatedPlan = false;
+
+        const TranslatedDrawPlan* translatedPlan = info.translatedPlan;
+        if (translatedPlan != nullptr) {
+            if (!translatedPlan->valid) {
+                rejectTranslatedPlan("invalid");
+            } else if (forceArgBufEnv) {
+                rejectTranslatedPlan("argbuf_env");
+            } else if (translatedPlan->colorFormat !=
+                       static_cast<std::uint32_t>(colorFormat)) {
+                rejectTranslatedPlan("color_format");
+            } else if (translatedPlan->attachmentSampleCount !=
+                       static_cast<std::uint32_t>(attachmentSampleCount)) {
+                rejectTranslatedPlan("sample_count");
+            } else if (translatedPlan->forcePerSampleFS != forcePerSampleFS) {
+                rejectTranslatedPlan("per_sample_fs");
+            } else if (translatedPlan->hasFragmentStage != hasFragmentStage) {
+                rejectTranslatedPlan("fragment_stage");
+            } else if (translatedPlan->useArgumentBuffers) {
+                rejectTranslatedPlan("argbuf_plan");
+            } else {
+                usedTranslatedPlan = true;
+                pipelineCacheKey = translatedPlan->pipelineCacheKey;
+                shaderSlots =
+                    phase2PlanMSLSlotsFromShaderSlots(translatedPlan->shaderSlots);
+                vertexUsesArgBuf = translatedPlan->vertexUsesArgumentBuffer;
+                fragmentUsesArgBuf = translatedPlan->fragmentUsesArgumentBuffer;
+                useArgBuf = translatedPlan->useArgumentBuffers;
+                vertexNeedsSSBOSizeBuffer =
+                    translatedPlan->vertexNeedsSSBOSizeBuffer;
+                fragmentNeedsSSBOSizeBuffer =
+                    translatedPlan->fragmentNeedsSSBOSizeBuffer;
+                fragmentNeedsFragCoordParams =
+                    translatedPlan->fragmentNeedsFragCoordParams;
+                fragmentNeedsGlNumSamplesArgBuf =
+                    translatedPlan->fragmentNeedsGlNumSamplesArgBuf;
+                vertexNeedsFragmentShadingRateState =
+                    translatedPlan->vertexNeedsFragmentShadingRateState;
+                vertexClipControlYSignSlot =
+                    shaderSlots.vertexClipControlYSignSlot;
+                clipControlShaderYFixup =
+                    translatedPlan->clipControlShaderYFixup;
+                clipControlInvertsWinding =
+                    translatedPlan->clipControlInvertsWinding;
+                vertexUsesMultiviewViewMask =
+                    translatedPlan->vertexUsesMultiviewViewMask;
+                fragmentUsesMultiviewViewMask =
+                    translatedPlan->fragmentUsesMultiviewViewMask;
+            }
+        }
+        if (!usedTranslatedPlan) {
+            pipelineCacheKey =
+                computePipelineCacheKey(info, colorFormat, attachmentSampleCount,
+                                         forcePerSampleFS);
+            shaderSlots =
+                translatedDrawMSLSlots(info, pipelineCacheKey, hasFragmentStage);
+            vertexUsesArgBuf =
+                forceArgBufEnv || shaderSlots.vertexMslUsesArgBuf;
+            fragmentUsesArgBuf =
+                forceArgBufEnv || shaderSlots.fragmentMslUsesArgBuf;
+            useArgBuf = vertexUsesArgBuf || fragmentUsesArgBuf;
+            vertexNeedsSSBOSizeBuffer =
+                vertexUsesArgBuf && shaderSlots.vertexHasSSBOSizeBuffer;
+            fragmentNeedsSSBOSizeBuffer =
+                fragmentUsesArgBuf && shaderSlots.fragmentHasSSBOSizeBuffer;
+            fragmentNeedsFragCoordParams =
+                shaderSlots.fragmentNeedsFragCoordParams;
+            fragmentNeedsGlNumSamplesArgBuf =
+                fragmentUsesArgBuf && shaderSlots.fragmentNeedsGlNumSamplesArgBuf;
+            vertexNeedsFragmentShadingRateState =
+                shaderSlots.vertexNeedsFragmentShadingRateState;
+            vertexClipControlYSignSlot =
+                shaderSlots.vertexClipControlYSignSlot;
+            clipControlShaderYFixup =
+                vertexClipControlYSignSlot >= 0 &&
+                info.clipControlYSignFixupEnabled &&
+                !info.stencilTestEnabled;
+            clipControlInvertsWinding =
+                clipControlShaderYFixup && info.clipOrigin != GL_UPPER_LEFT;
+            vertexUsesMultiviewViewMask =
+                shaderSlots.vertexUsesMultiviewViewMask;
+            fragmentUsesMultiviewViewMask =
+                shaderSlots.fragmentUsesMultiviewViewMask;
+        }
+        if (info.translatedPlanOut != nullptr) {
+            *info.translatedPlanOut = TranslatedDrawPlan{};
+            if (!useArgBuf && !forceArgBufEnv) {
+                info.translatedPlanOut->valid = true;
+                info.translatedPlanOut->pipelineCacheKey = pipelineCacheKey;
+                info.translatedPlanOut->colorFormat =
+                    static_cast<std::uint32_t>(colorFormat);
+                info.translatedPlanOut->attachmentSampleCount =
+                    static_cast<std::uint32_t>(attachmentSampleCount);
+                info.translatedPlanOut->forcePerSampleFS = forcePerSampleFS;
+                info.translatedPlanOut->hasFragmentStage = hasFragmentStage;
+                info.translatedPlanOut->vertexUsesArgumentBuffer =
+                    vertexUsesArgBuf;
+                info.translatedPlanOut->fragmentUsesArgumentBuffer =
+                    fragmentUsesArgBuf;
+                info.translatedPlanOut->useArgumentBuffers = useArgBuf;
+                info.translatedPlanOut->vertexNeedsSSBOSizeBuffer =
+                    vertexNeedsSSBOSizeBuffer;
+                info.translatedPlanOut->fragmentNeedsSSBOSizeBuffer =
+                    fragmentNeedsSSBOSizeBuffer;
+                info.translatedPlanOut->fragmentNeedsFragCoordParams =
+                    fragmentNeedsFragCoordParams;
+                info.translatedPlanOut->fragmentNeedsGlNumSamplesArgBuf =
+                    fragmentNeedsGlNumSamplesArgBuf;
+                info.translatedPlanOut->vertexNeedsFragmentShadingRateState =
+                    vertexNeedsFragmentShadingRateState;
+                info.translatedPlanOut->clipControlShaderYFixup =
+                    clipControlShaderYFixup;
+                info.translatedPlanOut->clipControlInvertsWinding =
+                    clipControlInvertsWinding;
+                info.translatedPlanOut->vertexUsesMultiviewViewMask =
+                    vertexUsesMultiviewViewMask;
+                info.translatedPlanOut->fragmentUsesMultiviewViewMask =
+                    fragmentUsesMultiviewViewMask;
+                info.translatedPlanOut->shaderSlots =
+                    phase2PlanShaderSlotsFromMSLSlots(shaderSlots);
+            } else if (info.translatedPlanRejectReasonOut != nullptr &&
+                       info.translatedPlanRejectReasonOut->empty()) {
+                info.translatedPlanRejectReasonOut->assign(
+                    forceArgBufEnv ? "argbuf_env" : "argbuf_plan");
+            }
+        }
         if (!info.submissionGroup.declared) {
             info.submissionGroup.reset(AppGLSubmissionGroupKind::TranslatedDraw,
                                        AppGLCommandReason::TranslatedDraw);
@@ -2535,28 +2769,6 @@ struct MetalFrameGraph::Impl {
                                              AppGLCommandReason::TranslatedDraw);
         }
         info.submissionGroup.argumentBuffersEnabled = useArgBuf;
-        const bool vertexNeedsSSBOSizeBuffer =
-            vertexUsesArgBuf && shaderSlots.vertexHasSSBOSizeBuffer;
-        const bool fragmentNeedsSSBOSizeBuffer =
-            fragmentUsesArgBuf && shaderSlots.fragmentHasSSBOSizeBuffer;
-        const bool fragmentNeedsFragCoordParams =
-            shaderSlots.fragmentNeedsFragCoordParams;
-        const bool fragmentNeedsGlNumSamplesArgBuf =
-            fragmentUsesArgBuf && shaderSlots.fragmentNeedsGlNumSamplesArgBuf;
-        const bool vertexNeedsFragmentShadingRateState =
-            shaderSlots.vertexNeedsFragmentShadingRateState;
-        const NSInteger vertexClipControlYSignSlot =
-            shaderSlots.vertexClipControlYSignSlot;
-        const bool clipControlShaderYFixup =
-            vertexClipControlYSignSlot >= 0 &&
-            info.clipControlYSignFixupEnabled &&
-            !info.stencilTestEnabled;
-        const bool clipControlInvertsWinding =
-            clipControlShaderYFixup && info.clipOrigin != GL_UPPER_LEFT;
-        const bool vertexUsesMultiviewViewMask =
-            shaderSlots.vertexUsesMultiviewViewMask;
-        const bool fragmentUsesMultiviewViewMask =
-            shaderSlots.fragmentUsesMultiviewViewMask;
         constexpr std::uint32_t kOVRMultiviewViewCount = 2;
         const std::uint32_t ovrViewMask[2] = {0u, kOVRMultiviewViewCount};
         const GLsizei effectiveInstanceCount =
