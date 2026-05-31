@@ -50210,6 +50210,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
 }
 
 bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void* indices, GLuint drawID) {
+    GLDrawProfileScope drawProfile(impl_->drawPathProfile);
     if (!isValidDrawMode(mode)) {
         pushError(GL_INVALID_ENUM);
         return false;
@@ -50236,6 +50237,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     if (!impl_->validateCurrentProgramPipelineForDraw()) {
         return false;
     }
+    drawProfile.mark(GLDrawProfileBucket::Validation);
     // GL 4.6 §22.1 / §22.3 — pipeline-stats counter update for non-GS
     // indexed draws. GS path is handled by writeGsXfbAndCheckDiscard.
     // Sprint 8 #9-A (CKPT67): VS-only TF capture path (CKPT59 helper)
@@ -50270,6 +50272,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     // rationale.
     impl_->frameGraph->resizeDrawable(impl_->drawableSurfaceWidth(), impl_->drawableSurfaceHeight());
     impl_->encodePendingWork();
+    drawProfile.mark(GLDrawProfileBucket::DrawablePrep);
 
     // Resolve element buffer early — needed by both translated and solid paths.
     const GLuint vaoName = impl_->state->boundVertexArray();
@@ -50389,6 +50392,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     if (impl_->state->boundDrawFramebuffer() == 0) {
         impl_->invalidateDefaultFramebufferShadow();
     }
+    drawProfile.mark(GLDrawProfileBucket::ProgramResolve);
 
     std::vector<std::uint32_t> primitiveRestartIndices;
     GLenum drawElementsMode = mode;
@@ -50876,8 +50880,10 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         }
         // Fall through to solid-color path on failure.
     }
+    drawProfile.mark(GLDrawProfileBucket::SpecialPathChecks);
     if (program != nullptr && program->hasTranslatedPipeline) {
         // Phase 8X Group 4d follow-up³ — name each fall-through gate to BAR's log.
+        drawProfile.mark(GLDrawProfileBucket::TranslatedPreflight);
         if (vao->attributes.empty()) {
             reportTranslatedFallbackOnce(program, programName,
                 TranslatedFallbackGate::EmptyAttributes, "drawElements",
@@ -50887,6 +50893,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             bool vaoLayoutCacheHit = false;
             const auto& vaoLayout =
                 cachedVertexArrayLayout(*vao, false, &vaoLayoutCacheHit);
+            drawProfile.mark(GLDrawProfileBucket::VaoLayout);
             GLBufferObject* vbo = (vaoLayout.primaryBufferName != 0)
                 ? impl_->objects->buffers().get(vaoLayout.primaryBufferName)
                 : nullptr;
@@ -50899,6 +50906,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     TranslatedFallbackGate::ShadowBytesEmpty, "drawElements",
                     vaoName, vao->attributes.size(), vaoLayout.primaryBufferName, 0);
             }
+            drawProfile.mark(GLDrawProfileBucket::VboResolve);
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
                 const std::size_t posStride = vaoLayout.primaryStride;
                 const std::size_t startOff = vaoLayout.primaryBaseOffset;
@@ -50924,6 +50932,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     tdi.indexCount = drawElementsCount;
                     tdi.indexType = drawElementsIndexType;
                     tdi.glIndexBuffer = elementBufferName;
+                    drawProfile.mark(GLDrawProfileBucket::InfoInit);
                     // OPT-5: pass Metal index buffer when indices weren't
                     // expanded (UINT16/UINT32 pass-through from element VBO).
                     // ADV-10: use the type check instead of the old local vector.
@@ -50938,6 +50947,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     // function state snapshot. See drawArrays.
                     populateTranslatedDrawFixedFunctionState(
                         tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program), this);
+                    drawProfile.mark(GLDrawProfileBucket::FixedFunctionState);
                     tdi.vertexMSL = &program->vertexMSL;
                     tdi.fragmentMSL = &program->fragmentMSL;
                     tdi.vertexReflection = &program->vertexReflection;
@@ -50957,22 +50967,30 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     // first-draw-per-program NSLog. Non-owning, no
                     // correctness impact; zero is a valid placeholder.
                     tdi.program = programName;
+                    drawProfile.mark(GLDrawProfileBucket::ShaderState);
 
                     applyCachedVertexArrayLayout(
                         vaoLayout, *impl_->objects, tdi, 0,
                         false, false);
+                    drawProfile.mark(GLDrawProfileBucket::VertexLayout);
 
                     logStateResolveCostClass(
                         "drawElements", programName, vaoName,
                         tdi, vao->attributes.size(), vaoLayoutCacheHit);
+                    drawProfile.mark(GLDrawProfileBucket::Diagnostics);
                     prepareTranslatedDrawUniformBuffers(
                         *program, programName, impl_->matrixState, drawID, tdi,
                         "drawElements");
+                    drawProfile.mark(GLDrawProfileBucket::UniformBuffers);
 
                     impl_->resolveSamplerBindings(*program, tdi);
+                    drawProfile.resetCursor();
                     impl_->resolveUBOBindings(*program, tdi);
+                    drawProfile.mark(GLDrawProfileBucket::UboBindings);
                     impl_->resolveSSBOBindings(*program, tdi);
+                    drawProfile.mark(GLDrawProfileBucket::SsboBindings);
                     impl_->resolveImageBindings(*program, tdi);
+                    drawProfile.mark(GLDrawProfileBucket::ImageBindings);
 
                     // RC-A02: resolve FBO render target.
                     {
@@ -50994,6 +51012,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                             tdi.fboHeight = fboH;
                         }
                     }
+                    drawProfile.mark(GLDrawProfileBucket::FboResolve);
 
                     // Phase 8X Group 4d follow-up⁴ — scratch buffer for the
                     // pipeline-build error text plumbed out of the encode-failed
@@ -51001,8 +51020,10 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     thread_local std::string pipelineBuildError;
                     pipelineBuildError.clear();
                     tdi.pipelineBuildErrorOut = &pipelineBuildError;
+                    drawProfile.mark(GLDrawProfileBucket::EncodePrep);
 
                     const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
+                    drawProfile.resetCursor();
                     if (ok) {
                         return true;
                     }
@@ -51034,6 +51055,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             GL_DEBUG_SEVERITY_LOW,
             "glDrawElements: draw skipped (no translated pipeline and solid-color path unsupported)"
         );
+        drawProfile.mark(GLDrawProfileBucket::SolidFallback);
         return false;
     }
 
@@ -51056,6 +51078,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             "glDrawElements: MetalFrameGraph failed to encode draw"
         );
     }
+    drawProfile.mark(GLDrawProfileBucket::SolidFallback);
     return ok;
 }
 

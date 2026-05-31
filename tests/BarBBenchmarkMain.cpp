@@ -58,6 +58,7 @@ struct GLApi {
     PFNGLDELETETEXTURESPROC DeleteTextures = nullptr;
     PFNGLDELETEVERTEXARRAYSPROC DeleteVertexArrays = nullptr;
     PFNGLDRAWARRAYSPROC DrawArrays = nullptr;
+    PFNGLDRAWELEMENTSPROC DrawElements = nullptr;
     PFNGLDRAWBUFFERPROC DrawBuffer = nullptr;
     PFNGLENABLEVERTEXATTRIBARRAYPROC EnableVertexAttribArray = nullptr;
     PFNGLFINISHPROC Finish = nullptr;
@@ -117,8 +118,10 @@ enum class ProfileBucket : std::size_t {
     ActiveTexture,
     BindTexture,
     DrawArrays,
+    DrawElements,
     TexImage2D,
     SwapBuffers,
+    Finish,
     Count,
 };
 
@@ -149,8 +152,10 @@ const char* profileBucketName(ProfileBucket bucket) {
     case ProfileBucket::ActiveTexture: return "active_texture";
     case ProfileBucket::BindTexture: return "bind_texture";
     case ProfileBucket::DrawArrays: return "draw_arrays";
+    case ProfileBucket::DrawElements: return "draw_elements";
     case ProfileBucket::TexImage2D: return "tex_image_2d";
     case ProfileBucket::SwapBuffers: return "swap_buffers";
+    case ProfileBucket::Finish: return "finish";
     case ProfileBucket::Count: break;
     }
     return "unknown";
@@ -174,7 +179,9 @@ void dumpCoreProfile(const char* runLabel,
     if (stats.frames == 0) {
         return;
     }
-    const auto& drawBucket = stats.buckets[static_cast<std::size_t>(ProfileBucket::DrawArrays)];
+    const auto& drawArraysBucket = stats.buckets[static_cast<std::size_t>(ProfileBucket::DrawArrays)];
+    const auto& drawElementsBucket = stats.buckets[static_cast<std::size_t>(ProfileBucket::DrawElements)];
+    const std::uint64_t drawCalls = drawArraysBucket.count + drawElementsBucket.count;
     const double accountedUs = profileAccountedUs(stats);
     const double denom = stats.wallUs > 0.0 ? stats.wallUs : 1.0;
     std::fprintf(stderr,
@@ -184,11 +191,11 @@ void dumpCoreProfile(const char* runLabel,
         runLabel,
         segment,
         stats.frames,
-        static_cast<unsigned long long>(drawBucket.count),
+        static_cast<unsigned long long>(drawCalls),
         stats.wallUs,
-        drawBucket.count > 0 ? stats.wallUs / static_cast<double>(drawBucket.count) : 0.0,
+        drawCalls > 0 ? stats.wallUs / static_cast<double>(drawCalls) : 0.0,
         accountedUs,
-        drawBucket.count > 0 ? accountedUs / static_cast<double>(drawBucket.count) : 0.0,
+        drawCalls > 0 ? accountedUs / static_cast<double>(drawCalls) : 0.0,
         std::max(0.0, stats.wallUs - accountedUs));
     for (std::size_t i = 0; i < static_cast<std::size_t>(ProfileBucket::Count); ++i) {
         const auto& bucket = stats.buckets[i];
@@ -264,8 +271,9 @@ Options parseOptions(int argc, char** argv) {
                 << "Usage: appgl_bar_b_benchmark [options]\n"
                 << "  --library PATH        libAppGL.dylib to dlopen (default: libAppGL.dylib)\n"
                 << "  --label NAME          label emitted in JSON (default: bar-b)\n"
-                << "  --mode producer|pingpong\n"
+                << "  --mode producer|pingpong|general\n"
                 << "                         producer is primary: many FBO writes, one consume\n"
+                << "                         general uses glDrawElements + glFinish, no FBO-sample edge\n"
                 << "  --size N              offscreen/FBO size (default: 128)\n"
                 << "  --frames N            measured present-once frames (default: 96)\n"
                 << "  --warmup-frames N     untimed warmup frames (default: 8)\n"
@@ -281,8 +289,8 @@ Options parseOptions(int argc, char** argv) {
     if (options.uploadEvery < 0) {
         fail("--upload-every must be non-negative");
     }
-    if (options.mode != "producer" && options.mode != "pingpong") {
-        fail("--mode must be producer or pingpong");
+    if (options.mode != "producer" && options.mode != "pingpong" && options.mode != "general") {
+        fail("--mode must be producer, pingpong, or general");
     }
     return options;
 }
@@ -339,6 +347,7 @@ RuntimeApi loadRuntime(const Options& options) {
     loadGL(api, "glDeleteTextures", gl.DeleteTextures);
     loadGL(api, "glDeleteVertexArrays", gl.DeleteVertexArrays);
     loadGL(api, "glDrawArrays", gl.DrawArrays);
+    loadGL(api, "glDrawElements", gl.DrawElements);
     loadGL(api, "glDrawBuffer", gl.DrawBuffer);
     loadGL(api, "glEnableVertexAttribArray", gl.EnableVertexAttribArray);
     loadGL(api, "glFinish", gl.Finish);
@@ -458,7 +467,7 @@ public:
         RunResult result;
         result.frames = frames;
         result.chainDraws = options_.chainDraws;
-        result.drawsPerFrame = options_.chainDraws + 2; // seed + chain + default present draw
+        result.drawsPerFrame = drawsPerFrame();
         result.totalDraws = frames * result.drawsPerFrame;
         result.textureUploads = 0;
 
@@ -513,8 +522,13 @@ public:
         }
 
         const auto readbackStart = Clock::now();
-        gl.BindFramebuffer(GL_FRAMEBUFFER, framebuffers_[currentTexture_]);
-        gl.ReadBuffer(GL_COLOR_ATTACHMENT0);
+        if (isGeneralMode()) {
+            gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+            gl.ReadBuffer(GL_BACK);
+        } else {
+            gl.BindFramebuffer(GL_FRAMEBUFFER, framebuffers_[currentTexture_]);
+            gl.ReadBuffer(GL_COLOR_ATTACHMENT0);
+        }
         const auto readbackBindEnd = Clock::now();
         gl.ReadPixels(options_.size / 2, options_.size / 2, 1, 1,
                       GL_RGBA, GL_UNSIGNED_BYTE, result.readbackPixel.data());
@@ -559,6 +573,17 @@ public:
     }
 
 private:
+    bool isGeneralMode() const {
+        return options_.mode == "general";
+    }
+
+    int drawsPerFrame() const {
+        if (isGeneralMode()) {
+            return options_.chainDraws;
+        }
+        return options_.chainDraws + 2; // seed + chain + default present draw
+    }
+
     template <typename Fn>
     void profileCall(ProfileBucket bucket, Fn&& fn) {
         if (!profileEnabled_) {
@@ -614,6 +639,10 @@ private:
         gl.BufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
         gl.EnableVertexAttribArray(0);
         gl.VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), nullptr);
+        const GLushort indices[] = {0, 1, 2};
+        gl.GenBuffers(1, &ebo_);
+        gl.BindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_);
+        gl.BufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
 
         gl.GenTextures(2, textures_.data());
         for (GLuint texture : textures_) {
@@ -651,7 +680,9 @@ private:
     }
 
     void runFrame(int frame, int& textureUploads) {
-        if (options_.mode == "pingpong") {
+        if (options_.mode == "general") {
+            runGeneralFrame(frame, textureUploads);
+        } else if (options_.mode == "pingpong") {
             runPingPongFrame(frame, textureUploads);
         } else {
             runProducerFrame(frame, textureUploads);
@@ -707,6 +738,39 @@ private:
 
         currentTexture_ = 0;
         drawPresentSample();
+    }
+
+    void runGeneralFrame(int frame, int& textureUploads) {
+        auto& gl = api_.gl;
+        profileCall(ProfileBucket::BindFramebuffer, [&] {
+            gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+        });
+        profileCall(ProfileBucket::Viewport, [&] {
+            gl.Viewport(0, 0, options_.size, options_.size);
+        });
+        profileCall(ProfileBucket::UseProgram, [&] {
+            gl.UseProgram(seedProgram_);
+        });
+        profileCall(ProfileBucket::BindVertexArray, [&] {
+            gl.BindVertexArray(vao_);
+        });
+
+        for (int iteration = 0; iteration < options_.chainDraws; ++iteration) {
+            const float r = static_cast<float>((frame * 17 + iteration * 3) % 251) / 255.0f;
+            const float g = static_cast<float>((frame * 31 + iteration * 5) % 251) / 255.0f;
+            const float b = static_cast<float>((frame * 47 + iteration * 7) % 251) / 255.0f;
+            profileCall(ProfileBucket::Uniform, [&] {
+                gl.Uniform4f(seedColorLocation_, r, g, b, 1.0f);
+            });
+            profileCall(ProfileBucket::DrawElements, [&] {
+                gl.DrawElements(GL_TRIANGLES, 3, GL_UNSIGNED_SHORT, nullptr);
+            });
+            maybeUploadDepth(frame, iteration, textureUploads);
+        }
+
+        profileCall(ProfileBucket::Finish, [&] {
+            gl.Finish();
+        });
     }
 
     void runPingPongFrame(int frame, int& textureUploads) {
@@ -817,6 +881,9 @@ private:
         if (vbo_ != 0) {
             gl.DeleteBuffers(1, &vbo_);
         }
+        if (ebo_ != 0) {
+            gl.DeleteBuffers(1, &ebo_);
+        }
         if (vao_ != 0) {
             gl.DeleteVertexArrays(1, &vao_);
         }
@@ -838,6 +905,7 @@ private:
     GLint sampleSourceLocation_ = -1;
     GLuint vao_ = 0;
     GLuint vbo_ = 0;
+    GLuint ebo_ = 0;
     std::array<GLuint, 2> textures_{0, 0};
     GLuint depthUploadTexture_ = 0;
     std::array<GLuint, 2> framebuffers_{0, 0};
@@ -883,7 +951,7 @@ void writeJSON(const Options& options, const RunResult& warmup, const RunResult&
         << "\"commandBufferBound\":48,"
         << "\"commandBufferReserve\":4,"
         << "\"readbackIsolated\":true,"
-        << "\"presentOncePerFrame\":true,"
+        << "\"presentOncePerFrame\":" << (options.mode == "general" ? "false" : "true") << ","
         << "\"size\":" << options.size << ","
         << "\"frames\":" << options.frames << ","
         << "\"warmupFrames\":" << options.warmupFrames << ","
