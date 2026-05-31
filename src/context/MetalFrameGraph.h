@@ -749,11 +749,10 @@ struct MetalTessDrawInfo {
 	    // skips the VS dispatch, and seeds a zeroed VS-output buffer.
 	    bool forcePhase3Buffers = false;
 	    // Phase 3B.4 [metal-tess-TF]: TES-as-compute pipeline state.
-    // When non-null AND transform feedback is active on the draw,
-    // the encoder extends the compute chain with a domain-point
-    // generator dispatch + a TES-as-compute dispatch whose output
-    // feeds the bound TF buffers. When null, the encoder uses the
-    // existing TES-as-vertex-function render path.
+    // The caller leaves this non-null only when an actual consumer needs
+    // generated TES output bytes, currently active tess TF or point-mode
+    // replay. When null, render-only tessellation uses the existing
+    // TES-as-vertex-function render path without domain/TES-compute buffers.
     void* tessEvalComputePipelineState = nullptr;  // id<MTLComputePipelineState>
 
     // Phase 3B.5 [metal-tess-TF]: encoder out-params used by the TF
@@ -763,9 +762,9 @@ struct MetalTessDrawInfo {
     // Shared-storage TES output buffer into `*outTesComputeOutBuf`.
     // Caller reads the buffer bytes and deposits them into the bound
     // GL_TRANSFORM_FEEDBACK_BUFFER per the program's TF layout. Both
-    // pointers are optional — null = no write-back (the encoder
-    // allocates everything locally and lets the compute dispatches
-    // run for observability only).
+    // pointers are optional for consumers that need TES-compute bytes without
+    // GL TF write-back; render-only callers should clear
+    // tessEvalComputePipelineState instead.
     std::uint32_t* outGeneratedVertCount = nullptr;
     void** outTesComputeOutBuf = nullptr;  // id<MTLBuffer>*
 

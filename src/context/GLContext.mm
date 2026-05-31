@@ -45814,24 +45814,10 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
           enableMetalTessTF)) {
         return false;
     }
-    // Rasterizer-discard is usually paired with TF. When the TF-
-    // capture chain is wired, we still run it (the render pass
-    // below is skipped naturally because the test is side-effect
-    // only). When unwired, defer to CPU.
-    //
-    // Phase 5 probe: with APPGL_LIFT_TESS_UNIFORM_GUARD, the CTS
-    // tess vertex-counter program's probe drawArrays (DISCARD on,
-    // TF off, PRIMITIVES_GENERATED query active) needs to take the
-    // same Metal compute chain so its count matches the subsequent
-    // Metal TF-capture draw. Otherwise counter goes CPU, main goes
-    // Metal, buffer sized by CPU count, Metal overflow = TF_WRITTEN
-    // comes back 0.
-    const bool keepMetalForDiscardProbe = liftUniformGuard &&
-        program.metalTessEvalComputePipelineState != nullptr &&
-        enableMetalTessTF &&
-        !tessFp64TfFallback;
-    if (state->isEnabled(GL_RASTERIZER_DISCARD) && !tessTFActive &&
-        !keepMetalForDiscardProbe) {
+    // Rasterizer-discard without active tess TF has no render output
+    // consumer. Keep it on the CPU tessellator so non-TF probes do not
+    // trigger the Metal TES-compute allocation path.
+    if (state->isEnabled(GL_RASTERIZER_DISCARD) && !tessTFActive) {
         return false;
     }
 
@@ -46242,24 +46228,26 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
         }
     }
 
-    // Phase 3B.5 [metal-tess-TF]: when the Metal tess-TF path is
-    // active and the program has a TES-compute PSO, wire the
-    // encoder's out-params so we can walk the produced vertex
-    // buffer + deposit TF bytes after the encode completes.
+    // Phase 3B.5 [metal-tess-TF]: request the TES-as-compute chain only
+    // when an actual consumer needs the generated TES bytes. Plain
+    // render-only tess draws use Metal's hardware tessellator directly;
+    // they must not allocate the domain/TES-compute buffers that exist
+    // for transform feedback. Point-mode render is the one render-side
+    // exception: Metal's tessellator cannot emit GL point_mode output, so
+    // we replay the retained TES-compute vertices as GL_POINTS below.
     std::uint32_t tfGeneratedVerts = 0;
     void* tfRetainedOutBuf = nullptr;
-    // NOTE: this intentionally fires on ANY tess draw that reaches
-    // this point with the compute chain wired — including non-TF
-    // draws — because `writeTessTFAndUpdateCounters` below updates
-    // PRIMITIVES_GENERATED from the domain-gen vertex count, and
-    // CTS tests compare that count against expected vs actual
-    // iteration counts (invariance_rule*, vertex_spacing_*). When
-    // TF is inactive the internal `doTF` check still skips the
-    // actual TF buffer write.
+    const bool needsPointModeReplay =
+        !state->isEnabled(GL_RASTERIZER_DISCARD) &&
+        program.tessGenPointMode == GL_TRUE;
     const bool runTessTFWrite =
+        (tessTFActive || needsPointModeReplay) &&
         program.metalTessEvalComputePipelineState != nullptr &&
         program.tessEvalOutputLayout.structSize > 0 &&
         enableMetalTessTF;
+    if (!runTessTFWrite) {
+        info.tessEvalComputePipelineState = nullptr;
+    }
     if (runTessTFWrite) {
         info.outGeneratedVertCount = &tfGeneratedVerts;
         info.outTesComputeOutBuf = &tfRetainedOutBuf;
@@ -46275,10 +46263,13 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
         std::fprintf(stderr,
             "APPGL_DETECTOR lift_pre_encode prog=%u "
             "metalTessEvalComputePSO_present=%d tesOutSize=%zu "
-            "enableMetalTF=%d -> runTessTFWrite=%d\n",
+            "tfActive=%d pointReplay=%d enableMetalTF=%d "
+            "-> runTessTFWrite=%d\n",
             (unsigned)programName,
             program.metalTessEvalComputePipelineState != nullptr ? 1 : 0,
             program.tessEvalOutputLayout.structSize,
+            tessTFActive ? 1 : 0,
+            needsPointModeReplay ? 1 : 0,
             enableMetalTessTF ? 1 : 0,
             runTessTFWrite ? 1 : 0);
     }

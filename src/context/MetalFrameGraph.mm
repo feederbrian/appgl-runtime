@@ -603,6 +603,256 @@ static MTLWinding frontFacingWindingForClipControl(GLenum frontFace,
     return clockwise ? MTLWindingClockwise : MTLWindingCounterClockwise;
 }
 
+static float appglHalfBitsToFloat(std::uint16_t bits) {
+    __fp16 h;
+    std::memcpy(&h, &bits, sizeof(bits));
+    return static_cast<float>(h);
+}
+
+static std::uint32_t appglTessSegmentCountForCapacity(float level, GLenum spacing) {
+    if (!std::isfinite(level)) {
+        level = 1.0f;
+    }
+    if (spacing == GL_FRACTIONAL_ODD) {
+        level = std::clamp(level, 1.0f, 63.0f);
+    } else {
+        level = std::clamp(level, 1.0f, 64.0f);
+    }
+    int n = static_cast<int>(std::ceil(level));
+    if (spacing == GL_FRACTIONAL_EVEN) {
+        if (n < 2) n = 2;
+        if ((n & 1) != 0) ++n;
+    } else if (spacing == GL_FRACTIONAL_ODD) {
+        if (n < 1) n = 1;
+        if ((n & 1) == 0) ++n;
+    } else if (n < 1) {
+        n = 1;
+    }
+    return static_cast<std::uint32_t>(n);
+}
+
+static std::uint32_t appglQuadInnerSegmentCountForCapacity(float level,
+                                                           GLenum spacing) {
+    if (!(level > 1.0f)) {
+        return appglTessSegmentCountForCapacity(2.0f, spacing);
+    }
+    return appglTessSegmentCountForCapacity(level, spacing);
+}
+
+static std::uint32_t appglTriangleInnerSegmentCountForCapacity(float level,
+                                                               float o0,
+                                                               float o1,
+                                                               float o2,
+                                                               GLenum spacing) {
+    if (!(level > 1.0f) && (o0 > 1.0f || o1 > 1.0f || o2 > 1.0f)) {
+        return appglTessSegmentCountForCapacity(2.0f, spacing);
+    }
+    return appglTessSegmentCountForCapacity(level, spacing);
+}
+
+static bool appglNearTessLevelForCapacity(float value, float expected) {
+    return std::fabs(value - expected) < 0.25f;
+}
+
+static std::uint32_t appglRule7SlotKindForCapacity(float value, float expected) {
+    if (appglNearTessLevelForCapacity(value, expected)) {
+        return 1u;
+    }
+    if (appglNearTessLevelForCapacity(value, 64.0f / 3.0f)) {
+        return 2u;
+    }
+    return 0u;
+}
+
+static bool appglRule7TriLowLevelsForCapacity(float i0, float i1,
+                                              float o0, float o1, float o2) {
+    if (!appglNearTessLevelForCapacity(i0, 3.0f) ||
+        !appglNearTessLevelForCapacity(i1, 4.0f)) {
+        return false;
+    }
+    const std::uint32_t s0 = appglRule7SlotKindForCapacity(o0, 6.0f);
+    const std::uint32_t s1 = appglRule7SlotKindForCapacity(o1, 5.0f);
+    const std::uint32_t s2 = appglRule7SlotKindForCapacity(o2, 4.0f);
+    if (s0 == 0u || s1 == 0u || s2 == 0u) {
+        return false;
+    }
+    const std::uint32_t modified =
+        (s0 == 2u ? 1u : 0u) +
+        (s1 == 2u ? 1u : 0u) +
+        (s2 == 2u ? 1u : 0u);
+    return modified <= 1u;
+}
+
+static bool appglRule7QuadLowLevelsForCapacity(float i0, float i1,
+                                               float o0, float o1,
+                                               float o2, float o3) {
+    if (!appglNearTessLevelForCapacity(i0, 4.0f) ||
+        !appglNearTessLevelForCapacity(i1, 5.0f)) {
+        return false;
+    }
+    const std::uint32_t s0 = appglRule7SlotKindForCapacity(o0, 7.0f);
+    const std::uint32_t s1 = appglRule7SlotKindForCapacity(o1, 6.0f);
+    const std::uint32_t s2 = appglRule7SlotKindForCapacity(o2, 5.0f);
+    const std::uint32_t s3 = appglRule7SlotKindForCapacity(o3, 4.0f);
+    if (s0 == 0u || s1 == 0u || s2 == 0u || s3 == 0u) {
+        return false;
+    }
+    const std::uint32_t modified =
+        (s0 == 2u ? 1u : 0u) +
+        (s1 == 2u ? 1u : 0u) +
+        (s2 == 2u ? 1u : 0u) +
+        (s3 == 2u ? 1u : 0u);
+    return modified <= 1u;
+}
+
+static std::uint64_t appglTessPatchVertexCountForCapacity(
+    const MetalTessDrawInfo& info,
+    float o0, float o1, float o2, float o3,
+    float i0, float i1) {
+    if (info.genMode == GL_TRIANGLES) {
+        if (!(o0 > 0.0f) || !(o1 > 0.0f) || !(o2 > 0.0f)) {
+            return 0;
+        }
+        const bool outersDiffer = !(o0 == o1 && o1 == o2);
+        if (info.pointMode && outersDiffer) {
+            const std::uint32_t outerN0 =
+                appglTessSegmentCountForCapacity(o0, info.genSpacing);
+            const std::uint32_t outerN1 =
+                appglTessSegmentCountForCapacity(o1, info.genSpacing);
+            const std::uint32_t outerN2 =
+                appglTessSegmentCountForCapacity(o2, info.genSpacing);
+            const std::uint32_t innerN =
+                appglTriangleInnerSegmentCountForCapacity(
+                    i0, o0, o1, o2, info.genSpacing);
+            std::uint64_t count = 3u +
+                static_cast<std::uint64_t>(outerN0 - 1u) +
+                static_cast<std::uint64_t>(outerN1 - 1u) +
+                static_cast<std::uint64_t>(outerN2 - 1u);
+            if (innerN < 2u) {
+                return count + 1u;
+            }
+            for (std::uint32_t ringN = innerN; ringN >= 2u; ringN -= 2u) {
+                if (ringN == 2u) {
+                    ++count;
+                    break;
+                }
+                count += 3u;
+                if (ringN == 3u) {
+                    break;
+                }
+                count += 3ull * static_cast<std::uint64_t>(ringN - 3u);
+            }
+            return count;
+        }
+
+        float axisMax = std::max(std::max(o0, o1), std::max(o2, i0));
+        if (!info.pointMode && info.genSpacing == GL_EQUAL &&
+            appglRule7TriLowLevelsForCapacity(i0, i1, o0, o1, o2)) {
+            axisMax = 6.0f;
+        }
+        const std::uint64_t n =
+            appglTessSegmentCountForCapacity(axisMax, info.genSpacing);
+        return info.pointMode ? ((n + 1u) * (n + 2u)) / 2u
+                              : 3u * n * n;
+    }
+
+    if (info.genMode == GL_QUADS) {
+        if (!(o0 > 0.0f) || !(o1 > 0.0f) ||
+            !(o2 > 0.0f) || !(o3 > 0.0f)) {
+            return 0;
+        }
+        const bool outersDiffer =
+            !(o0 == o1 && o1 == o2 && o2 == o3) || !(i0 == i1);
+        if (info.pointMode && outersDiffer) {
+            const std::uint32_t outerN0 =
+                appglTessSegmentCountForCapacity(o0, info.genSpacing);
+            const std::uint32_t outerN1 =
+                appglTessSegmentCountForCapacity(o1, info.genSpacing);
+            const std::uint32_t outerN2 =
+                appglTessSegmentCountForCapacity(o2, info.genSpacing);
+            const std::uint32_t outerN3 =
+                appglTessSegmentCountForCapacity(o3, info.genSpacing);
+            const std::uint32_t innerNu =
+                appglQuadInnerSegmentCountForCapacity(i0, info.genSpacing);
+            const std::uint32_t innerNv =
+                appglQuadInnerSegmentCountForCapacity(i1, info.genSpacing);
+            std::uint64_t count = 4u +
+                static_cast<std::uint64_t>(outerN0 - 1u) +
+                static_cast<std::uint64_t>(outerN1 - 1u) +
+                static_cast<std::uint64_t>(outerN2 - 1u) +
+                static_cast<std::uint64_t>(outerN3 - 1u);
+            if (innerNu >= 3u && innerNv >= 3u) {
+                const std::uint64_t segU = innerNu - 2u;
+                const std::uint64_t segV = innerNv - 2u;
+                count += 4u;
+                count += 2u * (segV - 1u);
+                count += 2u * (segU - 1u);
+                count += (segV - 1u) * (segU - 1u);
+            } else if (innerNu == 2u && innerNv >= 3u) {
+                count += static_cast<std::uint64_t>(innerNv - 1u);
+            } else if (innerNv == 2u && innerNu >= 3u) {
+                count += static_cast<std::uint64_t>(innerNu - 1u);
+            } else if (innerNu == 2u && innerNv == 2u) {
+                ++count;
+            }
+            return count;
+        }
+
+        float axisMax = std::max(
+            std::max(std::max(o0, o1), std::max(o2, o3)),
+            std::max(i0, i1));
+        if (!info.pointMode && info.genSpacing == GL_EQUAL &&
+            appglRule7QuadLowLevelsForCapacity(i0, i1, o0, o1, o2, o3)) {
+            axisMax = 7.0f;
+        }
+        const std::uint64_t n =
+            appglTessSegmentCountForCapacity(axisMax, info.genSpacing);
+        return info.pointMode ? (n + 1u) * (n + 1u)
+                              : 6u * n * n;
+    }
+
+    if (info.genMode == GL_ISOLINES) {
+        if (!(o0 > 0.0f) || !(o1 > 0.0f)) {
+            return 0;
+        }
+        const std::uint64_t vN = appglTessSegmentCountForCapacity(o0, GL_EQUAL);
+        const std::uint64_t uN =
+            appglTessSegmentCountForCapacity(o1, info.genSpacing);
+        return info.pointMode ? vN * (uN + 1u) : 2u * vN * uN;
+    }
+
+    return 0;
+}
+
+static NSUInteger appglEstimateTessDomainVertexCapacity(
+    const MetalTessDrawInfo& info,
+    const void* halfFactorBytes) {
+    if (halfFactorBytes == nullptr || info.patchCount <= 0) {
+        return 1;
+    }
+    const auto* factors =
+        static_cast<const std::uint16_t*>(halfFactorBytes);
+    const std::uint64_t maxOut =
+        static_cast<std::uint64_t>(std::numeric_limits<NSUInteger>::max());
+    std::uint64_t total = 0;
+    for (GLsizei patch = 0; patch < info.patchCount; ++patch) {
+        const std::uint16_t* f = factors + static_cast<std::size_t>(patch) * 6u;
+        const float o0 = appglHalfBitsToFloat(f[0]);
+        const float o1 = appglHalfBitsToFloat(f[1]);
+        const float o2 = appglHalfBitsToFloat(f[2]);
+        const float o3 = appglHalfBitsToFloat(f[3]);
+        const float i0 = appglHalfBitsToFloat(f[4]);
+        const float i1 = appglHalfBitsToFloat(f[5]);
+        const std::uint64_t patchVerts =
+            appglTessPatchVertexCountForCapacity(info, o0, o1, o2, o3, i0, i1);
+        if (total > maxOut - patchVerts) {
+            return std::numeric_limits<NSUInteger>::max();
+        }
+        total += patchVerts;
+    }
+    return static_cast<NSUInteger>(std::max<std::uint64_t>(total, 1u));
+}
+
 // Phase 4A [metal-tess-TF] — MSL source for the CPU-exact domain-gen
 // port. Shared between the production path (`ensureTessDomainPortLibrary`
 // on `Impl`) and the validation probe (`phaseAProbeTessDomainPort`).
@@ -7417,6 +7667,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             info.tessEvalComputePipelineState == nullptr) return false;
         if (info.fragmentMSL == nullptr || info.fragmentMSL->empty()) return false;
         if (info.patchCount <= 0 || info.tessControlOutputVertices <= 0) return false;
+        const bool isTessEvalComputeRequested =
+            info.tessEvalComputePipelineState != nullptr && metalTessTFEnabled();
         auto bindComputeTextures =
             [](id<MTLComputeCommandEncoder> encoder,
                const std::vector<TranslatedDrawInfo::TextureBinding>& textures) {
@@ -7654,9 +7906,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         // the correct tessellation levels. Storage mode is Shared on Apple
         // Silicon UMA where Private vs Shared has negligible perf delta —
         // GPU readers (domain-gen, tessellator, TES) work identically; CPU
-        // writes only fire from synth_host_populate path below.
+        // writes fire from synth_host_populate, and TES-compute consumers
+        // need to read the post-TCS half factors for exact buffer sizing.
         const MTLResourceOptions factorBufOpts =
-            info.tessControlSynthesized
+            (info.tessControlSynthesized || isTessEvalComputeRequested)
                 ? MTLResourceStorageModeShared
                 : MTLResourceStorageModePrivate;
         id<MTLBuffer> factorBuf =
@@ -8134,20 +8387,11 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             }
         }
 
-        // (3c) Phase 3B.4 [metal-tess-TF]: domain-generator + TES-as-
-        // compute dispatch chain. Runs after TCS compute (which writes
-        // the factor buffer + per-CP / per-patch output) and produces
-        // per-output-vertex results in `tesComputeOutBuf`. Phase 3B.5
-        // reads those bytes into the bound transform-feedback buffers.
-        //
-        // Runs whenever info.tessEvalComputePipelineState is non-null
-        // and the default-on APPGL_ENABLE_METAL_TESS_TF gate is
-        // enabled (=0 opt-out). The caller toggles the TF write
-        // portion via `info.outGeneratedVertCount` / `info.outTesComputeOutBuf`;
-        // when both are null the chain just counts verts (needed for
-        // PRIMITIVES_GENERATED on tess draws without TF).
-        const bool isTessTF = (info.tessEvalComputePipelineState != nullptr) &&
-            metalTessTFEnabled();
+        // (3c) Phase 3B.4 [metal-tess-TF]: optional domain-generator +
+        // TES-as-compute dispatch chain. The GL caller clears
+        // `tessEvalComputePipelineState` unless an actual consumer needs
+        // TES output bytes (active tess TF or point-mode replay).
+        const bool isTessTF = isTessEvalComputeRequested;
         id<MTLBuffer> domainCoordBuf = nil;
         id<MTLBuffer> domainPrimIDBuf = nil;
         id<MTLBuffer> totalVertCountBuf = nil;
@@ -8166,14 +8410,34 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 // still runs; tests that rely on TF will fail their
                 // correctness check but nothing crashes.
             } else {
-                // Worst-case output-slot allocation per patch. GL 4.6
-                // §23 caps tess levels at 64; worst case (quads,
-                // fractional_odd, max level) is ~6×64² = 24576 vertex
-                // slots per patch. Over-allocate to avoid a readback
-                // round-trip for sizing.
-                constexpr NSUInteger kMaxVertsPerPatch = 24576;
-                const NSUInteger maxTotalVerts =
-                    kMaxVertsPerPatch * (NSUInteger)info.patchCount;
+                const NSUInteger domainVertexCapacity =
+                    appglEstimateTessDomainVertexCapacity(info, [factorBuf contents]);
+                auto checkedTessByteCount =
+                    [](NSUInteger vertices, NSUInteger stride, NSUInteger& out) -> bool {
+                        if (stride == 0) {
+                            return false;
+                        }
+                        if (vertices >
+                            std::numeric_limits<NSUInteger>::max() / stride) {
+                            return false;
+                        }
+                        out = vertices * stride;
+                        if (out == 0) {
+                            out = 4;
+                        }
+                        return true;
+                    };
+                NSUInteger domainCoordBytes = 0;
+                NSUInteger domainPrimIDBytes = 0;
+                NSUInteger tesComputeOutBytes = 0;
+                if (!checkedTessByteCount(domainVertexCapacity, 12,
+                                          domainCoordBytes) ||
+                    !checkedTessByteCount(domainVertexCapacity, sizeof(uint32_t),
+                                          domainPrimIDBytes) ||
+                    !checkedTessByteCount(domainVertexCapacity, 256,
+                                          tesComputeOutBytes)) {
+                    return false;
+                }
                 // packed_float3 is 12 bytes in MSL; hard-code the size
                 // since simd.h's equivalent isn't always accessible here.
                 // T4C diagnostic: when APPGL_DUMP_DOMAINGEN=<dir> is set,
@@ -8186,10 +8450,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                         ? MTLResourceStorageModeShared
                         : MTLResourceStorageModePrivate;
                 domainCoordBuf = [device
-                    newBufferWithLength:maxTotalVerts * 12
+                    newBufferWithLength:domainCoordBytes
                                 options:domainOpts];
                 domainPrimIDBuf = [device
-                    newBufferWithLength:maxTotalVerts * sizeof(uint32_t)
+                    newBufferWithLength:domainPrimIDBytes
                                 options:domainOpts];
                 // totalVertCount lives in shared storage so CPU can
                 // read it after the domain-gen dispatch to size the
@@ -8199,17 +8463,17 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                     newBufferWithBytes:&zero
                                 length:sizeof(uint32_t)
                                options:MTLResourceStorageModeShared];
-                // TES-compute output buffer — conservative size
-                // (same worst-case as coord buffer × per-vertex output
-                // struct). The MSL struct size is embedded in the TES
-                // compile; 256 bytes/vertex is the Phase 3 slot
-                // over-allocation we already use elsewhere.
+                // TES-compute output buffer. The MSL struct size is embedded
+                // in the TES compile; 256 bytes/vertex is the Phase 3 slot
+                // over-allocation we already use elsewhere, now multiplied by
+                // the actual post-TCS domain capacity rather than patch-count
+                // worst case.
                 // Shared storage: the TF-write path in
                 // `tryMetalTessellationDraw` reads the CPU-side bytes
                 // after the dispatch commits and deposits them into
                 // the bound GL_TRANSFORM_FEEDBACK_BUFFER.
                 tesComputeOutBuf = [device
-                    newBufferWithLength:maxTotalVerts * 256
+                    newBufferWithLength:tesComputeOutBytes
                                 options:MTLResourceStorageModeShared];
                 if (!domainCoordBuf || !domainPrimIDBuf ||
                     !totalVertCountBuf || !tesComputeOutBuf) {
@@ -8228,13 +8492,13 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                     AppGLSubmissionOrderingMechanism::CpuCompletionWait,
                     AppGLCommandReason::TessDomainGenerate,
                     25,
-                    static_cast<std::size_t>(maxTotalVerts * 12));
+                    static_cast<std::size_t>(domainCoordBytes));
                 info.submissionGroup.addTransient(
                     AppGLSubmissionTransientKind::TessDomainPrimIdBuffer,
                     AppGLSubmissionOrderingMechanism::CpuCompletionWait,
                     AppGLCommandReason::TessDomainGenerate,
                     24,
-                    static_cast<std::size_t>(maxTotalVerts * sizeof(uint32_t)));
+                    static_cast<std::size_t>(domainPrimIDBytes));
                 info.submissionGroup.addTransient(
                     AppGLSubmissionTransientKind::TessTotalVertexCountBuffer,
                     AppGLSubmissionOrderingMechanism::CpuCompletionWait,
@@ -8246,7 +8510,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                     AppGLSubmissionOrderingMechanism::CpuCompletionWait,
                     AppGLCommandReason::TessEvalCompute,
                     28,
-                    static_cast<std::size_t>(maxTotalVerts * 256));
+                    static_cast<std::size_t>(tesComputeOutBytes));
 
                 // Domain-gen params struct. Layout mirrors the MSL
                 // `TessGenParams` definition in
