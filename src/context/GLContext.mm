@@ -11205,12 +11205,25 @@ struct GLContext::Impl {
         TranslatedDrawInfo& info)
     {
         info.uboBindings.clear();
-        const std::size_t vertexBlockCount = info.vertexReflection != nullptr
-            ? info.vertexReflection->uniformBlocks.size()
-            : 0;
-        const std::size_t fragmentBlockCount = info.fragmentReflection != nullptr
-            ? info.fragmentReflection->uniformBlocks.size()
-            : 0;
+        auto bindableUniformBlockCount = [](const ShaderReflection* reflection) {
+            if (reflection == nullptr) {
+                return std::size_t{0};
+            }
+            std::size_t count = 0;
+            for (const auto& block : reflection->uniformBlocks) {
+                if (block.name != "_DefaultUniforms") {
+                    ++count;
+                }
+            }
+            return count;
+        };
+        const std::size_t vertexBlockCount =
+            bindableUniformBlockCount(info.vertexReflection);
+        const std::size_t fragmentBlockCount =
+            bindableUniformBlockCount(info.fragmentReflection);
+        if (vertexBlockCount == 0 && fragmentBlockCount == 0) {
+            return;
+        }
         info.uboBindings.reserve(vertexBlockCount + fragmentBlockCount);
 
         auto resolveBlocks = [&](const ShaderReflection* reflection,
@@ -11334,6 +11347,11 @@ struct GLContext::Impl {
         const std::size_t fragmentStorageBufferCount = info.fragmentReflection != nullptr
             ? info.fragmentReflection->storageBuffers.size()
             : 0;
+        if (vertexStorageBufferCount == 0 &&
+            fragmentStorageBufferCount == 0 &&
+            program.resourceAtomicCounterBuffers.empty()) {
+            return;
+        }
         info.ssboBindings.reserve(
             vertexStorageBufferCount + fragmentStorageBufferCount);
         info.atomicCounterBindings.reserve(
@@ -11853,6 +11871,15 @@ struct GLContext::Impl {
         GLProgramObject& program,
         TranslatedDrawInfo& info)
     {
+        const std::size_t vertexImageCount = info.vertexReflection != nullptr
+            ? info.vertexReflection->storageImages.size()
+            : 0;
+        const std::size_t fragmentImageCount = info.fragmentReflection != nullptr
+            ? info.fragmentReflection->storageImages.size()
+            : 0;
+        if (vertexImageCount == 0 && fragmentImageCount == 0) {
+            return;
+        }
         const bool trace = std::getenv("APPGL_TRACE_IMG_BIND") != nullptr;
         if (trace) {
             std::fprintf(stderr, "[IMG-BIND] resolveImageBindings called: vsRefl=%p fsRefl=%p\n",
@@ -11868,12 +11895,6 @@ struct GLContext::Impl {
                     info.fragmentReflection->sampledTextures.size());
             }
         }
-        const std::size_t vertexImageCount = info.vertexReflection != nullptr
-            ? info.vertexReflection->storageImages.size()
-            : 0;
-        const std::size_t fragmentImageCount = info.fragmentReflection != nullptr
-            ? info.fragmentReflection->storageImages.size()
-            : 0;
         info.vertexTextures.reserve(info.vertexTextures.size() + vertexImageCount);
         info.fragmentTextures.reserve(info.fragmentTextures.size() + fragmentImageCount);
         info.readImageTextureNames.reserve(
