@@ -1,17 +1,37 @@
 # Phase 2 Encode-Under-Churn Design
 
 Status: design note; Slice 1 instrumentation is opt-in; behavior-changing
-levers remain gated on Foreman + SCOUT-W review.
+levers remain gated on the viewport re-baseline attribution, Foreman review, and
+SCOUT-W review.
 Date: 2026-05-31
+
+## Gate State
+
+Viewport correctness is closed at `886b1a4`. The corrected head changed the
+performance surface because the live MDI wall now coalesces compatible
+CPU-authored indirect draws from 128 calls to 1. That makes the older Phase 2
+numbers directionally useful but no longer sufficient for authorization.
+
+Do not implement Lever A until the viewport re-baseline attribution answers the
+load-bearing question:
+
+> After the MDI coalescing correction, does encode-under-churn still dominate
+> the real-app frame cost at the 500-5000 draw target range?
+
+The design work may proceed now so the implementation is ready to start if the
+attribution stays positive. The implementation gate remains closed until
+GLTest reports the now-correct viewport profile and Foreman explicitly releases
+the lever.
 
 ## Objective
 
-The S23 correctness queue is closed. Phase 2 targets the remaining real-app
-performance cliff: realistic state churn serializes AppGL's GL-to-Metal encode
-path enough that the real-app-pattern benchmark misses the operator's 120 FPS
-floor early in the 500-5000 draw range.
+The S23 viewport correctness arc is closed. Phase 2 targets the remaining
+real-app performance cliff only if the re-baseline confirms it: realistic state
+churn serializes AppGL's GL-to-Metal encode path enough that the
+real-app-pattern benchmark misses the operator's 120 FPS floor early in the
+500-5000 draw range.
 
-Baseline from the d17e298 stock real-app-pattern run:
+Pre-viewport-close baseline from the d17e298 stock real-app-pattern run:
 
 | Draws | FPS | Frame Time | Gap to 120 FPS |
 | ----- | --- | ---------- | -------------- |
@@ -33,7 +53,8 @@ therefore report both:
 ## Current Attribution
 
 The useful baseline is harness-free real-app-pattern, not the older
-BenchInternal `glFinish`-inflated 358 us number.
+BenchInternal `glFinish`-inflated 358 us number. Treat the numbers below as the
+pre-`886b1a4` attribution until GLTest publishes the viewport re-baseline.
 
 Current real-app profile shape:
 
@@ -62,6 +83,11 @@ make the encode path flex Apple Silicon resources: use memory for structural
 memoization, cores for parallel draw preparation where GL ordering allows it,
 and Metal hardware routing to reduce repeated per-draw binding work.
 
+Foreman-reported Slice 1 signal before the viewport re-baseline showed a
+98.18% churned-hit surface for the candidate plan key. That is strong enough to
+prepare Lever A, not strong enough to ship it. The re-baseline must confirm the
+same hit surface matters after MDI coalescing changes the draw mix.
+
 ## Design Constraints
 
 - Preserve GL draw order. Do not reorder overlapping draws, blending,
@@ -85,6 +111,17 @@ Build a reusable `TranslatedDrawPlan` for the parts of
 `TranslatedDrawInfo`/`encodeTranslatedDraw` that are structural rather than
 per-draw values. The plan is keyed by structural state and fills a per-draw
 packet with the current dynamic values.
+
+Design contract:
+
+- `TranslatedDrawPlan` is a memoized recipe, not a draw snapshot.
+- The plan may cache decisions that are invariant for a structural state shape.
+- The plan must not own live GL object contents, live Metal resource pointers, or
+  producer-token state.
+- A cache hit must produce the same `TranslatedDrawInfo`/Metal binding behavior
+  as the current direct path for the same GL state.
+- Any missing generation, side effect, or hazard proof is a miss or reject, not a
+  fallback approximation.
 
 Candidate key fields:
 
@@ -114,6 +151,18 @@ Candidate cached payload:
 - flags that decide whether the draw can use argument-buffer or future ICB
   paths.
 
+Candidate per-draw packet populated from a plan:
+
+- current vertex/index object names, Metal buffers, offsets, counts, and ranges;
+- current uniform bytes, dynamic UBO offsets, and ring-buffer allocations;
+- current texture, sampler, image, SSBO, atomic-counter, and buffer binding
+  objects;
+- current viewport/scissor rectangles and depth-range arrays;
+- current FBO attachment objects and drawable/FBO dimensions;
+- read/write resource declarations with actual object names;
+- a hazard summary produced from live producer-token state immediately before
+  encode.
+
 Dynamic values that must remain per draw:
 
 - vertex/index buffer object names, Metal pointers, offsets, counts;
@@ -123,6 +172,40 @@ Dynamic values that must remain per draw:
 - FBO attachment object pointers;
 - producer-token state and pending read/write hazards;
 - query/TF/feedback side effects.
+
+### GAP-A2 Hazard Composition
+
+The compute-source MDI fix at `886b1a4` is the rule for Lever A: producer-token
+discipline composes with memoization only when the memoized path keeps live
+hazards outside the cached payload.
+
+Required behavior:
+
+- Plan keys may include resource layout shape and read/write classes, but not the
+  current pending producer bits.
+- Plan payload may classify that a draw reads a vertex buffer, an index buffer,
+  sampled textures, SSBOs, images, UBOs, atomics, or FBO attachments, but it must
+  bind actual resource names and hazard bits per draw.
+- A cache hit must still call the same producer-drain logic as the direct path
+  before reading CPU-visible shadow bytes or before using a resource as a GPU
+  read after a GPU write.
+- Direct-Metal VBO binding must stay selected for GPU-authored vertex buffers
+  even when a plan-hit draw is otherwise structurally identical to a CPU-authored
+  draw.
+- The recent-GPU-write state (`gpuAuthoredSinceCpuWrite`) is live object state.
+  It cannot be baked into a reusable plan and cannot be cleared by a plan hit.
+- Argument-buffer or future ICB routes inherit the same rule: they may memoize
+  binding layout, but actual resources and producer fences are populated from
+  the current draw packet.
+
+Reject conditions:
+
+- any draw whose correctness depends on CPU shadow bytes for a resource with
+  pending or recent GPU writes;
+- any resource alias where the read/write relationship cannot be represented in
+  the plan's live hazard packet;
+- any command sequence where plan replay would bypass `drainPendingGpuProducers`,
+  framebuffer attachment producer drains, or readback invalidation.
 
 Invalidation:
 
@@ -135,6 +218,17 @@ Invalidation:
 - global fixed-function state changes select a different structural key rather
   than mutating the prior plan.
 
+Plan cache ownership:
+
+- Store plans per context, because GL object names and program/VAO/FBO
+  generations are context-local.
+- Bound the cache by entry count and/or memory. Eviction must be LRU or epoch
+  based and must not require object callbacks to stay correct.
+- Use generations for correctness and eviction hints for memory only. A missing
+  invalidation callback must degrade to a miss, not stale reuse.
+- Keep the Slice 1 key profiler separate from the behavior-changing cache so
+  instrumentation can remain enabled during conformance gates.
+
 Expected movement:
 
 - `framegraph_encode` drops first;
@@ -146,6 +240,43 @@ Review decision: key by VAO identity first for safety, then add optional
 layout-content keys after a dedicated equivalence gate. The ADV-3 lesson is
 that stable-layout caching is real, but layout-content equivalence needs
 instrumentation and proof.
+
+### Lever A Implementation Boundary
+
+The first behavior-changing Lever A slice should cache only validation-free,
+pure structural payload:
+
+- pipeline key selection and shader function identity;
+- vertex descriptor and attribute layout binding recipe;
+- reflected resource binding layout, including shader slots and binding point
+  indices;
+- fixed-function state encoding decisions that depend only on the structural
+  fingerprint;
+- submission read/write shape without concrete object names.
+
+Do not include:
+
+- command buffer, render encoder, drawable, or ring-buffer allocation state;
+- current Metal resource pointers;
+- current uniform bytes;
+- current producer-token bits;
+- CPU shadow data pointers;
+- transform-feedback, query, rasterizer-discard, image/SSBO side-effect replay.
+
+The expected first implementation shape is:
+
+1. Keep the existing direct path as the reference builder.
+2. Add a plan lookup after `TranslatedDrawInfo` has been populated enough to
+   compute the structural key.
+3. On miss, build the plan from the direct-path metadata and then execute the
+   direct path.
+4. On hit, populate a fresh per-draw packet from live GL objects, run normal
+   hazard classification/drain, and encode using the cached recipe.
+5. Keep a kill switch that forces misses and a trace flag that dumps key,
+   generation, hit/miss, and reject reason.
+
+This slice should not introduce argument buffers, parallel preparation, or
+hardware batching. Those are follow-on levers that consume the explicit plan.
 
 ## Lever B: Encoder Binding Plan + Argument Buffers
 
