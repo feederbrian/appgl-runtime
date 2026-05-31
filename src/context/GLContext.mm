@@ -46942,13 +46942,11 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     // buffer + deposit TF bytes after the encode completes.
     std::uint32_t tfGeneratedVerts = 0;
     void* tfRetainedOutBuf = nullptr;
-    // NOTE: this intentionally fires on ANY tess draw that reaches
-    // this point with the compute chain wired — including non-TF
-    // draws — because `writeTessTFAndUpdateCounters` below updates
-    // PRIMITIVES_GENERATED from the domain-gen vertex count, and
-    // CTS tests compare that count against expected vs actual
-    // iteration counts (invariance_rule*, vertex_spacing_*). When
-    // TF is inactive the internal `doTF` check still skips the
+    // Keep the out-params wired for every draw with a TES-compute PSO.
+    // MetalFrameGraph only runs the domain/TES-compute sidecar when it is
+    // required for TF, point-mode replay, or active tess counter queries
+    // (or when an explicit diagnostic env asks for optional output).
+    // If TF is inactive, `writeTessTFAndUpdateCounters` still skips the
     // actual TF buffer write.
     const bool runTessTFWrite =
         program.metalTessEvalComputePipelineState != nullptr &&

@@ -111,8 +111,17 @@ static bool appglEnvEnabledDefaultOn(const char* name) {
     return value == nullptr || (value[0] != '0' && value[0] != '\0');
 }
 
+static bool appglEnvEnabledDefaultOff(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] != '0' && value[0] != '\0';
+}
+
 static bool metalTessTFEnabled() {
     return appglEnvEnabledDefaultOn("APPGL_ENABLE_METAL_TESS_TF");
+}
+
+static bool optionalTessEvalComputeEnabled() {
+    return appglEnvEnabledDefaultOff("APPGL_ENABLE_OPTIONAL_TESS_COMPUTE");
 }
 
 using DrawProfileClock = std::chrono::steady_clock;
@@ -8896,7 +8905,18 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         ScopedOwnedObjCObject tesComputeOutBufRelease;
         NSUInteger tessTFGeneratedVerts = 0;
         if (isTessTF) {
-            if (!ensureTessDomainGenLibrary()) {
+            const bool forceOptionalTessCompute =
+                optionalTessEvalComputeEnabled() ||
+                std::getenv("APPGL_DUMP_DOMAINGEN") != nullptr ||
+                std::getenv("APPGL_DUMP_TESOUT") != nullptr;
+            if (!info.tessEvalComputeRequired && !forceOptionalTessCompute) {
+                if (std::getenv("APPGL_TRACE_TESS") ||
+                    std::getenv("APPGL_DETECTOR_TF")) {
+                    std::fprintf(stderr,
+                        "[APPGL] tess-tf: skip optional TES-compute "
+                        "reason=not-required\n");
+                }
+            } else if (!ensureTessDomainGenLibrary()) {
                 if (std::getenv("APPGL_TRACE_TESS")) {
                     std::fprintf(stderr, "[APPGL] tess-tf: domain-gen library build failed\n");
                 }
