@@ -7,6 +7,7 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <iomanip>
+#include <initializer_list>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -57,9 +58,11 @@ struct GLApi {
     PFNGLDELETESHADERPROC DeleteShader = nullptr;
     PFNGLDELETETEXTURESPROC DeleteTextures = nullptr;
     PFNGLDELETEVERTEXARRAYSPROC DeleteVertexArrays = nullptr;
+    PFNGLDISABLEPROC Disable = nullptr;
     PFNGLDRAWARRAYSPROC DrawArrays = nullptr;
     PFNGLDRAWELEMENTSPROC DrawElements = nullptr;
     PFNGLDRAWBUFFERPROC DrawBuffer = nullptr;
+    PFNGLENABLEPROC Enable = nullptr;
     PFNGLENABLEVERTEXATTRIBARRAYPROC EnableVertexAttribArray = nullptr;
     PFNGLFINISHPROC Finish = nullptr;
     PFNGLFRAMEBUFFERTEXTURE2DPROC FramebufferTexture2D = nullptr;
@@ -79,6 +82,7 @@ struct GLApi {
     PFNGLSHADERSOURCEPROC ShaderSource = nullptr;
     PFNGLTEXIMAGE2DPROC TexImage2D = nullptr;
     PFNGLTEXPARAMETERIPROC TexParameteri = nullptr;
+    PFNGLBLENDFUNCPROC BlendFunc = nullptr;
     PFNGLUNIFORM1IPROC Uniform1i = nullptr;
     PFNGLUNIFORM4FPROC Uniform4f = nullptr;
     PFNGLUSEPROGRAMPROC UseProgram = nullptr;
@@ -271,9 +275,10 @@ Options parseOptions(int argc, char** argv) {
                 << "Usage: appgl_bar_b_benchmark [options]\n"
                 << "  --library PATH        libAppGL.dylib to dlopen (default: libAppGL.dylib)\n"
                 << "  --label NAME          label emitted in JSON (default: bar-b)\n"
-                << "  --mode producer|pingpong|general\n"
+                << "  --mode producer|pingpong|general|churn\n"
                 << "                         producer is primary: many FBO writes, one consume\n"
                 << "                         general uses glDrawElements + glFinish, no FBO-sample edge\n"
+                << "                         churn varies program/VAO/FBO/fixed/resource state per draw\n"
                 << "  --size N              offscreen/FBO size (default: 128)\n"
                 << "  --frames N            measured present-once frames (default: 96)\n"
                 << "  --warmup-frames N     untimed warmup frames (default: 8)\n"
@@ -289,8 +294,9 @@ Options parseOptions(int argc, char** argv) {
     if (options.uploadEvery < 0) {
         fail("--upload-every must be non-negative");
     }
-    if (options.mode != "producer" && options.mode != "pingpong" && options.mode != "general") {
-        fail("--mode must be producer, pingpong, or general");
+    if (options.mode != "producer" && options.mode != "pingpong" &&
+        options.mode != "general" && options.mode != "churn") {
+        fail("--mode must be producer, pingpong, general, or churn");
     }
     return options;
 }
@@ -346,9 +352,11 @@ RuntimeApi loadRuntime(const Options& options) {
     loadGL(api, "glDeleteShader", gl.DeleteShader);
     loadGL(api, "glDeleteTextures", gl.DeleteTextures);
     loadGL(api, "glDeleteVertexArrays", gl.DeleteVertexArrays);
+    loadGL(api, "glDisable", gl.Disable);
     loadGL(api, "glDrawArrays", gl.DrawArrays);
     loadGL(api, "glDrawElements", gl.DrawElements);
     loadGL(api, "glDrawBuffer", gl.DrawBuffer);
+    loadGL(api, "glEnable", gl.Enable);
     loadGL(api, "glEnableVertexAttribArray", gl.EnableVertexAttribArray);
     loadGL(api, "glFinish", gl.Finish);
     loadGL(api, "glFramebufferTexture2D", gl.FramebufferTexture2D);
@@ -368,6 +376,7 @@ RuntimeApi loadRuntime(const Options& options) {
     loadGL(api, "glShaderSource", gl.ShaderSource);
     loadGL(api, "glTexImage2D", gl.TexImage2D);
     loadGL(api, "glTexParameteri", gl.TexParameteri);
+    loadGL(api, "glBlendFunc", gl.BlendFunc);
     loadGL(api, "glUniform1i", gl.Uniform1i);
     loadGL(api, "glUniform4f", gl.Uniform4f);
     loadGL(api, "glUseProgram", gl.UseProgram);
@@ -438,6 +447,41 @@ std::string makeSampleFragmentShader(int shaderIters) {
         << "        s = vec4(s.g, s.b, s.r, 1.0) * 0.998 + vec4(0.001, 0.0, 0.0, 0.0);\n"
         << "    }\n"
         << "    fragColor = vec4(s.r, s.g, s.b, 1.0);\n"
+        << "}\n";
+    return stream.str();
+}
+
+std::string makeTintedSampleFragmentShader(int shaderIters) {
+    std::ostringstream stream;
+    stream
+        << "#version 330 core\n"
+        << "uniform sampler2D uSource;\n"
+        << "out vec4 fragColor;\n"
+        << "void main() {\n"
+        << "    vec4 s = texture(uSource, vec2(0.25, 0.75));\n"
+        << "    for (int i = 0; i < " << shaderIters << "; ++i) {\n"
+        << "        s = vec4(s.b, s.r, s.g, 1.0) * 0.995 + vec4(0.0, 0.001, 0.001, 0.0);\n"
+        << "    }\n"
+        << "    fragColor = vec4(s.rgb * vec3(0.92, 1.03, 0.98), 1.0);\n"
+        << "}\n";
+    return stream.str();
+}
+
+std::string makeDualSampleFragmentShader(int shaderIters) {
+    std::ostringstream stream;
+    stream
+        << "#version 330 core\n"
+        << "uniform sampler2D uSourceA;\n"
+        << "uniform sampler2D uSourceB;\n"
+        << "out vec4 fragColor;\n"
+        << "void main() {\n"
+        << "    vec4 a = texture(uSourceA, vec2(0.5, 0.5));\n"
+        << "    vec4 b = texture(uSourceB, vec2(0.75, 0.25));\n"
+        << "    vec4 s = mix(a, b, 0.35);\n"
+        << "    for (int i = 0; i < " << shaderIters << "; ++i) {\n"
+        << "        s = vec4(s.g * 0.99 + 0.002, s.b, s.r, 1.0);\n"
+        << "    }\n"
+        << "    fragColor = vec4(s.rgb, 1.0);\n"
         << "}\n";
     return stream.str();
 }
@@ -577,9 +621,16 @@ private:
         return options_.mode == "general";
     }
 
+    bool isChurnMode() const {
+        return options_.mode == "churn";
+    }
+
     int drawsPerFrame() const {
         if (isGeneralMode()) {
             return options_.chainDraws;
+        }
+        if (isChurnMode()) {
+            return options_.chainDraws + 1; // churn body + default present draw
         }
         return options_.chainDraws + 2; // seed + chain + default present draw
     }
@@ -623,7 +674,23 @@ private:
                                       "sample program");
         seedColorLocation_ = gl.GetUniformLocation(seedProgram_, "uColor");
         sampleSourceLocation_ = gl.GetUniformLocation(sampleProgram_, "uSource");
+        if (isChurnMode()) {
+            tintedSampleProgram_ = buildProgram(
+                gl, kFullscreenVS, makeTintedSampleFragmentShader(options_.shaderIters + 1),
+                "tinted sample program");
+            dualSampleProgram_ = buildProgram(
+                gl, kFullscreenVS, makeDualSampleFragmentShader(options_.shaderIters),
+                "dual sample program");
+            tintedSourceLocation_ = gl.GetUniformLocation(tintedSampleProgram_, "uSource");
+            dualSourceALocation_ = gl.GetUniformLocation(dualSampleProgram_, "uSourceA");
+            dualSourceBLocation_ = gl.GetUniformLocation(dualSampleProgram_, "uSourceB");
+        }
         if (seedColorLocation_ < 0 || sampleSourceLocation_ < 0) {
+            fail("required uniform was optimized out");
+        }
+        if (isChurnMode() &&
+            (tintedSourceLocation_ < 0 || dualSourceALocation_ < 0 ||
+             dualSourceBLocation_ < 0)) {
             fail("required uniform was optimized out");
         }
 
@@ -644,8 +711,29 @@ private:
         gl.BindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_);
         gl.BufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
 
-        gl.GenTextures(2, textures_.data());
-        for (GLuint texture : textures_) {
+        if (isChurnMode()) {
+            makeChurnVao(churnVaos_[0], churnVbos_[0],
+                         {-1.0f, -1.0f, 0.0f, 0.0f,
+                           3.0f, -1.0f, 0.0f, 0.0f,
+                          -1.0f,  3.0f, 0.0f, 0.0f},
+                         4, 0);
+            makeChurnVao(churnVaos_[1], churnVbos_[1],
+                         {0.0f, 0.0f, -1.0f, -1.0f,
+                          0.0f, 0.0f,  3.0f, -1.0f,
+                          0.0f, 0.0f, -1.0f,  3.0f},
+                         4, 2);
+            makeChurnVao(churnVaos_[2], churnVbos_[2],
+                         {-1.0f, -1.0f,
+                           3.0f, -1.0f,
+                          -1.0f,  3.0f},
+                         2, 0);
+        }
+
+        const GLsizei targetCount =
+            isChurnMode() ? static_cast<GLsizei>(textures_.size()) : 2;
+        gl.GenTextures(targetCount, textures_.data());
+        for (GLsizei index = 0; index < targetCount; ++index) {
+            const GLuint texture = textures_[static_cast<std::size_t>(index)];
             gl.BindTexture(GL_TEXTURE_2D, texture);
             gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
             gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -655,11 +743,12 @@ private:
                           GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         }
 
-        gl.GenFramebuffers(2, framebuffers_.data());
-        for (int index = 0; index < 2; ++index) {
-            gl.BindFramebuffer(GL_FRAMEBUFFER, framebuffers_[index]);
+        gl.GenFramebuffers(targetCount, framebuffers_.data());
+        for (GLsizei index = 0; index < targetCount; ++index) {
+            const std::size_t targetIndex = static_cast<std::size_t>(index);
+            gl.BindFramebuffer(GL_FRAMEBUFFER, framebuffers_[targetIndex]);
             gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                                    GL_TEXTURE_2D, textures_[index], 0);
+                                    GL_TEXTURE_2D, textures_[targetIndex], 0);
             gl.DrawBuffer(GL_COLOR_ATTACHMENT0);
             gl.ReadBuffer(GL_COLOR_ATTACHMENT0);
             const GLenum status = gl.CheckFramebufferStatus(GL_FRAMEBUFFER);
@@ -679,9 +768,33 @@ private:
         checkGLError(gl, "setup");
     }
 
+    void makeChurnVao(GLuint& vao,
+                      GLuint& vbo,
+                      std::initializer_list<GLfloat> vertices,
+                      GLint strideFloats,
+                      GLint offsetFloats) {
+        auto& gl = api_.gl;
+        gl.GenVertexArrays(1, &vao);
+        gl.BindVertexArray(vao);
+        gl.GenBuffers(1, &vbo);
+        gl.BindBuffer(GL_ARRAY_BUFFER, vbo);
+        gl.BufferData(GL_ARRAY_BUFFER,
+                      static_cast<GLsizeiptr>(vertices.size() * sizeof(GLfloat)),
+                      vertices.begin(),
+                      GL_STATIC_DRAW);
+        gl.EnableVertexAttribArray(0);
+        gl.VertexAttribPointer(
+            0, 2, GL_FLOAT, GL_FALSE,
+            strideFloats * static_cast<GLint>(sizeof(GLfloat)),
+            reinterpret_cast<const void*>(
+                static_cast<std::uintptr_t>(offsetFloats * sizeof(GLfloat))));
+    }
+
     void runFrame(int frame, int& textureUploads) {
         if (options_.mode == "general") {
             runGeneralFrame(frame, textureUploads);
+        } else if (options_.mode == "churn") {
+            runChurnFrame(frame, textureUploads);
         } else if (options_.mode == "pingpong") {
             runPingPongFrame(frame, textureUploads);
         } else {
@@ -832,6 +945,123 @@ private:
         drawPresentSample();
     }
 
+    GLuint churnVao(int index) const {
+        if (index <= 0) {
+            return vao_;
+        }
+        return churnVaos_[static_cast<std::size_t>(index - 1) % churnVaos_.size()];
+    }
+
+    void applyChurnFixedState(int index) {
+        auto& gl = api_.gl;
+        if ((index & 1) != 0) {
+            profileCall(ProfileBucket::Uniform, [&] {
+                gl.Enable(GL_BLEND);
+                gl.BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            });
+        } else {
+            profileCall(ProfileBucket::Uniform, [&] {
+                gl.Disable(GL_BLEND);
+            });
+        }
+        if ((index & 2) != 0) {
+            profileCall(ProfileBucket::Uniform, [&] {
+                gl.Enable(GL_CULL_FACE);
+            });
+        } else {
+            profileCall(ProfileBucket::Uniform, [&] {
+                gl.Disable(GL_CULL_FACE);
+            });
+        }
+    }
+
+    int nonTargetTexture(int targetIndex, int offset) const {
+        const int count = static_cast<int>(textures_.size());
+        return (targetIndex + 1 + (offset % (count - 1))) % count;
+    }
+
+    void bindSamplerSource(GLint location, int textureUnit, GLuint texture) {
+        auto& gl = api_.gl;
+        profileCall(ProfileBucket::ActiveTexture, [&] {
+            gl.ActiveTexture(GL_TEXTURE0 + textureUnit);
+        });
+        profileCall(ProfileBucket::BindTexture, [&] {
+            gl.BindTexture(GL_TEXTURE_2D, texture);
+        });
+        profileCall(ProfileBucket::Uniform, [&] {
+            gl.Uniform1i(location, textureUnit);
+        });
+    }
+
+    void runChurnFrame(int frame, int& textureUploads) {
+        auto& gl = api_.gl;
+        int lastTarget = 0;
+        for (int iteration = 0; iteration < options_.chainDraws; ++iteration) {
+            const int variant = (frame * options_.chainDraws + iteration) & 1023;
+            const int fboIndex = variant & 3;
+            const int fixedIndex = (variant >> 2) & 3;
+            const int programIndex = (variant >> 4) & 3;
+            const int resourceIndex = (variant >> 6) & 3;
+            const int vaoIndex = (variant >> 8) & 3;
+            lastTarget = fboIndex;
+
+            profileCall(ProfileBucket::BindFramebuffer, [&] {
+                gl.BindFramebuffer(GL_FRAMEBUFFER, framebuffers_[fboIndex]);
+            });
+            profileCall(ProfileBucket::Viewport, [&] {
+                gl.Viewport(0, 0, options_.size, options_.size);
+            });
+            applyChurnFixedState(fixedIndex);
+
+            if (programIndex == 0) {
+                profileCall(ProfileBucket::UseProgram, [&] {
+                    gl.UseProgram(seedProgram_);
+                });
+                const float r = static_cast<float>((frame * 17 + iteration * 3) % 251) / 255.0f;
+                const float g = static_cast<float>((frame * 31 + iteration * 5) % 251) / 255.0f;
+                const float b = static_cast<float>((frame * 47 + iteration * 7) % 251) / 255.0f;
+                profileCall(ProfileBucket::Uniform, [&] {
+                    gl.Uniform4f(seedColorLocation_, r, g, b, 1.0f);
+                });
+            } else if (programIndex == 1) {
+                profileCall(ProfileBucket::UseProgram, [&] {
+                    gl.UseProgram(sampleProgram_);
+                });
+                const int unit = resourceIndex & 1;
+                const int src = nonTargetTexture(fboIndex, resourceIndex);
+                bindSamplerSource(sampleSourceLocation_, unit, textures_[src]);
+            } else if (programIndex == 2) {
+                profileCall(ProfileBucket::UseProgram, [&] {
+                    gl.UseProgram(tintedSampleProgram_);
+                });
+                const int unit = (resourceIndex >> 1) & 1;
+                const int src = nonTargetTexture(fboIndex, resourceIndex + 1);
+                bindSamplerSource(tintedSourceLocation_, unit, textures_[src]);
+            } else {
+                profileCall(ProfileBucket::UseProgram, [&] {
+                    gl.UseProgram(dualSampleProgram_);
+                });
+                const int unitA = resourceIndex & 1;
+                const int unitB = unitA == 0 ? 1 : 0;
+                const int srcA = nonTargetTexture(fboIndex, resourceIndex);
+                const int srcB = nonTargetTexture(fboIndex, resourceIndex + 1);
+                bindSamplerSource(dualSourceALocation_, unitA, textures_[srcA]);
+                bindSamplerSource(dualSourceBLocation_, unitB, textures_[srcB]);
+            }
+
+            profileCall(ProfileBucket::BindVertexArray, [&] {
+                gl.BindVertexArray(churnVao(vaoIndex));
+            });
+            profileCall(ProfileBucket::DrawArrays, [&] {
+                gl.DrawArrays(GL_TRIANGLES, 0, 3);
+            });
+            maybeUploadDepth(frame, iteration, textureUploads);
+        }
+
+        currentTexture_ = lastTarget;
+        drawPresentSample();
+    }
+
     void drawPresentSample() {
         auto& gl = api_.gl;
         profileCall(ProfileBucket::BindFramebuffer, [&] {
@@ -873,10 +1103,13 @@ private:
             gl.DeleteTextures(1, &depthUploadTexture_);
         }
         if (framebuffers_[0] != 0 || framebuffers_[1] != 0) {
-            gl.DeleteFramebuffers(2, framebuffers_.data());
+            gl.DeleteFramebuffers(static_cast<GLsizei>(framebuffers_.size()), framebuffers_.data());
         }
         if (textures_[0] != 0 || textures_[1] != 0) {
-            gl.DeleteTextures(2, textures_.data());
+            gl.DeleteTextures(static_cast<GLsizei>(textures_.size()), textures_.data());
+        }
+        if (churnVbos_[0] != 0) {
+            gl.DeleteBuffers(static_cast<GLsizei>(churnVbos_.size()), churnVbos_.data());
         }
         if (vbo_ != 0) {
             gl.DeleteBuffers(1, &vbo_);
@@ -887,11 +1120,20 @@ private:
         if (vao_ != 0) {
             gl.DeleteVertexArrays(1, &vao_);
         }
+        if (churnVaos_[0] != 0) {
+            gl.DeleteVertexArrays(static_cast<GLsizei>(churnVaos_.size()), churnVaos_.data());
+        }
         if (seedProgram_ != 0) {
             gl.DeleteProgram(seedProgram_);
         }
         if (sampleProgram_ != 0) {
             gl.DeleteProgram(sampleProgram_);
+        }
+        if (tintedSampleProgram_ != 0) {
+            gl.DeleteProgram(tintedSampleProgram_);
+        }
+        if (dualSampleProgram_ != 0) {
+            gl.DeleteProgram(dualSampleProgram_);
         }
         gl.Finish();
     }
@@ -901,14 +1143,21 @@ private:
     Options options_;
     GLuint seedProgram_ = 0;
     GLuint sampleProgram_ = 0;
+    GLuint tintedSampleProgram_ = 0;
+    GLuint dualSampleProgram_ = 0;
     GLint seedColorLocation_ = -1;
     GLint sampleSourceLocation_ = -1;
+    GLint tintedSourceLocation_ = -1;
+    GLint dualSourceALocation_ = -1;
+    GLint dualSourceBLocation_ = -1;
     GLuint vao_ = 0;
     GLuint vbo_ = 0;
     GLuint ebo_ = 0;
-    std::array<GLuint, 2> textures_{0, 0};
+    std::array<GLuint, 3> churnVaos_{0, 0, 0};
+    std::array<GLuint, 3> churnVbos_{0, 0, 0};
+    std::array<GLuint, 4> textures_{0, 0, 0, 0};
     GLuint depthUploadTexture_ = 0;
-    std::array<GLuint, 2> framebuffers_{0, 0};
+    std::array<GLuint, 4> framebuffers_{0, 0, 0, 0};
     std::vector<std::uint16_t> depthPixels_;
     int currentTexture_ = 0;
     bool cleanedUp_ = false;
