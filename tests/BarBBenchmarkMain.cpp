@@ -2,6 +2,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
@@ -106,6 +107,107 @@ struct RunResult {
     double finishMs = 0.0;
     std::array<unsigned char, 4> readbackPixel{0, 0, 0, 0};
 };
+
+enum class ProfileBucket : std::size_t {
+    BindFramebuffer,
+    Viewport,
+    UseProgram,
+    BindVertexArray,
+    Uniform,
+    ActiveTexture,
+    BindTexture,
+    DrawArrays,
+    TexImage2D,
+    SwapBuffers,
+    Count,
+};
+
+struct ProfileBucketStats {
+    std::uint64_t count = 0;
+    double totalUs = 0.0;
+};
+
+struct CoreProfileStats {
+    int frames = 0;
+    std::array<ProfileBucketStats, static_cast<std::size_t>(ProfileBucket::Count)> buckets{};
+    double wallUs = 0.0;
+
+    void add(ProfileBucket bucket, double us) {
+        auto& stats = buckets[static_cast<std::size_t>(bucket)];
+        ++stats.count;
+        stats.totalUs += us;
+    }
+};
+
+const char* profileBucketName(ProfileBucket bucket) {
+    switch (bucket) {
+    case ProfileBucket::BindFramebuffer: return "bind_framebuffer";
+    case ProfileBucket::Viewport: return "viewport";
+    case ProfileBucket::UseProgram: return "use_program";
+    case ProfileBucket::BindVertexArray: return "bind_vertex_array";
+    case ProfileBucket::Uniform: return "uniform";
+    case ProfileBucket::ActiveTexture: return "active_texture";
+    case ProfileBucket::BindTexture: return "bind_texture";
+    case ProfileBucket::DrawArrays: return "draw_arrays";
+    case ProfileBucket::TexImage2D: return "tex_image_2d";
+    case ProfileBucket::SwapBuffers: return "swap_buffers";
+    case ProfileBucket::Count: break;
+    }
+    return "unknown";
+}
+
+double elapsedUs(Clock::time_point start, Clock::time_point end) {
+    return std::chrono::duration<double, std::micro>(end - start).count();
+}
+
+double profileAccountedUs(const CoreProfileStats& stats) {
+    double total = 0.0;
+    for (const auto& bucket : stats.buckets) {
+        total += bucket.totalUs;
+    }
+    return total;
+}
+
+void dumpCoreProfile(const char* runLabel,
+                     const char* segment,
+                     const CoreProfileStats& stats) {
+    if (stats.frames == 0) {
+        return;
+    }
+    const auto& drawBucket = stats.buckets[static_cast<std::size_t>(ProfileBucket::DrawArrays)];
+    const double accountedUs = profileAccountedUs(stats);
+    const double denom = stats.wallUs > 0.0 ? stats.wallUs : 1.0;
+    std::fprintf(stderr,
+        "[APPGL_BARB_PROFILE] run=%s segment=%s frames=%d draw_calls=%llu "
+        "wall_us=%.3f wall_per_draw_us=%.3f accounted_us=%.3f "
+        "accounted_per_draw_us=%.3f unattributed_us=%.3f\n",
+        runLabel,
+        segment,
+        stats.frames,
+        static_cast<unsigned long long>(drawBucket.count),
+        stats.wallUs,
+        drawBucket.count > 0 ? stats.wallUs / static_cast<double>(drawBucket.count) : 0.0,
+        accountedUs,
+        drawBucket.count > 0 ? accountedUs / static_cast<double>(drawBucket.count) : 0.0,
+        std::max(0.0, stats.wallUs - accountedUs));
+    for (std::size_t i = 0; i < static_cast<std::size_t>(ProfileBucket::Count); ++i) {
+        const auto& bucket = stats.buckets[i];
+        if (bucket.count == 0) {
+            continue;
+        }
+        const ProfileBucket bucketId = static_cast<ProfileBucket>(i);
+        std::fprintf(stderr,
+            "[APPGL_BARB_PROFILE] run=%s segment=%s bucket=%s count=%llu "
+            "total_us=%.3f avg_us=%.3f pct_wall=%.2f\n",
+            runLabel,
+            segment,
+            profileBucketName(bucketId),
+            static_cast<unsigned long long>(bucket.count),
+            bucket.totalUs,
+            bucket.totalUs / static_cast<double>(bucket.count),
+            (bucket.totalUs * 100.0) / denom);
+    }
+}
 
 [[noreturn]] void fail(const std::string& message) {
     throw std::runtime_error(message);
@@ -334,8 +436,18 @@ std::string makeSampleFragmentShader(int shaderIters) {
 class BenchmarkRun {
 public:
     BenchmarkRun(RuntimeApi& api, AppGLContext* context, const Options& options)
-        : api_(api), context_(context), options_(options) {
+        : api_(api),
+          context_(context),
+          options_(options),
+          profileEnabled_(std::getenv("APPGL_BARB_PROFILE") != nullptr) {
+        const auto setupStart = Clock::now();
         setup();
+        if (profileEnabled_) {
+            const auto setupEnd = Clock::now();
+            std::fprintf(stderr,
+                "[APPGL_BARB_PROFILE] setup total_us=%.3f\n",
+                elapsedUs(setupStart, setupEnd));
+        }
     }
 
     ~BenchmarkRun() {
@@ -351,11 +463,41 @@ public:
         result.textureUploads = 0;
 
         auto& gl = api_.gl;
+        const auto preFinishStart = Clock::now();
         gl.Finish();
+        const auto preFinishEnd = Clock::now();
+        if (profileEnabled_) {
+            std::fprintf(stderr,
+                "[APPGL_BARB_PROFILE] run=%s outside=pre_run_finish total_us=%.3f\n",
+                measured ? "measured" : "warmup",
+                elapsedUs(preFinishStart, preFinishEnd));
+        }
 
+        CoreProfileStats totalProfile;
+        CoreProfileStats firstFrameProfile;
+        CoreProfileStats remainingProfile;
         const auto coreStart = Clock::now();
         for (int frame = 0; frame < frames; ++frame) {
+            CoreProfileStats* frameProfile =
+                profileEnabled_ ? (frame == 0 ? &firstFrameProfile : &remainingProfile) : nullptr;
+            if (profileEnabled_) {
+                activeTotalProfile_ = &totalProfile;
+                activeFrameProfile_ = frameProfile;
+            }
+            const auto frameStart = Clock::now();
             runFrame(frame, result.textureUploads);
+            const auto frameEnd = Clock::now();
+            if (profileEnabled_) {
+                const double frameUs = elapsedUs(frameStart, frameEnd);
+                totalProfile.wallUs += frameUs;
+                ++totalProfile.frames;
+                if (frameProfile != nullptr) {
+                    frameProfile->wallUs += frameUs;
+                    ++frameProfile->frames;
+                }
+                activeTotalProfile_ = nullptr;
+                activeFrameProfile_ = nullptr;
+            }
         }
         const auto coreEnd = Clock::now();
 
@@ -363,22 +505,51 @@ public:
         result.perDrawUs = result.totalDraws > 0
             ? (result.coreMs * 1000.0) / static_cast<double>(result.totalDraws)
             : 0.0;
+        if (profileEnabled_) {
+            const char* label = measured ? "measured" : "warmup";
+            dumpCoreProfile(label, "all_frames", totalProfile);
+            dumpCoreProfile(label, "first_frame", firstFrameProfile);
+            dumpCoreProfile(label, "remaining_frames", remainingProfile);
+        }
 
         const auto readbackStart = Clock::now();
         gl.BindFramebuffer(GL_FRAMEBUFFER, framebuffers_[currentTexture_]);
         gl.ReadBuffer(GL_COLOR_ATTACHMENT0);
+        const auto readbackBindEnd = Clock::now();
         gl.ReadPixels(options_.size / 2, options_.size / 2, 1, 1,
                       GL_RGBA, GL_UNSIGNED_BYTE, result.readbackPixel.data());
+        const auto readPixelsEnd = Clock::now();
         const auto readbackEnd = Clock::now();
         checkGLError(gl, measured ? "measured isolated readback" : "warmup isolated readback");
+        const auto readbackCheckEnd = Clock::now();
         result.isolatedReadbackMs =
             std::chrono::duration<double, std::milli>(readbackEnd - readbackStart).count();
+        if (profileEnabled_) {
+            std::fprintf(stderr,
+                "[APPGL_BARB_PROFILE] run=%s outside=readback_bind total_us=%.3f\n",
+                measured ? "measured" : "warmup",
+                elapsedUs(readbackStart, readbackBindEnd));
+            std::fprintf(stderr,
+                "[APPGL_BARB_PROFILE] run=%s outside=read_pixels total_us=%.3f\n",
+                measured ? "measured" : "warmup",
+                elapsedUs(readbackBindEnd, readPixelsEnd));
+            std::fprintf(stderr,
+                "[APPGL_BARB_PROFILE] run=%s outside=readback_check_error total_us=%.3f\n",
+                measured ? "measured" : "warmup",
+                elapsedUs(readbackEnd, readbackCheckEnd));
+        }
 
         const auto finishStart = Clock::now();
         gl.Finish();
         const auto finishEnd = Clock::now();
         result.finishMs =
             std::chrono::duration<double, std::milli>(finishEnd - finishStart).count();
+        if (profileEnabled_) {
+            std::fprintf(stderr,
+                "[APPGL_BARB_PROFILE] run=%s outside=final_finish total_us=%.3f\n",
+                measured ? "measured" : "warmup",
+                elapsedUs(finishStart, finishEnd));
+        }
 
         if (result.readbackPixel[3] < 240) {
             fail("readback alpha check failed");
@@ -388,6 +559,24 @@ public:
     }
 
 private:
+    template <typename Fn>
+    void profileCall(ProfileBucket bucket, Fn&& fn) {
+        if (!profileEnabled_) {
+            fn();
+            return;
+        }
+        const auto start = Clock::now();
+        fn();
+        const auto end = Clock::now();
+        const double us = elapsedUs(start, end);
+        if (activeTotalProfile_ != nullptr) {
+            activeTotalProfile_->add(bucket, us);
+        }
+        if (activeFrameProfile_ != nullptr) {
+            activeFrameProfile_->add(bucket, us);
+        }
+    }
+
     void setup() {
         auto& gl = api_.gl;
         static constexpr const char* kFullscreenVS =
@@ -478,25 +667,41 @@ private:
             depthPixels_[pixel] = static_cast<std::uint16_t>(
                 0x1000u + ((frame * 131u + iteration * 97u + pixel * 13u) & 0x7fffu));
         }
-        gl.BindTexture(GL_TEXTURE_2D, depthUploadTexture_);
-        gl.TexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT16, 16, 16, 0,
-                      GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, depthPixels_.data());
+        profileCall(ProfileBucket::BindTexture, [&] {
+            gl.BindTexture(GL_TEXTURE_2D, depthUploadTexture_);
+        });
+        profileCall(ProfileBucket::TexImage2D, [&] {
+            gl.TexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT16, 16, 16, 0,
+                          GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, depthPixels_.data());
+        });
         ++textureUploads;
     }
 
     void runProducerFrame(int frame, int& textureUploads) {
         auto& gl = api_.gl;
-        gl.BindFramebuffer(GL_FRAMEBUFFER, framebuffers_[0]);
-        gl.Viewport(0, 0, options_.size, options_.size);
-        gl.UseProgram(seedProgram_);
-        gl.BindVertexArray(vao_);
+        profileCall(ProfileBucket::BindFramebuffer, [&] {
+            gl.BindFramebuffer(GL_FRAMEBUFFER, framebuffers_[0]);
+        });
+        profileCall(ProfileBucket::Viewport, [&] {
+            gl.Viewport(0, 0, options_.size, options_.size);
+        });
+        profileCall(ProfileBucket::UseProgram, [&] {
+            gl.UseProgram(seedProgram_);
+        });
+        profileCall(ProfileBucket::BindVertexArray, [&] {
+            gl.BindVertexArray(vao_);
+        });
 
         for (int iteration = 0; iteration <= options_.chainDraws; ++iteration) {
             const float r = static_cast<float>((frame * 17 + iteration * 3) % 251) / 255.0f;
             const float g = static_cast<float>((frame * 31 + iteration * 5) % 251) / 255.0f;
             const float b = static_cast<float>((frame * 47 + iteration * 7) % 251) / 255.0f;
-            gl.Uniform4f(seedColorLocation_, r, g, b, 1.0f);
-            gl.DrawArrays(GL_TRIANGLES, 0, 3);
+            profileCall(ProfileBucket::Uniform, [&] {
+                gl.Uniform4f(seedColorLocation_, r, g, b, 1.0f);
+            });
+            profileCall(ProfileBucket::DrawArrays, [&] {
+                gl.DrawArrays(GL_TRIANGLES, 0, 3);
+            });
             maybeUploadDepth(frame, iteration, textureUploads);
         }
 
@@ -506,28 +711,56 @@ private:
 
     void runPingPongFrame(int frame, int& textureUploads) {
         auto& gl = api_.gl;
-        gl.BindFramebuffer(GL_FRAMEBUFFER, framebuffers_[0]);
-        gl.Viewport(0, 0, options_.size, options_.size);
-        gl.UseProgram(seedProgram_);
-        gl.Uniform4f(seedColorLocation_,
-                     1.0f,
-                     static_cast<float>((frame * 17) % 7) * 0.01f,
-                     static_cast<float>((frame * 31) % 5) * 0.01f,
-                     1.0f);
-        gl.BindVertexArray(vao_);
-        gl.DrawArrays(GL_TRIANGLES, 0, 3);
+        profileCall(ProfileBucket::BindFramebuffer, [&] {
+            gl.BindFramebuffer(GL_FRAMEBUFFER, framebuffers_[0]);
+        });
+        profileCall(ProfileBucket::Viewport, [&] {
+            gl.Viewport(0, 0, options_.size, options_.size);
+        });
+        profileCall(ProfileBucket::UseProgram, [&] {
+            gl.UseProgram(seedProgram_);
+        });
+        profileCall(ProfileBucket::Uniform, [&] {
+            gl.Uniform4f(seedColorLocation_,
+                         1.0f,
+                         static_cast<float>((frame * 17) % 7) * 0.01f,
+                         static_cast<float>((frame * 31) % 5) * 0.01f,
+                         1.0f);
+        });
+        profileCall(ProfileBucket::BindVertexArray, [&] {
+            gl.BindVertexArray(vao_);
+        });
+        profileCall(ProfileBucket::DrawArrays, [&] {
+            gl.DrawArrays(GL_TRIANGLES, 0, 3);
+        });
 
         currentTexture_ = 0;
         for (int iteration = 0; iteration < options_.chainDraws; ++iteration) {
             const int destination = 1 - currentTexture_;
-            gl.BindFramebuffer(GL_FRAMEBUFFER, framebuffers_[destination]);
-            gl.Viewport(0, 0, options_.size, options_.size);
-            gl.UseProgram(sampleProgram_);
-            gl.ActiveTexture(GL_TEXTURE0);
-            gl.BindTexture(GL_TEXTURE_2D, textures_[currentTexture_]);
-            gl.Uniform1i(sampleSourceLocation_, 0);
-            gl.BindVertexArray(vao_);
-            gl.DrawArrays(GL_TRIANGLES, 0, 3);
+            profileCall(ProfileBucket::BindFramebuffer, [&] {
+                gl.BindFramebuffer(GL_FRAMEBUFFER, framebuffers_[destination]);
+            });
+            profileCall(ProfileBucket::Viewport, [&] {
+                gl.Viewport(0, 0, options_.size, options_.size);
+            });
+            profileCall(ProfileBucket::UseProgram, [&] {
+                gl.UseProgram(sampleProgram_);
+            });
+            profileCall(ProfileBucket::ActiveTexture, [&] {
+                gl.ActiveTexture(GL_TEXTURE0);
+            });
+            profileCall(ProfileBucket::BindTexture, [&] {
+                gl.BindTexture(GL_TEXTURE_2D, textures_[currentTexture_]);
+            });
+            profileCall(ProfileBucket::Uniform, [&] {
+                gl.Uniform1i(sampleSourceLocation_, 0);
+            });
+            profileCall(ProfileBucket::BindVertexArray, [&] {
+                gl.BindVertexArray(vao_);
+            });
+            profileCall(ProfileBucket::DrawArrays, [&] {
+                gl.DrawArrays(GL_TRIANGLES, 0, 3);
+            });
             currentTexture_ = destination;
             maybeUploadDepth(frame, iteration, textureUploads);
         }
@@ -537,15 +770,33 @@ private:
 
     void drawPresentSample() {
         auto& gl = api_.gl;
-        gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
-        gl.Viewport(0, 0, options_.size, options_.size);
-        gl.UseProgram(sampleProgram_);
-        gl.ActiveTexture(GL_TEXTURE0);
-        gl.BindTexture(GL_TEXTURE_2D, textures_[currentTexture_]);
-        gl.Uniform1i(sampleSourceLocation_, 0);
-        gl.BindVertexArray(vao_);
-        gl.DrawArrays(GL_TRIANGLES, 0, 3);
-        api_.swapBuffers(context_);
+        profileCall(ProfileBucket::BindFramebuffer, [&] {
+            gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+        });
+        profileCall(ProfileBucket::Viewport, [&] {
+            gl.Viewport(0, 0, options_.size, options_.size);
+        });
+        profileCall(ProfileBucket::UseProgram, [&] {
+            gl.UseProgram(sampleProgram_);
+        });
+        profileCall(ProfileBucket::ActiveTexture, [&] {
+            gl.ActiveTexture(GL_TEXTURE0);
+        });
+        profileCall(ProfileBucket::BindTexture, [&] {
+            gl.BindTexture(GL_TEXTURE_2D, textures_[currentTexture_]);
+        });
+        profileCall(ProfileBucket::Uniform, [&] {
+            gl.Uniform1i(sampleSourceLocation_, 0);
+        });
+        profileCall(ProfileBucket::BindVertexArray, [&] {
+            gl.BindVertexArray(vao_);
+        });
+        profileCall(ProfileBucket::DrawArrays, [&] {
+            gl.DrawArrays(GL_TRIANGLES, 0, 3);
+        });
+        profileCall(ProfileBucket::SwapBuffers, [&] {
+            api_.swapBuffers(context_);
+        });
     }
 
     void cleanup() {
@@ -593,6 +844,9 @@ private:
     std::vector<std::uint16_t> depthPixels_;
     int currentTexture_ = 0;
     bool cleanedUp_ = false;
+    bool profileEnabled_ = false;
+    CoreProfileStats* activeTotalProfile_ = nullptr;
+    CoreProfileStats* activeFrameProfile_ = nullptr;
 };
 
 std::string jsonEscape(std::string_view value) {

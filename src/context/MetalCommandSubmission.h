@@ -8,6 +8,7 @@
 #include <array>
 #include <cassert>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -592,9 +593,14 @@ public:
         if (semaphore == nullptr) {
             return false;
         }
+        const bool profileEnabled = state_ && state_->profileEnabled;
+        const auto waitStart = profileEnabled
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         recordWaitReason(kind, reason, label);
-        if (kind == WaitKind::InFlightToken && state_ && state_->profileEnabled) {
+        if (kind == WaitKind::InFlightToken && profileEnabled) {
             if (dispatch_semaphore_wait(semaphore, DISPATCH_TIME_NOW) == 0) {
+                recordWaitComplete(kind, reason, label, waitStart);
                 return true;
             }
             const std::uint64_t count = state_->backpressureWaits.fetch_add(1) + 1;
@@ -612,6 +618,9 @@ public:
             DISPATCH_TIME_NOW,
             static_cast<int64_t>(timeoutMs * static_cast<std::uint64_t>(NSEC_PER_MSEC)));
         if (dispatch_semaphore_wait(semaphore, deadline) == 0) {
+            if (profileEnabled) {
+                recordWaitComplete(kind, reason, label, waitStart);
+            }
             return true;
         }
         recordTimeout(kind, reason, label, timeoutMs);
@@ -641,6 +650,31 @@ public:
                          state_->inFlightCount.load());
             std::fflush(stderr);
         }
+    }
+
+    void recordWaitComplete(WaitKind kind,
+                            AppGLCommandReason reason,
+                            NSString* label,
+                            std::chrono::steady_clock::time_point waitStart) {
+        if (!state_ || !state_->profileEnabled) {
+            return;
+        }
+        const auto waitEnd = std::chrono::steady_clock::now();
+        const double waitUs =
+            std::chrono::duration<double, std::micro>(waitEnd - waitStart).count();
+        const auto& record = appGLCommandReasonRecord(reason);
+        std::fprintf(stderr,
+                     "[APPGL_CB_PROFILE] wait_complete kind=%s reason=%s mode=%s dependency=%s label=%s wait_us=%.3f submitted=%llu completed=%llu in_flight=%u\n",
+                     waitKindName(kind),
+                     record.name,
+                     appGLSubmitModeName(record.submitMode),
+                     appGLDependencyClassName(record.dependencyClass),
+                     label != nil ? label.UTF8String : "(none)",
+                     waitUs,
+                     static_cast<unsigned long long>(state_->submittedCommandBuffers.load()),
+                     static_cast<unsigned long long>(state_->completedCommandBuffers.load()),
+                     state_->inFlightCount.load());
+        std::fflush(stderr);
     }
 
     const char* waitKindName(WaitKind kind) const {
