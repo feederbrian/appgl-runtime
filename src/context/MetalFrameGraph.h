@@ -760,6 +760,10 @@ struct MetalTessDrawInfo {
     // Optional render-verification uses may still run below the encoder's
     // soft allocation cap.
     bool tessEvalComputeRequired = false;
+    // Reflected size of TES-as-compute `main0_out`. The encoder sizes the
+    // Shared-storage spvOut buffer from this stride so wide TES output structs
+    // do not overrun the Phase 3 legacy slot size.
+    std::size_t tessEvalOutputStrideBytes = 256;
 
     // Phase 3B.5 [metal-tess-TF]: encoder out-params used by the TF
     // write path in `tryMetalTessellationDraw`. After the TES-compute

@@ -867,6 +867,199 @@ static NSUInteger appglOptionalTessEvalComputeByteLimit() {
     return static_cast<NSUInteger>(parsed);
 }
 
+static std::size_t appglAlignUp(std::size_t value, std::size_t alignment) {
+    if (alignment <= 1) {
+        return value;
+    }
+    const std::size_t rem = value % alignment;
+    return rem == 0 ? value : value + (alignment - rem);
+}
+
+static std::string appglTrimCopy(const std::string& value) {
+    std::size_t begin = 0;
+    while (begin < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[begin]))) {
+        ++begin;
+    }
+    std::size_t end = value.size();
+    while (end > begin &&
+           std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+        --end;
+    }
+    return value.substr(begin, end - begin);
+}
+
+static bool appglMslBaseTypeLayout(const std::string& rawType,
+                                   std::size_t& size,
+                                   std::size_t& alignment) {
+    const std::string type = appglTrimCopy(rawType);
+    auto vectorLayout = [&](std::size_t scalarBytes,
+                            std::size_t count) -> bool {
+        if (count == 0) {
+            return false;
+        }
+        if (count == 3 || count == 4) {
+            size = scalarBytes * 4;
+            alignment = scalarBytes * 4;
+        } else {
+            size = scalarBytes * count;
+            alignment = scalarBytes * count;
+        }
+        return true;
+    };
+
+    if (type.rfind("packed_float3", 0) == 0) {
+        size = 12;
+        alignment = 4;
+        return true;
+    }
+    if (type.rfind("float", 0) == 0 || type.rfind("int", 0) == 0 ||
+        type.rfind("uint", 0) == 0) {
+        const char* prefix = type.rfind("float", 0) == 0 ? "float" :
+            (type.rfind("uint", 0) == 0 ? "uint" : "int");
+        const std::size_t prefixLen = std::strlen(prefix);
+        if (type.size() == prefixLen) {
+            return vectorLayout(4, 1);
+        }
+        if (type.find('x', prefixLen) != std::string::npos) {
+            size = 64;
+            alignment = 16;
+            return true;
+        }
+        const unsigned char c = static_cast<unsigned char>(type[prefixLen]);
+        if (std::isdigit(c)) {
+            return vectorLayout(4, static_cast<std::size_t>(type[prefixLen] - '0'));
+        }
+    }
+    if (type.rfind("half", 0) == 0) {
+        if (type.size() == 4) {
+            return vectorLayout(2, 1);
+        }
+        const unsigned char c = static_cast<unsigned char>(type[4]);
+        if (std::isdigit(c)) {
+            return vectorLayout(2, static_cast<std::size_t>(type[4] - '0'));
+        }
+    }
+    if (type.rfind("appgl_df64", 0) == 0 || type.rfind("double", 0) == 0) {
+        size = 16;
+        alignment = 16;
+        return true;
+    }
+    if (type == "bool") {
+        size = 4;
+        alignment = 4;
+        return true;
+    }
+    return false;
+}
+
+static bool appglMslMemberLayout(const std::string& rawDecl,
+                                 std::size_t& size,
+                                 std::size_t& alignment) {
+    const std::string decl = appglTrimCopy(rawDecl);
+    if (decl.empty()) {
+        return false;
+    }
+    const std::string unsafePrefix = "spvUnsafeArray<";
+    const std::size_t unsafePos = decl.find(unsafePrefix);
+    if (unsafePos != std::string::npos) {
+        const std::size_t typeBegin = unsafePos + unsafePrefix.size();
+        const std::size_t comma = decl.find(',', typeBegin);
+        const std::size_t close = decl.find('>', comma);
+        if (comma == std::string::npos || close == std::string::npos) {
+            return false;
+        }
+        std::size_t elemSize = 0;
+        std::size_t elemAlign = 0;
+        if (!appglMslBaseTypeLayout(decl.substr(typeBegin, comma - typeBegin),
+                                    elemSize, elemAlign)) {
+            return false;
+        }
+        const std::string countText =
+            appglTrimCopy(decl.substr(comma + 1, close - comma - 1));
+        char* end = nullptr;
+        const unsigned long long count =
+            std::strtoull(countText.c_str(), &end, 10);
+        if (end == countText.c_str()) {
+            return false;
+        }
+        const std::size_t stride = appglAlignUp(elemSize, elemAlign);
+        size = stride * static_cast<std::size_t>(std::max<unsigned long long>(count, 1));
+        alignment = elemAlign;
+        return true;
+    }
+
+    const std::size_t typeEnd = decl.find_first_of(" \t");
+    if (typeEnd == std::string::npos) {
+        return false;
+    }
+    std::size_t baseSize = 0;
+    std::size_t baseAlign = 0;
+    if (!appglMslBaseTypeLayout(decl.substr(0, typeEnd), baseSize, baseAlign)) {
+        return false;
+    }
+    std::size_t count = 1;
+    const std::size_t bracket = decl.find('[', typeEnd);
+    if (bracket != std::string::npos) {
+        const std::size_t close = decl.find(']', bracket);
+        if (close != std::string::npos) {
+            char* end = nullptr;
+            const std::string countText =
+                appglTrimCopy(decl.substr(bracket + 1, close - bracket - 1));
+            const unsigned long long parsed =
+                std::strtoull(countText.c_str(), &end, 10);
+            if (end != countText.c_str()) {
+                count = static_cast<std::size_t>(std::max<unsigned long long>(parsed, 1));
+            }
+        }
+    }
+    size = appglAlignUp(baseSize, baseAlign) * count;
+    alignment = baseAlign;
+    return true;
+}
+
+static std::size_t appglEstimateMslStructStrideBytes(const std::string* msl,
+                                                     const char* structName) {
+    if (msl == nullptr || structName == nullptr) {
+        return 0;
+    }
+    const std::string needle = std::string("struct ") + structName;
+    const std::size_t structPos = msl->find(needle);
+    if (structPos == std::string::npos) {
+        return 0;
+    }
+    const std::size_t bodyBegin = msl->find('{', structPos);
+    const std::size_t bodyEnd = msl->find("};", bodyBegin);
+    if (bodyBegin == std::string::npos || bodyEnd == std::string::npos) {
+        return 0;
+    }
+
+    std::size_t offset = 0;
+    std::size_t maxAlign = 1;
+    bool sawMember = false;
+    std::size_t cursor = bodyBegin + 1;
+    while (cursor < bodyEnd) {
+        const std::size_t semi = msl->find(';', cursor);
+        if (semi == std::string::npos || semi > bodyEnd) {
+            break;
+        }
+        const std::string decl = msl->substr(cursor, semi - cursor);
+        cursor = semi + 1;
+        std::size_t memberSize = 0;
+        std::size_t memberAlign = 0;
+        if (!appglMslMemberLayout(decl, memberSize, memberAlign)) {
+            offset = appglAlignUp(offset, 16) + 256;
+            maxAlign = std::max<std::size_t>(maxAlign, 16);
+            continue;
+        }
+        offset = appglAlignUp(offset, memberAlign);
+        offset += memberSize;
+        maxAlign = std::max(maxAlign, memberAlign);
+        sawMember = true;
+    }
+    return sawMember ? appglAlignUp(offset, maxAlign) : 0;
+}
+
 // Phase 4A [metal-tess-TF] — MSL source for the CPU-exact domain-gen
 // port. Shared between the production path (`ensureTessDomainPortLibrary`
 // on `Impl`) and the validation probe (`phaseAProbeTessDomainPort`).
@@ -7939,27 +8132,52 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             26,
             static_cast<std::size_t>(factorBytes));
 
-        // Phase 3: additional buffers for VS-compute + TCS user
-        // output. Conservative over-allocation: 256 bytes per struct
-        // slot covers up to 16 vec4 members. Refine via SPIRV-Cross
-        // `get_declared_struct_size` once the three-pass encode is
-        // proven to work end-to-end. Storage mode is Private because
-        // writes come from compute and reads go to the tessellator +
-        // vertex function — all GPU-side.
-	        const bool isPhase3 =
-	            info.vertexComputePipelineState != nullptr || info.forcePhase3Buffers;
+        // Phase 3: additional buffers for VS-compute + TCS user output.
+        // Size each slot from the emitted MSL structs; 256 bytes remains the
+        // legacy minimum, but CTS max-in/out cases can legitimately carry
+        // larger arrays through VS/TCS/TES handoff buffers.
+        const bool isPhase3 =
+            info.vertexComputePipelineState != nullptr || info.forcePhase3Buffers;
         const NSUInteger kPhase3SlotBytes = 256;
+        const NSUInteger vsOutStride = std::max<NSUInteger>(
+            kPhase3SlotBytes,
+            static_cast<NSUInteger>(appglEstimateMslStructStrideBytes(
+                info.tessVertexAsComputeMSL, "main0_out")));
+        const NSUInteger cpOutStride = std::max<NSUInteger>(
+            kPhase3SlotBytes,
+            static_cast<NSUInteger>(appglEstimateMslStructStrideBytes(
+                info.tessControlMSL, "main0_out")));
+        const NSUInteger patchOutStride = std::max<NSUInteger>(
+            kPhase3SlotBytes,
+            static_cast<NSUInteger>(appglEstimateMslStructStrideBytes(
+                info.tessControlMSL, "main0_patchOut")));
         const NSUInteger vertexCount = isPhase3
             ? (NSUInteger)(info.patchCount * info.patchVertices)
             : 0;
-        const NSUInteger vsOutBytes =
-            isPhase3 ? vertexCount * kPhase3SlotBytes : 0;
-        const NSUInteger cpOutBytes = isPhase3
-            ? (NSUInteger)(info.patchCount * info.tessControlOutputVertices) * kPhase3SlotBytes
-            : 0;
-        const NSUInteger patchOutBytes = isPhase3
-            ? (NSUInteger)info.patchCount * kPhase3SlotBytes
-            : 0;
+        auto checkedPhase3Bytes =
+            [](NSUInteger count, NSUInteger stride, NSUInteger& out) -> bool {
+                if (stride == 0) {
+                    return false;
+                }
+                if (count > std::numeric_limits<NSUInteger>::max() / stride) {
+                    return false;
+                }
+                out = count * stride;
+                return true;
+            };
+        NSUInteger vsOutBytes = 0;
+        NSUInteger cpOutBytes = 0;
+        NSUInteger patchOutBytes = 0;
+        if (isPhase3) {
+            if (!checkedPhase3Bytes(vertexCount, vsOutStride, vsOutBytes) ||
+                !checkedPhase3Bytes(
+                    (NSUInteger)(info.patchCount * info.tessControlOutputVertices),
+                    cpOutStride, cpOutBytes) ||
+                !checkedPhase3Bytes((NSUInteger)info.patchCount,
+                                    patchOutStride, patchOutBytes)) {
+                return false;
+            }
+        }
         id<MTLBuffer> vsOutBuf = nil;
         id<MTLBuffer> cpOutBuf = nil;
         id<MTLBuffer> patchOutBuf = nil;
@@ -8023,11 +8241,17 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
 	            }
             if (s_trBuf) {
                 std::fprintf(stderr,
-                    "[TESS-BUF] alloc vsOutBuf=%p (sz=%lu) cpOutBuf=%p (sz=%lu) patchOutBuf=%p (sz=%lu) "
-                    "vertexCount=%lu patchCount=%d patchVertices=%d tessCtrlOutputVertices=%d\n",
+                    "[TESS-BUF] alloc vsOutBuf=%p (sz=%lu stride=%lu) "
+                    "cpOutBuf=%p (sz=%lu stride=%lu) "
+                    "patchOutBuf=%p (sz=%lu stride=%lu) "
+                    "vertexCount=%lu patchCount=%d patchVertices=%d "
+                    "tessCtrlOutputVertices=%d\n",
                     (__bridge void*)vsOutBuf, (unsigned long)vsOutBytes,
+                    (unsigned long)vsOutStride,
                     (__bridge void*)cpOutBuf, (unsigned long)cpOutBytes,
+                    (unsigned long)cpOutStride,
                     (__bridge void*)patchOutBuf, (unsigned long)patchOutBytes,
+                    (unsigned long)patchOutStride,
                     (unsigned long)vertexCount, info.patchCount, info.patchVertices,
                     info.tessControlOutputVertices);
             }
@@ -8184,7 +8408,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             if (std::getenv("APPGL_TRACE_TESS_BUF") != nullptr) {
                 const std::uint8_t* p = static_cast<const std::uint8_t*>([vsOutBuf contents]);
                 const NSUInteger len = vsOutBuf.length;
-                const NSUInteger slot = kPhase3SlotBytes;
+                const NSUInteger slot = vsOutStride;
                 const NSUInteger nverts = len / slot;
                 std::fprintf(stderr, "[TESS-BUF] post-VS-compute vsOutBuf len=%lu slot=%lu nverts=%lu\n",
                     (unsigned long)len, (unsigned long)slot, (unsigned long)nverts);
@@ -8254,7 +8478,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         if (std::getenv("APPGL_TRACE_TESS_BUF") != nullptr) {
             const std::uint8_t* p = static_cast<const std::uint8_t*>([cpOutBuf contents]);
             const NSUInteger len = cpOutBuf.length;
-            const NSUInteger slot = kPhase3SlotBytes;
+            const NSUInteger slot = cpOutStride;
             const NSUInteger ncps = len / slot;
             std::fprintf(stderr, "[TESS-BUF] post-TCS-compute cpOutBuf len=%lu slot=%lu ncps=%lu\n",
                 (unsigned long)len, (unsigned long)slot, (unsigned long)ncps);
@@ -8444,11 +8668,14 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 NSUInteger domainCoordBytes = 0;
                 NSUInteger domainPrimIDBytes = 0;
                 NSUInteger tesComputeOutBytes = 0;
+                const NSUInteger tesComputeOutStride =
+                    static_cast<NSUInteger>(
+                        std::max<std::size_t>(1, info.tessEvalOutputStrideBytes));
                 if (!checkedTessByteCount(domainVertexCapacity, 12,
                                           domainCoordBytes) ||
                     !checkedTessByteCount(domainVertexCapacity, sizeof(uint32_t),
                                           domainPrimIDBytes) ||
-                    !checkedTessByteCount(domainVertexCapacity, 256,
+                    !checkedTessByteCount(domainVertexCapacity, tesComputeOutStride,
                                           tesComputeOutBytes)) {
                     return false;
                 }
@@ -8466,10 +8693,11 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                         std::fprintf(stderr,
                             "[APPGL] tess-tf: skip optional TES-compute "
                             "capacity=%llu coordBytes=0x%llx primBytes=0x%llx "
-                            "tesBytes=0x%llx limit=0x%llx\n",
+                            "tesStride=%llu tesBytes=0x%llx limit=0x%llx\n",
                             (unsigned long long)domainVertexCapacity,
                             (unsigned long long)domainCoordBytes,
                             (unsigned long long)domainPrimIDBytes,
+                            (unsigned long long)tesComputeOutStride,
                             (unsigned long long)tesComputeOutBytes,
                             (unsigned long long)optionalLimit);
                     }
@@ -8500,10 +8728,9 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                                 length:sizeof(uint32_t)
                                options:MTLResourceStorageModeShared];
                 // TES-compute output buffer. The MSL struct size is embedded
-                // in the TES compile; 256 bytes/vertex is the Phase 3 slot
-                // over-allocation we already use elsewhere, now multiplied by
-                // the actual post-TCS domain capacity rather than patch-count
-                // worst case.
+                // in the TES compile; size the buffer from the reflected
+                // `main0_out` stride, preserving the Phase 3 legacy minimum
+                // slot while covering wide TES outputs.
                 // Shared storage: the TF-write path in
                 // `tryMetalTessellationDraw` reads the CPU-side bytes
                 // after the dispatch commits and deposits them into

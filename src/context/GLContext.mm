@@ -45962,6 +45962,10 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     // slot is ignored and the render path runs unchanged.
     info.tessEvalComputePipelineState =
         program.metalTessEvalComputePipelineState;
+    if (program.tessEvalOutputLayout.structSize > 0) {
+        info.tessEvalOutputStrideBytes =
+            std::max<std::size_t>(256, program.tessEvalOutputLayout.structSize);
+    }
     info.tessControlMSL = &program.tessControlMSL;
     info.tessVertexAsComputeMSL = &program.tessVertexAsComputeMSL;
     info.tessEvalAsComputeMSL = &program.tessEvalAsComputeMSL;
@@ -46357,11 +46361,9 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
             (id<MTLBuffer>)CFBridgingRelease(tfRetainedOutBuf);
         const std::uint8_t* bytes =
             static_cast<const std::uint8_t*>([tesOut contents]);
-        // Per-vertex slot size = reflected struct size. The TES
-        // compute kernel writes `spvOut[gl_GlobalInvocationID.x]`
-        // with this stride (Metal lays out arrays of structs packed
-        // at `sizeof(main0_out)`); the 256-byte over-allocation in
-        // the encoder just sizes the total buffer, not the stride.
+        // Per-vertex slot size = reflected struct size. The TES compute
+        // kernel writes `spvOut[gl_GlobalInvocationID.x]` at this stride
+        // (Metal lays out arrays of structs packed at `sizeof(main0_out)`).
         const std::size_t kTesComputeSlotBytes =
             program.tessEvalOutputLayout.structSize;
         // Topology from TES genMode: point_mode→GL_POINTS,
