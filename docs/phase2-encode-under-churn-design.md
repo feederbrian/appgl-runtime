@@ -1,6 +1,7 @@
 # Phase 2 Encode-Under-Churn Design
 
-Status: design note; implementation gated on Foreman + SCOUT-W review.
+Status: design note; Slice 1 instrumentation is opt-in; behavior-changing
+levers remain gated on Foreman + SCOUT-W review.
 Date: 2026-05-31
 
 ## Objective
@@ -278,6 +279,17 @@ show which stall moved.
 
 Each slice should carry its own before/after profile, not wait for the whole
 stack to land.
+
+Slice 1 instrumentation flag:
+
+- `APPGL_PHASE2_PLAN_PROFILE=1` enables candidate plan-key lookup accounting
+  in the translated-draw wrapper after submission-group classification.
+- `APPGL_PHASE2_PLAN_KEY_PROFILE=1` is accepted as an alias.
+- The report prefix is `[APPGL_PHASE2_PLAN_PROFILE]` and emits total draws,
+  lookups, hits, misses, rejects, unique key count, hit-rate percentage, and
+  per-reject reason counts.
+- The hook is measurement-only: every draw still executes the existing direct
+  `frameGraph->encodeTranslatedDraw` path.
 
 ## Validation Gates
 

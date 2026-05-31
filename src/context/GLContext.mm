@@ -45,6 +45,7 @@
 #include <iterator>
 #include <limits>
 #include <set>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -329,6 +330,474 @@ private:
     bool enabled_ = false;
     GLDrawProfileTimePoint start_{};
     GLDrawProfileTimePoint cursor_{};
+};
+
+enum class Phase2PlanRejectReason : std::size_t {
+    MissingProgram,
+    MissingShader,
+    MissingReflection,
+    SideEffect,
+    KeyCapacity,
+    Count,
+};
+
+static const char* phase2PlanRejectReasonName(Phase2PlanRejectReason reason) {
+    switch (reason) {
+        case Phase2PlanRejectReason::MissingProgram: return "missing_program";
+        case Phase2PlanRejectReason::MissingShader: return "missing_shader";
+        case Phase2PlanRejectReason::MissingReflection: return "missing_reflection";
+        case Phase2PlanRejectReason::SideEffect: return "side_effect";
+        case Phase2PlanRejectReason::KeyCapacity: return "key_capacity";
+        case Phase2PlanRejectReason::Count: break;
+    }
+    return "unknown";
+}
+
+static bool phase2PlanProfileEnabled() {
+    return std::getenv("APPGL_PHASE2_PLAN_PROFILE") != nullptr ||
+           std::getenv("APPGL_PHASE2_PLAN_KEY_PROFILE") != nullptr;
+}
+
+static constexpr std::uint64_t kPhase2PlanHashOffset = 1469598103934665603ull;
+static constexpr std::uint64_t kPhase2PlanHashPrime = 1099511628211ull;
+
+static void phase2PlanHashByte(std::uint64_t& hash, std::uint8_t byte) {
+    hash ^= byte;
+    hash *= kPhase2PlanHashPrime;
+}
+
+static void phase2PlanHashU64(std::uint64_t& hash, std::uint64_t value) {
+    for (int i = 0; i < 8; ++i) {
+        phase2PlanHashByte(
+            hash, static_cast<std::uint8_t>((value >> (i * 8)) & 0xFFu));
+    }
+}
+
+static void phase2PlanHashBool(std::uint64_t& hash, bool value) {
+    phase2PlanHashU64(hash, value ? 1ull : 0ull);
+}
+
+static void phase2PlanHashFloat(std::uint64_t& hash, float value) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    phase2PlanHashU64(hash, bits);
+}
+
+static void phase2PlanHashPointer(std::uint64_t& hash, const void* pointer) {
+    phase2PlanHashU64(hash,
+        static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(pointer)));
+}
+
+static void phase2PlanHashShaderIdentity(
+    std::uint64_t& hash,
+    const std::string* source)
+{
+    phase2PlanHashPointer(hash, source);
+    phase2PlanHashU64(hash, source != nullptr ? source->size() : 0u);
+    phase2PlanHashPointer(
+        hash, source != nullptr && !source->empty() ? source->data() : nullptr);
+}
+
+static void phase2PlanHashResourceBindingShape(
+    std::uint64_t& hash,
+    const ShaderReflection::ResourceBinding& binding)
+{
+    phase2PlanHashU64(hash, binding.glBinding);
+    phase2PlanHashU64(hash, static_cast<std::uint64_t>(binding.uniformLocation));
+    phase2PlanHashU64(hash, binding.glType);
+    phase2PlanHashU64(hash, binding.arraySize);
+    phase2PlanHashU64(hash, binding.metalBinding);
+    phase2PlanHashU64(hash, binding.byteSize);
+    phase2PlanHashBool(hash, binding.hasInstanceName);
+    phase2PlanHashU64(hash, binding.blockArraySize);
+    phase2PlanHashBool(hash, binding.hasExplicitBinding);
+    phase2PlanHashBool(hash, binding.active);
+    phase2PlanHashBool(hash, binding.multisampleStorageImage);
+    phase2PlanHashBool(hash, binding.multisampleStorageImageArray);
+    phase2PlanHashU64(hash, binding.storageImageTarget);
+    phase2PlanHashU64(hash, binding.metalAtomicBufferBinding);
+    phase2PlanHashBool(hash, binding.sparseStorageImageRead);
+    phase2PlanHashBool(hash, binding.sparseStorageImageWrite);
+    phase2PlanHashBool(hash, binding.containsFp64);
+    phase2PlanHashU64(hash, binding.members.size());
+    for (const auto& member : binding.members) {
+        phase2PlanHashU64(hash, member.offset);
+        phase2PlanHashU64(hash, member.size);
+        phase2PlanHashU64(hash, member.type);
+        phase2PlanHashBool(hash, member.isRowMajor);
+        phase2PlanHashU64(hash, member.arraySize);
+        phase2PlanHashBool(hash, member.isArray);
+        phase2PlanHashU64(hash, static_cast<std::uint64_t>(member.arrayStride));
+        phase2PlanHashU64(hash, static_cast<std::uint64_t>(member.matrixStride));
+        phase2PlanHashU64(hash, static_cast<std::uint64_t>(member.topLevelArraySize));
+        phase2PlanHashU64(hash, static_cast<std::uint64_t>(member.topLevelArrayStride));
+        phase2PlanHashBool(hash, member.containsFp64);
+    }
+}
+
+static void phase2PlanHashReflectionShape(
+    std::uint64_t& hash,
+    const ShaderReflection* reflection)
+{
+    phase2PlanHashPointer(hash, reflection);
+    if (reflection == nullptr) {
+        return;
+    }
+
+    phase2PlanHashU64(hash, reflection->vertexInputs.size());
+    for (const auto& input : reflection->vertexInputs) {
+        phase2PlanHashU64(hash, input.location);
+        phase2PlanHashU64(hash, input.sourceLocation);
+        phase2PlanHashU64(hash, input.type);
+        phase2PlanHashBool(hash, input.containsFp64);
+    }
+
+    auto hashBindings = [&](const auto& bindings) {
+        phase2PlanHashU64(hash, bindings.size());
+        for (const auto& binding : bindings) {
+            phase2PlanHashResourceBindingShape(hash, binding);
+        }
+    };
+    hashBindings(reflection->uniformBlocks);
+    hashBindings(reflection->sampledTextures);
+    hashBindings(reflection->storageBuffers);
+    hashBindings(reflection->storageImages);
+    phase2PlanHashBool(hash, reflection->usesPointSize);
+    phase2PlanHashBool(hash, reflection->usesFragmentShadingRateBuiltins);
+    phase2PlanHashBool(hash, reflection->usesFp64);
+    phase2PlanHashBool(hash, reflection->fp64TranslationActive);
+}
+
+static void phase2PlanHashVertexLayout(
+    std::uint64_t& hash,
+    const TranslatedDrawInfo::VertexAttributeLayout& layout)
+{
+    phase2PlanHashU64(hash, layout.location);
+    phase2PlanHashU64(hash, layout.offset);
+    phase2PlanHashU64(hash, layout.glType);
+    phase2PlanHashU64(hash, static_cast<std::uint64_t>(layout.glComponentCount));
+    phase2PlanHashBool(hash, layout.glNormalized != GL_FALSE);
+    phase2PlanHashBool(hash, layout.glIsInteger);
+}
+
+static void phase2PlanHashTextureBindings(
+    std::uint64_t& hash,
+    const std::vector<TranslatedDrawInfo::TextureBinding>& bindings)
+{
+    phase2PlanHashU64(hash, bindings.size());
+    for (const auto& binding : bindings) {
+        phase2PlanHashU64(hash, binding.metalSlot);
+        phase2PlanHashBool(hash, binding.textureBufferBackingMetalBuffer != nullptr);
+        phase2PlanHashBool(hash, binding.imageAtomicMetalBuffer != nullptr);
+        phase2PlanHashU64(hash, binding.imageAtomicBufferSlot);
+        phase2PlanHashU64(hash, binding.reductionMode);
+        phase2PlanHashU64(hash, binding.borderClampMask);
+    }
+}
+
+static void phase2PlanHashSubmissionGroup(
+    std::uint64_t& hash,
+    const AppGLSubmissionGroup& group)
+{
+    phase2PlanHashU64(hash, static_cast<std::uint64_t>(group.kind));
+    phase2PlanHashU64(hash, static_cast<std::uint64_t>(group.primaryReason));
+    phase2PlanHashBool(hash, group.declared);
+    phase2PlanHashBool(hash, group.argumentBuffersEnabled);
+    phase2PlanHashBool(hash, group.approximateFallbackDisallowed);
+    phase2PlanHashU64(hash, group.subgroupCount);
+    for (std::uint8_t i = 0; i < group.subgroupCount; ++i) {
+        phase2PlanHashU64(hash, static_cast<std::uint64_t>(group.subgroups[i].kind));
+        phase2PlanHashU64(hash, static_cast<std::uint64_t>(group.subgroups[i].reason));
+    }
+    phase2PlanHashU64(hash, group.readCount);
+    for (std::uint8_t i = 0; i < group.readCount; ++i) {
+        phase2PlanHashU64(hash, static_cast<std::uint64_t>(group.reads[i].kind));
+        phase2PlanHashU64(hash, group.reads[i].producerBits);
+    }
+    phase2PlanHashU64(hash, group.writeCount);
+    for (std::uint8_t i = 0; i < group.writeCount; ++i) {
+        phase2PlanHashU64(hash, static_cast<std::uint64_t>(group.writes[i].kind));
+        phase2PlanHashU64(hash, group.writes[i].producerBits);
+    }
+    phase2PlanHashU64(hash, group.transientCount);
+    for (std::uint8_t i = 0; i < group.transientCount; ++i) {
+        phase2PlanHashU64(hash, static_cast<std::uint64_t>(group.transients[i].kind));
+        phase2PlanHashU64(hash, static_cast<std::uint64_t>(group.transients[i].ordering));
+        phase2PlanHashU64(hash, static_cast<std::uint64_t>(group.transients[i].reason));
+        phase2PlanHashU64(hash, group.transients[i].slot);
+        phase2PlanHashU64(hash, group.transients[i].bytes);
+    }
+}
+
+static bool phase2PlanHasSideEffect(const TranslatedDrawInfo& tdi) {
+    return tdi.rasterizerDiscard ||
+           !tdi.writtenImageTextureNames.empty() ||
+           !tdi.ssboBindings.empty() ||
+           !tdi.atomicCounterBindings.empty() ||
+           tdi.submissionGroup.hasSubgroup(
+               AppGLSubmissionGroupKind::TransformFeedbackCapture);
+}
+
+static std::uint64_t phase2PlanKeyForDraw(const TranslatedDrawInfo& tdi,
+                                          GLuint vaoName,
+                                          std::uint32_t vaoGeneration,
+                                          GLuint drawFboName)
+{
+    std::uint64_t hash = kPhase2PlanHashOffset;
+    phase2PlanHashU64(hash, 0x4150474C50324B31ull); // "APGLP2K1"
+
+    phase2PlanHashU64(hash, tdi.program);
+    phase2PlanHashShaderIdentity(hash, tdi.vertexMSL);
+    phase2PlanHashShaderIdentity(hash, tdi.fragmentMSL);
+    phase2PlanHashReflectionShape(hash, tdi.vertexReflection);
+    phase2PlanHashReflectionShape(hash, tdi.fragmentReflection);
+
+    phase2PlanHashU64(hash, vaoName);
+    phase2PlanHashU64(hash, vaoGeneration);
+    phase2PlanHashU64(hash, drawFboName);
+    phase2PlanHashU64(hash, tdi.mode);
+    phase2PlanHashBool(hash, tdi.indices != nullptr || tdi.metalIndexBuffer != nullptr);
+    phase2PlanHashU64(hash, tdi.indexType);
+    phase2PlanHashBool(hash, tdi.instanceCount != 1);
+    phase2PlanHashBool(hash, tdi.baseInstance != 0);
+    phase2PlanHashBool(hash, tdi.baseVertex != 0);
+
+    phase2PlanHashBool(hash, tdi.vertexData != nullptr);
+    phase2PlanHashBool(hash, tdi.metalVertexBuffer != nullptr);
+    phase2PlanHashU64(hash, tdi.vertexStride);
+    phase2PlanHashU64(hash, tdi.vertexAttributeLayouts.size());
+    for (const auto& layout : tdi.vertexAttributeLayouts) {
+        phase2PlanHashVertexLayout(hash, layout);
+    }
+    phase2PlanHashU64(hash, tdi.extraVertexBuffers.size());
+    for (const auto& extra : tdi.extraVertexBuffers) {
+        phase2PlanHashBool(hash, extra.data != nullptr);
+        phase2PlanHashBool(hash, extra.metalBuffer != nullptr);
+        phase2PlanHashU64(hash, extra.stride);
+        phase2PlanHashU64(hash, extra.divisor);
+        phase2PlanHashBool(hash, extra.constantStep);
+        phase2PlanHashU64(hash, extra.attributes.size());
+        for (const auto& layout : extra.attributes) {
+            phase2PlanHashVertexLayout(hash, layout);
+        }
+    }
+    phase2PlanHashBool(hash, tdi.metalIndexBuffer != nullptr);
+
+    phase2PlanHashU64(hash, tdi.vertexUniformSize);
+    phase2PlanHashU64(hash, tdi.fragmentUniformSize);
+
+    phase2PlanHashTextureBindings(hash, tdi.fragmentTextures);
+    phase2PlanHashTextureBindings(hash, tdi.vertexTextures);
+
+    phase2PlanHashBool(hash, tdi.depthTestEnabled);
+    phase2PlanHashU64(hash, tdi.depthFunc);
+    phase2PlanHashBool(hash, tdi.depthWriteMask);
+    phase2PlanHashBool(hash, tdi.cullFaceEnabled);
+    phase2PlanHashU64(hash, tdi.cullFaceMode);
+    phase2PlanHashU64(hash, tdi.frontFace);
+    phase2PlanHashBool(hash, tdi.wireframe);
+    phase2PlanHashU64(hash, tdi.sampleMask);
+    phase2PlanHashBool(hash, tdi.stencilTestEnabled);
+    phase2PlanHashU64(hash, tdi.stencilFrontFunc);
+    phase2PlanHashU64(hash, static_cast<std::uint64_t>(tdi.stencilFrontRef));
+    phase2PlanHashU64(hash, tdi.stencilFrontValueMask);
+    phase2PlanHashU64(hash, tdi.stencilFrontFail);
+    phase2PlanHashU64(hash, tdi.stencilFrontDepthFail);
+    phase2PlanHashU64(hash, tdi.stencilFrontDepthPass);
+    phase2PlanHashU64(hash, tdi.stencilFrontWriteMask);
+    phase2PlanHashU64(hash, tdi.stencilBackFunc);
+    phase2PlanHashU64(hash, static_cast<std::uint64_t>(tdi.stencilBackRef));
+    phase2PlanHashU64(hash, tdi.stencilBackValueMask);
+    phase2PlanHashU64(hash, tdi.stencilBackFail);
+    phase2PlanHashU64(hash, tdi.stencilBackDepthFail);
+    phase2PlanHashU64(hash, tdi.stencilBackDepthPass);
+    phase2PlanHashU64(hash, tdi.stencilBackWriteMask);
+    phase2PlanHashBool(hash, tdi.polygonOffsetEnabled);
+    phase2PlanHashFloat(hash, tdi.polygonOffsetFactor);
+    phase2PlanHashFloat(hash, tdi.polygonOffsetUnits);
+    phase2PlanHashFloat(hash, tdi.polygonOffsetClamp);
+    phase2PlanHashBool(hash, tdi.rasterizerDiscard);
+    phase2PlanHashBool(hash, tdi.sampleShadingEnabled);
+    phase2PlanHashFloat(hash, tdi.minSampleShading);
+    phase2PlanHashU64(hash, tdi.fragmentShadingRate);
+    phase2PlanHashU64(hash, tdi.fragmentShadingRateShaderState.apiRate);
+    phase2PlanHashU64(hash, tdi.fragmentShadingRateShaderState.attachmentRate);
+    phase2PlanHashU64(hash, tdi.fragmentShadingRateShaderState.combinerOp0);
+    phase2PlanHashU64(hash, tdi.fragmentShadingRateShaderState.combinerOp1);
+    phase2PlanHashU64(hash, tdi.clipOrigin);
+    phase2PlanHashBool(hash, tdi.clipControlYSignFixupEnabled);
+    phase2PlanHashBool(hash, tdi.markColorAttachmentReadbackFlip);
+    phase2PlanHashBool(hash, tdi.scissorTestEnabled);
+    phase2PlanHashU64(hash, tdi.viewportArrayCount);
+    phase2PlanHashU64(hash, tdi.blend.enabled ? 1u : 0u);
+    phase2PlanHashU64(hash, tdi.blend.srcRGB);
+    phase2PlanHashU64(hash, tdi.blend.dstRGB);
+    phase2PlanHashU64(hash, tdi.blend.srcAlpha);
+    phase2PlanHashU64(hash, tdi.blend.dstAlpha);
+    phase2PlanHashU64(hash, tdi.blend.equationRGB);
+    phase2PlanHashU64(hash, tdi.blend.equationAlpha);
+    phase2PlanHashBool(hash, tdi.blend.colorMaskR);
+    phase2PlanHashBool(hash, tdi.blend.colorMaskG);
+    phase2PlanHashBool(hash, tdi.blend.colorMaskB);
+    phase2PlanHashBool(hash, tdi.blend.colorMaskA);
+
+    phase2PlanHashU64(hash, tdi.uboBindings.size());
+    for (const auto& ubo : tdi.uboBindings) {
+        phase2PlanHashU64(hash, ubo.metalSlot);
+        phase2PlanHashBool(hash, ubo.metalBuffer != nullptr);
+        phase2PlanHashBool(hash, ubo.isVertex);
+        phase2PlanHashBool(hash, ubo.isFragment);
+    }
+    phase2PlanHashU64(hash, tdi.ssboBindings.size());
+    for (const auto& ssbo : tdi.ssboBindings) {
+        phase2PlanHashU64(hash, ssbo.metalSlot);
+        phase2PlanHashBool(hash, ssbo.metalBuffer != nullptr);
+        phase2PlanHashBool(hash, ssbo.isVertex);
+        phase2PlanHashBool(hash, ssbo.isFragment);
+    }
+    phase2PlanHashU64(hash, tdi.atomicCounterBindings.size());
+    for (const auto& atomic : tdi.atomicCounterBindings) {
+        phase2PlanHashU64(hash, atomic.metalSlot);
+        phase2PlanHashBool(hash, atomic.metalBuffer != nullptr);
+        phase2PlanHashBool(hash, atomic.isVertex);
+        phase2PlanHashBool(hash, atomic.isFragment);
+    }
+    phase2PlanHashU64(hash, tdi.sampledTextureNames.size());
+    phase2PlanHashU64(hash, tdi.readImageTextureNames.size());
+    phase2PlanHashU64(hash, tdi.writtenImageTextureNames.size());
+
+    phase2PlanHashBool(hash, tdi.pipelineStateOut != nullptr);
+    phase2PlanHashBool(hash, tdi.pipelineColorFormatOut != nullptr);
+    phase2PlanHashBool(hash, tdi.pipelineStateCacheOut != nullptr);
+    phase2PlanHashBool(hash, tdi.metalVertexFunction != nullptr);
+    phase2PlanHashBool(hash, tdi.metalFragmentFunction != nullptr);
+    phase2PlanHashBool(hash, tdi.metalVertexFunctionOut != nullptr);
+    phase2PlanHashBool(hash, tdi.metalFragmentFunctionOut != nullptr);
+
+    phase2PlanHashPointer(hash, tdi.fboColorTexture);
+    for (void* texture : tdi.fboAdditionalColorTextures) {
+        phase2PlanHashPointer(hash, texture);
+    }
+    phase2PlanHashPointer(hash, tdi.fboDepthStencilTexture);
+    phase2PlanHashU64(hash, static_cast<std::uint64_t>(tdi.fboWidth));
+    phase2PlanHashU64(hash, static_cast<std::uint64_t>(tdi.fboHeight));
+    phase2PlanHashBool(hash, tdi.fboAttachmentless);
+    phase2PlanHashU64(hash, tdi.fboDefaultLayers);
+    phase2PlanHashU64(hash, tdi.fboColorArrayLength);
+    phase2PlanHashU64(hash, tdi.maxEmittedLayer);
+    for (auto value : tdi.fboColorSlices) {
+        phase2PlanHashU64(hash, value);
+    }
+    for (auto value : tdi.fboColorLevels) {
+        phase2PlanHashU64(hash, value);
+    }
+    phase2PlanHashU64(hash, tdi.fboDepthStencilSlice);
+    phase2PlanHashU64(hash, tdi.fboDepthStencilLevel);
+
+    phase2PlanHashU64(hash, static_cast<std::uint64_t>(tdi.fallbackSubgroupKind));
+    phase2PlanHashSubmissionGroup(hash, tdi.submissionGroup);
+    return hash;
+}
+
+struct Phase2PlanKeyProfile {
+    bool enabled = phase2PlanProfileEnabled();
+    std::uint64_t lookups = 0;
+    std::uint64_t hits = 0;
+    std::uint64_t misses = 0;
+    std::uint64_t rejects = 0;
+    std::array<std::uint64_t,
+               static_cast<std::size_t>(Phase2PlanRejectReason::Count)> rejectReasons{};
+    std::unordered_set<std::uint64_t> seenKeys;
+
+    static constexpr std::size_t kMaxTrackedKeys = 1u << 20;
+
+    void recordReject(Phase2PlanRejectReason reason) {
+        if (!enabled) {
+            return;
+        }
+        ++rejects;
+        ++rejectReasons[static_cast<std::size_t>(reason)];
+    }
+
+    void recordCandidate(std::uint64_t key) {
+        if (!enabled) {
+            return;
+        }
+        auto found = seenKeys.find(key);
+        if (found != seenKeys.end()) {
+            ++lookups;
+            ++hits;
+            return;
+        }
+        if (seenKeys.size() >= kMaxTrackedKeys) {
+            recordReject(Phase2PlanRejectReason::KeyCapacity);
+            return;
+        }
+        seenKeys.insert(key);
+        ++lookups;
+        ++misses;
+    }
+
+    void record(const TranslatedDrawInfo& tdi,
+                GLuint vaoName,
+                std::uint32_t vaoGeneration,
+                GLuint drawFboName) {
+        if (!enabled) {
+            return;
+        }
+        if (tdi.program == 0) {
+            recordReject(Phase2PlanRejectReason::MissingProgram);
+            return;
+        }
+        const bool needsFragmentStage = !tdi.rasterizerDiscard;
+        if (tdi.vertexMSL == nullptr || tdi.vertexMSL->empty() ||
+            (needsFragmentStage &&
+             (tdi.fragmentMSL == nullptr || tdi.fragmentMSL->empty()))) {
+            recordReject(Phase2PlanRejectReason::MissingShader);
+            return;
+        }
+        if (tdi.vertexReflection == nullptr ||
+            (needsFragmentStage && tdi.fragmentReflection == nullptr)) {
+            recordReject(Phase2PlanRejectReason::MissingReflection);
+            return;
+        }
+        if (phase2PlanHasSideEffect(tdi)) {
+            recordReject(Phase2PlanRejectReason::SideEffect);
+            return;
+        }
+        recordCandidate(
+            phase2PlanKeyForDraw(tdi, vaoName, vaoGeneration, drawFboName));
+    }
+
+    void dump() const {
+        if (!enabled || (lookups == 0 && rejects == 0)) {
+            return;
+        }
+        const double hitRate = lookups > 0
+            ? (static_cast<double>(hits) * 100.0) / static_cast<double>(lookups)
+            : 0.0;
+        std::fprintf(stderr,
+            "[APPGL_PHASE2_PLAN_PROFILE] summary draws=%llu lookups=%llu "
+            "hits=%llu misses=%llu rejects=%llu unique_keys=%llu hit_rate_pct=%.2f\n",
+            static_cast<unsigned long long>(lookups + rejects),
+            static_cast<unsigned long long>(lookups),
+            static_cast<unsigned long long>(hits),
+            static_cast<unsigned long long>(misses),
+            static_cast<unsigned long long>(rejects),
+            static_cast<unsigned long long>(seenKeys.size()),
+            hitRate);
+        for (std::size_t i = 0; i < rejectReasons.size(); ++i) {
+            if (rejectReasons[i] == 0) {
+                continue;
+            }
+            const auto reason = static_cast<Phase2PlanRejectReason>(i);
+            std::fprintf(stderr,
+                "[APPGL_PHASE2_PLAN_PROFILE] reject reason=%s count=%llu\n",
+                phase2PlanRejectReasonName(reason),
+                static_cast<unsigned long long>(rejectReasons[i]));
+        }
+        std::fflush(stderr);
+    }
 };
 
 bool sourceDeclaresFragCoordOriginUpperLeft(const std::string& source) {
@@ -3294,6 +3763,7 @@ bool defaultUniformBlockContainsFp64(const ShaderReflection& reflection);
 
 struct GLContext::Impl {
     ~Impl() {
+        phase2PlanKeyProfile.dump();
         drawPathProfile.dump();
         for (auto& entry : incompleteSampledColorTextures) {
             releaseRetainedMetalObject(entry.second);
@@ -17878,6 +18348,7 @@ struct GLContext::Impl {
     std::unique_ptr<GLObjectStore> objects;
     std::unique_ptr<GLStateTracker> state;
     GLDrawPathProfile drawPathProfile;
+    Phase2PlanKeyProfile phase2PlanKeyProfile;
     std::unordered_map<NSUInteger, void*> incompleteSampledColorTextures;
 
     // Phase 8X Group 4d follow-up⁸ — one-shot-per-key dedup sets for the
@@ -47588,7 +48059,8 @@ static bool translatedDrawUsesFragCoordParams(const TranslatedDrawInfo& tdi) {
 bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
     const auto wrapperPrepStart = drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
     prepareFp64VertexSidecars(tdi);
-    appendCurrentGenericVertexAttributes(tdi, currentVertexArrayOrDefault());
+    GLVertexArrayObject* currentVao = currentVertexArrayOrDefault();
+    appendCurrentGenericVertexAttributes(tdi, currentVao);
     const GLuint drawFboName = state->boundDrawFramebuffer();
     if (drawFboName != 0 &&
         translatedDrawHasClipControlYSignParameter(tdi)) {
@@ -47677,6 +48149,11 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                                submissionGroupStart,
                                glDrawProfileNow());
     }
+    phase2PlanKeyProfile.record(
+        tdi,
+        state->boundVertexArray(),
+        currentVao != nullptr ? currentVao->attribGeneration : 0u,
+        drawFboName);
     const auto framegraphEncodeStart = drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
     const bool ok = frameGraph->encodeTranslatedDraw(tdi);
     if (drawPathProfile.enabled) {
