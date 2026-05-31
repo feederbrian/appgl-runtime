@@ -115,6 +115,121 @@ static bool metalTessTFEnabled() {
     return appglEnvEnabledDefaultOn("APPGL_ENABLE_METAL_TESS_TF");
 }
 
+using DrawProfileClock = std::chrono::steady_clock;
+using DrawProfileTimePoint = DrawProfileClock::time_point;
+
+static DrawProfileTimePoint drawProfileNow() {
+    return DrawProfileClock::now();
+}
+
+static double drawProfileElapsedUs(DrawProfileTimePoint start,
+                                   DrawProfileTimePoint end) {
+    return std::chrono::duration<double, std::micro>(end - start).count();
+}
+
+struct DrawSubmitProfileSample {
+    double totalUs = 0.0;
+    double validationUs = 0.0;
+    double stateResolveUs = 0.0;
+    double pipelineBuildUs = 0.0;
+    double encoderSetupUs = 0.0;
+    double renderStateUs = 0.0;
+    double bindingUs = 0.0;
+    double primitivePrepUs = 0.0;
+    double metalDrawUs = 0.0;
+    double finalizeUs = 0.0;
+    bool cacheMiss = false;
+    bool encoderOpened = false;
+    bool fboDraw = false;
+    bool argumentBuffers = false;
+    bool indexed = false;
+    bool expanded = false;
+    std::uint32_t metalDrawCalls = 0;
+};
+
+struct DrawSubmitProfile {
+    bool enabled = std::getenv("APPGL_DRAW_PROFILE") != nullptr;
+    std::uint64_t draws = 0;
+    std::uint64_t cacheMisses = 0;
+    std::uint64_t encoderOpens = 0;
+    std::uint64_t fboDraws = 0;
+    std::uint64_t argbufDraws = 0;
+    std::uint64_t indexedDraws = 0;
+    std::uint64_t expandedDraws = 0;
+    std::uint64_t metalDrawCalls = 0;
+    double totalUs = 0.0;
+    double validationUs = 0.0;
+    double stateResolveUs = 0.0;
+    double pipelineBuildUs = 0.0;
+    double encoderSetupUs = 0.0;
+    double renderStateUs = 0.0;
+    double bindingUs = 0.0;
+    double primitivePrepUs = 0.0;
+    double metalDrawUs = 0.0;
+    double finalizeUs = 0.0;
+
+    void record(const DrawSubmitProfileSample& s) {
+        if (!enabled) return;
+        ++draws;
+        cacheMisses += s.cacheMiss ? 1 : 0;
+        encoderOpens += s.encoderOpened ? 1 : 0;
+        fboDraws += s.fboDraw ? 1 : 0;
+        argbufDraws += s.argumentBuffers ? 1 : 0;
+        indexedDraws += s.indexed ? 1 : 0;
+        expandedDraws += s.expanded ? 1 : 0;
+        metalDrawCalls += s.metalDrawCalls;
+        totalUs += s.totalUs;
+        validationUs += s.validationUs;
+        stateResolveUs += s.stateResolveUs;
+        pipelineBuildUs += s.pipelineBuildUs;
+        encoderSetupUs += s.encoderSetupUs;
+        renderStateUs += s.renderStateUs;
+        bindingUs += s.bindingUs;
+        primitivePrepUs += s.primitivePrepUs;
+        metalDrawUs += s.metalDrawUs;
+        finalizeUs += s.finalizeUs;
+    }
+
+    void dump() const {
+        if (!enabled || draws == 0) return;
+        const double denom = totalUs > 0.0 ? totalUs : 1.0;
+        auto line = [&](const char* name, double us) {
+            std::fprintf(stderr,
+                "[APPGL_DRAW_PROFILE] component=%s total_us=%.3f avg_us=%.3f pct=%.2f\n",
+                name, us, us / static_cast<double>(draws), (us * 100.0) / denom);
+        };
+        const double accounted =
+            validationUs + stateResolveUs + pipelineBuildUs + encoderSetupUs +
+            renderStateUs + bindingUs + primitivePrepUs + metalDrawUs + finalizeUs;
+        std::fprintf(stderr,
+            "[APPGL_DRAW_PROFILE] summary draws=%llu avg_us=%.3f total_us=%.3f "
+            "cache_misses=%llu encoder_opens=%llu fbo_draws=%llu argbuf_draws=%llu "
+            "indexed_draws=%llu expanded_draws=%llu metal_draw_calls=%llu "
+            "avg_metal_draw_calls=%.3f\n",
+            static_cast<unsigned long long>(draws),
+            totalUs / static_cast<double>(draws),
+            totalUs,
+            static_cast<unsigned long long>(cacheMisses),
+            static_cast<unsigned long long>(encoderOpens),
+            static_cast<unsigned long long>(fboDraws),
+            static_cast<unsigned long long>(argbufDraws),
+            static_cast<unsigned long long>(indexedDraws),
+            static_cast<unsigned long long>(expandedDraws),
+            static_cast<unsigned long long>(metalDrawCalls),
+            static_cast<double>(metalDrawCalls) / static_cast<double>(draws));
+        line("validation", validationUs);
+        line("state_resolve", stateResolveUs);
+        line("pipeline_build", pipelineBuildUs);
+        line("encoder_setup", encoderSetupUs);
+        line("render_state", renderStateUs);
+        line("binding", bindingUs);
+        line("primitive_prep", primitivePrepUs);
+        line("metal_draw_call", metalDrawUs);
+        line("finalize", finalizeUs);
+        line("unattributed", std::max(0.0, totalUs - accounted));
+    }
+};
+
 static NSInteger clipControlYSignBufferSlot(const std::string* msl) {
     if (msl == nullptr) {
         return -1;
@@ -1220,6 +1335,7 @@ struct MetalFrameGraph::Impl {
             signalRingSlotNow();
             ringSlotAcquired = false;
         }
+        drawSubmitProfile.dump();
         // ADV-14: persist the pipeline binary archive to disk so the
         // next launch gets pre-compiled GPU binaries.
         savePipelineArchive();
@@ -1769,6 +1885,12 @@ struct MetalFrameGraph::Impl {
         if (device == nil || commandQueue == nil) {
             return false;
         }
+        DrawSubmitProfileSample profileSample;
+        const bool profileDraw = drawSubmitProfile.enabled;
+        const DrawProfileTimePoint profileTotalStart =
+            profileDraw ? drawProfileNow() : DrawProfileTimePoint{};
+        DrawProfileTimePoint profileValidationEnd = profileTotalStart;
+        double profilePipelineBuildUs = 0.0;
         acquireRingSlot();  // OPT-8
         if (info.vertexCount <= 0) {
             FG_TRACE(@"encodeTranslatedDraw: vertexCount <= 0, returning false");
@@ -1884,6 +2006,11 @@ struct MetalFrameGraph::Impl {
             dsOnlyColorTex = [device newTextureWithDescriptor:dummyDesc];
             dsOnlyColorTexRelease.reset(dsOnlyColorTex);
             fboColorTex = dsOnlyColorTex;
+        }
+        if (profileDraw) {
+            profileValidationEnd = drawProfileNow();
+            profileSample.validationUs =
+                drawProfileElapsedUs(profileTotalStart, profileValidationEnd);
         }
 
         // Lazily create the MTLRenderPipelineState from translated MSL.
@@ -2018,6 +2145,7 @@ struct MetalFrameGraph::Impl {
             ++pipelineCacheHits;
         }
         if (pipelineState == nil) {
+            profileSample.cacheMiss = true;
             // Phase 8X Group 4d follow-up⁴ — every entry into the build branch
             // bumps `pipelineBuildAttempts`, separately from the success-only
             // `pipelineCacheMisses` counter. This lets BAR-side tooling
@@ -2743,6 +2871,9 @@ struct MetalFrameGraph::Impl {
 
             const auto buildEnd = std::chrono::steady_clock::now();
             pipelineCumulativeBuildMs += std::chrono::duration<double, std::milli>(buildEnd - buildStart).count();
+            if (profileDraw) {
+                profilePipelineBuildUs += drawProfileElapsedUs(buildStart, buildEnd);
+            }
             ++pipelineCacheMisses;
 
             // Phase 8X Group 4d follow-up¹⁴ — insert into the
@@ -2839,6 +2970,17 @@ struct MetalFrameGraph::Impl {
             }
         }
 
+        DrawProfileTimePoint profileEncoderSetupStart = profileValidationEnd;
+        if (profileDraw) {
+            const DrawProfileTimePoint stateResolveEnd = drawProfileNow();
+            profileSample.pipelineBuildUs = profilePipelineBuildUs;
+            profileSample.stateResolveUs = std::max(
+                0.0,
+                drawProfileElapsedUs(profileValidationEnd, stateResolveEnd) -
+                    profilePipelineBuildUs);
+            profileEncoderSetupStart = stateResolveEnd;
+        }
+
         // RC-A02: FBO draws need their own render pass targeting the FBO
         // texture.  If a default-framebuffer encoder is open, close it first.
         if (isFBODraw && currentRenderEncoder != nil) {
@@ -2857,6 +2999,7 @@ struct MetalFrameGraph::Impl {
         // Ensure a render encoder is open. Subsequent draws reuse the same
         // encoder without any GPU sync.
         if (currentRenderEncoder == nil) {
+            profileSample.encoderOpened = profileDraw;
             FG_TRACE(@"encodeTranslatedDraw: opening new render pass (prior cmdBuf=%p pendingClear=%d fbo=%d)",
                      currentCommandBuffer, hasPendingClear, isFBODraw);
             // Reuse the current command buffer if one exists (e.g. from a
@@ -3119,6 +3262,13 @@ struct MetalFrameGraph::Impl {
             readbackSourceTexture = colorTexture;
             readbackSourceIsBGRA = colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
             resetCachedEncoderState();
+        }
+
+        DrawProfileTimePoint profileRenderStateStart = profileEncoderSetupStart;
+        if (profileDraw) {
+            profileRenderStateStart = drawProfileNow();
+            profileSample.encoderSetupUs =
+                drawProfileElapsedUs(profileEncoderSetupStart, profileRenderStateStart);
         }
 
         // Encode the draw into the shared render encoder.
@@ -3424,6 +3574,13 @@ struct MetalFrameGraph::Impl {
                                                      info.scissorHeight);
                 [currentRenderEncoder setScissorRect:sr];
             }
+        }
+
+        DrawProfileTimePoint profileBindingStart = profileRenderStateStart;
+        if (profileDraw) {
+            profileBindingStart = drawProfileNow();
+            profileSample.renderStateUs =
+                drawProfileElapsedUs(profileRenderStateStart, profileBindingStart);
         }
 
         // Bind vertex data at buffer index 0.
@@ -4335,6 +4492,13 @@ struct MetalFrameGraph::Impl {
             }
         }
 
+        DrawProfileTimePoint profilePrimitivePrepStart = profileBindingStart;
+        if (profileDraw) {
+            profilePrimitivePrepStart = drawProfileNow();
+            profileSample.bindingUs =
+                drawProfileElapsedUs(profileBindingStart, profilePrimitivePrepStart);
+        }
+
         MTLPrimitiveType primitive;
         // GL_TRIANGLE_FAN, GL_LINE_LOOP, and the four *_ADJACENCY modes
         // have no Metal equivalent. Expand to an indexed draw with a
@@ -4507,6 +4671,31 @@ struct MetalFrameGraph::Impl {
             default:                primitive = MTLPrimitiveTypeTriangle; break;
         }
 
+        profileSample.fboDraw = isFBODraw;
+        profileSample.argumentBuffers = useArgBuf;
+        profileSample.indexed =
+            (useExpandedIndices && !expandedIndices.empty()) ||
+            (info.indices != nullptr && info.indexCount > 0);
+        profileSample.expanded = useExpandedIndices && !expandedIndices.empty();
+        DrawProfileTimePoint profilePreDrawStart = profilePrimitivePrepStart;
+        auto profileBeginMetalDraw = [&]() -> DrawProfileTimePoint {
+            if (!profileDraw) {
+                return DrawProfileTimePoint{};
+            }
+            const DrawProfileTimePoint metalDrawStart = drawProfileNow();
+            profileSample.primitivePrepUs +=
+                drawProfileElapsedUs(profilePreDrawStart, metalDrawStart);
+            ++profileSample.metalDrawCalls;
+            return metalDrawStart;
+        };
+        auto profileEndMetalDraw = [&](DrawProfileTimePoint metalDrawStart) {
+            if (!profileDraw) return;
+            const DrawProfileTimePoint metalDrawEnd = drawProfileNow();
+            profileSample.metalDrawUs +=
+                drawProfileElapsedUs(metalDrawStart, metalDrawEnd);
+            profilePreDrawStart = metalDrawEnd;
+        };
+
         if (useExpandedIndices && !expandedIndices.empty()) {
             // Primitive expansion path (GL_TRIANGLE_FAN, GL_LINE_LOOP,
             // adjacency modes). The expanded buffer carries actual
@@ -4520,6 +4709,7 @@ struct MetalFrameGraph::Impl {
                 return false;
             }
             if (effectiveInstanceCount > 1 || info.baseVertex != 0 || info.baseInstance != 0) {
+                const DrawProfileTimePoint metalDrawStart = profileBeginMetalDraw();
                 [currentRenderEncoder drawIndexedPrimitives:primitive
                                     indexCount:static_cast<NSUInteger>(expandedIndices.size())
                                      indexType:MTLIndexTypeUInt32
@@ -4528,12 +4718,15 @@ struct MetalFrameGraph::Impl {
                                  instanceCount:static_cast<NSUInteger>(effectiveInstanceCount)
                                     baseVertex:static_cast<NSUInteger>(info.baseVertex)
                                   baseInstance:static_cast<NSUInteger>(info.baseInstance)];
+                profileEndMetalDraw(metalDrawStart);
             } else {
+                const DrawProfileTimePoint metalDrawStart = profileBeginMetalDraw();
                 [currentRenderEncoder drawIndexedPrimitives:primitive
                                     indexCount:static_cast<NSUInteger>(expandedIndices.size())
                                      indexType:MTLIndexTypeUInt32
                                    indexBuffer:iAlloc.buffer
                              indexBufferOffset:iAlloc.offset];
+                profileEndMetalDraw(metalDrawStart);
             }
         } else if (info.indices != nullptr && info.indexCount > 0) {
             MTLIndexType metalIndexType = MTLIndexTypeUInt16;
@@ -4560,6 +4753,7 @@ struct MetalFrameGraph::Impl {
             }
 
             if (effectiveInstanceCount > 1 || info.baseVertex != 0 || info.baseInstance != 0) {
+                const DrawProfileTimePoint metalDrawStart = profileBeginMetalDraw();
                 [currentRenderEncoder drawIndexedPrimitives:primitive
                                     indexCount:static_cast<NSUInteger>(info.indexCount)
                                      indexType:metalIndexType
@@ -4568,27 +4762,36 @@ struct MetalFrameGraph::Impl {
                                  instanceCount:static_cast<NSUInteger>(effectiveInstanceCount)
                                     baseVertex:static_cast<NSUInteger>(info.baseVertex)
                                   baseInstance:static_cast<NSUInteger>(info.baseInstance)];
+                profileEndMetalDraw(metalDrawStart);
             } else {
+                const DrawProfileTimePoint metalDrawStart = profileBeginMetalDraw();
                 [currentRenderEncoder drawIndexedPrimitives:primitive
                                     indexCount:static_cast<NSUInteger>(info.indexCount)
                                      indexType:metalIndexType
                                    indexBuffer:idxBuffer
                              indexBufferOffset:idxOffset];
+                profileEndMetalDraw(metalDrawStart);
             }
         } else {
             if (effectiveInstanceCount > 1 || info.baseInstance != 0) {
+                const DrawProfileTimePoint metalDrawStart = profileBeginMetalDraw();
                 [currentRenderEncoder drawPrimitives:primitive
                             vertexStart:0
                             vertexCount:static_cast<NSUInteger>(info.vertexCount)
                           instanceCount:static_cast<NSUInteger>(effectiveInstanceCount)
                            baseInstance:static_cast<NSUInteger>(info.baseInstance)];
+                profileEndMetalDraw(metalDrawStart);
             } else {
+                const DrawProfileTimePoint metalDrawStart = profileBeginMetalDraw();
                 [currentRenderEncoder drawPrimitives:primitive
                             vertexStart:0
                             vertexCount:static_cast<NSUInteger>(info.vertexCount)];
+                profileEndMetalDraw(metalDrawStart);
             }
         }
 
+        const DrawProfileTimePoint profileFinalizeStart =
+            profileDraw ? drawProfileNow() : DrawProfileTimePoint{};
         if (isFBODraw) {
             [currentRenderEncoder endEncoding];
             currentRenderEncoder = nil;
@@ -4597,6 +4800,14 @@ struct MetalFrameGraph::Impl {
         }
 
         pendingPresent = true;
+        if (profileDraw) {
+            const DrawProfileTimePoint profileTotalEnd = drawProfileNow();
+            profileSample.finalizeUs =
+                drawProfileElapsedUs(profileFinalizeStart, profileTotalEnd);
+            profileSample.totalUs =
+                drawProfileElapsedUs(profileTotalStart, profileTotalEnd);
+            drawSubmitProfile.record(profileSample);
+        }
         return true;
     }
 
@@ -10473,6 +10684,7 @@ private:
         }
     };
     std::unordered_set<PipelineBuildLogKey, PipelineBuildLogKeyHash> loggedPipelineBuildPrograms;
+    DrawSubmitProfile drawSubmitProfile;
 
     // ── Encoder state deduplication (OPT-6) ──
     // Track what was last set on the current render encoder. Skip redundant
