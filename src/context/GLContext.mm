@@ -9914,16 +9914,33 @@ struct GLContext::Impl {
                                 const ShaderReflection* reflection,
                                 std::vector<TranslatedDrawInfo::TextureBinding>& outBindings,
                                 const std::string* stageMSL) {
-            GLSamplerBindingStageRecipe& recipe =
-                (stageTag[0] == 'f')
-                    ? program.samplerBindingRecipeCache.fragment
-                    : program.samplerBindingRecipeCache.vertex;
-            if (!stageRecipeMatches(recipe, reflection, stageMSL)) {
+            GLSamplerBindingStageRecipe transientRecipe;
+            const GLSamplerBindingStageRecipe* recipePtr = nullptr;
+            if (samplerRecipeCacheBypassForSparseMdi) {
                 buildSamplerStageRecipe(
-                    recipe,
+                    transientRecipe,
                     reflection,
                     stageMSL);
+                recipePtr = &transientRecipe;
+                if (g_lbLog) {
+                    std::fprintf(stderr,
+                        "[LB] stage=%s sampler-recipe BYPASS reason=sparse-mdi\n",
+                        stageTag);
+                }
+            } else {
+                GLSamplerBindingStageRecipe& cachedRecipe =
+                    (stageTag[0] == 'f')
+                        ? program.samplerBindingRecipeCache.fragment
+                        : program.samplerBindingRecipeCache.vertex;
+                if (!stageRecipeMatches(cachedRecipe, reflection, stageMSL)) {
+                    buildSamplerStageRecipe(
+                        cachedRecipe,
+                        reflection,
+                        stageMSL);
+                }
+                recipePtr = &cachedRecipe;
             }
+            const GLSamplerBindingStageRecipe& recipe = *recipePtr;
             if (recipe.entries.empty()) {
                 if (g_lbLog) {
                     std::fprintf(stderr,
@@ -11983,6 +12000,78 @@ struct GLContext::Impl {
         };
         resolveStage("VS", info.vertexReflection, program.vertexMSL, info.vertexTextures);
         resolveStage("FS", info.fragmentReflection, program.fragmentMSL, info.fragmentTextures);
+    }
+
+    bool bufferUsesSparseStorage(GLuint name) const {
+        if (name == 0 || objects == nullptr) {
+            return false;
+        }
+        GLBufferObject* buffer = objects->buffers().get(name);
+        return buffer != nullptr && buffer->sparseStorage;
+    }
+
+    bool currentDrawStateReferencesSparseBuffer(GLuint indirectBufferName) const {
+        if (bufferUsesSparseStorage(indirectBufferName)) {
+            return true;
+        }
+        if (state == nullptr || objects == nullptr) {
+            return false;
+        }
+
+        const GLuint vaoName = state->boundVertexArray();
+        const GLVertexArrayObject* vao =
+            vaoName != 0 ? objects->vertexArrays().get(vaoName) : nullptr;
+        if (vao != nullptr) {
+            if (bufferUsesSparseStorage(vao->elementArrayBuffer)) {
+                return true;
+            }
+            for (const auto& attr : vao->attributes) {
+                if (!attr.enabled) {
+                    continue;
+                }
+                if (bufferUsesSparseStorage(attr.buffer)) {
+                    return true;
+                }
+                if (attr.bindingIndex < vao->bindingPoints.size() &&
+                    bufferUsesSparseStorage(
+                        vao->bindingPoints[attr.bindingIndex].buffer)) {
+                    return true;
+                }
+            }
+        }
+
+        static constexpr GLuint kTextureUnitScanLimit = 144;
+        for (GLuint unit = 0; unit < kTextureUnitScanLimit; ++unit) {
+            const GLuint texName = state->boundTextureOnUnit(unit, GL_TEXTURE_BUFFER);
+            const GLTextureObject* tex =
+                texName != 0 ? objects->textures().get(texName) : nullptr;
+            if (tex != nullptr &&
+                tex->target == GL_TEXTURE_BUFFER &&
+                bufferUsesSparseStorage(tex->desc.sourceBuffer)) {
+                return true;
+            }
+        }
+
+        static constexpr GLuint kIndexedBufferScanLimit = 96;
+        const GLenum indexedTargets[] = {
+            GL_TRANSFORM_FEEDBACK_BUFFER,
+            GL_UNIFORM_BUFFER,
+            GL_SHADER_STORAGE_BUFFER,
+            GL_ATOMIC_COUNTER_BUFFER,
+        };
+        for (GLenum target : indexedTargets) {
+            if (bufferUsesSparseStorage(state->boundBuffer(target))) {
+                return true;
+            }
+            for (GLuint index = 0; index < kIndexedBufferScanLimit; ++index) {
+                const GLIndexedBufferBinding binding =
+                    state->indexedBufferBinding(target, index);
+                if (bufferUsesSparseStorage(binding.buffer)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     bool replaceBufferStorage(GLBufferObject& object, GLsizeiptr size, const void* data, GLenum usage) {
@@ -18485,6 +18574,10 @@ struct GLContext::Impl {
     std::unordered_map<std::uint64_t, TranslatedDrawPlan> translatedDrawPlanCache;
     std::uint64_t translatedDrawPlanGeneration = 0;
     std::unordered_map<NSUInteger, void*> incompleteSampledColorTextures;
+    // Slice-B [A]: sparse-buffer MDI can expose stale sampler recipe metadata
+    // when the persistent recipe is reused. Bypass it only while decomposing
+    // that draw shape; ordinary draws keep Slice-B's hot-path cache.
+    bool samplerRecipeCacheBypassForSparseMdi = false;
 
     // Phase 8X Group 4d follow-up⁸ — one-shot-per-key dedup sets for the
     // sampler-resolution / sampler-build diagnostic logs. Both fire at
@@ -55739,6 +55832,27 @@ bool GLContext::multiDrawArraysIndirect(GLenum mode, const void* indirect, GLsiz
         commands.push_back(cmd);
     }
 
+    const bool bypassSamplerRecipeForSparseMdi =
+        impl_->currentDrawStateReferencesSparseBuffer(indirectBuf);
+    struct ScopedSparseMdiSamplerRecipeBypass {
+        GLContext::Impl& impl;
+        bool previous = false;
+        ScopedSparseMdiSamplerRecipeBypass(GLContext::Impl& target, bool enable)
+            : impl(target), previous(target.samplerRecipeCacheBypassForSparseMdi) {
+            if (enable) {
+                impl.samplerRecipeCacheBypassForSparseMdi = true;
+            }
+        }
+        ~ScopedSparseMdiSamplerRecipeBypass() {
+            impl.samplerRecipeCacheBypassForSparseMdi = previous;
+        }
+    } sparseMdiSamplerRecipeBypass(*impl_, bypassSamplerRecipeForSparseMdi);
+    if (bypassSamplerRecipeForSparseMdi &&
+        std::getenv("APPGL_TRACE_MDI_PRODUCER")) {
+        std::fprintf(stderr,
+            "[APPGL] mdi-arrays sampler-recipe bypass reason=sparse-buffer\n");
+    }
+
     // Live layer-backed presents reuse one render encoder for the full
     // frame. On that path, Apple AGX currently fails to make per-subdraw
     // vertex range rebinding observable for VBO-backed MDI walls. When the
@@ -55826,6 +55940,9 @@ bool GLContext::multiDrawElementsIndirect(GLenum mode, GLenum type, const void* 
     };
     const GLsizei effectiveStride = (stride == 0) ? static_cast<GLsizei>(sizeof(DrawElementsIndirectCommand)) : stride;
     const GLsizei indexSize = (type == GL_UNSIGNED_INT) ? 4 : (type == GL_UNSIGNED_SHORT) ? 2 : 1;
+    const GLuint indirectBuf = impl_->state->boundBuffer(GL_DRAW_INDIRECT_BUFFER);
+    GLBufferObject* indirectObject =
+        indirectBuf != 0 ? impl_->objects->buffers().get(indirectBuf) : nullptr;
 
     // GL 4.6 §10.5: the INVALID_OPERATION check for "reading beyond
     // the end of the draw-indirect buffer" must fire BEFORE any
@@ -55834,27 +55951,43 @@ bool GLContext::multiDrawElementsIndirect(GLenum mode, GLenum type, const void* 
     // followed by the OOB at i=N), leaving the error queue with
     // more than one entry and breaking spec-exact error tests.
     if (drawcount > 0) {
-        const GLuint indirectBuf = impl_->state->boundBuffer(GL_DRAW_INDIRECT_BUFFER);
-        if (indirectBuf != 0) {
-            GLBufferObject* bo = impl_->objects->buffers().get(indirectBuf);
-            if (bo != nullptr) {
-                const uintptr_t offset = reinterpret_cast<uintptr_t>(indirect);
-                const uintptr_t strideBytes = static_cast<uintptr_t>(effectiveStride);
-                const uintptr_t commandBytes = static_cast<uintptr_t>(sizeof(DrawElementsIndirectCommand));
-                const uintptr_t lastCommandIndex = static_cast<uintptr_t>(drawcount - 1);
-                if (lastCommandIndex > (std::numeric_limits<uintptr_t>::max() - offset) / strideBytes) {
-                    pushError(GL_INVALID_OPERATION);
-                    return false;
-                }
-                const uintptr_t lastCommandOffset = offset + lastCommandIndex * strideBytes;
-                const uintptr_t bufferSize = static_cast<uintptr_t>(bo->size);
-                if (lastCommandOffset > bufferSize ||
-                    commandBytes > bufferSize - lastCommandOffset) {
-                    pushError(GL_INVALID_OPERATION);
-                    return false;
-                }
+        if (indirectObject != nullptr) {
+            const uintptr_t offset = reinterpret_cast<uintptr_t>(indirect);
+            const uintptr_t strideBytes = static_cast<uintptr_t>(effectiveStride);
+            const uintptr_t commandBytes = static_cast<uintptr_t>(sizeof(DrawElementsIndirectCommand));
+            const uintptr_t lastCommandIndex = static_cast<uintptr_t>(drawcount - 1);
+            if (lastCommandIndex > (std::numeric_limits<uintptr_t>::max() - offset) / strideBytes) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            const uintptr_t lastCommandOffset = offset + lastCommandIndex * strideBytes;
+            const uintptr_t bufferSize = static_cast<uintptr_t>(indirectObject->size);
+            if (lastCommandOffset > bufferSize ||
+                commandBytes > bufferSize - lastCommandOffset) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
             }
         }
+    }
+    const bool bypassSamplerRecipeForSparseMdi =
+        impl_->currentDrawStateReferencesSparseBuffer(indirectBuf);
+    struct ScopedSparseMdiSamplerRecipeBypass {
+        GLContext::Impl& impl;
+        bool previous = false;
+        ScopedSparseMdiSamplerRecipeBypass(GLContext::Impl& target, bool enable)
+            : impl(target), previous(target.samplerRecipeCacheBypassForSparseMdi) {
+            if (enable) {
+                impl.samplerRecipeCacheBypassForSparseMdi = true;
+            }
+        }
+        ~ScopedSparseMdiSamplerRecipeBypass() {
+            impl.samplerRecipeCacheBypassForSparseMdi = previous;
+        }
+    } sparseMdiSamplerRecipeBypass(*impl_, bypassSamplerRecipeForSparseMdi);
+    if (bypassSamplerRecipeForSparseMdi &&
+        std::getenv("APPGL_TRACE_MDI_PRODUCER")) {
+        std::fprintf(stderr,
+            "[APPGL] mdi-elements sampler-recipe bypass reason=sparse-buffer\n");
     }
     for (GLsizei i = 0; i < drawcount; ++i) {
         const void* cmdPtr = reinterpret_cast<const void*>(
