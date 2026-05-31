@@ -792,6 +792,38 @@ struct GLSynthesizedMatrixSlots {
     }
 };
 
+struct GLSamplerBindingRecipeEntry {
+    std::string name;
+    GLint uniformLocation = -1;
+    GLint samplerArraySize = 1;
+    GLenum samplerGLType = 0;
+    GLenum preferredTarget = 0;
+    std::uint32_t metalBinding = 0;
+    bool collapsedDirectSamplerArray = false;
+};
+
+struct GLSamplerBindingStageRecipe {
+    bool valid = false;
+    std::uint64_t generation = 0;
+    const ShaderReflection* reflection = nullptr;
+    const void* reflectionSampledData = nullptr;
+    std::size_t reflectionSampledCount = 0;
+    const std::string* stageMSL = nullptr;
+    const char* stageMSLData = nullptr;
+    std::size_t stageMSLSize = 0;
+    const void* uniformData = nullptr;
+    std::size_t uniformCount = 0;
+    bool usesSparseSampledSidecars = false;
+    bool stageUsesArgumentBufferSet0 = false;
+    std::size_t bindingReserve = 0;
+    std::vector<GLSamplerBindingRecipeEntry> entries;
+};
+
+struct GLSamplerBindingRecipeCache {
+    GLSamplerBindingStageRecipe fragment;
+    GLSamplerBindingStageRecipe vertex;
+};
+
 struct GLProgramObject {
     // Phase 3f-11: explicit special members declared here + defined
     // in GLObjectStore.cpp, where appgl::interp::SpirvModule is a
@@ -1528,6 +1560,12 @@ struct GLProgramObject {
     std::vector<std::uint8_t> cachedVertexUniformBuffer;
     std::vector<std::uint8_t> cachedFragmentUniformBuffer;
 
+    // Program-static sampler binding recipes. These cache reflection/MSL/
+    // uniform-table work; glUniform values, texture-unit bindings, sampler
+    // objects, texture dirty bits, and producer drains remain live per draw.
+    std::uint64_t samplerBindingRecipeGeneration = 1;
+    GLSamplerBindingRecipeCache samplerBindingRecipeCache;
+
     bool isUniformBufferDirty() const {
         return packedUniformGeneration != uniformValueGeneration;
     }
@@ -1549,6 +1587,14 @@ struct GLProgramObject {
         cachedFragmentUniformBuffer.clear();
         packedUniformGeneration = 0;
         markUniformsDirty();
+    }
+
+    void invalidateSamplerBindingRecipeCache() {
+        samplerBindingRecipeCache = GLSamplerBindingRecipeCache{};
+        ++samplerBindingRecipeGeneration;
+        if (samplerBindingRecipeGeneration == 0) {
+            samplerBindingRecipeGeneration = 1;
+        }
     }
 };
 

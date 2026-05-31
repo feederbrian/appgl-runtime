@@ -9612,10 +9612,6 @@ struct GLContext::Impl {
         // iteration; non-env-gated debug code follows cleanup
         // discipline).
         static const bool g_lbLog = (std::getenv("APPGL_LOG_LB") != nullptr);
-        const bool fragmentUsesSparseSampledSidecars =
-            program.fragmentMSL.find("appgl_sparse_sampled_sidecar_") != std::string::npos;
-        const bool vertexUsesSparseSampledSidecars =
-            program.vertexMSL.find("appgl_sparse_sampled_sidecar_") != std::string::npos;
         auto mslUsesArgumentBufferSet0 = [](const std::string* msl) -> bool {
             return msl != nullptr &&
                 msl->find("spvDescriptorSetBuffer0") != std::string::npos;
@@ -9665,6 +9661,63 @@ struct GLContext::Impl {
                     return true;
                 default:
                     return false;
+            }
+        };
+        auto preferredTargetForSamplerType = [](GLenum samplerGLType) -> GLenum {
+            switch (samplerGLType) {
+                case GL_SAMPLER_1D:
+                case GL_INT_SAMPLER_1D:
+                case GL_UNSIGNED_INT_SAMPLER_1D:
+                case GL_SAMPLER_1D_SHADOW:
+                    return GL_TEXTURE_1D;
+                case GL_SAMPLER_2D:
+                case GL_INT_SAMPLER_2D:
+                case GL_UNSIGNED_INT_SAMPLER_2D:
+                case GL_SAMPLER_2D_SHADOW:
+                    return GL_TEXTURE_2D;
+                case GL_SAMPLER_3D:
+                case GL_INT_SAMPLER_3D:
+                case GL_UNSIGNED_INT_SAMPLER_3D:
+                    return GL_TEXTURE_3D;
+                case GL_SAMPLER_CUBE:
+                case GL_INT_SAMPLER_CUBE:
+                case GL_UNSIGNED_INT_SAMPLER_CUBE:
+                case GL_SAMPLER_CUBE_SHADOW:
+                    return GL_TEXTURE_CUBE_MAP;
+                case GL_SAMPLER_1D_ARRAY:
+                case GL_INT_SAMPLER_1D_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+                case GL_SAMPLER_1D_ARRAY_SHADOW:
+                    return GL_TEXTURE_1D_ARRAY;
+                case GL_SAMPLER_2D_ARRAY:
+                case GL_INT_SAMPLER_2D_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+                case GL_SAMPLER_2D_ARRAY_SHADOW:
+                    return GL_TEXTURE_2D_ARRAY;
+                case GL_SAMPLER_CUBE_MAP_ARRAY:
+                case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+                case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+                    return GL_TEXTURE_CUBE_MAP_ARRAY;
+                case GL_SAMPLER_2D_MULTISAMPLE:
+                case GL_INT_SAMPLER_2D_MULTISAMPLE:
+                case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+                    return GL_TEXTURE_2D_MULTISAMPLE;
+                case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                    return GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+                case GL_SAMPLER_2D_RECT:
+                case GL_INT_SAMPLER_2D_RECT:
+                case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+                case GL_SAMPLER_2D_RECT_SHADOW:
+                    return GL_TEXTURE_RECTANGLE;
+                case GL_SAMPLER_BUFFER:
+                case GL_INT_SAMPLER_BUFFER:
+                case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+                    return GL_TEXTURE_BUFFER;
+                default:
+                    return 0;
             }
         };
         auto findTextureSlotInMSL =
@@ -9735,11 +9788,95 @@ struct GLContext::Impl {
             return bindings;
         };
 
-        auto resolveStage = [&](const char* stageTag,
-                                const ShaderReflection* reflection,
-                                std::vector<TranslatedDrawInfo::TextureBinding>& outBindings,
-                                const std::string* stageMSL,
-                                bool usesSparseSampledSidecars) {
+        auto stageRecipeMatches =
+            [&](const GLSamplerBindingStageRecipe& recipe,
+                const ShaderReflection* reflection,
+                const std::string* stageMSL) -> bool {
+            const auto sampledCount = reflection != nullptr
+                ? reflection->sampledTextures.size()
+                : 0u;
+            const void* sampledData = sampledCount != 0
+                ? static_cast<const void*>(reflection->sampledTextures.data())
+                : nullptr;
+            const char* mslData = stageMSL != nullptr ? stageMSL->data() : nullptr;
+            const std::size_t mslSize = stageMSL != nullptr ? stageMSL->size() : 0u;
+            const void* uniformData = !program.uniforms.empty()
+                ? static_cast<const void*>(program.uniforms.data())
+                : nullptr;
+            return recipe.valid &&
+                recipe.generation == program.samplerBindingRecipeGeneration &&
+                recipe.reflection == reflection &&
+                recipe.reflectionSampledData == sampledData &&
+                recipe.reflectionSampledCount == sampledCount &&
+                recipe.stageMSL == stageMSL &&
+                recipe.stageMSLData == mslData &&
+                recipe.stageMSLSize == mslSize &&
+                recipe.uniformData == uniformData &&
+                recipe.uniformCount == program.uniforms.size();
+        };
+
+        auto populateSamplerRecipeEntry =
+            [&](const ShaderReflection::ResourceBinding& sampledTex,
+                bool stageUsesArgBuf) {
+            GLSamplerBindingRecipeEntry entry;
+            entry.name = sampledTex.name;
+            entry.metalBinding = sampledTex.metalBinding;
+
+            auto matchUniform = [&](const std::string& name) -> bool {
+                for (const auto& uinfo : program.uniforms) {
+                    if (uinfo.name == name) {
+                        entry.uniformLocation = uinfo.location;
+                        entry.samplerArraySize = std::max<GLint>(uinfo.arraySize, 1);
+                        entry.samplerGLType = uinfo.type;
+                        return true;
+                    }
+                }
+                return false;
+            };
+            if (!matchUniform(sampledTex.name)) {
+                constexpr const char* kAppglPrefix = "_appgl_";
+                constexpr std::size_t kAppglPrefixLen = 7;
+                if (sampledTex.name.compare(0, kAppglPrefixLen, kAppglPrefix) == 0) {
+                    matchUniform(sampledTex.name.substr(kAppglPrefixLen));
+                }
+            }
+            entry.preferredTarget = preferredTargetForSamplerType(entry.samplerGLType);
+            static constexpr std::uint32_t kMaxDirectMetalSamplerSlots = 16u;
+            entry.collapsedDirectSamplerArray =
+                !stageUsesArgBuf &&
+                entry.samplerArraySize > 1 &&
+                entry.metalBinding +
+                    static_cast<std::uint32_t>(entry.samplerArraySize) >
+                        kMaxDirectMetalSamplerSlots;
+            return entry;
+        };
+
+        auto buildSamplerStageRecipe =
+            [&](GLSamplerBindingStageRecipe& recipe,
+                const ShaderReflection* reflection,
+                const std::string* stageMSL) -> GLSamplerBindingStageRecipe& {
+            recipe = GLSamplerBindingStageRecipe{};
+            recipe.valid = true;
+            recipe.generation = program.samplerBindingRecipeGeneration;
+            recipe.reflection = reflection;
+            recipe.reflectionSampledCount = reflection != nullptr
+                ? reflection->sampledTextures.size()
+                : 0u;
+            recipe.reflectionSampledData = recipe.reflectionSampledCount != 0
+                ? static_cast<const void*>(reflection->sampledTextures.data())
+                : nullptr;
+            recipe.stageMSL = stageMSL;
+            recipe.stageMSLData = stageMSL != nullptr ? stageMSL->data() : nullptr;
+            recipe.stageMSLSize = stageMSL != nullptr ? stageMSL->size() : 0u;
+            recipe.uniformData = !program.uniforms.empty()
+                ? static_cast<const void*>(program.uniforms.data())
+                : nullptr;
+            recipe.uniformCount = program.uniforms.size();
+            recipe.usesSparseSampledSidecars =
+                stageMSL != nullptr &&
+                stageMSL->find("appgl_sparse_sampled_sidecar_") != std::string::npos;
+            recipe.stageUsesArgumentBufferSet0 = mslUsesArgumentBufferSet0(stageMSL);
+
             std::vector<ShaderReflection::ResourceBinding> synthesizedBindings;
             const std::vector<ShaderReflection::ResourceBinding>* sampledTextures =
                 (reflection != nullptr && !reflection->sampledTextures.empty())
@@ -9759,6 +9896,35 @@ struct GLContext::Impl {
                 }
             }
             if (sampledTextures == nullptr || sampledTextures->empty()) {
+                return recipe;
+            }
+            recipe.entries.reserve(sampledTextures->size());
+            for (const auto& sampledTex : *sampledTextures) {
+                auto entry = populateSamplerRecipeEntry(
+                    sampledTex,
+                    recipe.stageUsesArgumentBufferSet0);
+                recipe.bindingReserve += static_cast<std::size_t>(
+                    std::max<GLint>(entry.samplerArraySize, 1));
+                recipe.entries.push_back(std::move(entry));
+            }
+            return recipe;
+        };
+
+        auto resolveStage = [&](const char* stageTag,
+                                const ShaderReflection* reflection,
+                                std::vector<TranslatedDrawInfo::TextureBinding>& outBindings,
+                                const std::string* stageMSL) {
+            GLSamplerBindingStageRecipe& recipe =
+                (stageTag[0] == 'f')
+                    ? program.samplerBindingRecipeCache.fragment
+                    : program.samplerBindingRecipeCache.vertex;
+            if (!stageRecipeMatches(recipe, reflection, stageMSL)) {
+                buildSamplerStageRecipe(
+                    recipe,
+                    reflection,
+                    stageMSL);
+            }
+            if (recipe.entries.empty()) {
                 if (g_lbLog) {
                     std::fprintf(stderr,
                         "[LB] stage=%s SKIP reason=no-sampled-textures (refl=%p sampCount=%zu)\n",
@@ -9767,61 +9933,21 @@ struct GLContext::Impl {
                 }
                 return;
             }
-            outBindings.reserve(outBindings.size() + sampledTextures->size());
+            outBindings.reserve(outBindings.size() + recipe.bindingReserve);
             info.sampledTextureNames.reserve(
-                info.sampledTextureNames.size() + sampledTextures->size());
-            static constexpr std::uint32_t kMaxDirectMetalSamplerSlots = 16u;
-            const bool stageUsesArgBuf = mslUsesArgumentBufferSet0(stageMSL);
+                info.sampledTextureNames.size() + recipe.bindingReserve);
             if (g_lbLog) {
                 std::fprintf(stderr,
                     "[LB] stage=%s ENTER sampCount=%zu\n",
-                    stageTag, sampledTextures->size());
+                    stageTag, recipe.entries.size());
             }
-            for (const auto& sampledTex : *sampledTextures) {
-                // Step 1: find the GL sampler uniform by name. For sampler
-                // arrays (`uniform sampler2D samp[N]`), SPIRV-Cross emits a
-                // single sampledTextures entry whose metalBinding spans N
-                // consecutive slots. The matching GL uniform has
-                // arraySize > 1, and `ints[i]` holds the texture unit for
-                // element i. We loop over all elements below.
-                //
-                // Step 8: sampler-name reverse-rename fallback. CompatShader-
-                // Rewrite renames GLSL reserved keywords (`sampler`,
-                // `texture`, etc.) to `_appgl_<name>` before handing the
-                // source to glslang so those keyword-clashing names compile.
-                // SPIRV-Cross's reflection then reports the rewritten name
-                // (e.g. `_appgl_sampler`). `program.uniforms` was
-                // reverse-renamed back to the original GLSL name at link
-                // time so the app-facing query API sees `sampler`, which
-                // makes the direct `uinfo.name == sampledTex.name` match
-                // fail for the renamed cases. Concrete failure:
-                // `KHR-GL46.layout_location.sampler_1d` (FS has
-                // `uniform sampler1D sampler;` — the reserved name IS the
-                // uniform identifier). Attempt a reverse-rename match if
-                // the direct lookup misses.
-                GLint uniformLocation = -1;
-                GLint samplerArraySize = 1;
-                GLenum samplerGLType = 0;
-                auto matchUniform = [&](const std::string& name) -> bool {
-                    for (const auto& uinfo : program.uniforms) {
-                        if (uinfo.name == name) {
-                            uniformLocation = uinfo.location;
-                            samplerArraySize = std::max<GLint>(uinfo.arraySize, 1);
-                            samplerGLType = uinfo.type;
-                            return true;
-                        }
-                    }
-                    return false;
-                };
-                if (!matchUniform(sampledTex.name)) {
-                    // Try stripping `_appgl_` prefix — the one SPIRV-Cross
-                    // carries forward from our CompatShaderRewrite output.
-                    constexpr const char* kAppglPrefix = "_appgl_";
-                    constexpr std::size_t kAppglPrefixLen = 7;
-                    if (sampledTex.name.compare(0, kAppglPrefixLen, kAppglPrefix) == 0) {
-                        matchUniform(sampledTex.name.substr(kAppglPrefixLen));
-                    }
-                }
+            const bool usesSparseSampledSidecars = recipe.usesSparseSampledSidecars;
+            for (const auto& sampledTex : recipe.entries) {
+                // Program-static sampler metadata was resolved when the
+                // recipe was built. Keep only the live GL state reads below.
+                const GLint uniformLocation = sampledTex.uniformLocation;
+                const GLint samplerArraySize = sampledTex.samplerArraySize;
+                const GLenum samplerGLType = sampledTex.samplerGLType;
 
                 // Phase 6-4: map sampler's GL uniform type to the GL
                 // texture target the shader declares it with. When the
@@ -9839,74 +9965,7 @@ struct GLContext::Impl {
                 //    at Texture binding at index 0 (expect
                 //    MTLTextureType2DMultisample)"
                 // draw-time assertion.
-                GLenum preferredTarget = 0;
-                switch (samplerGLType) {
-                    case GL_SAMPLER_1D:
-                    case GL_INT_SAMPLER_1D:
-                    case GL_UNSIGNED_INT_SAMPLER_1D:
-                    case GL_SAMPLER_1D_SHADOW:
-                        preferredTarget = GL_TEXTURE_1D;
-                        break;
-                    case GL_SAMPLER_2D:
-                    case GL_INT_SAMPLER_2D:
-                    case GL_UNSIGNED_INT_SAMPLER_2D:
-                    case GL_SAMPLER_2D_SHADOW:
-                        preferredTarget = GL_TEXTURE_2D;
-                        break;
-                    case GL_SAMPLER_3D:
-                    case GL_INT_SAMPLER_3D:
-                    case GL_UNSIGNED_INT_SAMPLER_3D:
-                        preferredTarget = GL_TEXTURE_3D;
-                        break;
-                    case GL_SAMPLER_CUBE:
-                    case GL_INT_SAMPLER_CUBE:
-                    case GL_UNSIGNED_INT_SAMPLER_CUBE:
-                    case GL_SAMPLER_CUBE_SHADOW:
-                        preferredTarget = GL_TEXTURE_CUBE_MAP;
-                        break;
-                    case GL_SAMPLER_1D_ARRAY:
-                    case GL_INT_SAMPLER_1D_ARRAY:
-                    case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
-                    case GL_SAMPLER_1D_ARRAY_SHADOW:
-                        preferredTarget = GL_TEXTURE_1D_ARRAY;
-                        break;
-                    case GL_SAMPLER_2D_ARRAY:
-                    case GL_INT_SAMPLER_2D_ARRAY:
-                    case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
-                    case GL_SAMPLER_2D_ARRAY_SHADOW:
-                        preferredTarget = GL_TEXTURE_2D_ARRAY;
-                        break;
-                    case GL_SAMPLER_CUBE_MAP_ARRAY:
-                    case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
-                    case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
-                    case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
-                        preferredTarget = GL_TEXTURE_CUBE_MAP_ARRAY;
-                        break;
-                    case GL_SAMPLER_2D_MULTISAMPLE:
-                    case GL_INT_SAMPLER_2D_MULTISAMPLE:
-                    case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
-                        preferredTarget = GL_TEXTURE_2D_MULTISAMPLE;
-                        break;
-                    case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
-                    case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
-                    case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
-                        preferredTarget = GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
-                        break;
-                    case GL_SAMPLER_2D_RECT:
-                    case GL_INT_SAMPLER_2D_RECT:
-                    case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
-                    case GL_SAMPLER_2D_RECT_SHADOW:
-                        preferredTarget = GL_TEXTURE_RECTANGLE;
-                        break;
-                    case GL_SAMPLER_BUFFER:
-                    case GL_INT_SAMPLER_BUFFER:
-                    case GL_UNSIGNED_INT_SAMPLER_BUFFER:
-                        preferredTarget = GL_TEXTURE_BUFFER;
-                        break;
-                    default:
-                        preferredTarget = 0;
-                        break;
-                }
+                const GLenum preferredTarget = sampledTex.preferredTarget;
 
                 const GLProgramUniformValue* samplerValue = nullptr;
                 if (uniformLocation >= 0) {
@@ -9946,11 +10005,7 @@ struct GLContext::Impl {
                             samplerGLType, sampledTex.metalBinding);
                     }
                     const bool collapsedDirectSamplerArray =
-                        !stageUsesArgBuf &&
-                        samplerArraySize > 1 &&
-                        sampledTex.metalBinding +
-                            static_cast<std::uint32_t>(samplerArraySize) >
-                                kMaxDirectMetalSamplerSlots;
+                        sampledTex.collapsedDirectSamplerArray;
                     // Note: GL 4.2 layout(binding=N) default-unit is
                     // baked into `samplerValue->ints[arrayElement]`
                     // at link time (see the samplerExplicitBindings
@@ -10306,9 +10361,9 @@ struct GLContext::Impl {
         };
 
         resolveStage("frag", info.fragmentReflection, info.fragmentTextures,
-                     info.fragmentMSL, fragmentUsesSparseSampledSidecars);
+                     info.fragmentMSL);
         resolveStage("vert", info.vertexReflection, info.vertexTextures,
-                     info.vertexMSL, vertexUsesSparseSampledSidecars);
+                     info.vertexMSL);
         if (profileSamplerBindings) {
             drawPathProfile.record(GLDrawProfileBucket::SamplerBindingsTotal,
                                    samplerBindingsStart,
@@ -35013,6 +35068,7 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->vsTfAsComputeUniformLayout.clear();
     programObject->uniformLayoutComputed = false;
     programObject->invalidateUniformBufferCache();
+    programObject->invalidateSamplerBindingRecipeCache();
     for (std::size_t stage = 0; stage < programObject->pipelineEmulationStageUniforms.size(); ++stage) {
         programObject->pipelineEmulationStageUniforms[stage].clear();
         programObject->pipelineEmulationStageUniformValues[stage].clear();
