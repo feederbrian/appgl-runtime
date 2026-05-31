@@ -748,12 +748,18 @@ struct MetalTessDrawInfo {
 	    // descriptor. The encoder allocates the Phase-3 handoff buffers,
 	    // skips the VS dispatch, and seeds a zeroed VS-output buffer.
 	    bool forcePhase3Buffers = false;
-	    // Phase 3B.4 [metal-tess-TF]: TES-as-compute pipeline state.
-    // The caller leaves this non-null only when an actual consumer needs
-    // generated TES output bytes, currently active tess TF or point-mode
-    // replay. When null, render-only tessellation uses the existing
-    // TES-as-vertex-function render path without domain/TES-compute buffers.
+    // Phase 3B.4 [metal-tess-TF]: TES-as-compute pipeline state.
+    // When non-null, the encoder can extend the compute chain with a
+    // domain-point generator dispatch + a TES-as-compute dispatch whose
+    // output feeds TF, point-mode replay, query accounting, or tess
+    // render-verification paths. When null, the encoder uses the existing
+    // TES-as-vertex-function render path.
     void* tessEvalComputePipelineState = nullptr;  // id<MTLComputePipelineState>
+    // True when correctness requires the TES-compute sidecar for this draw
+    // (active tess TF, point-mode replay, or active tess query accounting).
+    // Optional render-verification uses may still run below the encoder's
+    // soft allocation cap.
+    bool tessEvalComputeRequired = false;
 
     // Phase 3B.5 [metal-tess-TF]: encoder out-params used by the TF
     // write path in `tryMetalTessellationDraw`. After the TES-compute
@@ -762,9 +768,9 @@ struct MetalTessDrawInfo {
     // Shared-storage TES output buffer into `*outTesComputeOutBuf`.
     // Caller reads the buffer bytes and deposits them into the bound
     // GL_TRANSFORM_FEEDBACK_BUFFER per the program's TF layout. Both
-    // pointers are optional for consumers that need TES-compute bytes without
-    // GL TF write-back; render-only callers should clear
-    // tessEvalComputePipelineState instead.
+    // pointers are optional — null = no write-back (the encoder allocates
+    // everything locally and lets the compute dispatches run for coverage /
+    // query accounting only).
     std::uint32_t* outGeneratedVertCount = nullptr;
     void** outTesComputeOutBuf = nullptr;  // id<MTLBuffer>*
 

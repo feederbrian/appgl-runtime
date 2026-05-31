@@ -853,6 +853,20 @@ static NSUInteger appglEstimateTessDomainVertexCapacity(
     return static_cast<NSUInteger>(std::max<std::uint64_t>(total, 1u));
 }
 
+static NSUInteger appglOptionalTessEvalComputeByteLimit() {
+    constexpr std::uint64_t kDefaultLimit = 512ull * 1024ull * 1024ull;
+    const char* raw = std::getenv("APPGL_OPTIONAL_TESS_COMPUTE_BYTE_LIMIT");
+    if (raw == nullptr || raw[0] == '\0') {
+        return static_cast<NSUInteger>(kDefaultLimit);
+    }
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(raw, &end, 0);
+    if (end == raw) {
+        return static_cast<NSUInteger>(kDefaultLimit);
+    }
+    return static_cast<NSUInteger>(parsed);
+}
+
 // Phase 4A [metal-tess-TF] — MSL source for the CPU-exact domain-gen
 // port. Shared between the production path (`ensureTessDomainPortLibrary`
 // on `Impl`) and the validation probe (`phaseAProbeTessDomainPort`).
@@ -8388,9 +8402,9 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         }
 
         // (3c) Phase 3B.4 [metal-tess-TF]: optional domain-generator +
-        // TES-as-compute dispatch chain. The GL caller clears
-        // `tessEvalComputePipelineState` unless an actual consumer needs
-        // TES output bytes (active tess TF or point-mode replay).
+        // TES-as-compute dispatch chain. Small optional render-verification
+        // cases keep this path for coverage/query fidelity; oversized draws
+        // without a required TES-compute consumer stay on the render path.
         const bool isTessTF = isTessEvalComputeRequested;
         id<MTLBuffer> domainCoordBuf = nil;
         id<MTLBuffer> domainPrimIDBuf = nil;
@@ -8438,6 +8452,28 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                                           tesComputeOutBytes)) {
                     return false;
                 }
+                const NSUInteger optionalLimit =
+                    appglOptionalTessEvalComputeByteLimit();
+                const bool skipOptionalTessCompute =
+                    !info.tessEvalComputeRequired &&
+                    optionalLimit > 0 &&
+                    (domainCoordBytes > optionalLimit ||
+                     domainPrimIDBytes > optionalLimit ||
+                     tesComputeOutBytes > optionalLimit);
+                if (skipOptionalTessCompute) {
+                    if (std::getenv("APPGL_TRACE_TESS") ||
+                        std::getenv("APPGL_DETECTOR_TF")) {
+                        std::fprintf(stderr,
+                            "[APPGL] tess-tf: skip optional TES-compute "
+                            "capacity=%llu coordBytes=0x%llx primBytes=0x%llx "
+                            "tesBytes=0x%llx limit=0x%llx\n",
+                            (unsigned long long)domainVertexCapacity,
+                            (unsigned long long)domainCoordBytes,
+                            (unsigned long long)domainPrimIDBytes,
+                            (unsigned long long)tesComputeOutBytes,
+                            (unsigned long long)optionalLimit);
+                    }
+                } else {
                 // packed_float3 is 12 bytes in MSL; hard-code the size
                 // since simd.h's equivalent isn't always accessible here.
                 // T4C diagnostic: when APPGL_DUMP_DOMAINGEN=<dir> is set,
@@ -8985,6 +9021,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                     // TF write completes.
                     *info.outTesComputeOutBuf =
                         (void*)CFBridgingRetain(tesComputeOutBuf);
+                }
                 }
             }
         }
