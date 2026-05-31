@@ -7410,6 +7410,28 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         return true;
     }
 
+    bool drainPresentLifecycleForStandaloneEncoding(
+        std::string* diagnostic,
+        AppGLCommandReason reason) {
+        if (!drainCurrentCommandBufferForStandaloneEncoding(
+                diagnostic, reason)) {
+            return false;
+        }
+        if (usesOffscreenTarget ||
+            commandSubmission == nullptr ||
+            !commandSubmission->hasOutstandingCommandBuffers()) {
+            return true;
+        }
+        if (!commandSubmission->drainAllOutstanding(reason, false)) {
+            if (diagnostic != nullptr) {
+                *diagnostic = "outstanding present command buffers failed or timed out";
+            }
+            return false;
+        }
+        resetCachedEncoderState();
+        return true;
+    }
+
     bool isReady() const {
         return device != nil && commandQueue != nil && (layer != nil || usesOffscreenTarget);
     }
@@ -8067,9 +8089,28 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         // (1) Drain any prior state so compute runs against a clean
         // command buffer and subsequent render-pass reads see the
         // factor-buffer writes.
-        if (!drainCurrentCommandBufferForStandaloneEncoding(
-                nullptr,
-                AppGLCommandReason::TessDrainCurrent)) {
+        const bool defaultFramebufferTessDraw = info.fboColorTexture == nullptr;
+        const bool tessSamplesPriorFramebufferState =
+            !info.tessControlTextures.empty() ||
+            !info.tessVertexAsComputeTextures.empty() ||
+            !info.tessEvalTextures.empty() ||
+            !info.fragmentTextures.empty();
+        const bool keepDefaultFrameOpen =
+            defaultFramebufferTessDraw && !tessSamplesPriorFramebufferState;
+        if (keepDefaultFrameOpen) {
+            endRenderPass();
+            resetCachedEncoderState();
+            if (!usesOffscreenTarget &&
+                currentCommandBuffer == nil &&
+                commandSubmission != nullptr &&
+                commandSubmission->hasOutstandingCommandBuffers() &&
+                !commandSubmission->drainAllOutstanding(
+                    AppGLCommandReason::TessDrainCurrent, false)) {
+                return false;
+            }
+        } else if (!drainPresentLifecycleForStandaloneEncoding(
+                       nullptr,
+                       AppGLCommandReason::TessDrainCurrent)) {
             return false;
         }
 
@@ -9715,9 +9756,19 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         if (isDefaultTarget) {
             readbackSourceTexture = colorTex;
             readbackSourceIsBGRA = colorTex.pixelFormat == MTLPixelFormatBGRA8Unorm;
-            if (!usesOffscreenTarget && currentDrawable != nil) {
-                [currentCommandBuffer presentDrawable:currentDrawable];
+            pendingPresent = true;
+            currentCommandBufferLease.retainObjectUntilCompleted(factorBuf);
+            currentCommandBufferLease.retainObjectUntilCompleted(factorBufFull);
+            currentCommandBufferLease.retainObjectUntilCompleted(renderPSO);
+            if (cpOutBuf != nil) {
+                currentCommandBufferLease.retainObjectUntilCompleted(cpOutBuf);
             }
+            if (patchOutBuf != nil) {
+                currentCommandBufferLease.retainObjectUntilCompleted(patchOutBuf);
+            }
+            resetCachedEncoderState();
+            info.didRender = true;
+            return true;
         }
 
         // Commit + wait so subsequent readbacks / copies observe the
@@ -9785,7 +9836,9 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             info.diagnostic = "no color attachment";
             return false;
         }
-        if (!drainCurrentCommandBufferForStandaloneEncoding(&info.diagnostic)) {
+        if (!drainPresentLifecycleForStandaloneEncoding(
+                &info.diagnostic,
+                AppGLCommandReason::DrainCurrentStandalone)) {
             return false;
         }
 

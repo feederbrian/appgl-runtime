@@ -37491,7 +37491,8 @@ bool GLContext::linkProgram(GLuint program) {
                 addBuiltIn(programObject->resourceInputs,
                     "gl_InstanceID", GL_INT, 0x01);
             }
-            if (sourceUsesIdent(src, "gl_DrawID")) {
+            if (sourceUsesIdent(src, "gl_DrawID") ||
+                sourceUsesIdent(src, "gl_DrawIDARB")) {
                 addBuiltIn(programObject->resourceInputs,
                     "gl_DrawID", GL_INT, 0x01);
             }
@@ -44839,6 +44840,7 @@ static void applyCachedVertexArrayLayout(
             evb.byteCount = extraVbo->shadowBytes.size();
             evb.metalBuffer = extraVbo->metalBuffer;
             evb.metalBufferOffset = offsetExtraBuffersByFirst
+                && group.divisor == 0
                 ? static_cast<std::size_t>(first) * group.stride
                 : 0;
             evb.glBuffer = group.bufferName;
@@ -44849,6 +44851,78 @@ static void applyCachedVertexArrayLayout(
         }
         tdi.extraVertexBuffers.push_back(std::move(evb));
     }
+}
+
+static bool programUsesDrawArrayVertexBaseBuiltins(
+    const GLProgramObject& program)
+{
+    for (const auto& input : program.resourceInputs) {
+        if (input.name == "gl_VertexID" ||
+            input.name == "gl_BaseVertex") {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool programUsesResourceInput(const GLProgramObject& program,
+                                     std::string_view name)
+{
+    for (const auto& input : program.resourceInputs) {
+        if (input.name == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool shaderSourceUsesToken(const std::string& source, const char* token)
+{
+    std::size_t pos = 0;
+    while ((pos = source.find(token, pos)) != std::string::npos) {
+        if (tokenAt(source, pos, token)) {
+            return true;
+        }
+        pos += std::strlen(token);
+    }
+    return false;
+}
+
+static bool programAttachedShaderSourceUsesToken(
+    const GLProgramObject& program,
+    GLObjectStore& objects,
+    const char* token)
+{
+    for (GLuint shaderId : program.attachedShaders) {
+        const GLShaderObject* shader = objects.shaders().get(shaderId);
+        if (shader != nullptr &&
+            shaderSourceUsesToken(shader->source, token)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool programUsesDrawOrPrimitiveIDDependency(
+    const GLProgramObject& program,
+    GLObjectStore& objects)
+{
+    return program.shaderDrawIDUniformLocation >= 0 ||
+           programUsesResourceInput(program, "gl_DrawID") ||
+           programUsesResourceInput(program, "gl_DrawIDARB") ||
+           programUsesResourceInput(program, "gl_PrimitiveID") ||
+           programUsesResourceInput(program, "gl_PrimitiveIDIn") ||
+           programAttachedShaderSourceUsesToken(program, objects, "gl_DrawID") ||
+           programAttachedShaderSourceUsesToken(program, objects, "gl_DrawIDARB") ||
+           programAttachedShaderSourceUsesToken(program, objects, "gl_PrimitiveID") ||
+           programAttachedShaderSourceUsesToken(program, objects, "gl_PrimitiveIDIn");
+}
+
+static bool isCoalescibleArrayPrimitiveMode(GLenum mode)
+{
+    return mode == GL_POINTS ||
+           mode == GL_LINES ||
+           mode == GL_TRIANGLES;
 }
 
 static GLint shaderVertexInputComponentCount(GLenum type) {
@@ -50592,7 +50666,15 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             }
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
                 const std::size_t posStride = vaoLayout.primaryStride;
-                const std::size_t startOff = vaoLayout.primaryBaseOffset;
+                const bool canRebaseSingleArrayDraw =
+                    instancecount == 1 &&
+                    baseinstance == 0 &&
+                    !programUsesDrawArrayVertexBaseBuiltins(*program);
+                const std::size_t firstOff = canRebaseSingleArrayDraw
+                    ? static_cast<std::size_t>(first) * posStride
+                    : 0u;
+                const std::size_t startOff =
+                    vaoLayout.primaryBaseOffset + firstOff;
 
                 if (startOff > vbo->shadowBytes.size()) {
                     reportTranslatedFallbackOnce(program, programName,
@@ -50604,16 +50686,22 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
                     tdi.mode = mode;
                     tdi.vertexCount = count;
-                    tdi.baseVertex = first;
+                    tdi.baseVertex = canRebaseSingleArrayDraw ? 0 : first;
                     tdi.instanceCount = instancecount;
                     tdi.baseInstance = baseinstance;
                     tdi.vertexData = vbo->shadowBytes.data() + startOff;
                     tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
                     tdi.vertexStride = posStride;
                     // OPT-5: pass pre-uploaded Metal buffer for direct bind.
-                    tdi.metalVertexBuffer = vbo->metalBuffer;
-                    tdi.metalVertexBufferOffset = startOff;
-                    tdi.glVertexBuffer = vaoLayout.primaryBufferName;
+                    if (canRebaseSingleArrayDraw) {
+                        tdi.metalVertexBuffer = nullptr;
+                        tdi.metalVertexBufferOffset = 0;
+                        tdi.glVertexBuffer = 0;
+                    } else {
+                        tdi.metalVertexBuffer = vbo->metalBuffer;
+                        tdi.metalVertexBufferOffset = startOff;
+                        tdi.glVertexBuffer = vaoLayout.primaryBufferName;
+                    }
                     // Phase 8X Group 4d follow-up¹⁴ — centralised fixed-
                     // function state snapshot. See drawArrays.
                     populateTranslatedDrawFixedFunctionState(
@@ -50640,7 +50728,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
 
                     applyCachedVertexArrayLayout(
                         vaoLayout, *impl_->objects, tdi, first,
-                        false, false);
+                        canRebaseSingleArrayDraw, false);
 
                     logStateResolveCostClass(
                         "drawArraysInstanced", programName, vaoName,
@@ -55277,6 +55365,11 @@ bool GLContext::multiDrawArraysIndirect(GLenum mode, const void* indirect, GLsiz
             }
         }
     }
+    std::vector<DrawArraysIndirectCommand> commands;
+    commands.reserve(static_cast<std::size_t>(std::max<GLsizei>(drawcount, 0)));
+    bool canCoalesceContiguous = drawcount > 0;
+    GLuint coalescedFirst = 0;
+    GLuint coalescedEnd = 0;
     for (GLsizei i = 0; i < drawcount; ++i) {
         const void* cmdPtr = reinterpret_cast<const void*>(
             reinterpret_cast<uintptr_t>(indirect) + static_cast<uintptr_t>(i) * static_cast<uintptr_t>(effectiveStride));
@@ -55284,6 +55377,50 @@ bool GLContext::multiDrawArraysIndirect(GLenum mode, const void* indirect, GLsiz
         if (!readIndirectBuffer(GL_DRAW_INDIRECT_BUFFER, cmdPtr, sizeof(cmd), &cmd)) {
             return false;
         }
+        if (cmd.count == 0 || cmd.instanceCount == 0) {
+            canCoalesceContiguous = false;
+        } else if (cmd.instanceCount != 1 || cmd.baseInstance != 0) {
+            canCoalesceContiguous = false;
+        } else if (i == 0) {
+            coalescedFirst = cmd.first;
+            coalescedEnd = cmd.first + cmd.count;
+            if (coalescedEnd < cmd.first) {
+                canCoalesceContiguous = false;
+            }
+        } else if (canCoalesceContiguous && cmd.first == coalescedEnd) {
+            coalescedEnd += cmd.count;
+            if (coalescedEnd < cmd.first) {
+                canCoalesceContiguous = false;
+            }
+        } else {
+            canCoalesceContiguous = false;
+        }
+        commands.push_back(cmd);
+    }
+
+    // Live layer-backed presents reuse one render encoder for the full
+    // frame. On that path, Apple AGX currently fails to make per-subdraw
+    // vertex range rebinding observable for VBO-backed MDI walls. When the
+    // commands are exactly one contiguous, non-instanced independent-primitive
+    // array range and the shader has no draw/primitive ID dependency, the
+    // GL-visible result is identical to one drawArrays over the combined range
+    // and avoids the fragile per-command encoder state.
+    if (canCoalesceContiguous && isCoalescibleArrayPrimitiveMode(mode)) {
+        GLuint programName = impl_->state->currentProgram();
+        GLProgramObject* program = impl_->resolveDrawProgram(programName);
+        const GLuint coalescedCount = coalescedEnd - coalescedFirst;
+        if (program != nullptr &&
+            !programUsesDrawOrPrimitiveIDDependency(*program, *impl_->objects) &&
+            coalescedCount <= static_cast<GLuint>(std::numeric_limits<GLsizei>::max())) {
+            return drawArrays(mode,
+                              static_cast<GLint>(coalescedFirst),
+                              static_cast<GLsizei>(coalescedCount),
+                              0);
+        }
+    }
+
+    for (GLsizei i = 0; i < drawcount; ++i) {
+        const auto& cmd = commands[static_cast<std::size_t>(i)];
         if (cmd.count == 0 || cmd.instanceCount == 0) {
             continue;  // valid no-op for this sub-draw
         }

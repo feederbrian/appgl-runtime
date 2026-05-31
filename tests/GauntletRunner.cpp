@@ -1,6 +1,7 @@
 #include "GauntletRunner.h"
 
 #include "GoldenCompare.h"
+#include "LivePresentSentinel.h"
 #include "Scene.h"
 
 #include <algorithm>
@@ -12394,6 +12395,22 @@ TestResult runS22FirstRangeSentinel() {
     return result;
 }
 
+TestResult runS22LivePresentPathSentinel() {
+    auto result = runDirectSentinel("s22.live-present-mdi-reused-encoder", [&] {
+        std::string message;
+        if (!runS22LivePresentMDISentinel(message)) {
+            throw std::runtime_error(message.empty()
+                ? "live-present MDI sentinel failed"
+                : message);
+        }
+    });
+    if (result.status == "passed") {
+        result.message =
+            "layer-backed present MDI VBO draw rendered every viewport tile";
+    }
+    return result;
+}
+
 void appendCoverageDelta(TestResult& result, const std::string& phase) {
     // Bootstrap coverage checks only apply to phase-a scenes. Phase-c and later
     // scenes validate their own scenarioCoverage() list; requiring the full
@@ -12605,6 +12622,11 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
 
     if (normalizedPhase == "s22-first-range-sentinel") {
         tests.push_back(runS22FirstRangeSentinel());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "s22-live-present-sentinel") {
+        tests.push_back(runS22LivePresentPathSentinel());
         return buildJSON(normalizedPhase, tests);
     }
 

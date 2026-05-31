@@ -122,6 +122,7 @@ set(APPGL_SOURCES
 set(APPGL_TEST_SUPPORT_SOURCES
   tests/GoldenCompare.cpp
   tests/GauntletRunner.cpp
+  tests/LivePresentSentinel.mm
 )
 
 set(APPGL_PUBLIC_HEADERS
