@@ -7381,7 +7381,9 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         }
     }
 
-    bool drainCurrentCommandBufferForStandaloneEncoding(std::string* diagnostic) {
+    bool drainCurrentCommandBufferForStandaloneEncoding(
+        std::string* diagnostic,
+        AppGLCommandReason reason = AppGLCommandReason::DrainCurrentStandalone) {
         endRenderPass();
         if (currentCommandBuffer == nil) {
             return true;
@@ -7390,7 +7392,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         if (!usesOffscreenTarget && currentDrawable != nil && pendingPresent) {
             [currentCommandBuffer presentDrawable:currentDrawable];
         }
-        if (!currentCommandBufferLease.commitAndWait(AppGLCommandReason::DrainCurrentStandalone)) {
+        if (!currentCommandBufferLease.commitAndWait(reason)) {
             if (diagnostic != nullptr) {
                 *diagnostic = "prior command buffer failed or timed out";
             }
@@ -8065,12 +8067,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         // (1) Drain any prior state so compute runs against a clean
         // command buffer and subsequent render-pass reads see the
         // factor-buffer writes.
-        endRenderPass();
-        if (currentCommandBuffer != nil) {
-            if (!currentCommandBufferLease.commitAndWait(AppGLCommandReason::TessDrainCurrent)) {
-                return false;
-            }
-            currentCommandBuffer = nil;
+        if (!drainCurrentCommandBufferForStandaloneEncoding(
+                nullptr,
+                AppGLCommandReason::TessDrainCurrent)) {
+            return false;
         }
 
         auto fillTransientBufferAndWait =
@@ -9734,6 +9734,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             currentDrawable = nil;
             pendingPresent = false;
         }
+        resetCachedEncoderState();
         info.didRender = true;
 
         if (std::getenv("APPGL_TRACE_TESS")) {
