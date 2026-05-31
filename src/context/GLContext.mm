@@ -30774,20 +30774,44 @@ std::size_t shaderPreambleInsertOffset(const std::string& source) {
     return insertAt;
 }
 
-std::string rewriteShaderDrawIDForSpirv(const std::string& in, GLenum stage) {
+std::string rewriteShaderDrawParametersForSpirv(const std::string& in, GLenum stage) {
     if (stage != GL_VERTEX_SHADER) {
         return in;
     }
     std::string out = in;
-    const bool changedArb =
+    const bool changedDrawIDArb =
         replaceShaderDrawIDToken(out, "gl_DrawIDARB", "_appgl_DrawID");
-    const bool changedCore =
+    const bool changedDrawIDCore =
         replaceShaderDrawIDToken(out, "gl_DrawID", "_appgl_DrawID");
-    if (!changedArb && !changedCore) {
+    const bool changedBaseVertexArb =
+        replaceShaderDrawIDToken(out, "gl_BaseVertexARB", "_appgl_BaseVertex");
+    const bool changedBaseVertexCore =
+        replaceShaderDrawIDToken(out, "gl_BaseVertex", "_appgl_BaseVertex");
+    const bool changedBaseInstanceArb =
+        replaceShaderDrawIDToken(out, "gl_BaseInstanceARB", "_appgl_BaseInstance");
+    const bool changedBaseInstanceCore =
+        replaceShaderDrawIDToken(out, "gl_BaseInstance", "_appgl_BaseInstance");
+    const bool usesDrawID = changedDrawIDArb || changedDrawIDCore;
+    const bool usesBaseVertex = changedBaseVertexArb || changedBaseVertexCore;
+    const bool usesBaseInstance = changedBaseInstanceArb || changedBaseInstanceCore;
+    if (!usesDrawID && !usesBaseVertex && !usesBaseInstance) {
         return in;
     }
-    if (out.find("uniform int _appgl_DrawID") == std::string::npos) {
-        out.insert(shaderPreambleInsertOffset(out), "uniform int _appgl_DrawID;\n");
+    std::string injectedUniforms;
+    if (usesDrawID &&
+        out.find("uniform int _appgl_DrawID") == std::string::npos) {
+        injectedUniforms += "uniform int _appgl_DrawID;\n";
+    }
+    if (usesBaseVertex &&
+        out.find("uniform int _appgl_BaseVertex") == std::string::npos) {
+        injectedUniforms += "uniform int _appgl_BaseVertex;\n";
+    }
+    if (usesBaseInstance &&
+        out.find("uniform int _appgl_BaseInstance") == std::string::npos) {
+        injectedUniforms += "uniform int _appgl_BaseInstance;\n";
+    }
+    if (!injectedUniforms.empty()) {
+        out.insert(shaderPreambleInsertOffset(out), injectedUniforms);
     }
     return out;
 }
@@ -33152,7 +33176,7 @@ bool GLContext::compileShader(GLuint shader) {
             ? after420packQualifierRewrite
             : sourceAfterImplicitRewrite;
     std::string afterDrawIDRewrite =
-        rewriteShaderDrawIDForSpirv(sourceAfterQualifierRewrite, object->stage);
+        rewriteShaderDrawParametersForSpirv(sourceAfterQualifierRewrite, object->stage);
     const std::string& sourceAfterDrawIDRewrite =
         (afterDrawIDRewrite != sourceAfterQualifierRewrite)
             ? afterDrawIDRewrite
@@ -35973,6 +35997,10 @@ bool GLContext::linkProgram(GLuint program) {
             findLocByName(SUN::kTextureMatrix);
         programObject->shaderDrawIDUniformLocation =
             findLocByName("_appgl_DrawID");
+        programObject->shaderBaseVertexUniformLocation =
+            findLocByName("_appgl_BaseVertex");
+        programObject->shaderBaseInstanceUniformLocation =
+            findLocByName("_appgl_BaseInstance");
     }
 
     // ─── Transform feedback link-time validation ───────────────────────
@@ -37754,11 +37782,13 @@ bool GLContext::linkProgram(GLuint program) {
                 addBuiltIn(programObject->resourceInputs,
                     "gl_DrawID", GL_INT, 0x01);
             }
-            if (sourceUsesIdent(src, "gl_BaseVertex")) {
+            if (sourceUsesIdent(src, "gl_BaseVertex") ||
+                sourceUsesIdent(src, "gl_BaseVertexARB")) {
                 addBuiltIn(programObject->resourceInputs,
                     "gl_BaseVertex", GL_INT, 0x01);
             }
-            if (sourceUsesIdent(src, "gl_BaseInstance")) {
+            if (sourceUsesIdent(src, "gl_BaseInstance") ||
+                sourceUsesIdent(src, "gl_BaseInstanceARB")) {
                 addBuiltIn(programObject->resourceInputs,
                     "gl_BaseInstance", GL_INT, 0x01);
             }
@@ -38679,9 +38709,9 @@ bool GLContext::linkProgram(GLuint program) {
         const std::string& fsLinkSource =
             fsRewrite.didRewrite ? fsRewrite.source : fsStage->source;
         std::string vsDrawIDLinkSource =
-            rewriteShaderDrawIDForSpirv(vsLinkSource, GL_VERTEX_SHADER);
+            rewriteShaderDrawParametersForSpirv(vsLinkSource, GL_VERTEX_SHADER);
         std::string fsDrawIDLinkSource =
-            rewriteShaderDrawIDForSpirv(fsLinkSource, GL_FRAGMENT_SHADER);
+            rewriteShaderDrawParametersForSpirv(fsLinkSource, GL_FRAGMENT_SHADER);
         vsDrawIDLinkSource =
             rewriteUnsizedUniformArrayInitializersForSpirv(vsDrawIDLinkSource);
         fsDrawIDLinkSource =
@@ -44310,7 +44340,9 @@ static bool assignSynthesizedUniformInts(GLProgramUniformValue& value,
 static bool pushSynthesizedMatrixUniforms(
     GLProgramObject& program,
     const MatrixStateMirror& matrixState,
-    GLuint drawID = 0)
+    GLuint drawID = 0,
+    GLint baseVertex = 0,
+    GLuint baseInstance = 0)
 {
     bool changed = false;
     if (program.shaderDrawIDUniformLocation >= 0) {
@@ -44318,6 +44350,18 @@ static bool pushSynthesizedMatrixUniforms(
         const GLint drawIDValue = static_cast<GLint>(drawID);
         changed |= assignSynthesizedUniformInts(
             value, GL_INT, 1, &drawIDValue, 1);
+    }
+    if (program.shaderBaseVertexUniformLocation >= 0) {
+        auto& value = program.uniformValues[program.shaderBaseVertexUniformLocation];
+        const GLint baseVertexValue = baseVertex;
+        changed |= assignSynthesizedUniformInts(
+            value, GL_INT, 1, &baseVertexValue, 1);
+    }
+    if (program.shaderBaseInstanceUniformLocation >= 0) {
+        auto& value = program.uniformValues[program.shaderBaseInstanceUniformLocation];
+        const GLint baseInstanceValue = static_cast<GLint>(baseInstance);
+        changed |= assignSynthesizedUniformInts(
+            value, GL_INT, 1, &baseInstanceValue, 1);
     }
 
     const auto& slots = program.synthesizedMatrixSlots;
@@ -44504,7 +44548,9 @@ static void prepareTranslatedDrawUniformBuffers(
         program.invalidateUniformBufferCache();
     }
 
-    if (pushSynthesizedMatrixUniforms(program, matrixState, drawID)) {
+    if (pushSynthesizedMatrixUniforms(
+            program, matrixState, drawID,
+            tdi.shaderBaseVertex, tdi.baseInstance)) {
         program.markUniformsDirty();
     }
 
@@ -52303,6 +52349,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     tdi.mode = mode;
                     tdi.vertexCount = count;
                     tdi.baseVertex = basevertex;
+                    tdi.shaderBaseVertex = basevertex;
                     tdi.vertexData = vbo->shadowBytes.data() + startOff;
                     tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
                     tdi.vertexStride = posStride;
@@ -52877,6 +52924,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     tdi.mode = mode;
                     tdi.vertexCount = count;
                     tdi.baseVertex = basevertex;
+                    tdi.shaderBaseVertex = basevertex;
                     tdi.instanceCount = instancecount;
                     tdi.baseInstance = baseinstance;
                     tdi.vertexData = vbo->shadowBytes.data() + startOff;
@@ -62953,10 +63001,15 @@ bool GLContext::getQueryBufferObjectui64v(GLuint id, GLuint buffer, GLenum pname
 
 // GL 4.6 §10.5 validation for glMultiDraw{Arrays,Elements}IndirectCount.
 // Common gate: drawcount (offset into PARAMETER_BUFFER) must be aligned
-// to 4 bytes; PARAMETER_BUFFER must be bound; the referenced count +
-// maxdrawcount entries must fit in the parameter buffer.
+// to 4 bytes; PARAMETER_BUFFER must be bound; the referenced count word
+// must fit in the parameter buffer. The indirect command range is
+// validated by the non-count MDI path after the real draw count is read.
 bool GLContext::validateIndirectCount(GLintptr drawcount, GLsizei maxdrawcount) {
     if (maxdrawcount < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (drawcount < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
@@ -62985,6 +63038,34 @@ bool GLContext::validateIndirectCount(GLintptr drawcount, GLsizei maxdrawcount) 
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    return true;
+}
+
+bool GLContext::resolveIndirectDrawCount(GLintptr drawcount, GLsizei maxdrawcount, GLsizei& actualDrawcount) {
+    actualDrawcount = 0;
+    if (!validateIndirectCount(drawcount, maxdrawcount)) {
+        return false;
+    }
+    const GLuint paramBuffer =
+        impl_->state->boundBuffer(GL_PARAMETER_BUFFER);
+    GLBufferObject* bo = impl_->objects->buffers().get(paramBuffer);
+    if (bo == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    GLuint rawDrawcount = 0;
+    if (!impl_->readBufferRange(
+            *bo,
+            drawcount,
+            static_cast<GLsizeiptr>(sizeof(rawDrawcount)),
+            &rawDrawcount)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const GLuint clamped =
+        std::min<GLuint>(rawDrawcount, static_cast<GLuint>(maxdrawcount));
+    actualDrawcount = static_cast<GLsizei>(clamped);
     return true;
 }
 
@@ -63052,17 +63133,16 @@ void GLContext::endConditionalRender() {
 
 bool GLContext::multiDrawArraysIndirectCount(GLenum mode, const void* indirect,
                                               GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride) {
-    if (!validateIndirectCount(drawcount, maxdrawcount)) return false;
-    // Delegates to the non-count variant with maxdrawcount as the
-    // conservative upper bound. A real GPU-sourced count readback
-    // would require staging the parameter buffer at draw time.
-    return multiDrawArraysIndirect(mode, indirect, maxdrawcount, stride);
+    GLsizei actualDrawcount = 0;
+    if (!resolveIndirectDrawCount(drawcount, maxdrawcount, actualDrawcount)) return false;
+    return multiDrawArraysIndirect(mode, indirect, actualDrawcount, stride);
 }
 
 bool GLContext::multiDrawElementsIndirectCount(GLenum mode, GLenum type, const void* indirect,
                                                 GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride) {
-    if (!validateIndirectCount(drawcount, maxdrawcount)) return false;
-    return multiDrawElementsIndirect(mode, type, indirect, maxdrawcount, stride);
+    GLsizei actualDrawcount = 0;
+    if (!resolveIndirectDrawCount(drawcount, maxdrawcount, actualDrawcount)) return false;
+    return multiDrawElementsIndirect(mode, type, indirect, actualDrawcount, stride);
 }
 
 bool GLContext::specializeShader(GLuint shader, const GLchar* pEntryPoint,

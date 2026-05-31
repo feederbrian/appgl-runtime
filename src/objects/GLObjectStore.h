@@ -889,8 +889,10 @@ struct GLProgramObject {
     // get the index-1 slot for dual-source blending.
     std::unordered_map<std::string, GLuint> requestedFragDataLocationIndices;
     GLSynthesizedMatrixSlots synthesizedMatrixSlots;
-    // Hidden uniform synthesized for gl_DrawID/gl_DrawIDARB on Metal paths.
+    // Hidden uniforms synthesized for shader draw parameters on Metal paths.
     GLint shaderDrawIDUniformLocation = -1;
+    GLint shaderBaseVertexUniformLocation = -1;
+    GLint shaderBaseInstanceUniformLocation = -1;
 
     // Tessellation program properties (extracted from SPIR-V at link time).
     GLint tessControlOutputVertices = 0;

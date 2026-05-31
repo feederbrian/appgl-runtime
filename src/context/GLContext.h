@@ -550,6 +550,8 @@ public:
     // drawcount alignment, PARAMETER_BUFFER binding, and buffer-size
     // bounds. Returns false (with pushError) on any violation.
     bool validateIndirectCount(GLintptr drawcount, GLsizei maxdrawcount);
+    bool resolveIndirectDrawCount(
+        GLintptr drawcount, GLsizei maxdrawcount, GLsizei& actualDrawcount);
     bool specializeShader(GLuint shader, const GLchar* pEntryPoint, GLuint numSpecializationConstants, const GLuint* pConstantIndex, const GLuint* pConstantValue);
     bool polygonOffsetClamp(GLfloat factor, GLfloat units, GLfloat clamp);
 

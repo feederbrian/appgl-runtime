@@ -141,6 +141,7 @@ struct TranslatedDrawInfo {
     GLenum mode = 0;
     GLsizei vertexCount = 0;
     GLsizei baseVertex = 0;
+    GLint shaderBaseVertex = 0;
 
     // Raw vertex buffer bytes at the attribute start offset.
     // Used as fallback when metalVertexBuffer is null (headless / no VBO).
