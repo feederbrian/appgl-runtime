@@ -50010,6 +50010,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
             tdi.mode = mode;
             tdi.vertexCount = count;
+            tdi.baseVertex = first;
             tdi.instanceCount = instancecount;
             tdi.baseInstance = baseinstance;
             tdi.vertexData = nullptr;
@@ -50089,9 +50090,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             }
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
                 const std::size_t posStride = vaoLayout.primaryStride;
-                const std::size_t firstOff = static_cast<std::size_t>(first) * posStride;
-                const std::size_t startOff =
-                    vaoLayout.primaryBaseOffset + firstOff;
+                const std::size_t startOff = vaoLayout.primaryBaseOffset;
 
                 if (startOff > vbo->shadowBytes.size()) {
                     reportTranslatedFallbackOnce(program, programName,
@@ -50103,6 +50102,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
                     tdi.mode = mode;
                     tdi.vertexCount = count;
+                    tdi.baseVertex = first;
                     tdi.instanceCount = instancecount;
                     tdi.baseInstance = baseinstance;
                     tdi.vertexData = vbo->shadowBytes.data() + startOff;
@@ -50138,7 +50138,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
 
                     applyCachedVertexArrayLayout(
                         vaoLayout, *impl_->objects, tdi, first,
-                        true, false);
+                        false, false);
 
                     logStateResolveCostClass(
                         "drawArraysInstanced", programName, vaoName,

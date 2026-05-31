@@ -4773,10 +4773,10 @@ struct MetalFrameGraph::Impl {
                 profileEndMetalDraw(metalDrawStart);
             }
         } else {
-            if (effectiveInstanceCount > 1 || info.baseInstance != 0) {
+            if (effectiveInstanceCount > 1 || info.baseVertex != 0 || info.baseInstance != 0) {
                 const DrawProfileTimePoint metalDrawStart = profileBeginMetalDraw();
                 [currentRenderEncoder drawPrimitives:primitive
-                            vertexStart:0
+                            vertexStart:static_cast<NSUInteger>(info.baseVertex)
                             vertexCount:static_cast<NSUInteger>(info.vertexCount)
                           instanceCount:static_cast<NSUInteger>(effectiveInstanceCount)
                            baseInstance:static_cast<NSUInteger>(info.baseInstance)];
@@ -4784,7 +4784,7 @@ struct MetalFrameGraph::Impl {
             } else {
                 const DrawProfileTimePoint metalDrawStart = profileBeginMetalDraw();
                 [currentRenderEncoder drawPrimitives:primitive
-                            vertexStart:0
+                            vertexStart:static_cast<NSUInteger>(info.baseVertex)
                             vertexCount:static_cast<NSUInteger>(info.vertexCount)];
                 profileEndMetalDraw(metalDrawStart);
             }
