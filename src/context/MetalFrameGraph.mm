@@ -411,6 +411,26 @@ static const char* parallelEncodeFallbackReasonName(
     return "unknown";
 }
 
+static ParallelEncodeBoundaryReason parallelEncodeBoundaryForFallback(
+    ParallelEncodeFallbackReason reason) {
+    switch (reason) {
+        case ParallelEncodeFallbackReason::PipelineNotPrepared:
+            return ParallelEncodeBoundaryReason::PipelineNotPrepared;
+        case ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload:
+            return ParallelEncodeBoundaryReason::CpuOrRingUploadPath;
+        case ParallelEncodeFallbackReason::ParallelEncoderCreateFailure:
+        case ParallelEncodeFallbackReason::ChildEncoderCreateFailure:
+        case ParallelEncodeFallbackReason::EncodeFailure:
+            return ParallelEncodeBoundaryReason::CommandBufferCommit;
+        case ParallelEncodeFallbackReason::MixedRenderState:
+        case ParallelEncodeFallbackReason::SmallBatch:
+        case ParallelEncodeFallbackReason::WorkerCount:
+        case ParallelEncodeFallbackReason::Count:
+            break;
+    }
+    return ParallelEncodeBoundaryReason::ResourceMutationOrBarrier;
+}
+
 struct ParallelEncodeChunkProfile {
     std::uint64_t batchIndex = 0;
     std::uint64_t chunkIndex = 0;
@@ -491,6 +511,14 @@ struct ParallelEncodeFoundationProfile {
         }
         ++replayedDraws;
         serialReplayUs += elapsedUs;
+    }
+
+    void recordDirectSerialFallback(ParallelEncodeFallbackReason reason) {
+        if (!enabled) {
+            return;
+        }
+        ++serialFallbackDraws;
+        ++parallelFallbackReasons[static_cast<std::size_t>(reason)];
     }
 
     void recordSerialBatchReplay(ParallelEncodeBoundaryReason reason,
@@ -7006,9 +7034,90 @@ struct MetalFrameGraph::Impl {
         return true;
     }
 
+    bool tryReplayPendingPreparedTranslatedDrawBatchSerial(
+        ParallelEncodeBoundaryReason reason,
+        ParallelEncodeFallbackReason fallbackReason) {
+        const std::uint64_t drawCount =
+            static_cast<std::uint64_t>(pendingParallelTranslatedDraws.size());
+        if (drawCount == 0) {
+            return true;
+        }
+        const GLenum fragmentRate =
+            pendingParallelTranslatedDraws.front().info.fragmentShadingRate;
+        for (const auto& captured : pendingParallelTranslatedDraws) {
+            if (!captured.parallelPrepared ||
+                captured.info.fragmentShadingRate != fragmentRate) {
+                return false;
+            }
+        }
+
+        if (currentRenderEncoder != nil) {
+            [currentRenderEncoder endEncoding];
+            currentRenderEncoder = nil;
+            activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
+            resetCachedEncoderState();
+        }
+        acquireRingSlot();
+
+        MTLRenderPassDescriptor* pass = nil;
+        id<MTLTexture> colorTexture = nil;
+        id<MTLTexture> passDepthStencil = nil;
+        if (!buildDefaultParallelRenderPass(
+                pendingParallelTranslatedDraws.front().info,
+                pass,
+                colorTexture,
+                passDepthStencil)) {
+            return false;
+        }
+
+        currentRenderEncoder =
+            [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
+        if (currentRenderEncoder == nil) {
+            return false;
+        }
+        hasPendingClear = false;
+        readbackSourceTexture = colorTexture;
+        readbackSourceIsBGRA =
+            colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
+        activeRenderPassFragmentShadingRate = fragmentRate;
+
+        std::uint64_t failures = 0;
+        const DrawProfileTimePoint replayStart = drawProfileNow();
+        ParallelChildEncoderState encoderState;
+        for (CapturedTranslatedDrawRecord& captured :
+             pendingParallelTranslatedDraws) {
+            const bool encoded =
+                encodeCapturedTranslatedDrawOnChildEncoder(
+                    captured,
+                    currentRenderEncoder,
+                    colorTexture,
+                    passDepthStencil,
+                    encoderState);
+            if (!encoded) {
+                ++failures;
+            }
+        }
+        [currentRenderEncoder endEncoding];
+        currentRenderEncoder = nil;
+        activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
+        resetCachedEncoderState();
+        pendingPresent = true;
+
+        const double elapsedUs =
+            drawProfileElapsedUs(replayStart, drawProfileNow());
+        parallelEncodeProfile.recordSerialBatchReplay(
+            reason, fallbackReason, drawCount, elapsedUs, failures);
+        return true;
+    }
+
     void replayPendingParallelTranslatedDrawBatchSerial(
         ParallelEncodeBoundaryReason reason,
         ParallelEncodeFallbackReason fallbackReason) {
+        if (tryReplayPendingPreparedTranslatedDrawBatchSerial(
+                reason, fallbackReason)) {
+            return;
+        }
+
         const std::uint64_t drawCount =
             static_cast<std::uint64_t>(pendingParallelTranslatedDraws.size());
         std::uint64_t failures = 0;
@@ -7255,7 +7364,17 @@ struct MetalFrameGraph::Impl {
         }
         parallelEncodeProfile.recordCaptured(
             drawProfileElapsedUs(captureStart, drawProfileNow()));
-        prepareCapturedTranslatedDrawForParallel(info, captured);
+        if (!prepareCapturedTranslatedDrawForParallel(info, captured)) {
+            const ParallelEncodeFallbackReason fallbackReason =
+                captured.parallelFallbackReason;
+            const ParallelEncodeBoundaryReason boundaryReason =
+                parallelEncodeBoundaryForFallback(fallbackReason);
+            pendingParallelTranslatedDraws.pop_back();
+            flushParallelTranslatedDrawBatch(boundaryReason);
+            parallelEncodeProfile.recordBoundary(boundaryReason);
+            parallelEncodeProfile.recordDirectSerialFallback(fallbackReason);
+            return encodeTranslatedDrawSerial(info);
+        }
 
         return true;
     }
