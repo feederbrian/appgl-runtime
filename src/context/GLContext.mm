@@ -518,6 +518,491 @@ private:
     GLDrawProfileTimePoint start_{};
 };
 
+enum class ColdPathDiagnosticBucket : std::size_t {
+    BoundaryBookkeeping,
+    BoundaryHazardDecision,
+    CacheKeyProgram,
+    CacheKeyVaoLayout,
+    CacheKeyFbo,
+    CacheKeyBindings,
+    CacheKeyFixedState,
+    CacheKeyOther,
+    ProgramVaoFboFp64Sidecars,
+    ProgramVaoFboPrimitiveCounters,
+    ProgramVaoFboFrontendVaoSource,
+    ProgramVaoFboVaoSource,
+    ProgramVaoFboGenericAttributes,
+    ProgramVaoFboBoundFbo,
+    ProgramVaoFboLayoutCache,
+    ProgramVaoFboLayoutApply,
+    SnapshotEstimate,
+    Count,
+};
+
+struct ColdPathDiagnosticBucketStats {
+    std::uint64_t count = 0;
+    double totalUs = 0.0;
+};
+
+static const char* coldPathDiagnosticBucketName(
+    ColdPathDiagnosticBucket bucket) {
+    switch (bucket) {
+        case ColdPathDiagnosticBucket::BoundaryBookkeeping:
+            return "boundary_bookkeeping";
+        case ColdPathDiagnosticBucket::BoundaryHazardDecision:
+            return "boundary_hazard_decision";
+        case ColdPathDiagnosticBucket::CacheKeyProgram:
+            return "cache_key_program";
+        case ColdPathDiagnosticBucket::CacheKeyVaoLayout:
+            return "cache_key_vao_layout";
+        case ColdPathDiagnosticBucket::CacheKeyFbo:
+            return "cache_key_fbo";
+        case ColdPathDiagnosticBucket::CacheKeyBindings:
+            return "cache_key_bindings";
+        case ColdPathDiagnosticBucket::CacheKeyFixedState:
+            return "cache_key_fixed_state";
+        case ColdPathDiagnosticBucket::CacheKeyOther:
+            return "cache_key_other";
+        case ColdPathDiagnosticBucket::ProgramVaoFboFp64Sidecars:
+            return "program_vao_fbo_fp64_sidecars";
+        case ColdPathDiagnosticBucket::ProgramVaoFboPrimitiveCounters:
+            return "program_vao_fbo_primitive_counters";
+        case ColdPathDiagnosticBucket::ProgramVaoFboFrontendVaoSource:
+            return "program_vao_fbo_frontend_vao_source";
+        case ColdPathDiagnosticBucket::ProgramVaoFboVaoSource:
+            return "program_vao_fbo_vao_source";
+        case ColdPathDiagnosticBucket::ProgramVaoFboGenericAttributes:
+            return "program_vao_fbo_generic_attributes";
+        case ColdPathDiagnosticBucket::ProgramVaoFboBoundFbo:
+            return "program_vao_fbo_bound_fbo";
+        case ColdPathDiagnosticBucket::ProgramVaoFboLayoutCache:
+            return "program_vao_fbo_layout_cache";
+        case ColdPathDiagnosticBucket::ProgramVaoFboLayoutApply:
+            return "program_vao_fbo_layout_apply";
+        case ColdPathDiagnosticBucket::SnapshotEstimate:
+            return "snapshot_estimate";
+        case ColdPathDiagnosticBucket::Count:
+            break;
+    }
+    return "unknown";
+}
+
+static void coldPathHashU64(std::uint64_t& hash, std::uint64_t value) {
+    hash ^= value;
+    hash *= 1099511628211ull;
+}
+
+static void coldPathHashPointer(std::uint64_t& hash, const void* ptr) {
+    coldPathHashU64(
+        hash,
+        static_cast<std::uint64_t>(
+            reinterpret_cast<std::uintptr_t>(ptr)));
+}
+
+struct ColdPathDiagnosticProfile {
+    bool enabled = std::getenv("APPGL_7G_COLD_PATH_PROFILE") != nullptr;
+    std::array<ColdPathDiagnosticBucketStats,
+               static_cast<std::size_t>(ColdPathDiagnosticBucket::Count)>
+        buckets{};
+
+    std::uint64_t draws = 0;
+    std::uint64_t phase2Candidates = 0;
+    std::uint64_t phase2PlanHits = 0;
+    std::uint64_t phase2PlanMisses = 0;
+    std::uint64_t phase2PlanRejects = 0;
+    std::uint64_t phase2PlanForceMisses = 0;
+    std::uint64_t phase2MemoLookups = 0;
+    std::uint64_t phase2MemoSupported = 0;
+    std::uint64_t phase2MemoHits = 0;
+    std::uint64_t phase2MemoMisses = 0;
+    std::uint64_t preflightSnapshots = 0;
+    std::uint64_t preflightGenericPrepared = 0;
+    std::uint64_t preflightGenericUnprepared = 0;
+    std::uint64_t snapshotSamples = 0;
+    std::uint64_t snapshotBytes = 0;
+    std::uint64_t maxSnapshotBytes = 0;
+    std::uint64_t mergeBytes = 0;
+    std::uint64_t maxMergeBytes = 0;
+    std::uint64_t phase2KeyRepeats = 0;
+    std::uint64_t programRepeats = 0;
+    std::uint64_t vaoFboRepeats = 0;
+    std::uint64_t programVaoFboRepeats = 0;
+    std::uint64_t boundaryRepeats = 0;
+    std::uint64_t saturatedSurfaces = 0;
+
+    std::unordered_set<std::uint64_t> phase2Keys;
+    std::unordered_set<std::uint64_t> programKeys;
+    std::unordered_set<std::uint64_t> vaoFboKeys;
+    std::unordered_set<std::uint64_t> programVaoFboKeys;
+    std::unordered_set<std::uint64_t> boundaryKeys;
+
+    static constexpr std::size_t kMaxTrackedKeys = 1u << 20;
+
+    void record(ColdPathDiagnosticBucket bucket, double us) {
+        if (!enabled) {
+            return;
+        }
+        auto& stats = buckets[static_cast<std::size_t>(bucket)];
+        ++stats.count;
+        stats.totalUs += us;
+    }
+
+    void record(ColdPathDiagnosticBucket bucket,
+                GLDrawProfileTimePoint start,
+                GLDrawProfileTimePoint end) {
+        record(bucket, glDrawProfileElapsedUs(start, end));
+    }
+
+    void recordRepeat(std::unordered_set<std::uint64_t>& surface,
+                      std::uint64_t key,
+                      std::uint64_t& repeats) {
+        if (!enabled) {
+            return;
+        }
+        auto found = surface.find(key);
+        if (found != surface.end()) {
+            ++repeats;
+            return;
+        }
+        if (surface.size() >= kMaxTrackedKeys) {
+            ++saturatedSurfaces;
+            return;
+        }
+        surface.insert(key);
+    }
+
+    void recordPreflight(bool hasPreflight, bool genericPrepared) {
+        if (!enabled || !hasPreflight) {
+            return;
+        }
+        ++preflightSnapshots;
+        if (genericPrepared) {
+            ++preflightGenericPrepared;
+        } else {
+            ++preflightGenericUnprepared;
+        }
+    }
+
+    void recordDrawKeys(const TranslatedDrawInfo& tdi,
+                        GLuint vaoName,
+                        std::uint32_t vaoGeneration,
+                        GLuint drawFboName) {
+        if (!enabled) {
+            return;
+        }
+        ++draws;
+
+        std::uint64_t programKey = 1469598103934665603ull;
+        coldPathHashU64(programKey, tdi.program);
+        coldPathHashU64(programKey, tdi.pipelineEmulationFragmentProgram);
+        coldPathHashPointer(programKey, tdi.vertexMSL);
+        coldPathHashPointer(programKey, tdi.fragmentMSL);
+        recordRepeat(programKeys, programKey, programRepeats);
+
+        std::uint64_t vaoFboKey = 1469598103934665603ull;
+        coldPathHashU64(vaoFboKey, vaoName);
+        coldPathHashU64(vaoFboKey, vaoGeneration);
+        coldPathHashU64(vaoFboKey, drawFboName);
+        recordRepeat(vaoFboKeys, vaoFboKey, vaoFboRepeats);
+
+        std::uint64_t programVaoFboKey = programKey;
+        coldPathHashU64(programVaoFboKey, vaoName);
+        coldPathHashU64(programVaoFboKey, vaoGeneration);
+        coldPathHashU64(programVaoFboKey, drawFboName);
+        recordRepeat(programVaoFboKeys,
+                     programVaoFboKey,
+                     programVaoFboRepeats);
+    }
+
+    void recordBoundaryKey(const AppGLSubmissionGroup& group,
+                           GLuint drawFboName) {
+        if (!enabled) {
+            return;
+        }
+        std::uint64_t key = 1469598103934665603ull;
+        coldPathHashU64(key, drawFboName);
+        coldPathHashU64(key, static_cast<std::uint64_t>(group.kind));
+        coldPathHashU64(key, static_cast<std::uint64_t>(group.primaryReason));
+        coldPathHashU64(key, group.declared ? 1u : 0u);
+        coldPathHashU64(key, group.argumentBuffersEnabled ? 1u : 0u);
+        coldPathHashU64(key, group.approximateFallbackDisallowed ? 1u : 0u);
+        coldPathHashU64(key, group.subgroupCount);
+        coldPathHashU64(key, group.readCount);
+        coldPathHashU64(key, group.writeCount);
+        coldPathHashU64(key, group.transientCount);
+        for (std::uint8_t i = 0; i < group.subgroupCount; ++i) {
+            coldPathHashU64(
+                key, static_cast<std::uint64_t>(group.subgroups[i].kind));
+            coldPathHashU64(
+                key, static_cast<std::uint64_t>(group.subgroups[i].reason));
+        }
+        for (std::uint8_t i = 0; i < group.readCount; ++i) {
+            coldPathHashU64(
+                key, static_cast<std::uint64_t>(group.reads[i].kind));
+            coldPathHashU64(key, group.reads[i].name);
+            coldPathHashU64(key, group.reads[i].producerBits);
+        }
+        for (std::uint8_t i = 0; i < group.writeCount; ++i) {
+            coldPathHashU64(
+                key, static_cast<std::uint64_t>(group.writes[i].kind));
+            coldPathHashU64(key, group.writes[i].name);
+            coldPathHashU64(key, group.writes[i].producerBits);
+        }
+        for (std::uint8_t i = 0; i < group.transientCount; ++i) {
+            coldPathHashU64(
+                key, static_cast<std::uint64_t>(group.transients[i].kind));
+            coldPathHashU64(
+                key, static_cast<std::uint64_t>(group.transients[i].ordering));
+            coldPathHashU64(
+                key, static_cast<std::uint64_t>(group.transients[i].reason));
+            coldPathHashU64(key, group.transients[i].slot);
+            coldPathHashU64(key, group.transients[i].bytes);
+        }
+        recordRepeat(boundaryKeys, key, boundaryRepeats);
+    }
+
+    void recordPhase2Key(std::uint64_t key) {
+        if (!enabled) {
+            return;
+        }
+        ++phase2Candidates;
+        recordRepeat(phase2Keys, key, phase2KeyRepeats);
+    }
+
+    void recordPhase2Decision(const char* decision) {
+        if (!enabled || decision == nullptr) {
+            return;
+        }
+        if (std::strcmp(decision, "hit") == 0) {
+            ++phase2PlanHits;
+        } else if (std::strcmp(decision, "miss") == 0) {
+            ++phase2PlanMisses;
+        } else if (std::strcmp(decision, "reject") == 0) {
+            ++phase2PlanRejects;
+        }
+    }
+
+    void recordPhase2ForceMiss() {
+        if (enabled) {
+            ++phase2PlanForceMisses;
+        }
+    }
+
+    void recordMemo(bool supported, bool hit) {
+        if (!enabled) {
+            return;
+        }
+        ++phase2MemoLookups;
+        if (supported) {
+            ++phase2MemoSupported;
+        }
+        if (hit) {
+            ++phase2MemoHits;
+        } else {
+            ++phase2MemoMisses;
+        }
+    }
+
+    void recordSnapshotEstimate(const TranslatedDrawInfo& tdi) {
+        if (!enabled) {
+            return;
+        }
+        const auto estimateStart = glDrawProfileNow();
+        std::size_t bytes = sizeof(TranslatedDrawInfo);
+        bytes +=
+            tdi.vertexAttributeLayouts.size() *
+            sizeof(TranslatedDrawInfo::VertexAttributeLayout);
+        for (const auto& extra : tdi.extraVertexBuffers) {
+            bytes += sizeof(TranslatedDrawInfo::ExtraVertexBuffer);
+            bytes +=
+                extra.attributes.size() *
+                sizeof(TranslatedDrawInfo::VertexAttributeLayout);
+            bytes += extra.ownedData.size();
+        }
+        bytes += tdi.fragmentTextures.size() *
+                 sizeof(TranslatedDrawInfo::TextureBinding);
+        bytes += tdi.vertexTextures.size() *
+                 sizeof(TranslatedDrawInfo::TextureBinding);
+        bytes += tdi.uboBindings.size() *
+                 sizeof(TranslatedDrawInfo::UBOBinding);
+        bytes += tdi.ssboBindings.size() *
+                 sizeof(TranslatedDrawInfo::SSBOBinding);
+        bytes += tdi.atomicCounterBindings.size() *
+                 sizeof(TranslatedDrawInfo::AtomicCounterBinding);
+        bytes += tdi.sampledTextureNames.size() * sizeof(GLuint);
+        bytes += tdi.readImageTextureNames.size() * sizeof(GLuint);
+        bytes += tdi.writtenImageTextureNames.size() * sizeof(GLuint);
+        bytes += tdi.vertexUniformSize + tdi.fragmentUniformSize;
+
+        const AppGLSubmissionGroup& group = tdi.submissionGroup;
+        std::size_t estimatedMergeBytes = sizeof(AppGLSubmissionGroup);
+        estimatedMergeBytes +=
+            static_cast<std::size_t>(group.readCount + group.writeCount) *
+            sizeof(AppGLSubmissionResourceAccess);
+        estimatedMergeBytes +=
+            static_cast<std::size_t>(group.transientCount) *
+            sizeof(AppGLSubmissionTransient);
+
+        ++snapshotSamples;
+        snapshotBytes += static_cast<std::uint64_t>(bytes);
+        maxSnapshotBytes =
+            std::max<std::uint64_t>(maxSnapshotBytes, bytes);
+        mergeBytes += static_cast<std::uint64_t>(estimatedMergeBytes);
+        maxMergeBytes =
+            std::max<std::uint64_t>(maxMergeBytes, estimatedMergeBytes);
+        record(ColdPathDiagnosticBucket::SnapshotEstimate,
+               estimateStart,
+               glDrawProfileNow());
+    }
+
+    void dumpRepeat(const char* surface,
+                    std::uint64_t samples,
+                    std::size_t unique,
+                    std::uint64_t repeats) const {
+        if (samples == 0 && unique == 0) {
+            return;
+        }
+        const double repeatRate = samples > 0
+            ? (static_cast<double>(repeats) * 100.0) /
+                  static_cast<double>(samples)
+            : 0.0;
+        std::fprintf(stderr,
+            "[APPGL_7G_COLD_PATH_PROFILE] repeat surface=%s "
+            "samples=%llu unique=%llu repeats=%llu repeat_rate_pct=%.2f\n",
+            surface,
+            static_cast<unsigned long long>(samples),
+            static_cast<unsigned long long>(unique),
+            static_cast<unsigned long long>(repeats),
+            repeatRate);
+    }
+
+    void dump() const {
+        if (!enabled) {
+            return;
+        }
+        double totalUs = 0.0;
+        std::uint64_t samples = 0;
+        for (const auto& bucket : buckets) {
+            totalUs += bucket.totalUs;
+            samples += bucket.count;
+        }
+        const double avgSnapshotBytes = snapshotSamples > 0
+            ? static_cast<double>(snapshotBytes) /
+                  static_cast<double>(snapshotSamples)
+            : 0.0;
+        const double avgMergeBytes = snapshotSamples > 0
+            ? static_cast<double>(mergeBytes) /
+                  static_cast<double>(snapshotSamples)
+            : 0.0;
+        std::fprintf(stderr,
+            "[APPGL_7G_COLD_PATH_PROFILE] summary draws=%llu "
+            "timed_samples=%llu total_us=%.3f phase2_candidates=%llu "
+            "phase2_cache_hits=%llu phase2_cache_misses=%llu "
+            "phase2_cache_rejects=%llu phase2_force_misses=%llu "
+            "snapshot_samples=%llu avg_snapshot_bytes=%.1f "
+            "max_snapshot_bytes=%llu avg_merge_bytes=%.1f "
+            "max_merge_bytes=%llu saturated_surfaces=%llu\n",
+            static_cast<unsigned long long>(draws),
+            static_cast<unsigned long long>(samples),
+            totalUs,
+            static_cast<unsigned long long>(phase2Candidates),
+            static_cast<unsigned long long>(phase2PlanHits),
+            static_cast<unsigned long long>(phase2PlanMisses),
+            static_cast<unsigned long long>(phase2PlanRejects),
+            static_cast<unsigned long long>(phase2PlanForceMisses),
+            static_cast<unsigned long long>(snapshotSamples),
+            avgSnapshotBytes,
+            static_cast<unsigned long long>(maxSnapshotBytes),
+            avgMergeBytes,
+            static_cast<unsigned long long>(maxMergeBytes),
+            static_cast<unsigned long long>(saturatedSurfaces));
+        const double denom = draws > 0 ? static_cast<double>(draws) : 1.0;
+        for (std::size_t i = 0;
+             i < static_cast<std::size_t>(ColdPathDiagnosticBucket::Count);
+             ++i) {
+            const auto& bucket = buckets[i];
+            if (bucket.count == 0) {
+                continue;
+            }
+            const auto bucketId = static_cast<ColdPathDiagnosticBucket>(i);
+            std::fprintf(stderr,
+                "[APPGL_7G_COLD_PATH_PROFILE] component=%s count=%llu "
+                "total_us=%.3f avg_us=%.3f avg_per_draw_us=%.3f\n",
+                coldPathDiagnosticBucketName(bucketId),
+                static_cast<unsigned long long>(bucket.count),
+                bucket.totalUs,
+                bucket.totalUs / static_cast<double>(bucket.count),
+                bucket.totalUs / denom);
+        }
+        dumpRepeat("phase2_key",
+                   phase2Candidates,
+                   phase2Keys.size(),
+                   phase2KeyRepeats);
+        dumpRepeat("program",
+                   draws,
+                   programKeys.size(),
+                   programRepeats);
+        dumpRepeat("vao_fbo",
+                   draws,
+                   vaoFboKeys.size(),
+                   vaoFboRepeats);
+        dumpRepeat("program_vao_fbo",
+                   draws,
+                   programVaoFboKeys.size(),
+                   programVaoFboRepeats);
+        dumpRepeat("boundary",
+                   draws,
+                   boundaryKeys.size(),
+                   boundaryRepeats);
+        const double memoHitRate = phase2MemoLookups > 0
+            ? (static_cast<double>(phase2MemoHits) * 100.0) /
+                  static_cast<double>(phase2MemoLookups)
+            : 0.0;
+        std::fprintf(stderr,
+            "[APPGL_7G_COLD_PATH_PROFILE] memo lookups=%llu "
+            "supported=%llu hits=%llu misses=%llu hit_rate_pct=%.2f\n",
+            static_cast<unsigned long long>(phase2MemoLookups),
+            static_cast<unsigned long long>(phase2MemoSupported),
+            static_cast<unsigned long long>(phase2MemoHits),
+            static_cast<unsigned long long>(phase2MemoMisses),
+            memoHitRate);
+        std::fprintf(stderr,
+            "[APPGL_7G_COLD_PATH_PROFILE] preflight snapshots=%llu "
+            "generic_prepared=%llu generic_unprepared=%llu\n",
+            static_cast<unsigned long long>(preflightSnapshots),
+            static_cast<unsigned long long>(preflightGenericPrepared),
+            static_cast<unsigned long long>(preflightGenericUnprepared));
+        std::fflush(stderr);
+    }
+};
+
+class ColdPathDiagnosticScope {
+public:
+    ColdPathDiagnosticScope(ColdPathDiagnosticProfile* profile,
+                            ColdPathDiagnosticBucket bucket)
+        : profile_(profile != nullptr && profile->enabled ? profile : nullptr),
+          bucket_(bucket) {
+        if (profile_ != nullptr) {
+            start_ = glDrawProfileNow();
+        }
+    }
+
+    ColdPathDiagnosticScope(const ColdPathDiagnosticScope&) = delete;
+    ColdPathDiagnosticScope& operator=(const ColdPathDiagnosticScope&) =
+        delete;
+
+    ~ColdPathDiagnosticScope() {
+        if (profile_ != nullptr) {
+            profile_->record(bucket_, start_, glDrawProfileNow());
+        }
+    }
+
+private:
+    ColdPathDiagnosticProfile* profile_ = nullptr;
+    ColdPathDiagnosticBucket bucket_ = ColdPathDiagnosticBucket::Count;
+    GLDrawProfileTimePoint start_{};
+};
+
 enum class Phase2PlanRejectReason : std::size_t {
     MissingProgram,
     MissingShader,
@@ -745,8 +1230,27 @@ static bool phase2PlanHasSideEffect(const TranslatedDrawInfo& tdi) {
 static std::uint64_t phase2PlanKeyForDraw(const TranslatedDrawInfo& tdi,
                                           GLuint vaoName,
                                           std::uint32_t vaoGeneration,
-                                          GLuint drawFboName)
+                                          GLuint drawFboName,
+                                          ColdPathDiagnosticProfile* coldProfile = nullptr)
 {
+    const bool coldEnabled = coldProfile != nullptr && coldProfile->enabled;
+    GLDrawProfileTimePoint coldCursor =
+        coldEnabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
+    double coldProgramUs = 0.0;
+    double coldVaoLayoutUs = 0.0;
+    double coldFboUs = 0.0;
+    double coldBindingsUs = 0.0;
+    double coldFixedStateUs = 0.0;
+    double coldOtherUs = 0.0;
+    auto coldMark = [&](double& accumulator) {
+        if (!coldEnabled) {
+            return;
+        }
+        const auto now = glDrawProfileNow();
+        accumulator += glDrawProfileElapsedUs(coldCursor, now);
+        coldCursor = now;
+    };
+
     std::uint64_t hash = kPhase2PlanHashOffset;
     phase2PlanHashU64(hash, 0x4150474C50324B31ull); // "APGLP2K1"
 
@@ -756,10 +1260,13 @@ static std::uint64_t phase2PlanKeyForDraw(const TranslatedDrawInfo& tdi,
     phase2PlanHashShaderIdentity(hash, tdi.fragmentMSL);
     phase2PlanHashReflectionShape(hash, tdi.vertexReflection);
     phase2PlanHashReflectionShape(hash, tdi.fragmentReflection);
+    coldMark(coldProgramUs);
 
     phase2PlanHashU64(hash, vaoName);
     phase2PlanHashU64(hash, vaoGeneration);
+    coldMark(coldVaoLayoutUs);
     phase2PlanHashU64(hash, drawFboName);
+    coldMark(coldFboUs);
     phase2PlanHashU64(hash, tdi.mode);
     phase2PlanHashBool(hash, tdi.indices != nullptr || tdi.metalIndexBuffer != nullptr);
     phase2PlanHashU64(hash, tdi.indexType);
@@ -787,12 +1294,14 @@ static std::uint64_t phase2PlanKeyForDraw(const TranslatedDrawInfo& tdi,
         }
     }
     phase2PlanHashBool(hash, tdi.metalIndexBuffer != nullptr);
+    coldMark(coldVaoLayoutUs);
 
     phase2PlanHashU64(hash, tdi.vertexUniformSize);
     phase2PlanHashU64(hash, tdi.fragmentUniformSize);
 
     phase2PlanHashTextureBindings(hash, tdi.fragmentTextures);
     phase2PlanHashTextureBindings(hash, tdi.vertexTextures);
+    coldMark(coldBindingsUs);
 
     phase2PlanHashBool(hash, tdi.depthTestEnabled);
     phase2PlanHashU64(hash, tdi.depthFunc);
@@ -845,6 +1354,7 @@ static std::uint64_t phase2PlanKeyForDraw(const TranslatedDrawInfo& tdi,
     phase2PlanHashBool(hash, tdi.blend.colorMaskG);
     phase2PlanHashBool(hash, tdi.blend.colorMaskB);
     phase2PlanHashBool(hash, tdi.blend.colorMaskA);
+    coldMark(coldFixedStateUs);
 
     phase2PlanHashU64(hash, tdi.uboBindings.size());
     for (const auto& ubo : tdi.uboBindings) {
@@ -870,6 +1380,7 @@ static std::uint64_t phase2PlanKeyForDraw(const TranslatedDrawInfo& tdi,
     phase2PlanHashU64(hash, tdi.sampledTextureNames.size());
     phase2PlanHashU64(hash, tdi.readImageTextureNames.size());
     phase2PlanHashU64(hash, tdi.writtenImageTextureNames.size());
+    coldMark(coldBindingsUs);
 
     phase2PlanHashBool(hash, tdi.pipelineStateOut != nullptr);
     phase2PlanHashBool(hash, tdi.pipelineColorFormatOut != nullptr);
@@ -878,6 +1389,7 @@ static std::uint64_t phase2PlanKeyForDraw(const TranslatedDrawInfo& tdi,
     phase2PlanHashBool(hash, tdi.metalFragmentFunction != nullptr);
     phase2PlanHashBool(hash, tdi.metalVertexFunctionOut != nullptr);
     phase2PlanHashBool(hash, tdi.metalFragmentFunctionOut != nullptr);
+    coldMark(coldOtherUs);
 
     phase2PlanHashPointer(hash, tdi.fboColorTexture);
     for (void* texture : tdi.fboAdditionalColorTextures) {
@@ -898,9 +1410,25 @@ static std::uint64_t phase2PlanKeyForDraw(const TranslatedDrawInfo& tdi,
     }
     phase2PlanHashU64(hash, tdi.fboDepthStencilSlice);
     phase2PlanHashU64(hash, tdi.fboDepthStencilLevel);
+    coldMark(coldFboUs);
 
     phase2PlanHashU64(hash, static_cast<std::uint64_t>(tdi.fallbackSubgroupKind));
     phase2PlanHashSubmissionGroup(hash, tdi.submissionGroup);
+    coldMark(coldOtherUs);
+    if (coldEnabled) {
+        coldProfile->record(ColdPathDiagnosticBucket::CacheKeyProgram,
+                            coldProgramUs);
+        coldProfile->record(ColdPathDiagnosticBucket::CacheKeyVaoLayout,
+                            coldVaoLayoutUs);
+        coldProfile->record(ColdPathDiagnosticBucket::CacheKeyFbo,
+                            coldFboUs);
+        coldProfile->record(ColdPathDiagnosticBucket::CacheKeyBindings,
+                            coldBindingsUs);
+        coldProfile->record(ColdPathDiagnosticBucket::CacheKeyFixedState,
+                            coldFixedStateUs);
+        coldProfile->record(ColdPathDiagnosticBucket::CacheKeyOther,
+                            coldOtherUs);
+    }
     return hash;
 }
 
@@ -1613,7 +2141,8 @@ static bool phase2PlanCandidateKeyForDraw(const TranslatedDrawInfo& tdi,
                                           Phase2PlanRejectReason& outReject,
                                           GLDrawDetailProfile* detailProfile = nullptr,
                                           Phase2PlanKeyMemo* keyMemo = nullptr,
-                                          GLObjectStore* objects = nullptr)
+                                          GLObjectStore* objects = nullptr,
+                                          ColdPathDiagnosticProfile* coldProfile = nullptr)
 {
     const bool needsFragmentStage = !tdi.rasterizerDiscard;
     {
@@ -1665,13 +2194,20 @@ static bool phase2PlanCandidateKeyForDraw(const TranslatedDrawInfo& tdi,
         if (memoSupported && keyMemo->valid &&
             keyMemo->signature == keyMemo->scratch) {
             outKey = keyMemo->key;
+            if (coldProfile != nullptr) {
+                coldProfile->recordMemo(/*supported=*/true, /*hit=*/true);
+            }
             return true;
+        }
+        if (coldProfile != nullptr) {
+            coldProfile->recordMemo(memoSupported, /*hit=*/false);
         }
     }
     {
         GLDrawDetailScope detail(
             detailProfile, GLDrawDetailBucket::Phase2CacheKeyHash);
-        outKey = phase2PlanKeyForDraw(tdi, vaoName, vaoGeneration, drawFboName);
+        outKey = phase2PlanKeyForDraw(
+            tdi, vaoName, vaoGeneration, drawFboName, coldProfile);
     }
     if (memoSupported) {
         keyMemo->signature = keyMemo->scratch;
@@ -4754,6 +5290,7 @@ static TranslatedDrawPreflightSnapshot makeTranslatedDrawPreflightSnapshot(
 
 struct GLContext::Impl {
     ~Impl() {
+        coldPathProfile.dump();
         phase2PlanKeyProfile.dump();
         drawPathProfile.dump();
         drawDetailProfile.dump();
@@ -5261,6 +5798,8 @@ struct GLContext::Impl {
         {
             GLDrawDetailScope detail(
                 drawDetailProfile, GLDrawDetailBucket::SubmissionBoundaryChecks);
+            const auto coldBookkeepingStart =
+                coldPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
             group.reset(AppGLSubmissionGroupKind::TranslatedDraw,
                         AppGLCommandReason::TranslatedDraw);
             group.addSubgroup(AppGLSubmissionGroupKind::TranslatedDraw,
@@ -5269,6 +5808,14 @@ struct GLContext::Impl {
                 group.approximateFallbackDisallowed = true;
                 group.addSubgroup(tdi.fallbackSubgroupKind,
                                   AppGLCommandReason::TranslatedDraw);
+            }
+            const auto coldHazardStart =
+                coldPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
+            if (coldPathProfile.enabled) {
+                coldPathProfile.record(
+                    ColdPathDiagnosticBucket::BoundaryBookkeeping,
+                    coldBookkeepingStart,
+                    coldHazardStart);
             }
             const bool forceArgBuf =
                 std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr;
@@ -5279,6 +5826,12 @@ struct GLContext::Impl {
             if (group.argumentBuffersEnabled) {
                 group.addSubgroup(AppGLSubmissionGroupKind::ArgumentBinding,
                                   AppGLCommandReason::TranslatedDraw);
+            }
+            if (coldPathProfile.enabled) {
+                coldPathProfile.record(
+                    ColdPathDiagnosticBucket::BoundaryHazardDecision,
+                    coldHazardStart,
+                    glDrawProfileNow());
             }
         }
 
@@ -5350,6 +5903,7 @@ struct GLContext::Impl {
                 appendSubmissionWrites(group, writes);
             }
         }
+        coldPathProfile.recordBoundaryKey(group, drawFboName);
     }
 
     void declareComputeDispatchSubmissionGroup(
@@ -19551,6 +20105,7 @@ struct GLContext::Impl {
     std::unique_ptr<GLStateTracker> state;
     GLDrawPathProfile drawPathProfile;
     mutable GLDrawDetailProfile drawDetailProfile;
+    mutable ColdPathDiagnosticProfile coldPathProfile;
     Phase2PlanKeyProfile phase2PlanKeyProfile;
     std::unordered_map<std::uint64_t, TranslatedDrawPlan> translatedDrawPlanCache;
     Phase2PlanKeyMemo translatedDrawPlanKeyMemo;
@@ -46089,8 +46644,11 @@ static const GLVertexArrayCachedLayout& cachedVertexArrayLayout(
     bool divisorAware,
     bool* cacheHit = nullptr,
     bool forceAttributeZeroPrimary = false,
-    bool minimizePrimaryBaseOffset = true)
+    bool minimizePrimaryBaseOffset = true,
+    ColdPathDiagnosticProfile* coldProfile = nullptr)
 {
+    ColdPathDiagnosticScope coldScope(
+        coldProfile, ColdPathDiagnosticBucket::ProgramVaoFboLayoutCache);
     std::size_t index = kPlainVaoLayoutCacheIndex;
     if (divisorAware && forceAttributeZeroPrimary) {
         index = kIndexedDivisorAwareVaoLayoutCacheIndex;
@@ -46131,8 +46689,11 @@ static void applyCachedVertexArrayLayout(
     TranslatedDrawInfo& tdi,
     GLint first,
     bool offsetExtraBuffersByFirst,
-    bool keepEmptyExtraBufferGroups)
+    bool keepEmptyExtraBufferGroups,
+    ColdPathDiagnosticProfile* coldProfile = nullptr)
 {
+    ColdPathDiagnosticScope coldScope(
+        coldProfile, ColdPathDiagnosticBucket::ProgramVaoFboLayoutApply);
     tdi.vertexAttributeLayouts.reserve(
         tdi.vertexAttributeLayouts.size() + cache.primaryAttributes.size());
     tdi.extraVertexBuffers.reserve(
@@ -46305,8 +46866,11 @@ static bool translatedDrawHasVertexLayoutAt(
 
 static void appendCurrentGenericVertexAttributes(
     TranslatedDrawInfo& tdi,
-    const GLVertexArrayObject* vao)
+    const GLVertexArrayObject* vao,
+    ColdPathDiagnosticProfile* coldProfile = nullptr)
 {
+    ColdPathDiagnosticScope coldScope(
+        coldProfile, ColdPathDiagnosticBucket::ProgramVaoFboGenericAttributes);
     if (tdi.vertexReflection == nullptr || vao == nullptr) {
         return;
     }
@@ -49337,7 +49901,7 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
     const auto& vaoLayout =
         cachedVertexArrayLayout(
             vao, false, &vaoLayoutCacheHit,
-            false, false);
+            false, false, &coldPathProfile);
     if (!vaoLayout.hasEnabledAttributes) {
         return false;
     }
@@ -49389,7 +49953,7 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
 
     applyCachedVertexArrayLayout(
         vaoLayout, *objects, tdi, 0,
-        false, false);
+        false, false, &coldPathProfile);
 
     logStateResolveCostClass(
         "cull-filtered-draw", programName, 0, tdi, vao.attributes.size(),
@@ -49561,6 +50125,9 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
     const auto wrapperPrepStart = drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
     const bool hasPreflightVao =
         preflight != nullptr && preflight->vao != nullptr;
+    coldPathProfile.recordPreflight(
+        hasPreflightVao,
+        preflight != nullptr && preflight->genericVertexAttributesPrepared);
     const GLVertexArrayObject* currentVao = nullptr;
     GLuint drawFboName = 0;
     GLuint planVaoName = 0;
@@ -49568,19 +50135,35 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
     {
         GLDrawDetailScope detail(
             drawDetailProfile, GLDrawDetailBucket::TranslatedProgramVaoFboState);
-        prepareFp64VertexSidecars(tdi);
-        if (hasPreflightVao) {
-            currentVao = preflight->vao;
-            planVaoName = preflight->vaoName;
-            planVaoGeneration = preflight->vaoGeneration;
-        } else {
-            currentVao = currentVertexArrayOrDefault();
+        {
+            ColdPathDiagnosticScope cold(
+                &coldPathProfile,
+                ColdPathDiagnosticBucket::ProgramVaoFboFp64Sidecars);
+            prepareFp64VertexSidecars(tdi);
+        }
+        {
+            ColdPathDiagnosticScope cold(
+                &coldPathProfile,
+                ColdPathDiagnosticBucket::ProgramVaoFboVaoSource);
+            if (hasPreflightVao) {
+                currentVao = preflight->vao;
+                planVaoName = preflight->vaoName;
+                planVaoGeneration = preflight->vaoGeneration;
+            } else {
+                currentVao = currentVertexArrayOrDefault();
+            }
         }
         if (preflight == nullptr ||
             !preflight->genericVertexAttributesPrepared) {
-            appendCurrentGenericVertexAttributes(tdi, currentVao);
+            appendCurrentGenericVertexAttributes(
+                tdi, currentVao, &coldPathProfile);
         }
-        drawFboName = state->boundDrawFramebuffer();
+        {
+            ColdPathDiagnosticScope cold(
+                &coldPathProfile,
+                ColdPathDiagnosticBucket::ProgramVaoFboBoundFbo);
+            drawFboName = state->boundDrawFramebuffer();
+        }
     }
     {
         GLDrawDetailScope detail(
@@ -49697,6 +50280,9 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
         tdi.parallelEncodePrimitiveExpansionHazard =
             parallelEncodeModeRequiresPrimitiveExpansion(tdi.mode);
     }
+    coldPathProfile.recordDrawKeys(
+        tdi, planVaoName, planVaoGeneration, drawFboName);
+    coldPathProfile.recordSnapshotEstimate(tdi);
     {
         GLDrawDetailScope detail(
             drawDetailProfile, GLDrawDetailBucket::Phase2LegacyProfileRecord);
@@ -49735,7 +50321,11 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
             translatedPlanCandidateReject,
             &drawDetailProfile,
             &translatedDrawPlanKeyMemo,
-            objects.get());
+            objects.get(),
+            &coldPathProfile);
+        if (translatedPlanCandidate) {
+            coldPathProfile.recordPhase2Key(translatedPlanKey);
+        }
         if (!translatedPlanCandidate) {
             GLDrawDetailScope detail(
                 drawDetailProfile, GLDrawDetailBucket::Phase2MissBuildDecision);
@@ -49747,6 +50337,7 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
             translatedPlanDecision = "miss";
             translatedPlanReason = "force_miss";
             translatedPlanOut = &stagedTranslatedPlan;
+            coldPathProfile.recordPhase2ForceMiss();
         } else {
             auto planIt = translatedDrawPlanCache.end();
             {
@@ -49814,6 +50405,7 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
             }
         }
     }
+    coldPathProfile.recordPhase2Decision(translatedPlanDecision);
     if (translatedPlanTrace) {
         std::fprintf(stderr,
             "[APPGL_PHASE2_PLAN] key=0x%016llx vao=%u vao_gen=%u "
@@ -51443,11 +52035,23 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             GLDrawDetailScope detail(
                 impl_->drawDetailProfile,
                 GLDrawDetailBucket::TranslatedProgramVaoFboState);
-            if (!program->gsPresent) {
-                impl_->updatePrimitiveCountersForNonGsDraw(mode, count, 1);
+            {
+                ColdPathDiagnosticScope cold(
+                    &impl_->coldPathProfile,
+                    ColdPathDiagnosticBucket::ProgramVaoFboPrimitiveCounters);
+                if (!program->gsPresent) {
+                    impl_->updatePrimitiveCountersForNonGsDraw(mode, count, 1);
+                }
             }
-            vaoName = impl_->state->boundVertexArray();
-            vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+            {
+                ColdPathDiagnosticScope cold(
+                    &impl_->coldPathProfile,
+                    ColdPathDiagnosticBucket::ProgramVaoFboFrontendVaoSource);
+                vaoName = impl_->state->boundVertexArray();
+                vao = (vaoName != 0)
+                    ? impl_->objects->vertexArrays().get(vaoName)
+                    : nullptr;
+            }
         }
         // Phase 8X Group 4d follow-up³ — name each fall-through gate to BAR's log.
         bool gateEmpty = false;
@@ -51550,7 +52154,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     impl_->drawDetailProfile,
                     GLDrawDetailBucket::TranslatedProgramVaoFboState);
                 vaoLayoutPtr =
-                    &cachedVertexArrayLayout(*vao, false, &vaoLayoutCacheHit);
+                    &cachedVertexArrayLayout(
+                        *vao, false, &vaoLayoutCacheHit,
+                        false, true, &impl_->coldPathProfile);
             }
             const auto& vaoLayout = *vaoLayoutPtr;
             drawProfile.mark(GLDrawProfileBucket::VaoLayout);
@@ -51582,7 +52188,8 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 tdi.program = programName;
                 tdi.pipelineEmulationFragmentProgram =
                     program->pipelineEmulationFragmentProgram;
-                appendCurrentGenericVertexAttributes(tdi, vao);
+                appendCurrentGenericVertexAttributes(
+                    tdi, vao, &impl_->coldPathProfile);
 
                 logStateResolveCostClass(
                     "drawArrays-generic-attrs", programName, vaoName,
@@ -51706,8 +52313,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
 
                     applyCachedVertexArrayLayout(
                         vaoLayout, *impl_->objects, tdi, first,
-                        true, true);
-                    appendCurrentGenericVertexAttributes(tdi, vao);
+                        true, true, &impl_->coldPathProfile);
+                    appendCurrentGenericVertexAttributes(
+                        tdi, vao, &impl_->coldPathProfile);
                     drawProfile.mark(GLDrawProfileBucket::VertexLayout);
 
                     logStateResolveCostClass(
@@ -52236,8 +52844,13 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             GLDrawDetailScope detail(
                 impl_->drawDetailProfile,
                 GLDrawDetailBucket::TranslatedProgramVaoFboState);
+            ColdPathDiagnosticScope cold(
+                &impl_->coldPathProfile,
+                ColdPathDiagnosticBucket::ProgramVaoFboFrontendVaoSource);
             vaoName = impl_->state->boundVertexArray();
-            vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+            vao = (vaoName != 0)
+                ? impl_->objects->vertexArrays().get(vaoName)
+                : nullptr;
         }
         // Attributeless instanced draw path: vertex shader has no vertex inputs.
         bool attributelessInstDraw = false;
@@ -52329,7 +52942,9 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     impl_->drawDetailProfile,
                     GLDrawDetailBucket::TranslatedProgramVaoFboState);
                 vaoLayoutPtr =
-                    &cachedVertexArrayLayout(*vao, true, &vaoLayoutCacheHit);
+                    &cachedVertexArrayLayout(
+                        *vao, true, &vaoLayoutCacheHit,
+                        false, true, &impl_->coldPathProfile);
             }
             const auto& vaoLayout = *vaoLayoutPtr;
             GLBufferObject* vbo = (vaoLayout.primaryBufferName != 0)
@@ -52427,7 +53042,8 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
 
                     applyCachedVertexArrayLayout(
                         vaoLayout, *impl_->objects, tdi, first,
-                        canRebaseSingleArrayDraw, false);
+                        canRebaseSingleArrayDraw, false,
+                        &impl_->coldPathProfile);
 
                     logStateResolveCostClass(
                         "drawArraysInstanced", programName, vaoName,
@@ -53227,7 +53843,9 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     impl_->drawDetailProfile,
                     GLDrawDetailBucket::TranslatedProgramVaoFboState);
                 vaoLayoutPtr =
-                    &cachedVertexArrayLayout(*vao, false, &vaoLayoutCacheHit);
+                    &cachedVertexArrayLayout(
+                        *vao, false, &vaoLayoutCacheHit,
+                        false, true, &impl_->coldPathProfile);
             }
             const auto& vaoLayout = *vaoLayoutPtr;
             drawProfile.mark(GLDrawProfileBucket::VaoLayout);
@@ -53310,7 +53928,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
 
                     applyCachedVertexArrayLayout(
                         vaoLayout, *impl_->objects, tdi, 0,
-                        false, false);
+                        false, false, &impl_->coldPathProfile);
                     drawProfile.mark(GLDrawProfileBucket::VertexLayout);
 
                     logStateResolveCostClass(
@@ -53591,7 +54209,9 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
         if (!vao->attributes.empty()) {
             bool vaoLayoutCacheHit = false;
             const auto& vaoLayout =
-                cachedVertexArrayLayout(*vao, false, &vaoLayoutCacheHit);
+                cachedVertexArrayLayout(
+                    *vao, false, &vaoLayoutCacheHit,
+                    false, true, &impl_->coldPathProfile);
             GLBufferObject* vbo = (vaoLayout.primaryBufferName != 0)
                 ? impl_->objects->buffers().get(vaoLayout.primaryBufferName)
                 : nullptr;
@@ -53653,7 +54273,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
 
                     applyCachedVertexArrayLayout(
                         vaoLayout, *impl_->objects, tdi, 0,
-                        false, false);
+                        false, false, &impl_->coldPathProfile);
 
                     logStateResolveCostClass(
                         "drawElementsBaseVertex", programName, vaoName,
@@ -54171,7 +54791,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
             const auto& vaoLayout =
                 cachedVertexArrayLayout(
                     *vao, true, &vaoLayoutCacheHit,
-                    true, false);
+                    true, false, &impl_->coldPathProfile);
             GLBufferObject* vbo = (vaoLayout.primaryBufferName != 0)
                 ? impl_->objects->buffers().get(vaoLayout.primaryBufferName)
                 : nullptr;
@@ -54235,7 +54855,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
 
                     applyCachedVertexArrayLayout(
                         vaoLayout, *impl_->objects, tdi, 0,
-                        false, false);
+                        false, false, &impl_->coldPathProfile);
 
                     logStateResolveCostClass(
                         "drawElementsInstancedBaseVertex", programName, vaoName,
