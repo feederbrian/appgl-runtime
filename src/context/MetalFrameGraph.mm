@@ -345,11 +345,89 @@ static const char* parallelEncodeBoundaryReasonName(
     return "unknown";
 }
 
+static std::uint32_t envUInt(const char* name,
+                             std::uint32_t defaultValue,
+                             std::uint32_t minValue,
+                             std::uint32_t maxValue) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return defaultValue;
+    }
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (end == value) {
+        return defaultValue;
+    }
+    const auto clamped = static_cast<std::uint32_t>(
+        std::min<unsigned long>(
+            static_cast<unsigned long>(maxValue),
+            std::max<unsigned long>(
+                static_cast<unsigned long>(minValue), parsed)));
+    return clamped;
+}
+
+static std::uint32_t parallelEncodeConfiguredWorkerCount() {
+    return envUInt("APPGL_PARALLEL_ENCODE_WORKERS", 4, 1, 16);
+}
+
+static std::uint32_t parallelEncodeConfiguredMinBatch() {
+    return envUInt("APPGL_PARALLEL_ENCODE_MIN_BATCH", 32, 1, 1u << 20);
+}
+
+enum class ParallelEncodeFallbackReason : std::size_t {
+    SmallBatch,
+    WorkerCount,
+    ParallelEncoderCreateFailure,
+    ChildEncoderCreateFailure,
+    PipelineNotPrepared,
+    UnsafeResourceOrRingUpload,
+    MixedRenderState,
+    EncodeFailure,
+    Count,
+};
+
+static const char* parallelEncodeFallbackReasonName(
+    ParallelEncodeFallbackReason reason) {
+    switch (reason) {
+        case ParallelEncodeFallbackReason::SmallBatch:
+            return "small_batch";
+        case ParallelEncodeFallbackReason::WorkerCount:
+            return "worker_count_le_1";
+        case ParallelEncodeFallbackReason::ParallelEncoderCreateFailure:
+            return "parallel_encoder_create_failure";
+        case ParallelEncodeFallbackReason::ChildEncoderCreateFailure:
+            return "child_encoder_create_failure";
+        case ParallelEncodeFallbackReason::PipelineNotPrepared:
+            return "pipeline_not_prepared";
+        case ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload:
+            return "unsafe_resource_or_ring_upload";
+        case ParallelEncodeFallbackReason::MixedRenderState:
+            return "mixed_render_state";
+        case ParallelEncodeFallbackReason::EncodeFailure:
+            return "encode_failure";
+        case ParallelEncodeFallbackReason::Count:
+            break;
+    }
+    return "unknown";
+}
+
+struct ParallelEncodeChunkProfile {
+    std::uint64_t batchIndex = 0;
+    std::uint64_t chunkIndex = 0;
+    std::uint64_t drawBegin = 0;
+    std::uint64_t drawEnd = 0;
+    std::uint64_t drawCount = 0;
+    double workerEncodeUs = 0.0;
+    std::uint64_t failures = 0;
+};
+
 struct ParallelEncodeFoundationProfile {
     bool enabled = envEnabled("APPGL_PARALLEL_ENCODE");
     bool dumpEnabled = enabled && (
         envEnabled("APPGL_PARALLEL_ENCODE_PROFILE") ||
         envEnabled("APPGL_DRAW_PROFILE"));
+    std::uint32_t configuredWorkerCount = parallelEncodeConfiguredWorkerCount();
+    std::uint32_t configuredMinBatch = parallelEncodeConfiguredMinBatch();
     std::uint64_t translatedDraws = 0;
     std::uint64_t candidateDraws = 0;
     std::uint64_t capturedDraws = 0;
@@ -358,15 +436,27 @@ struct ParallelEncodeFoundationProfile {
     std::uint64_t batchDraws = 0;
     std::uint64_t maxBatchSize = 0;
     std::uint64_t batchReplayFailures = 0;
+    std::uint64_t chunkCount = 0;
+    std::uint64_t parallelBatchCount = 0;
+    std::uint64_t parallelEncodedDraws = 0;
+    std::uint64_t serialFallbackDraws = 0;
+    std::uint64_t workerFailures = 0;
     double serialCaptureUs = 0.0;
     double serialReplayUs = 0.0;
     double serialBatchReplayUs = 0.0;
+    double parallelEncodeWallUs = 0.0;
+    double sumWorkerEncodeUs = 0.0;
+    double maxWorkerEncodeUs = 0.0;
     std::array<std::uint64_t,
                static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count)>
         boundaryReasons{};
     std::array<std::uint64_t,
                static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count)>
         batchFlushReasons{};
+    std::array<std::uint64_t,
+               static_cast<std::size_t>(ParallelEncodeFallbackReason::Count)>
+        parallelFallbackReasons{};
+    std::vector<ParallelEncodeChunkProfile> chunkProfiles;
 
     void recordTranslatedDraw() {
         if (enabled) {
@@ -403,10 +493,11 @@ struct ParallelEncodeFoundationProfile {
         serialReplayUs += elapsedUs;
     }
 
-    void recordBatchReplay(ParallelEncodeBoundaryReason reason,
-                           std::uint64_t draws,
-                           double elapsedUs,
-                           std::uint64_t failures) {
+    void recordSerialBatchReplay(ParallelEncodeBoundaryReason reason,
+                                 ParallelEncodeFallbackReason fallbackReason,
+                                 std::uint64_t draws,
+                                 double elapsedUs,
+                                 std::uint64_t failures) {
         if (!enabled) {
             return;
         }
@@ -414,10 +505,52 @@ struct ParallelEncodeFoundationProfile {
         batchDraws += draws;
         maxBatchSize = std::max(maxBatchSize, draws);
         replayedDraws += draws;
+        serialFallbackDraws += draws;
         serialReplayUs += elapsedUs;
         serialBatchReplayUs += elapsedUs;
         batchReplayFailures += failures;
         ++batchFlushReasons[static_cast<std::size_t>(reason)];
+        ++parallelFallbackReasons[static_cast<std::size_t>(fallbackReason)];
+        if (failures > 0) {
+            ++parallelFallbackReasons[
+                static_cast<std::size_t>(
+                    ParallelEncodeFallbackReason::EncodeFailure)];
+        }
+    }
+
+    void recordParallelBatch(ParallelEncodeBoundaryReason reason,
+                             std::uint64_t draws,
+                             const std::vector<ParallelEncodeChunkProfile>& chunks,
+                             double wallUs,
+                             double sumWorkerUs,
+                             double maxWorkerUs,
+                             std::uint64_t failures) {
+        if (!enabled) {
+            return;
+        }
+        const std::uint64_t batchIndex = batchCount + 1;
+        ++batchCount;
+        ++parallelBatchCount;
+        batchDraws += draws;
+        maxBatchSize = std::max(maxBatchSize, draws);
+        replayedDraws += draws;
+        parallelEncodedDraws += draws;
+        chunkCount += static_cast<std::uint64_t>(chunks.size());
+        parallelEncodeWallUs += wallUs;
+        sumWorkerEncodeUs += sumWorkerUs;
+        maxWorkerEncodeUs = std::max(maxWorkerEncodeUs, maxWorkerUs);
+        batchReplayFailures += failures;
+        workerFailures += failures;
+        ++batchFlushReasons[static_cast<std::size_t>(reason)];
+        if (failures > 0) {
+            ++parallelFallbackReasons[
+                static_cast<std::size_t>(
+                    ParallelEncodeFallbackReason::EncodeFailure)];
+        }
+        for (ParallelEncodeChunkProfile chunk : chunks) {
+            chunk.batchIndex = batchIndex;
+            chunkProfiles.push_back(chunk);
+        }
     }
 
     void dump() const {
@@ -428,8 +561,13 @@ struct ParallelEncodeFoundationProfile {
             "[APPGL_PARALLEL_ENCODE] summary translated_draws=%llu "
             "candidates=%llu captured=%llu replayed=%llu "
             "batch_count=%llu batch_draws=%llu max_batch_size=%llu "
+            "worker_count=%u min_batch=%u chunk_count=%llu "
+            "parallel_batches=%llu parallel_encoded_draws=%llu "
+            "serial_fallback_draws=%llu worker_failures=%llu "
             "serial_capture_us=%.3f serial_replay_us=%.3f "
-            "serial_batch_replay_us=%.3f batch_replay_failures=%llu\n",
+            "serial_batch_replay_us=%.3f parallel_encode_wall_us=%.3f "
+            "sum_worker_encode_us=%.3f max_worker_encode_us=%.3f "
+            "batch_replay_failures=%llu\n",
             static_cast<unsigned long long>(translatedDraws),
             static_cast<unsigned long long>(candidateDraws),
             static_cast<unsigned long long>(capturedDraws),
@@ -437,9 +575,19 @@ struct ParallelEncodeFoundationProfile {
             static_cast<unsigned long long>(batchCount),
             static_cast<unsigned long long>(batchDraws),
             static_cast<unsigned long long>(maxBatchSize),
+            configuredWorkerCount,
+            configuredMinBatch,
+            static_cast<unsigned long long>(chunkCount),
+            static_cast<unsigned long long>(parallelBatchCount),
+            static_cast<unsigned long long>(parallelEncodedDraws),
+            static_cast<unsigned long long>(serialFallbackDraws),
+            static_cast<unsigned long long>(workerFailures),
             serialCaptureUs,
             serialReplayUs,
             serialBatchReplayUs,
+            parallelEncodeWallUs,
+            sumWorkerEncodeUs,
+            maxWorkerEncodeUs,
             static_cast<unsigned long long>(batchReplayFailures));
         for (std::size_t i = 0;
              i < static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count);
@@ -464,6 +612,31 @@ struct ParallelEncodeFoundationProfile {
                 "[APPGL_PARALLEL_ENCODE] flush reason=%s count=%llu\n",
                 parallelEncodeBoundaryReasonName(reason),
                 static_cast<unsigned long long>(batchFlushReasons[i]));
+        }
+        for (std::size_t i = 0;
+             i < static_cast<std::size_t>(ParallelEncodeFallbackReason::Count);
+             ++i) {
+            if (parallelFallbackReasons[i] == 0) {
+                continue;
+            }
+            const auto reason = static_cast<ParallelEncodeFallbackReason>(i);
+            std::fprintf(stderr,
+                "[APPGL_PARALLEL_ENCODE] parallel_fallback reason=%s count=%llu\n",
+                parallelEncodeFallbackReasonName(reason),
+                static_cast<unsigned long long>(parallelFallbackReasons[i]));
+        }
+        for (const auto& chunk : chunkProfiles) {
+            std::fprintf(stderr,
+                "[APPGL_PARALLEL_ENCODE] chunk batch=%llu chunk=%llu "
+                "draw_begin=%llu draw_end=%llu draw_count=%llu "
+                "worker_us=%.3f failures=%llu\n",
+                static_cast<unsigned long long>(chunk.batchIndex),
+                static_cast<unsigned long long>(chunk.chunkIndex),
+                static_cast<unsigned long long>(chunk.drawBegin),
+                static_cast<unsigned long long>(chunk.drawEnd),
+                static_cast<unsigned long long>(chunk.drawCount),
+                chunk.workerEncodeUs,
+                static_cast<unsigned long long>(chunk.failures));
         }
         std::fflush(stderr);
     }
@@ -496,6 +669,17 @@ struct CapturedTranslatedDrawRecord {
     std::vector<std::vector<std::uint8_t>> uboDataStorage;
     std::string pipelineBuildErrorStorage;
     std::vector<void*> retainedObjects;
+    bool parallelPrepared = false;
+    ParallelEncodeFallbackReason parallelFallbackReason =
+        ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
+    void* parallelPipelineState = nullptr;
+    void* parallelDepthStencilState = nullptr;
+    TranslatedDrawPlanShaderSlots parallelShaderSlots;
+    std::uint32_t parallelAttachmentSampleCount = 1;
+    std::uint32_t parallelColorFormat = 0;
+    bool parallelHasFragmentStage = false;
+    bool parallelClipControlShaderYFixup = false;
+    bool parallelClipControlInvertsWinding = false;
 
     CapturedTranslatedDrawRecord() = default;
     CapturedTranslatedDrawRecord(const CapturedTranslatedDrawRecord&) = delete;
@@ -6070,14 +6254,761 @@ struct MetalFrameGraph::Impl {
         return true;
     }
 
-    void flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason reason) {
-        if (!parallelEncodeProfile.enabled ||
-            pendingParallelTranslatedDraws.empty() ||
-            flushingParallelTranslatedBatch) {
-            return;
+    struct ParallelChildEncoderState {
+        id<MTLRenderPipelineState> cachedPipelineState = nil;
+        id<MTLDepthStencilState> cachedDepthStencilState = nil;
+        MTLCullMode cachedCullMode = static_cast<MTLCullMode>(0xFFFFFFFF);
+        MTLWinding cachedFrontFaceWinding =
+            static_cast<MTLWinding>(0xFFFFFFFF);
+        MTLTriangleFillMode cachedFillMode =
+            static_cast<MTLTriangleFillMode>(0xFFFFFFFF);
+    };
+
+    bool parallelTextureBindingsWorkerSafe(
+        const std::vector<TranslatedDrawInfo::TextureBinding>& textures) const {
+        for (const auto& binding : textures) {
+            if (binding.metalTexture == nullptr) {
+                continue;
+            }
+            if (binding.metalSamplerState == nullptr ||
+                binding.imageAtomicMetalBuffer != nullptr ||
+                binding.textureBufferBackingMetalBuffer != nullptr) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool translatedDrawWorkerEmitSafe(const TranslatedDrawInfo& info) const {
+        if (translatedDrawNeedsCpuOrRingUploadPath(info)) {
+            return false;
+        }
+        if (!info.ssboBindings.empty() ||
+            !info.atomicCounterBindings.empty() ||
+            !info.writtenImageTextureNames.empty()) {
+            return false;
+        }
+        if (!parallelTextureBindingsWorkerSafe(info.fragmentTextures) ||
+            !parallelTextureBindingsWorkerSafe(info.vertexTextures)) {
+            return false;
+        }
+        if (info.vertexUniformSize > 4096 ||
+            info.fragmentUniformSize > 4096) {
+            return false;
+        }
+        for (const auto& ubo : info.uboBindings) {
+            if (ubo.metalBuffer == nullptr && ubo.size > 4096) {
+                return false;
+            }
+        }
+        if (info.indexCount > 0 &&
+            info.indexType != GL_UNSIGNED_SHORT &&
+            info.indexType != GL_UNSIGNED_INT) {
+            return false;
+        }
+        return true;
+    }
+
+    bool prepareCapturedTranslatedDrawForParallel(
+        const TranslatedDrawInfo& source,
+        CapturedTranslatedDrawRecord& capture) {
+        capture.parallelPrepared = false;
+        capture.parallelFallbackReason =
+            ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
+
+        if (!translatedDrawWorkerEmitSafe(source)) {
+            return false;
         }
 
-        flushingParallelTranslatedBatch = true;
+        const bool hasFragmentStage =
+            source.fragmentMSL != nullptr && !source.fragmentMSL->empty();
+        id<MTLTexture> colorTexture =
+            usesOffscreenTarget ? offscreenColorTexture : nil;
+        const MTLPixelFormat colorFormat = colorTexture != nil
+            ? colorTexture.pixelFormat
+            : MTLPixelFormatBGRA8Unorm;
+        const NSUInteger attachmentSampleCount =
+            colorTexture != nil ? colorTexture.sampleCount : 1;
+        const bool forcePerSampleFS =
+            source.sampleShadingEnabled && source.minSampleShading > 0.0f &&
+            attachmentSampleCount > 1;
+
+        std::uint64_t pipelineCacheKey = 0;
+        TranslatedDrawPlanShaderSlots planSlots;
+        const TranslatedDrawPlan* translatedPlan = source.translatedPlan;
+        bool usedTranslatedPlan = false;
+        if (translatedPlan != nullptr &&
+            translatedPlan->valid &&
+            !translatedPlan->useArgumentBuffers &&
+            translatedPlan->colorFormat == static_cast<std::uint32_t>(colorFormat) &&
+            translatedPlan->attachmentSampleCount ==
+                static_cast<std::uint32_t>(attachmentSampleCount) &&
+            translatedPlan->forcePerSampleFS == forcePerSampleFS &&
+            translatedPlan->hasFragmentStage == hasFragmentStage) {
+            usedTranslatedPlan = true;
+            pipelineCacheKey = translatedPlan->pipelineCacheKey;
+            planSlots = translatedPlan->shaderSlots;
+        }
+        if (!usedTranslatedPlan) {
+            pipelineCacheKey =
+                computePipelineCacheKey(source, colorFormat,
+                                        attachmentSampleCount,
+                                        forcePerSampleFS);
+            const TranslatedDrawMSLSlots& slots =
+                translatedDrawMSLSlots(source, pipelineCacheKey,
+                                       hasFragmentStage);
+            planSlots = phase2PlanShaderSlotsFromMSLSlots(slots);
+        }
+
+        const TranslatedDrawMSLSlots slots =
+            phase2PlanMSLSlotsFromShaderSlots(planSlots);
+        if (slots.vertexMslUsesArgBuf ||
+            slots.fragmentMslUsesArgBuf ||
+            slots.vertexHasSSBOSizeBuffer ||
+            slots.fragmentHasSSBOSizeBuffer ||
+            slots.fragmentNeedsGlNumSamplesArgBuf ||
+            slots.vertexUsesMultiviewViewMask ||
+            slots.fragmentUsesMultiviewViewMask) {
+            return false;
+        }
+
+        id<MTLRenderPipelineState> pipelineState = nil;
+        if (source.pipelineStateCacheOut != nullptr) {
+            auto it = source.pipelineStateCacheOut->find(pipelineCacheKey);
+            if (it != source.pipelineStateCacheOut->end() &&
+                it->second != nullptr) {
+                pipelineState =
+                    (__bridge id<MTLRenderPipelineState>)(it->second);
+            }
+        } else if (source.pipelineStateOut != nullptr &&
+                   *source.pipelineStateOut != nullptr &&
+                   source.pipelineColorFormatOut != nullptr &&
+                   *source.pipelineColorFormatOut ==
+                       static_cast<std::uint32_t>(colorFormat)) {
+            pipelineState =
+                (__bridge id<MTLRenderPipelineState>)(*source.pipelineStateOut);
+        }
+        if (pipelineState == nil) {
+            capture.parallelFallbackReason =
+                ParallelEncodeFallbackReason::PipelineNotPrepared;
+            return false;
+        }
+
+        id<MTLDepthStencilState> depthState = nil;
+        if (depthStencilTexture != nil) {
+            MetalDrawInfo fakeInfo;
+            fakeInfo.depthTestEnabled = source.depthTestEnabled;
+            fakeInfo.depthFunc = source.depthFunc;
+            fakeInfo.depthWriteMask = source.depthWriteMask;
+            fakeInfo.stencilTestEnabled = source.stencilTestEnabled;
+            fakeInfo.stencilFrontFunc = source.stencilFrontFunc;
+            fakeInfo.stencilFrontRef = source.stencilFrontRef;
+            fakeInfo.stencilFrontValueMask = source.stencilFrontValueMask;
+            fakeInfo.stencilFrontFail = source.stencilFrontFail;
+            fakeInfo.stencilFrontDepthFail = source.stencilFrontDepthFail;
+            fakeInfo.stencilFrontDepthPass = source.stencilFrontDepthPass;
+            fakeInfo.stencilFrontWriteMask = source.stencilFrontWriteMask;
+            fakeInfo.stencilBackFunc = source.stencilBackFunc;
+            fakeInfo.stencilBackRef = source.stencilBackRef;
+            fakeInfo.stencilBackValueMask = source.stencilBackValueMask;
+            fakeInfo.stencilBackFail = source.stencilBackFail;
+            fakeInfo.stencilBackDepthFail = source.stencilBackDepthFail;
+            fakeInfo.stencilBackDepthPass = source.stencilBackDepthPass;
+            fakeInfo.stencilBackWriteMask = source.stencilBackWriteMask;
+            depthState = depthStencilStateForDraw(fakeInfo);
+        }
+
+        capture.parallelPipelineState = (__bridge void*)pipelineState;
+        capture.retainField(capture.parallelPipelineState);
+        if (depthState != nil) {
+            capture.parallelDepthStencilState = (__bridge void*)depthState;
+            capture.retainField(capture.parallelDepthStencilState);
+        }
+        capture.parallelShaderSlots = planSlots;
+        capture.parallelAttachmentSampleCount =
+            static_cast<std::uint32_t>(attachmentSampleCount);
+        capture.parallelColorFormat = static_cast<std::uint32_t>(colorFormat);
+        capture.parallelHasFragmentStage = hasFragmentStage;
+        capture.parallelClipControlShaderYFixup =
+            slots.vertexClipControlYSignSlot >= 0 &&
+            source.clipControlYSignFixupEnabled &&
+            !source.stencilTestEnabled;
+        capture.parallelClipControlInvertsWinding =
+            capture.parallelClipControlShaderYFixup &&
+            source.clipOrigin != GL_UPPER_LEFT;
+        capture.parallelPrepared = true;
+        return true;
+    }
+
+    bool buildDefaultParallelRenderPass(
+        const TranslatedDrawInfo& firstInfo,
+        MTLRenderPassDescriptor*& passOut,
+        id<MTLTexture>& colorTextureOut,
+        id<MTLTexture>& passDepthStencilOut) {
+        ensureDrawableResources();
+        if (currentCommandBuffer == nil) {
+            ensureCurrentCommandBuffer(AppGLCommandReason::TranslatedDraw);
+            if (currentCommandBuffer == nil) {
+                return false;
+            }
+        }
+        if (!acquireDrawableIfNeeded()) {
+            return false;
+        }
+
+        id<MTLTexture> colorTexture =
+            usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
+        if (colorTexture == nil) {
+            return false;
+        }
+        id<MTLTexture> passDepthStencil = depthStencilTexture;
+        if (depthStencilTexture != nil &&
+            (depthStencilTexture.width != colorTexture.width ||
+             depthStencilTexture.height != colorTexture.height)) {
+            MTLTextureDescriptor* dd = [MTLTextureDescriptor
+                texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                            width:colorTexture.width
+                                           height:colorTexture.height
+                                        mipmapped:NO];
+            dd.storageMode = MTLStorageModePrivate;
+            dd.usage = MTLTextureUsageRenderTarget;
+            replaceOwnedTexture(depthStencilTexture,
+                                [device newTextureWithDescriptor:dd]);
+            passDepthStencil = depthStencilTexture;
+            drawableWidth = static_cast<GLsizei>(colorTexture.width);
+            drawableHeight = static_cast<GLsizei>(colorTexture.height);
+        }
+        if (colorTexture != nil && passDepthStencil != nil &&
+            colorTexture.sampleCount != passDepthStencil.sampleCount) {
+            MTLTextureDescriptor* dd = [MTLTextureDescriptor
+                texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                            width:colorTexture.width
+                                           height:colorTexture.height
+                                        mipmapped:NO];
+            dd.storageMode = MTLStorageModePrivate;
+            dd.usage = MTLTextureUsageRenderTarget;
+            if (colorTexture.sampleCount > 1) {
+                dd.textureType = MTLTextureType2DMultisample;
+                dd.sampleCount = colorTexture.sampleCount;
+            }
+            replaceOwnedTexture(depthStencilTexture,
+                                [device newTextureWithDescriptor:dd]);
+            passDepthStencil = depthStencilTexture;
+        }
+
+        MTLRenderPassDescriptor* pass = getReusablePassDescriptor();
+        pass.colorAttachments[0].texture = colorTexture;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        if (hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
+            pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            pass.colorAttachments[0].clearColor = pendingClearColor;
+        } else {
+            pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        }
+        if (passDepthStencil != nil) {
+            pass.depthAttachment.texture = passDepthStencil;
+            pass.depthAttachment.storeAction = MTLStoreActionStore;
+            pass.depthAttachment.loadAction =
+                (hasPendingClear && (pendingClearMask & GL_DEPTH_BUFFER_BIT))
+                    ? MTLLoadActionClear
+                    : MTLLoadActionLoad;
+            if (pass.depthAttachment.loadAction == MTLLoadActionClear) {
+                pass.depthAttachment.clearDepth = pendingClearDepth;
+            }
+            pass.stencilAttachment.texture = passDepthStencil;
+            pass.stencilAttachment.storeAction = MTLStoreActionStore;
+            pass.stencilAttachment.loadAction =
+                (hasPendingClear && (pendingClearMask & GL_STENCIL_BUFFER_BIT))
+                    ? MTLLoadActionClear
+                    : MTLLoadActionLoad;
+            if (pass.stencilAttachment.loadAction == MTLLoadActionClear) {
+                pass.stencilAttachment.clearStencil = pendingClearStencil;
+            }
+        }
+        attachFragmentShadingRateMap(pass, firstInfo.fragmentShadingRate,
+                                     colorTexture, 1);
+        passOut = pass;
+        colorTextureOut = colorTexture;
+        passDepthStencilOut = passDepthStencil;
+        return true;
+    }
+
+    bool encodeCapturedTranslatedDrawOnChildEncoder(
+        const CapturedTranslatedDrawRecord& captured,
+        id<MTLRenderCommandEncoder> encoder,
+        id<MTLTexture> colorTexture,
+        id<MTLTexture> passDepthStencil,
+        ParallelChildEncoderState& encoderState) {
+        const TranslatedDrawInfo& info = captured.info;
+        if (!captured.parallelPrepared || encoder == nil || colorTexture == nil) {
+            return false;
+        }
+        id<MTLRenderPipelineState> pipelineState =
+            (__bridge id<MTLRenderPipelineState>)captured.parallelPipelineState;
+        if (pipelineState == nil) {
+            return false;
+        }
+        const TranslatedDrawMSLSlots shaderSlots =
+            phase2PlanMSLSlotsFromShaderSlots(captured.parallelShaderSlots);
+        const bool clipControlShaderYFixup =
+            captured.parallelClipControlShaderYFixup;
+        const bool clipControlInvertsWinding =
+            captured.parallelClipControlInvertsWinding;
+        const NSUInteger attachmentSampleCount =
+            static_cast<NSUInteger>(
+                std::max<std::uint32_t>(
+                    captured.parallelAttachmentSampleCount, 1u));
+
+        if (pipelineState != encoderState.cachedPipelineState) {
+            [encoder setRenderPipelineState:pipelineState];
+            encoderState.cachedPipelineState = pipelineState;
+        }
+        if (passDepthStencil != nil && captured.parallelDepthStencilState != nullptr) {
+            id<MTLDepthStencilState> dsState =
+                (__bridge id<MTLDepthStencilState>)
+                    captured.parallelDepthStencilState;
+            if (dsState != nil && dsState != encoderState.cachedDepthStencilState) {
+                [encoder setDepthStencilState:dsState];
+                encoderState.cachedDepthStencilState = dsState;
+            }
+            if (info.stencilTestEnabled) {
+                [encoder setStencilFrontReferenceValue:
+                             static_cast<uint32_t>(info.stencilFrontRef)
+                            backReferenceValue:
+                             static_cast<uint32_t>(info.stencilBackRef)];
+            }
+        }
+
+        const MTLCullMode desiredCull = info.cullFaceEnabled
+            ? (info.cullFaceMode == GL_FRONT ? MTLCullModeFront : MTLCullModeBack)
+            : MTLCullModeNone;
+        if (desiredCull != encoderState.cachedCullMode) {
+            [encoder setCullMode:desiredCull];
+            encoderState.cachedCullMode = desiredCull;
+        }
+        const MTLWinding desiredWinding =
+            frontFacingWindingForClipControl(info.frontFace,
+                                             clipControlInvertsWinding);
+        if (desiredWinding != encoderState.cachedFrontFaceWinding) {
+            [encoder setFrontFacingWinding:desiredWinding];
+            encoderState.cachedFrontFaceWinding = desiredWinding;
+        }
+        const MTLTriangleFillMode desiredFill =
+            info.wireframe ? MTLTriangleFillModeLines : MTLTriangleFillModeFill;
+        if (desiredFill != encoderState.cachedFillMode) {
+            [encoder setTriangleFillMode:desiredFill];
+            encoderState.cachedFillMode = desiredFill;
+        }
+        {
+            const std::uint32_t sampleMask = attachmentSampleCount > 1
+                ? info.sampleMask
+                : 0xFFFFFFFFu;
+            const NSInteger sampleMaskSlot =
+                fixedFunctionSampleMaskBufferSlot(info.fragmentMSL);
+            [encoder setFragmentBytes:&sampleMask
+                                length:sizeof(sampleMask)
+                               atIndex:static_cast<NSUInteger>(sampleMaskSlot)];
+        }
+        {
+            const float bias =
+                info.polygonOffsetEnabled ? info.polygonOffsetUnits : 0.0f;
+            const float slope =
+                info.polygonOffsetEnabled ? info.polygonOffsetFactor : 0.0f;
+            const float clampV =
+                info.polygonOffsetEnabled ? info.polygonOffsetClamp : 0.0f;
+            [encoder setDepthBias:bias slopeScale:slope clamp:clampV];
+        }
+
+        if (info.viewportWidth > 0 && info.viewportHeight > 0) {
+            const GLint rtW = static_cast<GLint>(colorTexture.width);
+            const GLint rtH = static_cast<GLint>(colorTexture.height);
+            const double rtHeight = static_cast<double>(rtH);
+            const GLint glX = std::max<GLint>(0, info.viewportX);
+            const GLint glY = std::max<GLint>(0, info.viewportY);
+            const GLsizei availW =
+                static_cast<GLsizei>(std::max<GLint>(0, rtW - glX));
+            const GLsizei availH =
+                static_cast<GLsizei>(std::max<GLint>(0, rtH - glY));
+            const GLsizei glW = std::min<GLsizei>(info.viewportWidth, availW);
+            const GLsizei glH = std::min<GLsizei>(info.viewportHeight, availH);
+            const bool flipY = (info.clipOrigin != GL_UPPER_LEFT);
+            MTLViewport vp;
+            vp.originX = static_cast<double>(glX);
+            vp.originY = clipControlShaderYFixup
+                ? static_cast<double>(glY)
+                : (flipY
+                    ? (rtHeight - static_cast<double>(glY) -
+                       static_cast<double>(glH))
+                    : static_cast<double>(glY));
+            vp.width = static_cast<double>(glW);
+            vp.height = static_cast<double>(glH);
+            vp.znear = info.depthRangeNear;
+            vp.zfar = info.depthRangeFar;
+            if (vp.width > 0 && vp.height > 0) {
+                [encoder setViewport:vp];
+            }
+        }
+        {
+            const NSUInteger rtW = colorTexture.width;
+            const NSUInteger rtH = colorTexture.height;
+            MTLScissorRect sr;
+            if (!info.scissorTestEnabled) {
+                sr = {0, 0, rtW, rtH};
+            } else if (info.scissorWidth <= 0 || info.scissorHeight <= 0) {
+                sr = {0, 0, 0, 0};
+            } else {
+                GLint metalX = std::max<GLint>(0, info.scissorX);
+                GLint metalYBottomLeft = std::max<GLint>(0, info.scissorY);
+                GLint metalY = static_cast<GLint>(rtH) -
+                    metalYBottomLeft - info.scissorHeight;
+                GLsizei scissorH = info.scissorHeight;
+                if (metalY < 0) {
+                    scissorH += metalY;
+                    metalY = 0;
+                }
+                const GLsizei availW =
+                    static_cast<GLsizei>(rtW) - metalX;
+                const GLsizei availH =
+                    static_cast<GLsizei>(rtH) - metalY;
+                const GLsizei finalW =
+                    std::min<GLsizei>(
+                        info.scissorWidth,
+                        std::max<GLsizei>(0, availW));
+                const GLsizei finalH =
+                    std::min<GLsizei>(
+                        scissorH,
+                        std::max<GLsizei>(0, availH));
+                if (finalW <= 0 || finalH <= 0) {
+                    sr = {rtW > 0 ? rtW - 1 : 0,
+                          rtH > 0 ? rtH - 1 : 0,
+                          1,
+                          1};
+                } else {
+                    sr = {static_cast<NSUInteger>(metalX),
+                          static_cast<NSUInteger>(metalY),
+                          static_cast<NSUInteger>(finalW),
+                          static_cast<NSUInteger>(finalH)};
+                }
+            }
+            [encoder setScissorRect:sr];
+        }
+
+        bool hasExtraVertexAttributes = false;
+        for (const auto& evb : info.extraVertexBuffers) {
+            if (!evb.attributes.empty()) {
+                hasExtraVertexAttributes = true;
+                break;
+            }
+        }
+        const bool attributelessDraw =
+            info.vertexData == nullptr &&
+            info.metalVertexBuffer == nullptr &&
+            info.vertexAttributeLayouts.empty() &&
+            !hasExtraVertexAttributes;
+        if (!attributelessDraw && !info.vertexAttributeLayouts.empty()) {
+            if (info.metalVertexBuffer == nullptr) {
+                return false;
+            }
+            id<MTLBuffer> mtlBuf =
+                (__bridge id<MTLBuffer>)info.metalVertexBuffer;
+            [encoder setVertexBuffer:mtlBuf
+                               offset:static_cast<NSUInteger>(
+                                          info.metalVertexBufferOffset)
+                              atIndex:0];
+        }
+        for (std::size_t ei = 0; ei < info.extraVertexBuffers.size(); ++ei) {
+            const auto& evb = info.extraVertexBuffers[ei];
+            if (evb.attributes.empty()) {
+                continue;
+            }
+            if (evb.metalBuffer == nullptr) {
+                return false;
+            }
+            id<MTLBuffer> mtlBuf = (__bridge id<MTLBuffer>)evb.metalBuffer;
+            [encoder setVertexBuffer:mtlBuf
+                               offset:static_cast<NSUInteger>(
+                                          evb.metalBufferOffset)
+                              atIndex:static_cast<NSUInteger>(ei + 1)];
+        }
+
+        if (info.vertexUniformData != nullptr && info.vertexUniformSize > 0) {
+            [encoder setVertexBytes:info.vertexUniformData
+                              length:info.vertexUniformSize
+                             atIndex:16];
+        }
+        if (info.fragmentUniformData != nullptr && info.fragmentUniformSize > 0) {
+            [encoder setFragmentBytes:info.fragmentUniformData
+                                length:info.fragmentUniformSize
+                               atIndex:16];
+        }
+        {
+            const int32_t glNumSamples =
+                static_cast<int32_t>(attachmentSampleCount);
+            [encoder setFragmentBytes:&glNumSamples
+                                length:sizeof(glNumSamples)
+                               atIndex:0];
+        }
+        if (shaderSlots.vertexNeedsFragmentShadingRateState) {
+            [encoder setVertexBytes:&info.fragmentShadingRateShaderState
+                              length:sizeof(info.fragmentShadingRateShaderState)
+                             atIndex:kAppGLFragmentShadingRateParamsBufferSlot];
+        }
+        if (shaderSlots.vertexClipControlYSignSlot >= 0) {
+            const float clipControlYSign =
+                (clipControlShaderYFixup &&
+                 info.clipOrigin != GL_UPPER_LEFT) ? -1.0f : 1.0f;
+            [encoder setVertexBytes:&clipControlYSign
+                              length:sizeof(clipControlYSign)
+                             atIndex:static_cast<NSUInteger>(
+                                         shaderSlots.vertexClipControlYSignSlot)];
+        }
+
+        auto setTextureModeBytes =
+            [&](NSInteger slot,
+                const std::vector<TranslatedDrawInfo::TextureBinding>& textures,
+                bool fragment,
+                auto builder) {
+                if (slot < 0) {
+                    return;
+                }
+                decltype(builder(textures)) payload = builder(textures);
+                if (payload.empty()) {
+                    return;
+                }
+                const void* data = payload.data();
+                const NSUInteger length =
+                    static_cast<NSUInteger>(
+                        payload.size() * sizeof(payload[0]));
+                if (fragment) {
+                    [encoder setFragmentBytes:data
+                                        length:length
+                                       atIndex:static_cast<NSUInteger>(slot)];
+                } else {
+                    [encoder setVertexBytes:data
+                                      length:length
+                                     atIndex:static_cast<NSUInteger>(slot)];
+                }
+            };
+        auto buildModes = [](const auto& textures) {
+            std::vector<std::uint32_t> modes;
+            buildTextureReductionModes(textures, modes);
+            return modes;
+        };
+        auto buildLodBiases = [](const auto& textures) {
+            std::vector<float> biases;
+            buildTextureLodBiases(textures, biases);
+            return biases;
+        };
+        auto buildBorderModes = [](const auto& textures) {
+            std::vector<std::uint32_t> modes;
+            buildTextureBorderClampModes(textures, modes);
+            return modes;
+        };
+        auto buildBorderColors = [](const auto& textures) {
+            std::vector<std::array<std::int32_t, 4>> colors;
+            buildTextureBorderClampColors(textures, colors);
+            return colors;
+        };
+        setTextureModeBytes(shaderSlots.vertexReductionModesSlot,
+                            info.vertexTextures, false, buildModes);
+        setTextureModeBytes(shaderSlots.vertexLodBiasesSlot,
+                            info.vertexTextures, false, buildLodBiases);
+        setTextureModeBytes(shaderSlots.vertexBorderClampModesSlot,
+                            info.vertexTextures, false, buildBorderModes);
+        setTextureModeBytes(shaderSlots.vertexBorderClampColorsSlot,
+                            info.vertexTextures, false, buildBorderColors);
+        if (shaderSlots.vertexImplicitLodBiasCorrectionSlot >= 0) {
+            const float correction = 0.0f;
+            [encoder setVertexBytes:&correction
+                              length:sizeof(correction)
+                             atIndex:static_cast<NSUInteger>(
+                                         shaderSlots.vertexImplicitLodBiasCorrectionSlot)];
+        }
+        setTextureModeBytes(shaderSlots.fragmentReductionModesSlot,
+                            info.fragmentTextures, true, buildModes);
+        setTextureModeBytes(shaderSlots.fragmentLodBiasesSlot,
+                            info.fragmentTextures, true, buildLodBiases);
+        setTextureModeBytes(shaderSlots.fragmentBorderClampModesSlot,
+                            info.fragmentTextures, true, buildBorderModes);
+        setTextureModeBytes(shaderSlots.fragmentBorderClampColorsSlot,
+                            info.fragmentTextures, true, buildBorderColors);
+        if (shaderSlots.fragmentImplicitLodBiasCorrectionSlot >= 0) {
+            const float correction =
+                implicitLodViewportBiasCorrection(info, false, colorTexture);
+            [encoder setFragmentBytes:&correction
+                                length:sizeof(correction)
+                               atIndex:static_cast<NSUInteger>(
+                                           shaderSlots.fragmentImplicitLodBiasCorrectionSlot)];
+        }
+        if (shaderSlots.fragmentNeedsFragCoordParams) {
+            auto fragmentSamplesColorAttachment = [&]() {
+                for (const auto& binding : info.fragmentTextures) {
+                    if (binding.metalTexture == nullptr) {
+                        continue;
+                    }
+                    id<MTLTexture> sampled =
+                        (__bridge id<MTLTexture>)binding.metalTexture;
+                    if (sampled == colorTexture) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            const float renderTargetHeight =
+                static_cast<float>(colorTexture.height);
+            const bool flipToLowerLeft =
+                (info.clipOrigin != GL_UPPER_LEFT) &&
+                !fragmentSamplesColorAttachment();
+            const GLint rtH = static_cast<GLint>(colorTexture.height);
+            const GLint glY = std::max<GLint>(0, info.viewportY);
+            const GLsizei availH =
+                static_cast<GLsizei>(std::max<GLint>(0, rtH - glY));
+            const GLsizei glH =
+                std::min<GLsizei>(info.viewportHeight, availH);
+            const float viewportLowerLeftBase =
+                static_cast<float>(glY + glH);
+            const float lowerLeftBase = clipControlShaderYFixup
+                ? viewportLowerLeftBase
+                : renderTargetHeight;
+            const float fragCoordParams[4] = {
+                flipToLowerLeft ? lowerLeftBase : 0.0f,
+                flipToLowerLeft ? -1.0f : 1.0f,
+                flipToLowerLeft ? 1.0f : 0.0f,
+                0.0f,
+            };
+            [encoder setFragmentBytes:fragCoordParams
+                                length:sizeof(fragCoordParams)
+                               atIndex:kAppGLFragCoordParamsBufferSlot];
+        }
+
+        for (const auto& ubo : info.uboBindings) {
+            if (ubo.size == 0) {
+                continue;
+            }
+            const NSUInteger slot = static_cast<NSUInteger>(ubo.metalSlot);
+            if (ubo.metalBuffer != nullptr) {
+                id<MTLBuffer> buf =
+                    (__bridge id<MTLBuffer>)ubo.metalBuffer;
+                const NSUInteger off =
+                    static_cast<NSUInteger>(ubo.metalBufferOffset);
+                if (ubo.isVertex) {
+                    [encoder setVertexBuffer:buf offset:off atIndex:slot];
+                }
+                if (ubo.isFragment) {
+                    [encoder setFragmentBuffer:buf offset:off atIndex:slot];
+                }
+            } else if (ubo.data != nullptr) {
+                if (ubo.isVertex) {
+                    [encoder setVertexBytes:ubo.data
+                                      length:static_cast<NSUInteger>(ubo.size)
+                                     atIndex:slot];
+                }
+                if (ubo.isFragment) {
+                    [encoder setFragmentBytes:ubo.data
+                                        length:static_cast<NSUInteger>(ubo.size)
+                                       atIndex:slot];
+                }
+            }
+        }
+
+        for (const auto& binding : info.fragmentTextures) {
+            if (binding.metalTexture == nullptr) {
+                continue;
+            }
+            id<MTLTexture> tex =
+                (__bridge id<MTLTexture>)binding.metalTexture;
+            id<MTLSamplerState> smp =
+                (__bridge id<MTLSamplerState>)binding.metalSamplerState;
+            if (smp == nil) {
+                return false;
+            }
+            [encoder setFragmentTexture:tex
+                                atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+            [encoder setFragmentSamplerState:smp
+                                     atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+        }
+        for (const auto& binding : info.vertexTextures) {
+            if (binding.metalTexture == nullptr) {
+                continue;
+            }
+            id<MTLTexture> tex =
+                (__bridge id<MTLTexture>)binding.metalTexture;
+            id<MTLSamplerState> smp =
+                (__bridge id<MTLSamplerState>)binding.metalSamplerState;
+            if (smp == nil) {
+                return false;
+            }
+            [encoder setVertexTexture:tex
+                              atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+            [encoder setVertexSamplerState:smp
+                                   atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+        }
+
+        MTLPrimitiveType primitive;
+        switch (info.mode) {
+            case GL_POINTS:         primitive = MTLPrimitiveTypePoint; break;
+            case GL_LINES:          primitive = MTLPrimitiveTypeLine; break;
+            case GL_LINE_STRIP:     primitive = MTLPrimitiveTypeLineStrip; break;
+            case GL_TRIANGLE_STRIP: primitive = MTLPrimitiveTypeTriangleStrip; break;
+            case GL_TRIANGLES:      primitive = MTLPrimitiveTypeTriangle; break;
+            default: return false;
+        }
+
+        const GLsizei effectiveInstanceCount =
+            std::max<GLsizei>(info.instanceCount, 1);
+        if (info.indexCount > 0) {
+            if (info.metalIndexBuffer == nullptr) {
+                return false;
+            }
+            id<MTLBuffer> idxBuffer =
+                (__bridge id<MTLBuffer>)info.metalIndexBuffer;
+            MTLIndexType metalIndexType = MTLIndexTypeUInt16;
+            if (info.indexType == GL_UNSIGNED_INT) {
+                metalIndexType = MTLIndexTypeUInt32;
+            } else if (info.indexType != GL_UNSIGNED_SHORT) {
+                return false;
+            }
+            if (effectiveInstanceCount > 1 ||
+                info.baseVertex != 0 ||
+                info.baseInstance != 0) {
+                [encoder drawIndexedPrimitives:primitive
+                                    indexCount:static_cast<NSUInteger>(info.indexCount)
+                                     indexType:metalIndexType
+                                   indexBuffer:idxBuffer
+                             indexBufferOffset:static_cast<NSUInteger>(
+                                                   info.metalIndexBufferOffset)
+                                 instanceCount:static_cast<NSUInteger>(
+                                                   effectiveInstanceCount)
+                                    baseVertex:static_cast<NSInteger>(info.baseVertex)
+                                  baseInstance:static_cast<NSUInteger>(
+                                                   info.baseInstance)];
+            } else {
+                [encoder drawIndexedPrimitives:primitive
+                                    indexCount:static_cast<NSUInteger>(info.indexCount)
+                                     indexType:metalIndexType
+                                   indexBuffer:idxBuffer
+                             indexBufferOffset:static_cast<NSUInteger>(
+                                                   info.metalIndexBufferOffset)];
+            }
+        } else if (effectiveInstanceCount > 1 ||
+                   info.baseVertex != 0 ||
+                   info.baseInstance != 0) {
+            [encoder drawPrimitives:primitive
+                         vertexStart:static_cast<NSUInteger>(info.baseVertex)
+                         vertexCount:static_cast<NSUInteger>(info.vertexCount)
+                       instanceCount:static_cast<NSUInteger>(effectiveInstanceCount)
+                        baseInstance:static_cast<NSUInteger>(info.baseInstance)];
+        } else {
+            [encoder drawPrimitives:primitive
+                         vertexStart:static_cast<NSUInteger>(info.baseVertex)
+                         vertexCount:static_cast<NSUInteger>(info.vertexCount)];
+        }
+        return true;
+    }
+
+    void replayPendingParallelTranslatedDrawBatchSerial(
+        ParallelEncodeBoundaryReason reason,
+        ParallelEncodeFallbackReason fallbackReason) {
         const std::uint64_t drawCount =
             static_cast<std::uint64_t>(pendingParallelTranslatedDraws.size());
         std::uint64_t failures = 0;
@@ -6091,8 +7022,199 @@ struct MetalFrameGraph::Impl {
         }
         const double elapsedUs =
             drawProfileElapsedUs(replayStart, drawProfileNow());
-        parallelEncodeProfile.recordBatchReplay(
-            reason, drawCount, elapsedUs, failures);
+        parallelEncodeProfile.recordSerialBatchReplay(
+            reason, fallbackReason, drawCount, elapsedUs, failures);
+    }
+
+    bool tryEncodeParallelTranslatedDrawBatch(
+        ParallelEncodeBoundaryReason reason,
+        ParallelEncodeFallbackReason& fallbackReason) {
+        const std::uint64_t drawCount =
+            static_cast<std::uint64_t>(pendingParallelTranslatedDraws.size());
+        if (drawCount < parallelEncodeProfile.configuredMinBatch) {
+            fallbackReason = ParallelEncodeFallbackReason::SmallBatch;
+            return false;
+        }
+        if (parallelEncodeProfile.configuredWorkerCount <= 1) {
+            fallbackReason = ParallelEncodeFallbackReason::WorkerCount;
+            return false;
+        }
+
+        const GLenum fragmentRate =
+            pendingParallelTranslatedDraws.front().info.fragmentShadingRate;
+        for (const auto& captured : pendingParallelTranslatedDraws) {
+            if (!captured.parallelPrepared) {
+                fallbackReason = captured.parallelFallbackReason;
+                return false;
+            }
+            if (captured.info.fragmentShadingRate != fragmentRate) {
+                fallbackReason = ParallelEncodeFallbackReason::MixedRenderState;
+                return false;
+            }
+        }
+
+        if (currentRenderEncoder != nil) {
+            endCurrentRenderPassOnly();
+            activeRenderPassFragmentShadingRate =
+                GL_SHADING_RATE_1X1_PIXELS_EXT;
+            resetCachedEncoderState();
+        }
+        acquireRingSlot();
+
+        MTLRenderPassDescriptor* pass = nil;
+        id<MTLTexture> colorTexture = nil;
+        id<MTLTexture> passDepthStencil = nil;
+        if (!buildDefaultParallelRenderPass(
+                pendingParallelTranslatedDraws.front().info,
+                pass,
+                colorTexture,
+                passDepthStencil)) {
+            fallbackReason =
+                ParallelEncodeFallbackReason::ParallelEncoderCreateFailure;
+            return false;
+        }
+
+        id<MTLParallelRenderCommandEncoder> parallelEncoder =
+            [currentCommandBuffer parallelRenderCommandEncoderWithDescriptor:pass];
+        if (parallelEncoder == nil) {
+            fallbackReason =
+                ParallelEncodeFallbackReason::ParallelEncoderCreateFailure;
+            return false;
+        }
+        hasPendingClear = false;
+        readbackSourceTexture = colorTexture;
+        readbackSourceIsBGRA =
+            colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
+        activeRenderPassFragmentShadingRate = fragmentRate;
+
+        const std::uint64_t configuredWorkers =
+            parallelEncodeProfile.configuredWorkerCount;
+        const std::uint64_t chunkCount =
+            std::min<std::uint64_t>(configuredWorkers, drawCount);
+        std::vector<id<MTLRenderCommandEncoder>> childEncoders;
+        childEncoders.reserve(static_cast<std::size_t>(chunkCount));
+        for (std::uint64_t chunk = 0; chunk < chunkCount; ++chunk) {
+            id<MTLRenderCommandEncoder> child =
+                [parallelEncoder renderCommandEncoder];
+            if (child == nil) {
+                for (id<MTLRenderCommandEncoder> enc : childEncoders) {
+                    [enc endEncoding];
+                }
+                [parallelEncoder endEncoding];
+                activeRenderPassFragmentShadingRate =
+                    GL_SHADING_RATE_1X1_PIXELS_EXT;
+                resetCachedEncoderState();
+                fallbackReason =
+                    ParallelEncodeFallbackReason::ChildEncoderCreateFailure;
+                return false;
+            }
+            childEncoders.push_back(child);
+        }
+
+        struct ParallelChunkWork {
+            std::uint64_t begin = 0;
+            std::uint64_t end = 0;
+            double workerUs = 0.0;
+            std::uint64_t failures = 0;
+        };
+        std::vector<ParallelChunkWork> chunks(
+            static_cast<std::size_t>(chunkCount));
+        const std::uint64_t baseChunkSize = drawCount / chunkCount;
+        const std::uint64_t remainder = drawCount % chunkCount;
+        std::uint64_t cursor = 0;
+        for (std::uint64_t chunk = 0; chunk < chunkCount; ++chunk) {
+            const std::uint64_t count =
+                baseChunkSize + (chunk < remainder ? 1u : 0u);
+            chunks[static_cast<std::size_t>(chunk)].begin = cursor;
+            chunks[static_cast<std::size_t>(chunk)].end = cursor + count;
+            cursor += count;
+        }
+
+        const DrawProfileTimePoint wallStart = drawProfileNow();
+        ParallelChunkWork* chunkData = chunks.data();
+        id<MTLRenderCommandEncoder>* encoderData = childEncoders.data();
+        Impl* self = this;
+        dispatch_queue_t queue =
+            dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+        dispatch_apply(static_cast<size_t>(chunkCount), queue, ^(size_t index) {
+            @autoreleasepool {
+                ParallelChildEncoderState childState;
+                ParallelChunkWork& work = chunkData[index];
+                id<MTLRenderCommandEncoder> child = encoderData[index];
+                const DrawProfileTimePoint workerStart = drawProfileNow();
+                for (std::uint64_t draw = work.begin; draw < work.end; ++draw) {
+                    const bool encoded =
+                        self->encodeCapturedTranslatedDrawOnChildEncoder(
+                            self->pendingParallelTranslatedDraws[
+                                static_cast<std::size_t>(draw)],
+                            child,
+                            colorTexture,
+                            passDepthStencil,
+                            childState);
+                    if (!encoded) {
+                        ++work.failures;
+                    }
+                }
+                work.workerUs =
+                    drawProfileElapsedUs(workerStart, drawProfileNow());
+                [child endEncoding];
+            }
+        });
+        [parallelEncoder endEncoding];
+        const double wallUs =
+            drawProfileElapsedUs(wallStart, drawProfileNow());
+        currentRenderEncoder = nil;
+        activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
+        resetCachedEncoderState();
+        pendingPresent = true;
+
+        std::vector<ParallelEncodeChunkProfile> chunkProfiles;
+        chunkProfiles.reserve(static_cast<std::size_t>(chunkCount));
+        double sumWorkerUs = 0.0;
+        double maxWorkerUs = 0.0;
+        std::uint64_t failures = 0;
+        for (std::uint64_t chunk = 0; chunk < chunkCount; ++chunk) {
+            const ParallelChunkWork& work =
+                chunks[static_cast<std::size_t>(chunk)];
+            sumWorkerUs += work.workerUs;
+            maxWorkerUs = std::max(maxWorkerUs, work.workerUs);
+            failures += work.failures;
+            ParallelEncodeChunkProfile profile;
+            profile.chunkIndex = chunk;
+            profile.drawBegin = work.begin;
+            profile.drawEnd = work.end;
+            profile.drawCount = work.end - work.begin;
+            profile.workerEncodeUs = work.workerUs;
+            profile.failures = work.failures;
+            chunkProfiles.push_back(profile);
+        }
+        parallelEncodeProfile.recordParallelBatch(
+            reason,
+            drawCount,
+            chunkProfiles,
+            wallUs,
+            sumWorkerUs,
+            maxWorkerUs,
+            failures);
+        return true;
+    }
+
+    void flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason reason) {
+        if (!parallelEncodeProfile.enabled ||
+            pendingParallelTranslatedDraws.empty() ||
+            flushingParallelTranslatedBatch) {
+            return;
+        }
+
+        flushingParallelTranslatedBatch = true;
+        ParallelEncodeFallbackReason fallbackReason =
+            ParallelEncodeFallbackReason::EncodeFailure;
+        const bool parallelEncoded =
+            tryEncodeParallelTranslatedDrawBatch(reason, fallbackReason);
+        if (!parallelEncoded) {
+            replayPendingParallelTranslatedDrawBatchSerial(
+                reason, fallbackReason);
+        }
         pendingParallelTranslatedDraws.clear();
         flushingParallelTranslatedBatch = false;
     }
@@ -6133,6 +7255,7 @@ struct MetalFrameGraph::Impl {
         }
         parallelEncodeProfile.recordCaptured(
             drawProfileElapsedUs(captureStart, drawProfileNow()));
+        prepareCapturedTranslatedDrawForParallel(info, captured);
 
         return true;
     }
