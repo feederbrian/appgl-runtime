@@ -460,10 +460,15 @@ struct ParallelEncodeFoundationProfile {
     std::uint64_t parallelBatchCount = 0;
     std::uint64_t parallelEncodedDraws = 0;
     std::uint64_t serialFallbackDraws = 0;
+    std::uint64_t descriptorPreparedDraws = 0;
+    std::uint64_t descriptorEncodedDraws = 0;
+    std::uint64_t descriptorFallbackDraws = 0;
     std::uint64_t workerFailures = 0;
     double serialCaptureUs = 0.0;
     double serialReplayUs = 0.0;
     double serialBatchReplayUs = 0.0;
+    double descriptorPrepareUs = 0.0;
+    double descriptorEncodeUs = 0.0;
     double parallelEncodeWallUs = 0.0;
     double sumWorkerEncodeUs = 0.0;
     double maxWorkerEncodeUs = 0.0;
@@ -511,6 +516,29 @@ struct ParallelEncodeFoundationProfile {
         }
         ++replayedDraws;
         serialReplayUs += elapsedUs;
+    }
+
+    void recordDescriptorPrepared(double elapsedUs) {
+        if (!enabled) {
+            return;
+        }
+        ++descriptorPreparedDraws;
+        descriptorPrepareUs += elapsedUs;
+    }
+
+    void recordDescriptorEncoded(double elapsedUs) {
+        if (!enabled) {
+            return;
+        }
+        ++descriptorEncodedDraws;
+        descriptorEncodeUs += elapsedUs;
+    }
+
+    void recordDescriptorFallback() {
+        if (!enabled) {
+            return;
+        }
+        ++descriptorFallbackDraws;
     }
 
     void recordDirectSerialFallback(ParallelEncodeFallbackReason reason) {
@@ -591,9 +619,12 @@ struct ParallelEncodeFoundationProfile {
             "batch_count=%llu batch_draws=%llu max_batch_size=%llu "
             "worker_count=%u min_batch=%u chunk_count=%llu "
             "parallel_batches=%llu parallel_encoded_draws=%llu "
-            "serial_fallback_draws=%llu worker_failures=%llu "
+            "serial_fallback_draws=%llu descriptor_prepared=%llu "
+            "descriptor_encoded=%llu descriptor_fallback_draws=%llu "
+            "worker_failures=%llu "
             "serial_capture_us=%.3f serial_replay_us=%.3f "
-            "serial_batch_replay_us=%.3f parallel_encode_wall_us=%.3f "
+            "serial_batch_replay_us=%.3f descriptor_prepare_us=%.3f "
+            "descriptor_encode_us=%.3f parallel_encode_wall_us=%.3f "
             "sum_worker_encode_us=%.3f max_worker_encode_us=%.3f "
             "batch_replay_failures=%llu\n",
             static_cast<unsigned long long>(translatedDraws),
@@ -609,10 +640,15 @@ struct ParallelEncodeFoundationProfile {
             static_cast<unsigned long long>(parallelBatchCount),
             static_cast<unsigned long long>(parallelEncodedDraws),
             static_cast<unsigned long long>(serialFallbackDraws),
+            static_cast<unsigned long long>(descriptorPreparedDraws),
+            static_cast<unsigned long long>(descriptorEncodedDraws),
+            static_cast<unsigned long long>(descriptorFallbackDraws),
             static_cast<unsigned long long>(workerFailures),
             serialCaptureUs,
             serialReplayUs,
             serialBatchReplayUs,
+            descriptorPrepareUs,
+            descriptorEncodeUs,
             parallelEncodeWallUs,
             sumWorkerEncodeUs,
             maxWorkerEncodeUs,
@@ -728,6 +764,262 @@ struct CapturedTranslatedDrawRecord {
     }
 };
 
+static constexpr std::size_t kLeanDirectMaxExtraVertexBuffers = 16;
+static constexpr std::size_t kLeanDirectMaxTextureBindings = 64;
+static constexpr std::size_t kLeanDirectMaxUBOBindings = 32;
+static constexpr std::size_t kLeanDirectMaxInlineUniformBytes = 4096;
+
+struct LeanDirectTranslatedDrawDescriptor {
+    struct ExtraVertexBuffer {
+        void* metalBuffer = nullptr;
+        std::size_t metalBufferOffset = 0;
+        std::uint32_t metalSlot = 0;
+    };
+    struct TextureBinding {
+        std::uint32_t metalSlot = 0;
+        void* metalTexture = nullptr;
+        void* metalSamplerState = nullptr;
+        std::uint32_t reductionMode = GL_WEIGHTED_AVERAGE_ARB;
+        float lodBias = 0.0f;
+        std::uint32_t borderClampMask = 0;
+        std::array<std::int32_t, 4> borderColor = {0, 0, 0, 0};
+    };
+    struct UBOBinding {
+        std::uint32_t metalSlot = 0;
+        const void* data = nullptr;
+        std::size_t size = 0;
+        void* metalBuffer = nullptr;
+        std::size_t metalBufferOffset = 0;
+        bool isVertex = false;
+        bool isFragment = false;
+    };
+
+    void* pipelineState = nullptr;
+    void* depthStencilState = nullptr;
+    TranslatedDrawPlanShaderSlots shaderSlots;
+    std::uint32_t attachmentSampleCount = 1;
+    std::uint32_t colorFormat = 0;
+    std::int32_t fixedFunctionSampleMaskSlot = 21;
+    bool clipControlShaderYFixup = false;
+    bool clipControlInvertsWinding = false;
+
+    GLenum mode = 0;
+    GLsizei vertexCount = 0;
+    GLsizei baseVertex = 0;
+    GLsizei instanceCount = 1;
+    GLuint baseInstance = 0;
+    GLsizei indexCount = 0;
+    GLenum indexType = 0;
+    void* metalIndexBuffer = nullptr;
+    std::size_t metalIndexBufferOffset = 0;
+
+    bool bindPrimaryVertexBuffer = false;
+    void* metalVertexBuffer = nullptr;
+    std::size_t metalVertexBufferOffset = 0;
+    std::array<ExtraVertexBuffer, kLeanDirectMaxExtraVertexBuffers>
+        extraVertexBuffers;
+    std::size_t extraVertexBufferCount = 0;
+
+    std::array<std::uint8_t, kLeanDirectMaxInlineUniformBytes>
+        vertexUniformStorage;
+    std::array<std::uint8_t, kLeanDirectMaxInlineUniformBytes>
+        fragmentUniformStorage;
+    const std::uint8_t* vertexUniformData = nullptr;
+    std::size_t vertexUniformSize = 0;
+    const std::uint8_t* fragmentUniformData = nullptr;
+    std::size_t fragmentUniformSize = 0;
+
+    std::array<TextureBinding, kLeanDirectMaxTextureBindings> vertexTextures;
+    std::size_t vertexTextureCount = 0;
+    std::array<TextureBinding, kLeanDirectMaxTextureBindings> fragmentTextures;
+    std::size_t fragmentTextureCount = 0;
+    std::array<UBOBinding, kLeanDirectMaxUBOBindings> uboBindings;
+    std::size_t uboBindingCount = 0;
+
+    bool depthTestEnabled = false;
+    GLenum depthFunc = GL_LESS;
+    bool depthWriteMask = true;
+    bool stencilTestEnabled = false;
+    GLint stencilFrontRef = 0;
+    GLint stencilBackRef = 0;
+    bool cullFaceEnabled = false;
+    GLenum cullFaceMode = GL_BACK;
+    GLenum frontFace = GL_CCW;
+    bool wireframe = false;
+    std::uint32_t sampleMask = 0xFFFFFFFFu;
+    bool polygonOffsetEnabled = false;
+    GLfloat polygonOffsetFactor = 0.0f;
+    GLfloat polygonOffsetUnits = 0.0f;
+    GLfloat polygonOffsetClamp = 0.0f;
+    GLint viewportX = 0;
+    GLint viewportY = 0;
+    GLsizei viewportWidth = 0;
+    GLsizei viewportHeight = 0;
+    GLdouble depthRangeNear = 0.0;
+    GLdouble depthRangeFar = 1.0;
+    bool scissorTestEnabled = false;
+    GLint scissorX = 0;
+    GLint scissorY = 0;
+    GLsizei scissorWidth = 0;
+    GLsizei scissorHeight = 0;
+    GLenum clipOrigin = GL_LOWER_LEFT;
+    GLenum fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
+    TranslatedDrawInfo::FragmentShadingRateShaderState
+        fragmentShadingRateShaderState;
+
+    void reset() {
+        pipelineState = nullptr;
+        depthStencilState = nullptr;
+        shaderSlots = TranslatedDrawPlanShaderSlots{};
+        attachmentSampleCount = 1;
+        colorFormat = 0;
+        fixedFunctionSampleMaskSlot = 21;
+        clipControlShaderYFixup = false;
+        clipControlInvertsWinding = false;
+        mode = 0;
+        vertexCount = 0;
+        baseVertex = 0;
+        instanceCount = 1;
+        baseInstance = 0;
+        indexCount = 0;
+        indexType = 0;
+        metalIndexBuffer = nullptr;
+        metalIndexBufferOffset = 0;
+        bindPrimaryVertexBuffer = false;
+        metalVertexBuffer = nullptr;
+        metalVertexBufferOffset = 0;
+        extraVertexBufferCount = 0;
+        vertexUniformData = nullptr;
+        vertexUniformSize = 0;
+        fragmentUniformData = nullptr;
+        fragmentUniformSize = 0;
+        vertexTextureCount = 0;
+        fragmentTextureCount = 0;
+        uboBindingCount = 0;
+        depthTestEnabled = false;
+        depthFunc = GL_LESS;
+        depthWriteMask = true;
+        stencilTestEnabled = false;
+        stencilFrontRef = 0;
+        stencilBackRef = 0;
+        cullFaceEnabled = false;
+        cullFaceMode = GL_BACK;
+        frontFace = GL_CCW;
+        wireframe = false;
+        sampleMask = 0xFFFFFFFFu;
+        polygonOffsetEnabled = false;
+        polygonOffsetFactor = 0.0f;
+        polygonOffsetUnits = 0.0f;
+        polygonOffsetClamp = 0.0f;
+        viewportX = 0;
+        viewportY = 0;
+        viewportWidth = 0;
+        viewportHeight = 0;
+        depthRangeNear = 0.0;
+        depthRangeFar = 1.0;
+        scissorTestEnabled = false;
+        scissorX = 0;
+        scissorY = 0;
+        scissorWidth = 0;
+        scissorHeight = 0;
+        clipOrigin = GL_LOWER_LEFT;
+        fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
+        fragmentShadingRateShaderState =
+            TranslatedDrawInfo::FragmentShadingRateShaderState{};
+    }
+};
+
+static std::uint32_t maxLeanDirectTextureBindingSlot(
+    const LeanDirectTranslatedDrawDescriptor::TextureBinding* textures,
+    std::size_t count) {
+    std::uint32_t maxSlot = 127;
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& binding = textures[i];
+        if (binding.metalTexture == nullptr ||
+            binding.metalSamplerState == nullptr) {
+            continue;
+        }
+        maxSlot = std::max(maxSlot, binding.metalSlot);
+    }
+    return maxSlot;
+}
+
+static void buildLeanDirectTextureReductionModes(
+    const LeanDirectTranslatedDrawDescriptor::TextureBinding* textures,
+    std::size_t count,
+    std::vector<std::uint32_t>& modes) {
+    modes.assign(
+        static_cast<std::size_t>(
+            maxLeanDirectTextureBindingSlot(textures, count)) + 1u,
+        static_cast<std::uint32_t>(GL_WEIGHTED_AVERAGE_ARB));
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& binding = textures[i];
+        if (binding.metalTexture == nullptr ||
+            binding.metalSamplerState == nullptr ||
+            binding.metalSlot >= modes.size()) {
+            continue;
+        }
+        modes[binding.metalSlot] = binding.reductionMode;
+    }
+}
+
+static void buildLeanDirectTextureLodBiases(
+    const LeanDirectTranslatedDrawDescriptor::TextureBinding* textures,
+    std::size_t count,
+    std::vector<float>& biases) {
+    biases.assign(
+        static_cast<std::size_t>(
+            maxLeanDirectTextureBindingSlot(textures, count)) + 1u,
+        0.0f);
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& binding = textures[i];
+        if (binding.metalTexture == nullptr ||
+            binding.metalSamplerState == nullptr ||
+            binding.metalSlot >= biases.size()) {
+            continue;
+        }
+        biases[binding.metalSlot] = binding.lodBias;
+    }
+}
+
+static void buildLeanDirectTextureBorderClampModes(
+    const LeanDirectTranslatedDrawDescriptor::TextureBinding* textures,
+    std::size_t count,
+    std::vector<std::uint32_t>& modes) {
+    modes.assign(
+        static_cast<std::size_t>(
+            maxLeanDirectTextureBindingSlot(textures, count)) + 1u,
+        0u);
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& binding = textures[i];
+        if (binding.metalTexture == nullptr ||
+            binding.metalSamplerState == nullptr ||
+            binding.metalSlot >= modes.size()) {
+            continue;
+        }
+        modes[binding.metalSlot] = binding.borderClampMask;
+    }
+}
+
+static void buildLeanDirectTextureBorderClampColors(
+    const LeanDirectTranslatedDrawDescriptor::TextureBinding* textures,
+    std::size_t count,
+    std::vector<std::array<std::int32_t, 4>>& colors) {
+    colors.assign(
+        static_cast<std::size_t>(
+            maxLeanDirectTextureBindingSlot(textures, count)) + 1u,
+        {0, 0, 0, 0});
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& binding = textures[i];
+        if (binding.metalTexture == nullptr ||
+            binding.metalSamplerState == nullptr ||
+            binding.metalSlot >= colors.size()) {
+            continue;
+        }
+        colors[binding.metalSlot] = binding.borderColor;
+    }
+}
+
 static std::size_t indexTypeSize(GLenum type) {
     switch (type) {
         case GL_UNSIGNED_BYTE: return 1;
@@ -744,14 +1036,6 @@ static bool hasAdditionalColorTargets(const TranslatedDrawInfo& info) {
         }
     }
     return false;
-}
-
-static bool mslUsesArgumentBuffers(const std::string* msl) {
-    if (msl == nullptr) {
-        return false;
-    }
-    return msl->find("spvDescriptorSetBuffer") != std::string::npos ||
-           msl->find("[[id(") != std::string::npos;
 }
 
 static bool translatedDrawUsesSimpleMetalPrimitive(GLenum mode) {
@@ -796,9 +1080,20 @@ static bool translatedDrawParallelCaptureEligible(
         return false;
     }
     if (info.submissionGroup.argumentBuffersEnabled ||
-        mslUsesArgumentBuffers(info.vertexMSL) ||
-        mslUsesArgumentBuffers(info.fragmentMSL) ||
         envEnabled("APPGL_ENABLE_ARGUMENT_BUFFERS")) {
+        reason = ParallelEncodeBoundaryReason::ArgumentBuffers;
+        return false;
+    }
+    const TranslatedDrawPlan* translatedPlan = info.translatedPlan;
+    if (translatedPlan == nullptr || !translatedPlan->valid) {
+        reason = ParallelEncodeBoundaryReason::PipelineNotPrepared;
+        return false;
+    }
+    if (translatedPlan->useArgumentBuffers ||
+        translatedPlan->vertexUsesArgumentBuffer ||
+        translatedPlan->fragmentUsesArgumentBuffer ||
+        translatedPlan->shaderSlots.vertexMslUsesArgBuf ||
+        translatedPlan->shaderSlots.fragmentMslUsesArgBuf) {
         reason = ParallelEncodeBoundaryReason::ArgumentBuffers;
         return false;
     }
@@ -6468,8 +6763,298 @@ struct MetalFrameGraph::Impl {
         return true;
     }
 
+    NSInteger fixedFunctionSampleMaskSlotForTranslatedDraw(
+        const TranslatedDrawInfo& source,
+        std::uint64_t pipelineCacheKey) {
+        auto it = translatedDrawSampleMaskSlotCache.find(pipelineCacheKey);
+        if (it != translatedDrawSampleMaskSlotCache.end()) {
+            return it->second;
+        }
+        const NSInteger slot = fixedFunctionSampleMaskBufferSlot(source.fragmentMSL);
+        translatedDrawSampleMaskSlotCache.emplace(pipelineCacheKey, slot);
+        return slot;
+    }
+
+    bool prepareLeanDirectTranslatedDrawDescriptor(
+        const TranslatedDrawInfo& source,
+        LeanDirectTranslatedDrawDescriptor& descriptor,
+        ParallelEncodeFallbackReason& fallbackReason) {
+        descriptor.reset();
+        fallbackReason = ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
+
+        if (!translatedDrawWorkerEmitSafe(source)) {
+            return false;
+        }
+        if (!translatedDrawUsesSimpleMetalPrimitive(source.mode)) {
+            fallbackReason = ParallelEncodeFallbackReason::MixedRenderState;
+            return false;
+        }
+
+        ensureDrawableResources();
+        const bool hasFragmentStage =
+            source.fragmentMSL != nullptr && !source.fragmentMSL->empty();
+        id<MTLTexture> colorTexture =
+            usesOffscreenTarget ? offscreenColorTexture : nil;
+        const MTLPixelFormat colorFormat = colorTexture != nil
+            ? colorTexture.pixelFormat
+            : MTLPixelFormatBGRA8Unorm;
+        const NSUInteger attachmentSampleCount =
+            colorTexture != nil ? colorTexture.sampleCount : 1;
+        const bool forcePerSampleFS =
+            source.sampleShadingEnabled && source.minSampleShading > 0.0f &&
+            attachmentSampleCount > 1;
+
+        const TranslatedDrawPlan* translatedPlan = source.translatedPlan;
+        if (translatedPlan == nullptr ||
+            !translatedPlan->valid ||
+            translatedPlan->useArgumentBuffers ||
+            translatedPlan->colorFormat !=
+                static_cast<std::uint32_t>(colorFormat) ||
+            translatedPlan->attachmentSampleCount !=
+                static_cast<std::uint32_t>(attachmentSampleCount) ||
+            translatedPlan->forcePerSampleFS != forcePerSampleFS ||
+            translatedPlan->hasFragmentStage != hasFragmentStage) {
+            fallbackReason = ParallelEncodeFallbackReason::PipelineNotPrepared;
+            return false;
+        }
+
+        const TranslatedDrawMSLSlots slots =
+            phase2PlanMSLSlotsFromShaderSlots(translatedPlan->shaderSlots);
+        if (slots.vertexMslUsesArgBuf ||
+            slots.fragmentMslUsesArgBuf ||
+            slots.vertexHasSSBOSizeBuffer ||
+            slots.fragmentHasSSBOSizeBuffer ||
+            slots.fragmentNeedsGlNumSamplesArgBuf ||
+            slots.vertexUsesMultiviewViewMask ||
+            slots.fragmentUsesMultiviewViewMask) {
+            return false;
+        }
+
+        id<MTLRenderPipelineState> pipelineState = nil;
+        const std::uint64_t pipelineCacheKey =
+            translatedPlan->pipelineCacheKey;
+        if (source.pipelineStateCacheOut != nullptr) {
+            auto it = source.pipelineStateCacheOut->find(pipelineCacheKey);
+            if (it != source.pipelineStateCacheOut->end() &&
+                it->second != nullptr) {
+                pipelineState =
+                    (__bridge id<MTLRenderPipelineState>)(it->second);
+            }
+        } else if (source.pipelineStateOut != nullptr &&
+                   *source.pipelineStateOut != nullptr &&
+                   source.pipelineColorFormatOut != nullptr &&
+                   *source.pipelineColorFormatOut ==
+                       static_cast<std::uint32_t>(colorFormat)) {
+            pipelineState =
+                (__bridge id<MTLRenderPipelineState>)(*source.pipelineStateOut);
+        }
+        if (pipelineState == nil) {
+            fallbackReason = ParallelEncodeFallbackReason::PipelineNotPrepared;
+            return false;
+        }
+
+        id<MTLDepthStencilState> depthState = nil;
+        if (depthStencilTexture != nil) {
+            MetalDrawInfo fakeInfo;
+            fakeInfo.depthTestEnabled = source.depthTestEnabled;
+            fakeInfo.depthFunc = source.depthFunc;
+            fakeInfo.depthWriteMask = source.depthWriteMask;
+            fakeInfo.stencilTestEnabled = source.stencilTestEnabled;
+            fakeInfo.stencilFrontFunc = source.stencilFrontFunc;
+            fakeInfo.stencilFrontRef = source.stencilFrontRef;
+            fakeInfo.stencilFrontValueMask = source.stencilFrontValueMask;
+            fakeInfo.stencilFrontFail = source.stencilFrontFail;
+            fakeInfo.stencilFrontDepthFail = source.stencilFrontDepthFail;
+            fakeInfo.stencilFrontDepthPass = source.stencilFrontDepthPass;
+            fakeInfo.stencilFrontWriteMask = source.stencilFrontWriteMask;
+            fakeInfo.stencilBackFunc = source.stencilBackFunc;
+            fakeInfo.stencilBackRef = source.stencilBackRef;
+            fakeInfo.stencilBackValueMask = source.stencilBackValueMask;
+            fakeInfo.stencilBackFail = source.stencilBackFail;
+            fakeInfo.stencilBackDepthFail = source.stencilBackDepthFail;
+            fakeInfo.stencilBackDepthPass = source.stencilBackDepthPass;
+            fakeInfo.stencilBackWriteMask = source.stencilBackWriteMask;
+            depthState = depthStencilStateForDraw(fakeInfo);
+        }
+
+        bool hasExtraVertexAttributes = false;
+        for (const auto& evb : source.extraVertexBuffers) {
+            if (!evb.attributes.empty()) {
+                hasExtraVertexAttributes = true;
+                break;
+            }
+        }
+        const bool attributelessDraw =
+            source.vertexData == nullptr &&
+            source.metalVertexBuffer == nullptr &&
+            source.vertexAttributeLayouts.empty() &&
+            !hasExtraVertexAttributes;
+        if (!attributelessDraw && !source.vertexAttributeLayouts.empty()) {
+            if (source.metalVertexBuffer == nullptr) {
+                return false;
+            }
+            descriptor.bindPrimaryVertexBuffer = true;
+            descriptor.metalVertexBuffer = source.metalVertexBuffer;
+            descriptor.metalVertexBufferOffset =
+                source.metalVertexBufferOffset;
+        }
+        for (std::size_t ei = 0; ei < source.extraVertexBuffers.size(); ++ei) {
+            const auto& evb = source.extraVertexBuffers[ei];
+            if (evb.attributes.empty()) {
+                continue;
+            }
+            if (evb.metalBuffer == nullptr ||
+                descriptor.extraVertexBufferCount >=
+                    descriptor.extraVertexBuffers.size()) {
+                return false;
+            }
+            auto& dst =
+                descriptor.extraVertexBuffers[descriptor.extraVertexBufferCount++];
+            dst.metalBuffer = evb.metalBuffer;
+            dst.metalBufferOffset = evb.metalBufferOffset;
+            dst.metalSlot = static_cast<std::uint32_t>(ei + 1);
+        }
+
+        if (source.vertexUniformSize > descriptor.vertexUniformStorage.size() ||
+            source.fragmentUniformSize >
+                descriptor.fragmentUniformStorage.size()) {
+            return false;
+        }
+        if (source.vertexUniformData != nullptr &&
+            source.vertexUniformSize > 0) {
+            std::memcpy(descriptor.vertexUniformStorage.data(),
+                        source.vertexUniformData,
+                        source.vertexUniformSize);
+            descriptor.vertexUniformData =
+                descriptor.vertexUniformStorage.data();
+            descriptor.vertexUniformSize = source.vertexUniformSize;
+        }
+        if (source.fragmentUniformData != nullptr &&
+            source.fragmentUniformSize > 0) {
+            std::memcpy(descriptor.fragmentUniformStorage.data(),
+                        source.fragmentUniformData,
+                        source.fragmentUniformSize);
+            descriptor.fragmentUniformData =
+                descriptor.fragmentUniformStorage.data();
+            descriptor.fragmentUniformSize = source.fragmentUniformSize;
+        }
+
+        auto copyTextures =
+            [](const std::vector<TranslatedDrawInfo::TextureBinding>& src,
+               std::array<LeanDirectTranslatedDrawDescriptor::TextureBinding,
+                          kLeanDirectMaxTextureBindings>& dst,
+               std::size_t& dstCount) {
+                for (const auto& binding : src) {
+                    if (binding.metalTexture == nullptr) {
+                        continue;
+                    }
+                    if (binding.metalSamplerState == nullptr ||
+                        binding.textureBufferBackingMetalBuffer != nullptr ||
+                        binding.imageAtomicMetalBuffer != nullptr ||
+                        dstCount >= dst.size()) {
+                        return false;
+                    }
+                    auto& copied = dst[dstCount++];
+                    copied.metalSlot = binding.metalSlot;
+                    copied.metalTexture = binding.metalTexture;
+                    copied.metalSamplerState = binding.metalSamplerState;
+                    copied.reductionMode = binding.reductionMode;
+                    copied.lodBias = binding.lodBias;
+                    copied.borderClampMask = binding.borderClampMask;
+                    copied.borderColor = binding.borderColor;
+                }
+                return true;
+            };
+        if (!copyTextures(source.vertexTextures,
+                          descriptor.vertexTextures,
+                          descriptor.vertexTextureCount) ||
+            !copyTextures(source.fragmentTextures,
+                          descriptor.fragmentTextures,
+                          descriptor.fragmentTextureCount)) {
+            return false;
+        }
+
+        for (const auto& ubo : source.uboBindings) {
+            if (ubo.size == 0) {
+                continue;
+            }
+            if (descriptor.uboBindingCount >=
+                descriptor.uboBindings.size()) {
+                return false;
+            }
+            auto& copied = descriptor.uboBindings[descriptor.uboBindingCount++];
+            copied.metalSlot = ubo.metalSlot;
+            copied.data = ubo.data;
+            copied.size = ubo.size;
+            copied.metalBuffer = ubo.metalBuffer;
+            copied.metalBufferOffset = ubo.metalBufferOffset;
+            copied.isVertex = ubo.isVertex;
+            copied.isFragment = ubo.isFragment;
+        }
+
+        descriptor.pipelineState = (__bridge void*)pipelineState;
+        descriptor.depthStencilState =
+            depthState != nil ? (__bridge void*)depthState : nullptr;
+        descriptor.shaderSlots = translatedPlan->shaderSlots;
+        descriptor.attachmentSampleCount =
+            static_cast<std::uint32_t>(attachmentSampleCount);
+        descriptor.colorFormat = static_cast<std::uint32_t>(colorFormat);
+        descriptor.fixedFunctionSampleMaskSlot =
+            static_cast<std::int32_t>(
+                fixedFunctionSampleMaskSlotForTranslatedDraw(
+                    source, pipelineCacheKey));
+        descriptor.clipControlShaderYFixup =
+            translatedPlan->clipControlShaderYFixup;
+        descriptor.clipControlInvertsWinding =
+            translatedPlan->clipControlInvertsWinding;
+
+        descriptor.mode = source.mode;
+        descriptor.vertexCount = source.vertexCount;
+        descriptor.baseVertex = source.baseVertex;
+        descriptor.instanceCount = source.instanceCount;
+        descriptor.baseInstance = source.baseInstance;
+        descriptor.indexCount = source.indexCount;
+        descriptor.indexType = source.indexType;
+        descriptor.metalIndexBuffer = source.metalIndexBuffer;
+        descriptor.metalIndexBufferOffset = source.metalIndexBufferOffset;
+
+        descriptor.depthTestEnabled = source.depthTestEnabled;
+        descriptor.depthFunc = source.depthFunc;
+        descriptor.depthWriteMask = source.depthWriteMask;
+        descriptor.stencilTestEnabled = source.stencilTestEnabled;
+        descriptor.stencilFrontRef = source.stencilFrontRef;
+        descriptor.stencilBackRef = source.stencilBackRef;
+        descriptor.cullFaceEnabled = source.cullFaceEnabled;
+        descriptor.cullFaceMode = source.cullFaceMode;
+        descriptor.frontFace = source.frontFace;
+        descriptor.wireframe = source.wireframe;
+        descriptor.sampleMask = source.sampleMask;
+        descriptor.polygonOffsetEnabled = source.polygonOffsetEnabled;
+        descriptor.polygonOffsetFactor = source.polygonOffsetFactor;
+        descriptor.polygonOffsetUnits = source.polygonOffsetUnits;
+        descriptor.polygonOffsetClamp = source.polygonOffsetClamp;
+        descriptor.viewportX = source.viewportX;
+        descriptor.viewportY = source.viewportY;
+        descriptor.viewportWidth = source.viewportWidth;
+        descriptor.viewportHeight = source.viewportHeight;
+        descriptor.depthRangeNear = source.depthRangeNear;
+        descriptor.depthRangeFar = source.depthRangeFar;
+        descriptor.scissorTestEnabled = source.scissorTestEnabled;
+        descriptor.scissorX = source.scissorX;
+        descriptor.scissorY = source.scissorY;
+        descriptor.scissorWidth = source.scissorWidth;
+        descriptor.scissorHeight = source.scissorHeight;
+        descriptor.clipOrigin = source.clipOrigin;
+        descriptor.fragmentShadingRate = source.fragmentShadingRate;
+        descriptor.fragmentShadingRateShaderState =
+            source.fragmentShadingRateShaderState;
+
+        fallbackReason = ParallelEncodeFallbackReason::Count;
+        return true;
+    }
+
     bool buildDefaultParallelRenderPass(
-        const TranslatedDrawInfo& firstInfo,
+        GLenum fragmentShadingRate,
         MTLRenderPassDescriptor*& passOut,
         id<MTLTexture>& colorTextureOut,
         id<MTLTexture>& passDepthStencilOut) {
@@ -6553,11 +7138,635 @@ struct MetalFrameGraph::Impl {
                 pass.stencilAttachment.clearStencil = pendingClearStencil;
             }
         }
-        attachFragmentShadingRateMap(pass, firstInfo.fragmentShadingRate,
+        attachFragmentShadingRateMap(pass, fragmentShadingRate,
                                      colorTexture, 1);
         passOut = pass;
         colorTextureOut = colorTexture;
         passDepthStencilOut = passDepthStencil;
+        return true;
+    }
+
+    bool ensureLeanDirectDefaultRenderPass(
+        GLenum fragmentShadingRate,
+        id<MTLTexture>& colorTextureOut,
+        id<MTLTexture>& passDepthStencilOut) {
+        if (currentRenderEncoder != nil &&
+            activeRenderPassFragmentShadingRate != fragmentShadingRate) {
+            endRenderPass();
+            resetCachedEncoderState();
+        }
+        if (currentRenderEncoder != nil) {
+            if (!usesOffscreenTarget && currentDrawable == nil &&
+                !acquireDrawableIfNeeded()) {
+                return false;
+            }
+            colorTextureOut =
+                usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
+            passDepthStencilOut = depthStencilTexture;
+            return colorTextureOut != nil;
+        }
+
+        MTLRenderPassDescriptor* pass = nil;
+        if (!buildDefaultParallelRenderPass(fragmentShadingRate,
+                                            pass,
+                                            colorTextureOut,
+                                            passDepthStencilOut)) {
+            return false;
+        }
+        currentRenderEncoder =
+            [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
+        if (currentRenderEncoder == nil) {
+            return false;
+        }
+        hasPendingClear = false;
+        activeRenderPassFragmentShadingRate = fragmentShadingRate;
+        readbackSourceTexture = colorTextureOut;
+        readbackSourceIsBGRA =
+            colorTextureOut.pixelFormat == MTLPixelFormatBGRA8Unorm;
+        resetCachedEncoderState();
+        return true;
+    }
+
+    bool encodeLeanDirectTranslatedDrawDescriptor(
+        const LeanDirectTranslatedDrawDescriptor& descriptor,
+        id<MTLTexture> colorTexture,
+        id<MTLTexture> passDepthStencil) {
+        if (currentRenderEncoder == nil || colorTexture == nil ||
+            descriptor.pipelineState == nullptr) {
+            return false;
+        }
+        id<MTLRenderCommandEncoder> encoder = currentRenderEncoder;
+        id<MTLRenderPipelineState> pipelineState =
+            (__bridge id<MTLRenderPipelineState>)descriptor.pipelineState;
+        if (pipelineState == nil) {
+            return false;
+        }
+        const TranslatedDrawMSLSlots shaderSlots =
+            phase2PlanMSLSlotsFromShaderSlots(descriptor.shaderSlots);
+        const NSUInteger attachmentSampleCount =
+            static_cast<NSUInteger>(
+                std::max<std::uint32_t>(
+                    descriptor.attachmentSampleCount, 1u));
+
+        if (pipelineState != cachedPipelineState) {
+            [encoder setRenderPipelineState:pipelineState];
+            cachedPipelineState = pipelineState;
+        }
+        if (passDepthStencil != nil &&
+            descriptor.depthStencilState != nullptr) {
+            id<MTLDepthStencilState> dsState =
+                (__bridge id<MTLDepthStencilState>)
+                    descriptor.depthStencilState;
+            if (dsState != nil && dsState != cachedDepthStencilState) {
+                [encoder setDepthStencilState:dsState];
+                cachedDepthStencilState = dsState;
+            }
+            if (descriptor.stencilTestEnabled) {
+                [encoder setStencilFrontReferenceValue:
+                             static_cast<uint32_t>(
+                                 descriptor.stencilFrontRef)
+                            backReferenceValue:
+                             static_cast<uint32_t>(
+                                 descriptor.stencilBackRef)];
+            }
+        }
+
+        const MTLCullMode desiredCull = descriptor.cullFaceEnabled
+            ? (descriptor.cullFaceMode == GL_FRONT ? MTLCullModeFront
+                                                   : MTLCullModeBack)
+            : MTLCullModeNone;
+        if (desiredCull != cachedCullMode) {
+            [encoder setCullMode:desiredCull];
+            cachedCullMode = desiredCull;
+        }
+        const MTLWinding desiredWinding =
+            frontFacingWindingForClipControl(
+                descriptor.frontFace,
+                descriptor.clipControlInvertsWinding);
+        if (desiredWinding != cachedFrontFaceWinding) {
+            [encoder setFrontFacingWinding:desiredWinding];
+            cachedFrontFaceWinding = desiredWinding;
+        }
+        const MTLTriangleFillMode desiredFill = descriptor.wireframe
+            ? MTLTriangleFillModeLines
+            : MTLTriangleFillModeFill;
+        if (desiredFill != cachedFillMode) {
+            [encoder setTriangleFillMode:desiredFill];
+            cachedFillMode = desiredFill;
+        }
+        {
+            const std::uint32_t sampleMask = attachmentSampleCount > 1
+                ? descriptor.sampleMask
+                : 0xFFFFFFFFu;
+            [encoder setFragmentBytes:&sampleMask
+                                length:sizeof(sampleMask)
+                               atIndex:static_cast<NSUInteger>(
+                                           descriptor.fixedFunctionSampleMaskSlot)];
+        }
+        {
+            const float bias = descriptor.polygonOffsetEnabled
+                ? descriptor.polygonOffsetUnits
+                : 0.0f;
+            const float slope = descriptor.polygonOffsetEnabled
+                ? descriptor.polygonOffsetFactor
+                : 0.0f;
+            const float clampV = descriptor.polygonOffsetEnabled
+                ? descriptor.polygonOffsetClamp
+                : 0.0f;
+            [encoder setDepthBias:bias slopeScale:slope clamp:clampV];
+        }
+
+        if (descriptor.viewportWidth > 0 &&
+            descriptor.viewportHeight > 0) {
+            const GLint rtW = static_cast<GLint>(colorTexture.width);
+            const GLint rtH = static_cast<GLint>(colorTexture.height);
+            const double rtHeight = static_cast<double>(rtH);
+            const GLint glX = std::max<GLint>(0, descriptor.viewportX);
+            const GLint glY = std::max<GLint>(0, descriptor.viewportY);
+            const GLsizei availW =
+                static_cast<GLsizei>(std::max<GLint>(0, rtW - glX));
+            const GLsizei availH =
+                static_cast<GLsizei>(std::max<GLint>(0, rtH - glY));
+            const GLsizei glW =
+                std::min<GLsizei>(descriptor.viewportWidth, availW);
+            const GLsizei glH =
+                std::min<GLsizei>(descriptor.viewportHeight, availH);
+            const bool flipY = (descriptor.clipOrigin != GL_UPPER_LEFT);
+            MTLViewport vp;
+            vp.originX = static_cast<double>(glX);
+            vp.originY = descriptor.clipControlShaderYFixup
+                ? static_cast<double>(glY)
+                : (flipY
+                    ? (rtHeight - static_cast<double>(glY) -
+                       static_cast<double>(glH))
+                    : static_cast<double>(glY));
+            vp.width = static_cast<double>(glW);
+            vp.height = static_cast<double>(glH);
+            vp.znear = descriptor.depthRangeNear;
+            vp.zfar = descriptor.depthRangeFar;
+            if (vp.width > 0 && vp.height > 0) {
+                [encoder setViewport:vp];
+            }
+        }
+        {
+            const NSUInteger rtW = colorTexture.width;
+            const NSUInteger rtH = colorTexture.height;
+            MTLScissorRect sr;
+            if (!descriptor.scissorTestEnabled) {
+                sr = {0, 0, rtW, rtH};
+            } else if (descriptor.scissorWidth <= 0 ||
+                       descriptor.scissorHeight <= 0) {
+                sr = {0, 0, 0, 0};
+            } else {
+                GLint metalX = std::max<GLint>(0, descriptor.scissorX);
+                GLint metalYBottomLeft =
+                    std::max<GLint>(0, descriptor.scissorY);
+                GLint metalY = static_cast<GLint>(rtH) -
+                    metalYBottomLeft - descriptor.scissorHeight;
+                GLsizei scissorH = descriptor.scissorHeight;
+                if (metalY < 0) {
+                    scissorH += metalY;
+                    metalY = 0;
+                }
+                const GLsizei availW =
+                    static_cast<GLsizei>(rtW) - metalX;
+                const GLsizei availH =
+                    static_cast<GLsizei>(rtH) - metalY;
+                const GLsizei finalW =
+                    std::min<GLsizei>(
+                        descriptor.scissorWidth,
+                        std::max<GLsizei>(0, availW));
+                const GLsizei finalH =
+                    std::min<GLsizei>(
+                        scissorH,
+                        std::max<GLsizei>(0, availH));
+                if (finalW <= 0 || finalH <= 0) {
+                    sr = {rtW > 0 ? rtW - 1 : 0,
+                          rtH > 0 ? rtH - 1 : 0,
+                          1,
+                          1};
+                } else {
+                    sr = {static_cast<NSUInteger>(metalX),
+                          static_cast<NSUInteger>(metalY),
+                          static_cast<NSUInteger>(finalW),
+                          static_cast<NSUInteger>(finalH)};
+                }
+            }
+            [encoder setScissorRect:sr];
+        }
+
+        if (descriptor.bindPrimaryVertexBuffer) {
+            if (descriptor.metalVertexBuffer == nullptr) {
+                return false;
+            }
+            id<MTLBuffer> mtlBuf =
+                (__bridge id<MTLBuffer>)descriptor.metalVertexBuffer;
+            [encoder setVertexBuffer:mtlBuf
+                               offset:static_cast<NSUInteger>(
+                                          descriptor.metalVertexBufferOffset)
+                              atIndex:0];
+        }
+        for (std::size_t i = 0;
+             i < descriptor.extraVertexBufferCount;
+             ++i) {
+            const auto& evb = descriptor.extraVertexBuffers[i];
+            if (evb.metalBuffer == nullptr) {
+                return false;
+            }
+            id<MTLBuffer> mtlBuf = (__bridge id<MTLBuffer>)evb.metalBuffer;
+            [encoder setVertexBuffer:mtlBuf
+                               offset:static_cast<NSUInteger>(
+                                          evb.metalBufferOffset)
+                              atIndex:static_cast<NSUInteger>(
+                                          evb.metalSlot)];
+        }
+
+        if (descriptor.vertexUniformData != nullptr &&
+            descriptor.vertexUniformSize > 0) {
+            [encoder setVertexBytes:descriptor.vertexUniformData
+                              length:descriptor.vertexUniformSize
+                             atIndex:16];
+        }
+        if (descriptor.fragmentUniformData != nullptr &&
+            descriptor.fragmentUniformSize > 0) {
+            [encoder setFragmentBytes:descriptor.fragmentUniformData
+                                length:descriptor.fragmentUniformSize
+                               atIndex:16];
+        }
+        {
+            const int32_t glNumSamples =
+                static_cast<int32_t>(attachmentSampleCount);
+            [encoder setFragmentBytes:&glNumSamples
+                                length:sizeof(glNumSamples)
+                               atIndex:0];
+        }
+        if (shaderSlots.vertexNeedsFragmentShadingRateState) {
+            [encoder setVertexBytes:
+                         &descriptor.fragmentShadingRateShaderState
+                              length:sizeof(
+                                  descriptor.fragmentShadingRateShaderState)
+                             atIndex:kAppGLFragmentShadingRateParamsBufferSlot];
+        }
+        if (shaderSlots.vertexClipControlYSignSlot >= 0) {
+            const float clipControlYSign =
+                (descriptor.clipControlShaderYFixup &&
+                 descriptor.clipOrigin != GL_UPPER_LEFT) ? -1.0f : 1.0f;
+            [encoder setVertexBytes:&clipControlYSign
+                              length:sizeof(clipControlYSign)
+                             atIndex:static_cast<NSUInteger>(
+                                         shaderSlots.vertexClipControlYSignSlot)];
+        }
+
+        auto setVertexBytesIfPresent = [&](NSInteger slot,
+                                           const void* data,
+                                           NSUInteger length) {
+            if (slot >= 0 && data != nullptr && length > 0) {
+                [encoder setVertexBytes:data
+                                  length:length
+                                 atIndex:static_cast<NSUInteger>(slot)];
+            }
+        };
+        auto setFragmentBytesIfPresent = [&](NSInteger slot,
+                                             const void* data,
+                                             NSUInteger length) {
+            if (slot >= 0 && data != nullptr && length > 0) {
+                [encoder setFragmentBytes:data
+                                    length:length
+                                   atIndex:static_cast<NSUInteger>(slot)];
+            }
+        };
+        if (shaderSlots.vertexReductionModesSlot >= 0) {
+            std::vector<std::uint32_t>& modes = textureUIntScratch();
+            buildLeanDirectTextureReductionModes(
+                descriptor.vertexTextures.data(),
+                descriptor.vertexTextureCount,
+                modes);
+            setVertexBytesIfPresent(
+                shaderSlots.vertexReductionModesSlot,
+                modes.data(),
+                static_cast<NSUInteger>(
+                    modes.size() * sizeof(std::uint32_t)));
+        }
+        if (shaderSlots.vertexLodBiasesSlot >= 0) {
+            std::vector<float>& biases = textureFloatScratch();
+            buildLeanDirectTextureLodBiases(
+                descriptor.vertexTextures.data(),
+                descriptor.vertexTextureCount,
+                biases);
+            setVertexBytesIfPresent(
+                shaderSlots.vertexLodBiasesSlot,
+                biases.data(),
+                static_cast<NSUInteger>(biases.size() * sizeof(float)));
+        }
+        if (shaderSlots.vertexBorderClampModesSlot >= 0) {
+            std::vector<std::uint32_t>& modes = textureUIntScratch();
+            buildLeanDirectTextureBorderClampModes(
+                descriptor.vertexTextures.data(),
+                descriptor.vertexTextureCount,
+                modes);
+            setVertexBytesIfPresent(
+                shaderSlots.vertexBorderClampModesSlot,
+                modes.data(),
+                static_cast<NSUInteger>(
+                    modes.size() * sizeof(std::uint32_t)));
+        }
+        if (shaderSlots.vertexBorderClampColorsSlot >= 0) {
+            std::vector<std::array<std::int32_t, 4>>& colors =
+                textureBorderColorScratch();
+            buildLeanDirectTextureBorderClampColors(
+                descriptor.vertexTextures.data(),
+                descriptor.vertexTextureCount,
+                colors);
+            setVertexBytesIfPresent(
+                shaderSlots.vertexBorderClampColorsSlot,
+                colors.data(),
+                static_cast<NSUInteger>(
+                    colors.size() *
+                    sizeof(std::array<std::int32_t, 4>)));
+        }
+        if (shaderSlots.vertexImplicitLodBiasCorrectionSlot >= 0) {
+            const float correction = 0.0f;
+            [encoder setVertexBytes:&correction
+                              length:sizeof(correction)
+                             atIndex:static_cast<NSUInteger>(
+                                         shaderSlots.vertexImplicitLodBiasCorrectionSlot)];
+        }
+        if (shaderSlots.fragmentReductionModesSlot >= 0) {
+            std::vector<std::uint32_t>& modes = textureUIntScratch();
+            buildLeanDirectTextureReductionModes(
+                descriptor.fragmentTextures.data(),
+                descriptor.fragmentTextureCount,
+                modes);
+            setFragmentBytesIfPresent(
+                shaderSlots.fragmentReductionModesSlot,
+                modes.data(),
+                static_cast<NSUInteger>(
+                    modes.size() * sizeof(std::uint32_t)));
+        }
+        if (shaderSlots.fragmentLodBiasesSlot >= 0) {
+            std::vector<float>& biases = textureFloatScratch();
+            buildLeanDirectTextureLodBiases(
+                descriptor.fragmentTextures.data(),
+                descriptor.fragmentTextureCount,
+                biases);
+            setFragmentBytesIfPresent(
+                shaderSlots.fragmentLodBiasesSlot,
+                biases.data(),
+                static_cast<NSUInteger>(biases.size() * sizeof(float)));
+        }
+        if (shaderSlots.fragmentBorderClampModesSlot >= 0) {
+            std::vector<std::uint32_t>& modes = textureUIntScratch();
+            buildLeanDirectTextureBorderClampModes(
+                descriptor.fragmentTextures.data(),
+                descriptor.fragmentTextureCount,
+                modes);
+            setFragmentBytesIfPresent(
+                shaderSlots.fragmentBorderClampModesSlot,
+                modes.data(),
+                static_cast<NSUInteger>(
+                    modes.size() * sizeof(std::uint32_t)));
+        }
+        if (shaderSlots.fragmentBorderClampColorsSlot >= 0) {
+            std::vector<std::array<std::int32_t, 4>>& colors =
+                textureBorderColorScratch();
+            buildLeanDirectTextureBorderClampColors(
+                descriptor.fragmentTextures.data(),
+                descriptor.fragmentTextureCount,
+                colors);
+            setFragmentBytesIfPresent(
+                shaderSlots.fragmentBorderClampColorsSlot,
+                colors.data(),
+                static_cast<NSUInteger>(
+                    colors.size() *
+                    sizeof(std::array<std::int32_t, 4>)));
+        }
+        auto implicitLodCorrection = [&]() -> float {
+            if (descriptor.viewportWidth <= 0 ||
+                descriptor.viewportHeight <= 0 ||
+                colorTexture == nil) {
+                return 0.0f;
+            }
+            const GLint rtW = static_cast<GLint>(colorTexture.width);
+            const GLint rtH = static_cast<GLint>(colorTexture.height);
+            if (rtW <= 0 || rtH <= 0) {
+                return 0.0f;
+            }
+            const GLint glX = std::max<GLint>(0, descriptor.viewportX);
+            const GLint glY = std::max<GLint>(0, descriptor.viewportY);
+            const GLsizei availW =
+                static_cast<GLsizei>(std::max<GLint>(0, rtW - glX));
+            const GLsizei availH =
+                static_cast<GLsizei>(std::max<GLint>(0, rtH - glY));
+            const GLsizei clampedW =
+                std::min<GLsizei>(descriptor.viewportWidth, availW);
+            const GLsizei clampedH =
+                std::min<GLsizei>(descriptor.viewportHeight, availH);
+            if (clampedW <= 0 || clampedH <= 0) {
+                return 0.0f;
+            }
+            const float scaleX =
+                static_cast<float>(descriptor.viewportWidth) /
+                static_cast<float>(clampedW);
+            const float scaleY =
+                static_cast<float>(descriptor.viewportHeight) /
+                static_cast<float>(clampedH);
+            const float scale = std::max(scaleX, scaleY);
+            return scale > 1.0f ? -std::log2(scale) : 0.0f;
+        };
+        if (shaderSlots.fragmentImplicitLodBiasCorrectionSlot >= 0) {
+            const float correction = implicitLodCorrection();
+            [encoder setFragmentBytes:&correction
+                                length:sizeof(correction)
+                               atIndex:static_cast<NSUInteger>(
+                                           shaderSlots.fragmentImplicitLodBiasCorrectionSlot)];
+        }
+        if (shaderSlots.fragmentNeedsFragCoordParams) {
+            auto fragmentSamplesColorAttachment = [&]() {
+                for (std::size_t i = 0;
+                     i < descriptor.fragmentTextureCount;
+                     ++i) {
+                    const auto& binding = descriptor.fragmentTextures[i];
+                    if (binding.metalTexture == nullptr) {
+                        continue;
+                    }
+                    id<MTLTexture> sampled =
+                        (__bridge id<MTLTexture>)binding.metalTexture;
+                    if (sampled == colorTexture) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            const float renderTargetHeight =
+                static_cast<float>(colorTexture.height);
+            const bool flipToLowerLeft =
+                (descriptor.clipOrigin != GL_UPPER_LEFT) &&
+                !fragmentSamplesColorAttachment();
+            const GLint rtH = static_cast<GLint>(colorTexture.height);
+            const GLint glY = std::max<GLint>(0, descriptor.viewportY);
+            const GLsizei availH =
+                static_cast<GLsizei>(std::max<GLint>(0, rtH - glY));
+            const GLsizei glH =
+                std::min<GLsizei>(descriptor.viewportHeight, availH);
+            const float viewportLowerLeftBase =
+                static_cast<float>(glY + glH);
+            const float lowerLeftBase = descriptor.clipControlShaderYFixup
+                ? viewportLowerLeftBase
+                : renderTargetHeight;
+            const float fragCoordParams[4] = {
+                flipToLowerLeft ? lowerLeftBase : 0.0f,
+                flipToLowerLeft ? -1.0f : 1.0f,
+                flipToLowerLeft ? 1.0f : 0.0f,
+                0.0f,
+            };
+            [encoder setFragmentBytes:fragCoordParams
+                                length:sizeof(fragCoordParams)
+                               atIndex:kAppGLFragCoordParamsBufferSlot];
+        }
+
+        for (std::size_t i = 0; i < descriptor.uboBindingCount; ++i) {
+            const auto& ubo = descriptor.uboBindings[i];
+            if (ubo.size == 0) {
+                continue;
+            }
+            const NSUInteger slot = static_cast<NSUInteger>(ubo.metalSlot);
+            if (ubo.metalBuffer != nullptr) {
+                id<MTLBuffer> buf =
+                    (__bridge id<MTLBuffer>)ubo.metalBuffer;
+                const NSUInteger off =
+                    static_cast<NSUInteger>(ubo.metalBufferOffset);
+                if (ubo.isVertex) {
+                    [encoder setVertexBuffer:buf offset:off atIndex:slot];
+                }
+                if (ubo.isFragment) {
+                    [encoder setFragmentBuffer:buf offset:off atIndex:slot];
+                }
+            } else if (ubo.data != nullptr) {
+                if (ubo.isVertex) {
+                    [encoder setVertexBytes:ubo.data
+                                      length:static_cast<NSUInteger>(ubo.size)
+                                     atIndex:slot];
+                }
+                if (ubo.isFragment) {
+                    [encoder setFragmentBytes:ubo.data
+                                        length:static_cast<NSUInteger>(ubo.size)
+                                       atIndex:slot];
+                }
+            }
+        }
+
+        for (std::size_t i = 0;
+             i < descriptor.fragmentTextureCount;
+             ++i) {
+            const auto& binding = descriptor.fragmentTextures[i];
+            if (binding.metalTexture == nullptr) {
+                continue;
+            }
+            id<MTLTexture> tex =
+                (__bridge id<MTLTexture>)binding.metalTexture;
+            id<MTLSamplerState> smp =
+                (__bridge id<MTLSamplerState>)binding.metalSamplerState;
+            if (smp == nil) {
+                return false;
+            }
+            [encoder setFragmentTexture:tex
+                                atIndex:static_cast<NSUInteger>(
+                                            binding.metalSlot)];
+            [encoder setFragmentSamplerState:smp
+                                     atIndex:static_cast<NSUInteger>(
+                                                 binding.metalSlot)];
+        }
+        for (std::size_t i = 0;
+             i < descriptor.vertexTextureCount;
+             ++i) {
+            const auto& binding = descriptor.vertexTextures[i];
+            if (binding.metalTexture == nullptr) {
+                continue;
+            }
+            id<MTLTexture> tex =
+                (__bridge id<MTLTexture>)binding.metalTexture;
+            id<MTLSamplerState> smp =
+                (__bridge id<MTLSamplerState>)binding.metalSamplerState;
+            if (smp == nil) {
+                return false;
+            }
+            [encoder setVertexTexture:tex
+                              atIndex:static_cast<NSUInteger>(
+                                          binding.metalSlot)];
+            [encoder setVertexSamplerState:smp
+                                   atIndex:static_cast<NSUInteger>(
+                                               binding.metalSlot)];
+        }
+
+        MTLPrimitiveType primitive;
+        switch (descriptor.mode) {
+            case GL_POINTS:         primitive = MTLPrimitiveTypePoint; break;
+            case GL_LINES:          primitive = MTLPrimitiveTypeLine; break;
+            case GL_LINE_STRIP:     primitive = MTLPrimitiveTypeLineStrip; break;
+            case GL_TRIANGLE_STRIP: primitive = MTLPrimitiveTypeTriangleStrip; break;
+            case GL_TRIANGLES:      primitive = MTLPrimitiveTypeTriangle; break;
+            default: return false;
+        }
+
+        const GLsizei effectiveInstanceCount =
+            std::max<GLsizei>(descriptor.instanceCount, 1);
+        if (descriptor.indexCount > 0) {
+            if (descriptor.metalIndexBuffer == nullptr) {
+                return false;
+            }
+            id<MTLBuffer> idxBuffer =
+                (__bridge id<MTLBuffer>)descriptor.metalIndexBuffer;
+            MTLIndexType metalIndexType = MTLIndexTypeUInt16;
+            if (descriptor.indexType == GL_UNSIGNED_INT) {
+                metalIndexType = MTLIndexTypeUInt32;
+            } else if (descriptor.indexType != GL_UNSIGNED_SHORT) {
+                return false;
+            }
+            if (effectiveInstanceCount > 1 ||
+                descriptor.baseVertex != 0 ||
+                descriptor.baseInstance != 0) {
+                [encoder drawIndexedPrimitives:primitive
+                                    indexCount:static_cast<NSUInteger>(
+                                                   descriptor.indexCount)
+                                     indexType:metalIndexType
+                                   indexBuffer:idxBuffer
+                             indexBufferOffset:static_cast<NSUInteger>(
+                                                   descriptor.metalIndexBufferOffset)
+                                 instanceCount:static_cast<NSUInteger>(
+                                                   effectiveInstanceCount)
+                                    baseVertex:static_cast<NSInteger>(
+                                                   descriptor.baseVertex)
+                                  baseInstance:static_cast<NSUInteger>(
+                                                   descriptor.baseInstance)];
+            } else {
+                [encoder drawIndexedPrimitives:primitive
+                                    indexCount:static_cast<NSUInteger>(
+                                                   descriptor.indexCount)
+                                     indexType:metalIndexType
+                                   indexBuffer:idxBuffer
+                             indexBufferOffset:static_cast<NSUInteger>(
+                                                   descriptor.metalIndexBufferOffset)];
+            }
+        } else if (effectiveInstanceCount > 1 ||
+                   descriptor.baseVertex != 0 ||
+                   descriptor.baseInstance != 0) {
+            [encoder drawPrimitives:primitive
+                         vertexStart:static_cast<NSUInteger>(
+                                         descriptor.baseVertex)
+                         vertexCount:static_cast<NSUInteger>(
+                                         descriptor.vertexCount)
+                       instanceCount:static_cast<NSUInteger>(
+                                         effectiveInstanceCount)
+                        baseInstance:static_cast<NSUInteger>(
+                                         descriptor.baseInstance)];
+        } else {
+            [encoder drawPrimitives:primitive
+                         vertexStart:static_cast<NSUInteger>(
+                                         descriptor.baseVertex)
+                         vertexCount:static_cast<NSUInteger>(
+                                         descriptor.vertexCount)];
+        }
+        pendingPresent = true;
         return true;
     }
 
@@ -7063,7 +8272,7 @@ struct MetalFrameGraph::Impl {
         id<MTLTexture> colorTexture = nil;
         id<MTLTexture> passDepthStencil = nil;
         if (!buildDefaultParallelRenderPass(
-                pendingParallelTranslatedDraws.front().info,
+                fragmentRate,
                 pass,
                 colorTexture,
                 passDepthStencil)) {
@@ -7174,7 +8383,7 @@ struct MetalFrameGraph::Impl {
         id<MTLTexture> colorTexture = nil;
         id<MTLTexture> passDepthStencil = nil;
         if (!buildDefaultParallelRenderPass(
-                pendingParallelTranslatedDraws.front().info,
+                fragmentRate,
                 pass,
                 colorTexture,
                 passDepthStencil)) {
@@ -7339,6 +8548,9 @@ struct MetalFrameGraph::Impl {
         }
 
         parallelEncodeProfile.recordTranslatedDraw();
+        if (flushingParallelTranslatedBatch) {
+            return encodeTranslatedDrawSerial(info);
+        }
 
         ParallelEncodeBoundaryReason reason =
             ParallelEncodeBoundaryReason::SerialPathOnly;
@@ -7350,31 +8562,52 @@ struct MetalFrameGraph::Impl {
 
         parallelEncodeProfile.recordCandidate();
 
-        pendingParallelTranslatedDraws.emplace_back();
-        CapturedTranslatedDrawRecord& captured =
-            pendingParallelTranslatedDraws.back();
-        const DrawProfileTimePoint captureStart = drawProfileNow();
-        if (!captureTranslatedDrawForSerialReplay(info, captured)) {
-            pendingParallelTranslatedDraws.pop_back();
-            parallelEncodeProfile.recordBoundary(
-                ParallelEncodeBoundaryReason::CaptureFailed);
-            flushParallelTranslatedDrawBatch(
-                ParallelEncodeBoundaryReason::CaptureFailed);
-            return encodeTranslatedDrawSerial(info);
-        }
-        parallelEncodeProfile.recordCaptured(
-            drawProfileElapsedUs(captureStart, drawProfileNow()));
-        if (!prepareCapturedTranslatedDrawForParallel(info, captured)) {
-            const ParallelEncodeFallbackReason fallbackReason =
-                captured.parallelFallbackReason;
+        LeanDirectTranslatedDrawDescriptor descriptor;
+        ParallelEncodeFallbackReason fallbackReason =
+            ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
+        const DrawProfileTimePoint prepareStart = drawProfileNow();
+        if (!prepareLeanDirectTranslatedDrawDescriptor(info,
+                                                       descriptor,
+                                                       fallbackReason)) {
             const ParallelEncodeBoundaryReason boundaryReason =
                 parallelEncodeBoundaryForFallback(fallbackReason);
-            pendingParallelTranslatedDraws.pop_back();
             flushParallelTranslatedDrawBatch(boundaryReason);
             parallelEncodeProfile.recordBoundary(boundaryReason);
+            parallelEncodeProfile.recordDescriptorFallback();
             parallelEncodeProfile.recordDirectSerialFallback(fallbackReason);
             return encodeTranslatedDrawSerial(info);
         }
+        parallelEncodeProfile.recordDescriptorPrepared(
+            drawProfileElapsedUs(prepareStart, drawProfileNow()));
+
+        id<MTLTexture> colorTexture = nil;
+        id<MTLTexture> passDepthStencil = nil;
+        const DrawProfileTimePoint encodeStart = drawProfileNow();
+        if (!ensureLeanDirectDefaultRenderPass(descriptor.fragmentShadingRate,
+                                               colorTexture,
+                                               passDepthStencil)) {
+            fallbackReason =
+                ParallelEncodeFallbackReason::ParallelEncoderCreateFailure;
+            const ParallelEncodeBoundaryReason boundaryReason =
+                parallelEncodeBoundaryForFallback(fallbackReason);
+            parallelEncodeProfile.recordBoundary(boundaryReason);
+            parallelEncodeProfile.recordDescriptorFallback();
+            parallelEncodeProfile.recordDirectSerialFallback(fallbackReason);
+            return encodeTranslatedDrawSerial(info);
+        }
+        if (!encodeLeanDirectTranslatedDrawDescriptor(descriptor,
+                                                     colorTexture,
+                                                     passDepthStencil)) {
+            fallbackReason = ParallelEncodeFallbackReason::EncodeFailure;
+            const ParallelEncodeBoundaryReason boundaryReason =
+                parallelEncodeBoundaryForFallback(fallbackReason);
+            parallelEncodeProfile.recordBoundary(boundaryReason);
+            parallelEncodeProfile.recordDescriptorFallback();
+            parallelEncodeProfile.recordDirectSerialFallback(fallbackReason);
+            return encodeTranslatedDrawSerial(info);
+        }
+        parallelEncodeProfile.recordDescriptorEncoded(
+            drawProfileElapsedUs(encodeStart, drawProfileNow()));
 
         return true;
     }
@@ -13245,6 +14478,8 @@ private:
     // repeated draws skip rescanning the same source for helper buffers.
     std::unordered_map<std::uint64_t, TranslatedDrawMSLSlots>
         translatedDrawMSLSlotCache;
+    std::unordered_map<std::uint64_t, NSInteger>
+        translatedDrawSampleMaskSlotCache;
 
     // ADV-4: reusable render pass descriptor. Avoids allocating a fresh
     // autoreleased ObjC object at each render-pass setup site.
