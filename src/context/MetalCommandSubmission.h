@@ -118,18 +118,29 @@ private:
         auto retainedObjects = retainedObjects_;
         NSString* releaseLabel = label != nil ? label : commandBuffer_.label;
         void (^completionCopy)(id<MTLCommandBuffer>) = completion;
+        const bool profileEnabled = state && state->profileEnabled;
+        const auto submittedAt = profileEnabled
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         recordSubmitted(state, reason, releaseLabel);
         [commandBuffer_ addCompletedHandler:^(id<MTLCommandBuffer> completed) {
             if (completionCopy != nil) {
                 completionCopy(completed);
             }
             recordCompleted(state, reason, releaseLabel, completed.status);
+            recordCompletionLatency(state, reason, releaseLabel, submittedAt);
             releaseToken(state, released, releaseLabel.UTF8String);
             releaseRetainedObjects(retainedObjects);
         }];
         tokenReleaseTransferred_ = true;
         retainedReleaseTransferred_ = true;
+        const auto commitStart = profileEnabled
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         [commandBuffer_ commit];
+        if (profileEnabled) {
+            recordCommitCall(state, reason, releaseLabel, commitStart);
+        }
         commandBuffer_ = nil;
         ownsToken_ = false;
     }
@@ -269,6 +280,54 @@ private:
                          state->inFlightCount.load());
             std::fflush(stderr);
         }
+    }
+
+    static void recordCommitCall(const std::shared_ptr<SharedState>& state,
+                                 AppGLCommandReason reason,
+                                 NSString* label,
+                                 std::chrono::steady_clock::time_point start) {
+        if (!state || !state->profileEnabled) {
+            return;
+        }
+        const double commitUs =
+            std::chrono::duration<double, std::micro>(
+                std::chrono::steady_clock::now() - start).count();
+        const auto& record = appGLCommandReasonRecord(reason);
+        std::fprintf(stderr,
+                     "[APPGL_CB_PROFILE] cb_commit reason=%s mode=%s dependency=%s label=%s commit_us=%.3f submitted=%llu completed=%llu in_flight=%u\n",
+                     record.name,
+                     appGLSubmitModeName(record.submitMode),
+                     appGLDependencyClassName(record.dependencyClass),
+                     label != nil ? label.UTF8String : "(none)",
+                     commitUs,
+                     static_cast<unsigned long long>(state->submittedCommandBuffers.load()),
+                     static_cast<unsigned long long>(state->completedCommandBuffers.load()),
+                     state->inFlightCount.load());
+        std::fflush(stderr);
+    }
+
+    static void recordCompletionLatency(const std::shared_ptr<SharedState>& state,
+                                        AppGLCommandReason reason,
+                                        NSString* label,
+                                        std::chrono::steady_clock::time_point submittedAt) {
+        if (!state || !state->profileEnabled) {
+            return;
+        }
+        const double latencyUs =
+            std::chrono::duration<double, std::micro>(
+                std::chrono::steady_clock::now() - submittedAt).count();
+        const auto& record = appGLCommandReasonRecord(reason);
+        std::fprintf(stderr,
+                     "[APPGL_CB_PROFILE] cb_latency reason=%s mode=%s dependency=%s label=%s latency_us=%.3f submitted=%llu completed=%llu in_flight=%u\n",
+                     record.name,
+                     appGLSubmitModeName(record.submitMode),
+                     appGLDependencyClassName(record.dependencyClass),
+                     label != nil ? label.UTF8String : "(none)",
+                     latencyUs,
+                     static_cast<unsigned long long>(state->submittedCommandBuffers.load()),
+                     static_cast<unsigned long long>(state->completedCommandBuffers.load()),
+                     state->inFlightCount.load());
+        std::fflush(stderr);
     }
 
     static void releaseToken(const std::shared_ptr<SharedState>& state,
@@ -428,6 +487,10 @@ public:
         }
         NSString* label = appGLCommandReasonNSString(reason);
         recordWaitReason(WaitKind::DrainAll, reason, label);
+        const bool profileEnabled = state_->profileEnabled;
+        const auto waitStart = profileEnabled
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         const std::uint64_t timeoutMs = timeoutMilliseconds();
         const dispatch_time_t deadline = dispatch_time(
             DISPATCH_TIME_NOW,
@@ -444,9 +507,12 @@ public:
         }
         const bool drained = acquired == state_->inFlightBound;
         if (state_->profileEnabled) {
+            const double waitUs =
+                std::chrono::duration<double, std::micro>(
+                    std::chrono::steady_clock::now() - waitStart).count();
             const auto& record = appGLCommandReasonRecord(reason);
             std::fprintf(stderr,
-                         "[APPGL_CB_PROFILE] drain_all reason=%s mode=%s dependency=%s label=%s drained=%d submitted=%llu completed=%llu in_flight=%u bound=%u\n",
+                         "[APPGL_CB_PROFILE] drain_all reason=%s mode=%s dependency=%s label=%s drained=%d submitted=%llu completed=%llu in_flight=%u bound=%u wait_us=%.3f\n",
                          record.name,
                          appGLSubmitModeName(record.submitMode),
                          appGLDependencyClassName(record.dependencyClass),
@@ -455,7 +521,8 @@ public:
                          static_cast<unsigned long long>(state_->submittedCommandBuffers.load()),
                          static_cast<unsigned long long>(state_->completedCommandBuffers.load()),
                          state_->inFlightCount.load(),
-                         state_->inFlightBound);
+                         state_->inFlightBound,
+                         waitUs);
             std::fflush(stderr);
         }
         return drained;
@@ -752,17 +819,28 @@ inline bool MetalCommandBufferLease::commitAndWaitImpl(NSString* label, AppGLCom
     auto released = released_;
     auto retainedObjects = retainedObjects_;
     NSString* releaseLabel = label != nil ? label : commandBuffer_.label;
+    const bool profileEnabled = state && state->profileEnabled;
+    const auto submittedAt = profileEnabled
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
     recordSubmitted(state, reason, releaseLabel);
     [commandBuffer_ addCompletedHandler:^(id<MTLCommandBuffer> completed) {
         finalStatus = completed.status;
         recordCompleted(state, reason, releaseLabel, completed.status);
+        recordCompletionLatency(state, reason, releaseLabel, submittedAt);
         releaseToken(state, released, releaseLabel.UTF8String);
         releaseRetainedObjects(retainedObjects);
         dispatch_semaphore_signal(done);
     }];
     tokenReleaseTransferred_ = true;
     retainedReleaseTransferred_ = true;
+    const auto commitStart = profileEnabled
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
     [commandBuffer_ commit];
+    if (profileEnabled) {
+        recordCommitCall(state, reason, releaseLabel, commitStart);
+    }
     commandBuffer_ = nil;
     ownsToken_ = false;
 

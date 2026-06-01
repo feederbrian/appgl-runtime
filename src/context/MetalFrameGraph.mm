@@ -816,6 +816,279 @@ struct ParallelEncodeFoundationProfile {
     }
 };
 
+enum class FrameAttributionAction : std::size_t {
+    Present,
+    Finish,
+    EndFrame,
+    FlushForReadback,
+    RingSlotWait,
+    Count,
+};
+
+static const char* frameAttributionActionName(FrameAttributionAction action) {
+    switch (action) {
+        case FrameAttributionAction::Present: return "present";
+        case FrameAttributionAction::Finish: return "finish";
+        case FrameAttributionAction::EndFrame: return "end_frame";
+        case FrameAttributionAction::FlushForReadback: return "flush_for_readback";
+        case FrameAttributionAction::RingSlotWait: return "ring_slot_wait";
+        case FrameAttributionAction::Count: break;
+    }
+    return "unknown";
+}
+
+struct FrameAttributionTimingBucket {
+    std::uint64_t count = 0;
+    std::uint64_t success = 0;
+    std::uint64_t draws = 0;
+    std::uint64_t chunks = 0;
+    std::uint64_t failures = 0;
+    double totalUs = 0.0;
+    double setupUs = 0.0;
+    double bodyUs = 0.0;
+    double finalizeUs = 0.0;
+};
+
+struct FrameAttributionProfile {
+    bool enabled = envEnabled("APPGL_FRAME_ATTRIBUTION_PROFILE") ||
+        envEnabled("APPGL_PARALLEL_ENCODE_ATTRIBUTION");
+    std::array<FrameAttributionTimingBucket,
+               static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count)>
+        descriptorFlushByReason{};
+    std::array<FrameAttributionTimingBucket,
+               static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count)>
+        descriptorWorkerByReason{};
+    std::array<FrameAttributionTimingBucket,
+               static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count)>
+        descriptorSerialByReason{};
+    std::array<FrameAttributionTimingBucket,
+               static_cast<std::size_t>(AppGLCommandReason::Count)>
+        commitCurrentByReason{};
+    std::array<FrameAttributionTimingBucket,
+               static_cast<std::size_t>(AppGLCommandReason::Count)>
+        commitFrameSignalByReason{};
+    std::array<FrameAttributionTimingBucket,
+               static_cast<std::size_t>(FrameAttributionAction::Count)>
+        actions{};
+    std::uint64_t descriptorImmediateDraws = 0;
+    std::uint64_t descriptorImmediateFailures = 0;
+    double descriptorImmediatePrepareUs = 0.0;
+    double descriptorImmediateEncodeUs = 0.0;
+
+    void recordDescriptorImmediate(double prepareUs, double encodeUs, bool success) {
+        if (!enabled) {
+            return;
+        }
+        ++descriptorImmediateDraws;
+        descriptorImmediateFailures += success ? 0 : 1;
+        descriptorImmediatePrepareUs += prepareUs;
+        descriptorImmediateEncodeUs += encodeUs;
+    }
+
+    void recordDescriptorFlush(ParallelEncodeBoundaryReason reason,
+                               std::uint64_t draws,
+                               double totalUs,
+                               bool workerPath) {
+        if (!enabled) {
+            return;
+        }
+        auto& bucket = descriptorFlushByReason[static_cast<std::size_t>(reason)];
+        ++bucket.count;
+        ++bucket.success;
+        bucket.chunks += workerPath ? 1 : 0;
+        bucket.draws += draws;
+        bucket.totalUs += totalUs;
+    }
+
+    void recordDescriptorWorker(ParallelEncodeBoundaryReason reason,
+                                std::uint64_t draws,
+                                std::uint64_t chunks,
+                                double totalUs,
+                                double setupUs,
+                                double dispatchUs,
+                                double finalizeUs,
+                                std::uint64_t failures) {
+        if (!enabled) {
+            return;
+        }
+        auto& bucket = descriptorWorkerByReason[static_cast<std::size_t>(reason)];
+        ++bucket.count;
+        bucket.success += failures == 0 ? 1 : 0;
+        bucket.draws += draws;
+        bucket.chunks += chunks;
+        bucket.failures += failures;
+        bucket.totalUs += totalUs;
+        bucket.setupUs += setupUs;
+        bucket.bodyUs += dispatchUs;
+        bucket.finalizeUs += finalizeUs;
+    }
+
+    void recordDescriptorSerial(ParallelEncodeBoundaryReason reason,
+                                std::uint64_t draws,
+                                double totalUs,
+                                double bodyUs,
+                                double finalizeUs,
+                                std::uint64_t failures) {
+        if (!enabled) {
+            return;
+        }
+        auto& bucket = descriptorSerialByReason[static_cast<std::size_t>(reason)];
+        ++bucket.count;
+        bucket.success += failures == 0 ? 1 : 0;
+        bucket.draws += draws;
+        bucket.failures += failures;
+        bucket.totalUs += totalUs;
+        bucket.bodyUs += bodyUs;
+        bucket.finalizeUs += finalizeUs;
+    }
+
+    void recordCommitCurrent(AppGLCommandReason reason, double totalUs, bool success) {
+        if (!enabled) {
+            return;
+        }
+        auto& bucket = commitCurrentByReason[static_cast<std::size_t>(reason)];
+        ++bucket.count;
+        bucket.success += success ? 1 : 0;
+        bucket.totalUs += totalUs;
+    }
+
+    void recordCommitFrameSignal(AppGLCommandReason reason, double totalUs) {
+        if (!enabled) {
+            return;
+        }
+        auto& bucket = commitFrameSignalByReason[static_cast<std::size_t>(reason)];
+        ++bucket.count;
+        ++bucket.success;
+        bucket.totalUs += totalUs;
+    }
+
+    void recordAction(FrameAttributionAction action, double totalUs, bool success) {
+        if (!enabled) {
+            return;
+        }
+        auto& bucket = actions[static_cast<std::size_t>(action)];
+        ++bucket.count;
+        bucket.success += success ? 1 : 0;
+        bucket.totalUs += totalUs;
+    }
+
+    static void dumpTimingLine(const char* kind,
+                               const char* name,
+                               const FrameAttributionTimingBucket& bucket) {
+        if (bucket.count == 0) {
+            return;
+        }
+        std::fprintf(stderr,
+            "[APPGL_FRAME_ATTRIBUTION] %s=%s count=%llu success=%llu draws=%llu "
+            "chunks=%llu failures=%llu total_us=%.3f avg_us=%.3f "
+            "setup_us=%.3f body_us=%.3f finalize_us=%.3f\n",
+            kind,
+            name,
+            static_cast<unsigned long long>(bucket.count),
+            static_cast<unsigned long long>(bucket.success),
+            static_cast<unsigned long long>(bucket.draws),
+            static_cast<unsigned long long>(bucket.chunks),
+            static_cast<unsigned long long>(bucket.failures),
+            bucket.totalUs,
+            bucket.totalUs / static_cast<double>(bucket.count),
+            bucket.setupUs,
+            bucket.bodyUs,
+            bucket.finalizeUs);
+    }
+
+    void dump() const {
+        if (!enabled) {
+            return;
+        }
+        std::uint64_t flushes = 0;
+        std::uint64_t flushDraws = 0;
+        double flushUs = 0.0;
+        for (const auto& bucket : descriptorFlushByReason) {
+            flushes += bucket.count;
+            flushDraws += bucket.draws;
+            flushUs += bucket.totalUs;
+        }
+        std::fprintf(stderr,
+            "[APPGL_FRAME_ATTRIBUTION] summary descriptor_flushes=%llu "
+            "descriptor_flush_draws=%llu descriptor_flush_us=%.3f "
+            "immediate_draws=%llu immediate_failures=%llu "
+            "immediate_prepare_us=%.3f immediate_encode_us=%.3f\n",
+            static_cast<unsigned long long>(flushes),
+            static_cast<unsigned long long>(flushDraws),
+            flushUs,
+            static_cast<unsigned long long>(descriptorImmediateDraws),
+            static_cast<unsigned long long>(descriptorImmediateFailures),
+            descriptorImmediatePrepareUs,
+            descriptorImmediateEncodeUs);
+        for (std::size_t i = 0;
+             i < static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count);
+             ++i) {
+            const auto reason = static_cast<ParallelEncodeBoundaryReason>(i);
+            dumpTimingLine("descriptor_flush",
+                           parallelEncodeBoundaryReasonName(reason),
+                           descriptorFlushByReason[i]);
+            dumpTimingLine("descriptor_worker",
+                           parallelEncodeBoundaryReasonName(reason),
+                           descriptorWorkerByReason[i]);
+            dumpTimingLine("descriptor_serial",
+                           parallelEncodeBoundaryReasonName(reason),
+                           descriptorSerialByReason[i]);
+        }
+        for (std::size_t i = 0;
+             i < static_cast<std::size_t>(AppGLCommandReason::Count);
+             ++i) {
+            const auto reason = static_cast<AppGLCommandReason>(i);
+            dumpTimingLine("commit_current",
+                           appGLCommandReasonName(reason),
+                           commitCurrentByReason[i]);
+            dumpTimingLine("commit_frame_signal",
+                           appGLCommandReasonName(reason),
+                           commitFrameSignalByReason[i]);
+        }
+        for (std::size_t i = 0;
+             i < static_cast<std::size_t>(FrameAttributionAction::Count);
+             ++i) {
+            const auto action = static_cast<FrameAttributionAction>(i);
+            dumpTimingLine("action", frameAttributionActionName(action), actions[i]);
+        }
+        std::fflush(stderr);
+    }
+};
+
+class FrameAttributionScope {
+public:
+    FrameAttributionScope(FrameAttributionProfile& profile,
+                          FrameAttributionAction action)
+        : profile_(profile.enabled ? &profile : nullptr), action_(action) {
+        if (profile_ != nullptr) {
+            start_ = drawProfileNow();
+        }
+    }
+
+    FrameAttributionScope(const FrameAttributionScope&) = delete;
+    FrameAttributionScope& operator=(const FrameAttributionScope&) = delete;
+
+    ~FrameAttributionScope() {
+        if (profile_ == nullptr) {
+            return;
+        }
+        profile_->recordAction(
+            action_,
+            drawProfileElapsedUs(start_, drawProfileNow()),
+            success_);
+    }
+
+    void markFailed() {
+        success_ = false;
+    }
+
+private:
+    FrameAttributionProfile* profile_ = nullptr;
+    FrameAttributionAction action_ = FrameAttributionAction::Count;
+    DrawProfileTimePoint start_{};
+    bool success_ = true;
+};
+
 static void releaseRetainedObjCObject(void* object) {
     if (object != nullptr) {
         CFBridgingRelease(object);
@@ -3082,6 +3355,7 @@ struct MetalFrameGraph::Impl {
         }
         drawSubmitProfile.dump();
         parallelEncodeProfile.dump();
+        frameAttributionProfile.dump();
         // ADV-14: persist the pipeline binary archive to disk so the
         // next launch gets pre-compiled GPU binaries.
         savePipelineArchive();
@@ -3380,10 +3654,18 @@ struct MetalFrameGraph::Impl {
     }
 
     bool commitCurrentAsync(AppGLCommandReason reason) {
+        const DrawProfileTimePoint attributionStart =
+            frameAttributionProfile.enabled ? drawProfileNow() : DrawProfileTimePoint{};
         flushParallelTranslatedDrawBatch(
             ParallelEncodeBoundaryReason::CommandBufferCommit);
         endRenderPass();
         if (currentCommandBuffer == nil) {
+            if (frameAttributionProfile.enabled) {
+                frameAttributionProfile.recordCommitCurrent(
+                    reason,
+                    drawProfileElapsedUs(attributionStart, drawProfileNow()),
+                    false);
+            }
             return false;
         }
         if (!usesOffscreenTarget && currentDrawable != nil && pendingPresent) {
@@ -3392,6 +3674,12 @@ struct MetalFrameGraph::Impl {
         commitWithFrameSignal(currentCommandBufferLease, reason);
         invalidateTransientState();
         advanceRingBuffer();
+        if (frameAttributionProfile.enabled) {
+            frameAttributionProfile.recordCommitCurrent(
+                reason,
+                drawProfileElapsedUs(attributionStart, drawProfileNow()),
+                true);
+        }
         return true;
     }
 
@@ -8546,6 +8834,7 @@ struct MetalFrameGraph::Impl {
                 ++failures;
             }
         }
+        const DrawProfileTimePoint bodyEnd = drawProfileNow();
         if (currentRenderEncoder != nil) {
             endCurrentRenderPassOnly();
             resetCachedEncoderState();
@@ -8555,6 +8844,14 @@ struct MetalFrameGraph::Impl {
             drawProfileElapsedUs(replayStart, drawProfileNow());
         parallelEncodeProfile.recordDescriptorSerialBatch(
             reason, drawCount, elapsedUs, failures);
+        const double bodyUs = drawProfileElapsedUs(replayStart, bodyEnd);
+        frameAttributionProfile.recordDescriptorSerial(
+            reason,
+            drawCount,
+            elapsedUs,
+            bodyUs,
+            std::max(0.0, elapsedUs - bodyUs),
+            failures);
         return failures == 0;
     }
 
@@ -8563,6 +8860,7 @@ struct MetalFrameGraph::Impl {
         ParallelEncodeFallbackReason& fallbackReason) {
         const std::uint64_t drawCount =
             static_cast<std::uint64_t>(pendingLeanDirectDescriptors.size());
+        const DrawProfileTimePoint totalStart = drawProfileNow();
         if (drawCount < parallelEncodeProfile.configuredMinBatch) {
             fallbackReason = ParallelEncodeFallbackReason::SmallBatch;
             return false;
@@ -8693,8 +8991,9 @@ struct MetalFrameGraph::Impl {
             }
         });
         [parallelEncoder endEncoding];
+        const DrawProfileTimePoint wallEnd = drawProfileNow();
         const double wallUs =
-            drawProfileElapsedUs(wallStart, drawProfileNow());
+            drawProfileElapsedUs(wallStart, wallEnd);
         currentRenderEncoder = nil;
         activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
         resetCachedEncoderState();
@@ -8728,6 +9027,18 @@ struct MetalFrameGraph::Impl {
             sumWorkerUs,
             maxWorkerUs,
             failures);
+        const double totalUs =
+            drawProfileElapsedUs(totalStart, drawProfileNow());
+        const double setupUs = drawProfileElapsedUs(totalStart, wallStart);
+        frameAttributionProfile.recordDescriptorWorker(
+            reason,
+            drawCount,
+            chunkCount,
+            totalUs,
+            setupUs,
+            wallUs,
+            std::max(0.0, totalUs - setupUs - wallUs),
+            failures);
         ++leanDirectDescriptorWorkerFlushCount;
         return true;
     }
@@ -8740,6 +9051,9 @@ struct MetalFrameGraph::Impl {
         }
 
         flushingLeanDirectDescriptorBatch = true;
+        const std::uint64_t drawCount =
+            static_cast<std::uint64_t>(pendingLeanDirectDescriptors.size());
+        const DrawProfileTimePoint flushStart = drawProfileNow();
         ParallelEncodeFallbackReason fallbackReason =
             ParallelEncodeFallbackReason::EncodeFailure;
         const bool parallelEncoded =
@@ -8748,6 +9062,11 @@ struct MetalFrameGraph::Impl {
             replayPendingLeanDirectDescriptorBatchSerial(
                 reason, fallbackReason);
         }
+        frameAttributionProfile.recordDescriptorFlush(
+            reason,
+            drawCount,
+            drawProfileElapsedUs(flushStart, drawProfileNow()),
+            parallelEncoded);
         pendingLeanDirectDescriptors.clear();
         flushingLeanDirectDescriptorBatch = false;
     }
@@ -8989,8 +9308,9 @@ struct MetalFrameGraph::Impl {
                 parallelEncodeProfile.recordDirectSerialFallback(fallbackReason);
                 return encodeTranslatedDrawSerial(info);
             }
-            parallelEncodeProfile.recordDescriptorPrepared(
-                drawProfileElapsedUs(prepareStart, drawProfileNow()));
+            const double prepareUs =
+                drawProfileElapsedUs(prepareStart, drawProfileNow());
+            parallelEncodeProfile.recordDescriptorPrepared(prepareUs);
 
             id<MTLTexture> colorTexture = nil;
             id<MTLTexture> passDepthStencil = nil;
@@ -9005,6 +9325,10 @@ struct MetalFrameGraph::Impl {
                 parallelEncodeProfile.recordBoundary(boundaryReason);
                 parallelEncodeProfile.recordDescriptorFallback();
                 parallelEncodeProfile.recordDirectSerialFallback(fallbackReason);
+                frameAttributionProfile.recordDescriptorImmediate(
+                    prepareUs,
+                    drawProfileElapsedUs(encodeStart, drawProfileNow()),
+                    false);
                 return encodeTranslatedDrawSerial(info);
             }
             if (!encodeLeanDirectTranslatedDrawDescriptor(descriptor,
@@ -9016,10 +9340,19 @@ struct MetalFrameGraph::Impl {
                 parallelEncodeProfile.recordBoundary(boundaryReason);
                 parallelEncodeProfile.recordDescriptorFallback();
                 parallelEncodeProfile.recordDirectSerialFallback(fallbackReason);
+                frameAttributionProfile.recordDescriptorImmediate(
+                    prepareUs,
+                    drawProfileElapsedUs(encodeStart, drawProfileNow()),
+                    false);
                 return encodeTranslatedDrawSerial(info);
             }
-            parallelEncodeProfile.recordDescriptorEncoded(
-                drawProfileElapsedUs(encodeStart, drawProfileNow()));
+            const double encodeUs =
+                drawProfileElapsedUs(encodeStart, drawProfileNow());
+            parallelEncodeProfile.recordDescriptorEncoded(encodeUs);
+            frameAttributionProfile.recordDescriptorImmediate(
+                prepareUs,
+                encodeUs,
+                true);
             return true;
         }
 
@@ -10968,14 +11301,21 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
     }
 
     void endFrame(GLObjectStore& objects) {
+        FrameAttributionScope attributionScope(
+            frameAttributionProfile,
+            FrameAttributionAction::EndFrame);
         endRenderPass();
         objects.drainDeferredDeletes();
         if (!commitCurrentAsync(AppGLCommandReason::EndFrame)) {
             invalidateTransientState();
+            attributionScope.markFailed();
         }
     }
 
     void present(AppGLCommandReason reason = AppGLCommandReason::PresentPendingWork) {
+        FrameAttributionScope attributionScope(
+            frameAttributionProfile,
+            FrameAttributionAction::Present);
         FG_TRACE(@"present: enter  pendingPresent=%d encoder=%p cmdBuf=%p drawable=%p",
                  pendingPresent, currentRenderEncoder, currentCommandBuffer, currentDrawable);
         flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason::Present);
@@ -10990,20 +11330,29 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         // semaphore, allowing the CPU to encode the next frame while the GPU
         // processes this one.  Replaces the old waitUntilCompleted which
         // serialised CPU and GPU completely for offscreen targets.
-        commitCurrentAsync(reason);
+        if (!commitCurrentAsync(reason)) {
+            attributionScope.markFailed();
+        }
     }
 
     bool finish() {
+        FrameAttributionScope attributionScope(
+            frameAttributionProfile,
+            FrameAttributionAction::Finish);
         flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason::Finish);
         if (hasPendingClear) {
             flushPendingClear();
         }
         endRenderPass();
         const bool submittedFinishWork = commitCurrentAsync(AppGLCommandReason::FinishWait);
-        return commandSubmission == nullptr
+        const bool finished = commandSubmission == nullptr
             ? true
             : commandSubmission->drainAllOutstanding(AppGLCommandReason::LifetimeDrain,
                                                      submittedFinishWork);
+        if (!finished) {
+            attributionScope.markFailed();
+        }
+        return finished;
     }
 
     bool copyPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* outPixels) {
@@ -11159,11 +11508,15 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
     // are guaranteed to have completed and their results are CPU-visible via
     // [MTLTexture getBytes:].  Used by FBO readback paths.
     void flushForReadback() {
+        FrameAttributionScope attributionScope(
+            frameAttributionProfile,
+            FrameAttributionAction::FlushForReadback);
         flushParallelTranslatedDrawBatch(
             ParallelEncodeBoundaryReason::CopyReadback);
         endRenderPass();
         if (currentCommandBuffer != nil) {
             if (!currentCommandBufferLease.commitAndWait(AppGLCommandReason::FlushForReadback)) {
+                attributionScope.markFailed();
                 return;
             }
             if (ringSlotAcquired) {
@@ -15093,6 +15446,7 @@ private:
     std::unordered_set<PipelineBuildLogKey, PipelineBuildLogKeyHash> loggedPipelineBuildPrograms;
     DrawSubmitProfile drawSubmitProfile;
     ParallelEncodeFoundationProfile parallelEncodeProfile;
+    FrameAttributionProfile frameAttributionProfile;
     std::deque<LeanDirectTranslatedDrawDescriptor> pendingLeanDirectDescriptors;
     bool flushingLeanDirectDescriptorBatch = false;
     std::uint64_t leanDirectDescriptorWorkerFlushCount = 0;
@@ -15206,9 +15560,17 @@ private:
     // once per ring-buffer generation.
     void acquireRingSlot() {
         if (!ringSlotAcquired) {
+            const DrawProfileTimePoint attributionStart =
+                frameAttributionProfile.enabled ? drawProfileNow() : DrawProfileTimePoint{};
             ringSlotAcquired = commandSubmission != nullptr
                 ? commandSubmission->waitForRingSlot(frameSemaphore, AppGLCommandReason::FrameRingSlot)
                 : (dispatch_semaphore_wait(frameSemaphore, DISPATCH_TIME_FOREVER) == 0);
+            if (frameAttributionProfile.enabled) {
+                frameAttributionProfile.recordAction(
+                    FrameAttributionAction::RingSlotWait,
+                    drawProfileElapsedUs(attributionStart, drawProfileNow()),
+                    ringSlotAcquired);
+            }
         }
     }
 
@@ -15226,9 +15588,16 @@ private:
     void commitWithFrameSignal(MetalCommandBufferLease& lease,
                                AppGLCommandReason reason = AppGLCommandReason::FrameCommandBuffer) {
         dispatch_semaphore_t sem = frameSemaphore;
+        const DrawProfileTimePoint attributionStart =
+            frameAttributionProfile.enabled ? drawProfileNow() : DrawProfileTimePoint{};
         lease.commitWithCompletion(reason, ^(id<MTLCommandBuffer>) {
             dispatch_semaphore_signal(sem);
         });
+        if (frameAttributionProfile.enabled) {
+            frameAttributionProfile.recordCommitFrameSignal(
+                reason,
+                drawProfileElapsedUs(attributionStart, drawProfileNow()));
+        }
     }
 
     void advanceRingBuffer() {
