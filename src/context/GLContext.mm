@@ -4727,6 +4727,29 @@ bool canonicalizeFp64ResourceBytes(std::uint8_t* bytes,
                                    Fp64TransportDirection direction);
 bool defaultUniformBlockContainsFp64(const ShaderReflection& reflection);
 
+// GL-thread-only values already resolved by draw entry points. Passing them
+// into the wrapper avoids repeated VAO/generic-attribute work without moving
+// hazard checks or submission-boundary authority off the GL thread.
+struct TranslatedDrawPreflightSnapshot {
+    const GLVertexArrayObject* vao = nullptr;
+    GLuint vaoName = 0;
+    std::uint32_t vaoGeneration = 0;
+    bool genericVertexAttributesPrepared = false;
+};
+
+static TranslatedDrawPreflightSnapshot makeTranslatedDrawPreflightSnapshot(
+    GLuint vaoName,
+    const GLVertexArrayObject* vao,
+    bool genericVertexAttributesPrepared)
+{
+    TranslatedDrawPreflightSnapshot snapshot;
+    snapshot.vao = vao;
+    snapshot.vaoName = vaoName;
+    snapshot.vaoGeneration = vao != nullptr ? vao->attribGeneration : 0u;
+    snapshot.genericVertexAttributesPrepared = genericVertexAttributesPrepared;
+    return snapshot;
+}
+
 }  // namespace
 
 struct GLContext::Impl {
@@ -19316,7 +19339,9 @@ struct GLContext::Impl {
     // `frameGraph->encodeTranslatedDraw` that marks the bound draw FBO's
     // colour-texture attachments when the caller opted into readback Y-unflip
     // via TranslatedDrawInfo::markColorAttachmentReadbackFlip.
-    bool encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi);
+    bool encodeTranslatedDrawAndMarkFbo(
+        TranslatedDrawInfo& tdi,
+        const TranslatedDrawPreflightSnapshot* preflight = nullptr);
 
     // Metal-native tessellation draw path (Phase 2 of the metal-tess
     // project). When the program has been identified as a tess program
@@ -46288,15 +46313,15 @@ static void appendCurrentGenericVertexAttributes(
 
     TranslatedDrawInfo::ExtraVertexBuffer* currentBuffer = nullptr;
     for (const auto& input : tdi.vertexReflection->vertexInputs) {
-        if (translatedDrawHasVertexLayoutAt(tdi, input.location)) {
-            continue;
-        }
         if (input.sourceLocation >= vao->attributes.size()) {
             continue;
         }
 
         const auto& attr = vao->attributes[input.sourceLocation];
         if (attr.enabled || input.containsFp64) {
+            continue;
+        }
+        if (translatedDrawHasVertexLayoutAt(tdi, input.location)) {
             continue;
         }
 
@@ -49406,7 +49431,11 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
     cpPipelineBuildErr.clear();
     tdi.pipelineBuildErrorOut = &cpPipelineBuildErr;
 
-    return encodeTranslatedDrawAndMarkFbo(tdi);
+    const TranslatedDrawPreflightSnapshot preflight =
+        makeTranslatedDrawPreflightSnapshot(
+            state->boundVertexArray(), &vao,
+            /*genericVertexAttributesPrepared=*/false);
+    return encodeTranslatedDrawAndMarkFbo(tdi, &preflight);
 }
 
 static bool translatedDrawUsesClipControlYSign(const TranslatedDrawInfo& tdi) {
@@ -49526,16 +49555,31 @@ static bool anyQueryObjectActive(GLObjectStore* objects)
 // Sprint 17 Day 7+ Bank-Group-H Path B Phase 3 day 4 — see header
 // comment at the Impl method declaration. Item 26 LIVE 19th-instance
 // candidate: sister-pattern leverage at the call-site-wrapper level.
-bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
+bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
+    TranslatedDrawInfo& tdi,
+    const TranslatedDrawPreflightSnapshot* preflight) {
     const auto wrapperPrepStart = drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
-    GLVertexArrayObject* currentVao = nullptr;
+    const bool hasPreflightVao =
+        preflight != nullptr && preflight->vao != nullptr;
+    const GLVertexArrayObject* currentVao = nullptr;
     GLuint drawFboName = 0;
+    GLuint planVaoName = 0;
+    std::uint32_t planVaoGeneration = 0;
     {
         GLDrawDetailScope detail(
             drawDetailProfile, GLDrawDetailBucket::TranslatedProgramVaoFboState);
         prepareFp64VertexSidecars(tdi);
-        currentVao = currentVertexArrayOrDefault();
-        appendCurrentGenericVertexAttributes(tdi, currentVao);
+        if (hasPreflightVao) {
+            currentVao = preflight->vao;
+            planVaoName = preflight->vaoName;
+            planVaoGeneration = preflight->vaoGeneration;
+        } else {
+            currentVao = currentVertexArrayOrDefault();
+        }
+        if (preflight == nullptr ||
+            !preflight->genericVertexAttributesPrepared) {
+            appendCurrentGenericVertexAttributes(tdi, currentVao);
+        }
         drawFboName = state->boundDrawFramebuffer();
     }
     {
@@ -49632,14 +49676,14 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
     }
     const auto phase2PlanLookupStart =
         drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
-    GLuint planVaoName = 0;
-    std::uint32_t planVaoGeneration = 0;
     {
         GLDrawDetailScope detail(
             drawDetailProfile, GLDrawDetailBucket::Phase2StateCompatibilityChecks);
-        planVaoName = state->boundVertexArray();
-        planVaoGeneration =
-            currentVao != nullptr ? currentVao->attribGeneration : 0u;
+        if (!hasPreflightVao) {
+            planVaoName = state->boundVertexArray();
+            planVaoGeneration =
+                currentVao != nullptr ? currentVao->attribGeneration : 0u;
+        }
         tdi.pipelineOrSubroutinePlanCacheUnsafe =
             currentDrawHasProgramPipelineOrSubroutinePlanCacheHazard(
                 state.get(), objects.get());
@@ -51482,7 +51526,12 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             pipelineBuildError.clear();
             tdi.pipelineBuildErrorOut = &pipelineBuildError;
 
-            const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
+            const TranslatedDrawPreflightSnapshot preflight =
+                makeTranslatedDrawPreflightSnapshot(
+                    vaoName, vao,
+                    /*genericVertexAttributesPrepared=*/true);
+            const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(
+                tdi, &preflight);
             if (ok) {
                 return true;
             }
@@ -51571,7 +51620,12 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 pipelineBuildErrorConst.clear();
                 tdi.pipelineBuildErrorOut = &pipelineBuildErrorConst;
 
-                const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
+                const TranslatedDrawPreflightSnapshot preflight =
+                    makeTranslatedDrawPreflightSnapshot(
+                        vaoName, vao,
+                        /*genericVertexAttributesPrepared=*/true);
+                const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(
+                    tdi, &preflight);
                 if (ok) {
                     return true;
                 }
@@ -51717,7 +51771,12 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     tdi.pipelineBuildErrorOut = &pipelineBuildError;
                     drawProfile.mark(GLDrawProfileBucket::EncodePrep);
 
-                    const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
+                    const TranslatedDrawPreflightSnapshot preflight =
+                        makeTranslatedDrawPreflightSnapshot(
+                            vaoName, vao,
+                            /*genericVertexAttributesPrepared=*/true);
+                    const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(
+                        tdi, &preflight);
                     drawProfile.resetCursor();
                     if (ok) {
                         return true;
@@ -52247,7 +52306,12 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             thread_local std::string pipelineBuildError;
             pipelineBuildError.clear();
             tdi.pipelineBuildErrorOut = &pipelineBuildError;
-            const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
+            const TranslatedDrawPreflightSnapshot preflight =
+                makeTranslatedDrawPreflightSnapshot(
+                    vaoName, vao,
+                    /*genericVertexAttributesPrepared=*/true);
+            const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(
+                tdi, &preflight);
             if (ok) {
                 return true;
             }
@@ -52408,7 +52472,12 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     pipelineBuildError.clear();
                     tdi.pipelineBuildErrorOut = &pipelineBuildError;
 
-                    const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
+                    const TranslatedDrawPreflightSnapshot preflight =
+                        makeTranslatedDrawPreflightSnapshot(
+                            vaoName, vao,
+                            /*genericVertexAttributesPrepared=*/false);
+                    const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(
+                        tdi, &preflight);
                     if (ok) {
                         return true;
                     }
@@ -53111,7 +53180,12 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         pipelineBuildErrorDE.clear();
         tdi.pipelineBuildErrorOut = &pipelineBuildErrorDE;
 
-        const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
+        const TranslatedDrawPreflightSnapshot preflight =
+            makeTranslatedDrawPreflightSnapshot(
+                vaoName, vao,
+                /*genericVertexAttributesPrepared=*/true);
+        const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(
+            tdi, &preflight);
         if (ok) {
             // Sprint 8 #9-A (CKPT67): primitive counter update is
             // handled by the VS-only-TF helper at the earlier hook
@@ -53287,7 +53361,12 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     tdi.pipelineBuildErrorOut = &pipelineBuildError;
                     drawProfile.mark(GLDrawProfileBucket::EncodePrep);
 
-                    const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
+                    const TranslatedDrawPreflightSnapshot preflight =
+                        makeTranslatedDrawPreflightSnapshot(
+                            vaoName, vao,
+                            /*genericVertexAttributesPrepared=*/false);
+                    const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(
+                        tdi, &preflight);
                     drawProfile.resetCursor();
                     if (ok) {
                         return true;
@@ -53613,7 +53692,12 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     pipelineBuildError.clear();
                     tdi.pipelineBuildErrorOut = &pipelineBuildError;
 
-                    const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
+                    const TranslatedDrawPreflightSnapshot preflight =
+                        makeTranslatedDrawPreflightSnapshot(
+                            vaoName, vao,
+                            /*genericVertexAttributesPrepared=*/false);
+                    const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(
+                        tdi, &preflight);
                     if (ok) {
                         return true;
                     }
@@ -54190,7 +54274,12 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     pipelineBuildError.clear();
                     tdi.pipelineBuildErrorOut = &pipelineBuildError;
 
-                    const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
+                    const TranslatedDrawPreflightSnapshot preflight =
+                        makeTranslatedDrawPreflightSnapshot(
+                            vaoName, vao,
+                            /*genericVertexAttributesPrepared=*/false);
+                    const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(
+                        tdi, &preflight);
                     if (ok) {
                         return true;
                     }
