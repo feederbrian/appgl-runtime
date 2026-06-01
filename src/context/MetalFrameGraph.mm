@@ -374,6 +374,10 @@ static std::uint32_t parallelEncodeConfiguredMinBatch() {
     return envUInt("APPGL_PARALLEL_ENCODE_MIN_BATCH", 32, 1, 1u << 20);
 }
 
+static std::uint32_t parallelEncodeConfiguredLeanMaxBatch() {
+    return envUInt("APPGL_PARALLEL_ENCODE_LEAN_MAX_BATCH", 2048, 1, 1u << 20);
+}
+
 enum class ParallelEncodeFallbackReason : std::size_t {
     SmallBatch,
     WorkerCount,
@@ -448,6 +452,8 @@ struct ParallelEncodeFoundationProfile {
         envEnabled("APPGL_DRAW_PROFILE"));
     std::uint32_t configuredWorkerCount = parallelEncodeConfiguredWorkerCount();
     std::uint32_t configuredMinBatch = parallelEncodeConfiguredMinBatch();
+    std::uint32_t configuredLeanMaxBatch =
+        parallelEncodeConfiguredLeanMaxBatch();
     std::uint64_t translatedDraws = 0;
     std::uint64_t candidateDraws = 0;
     std::uint64_t capturedDraws = 0;
@@ -463,12 +469,22 @@ struct ParallelEncodeFoundationProfile {
     std::uint64_t descriptorPreparedDraws = 0;
     std::uint64_t descriptorEncodedDraws = 0;
     std::uint64_t descriptorFallbackDraws = 0;
+    std::uint64_t descriptorSerialBatchCount = 0;
+    std::uint64_t descriptorSerialBatchDraws = 0;
+    std::uint64_t descriptorWorkerBatchCount = 0;
+    std::uint64_t descriptorWorkerEncodedDraws = 0;
+    std::uint64_t descriptorWorkerChunkCount = 0;
+    std::uint64_t descriptorWorkerFailures = 0;
     std::uint64_t workerFailures = 0;
     double serialCaptureUs = 0.0;
     double serialReplayUs = 0.0;
     double serialBatchReplayUs = 0.0;
     double descriptorPrepareUs = 0.0;
     double descriptorEncodeUs = 0.0;
+    double descriptorSerialBatchEncodeUs = 0.0;
+    double descriptorWorkerWallUs = 0.0;
+    double descriptorWorkerSumUs = 0.0;
+    double descriptorWorkerMaxUs = 0.0;
     double parallelEncodeWallUs = 0.0;
     double sumWorkerEncodeUs = 0.0;
     double maxWorkerEncodeUs = 0.0;
@@ -479,9 +495,13 @@ struct ParallelEncodeFoundationProfile {
                static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count)>
         batchFlushReasons{};
     std::array<std::uint64_t,
+               static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count)>
+        descriptorFlushReasons{};
+    std::array<std::uint64_t,
                static_cast<std::size_t>(ParallelEncodeFallbackReason::Count)>
         parallelFallbackReasons{};
     std::vector<ParallelEncodeChunkProfile> chunkProfiles;
+    std::vector<ParallelEncodeChunkProfile> descriptorWorkerChunkProfiles;
 
     void recordTranslatedDraw() {
         if (enabled) {
@@ -539,6 +559,50 @@ struct ParallelEncodeFoundationProfile {
             return;
         }
         ++descriptorFallbackDraws;
+    }
+
+    void recordDescriptorSerialBatch(ParallelEncodeBoundaryReason reason,
+                                     std::uint64_t draws,
+                                     double elapsedUs,
+                                     std::uint64_t failures) {
+        if (!enabled) {
+            return;
+        }
+        ++descriptorSerialBatchCount;
+        descriptorSerialBatchDraws += draws;
+        descriptorEncodedDraws += draws;
+        descriptorEncodeUs += elapsedUs;
+        descriptorSerialBatchEncodeUs += elapsedUs;
+        descriptorFallbackDraws += failures;
+        ++descriptorFlushReasons[static_cast<std::size_t>(reason)];
+    }
+
+    void recordDescriptorWorkerBatch(
+        ParallelEncodeBoundaryReason reason,
+        std::uint64_t draws,
+        const std::vector<ParallelEncodeChunkProfile>& chunks,
+        double wallUs,
+        double sumWorkerUs,
+        double maxWorkerUs,
+        std::uint64_t failures) {
+        if (!enabled) {
+            return;
+        }
+        const std::uint64_t batchIndex = descriptorWorkerBatchCount + 1;
+        ++descriptorWorkerBatchCount;
+        descriptorWorkerEncodedDraws += draws;
+        descriptorWorkerChunkCount += static_cast<std::uint64_t>(chunks.size());
+        descriptorWorkerFailures += failures;
+        descriptorEncodedDraws += draws;
+        descriptorEncodeUs += wallUs;
+        descriptorWorkerWallUs += wallUs;
+        descriptorWorkerSumUs += sumWorkerUs;
+        descriptorWorkerMaxUs = std::max(descriptorWorkerMaxUs, maxWorkerUs);
+        ++descriptorFlushReasons[static_cast<std::size_t>(reason)];
+        for (ParallelEncodeChunkProfile chunk : chunks) {
+            chunk.batchIndex = batchIndex;
+            descriptorWorkerChunkProfiles.push_back(chunk);
+        }
     }
 
     void recordDirectSerialFallback(ParallelEncodeFallbackReason reason) {
@@ -617,14 +681,24 @@ struct ParallelEncodeFoundationProfile {
             "[APPGL_PARALLEL_ENCODE] summary translated_draws=%llu "
             "candidates=%llu captured=%llu replayed=%llu "
             "batch_count=%llu batch_draws=%llu max_batch_size=%llu "
-            "worker_count=%u min_batch=%u chunk_count=%llu "
+            "worker_count=%u min_batch=%u lean_max_batch=%u chunk_count=%llu "
             "parallel_batches=%llu parallel_encoded_draws=%llu "
             "serial_fallback_draws=%llu descriptor_prepared=%llu "
             "descriptor_encoded=%llu descriptor_fallback_draws=%llu "
+            "descriptor_serial_batches=%llu descriptor_serial_batch_draws=%llu "
+            "descriptor_worker_batches=%llu "
+            "descriptor_worker_encoded_draws=%llu "
+            "descriptor_worker_chunk_count=%llu "
+            "descriptor_worker_failures=%llu "
             "worker_failures=%llu "
             "serial_capture_us=%.3f serial_replay_us=%.3f "
             "serial_batch_replay_us=%.3f descriptor_prepare_us=%.3f "
-            "descriptor_encode_us=%.3f parallel_encode_wall_us=%.3f "
+            "descriptor_encode_us=%.3f "
+            "descriptor_serial_batch_encode_us=%.3f "
+            "descriptor_worker_wall_us=%.3f "
+            "descriptor_worker_sum_us=%.3f "
+            "descriptor_worker_max_us=%.3f "
+            "parallel_encode_wall_us=%.3f "
             "sum_worker_encode_us=%.3f max_worker_encode_us=%.3f "
             "batch_replay_failures=%llu\n",
             static_cast<unsigned long long>(translatedDraws),
@@ -636,6 +710,7 @@ struct ParallelEncodeFoundationProfile {
             static_cast<unsigned long long>(maxBatchSize),
             configuredWorkerCount,
             configuredMinBatch,
+            configuredLeanMaxBatch,
             static_cast<unsigned long long>(chunkCount),
             static_cast<unsigned long long>(parallelBatchCount),
             static_cast<unsigned long long>(parallelEncodedDraws),
@@ -643,12 +718,22 @@ struct ParallelEncodeFoundationProfile {
             static_cast<unsigned long long>(descriptorPreparedDraws),
             static_cast<unsigned long long>(descriptorEncodedDraws),
             static_cast<unsigned long long>(descriptorFallbackDraws),
+            static_cast<unsigned long long>(descriptorSerialBatchCount),
+            static_cast<unsigned long long>(descriptorSerialBatchDraws),
+            static_cast<unsigned long long>(descriptorWorkerBatchCount),
+            static_cast<unsigned long long>(descriptorWorkerEncodedDraws),
+            static_cast<unsigned long long>(descriptorWorkerChunkCount),
+            static_cast<unsigned long long>(descriptorWorkerFailures),
             static_cast<unsigned long long>(workerFailures),
             serialCaptureUs,
             serialReplayUs,
             serialBatchReplayUs,
             descriptorPrepareUs,
             descriptorEncodeUs,
+            descriptorSerialBatchEncodeUs,
+            descriptorWorkerWallUs,
+            descriptorWorkerSumUs,
+            descriptorWorkerMaxUs,
             parallelEncodeWallUs,
             sumWorkerEncodeUs,
             maxWorkerEncodeUs,
@@ -678,6 +763,18 @@ struct ParallelEncodeFoundationProfile {
                 static_cast<unsigned long long>(batchFlushReasons[i]));
         }
         for (std::size_t i = 0;
+             i < static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count);
+             ++i) {
+            if (descriptorFlushReasons[i] == 0) {
+                continue;
+            }
+            const auto reason = static_cast<ParallelEncodeBoundaryReason>(i);
+            std::fprintf(stderr,
+                "[APPGL_PARALLEL_ENCODE] descriptor_flush reason=%s count=%llu\n",
+                parallelEncodeBoundaryReasonName(reason),
+                static_cast<unsigned long long>(descriptorFlushReasons[i]));
+        }
+        for (std::size_t i = 0;
              i < static_cast<std::size_t>(ParallelEncodeFallbackReason::Count);
              ++i) {
             if (parallelFallbackReasons[i] == 0) {
@@ -693,6 +790,19 @@ struct ParallelEncodeFoundationProfile {
             std::fprintf(stderr,
                 "[APPGL_PARALLEL_ENCODE] chunk batch=%llu chunk=%llu "
                 "draw_begin=%llu draw_end=%llu draw_count=%llu "
+                "worker_us=%.3f failures=%llu\n",
+                static_cast<unsigned long long>(chunk.batchIndex),
+                static_cast<unsigned long long>(chunk.chunkIndex),
+                static_cast<unsigned long long>(chunk.drawBegin),
+                static_cast<unsigned long long>(chunk.drawEnd),
+                static_cast<unsigned long long>(chunk.drawCount),
+                chunk.workerEncodeUs,
+                static_cast<unsigned long long>(chunk.failures));
+        }
+        for (const auto& chunk : descriptorWorkerChunkProfiles) {
+            std::fprintf(stderr,
+                "[APPGL_PARALLEL_ENCODE] descriptor_worker_chunk batch=%llu "
+                "chunk=%llu draw_begin=%llu draw_end=%llu draw_count=%llu "
                 "worker_us=%.3f failures=%llu\n",
                 static_cast<unsigned long long>(chunk.batchIndex),
                 static_cast<unsigned long long>(chunk.chunkIndex),
@@ -764,10 +874,11 @@ struct CapturedTranslatedDrawRecord {
     }
 };
 
-static constexpr std::size_t kLeanDirectMaxExtraVertexBuffers = 16;
-static constexpr std::size_t kLeanDirectMaxTextureBindings = 64;
-static constexpr std::size_t kLeanDirectMaxUBOBindings = 32;
-static constexpr std::size_t kLeanDirectMaxInlineUniformBytes = 4096;
+static constexpr std::size_t kLeanDirectMaxExtraVertexBuffers = 4;
+static constexpr std::size_t kLeanDirectMaxTextureBindings = 8;
+static constexpr std::size_t kLeanDirectMaxUBOBindings = 8;
+static constexpr std::size_t kLeanDirectMaxInlineUniformBytes = 256;
+static constexpr std::size_t kLeanDirectMaxInlineUboBytes = 512;
 
 struct LeanDirectTranslatedDrawDescriptor {
     struct ExtraVertexBuffer {
@@ -788,10 +899,12 @@ struct LeanDirectTranslatedDrawDescriptor {
         std::uint32_t metalSlot = 0;
         const void* data = nullptr;
         std::size_t size = 0;
+        std::size_t inlineDataOffset = 0;
         void* metalBuffer = nullptr;
         std::size_t metalBufferOffset = 0;
         bool isVertex = false;
         bool isFragment = false;
+        bool usesInlineData = false;
     };
 
     void* pipelineState = nullptr;
@@ -835,6 +948,8 @@ struct LeanDirectTranslatedDrawDescriptor {
     std::size_t fragmentTextureCount = 0;
     std::array<UBOBinding, kLeanDirectMaxUBOBindings> uboBindings;
     std::size_t uboBindingCount = 0;
+    std::array<std::uint8_t, kLeanDirectMaxInlineUboBytes> uboInlineStorage;
+    std::size_t uboInlineStorageSize = 0;
 
     bool depthTestEnabled = false;
     GLenum depthFunc = GL_LESS;
@@ -896,6 +1011,7 @@ struct LeanDirectTranslatedDrawDescriptor {
         vertexTextureCount = 0;
         fragmentTextureCount = 0;
         uboBindingCount = 0;
+        uboInlineStorageSize = 0;
         depthTestEnabled = false;
         depthFunc = GL_LESS;
         depthWriteMask = true;
@@ -3255,7 +3371,8 @@ struct MetalFrameGraph::Impl {
     }
 
     void endRenderPass() {
-        if (!flushingParallelTranslatedBatch) {
+        if (!flushingParallelTranslatedBatch &&
+            !flushingLeanDirectDescriptorBatch) {
             flushParallelTranslatedDrawBatch(
                 ParallelEncodeBoundaryReason::EndRenderPass);
         }
@@ -6925,8 +7042,6 @@ struct MetalFrameGraph::Impl {
             std::memcpy(descriptor.vertexUniformStorage.data(),
                         source.vertexUniformData,
                         source.vertexUniformSize);
-            descriptor.vertexUniformData =
-                descriptor.vertexUniformStorage.data();
             descriptor.vertexUniformSize = source.vertexUniformSize;
         }
         if (source.fragmentUniformData != nullptr &&
@@ -6934,8 +7049,6 @@ struct MetalFrameGraph::Impl {
             std::memcpy(descriptor.fragmentUniformStorage.data(),
                         source.fragmentUniformData,
                         source.fragmentUniformSize);
-            descriptor.fragmentUniformData =
-                descriptor.fragmentUniformStorage.data();
             descriptor.fragmentUniformSize = source.fragmentUniformSize;
         }
 
@@ -6984,12 +7097,28 @@ struct MetalFrameGraph::Impl {
             }
             auto& copied = descriptor.uboBindings[descriptor.uboBindingCount++];
             copied.metalSlot = ubo.metalSlot;
-            copied.data = ubo.data;
             copied.size = ubo.size;
             copied.metalBuffer = ubo.metalBuffer;
             copied.metalBufferOffset = ubo.metalBufferOffset;
             copied.isVertex = ubo.isVertex;
             copied.isFragment = ubo.isFragment;
+            copied.data = nullptr;
+            copied.inlineDataOffset = 0;
+            copied.usesInlineData = false;
+            if (ubo.metalBuffer == nullptr) {
+                if (ubo.data == nullptr ||
+                    descriptor.uboInlineStorageSize + ubo.size >
+                        descriptor.uboInlineStorage.size()) {
+                    return false;
+                }
+                copied.inlineDataOffset = descriptor.uboInlineStorageSize;
+                std::memcpy(descriptor.uboInlineStorage.data() +
+                                descriptor.uboInlineStorageSize,
+                            ubo.data,
+                            ubo.size);
+                descriptor.uboInlineStorageSize += ubo.size;
+                copied.usesInlineData = true;
+            }
         }
 
         descriptor.pipelineState = (__bridge void*)pipelineState;
@@ -7187,15 +7316,17 @@ struct MetalFrameGraph::Impl {
         return true;
     }
 
-    bool encodeLeanDirectTranslatedDrawDescriptor(
+    bool encodeLeanDirectTranslatedDrawDescriptorOnEncoder(
         const LeanDirectTranslatedDrawDescriptor& descriptor,
+        id<MTLRenderCommandEncoder> encoder,
         id<MTLTexture> colorTexture,
-        id<MTLTexture> passDepthStencil) {
-        if (currentRenderEncoder == nil || colorTexture == nil ||
+        id<MTLTexture> passDepthStencil,
+        ParallelChildEncoderState& encoderState,
+        bool markPendingPresent) {
+        if (encoder == nil || colorTexture == nil ||
             descriptor.pipelineState == nullptr) {
             return false;
         }
-        id<MTLRenderCommandEncoder> encoder = currentRenderEncoder;
         id<MTLRenderPipelineState> pipelineState =
             (__bridge id<MTLRenderPipelineState>)descriptor.pipelineState;
         if (pipelineState == nil) {
@@ -7208,18 +7339,19 @@ struct MetalFrameGraph::Impl {
                 std::max<std::uint32_t>(
                     descriptor.attachmentSampleCount, 1u));
 
-        if (pipelineState != cachedPipelineState) {
+        if (pipelineState != encoderState.cachedPipelineState) {
             [encoder setRenderPipelineState:pipelineState];
-            cachedPipelineState = pipelineState;
+            encoderState.cachedPipelineState = pipelineState;
         }
         if (passDepthStencil != nil &&
             descriptor.depthStencilState != nullptr) {
             id<MTLDepthStencilState> dsState =
                 (__bridge id<MTLDepthStencilState>)
                     descriptor.depthStencilState;
-            if (dsState != nil && dsState != cachedDepthStencilState) {
+            if (dsState != nil &&
+                dsState != encoderState.cachedDepthStencilState) {
                 [encoder setDepthStencilState:dsState];
-                cachedDepthStencilState = dsState;
+                encoderState.cachedDepthStencilState = dsState;
             }
             if (descriptor.stencilTestEnabled) {
                 [encoder setStencilFrontReferenceValue:
@@ -7235,24 +7367,24 @@ struct MetalFrameGraph::Impl {
             ? (descriptor.cullFaceMode == GL_FRONT ? MTLCullModeFront
                                                    : MTLCullModeBack)
             : MTLCullModeNone;
-        if (desiredCull != cachedCullMode) {
+        if (desiredCull != encoderState.cachedCullMode) {
             [encoder setCullMode:desiredCull];
-            cachedCullMode = desiredCull;
+            encoderState.cachedCullMode = desiredCull;
         }
         const MTLWinding desiredWinding =
             frontFacingWindingForClipControl(
                 descriptor.frontFace,
                 descriptor.clipControlInvertsWinding);
-        if (desiredWinding != cachedFrontFaceWinding) {
+        if (desiredWinding != encoderState.cachedFrontFaceWinding) {
             [encoder setFrontFacingWinding:desiredWinding];
-            cachedFrontFaceWinding = desiredWinding;
+            encoderState.cachedFrontFaceWinding = desiredWinding;
         }
         const MTLTriangleFillMode desiredFill = descriptor.wireframe
             ? MTLTriangleFillModeLines
             : MTLTriangleFillModeFill;
-        if (desiredFill != cachedFillMode) {
+        if (desiredFill != encoderState.cachedFillMode) {
             [encoder setTriangleFillMode:desiredFill];
-            cachedFillMode = desiredFill;
+            encoderState.cachedFillMode = desiredFill;
         }
         {
             const std::uint32_t sampleMask = attachmentSampleCount > 1
@@ -7381,15 +7513,13 @@ struct MetalFrameGraph::Impl {
                                           evb.metalSlot)];
         }
 
-        if (descriptor.vertexUniformData != nullptr &&
-            descriptor.vertexUniformSize > 0) {
-            [encoder setVertexBytes:descriptor.vertexUniformData
+        if (descriptor.vertexUniformSize > 0) {
+            [encoder setVertexBytes:descriptor.vertexUniformStorage.data()
                               length:descriptor.vertexUniformSize
                              atIndex:16];
         }
-        if (descriptor.fragmentUniformData != nullptr &&
-            descriptor.fragmentUniformSize > 0) {
-            [encoder setFragmentBytes:descriptor.fragmentUniformData
+        if (descriptor.fragmentUniformSize > 0) {
+            [encoder setFragmentBytes:descriptor.fragmentUniformStorage.data()
                                 length:descriptor.fragmentUniformSize
                                atIndex:16];
         }
@@ -7641,14 +7771,23 @@ struct MetalFrameGraph::Impl {
                 if (ubo.isFragment) {
                     [encoder setFragmentBuffer:buf offset:off atIndex:slot];
                 }
-            } else if (ubo.data != nullptr) {
+            } else {
+                const void* bytes = ubo.usesInlineData
+                    ? descriptor.uboInlineStorage.data() + ubo.inlineDataOffset
+                    : ubo.data;
+                if (bytes == nullptr ||
+                    (ubo.usesInlineData &&
+                     ubo.inlineDataOffset + ubo.size >
+                         descriptor.uboInlineStorage.size())) {
+                    return false;
+                }
                 if (ubo.isVertex) {
-                    [encoder setVertexBytes:ubo.data
+                    [encoder setVertexBytes:bytes
                                       length:static_cast<NSUInteger>(ubo.size)
                                      atIndex:slot];
                 }
                 if (ubo.isFragment) {
-                    [encoder setFragmentBytes:ubo.data
+                    [encoder setFragmentBytes:bytes
                                         length:static_cast<NSUInteger>(ubo.size)
                                        atIndex:slot];
                 }
@@ -7766,8 +7905,41 @@ struct MetalFrameGraph::Impl {
                          vertexCount:static_cast<NSUInteger>(
                                          descriptor.vertexCount)];
         }
-        pendingPresent = true;
+        if (markPendingPresent) {
+            pendingPresent = true;
+        }
         return true;
+    }
+
+    bool encodeLeanDirectTranslatedDrawDescriptor(
+        const LeanDirectTranslatedDrawDescriptor& descriptor,
+        id<MTLTexture> colorTexture,
+        id<MTLTexture> passDepthStencil) {
+        if (currentRenderEncoder == nil) {
+            return false;
+        }
+        ParallelChildEncoderState encoderState;
+        encoderState.cachedPipelineState = cachedPipelineState;
+        encoderState.cachedDepthStencilState = cachedDepthStencilState;
+        encoderState.cachedCullMode = cachedCullMode;
+        encoderState.cachedFrontFaceWinding = cachedFrontFaceWinding;
+        encoderState.cachedFillMode = cachedFillMode;
+        const bool encoded =
+            encodeLeanDirectTranslatedDrawDescriptorOnEncoder(
+                descriptor,
+                currentRenderEncoder,
+                colorTexture,
+                passDepthStencil,
+                encoderState,
+                true);
+        if (encoded) {
+            cachedPipelineState = encoderState.cachedPipelineState;
+            cachedDepthStencilState = encoderState.cachedDepthStencilState;
+            cachedCullMode = encoderState.cachedCullMode;
+            cachedFrontFaceWinding = encoderState.cachedFrontFaceWinding;
+            cachedFillMode = encoderState.cachedFillMode;
+        }
+        return encoded;
     }
 
     bool encodeCapturedTranslatedDrawOnChildEncoder(
@@ -8344,6 +8516,242 @@ struct MetalFrameGraph::Impl {
             reason, fallbackReason, drawCount, elapsedUs, failures);
     }
 
+    bool replayPendingLeanDirectDescriptorBatchSerial(
+        ParallelEncodeBoundaryReason reason,
+        ParallelEncodeFallbackReason fallbackReason) {
+        (void)fallbackReason;
+        const std::uint64_t drawCount =
+            static_cast<std::uint64_t>(pendingLeanDirectDescriptors.size());
+        if (drawCount == 0) {
+            return true;
+        }
+
+        const DrawProfileTimePoint replayStart = drawProfileNow();
+        std::uint64_t failures = 0;
+        for (const auto& descriptor : pendingLeanDirectDescriptors) {
+            id<MTLTexture> colorTexture = nil;
+            id<MTLTexture> passDepthStencil = nil;
+            const bool passReady =
+                ensureLeanDirectDefaultRenderPass(
+                    descriptor.fragmentShadingRate,
+                    colorTexture,
+                    passDepthStencil);
+            const bool encoded =
+                passReady &&
+                encodeLeanDirectTranslatedDrawDescriptor(
+                    descriptor,
+                    colorTexture,
+                    passDepthStencil);
+            if (!encoded) {
+                ++failures;
+            }
+        }
+        if (currentRenderEncoder != nil) {
+            endCurrentRenderPassOnly();
+            resetCachedEncoderState();
+        }
+        pendingPresent = true;
+        const double elapsedUs =
+            drawProfileElapsedUs(replayStart, drawProfileNow());
+        parallelEncodeProfile.recordDescriptorSerialBatch(
+            reason, drawCount, elapsedUs, failures);
+        return failures == 0;
+    }
+
+    bool tryEncodeLeanDirectDescriptorWorkerBatch(
+        ParallelEncodeBoundaryReason reason,
+        ParallelEncodeFallbackReason& fallbackReason) {
+        const std::uint64_t drawCount =
+            static_cast<std::uint64_t>(pendingLeanDirectDescriptors.size());
+        if (drawCount < parallelEncodeProfile.configuredMinBatch) {
+            fallbackReason = ParallelEncodeFallbackReason::SmallBatch;
+            return false;
+        }
+        if (parallelEncodeProfile.configuredWorkerCount <= 1) {
+            fallbackReason = ParallelEncodeFallbackReason::WorkerCount;
+            return false;
+        }
+        if (reason == ParallelEncodeBoundaryReason::Finish &&
+            leanDirectDescriptorWorkerFlushCount > 0) {
+            fallbackReason = ParallelEncodeFallbackReason::SmallBatch;
+            return false;
+        }
+
+        const GLenum fragmentRate =
+            pendingLeanDirectDescriptors.front().fragmentShadingRate;
+        for (const auto& descriptor : pendingLeanDirectDescriptors) {
+            if (descriptor.fragmentShadingRate != fragmentRate) {
+                fallbackReason = ParallelEncodeFallbackReason::MixedRenderState;
+                return false;
+            }
+        }
+
+        if (currentRenderEncoder != nil) {
+            endCurrentRenderPassOnly();
+            resetCachedEncoderState();
+        }
+        acquireRingSlot();
+
+        MTLRenderPassDescriptor* pass = nil;
+        id<MTLTexture> colorTexture = nil;
+        id<MTLTexture> passDepthStencil = nil;
+        if (!buildDefaultParallelRenderPass(fragmentRate,
+                                            pass,
+                                            colorTexture,
+                                            passDepthStencil)) {
+            fallbackReason =
+                ParallelEncodeFallbackReason::ParallelEncoderCreateFailure;
+            return false;
+        }
+
+        id<MTLParallelRenderCommandEncoder> parallelEncoder =
+            [currentCommandBuffer parallelRenderCommandEncoderWithDescriptor:pass];
+        if (parallelEncoder == nil) {
+            fallbackReason =
+                ParallelEncodeFallbackReason::ParallelEncoderCreateFailure;
+            return false;
+        }
+
+        const std::uint64_t configuredWorkers =
+            parallelEncodeProfile.configuredWorkerCount;
+        const std::uint64_t chunkCount =
+            std::min<std::uint64_t>(configuredWorkers, drawCount);
+        std::vector<id<MTLRenderCommandEncoder>> childEncoders;
+        childEncoders.reserve(static_cast<std::size_t>(chunkCount));
+        for (std::uint64_t chunk = 0; chunk < chunkCount; ++chunk) {
+            id<MTLRenderCommandEncoder> child =
+                [parallelEncoder renderCommandEncoder];
+            if (child == nil) {
+                for (id<MTLRenderCommandEncoder> enc : childEncoders) {
+                    [enc endEncoding];
+                }
+                [parallelEncoder endEncoding];
+                activeRenderPassFragmentShadingRate =
+                    GL_SHADING_RATE_1X1_PIXELS_EXT;
+                resetCachedEncoderState();
+                fallbackReason =
+                    ParallelEncodeFallbackReason::ChildEncoderCreateFailure;
+                return false;
+            }
+            childEncoders.push_back(child);
+        }
+
+        hasPendingClear = false;
+        readbackSourceTexture = colorTexture;
+        readbackSourceIsBGRA =
+            colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
+        activeRenderPassFragmentShadingRate = fragmentRate;
+
+        struct LeanDirectChunkWork {
+            std::uint64_t begin = 0;
+            std::uint64_t end = 0;
+            double workerUs = 0.0;
+            std::uint64_t failures = 0;
+        };
+        std::vector<LeanDirectChunkWork> chunks(
+            static_cast<std::size_t>(chunkCount));
+        const std::uint64_t baseChunkSize = drawCount / chunkCount;
+        const std::uint64_t remainder = drawCount % chunkCount;
+        std::uint64_t cursor = 0;
+        for (std::uint64_t chunk = 0; chunk < chunkCount; ++chunk) {
+            const std::uint64_t count =
+                baseChunkSize + (chunk < remainder ? 1u : 0u);
+            chunks[static_cast<std::size_t>(chunk)].begin = cursor;
+            chunks[static_cast<std::size_t>(chunk)].end = cursor + count;
+            cursor += count;
+        }
+
+        const DrawProfileTimePoint wallStart = drawProfileNow();
+        LeanDirectChunkWork* chunkData = chunks.data();
+        id<MTLRenderCommandEncoder>* encoderData = childEncoders.data();
+        Impl* self = this;
+        dispatch_queue_t queue =
+            dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+        dispatch_apply(static_cast<size_t>(chunkCount), queue, ^(size_t index) {
+            @autoreleasepool {
+                ParallelChildEncoderState childState;
+                LeanDirectChunkWork& work = chunkData[index];
+                id<MTLRenderCommandEncoder> child = encoderData[index];
+                const DrawProfileTimePoint workerStart = drawProfileNow();
+                for (std::uint64_t draw = work.begin; draw < work.end; ++draw) {
+                    const bool encoded =
+                        self->encodeLeanDirectTranslatedDrawDescriptorOnEncoder(
+                            self->pendingLeanDirectDescriptors[
+                                static_cast<std::size_t>(draw)],
+                            child,
+                            colorTexture,
+                            passDepthStencil,
+                            childState,
+                            false);
+                    if (!encoded) {
+                        ++work.failures;
+                    }
+                }
+                work.workerUs =
+                    drawProfileElapsedUs(workerStart, drawProfileNow());
+                [child endEncoding];
+            }
+        });
+        [parallelEncoder endEncoding];
+        const double wallUs =
+            drawProfileElapsedUs(wallStart, drawProfileNow());
+        currentRenderEncoder = nil;
+        activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
+        resetCachedEncoderState();
+        pendingPresent = true;
+
+        std::vector<ParallelEncodeChunkProfile> chunkProfiles;
+        chunkProfiles.reserve(static_cast<std::size_t>(chunkCount));
+        double sumWorkerUs = 0.0;
+        double maxWorkerUs = 0.0;
+        std::uint64_t failures = 0;
+        for (std::uint64_t chunk = 0; chunk < chunkCount; ++chunk) {
+            const LeanDirectChunkWork& work =
+                chunks[static_cast<std::size_t>(chunk)];
+            sumWorkerUs += work.workerUs;
+            maxWorkerUs = std::max(maxWorkerUs, work.workerUs);
+            failures += work.failures;
+            ParallelEncodeChunkProfile profile;
+            profile.chunkIndex = chunk;
+            profile.drawBegin = work.begin;
+            profile.drawEnd = work.end;
+            profile.drawCount = work.end - work.begin;
+            profile.workerEncodeUs = work.workerUs;
+            profile.failures = work.failures;
+            chunkProfiles.push_back(profile);
+        }
+        parallelEncodeProfile.recordDescriptorWorkerBatch(
+            reason,
+            drawCount,
+            chunkProfiles,
+            wallUs,
+            sumWorkerUs,
+            maxWorkerUs,
+            failures);
+        ++leanDirectDescriptorWorkerFlushCount;
+        return true;
+    }
+
+    void flushLeanDirectDescriptorBatch(ParallelEncodeBoundaryReason reason) {
+        if (!parallelEncodeProfile.enabled ||
+            pendingLeanDirectDescriptors.empty() ||
+            flushingLeanDirectDescriptorBatch) {
+            return;
+        }
+
+        flushingLeanDirectDescriptorBatch = true;
+        ParallelEncodeFallbackReason fallbackReason =
+            ParallelEncodeFallbackReason::EncodeFailure;
+        const bool parallelEncoded =
+            tryEncodeLeanDirectDescriptorWorkerBatch(reason, fallbackReason);
+        if (!parallelEncoded) {
+            replayPendingLeanDirectDescriptorBatchSerial(
+                reason, fallbackReason);
+        }
+        pendingLeanDirectDescriptors.clear();
+        flushingLeanDirectDescriptorBatch = false;
+    }
+
     bool tryEncodeParallelTranslatedDrawBatch(
         ParallelEncodeBoundaryReason reason,
         ParallelEncodeFallbackReason& fallbackReason) {
@@ -8518,6 +8926,9 @@ struct MetalFrameGraph::Impl {
     }
 
     void flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason reason) {
+        if (!flushingLeanDirectDescriptorBatch) {
+            flushLeanDirectDescriptorBatch(reason);
+        }
         if (!parallelEncodeProfile.enabled ||
             pendingParallelTranslatedDraws.empty() ||
             flushingParallelTranslatedBatch) {
@@ -8562,13 +8973,72 @@ struct MetalFrameGraph::Impl {
 
         parallelEncodeProfile.recordCandidate();
 
-        LeanDirectTranslatedDrawDescriptor descriptor;
+        if (parallelEncodeProfile.configuredWorkerCount <= 1) {
+            LeanDirectTranslatedDrawDescriptor descriptor;
+            ParallelEncodeFallbackReason fallbackReason =
+                ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
+            const DrawProfileTimePoint prepareStart = drawProfileNow();
+            if (!prepareLeanDirectTranslatedDrawDescriptor(info,
+                                                           descriptor,
+                                                           fallbackReason)) {
+                const ParallelEncodeBoundaryReason boundaryReason =
+                    parallelEncodeBoundaryForFallback(fallbackReason);
+                flushParallelTranslatedDrawBatch(boundaryReason);
+                parallelEncodeProfile.recordBoundary(boundaryReason);
+                parallelEncodeProfile.recordDescriptorFallback();
+                parallelEncodeProfile.recordDirectSerialFallback(fallbackReason);
+                return encodeTranslatedDrawSerial(info);
+            }
+            parallelEncodeProfile.recordDescriptorPrepared(
+                drawProfileElapsedUs(prepareStart, drawProfileNow()));
+
+            id<MTLTexture> colorTexture = nil;
+            id<MTLTexture> passDepthStencil = nil;
+            const DrawProfileTimePoint encodeStart = drawProfileNow();
+            if (!ensureLeanDirectDefaultRenderPass(descriptor.fragmentShadingRate,
+                                                   colorTexture,
+                                                   passDepthStencil)) {
+                fallbackReason =
+                    ParallelEncodeFallbackReason::ParallelEncoderCreateFailure;
+                const ParallelEncodeBoundaryReason boundaryReason =
+                    parallelEncodeBoundaryForFallback(fallbackReason);
+                parallelEncodeProfile.recordBoundary(boundaryReason);
+                parallelEncodeProfile.recordDescriptorFallback();
+                parallelEncodeProfile.recordDirectSerialFallback(fallbackReason);
+                return encodeTranslatedDrawSerial(info);
+            }
+            if (!encodeLeanDirectTranslatedDrawDescriptor(descriptor,
+                                                         colorTexture,
+                                                         passDepthStencil)) {
+                fallbackReason = ParallelEncodeFallbackReason::EncodeFailure;
+                const ParallelEncodeBoundaryReason boundaryReason =
+                    parallelEncodeBoundaryForFallback(fallbackReason);
+                parallelEncodeProfile.recordBoundary(boundaryReason);
+                parallelEncodeProfile.recordDescriptorFallback();
+                parallelEncodeProfile.recordDirectSerialFallback(fallbackReason);
+                return encodeTranslatedDrawSerial(info);
+            }
+            parallelEncodeProfile.recordDescriptorEncoded(
+                drawProfileElapsedUs(encodeStart, drawProfileNow()));
+            return true;
+        }
+
+        if (!pendingLeanDirectDescriptors.empty() &&
+            pendingLeanDirectDescriptors.front().fragmentShadingRate !=
+                info.fragmentShadingRate) {
+            flushLeanDirectDescriptorBatch(
+                ParallelEncodeBoundaryReason::ResourceMutationOrBarrier);
+        }
+        pendingLeanDirectDescriptors.emplace_back();
+        LeanDirectTranslatedDrawDescriptor& descriptor =
+            pendingLeanDirectDescriptors.back();
         ParallelEncodeFallbackReason fallbackReason =
             ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
         const DrawProfileTimePoint prepareStart = drawProfileNow();
         if (!prepareLeanDirectTranslatedDrawDescriptor(info,
                                                        descriptor,
                                                        fallbackReason)) {
+            pendingLeanDirectDescriptors.pop_back();
             const ParallelEncodeBoundaryReason boundaryReason =
                 parallelEncodeBoundaryForFallback(fallbackReason);
             flushParallelTranslatedDrawBatch(boundaryReason);
@@ -8579,35 +9049,11 @@ struct MetalFrameGraph::Impl {
         }
         parallelEncodeProfile.recordDescriptorPrepared(
             drawProfileElapsedUs(prepareStart, drawProfileNow()));
-
-        id<MTLTexture> colorTexture = nil;
-        id<MTLTexture> passDepthStencil = nil;
-        const DrawProfileTimePoint encodeStart = drawProfileNow();
-        if (!ensureLeanDirectDefaultRenderPass(descriptor.fragmentShadingRate,
-                                               colorTexture,
-                                               passDepthStencil)) {
-            fallbackReason =
-                ParallelEncodeFallbackReason::ParallelEncoderCreateFailure;
-            const ParallelEncodeBoundaryReason boundaryReason =
-                parallelEncodeBoundaryForFallback(fallbackReason);
-            parallelEncodeProfile.recordBoundary(boundaryReason);
-            parallelEncodeProfile.recordDescriptorFallback();
-            parallelEncodeProfile.recordDirectSerialFallback(fallbackReason);
-            return encodeTranslatedDrawSerial(info);
+        if (pendingLeanDirectDescriptors.size() >=
+            parallelEncodeProfile.configuredLeanMaxBatch) {
+            flushLeanDirectDescriptorBatch(
+                ParallelEncodeBoundaryReason::ResourceMutationOrBarrier);
         }
-        if (!encodeLeanDirectTranslatedDrawDescriptor(descriptor,
-                                                     colorTexture,
-                                                     passDepthStencil)) {
-            fallbackReason = ParallelEncodeFallbackReason::EncodeFailure;
-            const ParallelEncodeBoundaryReason boundaryReason =
-                parallelEncodeBoundaryForFallback(fallbackReason);
-            parallelEncodeProfile.recordBoundary(boundaryReason);
-            parallelEncodeProfile.recordDescriptorFallback();
-            parallelEncodeProfile.recordDirectSerialFallback(fallbackReason);
-            return encodeTranslatedDrawSerial(info);
-        }
-        parallelEncodeProfile.recordDescriptorEncoded(
-            drawProfileElapsedUs(encodeStart, drawProfileNow()));
 
         return true;
     }
@@ -14647,6 +15093,9 @@ private:
     std::unordered_set<PipelineBuildLogKey, PipelineBuildLogKeyHash> loggedPipelineBuildPrograms;
     DrawSubmitProfile drawSubmitProfile;
     ParallelEncodeFoundationProfile parallelEncodeProfile;
+    std::deque<LeanDirectTranslatedDrawDescriptor> pendingLeanDirectDescriptors;
+    bool flushingLeanDirectDescriptorBatch = false;
+    std::uint64_t leanDirectDescriptorWorkerFlushCount = 0;
     std::deque<CapturedTranslatedDrawRecord> pendingParallelTranslatedDraws;
     bool flushingParallelTranslatedBatch = false;
 
