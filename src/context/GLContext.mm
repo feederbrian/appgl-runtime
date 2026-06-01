@@ -354,6 +354,7 @@ enum class GLDrawDetailBucket : std::size_t {
     Phase2ReflectionChecks,
     Phase2StateCompatibilityChecks,
     Phase2CacheKeyHash,
+    Phase2CacheKeyMemoLookup,
     Phase2LegacyProfileRecord,
     Phase2CacheLookup,
     Phase2MissBuildDecision,
@@ -382,6 +383,7 @@ static const char* glDrawDetailParentName(GLDrawDetailBucket bucket) {
         case GLDrawDetailBucket::Phase2ReflectionChecks:
         case GLDrawDetailBucket::Phase2StateCompatibilityChecks:
         case GLDrawDetailBucket::Phase2CacheKeyHash:
+        case GLDrawDetailBucket::Phase2CacheKeyMemoLookup:
         case GLDrawDetailBucket::Phase2LegacyProfileRecord:
         case GLDrawDetailBucket::Phase2CacheLookup:
         case GLDrawDetailBucket::Phase2MissBuildDecision:
@@ -411,6 +413,7 @@ static const char* glDrawDetailBucketName(GLDrawDetailBucket bucket) {
         case GLDrawDetailBucket::Phase2ReflectionChecks: return "reflection_checks";
         case GLDrawDetailBucket::Phase2StateCompatibilityChecks: return "state_compatibility_checks";
         case GLDrawDetailBucket::Phase2CacheKeyHash: return "cache_key_hash";
+        case GLDrawDetailBucket::Phase2CacheKeyMemoLookup: return "cache_key_memo_lookup";
         case GLDrawDetailBucket::Phase2LegacyProfileRecord: return "legacy_profile_record";
         case GLDrawDetailBucket::Phase2CacheLookup: return "cache_lookup";
         case GLDrawDetailBucket::Phase2MissBuildDecision: return "miss_build_decision";
@@ -574,10 +577,14 @@ static void phase2PlanHashBool(std::uint64_t& hash, bool value) {
     phase2PlanHashU64(hash, value ? 1ull : 0ull);
 }
 
-static void phase2PlanHashFloat(std::uint64_t& hash, float value) {
+static std::uint32_t phase2PlanFloatBits(float value) {
     std::uint32_t bits = 0;
     std::memcpy(&bits, &value, sizeof(bits));
-    phase2PlanHashU64(hash, bits);
+    return bits;
+}
+
+static void phase2PlanHashFloat(std::uint64_t& hash, float value) {
+    phase2PlanHashU64(hash, phase2PlanFloatBits(value));
 }
 
 static void phase2PlanHashPointer(std::uint64_t& hash, const void* pointer) {
@@ -897,13 +904,716 @@ static std::uint64_t phase2PlanKeyForDraw(const TranslatedDrawInfo& tdi,
     return hash;
 }
 
+struct Phase2PlanMemoVertexAttributeLayout {
+    GLuint location = 0;
+    std::size_t offset = 0;
+    GLenum glType = GL_FLOAT;
+    GLint glComponentCount = 4;
+    bool glNormalized = false;
+    bool glIsInteger = false;
+
+    bool operator==(const Phase2PlanMemoVertexAttributeLayout& other) const {
+        return location == other.location &&
+               offset == other.offset &&
+               glType == other.glType &&
+               glComponentCount == other.glComponentCount &&
+               glNormalized == other.glNormalized &&
+               glIsInteger == other.glIsInteger;
+    }
+};
+
+struct Phase2PlanMemoExtraVertexBuffer {
+    bool dataPresent = false;
+    bool metalBufferPresent = false;
+    std::size_t stride = 0;
+    GLuint divisor = 0;
+    bool constantStep = false;
+    std::vector<Phase2PlanMemoVertexAttributeLayout> attributes;
+
+    bool operator==(const Phase2PlanMemoExtraVertexBuffer& other) const {
+        return dataPresent == other.dataPresent &&
+               metalBufferPresent == other.metalBufferPresent &&
+               stride == other.stride &&
+               divisor == other.divisor &&
+               constantStep == other.constantStep &&
+               attributes == other.attributes;
+    }
+};
+
+struct Phase2PlanMemoTextureBinding {
+    std::uint32_t metalSlot = 0;
+    bool textureBufferBackingMetalBufferPresent = false;
+    bool imageAtomicMetalBufferPresent = false;
+    std::uint32_t imageAtomicBufferSlot = 0xFFFFFFFFu;
+    std::uint32_t reductionMode = GL_WEIGHTED_AVERAGE_ARB;
+    std::uint32_t borderClampMask = 0;
+
+    bool operator==(const Phase2PlanMemoTextureBinding& other) const {
+        return metalSlot == other.metalSlot &&
+               textureBufferBackingMetalBufferPresent ==
+                   other.textureBufferBackingMetalBufferPresent &&
+               imageAtomicMetalBufferPresent ==
+                   other.imageAtomicMetalBufferPresent &&
+               imageAtomicBufferSlot == other.imageAtomicBufferSlot &&
+               reductionMode == other.reductionMode &&
+               borderClampMask == other.borderClampMask;
+    }
+};
+
+struct Phase2PlanMemoBufferBinding {
+    std::uint32_t metalSlot = 0;
+    bool metalBufferPresent = false;
+    bool isVertex = false;
+    bool isFragment = false;
+
+    bool operator==(const Phase2PlanMemoBufferBinding& other) const {
+        return metalSlot == other.metalSlot &&
+               metalBufferPresent == other.metalBufferPresent &&
+               isVertex == other.isVertex &&
+               isFragment == other.isFragment;
+    }
+};
+
+struct Phase2PlanMemoSubmissionSubgroup {
+    AppGLSubmissionGroupKind kind = AppGLSubmissionGroupKind::None;
+    AppGLCommandReason reason = AppGLCommandReason::Legacy;
+
+    bool operator==(const Phase2PlanMemoSubmissionSubgroup& other) const {
+        return kind == other.kind && reason == other.reason;
+    }
+};
+
+struct Phase2PlanMemoSubmissionAccess {
+    AppGLSubmissionResourceKind kind = AppGLSubmissionResourceKind::Texture;
+    std::uint32_t producerBits = 0;
+
+    bool operator==(const Phase2PlanMemoSubmissionAccess& other) const {
+        return kind == other.kind && producerBits == other.producerBits;
+    }
+};
+
+struct Phase2PlanMemoSubmissionTransient {
+    AppGLSubmissionTransientKind kind =
+        AppGLSubmissionTransientKind::ArgumentBufferPayload;
+    AppGLSubmissionOrderingMechanism ordering =
+        AppGLSubmissionOrderingMechanism::None;
+    AppGLCommandReason reason = AppGLCommandReason::Legacy;
+    std::uint32_t slot = 0;
+    std::size_t bytes = 0;
+
+    bool operator==(const Phase2PlanMemoSubmissionTransient& other) const {
+        return kind == other.kind &&
+               ordering == other.ordering &&
+               reason == other.reason &&
+               slot == other.slot &&
+               bytes == other.bytes;
+    }
+};
+
+struct Phase2PlanMemoSubmissionGroup {
+    AppGLSubmissionGroupKind kind = AppGLSubmissionGroupKind::None;
+    AppGLCommandReason primaryReason = AppGLCommandReason::Legacy;
+    bool declared = false;
+    bool argumentBuffersEnabled = false;
+    bool approximateFallbackDisallowed = false;
+    std::uint8_t subgroupCount = 0;
+    std::uint8_t readCount = 0;
+    std::uint8_t writeCount = 0;
+    std::uint8_t transientCount = 0;
+    std::array<Phase2PlanMemoSubmissionSubgroup,
+               AppGLSubmissionGroup::kMaxSubgroups> subgroups{};
+    std::array<Phase2PlanMemoSubmissionAccess,
+               AppGLSubmissionGroup::kMaxResourceAccesses> reads{};
+    std::array<Phase2PlanMemoSubmissionAccess,
+               AppGLSubmissionGroup::kMaxResourceAccesses> writes{};
+    std::array<Phase2PlanMemoSubmissionTransient,
+               AppGLSubmissionGroup::kMaxTransients> transients{};
+
+    bool operator==(const Phase2PlanMemoSubmissionGroup& other) const {
+        if (kind != other.kind ||
+            primaryReason != other.primaryReason ||
+            declared != other.declared ||
+            argumentBuffersEnabled != other.argumentBuffersEnabled ||
+            approximateFallbackDisallowed !=
+                other.approximateFallbackDisallowed ||
+            subgroupCount != other.subgroupCount ||
+            readCount != other.readCount ||
+            writeCount != other.writeCount ||
+            transientCount != other.transientCount) {
+            return false;
+        }
+        for (std::uint8_t i = 0; i < subgroupCount; ++i) {
+            if (!(subgroups[i] == other.subgroups[i])) {
+                return false;
+            }
+        }
+        for (std::uint8_t i = 0; i < readCount; ++i) {
+            if (!(reads[i] == other.reads[i])) {
+                return false;
+            }
+        }
+        for (std::uint8_t i = 0; i < writeCount; ++i) {
+            if (!(writes[i] == other.writes[i])) {
+                return false;
+            }
+        }
+        for (std::uint8_t i = 0; i < transientCount; ++i) {
+            if (!(transients[i] == other.transients[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
+struct Phase2PlanKeyMemoSignature {
+    const GLProgramObject* programObject = nullptr;
+    std::uint64_t executableGeneration = 0;
+    GLuint program = 0;
+    GLuint pipelineEmulationFragmentProgram = 0;
+    const std::string* vertexMSL = nullptr;
+    std::size_t vertexMSLSize = 0;
+    const char* vertexMSLData = nullptr;
+    const std::string* fragmentMSL = nullptr;
+    std::size_t fragmentMSLSize = 0;
+    const char* fragmentMSLData = nullptr;
+    const ShaderReflection* vertexReflection = nullptr;
+    const ShaderReflection* fragmentReflection = nullptr;
+    GLuint vaoName = 0;
+    std::uint32_t vaoGeneration = 0;
+    GLuint drawFboName = 0;
+    GLenum mode = 0;
+    bool hasIndexSource = false;
+    GLenum indexType = 0;
+    bool instanceCountNonDefault = false;
+    bool baseInstanceNonZero = false;
+    bool baseVertexNonZero = false;
+    bool vertexDataPresent = false;
+    bool metalVertexBufferPresent = false;
+    std::size_t vertexStride = 0;
+    std::vector<Phase2PlanMemoVertexAttributeLayout> vertexAttributeLayouts;
+    std::vector<Phase2PlanMemoExtraVertexBuffer> extraVertexBuffers;
+    bool metalIndexBufferPresent = false;
+    std::size_t vertexUniformSize = 0;
+    std::size_t fragmentUniformSize = 0;
+    std::vector<Phase2PlanMemoTextureBinding> fragmentTextures;
+    std::vector<Phase2PlanMemoTextureBinding> vertexTextures;
+    bool depthTestEnabled = false;
+    GLenum depthFunc = GL_LESS;
+    bool depthWriteMask = true;
+    bool cullFaceEnabled = false;
+    GLenum cullFaceMode = GL_BACK;
+    GLenum frontFace = GL_CCW;
+    bool wireframe = false;
+    std::uint32_t sampleMask = 0xFFFFFFFFu;
+    bool stencilTestEnabled = false;
+    GLenum stencilFrontFunc = GL_ALWAYS;
+    GLint stencilFrontRef = 0;
+    GLuint stencilFrontValueMask = 0xFFFFFFFFu;
+    GLenum stencilFrontFail = GL_KEEP;
+    GLenum stencilFrontDepthFail = GL_KEEP;
+    GLenum stencilFrontDepthPass = GL_KEEP;
+    GLuint stencilFrontWriteMask = 0xFFFFFFFFu;
+    GLenum stencilBackFunc = GL_ALWAYS;
+    GLint stencilBackRef = 0;
+    GLuint stencilBackValueMask = 0xFFFFFFFFu;
+    GLenum stencilBackFail = GL_KEEP;
+    GLenum stencilBackDepthFail = GL_KEEP;
+    GLenum stencilBackDepthPass = GL_KEEP;
+    GLuint stencilBackWriteMask = 0xFFFFFFFFu;
+    bool polygonOffsetEnabled = false;
+    std::uint32_t polygonOffsetFactorBits = 0;
+    std::uint32_t polygonOffsetUnitsBits = 0;
+    std::uint32_t polygonOffsetClampBits = 0;
+    bool rasterizerDiscard = false;
+    bool sampleShadingEnabled = false;
+    std::uint32_t minSampleShadingBits = 0;
+    GLenum fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
+    std::uint32_t fragmentShadingRateApiRate = 0;
+    std::uint32_t fragmentShadingRateAttachmentRate = 0;
+    std::uint32_t fragmentShadingRateCombinerOp0 = 0;
+    std::uint32_t fragmentShadingRateCombinerOp1 = 0;
+    GLenum clipOrigin = GL_LOWER_LEFT;
+    bool clipControlYSignFixupEnabled = false;
+    bool markColorAttachmentReadbackFlip = false;
+    bool scissorTestEnabled = false;
+    std::size_t viewportArrayCount = 0;
+    bool blendEnabled = false;
+    GLenum blendSrcRGB = GL_ONE;
+    GLenum blendDstRGB = GL_ZERO;
+    GLenum blendSrcAlpha = GL_ONE;
+    GLenum blendDstAlpha = GL_ZERO;
+    GLenum blendEquationRGB = GL_FUNC_ADD;
+    GLenum blendEquationAlpha = GL_FUNC_ADD;
+    bool blendColorMaskR = true;
+    bool blendColorMaskG = true;
+    bool blendColorMaskB = true;
+    bool blendColorMaskA = true;
+    std::vector<Phase2PlanMemoBufferBinding> uboBindings;
+    std::vector<Phase2PlanMemoBufferBinding> ssboBindings;
+    std::vector<Phase2PlanMemoBufferBinding> atomicCounterBindings;
+    std::size_t sampledTextureNameCount = 0;
+    std::size_t readImageTextureNameCount = 0;
+    std::size_t writtenImageTextureNameCount = 0;
+    bool pipelineStateOutPresent = false;
+    bool pipelineColorFormatOutPresent = false;
+    bool pipelineStateCacheOutPresent = false;
+    bool metalVertexFunctionPresent = false;
+    bool metalFragmentFunctionPresent = false;
+    bool metalVertexFunctionOutPresent = false;
+    bool metalFragmentFunctionOutPresent = false;
+    const void* fboColorTexture = nullptr;
+    std::array<const void*, 7> fboAdditionalColorTextures{};
+    const void* fboDepthStencilTexture = nullptr;
+    GLsizei fboWidth = 0;
+    GLsizei fboHeight = 0;
+    bool fboAttachmentless = false;
+    std::uint32_t fboDefaultLayers = 0;
+    std::uint32_t fboColorArrayLength = 0;
+    std::uint32_t maxEmittedLayer = 0;
+    std::array<std::uint32_t, 8> fboColorSlices{};
+    std::array<std::uint32_t, 8> fboColorLevels{};
+    std::uint32_t fboDepthStencilSlice = 0;
+    std::uint32_t fboDepthStencilLevel = 0;
+    AppGLSubmissionGroupKind fallbackSubgroupKind =
+        AppGLSubmissionGroupKind::None;
+    Phase2PlanMemoSubmissionGroup submissionGroup;
+
+    void clear() {
+        vertexAttributeLayouts.clear();
+        extraVertexBuffers.clear();
+        fragmentTextures.clear();
+        vertexTextures.clear();
+        uboBindings.clear();
+        ssboBindings.clear();
+        atomicCounterBindings.clear();
+    }
+
+    bool operator==(const Phase2PlanKeyMemoSignature& other) const {
+        return programObject == other.programObject &&
+               executableGeneration == other.executableGeneration &&
+               program == other.program &&
+               pipelineEmulationFragmentProgram ==
+                   other.pipelineEmulationFragmentProgram &&
+               vertexMSL == other.vertexMSL &&
+               vertexMSLSize == other.vertexMSLSize &&
+               vertexMSLData == other.vertexMSLData &&
+               fragmentMSL == other.fragmentMSL &&
+               fragmentMSLSize == other.fragmentMSLSize &&
+               fragmentMSLData == other.fragmentMSLData &&
+               vertexReflection == other.vertexReflection &&
+               fragmentReflection == other.fragmentReflection &&
+               vaoName == other.vaoName &&
+               vaoGeneration == other.vaoGeneration &&
+               drawFboName == other.drawFboName &&
+               mode == other.mode &&
+               hasIndexSource == other.hasIndexSource &&
+               indexType == other.indexType &&
+               instanceCountNonDefault == other.instanceCountNonDefault &&
+               baseInstanceNonZero == other.baseInstanceNonZero &&
+               baseVertexNonZero == other.baseVertexNonZero &&
+               vertexDataPresent == other.vertexDataPresent &&
+               metalVertexBufferPresent == other.metalVertexBufferPresent &&
+               vertexStride == other.vertexStride &&
+               vertexAttributeLayouts == other.vertexAttributeLayouts &&
+               extraVertexBuffers == other.extraVertexBuffers &&
+               metalIndexBufferPresent == other.metalIndexBufferPresent &&
+               vertexUniformSize == other.vertexUniformSize &&
+               fragmentUniformSize == other.fragmentUniformSize &&
+               fragmentTextures == other.fragmentTextures &&
+               vertexTextures == other.vertexTextures &&
+               depthTestEnabled == other.depthTestEnabled &&
+               depthFunc == other.depthFunc &&
+               depthWriteMask == other.depthWriteMask &&
+               cullFaceEnabled == other.cullFaceEnabled &&
+               cullFaceMode == other.cullFaceMode &&
+               frontFace == other.frontFace &&
+               wireframe == other.wireframe &&
+               sampleMask == other.sampleMask &&
+               stencilTestEnabled == other.stencilTestEnabled &&
+               stencilFrontFunc == other.stencilFrontFunc &&
+               stencilFrontRef == other.stencilFrontRef &&
+               stencilFrontValueMask == other.stencilFrontValueMask &&
+               stencilFrontFail == other.stencilFrontFail &&
+               stencilFrontDepthFail == other.stencilFrontDepthFail &&
+               stencilFrontDepthPass == other.stencilFrontDepthPass &&
+               stencilFrontWriteMask == other.stencilFrontWriteMask &&
+               stencilBackFunc == other.stencilBackFunc &&
+               stencilBackRef == other.stencilBackRef &&
+               stencilBackValueMask == other.stencilBackValueMask &&
+               stencilBackFail == other.stencilBackFail &&
+               stencilBackDepthFail == other.stencilBackDepthFail &&
+               stencilBackDepthPass == other.stencilBackDepthPass &&
+               stencilBackWriteMask == other.stencilBackWriteMask &&
+               polygonOffsetEnabled == other.polygonOffsetEnabled &&
+               polygonOffsetFactorBits == other.polygonOffsetFactorBits &&
+               polygonOffsetUnitsBits == other.polygonOffsetUnitsBits &&
+               polygonOffsetClampBits == other.polygonOffsetClampBits &&
+               rasterizerDiscard == other.rasterizerDiscard &&
+               sampleShadingEnabled == other.sampleShadingEnabled &&
+               minSampleShadingBits == other.minSampleShadingBits &&
+               fragmentShadingRate == other.fragmentShadingRate &&
+               fragmentShadingRateApiRate ==
+                   other.fragmentShadingRateApiRate &&
+               fragmentShadingRateAttachmentRate ==
+                   other.fragmentShadingRateAttachmentRate &&
+               fragmentShadingRateCombinerOp0 ==
+                   other.fragmentShadingRateCombinerOp0 &&
+               fragmentShadingRateCombinerOp1 ==
+                   other.fragmentShadingRateCombinerOp1 &&
+               clipOrigin == other.clipOrigin &&
+               clipControlYSignFixupEnabled ==
+                   other.clipControlYSignFixupEnabled &&
+               markColorAttachmentReadbackFlip ==
+                   other.markColorAttachmentReadbackFlip &&
+               scissorTestEnabled == other.scissorTestEnabled &&
+               viewportArrayCount == other.viewportArrayCount &&
+               blendEnabled == other.blendEnabled &&
+               blendSrcRGB == other.blendSrcRGB &&
+               blendDstRGB == other.blendDstRGB &&
+               blendSrcAlpha == other.blendSrcAlpha &&
+               blendDstAlpha == other.blendDstAlpha &&
+               blendEquationRGB == other.blendEquationRGB &&
+               blendEquationAlpha == other.blendEquationAlpha &&
+               blendColorMaskR == other.blendColorMaskR &&
+               blendColorMaskG == other.blendColorMaskG &&
+               blendColorMaskB == other.blendColorMaskB &&
+               blendColorMaskA == other.blendColorMaskA &&
+               uboBindings == other.uboBindings &&
+               ssboBindings == other.ssboBindings &&
+               atomicCounterBindings == other.atomicCounterBindings &&
+               sampledTextureNameCount == other.sampledTextureNameCount &&
+               readImageTextureNameCount == other.readImageTextureNameCount &&
+               writtenImageTextureNameCount ==
+                   other.writtenImageTextureNameCount &&
+               pipelineStateOutPresent == other.pipelineStateOutPresent &&
+               pipelineColorFormatOutPresent ==
+                   other.pipelineColorFormatOutPresent &&
+               pipelineStateCacheOutPresent ==
+                   other.pipelineStateCacheOutPresent &&
+               metalVertexFunctionPresent ==
+                   other.metalVertexFunctionPresent &&
+               metalFragmentFunctionPresent ==
+                   other.metalFragmentFunctionPresent &&
+               metalVertexFunctionOutPresent ==
+                   other.metalVertexFunctionOutPresent &&
+               metalFragmentFunctionOutPresent ==
+                   other.metalFragmentFunctionOutPresent &&
+               fboColorTexture == other.fboColorTexture &&
+               fboAdditionalColorTextures ==
+                   other.fboAdditionalColorTextures &&
+               fboDepthStencilTexture == other.fboDepthStencilTexture &&
+               fboWidth == other.fboWidth &&
+               fboHeight == other.fboHeight &&
+               fboAttachmentless == other.fboAttachmentless &&
+               fboDefaultLayers == other.fboDefaultLayers &&
+               fboColorArrayLength == other.fboColorArrayLength &&
+               maxEmittedLayer == other.maxEmittedLayer &&
+               fboColorSlices == other.fboColorSlices &&
+               fboColorLevels == other.fboColorLevels &&
+               fboDepthStencilSlice == other.fboDepthStencilSlice &&
+               fboDepthStencilLevel == other.fboDepthStencilLevel &&
+               fallbackSubgroupKind == other.fallbackSubgroupKind &&
+               submissionGroup == other.submissionGroup;
+    }
+};
+
+struct Phase2PlanKeyMemo {
+    bool valid = false;
+    std::uint64_t key = 0;
+    Phase2PlanKeyMemoSignature signature;
+    Phase2PlanKeyMemoSignature scratch;
+
+    void invalidate() {
+        valid = false;
+        key = 0;
+    }
+};
+
+static Phase2PlanMemoVertexAttributeLayout phase2PlanMemoVertexAttributeLayoutFor(
+    const TranslatedDrawInfo::VertexAttributeLayout& layout)
+{
+    Phase2PlanMemoVertexAttributeLayout memo;
+    memo.location = layout.location;
+    memo.offset = layout.offset;
+    memo.glType = layout.glType;
+    memo.glComponentCount = layout.glComponentCount;
+    memo.glNormalized = layout.glNormalized != GL_FALSE;
+    memo.glIsInteger = layout.glIsInteger;
+    return memo;
+}
+
+static Phase2PlanMemoTextureBinding phase2PlanMemoTextureBindingFor(
+    const TranslatedDrawInfo::TextureBinding& binding)
+{
+    Phase2PlanMemoTextureBinding memo;
+    memo.metalSlot = binding.metalSlot;
+    memo.textureBufferBackingMetalBufferPresent =
+        binding.textureBufferBackingMetalBuffer != nullptr;
+    memo.imageAtomicMetalBufferPresent =
+        binding.imageAtomicMetalBuffer != nullptr;
+    memo.imageAtomicBufferSlot = binding.imageAtomicBufferSlot;
+    memo.reductionMode = binding.reductionMode;
+    memo.borderClampMask = binding.borderClampMask;
+    return memo;
+}
+
+template <typename Binding>
+static Phase2PlanMemoBufferBinding phase2PlanMemoBufferBindingFor(
+    const Binding& binding)
+{
+    Phase2PlanMemoBufferBinding memo;
+    memo.metalSlot = binding.metalSlot;
+    memo.metalBufferPresent = binding.metalBuffer != nullptr;
+    memo.isVertex = binding.isVertex;
+    memo.isFragment = binding.isFragment;
+    return memo;
+}
+
+static Phase2PlanMemoSubmissionGroup phase2PlanMemoSubmissionGroupFor(
+    const AppGLSubmissionGroup& group)
+{
+    Phase2PlanMemoSubmissionGroup memo;
+    memo.kind = group.kind;
+    memo.primaryReason = group.primaryReason;
+    memo.declared = group.declared;
+    memo.argumentBuffersEnabled = group.argumentBuffersEnabled;
+    memo.approximateFallbackDisallowed = group.approximateFallbackDisallowed;
+    memo.subgroupCount = group.subgroupCount;
+    memo.readCount = group.readCount;
+    memo.writeCount = group.writeCount;
+    memo.transientCount = group.transientCount;
+    for (std::uint8_t i = 0; i < group.subgroupCount; ++i) {
+        memo.subgroups[i].kind = group.subgroups[i].kind;
+        memo.subgroups[i].reason = group.subgroups[i].reason;
+    }
+    for (std::uint8_t i = 0; i < group.readCount; ++i) {
+        memo.reads[i].kind = group.reads[i].kind;
+        memo.reads[i].producerBits = group.reads[i].producerBits;
+    }
+    for (std::uint8_t i = 0; i < group.writeCount; ++i) {
+        memo.writes[i].kind = group.writes[i].kind;
+        memo.writes[i].producerBits = group.writes[i].producerBits;
+    }
+    for (std::uint8_t i = 0; i < group.transientCount; ++i) {
+        memo.transients[i].kind = group.transients[i].kind;
+        memo.transients[i].ordering = group.transients[i].ordering;
+        memo.transients[i].reason = group.transients[i].reason;
+        memo.transients[i].slot = group.transients[i].slot;
+        memo.transients[i].bytes = group.transients[i].bytes;
+    }
+    return memo;
+}
+
+static bool phase2PlanBuildKeyMemoSignature(const TranslatedDrawInfo& tdi,
+                                            GLuint vaoName,
+                                            std::uint32_t vaoGeneration,
+                                            GLuint drawFboName,
+                                            GLObjectStore* objects,
+                                            Phase2PlanKeyMemoSignature& out)
+{
+    // Last-key only: avoid rescanning shader reflection on repeated ordinary
+    // current-program draws, while relinks and separable pipeline splices fall
+    // back to the full key path.
+    out.clear();
+    if (objects == nullptr || tdi.pipelineOrSubroutinePlanCacheUnsafe ||
+        tdi.pipelineEmulationFragmentProgram != 0) {
+        return false;
+    }
+
+    const GLProgramObject* program = objects->programs().get(tdi.program);
+    if (program == nullptr || !program->linked || program->separableLinked) {
+        return false;
+    }
+    if (tdi.vertexMSL != &program->vertexMSL ||
+        tdi.vertexReflection != &program->vertexReflection) {
+        return false;
+    }
+    if (!tdi.rasterizerDiscard &&
+        (tdi.fragmentMSL != &program->fragmentMSL ||
+         tdi.fragmentReflection != &program->fragmentReflection)) {
+        return false;
+    }
+    if (tdi.rasterizerDiscard &&
+        ((tdi.fragmentMSL != nullptr &&
+          tdi.fragmentMSL != &program->fragmentMSL) ||
+         (tdi.fragmentReflection != nullptr &&
+          tdi.fragmentReflection != &program->fragmentReflection))) {
+        return false;
+    }
+
+    out.programObject = program;
+    out.executableGeneration = program->executableGeneration;
+    out.program = tdi.program;
+    out.pipelineEmulationFragmentProgram = tdi.pipelineEmulationFragmentProgram;
+    out.vertexMSL = tdi.vertexMSL;
+    out.vertexMSLSize = tdi.vertexMSL != nullptr ? tdi.vertexMSL->size() : 0u;
+    out.vertexMSLData =
+        tdi.vertexMSL != nullptr && !tdi.vertexMSL->empty()
+            ? tdi.vertexMSL->data()
+            : nullptr;
+    out.fragmentMSL = tdi.fragmentMSL;
+    out.fragmentMSLSize =
+        tdi.fragmentMSL != nullptr ? tdi.fragmentMSL->size() : 0u;
+    out.fragmentMSLData =
+        tdi.fragmentMSL != nullptr && !tdi.fragmentMSL->empty()
+            ? tdi.fragmentMSL->data()
+            : nullptr;
+    out.vertexReflection = tdi.vertexReflection;
+    out.fragmentReflection = tdi.fragmentReflection;
+    out.vaoName = vaoName;
+    out.vaoGeneration = vaoGeneration;
+    out.drawFboName = drawFboName;
+    out.mode = tdi.mode;
+    out.hasIndexSource = tdi.indices != nullptr ||
+                         tdi.metalIndexBuffer != nullptr;
+    out.indexType = tdi.indexType;
+    out.instanceCountNonDefault = tdi.instanceCount != 1;
+    out.baseInstanceNonZero = tdi.baseInstance != 0;
+    out.baseVertexNonZero = tdi.baseVertex != 0;
+    out.vertexDataPresent = tdi.vertexData != nullptr;
+    out.metalVertexBufferPresent = tdi.metalVertexBuffer != nullptr;
+    out.vertexStride = tdi.vertexStride;
+    out.vertexAttributeLayouts.reserve(tdi.vertexAttributeLayouts.size());
+    for (const auto& layout : tdi.vertexAttributeLayouts) {
+        out.vertexAttributeLayouts.push_back(
+            phase2PlanMemoVertexAttributeLayoutFor(layout));
+    }
+    out.extraVertexBuffers.reserve(tdi.extraVertexBuffers.size());
+    for (const auto& extra : tdi.extraVertexBuffers) {
+        Phase2PlanMemoExtraVertexBuffer memoExtra;
+        memoExtra.dataPresent = extra.data != nullptr;
+        memoExtra.metalBufferPresent = extra.metalBuffer != nullptr;
+        memoExtra.stride = extra.stride;
+        memoExtra.divisor = extra.divisor;
+        memoExtra.constantStep = extra.constantStep;
+        memoExtra.attributes.reserve(extra.attributes.size());
+        for (const auto& layout : extra.attributes) {
+            memoExtra.attributes.push_back(
+                phase2PlanMemoVertexAttributeLayoutFor(layout));
+        }
+        out.extraVertexBuffers.push_back(std::move(memoExtra));
+    }
+    out.metalIndexBufferPresent = tdi.metalIndexBuffer != nullptr;
+    out.vertexUniformSize = tdi.vertexUniformSize;
+    out.fragmentUniformSize = tdi.fragmentUniformSize;
+    out.fragmentTextures.reserve(tdi.fragmentTextures.size());
+    for (const auto& binding : tdi.fragmentTextures) {
+        out.fragmentTextures.push_back(phase2PlanMemoTextureBindingFor(binding));
+    }
+    out.vertexTextures.reserve(tdi.vertexTextures.size());
+    for (const auto& binding : tdi.vertexTextures) {
+        out.vertexTextures.push_back(phase2PlanMemoTextureBindingFor(binding));
+    }
+    out.depthTestEnabled = tdi.depthTestEnabled;
+    out.depthFunc = tdi.depthFunc;
+    out.depthWriteMask = tdi.depthWriteMask;
+    out.cullFaceEnabled = tdi.cullFaceEnabled;
+    out.cullFaceMode = tdi.cullFaceMode;
+    out.frontFace = tdi.frontFace;
+    out.wireframe = tdi.wireframe;
+    out.sampleMask = tdi.sampleMask;
+    out.stencilTestEnabled = tdi.stencilTestEnabled;
+    out.stencilFrontFunc = tdi.stencilFrontFunc;
+    out.stencilFrontRef = tdi.stencilFrontRef;
+    out.stencilFrontValueMask = tdi.stencilFrontValueMask;
+    out.stencilFrontFail = tdi.stencilFrontFail;
+    out.stencilFrontDepthFail = tdi.stencilFrontDepthFail;
+    out.stencilFrontDepthPass = tdi.stencilFrontDepthPass;
+    out.stencilFrontWriteMask = tdi.stencilFrontWriteMask;
+    out.stencilBackFunc = tdi.stencilBackFunc;
+    out.stencilBackRef = tdi.stencilBackRef;
+    out.stencilBackValueMask = tdi.stencilBackValueMask;
+    out.stencilBackFail = tdi.stencilBackFail;
+    out.stencilBackDepthFail = tdi.stencilBackDepthFail;
+    out.stencilBackDepthPass = tdi.stencilBackDepthPass;
+    out.stencilBackWriteMask = tdi.stencilBackWriteMask;
+    out.polygonOffsetEnabled = tdi.polygonOffsetEnabled;
+    out.polygonOffsetFactorBits = phase2PlanFloatBits(tdi.polygonOffsetFactor);
+    out.polygonOffsetUnitsBits = phase2PlanFloatBits(tdi.polygonOffsetUnits);
+    out.polygonOffsetClampBits = phase2PlanFloatBits(tdi.polygonOffsetClamp);
+    out.rasterizerDiscard = tdi.rasterizerDiscard;
+    out.sampleShadingEnabled = tdi.sampleShadingEnabled;
+    out.minSampleShadingBits = phase2PlanFloatBits(tdi.minSampleShading);
+    out.fragmentShadingRate = tdi.fragmentShadingRate;
+    out.fragmentShadingRateApiRate =
+        tdi.fragmentShadingRateShaderState.apiRate;
+    out.fragmentShadingRateAttachmentRate =
+        tdi.fragmentShadingRateShaderState.attachmentRate;
+    out.fragmentShadingRateCombinerOp0 =
+        tdi.fragmentShadingRateShaderState.combinerOp0;
+    out.fragmentShadingRateCombinerOp1 =
+        tdi.fragmentShadingRateShaderState.combinerOp1;
+    out.clipOrigin = tdi.clipOrigin;
+    out.clipControlYSignFixupEnabled = tdi.clipControlYSignFixupEnabled;
+    out.markColorAttachmentReadbackFlip = tdi.markColorAttachmentReadbackFlip;
+    out.scissorTestEnabled = tdi.scissorTestEnabled;
+    out.viewportArrayCount = tdi.viewportArrayCount;
+    out.blendEnabled = tdi.blend.enabled;
+    out.blendSrcRGB = tdi.blend.srcRGB;
+    out.blendDstRGB = tdi.blend.dstRGB;
+    out.blendSrcAlpha = tdi.blend.srcAlpha;
+    out.blendDstAlpha = tdi.blend.dstAlpha;
+    out.blendEquationRGB = tdi.blend.equationRGB;
+    out.blendEquationAlpha = tdi.blend.equationAlpha;
+    out.blendColorMaskR = tdi.blend.colorMaskR;
+    out.blendColorMaskG = tdi.blend.colorMaskG;
+    out.blendColorMaskB = tdi.blend.colorMaskB;
+    out.blendColorMaskA = tdi.blend.colorMaskA;
+    out.uboBindings.reserve(tdi.uboBindings.size());
+    for (const auto& binding : tdi.uboBindings) {
+        out.uboBindings.push_back(phase2PlanMemoBufferBindingFor(binding));
+    }
+    out.ssboBindings.reserve(tdi.ssboBindings.size());
+    for (const auto& binding : tdi.ssboBindings) {
+        out.ssboBindings.push_back(phase2PlanMemoBufferBindingFor(binding));
+    }
+    out.atomicCounterBindings.reserve(tdi.atomicCounterBindings.size());
+    for (const auto& binding : tdi.atomicCounterBindings) {
+        out.atomicCounterBindings.push_back(
+            phase2PlanMemoBufferBindingFor(binding));
+    }
+    out.sampledTextureNameCount = tdi.sampledTextureNames.size();
+    out.readImageTextureNameCount = tdi.readImageTextureNames.size();
+    out.writtenImageTextureNameCount = tdi.writtenImageTextureNames.size();
+    out.pipelineStateOutPresent = tdi.pipelineStateOut != nullptr;
+    out.pipelineColorFormatOutPresent = tdi.pipelineColorFormatOut != nullptr;
+    out.pipelineStateCacheOutPresent = tdi.pipelineStateCacheOut != nullptr;
+    out.metalVertexFunctionPresent = tdi.metalVertexFunction != nullptr;
+    out.metalFragmentFunctionPresent = tdi.metalFragmentFunction != nullptr;
+    out.metalVertexFunctionOutPresent = tdi.metalVertexFunctionOut != nullptr;
+    out.metalFragmentFunctionOutPresent =
+        tdi.metalFragmentFunctionOut != nullptr;
+    out.fboColorTexture = tdi.fboColorTexture;
+    for (std::size_t i = 0; i < out.fboAdditionalColorTextures.size(); ++i) {
+        out.fboAdditionalColorTextures[i] =
+            tdi.fboAdditionalColorTextures[i];
+    }
+    out.fboDepthStencilTexture = tdi.fboDepthStencilTexture;
+    out.fboWidth = tdi.fboWidth;
+    out.fboHeight = tdi.fboHeight;
+    out.fboAttachmentless = tdi.fboAttachmentless;
+    out.fboDefaultLayers = tdi.fboDefaultLayers;
+    out.fboColorArrayLength = tdi.fboColorArrayLength;
+    out.maxEmittedLayer = tdi.maxEmittedLayer;
+    out.fboColorSlices = tdi.fboColorSlices;
+    out.fboColorLevels = tdi.fboColorLevels;
+    out.fboDepthStencilSlice = tdi.fboDepthStencilSlice;
+    out.fboDepthStencilLevel = tdi.fboDepthStencilLevel;
+    out.fallbackSubgroupKind = tdi.fallbackSubgroupKind;
+    out.submissionGroup = phase2PlanMemoSubmissionGroupFor(tdi.submissionGroup);
+    return true;
+}
+
 static bool phase2PlanCandidateKeyForDraw(const TranslatedDrawInfo& tdi,
                                           GLuint vaoName,
                                           std::uint32_t vaoGeneration,
                                           GLuint drawFboName,
                                           std::uint64_t& outKey,
                                           Phase2PlanRejectReason& outReject,
-                                          GLDrawDetailProfile* detailProfile = nullptr)
+                                          GLDrawDetailProfile* detailProfile = nullptr,
+                                          Phase2PlanKeyMemo* keyMemo = nullptr,
+                                          GLObjectStore* objects = nullptr)
 {
     const bool needsFragmentStage = !tdi.rasterizerDiscard;
     {
@@ -941,10 +1651,32 @@ static bool phase2PlanCandidateKeyForDraw(const TranslatedDrawInfo& tdi,
             return false;
         }
     }
+    bool memoSupported = false;
+    if (keyMemo != nullptr && objects != nullptr) {
+        GLDrawDetailScope detail(
+            detailProfile, GLDrawDetailBucket::Phase2CacheKeyMemoLookup);
+        memoSupported = phase2PlanBuildKeyMemoSignature(
+            tdi,
+            vaoName,
+            vaoGeneration,
+            drawFboName,
+            objects,
+            keyMemo->scratch);
+        if (memoSupported && keyMemo->valid &&
+            keyMemo->signature == keyMemo->scratch) {
+            outKey = keyMemo->key;
+            return true;
+        }
+    }
     {
         GLDrawDetailScope detail(
             detailProfile, GLDrawDetailBucket::Phase2CacheKeyHash);
         outKey = phase2PlanKeyForDraw(tdi, vaoName, vaoGeneration, drawFboName);
+    }
+    if (memoSupported) {
+        keyMemo->signature = keyMemo->scratch;
+        keyMemo->key = outKey;
+        keyMemo->valid = true;
     }
     return true;
 }
@@ -4940,6 +5672,7 @@ struct GLContext::Impl {
         releaseMap(object.metalPipelineStateCache);
         object.metalPipelineColorFormat = 0;
         translatedDrawPlanCache.clear();
+        translatedDrawPlanKeyMemo.invalidate();
         releaseRetainedMetalObject(object.gsPassThroughPipelineState);
         object.gsPassThroughPipelineState = nullptr;
         releaseMap(object.gsPassThroughPipelineStateCache);
@@ -18795,6 +19528,7 @@ struct GLContext::Impl {
     mutable GLDrawDetailProfile drawDetailProfile;
     Phase2PlanKeyProfile phase2PlanKeyProfile;
     std::unordered_map<std::uint64_t, TranslatedDrawPlan> translatedDrawPlanCache;
+    Phase2PlanKeyMemo translatedDrawPlanKeyMemo;
     std::uint64_t translatedDrawPlanGeneration = 0;
     std::unordered_map<NSUInteger, void*> incompleteSampledColorTextures;
     // Slice-B [A]: sparse-buffer MDI can expose stale sampler recipe metadata
@@ -42711,6 +43445,10 @@ bool GLContext::linkProgram(GLuint program) {
     addParsedBlockArrayResources(fallbackTesSrc, 0x10, true);
     addParsedBlockArrayResources(fallbackCsSrc, 0x20, true);
 
+    ++programObject->executableGeneration;
+    if (programObject->executableGeneration == 0) {
+        programObject->executableGeneration = 1;
+    }
     return true;
 }
 
@@ -48951,7 +49689,9 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
             drawFboName,
             translatedPlanKey,
             translatedPlanCandidateReject,
-            &drawDetailProfile);
+            &drawDetailProfile,
+            &translatedDrawPlanKeyMemo,
+            objects.get());
         if (!translatedPlanCandidate) {
             GLDrawDetailScope detail(
                 drawDetailProfile, GLDrawDetailBucket::Phase2MissBuildDecision);

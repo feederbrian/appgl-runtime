@@ -860,6 +860,10 @@ struct GLProgramObject {
     // Unlike attachedShaders, this survives glCreateShaderProgramv's
     // attach-link-detach flow for separable program pipeline stages.
     GLbitfield linkedStageBits = 0;
+    // Monotonic structural identity for the linked shader/reflection payload.
+    // Phase-2 draw-key memoization uses this to trust cached reflection shape
+    // only across draws from the same context-local program executable.
+    std::uint64_t executableGeneration = 1;
     bool deleteRequested = false;
     std::vector<GLProgramUniformInfo> uniforms;
     std::vector<GLProgramAttributeInfo> attributes;
