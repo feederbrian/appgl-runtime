@@ -584,6 +584,8 @@ public:
     const GLObjectStore& objects() const;
     GLStateTracker& state();
     const GLStateTracker& state() const;
+    void noteQueryBegan(GLenum target);
+    void noteQueryEnded(GLenum target);
 
     // Decision H4 extension facade: ExtensionContext exposes these instead
     // of letting modules reach through GLContext internals directly.

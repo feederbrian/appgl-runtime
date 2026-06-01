@@ -6112,6 +6112,7 @@ void APIENTRY glBeginQueryIndexed(GLenum target, GLuint index, GLuint id) {
     query->active = true;
     query->result = 0;
     query->samplesPassedResolved = false;
+    context->noteQueryBegan(target);
     markStateFunction(FunctionId::glBeginQueryIndexed, "Indexed query begin tracks per-(target,index).");
     Runtime::shared().recordBootstrapTrace("glBeginQueryIndexed(target=" + std::to_string(target) + ", index=" + std::to_string(index) + ", id=" + std::to_string(id) + ")");
 }
@@ -6138,9 +6139,10 @@ void APIENTRY glEndQueryIndexed(GLenum target, GLuint index) {
         return;
     }
     context->objects().queries().forEach(
-        [target, index](GLuint /*id*/, GLQueryObject& q) {
+        [target, index, context](GLuint /*id*/, GLQueryObject& q) {
             if (q.active && q.target == target && q.index == index) {
                 q.active = false;
+                context->noteQueryEnded(q.target);
                 switch (q.target) {
                     case GL_PRIMITIVES_GENERATED:
                     case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:

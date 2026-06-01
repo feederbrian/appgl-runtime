@@ -5422,6 +5422,84 @@ static TranslatedDrawPreflightSnapshot makeTranslatedDrawPreflightSnapshot(
     return snapshot;
 }
 
+enum ActiveQueryTargetIndex : std::size_t {
+    ActiveQuerySamplesPassed = 0,
+    ActiveQueryAnySamplesPassed,
+    ActiveQueryAnySamplesPassedConservative,
+    ActiveQueryPrimitivesGenerated,
+    ActiveQueryTransformFeedbackPrimitivesWritten,
+    ActiveQueryTransformFeedbackOverflow,
+    ActiveQueryTransformFeedbackStreamOverflow,
+    ActiveQueryTimeElapsed,
+    ActiveQueryTimestamp,
+    ActiveQueryVerticesSubmitted,
+    ActiveQueryPrimitivesSubmitted,
+    ActiveQueryVertexShaderInvocations,
+    ActiveQueryTessControlShaderPatches,
+    ActiveQueryTessEvaluationShaderInvocations,
+    ActiveQueryGeometryShaderInvocations,
+    ActiveQueryGeometryShaderPrimitivesEmitted,
+    ActiveQueryFragmentShaderInvocations,
+    ActiveQueryComputeShaderInvocations,
+    ActiveQueryClippingInputPrimitives,
+    ActiveQueryClippingOutputPrimitives,
+    kTrackedQueryTargetCount
+};
+
+static int activeQueryTargetIndex(GLenum target)
+{
+    switch (target) {
+        case GL_SAMPLES_PASSED: return ActiveQuerySamplesPassed;
+        case GL_ANY_SAMPLES_PASSED: return ActiveQueryAnySamplesPassed;
+        case GL_ANY_SAMPLES_PASSED_CONSERVATIVE: return ActiveQueryAnySamplesPassedConservative;
+        case GL_PRIMITIVES_GENERATED: return ActiveQueryPrimitivesGenerated;
+        case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN: return ActiveQueryTransformFeedbackPrimitivesWritten;
+        case GL_TRANSFORM_FEEDBACK_OVERFLOW: return ActiveQueryTransformFeedbackOverflow;
+        case GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW: return ActiveQueryTransformFeedbackStreamOverflow;
+        case GL_TIME_ELAPSED: return ActiveQueryTimeElapsed;
+        case GL_TIMESTAMP: return ActiveQueryTimestamp;
+        case GL_VERTICES_SUBMITTED: return ActiveQueryVerticesSubmitted;
+        case GL_PRIMITIVES_SUBMITTED: return ActiveQueryPrimitivesSubmitted;
+        case GL_VERTEX_SHADER_INVOCATIONS: return ActiveQueryVertexShaderInvocations;
+        case GL_TESS_CONTROL_SHADER_PATCHES: return ActiveQueryTessControlShaderPatches;
+        case GL_TESS_EVALUATION_SHADER_INVOCATIONS: return ActiveQueryTessEvaluationShaderInvocations;
+        case GL_GEOMETRY_SHADER_INVOCATIONS: return ActiveQueryGeometryShaderInvocations;
+        case GL_GEOMETRY_SHADER_PRIMITIVES_EMITTED: return ActiveQueryGeometryShaderPrimitivesEmitted;
+        case GL_FRAGMENT_SHADER_INVOCATIONS: return ActiveQueryFragmentShaderInvocations;
+        case GL_COMPUTE_SHADER_INVOCATIONS: return ActiveQueryComputeShaderInvocations;
+        case GL_CLIPPING_INPUT_PRIMITIVES: return ActiveQueryClippingInputPrimitives;
+        case GL_CLIPPING_OUTPUT_PRIMITIVES: return ActiveQueryClippingOutputPrimitives;
+        default: return -1;
+    }
+}
+
+static constexpr std::uint64_t activeQueryTargetBit(ActiveQueryTargetIndex index)
+{
+    return std::uint64_t{1} << static_cast<std::size_t>(index);
+}
+
+static constexpr std::uint64_t kNonGsSampleQueryMask =
+    activeQueryTargetBit(ActiveQuerySamplesPassed) |
+    activeQueryTargetBit(ActiveQueryAnySamplesPassed) |
+    activeQueryTargetBit(ActiveQueryAnySamplesPassedConservative);
+
+static constexpr std::uint64_t kNonGsPrimitiveCounterQueryMask =
+    activeQueryTargetBit(ActiveQueryPrimitivesGenerated) |
+    activeQueryTargetBit(ActiveQueryPrimitivesSubmitted) |
+    activeQueryTargetBit(ActiveQueryClippingInputPrimitives) |
+    activeQueryTargetBit(ActiveQueryClippingOutputPrimitives) |
+    activeQueryTargetBit(ActiveQueryVerticesSubmitted) |
+    activeQueryTargetBit(ActiveQueryVertexShaderInvocations) |
+    activeQueryTargetBit(ActiveQueryFragmentShaderInvocations) |
+    kNonGsSampleQueryMask;
+
+static constexpr std::uint64_t kSubmittedPipelineStatsQueryMask =
+    activeQueryTargetBit(ActiveQueryPrimitivesSubmitted) |
+    activeQueryTargetBit(ActiveQueryClippingInputPrimitives) |
+    activeQueryTargetBit(ActiveQueryClippingOutputPrimitives) |
+    activeQueryTargetBit(ActiveQueryVerticesSubmitted) |
+    activeQueryTargetBit(ActiveQueryVertexShaderInvocations);
+
 }  // namespace
 
 struct GLContext::Impl {
@@ -20477,6 +20555,8 @@ struct GLContext::Impl {
     GLenum transformFeedbackPrimitiveMode = GL_POINTS;
     GLuint boundTransformFeedbackId = 0;
     std::array<GLsizei, GLTransformFeedbackObject::kMaxTransformFeedbackStreams> defaultTransformFeedbackCapturedVertexCount{};
+    std::array<std::uint32_t, kTrackedQueryTargetCount> activeQueryTargetCounts{};
+    std::uint64_t activeQueryTargetMask = 0;
 
     // CKPT85 helpers — Impl methods can't call the public GLContext
     // getters directly without a back-pointer dance, so these inlines
@@ -28771,6 +28851,35 @@ const GLStateTracker& GLContext::state() const {
     return *impl_->state;
 }
 
+void GLContext::noteQueryBegan(GLenum target) {
+    const int index = activeQueryTargetIndex(target);
+    if (index < 0) {
+        return;
+    }
+    auto& count = impl_->activeQueryTargetCounts[static_cast<std::size_t>(index)];
+    if (count == 0) {
+        impl_->activeQueryTargetMask |=
+            (std::uint64_t{1} << static_cast<std::size_t>(index));
+    }
+    ++count;
+}
+
+void GLContext::noteQueryEnded(GLenum target) {
+    const int index = activeQueryTargetIndex(target);
+    if (index < 0) {
+        return;
+    }
+    auto& count = impl_->activeQueryTargetCounts[static_cast<std::size_t>(index)];
+    if (count == 0) {
+        return;
+    }
+    --count;
+    if (count == 0) {
+        impl_->activeQueryTargetMask &=
+            ~(std::uint64_t{1} << static_cast<std::size_t>(index));
+    }
+}
+
 void* GLContext::extensionMetalDevice() const {
     return (__bridge void*)impl_->device;
 }
@@ -29596,6 +29705,11 @@ void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
     GLsizei restartSkipCount)
 {
     if (vertexCount <= 0 || instanceCount <= 0) return;
+    const std::uint64_t activeCounterMask =
+        activeQueryTargetMask & kNonGsPrimitiveCounterQueryMask;
+    const bool tfActive = transformFeedbackActive;
+    if (!tfActive && activeCounterMask == 0) return;
+
     // GL 4.6 §10.1: post-decomposition primitive count for non-GS
     // draws. Strip/loop topologies produce (count - {1,2}) primitives;
     // list topologies produce count / verts-per-prim. Quads aren't a
@@ -29643,12 +29757,15 @@ void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
     }
     prims *= static_cast<std::size_t>(instanceCount);
     const std::size_t vertsTotal = submittedRaw * static_cast<std::size_t>(instanceCount);
-    const bool tfActive = transformFeedbackActive;
+    if (activeCounterMask == 0) return;
+
+    const bool sampleQueryActive =
+        (activeCounterMask & kNonGsSampleQueryMask) != 0;
     bool samplesPassed = prims > 0;
     bool resolvedSamplesPassed = false;
     bool incomingDepthResolved = false;
     float incomingDepth = 0.0f;
-    if (samplesPassed && state != nullptr && state->isEnabled(GL_DEPTH_TEST)) {
+    if (sampleQueryActive && samplesPassed && state != nullptr && state->isEnabled(GL_DEPTH_TEST)) {
         incomingDepthResolved = estimateCurrentVertexWindowDepth(incomingDepth);
         if (incomingDepthResolved && occlusionApproxDepthKnown) {
             samplesPassed = appglDepthCompareForOcclusion(
@@ -29669,7 +29786,7 @@ void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
             }
         }
     }
-    if (samplesPassed && state != nullptr && objects != nullptr) {
+    if (sampleQueryActive && samplesPassed && state != nullptr && objects != nullptr) {
         const GLuint progName = state->currentProgram();
         const GLProgramObject* program = progName == 0
             ? nullptr
@@ -29732,7 +29849,7 @@ void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
             case GL_ANY_SAMPLES_PASSED:
             case GL_ANY_SAMPLES_PASSED_CONSERVATIVE:
                 q.samplesPassedResolved = resolvedSamplesPassed ||
-                    !state->isEnabled(GL_DEPTH_TEST);
+                    state == nullptr || !state->isEnabled(GL_DEPTH_TEST);
                 if (samplesPassed) q.result += 1;
                 break;
             default:
@@ -29746,6 +29863,7 @@ void GLContext::Impl::updateSubmittedPipelineStatsForNonGsDraw(
     GLsizei restartSkipCount)
 {
     if (vertexCount <= 0 || instanceCount <= 0) return;
+    if ((activeQueryTargetMask & kSubmittedPipelineStatsQueryMask) == 0) return;
 
     std::size_t prims = 0;
     const std::size_t n = static_cast<std::size_t>(vertexCount);

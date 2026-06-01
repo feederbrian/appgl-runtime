@@ -2330,6 +2330,10 @@ static void APIENTRY glDeleteQueries(GLsizei n, const GLuint* ids) {
         return;
     }
     for (GLsizei index = 0; index < n; ++index) {
+        if (auto* query = context->objects().queries().get(ids[index]);
+            query != nullptr && query->active) {
+            context->noteQueryEnded(query->target);
+        }
         context->objects().queries().erase(ids[index]);
     }
 }
@@ -2452,6 +2456,7 @@ static void APIENTRY glBeginQuery(GLenum target, GLuint id) {
     query->startTimeNs = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
+    context->noteQueryBegan(target);
 }
 
 static void APIENTRY glEndQuery(GLenum target) {
@@ -2471,9 +2476,10 @@ static void APIENTRY glEndQuery(GLenum target) {
                            "no active query on this target");
         return;
     }
-    context->objects().queries().forEach([target](GLuint /*id*/, GLQueryObject& query) {
+    context->objects().queries().forEach([target, context](GLuint /*id*/, GLQueryObject& query) {
         if (query.active && query.target == target && query.index == 0) {
             query.active = false;
+            context->noteQueryEnded(query.target);
             // Preserve the accumulated result that draw-time hooks
             // produced while the query was active. For query
             // targets the driver doesn't implement yet:
