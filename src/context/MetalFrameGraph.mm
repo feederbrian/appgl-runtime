@@ -136,6 +136,11 @@ static double drawProfileElapsedUs(DrawProfileTimePoint start,
     return std::chrono::duration<double, std::micro>(end - start).count();
 }
 
+static bool envEnabled(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
 struct DrawSubmitProfileSample {
     double totalUs = 0.0;
     double validationUs = 0.0;
@@ -236,6 +241,80 @@ struct DrawSubmitProfile {
         line("metal_draw_call", metalDrawUs);
         line("finalize", finalizeUs);
         line("unattributed", std::max(0.0, totalUs - accounted));
+    }
+};
+
+enum class ParallelEncodeBoundaryReason : std::size_t {
+    SerialPathOnly,
+    Count,
+};
+
+static const char* parallelEncodeBoundaryReasonName(
+    ParallelEncodeBoundaryReason reason) {
+    switch (reason) {
+        case ParallelEncodeBoundaryReason::SerialPathOnly:
+            return "serial_path_only";
+        case ParallelEncodeBoundaryReason::Count:
+            break;
+    }
+    return "unknown";
+}
+
+struct ParallelEncodeFoundationProfile {
+    bool enabled = envEnabled("APPGL_PARALLEL_ENCODE");
+    bool dumpEnabled = enabled && (
+        envEnabled("APPGL_PARALLEL_ENCODE_PROFILE") ||
+        envEnabled("APPGL_DRAW_PROFILE"));
+    std::uint64_t translatedDraws = 0;
+    std::uint64_t candidateDraws = 0;
+    std::uint64_t capturedDraws = 0;
+    std::uint64_t replayedDraws = 0;
+    double serialCaptureUs = 0.0;
+    double serialReplayUs = 0.0;
+    std::array<std::uint64_t,
+               static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count)>
+        boundaryReasons{};
+
+    void recordTranslatedDraw() {
+        if (enabled) {
+            ++translatedDraws;
+        }
+    }
+
+    void recordBoundary(ParallelEncodeBoundaryReason reason) {
+        if (!enabled) {
+            return;
+        }
+        ++boundaryReasons[static_cast<std::size_t>(reason)];
+    }
+
+    void dump() const {
+        if (!dumpEnabled) {
+            return;
+        }
+        std::fprintf(stderr,
+            "[APPGL_PARALLEL_ENCODE] summary translated_draws=%llu "
+            "candidates=%llu captured=%llu replayed=%llu "
+            "serial_capture_us=%.3f serial_replay_us=%.3f\n",
+            static_cast<unsigned long long>(translatedDraws),
+            static_cast<unsigned long long>(candidateDraws),
+            static_cast<unsigned long long>(capturedDraws),
+            static_cast<unsigned long long>(replayedDraws),
+            serialCaptureUs,
+            serialReplayUs);
+        for (std::size_t i = 0;
+             i < static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count);
+             ++i) {
+            if (boundaryReasons[i] == 0) {
+                continue;
+            }
+            const auto reason = static_cast<ParallelEncodeBoundaryReason>(i);
+            std::fprintf(stderr,
+                "[APPGL_PARALLEL_ENCODE] boundary reason=%s count=%llu\n",
+                parallelEncodeBoundaryReasonName(reason),
+                static_cast<unsigned long long>(boundaryReasons[i]));
+        }
+        std::fflush(stderr);
     }
 };
 
@@ -1896,6 +1975,7 @@ struct MetalFrameGraph::Impl {
             ringSlotAcquired = false;
         }
         drawSubmitProfile.dump();
+        parallelEncodeProfile.dump();
         // ADV-14: persist the pipeline binary archive to disk so the
         // next launch gets pre-compiled GPU binaries.
         savePipelineArchive();
@@ -2442,6 +2522,9 @@ struct MetalFrameGraph::Impl {
     bool encodeTranslatedDraw(TranslatedDrawInfo& info) {
         FG_TRACE(@"encodeTranslatedDraw: enter  mode=0x%X verts=%d instances=%d encoder=%p cmdBuf=%p",
                  info.mode, info.vertexCount, info.instanceCount, currentRenderEncoder, currentCommandBuffer);
+        parallelEncodeProfile.recordTranslatedDraw();
+        parallelEncodeProfile.recordBoundary(
+            ParallelEncodeBoundaryReason::SerialPathOnly);
         if (device == nil || commandQueue == nil) {
             return false;
         }
@@ -11504,6 +11587,7 @@ private:
     };
     std::unordered_set<PipelineBuildLogKey, PipelineBuildLogKeyHash> loggedPipelineBuildPrograms;
     DrawSubmitProfile drawSubmitProfile;
+    ParallelEncodeFoundationProfile parallelEncodeProfile;
 
     // ── Encoder state deduplication (OPT-6) ──
     // Track what was last set on the current render encoder. Skip redundant
