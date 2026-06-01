@@ -349,6 +349,172 @@ private:
     GLDrawProfileTimePoint cursor_{};
 };
 
+enum class GLDrawDetailBucket : std::size_t {
+    Phase2ProgramChecks,
+    Phase2ReflectionChecks,
+    Phase2StateCompatibilityChecks,
+    Phase2CacheKeyHash,
+    Phase2LegacyProfileRecord,
+    Phase2CacheLookup,
+    Phase2MissBuildDecision,
+    Phase2PostEncodeCacheUpdate,
+    SubmissionBoundaryChecks,
+    SubmissionPendingProducerReads,
+    SubmissionResourceWrites,
+    SubmissionFramebufferWrites,
+    SubmissionFramegraphHandoff,
+    TranslatedDrawEligibility,
+    TranslatedProgramVaoFboState,
+    TranslatedIndexRangeValidation,
+    TranslatedFixedFunctionTransientHazards,
+    TranslatedFallbackDecision,
+    Count,
+};
+
+struct GLDrawDetailBucketStats {
+    std::uint64_t count = 0;
+    double totalUs = 0.0;
+};
+
+static const char* glDrawDetailParentName(GLDrawDetailBucket bucket) {
+    switch (bucket) {
+        case GLDrawDetailBucket::Phase2ProgramChecks:
+        case GLDrawDetailBucket::Phase2ReflectionChecks:
+        case GLDrawDetailBucket::Phase2StateCompatibilityChecks:
+        case GLDrawDetailBucket::Phase2CacheKeyHash:
+        case GLDrawDetailBucket::Phase2LegacyProfileRecord:
+        case GLDrawDetailBucket::Phase2CacheLookup:
+        case GLDrawDetailBucket::Phase2MissBuildDecision:
+        case GLDrawDetailBucket::Phase2PostEncodeCacheUpdate:
+            return "phase2_plan_lookup";
+        case GLDrawDetailBucket::SubmissionBoundaryChecks:
+        case GLDrawDetailBucket::SubmissionPendingProducerReads:
+        case GLDrawDetailBucket::SubmissionResourceWrites:
+        case GLDrawDetailBucket::SubmissionFramebufferWrites:
+        case GLDrawDetailBucket::SubmissionFramegraphHandoff:
+            return "submission_group";
+        case GLDrawDetailBucket::TranslatedDrawEligibility:
+        case GLDrawDetailBucket::TranslatedProgramVaoFboState:
+        case GLDrawDetailBucket::TranslatedIndexRangeValidation:
+        case GLDrawDetailBucket::TranslatedFixedFunctionTransientHazards:
+        case GLDrawDetailBucket::TranslatedFallbackDecision:
+            return "translated_preflight";
+        case GLDrawDetailBucket::Count:
+            break;
+    }
+    return "unknown";
+}
+
+static const char* glDrawDetailBucketName(GLDrawDetailBucket bucket) {
+    switch (bucket) {
+        case GLDrawDetailBucket::Phase2ProgramChecks: return "program_checks";
+        case GLDrawDetailBucket::Phase2ReflectionChecks: return "reflection_checks";
+        case GLDrawDetailBucket::Phase2StateCompatibilityChecks: return "state_compatibility_checks";
+        case GLDrawDetailBucket::Phase2CacheKeyHash: return "cache_key_hash";
+        case GLDrawDetailBucket::Phase2LegacyProfileRecord: return "legacy_profile_record";
+        case GLDrawDetailBucket::Phase2CacheLookup: return "cache_lookup";
+        case GLDrawDetailBucket::Phase2MissBuildDecision: return "miss_build_decision";
+        case GLDrawDetailBucket::Phase2PostEncodeCacheUpdate: return "post_encode_cache_update";
+        case GLDrawDetailBucket::SubmissionBoundaryChecks: return "boundary_checks";
+        case GLDrawDetailBucket::SubmissionPendingProducerReads: return "pending_producer_reads";
+        case GLDrawDetailBucket::SubmissionResourceWrites: return "resource_writes";
+        case GLDrawDetailBucket::SubmissionFramebufferWrites: return "framebuffer_writes";
+        case GLDrawDetailBucket::SubmissionFramegraphHandoff: return "framegraph_encode_handoff";
+        case GLDrawDetailBucket::TranslatedDrawEligibility: return "draw_eligibility_checks";
+        case GLDrawDetailBucket::TranslatedProgramVaoFboState: return "program_vao_fbo_state";
+        case GLDrawDetailBucket::TranslatedIndexRangeValidation: return "buffer_index_range_validation";
+        case GLDrawDetailBucket::TranslatedFixedFunctionTransientHazards: return "fixed_function_transient_hazards";
+        case GLDrawDetailBucket::TranslatedFallbackDecision: return "fallback_decision";
+        case GLDrawDetailBucket::Count:
+            break;
+    }
+    return "unknown";
+}
+
+struct GLDrawDetailProfile {
+    bool enabled = std::getenv("APPGL_GL_DRAW_DETAIL_PROFILE") != nullptr;
+    std::array<GLDrawDetailBucketStats,
+               static_cast<std::size_t>(GLDrawDetailBucket::Count)> buckets{};
+
+    void record(GLDrawDetailBucket bucket, double us) {
+        if (!enabled) {
+            return;
+        }
+        auto& stats = buckets[static_cast<std::size_t>(bucket)];
+        ++stats.count;
+        stats.totalUs += us;
+    }
+
+    void record(GLDrawDetailBucket bucket,
+                GLDrawProfileTimePoint start,
+                GLDrawProfileTimePoint end) {
+        record(bucket, glDrawProfileElapsedUs(start, end));
+    }
+
+    void dump() const {
+        if (!enabled) {
+            return;
+        }
+        std::uint64_t samples = 0;
+        double totalUs = 0.0;
+        for (const auto& bucket : buckets) {
+            samples += bucket.count;
+            totalUs += bucket.totalUs;
+        }
+        if (samples == 0) {
+            return;
+        }
+        std::fprintf(stderr,
+            "[APPGL_GL_DRAW_DETAIL_PROFILE] summary samples=%llu total_us=%.3f\n",
+            static_cast<unsigned long long>(samples),
+            totalUs);
+        for (std::size_t i = 0; i < static_cast<std::size_t>(GLDrawDetailBucket::Count); ++i) {
+            const auto& bucket = buckets[i];
+            if (bucket.count == 0) {
+                continue;
+            }
+            const auto bucketId = static_cast<GLDrawDetailBucket>(i);
+            std::fprintf(stderr,
+                "[APPGL_GL_DRAW_DETAIL_PROFILE] parent=%s component=%s "
+                "count=%llu total_us=%.3f avg_us=%.3f\n",
+                glDrawDetailParentName(bucketId),
+                glDrawDetailBucketName(bucketId),
+                static_cast<unsigned long long>(bucket.count),
+                bucket.totalUs,
+                bucket.totalUs / static_cast<double>(bucket.count));
+        }
+        std::fflush(stderr);
+    }
+};
+
+class GLDrawDetailScope {
+public:
+    GLDrawDetailScope(GLDrawDetailProfile& profile, GLDrawDetailBucket bucket)
+        : GLDrawDetailScope(profile.enabled ? &profile : nullptr, bucket) {}
+
+    GLDrawDetailScope(GLDrawDetailProfile* profile, GLDrawDetailBucket bucket)
+        : profile_(profile != nullptr && profile->enabled ? profile : nullptr),
+          bucket_(bucket) {
+        if (profile_ != nullptr) {
+            start_ = glDrawProfileNow();
+        }
+    }
+
+    GLDrawDetailScope(const GLDrawDetailScope&) = delete;
+    GLDrawDetailScope& operator=(const GLDrawDetailScope&) = delete;
+
+    ~GLDrawDetailScope() {
+        if (profile_ != nullptr) {
+            profile_->record(bucket_, start_, glDrawProfileNow());
+        }
+    }
+
+private:
+    GLDrawDetailProfile* profile_ = nullptr;
+    GLDrawDetailBucket bucket_ = GLDrawDetailBucket::Count;
+    GLDrawProfileTimePoint start_{};
+};
+
 enum class Phase2PlanRejectReason : std::size_t {
     MissingProgram,
     MissingShader,
@@ -736,33 +902,50 @@ static bool phase2PlanCandidateKeyForDraw(const TranslatedDrawInfo& tdi,
                                           std::uint32_t vaoGeneration,
                                           GLuint drawFboName,
                                           std::uint64_t& outKey,
-                                          Phase2PlanRejectReason& outReject)
+                                          Phase2PlanRejectReason& outReject,
+                                          GLDrawDetailProfile* detailProfile = nullptr)
 {
-    if (tdi.program == 0) {
-        outReject = Phase2PlanRejectReason::MissingProgram;
-        return false;
-    }
     const bool needsFragmentStage = !tdi.rasterizerDiscard;
-    if (tdi.vertexMSL == nullptr || tdi.vertexMSL->empty() ||
-        (needsFragmentStage &&
-         (tdi.fragmentMSL == nullptr || tdi.fragmentMSL->empty()))) {
-        outReject = Phase2PlanRejectReason::MissingShader;
-        return false;
+    {
+        GLDrawDetailScope detail(
+            detailProfile, GLDrawDetailBucket::Phase2ProgramChecks);
+        if (tdi.program == 0) {
+            outReject = Phase2PlanRejectReason::MissingProgram;
+            return false;
+        }
+        if (tdi.vertexMSL == nullptr || tdi.vertexMSL->empty() ||
+            (needsFragmentStage &&
+             (tdi.fragmentMSL == nullptr || tdi.fragmentMSL->empty()))) {
+            outReject = Phase2PlanRejectReason::MissingShader;
+            return false;
+        }
     }
-    if (tdi.vertexReflection == nullptr ||
-        (needsFragmentStage && tdi.fragmentReflection == nullptr)) {
-        outReject = Phase2PlanRejectReason::MissingReflection;
-        return false;
+    {
+        GLDrawDetailScope detail(
+            detailProfile, GLDrawDetailBucket::Phase2ReflectionChecks);
+        if (tdi.vertexReflection == nullptr ||
+            (needsFragmentStage && tdi.fragmentReflection == nullptr)) {
+            outReject = Phase2PlanRejectReason::MissingReflection;
+            return false;
+        }
     }
-    if (tdi.pipelineOrSubroutinePlanCacheUnsafe) {
-        outReject = Phase2PlanRejectReason::ProgramPipelineOrSubroutineState;
-        return false;
+    {
+        GLDrawDetailScope detail(
+            detailProfile, GLDrawDetailBucket::Phase2StateCompatibilityChecks);
+        if (tdi.pipelineOrSubroutinePlanCacheUnsafe) {
+            outReject = Phase2PlanRejectReason::ProgramPipelineOrSubroutineState;
+            return false;
+        }
+        if (phase2PlanHasSideEffect(tdi)) {
+            outReject = Phase2PlanRejectReason::SideEffect;
+            return false;
+        }
     }
-    if (phase2PlanHasSideEffect(tdi)) {
-        outReject = Phase2PlanRejectReason::SideEffect;
-        return false;
+    {
+        GLDrawDetailScope detail(
+            detailProfile, GLDrawDetailBucket::Phase2CacheKeyHash);
+        outKey = phase2PlanKeyForDraw(tdi, vaoName, vaoGeneration, drawFboName);
     }
-    outKey = phase2PlanKeyForDraw(tdi, vaoName, vaoGeneration, drawFboName);
     return true;
 }
 
@@ -3818,6 +4001,7 @@ struct GLContext::Impl {
     ~Impl() {
         phase2PlanKeyProfile.dump();
         drawPathProfile.dump();
+        drawDetailProfile.dump();
         for (auto& entry : incompleteSampledColorTextures) {
             releaseRetainedMetalObject(entry.second);
         }
@@ -4319,80 +4503,97 @@ struct GLContext::Impl {
     void declareTranslatedDrawSubmissionGroup(TranslatedDrawInfo& tdi,
                                               GLuint drawFboName) const {
         AppGLSubmissionGroup& group = tdi.submissionGroup;
-        group.reset(AppGLSubmissionGroupKind::TranslatedDraw,
-                    AppGLCommandReason::TranslatedDraw);
-        group.addSubgroup(AppGLSubmissionGroupKind::TranslatedDraw,
-                          AppGLCommandReason::TranslatedDraw);
-        if (tdi.fallbackSubgroupKind != AppGLSubmissionGroupKind::None) {
-            group.approximateFallbackDisallowed = true;
-            group.addSubgroup(tdi.fallbackSubgroupKind,
+        {
+            GLDrawDetailScope detail(
+                drawDetailProfile, GLDrawDetailBucket::SubmissionBoundaryChecks);
+            group.reset(AppGLSubmissionGroupKind::TranslatedDraw,
+                        AppGLCommandReason::TranslatedDraw);
+            group.addSubgroup(AppGLSubmissionGroupKind::TranslatedDraw,
                               AppGLCommandReason::TranslatedDraw);
-        }
-        const bool forceArgBuf =
-            std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr;
-        group.argumentBuffersEnabled =
-            forceArgBuf ||
-            submissionMslUsesArgumentBuffer(tdi.vertexMSL) ||
-            submissionMslUsesArgumentBuffer(tdi.fragmentMSL);
-        if (group.argumentBuffersEnabled) {
-            group.addSubgroup(AppGLSubmissionGroupKind::ArgumentBinding,
-                              AppGLCommandReason::TranslatedDraw);
-        }
-
-        if (tdi.glVertexBuffer != 0) {
-            group.addRead(AppGLSubmissionResourceKind::Buffer,
-                          tdi.glVertexBuffer, kProducerAll);
-        }
-        if (tdi.glIndexBuffer != 0) {
-            group.addRead(AppGLSubmissionResourceKind::Buffer,
-                          tdi.glIndexBuffer, kProducerAll);
-        }
-        for (const auto& extra : tdi.extraVertexBuffers) {
-            if (extra.glBuffer != 0) {
-                group.addRead(AppGLSubmissionResourceKind::Buffer,
-                              extra.glBuffer, kProducerAll);
+            if (tdi.fallbackSubgroupKind != AppGLSubmissionGroupKind::None) {
+                group.approximateFallbackDisallowed = true;
+                group.addSubgroup(tdi.fallbackSubgroupKind,
+                                  AppGLCommandReason::TranslatedDraw);
+            }
+            const bool forceArgBuf =
+                std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr;
+            group.argumentBuffersEnabled =
+                forceArgBuf ||
+                submissionMslUsesArgumentBuffer(tdi.vertexMSL) ||
+                submissionMslUsesArgumentBuffer(tdi.fragmentMSL);
+            if (group.argumentBuffersEnabled) {
+                group.addSubgroup(AppGLSubmissionGroupKind::ArgumentBinding,
+                                  AppGLCommandReason::TranslatedDraw);
             }
         }
-        for (const auto& ubo : tdi.uboBindings) {
-            group.addRead(AppGLSubmissionResourceKind::Buffer,
-                          ubo.glBufferName, kProducerAll);
+
+        {
+            GLDrawDetailScope detail(
+                drawDetailProfile,
+                GLDrawDetailBucket::SubmissionPendingProducerReads);
+            if (tdi.glVertexBuffer != 0) {
+                group.addRead(AppGLSubmissionResourceKind::Buffer,
+                              tdi.glVertexBuffer, kProducerAll);
+            }
+            if (tdi.glIndexBuffer != 0) {
+                group.addRead(AppGLSubmissionResourceKind::Buffer,
+                              tdi.glIndexBuffer, kProducerAll);
+            }
+            for (const auto& extra : tdi.extraVertexBuffers) {
+                if (extra.glBuffer != 0) {
+                    group.addRead(AppGLSubmissionResourceKind::Buffer,
+                                  extra.glBuffer, kProducerAll);
+                }
+            }
+            for (const auto& ubo : tdi.uboBindings) {
+                group.addRead(AppGLSubmissionResourceKind::Buffer,
+                              ubo.glBufferName, kProducerAll);
+            }
+            for (GLuint textureName : tdi.sampledTextureNames) {
+                group.addRead(AppGLSubmissionResourceKind::Texture,
+                              textureName, kProducerAll);
+            }
+            for (GLuint textureName : tdi.readImageTextureNames) {
+                group.addRead(AppGLSubmissionResourceKind::Texture,
+                              textureName, kProducerAll);
+            }
         }
-        for (GLuint textureName : tdi.sampledTextureNames) {
-            group.addRead(AppGLSubmissionResourceKind::Texture,
-                          textureName, kProducerAll);
+        {
+            GLDrawDetailScope detail(
+                drawDetailProfile, GLDrawDetailBucket::SubmissionResourceWrites);
+            for (GLuint textureName : tdi.writtenImageTextureNames) {
+                group.addWrite(AppGLSubmissionResourceKind::Texture,
+                               textureName, kProducerStorageImageWrite);
+            }
+            for (const auto& ssbo : tdi.ssboBindings) {
+                group.addRead(AppGLSubmissionResourceKind::Buffer,
+                              ssbo.glBufferName, kProducerAll);
+                group.addWrite(AppGLSubmissionResourceKind::Buffer,
+                               ssbo.glBufferName, kProducerShaderStorageWrite);
+            }
+            for (const auto& atomic : tdi.atomicCounterBindings) {
+                group.addRead(AppGLSubmissionResourceKind::Buffer,
+                              atomic.glBufferName, kProducerAll);
+                group.addWrite(AppGLSubmissionResourceKind::Buffer,
+                               atomic.glBufferName, kProducerAtomicCounterWrite);
+            }
         }
-        for (GLuint textureName : tdi.readImageTextureNames) {
-            group.addRead(AppGLSubmissionResourceKind::Texture,
-                          textureName, kProducerAll);
-        }
-        for (GLuint textureName : tdi.writtenImageTextureNames) {
-            group.addWrite(AppGLSubmissionResourceKind::Texture,
-                           textureName, kProducerStorageImageWrite);
-        }
-        for (const auto& ssbo : tdi.ssboBindings) {
-            group.addRead(AppGLSubmissionResourceKind::Buffer,
-                          ssbo.glBufferName, kProducerAll);
-            group.addWrite(AppGLSubmissionResourceKind::Buffer,
-                           ssbo.glBufferName, kProducerShaderStorageWrite);
-        }
-        for (const auto& atomic : tdi.atomicCounterBindings) {
-            group.addRead(AppGLSubmissionResourceKind::Buffer,
-                          atomic.glBufferName, kProducerAll);
-            group.addWrite(AppGLSubmissionResourceKind::Buffer,
-                           atomic.glBufferName, kProducerAtomicCounterWrite);
-        }
-        if (drawFboName == 0) {
-            group.addWrite(AppGLSubmissionResourceKind::DefaultFramebuffer,
-                           0,
-                           kProducerFboColorWrite |
-                               kProducerFboDepthStencilWrite);
-        } else if (const GLFramebufferObject* fbo =
-                       objects != nullptr
-                           ? objects->framebuffers().get(drawFboName)
-                           : nullptr) {
-            GpuResourceWriteSet writes;
-            appendFramebufferAttachmentWrites(writes, *fbo);
-            appendSubmissionWrites(group, writes);
+        {
+            GLDrawDetailScope detail(
+                drawDetailProfile, GLDrawDetailBucket::SubmissionFramebufferWrites);
+            if (drawFboName == 0) {
+                group.addWrite(AppGLSubmissionResourceKind::DefaultFramebuffer,
+                               0,
+                               kProducerFboColorWrite |
+                                   kProducerFboDepthStencilWrite);
+            } else if (const GLFramebufferObject* fbo =
+                           objects != nullptr
+                               ? objects->framebuffers().get(drawFboName)
+                               : nullptr) {
+                GpuResourceWriteSet writes;
+                appendFramebufferAttachmentWrites(writes, *fbo);
+                appendSubmissionWrites(group, writes);
+            }
         }
     }
 
@@ -18591,6 +18792,7 @@ struct GLContext::Impl {
     std::unique_ptr<GLObjectStore> objects;
     std::unique_ptr<GLStateTracker> state;
     GLDrawPathProfile drawPathProfile;
+    mutable GLDrawDetailProfile drawDetailProfile;
     Phase2PlanKeyProfile phase2PlanKeyProfile;
     std::unordered_map<std::uint64_t, TranslatedDrawPlan> translatedDrawPlanCache;
     std::uint64_t translatedDrawPlanGeneration = 0;
@@ -48588,83 +48790,94 @@ static bool anyQueryObjectActive(GLObjectStore* objects)
 // candidate: sister-pattern leverage at the call-site-wrapper level.
 bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
     const auto wrapperPrepStart = drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
-    prepareFp64VertexSidecars(tdi);
-    GLVertexArrayObject* currentVao = currentVertexArrayOrDefault();
-    appendCurrentGenericVertexAttributes(tdi, currentVao);
-    const GLuint drawFboName = state->boundDrawFramebuffer();
-    if (drawFboName != 0 &&
-        translatedDrawHasClipControlYSignParameter(tdi)) {
-        if (const GLFramebufferObject* fbo =
-                objects->framebuffers().get(drawFboName)) {
-            tdi.clipControlYSignFixupEnabled =
-                framebufferUsesRenderbufferOnlyColorTargets(*fbo);
-        }
-    } else {
-        tdi.clipControlYSignFixupEnabled = false;
+    GLVertexArrayObject* currentVao = nullptr;
+    GLuint drawFboName = 0;
+    {
+        GLDrawDetailScope detail(
+            drawDetailProfile, GLDrawDetailBucket::TranslatedProgramVaoFboState);
+        prepareFp64VertexSidecars(tdi);
+        currentVao = currentVertexArrayOrDefault();
+        appendCurrentGenericVertexAttributes(tdi, currentVao);
+        drawFboName = state->boundDrawFramebuffer();
     }
-    if (drawFboName != 0) {
-        if (const GLFramebufferObject* drawFbo =
-                objects->framebuffers().get(drawFboName)) {
-            auto attachmentLiveExact = [&](GLenum attachment) {
-                auto it = drawFbo->attachments.find(attachment);
-                return it != drawFbo->attachments.end() &&
-                       it->second.kind != GLFramebufferAttachment::Kind::None &&
-                       it->second.object != 0;
-            };
-            const bool hasDepth =
-                attachmentLiveExact(GL_DEPTH_ATTACHMENT) ||
-                attachmentLiveExact(GL_DEPTH_STENCIL_ATTACHMENT);
-            const bool hasStencil =
-                attachmentLiveExact(GL_STENCIL_ATTACHMENT) ||
-                attachmentLiveExact(GL_DEPTH_STENCIL_ATTACHMENT);
-            if (!hasDepth) {
-                tdi.depthTestEnabled = false;
-                tdi.depthWriteMask = false;
+    {
+        GLDrawDetailScope detail(
+            drawDetailProfile,
+            GLDrawDetailBucket::TranslatedFixedFunctionTransientHazards);
+        if (drawFboName != 0 &&
+            translatedDrawHasClipControlYSignParameter(tdi)) {
+            if (const GLFramebufferObject* fbo =
+                    objects->framebuffers().get(drawFboName)) {
+                tdi.clipControlYSignFixupEnabled =
+                    framebufferUsesRenderbufferOnlyColorTargets(*fbo);
             }
-            if (!hasStencil) {
-                tdi.stencilTestEnabled = false;
-            }
-        }
-    }
-    if (mslWritesRenderTargetArrayIndex(tdi.vertexMSL) &&
-        tdi.fboColorArrayLength == 0) {
-        if (drawFboName == 0) {
-            tdi.fboColorArrayLength = 1;
         } else {
-            GLsizei fboW = 0, fboH = 0;
-            void* fboDSTex = nullptr;
-            std::uint32_t fboArrayLen = 0;
-            std::uint32_t fboDSSlice = 0;
-            std::uint32_t fboDSLevel = 0;
-            std::array<void*, 7> extraColTex = {};
-            std::array<std::uint32_t, 8> colSlices = {};
-            std::array<std::uint32_t, 8> colLevels = {};
-            void* fboColTex = resolveFBOColorTarget(
-                fboW, fboH, fboDSTex, &fboArrayLen,
-                &extraColTex, &colSlices, &colLevels,
-                &fboDSSlice, &fboDSLevel);
-            if (fboColTex != nullptr || fboDSTex != nullptr) {
-                tdi.fboColorTexture = fboColTex;
-                tdi.fboAdditionalColorTextures = extraColTex;
-                tdi.fboColorSlices = colSlices;
-                tdi.fboColorLevels = colLevels;
-                tdi.fboDepthStencilTexture = fboDSTex;
-                tdi.fboDepthStencilSlice = fboDSSlice;
-                tdi.fboDepthStencilLevel = fboDSLevel;
-                tdi.fboWidth = fboW;
-                tdi.fboHeight = fboH;
-                if (fboColTex != nullptr) {
-                    tdi.fboColorArrayLength =
-                        fboArrayLen > 0 ? fboArrayLen : 1u;
+            tdi.clipControlYSignFixupEnabled = false;
+        }
+        if (drawFboName != 0) {
+            if (const GLFramebufferObject* drawFbo =
+                    objects->framebuffers().get(drawFboName)) {
+                auto attachmentLiveExact = [&](GLenum attachment) {
+                    auto it = drawFbo->attachments.find(attachment);
+                    return it != drawFbo->attachments.end() &&
+                           it->second.kind != GLFramebufferAttachment::Kind::None &&
+                           it->second.object != 0;
+                };
+                const bool hasDepth =
+                    attachmentLiveExact(GL_DEPTH_ATTACHMENT) ||
+                    attachmentLiveExact(GL_DEPTH_STENCIL_ATTACHMENT);
+                const bool hasStencil =
+                    attachmentLiveExact(GL_STENCIL_ATTACHMENT) ||
+                    attachmentLiveExact(GL_DEPTH_STENCIL_ATTACHMENT);
+                if (!hasDepth) {
+                    tdi.depthTestEnabled = false;
+                    tdi.depthWriteMask = false;
+                }
+                if (!hasStencil) {
+                    tdi.stencilTestEnabled = false;
                 }
             }
         }
-    }
-    if (!tdi.markColorAttachmentReadbackFlip &&
-        tdi.viewportArrayCount > 1 &&
-        mslWritesViewportArrayIndex(tdi.vertexMSL) &&
-        tdi.clipOrigin == GL_LOWER_LEFT) {
-        tdi.markColorAttachmentReadbackFlip = true;
+        if (mslWritesRenderTargetArrayIndex(tdi.vertexMSL) &&
+            tdi.fboColorArrayLength == 0) {
+            if (drawFboName == 0) {
+                tdi.fboColorArrayLength = 1;
+            } else {
+                GLsizei fboW = 0, fboH = 0;
+                void* fboDSTex = nullptr;
+                std::uint32_t fboArrayLen = 0;
+                std::uint32_t fboDSSlice = 0;
+                std::uint32_t fboDSLevel = 0;
+                std::array<void*, 7> extraColTex = {};
+                std::array<std::uint32_t, 8> colSlices = {};
+                std::array<std::uint32_t, 8> colLevels = {};
+                void* fboColTex = resolveFBOColorTarget(
+                    fboW, fboH, fboDSTex, &fboArrayLen,
+                    &extraColTex, &colSlices, &colLevels,
+                    &fboDSSlice, &fboDSLevel);
+                if (fboColTex != nullptr || fboDSTex != nullptr) {
+                    tdi.fboColorTexture = fboColTex;
+                    tdi.fboAdditionalColorTextures = extraColTex;
+                    tdi.fboColorSlices = colSlices;
+                    tdi.fboColorLevels = colLevels;
+                    tdi.fboDepthStencilTexture = fboDSTex;
+                    tdi.fboDepthStencilSlice = fboDSSlice;
+                    tdi.fboDepthStencilLevel = fboDSLevel;
+                    tdi.fboWidth = fboW;
+                    tdi.fboHeight = fboH;
+                    if (fboColTex != nullptr) {
+                        tdi.fboColorArrayLength =
+                            fboArrayLen > 0 ? fboArrayLen : 1u;
+                    }
+                }
+            }
+        }
+        if (!tdi.markColorAttachmentReadbackFlip &&
+            tdi.viewportArrayCount > 1 &&
+            mslWritesViewportArrayIndex(tdi.vertexMSL) &&
+            tdi.clipOrigin == GL_LOWER_LEFT) {
+            tdi.markColorAttachmentReadbackFlip = true;
+        }
     }
 
     if (drawPathProfile.enabled) {
@@ -48681,26 +48894,36 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
     }
     const auto phase2PlanLookupStart =
         drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
-    const GLuint planVaoName = state->boundVertexArray();
-    const std::uint32_t planVaoGeneration =
-        currentVao != nullptr ? currentVao->attribGeneration : 0u;
-    tdi.pipelineOrSubroutinePlanCacheUnsafe =
-        currentDrawHasProgramPipelineOrSubroutinePlanCacheHazard(
-            state.get(), objects.get());
-    tdi.parallelEncodeQueryOrTransformFeedbackHazard =
-        conditionalRenderMode != 0 ||
-        isTfActiveOnBoundImpl() ||
-        anyQueryObjectActive(objects.get());
-    tdi.parallelEncodeTessMeshOrGeometryHazard =
-        currentDrawHasParallelEncodeTessMeshOrGeometryHazard(
-            state.get(), objects.get());
-    tdi.parallelEncodePrimitiveExpansionHazard =
-        parallelEncodeModeRequiresPrimitiveExpansion(tdi.mode);
-    phase2PlanKeyProfile.record(
-        tdi,
-        planVaoName,
-        planVaoGeneration,
-        drawFboName);
+    GLuint planVaoName = 0;
+    std::uint32_t planVaoGeneration = 0;
+    {
+        GLDrawDetailScope detail(
+            drawDetailProfile, GLDrawDetailBucket::Phase2StateCompatibilityChecks);
+        planVaoName = state->boundVertexArray();
+        planVaoGeneration =
+            currentVao != nullptr ? currentVao->attribGeneration : 0u;
+        tdi.pipelineOrSubroutinePlanCacheUnsafe =
+            currentDrawHasProgramPipelineOrSubroutinePlanCacheHazard(
+                state.get(), objects.get());
+        tdi.parallelEncodeQueryOrTransformFeedbackHazard =
+            conditionalRenderMode != 0 ||
+            isTfActiveOnBoundImpl() ||
+            anyQueryObjectActive(objects.get());
+        tdi.parallelEncodeTessMeshOrGeometryHazard =
+            currentDrawHasParallelEncodeTessMeshOrGeometryHazard(
+                state.get(), objects.get());
+        tdi.parallelEncodePrimitiveExpansionHazard =
+            parallelEncodeModeRequiresPrimitiveExpansion(tdi.mode);
+    }
+    {
+        GLDrawDetailScope detail(
+            drawDetailProfile, GLDrawDetailBucket::Phase2LegacyProfileRecord);
+        phase2PlanKeyProfile.record(
+            tdi,
+            planVaoName,
+            planVaoGeneration,
+            drawFboName);
+    }
     TranslatedDrawPlan stagedTranslatedPlan;
     std::string translatedPlanRejectReason;
     std::uint64_t translatedPlanKey = 0;
@@ -48727,31 +48950,46 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
             planVaoGeneration,
             drawFboName,
             translatedPlanKey,
-            translatedPlanCandidateReject);
+            translatedPlanCandidateReject,
+            &drawDetailProfile);
         if (!translatedPlanCandidate) {
+            GLDrawDetailScope detail(
+                drawDetailProfile, GLDrawDetailBucket::Phase2MissBuildDecision);
             translatedPlanReason =
                 phase2PlanRejectReasonName(translatedPlanCandidateReject);
         } else if (translatedPlanForceMiss) {
+            GLDrawDetailScope detail(
+                drawDetailProfile, GLDrawDetailBucket::Phase2MissBuildDecision);
             translatedPlanDecision = "miss";
             translatedPlanReason = "force_miss";
             translatedPlanOut = &stagedTranslatedPlan;
         } else {
-            auto planIt = translatedDrawPlanCache.find(translatedPlanKey);
+            auto planIt = translatedDrawPlanCache.end();
+            {
+                GLDrawDetailScope detail(
+                    drawDetailProfile, GLDrawDetailBucket::Phase2CacheLookup);
+                planIt = translatedDrawPlanCache.find(translatedPlanKey);
+            }
             if (planIt != translatedDrawPlanCache.end()) {
                 translatedPlanDecision = "hit";
                 translatedPlanReason = "cache";
                 translatedPlanIn = &planIt->second;
                 translatedPlanTraceGeneration = planIt->second.generation;
-            } else if (translatedDrawPlanCache.size() >=
-                       Phase2PlanKeyProfile::kMaxTrackedKeys) {
-                translatedPlanDecision = "reject";
-                translatedPlanReason =
-                    phase2PlanRejectReasonName(
-                        Phase2PlanRejectReason::KeyCapacity);
             } else {
-                translatedPlanDecision = "miss";
-                translatedPlanReason = "cold";
-                translatedPlanOut = &stagedTranslatedPlan;
+                GLDrawDetailScope detail(
+                    drawDetailProfile,
+                    GLDrawDetailBucket::Phase2MissBuildDecision);
+                if (translatedDrawPlanCache.size() >=
+                    Phase2PlanKeyProfile::kMaxTrackedKeys) {
+                    translatedPlanDecision = "reject";
+                    translatedPlanReason =
+                        phase2PlanRejectReasonName(
+                            Phase2PlanRejectReason::KeyCapacity);
+                } else {
+                    translatedPlanDecision = "miss";
+                    translatedPlanReason = "cold";
+                    translatedPlanOut = &stagedTranslatedPlan;
+                }
             }
         }
     }
@@ -48760,28 +48998,36 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                                phase2PlanLookupStart,
                                glDrawProfileNow());
     }
-    tdi.translatedPlan = translatedPlanIn;
-    tdi.translatedPlanOut = translatedPlanOut;
-    tdi.translatedPlanRejectReasonOut = &translatedPlanRejectReason;
+    {
+        GLDrawDetailScope detail(
+            drawDetailProfile, GLDrawDetailBucket::SubmissionFramegraphHandoff);
+        tdi.translatedPlan = translatedPlanIn;
+        tdi.translatedPlanOut = translatedPlanOut;
+        tdi.translatedPlanRejectReasonOut = &translatedPlanRejectReason;
+    }
     const auto framegraphEncodeStart = drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
     const bool ok = frameGraph->encodeTranslatedDraw(tdi);
     tdi.translatedPlan = nullptr;
     tdi.translatedPlanOut = nullptr;
     tdi.translatedPlanRejectReasonOut = nullptr;
-    if (translatedPlanCacheEnabled && translatedPlanCandidate) {
-        if (!translatedPlanRejectReason.empty()) {
-            translatedPlanDecision = "reject";
-            translatedPlanReason = translatedPlanRejectReason.c_str();
-            if (translatedPlanIn != nullptr) {
-                translatedDrawPlanCache.erase(translatedPlanKey);
-                translatedPlanTraceGeneration = 0;
+    {
+        GLDrawDetailScope detail(
+            drawDetailProfile, GLDrawDetailBucket::Phase2PostEncodeCacheUpdate);
+        if (translatedPlanCacheEnabled && translatedPlanCandidate) {
+            if (!translatedPlanRejectReason.empty()) {
+                translatedPlanDecision = "reject";
+                translatedPlanReason = translatedPlanRejectReason.c_str();
+                if (translatedPlanIn != nullptr) {
+                    translatedDrawPlanCache.erase(translatedPlanKey);
+                    translatedPlanTraceGeneration = 0;
+                }
+            } else if (ok && translatedPlanOut != nullptr &&
+                       stagedTranslatedPlan.valid &&
+                       !translatedPlanForceMiss) {
+                stagedTranslatedPlan.generation = ++translatedDrawPlanGeneration;
+                translatedPlanTraceGeneration = stagedTranslatedPlan.generation;
+                translatedDrawPlanCache[translatedPlanKey] = stagedTranslatedPlan;
             }
-        } else if (ok && translatedPlanOut != nullptr &&
-                   stagedTranslatedPlan.valid &&
-                   !translatedPlanForceMiss) {
-            stagedTranslatedPlan.generation = ++translatedDrawPlanGeneration;
-            translatedPlanTraceGeneration = stagedTranslatedPlan.generation;
-            translatedDrawPlanCache[translatedPlanKey] = stagedTranslatedPlan;
         }
     }
     if (translatedPlanTrace) {
@@ -50394,24 +50640,44 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     }
 
     drawProfile.mark(GLDrawProfileBucket::SpecialPathChecks);
-    if (program != nullptr && program->hasTranslatedPipeline) {
+    const bool translatedDrawArraysEligible = [&]() {
+        GLDrawDetailScope detail(
+            impl_->drawDetailProfile,
+            GLDrawDetailBucket::TranslatedDrawEligibility);
+        return program != nullptr && program->hasTranslatedPipeline;
+    }();
+    if (translatedDrawArraysEligible) {
         // GL 4.6 §22.1 / §22.3 — non-GS draws credit the
         // PRIMITIVES_GENERATED and TRANSFORM_FEEDBACK_PRIMITIVES_-
         // WRITTEN counters with the input-primitive count. GS-
         // emulated draws already counted post-GS primitives inside
         // writeGsXfbAndCheckDiscard, so skip this path to avoid
         // double-counting.
-        if (!program->gsPresent) {
-            impl_->updatePrimitiveCountersForNonGsDraw(mode, count, 1);
+        GLuint vaoName = 0;
+        GLVertexArrayObject* vao = nullptr;
+        {
+            GLDrawDetailScope detail(
+                impl_->drawDetailProfile,
+                GLDrawDetailBucket::TranslatedProgramVaoFboState);
+            if (!program->gsPresent) {
+                impl_->updatePrimitiveCountersForNonGsDraw(mode, count, 1);
+            }
+            vaoName = impl_->state->boundVertexArray();
+            vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
         }
-        const GLuint vaoName = impl_->state->boundVertexArray();
-        GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
         // Phase 8X Group 4d follow-up³ — name each fall-through gate to BAR's log.
-        const bool gateEmpty = (vao == nullptr || vao->attributes.empty());
+        bool gateEmpty = false;
         // Attributeless draw path: vertex shader has no vertex inputs
         // (generates its own vertices via gl_VertexID / [[vertex_id]]).
-        const bool attributelessDraw = (vao != nullptr &&
-            program->vertexReflection.vertexInputs.empty());
+        bool attributelessDraw = false;
+        {
+            GLDrawDetailScope detail(
+                impl_->drawDetailProfile,
+                GLDrawDetailBucket::TranslatedFallbackDecision);
+            gateEmpty = (vao == nullptr || vao->attributes.empty());
+            attributelessDraw = (vao != nullptr &&
+                program->vertexReflection.vertexInputs.empty());
+        }
         drawProfile.mark(GLDrawProfileBucket::TranslatedPreflight);
         if (attributelessDraw) {
             TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
@@ -50489,8 +50755,15 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
         }
         if (vao != nullptr && !vao->attributes.empty()) {
             bool vaoLayoutCacheHit = false;
-            const auto& vaoLayout =
-                cachedVertexArrayLayout(*vao, false, &vaoLayoutCacheHit);
+            const GLVertexArrayCachedLayout* vaoLayoutPtr = nullptr;
+            {
+                GLDrawDetailScope detail(
+                    impl_->drawDetailProfile,
+                    GLDrawDetailBucket::TranslatedProgramVaoFboState);
+                vaoLayoutPtr =
+                    &cachedVertexArrayLayout(*vao, false, &vaoLayoutCacheHit);
+            }
+            const auto& vaoLayout = *vaoLayoutPtr;
             drawProfile.mark(GLDrawProfileBucket::VaoLayout);
             const bool foundEnabledAttrib = vaoLayout.hasEnabledAttributes;
             if (!foundEnabledAttrib &&
@@ -51151,12 +51424,31 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
         }
     }
 
-    if (program != nullptr && program->hasTranslatedPipeline) {
-        const GLuint vaoName = impl_->state->boundVertexArray();
-        GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+    const bool translatedDrawArraysInstancedEligible = [&]() {
+        GLDrawDetailScope detail(
+            impl_->drawDetailProfile,
+            GLDrawDetailBucket::TranslatedDrawEligibility);
+        return program != nullptr && program->hasTranslatedPipeline;
+    }();
+    if (translatedDrawArraysInstancedEligible) {
+        GLuint vaoName = 0;
+        GLVertexArrayObject* vao = nullptr;
+        {
+            GLDrawDetailScope detail(
+                impl_->drawDetailProfile,
+                GLDrawDetailBucket::TranslatedProgramVaoFboState);
+            vaoName = impl_->state->boundVertexArray();
+            vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+        }
         // Attributeless instanced draw path: vertex shader has no vertex inputs.
-        const bool attributelessInstDraw = (vao != nullptr &&
-            program->vertexReflection.vertexInputs.empty());
+        bool attributelessInstDraw = false;
+        {
+            GLDrawDetailScope detail(
+                impl_->drawDetailProfile,
+                GLDrawDetailBucket::TranslatedFallbackDecision);
+            attributelessInstDraw = (vao != nullptr &&
+                program->vertexReflection.vertexInputs.empty());
+        }
         if (attributelessInstDraw) {
             TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
             tdi.mode = mode;
@@ -51227,8 +51519,15 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
         }
         if (vao != nullptr && !vao->attributes.empty()) {
             bool vaoLayoutCacheHit = false;
-            const auto& vaoLayout =
-                cachedVertexArrayLayout(*vao, true, &vaoLayoutCacheHit);
+            const GLVertexArrayCachedLayout* vaoLayoutPtr = nullptr;
+            {
+                GLDrawDetailScope detail(
+                    impl_->drawDetailProfile,
+                    GLDrawDetailBucket::TranslatedProgramVaoFboState);
+                vaoLayoutPtr =
+                    &cachedVertexArrayLayout(*vao, true, &vaoLayoutCacheHit);
+            }
+            const auto& vaoLayout = *vaoLayoutPtr;
             GLBufferObject* vbo = (vaoLayout.primaryBufferName != 0)
                 ? impl_->objects->buffers().get(vaoLayout.primaryBufferName)
                 : nullptr;
@@ -51461,101 +51760,109 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     drawProfile.mark(GLDrawProfileBucket::DrawablePrep);
 
     // Resolve element buffer early — needed by both translated and solid paths.
-    const GLuint vaoName = impl_->state->boundVertexArray();
-    GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
-    if (vao == nullptr) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
-    }
-    const GLuint elementBufferName = vao->elementArrayBuffer;
+    GLuint vaoName = 0;
+    GLVertexArrayObject* vao = nullptr;
+    GLuint elementBufferName = 0;
     GLenum effectiveType = type;
     const void* effectivePtr = nullptr;
     GLBufferObject* elementBuffer = nullptr;
     std::size_t indexOffset = 0;
-
-    // Sprint 7 #9 (CKPT65): GL 2.x compatibility — when no
-    // GL_ELEMENT_ARRAY_BUFFER is bound, the `indices` parameter is a
-    // client-side pointer to `count` indices in CPU memory (not a
-    // buffer offset). Materialize the data into a thread-local scratch
-    // buffer, applying GL_UNSIGNED_BYTE→GL_UNSIGNED_SHORT promotion
-    // the same way the buffer-bound path does. CTS
-    // `transform_feedback.{capture,query,discard}_vertex_*` tests use
-    // this pattern with a stack-allocated GLuint[] passed directly to
-    // glDrawElements.
-    thread_local std::vector<std::uint8_t> clientIndexScratch;
-    if (elementBufferName == 0) {
-        if (count > 0 && indices == nullptr) {
+    {
+        GLDrawDetailScope detail(
+            impl_->drawDetailProfile,
+            GLDrawDetailBucket::TranslatedIndexRangeValidation);
+        vaoName = impl_->state->boundVertexArray();
+        vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+        if (vao == nullptr) {
             pushError(GL_INVALID_OPERATION);
             return false;
         }
-        if (count > 0) {
-            IndexExpansionResult result = expandElementIndices(count, type, indices);
-            if (!result.ok) {
-                pushError(result.error);
+        elementBufferName = vao->elementArrayBuffer;
+
+        // Sprint 7 #9 (CKPT65): GL 2.x compatibility — when no
+        // GL_ELEMENT_ARRAY_BUFFER is bound, the `indices` parameter is a
+        // client-side pointer to `count` indices in CPU memory (not a
+        // buffer offset). Materialize the data into a thread-local scratch
+        // buffer, applying GL_UNSIGNED_BYTE→GL_UNSIGNED_SHORT promotion
+        // the same way the buffer-bound path does. CTS
+        // `transform_feedback.{capture,query,discard}_vertex_*` tests use
+        // this pattern with a stack-allocated GLuint[] passed directly to
+        // glDrawElements.
+        thread_local std::vector<std::uint8_t> clientIndexScratch;
+        if (elementBufferName == 0) {
+            if (count > 0 && indices == nullptr) {
+                pushError(GL_INVALID_OPERATION);
                 return false;
             }
-            clientIndexScratch = std::move(result.bytes);
-            effectivePtr = clientIndexScratch.data();
-            effectiveType = result.outputType;
-            if (elementIndexTypeNeedsExpansion(type)) {
-                logIndexExpansionCostClass(
-                    "drawElements-client", 0, type, effectiveType, count,
-                    clientIndexScratch.size(), false, 0);
-            }
-        }
-        // elementBuffer stays nullptr; indexOffset stays 0. Downstream
-        // Metal-buffer-pass-through gates on `elementBuffer != nullptr`
-        // so the client-side path naturally falls into the
-        // CPU-staging-buffer branch.
-    } else {
-        elementBuffer = impl_->objects->buffers().get(elementBufferName);
-        if (elementBuffer == nullptr || elementBuffer->shadowBytes.empty()) {
-            pushError(GL_INVALID_OPERATION);
-            return false;
-        }
-
-        indexOffset = reinterpret_cast<std::uintptr_t>(indices);
-        if (indexOffset > elementBuffer->shadowBytes.size()) {
-            pushError(GL_INVALID_OPERATION);
-            return false;
-        }
-        const void* indexPtr = elementBuffer->shadowBytes.data() + indexOffset;
-
-        // GL_UNSIGNED_BYTE is not supported natively by Metal; expandElementIndices
-        // promotes to GL_UNSIGNED_SHORT. For UINT16/UINT32 we can pass through.
-        //
-        // ADV-10: cache the expanded index buffer on the GLBufferObject so
-        // repeated drawElements calls with the same element buffer don't
-        // re-allocate and re-widen on every draw.  The cache covers the
-        // entire shadowBytes range (not per-offset subsets) and is
-        // invalidated when the buffer data changes via glBufferData /
-        // glBufferSubData (generation counter bump).
-        effectivePtr = indexPtr;
-        if (elementIndexTypeNeedsExpansion(type)) {
-            const bool expansionCacheHit =
-                elementBuffer->cachedExpansionGeneration == elementBuffer->indexExpansionGeneration &&
-                !elementBuffer->cachedExpandedIndices.empty();
-            // Rebuild cache if stale or absent.
-            if (!expansionCacheHit) {
-                const GLsizei totalIndices = static_cast<GLsizei>(elementBuffer->shadowBytes.size());
-                IndexExpansionResult result = expandElementIndices(
-                    totalIndices, type, elementBuffer->shadowBytes.data());
+            if (count > 0) {
+                IndexExpansionResult result = expandElementIndices(count, type, indices);
                 if (!result.ok) {
                     pushError(result.error);
                     return false;
                 }
-                elementBuffer->cachedExpandedIndices = std::move(result.bytes);
-                elementBuffer->cachedExpansionGeneration = elementBuffer->indexExpansionGeneration;
+                clientIndexScratch = std::move(result.bytes);
+                effectivePtr = clientIndexScratch.data();
+                effectiveType = result.outputType;
+                if (elementIndexTypeNeedsExpansion(type)) {
+                    logIndexExpansionCostClass(
+                        "drawElements-client", 0, type, effectiveType, count,
+                        clientIndexScratch.size(), false, 0);
+                }
             }
-            effectiveType = GL_UNSIGNED_SHORT;
-            // Recompute offset: each source byte becomes 2 bytes (uint16).
-            const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
-            effectivePtr = elementBuffer->cachedExpandedIndices.data() + expandedOffset;
-            logIndexExpansionCostClass(
-                "drawElements", elementBufferName, type, effectiveType,
-                static_cast<GLsizei>(elementBuffer->shadowBytes.size()),
-                elementBuffer->cachedExpandedIndices.size(), expansionCacheHit,
-                elementBuffer->cachedExpansionGeneration);
+            // elementBuffer stays nullptr; indexOffset stays 0. Downstream
+            // Metal-buffer-pass-through gates on `elementBuffer != nullptr`
+            // so the client-side path naturally falls into the
+            // CPU-staging-buffer branch.
+        } else {
+            elementBuffer = impl_->objects->buffers().get(elementBufferName);
+            if (elementBuffer == nullptr || elementBuffer->shadowBytes.empty()) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+
+            indexOffset = reinterpret_cast<std::uintptr_t>(indices);
+            if (indexOffset > elementBuffer->shadowBytes.size()) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            const void* indexPtr = elementBuffer->shadowBytes.data() + indexOffset;
+
+            // GL_UNSIGNED_BYTE is not supported natively by Metal; expandElementIndices
+            // promotes to GL_UNSIGNED_SHORT. For UINT16/UINT32 we can pass through.
+            //
+            // ADV-10: cache the expanded index buffer on the GLBufferObject so
+            // repeated drawElements calls with the same element buffer don't
+            // re-allocate and re-widen on every draw.  The cache covers the
+            // entire shadowBytes range (not per-offset subsets) and is
+            // invalidated when the buffer data changes via glBufferData /
+            // glBufferSubData (generation counter bump).
+            effectivePtr = indexPtr;
+            if (elementIndexTypeNeedsExpansion(type)) {
+                const bool expansionCacheHit =
+                    elementBuffer->cachedExpansionGeneration == elementBuffer->indexExpansionGeneration &&
+                    !elementBuffer->cachedExpandedIndices.empty();
+                // Rebuild cache if stale or absent.
+                if (!expansionCacheHit) {
+                    const GLsizei totalIndices = static_cast<GLsizei>(elementBuffer->shadowBytes.size());
+                    IndexExpansionResult result = expandElementIndices(
+                        totalIndices, type, elementBuffer->shadowBytes.data());
+                    if (!result.ok) {
+                        pushError(result.error);
+                        return false;
+                    }
+                    elementBuffer->cachedExpandedIndices = std::move(result.bytes);
+                    elementBuffer->cachedExpansionGeneration = elementBuffer->indexExpansionGeneration;
+                }
+                effectiveType = GL_UNSIGNED_SHORT;
+                // Recompute offset: each source byte becomes 2 bytes (uint16).
+                const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
+                effectivePtr = elementBuffer->cachedExpandedIndices.data() + expandedOffset;
+                logIndexExpansionCostClass(
+                    "drawElements", elementBufferName, type, effectiveType,
+                    static_cast<GLsizei>(elementBuffer->shadowBytes.size()),
+                    elementBuffer->cachedExpandedIndices.size(), expansionCacheHit,
+                    elementBuffer->cachedExpansionGeneration);
+            }
         }
     }
 
@@ -51972,10 +52279,24 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     // returns false even when nothing is actually bound. The shader
     // reflection's `vertexInputs.empty()` is the correct indicator
     // for an attribute-less draw.
-    if (program != nullptr && program->hasTranslatedPipeline &&
-        vao != nullptr &&
-        program->vertexReflection.vertexInputs.empty() &&
-        count > 0 && effectivePtr != nullptr) {
+    const bool translatedDrawElementsEligible = [&]() {
+        GLDrawDetailScope detail(
+            impl_->drawDetailProfile,
+            GLDrawDetailBucket::TranslatedDrawEligibility);
+        return program != nullptr && program->hasTranslatedPipeline;
+    }();
+    bool translatedDrawElementsAttributelessEligible = false;
+    {
+        GLDrawDetailScope detail(
+            impl_->drawDetailProfile,
+            GLDrawDetailBucket::TranslatedFallbackDecision);
+        translatedDrawElementsAttributelessEligible =
+            translatedDrawElementsEligible &&
+            vao != nullptr &&
+            program->vertexReflection.vertexInputs.empty() &&
+            count > 0 && effectivePtr != nullptr;
+    }
+    if (translatedDrawElementsAttributelessEligible) {
         TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
         tdi.mode = drawElementsMode;
         tdi.vertexCount = drawElementsCount;
@@ -52069,18 +52390,32 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         // Fall through to solid-color path on failure.
     }
     drawProfile.mark(GLDrawProfileBucket::SpecialPathChecks);
-    if (program != nullptr && program->hasTranslatedPipeline) {
+    if (translatedDrawElementsEligible) {
         // Phase 8X Group 4d follow-up³ — name each fall-through gate to BAR's log.
         drawProfile.mark(GLDrawProfileBucket::TranslatedPreflight);
-        if (vao->attributes.empty()) {
-            reportTranslatedFallbackOnce(program, programName,
-                TranslatedFallbackGate::EmptyAttributes, "drawElements",
-                vaoName, 0, 0, 0);
+        bool attributesEmpty = false;
+        {
+            GLDrawDetailScope detail(
+                impl_->drawDetailProfile,
+                GLDrawDetailBucket::TranslatedFallbackDecision);
+            attributesEmpty = vao->attributes.empty();
+            if (attributesEmpty) {
+                reportTranslatedFallbackOnce(program, programName,
+                    TranslatedFallbackGate::EmptyAttributes, "drawElements",
+                    vaoName, 0, 0, 0);
+            }
         }
-        if (!vao->attributes.empty()) {
+        if (!attributesEmpty) {
             bool vaoLayoutCacheHit = false;
-            const auto& vaoLayout =
-                cachedVertexArrayLayout(*vao, false, &vaoLayoutCacheHit);
+            const GLVertexArrayCachedLayout* vaoLayoutPtr = nullptr;
+            {
+                GLDrawDetailScope detail(
+                    impl_->drawDetailProfile,
+                    GLDrawDetailBucket::TranslatedProgramVaoFboState);
+                vaoLayoutPtr =
+                    &cachedVertexArrayLayout(*vao, false, &vaoLayoutCacheHit);
+            }
+            const auto& vaoLayout = *vaoLayoutPtr;
             drawProfile.mark(GLDrawProfileBucket::VaoLayout);
             GLBufferObject* vbo = (vaoLayout.primaryBufferName != 0)
                 ? impl_->objects->buffers().get(vaoLayout.primaryBufferName)
