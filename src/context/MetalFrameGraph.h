@@ -297,6 +297,13 @@ struct TranslatedDrawInfo {
     // structural key, the Phase-2 plan cache routes the draw through the
     // direct encoder path.
     bool pipelineOrSubroutinePlanCacheUnsafe = false;
+    // 7C-0 parallel-encode serial batching keeps eligibility deliberately
+    // narrower than the translated-draw encoder. GLContext owns these hidden
+    // draw-side hazards and snapshots them before handing the draw to the
+    // frame graph.
+    bool parallelEncodeQueryOrTransformFeedbackHazard = false;
+    bool parallelEncodeTessMeshOrGeometryHazard = false;
+    bool parallelEncodePrimitiveExpansionHazard = false;
 
     // Pipeline state toggles.
     bool depthTestEnabled = false;
@@ -1017,6 +1024,10 @@ public:
     void beginRenderPassForCurrentFramebuffer(GLStateTracker& state, GLObjectStore& objects);
     void* currentRenderEncoder() const;
     void endRenderPass();
+    // 7C-0 serial batch protocol: callers that are about to mutate GL-visible
+    // resources or issue a visibility barrier use this to close any pending
+    // translated default-framebuffer batch before the mutation becomes visible.
+    void flushParallelEncodeBoundary();
     // Encodes a single draw call against the current default framebuffer using
     // the prebaked "solid color" pipeline state. Phase A Group 7 MVP. Returns
     // true on success. If the provided layout cannot be handled the caller is

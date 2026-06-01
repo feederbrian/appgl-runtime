@@ -21603,6 +21603,9 @@ bool GLContext::deleteBuffers(GLsizei count, const GLuint* buffers) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
+    }
     for (GLsizei index = 0; index < count; ++index) {
         const GLuint name = buffers[index];
         if (name == 0) {
@@ -21792,6 +21795,9 @@ bool GLContext::bufferData(GLenum target, GLsizeiptr size, const void* data, GLe
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
+    }
     if (!impl_->replaceBufferStorage(*object, size, data, usage)) {
         pushError(GL_OUT_OF_MEMORY);
         return false;
@@ -21843,6 +21849,9 @@ bool GLContext::bufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
         return false;
     }
     if (size > 0) {
+        if (impl_->frameGraph != nullptr) {
+            impl_->frameGraph->flushParallelEncodeBoundary();
+        }
         if (!impl_->writeBufferRange(*object, offset, data, size)) {
             pushError(GL_OUT_OF_MEMORY);
             return false;
@@ -21896,6 +21905,9 @@ bool GLContext::copyBufferSubData(
         }
     }
     if (size > 0) {
+        if (impl_->frameGraph != nullptr) {
+            impl_->frameGraph->flushParallelEncodeBoundary();
+        }
         std::vector<std::uint8_t> copyBytes(static_cast<std::size_t>(size));
         if (!impl_->readBufferRange(*readObject, readOffset, size, copyBytes.data())) {
             pushError(GL_INVALID_OPERATION);
@@ -22100,6 +22112,11 @@ void* GLContext::mapBufferRange(GLenum target, GLintptr offset, GLsizeiptr lengt
         return nullptr;
     }
 
+    if ((access & (GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT |
+                   GL_MAP_INVALIDATE_BUFFER_BIT)) != 0 &&
+        impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
+    }
     if (access & GL_MAP_READ_BIT) {
         impl_->drainPendingGpuProducers(*object);
     }
@@ -23123,6 +23140,9 @@ bool GLContext::deleteTextures(GLsizei count, const GLuint* textures) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
+    }
     for (GLsizei index = 0; index < count; ++index) {
         const GLuint name = textures[index];
         if (name == 0) {
@@ -23276,6 +23296,9 @@ bool GLContext::texImage(
     if (object->desc.immutable) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
     }
 
     GLTextureImageLevel image;
@@ -23788,6 +23811,9 @@ bool GLContext::texSubImage(
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
+    }
     for (GLsizei z = 0; z < depth; ++z) {
         for (GLsizei y = 0; y < height; ++y) {
             const std::size_t sourceOffset =
@@ -23950,6 +23976,9 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
     }
     const int cubeFace = Impl::cubeFaceIndexForTarget(target);
     const GLenum effectiveTarget = cubeFace >= 0 ? GL_TEXTURE_CUBE_MAP : target;
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
+    }
     // Sprint 17 Day 9+ Bank-Group-E narrow-gate (regression-debt #3):
     // record dimensions UNCONDITIONALLY for any valid level/width/
     // height before format-specific dispatch. Pre-narrow `dcba5cd`
@@ -24251,6 +24280,9 @@ bool GLContext::texStorage(
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
+    }
     ExtensionContext extensionContext(*this);
     const bool allocateSparse =
         extensions::sparse_texture::textureSparse(extensionContext, object) == GL_TRUE;
@@ -24456,6 +24488,9 @@ bool GLContext::texStorageMultisample(
     if (object->desc.immutable) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
     }
     ExtensionContext extensionContext(*this);
     const bool allocateSparse =
@@ -25339,6 +25374,9 @@ bool GLContext::generateMipmap(GLenum target) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
+    }
     if (!impl_->generateMipmaps(*object)) {
         pushError(GL_INVALID_OPERATION);
         return false;
@@ -25371,6 +25409,9 @@ bool GLContext::deleteRenderbuffers(GLsizei count, const GLuint* renderbuffers) 
     if (count < 0 || (count > 0 && renderbuffers == nullptr)) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
     }
     for (GLsizei index = 0; index < count; ++index) {
         const GLuint name = renderbuffers[index];
@@ -25493,6 +25534,9 @@ bool GLContext::renderbufferStorage(GLenum target, GLenum internalformat, GLsize
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
+    }
     if (!impl_->replaceRenderbufferStorage(*object, internalformat, width, height, samples)) {
         pushError(GL_OUT_OF_MEMORY);
         return false;
@@ -25594,6 +25638,9 @@ bool GLContext::deleteFramebuffers(GLsizei count, const GLuint* framebuffers) {
     if (count < 0 || (count > 0 && framebuffers == nullptr)) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
     }
     for (GLsizei index = 0; index < count; ++index) {
         const GLuint name = framebuffers[index];
@@ -25703,6 +25750,9 @@ bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum text
     }
 
     if (texture == 0) {
+        if (impl_->frameGraph != nullptr) {
+            impl_->frameGraph->flushParallelEncodeBoundary();
+        }
         framebuffer->attachments.erase(attachment);
         return true;
     }
@@ -25910,6 +25960,9 @@ bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum text
         textureObject->target == GL_TEXTURE_CUBE_MAP ||
         textureObject->target == GL_TEXTURE_CUBE_MAP_ARRAY;
     stored.layered = layered && targetIsLayered;
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
+    }
     framebuffer->attachments[attachment] = stored;
     // Sprint 17 Day 1 (CKPT236) [A.2 narrow gate]: the binding-time
     // `wasRenderedTo` set originally added by Sprint 16 Day 17
@@ -48476,6 +48529,60 @@ static bool currentDrawHasProgramPipelineOrSubroutinePlanCacheHazard(
     return true;
 }
 
+static bool currentDrawHasParallelEncodeTessMeshOrGeometryHazard(
+    const GLStateTracker* state,
+    GLObjectStore* objects)
+{
+    if (state == nullptr || objects == nullptr) {
+        return false;
+    }
+    const GLuint currentProgram = state->currentProgram();
+    if (currentProgram != 0) {
+        const GLProgramObject* program =
+            objects->programs().get(currentProgram);
+        return program != nullptr &&
+            (program->hasTessellation || program->gsPresent ||
+             program->metalGSTier ==
+                 GLProgramObject::MetalGSTier::MeshShader);
+    }
+    const GLuint pipelineName = state->currentProgramPipeline();
+    if (pipelineName == 0) {
+        return false;
+    }
+    const GLProgramPipelineObject* pipeline =
+        objects->programPipelines().get(pipelineName);
+    return pipeline != nullptr &&
+        (pipeline->geometryProgram != 0 ||
+         pipeline->tessControlProgram != 0 ||
+         pipeline->tessEvalProgram != 0);
+}
+
+static bool parallelEncodeModeRequiresPrimitiveExpansion(GLenum mode)
+{
+    switch (mode) {
+        case GL_POINTS:
+        case GL_LINES:
+        case GL_LINE_STRIP:
+        case GL_TRIANGLES:
+        case GL_TRIANGLE_STRIP:
+            return false;
+        default:
+            return true;
+    }
+}
+
+static bool anyQueryObjectActive(GLObjectStore* objects)
+{
+    if (objects == nullptr) {
+        return false;
+    }
+    bool active = false;
+    objects->queries().forEach([&](GLuint, GLQueryObject& query) {
+        active = active || query.active;
+    });
+    return active;
+}
+
 // Sprint 17 Day 7+ Bank-Group-H Path B Phase 3 day 4 — see header
 // comment at the Impl method declaration. Item 26 LIVE 19th-instance
 // candidate: sister-pattern leverage at the call-site-wrapper level.
@@ -48580,6 +48687,15 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
     tdi.pipelineOrSubroutinePlanCacheUnsafe =
         currentDrawHasProgramPipelineOrSubroutinePlanCacheHazard(
             state.get(), objects.get());
+    tdi.parallelEncodeQueryOrTransformFeedbackHazard =
+        conditionalRenderMode != 0 ||
+        isTfActiveOnBoundImpl() ||
+        anyQueryObjectActive(objects.get());
+    tdi.parallelEncodeTessMeshOrGeometryHazard =
+        currentDrawHasParallelEncodeTessMeshOrGeometryHazard(
+            state.get(), objects.get());
+    tdi.parallelEncodePrimitiveExpansionHazard =
+        parallelEncodeModeRequiresPrimitiveExpansion(tdi.mode);
     phase2PlanKeyProfile.record(
         tdi,
         planVaoName,
@@ -53181,6 +53297,9 @@ bool GLContext::memoryBarrier(GLbitfield barriers) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
+    }
 
     // For CPU-visible barrier bits (BUFFER_UPDATE | TEXTURE_UPDATE |
     // PIXEL_BUFFER | CLIENT_MAPPED_BUFFER) we need to commit + wait so
@@ -56244,6 +56363,9 @@ bool GLContext::clearBufferData(GLenum target, GLenum internalformat, GLenum for
     if (buffer->size == 0) {
         return true; // valid no-op
     }
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
+    }
     const std::size_t patternBytes = bufferClearPatternBytes(format, type);
     if (!impl_->fillBufferRange(*buffer, 0, buffer->size, data, patternBytes)) {
         pushError(GL_OUT_OF_MEMORY);
@@ -56301,6 +56423,9 @@ bool GLContext::clearBufferSubData(GLenum target, GLenum internalformat, GLintpt
     }
     if (size == 0) {
         return true;
+    }
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
     }
     const std::size_t patternBytes = bufferClearPatternBytes(format, type);
     if (!impl_->fillBufferRange(*buffer, offset, size, data, patternBytes)) {
@@ -58637,6 +58762,9 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
+    }
     // If level is -1, clear all defined levels to zero.
     if (level < 0) {
         for (auto& [lvl, img] : tex->levels) {
@@ -58667,6 +58795,9 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
         !clearTexFormatCompatible(internalFormat, format)) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
     }
     fillLevelWithClearValue_T(impl_.get(), *tex, it->second,
                             0, 0, 0,
@@ -62883,10 +63014,16 @@ bool GLContext::getnCompressedTexImage(GLenum target, GLint lod, GLsizei bufSize
 
 bool GLContext::memoryBarrierByRegion(GLbitfield barriers) {
     (void)barriers;
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
+    }
     return true;
 }
 
 bool GLContext::textureBarrier() {
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
+    }
     return true;
 }
 

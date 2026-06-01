@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <deque>
 #include <limits>
 #include <unordered_map>
 #include <unordered_set>
@@ -246,6 +247,21 @@ struct DrawSubmitProfile {
 
 enum class ParallelEncodeBoundaryReason : std::size_t {
     SerialPathOnly,
+    SolidColorDraw,
+    ImmediateModeDraw,
+    TessellationDraw,
+    MeshGsDraw,
+    ComputeDispatch,
+    Clear,
+    BeginRenderPass,
+    EndRenderPass,
+    Present,
+    Finish,
+    CopyReadback,
+    Resize,
+    CommandBufferCommit,
+    TransientInvalidation,
+    ResourceMutationOrBarrier,
     FboDraw,
     RasterizerDiscard,
     ArgumentBuffers,
@@ -253,6 +269,11 @@ enum class ParallelEncodeBoundaryReason : std::size_t {
     ImageWriteSideEffects,
     ProgramPipelineOrSubroutineState,
     LayeredOrViewportArrayState,
+    QueryOrTransformFeedbackState,
+    TessMeshOrGeometryState,
+    PrimitiveExpansion,
+    CpuOrRingUploadPath,
+    PipelineNotPrepared,
     CaptureFailed,
     Count,
 };
@@ -262,6 +283,36 @@ static const char* parallelEncodeBoundaryReasonName(
     switch (reason) {
         case ParallelEncodeBoundaryReason::SerialPathOnly:
             return "serial_path_only";
+        case ParallelEncodeBoundaryReason::SolidColorDraw:
+            return "solid_color_draw";
+        case ParallelEncodeBoundaryReason::ImmediateModeDraw:
+            return "immediate_mode_draw";
+        case ParallelEncodeBoundaryReason::TessellationDraw:
+            return "tessellation_draw";
+        case ParallelEncodeBoundaryReason::MeshGsDraw:
+            return "mesh_gs_draw";
+        case ParallelEncodeBoundaryReason::ComputeDispatch:
+            return "compute_dispatch";
+        case ParallelEncodeBoundaryReason::Clear:
+            return "clear";
+        case ParallelEncodeBoundaryReason::BeginRenderPass:
+            return "begin_render_pass";
+        case ParallelEncodeBoundaryReason::EndRenderPass:
+            return "end_render_pass";
+        case ParallelEncodeBoundaryReason::Present:
+            return "present";
+        case ParallelEncodeBoundaryReason::Finish:
+            return "finish";
+        case ParallelEncodeBoundaryReason::CopyReadback:
+            return "copy_readback";
+        case ParallelEncodeBoundaryReason::Resize:
+            return "resize";
+        case ParallelEncodeBoundaryReason::CommandBufferCommit:
+            return "command_buffer_commit";
+        case ParallelEncodeBoundaryReason::TransientInvalidation:
+            return "transient_invalidation";
+        case ParallelEncodeBoundaryReason::ResourceMutationOrBarrier:
+            return "resource_mutation_or_barrier";
         case ParallelEncodeBoundaryReason::FboDraw:
             return "fbo_draw";
         case ParallelEncodeBoundaryReason::RasterizerDiscard:
@@ -276,6 +327,16 @@ static const char* parallelEncodeBoundaryReasonName(
             return "program_pipeline_or_subroutine_state";
         case ParallelEncodeBoundaryReason::LayeredOrViewportArrayState:
             return "layered_or_viewport_array_state";
+        case ParallelEncodeBoundaryReason::QueryOrTransformFeedbackState:
+            return "query_or_transform_feedback_state";
+        case ParallelEncodeBoundaryReason::TessMeshOrGeometryState:
+            return "tess_mesh_or_geometry_state";
+        case ParallelEncodeBoundaryReason::PrimitiveExpansion:
+            return "primitive_expansion";
+        case ParallelEncodeBoundaryReason::CpuOrRingUploadPath:
+            return "cpu_or_ring_upload_path";
+        case ParallelEncodeBoundaryReason::PipelineNotPrepared:
+            return "pipeline_not_prepared";
         case ParallelEncodeBoundaryReason::CaptureFailed:
             return "capture_failed";
         case ParallelEncodeBoundaryReason::Count:
@@ -293,11 +354,19 @@ struct ParallelEncodeFoundationProfile {
     std::uint64_t candidateDraws = 0;
     std::uint64_t capturedDraws = 0;
     std::uint64_t replayedDraws = 0;
+    std::uint64_t batchCount = 0;
+    std::uint64_t batchDraws = 0;
+    std::uint64_t maxBatchSize = 0;
+    std::uint64_t batchReplayFailures = 0;
     double serialCaptureUs = 0.0;
     double serialReplayUs = 0.0;
+    double serialBatchReplayUs = 0.0;
     std::array<std::uint64_t,
                static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count)>
         boundaryReasons{};
+    std::array<std::uint64_t,
+               static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count)>
+        batchFlushReasons{};
 
     void recordTranslatedDraw() {
         if (enabled) {
@@ -334,6 +403,23 @@ struct ParallelEncodeFoundationProfile {
         serialReplayUs += elapsedUs;
     }
 
+    void recordBatchReplay(ParallelEncodeBoundaryReason reason,
+                           std::uint64_t draws,
+                           double elapsedUs,
+                           std::uint64_t failures) {
+        if (!enabled) {
+            return;
+        }
+        ++batchCount;
+        batchDraws += draws;
+        maxBatchSize = std::max(maxBatchSize, draws);
+        replayedDraws += draws;
+        serialReplayUs += elapsedUs;
+        serialBatchReplayUs += elapsedUs;
+        batchReplayFailures += failures;
+        ++batchFlushReasons[static_cast<std::size_t>(reason)];
+    }
+
     void dump() const {
         if (!dumpEnabled) {
             return;
@@ -341,13 +427,20 @@ struct ParallelEncodeFoundationProfile {
         std::fprintf(stderr,
             "[APPGL_PARALLEL_ENCODE] summary translated_draws=%llu "
             "candidates=%llu captured=%llu replayed=%llu "
-            "serial_capture_us=%.3f serial_replay_us=%.3f\n",
+            "batch_count=%llu batch_draws=%llu max_batch_size=%llu "
+            "serial_capture_us=%.3f serial_replay_us=%.3f "
+            "serial_batch_replay_us=%.3f batch_replay_failures=%llu\n",
             static_cast<unsigned long long>(translatedDraws),
             static_cast<unsigned long long>(candidateDraws),
             static_cast<unsigned long long>(capturedDraws),
             static_cast<unsigned long long>(replayedDraws),
+            static_cast<unsigned long long>(batchCount),
+            static_cast<unsigned long long>(batchDraws),
+            static_cast<unsigned long long>(maxBatchSize),
             serialCaptureUs,
-            serialReplayUs);
+            serialReplayUs,
+            serialBatchReplayUs,
+            static_cast<unsigned long long>(batchReplayFailures));
         for (std::size_t i = 0;
              i < static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count);
              ++i) {
@@ -359,6 +452,18 @@ struct ParallelEncodeFoundationProfile {
                 "[APPGL_PARALLEL_ENCODE] boundary reason=%s count=%llu\n",
                 parallelEncodeBoundaryReasonName(reason),
                 static_cast<unsigned long long>(boundaryReasons[i]));
+        }
+        for (std::size_t i = 0;
+             i < static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count);
+             ++i) {
+            if (batchFlushReasons[i] == 0) {
+                continue;
+            }
+            const auto reason = static_cast<ParallelEncodeBoundaryReason>(i);
+            std::fprintf(stderr,
+                "[APPGL_PARALLEL_ENCODE] flush reason=%s count=%llu\n",
+                parallelEncodeBoundaryReasonName(reason),
+                static_cast<unsigned long long>(batchFlushReasons[i]));
         }
         std::fflush(stderr);
     }
@@ -437,6 +542,33 @@ static bool mslUsesArgumentBuffers(const std::string* msl) {
            msl->find("[[id(") != std::string::npos;
 }
 
+static bool translatedDrawUsesSimpleMetalPrimitive(GLenum mode) {
+    switch (mode) {
+        case GL_POINTS:
+        case GL_LINES:
+        case GL_LINE_STRIP:
+        case GL_TRIANGLES:
+        case GL_TRIANGLE_STRIP:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool translatedDrawNeedsCpuOrRingUploadPath(
+    const TranslatedDrawInfo& info) {
+    if (!info.vertexAttributeLayouts.empty() &&
+        info.metalVertexBuffer == nullptr) {
+        return true;
+    }
+    for (const auto& extra : info.extraVertexBuffers) {
+        if (!extra.attributes.empty() && extra.metalBuffer == nullptr) {
+            return true;
+        }
+    }
+    return info.indexCount > 0 && info.metalIndexBuffer == nullptr;
+}
+
 static bool translatedDrawParallelCaptureEligible(
     const TranslatedDrawInfo& info,
     ParallelEncodeBoundaryReason& reason) {
@@ -475,6 +607,33 @@ static bool translatedDrawParallelCaptureEligible(
         info.maxEmittedLayer > 0 ||
         info.markColorAttachmentReadbackFlip) {
         reason = ParallelEncodeBoundaryReason::LayeredOrViewportArrayState;
+        return false;
+    }
+    if (info.parallelEncodeQueryOrTransformFeedbackHazard) {
+        reason = ParallelEncodeBoundaryReason::QueryOrTransformFeedbackState;
+        return false;
+    }
+    if (info.parallelEncodeTessMeshOrGeometryHazard) {
+        reason = ParallelEncodeBoundaryReason::TessMeshOrGeometryState;
+        return false;
+    }
+    if (!translatedDrawUsesSimpleMetalPrimitive(info.mode) ||
+        info.parallelEncodePrimitiveExpansionHazard) {
+        reason = ParallelEncodeBoundaryReason::PrimitiveExpansion;
+        return false;
+    }
+    if (translatedDrawNeedsCpuOrRingUploadPath(info)) {
+        reason = ParallelEncodeBoundaryReason::CpuOrRingUploadPath;
+        return false;
+    }
+    if (info.pipelineStateCacheOut != nullptr &&
+        info.pipelineStateCacheOut->empty()) {
+        reason = ParallelEncodeBoundaryReason::PipelineNotPrepared;
+        return false;
+    }
+    if (info.pipelineStateCacheOut == nullptr &&
+        (info.pipelineStateOut == nullptr || *info.pipelineStateOut == nullptr)) {
+        reason = ParallelEncodeBoundaryReason::PipelineNotPrepared;
         return false;
     }
     return true;
@@ -2410,6 +2569,7 @@ struct MetalFrameGraph::Impl {
         if (newW == drawableWidth && newH == drawableHeight) {
             return;  // No-op when size is unchanged.
         }
+        flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason::Resize);
         drawableWidth = newW;
         drawableHeight = newH;
         headlessReadbackRGBA.clear();
@@ -2442,6 +2602,8 @@ struct MetalFrameGraph::Impl {
         }
 
         FG_TRACE(@"encodeClear: enter (deferred)  encoder=%p cmdBuf=%p", currentRenderEncoder, currentCommandBuffer);
+
+        flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason::Clear);
 
         // OPT-8: Acquire a ring buffer slot before any GPU work.
         acquireRingSlot();
@@ -2481,6 +2643,7 @@ struct MetalFrameGraph::Impl {
         }
         acquireRingSlot();  // OPT-8
         FG_TRACE(@"beginRenderPass: enter  encoder=%p cmdBuf=%p", currentRenderEncoder, currentCommandBuffer);
+        flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason::BeginRenderPass);
         endRenderPass();
         ensureDrawableResources();
         if (currentCommandBuffer == nil) {
@@ -2574,7 +2737,7 @@ struct MetalFrameGraph::Impl {
         return false;
     }
 
-    void endRenderPass() {
+    void endCurrentRenderPassOnly() {
         if (currentRenderEncoder != nil) {
             FG_TRACE(@"endRenderPass: ending encoder %p on cmdBuf %p", currentRenderEncoder, currentCommandBuffer);
             [currentRenderEncoder endEncoding];
@@ -2584,7 +2747,17 @@ struct MetalFrameGraph::Impl {
         }
     }
 
+    void endRenderPass() {
+        if (!flushingParallelTranslatedBatch) {
+            flushParallelTranslatedDrawBatch(
+                ParallelEncodeBoundaryReason::EndRenderPass);
+        }
+        endCurrentRenderPassOnly();
+    }
+
     bool commitCurrentAsync(AppGLCommandReason reason) {
+        flushParallelTranslatedDrawBatch(
+            ParallelEncodeBoundaryReason::CommandBufferCommit);
         endRenderPass();
         if (currentCommandBuffer == nil) {
             return false;
@@ -2615,6 +2788,8 @@ struct MetalFrameGraph::Impl {
     }
 
     bool commitCurrentBeforeTransientInvalidation(AppGLCommandReason reason) {
+        flushParallelTranslatedDrawBatch(
+            ParallelEncodeBoundaryReason::TransientInvalidation);
         endRenderPass();
         if (currentCommandBuffer == nil || currentCommandBufferLease.get() == nil) {
             return false;
@@ -2687,6 +2862,8 @@ struct MetalFrameGraph::Impl {
         if (device == nil || commandQueue == nil) {
             return false;
         }
+        flushParallelTranslatedDrawBatch(
+            ParallelEncodeBoundaryReason::SolidColorDraw);
         acquireRingSlot();  // OPT-8
         if (info.vertexCount <= 0 || info.positions == nullptr || info.positionByteCount == 0) {
             return false;
@@ -5893,6 +6070,38 @@ struct MetalFrameGraph::Impl {
         return true;
     }
 
+    void flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason reason) {
+        if (!parallelEncodeProfile.enabled ||
+            pendingParallelTranslatedDraws.empty() ||
+            flushingParallelTranslatedBatch) {
+            return;
+        }
+
+        flushingParallelTranslatedBatch = true;
+        const std::uint64_t drawCount =
+            static_cast<std::uint64_t>(pendingParallelTranslatedDraws.size());
+        std::uint64_t failures = 0;
+        const DrawProfileTimePoint replayStart = drawProfileNow();
+        for (CapturedTranslatedDrawRecord& captured :
+             pendingParallelTranslatedDraws) {
+            const bool encoded = encodeTranslatedDrawSerial(captured.info);
+            if (!encoded) {
+                ++failures;
+            }
+        }
+        const double elapsedUs =
+            drawProfileElapsedUs(replayStart, drawProfileNow());
+        parallelEncodeProfile.recordBatchReplay(
+            reason, drawCount, elapsedUs, failures);
+        pendingParallelTranslatedDraws.clear();
+        flushingParallelTranslatedBatch = false;
+    }
+
+    void flushParallelEncodeBoundary() {
+        flushParallelTranslatedDrawBatch(
+            ParallelEncodeBoundaryReason::ResourceMutationOrBarrier);
+    }
+
     bool encodeTranslatedDraw(TranslatedDrawInfo& info) {
         if (!parallelEncodeProfile.enabled) {
             return encodeTranslatedDrawSerial(info);
@@ -5903,32 +6112,29 @@ struct MetalFrameGraph::Impl {
         ParallelEncodeBoundaryReason reason =
             ParallelEncodeBoundaryReason::SerialPathOnly;
         if (!translatedDrawParallelCaptureEligible(info, reason)) {
+            flushParallelTranslatedDrawBatch(reason);
             parallelEncodeProfile.recordBoundary(reason);
             return encodeTranslatedDrawSerial(info);
         }
 
         parallelEncodeProfile.recordCandidate();
 
-        CapturedTranslatedDrawRecord captured;
+        pendingParallelTranslatedDraws.emplace_back();
+        CapturedTranslatedDrawRecord& captured =
+            pendingParallelTranslatedDraws.back();
         const DrawProfileTimePoint captureStart = drawProfileNow();
         if (!captureTranslatedDrawForSerialReplay(info, captured)) {
+            pendingParallelTranslatedDraws.pop_back();
             parallelEncodeProfile.recordBoundary(
+                ParallelEncodeBoundaryReason::CaptureFailed);
+            flushParallelTranslatedDrawBatch(
                 ParallelEncodeBoundaryReason::CaptureFailed);
             return encodeTranslatedDrawSerial(info);
         }
         parallelEncodeProfile.recordCaptured(
             drawProfileElapsedUs(captureStart, drawProfileNow()));
 
-        const DrawProfileTimePoint replayStart = drawProfileNow();
-        const bool encoded = encodeTranslatedDrawSerial(captured.info);
-        parallelEncodeProfile.recordReplayed(
-            drawProfileElapsedUs(replayStart, drawProfileNow()));
-        if (!encoded &&
-            info.pipelineBuildErrorOut != nullptr &&
-            !captured.pipelineBuildErrorStorage.empty()) {
-            *info.pipelineBuildErrorOut = captured.pipelineBuildErrorStorage;
-        }
-        return encoded;
+        return true;
     }
 
     // Phase 3B.3 [metal-tess-TF] — build the tess domain-point
@@ -7155,6 +7361,7 @@ fragment float4 appgl_immediate_textured_fs(
                                  bool isColor, bool isDepth, bool isStencil,
                                  const float rgba[4], float depth, std::uint32_t stencil) {
         if (texVoid == nullptr || device == nil || commandQueue == nil) return false;
+        flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason::Clear);
         id<MTLTexture> tex = (__bridge id<MTLTexture>)texVoid;
         // Close any in-flight encoder. Metal disallows two render
         // encoders open on the same command buffer.
@@ -7581,6 +7788,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         if (device == nil || commandQueue == nil) {
             return false;
         }
+        flushParallelTranslatedDrawBatch(
+            ParallelEncodeBoundaryReason::ImmediateModeDraw);
         if (info.vertices == nullptr || info.vertexCount == 0 || info.vertexStride == 0) {
             return false;
         }
@@ -7848,6 +8057,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
     void present(AppGLCommandReason reason = AppGLCommandReason::PresentPendingWork) {
         FG_TRACE(@"present: enter  pendingPresent=%d encoder=%p cmdBuf=%p drawable=%p",
                  pendingPresent, currentRenderEncoder, currentCommandBuffer, currentDrawable);
+        flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason::Present);
         // Flush any deferred clear that wasn't consumed by a draw call.
         if (hasPendingClear) {
             flushPendingClear();
@@ -7863,6 +8073,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
     }
 
     bool finish() {
+        flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason::Finish);
         if (hasPendingClear) {
             flushPendingClear();
         }
@@ -7885,6 +8096,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         if (device == nil || commandQueue == nil) {
             return copyHeadlessPixels(x, y, width, height, outPixels);
         }
+        flushParallelTranslatedDrawBatch(
+            ParallelEncodeBoundaryReason::CopyReadback);
         // Flush any deferred clear before readback.
         if (hasPendingClear) {
             flushPendingClear();
@@ -8025,6 +8238,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
     // are guaranteed to have completed and their results are CPU-visible via
     // [MTLTexture getBytes:].  Used by FBO readback paths.
     void flushForReadback() {
+        flushParallelTranslatedDrawBatch(
+            ParallelEncodeBoundaryReason::CopyReadback);
         endRenderPass();
         if (currentCommandBuffer != nil) {
             if (!currentCommandBufferLease.commitAndWait(AppGLCommandReason::FlushForReadback)) {
@@ -8551,6 +8766,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             info.submissionGroup.approximateFallbackDisallowed = true;
         }
         if (device == nil || commandQueue == nil) return false;
+        flushParallelTranslatedDrawBatch(
+            ParallelEncodeBoundaryReason::TessellationDraw);
         if (info.tessControlPipelineState == nullptr) return false;
         // Allow `tessEvalMSL` to be empty when the as-compute kernel is
         // present (isolines TES post-SPIRV-Cross-095c99c). Render pipeline
@@ -10501,6 +10718,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             info.diagnostic = "no Metal device";
             return false;
         }
+        flushParallelTranslatedDrawBatch(
+            ParallelEncodeBoundaryReason::MeshGsDraw);
         if (info.vertexComputePipelineState == nullptr ||
             info.meshFunction == nullptr ||
             info.fragmentFunction == nullptr) {
@@ -11058,6 +11277,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         if (device == nil || commandQueue == nil) {
             return false;
         }
+        flushParallelTranslatedDrawBatch(
+            ParallelEncodeBoundaryReason::ComputeDispatch);
         id<MTLComputePipelineState> pso =
             (__bridge id<MTLComputePipelineState>)info.metalComputePipelineState;
         if (pso == nil) {
@@ -11653,6 +11874,8 @@ private:
     }
 
     void invalidateTransientState() {
+        flushParallelTranslatedDrawBatch(
+            ParallelEncodeBoundaryReason::TransientInvalidation);
         const bool submittedBeforeInvalidation =
             commitCurrentBeforeTransientInvalidation(AppGLCommandReason::FlushForReadback);
         if (submittedBeforeInvalidation && commandSubmission != nullptr) {
@@ -11947,6 +12170,8 @@ private:
     std::unordered_set<PipelineBuildLogKey, PipelineBuildLogKeyHash> loggedPipelineBuildPrograms;
     DrawSubmitProfile drawSubmitProfile;
     ParallelEncodeFoundationProfile parallelEncodeProfile;
+    std::deque<CapturedTranslatedDrawRecord> pendingParallelTranslatedDraws;
+    bool flushingParallelTranslatedBatch = false;
 
     // ── Encoder state deduplication (OPT-6) ──
     // Track what was last set on the current render encoder. Skip redundant
@@ -12761,6 +12986,10 @@ void* MetalFrameGraph::currentRenderEncoder() const {
 
 void MetalFrameGraph::endRenderPass() {
     impl_->endRenderPass();
+}
+
+void MetalFrameGraph::flushParallelEncodeBoundary() {
+    impl_->flushParallelEncodeBoundary();
 }
 
 void MetalFrameGraph::flushForReadback() {
