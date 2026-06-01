@@ -246,6 +246,14 @@ struct DrawSubmitProfile {
 
 enum class ParallelEncodeBoundaryReason : std::size_t {
     SerialPathOnly,
+    FboDraw,
+    RasterizerDiscard,
+    ArgumentBuffers,
+    StorageOrAtomicSideEffects,
+    ImageWriteSideEffects,
+    ProgramPipelineOrSubroutineState,
+    LayeredOrViewportArrayState,
+    CaptureFailed,
     Count,
 };
 
@@ -254,6 +262,22 @@ static const char* parallelEncodeBoundaryReasonName(
     switch (reason) {
         case ParallelEncodeBoundaryReason::SerialPathOnly:
             return "serial_path_only";
+        case ParallelEncodeBoundaryReason::FboDraw:
+            return "fbo_draw";
+        case ParallelEncodeBoundaryReason::RasterizerDiscard:
+            return "rasterizer_discard";
+        case ParallelEncodeBoundaryReason::ArgumentBuffers:
+            return "argument_buffers";
+        case ParallelEncodeBoundaryReason::StorageOrAtomicSideEffects:
+            return "storage_or_atomic_side_effects";
+        case ParallelEncodeBoundaryReason::ImageWriteSideEffects:
+            return "image_write_side_effects";
+        case ParallelEncodeBoundaryReason::ProgramPipelineOrSubroutineState:
+            return "program_pipeline_or_subroutine_state";
+        case ParallelEncodeBoundaryReason::LayeredOrViewportArrayState:
+            return "layered_or_viewport_array_state";
+        case ParallelEncodeBoundaryReason::CaptureFailed:
+            return "capture_failed";
         case ParallelEncodeBoundaryReason::Count:
             break;
     }
@@ -281,11 +305,33 @@ struct ParallelEncodeFoundationProfile {
         }
     }
 
+    void recordCandidate() {
+        if (enabled) {
+            ++candidateDraws;
+        }
+    }
+
     void recordBoundary(ParallelEncodeBoundaryReason reason) {
         if (!enabled) {
             return;
         }
         ++boundaryReasons[static_cast<std::size_t>(reason)];
+    }
+
+    void recordCaptured(double elapsedUs) {
+        if (!enabled) {
+            return;
+        }
+        ++capturedDraws;
+        serialCaptureUs += elapsedUs;
+    }
+
+    void recordReplayed(double elapsedUs) {
+        if (!enabled) {
+            return;
+        }
+        ++replayedDraws;
+        serialReplayUs += elapsedUs;
     }
 
     void dump() const {
@@ -317,6 +363,284 @@ struct ParallelEncodeFoundationProfile {
         std::fflush(stderr);
     }
 };
+
+static void releaseRetainedObjCObject(void* object) {
+    if (object != nullptr) {
+        CFBridgingRelease(object);
+    }
+}
+
+static void* retainObjCObjectAsVoid(void* object) {
+    if (object == nullptr) {
+        return nullptr;
+    }
+    return (void*)CFBridgingRetain((__bridge id)object);
+}
+
+struct CapturedTranslatedDrawRecord {
+    TranslatedDrawInfo info;
+    std::string vertexMSLStorage;
+    std::string fragmentMSLStorage;
+    ShaderReflection vertexReflectionStorage;
+    ShaderReflection fragmentReflectionStorage;
+    std::vector<std::uint8_t> vertexDataStorage;
+    std::vector<std::uint8_t> indexDataStorage;
+    std::vector<std::uint8_t> vertexUniformStorage;
+    std::vector<std::uint8_t> fragmentUniformStorage;
+    std::vector<std::vector<std::uint8_t>> extraVertexDataStorage;
+    std::vector<std::vector<std::uint8_t>> uboDataStorage;
+    std::string pipelineBuildErrorStorage;
+    std::vector<void*> retainedObjects;
+
+    CapturedTranslatedDrawRecord() = default;
+    CapturedTranslatedDrawRecord(const CapturedTranslatedDrawRecord&) = delete;
+    CapturedTranslatedDrawRecord& operator=(const CapturedTranslatedDrawRecord&) = delete;
+
+    ~CapturedTranslatedDrawRecord() {
+        for (void* object : retainedObjects) {
+            releaseRetainedObjCObject(object);
+        }
+    }
+
+    void retainField(void*& field) {
+        void* retained = retainObjCObjectAsVoid(field);
+        field = retained;
+        if (retained != nullptr) {
+            retainedObjects.push_back(retained);
+        }
+    }
+};
+
+static std::size_t indexTypeSize(GLenum type) {
+    switch (type) {
+        case GL_UNSIGNED_BYTE: return 1;
+        case GL_UNSIGNED_SHORT: return 2;
+        case GL_UNSIGNED_INT: return 4;
+        default: return 0;
+    }
+}
+
+static bool hasAdditionalColorTargets(const TranslatedDrawInfo& info) {
+    for (void* texture : info.fboAdditionalColorTextures) {
+        if (texture != nullptr) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool mslUsesArgumentBuffers(const std::string* msl) {
+    if (msl == nullptr) {
+        return false;
+    }
+    return msl->find("spvDescriptorSetBuffer") != std::string::npos ||
+           msl->find("[[id(") != std::string::npos;
+}
+
+static bool translatedDrawParallelCaptureEligible(
+    const TranslatedDrawInfo& info,
+    ParallelEncodeBoundaryReason& reason) {
+    if (info.fboColorTexture != nullptr ||
+        info.fboDepthStencilTexture != nullptr ||
+        info.fboAttachmentless ||
+        hasAdditionalColorTargets(info)) {
+        reason = ParallelEncodeBoundaryReason::FboDraw;
+        return false;
+    }
+    if (info.rasterizerDiscard) {
+        reason = ParallelEncodeBoundaryReason::RasterizerDiscard;
+        return false;
+    }
+    if (info.submissionGroup.argumentBuffersEnabled ||
+        mslUsesArgumentBuffers(info.vertexMSL) ||
+        mslUsesArgumentBuffers(info.fragmentMSL) ||
+        envEnabled("APPGL_ENABLE_ARGUMENT_BUFFERS")) {
+        reason = ParallelEncodeBoundaryReason::ArgumentBuffers;
+        return false;
+    }
+    if (!info.ssboBindings.empty() || !info.atomicCounterBindings.empty()) {
+        reason = ParallelEncodeBoundaryReason::StorageOrAtomicSideEffects;
+        return false;
+    }
+    if (!info.writtenImageTextureNames.empty()) {
+        reason = ParallelEncodeBoundaryReason::ImageWriteSideEffects;
+        return false;
+    }
+    if (info.pipelineOrSubroutinePlanCacheUnsafe) {
+        reason = ParallelEncodeBoundaryReason::ProgramPipelineOrSubroutineState;
+        return false;
+    }
+    if (info.viewportArrayCount > 1 ||
+        info.fboColorArrayLength > 0 ||
+        info.maxEmittedLayer > 0 ||
+        info.markColorAttachmentReadbackFlip) {
+        reason = ParallelEncodeBoundaryReason::LayeredOrViewportArrayState;
+        return false;
+    }
+    return true;
+}
+
+static void copyBytes(std::vector<std::uint8_t>& storage,
+                      const void* source,
+                      std::size_t byteCount,
+                      const void*& destination) {
+    if (source == nullptr || byteCount == 0) {
+        destination = nullptr;
+        storage.clear();
+        return;
+    }
+    const auto* begin = static_cast<const std::uint8_t*>(source);
+    storage.assign(begin, begin + byteCount);
+    destination = storage.data();
+}
+
+static bool captureTranslatedDrawForSerialReplay(
+    const TranslatedDrawInfo& source,
+    CapturedTranslatedDrawRecord& capture) {
+    capture.info = source;
+
+    if (source.vertexMSL != nullptr) {
+        capture.vertexMSLStorage = *source.vertexMSL;
+        capture.info.vertexMSL = &capture.vertexMSLStorage;
+    } else {
+        capture.info.vertexMSL = nullptr;
+    }
+    if (source.fragmentMSL != nullptr) {
+        capture.fragmentMSLStorage = *source.fragmentMSL;
+        capture.info.fragmentMSL = &capture.fragmentMSLStorage;
+    } else {
+        capture.info.fragmentMSL = nullptr;
+    }
+    if (source.vertexReflection != nullptr) {
+        capture.vertexReflectionStorage = *source.vertexReflection;
+        capture.info.vertexReflection = &capture.vertexReflectionStorage;
+    } else {
+        capture.info.vertexReflection = nullptr;
+    }
+    if (source.fragmentReflection != nullptr) {
+        capture.fragmentReflectionStorage = *source.fragmentReflection;
+        capture.info.fragmentReflection = &capture.fragmentReflectionStorage;
+    } else {
+        capture.info.fragmentReflection = nullptr;
+    }
+
+    copyBytes(capture.vertexDataStorage,
+              source.vertexData,
+              source.vertexDataByteCount,
+              capture.info.vertexData);
+    if (source.metalVertexBuffer != nullptr) {
+        capture.info.metalVertexBuffer = source.metalVertexBuffer;
+        capture.retainField(capture.info.metalVertexBuffer);
+    }
+
+    capture.extraVertexDataStorage.resize(capture.info.extraVertexBuffers.size());
+    for (std::size_t i = 0; i < capture.info.extraVertexBuffers.size(); ++i) {
+        auto& extra = capture.info.extraVertexBuffers[i];
+        if (extra.metalBuffer != nullptr) {
+            capture.retainField(extra.metalBuffer);
+            continue;
+        }
+        const void* extraData = extra.data != nullptr
+            ? extra.data
+            : (extra.ownedData.empty() ? nullptr : extra.ownedData.data());
+        if (extraData != nullptr && extra.byteCount > 0) {
+            const auto* begin = static_cast<const std::uint8_t*>(extraData);
+            auto& storage = capture.extraVertexDataStorage[i];
+            storage.assign(begin, begin + extra.byteCount);
+            extra.ownedData = storage;
+            extra.data = extra.ownedData.data();
+        } else {
+            extra.data = nullptr;
+            extra.ownedData.clear();
+        }
+    }
+
+    if (source.indices != nullptr && source.indexCount > 0) {
+        const std::size_t indexSize = indexTypeSize(source.indexType);
+        if (indexSize == 0) {
+            return false;
+        }
+        copyBytes(capture.indexDataStorage,
+                  source.indices,
+                  static_cast<std::size_t>(source.indexCount) * indexSize,
+                  capture.info.indices);
+    } else {
+        capture.info.indices = nullptr;
+    }
+    if (source.metalIndexBuffer != nullptr) {
+        capture.info.metalIndexBuffer = source.metalIndexBuffer;
+        capture.retainField(capture.info.metalIndexBuffer);
+    }
+
+    const void* vertexUniformOut = nullptr;
+    copyBytes(capture.vertexUniformStorage,
+              source.vertexUniformData,
+              source.vertexUniformSize,
+              vertexUniformOut);
+    capture.info.vertexUniformData =
+        static_cast<const std::uint8_t*>(vertexUniformOut);
+    const void* fragmentUniformOut = nullptr;
+    copyBytes(capture.fragmentUniformStorage,
+              source.fragmentUniformData,
+              source.fragmentUniformSize,
+              fragmentUniformOut);
+    capture.info.fragmentUniformData =
+        static_cast<const std::uint8_t*>(fragmentUniformOut);
+
+    auto retainTextures = [&capture](
+        std::vector<TranslatedDrawInfo::TextureBinding>& textures) {
+        for (auto& binding : textures) {
+            capture.retainField(binding.metalTexture);
+            capture.retainField(binding.metalSamplerState);
+            capture.retainField(binding.textureBufferBackingMetalBuffer);
+            capture.retainField(binding.imageAtomicMetalBuffer);
+        }
+    };
+    retainTextures(capture.info.fragmentTextures);
+    retainTextures(capture.info.vertexTextures);
+
+    capture.uboDataStorage.resize(capture.info.uboBindings.size());
+    for (std::size_t i = 0; i < capture.info.uboBindings.size(); ++i) {
+        auto& ubo = capture.info.uboBindings[i];
+        if (ubo.metalBuffer != nullptr) {
+            capture.retainField(ubo.metalBuffer);
+        } else if (ubo.data != nullptr && ubo.size > 0) {
+            auto& storage = capture.uboDataStorage[i];
+            const auto* begin = static_cast<const std::uint8_t*>(ubo.data);
+            storage.assign(begin, begin + ubo.size);
+            ubo.data = storage.data();
+        } else {
+            ubo.data = nullptr;
+        }
+    }
+
+    for (auto& ssbo : capture.info.ssboBindings) {
+        capture.retainField(ssbo.metalBuffer);
+    }
+    for (auto& atomic : capture.info.atomicCounterBindings) {
+        capture.retainField(atomic.metalBuffer);
+    }
+
+    capture.info.translatedPlan = nullptr;
+    capture.info.translatedPlanOut = nullptr;
+    capture.info.translatedPlanRejectReasonOut = nullptr;
+    capture.info.pipelineStateCacheOut = nullptr;
+    capture.info.pipelineBuildErrorOut = &capture.pipelineBuildErrorStorage;
+    capture.info.pipelineStateOut = nullptr;
+    capture.info.pipelineColorFormatOut = nullptr;
+    capture.info.metalVertexFunctionOut = nullptr;
+    capture.info.metalFragmentFunctionOut = nullptr;
+    if (source.metalVertexFunction != nullptr) {
+        capture.info.metalVertexFunction = source.metalVertexFunction;
+        capture.retainField(capture.info.metalVertexFunction);
+    }
+    if (source.metalFragmentFunction != nullptr) {
+        capture.info.metalFragmentFunction = source.metalFragmentFunction;
+        capture.retainField(capture.info.metalFragmentFunction);
+    }
+
+    return true;
+}
 
 static NSInteger clipControlYSignBufferSlot(const std::string* msl) {
     if (msl == nullptr) {
@@ -2519,12 +2843,9 @@ struct MetalFrameGraph::Impl {
         return true;
     }
 
-    bool encodeTranslatedDraw(TranslatedDrawInfo& info) {
+    bool encodeTranslatedDrawSerial(TranslatedDrawInfo& info) {
         FG_TRACE(@"encodeTranslatedDraw: enter  mode=0x%X verts=%d instances=%d encoder=%p cmdBuf=%p",
                  info.mode, info.vertexCount, info.instanceCount, currentRenderEncoder, currentCommandBuffer);
-        parallelEncodeProfile.recordTranslatedDraw();
-        parallelEncodeProfile.recordBoundary(
-            ParallelEncodeBoundaryReason::SerialPathOnly);
         if (device == nil || commandQueue == nil) {
             return false;
         }
@@ -5570,6 +5891,44 @@ struct MetalFrameGraph::Impl {
             drawSubmitProfile.record(profileSample);
         }
         return true;
+    }
+
+    bool encodeTranslatedDraw(TranslatedDrawInfo& info) {
+        if (!parallelEncodeProfile.enabled) {
+            return encodeTranslatedDrawSerial(info);
+        }
+
+        parallelEncodeProfile.recordTranslatedDraw();
+
+        ParallelEncodeBoundaryReason reason =
+            ParallelEncodeBoundaryReason::SerialPathOnly;
+        if (!translatedDrawParallelCaptureEligible(info, reason)) {
+            parallelEncodeProfile.recordBoundary(reason);
+            return encodeTranslatedDrawSerial(info);
+        }
+
+        parallelEncodeProfile.recordCandidate();
+
+        CapturedTranslatedDrawRecord captured;
+        const DrawProfileTimePoint captureStart = drawProfileNow();
+        if (!captureTranslatedDrawForSerialReplay(info, captured)) {
+            parallelEncodeProfile.recordBoundary(
+                ParallelEncodeBoundaryReason::CaptureFailed);
+            return encodeTranslatedDrawSerial(info);
+        }
+        parallelEncodeProfile.recordCaptured(
+            drawProfileElapsedUs(captureStart, drawProfileNow()));
+
+        const DrawProfileTimePoint replayStart = drawProfileNow();
+        const bool encoded = encodeTranslatedDrawSerial(captured.info);
+        parallelEncodeProfile.recordReplayed(
+            drawProfileElapsedUs(replayStart, drawProfileNow()));
+        if (!encoded &&
+            info.pipelineBuildErrorOut != nullptr &&
+            !captured.pipelineBuildErrorStorage.empty()) {
+            *info.pipelineBuildErrorOut = captured.pipelineBuildErrorStorage;
+        }
+        return encoded;
     }
 
     // Phase 3B.3 [metal-tess-TF] — build the tess domain-point
