@@ -615,6 +615,10 @@ struct ColdPathDiagnosticProfile {
     std::uint64_t phase2MemoSupported = 0;
     std::uint64_t phase2MemoHits = 0;
     std::uint64_t phase2MemoMisses = 0;
+    std::uint64_t programFingerprintLookups = 0;
+    std::uint64_t programFingerprintHits = 0;
+    std::uint64_t programFingerprintMisses = 0;
+    std::uint64_t programFingerprintFallbacks = 0;
     std::uint64_t preflightSnapshots = 0;
     std::uint64_t preflightGenericPrepared = 0;
     std::uint64_t preflightGenericUnprepared = 0;
@@ -803,6 +807,22 @@ struct ColdPathDiagnosticProfile {
         }
     }
 
+    void recordProgramFingerprint(bool eligible, bool hit) {
+        if (!enabled) {
+            return;
+        }
+        if (!eligible) {
+            ++programFingerprintFallbacks;
+            return;
+        }
+        ++programFingerprintLookups;
+        if (hit) {
+            ++programFingerprintHits;
+        } else {
+            ++programFingerprintMisses;
+        }
+    }
+
     void recordSnapshotEstimate(const TranslatedDrawInfo& tdi) {
         if (!enabled) {
             return;
@@ -966,6 +986,19 @@ struct ColdPathDiagnosticProfile {
             static_cast<unsigned long long>(phase2MemoHits),
             static_cast<unsigned long long>(phase2MemoMisses),
             memoHitRate);
+        const double fingerprintHitRate = programFingerprintLookups > 0
+            ? (static_cast<double>(programFingerprintHits) * 100.0) /
+                  static_cast<double>(programFingerprintLookups)
+            : 0.0;
+        std::fprintf(stderr,
+            "[APPGL_7G_COLD_PATH_PROFILE] fingerprint surface=program "
+            "lookups=%llu hits=%llu misses=%llu fallbacks=%llu "
+            "hit_rate_pct=%.2f\n",
+            static_cast<unsigned long long>(programFingerprintLookups),
+            static_cast<unsigned long long>(programFingerprintHits),
+            static_cast<unsigned long long>(programFingerprintMisses),
+            static_cast<unsigned long long>(programFingerprintFallbacks),
+            fingerprintHitRate);
         std::fprintf(stderr,
             "[APPGL_7G_COLD_PATH_PROFILE] preflight snapshots=%llu "
             "generic_prepared=%llu generic_unprepared=%llu\n",
@@ -1157,6 +1190,89 @@ static void phase2PlanHashReflectionShape(
     phase2PlanHashBool(hash, reflection->fp64TranslationActive);
 }
 
+struct Phase2ProgramStructuralFingerprint {
+    bool valid = false;
+    std::uint64_t programSegmentHash = 0;
+};
+
+static void phase2PlanInvalidateProgramStructuralFingerprint(
+    GLProgramObject& program)
+{
+    program.phase2ProgramStructuralFingerprintValid = false;
+    program.phase2ProgramStructuralFingerprintProgram = 0;
+    program.phase2ProgramStructuralFingerprintGeneration = 0;
+    program.phase2ProgramStructuralFingerprint = 0;
+}
+
+static std::uint64_t phase2PlanBuildProgramStructuralFingerprint(
+    GLuint programName,
+    const GLProgramObject& program)
+{
+    std::uint64_t hash = kPhase2PlanHashOffset;
+    phase2PlanHashU64(hash, 0x4150474C50324B31ull); // "APGLP2K1"
+    phase2PlanHashU64(hash, programName);
+    phase2PlanHashU64(hash, 0u);
+    phase2PlanHashShaderIdentity(hash, &program.vertexMSL);
+    phase2PlanHashShaderIdentity(hash, &program.fragmentMSL);
+    phase2PlanHashReflectionShape(hash, &program.vertexReflection);
+    phase2PlanHashReflectionShape(hash, &program.fragmentReflection);
+    return hash;
+}
+
+static Phase2ProgramStructuralFingerprint
+phase2PlanProgramStructuralFingerprintForDraw(
+    const TranslatedDrawInfo& tdi,
+    GLObjectStore* objects,
+    ColdPathDiagnosticProfile* coldProfile)
+{
+    auto fallback = [&]() {
+        if (coldProfile != nullptr) {
+            coldProfile->recordProgramFingerprint(/*eligible=*/false,
+                                                  /*hit=*/false);
+        }
+        return Phase2ProgramStructuralFingerprint{};
+    };
+
+    if (objects == nullptr || tdi.rasterizerDiscard ||
+        tdi.pipelineEmulationFragmentProgram != 0) {
+        return fallback();
+    }
+
+    GLProgramObject* program = objects->programs().get(tdi.program);
+    if (program == nullptr || !program->linked || program->separableLinked) {
+        return fallback();
+    }
+    if (tdi.vertexMSL != &program->vertexMSL ||
+        tdi.fragmentMSL != &program->fragmentMSL ||
+        tdi.vertexReflection != &program->vertexReflection ||
+        tdi.fragmentReflection != &program->fragmentReflection) {
+        return fallback();
+    }
+
+    const bool hit =
+        program->phase2ProgramStructuralFingerprintValid &&
+        program->phase2ProgramStructuralFingerprintProgram == tdi.program &&
+        program->phase2ProgramStructuralFingerprintGeneration ==
+            program->executableGeneration;
+    if (!hit) {
+        program->phase2ProgramStructuralFingerprint =
+            phase2PlanBuildProgramStructuralFingerprint(tdi.program, *program);
+        program->phase2ProgramStructuralFingerprintProgram = tdi.program;
+        program->phase2ProgramStructuralFingerprintGeneration =
+            program->executableGeneration;
+        program->phase2ProgramStructuralFingerprintValid = true;
+    }
+    if (coldProfile != nullptr) {
+        coldProfile->recordProgramFingerprint(/*eligible=*/true, hit);
+    }
+
+    Phase2ProgramStructuralFingerprint fingerprint;
+    fingerprint.valid = true;
+    fingerprint.programSegmentHash =
+        program->phase2ProgramStructuralFingerprint;
+    return fingerprint;
+}
+
 static void phase2PlanHashVertexLayout(
     std::uint64_t& hash,
     const TranslatedDrawInfo::VertexAttributeLayout& layout)
@@ -1231,12 +1347,14 @@ static std::uint64_t phase2PlanKeyForDraw(const TranslatedDrawInfo& tdi,
                                           GLuint vaoName,
                                           std::uint32_t vaoGeneration,
                                           GLuint drawFboName,
-                                          ColdPathDiagnosticProfile* coldProfile = nullptr)
+                                          ColdPathDiagnosticProfile* coldProfile = nullptr,
+                                          const Phase2ProgramStructuralFingerprint* programFingerprint = nullptr,
+                                          double coldProgramPrefixUs = 0.0)
 {
     const bool coldEnabled = coldProfile != nullptr && coldProfile->enabled;
     GLDrawProfileTimePoint coldCursor =
         coldEnabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
-    double coldProgramUs = 0.0;
+    double coldProgramUs = coldProgramPrefixUs;
     double coldVaoLayoutUs = 0.0;
     double coldFboUs = 0.0;
     double coldBindingsUs = 0.0;
@@ -1252,14 +1370,17 @@ static std::uint64_t phase2PlanKeyForDraw(const TranslatedDrawInfo& tdi,
     };
 
     std::uint64_t hash = kPhase2PlanHashOffset;
-    phase2PlanHashU64(hash, 0x4150474C50324B31ull); // "APGLP2K1"
-
-    phase2PlanHashU64(hash, tdi.program);
-    phase2PlanHashU64(hash, tdi.pipelineEmulationFragmentProgram);
-    phase2PlanHashShaderIdentity(hash, tdi.vertexMSL);
-    phase2PlanHashShaderIdentity(hash, tdi.fragmentMSL);
-    phase2PlanHashReflectionShape(hash, tdi.vertexReflection);
-    phase2PlanHashReflectionShape(hash, tdi.fragmentReflection);
+    if (programFingerprint != nullptr && programFingerprint->valid) {
+        hash = programFingerprint->programSegmentHash;
+    } else {
+        phase2PlanHashU64(hash, 0x4150474C50324B31ull); // "APGLP2K1"
+        phase2PlanHashU64(hash, tdi.program);
+        phase2PlanHashU64(hash, tdi.pipelineEmulationFragmentProgram);
+        phase2PlanHashShaderIdentity(hash, tdi.vertexMSL);
+        phase2PlanHashShaderIdentity(hash, tdi.fragmentMSL);
+        phase2PlanHashReflectionShape(hash, tdi.vertexReflection);
+        phase2PlanHashReflectionShape(hash, tdi.fragmentReflection);
+    }
     coldMark(coldProgramUs);
 
     phase2PlanHashU64(hash, vaoName);
@@ -2206,8 +2327,23 @@ static bool phase2PlanCandidateKeyForDraw(const TranslatedDrawInfo& tdi,
     {
         GLDrawDetailScope detail(
             detailProfile, GLDrawDetailBucket::Phase2CacheKeyHash);
+        const bool coldEnabled = coldProfile != nullptr && coldProfile->enabled;
+        const auto fingerprintStart =
+            coldEnabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
+        const Phase2ProgramStructuralFingerprint programFingerprint =
+            phase2PlanProgramStructuralFingerprintForDraw(
+                tdi, objects, coldProfile);
+        const double fingerprintLookupUs = coldEnabled
+            ? glDrawProfileElapsedUs(fingerprintStart, glDrawProfileNow())
+            : 0.0;
         outKey = phase2PlanKeyForDraw(
-            tdi, vaoName, vaoGeneration, drawFboName, coldProfile);
+            tdi,
+            vaoName,
+            vaoGeneration,
+            drawFboName,
+            coldProfile,
+            programFingerprint.valid ? &programFingerprint : nullptr,
+            fingerprintLookupUs);
     }
     if (memoSupported) {
         keyMemo->signature = keyMemo->scratch;
@@ -36786,6 +36922,7 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->linkedStageBits = 0;
     programObject->advancedBlendSupportMask = 0;
     programObject->advancedBlendSupportAll = false;
+    phase2PlanInvalidateProgramStructuralFingerprint(*programObject);
 
     // RC-D09: Clear resource tables from any previous link so stale
     // introspection data never survives a failed re-link.

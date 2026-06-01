@@ -864,6 +864,10 @@ struct GLProgramObject {
     // Phase-2 draw-key memoization uses this to trust cached reflection shape
     // only across draws from the same context-local program executable.
     std::uint64_t executableGeneration = 1;
+    mutable bool phase2ProgramStructuralFingerprintValid = false;
+    mutable GLuint phase2ProgramStructuralFingerprintProgram = 0;
+    mutable std::uint64_t phase2ProgramStructuralFingerprintGeneration = 0;
+    mutable std::uint64_t phase2ProgramStructuralFingerprint = 0;
     bool deleteRequested = false;
     std::vector<GLProgramUniformInfo> uniforms;
     std::vector<GLProgramAttributeInfo> attributes;
