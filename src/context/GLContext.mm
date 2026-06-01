@@ -599,6 +599,35 @@ static void coldPathHashPointer(std::uint64_t& hash, const void* ptr) {
             reinterpret_cast<std::uintptr_t>(ptr)));
 }
 
+static bool mslUsesArgumentBuffer(const std::string& msl) {
+    return msl.find("spvDescriptorSetBuffer") != std::string::npos;
+}
+
+static bool mslUsesArgumentBuffer(const std::string* msl) {
+    return msl != nullptr && mslUsesArgumentBuffer(*msl);
+}
+
+static void refreshProgramMslArgumentBufferMetadata(GLProgramObject& program) {
+    program.vertexMslUsesArgumentBuffer =
+        mslUsesArgumentBuffer(program.vertexMSL);
+    program.fragmentMslUsesArgumentBuffer =
+        mslUsesArgumentBuffer(program.fragmentMSL);
+    program.gsPassThroughVertexMslUsesArgumentBuffer =
+        mslUsesArgumentBuffer(program.gsPassThroughVertexMSL);
+    program.gsPassThroughFragmentMslUsesArgumentBuffer =
+        mslUsesArgumentBuffer(program.gsPassThroughFragmentMSL);
+}
+
+static void assignTranslatedDrawProgramMsl(TranslatedDrawInfo& tdi,
+                                           const GLProgramObject& program) {
+    tdi.vertexMSL = &program.vertexMSL;
+    tdi.fragmentMSL = &program.fragmentMSL;
+    tdi.vertexMslUsesArgumentBuffer =
+        program.vertexMslUsesArgumentBuffer;
+    tdi.fragmentMslUsesArgumentBuffer =
+        program.fragmentMslUsesArgumentBuffer;
+}
+
 struct ColdPathDiagnosticProfile {
     bool enabled = std::getenv("APPGL_7G_COLD_PATH_PROFILE") != nullptr;
     std::array<ColdPathDiagnosticBucketStats,
@@ -6002,8 +6031,7 @@ struct GLContext::Impl {
     }
 
     static bool submissionMslUsesArgumentBuffer(const std::string* msl) {
-        return msl != nullptr &&
-            msl->find("spvDescriptorSetBuffer") != std::string::npos;
+        return mslUsesArgumentBuffer(msl);
     }
 
     void declareTranslatedDrawSubmissionGroup(TranslatedDrawInfo& tdi,
@@ -6035,8 +6063,8 @@ struct GLContext::Impl {
                 std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr;
             group.argumentBuffersEnabled =
                 forceArgBuf ||
-                submissionMslUsesArgumentBuffer(tdi.vertexMSL) ||
-                submissionMslUsesArgumentBuffer(tdi.fragmentMSL);
+                tdi.vertexMslUsesArgumentBuffer ||
+                tdi.fragmentMslUsesArgumentBuffer;
             if (group.argumentBuffersEnabled) {
                 group.addSubgroup(AppGLSubmissionGroupKind::ArgumentBinding,
                                   AppGLCommandReason::TranslatedDraw);
@@ -40136,6 +40164,8 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->hasTranslatedPipeline = false;
     programObject->vertexMSL.clear();
     programObject->fragmentMSL.clear();
+    programObject->vertexMslUsesArgumentBuffer = false;
+    programObject->fragmentMslUsesArgumentBuffer = false;
     programObject->tessControlMSL.clear();
     programObject->tessEvalMSL.clear();
     programObject->tessVertexAsComputeMSL.clear();
@@ -40235,6 +40265,8 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->gsPassThroughFragmentFunction = nullptr;
     programObject->gsPassThroughVertexMSL.clear();
     programObject->gsPassThroughFragmentMSL.clear();
+    programObject->gsPassThroughVertexMslUsesArgumentBuffer = false;
+    programObject->gsPassThroughFragmentMslUsesArgumentBuffer = false;
     programObject->gsPassThroughFragmentMSLActive = false;
     programObject->gsPassThroughFragmentMSLPrimIdLoc = 0;
     programObject->gsPassThroughReflection = ShaderReflection{};
@@ -42845,6 +42877,8 @@ bool GLContext::linkProgram(GLuint program) {
         case ProgramKind::Unknown:
             break;  // Already handled above; kept so -Wswitch stays happy.
     }
+
+    refreshProgramMslArgumentBufferMetadata(*programObject);
 
     APPGL_LOG(SHADER, @"[GL] linkProgram: program=%u kind=%d translationOk=%d "
           @"vertexInputs=%zu vsUniformBlocks=%zu fsUniformBlocks=%zu",
@@ -47424,6 +47458,7 @@ GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
         releaseRetainedMetalObject(program->gsPassThroughFragmentFunction);
         program->gsPassThroughFragmentFunction = nullptr;
         program->gsPassThroughFragmentMSL.clear();
+        program->gsPassThroughFragmentMslUsesArgumentBuffer = false;
         program->gsPassThroughFragmentMSLActive = false;
         program->gsPassThroughFragmentMSLPrimIdLoc = 0;
     };
@@ -47566,6 +47601,8 @@ GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
                 gsProg->pipelineEmulationFragmentProgram != ppo->fragmentProgram ||
                 gsProg->fragmentMSL != fsProg->fragmentMSL;
             gsProg->fragmentMSL = fsProg->fragmentMSL;
+            gsProg->fragmentMslUsesArgumentBuffer =
+                fsProg->fragmentMslUsesArgumentBuffer;
             gsProg->fragmentReflection = fsProg->fragmentReflection;
             gsProg->pipelineEmulationFragmentProgram = ppo->fragmentProgram;
             if (fragmentStageChanged) {
@@ -47574,6 +47611,7 @@ GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
         }
     } else if (gsProg->pipelineEmulationFragmentProgram != 0 || !gsProg->fragmentMSL.empty()) {
         gsProg->fragmentMSL.clear();
+        gsProg->fragmentMslUsesArgumentBuffer = false;
         gsProg->fragmentReflection = ShaderReflection{};
         gsProg->pipelineEmulationFragmentProgram = 0;
         invalidateGsPassThroughFragmentCache(gsProg);
@@ -47757,6 +47795,8 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
         GLProgramObject* fsProg = objects->programs().get(ppo->fragmentProgram);
         if (fsProg != nullptr) {
             vsProg->fragmentMSL = fsProg->fragmentMSL;
+            vsProg->fragmentMslUsesArgumentBuffer =
+                fsProg->fragmentMslUsesArgumentBuffer;
             rewriteMslOutputLocationsForFragmentInputs(
                 vsProg->vertexMSL, vsProg->fragmentMSL);
             vsProg->fragmentReflection = fsProg->fragmentReflection;
@@ -47806,6 +47846,7 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
         // data so we don't accidentally render with a stale FS left
         // over from a previous pipeline that did have one.
         vsProg->fragmentMSL.clear();
+        vsProg->fragmentMslUsesArgumentBuffer = false;
         vsProg->fragmentReflection = ShaderReflection{};
         vsProg->uniformLayoutComputed = false;
     }
@@ -48038,10 +48079,14 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
     //    pattern for non-tess pipeline-bound draws.
     if (fsProg != nullptr) {
         synth->fragmentMSL = fsProg->fragmentMSL;
+        synth->fragmentMslUsesArgumentBuffer =
+            fsProg->fragmentMslUsesArgumentBuffer;
         synth->fragmentReflection = fsProg->fragmentReflection;
     }
     if (vsProg != nullptr) {
         synth->vertexMSL = vsProg->vertexMSL;
+        synth->vertexMslUsesArgumentBuffer =
+            vsProg->vertexMslUsesArgumentBuffer;
         synth->vertexReflection = vsProg->vertexReflection;
     }
 
@@ -49783,6 +49828,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         (program.gsPassThroughVertexMSLLayered != routeLayer ||
          program.gsPassThroughVertexMSLViewportArray != routeViewportIndex)) {
         program.gsPassThroughVertexMSL.clear();
+        program.gsPassThroughVertexMslUsesArgumentBuffer = false;
         for (auto& entry : program.gsPassThroughPipelineStateCache) {
             releaseRetainedMetalObject(entry.second);
         }
@@ -49799,6 +49845,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         // the VS rebuilds, the FS has to follow so MSL's
         // user(locnN) linkage stays in sync.
         program.gsPassThroughFragmentMSL.clear();
+        program.gsPassThroughFragmentMslUsesArgumentBuffer = false;
         program.gsPassThroughFragmentMSLActive = false;
     }
 
@@ -49810,6 +49857,8 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     if (program.gsPassThroughVertexMSL.empty()) {
         program.gsPassThroughVertexMSL = appgl::synthesisePassThroughVertexMSL(
             replayDraw, routeLayer, routeViewportIndex);
+        program.gsPassThroughVertexMslUsesArgumentBuffer =
+            mslUsesArgumentBuffer(program.gsPassThroughVertexMSL);
         program.gsPassThroughVertexMSLLayered = routeLayer;
         program.gsPassThroughVertexMSLViewportArray = routeViewportIndex;
         if (std::getenv("APPGL_GS_DUMP_MSL") != nullptr) {
@@ -50030,6 +50079,8 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                     appgl::rewriteFragmentMSLForPrimitiveID(rewrittenFragment, replayDraw);
             }
             program.gsPassThroughFragmentMSL = std::move(rewrittenFragment);
+            program.gsPassThroughFragmentMslUsesArgumentBuffer =
+                mslUsesArgumentBuffer(program.gsPassThroughFragmentMSL);
             program.gsPassThroughFragmentMSLPrimIdLoc = replayDraw.primitiveIDLocation;
             program.gsPassThroughFragmentMSLActive = true;
             // Rebuilding FS invalidates any cached pipeline state.
@@ -50049,9 +50100,15 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             }
         }
         tdi.fragmentMSL = &program.gsPassThroughFragmentMSL;
+        tdi.fragmentMslUsesArgumentBuffer =
+            program.gsPassThroughFragmentMslUsesArgumentBuffer;
     } else {
         tdi.fragmentMSL = &program.fragmentMSL;
+        tdi.fragmentMslUsesArgumentBuffer =
+            program.fragmentMslUsesArgumentBuffer;
     }
+    tdi.vertexMslUsesArgumentBuffer =
+        program.gsPassThroughVertexMslUsesArgumentBuffer;
     tdi.vertexReflection = &program.gsPassThroughReflection;
     tdi.fragmentReflection = &program.fragmentReflection;
     tdi.pipelineStateOut = &program.gsPassThroughPipelineState;
@@ -50191,8 +50248,7 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
         tdi, *state, effectiveFragmentShadingRateForProgram(*owner, &program), owner);
     tdi.markColorAttachmentReadbackFlip =
         (tdi.clipOrigin == GL_LOWER_LEFT);
-    tdi.vertexMSL = &program.vertexMSL;
-    tdi.fragmentMSL = &program.fragmentMSL;
+    assignTranslatedDrawProgramMsl(tdi, program);
     tdi.vertexReflection = &program.vertexReflection;
     tdi.fragmentReflection = &program.fragmentReflection;
     tdi.pipelineStateOut = &program.metalPipelineState;
@@ -52333,8 +52389,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             tdi.vertexStride = 0;
             populateTranslatedDrawFixedFunctionState(
                 tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program), this);
-            tdi.vertexMSL = &program->vertexMSL;
-            tdi.fragmentMSL = &program->fragmentMSL;
+            assignTranslatedDrawProgramMsl(tdi, *program);
             tdi.vertexReflection = &program->vertexReflection;
             tdi.fragmentReflection = &program->fragmentReflection;
             tdi.pipelineStateOut = &program->metalPipelineState;
@@ -52429,8 +52484,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     tdi, *impl_->state,
                     effectiveFragmentShadingRateForProgram(*this, program),
                     this);
-                tdi.vertexMSL = &program->vertexMSL;
-                tdi.fragmentMSL = &program->fragmentMSL;
+                assignTranslatedDrawProgramMsl(tdi, *program);
                 tdi.vertexReflection = &program->vertexReflection;
                 tdi.fragmentReflection = &program->fragmentReflection;
                 tdi.pipelineStateOut = &program->metalPipelineState;
@@ -52543,8 +52597,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     populateTranslatedDrawFixedFunctionState(
                         tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program), this);
                     drawProfile.mark(GLDrawProfileBucket::FixedFunctionState);
-                    tdi.vertexMSL = &program->vertexMSL;
-                    tdi.fragmentMSL = &program->fragmentMSL;
+                    assignTranslatedDrawProgramMsl(tdi, *program);
                     tdi.vertexReflection = &program->vertexReflection;
                     tdi.fragmentReflection = &program->fragmentReflection;
                     tdi.pipelineStateOut = &program->metalPipelineState;
@@ -53128,8 +53181,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             tdi.vertexStride = 0;
             populateTranslatedDrawFixedFunctionState(
                 tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program), this);
-            tdi.vertexMSL = &program->vertexMSL;
-            tdi.fragmentMSL = &program->fragmentMSL;
+            assignTranslatedDrawProgramMsl(tdi, *program);
             tdi.vertexReflection = &program->vertexReflection;
             tdi.fragmentReflection = &program->fragmentReflection;
             tdi.pipelineStateOut = &program->metalPipelineState;
@@ -53273,8 +53325,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     // function state snapshot. See drawArrays.
                     populateTranslatedDrawFixedFunctionState(
                         tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program), this);
-                    tdi.vertexMSL = &program->vertexMSL;
-                    tdi.fragmentMSL = &program->fragmentMSL;
+                    assignTranslatedDrawProgramMsl(tdi, *program);
                     tdi.vertexReflection = &program->vertexReflection;
                     tdi.fragmentReflection = &program->fragmentReflection;
                     tdi.pipelineStateOut = &program->metalPipelineState;
@@ -53999,8 +54050,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         }
         populateTranslatedDrawFixedFunctionState(
             tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program), this);
-        tdi.vertexMSL = &program->vertexMSL;
-        tdi.fragmentMSL = &program->fragmentMSL;
+        assignTranslatedDrawProgramMsl(tdi, *program);
         tdi.vertexReflection = &program->vertexReflection;
         tdi.fragmentReflection = &program->fragmentReflection;
         tdi.pipelineStateOut = &program->metalPipelineState;
@@ -54158,8 +54208,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     populateTranslatedDrawFixedFunctionState(
                         tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program), this);
                     drawProfile.mark(GLDrawProfileBucket::FixedFunctionState);
-                    tdi.vertexMSL = &program->vertexMSL;
-                    tdi.fragmentMSL = &program->fragmentMSL;
+                    assignTranslatedDrawProgramMsl(tdi, *program);
                     tdi.vertexReflection = &program->vertexReflection;
                     tdi.fragmentReflection = &program->fragmentReflection;
                     tdi.pipelineStateOut = &program->metalPipelineState;
@@ -54511,8 +54560,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     }
                     populateTranslatedDrawFixedFunctionState(
                         tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program), this);
-                    tdi.vertexMSL = &program->vertexMSL;
-                    tdi.fragmentMSL = &program->fragmentMSL;
+                    assignTranslatedDrawProgramMsl(tdi, *program);
                     tdi.vertexReflection = &program->vertexReflection;
                     tdi.fragmentReflection = &program->fragmentReflection;
                     tdi.pipelineStateOut = &program->metalPipelineState;
@@ -55093,8 +55141,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     }
                     populateTranslatedDrawFixedFunctionState(
                         tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program), this);
-                    tdi.vertexMSL = &program->vertexMSL;
-                    tdi.fragmentMSL = &program->fragmentMSL;
+                    assignTranslatedDrawProgramMsl(tdi, *program);
                     tdi.vertexReflection = &program->vertexReflection;
                     tdi.fragmentReflection = &program->fragmentReflection;
                     tdi.pipelineStateOut = &program->metalPipelineState;

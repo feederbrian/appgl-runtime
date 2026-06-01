@@ -915,6 +915,8 @@ struct GLProgramObject {
     // to create MTLRenderPipelineState on first draw.
     std::string vertexMSL;
     std::string fragmentMSL;
+    bool vertexMslUsesArgumentBuffer = false;
+    bool fragmentMslUsesArgumentBuffer = false;
     // Metal-native tessellation pipeline MSL (Phase 1 of the metal-tess
     // project). Populated at link time for tess programs with SPIRV-Cross's
     // tess options forced on, so TCS is emittable as a compute kernel and
@@ -1118,6 +1120,7 @@ struct GLProgramObject {
     // invalidated and re-synthesised — the MSL declarations differ
     // (layered vs. non-layered) and Metal won't accept swapping.
     std::string gsPassThroughVertexMSL;
+    bool gsPassThroughVertexMslUsesArgumentBuffer = false;
     bool gsPassThroughVertexMSLLayered = false;
     // Sprint 15 Day 10 [metal-viewport-array]: sister to
     // gsPassThroughVertexMSLLayered. True when the cached MSL emits
@@ -1137,6 +1140,7 @@ struct GLProgramObject {
     // when varyingLocations change between pipelines — shouldn't
     // happen for a linked program but guard anyway) can rebuild.
     std::string gsPassThroughFragmentMSL;
+    bool gsPassThroughFragmentMslUsesArgumentBuffer = false;
     bool gsPassThroughFragmentMSLActive = false;
     std::uint32_t gsPassThroughFragmentMSLPrimIdLoc = 0;
     // Parallel pipeline-state cache so the emulated draw doesn't

@@ -554,6 +554,8 @@ struct TranslatedDrawInfo {
     // Translated MSL + reflection (borrowed from GLProgramObject).
     const std::string* vertexMSL = nullptr;
     const std::string* fragmentMSL = nullptr;
+    bool vertexMslUsesArgumentBuffer = false;
+    bool fragmentMslUsesArgumentBuffer = false;
     const ShaderReflection* vertexReflection = nullptr;
     const ShaderReflection* fragmentReflection = nullptr;
 
