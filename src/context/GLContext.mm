@@ -5965,6 +5965,472 @@ static TranslatedDrawPreflightSnapshot makeTranslatedDrawPreflightSnapshot(
     return snapshot;
 }
 
+enum class SerialDeferredRecordFallbackReason : std::size_t {
+    InvalidIndexType,
+    LiveGlAliasEscape,
+    SnapshotFailed,
+    Count,
+};
+
+static const char* serialDeferredRecordFallbackReasonName(
+    SerialDeferredRecordFallbackReason reason)
+{
+    switch (reason) {
+        case SerialDeferredRecordFallbackReason::InvalidIndexType:
+            return "invalid_index_type";
+        case SerialDeferredRecordFallbackReason::LiveGlAliasEscape:
+            return "live_gl_alias_escape";
+        case SerialDeferredRecordFallbackReason::SnapshotFailed:
+            return "snapshot_failed";
+        case SerialDeferredRecordFallbackReason::Count:
+            break;
+    }
+    return "unknown";
+}
+
+struct SerialDeferredRecordMetrics {
+    std::size_t approxBytes = 0;
+    std::uint64_t mutableOutputSlotsCleared = 0;
+    std::uint64_t backendHandleRefs = 0;
+    std::uint64_t immutableProgramRefs = 0;
+    bool immutable = false;
+};
+
+struct SerialDeferredRecordProfile {
+    bool requested =
+        std::getenv("APPGL_7K_SERIAL_DEFERRED_RECORD") != nullptr;
+    bool parallelEncodeSuppressed =
+        std::getenv("APPGL_PARALLEL_ENCODE") != nullptr;
+    bool enabled = requested && !parallelEncodeSuppressed;
+    bool dumpEnabled =
+        requested ||
+        std::getenv("APPGL_7K_SERIAL_DEFERRED_RECORD_PROFILE") != nullptr;
+    std::uint64_t constructionAttempts = 0;
+    std::uint64_t created = 0;
+    std::uint64_t consumed = 0;
+    std::uint64_t orderedMergeSerial = 0;
+    std::uint64_t fallbacks = 0;
+    std::uint64_t immutableRecords = 0;
+    std::uint64_t liveGlAliasEscapes = 0;
+    std::uint64_t mutableOutputSlotsCleared = 0;
+    std::uint64_t backendHandleRefs = 0;
+    std::uint64_t immutableProgramRefs = 0;
+    std::uint64_t recordBytesTotal = 0;
+    std::uint64_t recordBytesMax = 0;
+    double constructionUs = 0.0;
+    double consumptionUs = 0.0;
+    std::array<std::uint64_t,
+               static_cast<std::size_t>(
+                   SerialDeferredRecordFallbackReason::Count)>
+        fallbackReasons{};
+
+    void recordCreated(const SerialDeferredRecordMetrics& metrics,
+                       double elapsedUs) {
+        if (!enabled) {
+            return;
+        }
+        ++constructionAttempts;
+        ++created;
+        constructionUs += elapsedUs;
+        if (metrics.immutable) {
+            ++immutableRecords;
+        } else {
+            ++liveGlAliasEscapes;
+        }
+        mutableOutputSlotsCleared += metrics.mutableOutputSlotsCleared;
+        backendHandleRefs += metrics.backendHandleRefs;
+        immutableProgramRefs += metrics.immutableProgramRefs;
+        recordBytesTotal += static_cast<std::uint64_t>(metrics.approxBytes);
+        recordBytesMax = std::max<std::uint64_t>(
+            recordBytesMax,
+            static_cast<std::uint64_t>(metrics.approxBytes));
+    }
+
+    void recordConsumed(double elapsedUs) {
+        if (!enabled) {
+            return;
+        }
+        ++consumed;
+        ++orderedMergeSerial;
+        consumptionUs += elapsedUs;
+    }
+
+    void recordFallback(SerialDeferredRecordFallbackReason reason,
+                        double elapsedUs) {
+        if (!enabled) {
+            return;
+        }
+        ++constructionAttempts;
+        ++fallbacks;
+        constructionUs += elapsedUs;
+        ++fallbackReasons[static_cast<std::size_t>(reason)];
+    }
+
+    void dump() const {
+        if (!dumpEnabled ||
+            (constructionAttempts == 0 && created == 0 &&
+             consumed == 0 && fallbacks == 0)) {
+            return;
+        }
+        const double createdDenom =
+            created > 0 ? static_cast<double>(created) : 1.0;
+        const double consumedDenom =
+            consumed > 0 ? static_cast<double>(consumed) : 1.0;
+        std::fprintf(stderr,
+            "[APPGL_7K_SERIAL_DEFERRED_RECORD] summary "
+            "requested=%d enabled=%d parallel_encode_suppressed=%d "
+            "attempts=%llu created=%llu consumed=%llu "
+            "ordered_merge_serial=%llu fallbacks=%llu "
+            "immutable_records=%llu live_gl_alias_escapes=%llu "
+            "record_bytes_total=%llu record_bytes_avg=%.1f "
+            "record_bytes_max=%llu construction_us=%.3f "
+            "construction_avg_us=%.3f consumption_us=%.3f "
+            "consumption_avg_us=%.3f mutable_output_slots_cleared=%llu "
+            "backend_handle_refs=%llu immutable_program_refs=%llu\n",
+            requested ? 1 : 0,
+            enabled ? 1 : 0,
+            parallelEncodeSuppressed ? 1 : 0,
+            static_cast<unsigned long long>(constructionAttempts),
+            static_cast<unsigned long long>(created),
+            static_cast<unsigned long long>(consumed),
+            static_cast<unsigned long long>(orderedMergeSerial),
+            static_cast<unsigned long long>(fallbacks),
+            static_cast<unsigned long long>(immutableRecords),
+            static_cast<unsigned long long>(liveGlAliasEscapes),
+            static_cast<unsigned long long>(recordBytesTotal),
+            static_cast<double>(recordBytesTotal) / createdDenom,
+            static_cast<unsigned long long>(recordBytesMax),
+            constructionUs,
+            constructionUs /
+                (constructionAttempts > 0
+                     ? static_cast<double>(constructionAttempts)
+                     : 1.0),
+            consumptionUs,
+            consumptionUs / consumedDenom,
+            static_cast<unsigned long long>(mutableOutputSlotsCleared),
+            static_cast<unsigned long long>(backendHandleRefs),
+            static_cast<unsigned long long>(immutableProgramRefs));
+        for (std::size_t i = 0;
+             i < static_cast<std::size_t>(
+                     SerialDeferredRecordFallbackReason::Count);
+             ++i) {
+            if (fallbackReasons[i] == 0) {
+                continue;
+            }
+            const auto reason =
+                static_cast<SerialDeferredRecordFallbackReason>(i);
+            std::fprintf(stderr,
+                "[APPGL_7K_SERIAL_DEFERRED_RECORD] fallback reason=%s "
+                "count=%llu\n",
+                serialDeferredRecordFallbackReasonName(reason),
+                static_cast<unsigned long long>(fallbackReasons[i]));
+        }
+        std::fflush(stderr);
+    }
+};
+
+struct SerialDeferredTranslatedDrawRecord {
+    TranslatedDrawInfo info;
+    std::vector<std::uint8_t> vertexDataStorage;
+    std::vector<std::uint8_t> indexDataStorage;
+    std::vector<std::uint8_t> vertexUniformStorage;
+    std::vector<std::uint8_t> fragmentUniformStorage;
+    std::vector<std::vector<std::uint8_t>> uboDataStorage;
+    SerialDeferredRecordMetrics metrics;
+};
+
+static std::size_t serialDeferredIndexTypeSize(GLenum type) {
+    switch (type) {
+        case GL_UNSIGNED_BYTE: return 1;
+        case GL_UNSIGNED_SHORT: return 2;
+        case GL_UNSIGNED_INT: return 4;
+        default: return 0;
+    }
+}
+
+static void serialDeferredCopyBytes(std::vector<std::uint8_t>& storage,
+                                    const void* source,
+                                    std::size_t byteCount,
+                                    const void*& destination) {
+    if (source == nullptr || byteCount == 0) {
+        storage.clear();
+        destination = nullptr;
+        return;
+    }
+    const auto* begin = static_cast<const std::uint8_t*>(source);
+    storage.assign(begin, begin + byteCount);
+    destination = storage.data();
+}
+
+static void serialDeferredCopyUniformBytes(
+    std::vector<std::uint8_t>& storage,
+    const std::uint8_t* source,
+    std::size_t byteCount,
+    const std::uint8_t*& destination) {
+    const void* copied = nullptr;
+    serialDeferredCopyBytes(storage, source, byteCount, copied);
+    destination = static_cast<const std::uint8_t*>(copied);
+}
+
+static std::uint64_t serialDeferredClearMutableOutputSlots(
+    TranslatedDrawInfo& info) {
+    std::uint64_t cleared = 0;
+    if (info.pipelineStateOut != nullptr) {
+        ++cleared;
+        info.pipelineStateOut = nullptr;
+    }
+    if (info.pipelineColorFormatOut != nullptr) {
+        ++cleared;
+        info.pipelineColorFormatOut = nullptr;
+    }
+    if (info.pipelineStateCacheOut != nullptr) {
+        ++cleared;
+        info.pipelineStateCacheOut = nullptr;
+    }
+    if (info.translatedPlan != nullptr) {
+        ++cleared;
+        info.translatedPlan = nullptr;
+    }
+    if (info.translatedPlanOut != nullptr) {
+        ++cleared;
+        info.translatedPlanOut = nullptr;
+    }
+    if (info.translatedPlanRejectReasonOut != nullptr) {
+        ++cleared;
+        info.translatedPlanRejectReasonOut = nullptr;
+    }
+    if (info.metalVertexFunctionOut != nullptr) {
+        ++cleared;
+        info.metalVertexFunctionOut = nullptr;
+    }
+    if (info.metalFragmentFunctionOut != nullptr) {
+        ++cleared;
+        info.metalFragmentFunctionOut = nullptr;
+    }
+    if (info.pipelineBuildErrorOut != nullptr) {
+        ++cleared;
+        info.pipelineBuildErrorOut = nullptr;
+    }
+    return cleared;
+}
+
+static bool serialDeferredHasLiveGlAliasEscape(
+    const TranslatedDrawInfo& info) {
+    return info.pipelineStateOut != nullptr ||
+        info.pipelineColorFormatOut != nullptr ||
+        info.pipelineStateCacheOut != nullptr ||
+        info.translatedPlan != nullptr ||
+        info.translatedPlanOut != nullptr ||
+        info.translatedPlanRejectReasonOut != nullptr ||
+        info.metalVertexFunctionOut != nullptr ||
+        info.metalFragmentFunctionOut != nullptr ||
+        info.pipelineBuildErrorOut != nullptr;
+}
+
+static std::uint64_t serialDeferredCountBackendHandleRefs(
+    const TranslatedDrawInfo& info) {
+    std::uint64_t refs = 0;
+    auto count = [&refs](const void* ptr) {
+        if (ptr != nullptr) {
+            ++refs;
+        }
+    };
+    count(info.metalVertexBuffer);
+    count(info.metalIndexBuffer);
+    count(info.metalVertexFunction);
+    count(info.metalFragmentFunction);
+    count(info.fboColorTexture);
+    count(info.fboDepthStencilTexture);
+    for (void* texture : info.fboAdditionalColorTextures) {
+        count(texture);
+    }
+    for (const auto& extra : info.extraVertexBuffers) {
+        count(extra.metalBuffer);
+    }
+    auto countTextures =
+        [&count](const std::vector<TranslatedDrawInfo::TextureBinding>& textures) {
+            for (const auto& binding : textures) {
+                count(binding.metalTexture);
+                count(binding.metalSamplerState);
+                count(binding.textureBufferBackingMetalBuffer);
+                count(binding.imageAtomicMetalBuffer);
+            }
+        };
+    countTextures(info.fragmentTextures);
+    countTextures(info.vertexTextures);
+    for (const auto& ubo : info.uboBindings) {
+        count(ubo.metalBuffer);
+    }
+    for (const auto& ssbo : info.ssboBindings) {
+        count(ssbo.metalBuffer);
+    }
+    for (const auto& atomic : info.atomicCounterBindings) {
+        count(atomic.metalBuffer);
+    }
+    return refs;
+}
+
+static std::uint64_t serialDeferredCountImmutableProgramRefs(
+    const TranslatedDrawInfo& info) {
+    std::uint64_t refs = 0;
+    if (info.vertexMSL != nullptr) ++refs;
+    if (info.fragmentMSL != nullptr) ++refs;
+    if (info.vertexReflection != nullptr) ++refs;
+    if (info.fragmentReflection != nullptr) ++refs;
+    return refs;
+}
+
+template <typename T>
+static std::size_t serialDeferredVectorBytes(const std::vector<T>& values) {
+    return values.size() * sizeof(T);
+}
+
+static std::size_t serialDeferredApproxRecordBytes(
+    const SerialDeferredTranslatedDrawRecord& record) {
+    std::size_t bytes = sizeof(SerialDeferredTranslatedDrawRecord);
+    const auto& info = record.info;
+    bytes += serialDeferredVectorBytes(info.vertexAttributeLayouts);
+    bytes += serialDeferredVectorBytes(info.extraVertexBuffers);
+    for (const auto& extra : info.extraVertexBuffers) {
+        bytes += serialDeferredVectorBytes(extra.attributes);
+        bytes += serialDeferredVectorBytes(extra.ownedData);
+    }
+    bytes += serialDeferredVectorBytes(info.fragmentTextures);
+    bytes += serialDeferredVectorBytes(info.vertexTextures);
+    bytes += serialDeferredVectorBytes(info.uboBindings);
+    bytes += serialDeferredVectorBytes(info.ssboBindings);
+    bytes += serialDeferredVectorBytes(info.atomicCounterBindings);
+    bytes += serialDeferredVectorBytes(info.sampledTextureNames);
+    bytes += serialDeferredVectorBytes(info.readImageTextureNames);
+    bytes += serialDeferredVectorBytes(info.writtenImageTextureNames);
+    bytes += serialDeferredVectorBytes(record.vertexDataStorage);
+    bytes += serialDeferredVectorBytes(record.indexDataStorage);
+    bytes += serialDeferredVectorBytes(record.vertexUniformStorage);
+    bytes += serialDeferredVectorBytes(record.fragmentUniformStorage);
+    bytes += serialDeferredVectorBytes(record.uboDataStorage);
+    for (const auto& ubo : record.uboDataStorage) {
+        bytes += serialDeferredVectorBytes(ubo);
+    }
+    return bytes;
+}
+
+static bool makeSerialDeferredTranslatedDrawRecord(
+    const TranslatedDrawInfo& source,
+    SerialDeferredTranslatedDrawRecord& record,
+    SerialDeferredRecordFallbackReason& fallbackReason) {
+    record = SerialDeferredTranslatedDrawRecord{};
+    record.info = source;
+
+    if (source.metalVertexBuffer != nullptr) {
+        record.vertexDataStorage.clear();
+        record.info.vertexData = nullptr;
+    } else {
+        serialDeferredCopyBytes(record.vertexDataStorage,
+                                source.vertexData,
+                                source.vertexDataByteCount,
+                                record.info.vertexData);
+    }
+
+    for (std::size_t i = 0; i < source.extraVertexBuffers.size(); ++i) {
+        auto& extra = record.info.extraVertexBuffers[i];
+        const auto& sourceExtra = source.extraVertexBuffers[i];
+        if (sourceExtra.metalBuffer != nullptr) {
+            extra.data = nullptr;
+            extra.ownedData.clear();
+            continue;
+        }
+        const void* extraData = sourceExtra.data != nullptr
+            ? sourceExtra.data
+            : (sourceExtra.ownedData.empty()
+                   ? nullptr
+                   : sourceExtra.ownedData.data());
+        if (extraData != nullptr && sourceExtra.byteCount > 0) {
+            const auto* begin = static_cast<const std::uint8_t*>(extraData);
+            extra.ownedData.assign(begin, begin + sourceExtra.byteCount);
+            extra.data = extra.ownedData.data();
+        } else {
+            extra.data = nullptr;
+            extra.ownedData.clear();
+        }
+    }
+
+    if (source.indices != nullptr && source.indexCount > 0) {
+        const std::size_t indexSize =
+            serialDeferredIndexTypeSize(source.indexType);
+        if (indexSize == 0) {
+            fallbackReason =
+                SerialDeferredRecordFallbackReason::InvalidIndexType;
+            return false;
+        }
+        serialDeferredCopyBytes(
+            record.indexDataStorage,
+            source.indices,
+            static_cast<std::size_t>(source.indexCount) * indexSize,
+            record.info.indices);
+    } else {
+        record.info.indices = nullptr;
+    }
+
+    serialDeferredCopyUniformBytes(record.vertexUniformStorage,
+                                   source.vertexUniformData,
+                                   source.vertexUniformSize,
+                                   record.info.vertexUniformData);
+    serialDeferredCopyUniformBytes(record.fragmentUniformStorage,
+                                   source.fragmentUniformData,
+                                   source.fragmentUniformSize,
+                                   record.info.fragmentUniformData);
+
+    record.uboDataStorage.resize(record.info.uboBindings.size());
+    for (std::size_t i = 0; i < source.uboBindings.size(); ++i) {
+        auto& ubo = record.info.uboBindings[i];
+        const auto& sourceUbo = source.uboBindings[i];
+        if (sourceUbo.metalBuffer != nullptr) {
+            ubo.data = nullptr;
+            continue;
+        }
+        if (sourceUbo.data != nullptr && sourceUbo.size > 0) {
+            auto& storage = record.uboDataStorage[i];
+            const auto* begin =
+                static_cast<const std::uint8_t*>(sourceUbo.data);
+            storage.assign(begin, begin + sourceUbo.size);
+            ubo.data = storage.data();
+        } else {
+            ubo.data = nullptr;
+        }
+    }
+
+    record.metrics.mutableOutputSlotsCleared =
+        serialDeferredClearMutableOutputSlots(record.info);
+    record.metrics.backendHandleRefs =
+        serialDeferredCountBackendHandleRefs(record.info);
+    record.metrics.immutableProgramRefs =
+        serialDeferredCountImmutableProgramRefs(record.info);
+    record.metrics.immutable =
+        !serialDeferredHasLiveGlAliasEscape(record.info);
+    if (!record.metrics.immutable) {
+        fallbackReason =
+            SerialDeferredRecordFallbackReason::LiveGlAliasEscape;
+        return false;
+    }
+    record.metrics.approxBytes = serialDeferredApproxRecordBytes(record);
+    return true;
+}
+
+static void rebindSerialDeferredTranslatedDrawForConsume(
+    TranslatedDrawInfo& replay,
+    const TranslatedDrawInfo& source) {
+    replay.pipelineStateOut = source.pipelineStateOut;
+    replay.pipelineColorFormatOut = source.pipelineColorFormatOut;
+    replay.pipelineStateCacheOut = source.pipelineStateCacheOut;
+    replay.translatedPlan = source.translatedPlan;
+    replay.translatedPlanOut = source.translatedPlanOut;
+    replay.translatedPlanRejectReasonOut =
+        source.translatedPlanRejectReasonOut;
+    replay.metalVertexFunctionOut = source.metalVertexFunctionOut;
+    replay.metalFragmentFunctionOut = source.metalFragmentFunctionOut;
+    replay.pipelineBuildErrorOut = source.pipelineBuildErrorOut;
+}
+
 enum ActiveQueryTargetIndex : std::size_t {
     ActiveQuerySamplesPassed = 0,
     ActiveQueryAnySamplesPassed,
@@ -6050,6 +6516,7 @@ struct GLContext::Impl {
         coldPathProfile.dump();
         phase2PlanKeyProfile.dump();
         drawPathProfile.dump();
+        serialDeferredRecordProfile.dump();
         drawDetailProfile.dump();
         for (auto& entry : incompleteSampledColorTextures) {
             releaseRetainedMetalObject(entry.second);
@@ -20904,6 +21371,7 @@ struct GLContext::Impl {
     std::unique_ptr<GLObjectStore> objects;
     std::unique_ptr<GLStateTracker> state;
     GLDrawPathProfile drawPathProfile;
+    SerialDeferredRecordProfile serialDeferredRecordProfile;
     mutable GLDrawDetailProfile drawDetailProfile;
     mutable ColdPathDiagnosticProfile coldPathProfile;
     Phase2PlanKeyProfile phase2PlanKeyProfile;
@@ -51293,7 +51761,37 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
         tdi.translatedPlanRejectReasonOut = &translatedPlanRejectReason;
     }
     const auto framegraphEncodeStart = drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
-    const bool ok = frameGraph->encodeTranslatedDraw(tdi);
+    bool ok = false;
+    if (serialDeferredRecordProfile.enabled) {
+        // 7K-0 records only after GL-thread hazard/boundary and Phase-2
+        // authority have run. Mutable program/cache outputs are stripped
+        // from the record and rebound only for same-thread serial consume.
+        SerialDeferredTranslatedDrawRecord deferredRecord;
+        SerialDeferredRecordFallbackReason fallbackReason =
+            SerialDeferredRecordFallbackReason::SnapshotFailed;
+        const auto constructStart = glDrawProfileNow();
+        const bool recordReady =
+            makeSerialDeferredTranslatedDrawRecord(
+                tdi, deferredRecord, fallbackReason);
+        const double constructUs =
+            glDrawProfileElapsedUs(constructStart, glDrawProfileNow());
+        if (recordReady) {
+            serialDeferredRecordProfile.recordCreated(
+                deferredRecord.metrics, constructUs);
+            TranslatedDrawInfo replayInfo = deferredRecord.info;
+            rebindSerialDeferredTranslatedDrawForConsume(replayInfo, tdi);
+            const auto consumeStart = glDrawProfileNow();
+            ok = frameGraph->encodeTranslatedDraw(replayInfo);
+            serialDeferredRecordProfile.recordConsumed(
+                glDrawProfileElapsedUs(consumeStart, glDrawProfileNow()));
+        } else {
+            serialDeferredRecordProfile.recordFallback(
+                fallbackReason, constructUs);
+            ok = frameGraph->encodeTranslatedDraw(tdi);
+        }
+    } else {
+        ok = frameGraph->encodeTranslatedDraw(tdi);
+    }
     tdi.translatedPlan = nullptr;
     tdi.translatedPlanOut = nullptr;
     tdi.translatedPlanRejectReasonOut = nullptr;
