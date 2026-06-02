@@ -188,6 +188,9 @@ struct TranslatedDrawInfo {
         bool glIsInteger = false;
     };
     std::vector<VertexAttributeLayout> vertexAttributeLayouts;
+    std::uint64_t phase2VaoLayoutSegmentHash = 0;
+    std::uint64_t phase2VaoLayoutSegmentCacheIndex = 0;
+    bool phase2VaoLayoutSegmentHashValid = false;
 
     // Additional vertex buffer bindings for multi-VBO setups (e.g. per-instance
     // attribute buffers with glVertexAttribDivisor).  Buffer index 0 is the

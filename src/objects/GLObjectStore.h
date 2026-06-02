@@ -511,6 +511,9 @@ struct GLVertexArrayCachedLayoutGroup {
 struct GLVertexArrayCachedLayout {
     bool valid = false;
     std::uint32_t generation = 0;
+    bool phase2LayoutFingerprintValid = false;
+    std::uint64_t phase2LayoutFingerprint = 0;
+    std::uint64_t phase2LayoutFingerprintCacheIndex = 0;
     bool hasEnabledAttributes = false;
     std::size_t primaryAttributeIndex = 0;
     GLuint primaryBufferName = 0;

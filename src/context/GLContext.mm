@@ -1117,8 +1117,16 @@ static bool phase2BindingShapeSegmentShadowEnabled() {
     return enabled;
 }
 
+static bool phase2VaoLayoutSegmentShadowEnabled() {
+    static const bool enabled =
+        std::getenv("APPGL_PHASE2_VAO_LAYOUT_SEGMENT_SHADOW") != nullptr;
+    return enabled;
+}
+
 static constexpr std::uint64_t kPhase2PlanHashOffset = 1469598103934665603ull;
 static constexpr std::uint64_t kPhase2PlanHashPrime = 1099511628211ull;
+static constexpr std::uint64_t kPhase2PlanVaoLayoutRuntimeCacheIndex =
+    std::numeric_limits<std::uint64_t>::max();
 
 static void phase2PlanHashByte(std::uint64_t& hash, std::uint8_t byte) {
     hash ^= byte;
@@ -1324,6 +1332,198 @@ static void phase2PlanHashVertexLayout(
     phase2PlanHashU64(hash, static_cast<std::uint64_t>(layout.glComponentCount));
     phase2PlanHashBool(hash, layout.glNormalized != GL_FALSE);
     phase2PlanHashBool(hash, layout.glIsInteger);
+}
+
+static void phase2PlanHashCachedVertexLayoutAsTranslated(
+    std::uint64_t& hash,
+    const GLVertexArrayCachedAttributeLayout& layout,
+    std::size_t baseOffset = 0)
+{
+    phase2PlanHashU64(hash, layout.location);
+    phase2PlanHashU64(hash, layout.offset - baseOffset);
+    phase2PlanHashU64(hash, layout.glType);
+    phase2PlanHashU64(
+        hash, static_cast<std::uint64_t>(layout.glComponentCount));
+    phase2PlanHashBool(hash, layout.glNormalized != GL_FALSE);
+    phase2PlanHashBool(hash, layout.glIsInteger);
+}
+
+static void phase2PlanHashVaoLayoutSegmentFields(
+    std::uint64_t& hash,
+    const TranslatedDrawInfo& tdi,
+    std::uint64_t cacheIndex)
+{
+    phase2PlanHashU64(hash, 0x4150474C5032564Cull); // "APGLP2VL"
+    phase2PlanHashU64(hash, cacheIndex);
+    phase2PlanHashU64(hash, tdi.vertexStride);
+    phase2PlanHashU64(hash, tdi.vertexAttributeLayouts.size());
+    for (const auto& layout : tdi.vertexAttributeLayouts) {
+        phase2PlanHashVertexLayout(hash, layout);
+    }
+    phase2PlanHashU64(hash, tdi.extraVertexBuffers.size());
+    for (const auto& extra : tdi.extraVertexBuffers) {
+        phase2PlanHashU64(hash, extra.stride);
+        phase2PlanHashU64(hash, extra.divisor);
+        phase2PlanHashBool(hash, extra.constantStep);
+        phase2PlanHashU64(hash, extra.attributes.size());
+        for (const auto& layout : extra.attributes) {
+            phase2PlanHashVertexLayout(hash, layout);
+        }
+    }
+}
+
+static std::uint64_t phase2PlanBuildVaoLayoutSegmentHash(
+    const TranslatedDrawInfo& tdi,
+    std::uint64_t cacheIndex)
+{
+    std::uint64_t hash = kPhase2PlanHashOffset;
+    phase2PlanHashVaoLayoutSegmentFields(hash, tdi, cacheIndex);
+    return hash;
+}
+
+static std::uint64_t phase2PlanBuildCachedVaoLayoutFingerprint(
+    const GLVertexArrayCachedLayout& cache,
+    std::uint64_t cacheIndex)
+{
+    std::uint64_t hash = kPhase2PlanHashOffset;
+    phase2PlanHashU64(hash, 0x4150474C5032564Cull); // "APGLP2VL"
+    phase2PlanHashU64(hash, cacheIndex);
+    phase2PlanHashU64(hash, cache.primaryStride);
+    phase2PlanHashU64(hash, cache.primaryAttributes.size());
+    for (const auto& layout : cache.primaryAttributes) {
+        phase2PlanHashCachedVertexLayoutAsTranslated(
+            hash, layout, cache.primaryBaseOffset);
+    }
+    phase2PlanHashU64(hash, cache.extraGroups.size());
+    for (const auto& group : cache.extraGroups) {
+        phase2PlanHashU64(hash, group.stride);
+        phase2PlanHashU64(hash, group.divisor);
+        phase2PlanHashBool(hash, false);
+        phase2PlanHashU64(hash, group.attributes.size());
+        for (const auto& layout : group.attributes) {
+            phase2PlanHashCachedVertexLayoutAsTranslated(hash, layout);
+        }
+    }
+    return hash;
+}
+
+static void phase2PlanLogVaoLayoutSegmentNamespaceOnce()
+{
+    if (!phase2VaoLayoutSegmentShadowEnabled()) {
+        return;
+    }
+    static bool logged = false;
+    if (logged) {
+        return;
+    }
+    logged = true;
+    std::fprintf(
+        stderr,
+        "[APPGL_PHASE2_VAO_LAYOUT_SEGMENT_SHADOW] "
+        "final key namespace changed intentionally; "
+        "checking vao-layout segment coverage\n");
+}
+
+static void phase2PlanAssertVaoLayoutSegmentCoverage(
+    const TranslatedDrawInfo& tdi,
+    const char* site,
+    std::uint64_t segmentHash)
+{
+    if (!phase2VaoLayoutSegmentShadowEnabled()) {
+        return;
+    }
+    phase2PlanLogVaoLayoutSegmentNamespaceOnce();
+    const std::uint64_t reference =
+        phase2PlanBuildVaoLayoutSegmentHash(
+            tdi, tdi.phase2VaoLayoutSegmentCacheIndex);
+    if (segmentHash == reference) {
+        return;
+    }
+    std::fprintf(
+        stderr,
+        "[APPGL_PHASE2_VAO_LAYOUT_SEGMENT_SHADOW] "
+        "vao-layout segment coverage mismatch site=%s stored=0x%016llx "
+        "reference=0x%016llx cache_index=%llu "
+        "final_key_namespace=changed_intentionally\n",
+        site != nullptr ? site : "unknown",
+        static_cast<unsigned long long>(segmentHash),
+        static_cast<unsigned long long>(reference),
+        static_cast<unsigned long long>(
+            tdi.phase2VaoLayoutSegmentCacheIndex));
+    std::abort();
+}
+
+static void phase2PlanInvalidateVaoLayoutSegmentHash(TranslatedDrawInfo& tdi)
+{
+    tdi.phase2VaoLayoutSegmentHashValid = false;
+    tdi.phase2VaoLayoutSegmentHash = 0;
+    tdi.phase2VaoLayoutSegmentCacheIndex =
+        kPhase2PlanVaoLayoutRuntimeCacheIndex;
+}
+
+static void phase2PlanRefreshVaoLayoutSegmentHash(
+    TranslatedDrawInfo& tdi,
+    const char* site,
+    std::uint64_t cacheIndex = kPhase2PlanVaoLayoutRuntimeCacheIndex)
+{
+    tdi.phase2VaoLayoutSegmentCacheIndex = cacheIndex;
+    tdi.phase2VaoLayoutSegmentHash =
+        phase2PlanBuildVaoLayoutSegmentHash(tdi, cacheIndex);
+    tdi.phase2VaoLayoutSegmentHashValid = true;
+    phase2PlanAssertVaoLayoutSegmentCoverage(
+        tdi, site, tdi.phase2VaoLayoutSegmentHash);
+}
+
+static void phase2PlanSetVaoLayoutSegmentHashFromCache(
+    TranslatedDrawInfo& tdi,
+    const GLVertexArrayCachedLayout& cache,
+    const char* site)
+{
+    if (!cache.phase2LayoutFingerprintValid) {
+        phase2PlanInvalidateVaoLayoutSegmentHash(tdi);
+        return;
+    }
+    tdi.phase2VaoLayoutSegmentCacheIndex =
+        cache.phase2LayoutFingerprintCacheIndex;
+    tdi.phase2VaoLayoutSegmentHash = cache.phase2LayoutFingerprint;
+    tdi.phase2VaoLayoutSegmentHashValid = true;
+    phase2PlanAssertVaoLayoutSegmentCoverage(
+        tdi, site, tdi.phase2VaoLayoutSegmentHash);
+}
+
+static void phase2PlanEnsureVaoLayoutSegmentHash(TranslatedDrawInfo& tdi,
+                                                 const char* site)
+{
+    if (!tdi.phase2VaoLayoutSegmentHashValid) {
+        phase2PlanRefreshVaoLayoutSegmentHash(tdi, site);
+        return;
+    }
+    phase2PlanAssertVaoLayoutSegmentCoverage(
+        tdi, site, tdi.phase2VaoLayoutSegmentHash);
+}
+
+static std::uint64_t phase2PlanVaoLayoutSegmentHashForKey(
+    const TranslatedDrawInfo& tdi)
+{
+    if (tdi.phase2VaoLayoutSegmentHashValid) {
+        phase2PlanAssertVaoLayoutSegmentCoverage(
+            tdi, "key", tdi.phase2VaoLayoutSegmentHash);
+        return tdi.phase2VaoLayoutSegmentHash;
+    }
+    const std::uint64_t fallback =
+        phase2PlanBuildVaoLayoutSegmentHash(
+            tdi, kPhase2PlanVaoLayoutRuntimeCacheIndex);
+    if (phase2VaoLayoutSegmentShadowEnabled()) {
+        phase2PlanLogVaoLayoutSegmentNamespaceOnce();
+        std::fprintf(
+            stderr,
+            "[APPGL_PHASE2_VAO_LAYOUT_SEGMENT_SHADOW] "
+            "vao-layout segment missing before key site=key "
+            "fallback=0x%016llx final_key_namespace=changed_intentionally\n",
+            static_cast<unsigned long long>(fallback));
+        std::abort();
+    }
+    return fallback;
 }
 
 static void phase2PlanHashTextureBindings(
@@ -1831,22 +2031,11 @@ static std::uint64_t phase2PlanKeyForDraw(const TranslatedDrawInfo& tdi,
 
     phase2PlanHashBool(hash, tdi.vertexData != nullptr);
     phase2PlanHashBool(hash, tdi.metalVertexBuffer != nullptr);
-    phase2PlanHashU64(hash, tdi.vertexStride);
-    phase2PlanHashU64(hash, tdi.vertexAttributeLayouts.size());
-    for (const auto& layout : tdi.vertexAttributeLayouts) {
-        phase2PlanHashVertexLayout(hash, layout);
-    }
+    phase2PlanHashU64(hash, phase2PlanVaoLayoutSegmentHashForKey(tdi));
     phase2PlanHashU64(hash, tdi.extraVertexBuffers.size());
     for (const auto& extra : tdi.extraVertexBuffers) {
         phase2PlanHashBool(hash, extra.data != nullptr);
         phase2PlanHashBool(hash, extra.metalBuffer != nullptr);
-        phase2PlanHashU64(hash, extra.stride);
-        phase2PlanHashU64(hash, extra.divisor);
-        phase2PlanHashBool(hash, extra.constantStep);
-        phase2PlanHashU64(hash, extra.attributes.size());
-        for (const auto& layout : extra.attributes) {
-            phase2PlanHashVertexLayout(hash, layout);
-        }
     }
     phase2PlanHashBool(hash, tdi.metalIndexBuffer != nullptr);
     coldMark(coldVaoLayoutUs);
@@ -15155,17 +15344,33 @@ struct GLContext::Impl {
     }
 
     void deleteBufferReferencesFromVertexArrays(GLuint buffer) {
-        objects->vertexArrays().forEach([&](GLuint, GLVertexArrayObject& vertexArray) {
+        auto clearVaoBufferReferences = [&](GLVertexArrayObject& vertexArray) {
+            bool dirty = false;
             if (vertexArray.elementArrayBuffer == buffer) {
                 vertexArray.elementArrayBuffer = 0;
             }
             for (auto& attribute : vertexArray.attributes) {
                 if (attribute.buffer == buffer) {
                     attribute.buffer = 0;
-                    markVertexDescriptorDirty(vertexArray);
+                    dirty = true;
                 }
             }
+            for (auto& bindingPoint : vertexArray.bindingPoints) {
+                if (bindingPoint.buffer == buffer) {
+                    bindingPoint.buffer = 0;
+                    dirty = true;
+                }
+            }
+            if (dirty) {
+                markVertexDescriptorDirty(vertexArray);
+            }
+        };
+        objects->vertexArrays().forEach([&](GLuint, GLVertexArrayObject& vertexArray) {
+            clearVaoBufferReferences(vertexArray);
         });
+        if (defaultVertexArrayReady) {
+            clearVaoBufferReferences(defaultVertexArray);
+        }
     }
 
     void deleteTextureReferencesFromFramebuffers(GLuint texture) {
@@ -47166,6 +47371,7 @@ static GLVertexArrayCachedAttributeLayout makeCachedVertexAttributeLayout(
 
 static GLVertexArrayCachedLayout buildVertexArrayCachedLayout(
     const GLVertexArrayObject& vao,
+    std::uint64_t cacheIndex,
     bool divisorAware,
     bool forceAttributeZeroPrimary,
     bool minimizePrimaryBaseOffset)
@@ -47174,6 +47380,10 @@ static GLVertexArrayCachedLayout buildVertexArrayCachedLayout(
     cache.valid = true;
     cache.generation = vao.attribGeneration;
     if (vao.attributes.empty()) {
+        cache.phase2LayoutFingerprintCacheIndex = cacheIndex;
+        cache.phase2LayoutFingerprint =
+            phase2PlanBuildCachedVaoLayoutFingerprint(cache, cacheIndex);
+        cache.phase2LayoutFingerprintValid = true;
         return cache;
     }
 
@@ -47198,6 +47408,10 @@ static GLVertexArrayCachedLayout buildVertexArrayCachedLayout(
     cache.primaryBaseOffset = primaryResolved.offset;
 
     if (!foundEnabledAttrib) {
+        cache.phase2LayoutFingerprintCacheIndex = cacheIndex;
+        cache.phase2LayoutFingerprint =
+            phase2PlanBuildCachedVaoLayoutFingerprint(cache, cacheIndex);
+        cache.phase2LayoutFingerprintValid = true;
         return cache;
     }
 
@@ -47251,6 +47465,10 @@ static GLVertexArrayCachedLayout buildVertexArrayCachedLayout(
         groupIt->attributes.push_back(std::move(layout));
     }
 
+    cache.phase2LayoutFingerprintCacheIndex = cacheIndex;
+    cache.phase2LayoutFingerprint =
+        phase2PlanBuildCachedVaoLayoutFingerprint(cache, cacheIndex);
+    cache.phase2LayoutFingerprintValid = true;
     return cache;
 }
 
@@ -47276,7 +47494,7 @@ static const GLVertexArrayCachedLayout& cachedVertexArrayLayout(
     const bool hit = cache.valid && cache.generation == vao.attribGeneration;
     if (!hit) {
         cache = buildVertexArrayCachedLayout(
-            vao, divisorAware, forceAttributeZeroPrimary,
+            vao, index, divisorAware, forceAttributeZeroPrimary,
             minimizePrimaryBaseOffset);
     }
     if (cacheHit != nullptr) {
@@ -47309,6 +47527,9 @@ static void applyCachedVertexArrayLayout(
 {
     ColdPathDiagnosticScope coldScope(
         coldProfile, ColdPathDiagnosticBucket::ProgramVaoFboLayoutApply);
+    const bool tdiLayoutWasEmpty =
+        tdi.vertexAttributeLayouts.empty() && tdi.extraVertexBuffers.empty();
+    bool skippedExtraGroup = false;
     tdi.vertexAttributeLayouts.reserve(
         tdi.vertexAttributeLayouts.size() + cache.primaryAttributes.size());
     tdi.extraVertexBuffers.reserve(
@@ -47327,6 +47548,7 @@ static void applyCachedVertexArrayLayout(
         const bool hasExtraBytes =
             extraVbo != nullptr && !extraVbo->shadowBytes.empty();
         if (!keepEmptyExtraBufferGroups && !hasExtraBytes) {
+            skippedExtraGroup = true;
             continue;
         }
 
@@ -47348,6 +47570,12 @@ static void applyCachedVertexArrayLayout(
             evb.attributes.push_back(makeTranslatedLayout(cachedAttr));
         }
         tdi.extraVertexBuffers.push_back(std::move(evb));
+    }
+    if (tdiLayoutWasEmpty && !skippedExtraGroup) {
+        phase2PlanSetVaoLayoutSegmentHashFromCache(
+            tdi, cache, "apply_cached_vao_layout");
+    } else {
+        phase2PlanInvalidateVaoLayoutSegmentHash(tdi);
     }
 }
 
@@ -47486,6 +47714,7 @@ static void appendCurrentGenericVertexAttributes(
 {
     ColdPathDiagnosticScope coldScope(
         coldProfile, ColdPathDiagnosticBucket::ProgramVaoFboGenericAttributes);
+    bool appended = false;
     if (tdi.vertexReflection == nullptr || vao == nullptr) {
         return;
     }
@@ -47549,6 +47778,10 @@ static void appendCurrentGenericVertexAttributes(
         currentBuffer->attributes.push_back(layout);
         currentBuffer->byteCount = currentBuffer->ownedData.size();
         currentBuffer->stride = currentBuffer->byteCount;
+        appended = true;
+    }
+    if (appended) {
+        phase2PlanInvalidateVaoLayoutSegmentHash(tdi);
     }
 }
 
@@ -50928,6 +51161,7 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
         tdi.parallelEncodePrimitiveExpansionHazard =
             parallelEncodeModeRequiresPrimitiveExpansion(tdi.mode);
     }
+    phase2PlanEnsureVaoLayoutSegmentHash(tdi, "pre_phase2_key");
     phase2PlanEnsureBindingShapeSegmentHash(tdi, "pre_phase2_key");
     phase2PlanEnsureFixedStateSegmentHash(tdi, "pre_phase2_key");
     coldPathProfile.recordDrawKeys(
