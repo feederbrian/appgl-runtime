@@ -1,6 +1,16 @@
 # AppGL Feature Flags
 
-AppGL resolves runtime feature flags with one shared launch-time resolver.
+AppGL resolves launch-time feature flags with one shared typed resolver.
+The resolver owns per-flag metadata:
+
+- canonical name and aliases
+- porter environment-variable aliases
+- type: bool, int, float, enum, string, or path
+- default value
+- scope: porter, app, runtime, or both
+- validator and invalid-value policy
+- optional NORM#1 label for runtime-touching flags
+
 The S23 precedence rule is deterministic:
 
 1. Command-line arguments on the host process.
@@ -8,8 +18,14 @@ The S23 precedence rule is deterministic:
 3. User JSON config.
 4. Built-in default.
 
-Malformed or unreadable JSON files are ignored. Startup falls back to the next
-lower source instead of crashing.
+Invalid values are diagnosed and ignored; resolution falls through to the next
+lower valid source or the built-in default. Runtime-dangerous flags can mark
+their invalid policy as default-safe, which forces the default after a bad
+explicit value.
+
+Missing default-discovery JSON files are silent. Malformed or unreadable
+explicit JSON paths selected by `--appgl-config`, `APPGL_OPTIONS_JSON`, or
+`APPGL_CONFIG_JSON` are recorded in the feature-flag diagnostics surface.
 
 ## Command Line
 
@@ -26,6 +42,18 @@ Boolean flags accept either generic or per-flag forms:
 If the same flag appears more than once on the command line, the last matching
 argument wins within the command-line source.
 
+Typed flags use per-flag assignment:
+
+```bash
+--appgl-some-float-flag=1.0
+--appgl-some-enum-flag=off
+--appgl-some-path-flag=/tmp/appgl
+```
+
+`--appgl-config=/path/to/appgl-options.json` selects a JSON config file. Values
+from that file still have JSON precedence; they do not outrank command-line
+feature values or porter environment variables.
+
 ## Environment
 
 Each feature owns its compatibility environment-variable aliases. Environment
@@ -39,14 +67,17 @@ Accepted false tokens: `0`, `false`, `no`, `off`, `disable`, `disabled`.
 
 Search order:
 
-1. `APPGL_OPTIONS_JSON` or `APPGL_CONFIG_JSON` if set.
-2. `appgl-options.json` in the current working directory.
-3. `appgl-options.json` next to the process executable.
-4. `appgl-options.json` in the app bundle resources.
+1. `--appgl-config=/path/to/appgl-options.json` if set.
+2. `APPGL_OPTIONS_JSON` or `APPGL_CONFIG_JSON` if set.
+3. `appgl-options.json` in the current working directory.
+4. `appgl-options.json` next to the process executable.
+5. `appgl-options.json` in the app bundle resources.
 
 Flag keys may be top-level or nested under `appgl` or `features`.
-Boolean values may be booleans, boolean strings, numbers, or objects with an
-`enabled`, `force`, or `value` member.
+Values may be raw JSON scalars or objects with an `enabled`, `force`, or `value`
+member. Boolean values may be booleans, boolean strings, or numbers. Numeric,
+enum, string, and path flags are parsed according to their registry type and
+validator.
 
 ```json
 {
