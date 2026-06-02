@@ -1105,6 +1105,12 @@ static bool phase2TranslatedDrawPlanTraceEnabled() {
     return std::getenv("APPGL_PHASE2_PLAN_TRACE") != nullptr;
 }
 
+static bool phase2FixedStateSegmentShadowEnabled() {
+    static const bool enabled =
+        std::getenv("APPGL_PHASE2_FIXED_STATE_SEGMENT_SHADOW") != nullptr;
+    return enabled;
+}
+
 static constexpr std::uint64_t kPhase2PlanHashOffset = 1469598103934665603ull;
 static constexpr std::uint64_t kPhase2PlanHashPrime = 1099511628211ull;
 
@@ -1329,6 +1335,225 @@ static void phase2PlanHashTextureBindings(
     }
 }
 
+static std::uint64_t phase2PlanBuildFixedStateSegmentHash(
+    const TranslatedDrawInfo& tdi)
+{
+    std::uint64_t hash = kPhase2PlanHashOffset;
+    phase2PlanHashU64(hash, 0x4150474C50324653ull); // "APGLP2FS"
+    phase2PlanHashBool(hash, tdi.depthTestEnabled);
+    phase2PlanHashU64(hash, tdi.depthFunc);
+    phase2PlanHashBool(hash, tdi.depthWriteMask);
+    phase2PlanHashBool(hash, tdi.cullFaceEnabled);
+    phase2PlanHashU64(hash, tdi.cullFaceMode);
+    phase2PlanHashU64(hash, tdi.frontFace);
+    phase2PlanHashBool(hash, tdi.wireframe);
+    phase2PlanHashU64(hash, tdi.sampleMask);
+    phase2PlanHashBool(hash, tdi.stencilTestEnabled);
+    phase2PlanHashU64(hash, tdi.stencilFrontFunc);
+    phase2PlanHashU64(hash, static_cast<std::uint64_t>(tdi.stencilFrontRef));
+    phase2PlanHashU64(hash, tdi.stencilFrontValueMask);
+    phase2PlanHashU64(hash, tdi.stencilFrontFail);
+    phase2PlanHashU64(hash, tdi.stencilFrontDepthFail);
+    phase2PlanHashU64(hash, tdi.stencilFrontDepthPass);
+    phase2PlanHashU64(hash, tdi.stencilFrontWriteMask);
+    phase2PlanHashU64(hash, tdi.stencilBackFunc);
+    phase2PlanHashU64(hash, static_cast<std::uint64_t>(tdi.stencilBackRef));
+    phase2PlanHashU64(hash, tdi.stencilBackValueMask);
+    phase2PlanHashU64(hash, tdi.stencilBackFail);
+    phase2PlanHashU64(hash, tdi.stencilBackDepthFail);
+    phase2PlanHashU64(hash, tdi.stencilBackDepthPass);
+    phase2PlanHashU64(hash, tdi.stencilBackWriteMask);
+    phase2PlanHashBool(hash, tdi.polygonOffsetEnabled);
+    phase2PlanHashFloat(hash, tdi.polygonOffsetFactor);
+    phase2PlanHashFloat(hash, tdi.polygonOffsetUnits);
+    phase2PlanHashFloat(hash, tdi.polygonOffsetClamp);
+    phase2PlanHashBool(hash, tdi.rasterizerDiscard);
+    phase2PlanHashBool(hash, tdi.sampleShadingEnabled);
+    phase2PlanHashFloat(hash, tdi.minSampleShading);
+    phase2PlanHashU64(hash, tdi.fragmentShadingRate);
+    phase2PlanHashU64(hash, tdi.fragmentShadingRateShaderState.apiRate);
+    phase2PlanHashU64(hash, tdi.fragmentShadingRateShaderState.attachmentRate);
+    phase2PlanHashU64(hash, tdi.fragmentShadingRateShaderState.combinerOp0);
+    phase2PlanHashU64(hash, tdi.fragmentShadingRateShaderState.combinerOp1);
+    phase2PlanHashU64(hash, tdi.clipOrigin);
+    phase2PlanHashBool(hash, tdi.clipControlYSignFixupEnabled);
+    phase2PlanHashBool(hash, tdi.markColorAttachmentReadbackFlip);
+    phase2PlanHashBool(hash, tdi.scissorTestEnabled);
+    phase2PlanHashU64(hash, tdi.viewportArrayCount);
+    phase2PlanHashU64(hash, tdi.blend.enabled ? 1u : 0u);
+    phase2PlanHashU64(hash, tdi.blend.srcRGB);
+    phase2PlanHashU64(hash, tdi.blend.dstRGB);
+    phase2PlanHashU64(hash, tdi.blend.srcAlpha);
+    phase2PlanHashU64(hash, tdi.blend.dstAlpha);
+    phase2PlanHashU64(hash, tdi.blend.equationRGB);
+    phase2PlanHashU64(hash, tdi.blend.equationAlpha);
+    phase2PlanHashBool(hash, tdi.blend.colorMaskR);
+    phase2PlanHashBool(hash, tdi.blend.colorMaskG);
+    phase2PlanHashBool(hash, tdi.blend.colorMaskB);
+    phase2PlanHashBool(hash, tdi.blend.colorMaskA);
+    return hash;
+}
+
+static std::uint64_t phase2PlanBuildFixedStateReferenceSegmentHash(
+    const TranslatedDrawInfo& tdi)
+{
+    std::uint64_t hash = kPhase2PlanHashOffset;
+    phase2PlanHashU64(hash, 0x4150474C50324653ull); // "APGLP2FS"
+    phase2PlanHashBool(hash, tdi.depthTestEnabled);
+    phase2PlanHashU64(hash, tdi.depthFunc);
+    phase2PlanHashBool(hash, tdi.depthWriteMask);
+    phase2PlanHashBool(hash, tdi.cullFaceEnabled);
+    phase2PlanHashU64(hash, tdi.cullFaceMode);
+    phase2PlanHashU64(hash, tdi.frontFace);
+    phase2PlanHashBool(hash, tdi.wireframe);
+    phase2PlanHashU64(hash, tdi.sampleMask);
+    phase2PlanHashBool(hash, tdi.stencilTestEnabled);
+    phase2PlanHashU64(hash, tdi.stencilFrontFunc);
+    phase2PlanHashU64(hash, static_cast<std::uint64_t>(tdi.stencilFrontRef));
+    phase2PlanHashU64(hash, tdi.stencilFrontValueMask);
+    phase2PlanHashU64(hash, tdi.stencilFrontFail);
+    phase2PlanHashU64(hash, tdi.stencilFrontDepthFail);
+    phase2PlanHashU64(hash, tdi.stencilFrontDepthPass);
+    phase2PlanHashU64(hash, tdi.stencilFrontWriteMask);
+    phase2PlanHashU64(hash, tdi.stencilBackFunc);
+    phase2PlanHashU64(hash, static_cast<std::uint64_t>(tdi.stencilBackRef));
+    phase2PlanHashU64(hash, tdi.stencilBackValueMask);
+    phase2PlanHashU64(hash, tdi.stencilBackFail);
+    phase2PlanHashU64(hash, tdi.stencilBackDepthFail);
+    phase2PlanHashU64(hash, tdi.stencilBackDepthPass);
+    phase2PlanHashU64(hash, tdi.stencilBackWriteMask);
+    phase2PlanHashBool(hash, tdi.polygonOffsetEnabled);
+    phase2PlanHashFloat(hash, tdi.polygonOffsetFactor);
+    phase2PlanHashFloat(hash, tdi.polygonOffsetUnits);
+    phase2PlanHashFloat(hash, tdi.polygonOffsetClamp);
+    phase2PlanHashBool(hash, tdi.rasterizerDiscard);
+    phase2PlanHashBool(hash, tdi.sampleShadingEnabled);
+    phase2PlanHashFloat(hash, tdi.minSampleShading);
+    phase2PlanHashU64(hash, tdi.fragmentShadingRate);
+    phase2PlanHashU64(hash, tdi.fragmentShadingRateShaderState.apiRate);
+    phase2PlanHashU64(hash, tdi.fragmentShadingRateShaderState.attachmentRate);
+    phase2PlanHashU64(hash, tdi.fragmentShadingRateShaderState.combinerOp0);
+    phase2PlanHashU64(hash, tdi.fragmentShadingRateShaderState.combinerOp1);
+    phase2PlanHashU64(hash, tdi.clipOrigin);
+    phase2PlanHashBool(hash, tdi.clipControlYSignFixupEnabled);
+    phase2PlanHashBool(hash, tdi.markColorAttachmentReadbackFlip);
+    phase2PlanHashBool(hash, tdi.scissorTestEnabled);
+    phase2PlanHashU64(hash, tdi.viewportArrayCount);
+    phase2PlanHashU64(hash, tdi.blend.enabled ? 1u : 0u);
+    phase2PlanHashU64(hash, tdi.blend.srcRGB);
+    phase2PlanHashU64(hash, tdi.blend.dstRGB);
+    phase2PlanHashU64(hash, tdi.blend.srcAlpha);
+    phase2PlanHashU64(hash, tdi.blend.dstAlpha);
+    phase2PlanHashU64(hash, tdi.blend.equationRGB);
+    phase2PlanHashU64(hash, tdi.blend.equationAlpha);
+    phase2PlanHashBool(hash, tdi.blend.colorMaskR);
+    phase2PlanHashBool(hash, tdi.blend.colorMaskG);
+    phase2PlanHashBool(hash, tdi.blend.colorMaskB);
+    phase2PlanHashBool(hash, tdi.blend.colorMaskA);
+    return hash;
+}
+
+static void phase2PlanLogFixedStateSegmentNamespaceOnce()
+{
+    if (!phase2FixedStateSegmentShadowEnabled()) {
+        return;
+    }
+    static bool logged = false;
+    if (logged) {
+        return;
+    }
+    logged = true;
+    std::fprintf(
+        stderr,
+        "[APPGL_PHASE2_FIXED_STATE_SEGMENT_SHADOW] "
+        "final key namespace changed intentionally; "
+        "checking fixed-state segment coverage\n");
+}
+
+static void phase2PlanAssertFixedStateSegmentCoverage(
+    const TranslatedDrawInfo& tdi,
+    const char* site,
+    std::uint64_t segmentHash)
+{
+    if (!phase2FixedStateSegmentShadowEnabled()) {
+        return;
+    }
+    phase2PlanLogFixedStateSegmentNamespaceOnce();
+    const std::uint64_t reference =
+        phase2PlanBuildFixedStateReferenceSegmentHash(tdi);
+    if (segmentHash == reference) {
+        return;
+    }
+    std::fprintf(
+        stderr,
+        "[APPGL_PHASE2_FIXED_STATE_SEGMENT_SHADOW] "
+        "fixed-state segment coverage mismatch site=%s stored=0x%016llx "
+        "reference=0x%016llx final_key_namespace=changed_intentionally\n",
+        site != nullptr ? site : "unknown",
+        static_cast<unsigned long long>(segmentHash),
+        static_cast<unsigned long long>(reference));
+    std::abort();
+}
+
+static void phase2PlanInvalidateFixedStateSegmentHash(TranslatedDrawInfo& tdi)
+{
+    tdi.phase2FixedStateSegmentHashValid = false;
+}
+
+static void phase2PlanRefreshFixedStateSegmentHash(TranslatedDrawInfo& tdi,
+                                                   const char* site)
+{
+    tdi.phase2FixedStateSegmentHash =
+        phase2PlanBuildFixedStateSegmentHash(tdi);
+    tdi.phase2FixedStateSegmentHashValid = true;
+    phase2PlanAssertFixedStateSegmentCoverage(
+        tdi, site, tdi.phase2FixedStateSegmentHash);
+}
+
+static void phase2PlanEnsureFixedStateSegmentHash(TranslatedDrawInfo& tdi,
+                                                  const char* site)
+{
+    if (!tdi.phase2FixedStateSegmentHashValid) {
+        phase2PlanRefreshFixedStateSegmentHash(tdi, site);
+        return;
+    }
+    phase2PlanAssertFixedStateSegmentCoverage(
+        tdi, site, tdi.phase2FixedStateSegmentHash);
+}
+
+static void phase2PlanSetFixedStateBool(TranslatedDrawInfo& tdi,
+                                        bool& field,
+                                        bool value)
+{
+    if (field == value) {
+        return;
+    }
+    field = value;
+    phase2PlanInvalidateFixedStateSegmentHash(tdi);
+}
+
+static std::uint64_t phase2PlanFixedStateSegmentHashForKey(
+    const TranslatedDrawInfo& tdi)
+{
+    if (tdi.phase2FixedStateSegmentHashValid) {
+        phase2PlanAssertFixedStateSegmentCoverage(
+            tdi, "key", tdi.phase2FixedStateSegmentHash);
+        return tdi.phase2FixedStateSegmentHash;
+    }
+    const std::uint64_t fallback = phase2PlanBuildFixedStateSegmentHash(tdi);
+    if (phase2FixedStateSegmentShadowEnabled()) {
+        phase2PlanLogFixedStateSegmentNamespaceOnce();
+        std::fprintf(
+            stderr,
+            "[APPGL_PHASE2_FIXED_STATE_SEGMENT_SHADOW] "
+            "fixed-state segment missing before key site=key "
+            "fallback=0x%016llx final_key_namespace=changed_intentionally\n",
+            static_cast<unsigned long long>(fallback));
+        std::abort();
+    }
+    return fallback;
+}
+
 static void phase2PlanHashSubmissionGroup(
     std::uint64_t& hash,
     const AppGLSubmissionGroup& group)
@@ -1453,57 +1678,7 @@ static std::uint64_t phase2PlanKeyForDraw(const TranslatedDrawInfo& tdi,
     phase2PlanHashTextureBindings(hash, tdi.vertexTextures);
     coldMark(coldBindingsUs);
 
-    phase2PlanHashBool(hash, tdi.depthTestEnabled);
-    phase2PlanHashU64(hash, tdi.depthFunc);
-    phase2PlanHashBool(hash, tdi.depthWriteMask);
-    phase2PlanHashBool(hash, tdi.cullFaceEnabled);
-    phase2PlanHashU64(hash, tdi.cullFaceMode);
-    phase2PlanHashU64(hash, tdi.frontFace);
-    phase2PlanHashBool(hash, tdi.wireframe);
-    phase2PlanHashU64(hash, tdi.sampleMask);
-    phase2PlanHashBool(hash, tdi.stencilTestEnabled);
-    phase2PlanHashU64(hash, tdi.stencilFrontFunc);
-    phase2PlanHashU64(hash, static_cast<std::uint64_t>(tdi.stencilFrontRef));
-    phase2PlanHashU64(hash, tdi.stencilFrontValueMask);
-    phase2PlanHashU64(hash, tdi.stencilFrontFail);
-    phase2PlanHashU64(hash, tdi.stencilFrontDepthFail);
-    phase2PlanHashU64(hash, tdi.stencilFrontDepthPass);
-    phase2PlanHashU64(hash, tdi.stencilFrontWriteMask);
-    phase2PlanHashU64(hash, tdi.stencilBackFunc);
-    phase2PlanHashU64(hash, static_cast<std::uint64_t>(tdi.stencilBackRef));
-    phase2PlanHashU64(hash, tdi.stencilBackValueMask);
-    phase2PlanHashU64(hash, tdi.stencilBackFail);
-    phase2PlanHashU64(hash, tdi.stencilBackDepthFail);
-    phase2PlanHashU64(hash, tdi.stencilBackDepthPass);
-    phase2PlanHashU64(hash, tdi.stencilBackWriteMask);
-    phase2PlanHashBool(hash, tdi.polygonOffsetEnabled);
-    phase2PlanHashFloat(hash, tdi.polygonOffsetFactor);
-    phase2PlanHashFloat(hash, tdi.polygonOffsetUnits);
-    phase2PlanHashFloat(hash, tdi.polygonOffsetClamp);
-    phase2PlanHashBool(hash, tdi.rasterizerDiscard);
-    phase2PlanHashBool(hash, tdi.sampleShadingEnabled);
-    phase2PlanHashFloat(hash, tdi.minSampleShading);
-    phase2PlanHashU64(hash, tdi.fragmentShadingRate);
-    phase2PlanHashU64(hash, tdi.fragmentShadingRateShaderState.apiRate);
-    phase2PlanHashU64(hash, tdi.fragmentShadingRateShaderState.attachmentRate);
-    phase2PlanHashU64(hash, tdi.fragmentShadingRateShaderState.combinerOp0);
-    phase2PlanHashU64(hash, tdi.fragmentShadingRateShaderState.combinerOp1);
-    phase2PlanHashU64(hash, tdi.clipOrigin);
-    phase2PlanHashBool(hash, tdi.clipControlYSignFixupEnabled);
-    phase2PlanHashBool(hash, tdi.markColorAttachmentReadbackFlip);
-    phase2PlanHashBool(hash, tdi.scissorTestEnabled);
-    phase2PlanHashU64(hash, tdi.viewportArrayCount);
-    phase2PlanHashU64(hash, tdi.blend.enabled ? 1u : 0u);
-    phase2PlanHashU64(hash, tdi.blend.srcRGB);
-    phase2PlanHashU64(hash, tdi.blend.dstRGB);
-    phase2PlanHashU64(hash, tdi.blend.srcAlpha);
-    phase2PlanHashU64(hash, tdi.blend.dstAlpha);
-    phase2PlanHashU64(hash, tdi.blend.equationRGB);
-    phase2PlanHashU64(hash, tdi.blend.equationAlpha);
-    phase2PlanHashBool(hash, tdi.blend.colorMaskR);
-    phase2PlanHashBool(hash, tdi.blend.colorMaskG);
-    phase2PlanHashBool(hash, tdi.blend.colorMaskB);
-    phase2PlanHashBool(hash, tdi.blend.colorMaskA);
+    phase2PlanHashU64(hash, phase2PlanFixedStateSegmentHashForKey(tdi));
     coldMark(coldFixedStateUs);
 
     phase2PlanHashU64(hash, tdi.uboBindings.size());
@@ -46801,6 +46976,7 @@ static void populateTranslatedDrawFixedFunctionState(
     tdi.scissorY = sc.y;
     tdi.scissorWidth = sc.width;
     tdi.scissorHeight = sc.height;
+    phase2PlanRefreshFixedStateSegmentHash(tdi, "populate_fixed_function_state");
 }
 
 static constexpr std::size_t kPlainVaoLayoutCacheIndex = 0;
@@ -50050,9 +50226,11 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         program.gsPresent ||
         program.hasTessellation ||
         replayDraw.tessOutputVerticesPerPatch != 0;
-    tdi.markColorAttachmentReadbackFlip =
+    phase2PlanSetFixedStateBool(
+        tdi,
+        tdi.markColorAttachmentReadbackFlip,
         tdi.clipOrigin == GL_LOWER_LEFT &&
-        (routeViewportIndex || cpuExpandedDomain);
+            (routeViewportIndex || cpuExpandedDomain));
     tdi.vertexMSL = &program.gsPassThroughVertexMSL;
     // Post-process the FS MSL for GS-emulation replay. PrimitiveID needs
     // a user-varying redirect; fp64 stage inputs need float transport
@@ -50246,8 +50424,10 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
 
     populateTranslatedDrawFixedFunctionState(
         tdi, *state, effectiveFragmentShadingRateForProgram(*owner, &program), owner);
-    tdi.markColorAttachmentReadbackFlip =
-        (tdi.clipOrigin == GL_LOWER_LEFT);
+    phase2PlanSetFixedStateBool(
+        tdi,
+        tdi.markColorAttachmentReadbackFlip,
+        tdi.clipOrigin == GL_LOWER_LEFT);
     assignTranslatedDrawProgramMsl(tdi, program);
     tdi.vertexReflection = &program.vertexReflection;
     tdi.fragmentReflection = &program.fragmentReflection;
@@ -50484,11 +50664,14 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
             translatedDrawHasClipControlYSignParameter(tdi)) {
             if (const GLFramebufferObject* fbo =
                     objects->framebuffers().get(drawFboName)) {
-                tdi.clipControlYSignFixupEnabled =
-                    framebufferUsesRenderbufferOnlyColorTargets(*fbo);
+                phase2PlanSetFixedStateBool(
+                    tdi,
+                    tdi.clipControlYSignFixupEnabled,
+                    framebufferUsesRenderbufferOnlyColorTargets(*fbo));
             }
         } else {
-            tdi.clipControlYSignFixupEnabled = false;
+            phase2PlanSetFixedStateBool(
+                tdi, tdi.clipControlYSignFixupEnabled, false);
         }
         if (drawFboName != 0) {
             if (const GLFramebufferObject* drawFbo =
@@ -50506,11 +50689,14 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                     attachmentLiveExact(GL_STENCIL_ATTACHMENT) ||
                     attachmentLiveExact(GL_DEPTH_STENCIL_ATTACHMENT);
                 if (!hasDepth) {
-                    tdi.depthTestEnabled = false;
-                    tdi.depthWriteMask = false;
+                    phase2PlanSetFixedStateBool(
+                        tdi, tdi.depthTestEnabled, false);
+                    phase2PlanSetFixedStateBool(
+                        tdi, tdi.depthWriteMask, false);
                 }
                 if (!hasStencil) {
-                    tdi.stencilTestEnabled = false;
+                    phase2PlanSetFixedStateBool(
+                        tdi, tdi.stencilTestEnabled, false);
                 }
             }
         }
@@ -50552,7 +50738,8 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
             tdi.viewportArrayCount > 1 &&
             mslWritesViewportArrayIndex(tdi.vertexMSL) &&
             tdi.clipOrigin == GL_LOWER_LEFT) {
-            tdi.markColorAttachmentReadbackFlip = true;
+            phase2PlanSetFixedStateBool(
+                tdi, tdi.markColorAttachmentReadbackFlip, true);
         }
     }
 
@@ -50591,6 +50778,7 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
         tdi.parallelEncodePrimitiveExpansionHazard =
             parallelEncodeModeRequiresPrimitiveExpansion(tdi.mode);
     }
+    phase2PlanEnsureFixedStateSegmentHash(tdi, "pre_phase2_key");
     coldPathProfile.recordDrawKeys(
         tdi, planVaoName, planVaoGeneration, drawFboName);
     coldPathProfile.recordSnapshotEstimate(tdi);

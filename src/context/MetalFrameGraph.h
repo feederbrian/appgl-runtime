@@ -498,6 +498,12 @@ struct TranslatedDrawInfo {
     };
     BlendState blend;
 
+    // Phase-2 plan key Rung-1: compact digest of the fixed-function fields
+    // above that are key-visible. Raw fields remain authoritative for encode
+    // and semantic decisions; this is refreshed from the current TDI snapshot.
+    std::uint64_t phase2FixedStateSegmentHash = 0;
+    bool phase2FixedStateSegmentHashValid = false;
+
     // Uniform Buffer Object bindings.  Resolved from the GL state by
     // GLContext::drawArrays at draw time, then bound to the Metal encoder
     // by encodeTranslatedDraw. Each entry pairs a Metal [[buffer(N)]] slot
