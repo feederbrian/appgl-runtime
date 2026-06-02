@@ -851,9 +851,8 @@ struct ThreadedDeferredRecordProfile {
     bool enabled = envEnabled("APPGL_7K_THREADED_DEFERRED_RECORD");
     bool asyncEnabled =
         enabled && envEnabled("APPGL_7K_DEFERRED_RECORD_ASYNC");
-    // Default 7K-1 records the immutable lean descriptor itself. Set
-    // APPGL_7K_DEFERRED_RECORD_DESCRIPTOR_FAST=0 to exercise the copied-TDI
-    // worker-prep path, or APPGL_7K_DEFERRED_RECORD_ASYNC=1 for async chunks.
+    // Descriptor-fast records the immutable lean descriptor itself. Set
+    // APPGL_7K_DEFERRED_RECORD_DESCRIPTOR_FAST=0 to use copied-TDI records.
     bool descriptorFastEnabled =
         enabled && !asyncEnabled &&
         appglEnvEnabledDefaultOn("APPGL_7K_DEFERRED_RECORD_DESCRIPTOR_FAST");
@@ -9719,25 +9718,46 @@ struct MetalFrameGraph::Impl {
         }
 
         std::uint64_t failures = 0;
-        for (const auto& record : pendingThreadedDeferredRecords) {
-            LeanDirectTranslatedDrawDescriptor descriptor;
+        for (std::size_t draw = 0;
+             draw < pendingThreadedDeferredRecords.size();
+             ++draw) {
+            const CapturedTranslatedDrawRecord& record =
+                pendingThreadedDeferredRecords[draw];
+            LeanDirectTranslatedDrawDescriptor descriptorStorage;
+            const LeanDirectTranslatedDrawDescriptor* descriptor = nullptr;
             ParallelEncodeFallbackReason descriptorFallback =
                 ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
-            const bool prepared =
-                prepareThreadedDeferredDescriptorFromRecord(
-                    record, descriptor, descriptorFallback);
+            bool prepared = false;
+            if (record.threadedDescriptorFastRecord) {
+                prepared =
+                    record.threadedDescriptorPrepared &&
+                    draw < pendingThreadedDeferredDescriptors.size();
+                if (prepared) {
+                    descriptor = &pendingThreadedDeferredDescriptors[draw];
+                } else {
+                    descriptorFallback =
+                        record.threadedDescriptorFallbackReason;
+                }
+            } else {
+                prepared =
+                    prepareThreadedDeferredDescriptorFromRecord(
+                        record, descriptorStorage, descriptorFallback);
+                if (prepared) {
+                    descriptor = &descriptorStorage;
+                }
+            }
             id<MTLTexture> colorTexture = nil;
             id<MTLTexture> passDepthStencil = nil;
             const bool passReady =
                 prepared &&
                 ensureLeanDirectDefaultRenderPass(
-                    descriptor.fragmentShadingRate,
+                    descriptor->fragmentShadingRate,
                     colorTexture,
                     passDepthStencil);
             const bool encoded =
                 passReady &&
                 encodeLeanDirectTranslatedDrawDescriptor(
-                    descriptor,
+                    *descriptor,
                     colorTexture,
                     passDepthStencil);
             if (!encoded) {
@@ -10532,9 +10552,9 @@ struct MetalFrameGraph::Impl {
                     0, std::memory_order_relaxed);
             }
             if (threadedDeferredRecordProfile.descriptorFastEnabled) {
-                // The descriptor is the immutable deferred record payload in
-                // the perf path; flush still validates chunks and performs an
-                // ordered serial merge by threadedSequence.
+                // Use the descriptor as the deferred record payload while
+                // preserving chunk validation and ordered serial merge by
+                // threadedSequence.
                 pendingThreadedDeferredRecords.emplace_back();
                 CapturedTranslatedDrawRecord& record =
                     pendingThreadedDeferredRecords.back();
