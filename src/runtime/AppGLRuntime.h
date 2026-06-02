@@ -753,6 +753,7 @@ public:
         std::uint64_t metalComputePipelineCount = 0;
         std::uint64_t metalFunctionCount = 0;
         std::uint64_t metalLibraryCacheEntries = 0;
+        GLContext::MetalResourceInventory metalInventory;
         std::uint64_t metalFrameGraphBufferCount = 0;
         std::uint64_t metalFrameGraphBufferBytes = 0;
         std::uint64_t metalFrameGraphTextureCount = 0;

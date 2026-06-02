@@ -6,6 +6,7 @@
 
 namespace appgl {
 class ExtensionContext;
+class GLContext;
 struct GLTextureObject;
 }
 
@@ -23,6 +24,11 @@ struct SparseStorageImageSidecarInfo {
     GLsizei layers = 0;
     GLsizei levels = 0;
     GLsizei arrayLength = 0;
+};
+
+struct SparseStorageImageSidecarInventory {
+    std::uint64_t sidecars = 0;
+    std::uint64_t sidecarBytes = 0;
 };
 
 enum class SparseStorageImageBindingRoute {
@@ -58,5 +64,7 @@ void resetSparseStorageImageSidecar(ExtensionContext& ctx,
 void destroySparseStorageImageSidecar(ExtensionContext& ctx,
                                       GLTextureObject& texture);
 void destroySparseStorageImageSidecars(ExtensionContext& ctx);
+SparseStorageImageSidecarInventory sparseStorageImageSidecarInventory(
+    const GLContext& context);
 
 }  // namespace appgl::extensions::sparse_texture

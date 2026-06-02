@@ -1494,6 +1494,15 @@ public:
         std::uint64_t libraryCount = 0;
         std::uint64_t depthStencilStateCount = 0;
         std::uint64_t binaryArchiveCount = 0;
+        std::uint64_t ringBufferCount = 0;
+        std::uint64_t ringBufferBytes = 0;
+        std::uint64_t ringFallbackAllocations = 0;
+        std::uint64_t ringFallbackBytes = 0;
+        std::uint64_t ringFallbackMaxBytes = 0;
+        std::uint64_t mslLibraryCacheLimit = 0;
+        std::uint64_t mslLibraryCacheEvictions = 0;
+        std::uint64_t translatedDrawMSLSlotCacheEntries = 0;
+        std::uint64_t translatedDrawSampleMaskSlotCacheEntries = 0;
     };
     InternalMetalResourceInventory internalMetalResourceInventory() const;
 

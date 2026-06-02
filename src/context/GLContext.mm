@@ -30177,10 +30177,33 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         inventory.frameGraphLibraryCount = frameGraphMetal.libraryCount;
         inventory.frameGraphDepthStencilStateCount = frameGraphMetal.depthStencilStateCount;
         inventory.frameGraphBinaryArchiveCount = frameGraphMetal.binaryArchiveCount;
+        inventory.frameGraphRingBufferCount = frameGraphMetal.ringBufferCount;
+        inventory.frameGraphRingBufferBytes = frameGraphMetal.ringBufferBytes;
+        inventory.frameGraphRingFallbackAllocations =
+            frameGraphMetal.ringFallbackAllocations;
+        inventory.frameGraphRingFallbackBytes = frameGraphMetal.ringFallbackBytes;
+        inventory.frameGraphRingFallbackMaxBytes =
+            frameGraphMetal.ringFallbackMaxBytes;
+        inventory.cacheLimitMslLibraryEntries =
+            frameGraphMetal.mslLibraryCacheLimit;
+        inventory.cacheEvictionsMslLibraries =
+            frameGraphMetal.mslLibraryCacheEvictions;
+        inventory.cacheLiveMslLibraries =
+            static_cast<std::uint64_t>(inventory.libraryCacheEntries);
+        inventory.cacheLiveTranslatedDrawMSLSlots =
+            frameGraphMetal.translatedDrawMSLSlotCacheEntries;
+        inventory.cacheLiveTranslatedSampleMaskSlots =
+            frameGraphMetal.translatedDrawSampleMaskSlotCacheEntries;
     }
+    inventory.cacheLimitTranslatedDrawPlans =
+        static_cast<std::uint64_t>(Phase2PlanKeyProfile::kMaxTrackedKeys);
+    inventory.cacheLiveTranslatedDrawPlans =
+        static_cast<std::uint64_t>(impl_->translatedDrawPlanCache.size());
 
     std::unordered_set<void*> bufferResources;
     std::unordered_set<void*> textureResources;
+    std::unordered_set<void*> genericTextureResources;
+    std::unordered_set<void*> renderbufferTextureResources;
     std::unordered_set<void*> textureViewResources;
     std::unordered_set<void*> samplerObjects;
     std::unordered_set<void*> renderPipelines;
@@ -30197,6 +30220,10 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         }
         return 0;
     };
+    auto imageBytes = [](const GLTextureImageLevel& image) -> std::uint64_t {
+        return static_cast<std::uint64_t>(image.rgba8.size())
+            + static_cast<std::uint64_t>(image.nativeData.size());
+    };
     auto addBuffer = [&](void* raw) {
         if (raw == nullptr || !bufferResources.insert(raw).second) {
             return;
@@ -30210,6 +30237,20 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         }
         ++inventory.textureCount;
         inventory.textureBytes += allocatedSize(raw);
+    };
+    auto addGenericTexture = [&](void* raw) {
+        if (raw != nullptr && genericTextureResources.insert(raw).second) {
+            ++inventory.genericTextureCount;
+            inventory.genericTextureBytes += allocatedSize(raw);
+        }
+        addTexture(raw);
+    };
+    auto addRenderbufferTexture = [&](void* raw) {
+        if (raw != nullptr && renderbufferTextureResources.insert(raw).second) {
+            ++inventory.renderbufferTextureCount;
+            inventory.renderbufferTextureBytes += allocatedSize(raw);
+        }
+        addTexture(raw);
     };
     auto addTextureView = [&](void* raw) {
         if (raw == nullptr || !textureViewResources.insert(raw).second) {
@@ -30245,23 +30286,34 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         for (const auto& entry : program.metalTessVertexPSOCache) {
             addComputePipeline(entry.second);
         }
+        inventory.cacheLiveTessVertexComputePso +=
+            static_cast<std::uint64_t>(program.metalTessVertexPSOCache.size());
         addComputePipeline(program.metalTessEvalComputePipelineState);
         addComputePipeline(program.metalVsTfComputePipelineState);
         for (const auto& entry : program.metalVsTfComputePSOCache) {
             addComputePipeline(entry.second);
         }
+        inventory.cacheLiveVsTfComputePso +=
+            static_cast<std::uint64_t>(program.metalVsTfComputePSOCache.size());
         addComputePipeline(program.metalGSVsComputePipelineState);
         for (const auto& entry : program.metalGSVsComputePSOCache) {
             addComputePipeline(entry.second);
         }
+        inventory.cacheLiveGsVsComputePso +=
+            static_cast<std::uint64_t>(program.metalGSVsComputePSOCache.size());
         addRenderPipeline(program.metalPipelineState);
         for (const auto& entry : program.metalPipelineStateCache) {
             addRenderPipeline(entry.second);
         }
+        inventory.cacheLiveRenderPso +=
+            static_cast<std::uint64_t>(program.metalPipelineStateCache.size());
         addRenderPipeline(program.gsPassThroughPipelineState);
         for (const auto& entry : program.gsPassThroughPipelineStateCache) {
             addRenderPipeline(entry.second);
         }
+        inventory.cacheLiveGsPassThroughPso +=
+            static_cast<std::uint64_t>(
+                program.gsPassThroughPipelineStateCache.size());
         addRenderPipeline(program.metalGSMeshPipelineState);
         addFunction(program.metalComputeFunction);
         addFunction(program.metalVertexFunction);
@@ -30278,22 +30330,89 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
     }
     store->buffers().forEach([&](GLuint, GLBufferObject& buffer) {
         addBuffer(buffer.metalBuffer);
+        if (!buffer.cachedExpandedIndices.empty()) {
+            ++inventory.expandedIndexBuffers;
+            inventory.expandedIndexBytes +=
+                static_cast<std::uint64_t>(buffer.cachedExpandedIndices.size());
+        }
+        if (buffer.sparseStorage) {
+            ++inventory.sparseBufferObjects;
+            inventory.sparseBufferPageTableBytes +=
+                static_cast<std::uint64_t>(buffer.sparseCommittedPages.size());
+            const auto committedPages = static_cast<std::uint64_t>(
+                std::count_if(buffer.sparseCommittedPages.begin(),
+                              buffer.sparseCommittedPages.end(),
+                              [](std::uint8_t committed) {
+                                  return committed != 0;
+                              }));
+            inventory.sparseBufferCommittedPages += committedPages;
+            if (buffer.sparsePageSize > 0) {
+                inventory.sparseBufferCommittedBytes += committedPages *
+                    static_cast<std::uint64_t>(buffer.sparsePageSize);
+            }
+        }
+        if (!buffer.fp64TransportSidecars.empty()) {
+            ++inventory.fp64SidecarBuffers;
+        }
         for (const auto& sidecar : buffer.fp64TransportSidecars) {
+            ++inventory.fp64Sidecars;
+            inventory.fp64SidecarCpuBytes +=
+                static_cast<std::uint64_t>(sidecar.bytes.size());
+            inventory.fp64SidecarMaxGeneration = std::max<std::uint64_t>(
+                inventory.fp64SidecarMaxGeneration,
+                sidecar.sourceGeneration);
+            if (sidecar.metalBuffer != nullptr) {
+                ++inventory.fp64SidecarMetalBuffers;
+                inventory.fp64SidecarMetalBufferBytes +=
+                    allocatedSize(sidecar.metalBuffer);
+            }
             addBuffer(sidecar.metalBuffer);
         }
     });
     store->textures().forEach([&](GLuint, GLTextureObject& texture) {
+        for (const auto& [level, image] : texture.levels) {
+            (void)level;
+            ++inventory.genericTextureLevelImages;
+            inventory.genericTextureLevelBytes += imageBytes(image);
+        }
+        for (const auto& faceLevels : texture.cubeFaceLevels) {
+            for (const auto& [level, image] : faceLevels) {
+                (void)level;
+                ++inventory.cubeFaceLevelImages;
+                inventory.cubeFaceLevelBytes += imageBytes(image);
+            }
+        }
         if (texture.viewSourceTexture != 0) {
             addTextureView(texture.metalTexture);
         } else {
-            addTexture(texture.metalTexture);
+            addGenericTexture(texture.metalTexture);
         }
         addTextureView(texture.metalSwizzledView);
-        addTexture(texture.metalSamplingProxy);
+        addGenericTexture(texture.metalSamplingProxy);
         addSampler(texture.metalSampler);
+        if (texture.textureBufferExpandedMetalBuffer != nullptr) {
+            ++inventory.textureBufferExpansionMetalBuffers;
+            inventory.textureBufferExpansionMetalBufferBytes +=
+                allocatedSize(texture.textureBufferExpandedMetalBuffer);
+            addBuffer(texture.textureBufferExpandedMetalBuffer);
+        }
+        if (texture.imageAtomicBuffer != nullptr || texture.imageAtomicBufferSize > 0) {
+            ++inventory.imageAtomicSidecars;
+            inventory.imageAtomicSidecarBytes +=
+                static_cast<std::uint64_t>(texture.imageAtomicBufferSize);
+            if (texture.imageAtomicBufferDirtyToTexture) {
+                ++inventory.imageAtomicDirtySidecars;
+            }
+            if (texture.imageAtomicBuffer != nullptr) {
+                ++inventory.imageAtomicSidecarMetalBuffers;
+                inventory.imageAtomicSidecarMetalBufferBytes +=
+                    allocatedSize(texture.imageAtomicBuffer);
+                addBuffer(texture.imageAtomicBuffer);
+            }
+        }
     });
     store->renderbuffers().forEach([&](GLuint, GLRenderbufferObject& renderbuffer) {
-        addTexture(renderbuffer.metalTexture);
+        addRenderbufferTexture(renderbuffer.metalTexture);
     });
     store->samplers().forEach([&](GLuint, GLSamplerObject& sampler) {
         addSampler(sampler.metalSampler);
@@ -30306,6 +30425,26 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             addProgram(*pipeline.syntheticTessProgram);
         }
     });
+
+    const auto sparseTextureInventory =
+        extensions::sparse_texture::sparseTextureMemoryInventory(*this);
+    inventory.sparseTextureStates = sparseTextureInventory.textureStates;
+    inventory.sparseTextureHeaps = sparseTextureInventory.sparseHeaps;
+    inventory.sparseTextureHeapBytes = sparseTextureInventory.sparseHeapBytes;
+    inventory.sparseTextureCommittedRegions =
+        sparseTextureInventory.committedRegions;
+
+    const auto sparseStorageSidecars =
+        extensions::sparse_texture::sparseStorageImageSidecarInventory(*this);
+    inventory.sparseStorageImageSidecars = sparseStorageSidecars.sidecars;
+    inventory.sparseStorageImageSidecarBytes = sparseStorageSidecars.sidecarBytes;
+
+    const auto multisampleStorageSidecars =
+        extensions::sparse_texture::multisampleStorageImageSidecarInventory(*this);
+    inventory.multisampleStorageImageSidecars =
+        multisampleStorageSidecars.sidecars;
+    inventory.multisampleStorageImageSidecarBytes =
+        multisampleStorageSidecars.sidecarBytes;
 
     return inventory;
 }

@@ -399,4 +399,26 @@ void destroyMultisampleStorageImageSidecars(ExtensionContext& ctx) {
     contextStates().erase(contextIt);
 }
 
+MultisampleStorageImageSidecarInventory multisampleStorageImageSidecarInventory(
+    const GLContext& context) {
+    std::lock_guard<std::mutex> lock(stateMutex());
+    MultisampleStorageImageSidecarInventory inventory;
+    auto contextIt = contextStates().find(&context);
+    if (contextIt == contextStates().end()) {
+        return inventory;
+    }
+    for (const auto& entry : contextIt->second.sidecars) {
+        const MultisampleStorageImageSidecarInfo& info = entry.second.info;
+        if (info.metalTexture == nullptr) {
+            continue;
+        }
+        ++inventory.sidecars;
+        id<MTLResource> resource = (__bridge id<MTLResource>)info.metalTexture;
+        if (resource != nil && [resource respondsToSelector:@selector(allocatedSize)]) {
+            inventory.sidecarBytes += static_cast<std::uint64_t>(resource.allocatedSize);
+        }
+    }
+    return inventory;
+}
+
 }  // namespace appgl::extensions::sparse_texture

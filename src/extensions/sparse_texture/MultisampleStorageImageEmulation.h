@@ -6,6 +6,7 @@
 
 namespace appgl {
 class ExtensionContext;
+class GLContext;
 struct GLTextureObject;
 }
 
@@ -21,6 +22,11 @@ struct MultisampleStorageImageSidecarInfo {
     GLsizei layers = 0;
     GLsizei samples = 0;
     GLsizei arrayLength = 0;
+};
+
+struct MultisampleStorageImageSidecarInventory {
+    std::uint64_t sidecars = 0;
+    std::uint64_t sidecarBytes = 0;
 };
 
 bool isMultisampleStorageImageTarget(GLenum target);
@@ -42,5 +48,7 @@ void resetMultisampleStorageImageSidecar(ExtensionContext& ctx,
 void destroyMultisampleStorageImageSidecar(ExtensionContext& ctx,
                                            GLTextureObject& texture);
 void destroyMultisampleStorageImageSidecars(ExtensionContext& ctx);
+MultisampleStorageImageSidecarInventory multisampleStorageImageSidecarInventory(
+    const GLContext& context);
 
 }  // namespace appgl::extensions::sparse_texture

@@ -16308,11 +16308,20 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         auto addDepthStencil = [&inventory](id<MTLDepthStencilState> state) {
             if (state != nil) ++inventory.depthStencilStateCount;
         };
+        auto addRingBuffer = [&inventory](id<MTLBuffer> buffer) {
+            if (buffer != nil) {
+                ++inventory.ringBufferCount;
+                inventory.ringBufferBytes += metalAllocatedSize(buffer);
+            }
+        };
 
         addTexture(depthStencilTexture);
         addTexture(offscreenColorTexture);
         addDrawable(currentDrawable);
-        for (id<MTLBuffer> buffer : ringBuffers) addBuffer(buffer);
+        for (id<MTLBuffer> buffer : ringBuffers) {
+            addBuffer(buffer);
+            addRingBuffer(buffer);
+        }
         addLibrary(solidColorLibrary);
         addFunction(solidColorVertexFn);
         addFunction(solidColorFragmentFn);
@@ -16349,6 +16358,15 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         if (pipelineArchive != nil) {
             ++inventory.binaryArchiveCount;
         }
+        inventory.ringFallbackAllocations = ringFallbackAllocations;
+        inventory.ringFallbackBytes = ringFallbackBytes;
+        inventory.ringFallbackMaxBytes = ringFallbackMaxBytes;
+        inventory.mslLibraryCacheLimit = mslLibraryCacheLimit();
+        inventory.mslLibraryCacheEvictions = mslLibraryCacheEvictions;
+        inventory.translatedDrawMSLSlotCacheEntries =
+            static_cast<std::uint64_t>(translatedDrawMSLSlotCache.size());
+        inventory.translatedDrawSampleMaskSlotCacheEntries =
+            static_cast<std::uint64_t>(translatedDrawSampleMaskSlotCache.size());
         return inventory;
     }
 
@@ -16626,6 +16644,7 @@ private:
     // are unique-enough that this doesn't happen.
     std::unordered_map<std::size_t, id<MTLLibrary>> mslLibraryCache;
     std::vector<std::size_t> mslLibraryCacheOrder;
+    std::uint64_t mslLibraryCacheEvictions = 0;
 
     // Per-pipeline cache for fixed helper parameter slots discovered in
     // translated MSL. The pipeline key already fingerprints shader text, so
@@ -16730,6 +16749,7 @@ private:
                 }
                 releaseOwnedObjCObject(evict->second);
                 mslLibraryCache.erase(evict);
+                ++mslLibraryCacheEvictions;
             }
         } else if (std::getenv("APPGL_TRACE_SHADER_BUILD")) {
             std::fprintf(stderr, "[APPGL] MSL library build failed: %s\n",
@@ -16859,6 +16879,9 @@ private:
     id<MTLBuffer> ringBuffers[kRingBufferCount] = { nil, nil, nil };
     int ringBufferIndex = 0;
     std::size_t ringBufferOffset = 0;
+    std::uint64_t ringFallbackAllocations = 0;
+    std::uint64_t ringFallbackBytes = 0;
+    std::uint64_t ringFallbackMaxBytes = 0;
 
     void ensureRingBuffers() {
         if (ringBuffers[0] != nil) return;
@@ -16891,6 +16914,11 @@ private:
         }
 
         // Overflow fallback: single draw exceeds remaining space.
+        ++ringFallbackAllocations;
+        ringFallbackBytes += byteCount;
+        ringFallbackMaxBytes = std::max<std::uint64_t>(
+            ringFallbackMaxBytes,
+            static_cast<std::uint64_t>(byteCount));
         id<MTLBuffer> fallback = [device newBufferWithBytes:src
                                                       length:byteCount
                                                      options:MTLResourceStorageModeShared];
@@ -16915,6 +16943,11 @@ private:
             ringBufferOffset += aligned;
             return { active, thisOffset };
         }
+        ++ringFallbackAllocations;
+        ringFallbackBytes += byteCount;
+        ringFallbackMaxBytes = std::max<std::uint64_t>(
+            ringFallbackMaxBytes,
+            static_cast<std::uint64_t>(byteCount));
         id<MTLBuffer> fallback = [device newBufferWithLength:byteCount
                                                      options:MTLResourceStorageModeShared];
         currentCommandBufferLease.adoptRetainedObject(fallback);

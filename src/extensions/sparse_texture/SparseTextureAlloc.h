@@ -1,11 +1,13 @@
 #pragma once
 
+#include <cstdint>
 #include <vector>
 
 #include "../../../include/AppGL/glcorearb.h"
 
 namespace appgl {
 class ExtensionContext;
+class GLContext;
 struct GLTextureObject;
 }
 
@@ -19,6 +21,13 @@ struct CommittedRegion {
     GLsizei width = 0;
     GLsizei height = 0;
     GLsizei depth = 0;
+};
+
+struct SparseTextureMemoryInventory {
+    std::uint64_t textureStates = 0;
+    std::uint64_t sparseHeaps = 0;
+    std::uint64_t sparseHeapBytes = 0;
+    std::uint64_t committedRegions = 0;
 };
 
 bool isAllocationTarget(GLenum target);
@@ -79,5 +88,6 @@ bool pageCommitment(ExtensionContext& ctx,
 void resetStorage(ExtensionContext& ctx, GLTextureObject& texture);
 void destroyTexture(ExtensionContext& ctx, GLTextureObject& texture);
 void destroyContext(ExtensionContext& ctx);
+SparseTextureMemoryInventory sparseTextureMemoryInventory(const GLContext& context);
 
 }  // namespace appgl::extensions::sparse_texture

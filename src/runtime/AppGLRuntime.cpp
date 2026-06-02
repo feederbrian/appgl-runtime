@@ -1964,6 +1964,7 @@ void Runtime::snapshotContextInventoryLocked(GLContext* context) {
     snap.metalComputePipelineCount = metal.computePipelineCount;
     snap.metalFunctionCount = metal.functionCount;
     snap.metalLibraryCacheEntries = metal.libraryCacheEntries;
+    snap.metalInventory = metal;
     snap.metalFrameGraphBufferCount = metal.frameGraphBufferCount;
     snap.metalFrameGraphBufferBytes = metal.frameGraphBufferBytes;
     snap.metalFrameGraphTextureCount = metal.frameGraphTextureCount;
@@ -2139,6 +2140,57 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
     std::uint64_t pipelineBuildFailures = 0;
     double pipelineCumulativeBuildMillis = 0.0;
     GLContext::MetalResourceInventory metalInventory;
+    auto writeExtendedObjectStoreFields =
+        [&](const GLContext::MetalResourceInventory& inventory) {
+            stream << ",\"genericTextureLevelImages\":"
+                   << inventory.genericTextureLevelImages
+                   << ",\"genericTextureLevelBytes\":"
+                   << inventory.genericTextureLevelBytes
+                   << ",\"cubeFaceLevelImages\":" << inventory.cubeFaceLevelImages
+                   << ",\"cubeFaceLevelBytes\":" << inventory.cubeFaceLevelBytes
+                   << ",\"expandedIndexBuffers\":"
+                   << inventory.expandedIndexBuffers
+                   << ",\"expandedIndexBytes\":" << inventory.expandedIndexBytes
+                   << ",\"fp64SidecarBuffers\":"
+                   << inventory.fp64SidecarBuffers
+                   << ",\"fp64Sidecars\":" << inventory.fp64Sidecars
+                   << ",\"fp64SidecarCpuBytes\":"
+                   << inventory.fp64SidecarCpuBytes
+                   << ",\"fp64SidecarMetalBuffers\":"
+                   << inventory.fp64SidecarMetalBuffers
+                   << ",\"fp64SidecarMetalBufferBytes\":"
+                   << inventory.fp64SidecarMetalBufferBytes
+                   << ",\"fp64SidecarMaxGeneration\":"
+                   << inventory.fp64SidecarMaxGeneration
+                   << ",\"textureBufferExpansions\":"
+                   << inventory.textureBufferExpansionMetalBuffers
+                   << ",\"textureBufferExpansionMetalBuffers\":"
+                   << inventory.textureBufferExpansionMetalBuffers
+                   << ",\"textureBufferExpansionMetalBufferBytes\":"
+                   << inventory.textureBufferExpansionMetalBufferBytes
+                   << ",\"imageAtomicSidecars\":"
+                   << inventory.imageAtomicSidecars
+                   << ",\"imageAtomicSidecarBytes\":"
+                   << inventory.imageAtomicSidecarBytes
+                   << ",\"imageAtomicDirtySidecars\":"
+                   << inventory.imageAtomicDirtySidecars
+                   << ",\"imageAtomicSidecarMetalBuffers\":"
+                   << inventory.imageAtomicSidecarMetalBuffers
+                   << ",\"imageAtomicSidecarMetalBufferBytes\":"
+                   << inventory.imageAtomicSidecarMetalBufferBytes
+                   << ",\"sparseBufferObjects\":"
+                   << inventory.sparseBufferObjects
+                   << ",\"sparseBufferPageTableBytes\":"
+                   << inventory.sparseBufferPageTableBytes
+                   << ",\"sparseBufferCommittedPages\":"
+                   << inventory.sparseBufferCommittedPages
+                   << ",\"sparseBufferCommittedBytes\":"
+                   << inventory.sparseBufferCommittedBytes
+                   << ",\"sparseTextureStates\":"
+                   << inventory.sparseTextureStates
+                   << ",\"sparseTextureCommittedRegions\":"
+                   << inventory.sparseTextureCommittedRegions;
+        };
     if (contextIsLive) {
         auto& store = currentContext->objects();
 
@@ -2162,6 +2214,7 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
                 + static_cast<std::uint64_t>(rb.depth32.size() * sizeof(GLfloat))
                 + static_cast<std::uint64_t>(rb.stencil8.size());
         });
+        metalInventory = currentContext->metalResourceInventory();
 
         stream << "\"buffers\":" << store.buffers().size() << ",";
         stream << "\"textures\":" << store.textures().size() << ",";
@@ -2177,6 +2230,7 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
         stream << "\"bufferBytes\":" << bufferBytes << ",";
         stream << "\"textureBytes\":" << textureBytes << ",";
         stream << "\"renderbufferBytes\":" << renderbufferBytes;
+        writeExtendedObjectStoreFields(metalInventory);
 
         const auto metrics = currentContext->pipelineCacheMetrics();
         pipelineCacheHits = metrics.hits;
@@ -2184,9 +2238,9 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
         pipelineBuildAttempts = metrics.buildAttempts;
         pipelineBuildFailures = metrics.buildFailures;
         pipelineCumulativeBuildMillis = metrics.cumulativeBuildMillis;
-        metalInventory = currentContext->metalResourceInventory();
     } else if (lastKnownInventory_.valid) {
         const auto& snap = lastKnownInventory_;
+        metalInventory = snap.metalInventory;
         stream << "\"buffers\":" << snap.buffers << ",";
         stream << "\"textures\":" << snap.textures << ",";
         stream << "\"samplers\":" << snap.samplers << ",";
@@ -2201,6 +2255,7 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
         stream << "\"bufferBytes\":" << snap.bufferBytes << ",";
         stream << "\"textureBytes\":" << snap.textureBytes << ",";
         stream << "\"renderbufferBytes\":" << snap.renderbufferBytes;
+        writeExtendedObjectStoreFields(metalInventory);
 
         pipelineCacheHits = snap.pipelineCacheHits;
         pipelineCacheMisses = snap.pipelineCacheMisses;
@@ -2239,6 +2294,7 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
                   "\"framebuffers\":0,\"vertexArrays\":0,\"shaders\":0,\"programs\":0,"
                   "\"queries\":0,\"syncs\":0,\"transformFeedbacks\":0,"
                   "\"bufferBytes\":0,\"textureBytes\":0,\"renderbufferBytes\":0";
+        writeExtendedObjectStoreFields(metalInventory);
     }
     stream << "},";
 
@@ -2248,6 +2304,8 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << "\"bufferBytes\":" << metalInventory.bufferBytes << ","
            << "\"textures\":" << metalInventory.textureCount << ","
            << "\"textureBytes\":" << metalInventory.textureBytes << ","
+           << "\"genericTextures\":" << metalInventory.genericTextureCount << ","
+           << "\"genericTextureBytes\":" << metalInventory.genericTextureBytes << ","
            << "\"renderbufferTextures\":" << metalInventory.renderbufferTextureCount << ","
            << "\"renderbufferTextureBytes\":" << metalInventory.renderbufferTextureBytes << ","
            << "\"textureViews\":" << metalInventory.textureViewCount << ","
@@ -2257,6 +2315,36 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << "\"computePipelines\":" << metalInventory.computePipelineCount << ","
            << "\"functions\":" << metalInventory.functionCount << ","
            << "\"libraryCacheEntries\":" << metalInventory.libraryCacheEntries << ","
+           << "\"fp64SidecarBuffers\":" << metalInventory.fp64SidecarBuffers << ","
+           << "\"fp64Sidecars\":" << metalInventory.fp64Sidecars << ","
+           << "\"fp64SidecarCpuBytes\":" << metalInventory.fp64SidecarCpuBytes << ","
+           << "\"fp64SidecarMetalBuffers\":"
+           << metalInventory.fp64SidecarMetalBuffers << ","
+           << "\"fp64SidecarMetalBufferBytes\":"
+           << metalInventory.fp64SidecarMetalBufferBytes << ","
+           << "\"fp64SidecarMaxGeneration\":"
+           << metalInventory.fp64SidecarMaxGeneration << ","
+           << "\"textureBufferExpansionBuffers\":"
+           << metalInventory.textureBufferExpansionMetalBuffers << ","
+           << "\"textureBufferExpansionBufferBytes\":"
+           << metalInventory.textureBufferExpansionMetalBufferBytes << ","
+           << "\"imageAtomicSidecarBuffers\":"
+           << metalInventory.imageAtomicSidecarMetalBuffers << ","
+           << "\"imageAtomicSidecarBufferBytes\":"
+           << metalInventory.imageAtomicSidecarMetalBufferBytes << ","
+           << "\"sparseTextureHeaps\":" << metalInventory.sparseTextureHeaps << ","
+           << "\"sparseTextureHeapBytes\":"
+           << metalInventory.sparseTextureHeapBytes << ","
+           << "\"sparseTextureCommittedRegions\":"
+           << metalInventory.sparseTextureCommittedRegions << ","
+           << "\"sparseStorageImageSidecars\":"
+           << metalInventory.sparseStorageImageSidecars << ","
+           << "\"sparseStorageImageSidecarBytes\":"
+           << metalInventory.sparseStorageImageSidecarBytes << ","
+           << "\"multisampleStorageImageSidecars\":"
+           << metalInventory.multisampleStorageImageSidecars << ","
+           << "\"multisampleStorageImageSidecarBytes\":"
+           << metalInventory.multisampleStorageImageSidecarBytes << ","
            << "\"frameGraph\":{"
            << "\"buffers\":" << metalInventory.frameGraphBufferCount << ","
            << "\"bufferBytes\":" << metalInventory.frameGraphBufferBytes << ","
@@ -2270,7 +2358,15 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << "\"functions\":" << metalInventory.frameGraphFunctionCount << ","
            << "\"libraries\":" << metalInventory.frameGraphLibraryCount << ","
            << "\"depthStencilStates\":" << metalInventory.frameGraphDepthStencilStateCount << ","
-           << "\"binaryArchives\":" << metalInventory.frameGraphBinaryArchiveCount
+           << "\"binaryArchives\":" << metalInventory.frameGraphBinaryArchiveCount << ","
+           << "\"ringBuffers\":" << metalInventory.frameGraphRingBufferCount << ","
+           << "\"ringBufferBytes\":" << metalInventory.frameGraphRingBufferBytes << ","
+           << "\"ringFallbackAllocations\":"
+           << metalInventory.frameGraphRingFallbackAllocations << ","
+           << "\"ringFallbackBytes\":"
+           << metalInventory.frameGraphRingFallbackBytes << ","
+           << "\"ringFallbackMaxBytes\":"
+           << metalInventory.frameGraphRingFallbackMaxBytes
            << "}"
            << "},";
 
@@ -2296,7 +2392,60 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << "\"misses\":" << pipelineCacheMisses << ","
            << "\"buildAttempts\":" << pipelineBuildAttempts << ","
            << "\"buildFailures\":" << pipelineBuildFailures << ","
-           << "\"averageBuildMillis\":" << averageBuildMillis
+           << "\"averageBuildMillis\":" << averageBuildMillis << ","
+           << "\"cacheLimits\":{"
+           << "\"mslLibraries\":" << metalInventory.cacheLimitMslLibraryEntries << ","
+           << "\"translatedDrawPlans\":"
+           << metalInventory.cacheLimitTranslatedDrawPlans << ","
+           << "\"translatedDrawMSLSlots\":"
+           << metalInventory.cacheLimitTranslatedDrawMSLSlots << ","
+           << "\"translatedSampleMaskSlots\":"
+           << metalInventory.cacheLimitTranslatedSampleMaskSlots << ","
+           << "\"renderPsoPerProgram\":"
+           << metalInventory.cacheLimitRenderPsoPerProgram << ","
+           << "\"gsPassThroughPsoPerProgram\":"
+           << metalInventory.cacheLimitGsPassThroughPsoPerProgram << ","
+           << "\"tessVertexComputePsoPerProgram\":"
+           << metalInventory.cacheLimitTessVertexComputePsoPerProgram << ","
+           << "\"vsTfComputePsoPerProgram\":"
+           << metalInventory.cacheLimitVsTfComputePsoPerProgram << ","
+           << "\"gsVsComputePsoPerProgram\":"
+           << metalInventory.cacheLimitGsVsComputePsoPerProgram
+           << "},"
+           << "\"evictions\":{"
+           << "\"mslLibraries\":" << metalInventory.cacheEvictionsMslLibraries << ","
+           << "\"translatedDrawMSLSlots\":"
+           << metalInventory.cacheEvictionsTranslatedDrawMSLSlots << ","
+           << "\"translatedSampleMaskSlots\":"
+           << metalInventory.cacheEvictionsTranslatedSampleMaskSlots << ","
+           << "\"renderPso\":" << metalInventory.cacheEvictionsRenderPso << ","
+           << "\"gsPassThroughPso\":"
+           << metalInventory.cacheEvictionsGsPassThroughPso << ","
+           << "\"tessVertexComputePso\":"
+           << metalInventory.cacheEvictionsTessVertexComputePso << ","
+           << "\"vsTfComputePso\":"
+           << metalInventory.cacheEvictionsVsTfComputePso << ","
+           << "\"gsVsComputePso\":"
+           << metalInventory.cacheEvictionsGsVsComputePso
+           << "},"
+           << "\"liveEntries\":{"
+           << "\"mslLibraries\":" << metalInventory.cacheLiveMslLibraries << ","
+           << "\"translatedDrawMSLSlots\":"
+           << metalInventory.cacheLiveTranslatedDrawMSLSlots << ","
+           << "\"translatedSampleMaskSlots\":"
+           << metalInventory.cacheLiveTranslatedSampleMaskSlots << ","
+           << "\"translatedDrawPlans\":"
+           << metalInventory.cacheLiveTranslatedDrawPlans << ","
+           << "\"renderPso\":" << metalInventory.cacheLiveRenderPso << ","
+           << "\"gsPassThroughPso\":"
+           << metalInventory.cacheLiveGsPassThroughPso << ","
+           << "\"tessVertexComputePso\":"
+           << metalInventory.cacheLiveTessVertexComputePso << ","
+           << "\"vsTfComputePso\":"
+           << metalInventory.cacheLiveVsTfComputePso << ","
+           << "\"gsVsComputePso\":"
+           << metalInventory.cacheLiveGsVsComputePso
+           << "}"
            << "},";
 
     // ── Shader translation log ──

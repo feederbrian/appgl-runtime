@@ -1064,4 +1064,26 @@ void destroyContext(ExtensionContext& ctx) {
     contextStates().erase(contextIt);
 }
 
+SparseTextureMemoryInventory sparseTextureMemoryInventory(const GLContext& context) {
+    std::lock_guard<std::mutex> lock(stateMutex());
+    SparseTextureMemoryInventory inventory;
+    auto contextIt = contextStates().find(&context);
+    if (contextIt == contextStates().end()) {
+        return inventory;
+    }
+    for (const auto& entry : contextIt->second.textures) {
+        const TextureState& state = entry.second;
+        ++inventory.textureStates;
+        inventory.committedRegions += state.committedRegions.size();
+        if (state.sparseHeap != nullptr) {
+            ++inventory.sparseHeaps;
+            id<MTLHeap> heap = (__bridge id<MTLHeap>)state.sparseHeap;
+            if (heap != nil) {
+                inventory.sparseHeapBytes += static_cast<std::uint64_t>(heap.size);
+            }
+        }
+    }
+    return inventory;
+}
+
 }  // namespace appgl::extensions::sparse_texture
