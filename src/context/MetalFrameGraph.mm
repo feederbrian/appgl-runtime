@@ -12,6 +12,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cstdint>
@@ -21,6 +22,7 @@
 #include <cmath>
 #include <deque>
 #include <limits>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -378,6 +380,25 @@ static std::uint32_t parallelEncodeConfiguredLeanMaxBatch() {
     return envUInt("APPGL_PARALLEL_ENCODE_LEAN_MAX_BATCH", 2048, 1, 1u << 20);
 }
 
+static std::uint32_t threadedDeferredRecordWorkerCount() {
+    return envUInt("APPGL_7K_DEFERRED_RECORD_WORKERS",
+                   parallelEncodeConfiguredWorkerCount(),
+                   1,
+                   16);
+}
+
+static std::uint32_t threadedDeferredRecordMinBatch() {
+    return envUInt("APPGL_7K_DEFERRED_RECORD_MIN_BATCH", 16, 1, 1u << 20);
+}
+
+static std::uint32_t threadedDeferredRecordMaxBatch() {
+    return envUInt("APPGL_7K_DEFERRED_RECORD_MAX_BATCH", 2048, 1, 1u << 20);
+}
+
+static std::uint32_t threadedDeferredRecordAsyncChunkSize() {
+    return envUInt("APPGL_7K_DEFERRED_RECORD_ASYNC_CHUNK", 8, 1, 1u << 20);
+}
+
 enum class ParallelEncodeFallbackReason : std::size_t {
     SmallBatch,
     WorkerCount,
@@ -443,6 +464,16 @@ struct ParallelEncodeChunkProfile {
     std::uint64_t drawCount = 0;
     double workerEncodeUs = 0.0;
     std::uint64_t failures = 0;
+};
+
+struct ThreadedDeferredAsyncChunk {
+    std::uint64_t chunkIndex = 0;
+    std::uint64_t begin = 0;
+    std::uint64_t end = 0;
+    double workerUs = 0.0;
+    std::uint64_t failures = 0;
+    std::uint64_t completionOrdinal =
+        std::numeric_limits<std::uint64_t>::max();
 };
 
 struct ParallelEncodeFoundationProfile {
@@ -816,6 +847,217 @@ struct ParallelEncodeFoundationProfile {
     }
 };
 
+struct ThreadedDeferredRecordProfile {
+    bool enabled = envEnabled("APPGL_7K_THREADED_DEFERRED_RECORD");
+    bool asyncEnabled =
+        enabled && envEnabled("APPGL_7K_DEFERRED_RECORD_ASYNC");
+    // Default 7K-1 records the immutable lean descriptor itself. Set
+    // APPGL_7K_DEFERRED_RECORD_DESCRIPTOR_FAST=0 to exercise the copied-TDI
+    // worker-prep path, or APPGL_7K_DEFERRED_RECORD_ASYNC=1 for async chunks.
+    bool descriptorFastEnabled =
+        enabled && !asyncEnabled &&
+        appglEnvEnabledDefaultOn("APPGL_7K_DEFERRED_RECORD_DESCRIPTOR_FAST");
+    bool dumpEnabled =
+        enabled || envEnabled("APPGL_7K_THREADED_DEFERRED_RECORD_PROFILE");
+    std::uint32_t configuredWorkerCount =
+        threadedDeferredRecordWorkerCount();
+    std::uint32_t configuredMinBatch = threadedDeferredRecordMinBatch();
+    std::uint32_t configuredMaxBatch = threadedDeferredRecordMaxBatch();
+    std::uint32_t configuredAsyncChunkSize =
+        threadedDeferredRecordAsyncChunkSize();
+    std::uint64_t translatedDraws = 0;
+    std::uint64_t candidateDraws = 0;
+    std::uint64_t recordsSubmitted = 0;
+    std::uint64_t recordsCompleted = 0;
+    std::uint64_t batches = 0;
+    std::uint64_t workerChunks = 0;
+    std::uint64_t workerFailures = 0;
+    std::uint64_t serialFallbackDraws = 0;
+    std::uint64_t orderedMergeCount = 0;
+    std::uint64_t orderedMergeBatches = 0;
+    std::uint64_t orderedMergeSequenceViolations = 0;
+    std::uint64_t orderedMergeMissingOrDuplicate = 0;
+    std::uint64_t outOfOrderWorkerCompletions = 0;
+    std::uint64_t liveAliasEscapes = 0;
+    std::uint64_t recordBytesTotal = 0;
+    std::uint64_t recordBytesMax = 0;
+    double captureUs = 0.0;
+    double workerPrepWallUs = 0.0;
+    double workerPrepSumUs = 0.0;
+    double workerPrepMaxUs = 0.0;
+    double mergeEncodeUs = 0.0;
+    double mergeWaitUs = 0.0;
+    std::array<std::uint64_t,
+               static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count)>
+        boundaryReasons{};
+    std::array<std::uint64_t,
+               static_cast<std::size_t>(ParallelEncodeFallbackReason::Count)>
+        fallbackReasons{};
+    std::vector<ParallelEncodeChunkProfile> chunkProfiles;
+
+    void recordTranslatedDraw() {
+        if (enabled) ++translatedDraws;
+    }
+
+    void recordCandidate() {
+        if (enabled) ++candidateDraws;
+    }
+
+    void recordBoundary(ParallelEncodeBoundaryReason reason) {
+        if (!enabled) return;
+        ++boundaryReasons[static_cast<std::size_t>(reason)];
+    }
+
+    void recordFallback(ParallelEncodeFallbackReason reason,
+                        std::uint64_t draws = 1) {
+        if (!enabled) return;
+        if (reason == ParallelEncodeFallbackReason::Count) return;
+        serialFallbackDraws += draws;
+        ++fallbackReasons[static_cast<std::size_t>(reason)];
+    }
+
+    void recordCapture(std::size_t bytes, double elapsedUs) {
+        if (!enabled) return;
+        ++recordsSubmitted;
+        recordBytesTotal += static_cast<std::uint64_t>(bytes);
+        recordBytesMax = std::max<std::uint64_t>(
+            recordBytesMax, static_cast<std::uint64_t>(bytes));
+        captureUs += elapsedUs;
+    }
+
+    void recordBatch(std::uint64_t draws,
+                     std::uint64_t chunks,
+                     const std::vector<ParallelEncodeChunkProfile>& profiles,
+                     double wallUs,
+                     double sumUs,
+                     double maxUs,
+                     double waitUs,
+                     double mergeUs,
+                     std::uint64_t failures,
+                     std::uint64_t outOfOrderChunks,
+                     std::uint64_t sequenceViolations,
+                     std::uint64_t missingOrDuplicate) {
+        if (!enabled) return;
+        ++batches;
+        recordsCompleted += draws;
+        workerChunks += chunks;
+        workerFailures += failures;
+        workerPrepWallUs += wallUs;
+        workerPrepSumUs += sumUs;
+        workerPrepMaxUs = std::max(workerPrepMaxUs, maxUs);
+        mergeWaitUs += waitUs;
+        mergeEncodeUs += mergeUs;
+        outOfOrderWorkerCompletions += outOfOrderChunks;
+        orderedMergeSequenceViolations += sequenceViolations;
+        orderedMergeMissingOrDuplicate += missingOrDuplicate;
+        if (failures == 0 &&
+            sequenceViolations == 0 &&
+            missingOrDuplicate == 0) {
+            ++orderedMergeBatches;
+            orderedMergeCount += draws;
+        }
+        for (ParallelEncodeChunkProfile profile : profiles) {
+            profile.batchIndex = batches;
+            chunkProfiles.push_back(profile);
+        }
+    }
+
+    void dump() const {
+        if (!dumpEnabled) {
+            return;
+        }
+        const double submittedDenom =
+            recordsSubmitted > 0 ? static_cast<double>(recordsSubmitted) : 1.0;
+        const double completedDenom =
+            recordsCompleted > 0 ? static_cast<double>(recordsCompleted) : 1.0;
+        std::fprintf(stderr,
+            "[APPGL_7K_THREADED_DEFERRED_RECORD] summary enabled=%d "
+            "async=%d descriptor_fast=%d worker_count=%u min_batch=%u "
+            "max_batch=%u async_chunk=%u "
+            "translated_draws=%llu candidates=%llu submitted=%llu "
+            "completed=%llu batches=%llu worker_chunks=%llu "
+            "worker_failures=%llu serial_fallback_draws=%llu "
+            "ordered_merge_batches=%llu ordered_merge_count=%llu "
+            "sequence_violations=%llu missing_or_duplicate=%llu "
+            "out_of_order_worker_completions=%llu live_alias_escapes=%llu "
+            "record_bytes_total=%llu record_bytes_avg=%.1f "
+            "record_bytes_max=%llu capture_us=%.3f capture_avg_us=%.3f "
+            "worker_prep_wall_us=%.3f worker_prep_sum_us=%.3f "
+            "worker_prep_max_us=%.3f worker_prep_avg_per_draw_us=%.3f "
+            "merge_wait_us=%.3f merge_encode_us=%.3f "
+            "merge_encode_avg_per_draw_us=%.3f\n",
+            enabled ? 1 : 0,
+            asyncEnabled ? 1 : 0,
+            descriptorFastEnabled ? 1 : 0,
+            configuredWorkerCount,
+            configuredMinBatch,
+            configuredMaxBatch,
+            configuredAsyncChunkSize,
+            static_cast<unsigned long long>(translatedDraws),
+            static_cast<unsigned long long>(candidateDraws),
+            static_cast<unsigned long long>(recordsSubmitted),
+            static_cast<unsigned long long>(recordsCompleted),
+            static_cast<unsigned long long>(batches),
+            static_cast<unsigned long long>(workerChunks),
+            static_cast<unsigned long long>(workerFailures),
+            static_cast<unsigned long long>(serialFallbackDraws),
+            static_cast<unsigned long long>(orderedMergeBatches),
+            static_cast<unsigned long long>(orderedMergeCount),
+            static_cast<unsigned long long>(orderedMergeSequenceViolations),
+            static_cast<unsigned long long>(orderedMergeMissingOrDuplicate),
+            static_cast<unsigned long long>(outOfOrderWorkerCompletions),
+            static_cast<unsigned long long>(liveAliasEscapes),
+            static_cast<unsigned long long>(recordBytesTotal),
+            static_cast<double>(recordBytesTotal) / submittedDenom,
+            static_cast<unsigned long long>(recordBytesMax),
+            captureUs,
+            captureUs / submittedDenom,
+            workerPrepWallUs,
+            workerPrepSumUs,
+            workerPrepMaxUs,
+            workerPrepSumUs / completedDenom,
+            mergeWaitUs,
+            mergeEncodeUs,
+            mergeEncodeUs / completedDenom);
+        for (std::size_t i = 0;
+             i < static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count);
+             ++i) {
+            if (boundaryReasons[i] == 0) continue;
+            const auto reason = static_cast<ParallelEncodeBoundaryReason>(i);
+            std::fprintf(stderr,
+                "[APPGL_7K_THREADED_DEFERRED_RECORD] boundary reason=%s "
+                "count=%llu\n",
+                parallelEncodeBoundaryReasonName(reason),
+                static_cast<unsigned long long>(boundaryReasons[i]));
+        }
+        for (std::size_t i = 0;
+             i < static_cast<std::size_t>(ParallelEncodeFallbackReason::Count);
+             ++i) {
+            if (fallbackReasons[i] == 0) continue;
+            const auto reason = static_cast<ParallelEncodeFallbackReason>(i);
+            std::fprintf(stderr,
+                "[APPGL_7K_THREADED_DEFERRED_RECORD] fallback reason=%s "
+                "count=%llu\n",
+                parallelEncodeFallbackReasonName(reason),
+                static_cast<unsigned long long>(fallbackReasons[i]));
+        }
+        for (const auto& chunk : chunkProfiles) {
+            std::fprintf(stderr,
+                "[APPGL_7K_THREADED_DEFERRED_RECORD] chunk batch=%llu "
+                "chunk=%llu draw_begin=%llu draw_end=%llu draw_count=%llu "
+                "worker_us=%.3f failures=%llu\n",
+                static_cast<unsigned long long>(chunk.batchIndex),
+                static_cast<unsigned long long>(chunk.chunkIndex),
+                static_cast<unsigned long long>(chunk.drawBegin),
+                static_cast<unsigned long long>(chunk.drawEnd),
+                static_cast<unsigned long long>(chunk.drawCount),
+                chunk.workerEncodeUs,
+                static_cast<unsigned long long>(chunk.failures));
+        }
+        std::fflush(stderr);
+    }
+};
+
 enum class FrameAttributionAction : std::size_t {
     Present,
     Finish,
@@ -1127,6 +1369,19 @@ struct CapturedTranslatedDrawRecord {
     bool parallelHasFragmentStage = false;
     bool parallelClipControlShaderYFixup = false;
     bool parallelClipControlInvertsWinding = false;
+    bool threadedPrepared = false;
+    ParallelEncodeFallbackReason threadedFallbackReason =
+        ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
+    TranslatedDrawPlan threadedPlanStorage;
+    void* threadedPipelineState = nullptr;
+    void* threadedDepthStencilState = nullptr;
+    std::int32_t threadedFixedFunctionSampleMaskSlot = 21;
+    std::uint64_t threadedSequence = 0;
+    std::size_t threadedApproxBytes = 0;
+    bool threadedDescriptorFastRecord = false;
+    bool threadedDescriptorPrepared = false;
+    ParallelEncodeFallbackReason threadedDescriptorFallbackReason =
+        ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
 
     CapturedTranslatedDrawRecord() = default;
     CapturedTranslatedDrawRecord(const CapturedTranslatedDrawRecord&) = delete;
@@ -1695,6 +1950,117 @@ static bool captureTranslatedDrawForSerialReplay(
     }
 
     return true;
+}
+
+static bool captureTranslatedDrawForThreadedDeferred(
+    const TranslatedDrawInfo& source,
+    CapturedTranslatedDrawRecord& capture) {
+    capture.info = source;
+
+    capture.info.vertexMSL = nullptr;
+    capture.info.fragmentMSL = nullptr;
+    capture.info.vertexReflection = nullptr;
+    capture.info.fragmentReflection = nullptr;
+    capture.info.vertexData = nullptr;
+    capture.info.indices = nullptr;
+
+    if (source.metalVertexBuffer != nullptr) {
+        capture.info.metalVertexBuffer = source.metalVertexBuffer;
+        capture.retainField(capture.info.metalVertexBuffer);
+    }
+    for (auto& extra : capture.info.extraVertexBuffers) {
+        extra.data = nullptr;
+        extra.ownedData.clear();
+        if (extra.metalBuffer != nullptr) {
+            capture.retainField(extra.metalBuffer);
+        }
+    }
+    if (source.metalIndexBuffer != nullptr) {
+        capture.info.metalIndexBuffer = source.metalIndexBuffer;
+        capture.retainField(capture.info.metalIndexBuffer);
+    }
+
+    const void* vertexUniformOut = nullptr;
+    copyBytes(capture.vertexUniformStorage,
+              source.vertexUniformData,
+              source.vertexUniformSize,
+              vertexUniformOut);
+    capture.info.vertexUniformData =
+        static_cast<const std::uint8_t*>(vertexUniformOut);
+    const void* fragmentUniformOut = nullptr;
+    copyBytes(capture.fragmentUniformStorage,
+              source.fragmentUniformData,
+              source.fragmentUniformSize,
+              fragmentUniformOut);
+    capture.info.fragmentUniformData =
+        static_cast<const std::uint8_t*>(fragmentUniformOut);
+
+    auto retainTextures = [&capture](
+        std::vector<TranslatedDrawInfo::TextureBinding>& textures) {
+        for (auto& binding : textures) {
+            capture.retainField(binding.metalTexture);
+            capture.retainField(binding.metalSamplerState);
+            capture.retainField(binding.textureBufferBackingMetalBuffer);
+            capture.retainField(binding.imageAtomicMetalBuffer);
+        }
+    };
+    retainTextures(capture.info.fragmentTextures);
+    retainTextures(capture.info.vertexTextures);
+
+    capture.uboDataStorage.resize(capture.info.uboBindings.size());
+    for (std::size_t i = 0; i < capture.info.uboBindings.size(); ++i) {
+        auto& ubo = capture.info.uboBindings[i];
+        if (ubo.metalBuffer != nullptr) {
+            capture.retainField(ubo.metalBuffer);
+        } else if (ubo.data != nullptr && ubo.size > 0) {
+            auto& storage = capture.uboDataStorage[i];
+            const auto* begin = static_cast<const std::uint8_t*>(ubo.data);
+            storage.assign(begin, begin + ubo.size);
+            ubo.data = storage.data();
+        } else {
+            ubo.data = nullptr;
+        }
+    }
+
+    capture.info.ssboBindings.clear();
+    capture.info.atomicCounterBindings.clear();
+    capture.info.translatedPlan = nullptr;
+    capture.info.translatedPlanOut = nullptr;
+    capture.info.translatedPlanRejectReasonOut = nullptr;
+    capture.info.pipelineStateCacheOut = nullptr;
+    capture.info.pipelineBuildErrorOut = nullptr;
+    capture.info.pipelineStateOut = nullptr;
+    capture.info.pipelineColorFormatOut = nullptr;
+    capture.info.metalVertexFunction = nullptr;
+    capture.info.metalFragmentFunction = nullptr;
+    capture.info.metalVertexFunctionOut = nullptr;
+    capture.info.metalFragmentFunctionOut = nullptr;
+    return true;
+}
+
+static std::size_t capturedTranslatedDrawRecordApproxBytes(
+    const CapturedTranslatedDrawRecord& capture) {
+    std::size_t bytes = sizeof(capture);
+    bytes += capture.vertexMSLStorage.size();
+    bytes += capture.fragmentMSLStorage.size();
+    bytes += capture.vertexDataStorage.size();
+    bytes += capture.indexDataStorage.size();
+    bytes += capture.vertexUniformStorage.size();
+    bytes += capture.fragmentUniformStorage.size();
+    bytes += capture.pipelineBuildErrorStorage.size();
+    for (const auto& storage : capture.extraVertexDataStorage) {
+        bytes += storage.size();
+    }
+    for (const auto& storage : capture.uboDataStorage) {
+        bytes += storage.size();
+    }
+    bytes += capture.info.fragmentTextures.size() *
+        sizeof(TranslatedDrawInfo::TextureBinding);
+    bytes += capture.info.vertexTextures.size() *
+        sizeof(TranslatedDrawInfo::TextureBinding);
+    bytes += capture.info.uboBindings.size() *
+        sizeof(TranslatedDrawInfo::UBOBinding);
+    return bytes;
 }
 
 static NSInteger clipControlYSignBufferSlot(const std::string* msl) {
@@ -3337,6 +3703,14 @@ struct MetalFrameGraph::Impl {
         if (commandSubmission != nullptr) {
             commandSubmission->setPressureFlushCallback({});
         }
+        if (threadedDeferredRecordGroup != nullptr) {
+            dispatch_group_wait(threadedDeferredRecordGroup,
+                                DISPATCH_TIME_FOREVER);
+#if !OS_OBJECT_USE_OBJC
+            dispatch_release(threadedDeferredRecordGroup);
+#endif
+            threadedDeferredRecordGroup = nullptr;
+        }
         // End any open render encoder before the autorelease pool reclaims it.
         // Without this, destroying a context with an in-flight render pass
         // triggers "Command encoder released without endEncoding".
@@ -3355,6 +3729,7 @@ struct MetalFrameGraph::Impl {
         }
         drawSubmitProfile.dump();
         parallelEncodeProfile.dump();
+        threadedDeferredRecordProfile.dump();
         frameAttributionProfile.dump();
         // ADV-14: persist the pipeline binary archive to disk so the
         // next launch gets pre-compiled GPU binaries.
@@ -3646,7 +4021,8 @@ struct MetalFrameGraph::Impl {
 
     void endRenderPass() {
         if (!flushingParallelTranslatedBatch &&
-            !flushingLeanDirectDescriptorBatch) {
+            !flushingLeanDirectDescriptorBatch &&
+            !flushingThreadedDeferredRecordBatch) {
             flushParallelTranslatedDrawBatch(
                 ParallelEncodeBoundaryReason::EndRenderPass);
         }
@@ -7180,6 +7556,150 @@ struct MetalFrameGraph::Impl {
         return slot;
     }
 
+    bool captureThreadedDeferredTranslatedDrawRecord(
+        const TranslatedDrawInfo& source,
+        CapturedTranslatedDrawRecord& capture,
+        ParallelEncodeFallbackReason& fallbackReason) {
+        capture.threadedPrepared = false;
+        capture.threadedFallbackReason =
+            ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
+        fallbackReason = capture.threadedFallbackReason;
+
+        if (!translatedDrawWorkerEmitSafe(source)) {
+            return false;
+        }
+        if (!translatedDrawUsesSimpleMetalPrimitive(source.mode)) {
+            fallbackReason = ParallelEncodeFallbackReason::MixedRenderState;
+            capture.threadedFallbackReason = fallbackReason;
+            return false;
+        }
+
+        ensureDrawableResources();
+        const bool hasFragmentStage =
+            source.fragmentMSL != nullptr && !source.fragmentMSL->empty();
+        id<MTLTexture> colorTexture =
+            usesOffscreenTarget ? offscreenColorTexture : nil;
+        const MTLPixelFormat colorFormat = colorTexture != nil
+            ? colorTexture.pixelFormat
+            : MTLPixelFormatBGRA8Unorm;
+        const NSUInteger attachmentSampleCount =
+            colorTexture != nil ? colorTexture.sampleCount : 1;
+        const bool forcePerSampleFS =
+            source.sampleShadingEnabled && source.minSampleShading > 0.0f &&
+            attachmentSampleCount > 1;
+
+        const TranslatedDrawPlan* translatedPlan = source.translatedPlan;
+        if (translatedPlan == nullptr ||
+            !translatedPlan->valid ||
+            translatedPlan->useArgumentBuffers ||
+            translatedPlan->vertexUsesArgumentBuffer ||
+            translatedPlan->fragmentUsesArgumentBuffer ||
+            translatedPlan->colorFormat !=
+                static_cast<std::uint32_t>(colorFormat) ||
+            translatedPlan->attachmentSampleCount !=
+                static_cast<std::uint32_t>(attachmentSampleCount) ||
+            translatedPlan->forcePerSampleFS != forcePerSampleFS ||
+            translatedPlan->hasFragmentStage != hasFragmentStage) {
+            fallbackReason = ParallelEncodeFallbackReason::PipelineNotPrepared;
+            capture.threadedFallbackReason = fallbackReason;
+            return false;
+        }
+
+        const TranslatedDrawMSLSlots slots =
+            phase2PlanMSLSlotsFromShaderSlots(translatedPlan->shaderSlots);
+        if (slots.vertexMslUsesArgBuf ||
+            slots.fragmentMslUsesArgBuf ||
+            slots.vertexHasSSBOSizeBuffer ||
+            slots.fragmentHasSSBOSizeBuffer ||
+            slots.fragmentNeedsGlNumSamplesArgBuf ||
+            slots.vertexUsesMultiviewViewMask ||
+            slots.fragmentUsesMultiviewViewMask) {
+            return false;
+        }
+
+        id<MTLRenderPipelineState> pipelineState = nil;
+        const std::uint64_t pipelineCacheKey =
+            translatedPlan->pipelineCacheKey;
+        if (source.pipelineStateCacheOut != nullptr) {
+            auto it = source.pipelineStateCacheOut->find(pipelineCacheKey);
+            if (it != source.pipelineStateCacheOut->end() &&
+                it->second != nullptr) {
+                pipelineState =
+                    (__bridge id<MTLRenderPipelineState>)(it->second);
+            }
+        } else if (source.pipelineStateOut != nullptr &&
+                   *source.pipelineStateOut != nullptr &&
+                   source.pipelineColorFormatOut != nullptr &&
+                   *source.pipelineColorFormatOut ==
+                       static_cast<std::uint32_t>(colorFormat)) {
+            pipelineState =
+                (__bridge id<MTLRenderPipelineState>)(*source.pipelineStateOut);
+        }
+        if (pipelineState == nil) {
+            fallbackReason = ParallelEncodeFallbackReason::PipelineNotPrepared;
+            capture.threadedFallbackReason = fallbackReason;
+            return false;
+        }
+
+        id<MTLDepthStencilState> depthState = nil;
+        if (depthStencilTexture != nil) {
+            MetalDrawInfo fakeInfo;
+            fakeInfo.depthTestEnabled = source.depthTestEnabled;
+            fakeInfo.depthFunc = source.depthFunc;
+            fakeInfo.depthWriteMask = source.depthWriteMask;
+            fakeInfo.stencilTestEnabled = source.stencilTestEnabled;
+            fakeInfo.stencilFrontFunc = source.stencilFrontFunc;
+            fakeInfo.stencilFrontRef = source.stencilFrontRef;
+            fakeInfo.stencilFrontValueMask = source.stencilFrontValueMask;
+            fakeInfo.stencilFrontFail = source.stencilFrontFail;
+            fakeInfo.stencilFrontDepthFail = source.stencilFrontDepthFail;
+            fakeInfo.stencilFrontDepthPass = source.stencilFrontDepthPass;
+            fakeInfo.stencilFrontWriteMask = source.stencilFrontWriteMask;
+            fakeInfo.stencilBackFunc = source.stencilBackFunc;
+            fakeInfo.stencilBackRef = source.stencilBackRef;
+            fakeInfo.stencilBackValueMask = source.stencilBackValueMask;
+            fakeInfo.stencilBackFail = source.stencilBackFail;
+            fakeInfo.stencilBackDepthFail = source.stencilBackDepthFail;
+            fakeInfo.stencilBackDepthPass = source.stencilBackDepthPass;
+            fakeInfo.stencilBackWriteMask = source.stencilBackWriteMask;
+            depthState = depthStencilStateForDraw(fakeInfo);
+        }
+
+        if (!captureTranslatedDrawForThreadedDeferred(source, capture)) {
+            fallbackReason = ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
+            capture.threadedFallbackReason = fallbackReason;
+            return false;
+        }
+
+        capture.threadedPlanStorage = *translatedPlan;
+        capture.info.translatedPlan = &capture.threadedPlanStorage;
+        capture.info.translatedPlanOut = nullptr;
+        capture.info.translatedPlanRejectReasonOut = nullptr;
+        capture.info.pipelineStateCacheOut = nullptr;
+        capture.info.pipelineStateOut = nullptr;
+        capture.info.pipelineColorFormatOut = nullptr;
+        capture.info.pipelineBuildErrorOut = nullptr;
+        capture.info.metalVertexFunctionOut = nullptr;
+        capture.info.metalFragmentFunctionOut = nullptr;
+
+        capture.threadedPipelineState = (__bridge void*)pipelineState;
+        capture.retainField(capture.threadedPipelineState);
+        if (depthState != nil) {
+            capture.threadedDepthStencilState = (__bridge void*)depthState;
+            capture.retainField(capture.threadedDepthStencilState);
+        }
+        capture.threadedFixedFunctionSampleMaskSlot =
+            static_cast<std::int32_t>(
+                fixedFunctionSampleMaskSlotForTranslatedDraw(
+                    source, pipelineCacheKey));
+        capture.threadedApproxBytes =
+            capturedTranslatedDrawRecordApproxBytes(capture);
+        capture.threadedPrepared = true;
+        capture.threadedFallbackReason = ParallelEncodeFallbackReason::Count;
+        fallbackReason = ParallelEncodeFallbackReason::Count;
+        return true;
+    }
+
     bool prepareLeanDirectTranslatedDrawDescriptor(
         const TranslatedDrawInfo& source,
         LeanDirectTranslatedDrawDescriptor& descriptor,
@@ -7424,6 +7944,231 @@ struct MetalFrameGraph::Impl {
             translatedPlan->clipControlShaderYFixup;
         descriptor.clipControlInvertsWinding =
             translatedPlan->clipControlInvertsWinding;
+
+        descriptor.mode = source.mode;
+        descriptor.vertexCount = source.vertexCount;
+        descriptor.baseVertex = source.baseVertex;
+        descriptor.instanceCount = source.instanceCount;
+        descriptor.baseInstance = source.baseInstance;
+        descriptor.indexCount = source.indexCount;
+        descriptor.indexType = source.indexType;
+        descriptor.metalIndexBuffer = source.metalIndexBuffer;
+        descriptor.metalIndexBufferOffset = source.metalIndexBufferOffset;
+
+        descriptor.depthTestEnabled = source.depthTestEnabled;
+        descriptor.depthFunc = source.depthFunc;
+        descriptor.depthWriteMask = source.depthWriteMask;
+        descriptor.stencilTestEnabled = source.stencilTestEnabled;
+        descriptor.stencilFrontRef = source.stencilFrontRef;
+        descriptor.stencilBackRef = source.stencilBackRef;
+        descriptor.cullFaceEnabled = source.cullFaceEnabled;
+        descriptor.cullFaceMode = source.cullFaceMode;
+        descriptor.frontFace = source.frontFace;
+        descriptor.wireframe = source.wireframe;
+        descriptor.sampleMask = source.sampleMask;
+        descriptor.polygonOffsetEnabled = source.polygonOffsetEnabled;
+        descriptor.polygonOffsetFactor = source.polygonOffsetFactor;
+        descriptor.polygonOffsetUnits = source.polygonOffsetUnits;
+        descriptor.polygonOffsetClamp = source.polygonOffsetClamp;
+        descriptor.viewportX = source.viewportX;
+        descriptor.viewportY = source.viewportY;
+        descriptor.viewportWidth = source.viewportWidth;
+        descriptor.viewportHeight = source.viewportHeight;
+        descriptor.depthRangeNear = source.depthRangeNear;
+        descriptor.depthRangeFar = source.depthRangeFar;
+        descriptor.scissorTestEnabled = source.scissorTestEnabled;
+        descriptor.scissorX = source.scissorX;
+        descriptor.scissorY = source.scissorY;
+        descriptor.scissorWidth = source.scissorWidth;
+        descriptor.scissorHeight = source.scissorHeight;
+        descriptor.clipOrigin = source.clipOrigin;
+        descriptor.fragmentShadingRate = source.fragmentShadingRate;
+        descriptor.fragmentShadingRateShaderState =
+            source.fragmentShadingRateShaderState;
+
+        fallbackReason = ParallelEncodeFallbackReason::Count;
+        return true;
+    }
+
+    bool prepareThreadedDeferredDescriptorFromRecord(
+        const CapturedTranslatedDrawRecord& record,
+        LeanDirectTranslatedDrawDescriptor& descriptor,
+        ParallelEncodeFallbackReason& fallbackReason) const {
+        descriptor.reset();
+        fallbackReason = ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
+        if (!record.threadedPrepared ||
+            record.threadedPipelineState == nullptr ||
+            record.info.translatedPlan != &record.threadedPlanStorage) {
+            fallbackReason = ParallelEncodeFallbackReason::PipelineNotPrepared;
+            return false;
+        }
+
+        const TranslatedDrawInfo& source = record.info;
+        if (!translatedDrawWorkerEmitSafe(source)) {
+            return false;
+        }
+        if (!translatedDrawUsesSimpleMetalPrimitive(source.mode)) {
+            fallbackReason = ParallelEncodeFallbackReason::MixedRenderState;
+            return false;
+        }
+
+        const TranslatedDrawPlan& translatedPlan =
+            record.threadedPlanStorage;
+        if (!translatedPlan.valid || translatedPlan.useArgumentBuffers) {
+            fallbackReason = ParallelEncodeFallbackReason::PipelineNotPrepared;
+            return false;
+        }
+        const TranslatedDrawMSLSlots slots =
+            phase2PlanMSLSlotsFromShaderSlots(translatedPlan.shaderSlots);
+        if (slots.vertexMslUsesArgBuf ||
+            slots.fragmentMslUsesArgBuf ||
+            slots.vertexHasSSBOSizeBuffer ||
+            slots.fragmentHasSSBOSizeBuffer ||
+            slots.fragmentNeedsGlNumSamplesArgBuf ||
+            slots.vertexUsesMultiviewViewMask ||
+            slots.fragmentUsesMultiviewViewMask) {
+            return false;
+        }
+
+        bool hasExtraVertexAttributes = false;
+        for (const auto& evb : source.extraVertexBuffers) {
+            if (!evb.attributes.empty()) {
+                hasExtraVertexAttributes = true;
+                break;
+            }
+        }
+        const bool attributelessDraw =
+            source.vertexData == nullptr &&
+            source.metalVertexBuffer == nullptr &&
+            source.vertexAttributeLayouts.empty() &&
+            !hasExtraVertexAttributes;
+        if (!attributelessDraw && !source.vertexAttributeLayouts.empty()) {
+            if (source.metalVertexBuffer == nullptr) {
+                return false;
+            }
+            descriptor.bindPrimaryVertexBuffer = true;
+            descriptor.metalVertexBuffer = source.metalVertexBuffer;
+            descriptor.metalVertexBufferOffset =
+                source.metalVertexBufferOffset;
+        }
+        for (std::size_t ei = 0; ei < source.extraVertexBuffers.size(); ++ei) {
+            const auto& evb = source.extraVertexBuffers[ei];
+            if (evb.attributes.empty()) {
+                continue;
+            }
+            if (evb.metalBuffer == nullptr ||
+                descriptor.extraVertexBufferCount >=
+                    descriptor.extraVertexBuffers.size()) {
+                return false;
+            }
+            auto& dst =
+                descriptor.extraVertexBuffers[descriptor.extraVertexBufferCount++];
+            dst.metalBuffer = evb.metalBuffer;
+            dst.metalBufferOffset = evb.metalBufferOffset;
+            dst.metalSlot = static_cast<std::uint32_t>(ei + 1);
+        }
+
+        if (source.vertexUniformSize > descriptor.vertexUniformStorage.size() ||
+            source.fragmentUniformSize >
+                descriptor.fragmentUniformStorage.size()) {
+            return false;
+        }
+        if (source.vertexUniformData != nullptr &&
+            source.vertexUniformSize > 0) {
+            std::memcpy(descriptor.vertexUniformStorage.data(),
+                        source.vertexUniformData,
+                        source.vertexUniformSize);
+            descriptor.vertexUniformSize = source.vertexUniformSize;
+        }
+        if (source.fragmentUniformData != nullptr &&
+            source.fragmentUniformSize > 0) {
+            std::memcpy(descriptor.fragmentUniformStorage.data(),
+                        source.fragmentUniformData,
+                        source.fragmentUniformSize);
+            descriptor.fragmentUniformSize = source.fragmentUniformSize;
+        }
+
+        auto copyTextures =
+            [](const std::vector<TranslatedDrawInfo::TextureBinding>& src,
+               std::array<LeanDirectTranslatedDrawDescriptor::TextureBinding,
+                          kLeanDirectMaxTextureBindings>& dst,
+               std::size_t& dstCount) {
+                for (const auto& binding : src) {
+                    if (binding.metalTexture == nullptr) {
+                        continue;
+                    }
+                    if (binding.metalSamplerState == nullptr ||
+                        binding.textureBufferBackingMetalBuffer != nullptr ||
+                        binding.imageAtomicMetalBuffer != nullptr ||
+                        dstCount >= dst.size()) {
+                        return false;
+                    }
+                    auto& copied = dst[dstCount++];
+                    copied.metalSlot = binding.metalSlot;
+                    copied.metalTexture = binding.metalTexture;
+                    copied.metalSamplerState = binding.metalSamplerState;
+                    copied.reductionMode = binding.reductionMode;
+                    copied.lodBias = binding.lodBias;
+                    copied.borderClampMask = binding.borderClampMask;
+                    copied.borderColor = binding.borderColor;
+                }
+                return true;
+            };
+        if (!copyTextures(source.vertexTextures,
+                          descriptor.vertexTextures,
+                          descriptor.vertexTextureCount) ||
+            !copyTextures(source.fragmentTextures,
+                          descriptor.fragmentTextures,
+                          descriptor.fragmentTextureCount)) {
+            return false;
+        }
+
+        for (const auto& ubo : source.uboBindings) {
+            if (ubo.size == 0) {
+                continue;
+            }
+            if (descriptor.uboBindingCount >=
+                descriptor.uboBindings.size()) {
+                return false;
+            }
+            auto& copied = descriptor.uboBindings[descriptor.uboBindingCount++];
+            copied.metalSlot = ubo.metalSlot;
+            copied.size = ubo.size;
+            copied.metalBuffer = ubo.metalBuffer;
+            copied.metalBufferOffset = ubo.metalBufferOffset;
+            copied.isVertex = ubo.isVertex;
+            copied.isFragment = ubo.isFragment;
+            copied.data = nullptr;
+            copied.inlineDataOffset = 0;
+            copied.usesInlineData = false;
+            if (ubo.metalBuffer == nullptr) {
+                if (ubo.data == nullptr ||
+                    descriptor.uboInlineStorageSize + ubo.size >
+                        descriptor.uboInlineStorage.size()) {
+                    return false;
+                }
+                copied.inlineDataOffset = descriptor.uboInlineStorageSize;
+                std::memcpy(descriptor.uboInlineStorage.data() +
+                                descriptor.uboInlineStorageSize,
+                            ubo.data,
+                            ubo.size);
+                descriptor.uboInlineStorageSize += ubo.size;
+                copied.usesInlineData = true;
+            }
+        }
+
+        descriptor.pipelineState = record.threadedPipelineState;
+        descriptor.depthStencilState = record.threadedDepthStencilState;
+        descriptor.shaderSlots = translatedPlan.shaderSlots;
+        descriptor.attachmentSampleCount =
+            translatedPlan.attachmentSampleCount;
+        descriptor.colorFormat = translatedPlan.colorFormat;
+        descriptor.fixedFunctionSampleMaskSlot =
+            record.threadedFixedFunctionSampleMaskSlot;
+        descriptor.clipControlShaderYFixup =
+            translatedPlan.clipControlShaderYFixup;
+        descriptor.clipControlInvertsWinding =
+            translatedPlan.clipControlInvertsWinding;
 
         descriptor.mode = source.mode;
         descriptor.vertexCount = source.vertexCount;
@@ -8855,6 +9600,486 @@ struct MetalFrameGraph::Impl {
         return failures == 0;
     }
 
+    void dispatchThreadedDeferredRecordChunks(bool flushAll) {
+        if (!threadedDeferredRecordProfile.enabled) {
+            return;
+        }
+        if (!flushAll && !threadedDeferredRecordProfile.asyncEnabled) {
+            return;
+        }
+        if (threadedDeferredRecordGroup == nullptr) {
+            threadedDeferredRecordGroup = dispatch_group_create();
+        }
+        const std::uint64_t available =
+            static_cast<std::uint64_t>(pendingThreadedDeferredRecords.size());
+        const bool splitByWorkers =
+            flushAll && !threadedDeferredRecordProfile.asyncEnabled;
+        const std::uint64_t remainingAtStart =
+            available - nextThreadedDeferredRecordToDispatch;
+        const std::uint64_t splitChunkCount = splitByWorkers
+            ? std::min<std::uint64_t>(
+                  std::max<std::uint32_t>(
+                      threadedDeferredRecordProfile.configuredWorkerCount, 1u),
+                  remainingAtStart)
+            : 0;
+        const std::uint64_t splitBase = splitChunkCount > 0
+            ? remainingAtStart / splitChunkCount
+            : 0;
+        const std::uint64_t splitRemainder = splitChunkCount > 0
+            ? remainingAtStart % splitChunkCount
+            : 0;
+        std::uint64_t splitOrdinal = 0;
+        const std::uint64_t asyncChunkSize =
+            std::max<std::uint64_t>(
+                threadedDeferredRecordProfile.configuredAsyncChunkSize, 1u);
+        while (nextThreadedDeferredRecordToDispatch < available) {
+            const std::uint64_t remaining =
+                available - nextThreadedDeferredRecordToDispatch;
+            if (splitByWorkers && splitOrdinal >= splitChunkCount) {
+                break;
+            }
+            if (!splitByWorkers && !flushAll && remaining < asyncChunkSize) {
+                break;
+            }
+            const std::uint64_t count = splitByWorkers
+                ? (splitBase + (splitOrdinal < splitRemainder ? 1u : 0u))
+                : std::min<std::uint64_t>(asyncChunkSize, remaining);
+            if (count == 0) {
+                break;
+            }
+            ++splitOrdinal;
+            const std::uint64_t begin =
+                nextThreadedDeferredRecordToDispatch;
+            const std::uint64_t end = begin + count;
+            pendingThreadedDeferredChunks.emplace_back();
+            ThreadedDeferredAsyncChunk& chunk =
+                pendingThreadedDeferredChunks.back();
+            chunk.chunkIndex = nextThreadedDeferredChunkIndex++;
+            chunk.begin = begin;
+            chunk.end = end;
+            auto records =
+                std::make_shared<
+                    std::vector<CapturedTranslatedDrawRecord*>>();
+            auto descriptors =
+                std::make_shared<
+                    std::vector<LeanDirectTranslatedDrawDescriptor*>>();
+            records->reserve(static_cast<std::size_t>(count));
+            descriptors->reserve(static_cast<std::size_t>(count));
+            for (std::uint64_t draw = begin; draw < end; ++draw) {
+                records->push_back(&pendingThreadedDeferredRecords[
+                    static_cast<std::size_t>(draw)]);
+                descriptors->push_back(&pendingThreadedDeferredDescriptors[
+                    static_cast<std::size_t>(draw)]);
+            }
+            ThreadedDeferredAsyncChunk* chunkPtr = &chunk;
+            std::atomic<std::uint64_t>* completionOrdinalPtr =
+                &threadedDeferredCompletionOrdinal;
+            Impl* self = this;
+            dispatch_queue_t queue =
+                dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+            dispatch_group_async(threadedDeferredRecordGroup, queue, ^{
+                @autoreleasepool {
+                    const DrawProfileTimePoint workerStart = drawProfileNow();
+                    std::uint64_t failures = 0;
+                    for (std::size_t i = 0; i < records->size(); ++i) {
+                        CapturedTranslatedDrawRecord* record = (*records)[i];
+                        LeanDirectTranslatedDrawDescriptor* descriptor =
+                            (*descriptors)[i];
+                        ParallelEncodeFallbackReason drawFallback =
+                            ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
+                        const bool prepared =
+                            self->prepareThreadedDeferredDescriptorFromRecord(
+                                *record, *descriptor, drawFallback);
+                        record->threadedDescriptorPrepared = prepared;
+                        record->threadedDescriptorFallbackReason = drawFallback;
+                        if (!prepared) {
+                            ++failures;
+                        }
+                    }
+                    chunkPtr->workerUs =
+                        drawProfileElapsedUs(workerStart, drawProfileNow());
+                    chunkPtr->failures = failures;
+                    chunkPtr->completionOrdinal =
+                        completionOrdinalPtr->fetch_add(
+                            1, std::memory_order_relaxed);
+                }
+            });
+            nextThreadedDeferredRecordToDispatch = end;
+        }
+    }
+
+    bool replayThreadedDeferredRecordBatchSerialWithDescriptors(
+        ParallelEncodeBoundaryReason reason,
+        ParallelEncodeFallbackReason fallbackReason) {
+        (void)reason;
+        const std::uint64_t drawCount =
+            static_cast<std::uint64_t>(pendingThreadedDeferredRecords.size());
+        if (drawCount == 0) {
+            return true;
+        }
+
+        std::uint64_t failures = 0;
+        for (const auto& record : pendingThreadedDeferredRecords) {
+            LeanDirectTranslatedDrawDescriptor descriptor;
+            ParallelEncodeFallbackReason descriptorFallback =
+                ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
+            const bool prepared =
+                prepareThreadedDeferredDescriptorFromRecord(
+                    record, descriptor, descriptorFallback);
+            id<MTLTexture> colorTexture = nil;
+            id<MTLTexture> passDepthStencil = nil;
+            const bool passReady =
+                prepared &&
+                ensureLeanDirectDefaultRenderPass(
+                    descriptor.fragmentShadingRate,
+                    colorTexture,
+                    passDepthStencil);
+            const bool encoded =
+                passReady &&
+                encodeLeanDirectTranslatedDrawDescriptor(
+                    descriptor,
+                    colorTexture,
+                    passDepthStencil);
+            if (!encoded) {
+                ++failures;
+            }
+        }
+        if (currentRenderEncoder != nil) {
+            endCurrentRenderPassOnly();
+            resetCachedEncoderState();
+        }
+        pendingPresent = true;
+        threadedDeferredRecordProfile.recordFallback(
+            fallbackReason, drawCount);
+        if (failures > 0) {
+            threadedDeferredRecordProfile.recordFallback(
+                ParallelEncodeFallbackReason::EncodeFailure, failures);
+        }
+        return failures == 0;
+    }
+
+    bool tryEncodeThreadedDeferredRecordBatch(
+        ParallelEncodeBoundaryReason reason,
+        ParallelEncodeFallbackReason& fallbackReason) {
+        (void)reason;
+        const std::uint64_t drawCount =
+            static_cast<std::uint64_t>(pendingThreadedDeferredRecords.size());
+        const bool asyncMode = threadedDeferredRecordProfile.asyncEnabled;
+        double waitUs = 0.0;
+        if (asyncMode) {
+            dispatchThreadedDeferredRecordChunks(true);
+            const DrawProfileTimePoint waitStart = drawProfileNow();
+            if (threadedDeferredRecordGroup != nullptr) {
+                dispatch_group_wait(threadedDeferredRecordGroup,
+                                    DISPATCH_TIME_FOREVER);
+            }
+            waitUs = drawProfileElapsedUs(waitStart, drawProfileNow());
+        }
+        if (drawCount < threadedDeferredRecordProfile.configuredMinBatch) {
+            fallbackReason = ParallelEncodeFallbackReason::SmallBatch;
+            return false;
+        }
+
+        const GLenum fragmentRate =
+            pendingThreadedDeferredRecords.front().info.fragmentShadingRate;
+        bool descriptorFastBatch = !asyncMode;
+        for (const auto& record : pendingThreadedDeferredRecords) {
+            if (!record.threadedPrepared) {
+                fallbackReason = record.threadedFallbackReason;
+                return false;
+            }
+            if (!record.threadedDescriptorFastRecord) {
+                descriptorFastBatch = false;
+            }
+            if (record.info.fragmentShadingRate != fragmentRate) {
+                fallbackReason = ParallelEncodeFallbackReason::MixedRenderState;
+                return false;
+            }
+        }
+
+        std::vector<ParallelEncodeChunkProfile> chunkProfiles;
+        double sumWorkerUs = 0.0;
+        double maxWorkerUs = 0.0;
+        std::uint64_t failures = 0;
+        std::uint64_t outOfOrderCompletions = 0;
+        std::uint64_t chunkCount = 0;
+
+        if (asyncMode) {
+            chunkCount = static_cast<std::uint64_t>(
+                pendingThreadedDeferredChunks.size());
+            chunkProfiles.reserve(static_cast<std::size_t>(chunkCount));
+            for (const ThreadedDeferredAsyncChunk& work :
+                 pendingThreadedDeferredChunks) {
+                sumWorkerUs += work.workerUs;
+                maxWorkerUs = std::max(maxWorkerUs, work.workerUs);
+                failures += work.failures;
+                if (work.completionOrdinal != work.chunkIndex) {
+                    ++outOfOrderCompletions;
+                }
+                ParallelEncodeChunkProfile profile;
+                profile.chunkIndex = work.chunkIndex;
+                profile.drawBegin = work.begin;
+                profile.drawEnd = work.end;
+                profile.drawCount = work.end - work.begin;
+                profile.workerEncodeUs = work.workerUs;
+                profile.failures = work.failures;
+                chunkProfiles.push_back(profile);
+            }
+            for (const auto& record : pendingThreadedDeferredRecords) {
+                if (!record.threadedDescriptorPrepared) {
+                    ++failures;
+                    if (fallbackReason == ParallelEncodeFallbackReason::EncodeFailure) {
+                        fallbackReason = record.threadedDescriptorFallbackReason;
+                    }
+                }
+            }
+        } else {
+            struct ThreadedDeferredChunkWork {
+                std::uint64_t chunkIndex = 0;
+                std::uint64_t begin = 0;
+                std::uint64_t end = 0;
+                double workerUs = 0.0;
+                std::uint64_t failures = 0;
+                std::uint64_t completionOrdinal =
+                    std::numeric_limits<std::uint64_t>::max();
+            };
+
+            const std::uint64_t configuredWorkers =
+                std::max<std::uint32_t>(
+                    threadedDeferredRecordProfile.configuredWorkerCount, 1u);
+            chunkCount = std::min<std::uint64_t>(configuredWorkers, drawCount);
+            std::vector<ThreadedDeferredChunkWork> chunks(
+                static_cast<std::size_t>(chunkCount));
+            const std::uint64_t baseChunkSize = drawCount / chunkCount;
+            const std::uint64_t remainder = drawCount % chunkCount;
+            std::uint64_t cursor = 0;
+            for (std::uint64_t chunk = 0; chunk < chunkCount; ++chunk) {
+                const std::uint64_t count =
+                    baseChunkSize + (chunk < remainder ? 1u : 0u);
+                ThreadedDeferredChunkWork& work =
+                    chunks[static_cast<std::size_t>(chunk)];
+                work.chunkIndex = chunk;
+                work.begin = cursor;
+                work.end = cursor + count;
+                cursor += count;
+            }
+
+            ThreadedDeferredChunkWork* chunkData = chunks.data();
+            Impl* self = this;
+            std::atomic<std::uint64_t> completionOrdinal{0};
+            std::atomic<std::uint64_t>* completionOrdinalPtr =
+                &completionOrdinal;
+            const DrawProfileTimePoint wallStart = drawProfileNow();
+            auto prepareChunk = ^(std::uint64_t index) {
+                @autoreleasepool {
+                    ThreadedDeferredChunkWork& work =
+                        chunkData[static_cast<std::size_t>(index)];
+                    const DrawProfileTimePoint workerStart = drawProfileNow();
+                    for (std::uint64_t draw = work.begin;
+                         draw < work.end;
+                         ++draw) {
+                        CapturedTranslatedDrawRecord& record =
+                            self->pendingThreadedDeferredRecords[
+                                static_cast<std::size_t>(draw)];
+                        LeanDirectTranslatedDrawDescriptor& descriptor =
+                            self->pendingThreadedDeferredDescriptors[
+                                static_cast<std::size_t>(draw)];
+                        if (record.threadedDescriptorFastRecord) {
+                            if (!record.threadedDescriptorPrepared ||
+                                descriptor.fragmentShadingRate !=
+                                    record.info.fragmentShadingRate) {
+                                ++work.failures;
+                            }
+                            continue;
+                        }
+                        ParallelEncodeFallbackReason drawFallback =
+                            ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
+                        const bool prepared =
+                            self->prepareThreadedDeferredDescriptorFromRecord(
+                                record, descriptor, drawFallback);
+                        record.threadedDescriptorPrepared = prepared;
+                        record.threadedDescriptorFallbackReason = drawFallback;
+                        if (!prepared) {
+                            ++work.failures;
+                        }
+                    }
+                    work.workerUs =
+                        drawProfileElapsedUs(workerStart, drawProfileNow());
+                    work.completionOrdinal =
+                        completionOrdinalPtr->fetch_add(
+                            1, std::memory_order_relaxed);
+                }
+            };
+            if (chunkCount == 1 || descriptorFastBatch) {
+                for (std::uint64_t chunk = 0; chunk < chunkCount; ++chunk) {
+                    prepareChunk(chunk);
+                }
+            } else {
+                dispatch_queue_t queue =
+                    dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+                dispatch_apply(static_cast<size_t>(chunkCount),
+                               queue,
+                               ^(size_t index) {
+                    prepareChunk(static_cast<std::uint64_t>(index));
+                });
+            }
+            waitUs = drawProfileElapsedUs(wallStart, drawProfileNow());
+
+            chunkProfiles.reserve(static_cast<std::size_t>(chunkCount));
+            for (const ThreadedDeferredChunkWork& work : chunks) {
+                sumWorkerUs += work.workerUs;
+                maxWorkerUs = std::max(maxWorkerUs, work.workerUs);
+                failures += work.failures;
+                if (work.completionOrdinal != work.chunkIndex) {
+                    ++outOfOrderCompletions;
+                }
+                ParallelEncodeChunkProfile profile;
+                profile.chunkIndex = work.chunkIndex;
+                profile.drawBegin = work.begin;
+                profile.drawEnd = work.end;
+                profile.drawCount = work.end - work.begin;
+                profile.workerEncodeUs = work.workerUs;
+                profile.failures = work.failures;
+                chunkProfiles.push_back(profile);
+            }
+            for (const auto& record : pendingThreadedDeferredRecords) {
+                if (!record.threadedDescriptorPrepared) {
+                    ++failures;
+                    if (fallbackReason == ParallelEncodeFallbackReason::EncodeFailure) {
+                        fallbackReason = record.threadedDescriptorFallbackReason;
+                    }
+                }
+            }
+        }
+        if (failures > 0) {
+            if (fallbackReason == ParallelEncodeFallbackReason::Count) {
+                fallbackReason = ParallelEncodeFallbackReason::EncodeFailure;
+            }
+            threadedDeferredRecordProfile.recordBatch(
+                drawCount,
+                chunkCount,
+                chunkProfiles,
+                waitUs,
+                sumWorkerUs,
+                maxWorkerUs,
+                waitUs,
+                0.0,
+                failures,
+                outOfOrderCompletions,
+                0,
+                0);
+            return false;
+        }
+
+        std::uint64_t sequenceViolations = 0;
+        std::uint64_t missingOrDuplicate = 0;
+        std::uint64_t expectedSequence =
+            pendingThreadedDeferredRecords.front().threadedSequence;
+        std::uint64_t previousSequence = 0;
+        bool havePreviousSequence = false;
+        for (const auto& record : pendingThreadedDeferredRecords) {
+            if (record.threadedSequence != expectedSequence) {
+                ++sequenceViolations;
+            }
+            if (havePreviousSequence &&
+                record.threadedSequence != previousSequence + 1) {
+                ++missingOrDuplicate;
+            }
+            previousSequence = record.threadedSequence;
+            havePreviousSequence = true;
+            ++expectedSequence;
+        }
+        if (sequenceViolations > 0 || missingOrDuplicate > 0) {
+            fallbackReason = ParallelEncodeFallbackReason::EncodeFailure;
+            threadedDeferredRecordProfile.recordBatch(
+                drawCount,
+                chunkCount,
+                chunkProfiles,
+                waitUs,
+                sumWorkerUs,
+                maxWorkerUs,
+                waitUs,
+                0.0,
+                sequenceViolations + missingOrDuplicate,
+                outOfOrderCompletions,
+                sequenceViolations,
+                missingOrDuplicate);
+            return false;
+        }
+
+        const DrawProfileTimePoint mergeStart = drawProfileNow();
+        std::uint64_t encodeFailures = 0;
+        std::uint64_t encodedDraws = 0;
+        for (const auto& descriptor : pendingThreadedDeferredDescriptors) {
+            id<MTLTexture> colorTexture = nil;
+            id<MTLTexture> passDepthStencil = nil;
+            const bool passReady =
+                ensureLeanDirectDefaultRenderPass(
+                    descriptor.fragmentShadingRate,
+                    colorTexture,
+                    passDepthStencil);
+            const bool encoded =
+                passReady &&
+                encodeLeanDirectTranslatedDrawDescriptor(
+                    descriptor,
+                    colorTexture,
+                    passDepthStencil);
+            if (!encoded) {
+                ++encodeFailures;
+                if (encodedDraws == 0) {
+                    break;
+                }
+                continue;
+            }
+            ++encodedDraws;
+        }
+        const double mergeUs =
+            drawProfileElapsedUs(mergeStart, drawProfileNow());
+        threadedDeferredRecordProfile.recordBatch(
+            drawCount,
+            chunkCount,
+            chunkProfiles,
+            waitUs,
+            sumWorkerUs,
+            maxWorkerUs,
+            waitUs,
+            mergeUs,
+            encodeFailures,
+            outOfOrderCompletions,
+            0,
+            0);
+        fallbackReason = encodeFailures == 0
+            ? ParallelEncodeFallbackReason::Count
+            : ParallelEncodeFallbackReason::EncodeFailure;
+        return encodeFailures == 0 || encodedDraws > 0;
+    }
+
+    void flushThreadedDeferredRecordBatch(ParallelEncodeBoundaryReason reason) {
+        if (!threadedDeferredRecordProfile.enabled ||
+            pendingThreadedDeferredRecords.empty() ||
+            flushingThreadedDeferredRecordBatch) {
+            return;
+        }
+
+        flushingThreadedDeferredRecordBatch = true;
+        threadedDeferredRecordProfile.recordBoundary(reason);
+        ParallelEncodeFallbackReason fallbackReason =
+            ParallelEncodeFallbackReason::EncodeFailure;
+        const bool encoded =
+            tryEncodeThreadedDeferredRecordBatch(reason, fallbackReason);
+        if (!encoded) {
+            replayThreadedDeferredRecordBatchSerialWithDescriptors(
+                reason, fallbackReason);
+        }
+        pendingThreadedDeferredRecords.clear();
+        pendingThreadedDeferredDescriptors.clear();
+        pendingThreadedDeferredChunks.clear();
+        nextThreadedDeferredRecordToDispatch = 0;
+        nextThreadedDeferredChunkIndex = 0;
+        threadedDeferredCompletionOrdinal.store(0, std::memory_order_relaxed);
+        flushingThreadedDeferredRecordBatch = false;
+    }
+
     bool tryEncodeLeanDirectDescriptorWorkerBatch(
         ParallelEncodeBoundaryReason reason,
         ParallelEncodeFallbackReason& fallbackReason) {
@@ -9245,6 +10470,9 @@ struct MetalFrameGraph::Impl {
     }
 
     void flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason reason) {
+        if (!flushingThreadedDeferredRecordBatch) {
+            flushThreadedDeferredRecordBatch(reason);
+        }
         if (!flushingLeanDirectDescriptorBatch) {
             flushLeanDirectDescriptorBatch(reason);
         }
@@ -9273,6 +10501,113 @@ struct MetalFrameGraph::Impl {
     }
 
     bool encodeTranslatedDraw(TranslatedDrawInfo& info) {
+        if (threadedDeferredRecordProfile.enabled) {
+            threadedDeferredRecordProfile.recordTranslatedDraw();
+            if (flushingThreadedDeferredRecordBatch) {
+                return encodeTranslatedDrawSerial(info);
+            }
+
+            ParallelEncodeBoundaryReason reason =
+                ParallelEncodeBoundaryReason::SerialPathOnly;
+            if (!translatedDrawParallelCaptureEligible(info, reason)) {
+                flushThreadedDeferredRecordBatch(reason);
+                threadedDeferredRecordProfile.recordBoundary(reason);
+                return encodeTranslatedDrawSerial(info);
+            }
+
+            threadedDeferredRecordProfile.recordCandidate();
+            if (!pendingThreadedDeferredRecords.empty() &&
+                pendingThreadedDeferredRecords.front().info.fragmentShadingRate !=
+                    info.fragmentShadingRate) {
+                flushThreadedDeferredRecordBatch(
+                    ParallelEncodeBoundaryReason::ResourceMutationOrBarrier);
+            }
+
+            if (pendingThreadedDeferredRecords.empty()) {
+                pendingThreadedDeferredDescriptors.clear();
+                pendingThreadedDeferredChunks.clear();
+                nextThreadedDeferredRecordToDispatch = 0;
+                nextThreadedDeferredChunkIndex = 0;
+                threadedDeferredCompletionOrdinal.store(
+                    0, std::memory_order_relaxed);
+            }
+            if (threadedDeferredRecordProfile.descriptorFastEnabled) {
+                // The descriptor is the immutable deferred record payload in
+                // the perf path; flush still validates chunks and performs an
+                // ordered serial merge by threadedSequence.
+                pendingThreadedDeferredRecords.emplace_back();
+                CapturedTranslatedDrawRecord& record =
+                    pendingThreadedDeferredRecords.back();
+                pendingThreadedDeferredDescriptors.emplace_back();
+                LeanDirectTranslatedDrawDescriptor& descriptor =
+                    pendingThreadedDeferredDescriptors.back();
+                ParallelEncodeFallbackReason fallbackReason =
+                    ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
+                const DrawProfileTimePoint captureStart = drawProfileNow();
+                if (!prepareLeanDirectTranslatedDrawDescriptor(
+                        info, descriptor, fallbackReason)) {
+                    pendingThreadedDeferredDescriptors.pop_back();
+                    pendingThreadedDeferredRecords.pop_back();
+                    const ParallelEncodeBoundaryReason boundaryReason =
+                        parallelEncodeBoundaryForFallback(fallbackReason);
+                    flushThreadedDeferredRecordBatch(boundaryReason);
+                    threadedDeferredRecordProfile.recordBoundary(boundaryReason);
+                    threadedDeferredRecordProfile.recordFallback(fallbackReason);
+                    return encodeTranslatedDrawSerial(info);
+                }
+                record.threadedPrepared = true;
+                record.threadedFallbackReason =
+                    ParallelEncodeFallbackReason::Count;
+                record.threadedDescriptorFastRecord = true;
+                record.threadedDescriptorPrepared = true;
+                record.threadedDescriptorFallbackReason =
+                    ParallelEncodeFallbackReason::Count;
+                record.info.fragmentShadingRate =
+                    descriptor.fragmentShadingRate;
+                record.threadedSequence = nextThreadedDeferredSequence++;
+                record.threadedApproxBytes =
+                    sizeof(LeanDirectTranslatedDrawDescriptor);
+                threadedDeferredRecordProfile.recordCapture(
+                    record.threadedApproxBytes,
+                    drawProfileElapsedUs(captureStart, drawProfileNow()));
+                if (pendingThreadedDeferredRecords.size() >=
+                    threadedDeferredRecordProfile.configuredMaxBatch) {
+                    flushThreadedDeferredRecordBatch(
+                        ParallelEncodeBoundaryReason::ResourceMutationOrBarrier);
+                }
+                return true;
+            }
+            pendingThreadedDeferredRecords.emplace_back();
+            CapturedTranslatedDrawRecord& capture =
+                pendingThreadedDeferredRecords.back();
+            ParallelEncodeFallbackReason fallbackReason =
+                ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
+            const DrawProfileTimePoint captureStart = drawProfileNow();
+            if (!captureThreadedDeferredTranslatedDrawRecord(info,
+                                                             capture,
+                                                             fallbackReason)) {
+                pendingThreadedDeferredRecords.pop_back();
+                const ParallelEncodeBoundaryReason boundaryReason =
+                    parallelEncodeBoundaryForFallback(fallbackReason);
+                flushThreadedDeferredRecordBatch(boundaryReason);
+                threadedDeferredRecordProfile.recordBoundary(boundaryReason);
+                threadedDeferredRecordProfile.recordFallback(fallbackReason);
+                return encodeTranslatedDrawSerial(info);
+            }
+            pendingThreadedDeferredDescriptors.emplace_back();
+            capture.threadedSequence = nextThreadedDeferredSequence++;
+            threadedDeferredRecordProfile.recordCapture(
+                capture.threadedApproxBytes,
+                drawProfileElapsedUs(captureStart, drawProfileNow()));
+            dispatchThreadedDeferredRecordChunks(false);
+            if (pendingThreadedDeferredRecords.size() >=
+                threadedDeferredRecordProfile.configuredMaxBatch) {
+                flushThreadedDeferredRecordBatch(
+                    ParallelEncodeBoundaryReason::ResourceMutationOrBarrier);
+            }
+            return true;
+        }
+
         if (!parallelEncodeProfile.enabled) {
             return encodeTranslatedDrawSerial(info);
         }
@@ -15446,7 +16781,18 @@ private:
     std::unordered_set<PipelineBuildLogKey, PipelineBuildLogKeyHash> loggedPipelineBuildPrograms;
     DrawSubmitProfile drawSubmitProfile;
     ParallelEncodeFoundationProfile parallelEncodeProfile;
+    ThreadedDeferredRecordProfile threadedDeferredRecordProfile;
     FrameAttributionProfile frameAttributionProfile;
+    std::deque<CapturedTranslatedDrawRecord> pendingThreadedDeferredRecords;
+    std::deque<LeanDirectTranslatedDrawDescriptor>
+        pendingThreadedDeferredDescriptors;
+    std::deque<ThreadedDeferredAsyncChunk> pendingThreadedDeferredChunks;
+    bool flushingThreadedDeferredRecordBatch = false;
+    std::uint64_t nextThreadedDeferredSequence = 1;
+    std::uint64_t nextThreadedDeferredRecordToDispatch = 0;
+    std::uint64_t nextThreadedDeferredChunkIndex = 0;
+    std::atomic<std::uint64_t> threadedDeferredCompletionOrdinal{0};
+    dispatch_group_t threadedDeferredRecordGroup = nullptr;
     std::deque<LeanDirectTranslatedDrawDescriptor> pendingLeanDirectDescriptors;
     bool flushingLeanDirectDescriptorBatch = false;
     std::uint64_t leanDirectDescriptorWorkerFlushCount = 0;
