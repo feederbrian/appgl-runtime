@@ -1111,6 +1111,12 @@ static bool phase2FixedStateSegmentShadowEnabled() {
     return enabled;
 }
 
+static bool phase2BindingShapeSegmentShadowEnabled() {
+    static const bool enabled =
+        std::getenv("APPGL_PHASE2_BINDING_SEGMENT_SHADOW") != nullptr;
+    return enabled;
+}
+
 static constexpr std::uint64_t kPhase2PlanHashOffset = 1469598103934665603ull;
 static constexpr std::uint64_t kPhase2PlanHashPrime = 1099511628211ull;
 
@@ -1333,6 +1339,180 @@ static void phase2PlanHashTextureBindings(
         phase2PlanHashU64(hash, binding.reductionMode);
         phase2PlanHashU64(hash, binding.borderClampMask);
     }
+}
+
+template <typename Binding>
+static void phase2PlanHashBufferBindings(
+    std::uint64_t& hash,
+    const std::vector<Binding>& bindings)
+{
+    phase2PlanHashU64(hash, bindings.size());
+    for (const auto& binding : bindings) {
+        phase2PlanHashU64(hash, binding.metalSlot);
+        phase2PlanHashBool(hash, binding.metalBuffer != nullptr);
+        phase2PlanHashBool(hash, binding.isVertex);
+        phase2PlanHashBool(hash, binding.isFragment);
+    }
+}
+
+static std::uint64_t phase2PlanBuildBindingShapeSegmentHash(
+    const TranslatedDrawInfo& tdi)
+{
+    std::uint64_t hash = kPhase2PlanHashOffset;
+    phase2PlanHashU64(hash, 0x4150474C50324253ull); // "APGLP2BS"
+    phase2PlanHashU64(hash, tdi.vertexUniformSize);
+    phase2PlanHashU64(hash, tdi.fragmentUniformSize);
+    phase2PlanHashTextureBindings(hash, tdi.fragmentTextures);
+    phase2PlanHashTextureBindings(hash, tdi.vertexTextures);
+    phase2PlanHashBufferBindings(hash, tdi.uboBindings);
+    phase2PlanHashBufferBindings(hash, tdi.ssboBindings);
+    phase2PlanHashBufferBindings(hash, tdi.atomicCounterBindings);
+    phase2PlanHashU64(hash, tdi.sampledTextureNames.size());
+    phase2PlanHashU64(hash, tdi.readImageTextureNames.size());
+    phase2PlanHashU64(hash, tdi.writtenImageTextureNames.size());
+    return hash;
+}
+
+static std::uint64_t phase2PlanBuildBindingShapeReferenceSegmentHash(
+    const TranslatedDrawInfo& tdi)
+{
+    std::uint64_t hash = kPhase2PlanHashOffset;
+    phase2PlanHashU64(hash, 0x4150474C50324253ull); // "APGLP2BS"
+    phase2PlanHashU64(hash, tdi.vertexUniformSize);
+    phase2PlanHashU64(hash, tdi.fragmentUniformSize);
+
+    phase2PlanHashU64(hash, tdi.fragmentTextures.size());
+    for (const auto& binding : tdi.fragmentTextures) {
+        phase2PlanHashU64(hash, binding.metalSlot);
+        phase2PlanHashBool(
+            hash, binding.textureBufferBackingMetalBuffer != nullptr);
+        phase2PlanHashBool(hash, binding.imageAtomicMetalBuffer != nullptr);
+        phase2PlanHashU64(hash, binding.imageAtomicBufferSlot);
+        phase2PlanHashU64(hash, binding.reductionMode);
+        phase2PlanHashU64(hash, binding.borderClampMask);
+    }
+    phase2PlanHashU64(hash, tdi.vertexTextures.size());
+    for (const auto& binding : tdi.vertexTextures) {
+        phase2PlanHashU64(hash, binding.metalSlot);
+        phase2PlanHashBool(
+            hash, binding.textureBufferBackingMetalBuffer != nullptr);
+        phase2PlanHashBool(hash, binding.imageAtomicMetalBuffer != nullptr);
+        phase2PlanHashU64(hash, binding.imageAtomicBufferSlot);
+        phase2PlanHashU64(hash, binding.reductionMode);
+        phase2PlanHashU64(hash, binding.borderClampMask);
+    }
+
+    phase2PlanHashU64(hash, tdi.uboBindings.size());
+    for (const auto& ubo : tdi.uboBindings) {
+        phase2PlanHashU64(hash, ubo.metalSlot);
+        phase2PlanHashBool(hash, ubo.metalBuffer != nullptr);
+        phase2PlanHashBool(hash, ubo.isVertex);
+        phase2PlanHashBool(hash, ubo.isFragment);
+    }
+    phase2PlanHashU64(hash, tdi.ssboBindings.size());
+    for (const auto& ssbo : tdi.ssboBindings) {
+        phase2PlanHashU64(hash, ssbo.metalSlot);
+        phase2PlanHashBool(hash, ssbo.metalBuffer != nullptr);
+        phase2PlanHashBool(hash, ssbo.isVertex);
+        phase2PlanHashBool(hash, ssbo.isFragment);
+    }
+    phase2PlanHashU64(hash, tdi.atomicCounterBindings.size());
+    for (const auto& atomic : tdi.atomicCounterBindings) {
+        phase2PlanHashU64(hash, atomic.metalSlot);
+        phase2PlanHashBool(hash, atomic.metalBuffer != nullptr);
+        phase2PlanHashBool(hash, atomic.isVertex);
+        phase2PlanHashBool(hash, atomic.isFragment);
+    }
+    phase2PlanHashU64(hash, tdi.sampledTextureNames.size());
+    phase2PlanHashU64(hash, tdi.readImageTextureNames.size());
+    phase2PlanHashU64(hash, tdi.writtenImageTextureNames.size());
+    return hash;
+}
+
+static void phase2PlanLogBindingShapeSegmentNamespaceOnce()
+{
+    if (!phase2BindingShapeSegmentShadowEnabled()) {
+        return;
+    }
+    static bool logged = false;
+    if (logged) {
+        return;
+    }
+    logged = true;
+    std::fprintf(
+        stderr,
+        "[APPGL_PHASE2_BINDING_SEGMENT_SHADOW] "
+        "final key namespace changed intentionally; "
+        "checking binding-shape segment coverage\n");
+}
+
+static void phase2PlanAssertBindingShapeSegmentCoverage(
+    const TranslatedDrawInfo& tdi,
+    const char* site,
+    std::uint64_t segmentHash)
+{
+    if (!phase2BindingShapeSegmentShadowEnabled()) {
+        return;
+    }
+    phase2PlanLogBindingShapeSegmentNamespaceOnce();
+    const std::uint64_t reference =
+        phase2PlanBuildBindingShapeReferenceSegmentHash(tdi);
+    if (segmentHash == reference) {
+        return;
+    }
+    std::fprintf(
+        stderr,
+        "[APPGL_PHASE2_BINDING_SEGMENT_SHADOW] "
+        "binding-shape segment coverage mismatch site=%s stored=0x%016llx "
+        "reference=0x%016llx final_key_namespace=changed_intentionally\n",
+        site != nullptr ? site : "unknown",
+        static_cast<unsigned long long>(segmentHash),
+        static_cast<unsigned long long>(reference));
+    std::abort();
+}
+
+static void phase2PlanRefreshBindingShapeSegmentHash(TranslatedDrawInfo& tdi,
+                                                     const char* site)
+{
+    tdi.phase2BindingShapeSegmentHash =
+        phase2PlanBuildBindingShapeSegmentHash(tdi);
+    tdi.phase2BindingShapeSegmentHashValid = true;
+    phase2PlanAssertBindingShapeSegmentCoverage(
+        tdi, site, tdi.phase2BindingShapeSegmentHash);
+}
+
+static void phase2PlanEnsureBindingShapeSegmentHash(TranslatedDrawInfo& tdi,
+                                                    const char* site)
+{
+    if (!tdi.phase2BindingShapeSegmentHashValid) {
+        phase2PlanRefreshBindingShapeSegmentHash(tdi, site);
+        return;
+    }
+    phase2PlanAssertBindingShapeSegmentCoverage(
+        tdi, site, tdi.phase2BindingShapeSegmentHash);
+}
+
+static std::uint64_t phase2PlanBindingShapeSegmentHashForKey(
+    const TranslatedDrawInfo& tdi)
+{
+    if (tdi.phase2BindingShapeSegmentHashValid) {
+        phase2PlanAssertBindingShapeSegmentCoverage(
+            tdi, "key", tdi.phase2BindingShapeSegmentHash);
+        return tdi.phase2BindingShapeSegmentHash;
+    }
+    const std::uint64_t fallback =
+        phase2PlanBuildBindingShapeSegmentHash(tdi);
+    if (phase2BindingShapeSegmentShadowEnabled()) {
+        phase2PlanLogBindingShapeSegmentNamespaceOnce();
+        std::fprintf(
+            stderr,
+            "[APPGL_PHASE2_BINDING_SEGMENT_SHADOW] "
+            "binding-shape segment missing before key site=key "
+            "fallback=0x%016llx final_key_namespace=changed_intentionally\n",
+            static_cast<unsigned long long>(fallback));
+        std::abort();
+    }
+    return fallback;
 }
 
 static std::uint64_t phase2PlanBuildFixedStateSegmentHash(
@@ -1671,41 +1851,11 @@ static std::uint64_t phase2PlanKeyForDraw(const TranslatedDrawInfo& tdi,
     phase2PlanHashBool(hash, tdi.metalIndexBuffer != nullptr);
     coldMark(coldVaoLayoutUs);
 
-    phase2PlanHashU64(hash, tdi.vertexUniformSize);
-    phase2PlanHashU64(hash, tdi.fragmentUniformSize);
-
-    phase2PlanHashTextureBindings(hash, tdi.fragmentTextures);
-    phase2PlanHashTextureBindings(hash, tdi.vertexTextures);
+    phase2PlanHashU64(hash, phase2PlanBindingShapeSegmentHashForKey(tdi));
     coldMark(coldBindingsUs);
 
     phase2PlanHashU64(hash, phase2PlanFixedStateSegmentHashForKey(tdi));
     coldMark(coldFixedStateUs);
-
-    phase2PlanHashU64(hash, tdi.uboBindings.size());
-    for (const auto& ubo : tdi.uboBindings) {
-        phase2PlanHashU64(hash, ubo.metalSlot);
-        phase2PlanHashBool(hash, ubo.metalBuffer != nullptr);
-        phase2PlanHashBool(hash, ubo.isVertex);
-        phase2PlanHashBool(hash, ubo.isFragment);
-    }
-    phase2PlanHashU64(hash, tdi.ssboBindings.size());
-    for (const auto& ssbo : tdi.ssboBindings) {
-        phase2PlanHashU64(hash, ssbo.metalSlot);
-        phase2PlanHashBool(hash, ssbo.metalBuffer != nullptr);
-        phase2PlanHashBool(hash, ssbo.isVertex);
-        phase2PlanHashBool(hash, ssbo.isFragment);
-    }
-    phase2PlanHashU64(hash, tdi.atomicCounterBindings.size());
-    for (const auto& atomic : tdi.atomicCounterBindings) {
-        phase2PlanHashU64(hash, atomic.metalSlot);
-        phase2PlanHashBool(hash, atomic.metalBuffer != nullptr);
-        phase2PlanHashBool(hash, atomic.isVertex);
-        phase2PlanHashBool(hash, atomic.isFragment);
-    }
-    phase2PlanHashU64(hash, tdi.sampledTextureNames.size());
-    phase2PlanHashU64(hash, tdi.readImageTextureNames.size());
-    phase2PlanHashU64(hash, tdi.writtenImageTextureNames.size());
-    coldMark(coldBindingsUs);
 
     phase2PlanHashBool(hash, tdi.pipelineStateOut != nullptr);
     phase2PlanHashBool(hash, tdi.pipelineColorFormatOut != nullptr);
@@ -50778,6 +50928,7 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
         tdi.parallelEncodePrimitiveExpansionHazard =
             parallelEncodeModeRequiresPrimitiveExpansion(tdi.mode);
     }
+    phase2PlanEnsureBindingShapeSegmentHash(tdi, "pre_phase2_key");
     phase2PlanEnsureFixedStateSegmentHash(tdi, "pre_phase2_key");
     coldPathProfile.recordDrawKeys(
         tdi, planVaoName, planVaoGeneration, drawFboName);

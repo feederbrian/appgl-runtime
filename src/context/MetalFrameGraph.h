@@ -504,6 +504,12 @@ struct TranslatedDrawInfo {
     std::uint64_t phase2FixedStateSegmentHash = 0;
     bool phase2FixedStateSegmentHashValid = false;
 
+    // Phase-2 plan key Rung-2: compact digest of post-resolver binding shape.
+    // Resolvers still populate the live vectors and exact memo equality keeps
+    // comparing those raw vectors; this only shortens final key construction.
+    std::uint64_t phase2BindingShapeSegmentHash = 0;
+    bool phase2BindingShapeSegmentHashValid = false;
+
     // Uniform Buffer Object bindings.  Resolved from the GL state by
     // GLContext::drawArrays at draw time, then bound to the Metal encoder
     // by encodeTranslatedDraw. Each entry pairs a Metal [[buffer(N)]] slot
