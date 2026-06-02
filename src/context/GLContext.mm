@@ -15158,6 +15158,27 @@ struct GLContext::Impl {
             return;
         }
 
+        auto sameLayouts =
+            [](const std::vector<TranslatedDrawInfo::VertexAttributeLayout>& lhs,
+               const std::vector<TranslatedDrawInfo::VertexAttributeLayout>& rhs) {
+                if (lhs.size() != rhs.size()) {
+                    return false;
+                }
+                for (std::size_t i = 0; i < lhs.size(); ++i) {
+                    const auto& a = lhs[i];
+                    const auto& b = rhs[i];
+                    if (a.location != b.location || a.offset != b.offset ||
+                        a.glType != b.glType ||
+                        a.glComponentCount != b.glComponentCount ||
+                        a.glNormalized != b.glNormalized ||
+                        a.glIsInteger != b.glIsInteger) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+        bool layoutMutated = false;
+
         auto lowerLayout = [&](TranslatedDrawInfo::VertexAttributeLayout layout,
                                std::vector<TranslatedDrawInfo::VertexAttributeLayout>& out,
                                std::vector<Fp64VertexAttribRange>& ranges,
@@ -15210,6 +15231,8 @@ struct GLContext::Impl {
                     }
                 }
             }
+            layoutMutated =
+                layoutMutated || !sameLayouts(info.vertexAttributeLayouts, lowered);
             info.vertexAttributeLayouts = std::move(lowered);
         }
 
@@ -15239,7 +15262,12 @@ struct GLContext::Impl {
                     }
                 }
             }
+            layoutMutated =
+                layoutMutated || !sameLayouts(evb.attributes, lowered);
             evb.attributes = std::move(lowered);
+        }
+        if (layoutMutated) {
+            phase2PlanInvalidateVaoLayoutSegmentHash(info);
         }
     }
 
