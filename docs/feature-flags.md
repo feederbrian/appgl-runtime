@@ -100,3 +100,68 @@ APPGL_ENABLE_FP64_EMULATION=1
 APPGL_ENABLE_GPU_SHADER_FP64=1
 APPGL_ENABLE_VERTEX_ATTRIB_64BIT=1
 ```
+
+## Diagnostic Logging
+
+Batch-A diagnostic logging is resolved once at runtime initialization and is
+default-inert.
+
+| Flag | Type | Default | Aliases | Environment |
+| --- | --- | --- | --- | --- |
+| `logging` | enum: `off`, `error`, `warn`, `info`, `debug`, `trace` | `off` | `log`, `diagnostic-logging` | `APPGL_LOGGING`, `APPGL_DIAGNOSTIC_LOGGING` |
+| `logging-file` | path | empty | `log-file`, `logging-output`, `log-output` | `APPGL_LOGGING_FILE`, `APPGL_LOG_FILE` |
+| `logging-components` | comma-delimited string | `all` | `log-components`, `logging-component-filter` | `APPGL_LOGGING_COMPONENTS`, `APPGL_LOG_COMPONENTS` |
+
+When `logging` is not `off` and `logging-file` is empty, AppGL uses the
+stderr/console diagnostic sink. When `logging-file` is set, AppGL opens that
+explicit path once at init and writes diagnostic log lines there. Open failures
+are diagnosed and file export is disabled; they do not fail process startup.
+Automatic directories and timestamped file names are deferred to a future
+`logging-dir` flag.
+
+`logging-components` accepts:
+
+```text
+all,runtime,feature_flags,shader_translator,frame_graph,command_submission,
+extension_registry,draw,shader,texture,buffer,pipeline
+```
+
+Repeated component arguments are not accumulated in Batch-A; use one
+comma-delimited value such as:
+
+```bash
+--appgl-logging=debug
+--appgl-logging-components=shader_translator,frame_graph
+--appgl-logging-file=/tmp/appgl.log
+```
+
+`AppGLLog.h` remains the compile-time upper bound for hot-path structured
+logging. Unless CMake options such as `APPGL_LOG_DRAW`, `APPGL_LOG_SHADER`,
+`APPGL_LOG_TEXTURE`, `APPGL_LOG_BUFFER`, or `APPGL_LOG_PIPELINE` are enabled,
+those callsites compile to zero-overhead stubs and runtime component filtering
+does not touch draw or encode paths. Existing ad hoc `APPGL_TRACE_*`,
+`APPGL_*PROFILE`, `APPGL_LOG_LB`, and `APPGL_LOG_LINK` probes are not aliases for
+Batch-A logging.
+
+## Metal Validation Reconciliation
+
+`metal-validation-layer` is a request and diagnostic reconciliation flag. It does
+not force Metal validation internally and it is not a runtime switch.
+
+| Flag | Type | Default | Aliases | Environment |
+| --- | --- | --- | --- | --- |
+| `metal-validation-layer` | bool | `false` | `metal-validation`, `metal-debug-layer`, `mtl-debug-layer` | `APPGL_METAL_VALIDATION_LAYER`, `APPGL_METAL_VALIDATION` |
+
+AppGL resolves this flag before the first `MTLCreateSystemDefaultDevice()` call.
+Actual Metal validation enablement must be arranged by the porter or launcher
+before the process loads Metal. AppGL reconciles against Apple's pre-launch
+environment signal `METAL_DEVICE_WRAPPER_TYPE`:
+
+- requested and `METAL_DEVICE_WRAPPER_TYPE` enabled: silent OK
+- requested and the pre-launch env is not enabled: one diagnostic with porter
+  guidance
+- not requested: silent
+
+The diagnostic explicitly states that enablement is porter/launcher/pre-process
+work and that AppGL cannot guarantee or force validation internally after Metal
+has loaded or after a device exists.

@@ -1,4 +1,5 @@
 #include "GLContext.h"
+#include "../runtime/AppGLDiagnostics.h"
 #include "../runtime/AppGLLog.h"
 #include "MetalFrameGraph.h"
 #include "MetalCommandSubmission.h"
@@ -6555,6 +6556,7 @@ struct GLContext::Impl {
          bool offscreen)
         : owner(ownerContext) {
         layer = (__bridge CAMetalLayer*)rawLayer;
+        appgl::diagnostics::diagnosticOptions();
         device = MTLCreateSystemDefaultDevice();
         if (layer != nil && device != nil) {
             layer.device = device;

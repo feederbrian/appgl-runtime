@@ -3,16 +3,19 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <unistd.h>
 #include <vector>
 
+#include "../src/runtime/AppGLDiagnostics.h"
 #include "../src/runtime/AppGLFeatureFlags.h"
 
 namespace {
 
 namespace flags = appgl::feature_flags;
+namespace diagnostics = appgl::diagnostics;
 
 class ScopedEnv {
 public:
@@ -40,6 +43,35 @@ public:
 private:
     std::string name_;
     std::optional<std::string> oldValue_;
+};
+
+class ScopedBatchAEnv {
+public:
+    ScopedBatchAEnv()
+        : logging_("APPGL_LOGGING", std::nullopt),
+          diagnosticLogging_("APPGL_DIAGNOSTIC_LOGGING", std::nullopt),
+          loggingFile_("APPGL_LOGGING_FILE", std::nullopt),
+          logFile_("APPGL_LOG_FILE", std::nullopt),
+          loggingComponents_("APPGL_LOGGING_COMPONENTS", std::nullopt),
+          logComponents_("APPGL_LOG_COMPONENTS", std::nullopt),
+          metalValidation_("APPGL_METAL_VALIDATION_LAYER", std::nullopt),
+          metalValidationAlias_("APPGL_METAL_VALIDATION", std::nullopt),
+          metalWrapper_("METAL_DEVICE_WRAPPER_TYPE", std::nullopt),
+          optionsJson_("APPGL_OPTIONS_JSON", std::nullopt),
+          configJson_("APPGL_CONFIG_JSON", std::nullopt) {}
+
+private:
+    ScopedEnv logging_;
+    ScopedEnv diagnosticLogging_;
+    ScopedEnv loggingFile_;
+    ScopedEnv logFile_;
+    ScopedEnv loggingComponents_;
+    ScopedEnv logComponents_;
+    ScopedEnv metalValidation_;
+    ScopedEnv metalValidationAlias_;
+    ScopedEnv metalWrapper_;
+    ScopedEnv optionsJson_;
+    ScopedEnv configJson_;
 };
 
 class ScopedArgs {
@@ -93,6 +125,17 @@ std::filesystem::path makeTempDir() {
 void writeFile(const std::filesystem::path& path, const std::string& text) {
     std::ofstream out(path, std::ios::binary);
     out << text;
+}
+
+std::string readFile(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in),
+                       std::istreambuf_iterator<char>());
+}
+
+void resetDiagnosticsForProbe() {
+    flags::clearDiagnosticsForTesting();
+    diagnostics::resetDiagnosticOptionsForTesting();
 }
 
 flags::FeatureFlagSpec boolSpec() {
@@ -175,6 +218,15 @@ bool hasDiagnosticFor(const std::string& flag, flags::FlagSource source) {
     return false;
 }
 
+bool hasRuntimeDiagnosticContaining(const std::string& needle) {
+    for (const auto& diagnostic : diagnostics::diagnosticsSnapshotForTesting()) {
+        if (diagnostic.message.find(needle) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool fp64RuntimeFlagForProbe() {
 #if APPGL_FP64_EMULATION
     constexpr bool buildDefault = true;
@@ -204,11 +256,18 @@ int runSelfTest() {
     const std::filesystem::path jsonFalse = tempDir / "false.json";
     const std::filesystem::path jsonTyped = tempDir / "typed.json";
     const std::filesystem::path jsonMalformed = tempDir / "malformed.json";
+    const std::filesystem::path jsonBatchA = tempDir / "batch-a.json";
+    const std::filesystem::path jsonBatchALog = tempDir / "batch-a-json.log";
     writeFile(jsonTrue, R"({"appgl":{"features":{"stage1-bool":true}}})");
     writeFile(jsonFalse, R"({"features":{"stage1-bool":false}})");
     writeFile(jsonTyped,
               R"({"appgl":{"features":{"stage1-float":1.25,"stage1-path":"/tmp/appgl-cache"}}})");
     writeFile(jsonMalformed, "{ this is not json");
+    writeFile(jsonBatchA,
+              "{\"features\":{\"logging\":\"warn\","
+              "\"logging-file\":\"" + jsonBatchALog.string() + "\","
+              "\"logging-components\":\"frame_graph\","
+              "\"metal-validation-layer\":true}}");
 
     {
         flags::clearDiagnosticsForTesting();
@@ -355,6 +414,211 @@ int runSelfTest() {
         ScopedEnv f64Env("APPGL_ENABLE_FP64_EMULATION", std::string("1"));
         expect(state, fp64RuntimeFlagForProbe(),
                "F64 existing env alias remains compatible");
+    }
+
+    {
+        ScopedBatchAEnv cleanEnv;
+        ScopedArgs args({"probe"});
+        resetDiagnosticsForProbe();
+        const auto& options = diagnostics::diagnosticOptions();
+        expect(state, options.logging.verbosity == diagnostics::LogVerbosity::Off,
+               "Batch-A logging default is off");
+        expect(state, options.logging.filePath.empty(),
+               "Batch-A logging-file default is empty");
+        expect(state, !options.logging.consoleEnabled && !options.logging.fileEnabled,
+               "Batch-A logging default creates no sink");
+        expect(state, diagnostics::isComponentEnabledForTesting("draw"),
+               "Batch-A logging-components default covers all components");
+        expect(state, !options.metalValidation.requested,
+               "Batch-A metal validation default is not requested");
+        expect(state, diagnostics::diagnosticsSnapshotForTesting().empty(),
+               "Batch-A defaults are diagnostic-silent");
+    }
+
+    {
+        const std::filesystem::path cliLog = tempDir / "batch-a-cli.log";
+        ScopedBatchAEnv cleanEnv;
+        ScopedArgs args({"probe",
+                         "--appgl-config=" + jsonBatchA.string(),
+                         "--appgl-logging=debug",
+                         "--appgl-logging-file=" + cliLog.string(),
+                         "--appgl-logging-components=shader_translator,frame_graph",
+                         "--appgl-no-metal-validation-layer"});
+        ScopedEnv envLogging("APPGL_LOGGING", std::string("info"));
+        ScopedEnv envFile("APPGL_LOGGING_FILE", (tempDir / "batch-a-env.log").string());
+        ScopedEnv envComponents("APPGL_LOGGING_COMPONENTS", std::string("draw"));
+        ScopedEnv envMetal("APPGL_METAL_VALIDATION_LAYER", std::string("1"));
+        ScopedEnv metalWrapper("METAL_DEVICE_WRAPPER_TYPE", std::string("1"));
+        resetDiagnosticsForProbe();
+        const auto& options = diagnostics::diagnosticOptions();
+        expect(state, options.logging.verbosity == diagnostics::LogVerbosity::Debug,
+               "Batch-A CLI logging beats env and JSON");
+        expect(state, options.logging.filePath == cliLog.string(),
+               "Batch-A CLI logging-file beats env and JSON");
+        expect(state, diagnostics::isComponentEnabledForTesting("shader_translator") &&
+                          diagnostics::isComponentEnabledForTesting("frame_graph") &&
+                          !diagnostics::isComponentEnabledForTesting("draw"),
+               "Batch-A CLI logging-components beats env and JSON");
+        expect(state, !options.metalValidation.requested,
+               "Batch-A CLI metal disable beats env and JSON");
+    }
+
+    {
+        const std::filesystem::path envLog = tempDir / "batch-a-env.log";
+        ScopedBatchAEnv cleanEnv;
+        ScopedArgs args({"probe", "--appgl-config=" + jsonBatchA.string()});
+        ScopedEnv envLogging("APPGL_LOGGING", std::string("info"));
+        ScopedEnv envFile("APPGL_LOGGING_FILE", envLog.string());
+        ScopedEnv envComponents("APPGL_LOGGING_COMPONENTS", std::string("shader"));
+        ScopedEnv envMetal("APPGL_METAL_VALIDATION_LAYER", std::string("1"));
+        ScopedEnv metalWrapper("METAL_DEVICE_WRAPPER_TYPE", std::string("1"));
+        resetDiagnosticsForProbe();
+        const auto& options = diagnostics::diagnosticOptions();
+        expect(state, options.logging.verbosity == diagnostics::LogVerbosity::Info,
+               "Batch-A env logging beats JSON");
+        expect(state, options.logging.filePath == envLog.string(),
+               "Batch-A env logging-file beats JSON");
+        expect(state, diagnostics::isComponentEnabledForTesting("shader") &&
+                          !diagnostics::isComponentEnabledForTesting("frame_graph"),
+               "Batch-A env logging-components beats JSON");
+        expect(state, options.metalValidation.requested &&
+                          options.metalValidation.prelaunchEnvEnabled,
+               "Batch-A env metal request reconciles with prelaunch env");
+        expect(state, diagnostics::diagnosticsSnapshotForTesting().empty(),
+               "Batch-A requested metal with env enabled is silent");
+    }
+
+    {
+        ScopedBatchAEnv cleanEnv;
+        ScopedArgs args({"probe", "--appgl-config=" + jsonBatchA.string()});
+        ScopedEnv metalWrapper("METAL_DEVICE_WRAPPER_TYPE", std::string("1"));
+        resetDiagnosticsForProbe();
+        const auto& options = diagnostics::diagnosticOptions();
+        expect(state, options.logging.verbosity == diagnostics::LogVerbosity::Warn,
+               "Batch-A JSON logging beats default");
+        expect(state, options.logging.filePath == jsonBatchALog.string(),
+               "Batch-A JSON logging-file beats default");
+        expect(state, diagnostics::isComponentEnabledForTesting("frame_graph") &&
+                          !diagnostics::isComponentEnabledForTesting("shader"),
+               "Batch-A JSON logging-components beats default");
+        expect(state, options.metalValidation.requested &&
+                          options.metalValidation.prelaunchEnvEnabled,
+               "Batch-A JSON metal request beats default");
+    }
+
+    {
+        ScopedBatchAEnv cleanEnv;
+        ScopedArgs args({"probe", "--appgl-logging=verbose"});
+        ScopedEnv envLogging("APPGL_LOGGING", std::string("trace"));
+        resetDiagnosticsForProbe();
+        const auto& options = diagnostics::diagnosticOptions();
+        expect(state, options.logging.verbosity == diagnostics::LogVerbosity::Off,
+               "Batch-A invalid logging uses default-safe off");
+        expect(state, hasDiagnosticFor("logging", flags::FlagSource::CommandLine),
+               "Batch-A invalid logging diagnostic recorded");
+    }
+
+    {
+        ScopedBatchAEnv cleanEnv;
+        ScopedArgs args({"probe", "--appgl-config=" + jsonBatchA.string()});
+        ScopedEnv envComponents("APPGL_LOGGING_COMPONENTS",
+                                std::string("bad_component"));
+        ScopedEnv metalWrapper("METAL_DEVICE_WRAPPER_TYPE", std::string("1"));
+        resetDiagnosticsForProbe();
+        const auto& options = diagnostics::diagnosticOptions();
+        expect(state, options.logging.verbosity == diagnostics::LogVerbosity::Warn,
+               "Batch-A component invalid source falls through to JSON");
+        expect(state, diagnostics::isComponentEnabledForTesting("frame_graph") &&
+                          !diagnostics::isComponentEnabledForTesting("draw"),
+               "Batch-A component fallthrough uses JSON value");
+        expect(state, hasDiagnosticFor("logging-components",
+                                      flags::FlagSource::Environment),
+               "Batch-A invalid component diagnostic recorded");
+    }
+
+    {
+        ScopedBatchAEnv cleanEnv;
+        ScopedArgs args({"probe", "--appgl-metal-validation-layer=maybe"});
+        resetDiagnosticsForProbe();
+        const auto& options = diagnostics::diagnosticOptions();
+        expect(state, !options.metalValidation.requested,
+               "Batch-A invalid metal bool uses default-safe false");
+        expect(state, hasDiagnosticFor("metal-validation-layer",
+                                      flags::FlagSource::CommandLine),
+               "Batch-A invalid metal bool diagnostic recorded");
+    }
+
+    {
+        const std::filesystem::path smokeLog = tempDir / "batch-a-smoke.log";
+        ScopedBatchAEnv cleanEnv;
+        ScopedArgs args({"probe",
+                         "--appgl-logging=info",
+                         "--appgl-logging-file=" + smokeLog.string(),
+                         "--appgl-logging-components=feature_flags"});
+        resetDiagnosticsForProbe();
+        const auto& options = diagnostics::diagnosticOptions();
+        expect(state, options.logging.fileEnabled && !options.logging.consoleEnabled,
+               "Batch-A logging-file opens once when logging is enabled");
+        expect(state,
+               diagnostics::emitDiagnosticLogForTesting("feature_flags",
+                                                        diagnostics::LogVerbosity::Info,
+                                                        "batch-a logging smoke"),
+               "Batch-A logging-on smoke emitted");
+        expect(state,
+               readFile(smokeLog).find("batch-a logging smoke") != std::string::npos,
+               "Batch-A logging-on smoke writes file");
+    }
+
+    {
+        ScopedBatchAEnv cleanEnv;
+        ScopedArgs args({"probe", "--appgl-logging=info"});
+        resetDiagnosticsForProbe();
+        const auto& options = diagnostics::diagnosticOptions();
+        expect(state, options.logging.consoleEnabled && !options.logging.fileEnabled,
+               "Batch-A logging without logging-file uses console sink");
+    }
+
+    {
+        const std::filesystem::path badLog = tempDir / "missing-parent" / "log.txt";
+        ScopedBatchAEnv cleanEnv;
+        ScopedArgs args({"probe",
+                         "--appgl-logging=info",
+                         "--appgl-logging-file=" + badLog.string()});
+        resetDiagnosticsForProbe();
+        const auto& options = diagnostics::diagnosticOptions();
+        expect(state, options.logging.fileOpenFailed && !options.logging.fileEnabled,
+               "Batch-A logging-file open failure disables file export");
+        expect(state, hasRuntimeDiagnosticContaining("logging-file could not be opened"),
+               "Batch-A logging-file open failure diagnostic recorded");
+    }
+
+    {
+        ScopedBatchAEnv cleanEnv;
+        ScopedArgs args({"probe", "--appgl-metal-validation-layer=1"});
+        resetDiagnosticsForProbe();
+        const auto& options = diagnostics::diagnosticOptions();
+        expect(state, options.metalValidation.requested &&
+                          !options.metalValidation.prelaunchEnvEnabled,
+               "Batch-A metal requested-state recorded without Apple env");
+        expect(state, options.metalValidation.guidanceDiagnosticEmitted,
+               "Batch-A metal missing-env guidance flag recorded");
+        expect(state, hasRuntimeDiagnosticContaining("porter/launcher/pre-process"),
+               "Batch-A metal missing-env diagnostic cites porter pre-process");
+    }
+
+    {
+        ScopedBatchAEnv cleanEnv;
+        ScopedArgs args({"probe", "--appgl-metal-validation-layer=1"});
+        ScopedEnv metalWrapper("METAL_DEVICE_WRAPPER_TYPE", std::string("1"));
+        resetDiagnosticsForProbe();
+        const auto& options = diagnostics::diagnosticOptions();
+        expect(state, options.metalValidation.requested &&
+                          options.metalValidation.prelaunchEnvEnabled,
+               "Batch-A metal requested-state reconciles with Apple env");
+        expect(state, !options.metalValidation.guidanceDiagnosticEmitted,
+               "Batch-A metal env-enabled request is silent");
+        expect(state, diagnostics::diagnosticsSnapshotForTesting().empty(),
+               "Batch-A metal env-enabled request records no runtime diagnostic");
     }
 
     std::filesystem::remove_all(tempDir);

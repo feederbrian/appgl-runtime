@@ -77,6 +77,7 @@ add_custom_target(appgl-codegen
 set(APPGL_SOURCES
   src/runtime/AppGLRuntime.cpp
   src/runtime/AppGLGroup8.cpp
+  src/runtime/AppGLDiagnostics.cpp
   src/runtime/AppGLFeatureFlags.mm
   src/runtime/AppGLMatrixOverrides.cpp
   src/runtime/AppGLImmediateMode.cpp
@@ -241,7 +242,10 @@ target_link_libraries(appgl_bar_b_benchmark PRIVATE "-ldl")
 
 add_executable(appgl_feature_flags_probe tests/FeatureFlagsProbe.cpp)
 add_dependencies(appgl_feature_flags_probe appgl-codegen)
-target_sources(appgl_feature_flags_probe PRIVATE src/runtime/AppGLFeatureFlags.mm)
+target_sources(appgl_feature_flags_probe PRIVATE
+  src/runtime/AppGLDiagnostics.cpp
+  src/runtime/AppGLFeatureFlags.mm
+)
 target_include_directories(appgl_feature_flags_probe
   PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
