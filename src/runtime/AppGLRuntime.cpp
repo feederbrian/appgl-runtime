@@ -1970,6 +1970,15 @@ void Runtime::snapshotContextInventoryLocked(GLContext* context) {
     snap.metalFunctionCount = metal.functionCount;
     snap.metalLibraryCacheEntries = metal.libraryCacheEntries;
     snap.metalInventory = metal;
+    snap.metalInventory.residencyRows.clear();
+    snap.metalInventory.r5OrderingCandidates.clear();
+    snap.metalInventory.r5Ordering.snapshotRowsStripped = 1;
+    snap.metalInventory.r5Ordering.rowsExported = 0;
+    snap.metalInventory.r5Ordering.rowsTruncated =
+        snap.metalInventory.r5Ordering.rowsSeen;
+    snap.metalInventory.r5Ordering.candidatesExported = 0;
+    snap.metalInventory.r5Ordering.candidatesTruncated =
+        snap.metalInventory.r5Ordering.candidateRows;
     snap.metalFrameGraphBufferCount = metal.frameGraphBufferCount;
     snap.metalFrameGraphBufferBytes = metal.frameGraphBufferBytes;
     snap.metalFrameGraphTextureCount = metal.frameGraphTextureCount;
@@ -2587,6 +2596,102 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << "\"dispatchTouches\":"
            << metalInventory.r5Touches.dispatchTouches
            << "},";
+    auto writeResidencyRow = [&](const ResourceResidencyRecord& record) {
+        const MetalR5EvictionScope scope =
+            metalR5EvictionScopeForRecord(record);
+        stream << "{"
+               << "\"recordId\":" << record.recordId << ","
+               << "\"owner\":" << static_cast<unsigned>(record.owner) << ","
+               << "\"ownerName\":\"" << metalResidencyOwnerName(record.owner)
+               << "\","
+               << "\"glName\":" << record.glName << ","
+               << "\"kind\":" << static_cast<unsigned>(record.kind) << ","
+               << "\"kindName\":\"" << metalResidencyKindName(record.kind)
+               << "\","
+               << "\"authority\":"
+               << static_cast<unsigned>(record.authority) << ","
+               << "\"authorityName\":\""
+               << metalResidencyAuthorityName(record.authority) << "\","
+               << "\"heapClass\":"
+               << static_cast<unsigned>(record.heapClass) << ","
+               << "\"heapClassName\":\""
+               << metalResidencyHeapClassName(record.heapClass) << "\","
+               << "\"retainedBytes\":" << record.retainedBytes << ","
+               << "\"metalBytes\":" << record.metalBytes << ","
+               << "\"hostBytes\":" << record.hostBytes << ","
+               << "\"recipeId\":" << record.recipeId << ","
+               << "\"sourceGeneration\":" << record.sourceGeneration << ","
+               << "\"lastUseFrame\":" << record.lastUseFrame << ","
+               << "\"lastUseCommandSerial\":"
+               << record.lastUseCommandSerial << ","
+               << "\"inFlightSerial\":" << record.inFlightSerial << ","
+               << "\"purgeableEligible\":"
+               << static_cast<unsigned>(record.purgeableEligible) << ","
+               << "\"diagnosticBucketId\":"
+               << record.diagnosticBucketId << ","
+               << "\"r5EvictionScope\":\""
+               << metalR5EvictionScopeName(scope) << "\","
+               << "\"lastUseKnown\":"
+               << (metalR5LastUseKnown(record) ? "true" : "false")
+               << "}";
+    };
+    stream << "\"r5Ordering\":{"
+           << "\"version\":" << metalInventory.r5Ordering.version << ","
+           << "\"resourceUseSerial\":"
+           << metalInventory.r5Ordering.resourceUseSerial << ","
+           << "\"boundarySerial\":"
+           << metalInventory.r5Ordering.boundarySerial << ","
+           << "\"rowLimit\":" << metalInventory.r5Ordering.rowLimit << ","
+           << "\"candidateLimit\":"
+           << metalInventory.r5Ordering.candidateLimit << ","
+           << "\"rowsSeen\":" << metalInventory.r5Ordering.rowsSeen << ","
+           << "\"rowsExported\":"
+           << metalInventory.r5Ordering.rowsExported << ","
+           << "\"rowsTruncated\":"
+           << metalInventory.r5Ordering.rowsTruncated << ","
+           << "\"snapshotRowsStripped\":"
+           << metalInventory.r5Ordering.snapshotRowsStripped << ","
+           << "\"candidateRows\":"
+           << metalInventory.r5Ordering.candidateRows << ","
+           << "\"candidateBytes\":"
+           << metalInventory.r5Ordering.candidateBytes << ","
+           << "\"candidateMetalBytes\":"
+           << metalInventory.r5Ordering.candidateMetalBytes << ","
+           << "\"candidateHostBytes\":"
+           << metalInventory.r5Ordering.candidateHostBytes << ","
+           << "\"textureViewCandidateRows\":"
+           << metalInventory.r5Ordering.textureViewCandidateRows << ","
+           << "\"textureViewCandidateBytes\":"
+           << metalInventory.r5Ordering.textureViewCandidateBytes << ","
+           << "\"expandedIndexCandidateRows\":"
+           << metalInventory.r5Ordering.expandedIndexCandidateRows << ","
+           << "\"expandedIndexCandidateBytes\":"
+           << metalInventory.r5Ordering.expandedIndexCandidateBytes << ","
+           << "\"missingLastUseCandidateRows\":"
+           << metalInventory.r5Ordering.missingLastUseCandidateRows << ","
+           << "\"oldestLastUseCommandSerial\":"
+           << metalInventory.r5Ordering.oldestLastUseCommandSerial << ","
+           << "\"newestLastUseCommandSerial\":"
+           << metalInventory.r5Ordering.newestLastUseCommandSerial << ","
+           << "\"candidatesExported\":"
+           << metalInventory.r5Ordering.candidatesExported << ","
+           << "\"candidatesTruncated\":"
+           << metalInventory.r5Ordering.candidatesTruncated << ","
+           << "\"candidates\":[";
+    for (std::size_t i = 0; i < metalInventory.r5OrderingCandidates.size(); ++i) {
+        if (i != 0) {
+            stream << ",";
+        }
+        writeResidencyRow(metalInventory.r5OrderingCandidates[i]);
+    }
+    stream << "],\"rows\":[";
+    for (std::size_t i = 0; i < metalInventory.residencyRows.size(); ++i) {
+        if (i != 0) {
+            stream << ",";
+        }
+        writeResidencyRow(metalInventory.residencyRows[i]);
+    }
+    stream << "]},";
     stream << "\"hostCaches\":{"
            << "\"totalBytes\":" << metalInventory.hostCaches.totalBytes
            << ","

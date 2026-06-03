@@ -7,6 +7,7 @@
 #include <source_location>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "../../include/AppGL/glcorearb.h"
 #include "AppGLCommandReasons.h"
@@ -757,6 +758,9 @@ public:
         MetalHostCacheSummary hostCaches;
         MetalR5ResidencyDryRunSummary r5DryRun;
         MetalR5ResidencyTouchSummary r5Touches;
+        MetalR5ResidencyOrderingSummary r5Ordering;
+        std::vector<ResourceResidencyRecord> residencyRows;
+        std::vector<ResourceResidencyRecord> r5OrderingCandidates;
     };
     MetalResourceInventory metalResourceInventory() const;
 

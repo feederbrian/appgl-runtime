@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "../src/context/MetalResourceResidency.h"
 
@@ -40,6 +41,26 @@ appgl::ResourceResidencyRecord record(
          appgl::metalR5FuturePurgeableEligibleKind(kind))
             ? 1
             : 0;
+    return result;
+}
+
+appgl::ResourceResidencyRecord scopedRecord(
+    appgl::MetalResidencyOwner owner,
+    appgl::MetalResidencyKind kind,
+    appgl::MetalResidencyHeapClass heap,
+    std::uint32_t diagnosticBucketId,
+    std::uint64_t lastUseSerial,
+    std::uint64_t metalBytes,
+    std::uint64_t hostBytes) {
+    auto result = record(kind,
+                         appgl::MetalResidencyAuthorityClass::Reconstructable,
+                         heap,
+                         metalBytes,
+                         hostBytes);
+    result.owner = owner;
+    result.diagnosticBucketId = diagnosticBucketId;
+    result.lastUseCommandSerial = lastUseSerial;
+    result.lastUseFrame = lastUseSerial == 0 ? 0 : 3;
     return result;
 }
 
@@ -142,6 +163,128 @@ void runClassifierProbe(ProbeState& state) {
     expect(state, summary.drainRequests == 0, "R5-0 performs no drains");
 }
 
+void runOrderingProbe(ProbeState& state) {
+    using appgl::MetalR5EvictionScope;
+    using appgl::MetalResidencyAuthorityClass;
+    using appgl::MetalResidencyHeapClass;
+    using appgl::MetalResidencyKind;
+    using appgl::MetalResidencyOwner;
+
+    const auto textureView = scopedRecord(
+        MetalResidencyOwner::Texture,
+        MetalResidencyKind::TextureView,
+        MetalResidencyHeapClass::MetalDevice,
+        appgl::kMetalR5DiagnosticBucketTextureView,
+        7,
+        64,
+        0);
+    const auto expandedIndex = scopedRecord(
+        MetalResidencyOwner::Buffer,
+        MetalResidencyKind::ExpandedIndexCache,
+        MetalResidencyHeapClass::Cache,
+        appgl::kMetalR5DiagnosticBucketExpandedIndexCache,
+        5,
+        0,
+        16);
+    const auto swizzledUnknownUse = scopedRecord(
+        MetalResidencyOwner::Texture,
+        MetalResidencyKind::TextureView,
+        MetalResidencyHeapClass::MetalDevice,
+        appgl::kMetalR5DiagnosticBucketSwizzledTextureView,
+        0,
+        32,
+        0);
+    const auto samplingProxy = scopedRecord(
+        MetalResidencyOwner::Texture,
+        MetalResidencyKind::MetalTexture,
+        MetalResidencyHeapClass::Cache,
+        0,
+        9,
+        48,
+        0);
+    auto authoritativeTextureView = textureView;
+    authoritativeTextureView.authority =
+        MetalResidencyAuthorityClass::Authoritative;
+
+    expect(state,
+           appgl::metalR5EvictionScopeForRecord(textureView) ==
+               MetalR5EvictionScope::TextureView,
+           "texture-view scope detected");
+    expect(state,
+           appgl::metalR5EvictionScopeForRecord(expandedIndex) ==
+               MetalR5EvictionScope::ExpandedIndexCache,
+           "expanded-index-cache scope detected");
+    expect(state,
+           appgl::metalR5EvictionScopeForRecord(samplingProxy) ==
+               MetalR5EvictionScope::None,
+           "sampling proxy / reconstructable MetalTexture remains scoped none");
+    expect(state,
+           appgl::metalR5EvictionScopeForRecord(authoritativeTextureView) ==
+               MetalR5EvictionScope::None,
+           "authoritative resources excluded from R5-0.5 scope");
+    expect(state,
+           std::string(appgl::metalResidencyOwnerName(
+               MetalResidencyOwner::Texture)) == "texture",
+           "stable owner name");
+    expect(state,
+           std::string(appgl::metalResidencyKindName(
+               MetalResidencyKind::ExpandedIndexCache)) ==
+               "expanded-index-cache",
+           "stable kind name");
+    expect(state,
+           std::string(appgl::metalR5EvictionScopeName(
+               MetalR5EvictionScope::TextureView)) == "texture-view",
+           "stable eviction-scope name");
+
+    appgl::MetalR5ResidencyOrderingSummary ordering;
+    appgl::accumulateR5ResidencyOrderingRecord(ordering, textureView);
+    appgl::accumulateR5ResidencyOrderingRecord(ordering, expandedIndex);
+    appgl::accumulateR5ResidencyOrderingRecord(ordering, swizzledUnknownUse);
+    appgl::accumulateR5ResidencyOrderingRecord(ordering, samplingProxy);
+    appgl::accumulateR5ResidencyOrderingRecord(ordering,
+                                               authoritativeTextureView);
+    expect(state, ordering.rowsSeen == 5, "ordering rows seen");
+    expect(state, ordering.candidateRows == 3,
+           "narrow R5 candidate rows");
+    expect(state, ordering.candidateBytes == 112,
+           "narrow R5 candidate bytes");
+    expect(state, ordering.candidateMetalBytes == 96,
+           "narrow R5 candidate metal bytes");
+    expect(state, ordering.candidateHostBytes == 16,
+           "narrow R5 candidate host bytes");
+    expect(state, ordering.textureViewCandidateRows == 2,
+           "texture-view candidate rows");
+    expect(state, ordering.expandedIndexCandidateRows == 1,
+           "expanded-index candidate rows");
+    expect(state, ordering.missingLastUseCandidateRows == 1,
+           "unknown last-use candidate tracked");
+    expect(state, ordering.oldestLastUseCommandSerial == 5,
+           "oldest known last-use serial");
+    expect(state, ordering.newestLastUseCommandSerial == 7,
+           "newest known last-use serial");
+
+    expect(state,
+           appgl::metalR5OrderingRecordLess(expandedIndex, textureView),
+           "older known resource sorts first");
+    expect(state,
+           appgl::metalR5OrderingRecordLess(textureView,
+                                            swizzledUnknownUse),
+           "known last-use sorts before unknown last-use");
+
+    std::vector<appgl::ResourceResidencyRecord> rows;
+    constexpr std::uint64_t rowLimit = 4;
+    std::uint64_t appended = 0;
+    for (std::uint64_t i = 0; i < 100; ++i) {
+        auto row = textureView;
+        row.recordId = i + 1;
+        if (appgl::metalR5AppendBoundedResidencyRow(rows, row, rowLimit)) {
+            ++appended;
+        }
+    }
+    expect(state, appended == rowLimit, "bounded row append count");
+    expect(state, rows.size() == rowLimit, "bounded row vector size");
+}
+
 void runTouchProbe(ProbeState& state) {
     using appgl::MetalR5ResidencyTouchKind;
 
@@ -197,6 +340,7 @@ void runTouchProbe(ProbeState& state) {
 int main() {
     ProbeState state;
     runClassifierProbe(state);
+    runOrderingProbe(state);
     runTouchProbe(state);
 
     if (state.failures != 0) {

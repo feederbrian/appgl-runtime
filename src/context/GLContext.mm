@@ -11389,6 +11389,9 @@ struct GLContext::Impl {
             rootObj = objects->textures().get(rootName);
         }
         if (rootObj == nullptr) {
+            if (viewObj.metalTexture != nullptr) {
+                touchR5TextureView(viewObj);
+            }
             return viewObj.metalTexture != nullptr;
         }
         if ((rootObj->metalTexture == nullptr || !rootObj->instantiated) &&
@@ -11465,6 +11468,7 @@ struct GLContext::Impl {
         viewObj.swizzleDirty = true;
         releaseRetainedMetalObject(viewObj.metalSamplingProxy);
         viewObj.metalSamplingProxy = nullptr;
+        touchR5TextureView(viewObj);
         return true;
     }
 
@@ -11560,6 +11564,7 @@ struct GLContext::Impl {
 
         if (depthStencilNeedsSamplingFlip) {
             if (!texObj.swizzleDirty && texObj.metalSwizzledView != nullptr) {
+                touchR5SwizzledTextureView(texObj);
                 return texObj.metalSwizzledView;
             }
             releaseRetainedMetalObject(texObj.metalSwizzledView);
@@ -11569,6 +11574,9 @@ struct GLContext::Impl {
                 texObj.metalSwizzledView = transferRetainedMetalObject(flipped);
             }
             texObj.swizzleDirty = false;
+            if (texObj.metalSwizzledView != nullptr) {
+                touchR5SwizzledTextureView(texObj);
+            }
             return texObj.metalSwizzledView != nullptr
                 ? texObj.metalSwizzledView
                 : baseTextureRaw;
@@ -11576,6 +11584,7 @@ struct GLContext::Impl {
 
         // Non-default swizzle — rebuild view if dirty.
         if (!texObj.swizzleDirty && texObj.metalSwizzledView != nullptr) {
+            touchR5SwizzledTextureView(texObj);
             return texObj.metalSwizzledView;
         }
 
@@ -11632,6 +11641,9 @@ struct GLContext::Impl {
                 texObj.metalSwizzledView = transferRetainedMetalObject(viewSource);
             }
             texObj.swizzleDirty = false;
+            if (texObj.metalSwizzledView != nullptr) {
+                touchR5SwizzledTextureView(texObj);
+            }
             return texObj.metalSwizzledView != nullptr
                 ? texObj.metalSwizzledView
                 : baseTextureRaw;
@@ -11652,6 +11664,9 @@ struct GLContext::Impl {
             texObj.metalSwizzledView = transferRetainedMetalObject(swizzledView);
         }
         texObj.swizzleDirty = false;
+        if (texObj.metalSwizzledView != nullptr) {
+            touchR5SwizzledTextureView(texObj);
+        }
         return texObj.metalSwizzledView != nullptr
             ? texObj.metalSwizzledView
             : baseTextureRaw;
@@ -21310,11 +21325,16 @@ struct GLContext::Impl {
         if (frameGraph != nullptr) {
             frameGraph->present(AppGLCommandReason::PresentPendingWork);
         }
+        markR5Boundary();
     }
 
     bool finishPendingWork() {
         encodePendingWork();
-        return frameGraph == nullptr ? true : frameGraph->finish();
+        const bool completed = frameGraph == nullptr ? true : frameGraph->finish();
+        if (completed) {
+            markR5Boundary();
+        }
+        return completed;
     }
 
     bool debugMessageEnabled(const DebugMessageRecord& message) const {
@@ -21371,6 +21391,29 @@ struct GLContext::Impl {
         recordMetalR5ResidencyTouch(r5Touches, kind);
     }
 
+    std::uint64_t nextR5ResourceUseSerial() noexcept {
+        return ++r5ResourceUseSerial;
+    }
+
+    void touchR5TextureView(GLTextureObject& texture) noexcept {
+        texture.r5TextureViewLastUseSerial = nextR5ResourceUseSerial();
+        texture.r5TextureViewLastUseBoundarySerial = r5BoundarySerial;
+    }
+
+    void touchR5SwizzledTextureView(GLTextureObject& texture) noexcept {
+        texture.r5SwizzledViewLastUseSerial = nextR5ResourceUseSerial();
+        texture.r5SwizzledViewLastUseBoundarySerial = r5BoundarySerial;
+    }
+
+    void touchR5ExpandedIndexCache(GLBufferObject& buffer) noexcept {
+        buffer.r5ExpandedIndexLastUseSerial = nextR5ResourceUseSerial();
+        buffer.r5ExpandedIndexLastUseBoundarySerial = r5BoundarySerial;
+    }
+
+    void markR5Boundary() noexcept {
+        ++r5BoundarySerial;
+    }
+
     CAMetalLayer* layer = nil;
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> commandQueue = nil;
@@ -21385,6 +21428,8 @@ struct GLContext::Impl {
     mutable ColdPathDiagnosticProfile coldPathProfile;
     Phase2PlanKeyProfile phase2PlanKeyProfile;
     MetalR5ResidencyTouchSummary r5Touches;
+    std::uint64_t r5ResourceUseSerial = 0;
+    std::uint64_t r5BoundarySerial = 0;
     std::unordered_map<std::uint64_t, TranslatedDrawPlan> translatedDrawPlanCache;
     Phase2PlanKeyMemo translatedDrawPlanKeyMemo;
     std::uint64_t translatedDrawPlanGeneration = 0;
@@ -30184,6 +30229,10 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
     inventory.deviceAllocatedBytes = metalAllocatedBytes();
     inventory.r5DryRun.dryRunPasses = 1;
     inventory.r5Touches = impl_->r5Touches;
+    inventory.r5Ordering.resourceUseSerial = impl_->r5ResourceUseSerial;
+    inventory.r5Ordering.boundarySerial = impl_->r5BoundarySerial;
+    inventory.r5Ordering.rowLimit = kMetalR5ResidencyRawRowLimit;
+    inventory.r5Ordering.candidateLimit = kMetalR5ResidencyCandidateLimit;
     auto finalizePressureInputs = [&]() {
         inventory.pressure.currentAllocatedBytes = inventory.deviceAllocatedBytes;
         inventory.pressure.trackedHostHeapBytes = inventory.residency.hostBytes;
@@ -30282,6 +30331,31 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
     };
 
     std::uint64_t nextResidencyRecordId = 1;
+    auto retainR5OrderingCandidate = [&](const ResourceResidencyRecord& record) {
+        if (metalR5EvictionScopeForRecord(record) == MetalR5EvictionScope::None) {
+            return;
+        }
+        auto& candidates = inventory.r5OrderingCandidates;
+        const auto limit =
+            static_cast<std::size_t>(inventory.r5Ordering.candidateLimit);
+        if (limit == 0) {
+            return;
+        }
+        if (candidates.size() < limit) {
+            candidates.push_back(record);
+            return;
+        }
+        auto worst = std::max_element(
+            candidates.begin(), candidates.end(),
+            [](const ResourceResidencyRecord& lhs,
+               const ResourceResidencyRecord& rhs) {
+                return metalR5OrderingRecordLess(lhs, rhs);
+            });
+        if (worst != candidates.end() &&
+            metalR5OrderingRecordLess(record, *worst)) {
+            *worst = record;
+        }
+    };
     auto recordResidency =
         [&](MetalResidencyOwner owner,
             GLuint glName,
@@ -30291,7 +30365,11 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             std::uint64_t metalBytes,
             std::uint64_t hostBytes,
             std::uint64_t recipeId = 0,
-            std::uint64_t sourceGeneration = 0) {
+            std::uint64_t sourceGeneration = 0,
+            std::uint64_t lastUseFrame = 0,
+            std::uint64_t lastUseCommandSerial = 0,
+            std::uint64_t inFlightSerial = 0,
+            std::uint32_t diagnosticBucketId = 0) {
             const std::uint64_t retainedBytes = metalBytes + hostBytes;
             if (retainedBytes == 0) {
                 return;
@@ -30308,6 +30386,9 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             record.authority = authority;
             record.recipeId = recipeId;
             record.sourceGeneration = sourceGeneration;
+            record.lastUseFrame = lastUseFrame;
+            record.lastUseCommandSerial = lastUseCommandSerial;
+            record.inFlightSerial = inFlightSerial;
             record.heapClass = heapClass;
             record.purgeableEligible =
                 (authority == MetalResidencyAuthorityClass::Reconstructable &&
@@ -30315,6 +30396,14 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
                  metalR5FuturePurgeableEligibleKind(kind))
                     ? 1
                     : 0;
+            record.diagnosticBucketId = diagnosticBucketId;
+            if (!metalR5AppendBoundedResidencyRow(
+                    inventory.residencyRows, record,
+                    inventory.r5Ordering.rowLimit)) {
+                ++inventory.r5Ordering.rowsTruncated;
+            }
+            accumulateR5ResidencyOrderingRecord(inventory.r5Ordering, record);
+            retainR5OrderingCandidate(record);
             accumulateResidencyRecord(inventory.residency, record);
             accumulateR5ResidencyDryRunRecord(inventory.r5DryRun, record);
         };
@@ -30378,7 +30467,12 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
                    MetalResidencyAuthorityClass::Authoritative,
                    MetalResidencyHeapClass::MetalDevice);
     };
-    auto addTextureView = [&](void* raw, GLuint glName) {
+    auto addTextureView =
+        [&](void* raw,
+            GLuint glName,
+            std::uint32_t diagnosticBucketId,
+            std::uint64_t lastUseSerial,
+            std::uint64_t lastUseBoundarySerial) {
         if (raw == nullptr || !textureViewResources.insert(raw).second) {
             return;
         }
@@ -30388,7 +30482,9 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         recordResidency(MetalResidencyOwner::Texture, glName,
                         MetalResidencyKind::TextureView,
                         MetalResidencyAuthorityClass::Reconstructable,
-                        MetalResidencyHeapClass::MetalDevice, bytes, 0);
+                        MetalResidencyHeapClass::MetalDevice, bytes, 0,
+                        0, 0, lastUseBoundarySerial, lastUseSerial, 0,
+                        diagnosticBucketId);
     };
     auto addSampler = [&](void* raw) {
         if (raw != nullptr && samplerObjects.insert(raw).second) {
@@ -30560,7 +30656,11 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
                             MetalResidencyAuthorityClass::Reconstructable,
                             MetalResidencyHeapClass::Cache, 0, bytes,
                             buffer.indexExpansionGeneration,
-                            buffer.cachedExpansionGeneration);
+                            buffer.cachedExpansionGeneration,
+                            buffer.r5ExpandedIndexLastUseBoundarySerial,
+                            buffer.r5ExpandedIndexLastUseSerial,
+                            0,
+                            kMetalR5DiagnosticBucketExpandedIndexCache);
         }
         if (buffer.sparseStorage) {
             const auto pageTableBytes =
@@ -30654,11 +30754,17 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             }
         }
         if (texture.viewSourceTexture != 0) {
-            addTextureView(texture.metalTexture, textureName);
+            addTextureView(texture.metalTexture, textureName,
+                           kMetalR5DiagnosticBucketTextureView,
+                           texture.r5TextureViewLastUseSerial,
+                           texture.r5TextureViewLastUseBoundarySerial);
         } else {
             addGenericTexture(texture.metalTexture, textureName);
         }
-        addTextureView(texture.metalSwizzledView, textureName);
+        addTextureView(texture.metalSwizzledView, textureName,
+                       kMetalR5DiagnosticBucketSwizzledTextureView,
+                       texture.r5SwizzledViewLastUseSerial,
+                       texture.r5SwizzledViewLastUseBoundarySerial);
         addTexture(texture.metalSamplingProxy, MetalResidencyOwner::Texture,
                    textureName, MetalResidencyKind::MetalTexture,
                    MetalResidencyAuthorityClass::Reconstructable,
@@ -30806,6 +30912,19 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
                     MetalResidencyAuthorityClass::SparseSpecial,
                     MetalResidencyHeapClass::Sparse,
                     multisampleStorageSidecars.sidecarBytes, 0);
+
+    std::sort(inventory.r5OrderingCandidates.begin(),
+              inventory.r5OrderingCandidates.end(),
+              metalR5OrderingRecordLess);
+    inventory.r5Ordering.rowsExported =
+        static_cast<std::uint64_t>(inventory.residencyRows.size());
+    inventory.r5Ordering.candidatesExported =
+        static_cast<std::uint64_t>(inventory.r5OrderingCandidates.size());
+    inventory.r5Ordering.candidatesTruncated =
+        inventory.r5Ordering.candidateRows > inventory.r5Ordering.candidatesExported
+            ? inventory.r5Ordering.candidateRows -
+                  inventory.r5Ordering.candidatesExported
+            : 0;
 
 #ifndef NDEBUG
     if (std::getenv("APPGL_R3_ASSERT_NO_UNKNOWN") != nullptr) {
@@ -55200,6 +55319,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 // Recompute offset: each source byte becomes 2 bytes (uint16).
                 const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
                 effectivePtr = elementBuffer->cachedExpandedIndices.data() + expandedOffset;
+                impl_->touchR5ExpandedIndexCache(*elementBuffer);
                 logIndexExpansionCostClass(
                     "drawElements", elementBufferName, type, effectiveType,
                     static_cast<GLsizei>(elementBuffer->shadowBytes.size()),
@@ -56059,6 +56179,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
         effectiveType = GL_UNSIGNED_SHORT;
         const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
         effectivePtr = elementBuffer->cachedExpandedIndices.data() + expandedOffset;
+        impl_->touchR5ExpandedIndexCache(*elementBuffer);
         logIndexExpansionCostClass(
             "drawElementsBaseVertex", elementBufferName, type, effectiveType,
             static_cast<GLsizei>(elementBuffer->shadowBytes.size()),
@@ -56405,6 +56526,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
         effectiveType = GL_UNSIGNED_SHORT;
         const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
         effectivePtr = elementBuffer->cachedExpandedIndices.data() + expandedOffset;
+        impl_->touchR5ExpandedIndexCache(*elementBuffer);
         logIndexExpansionCostClass(
             "drawElementsInstancedBaseVertex", elementBufferName,
             type, effectiveType,

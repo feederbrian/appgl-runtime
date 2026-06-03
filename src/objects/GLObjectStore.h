@@ -137,6 +137,8 @@ struct GLBufferObject {
     std::vector<std::uint8_t> cachedExpandedIndices;
     uint32_t indexExpansionGeneration = 0;   // bumped on data change
     uint32_t cachedExpansionGeneration = 0;  // generation when cache was built
+    std::uint64_t r5ExpandedIndexLastUseSerial = 0;
+    std::uint64_t r5ExpandedIndexLastUseBoundarySerial = 0;
     GLProducerPendingState producerPending;
     bool gpuAuthoredSinceCpuWrite = false;
 };
@@ -215,6 +217,8 @@ struct GLTextureObject {
     GLint viewNumLevels = 0;
     GLint viewMinLayer = 0;
     GLint viewNumLayers = 0;
+    std::uint64_t r5TextureViewLastUseSerial = 0;
+    std::uint64_t r5TextureViewLastUseBoundarySerial = 0;
 
     // Phase 8X Group 4d follow-up⁷ — lazy MTLSamplerState cached on the
     // texture object itself, rebuilt from `params` on demand. GL's
@@ -258,6 +262,8 @@ struct GLTextureObject {
     // changes, so the view is rebuilt on the next draw.
     void* metalSwizzledView = nullptr;
     bool swizzleDirty = true;
+    std::uint64_t r5SwizzledViewLastUseSerial = 0;
+    std::uint64_t r5SwizzledViewLastUseBoundarySerial = 0;
 
     // Sampling-only proxy used when a GL texture view has cube-family
     // semantics that Metal does not reproduce through a direct texture

@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <type_traits>
+#include <vector>
 
 namespace appgl {
 
@@ -81,6 +83,18 @@ enum class MetalR5ResidencyTouchKind : std::uint8_t {
     Dispatch,
 };
 
+enum class MetalR5EvictionScope : std::uint8_t {
+    None = 0,
+    TextureView,
+    ExpandedIndexCache,
+};
+
+inline constexpr std::uint64_t kMetalR5ResidencyRawRowLimit = 256;
+inline constexpr std::uint64_t kMetalR5ResidencyCandidateLimit = 64;
+inline constexpr std::uint32_t kMetalR5DiagnosticBucketTextureView = 1;
+inline constexpr std::uint32_t kMetalR5DiagnosticBucketSwizzledTextureView = 2;
+inline constexpr std::uint32_t kMetalR5DiagnosticBucketExpandedIndexCache = 3;
+
 struct ResourceResidencyRecord {
     std::uint64_t recordId = 0;
     MetalResidencyOwner owner = MetalResidencyOwner::Unknown;
@@ -99,6 +113,31 @@ struct ResourceResidencyRecord {
     MetalResidencyHeapClass heapClass = MetalResidencyHeapClass::Unknown;
     std::uint8_t purgeableEligible = 0;
     std::uint32_t diagnosticBucketId = 0;
+};
+
+struct MetalR5ResidencyOrderingSummary {
+    std::uint64_t version = 1;
+    std::uint64_t resourceUseSerial = 0;
+    std::uint64_t boundarySerial = 0;
+    std::uint64_t rowLimit = kMetalR5ResidencyRawRowLimit;
+    std::uint64_t candidateLimit = kMetalR5ResidencyCandidateLimit;
+    std::uint64_t rowsSeen = 0;
+    std::uint64_t rowsExported = 0;
+    std::uint64_t rowsTruncated = 0;
+    std::uint64_t snapshotRowsStripped = 0;
+    std::uint64_t candidateRows = 0;
+    std::uint64_t candidateBytes = 0;
+    std::uint64_t candidateMetalBytes = 0;
+    std::uint64_t candidateHostBytes = 0;
+    std::uint64_t textureViewCandidateRows = 0;
+    std::uint64_t textureViewCandidateBytes = 0;
+    std::uint64_t expandedIndexCandidateRows = 0;
+    std::uint64_t expandedIndexCandidateBytes = 0;
+    std::uint64_t missingLastUseCandidateRows = 0;
+    std::uint64_t oldestLastUseCommandSerial = 0;
+    std::uint64_t newestLastUseCommandSerial = 0;
+    std::uint64_t candidatesExported = 0;
+    std::uint64_t candidatesTruncated = 0;
 };
 
 struct MetalR5ResidencyDryRunSummary {
@@ -205,6 +244,88 @@ struct MetalHostCacheSummary {
     std::uint64_t multisampleStorageImageSidecarBytes = 0;
 };
 
+inline const char* metalResidencyOwnerName(MetalResidencyOwner owner) {
+    switch (owner) {
+    case MetalResidencyOwner::Unknown: return "unknown";
+    case MetalResidencyOwner::Buffer: return "buffer";
+    case MetalResidencyOwner::Texture: return "texture";
+    case MetalResidencyOwner::Renderbuffer: return "renderbuffer";
+    case MetalResidencyOwner::Shader: return "shader";
+    case MetalResidencyOwner::Program: return "program";
+    case MetalResidencyOwner::FrameGraph: return "framegraph";
+    case MetalResidencyOwner::SparseTexture: return "sparse-texture";
+    }
+    return "unknown";
+}
+
+inline const char* metalResidencyKindName(MetalResidencyKind kind) {
+    switch (kind) {
+    case MetalResidencyKind::Unknown: return "unknown";
+    case MetalResidencyKind::MetalBuffer: return "metal-buffer";
+    case MetalResidencyKind::MetalTexture: return "metal-texture";
+    case MetalResidencyKind::TextureView: return "texture-view";
+    case MetalResidencyKind::Sampler: return "sampler";
+    case MetalResidencyKind::RenderPipeline: return "render-pipeline";
+    case MetalResidencyKind::ComputePipeline: return "compute-pipeline";
+    case MetalResidencyKind::Function: return "function";
+    case MetalResidencyKind::Library: return "library";
+    case MetalResidencyKind::HostShadow: return "host-shadow";
+    case MetalResidencyKind::ShaderSource: return "shader-source";
+    case MetalResidencyKind::ShaderSpirv: return "shader-spirv";
+    case MetalResidencyKind::ProgramMslSource: return "program-msl-source";
+    case MetalResidencyKind::MslLibraryCacheSource: return "msl-library-cache-source";
+    case MetalResidencyKind::MslLibraryCacheSourceKey: return "msl-library-cache-source-key";
+    case MetalResidencyKind::MslLibraryCompileTransientSource: return "msl-library-compile-transient-source";
+    case MetalResidencyKind::ExpandedIndexCache: return "expanded-index-cache";
+    case MetalResidencyKind::Fp64SidecarCpu: return "fp64-sidecar-cpu";
+    case MetalResidencyKind::Fp64SidecarMetal: return "fp64-sidecar-metal";
+    case MetalResidencyKind::TextureBufferExpansion: return "texture-buffer-expansion";
+    case MetalResidencyKind::ImageAtomicSidecar: return "image-atomic-sidecar";
+    case MetalResidencyKind::SparsePageTable: return "sparse-page-table";
+    case MetalResidencyKind::SparseHeap: return "sparse-heap";
+    case MetalResidencyKind::SparseStorageSidecar: return "sparse-storage-sidecar";
+    case MetalResidencyKind::MultisampleStorageSidecar: return "multisample-storage-sidecar";
+    case MetalResidencyKind::FrameGraphResource: return "framegraph-resource";
+    }
+    return "unknown";
+}
+
+inline const char* metalResidencyAuthorityName(
+    MetalResidencyAuthorityClass authority) {
+    switch (authority) {
+    case MetalResidencyAuthorityClass::Authoritative: return "authoritative";
+    case MetalResidencyAuthorityClass::Reconstructable: return "reconstructable";
+    case MetalResidencyAuthorityClass::Transient: return "transient";
+    case MetalResidencyAuthorityClass::SparseSpecial: return "sparse-special";
+    case MetalResidencyAuthorityClass::Unknown: return "unknown";
+    }
+    return "unknown";
+}
+
+inline const char* metalResidencyHeapClassName(
+    MetalResidencyHeapClass heapClass) {
+    switch (heapClass) {
+    case MetalResidencyHeapClass::Host: return "host";
+    case MetalResidencyHeapClass::MetalDevice: return "metal-device";
+    case MetalResidencyHeapClass::FrameGraph: return "framegraph";
+    case MetalResidencyHeapClass::Cache: return "cache";
+    case MetalResidencyHeapClass::Sidecar: return "sidecar";
+    case MetalResidencyHeapClass::Sparse: return "sparse";
+    case MetalResidencyHeapClass::Unknown: return "unknown";
+    }
+    return "unknown";
+}
+
+inline const char* metalR5EvictionScopeName(MetalR5EvictionScope scope) {
+    switch (scope) {
+    case MetalR5EvictionScope::None: return "none";
+    case MetalR5EvictionScope::TextureView: return "texture-view";
+    case MetalR5EvictionScope::ExpandedIndexCache:
+        return "expanded-index-cache";
+    }
+    return "none";
+}
+
 inline bool metalResidencyKnownKind(MetalResidencyKind kind) {
     switch (kind) {
     case MetalResidencyKind::MetalBuffer:
@@ -239,6 +360,61 @@ inline bool metalResidencyKnownKind(MetalResidencyKind kind) {
     return false;
 }
 
+inline MetalR5EvictionScope metalR5EvictionScopeForRecord(
+    const ResourceResidencyRecord& record) {
+    if (record.authority != MetalResidencyAuthorityClass::Reconstructable) {
+        return MetalR5EvictionScope::None;
+    }
+    if (record.owner == MetalResidencyOwner::Texture &&
+        record.kind == MetalResidencyKind::TextureView &&
+        (record.diagnosticBucketId == kMetalR5DiagnosticBucketTextureView ||
+         record.diagnosticBucketId ==
+             kMetalR5DiagnosticBucketSwizzledTextureView)) {
+        return MetalR5EvictionScope::TextureView;
+    }
+    if (record.owner == MetalResidencyOwner::Buffer &&
+        record.kind == MetalResidencyKind::ExpandedIndexCache &&
+        record.diagnosticBucketId ==
+            kMetalR5DiagnosticBucketExpandedIndexCache) {
+        return MetalR5EvictionScope::ExpandedIndexCache;
+    }
+    return MetalR5EvictionScope::None;
+}
+
+inline bool metalR5LastUseKnown(const ResourceResidencyRecord& record) {
+    return record.lastUseCommandSerial != 0;
+}
+
+inline bool metalR5OrderingRecordLess(const ResourceResidencyRecord& lhs,
+                                      const ResourceResidencyRecord& rhs) {
+    const bool lhsKnown = metalR5LastUseKnown(lhs);
+    const bool rhsKnown = metalR5LastUseKnown(rhs);
+    if (lhsKnown != rhsKnown) {
+        return lhsKnown;
+    }
+    if (lhsKnown && lhs.lastUseCommandSerial != rhs.lastUseCommandSerial) {
+        return lhs.lastUseCommandSerial < rhs.lastUseCommandSerial;
+    }
+    if (lhs.lastUseFrame != rhs.lastUseFrame) {
+        return lhs.lastUseFrame < rhs.lastUseFrame;
+    }
+    if (lhs.retainedBytes != rhs.retainedBytes) {
+        return lhs.retainedBytes > rhs.retainedBytes;
+    }
+    return lhs.recordId < rhs.recordId;
+}
+
+inline bool metalR5AppendBoundedResidencyRow(
+    std::vector<ResourceResidencyRecord>& rows,
+    const ResourceResidencyRecord& record,
+    std::uint64_t limit = kMetalR5ResidencyRawRowLimit) {
+    if (rows.size() >= static_cast<std::size_t>(limit)) {
+        return false;
+    }
+    rows.push_back(record);
+    return true;
+}
+
 inline bool metalR5FuturePurgeableEligibleKind(MetalResidencyKind kind) {
     switch (kind) {
     case MetalResidencyKind::MetalBuffer:
@@ -271,6 +447,40 @@ inline bool metalR5FuturePurgeableEligibleKind(MetalResidencyKind kind) {
         return false;
     }
     return false;
+}
+
+inline void accumulateR5ResidencyOrderingRecord(
+    MetalR5ResidencyOrderingSummary& summary,
+    const ResourceResidencyRecord& record) {
+    ++summary.rowsSeen;
+    const MetalR5EvictionScope scope = metalR5EvictionScopeForRecord(record);
+    if (scope == MetalR5EvictionScope::None) {
+        return;
+    }
+
+    ++summary.candidateRows;
+    summary.candidateBytes += record.retainedBytes;
+    summary.candidateMetalBytes += record.metalBytes;
+    summary.candidateHostBytes += record.hostBytes;
+    if (scope == MetalR5EvictionScope::TextureView) {
+        ++summary.textureViewCandidateRows;
+        summary.textureViewCandidateBytes += record.retainedBytes;
+    } else if (scope == MetalR5EvictionScope::ExpandedIndexCache) {
+        ++summary.expandedIndexCandidateRows;
+        summary.expandedIndexCandidateBytes += record.retainedBytes;
+    }
+
+    if (!metalR5LastUseKnown(record)) {
+        ++summary.missingLastUseCandidateRows;
+        return;
+    }
+    if (summary.oldestLastUseCommandSerial == 0 ||
+        record.lastUseCommandSerial < summary.oldestLastUseCommandSerial) {
+        summary.oldestLastUseCommandSerial = record.lastUseCommandSerial;
+    }
+    if (record.lastUseCommandSerial > summary.newestLastUseCommandSerial) {
+        summary.newestLastUseCommandSerial = record.lastUseCommandSerial;
+    }
 }
 
 inline MetalR5ResidencyClass classifyMetalR5ResidencyRecord(
@@ -445,6 +655,8 @@ inline void accumulateResidencyRecord(
 
 static_assert(std::is_standard_layout<ResourceResidencyRecord>::value,
               "ResourceResidencyRecord must remain POD-shaped");
+static_assert(std::is_standard_layout<MetalR5ResidencyOrderingSummary>::value,
+              "MetalR5ResidencyOrderingSummary must remain POD-shaped");
 static_assert(std::is_standard_layout<MetalR5ResidencyDryRunSummary>::value,
               "MetalR5ResidencyDryRunSummary must remain POD-shaped");
 static_assert(std::is_standard_layout<MetalR5ResidencyTouchSummary>::value,
