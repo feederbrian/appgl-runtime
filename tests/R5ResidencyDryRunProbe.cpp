@@ -1,10 +1,19 @@
+#include <algorithm>
 #include <chrono>
+#include <cctype>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <vector>
 
+#include <AppGL/AppGL.h>
+
 #include "../src/context/MetalResourceResidency.h"
+
+extern "C" std::uint64_t appglR5EvictDerivedCachesForTesting(
+    std::uint64_t budget);
 
 namespace {
 
@@ -14,6 +23,194 @@ struct ProbeState {
 
 volatile std::uint64_t gTouchSelector = 0;
 volatile std::uint64_t gTouchSink = 0;
+
+void expect(ProbeState& state, bool condition, const std::string& message);
+
+struct ContextGuard {
+    explicit ContextGuard(AppGLContext* value) : context(value) {}
+    ~ContextGuard() {
+        if (context != nullptr) {
+            appglMakeCurrent(nullptr);
+            appglDestroyContext(context);
+        }
+    }
+    AppGLContext* context = nullptr;
+};
+
+template <typename T>
+T loadGL(ProbeState& state, const char* name) {
+    AppGLProc proc = appglGetProcAddress(name);
+    if (proc == nullptr) {
+        ++state.failures;
+        std::cerr << "FAIL: missing GL proc " << name << "\n";
+        return nullptr;
+    }
+    return reinterpret_cast<T>(proc);
+}
+
+std::string diagnosticsJSON() {
+    const std::size_t required = appglDiagnosticsJSON(nullptr, 0);
+    std::string payload(required + 1, '\0');
+    const std::size_t written =
+        appglDiagnosticsJSON(payload.data(), payload.size());
+    payload.resize(std::min(required, written));
+    return payload;
+}
+
+std::uint64_t jsonCounter(const std::string& json, const std::string& key) {
+    const std::string needle = "\"" + key + "\":";
+    const std::size_t pos = json.find(needle);
+    if (pos == std::string::npos) {
+        return 0;
+    }
+    std::size_t cursor = pos + needle.size();
+    while (cursor < json.size() &&
+           std::isspace(static_cast<unsigned char>(json[cursor]))) {
+        ++cursor;
+    }
+    std::uint64_t value = 0;
+    while (cursor < json.size() &&
+           std::isdigit(static_cast<unsigned char>(json[cursor]))) {
+        value = value * 10u + static_cast<unsigned>(json[cursor] - '0');
+        ++cursor;
+    }
+    return value;
+}
+
+void expectNoGLError(ProbeState& state,
+                     PFNGLGETERRORPROC getError,
+                     const std::string& message) {
+    if (getError == nullptr) {
+        return;
+    }
+    const GLenum error = getError();
+    expect(state, error == GL_NO_ERROR,
+           message + " GL error=" + std::to_string(error));
+}
+
+struct R5GL {
+    PFNGLGETERRORPROC GetError = nullptr;
+    PFNGLGENTEXTURESPROC GenTextures = nullptr;
+    PFNGLDELETETEXTURESPROC DeleteTextures = nullptr;
+    PFNGLBINDTEXTUREPROC BindTexture = nullptr;
+    PFNGLTEXSTORAGE2DPROC TexStorage2D = nullptr;
+    PFNGLTEXSTORAGE3DPROC TexStorage3D = nullptr;
+    PFNGLTEXTUREVIEWPROC TextureView = nullptr;
+    PFNGLTEXPARAMETERIPROC TexParameteri = nullptr;
+    PFNGLGENFRAMEBUFFERSPROC GenFramebuffers = nullptr;
+    PFNGLDELETEFRAMEBUFFERSPROC DeleteFramebuffers = nullptr;
+    PFNGLBINDFRAMEBUFFERPROC BindFramebuffer = nullptr;
+    PFNGLFRAMEBUFFERTEXTURE2DPROC FramebufferTexture2D = nullptr;
+    PFNGLCHECKFRAMEBUFFERSTATUSPROC CheckFramebufferStatus = nullptr;
+    PFNGLDRAWBUFFERPROC DrawBuffer = nullptr;
+    PFNGLREADBUFFERPROC ReadBuffer = nullptr;
+    PFNGLVIEWPORTPROC Viewport = nullptr;
+    PFNGLCLEARCOLORPROC ClearColor = nullptr;
+    PFNGLCLEARPROC Clear = nullptr;
+    PFNGLREADPIXELSPROC ReadPixels = nullptr;
+    PFNGLFINISHPROC Finish = nullptr;
+    PFNGLCREATESHADERPROC CreateShader = nullptr;
+    PFNGLSHADERSOURCEPROC ShaderSource = nullptr;
+    PFNGLCOMPILESHADERPROC CompileShader = nullptr;
+    PFNGLGETSHADERIVPROC GetShaderiv = nullptr;
+    PFNGLGETSHADERINFOLOGPROC GetShaderInfoLog = nullptr;
+    PFNGLCREATEPROGRAMPROC CreateProgram = nullptr;
+    PFNGLATTACHSHADERPROC AttachShader = nullptr;
+    PFNGLLINKPROGRAMPROC LinkProgram = nullptr;
+    PFNGLGETPROGRAMIVPROC GetProgramiv = nullptr;
+    PFNGLGETPROGRAMINFOLOGPROC GetProgramInfoLog = nullptr;
+    PFNGLUSEPROGRAMPROC UseProgram = nullptr;
+    PFNGLDELETESHADERPROC DeleteShader = nullptr;
+    PFNGLDELETEPROGRAMPROC DeleteProgram = nullptr;
+    PFNGLGENVERTEXARRAYSPROC GenVertexArrays = nullptr;
+    PFNGLDELETEVERTEXARRAYSPROC DeleteVertexArrays = nullptr;
+    PFNGLBINDVERTEXARRAYPROC BindVertexArray = nullptr;
+    PFNGLGENBUFFERSPROC GenBuffers = nullptr;
+    PFNGLDELETEBUFFERSPROC DeleteBuffers = nullptr;
+    PFNGLBINDBUFFERPROC BindBuffer = nullptr;
+    PFNGLBUFFERDATAPROC BufferData = nullptr;
+    PFNGLBUFFERSUBDATAPROC BufferSubData = nullptr;
+    PFNGLENABLEVERTEXATTRIBARRAYPROC EnableVertexAttribArray = nullptr;
+    PFNGLVERTEXATTRIBPOINTERPROC VertexAttribPointer = nullptr;
+    PFNGLDRAWARRAYSPROC DrawArrays = nullptr;
+    PFNGLDRAWELEMENTSPROC DrawElements = nullptr;
+};
+
+R5GL loadR5GL(ProbeState& state) {
+    R5GL gl;
+    gl.GetError = loadGL<PFNGLGETERRORPROC>(state, "glGetError");
+    gl.GenTextures = loadGL<PFNGLGENTEXTURESPROC>(state, "glGenTextures");
+    gl.DeleteTextures =
+        loadGL<PFNGLDELETETEXTURESPROC>(state, "glDeleteTextures");
+    gl.BindTexture = loadGL<PFNGLBINDTEXTUREPROC>(state, "glBindTexture");
+    gl.TexStorage2D =
+        loadGL<PFNGLTEXSTORAGE2DPROC>(state, "glTexStorage2D");
+    gl.TexStorage3D =
+        loadGL<PFNGLTEXSTORAGE3DPROC>(state, "glTexStorage3D");
+    gl.TextureView = loadGL<PFNGLTEXTUREVIEWPROC>(state, "glTextureView");
+    gl.TexParameteri =
+        loadGL<PFNGLTEXPARAMETERIPROC>(state, "glTexParameteri");
+    gl.GenFramebuffers =
+        loadGL<PFNGLGENFRAMEBUFFERSPROC>(state, "glGenFramebuffers");
+    gl.DeleteFramebuffers =
+        loadGL<PFNGLDELETEFRAMEBUFFERSPROC>(state, "glDeleteFramebuffers");
+    gl.BindFramebuffer =
+        loadGL<PFNGLBINDFRAMEBUFFERPROC>(state, "glBindFramebuffer");
+    gl.FramebufferTexture2D =
+        loadGL<PFNGLFRAMEBUFFERTEXTURE2DPROC>(state,
+                                              "glFramebufferTexture2D");
+    gl.CheckFramebufferStatus =
+        loadGL<PFNGLCHECKFRAMEBUFFERSTATUSPROC>(state,
+                                                "glCheckFramebufferStatus");
+    gl.DrawBuffer = loadGL<PFNGLDRAWBUFFERPROC>(state, "glDrawBuffer");
+    gl.ReadBuffer = loadGL<PFNGLREADBUFFERPROC>(state, "glReadBuffer");
+    gl.Viewport = loadGL<PFNGLVIEWPORTPROC>(state, "glViewport");
+    gl.ClearColor = loadGL<PFNGLCLEARCOLORPROC>(state, "glClearColor");
+    gl.Clear = loadGL<PFNGLCLEARPROC>(state, "glClear");
+    gl.ReadPixels = loadGL<PFNGLREADPIXELSPROC>(state, "glReadPixels");
+    gl.Finish = loadGL<PFNGLFINISHPROC>(state, "glFinish");
+    gl.CreateShader = loadGL<PFNGLCREATESHADERPROC>(state, "glCreateShader");
+    gl.ShaderSource = loadGL<PFNGLSHADERSOURCEPROC>(state, "glShaderSource");
+    gl.CompileShader =
+        loadGL<PFNGLCOMPILESHADERPROC>(state, "glCompileShader");
+    gl.GetShaderiv = loadGL<PFNGLGETSHADERIVPROC>(state, "glGetShaderiv");
+    gl.GetShaderInfoLog =
+        loadGL<PFNGLGETSHADERINFOLOGPROC>(state, "glGetShaderInfoLog");
+    gl.CreateProgram =
+        loadGL<PFNGLCREATEPROGRAMPROC>(state, "glCreateProgram");
+    gl.AttachShader = loadGL<PFNGLATTACHSHADERPROC>(state, "glAttachShader");
+    gl.LinkProgram = loadGL<PFNGLLINKPROGRAMPROC>(state, "glLinkProgram");
+    gl.GetProgramiv = loadGL<PFNGLGETPROGRAMIVPROC>(state, "glGetProgramiv");
+    gl.GetProgramInfoLog =
+        loadGL<PFNGLGETPROGRAMINFOLOGPROC>(state, "glGetProgramInfoLog");
+    gl.UseProgram = loadGL<PFNGLUSEPROGRAMPROC>(state, "glUseProgram");
+    gl.DeleteShader = loadGL<PFNGLDELETESHADERPROC>(state, "glDeleteShader");
+    gl.DeleteProgram =
+        loadGL<PFNGLDELETEPROGRAMPROC>(state, "glDeleteProgram");
+    gl.GenVertexArrays =
+        loadGL<PFNGLGENVERTEXARRAYSPROC>(state, "glGenVertexArrays");
+    gl.DeleteVertexArrays =
+        loadGL<PFNGLDELETEVERTEXARRAYSPROC>(state, "glDeleteVertexArrays");
+    gl.BindVertexArray =
+        loadGL<PFNGLBINDVERTEXARRAYPROC>(state, "glBindVertexArray");
+    gl.GenBuffers = loadGL<PFNGLGENBUFFERSPROC>(state, "glGenBuffers");
+    gl.DeleteBuffers =
+        loadGL<PFNGLDELETEBUFFERSPROC>(state, "glDeleteBuffers");
+    gl.BindBuffer = loadGL<PFNGLBINDBUFFERPROC>(state, "glBindBuffer");
+    gl.BufferData = loadGL<PFNGLBUFFERDATAPROC>(state, "glBufferData");
+    gl.BufferSubData =
+        loadGL<PFNGLBUFFERSUBDATAPROC>(state, "glBufferSubData");
+    gl.EnableVertexAttribArray =
+        loadGL<PFNGLENABLEVERTEXATTRIBARRAYPROC>(state,
+                                                 "glEnableVertexAttribArray");
+    gl.VertexAttribPointer =
+        loadGL<PFNGLVERTEXATTRIBPOINTERPROC>(state,
+                                             "glVertexAttribPointer");
+    gl.DrawArrays = loadGL<PFNGLDRAWARRAYSPROC>(state, "glDrawArrays");
+    gl.DrawElements =
+        loadGL<PFNGLDRAWELEMENTSPROC>(state, "glDrawElements");
+    return gl;
+}
 
 void expect(ProbeState& state, bool condition, const std::string& message) {
     if (!condition) {
@@ -335,6 +532,392 @@ void runTouchProbe(ProbeState& state) {
               << "\n";
 }
 
+bool pixelNear(const std::uint8_t* rgba,
+               std::uint8_t r,
+               std::uint8_t g,
+               std::uint8_t b) {
+    const auto near = [](std::uint8_t actual, std::uint8_t expected) {
+        const int delta = static_cast<int>(actual) - static_cast<int>(expected);
+        return delta >= -2 && delta <= 2;
+    };
+    return near(rgba[0], r) && near(rgba[1], g) && near(rgba[2], b) &&
+           rgba[3] >= 250;
+}
+
+GLuint compileShader(ProbeState& state,
+                     const R5GL& gl,
+                     GLenum type,
+                     const char* source) {
+    const GLuint shader = gl.CreateShader(type);
+    gl.ShaderSource(shader, 1, &source, nullptr);
+    gl.CompileShader(shader);
+    GLint ok = GL_FALSE;
+    gl.GetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    if (ok != GL_TRUE) {
+        char log[1024] = {};
+        gl.GetShaderInfoLog(shader, static_cast<GLsizei>(sizeof(log)),
+                            nullptr, log);
+        ++state.failures;
+        std::cerr << "FAIL: shader compile failed: " << log << "\n";
+    }
+    return shader;
+}
+
+GLuint buildFlatProgram(ProbeState& state,
+                        const R5GL& gl,
+                        const char* colorExpr = "0.0, 1.0, 0.0") {
+    const char* vertex =
+        "#version 330 core\n"
+        "layout(location=0) in vec2 a_pos;\n"
+        "void main(){ gl_Position = vec4(a_pos, 0.0, 1.0); }\n";
+    const std::string fragment =
+        "#version 330 core\n"
+        "out vec4 color;\n"
+        "void main(){ color = vec4(" +
+        std::string(colorExpr) + ", 1.0); }\n";
+    const GLuint vs = compileShader(state, gl, GL_VERTEX_SHADER, vertex);
+    const GLuint fs =
+        compileShader(state, gl, GL_FRAGMENT_SHADER, fragment.c_str());
+    const GLuint program = gl.CreateProgram();
+    gl.AttachShader(program, vs);
+    gl.AttachShader(program, fs);
+    gl.LinkProgram(program);
+    GLint ok = GL_FALSE;
+    gl.GetProgramiv(program, GL_LINK_STATUS, &ok);
+    if (ok != GL_TRUE) {
+        char log[1024] = {};
+        gl.GetProgramInfoLog(program, static_cast<GLsizei>(sizeof(log)),
+                             nullptr, log);
+        ++state.failures;
+        std::cerr << "FAIL: program link failed: " << log << "\n";
+    }
+    gl.DeleteShader(vs);
+    gl.DeleteShader(fs);
+    return program;
+}
+
+GLuint buildCubeSampleProgram(ProbeState& state, const R5GL& gl) {
+    const char* vertex =
+        "#version 330 core\n"
+        "layout(location=0) in vec2 a_pos;\n"
+        "void main(){ gl_Position = vec4(a_pos, 0.0, 1.0); }\n";
+    const char* fragment =
+        "#version 330 core\n"
+        "uniform samplerCube u_tex;\n"
+        "out vec4 color;\n"
+        "void main(){ color = texture(u_tex, vec3(1.0, 0.0, 0.0)); }\n";
+    const GLuint vs = compileShader(state, gl, GL_VERTEX_SHADER, vertex);
+    const GLuint fs = compileShader(state, gl, GL_FRAGMENT_SHADER, fragment);
+    const GLuint program = gl.CreateProgram();
+    gl.AttachShader(program, vs);
+    gl.AttachShader(program, fs);
+    gl.LinkProgram(program);
+    GLint ok = GL_FALSE;
+    gl.GetProgramiv(program, GL_LINK_STATUS, &ok);
+    if (ok != GL_TRUE) {
+        char log[1024] = {};
+        gl.GetProgramInfoLog(program, static_cast<GLsizei>(sizeof(log)),
+                             nullptr, log);
+        ++state.failures;
+        std::cerr << "FAIL: cube sample program link failed: " << log
+                  << "\n";
+    }
+    gl.DeleteShader(vs);
+    gl.DeleteShader(fs);
+    return program;
+}
+
+void drawDefaultTriangle(ProbeState& state,
+                         const R5GL& gl,
+                         GLuint program,
+                         const std::string& label) {
+    GLuint vao = 0;
+    GLuint vbo = 0;
+    gl.GenVertexArrays(1, &vao);
+    gl.BindVertexArray(vao);
+    gl.GenBuffers(1, &vbo);
+    gl.BindBuffer(GL_ARRAY_BUFFER, vbo);
+    const float vertices[] = {
+        -1.0f, -1.0f,
+         3.0f, -1.0f,
+        -1.0f,  3.0f,
+    };
+    gl.BufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices,
+                  GL_STATIC_DRAW);
+    gl.EnableVertexAttribArray(0);
+    gl.VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float),
+                           nullptr);
+    gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+    gl.Viewport(0, 0, 4, 4);
+    gl.UseProgram(program);
+    gl.DrawArrays(GL_TRIANGLES, 0, 3);
+    gl.Finish();
+    expectNoGLError(state, gl.GetError, label);
+    gl.DeleteBuffers(1, &vbo);
+    gl.DeleteVertexArrays(1, &vao);
+}
+
+void drawAndReadFBO(ProbeState& state,
+                    const R5GL& gl,
+                    GLuint framebuffer,
+                    GLuint program,
+                    std::uint8_t expectedR,
+                    std::uint8_t expectedG,
+                    std::uint8_t expectedB,
+                    const std::string& label) {
+    GLuint vao = 0;
+    GLuint vbo = 0;
+    gl.GenVertexArrays(1, &vao);
+    gl.BindVertexArray(vao);
+    gl.GenBuffers(1, &vbo);
+    gl.BindBuffer(GL_ARRAY_BUFFER, vbo);
+    const float vertices[] = {
+        -1.0f, -1.0f,
+         3.0f, -1.0f,
+        -1.0f,  3.0f,
+    };
+    gl.BufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices,
+                  GL_STATIC_DRAW);
+    gl.EnableVertexAttribArray(0);
+    gl.VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float),
+                           nullptr);
+
+    gl.BindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    gl.DrawBuffer(GL_COLOR_ATTACHMENT0);
+    gl.ReadBuffer(GL_COLOR_ATTACHMENT0);
+    gl.Viewport(0, 0, 4, 4);
+    gl.UseProgram(program);
+    gl.DrawArrays(GL_TRIANGLES, 0, 3);
+    gl.Finish();
+    std::uint8_t pixel[4] = {};
+    gl.ReadPixels(2, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    expectNoGLError(state, gl.GetError, label);
+    expect(state, pixelNear(pixel, expectedR, expectedG, expectedB), label);
+
+    gl.DeleteBuffers(1, &vbo);
+    gl.DeleteVertexArrays(1, &vao);
+}
+
+void runTextureViewEvictionProbe(ProbeState& state, const R5GL& gl) {
+    const GLuint program = buildFlatProgram(state, gl, "1.0, 0.0, 0.0");
+    GLuint base = 0;
+    GLuint view = 0;
+    GLuint framebuffer = 0;
+    gl.GenTextures(1, &base);
+    gl.BindTexture(GL_TEXTURE_2D, base);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl.TexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 4, 4);
+    expectNoGLError(state, gl.GetError, "texture-view base storage setup");
+    gl.GenTextures(1, &view);
+    gl.TextureView(view, GL_TEXTURE_2D, base, GL_RGBA8, 0, 1, 0, 1);
+    expectNoGLError(state, gl.GetError, "texture-view object setup");
+    gl.GenFramebuffers(1, &framebuffer);
+    gl.BindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                            GL_TEXTURE_2D, view, 0);
+    expectNoGLError(state, gl.GetError, "texture-view FBO attachment");
+    expect(state,
+           gl.CheckFramebufferStatus(GL_FRAMEBUFFER) ==
+               GL_FRAMEBUFFER_COMPLETE,
+           "texture-view FBO is complete");
+    drawAndReadFBO(state, gl, framebuffer, program, 255, 0, 0,
+                   "pre-evict rendered-to texture-view readback");
+
+    unsetenv("APPGL_R5_EVICTION");
+    unsetenv("APPGL_R5_EVICTION_ENABLE");
+    const std::uint64_t disabledMutations =
+        appglR5EvictDerivedCachesForTesting(1);
+    expect(state, disabledMutations == 0,
+           "disabled R5 eviction is a negative-control no-op");
+    std::string disabledDiag = diagnosticsJSON();
+    expect(state, jsonCounter(disabledDiag, "passSkippedDisabled") >= 1,
+           "disabled negative control increments skip counter");
+
+    setenv("APPGL_R5_EVICTION", "1", 1);
+    const std::uint64_t enabledMutations =
+        appglR5EvictDerivedCachesForTesting(1);
+    expect(state, enabledMutations == 1,
+           "budget=1 texture-view eviction mutates one record");
+    std::string evictDiag = diagnosticsJSON();
+    expect(state,
+           jsonCounter(evictDiag, "textureViewBaseReleaseSuccesses") >= 1,
+           "texture-view base handle was released");
+    expect(state,
+           jsonCounter(evictDiag, "lastPostTextureViewCount") <
+               jsonCounter(evictDiag, "lastPreTextureViewCount"),
+           "texture-view accounting decreased after eviction");
+    expect(state, jsonCounter(evictDiag, "primaryTextureReleaseAttempts") == 0,
+           "no primary texture release attempts");
+    expect(state, jsonCounter(evictDiag, "setPurgeableStateCalls") == 0,
+           "no purgeable state calls");
+
+    drawAndReadFBO(state, gl, framebuffer, program, 255, 0, 0,
+                   "post-evict rendered-to texture-view reconstruct AE=0");
+    std::string rebuildDiag = diagnosticsJSON();
+    expect(state,
+           jsonCounter(rebuildDiag, "textureViewRebuildsAfterR5Evict") >= 1,
+           "texture-view rematerialized after R5 eviction");
+
+    gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+    gl.DeleteFramebuffers(1, &framebuffer);
+    GLuint textures[2] = {view, base};
+    gl.DeleteTextures(2, textures);
+    gl.DeleteProgram(program);
+}
+
+void runSamplingProxySkipProbe(ProbeState& state, const R5GL& gl) {
+    const GLuint program = buildCubeSampleProgram(state, gl);
+    GLuint base = 0;
+    GLuint view = 0;
+    gl.GenTextures(1, &base);
+    gl.BindTexture(GL_TEXTURE_2D_ARRAY, base);
+    gl.TexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER,
+                     GL_NEAREST);
+    gl.TexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER,
+                     GL_NEAREST);
+    gl.TexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, 4, 4, 6);
+    expectNoGLError(state, gl.GetError, "sampling-proxy base storage setup");
+
+    gl.GenTextures(1, &view);
+    gl.TextureView(view, GL_TEXTURE_CUBE_MAP, base, GL_RGBA8, 0, 1, 0, 6);
+    expectNoGLError(state, gl.GetError, "sampling-proxy cube view setup");
+    gl.BindTexture(GL_TEXTURE_CUBE_MAP, view);
+    gl.TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl.TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    drawDefaultTriangle(state, gl, program, "sampling-proxy cube-view draw");
+
+    setenv("APPGL_R5_EVICTION", "1", 1);
+    const std::uint64_t proxyMutations =
+        appglR5EvictDerivedCachesForTesting(1);
+    expect(state, proxyMutations == 0,
+           "sampling-proxy texture-view candidate is skipped");
+    const std::string proxyDiag = diagnosticsJSON();
+    expect(state, jsonCounter(proxyDiag, "samplingProxySkipped") >= 1,
+           "sampling-proxy skip counter increments");
+    expect(state,
+           jsonCounter(proxyDiag, "textureViewBaseReleaseSuccesses") == 0,
+           "sampling-proxy path does not release view base");
+
+    GLuint textures[2] = {view, base};
+    gl.DeleteTextures(2, textures);
+    gl.DeleteProgram(program);
+}
+
+void drawIndexedTriangle(ProbeState& state,
+                         const R5GL& gl,
+                         GLuint program,
+                         const std::string& label) {
+    gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+    gl.Viewport(0, 0, 4, 4);
+    gl.ClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    gl.Clear(GL_COLOR_BUFFER_BIT);
+    gl.UseProgram(program);
+    gl.DrawElements(GL_TRIANGLES, 3, GL_UNSIGNED_BYTE, nullptr);
+    gl.Finish();
+    std::uint8_t pixel[4] = {};
+    gl.ReadPixels(2, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    expectNoGLError(state, gl.GetError, label);
+    expect(state, pixelNear(pixel, 0, 255, 0), label);
+}
+
+void runExpandedIndexEvictionProbe(ProbeState& state, const R5GL& gl) {
+    const GLuint program = buildFlatProgram(state, gl);
+    GLuint vao = 0;
+    GLuint vbo = 0;
+    GLuint ebo = 0;
+    gl.GenVertexArrays(1, &vao);
+    gl.BindVertexArray(vao);
+    gl.GenBuffers(1, &vbo);
+    gl.BindBuffer(GL_ARRAY_BUFFER, vbo);
+    const float vertices[] = {
+        -1.0f, -1.0f,
+         1.0f, -1.0f,
+         0.0f,  1.0f,
+    };
+    gl.BufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices,
+                  GL_STATIC_DRAW);
+    gl.EnableVertexAttribArray(0);
+    gl.VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float),
+                           nullptr);
+    gl.GenBuffers(1, &ebo);
+    gl.BindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    const std::uint8_t indices[] = {0, 1, 2};
+    gl.BufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices,
+                  GL_STATIC_DRAW);
+    drawIndexedTriangle(state, gl, program,
+                        "pre-evict GL_UNSIGNED_BYTE indexed draw");
+
+    std::uint8_t changed[] = {0, 1, 2};
+    gl.BufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, sizeof(changed), changed);
+    const std::uint64_t staleMutations =
+        appglR5EvictDerivedCachesForTesting(1);
+    expect(state, staleMutations == 0,
+           "stale expanded-index generation skips eviction");
+    std::string staleDiag = diagnosticsJSON();
+    expect(state,
+           jsonCounter(staleDiag, "generationMismatchSkipped") >= 1,
+           "stale generation skip counter increments");
+
+    drawIndexedTriangle(state, gl, program,
+                        "post-stale-skip indexed draw rebuilds cache");
+    const std::uint64_t evictMutations =
+        appglR5EvictDerivedCachesForTesting(1);
+    expect(state, evictMutations == 1,
+           "budget=1 expanded-index eviction mutates one record");
+    std::string evictDiag = diagnosticsJSON();
+    expect(state,
+           jsonCounter(evictDiag, "expandedIndexClearSuccesses") >= 1,
+           "expanded-index cache was cleared");
+    expect(state,
+           jsonCounter(evictDiag, "lastPostExpandedIndexBuffers") <
+               jsonCounter(evictDiag, "lastPreExpandedIndexBuffers"),
+           "expanded-index accounting decreased after eviction");
+    expect(state, jsonCounter(evictDiag, "primaryBufferReleaseAttempts") == 0,
+           "no primary buffer release attempts");
+    expect(state, jsonCounter(evictDiag, "hostShadowMutationAttempts") == 0,
+           "no host shadow mutation attempts");
+
+    drawIndexedTriangle(state, gl, program,
+                        "post-evict expanded-index reconstruct AE=0");
+    std::string rebuildDiag = diagnosticsJSON();
+    expect(state,
+           jsonCounter(rebuildDiag, "expandedIndexRebuildsAfterR5Evict") >= 1,
+           "expanded-index cache rebuilt after R5 eviction");
+
+    gl.DeleteBuffers(1, &ebo);
+    gl.DeleteBuffers(1, &vbo);
+    gl.DeleteVertexArrays(1, &vao);
+    gl.DeleteProgram(program);
+}
+
+void runLiveEvictionProbe(ProbeState& state) {
+    ContextGuard context(appglCreateOffscreenContext(4, 4));
+    expect(state, context.context != nullptr,
+           "offscreen context created for live R5 probe");
+    if (context.context == nullptr) {
+        return;
+    }
+    appglMakeCurrent(context.context);
+    R5GL gl = loadR5GL(state);
+    if (state.failures != 0) {
+        return;
+    }
+    runSamplingProxySkipProbe(state, gl);
+    runTextureViewEvictionProbe(state, gl);
+    runExpandedIndexEvictionProbe(state, gl);
+
+    const std::string finalDiag = diagnosticsJSON();
+    expect(state, jsonCounter(finalDiag, "primaryTextureReleaseAttempts") == 0,
+           "gate-wide primary texture release counter remains zero");
+    expect(state, jsonCounter(finalDiag, "primaryBufferReleaseAttempts") == 0,
+           "gate-wide primary buffer release counter remains zero");
+    expect(state, jsonCounter(finalDiag, "hostShadowMutationAttempts") == 0,
+           "gate-wide host-shadow mutation counter remains zero");
+    expect(state, jsonCounter(finalDiag, "setPurgeableStateCalls") == 0,
+           "gate-wide purgeable-state counter remains zero");
+}
+
 }  // namespace
 
 int main() {
@@ -342,6 +925,7 @@ int main() {
     runClassifierProbe(state);
     runOrderingProbe(state);
     runTouchProbe(state);
+    runLiveEvictionProbe(state);
 
     if (state.failures != 0) {
         std::cerr << state.failures << " R5 residency dry-run probe failures\n";

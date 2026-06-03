@@ -188,6 +188,57 @@ struct MetalR5ResidencyTouchSummary {
     std::uint64_t dispatchTouches = 0;
 };
 
+struct MetalR5EvictionSummary {
+    std::uint64_t version = 1;
+    std::uint64_t enabled = 0;
+    std::uint64_t explicitTriggerRequests = 0;
+    std::uint64_t hardPressureRequests = 0;
+    std::uint64_t criticalPressureRequests = 0;
+    std::uint64_t passAttempts = 0;
+    std::uint64_t passCompleted = 0;
+    std::uint64_t passSkippedDisabled = 0;
+    std::uint64_t passSkippedPressure = 0;
+    std::uint64_t drainRequests = 0;
+    std::uint64_t drainFailures = 0;
+    std::uint64_t candidatesSeen = 0;
+    std::uint64_t eligibleSeen = 0;
+    std::uint64_t selectedRecords = 0;
+    std::uint64_t mutatedRecords = 0;
+    std::uint64_t budgetSkippedRecords = 0;
+    std::uint64_t unknownLastUseSkipped = 0;
+    std::uint64_t scopeSkipped = 0;
+    std::uint64_t objectMissingSkipped = 0;
+    std::uint64_t handleMissingSkipped = 0;
+    std::uint64_t generationMismatchSkipped = 0;
+    std::uint64_t lastUseMismatchSkipped = 0;
+    std::uint64_t samplingProxySkipped = 0;
+    std::uint64_t textureViewBaseReleaseAttempts = 0;
+    std::uint64_t textureViewBaseReleaseSuccesses = 0;
+    std::uint64_t swizzledViewReleaseAttempts = 0;
+    std::uint64_t swizzledViewReleaseSuccesses = 0;
+    std::uint64_t expandedIndexClearAttempts = 0;
+    std::uint64_t expandedIndexClearSuccesses = 0;
+    std::uint64_t primaryTextureReleaseAttempts = 0;
+    std::uint64_t primaryBufferReleaseAttempts = 0;
+    std::uint64_t hostShadowMutationAttempts = 0;
+    std::uint64_t setPurgeableStateCalls = 0;
+    std::uint64_t lastBudget = 0;
+    std::uint64_t lastPreTextureViewCount = 0;
+    std::uint64_t lastPostTextureViewCount = 0;
+    std::uint64_t lastPreTextureViewBytes = 0;
+    std::uint64_t lastPostTextureViewBytes = 0;
+    std::uint64_t lastPreExpandedIndexBuffers = 0;
+    std::uint64_t lastPostExpandedIndexBuffers = 0;
+    std::uint64_t lastPreExpandedIndexBytes = 0;
+    std::uint64_t lastPostExpandedIndexBytes = 0;
+    std::uint64_t reclaimedMetalViewBytes = 0;
+    std::uint64_t reclaimedHostCacheBytes = 0;
+    std::uint64_t textureViewRebuildsAfterR5Evict = 0;
+    std::uint64_t swizzledViewRebuildsAfterR5Evict = 0;
+    std::uint64_t expandedIndexRebuildsAfterR5Evict = 0;
+    std::uint64_t reconstructionFailures = 0;
+};
+
 struct MetalResourceResidencySummary {
     std::uint64_t records = 0;
     std::uint64_t retainedBytes = 0;
@@ -661,6 +712,8 @@ static_assert(std::is_standard_layout<MetalR5ResidencyDryRunSummary>::value,
               "MetalR5ResidencyDryRunSummary must remain POD-shaped");
 static_assert(std::is_standard_layout<MetalR5ResidencyTouchSummary>::value,
               "MetalR5ResidencyTouchSummary must remain POD-shaped");
+static_assert(std::is_standard_layout<MetalR5EvictionSummary>::value,
+              "MetalR5EvictionSummary must remain POD-shaped");
 static_assert(std::is_standard_layout<MetalResourceResidencySummary>::value,
               "MetalResourceResidencySummary must remain POD-shaped");
 static_assert(std::is_standard_layout<MetalHostCacheSummary>::value,

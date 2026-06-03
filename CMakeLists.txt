@@ -276,6 +276,7 @@ target_include_directories(appgl_r5_residency_probe
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
+target_link_libraries(appgl_r5_residency_probe PRIVATE AppGL)
 
 add_executable(appgl_coverage_store_concurrency_probe
   tests/CoverageStoreConcurrencyProbe.cpp

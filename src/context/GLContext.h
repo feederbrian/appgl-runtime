@@ -759,10 +759,12 @@ public:
         MetalR5ResidencyDryRunSummary r5DryRun;
         MetalR5ResidencyTouchSummary r5Touches;
         MetalR5ResidencyOrderingSummary r5Ordering;
+        MetalR5EvictionSummary r5Eviction;
         std::vector<ResourceResidencyRecord> residencyRows;
         std::vector<ResourceResidencyRecord> r5OrderingCandidates;
     };
     MetalResourceInventory metalResourceInventory() const;
+    std::uint64_t evictR5DerivedCachesForTesting(std::uint64_t budget);
 
     // Transform feedback active state tracking (for CTS api_errors_test).
     bool isTransformFeedbackActive() const;

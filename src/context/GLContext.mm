@@ -1,5 +1,6 @@
 #include "GLContext.h"
 #include "../runtime/AppGLDiagnostics.h"
+#include "../runtime/AppGLFeatureFlags.h"
 #include "../runtime/AppGLLog.h"
 #include "MetalFrameGraph.h"
 #include "MetalCommandSubmission.h"
@@ -148,6 +149,14 @@ bool metalTessTFEnabled() {
 
 bool liftTessUniformGuardEnabled() {
     return appglEnvEnabledDefaultOn("APPGL_LIFT_TESS_UNIFORM_GUARD");
+}
+
+bool r5EvictionEnabled() {
+    return feature_flags::isBooleanFlagEnabled(
+        "r5_eviction",
+        {"R5Eviction", "r5-derived-cache-eviction"},
+        {"APPGL_R5_EVICTION", "APPGL_R5_EVICTION_ENABLE"},
+        false);
 }
 
 using GLDrawProfileClock = std::chrono::steady_clock;
@@ -7343,6 +7352,11 @@ struct GLContext::Impl {
         object.fp64TransportSidecars.clear();
         object.size = 0;
         object.shadowBytes.clear();
+        object.cachedExpandedIndices.clear();
+        object.cachedExpansionGeneration = 0;
+        object.r5ExpandedIndexLastUseSerial = 0;
+        object.r5ExpandedIndexLastUseBoundarySerial = 0;
+        object.r5ExpandedIndexEvicted = false;
         object.sparseStorage = false;
         object.sparsePageSize = 0;
         object.sparseCommittedPages.clear();
@@ -7373,6 +7387,9 @@ struct GLContext::Impl {
         drainPendingGpuProducers(object);
         releaseRetainedMetalObject(object.metalTexture);
         object.metalTexture = nullptr;
+        object.r5TextureViewLastUseSerial = 0;
+        object.r5TextureViewLastUseBoundarySerial = 0;
+        object.r5TextureViewEvicted = false;
         releaseTextureBufferExpansion(object);
         if (owner != nullptr) {
             ExtensionContext extensionContext(*owner);
@@ -7390,6 +7407,9 @@ struct GLContext::Impl {
         releaseRetainedMetalObject(object.metalSwizzledView);
         object.metalSwizzledView = nullptr;
         object.swizzleDirty = true;
+        object.r5SwizzledViewLastUseSerial = 0;
+        object.r5SwizzledViewLastUseBoundarySerial = 0;
+        object.r5SwizzledViewEvicted = false;
         releaseRetainedMetalObject(object.metalSamplingProxy);
         object.metalSamplingProxy = nullptr;
         releaseRetainedMetalObject(object.imageAtomicBuffer);
@@ -11469,6 +11489,7 @@ struct GLContext::Impl {
         releaseRetainedMetalObject(viewObj.metalSamplingProxy);
         viewObj.metalSamplingProxy = nullptr;
         touchR5TextureView(viewObj);
+        noteR5TextureViewRebuilt(viewObj);
         return true;
     }
 
@@ -11576,6 +11597,7 @@ struct GLContext::Impl {
             texObj.swizzleDirty = false;
             if (texObj.metalSwizzledView != nullptr) {
                 touchR5SwizzledTextureView(texObj);
+                noteR5SwizzledViewRebuilt(texObj);
             }
             return texObj.metalSwizzledView != nullptr
                 ? texObj.metalSwizzledView
@@ -11643,6 +11665,7 @@ struct GLContext::Impl {
             texObj.swizzleDirty = false;
             if (texObj.metalSwizzledView != nullptr) {
                 touchR5SwizzledTextureView(texObj);
+                noteR5SwizzledViewRebuilt(texObj);
             }
             return texObj.metalSwizzledView != nullptr
                 ? texObj.metalSwizzledView
@@ -11666,6 +11689,7 @@ struct GLContext::Impl {
         texObj.swizzleDirty = false;
         if (texObj.metalSwizzledView != nullptr) {
             touchR5SwizzledTextureView(texObj);
+            noteR5SwizzledViewRebuilt(texObj);
         }
         return texObj.metalSwizzledView != nullptr
             ? texObj.metalSwizzledView
@@ -21400,9 +21424,25 @@ struct GLContext::Impl {
         texture.r5TextureViewLastUseBoundarySerial = r5BoundarySerial;
     }
 
+    void noteR5TextureViewRebuilt(GLTextureObject& texture) noexcept {
+        if (!texture.r5TextureViewEvicted) {
+            return;
+        }
+        ++r5Eviction.textureViewRebuildsAfterR5Evict;
+        texture.r5TextureViewEvicted = false;
+    }
+
     void touchR5SwizzledTextureView(GLTextureObject& texture) noexcept {
         texture.r5SwizzledViewLastUseSerial = nextR5ResourceUseSerial();
         texture.r5SwizzledViewLastUseBoundarySerial = r5BoundarySerial;
+    }
+
+    void noteR5SwizzledViewRebuilt(GLTextureObject& texture) noexcept {
+        if (!texture.r5SwizzledViewEvicted) {
+            return;
+        }
+        ++r5Eviction.swizzledViewRebuildsAfterR5Evict;
+        texture.r5SwizzledViewEvicted = false;
     }
 
     void touchR5ExpandedIndexCache(GLBufferObject& buffer) noexcept {
@@ -21410,8 +21450,212 @@ struct GLContext::Impl {
         buffer.r5ExpandedIndexLastUseBoundarySerial = r5BoundarySerial;
     }
 
+    void noteR5ExpandedIndexCacheRebuilt(GLBufferObject& buffer) noexcept {
+        if (!buffer.r5ExpandedIndexEvicted) {
+            return;
+        }
+        ++r5Eviction.expandedIndexRebuildsAfterR5Evict;
+        buffer.r5ExpandedIndexEvicted = false;
+    }
+
     void markR5Boundary() noexcept {
         ++r5BoundarySerial;
+    }
+
+    bool r5TextureRecordLastUseMatches(const GLTextureObject& texture,
+                                       const ResourceResidencyRecord& record,
+                                       bool swizzled) const noexcept {
+        const std::uint64_t serial = swizzled
+            ? texture.r5SwizzledViewLastUseSerial
+            : texture.r5TextureViewLastUseSerial;
+        const std::uint64_t boundary = swizzled
+            ? texture.r5SwizzledViewLastUseBoundarySerial
+            : texture.r5TextureViewLastUseBoundarySerial;
+        return serial == record.lastUseCommandSerial &&
+               boundary == record.lastUseFrame;
+    }
+
+    bool r5ExpandedIndexRecordMatches(const GLBufferObject& buffer,
+                                      const ResourceResidencyRecord& record) const noexcept {
+        return buffer.r5ExpandedIndexLastUseSerial ==
+                   record.lastUseCommandSerial &&
+               buffer.r5ExpandedIndexLastUseBoundarySerial ==
+                   record.lastUseFrame &&
+               static_cast<std::uint64_t>(buffer.indexExpansionGeneration) ==
+                   record.recipeId &&
+               static_cast<std::uint64_t>(buffer.cachedExpansionGeneration) ==
+                   record.sourceGeneration &&
+               buffer.cachedExpansionGeneration ==
+                   buffer.indexExpansionGeneration;
+    }
+
+    std::uint64_t evictR5DerivedCachesForTesting(std::uint64_t budget) {
+        ++r5Eviction.explicitTriggerRequests;
+        r5Eviction.lastBudget = budget;
+        r5Eviction.enabled = r5EvictionEnabled() ? 1 : 0;
+        if (r5Eviction.enabled == 0) {
+            ++r5Eviction.passSkippedDisabled;
+            return 0;
+        }
+
+        ++r5Eviction.passAttempts;
+        const MetalResourceInventory pre = owner != nullptr
+            ? owner->metalResourceInventory()
+            : MetalResourceInventory{};
+        r5Eviction.lastPreTextureViewCount = pre.textureViewCount;
+        r5Eviction.lastPreTextureViewBytes = pre.textureViewBytes;
+        r5Eviction.lastPreExpandedIndexBuffers = pre.expandedIndexBuffers;
+        r5Eviction.lastPreExpandedIndexBytes = pre.expandedIndexBytes;
+
+        ++r5Eviction.drainRequests;
+        if (!finishPendingWork()) {
+            ++r5Eviction.drainFailures;
+            return 0;
+        }
+
+        const MetalResourceInventory selection = owner != nullptr
+            ? owner->metalResourceInventory()
+            : MetalResourceInventory{};
+        r5Eviction.candidatesSeen +=
+            static_cast<std::uint64_t>(selection.r5OrderingCandidates.size());
+
+        std::uint64_t mutated = 0;
+        for (const ResourceResidencyRecord& record :
+             selection.r5OrderingCandidates) {
+            if (budget != 0 && mutated >= budget) {
+                ++r5Eviction.budgetSkippedRecords;
+                continue;
+            }
+            if (!metalR5LastUseKnown(record)) {
+                ++r5Eviction.unknownLastUseSkipped;
+                continue;
+            }
+
+            const MetalR5EvictionScope scope =
+                metalR5EvictionScopeForRecord(record);
+            if (scope == MetalR5EvictionScope::None) {
+                ++r5Eviction.scopeSkipped;
+                continue;
+            }
+            ++r5Eviction.eligibleSeen;
+
+            if (scope == MetalR5EvictionScope::TextureView) {
+                if (objects == nullptr) {
+                    ++r5Eviction.objectMissingSkipped;
+                    continue;
+                }
+                GLTextureObject* texture =
+                    objects->textures().get(record.glName);
+                if (texture == nullptr) {
+                    ++r5Eviction.objectMissingSkipped;
+                    continue;
+                }
+
+                if (record.diagnosticBucketId ==
+                    kMetalR5DiagnosticBucketTextureView) {
+                    if (texture->metalSamplingProxy != nullptr) {
+                        ++r5Eviction.samplingProxySkipped;
+                        continue;
+                    }
+                    if (texture->viewSourceTexture == 0 ||
+                        texture->metalTexture == nullptr) {
+                        ++r5Eviction.handleMissingSkipped;
+                        continue;
+                    }
+                    if (!r5TextureRecordLastUseMatches(*texture, record,
+                                                       false)) {
+                        ++r5Eviction.lastUseMismatchSkipped;
+                        continue;
+                    }
+
+                    ++r5Eviction.textureViewBaseReleaseAttempts;
+                    releaseRetainedMetalObject(texture->metalTexture);
+                    texture->metalTexture = nullptr;
+                    texture->instantiated = false;
+                    texture->r5TextureViewLastUseSerial = 0;
+                    texture->r5TextureViewLastUseBoundarySerial = 0;
+                    texture->r5TextureViewEvicted = true;
+                    ++r5Eviction.textureViewBaseReleaseSuccesses;
+                    ++r5Eviction.selectedRecords;
+                    ++mutated;
+                    r5Eviction.reclaimedMetalViewBytes += record.metalBytes;
+                    continue;
+                }
+
+                if (record.diagnosticBucketId ==
+                    kMetalR5DiagnosticBucketSwizzledTextureView) {
+                    if (texture->metalSwizzledView == nullptr) {
+                        ++r5Eviction.handleMissingSkipped;
+                        continue;
+                    }
+                    if (!r5TextureRecordLastUseMatches(*texture, record,
+                                                       true)) {
+                        ++r5Eviction.lastUseMismatchSkipped;
+                        continue;
+                    }
+
+                    ++r5Eviction.swizzledViewReleaseAttempts;
+                    releaseRetainedMetalObject(texture->metalSwizzledView);
+                    texture->metalSwizzledView = nullptr;
+                    texture->swizzleDirty = true;
+                    texture->r5SwizzledViewLastUseSerial = 0;
+                    texture->r5SwizzledViewLastUseBoundarySerial = 0;
+                    texture->r5SwizzledViewEvicted = true;
+                    ++r5Eviction.swizzledViewReleaseSuccesses;
+                    ++r5Eviction.selectedRecords;
+                    ++mutated;
+                    r5Eviction.reclaimedMetalViewBytes += record.metalBytes;
+                    continue;
+                }
+
+                ++r5Eviction.scopeSkipped;
+                continue;
+            }
+
+            if (scope == MetalR5EvictionScope::ExpandedIndexCache) {
+                if (objects == nullptr) {
+                    ++r5Eviction.objectMissingSkipped;
+                    continue;
+                }
+                GLBufferObject* buffer = objects->buffers().get(record.glName);
+                if (buffer == nullptr) {
+                    ++r5Eviction.objectMissingSkipped;
+                    continue;
+                }
+                if (buffer->cachedExpandedIndices.empty()) {
+                    ++r5Eviction.handleMissingSkipped;
+                    continue;
+                }
+                if (!r5ExpandedIndexRecordMatches(*buffer, record)) {
+                    ++r5Eviction.generationMismatchSkipped;
+                    continue;
+                }
+
+                ++r5Eviction.expandedIndexClearAttempts;
+                std::vector<std::uint8_t>().swap(buffer->cachedExpandedIndices);
+                buffer->cachedExpansionGeneration = 0;
+                buffer->r5ExpandedIndexLastUseSerial = 0;
+                buffer->r5ExpandedIndexLastUseBoundarySerial = 0;
+                buffer->r5ExpandedIndexEvicted = true;
+                ++r5Eviction.expandedIndexClearSuccesses;
+                ++r5Eviction.selectedRecords;
+                ++mutated;
+                r5Eviction.reclaimedHostCacheBytes += record.hostBytes;
+                continue;
+            }
+        }
+
+        r5Eviction.mutatedRecords += mutated;
+        ++r5Eviction.passCompleted;
+
+        const MetalResourceInventory post = owner != nullptr
+            ? owner->metalResourceInventory()
+            : MetalResourceInventory{};
+        r5Eviction.lastPostTextureViewCount = post.textureViewCount;
+        r5Eviction.lastPostTextureViewBytes = post.textureViewBytes;
+        r5Eviction.lastPostExpandedIndexBuffers = post.expandedIndexBuffers;
+        r5Eviction.lastPostExpandedIndexBytes = post.expandedIndexBytes;
+        return mutated;
     }
 
     CAMetalLayer* layer = nil;
@@ -21428,6 +21672,7 @@ struct GLContext::Impl {
     mutable ColdPathDiagnosticProfile coldPathProfile;
     Phase2PlanKeyProfile phase2PlanKeyProfile;
     MetalR5ResidencyTouchSummary r5Touches;
+    MetalR5EvictionSummary r5Eviction;
     std::uint64_t r5ResourceUseSerial = 0;
     std::uint64_t r5BoundarySerial = 0;
     std::unordered_map<std::uint64_t, TranslatedDrawPlan> translatedDrawPlanCache;
@@ -22666,6 +22911,10 @@ void GLContext::swapBuffers() {
 
 AppGLCommandSubmissionDebugCounters GLContext::commandSubmissionDebugCounters() const {
     return impl_->commandSubmissionDebugCounters();
+}
+
+std::uint64_t GLContext::evictR5DerivedCachesForTesting(std::uint64_t budget) {
+    return impl_->evictR5DerivedCachesForTesting(budget);
 }
 
 bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void* pixels) {
@@ -30229,6 +30478,7 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
     inventory.deviceAllocatedBytes = metalAllocatedBytes();
     inventory.r5DryRun.dryRunPasses = 1;
     inventory.r5Touches = impl_->r5Touches;
+    inventory.r5Eviction = impl_->r5Eviction;
     inventory.r5Ordering.resourceUseSerial = impl_->r5ResourceUseSerial;
     inventory.r5Ordering.boundarySerial = impl_->r5BoundarySerial;
     inventory.r5Ordering.rowLimit = kMetalR5ResidencyRawRowLimit;
@@ -55314,6 +55564,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     }
                     elementBuffer->cachedExpandedIndices = std::move(result.bytes);
                     elementBuffer->cachedExpansionGeneration = elementBuffer->indexExpansionGeneration;
+                    impl_->noteR5ExpandedIndexCacheRebuilt(*elementBuffer);
                 }
                 effectiveType = GL_UNSIGNED_SHORT;
                 // Recompute offset: each source byte becomes 2 bytes (uint16).
@@ -56175,6 +56426,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
             }
             elementBuffer->cachedExpandedIndices = std::move(result.bytes);
             elementBuffer->cachedExpansionGeneration = elementBuffer->indexExpansionGeneration;
+            impl_->noteR5ExpandedIndexCacheRebuilt(*elementBuffer);
         }
         effectiveType = GL_UNSIGNED_SHORT;
         const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
@@ -56522,6 +56774,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
             }
             elementBuffer->cachedExpandedIndices = std::move(result.bytes);
             elementBuffer->cachedExpansionGeneration = elementBuffer->indexExpansionGeneration;
+            impl_->noteR5ExpandedIndexCacheRebuilt(*elementBuffer);
         }
         effectiveType = GL_UNSIGNED_SHORT;
         const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
