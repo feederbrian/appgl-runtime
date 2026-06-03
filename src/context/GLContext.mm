@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -30161,9 +30162,16 @@ std::uint64_t GLContext::metalAllocatedBytes() const {
 GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
     MetalResourceInventory inventory;
     inventory.deviceAllocatedBytes = metalAllocatedBytes();
+    std::uint64_t frameGraphResidencyBufferBytes = 0;
+    std::uint64_t frameGraphResidencyTextureBytes = 0;
+    std::uint64_t frameGraphResidencyDrawableTextureBytes = 0;
     if (impl_->frameGraph) {
         inventory.libraryCacheEntries = impl_->frameGraph->mslLibraryCacheEntries();
         const auto frameGraphMetal = impl_->frameGraph->internalMetalResourceInventory();
+        frameGraphResidencyBufferBytes = frameGraphMetal.bufferBytes;
+        frameGraphResidencyTextureBytes = frameGraphMetal.textureBytes;
+        frameGraphResidencyDrawableTextureBytes =
+            frameGraphMetal.drawableTextureBytes;
         inventory.frameGraphBufferCount = frameGraphMetal.bufferCount;
         inventory.frameGraphBufferBytes = frameGraphMetal.bufferBytes;
         inventory.frameGraphTextureCount = frameGraphMetal.textureCount;
@@ -30234,40 +30242,108 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         return static_cast<std::uint64_t>(image.rgba8.size())
             + static_cast<std::uint64_t>(image.nativeData.size());
     };
-    auto addBuffer = [&](void* raw) {
+
+    std::uint64_t nextResidencyRecordId = 1;
+    auto recordResidency =
+        [&](MetalResidencyOwner owner,
+            GLuint glName,
+            MetalResidencyKind kind,
+            MetalResidencyAuthorityClass authority,
+            MetalResidencyHeapClass heapClass,
+            std::uint64_t metalBytes,
+            std::uint64_t hostBytes,
+            std::uint64_t recipeId = 0,
+            std::uint64_t sourceGeneration = 0) {
+            const std::uint64_t retainedBytes = metalBytes + hostBytes;
+            if (retainedBytes == 0) {
+                return;
+            }
+
+            ResourceResidencyRecord record;
+            record.recordId = nextResidencyRecordId++;
+            record.owner = owner;
+            record.glName = glName;
+            record.kind = kind;
+            record.retainedBytes = retainedBytes;
+            record.metalBytes = metalBytes;
+            record.hostBytes = hostBytes;
+            record.authority = authority;
+            record.recipeId = recipeId;
+            record.sourceGeneration = sourceGeneration;
+            record.heapClass = heapClass;
+            accumulateResidencyRecord(inventory.residency, record);
+        };
+    auto addHostCacheBytes = [&](std::uint64_t bytes) {
+        inventory.hostCaches.totalBytes += bytes;
+    };
+    auto addBuffer =
+        [&](void* raw,
+            MetalResidencyOwner owner = MetalResidencyOwner::Buffer,
+            GLuint glName = 0,
+            MetalResidencyKind kind = MetalResidencyKind::MetalBuffer,
+            MetalResidencyAuthorityClass authority =
+                MetalResidencyAuthorityClass::Authoritative,
+            MetalResidencyHeapClass heapClass =
+                MetalResidencyHeapClass::MetalDevice,
+            std::uint64_t recipeId = 0,
+            std::uint64_t sourceGeneration = 0) {
         if (raw == nullptr || !bufferResources.insert(raw).second) {
             return;
         }
+        const std::uint64_t bytes = allocatedSize(raw);
         ++inventory.bufferCount;
-        inventory.bufferBytes += allocatedSize(raw);
+        inventory.bufferBytes += bytes;
+        recordResidency(owner, glName, kind, authority, heapClass, bytes, 0,
+                        recipeId, sourceGeneration);
     };
-    auto addTexture = [&](void* raw) {
+    auto addTexture =
+        [&](void* raw,
+            MetalResidencyOwner owner = MetalResidencyOwner::Texture,
+            GLuint glName = 0,
+            MetalResidencyKind kind = MetalResidencyKind::MetalTexture,
+            MetalResidencyAuthorityClass authority =
+                MetalResidencyAuthorityClass::Authoritative,
+            MetalResidencyHeapClass heapClass =
+                MetalResidencyHeapClass::MetalDevice) {
         if (raw == nullptr || !textureResources.insert(raw).second) {
             return;
         }
+        const std::uint64_t bytes = allocatedSize(raw);
         ++inventory.textureCount;
-        inventory.textureBytes += allocatedSize(raw);
+        inventory.textureBytes += bytes;
+        recordResidency(owner, glName, kind, authority, heapClass, bytes, 0);
     };
-    auto addGenericTexture = [&](void* raw) {
+    auto addGenericTexture = [&](void* raw, GLuint glName) {
         if (raw != nullptr && genericTextureResources.insert(raw).second) {
             ++inventory.genericTextureCount;
             inventory.genericTextureBytes += allocatedSize(raw);
         }
-        addTexture(raw);
+        addTexture(raw, MetalResidencyOwner::Texture, glName,
+                   MetalResidencyKind::MetalTexture,
+                   MetalResidencyAuthorityClass::Authoritative,
+                   MetalResidencyHeapClass::MetalDevice);
     };
-    auto addRenderbufferTexture = [&](void* raw) {
+    auto addRenderbufferTexture = [&](void* raw, GLuint glName) {
         if (raw != nullptr && renderbufferTextureResources.insert(raw).second) {
             ++inventory.renderbufferTextureCount;
             inventory.renderbufferTextureBytes += allocatedSize(raw);
         }
-        addTexture(raw);
+        addTexture(raw, MetalResidencyOwner::Renderbuffer, glName,
+                   MetalResidencyKind::MetalTexture,
+                   MetalResidencyAuthorityClass::Authoritative,
+                   MetalResidencyHeapClass::MetalDevice);
     };
-    auto addTextureView = [&](void* raw) {
+    auto addTextureView = [&](void* raw, GLuint glName) {
         if (raw == nullptr || !textureViewResources.insert(raw).second) {
             return;
         }
+        const std::uint64_t bytes = allocatedSize(raw);
         ++inventory.textureViewCount;
-        inventory.textureViewBytes += allocatedSize(raw);
+        inventory.textureViewBytes += bytes;
+        recordResidency(MetalResidencyOwner::Texture, glName,
+                        MetalResidencyKind::TextureView,
+                        MetalResidencyAuthorityClass::Reconstructable,
+                        MetalResidencyHeapClass::MetalDevice, bytes, 0);
     };
     auto addSampler = [&](void* raw) {
         if (raw != nullptr && samplerObjects.insert(raw).second) {
@@ -30289,7 +30365,77 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             ++inventory.functionCount;
         }
     };
-    auto addProgram = [&](const GLProgramObject& program) {
+    recordResidency(MetalResidencyOwner::FrameGraph, 0,
+                    MetalResidencyKind::FrameGraphResource,
+                    MetalResidencyAuthorityClass::Transient,
+                    MetalResidencyHeapClass::FrameGraph,
+                    frameGraphResidencyBufferBytes, 0);
+    recordResidency(MetalResidencyOwner::FrameGraph, 0,
+                    MetalResidencyKind::FrameGraphResource,
+                    MetalResidencyAuthorityClass::Transient,
+                    MetalResidencyHeapClass::FrameGraph,
+                    frameGraphResidencyTextureBytes, 0);
+    recordResidency(MetalResidencyOwner::FrameGraph, 0,
+                    MetalResidencyKind::FrameGraphResource,
+                    MetalResidencyAuthorityClass::Transient,
+                    MetalResidencyHeapClass::FrameGraph,
+                    frameGraphResidencyDrawableTextureBytes, 0);
+
+    inventory.hostCaches.mslLibraryCacheSourceBytes =
+        inventory.mslLibraryCacheSourceBytes;
+    inventory.hostCaches.mslLibraryCacheSourceKeyBytes =
+        inventory.mslLibraryCacheSourceKeyBytes;
+    inventory.hostCaches.mslLibraryCompileTransientSourceBytes =
+        inventory.mslLibraryCompileTransientSourceBytes;
+    addHostCacheBytes(inventory.mslLibraryCacheSourceBytes);
+    addHostCacheBytes(inventory.mslLibraryCacheSourceKeyBytes);
+    addHostCacheBytes(inventory.mslLibraryCompileTransientSourceBytes);
+    recordResidency(MetalResidencyOwner::FrameGraph, 0,
+                    MetalResidencyKind::MslLibraryCacheSource,
+                    MetalResidencyAuthorityClass::Reconstructable,
+                    MetalResidencyHeapClass::Cache, 0,
+                    inventory.mslLibraryCacheSourceBytes);
+    recordResidency(MetalResidencyOwner::FrameGraph, 0,
+                    MetalResidencyKind::MslLibraryCacheSourceKey,
+                    MetalResidencyAuthorityClass::Reconstructable,
+                    MetalResidencyHeapClass::Cache, 0,
+                    inventory.mslLibraryCacheSourceKeyBytes);
+    recordResidency(MetalResidencyOwner::FrameGraph, 0,
+                    MetalResidencyKind::MslLibraryCompileTransientSource,
+                    MetalResidencyAuthorityClass::Transient,
+                    MetalResidencyHeapClass::Cache, 0,
+                    inventory.mslLibraryCompileTransientSourceBytes);
+
+    auto addProgramMslBytes = [&](GLuint programName,
+                                  const GLProgramObject& program) {
+        std::uint64_t bytes = 0;
+        auto addString = [&](const std::string& value) {
+            bytes += static_cast<std::uint64_t>(value.size());
+        };
+        addString(program.vertexMSL);
+        addString(program.fragmentMSL);
+        addString(program.tessControlMSL);
+        addString(program.tessEvalMSL);
+        addString(program.tessVertexAsComputeMSL);
+        addString(program.tessEvalAsComputeMSL);
+        addString(program.gsPassThroughVertexMSL);
+        addString(program.gsPassThroughFragmentMSL);
+        addString(program.computeMSL);
+        addString(program.vsTfAsComputeMSL);
+        addString(program.geometryShaderAsMeshMSL);
+        addString(program.metalGSVsComputeMSL);
+        if (bytes == 0) {
+            return;
+        }
+        inventory.hostCaches.programMslSourceBytes += bytes;
+        addHostCacheBytes(bytes);
+        recordResidency(MetalResidencyOwner::Program, programName,
+                        MetalResidencyKind::ProgramMslSource,
+                        MetalResidencyAuthorityClass::Reconstructable,
+                        MetalResidencyHeapClass::Host, 0, bytes);
+    };
+    auto addProgram = [&](GLuint programName, const GLProgramObject& program) {
+        addProgramMslBytes(programName, program);
         addComputePipeline(program.metalComputePipelineState);
         addComputePipeline(program.metalTessControlPipelineState);
         addComputePipeline(program.metalTessVertexPipelineState);
@@ -30338,17 +30484,50 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
     if (store == nullptr) {
         return inventory;
     }
-    store->buffers().forEach([&](GLuint, GLBufferObject& buffer) {
-        addBuffer(buffer.metalBuffer);
+    store->buffers().forEach([&](GLuint bufferName, GLBufferObject& buffer) {
+        addBuffer(buffer.metalBuffer, MetalResidencyOwner::Buffer,
+                  bufferName, MetalResidencyKind::MetalBuffer,
+                  MetalResidencyAuthorityClass::Authoritative,
+                  MetalResidencyHeapClass::MetalDevice);
+        if (!buffer.shadowBytes.empty()) {
+            const auto bytes =
+                static_cast<std::uint64_t>(buffer.shadowBytes.size());
+            ++inventory.hostCaches.bufferShadowObjects;
+            inventory.hostCaches.bufferShadowBytes += bytes;
+            addHostCacheBytes(bytes);
+            recordResidency(MetalResidencyOwner::Buffer, bufferName,
+                            MetalResidencyKind::HostShadow,
+                            MetalResidencyAuthorityClass::Authoritative,
+                            MetalResidencyHeapClass::Host, 0, bytes,
+                            0, buffer.indexExpansionGeneration);
+        }
         if (!buffer.cachedExpandedIndices.empty()) {
+            const auto bytes = static_cast<std::uint64_t>(
+                buffer.cachedExpandedIndices.size());
             ++inventory.expandedIndexBuffers;
-            inventory.expandedIndexBytes +=
-                static_cast<std::uint64_t>(buffer.cachedExpandedIndices.size());
+            inventory.expandedIndexBytes += bytes;
+            ++inventory.hostCaches.expandedIndexBuffers;
+            inventory.hostCaches.expandedIndexBytes += bytes;
+            addHostCacheBytes(bytes);
+            recordResidency(MetalResidencyOwner::Buffer, bufferName,
+                            MetalResidencyKind::ExpandedIndexCache,
+                            MetalResidencyAuthorityClass::Reconstructable,
+                            MetalResidencyHeapClass::Cache, 0, bytes,
+                            buffer.indexExpansionGeneration,
+                            buffer.cachedExpansionGeneration);
         }
         if (buffer.sparseStorage) {
-            ++inventory.sparseBufferObjects;
-            inventory.sparseBufferPageTableBytes +=
+            const auto pageTableBytes =
                 static_cast<std::uint64_t>(buffer.sparseCommittedPages.size());
+            ++inventory.sparseBufferObjects;
+            inventory.sparseBufferPageTableBytes += pageTableBytes;
+            inventory.hostCaches.sparseBufferPageTableBytes += pageTableBytes;
+            addHostCacheBytes(pageTableBytes);
+            recordResidency(MetalResidencyOwner::Buffer, bufferName,
+                            MetalResidencyKind::SparsePageTable,
+                            MetalResidencyAuthorityClass::SparseSpecial,
+                            MetalResidencyHeapClass::Sparse, 0,
+                            pageTableBytes);
             const auto committedPages = static_cast<std::uint64_t>(
                 std::count_if(buffer.sparseCommittedPages.begin(),
                               buffer.sparseCommittedPages.end(),
@@ -30365,9 +30544,20 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             ++inventory.fp64SidecarBuffers;
         }
         for (const auto& sidecar : buffer.fp64TransportSidecars) {
-            ++inventory.fp64Sidecars;
-            inventory.fp64SidecarCpuBytes +=
+            const auto sidecarCpuBytes =
                 static_cast<std::uint64_t>(sidecar.bytes.size());
+            ++inventory.fp64Sidecars;
+            inventory.fp64SidecarCpuBytes += sidecarCpuBytes;
+            ++inventory.hostCaches.fp64Sidecars;
+            inventory.hostCaches.fp64SidecarCpuBytes += sidecarCpuBytes;
+            addHostCacheBytes(sidecarCpuBytes);
+            recordResidency(MetalResidencyOwner::Buffer, bufferName,
+                            MetalResidencyKind::Fp64SidecarCpu,
+                            MetalResidencyAuthorityClass::Reconstructable,
+                            MetalResidencyHeapClass::Sidecar, 0,
+                            sidecarCpuBytes,
+                            static_cast<std::uint64_t>(sidecar.layoutHash),
+                            sidecar.sourceGeneration);
             inventory.fp64SidecarMaxGeneration = std::max<std::uint64_t>(
                 inventory.fp64SidecarMaxGeneration,
                 sidecar.sourceGeneration);
@@ -30376,40 +30566,84 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
                 inventory.fp64SidecarMetalBufferBytes +=
                     allocatedSize(sidecar.metalBuffer);
             }
-            addBuffer(sidecar.metalBuffer);
+            addBuffer(sidecar.metalBuffer, MetalResidencyOwner::Buffer,
+                      bufferName, MetalResidencyKind::Fp64SidecarMetal,
+                      MetalResidencyAuthorityClass::Reconstructable,
+                      MetalResidencyHeapClass::Sidecar,
+                      static_cast<std::uint64_t>(sidecar.layoutHash),
+                      sidecar.sourceGeneration);
         }
     });
-    store->textures().forEach([&](GLuint, GLTextureObject& texture) {
+    store->textures().forEach([&](GLuint textureName, GLTextureObject& texture) {
         for (const auto& [level, image] : texture.levels) {
             (void)level;
+            const std::uint64_t bytes = imageBytes(image);
             ++inventory.genericTextureLevelImages;
-            inventory.genericTextureLevelBytes += imageBytes(image);
+            inventory.genericTextureLevelBytes += bytes;
+            if (bytes != 0) {
+                ++inventory.hostCaches.textureShadowImages;
+                inventory.hostCaches.textureShadowBytes += bytes;
+                addHostCacheBytes(bytes);
+                recordResidency(MetalResidencyOwner::Texture, textureName,
+                                MetalResidencyKind::HostShadow,
+                                MetalResidencyAuthorityClass::Authoritative,
+                                MetalResidencyHeapClass::Host, 0, bytes);
+            }
         }
         for (const auto& faceLevels : texture.cubeFaceLevels) {
             for (const auto& [level, image] : faceLevels) {
                 (void)level;
+                const std::uint64_t bytes = imageBytes(image);
                 ++inventory.cubeFaceLevelImages;
-                inventory.cubeFaceLevelBytes += imageBytes(image);
+                inventory.cubeFaceLevelBytes += bytes;
+                if (bytes != 0) {
+                    ++inventory.hostCaches.cubeFaceShadowImages;
+                    inventory.hostCaches.cubeFaceShadowBytes += bytes;
+                    addHostCacheBytes(bytes);
+                    recordResidency(MetalResidencyOwner::Texture, textureName,
+                                    MetalResidencyKind::HostShadow,
+                                    MetalResidencyAuthorityClass::Authoritative,
+                                    MetalResidencyHeapClass::Host, 0, bytes);
+                }
             }
         }
         if (texture.viewSourceTexture != 0) {
-            addTextureView(texture.metalTexture);
+            addTextureView(texture.metalTexture, textureName);
         } else {
-            addGenericTexture(texture.metalTexture);
+            addGenericTexture(texture.metalTexture, textureName);
         }
-        addTextureView(texture.metalSwizzledView);
-        addGenericTexture(texture.metalSamplingProxy);
+        addTextureView(texture.metalSwizzledView, textureName);
+        addTexture(texture.metalSamplingProxy, MetalResidencyOwner::Texture,
+                   textureName, MetalResidencyKind::MetalTexture,
+                   MetalResidencyAuthorityClass::Reconstructable,
+                   MetalResidencyHeapClass::Cache);
+        if (texture.metalSamplingProxy != nullptr &&
+            genericTextureResources.insert(texture.metalSamplingProxy).second) {
+            ++inventory.genericTextureCount;
+            inventory.genericTextureBytes += allocatedSize(texture.metalSamplingProxy);
+        }
         addSampler(texture.metalSampler);
         if (texture.textureBufferExpandedMetalBuffer != nullptr) {
+            const auto bytes = allocatedSize(texture.textureBufferExpandedMetalBuffer);
             ++inventory.textureBufferExpansionMetalBuffers;
-            inventory.textureBufferExpansionMetalBufferBytes +=
-                allocatedSize(texture.textureBufferExpandedMetalBuffer);
-            addBuffer(texture.textureBufferExpandedMetalBuffer);
+            inventory.textureBufferExpansionMetalBufferBytes += bytes;
+            ++inventory.hostCaches.textureBufferExpansionMetalBuffers;
+            inventory.hostCaches.textureBufferExpansionMetalBufferBytes += bytes;
+            addBuffer(texture.textureBufferExpandedMetalBuffer,
+                      MetalResidencyOwner::Texture, textureName,
+                      MetalResidencyKind::TextureBufferExpansion,
+                      MetalResidencyAuthorityClass::Reconstructable,
+                      MetalResidencyHeapClass::Cache,
+                      texture.textureBufferExpandedSourceBuffer,
+                      texture.textureBufferExpandedSourceGeneration);
         }
         if (texture.imageAtomicBuffer != nullptr || texture.imageAtomicBufferSize > 0) {
-            ++inventory.imageAtomicSidecars;
-            inventory.imageAtomicSidecarBytes +=
+            const auto bytes =
                 static_cast<std::uint64_t>(texture.imageAtomicBufferSize);
+            ++inventory.imageAtomicSidecars;
+            inventory.imageAtomicSidecarBytes += bytes;
+            ++inventory.hostCaches.imageAtomicSidecars;
+            inventory.hostCaches.imageAtomicSidecarBytes += bytes;
             if (texture.imageAtomicBufferDirtyToTexture) {
                 ++inventory.imageAtomicDirtySidecars;
             }
@@ -30417,22 +30651,66 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
                 ++inventory.imageAtomicSidecarMetalBuffers;
                 inventory.imageAtomicSidecarMetalBufferBytes +=
                     allocatedSize(texture.imageAtomicBuffer);
-                addBuffer(texture.imageAtomicBuffer);
+                addBuffer(texture.imageAtomicBuffer,
+                          MetalResidencyOwner::Texture, textureName,
+                          MetalResidencyKind::ImageAtomicSidecar,
+                          MetalResidencyAuthorityClass::Authoritative,
+                          MetalResidencyHeapClass::Sidecar);
             }
         }
     });
-    store->renderbuffers().forEach([&](GLuint, GLRenderbufferObject& renderbuffer) {
-        addRenderbufferTexture(renderbuffer.metalTexture);
+    store->renderbuffers().forEach([&](GLuint renderbufferName, GLRenderbufferObject& renderbuffer) {
+        const std::uint64_t shadowBytes =
+            static_cast<std::uint64_t>(renderbuffer.rgba8.size()) +
+            static_cast<std::uint64_t>(renderbuffer.nativeData.size()) +
+            static_cast<std::uint64_t>(renderbuffer.depth32.size() * sizeof(GLfloat)) +
+            static_cast<std::uint64_t>(renderbuffer.stencil8.size());
+        if (shadowBytes != 0) {
+            ++inventory.hostCaches.renderbufferShadowObjects;
+            inventory.hostCaches.renderbufferShadowBytes += shadowBytes;
+            addHostCacheBytes(shadowBytes);
+            recordResidency(MetalResidencyOwner::Renderbuffer,
+                            renderbufferName,
+                            MetalResidencyKind::HostShadow,
+                            MetalResidencyAuthorityClass::Authoritative,
+                            MetalResidencyHeapClass::Host, 0, shadowBytes);
+        }
+        addRenderbufferTexture(renderbuffer.metalTexture, renderbufferName);
     });
     store->samplers().forEach([&](GLuint, GLSamplerObject& sampler) {
         addSampler(sampler.metalSampler);
     });
-    store->programs().forEach([&](GLuint, GLProgramObject& program) {
-        addProgram(program);
+    store->shaders().forEach([&](GLuint shaderName, GLShaderObject& shader) {
+        const auto sourceBytes =
+            static_cast<std::uint64_t>(shader.source.size());
+        if (sourceBytes != 0) {
+            inventory.hostCaches.shaderSourceBytes += sourceBytes;
+            addHostCacheBytes(sourceBytes);
+            recordResidency(MetalResidencyOwner::Shader, shaderName,
+                            MetalResidencyKind::ShaderSource,
+                            MetalResidencyAuthorityClass::Authoritative,
+                            MetalResidencyHeapClass::Host, 0, sourceBytes);
+        }
+        const auto spirvBytes = static_cast<std::uint64_t>(
+            shader.spirv.size() * sizeof(std::uint32_t));
+        if (spirvBytes != 0) {
+            inventory.hostCaches.shaderSpirvBytes += spirvBytes;
+            addHostCacheBytes(spirvBytes);
+            recordResidency(
+                MetalResidencyOwner::Shader, shaderName,
+                MetalResidencyKind::ShaderSpirv,
+                shader.isSpirvBinary
+                    ? MetalResidencyAuthorityClass::Authoritative
+                    : MetalResidencyAuthorityClass::Reconstructable,
+                MetalResidencyHeapClass::Host, 0, spirvBytes);
+        }
+    });
+    store->programs().forEach([&](GLuint programName, GLProgramObject& program) {
+        addProgram(programName, program);
     });
     store->programPipelines().forEach([&](GLuint, GLProgramPipelineObject& pipeline) {
         if (pipeline.syntheticTessProgram != nullptr) {
-            addProgram(*pipeline.syntheticTessProgram);
+            addProgram(0, *pipeline.syntheticTessProgram);
         }
     });
 
@@ -30443,11 +30721,29 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
     inventory.sparseTextureHeapBytes = sparseTextureInventory.sparseHeapBytes;
     inventory.sparseTextureCommittedRegions =
         sparseTextureInventory.committedRegions;
+    inventory.hostCaches.sparseTextureHeaps =
+        sparseTextureInventory.sparseHeaps;
+    inventory.hostCaches.sparseTextureHeapBytes =
+        sparseTextureInventory.sparseHeapBytes;
+    recordResidency(MetalResidencyOwner::SparseTexture, 0,
+                    MetalResidencyKind::SparseHeap,
+                    MetalResidencyAuthorityClass::SparseSpecial,
+                    MetalResidencyHeapClass::Sparse,
+                    sparseTextureInventory.sparseHeapBytes, 0);
 
     const auto sparseStorageSidecars =
         extensions::sparse_texture::sparseStorageImageSidecarInventory(*this);
     inventory.sparseStorageImageSidecars = sparseStorageSidecars.sidecars;
     inventory.sparseStorageImageSidecarBytes = sparseStorageSidecars.sidecarBytes;
+    inventory.hostCaches.sparseStorageImageSidecars =
+        sparseStorageSidecars.sidecars;
+    inventory.hostCaches.sparseStorageImageSidecarBytes =
+        sparseStorageSidecars.sidecarBytes;
+    recordResidency(MetalResidencyOwner::SparseTexture, 0,
+                    MetalResidencyKind::SparseStorageSidecar,
+                    MetalResidencyAuthorityClass::SparseSpecial,
+                    MetalResidencyHeapClass::Sparse,
+                    sparseStorageSidecars.sidecarBytes, 0);
 
     const auto multisampleStorageSidecars =
         extensions::sparse_texture::multisampleStorageImageSidecarInventory(*this);
@@ -30455,6 +30751,21 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         multisampleStorageSidecars.sidecars;
     inventory.multisampleStorageImageSidecarBytes =
         multisampleStorageSidecars.sidecarBytes;
+    inventory.hostCaches.multisampleStorageImageSidecars =
+        multisampleStorageSidecars.sidecars;
+    inventory.hostCaches.multisampleStorageImageSidecarBytes =
+        multisampleStorageSidecars.sidecarBytes;
+    recordResidency(MetalResidencyOwner::SparseTexture, 0,
+                    MetalResidencyKind::MultisampleStorageSidecar,
+                    MetalResidencyAuthorityClass::SparseSpecial,
+                    MetalResidencyHeapClass::Sparse,
+                    multisampleStorageSidecars.sidecarBytes, 0);
+
+#ifndef NDEBUG
+    if (std::getenv("APPGL_R3_ASSERT_NO_UNKNOWN") != nullptr) {
+        assert(inventory.residency.unknownRecords == 0);
+    }
+#endif
 
     return inventory;
 }
