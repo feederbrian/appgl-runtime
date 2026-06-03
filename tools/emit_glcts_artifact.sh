@@ -16,6 +16,7 @@ Usage:
     [--cluster-check-root DIR] \
     [--sentinels TEXT] \
     [--notes TEXT] \
+    [--diagnostic-label TEXT] \
     [--no-preflight]
 
 Emits a CTS runnable artifact containing:
@@ -23,6 +24,10 @@ Emits a CTS runnable artifact containing:
 
 The gl_cts/data payload is mandatory because shader/preprocessor CTS cases
 load files relative to the glcts working directory.
+
+Release-shape enforcement is ON by default. Use --diagnostic-label for explicit
+diagnostic/debug artifact opt-out; diagnostic artifacts still emit full binary
+shape evidence.
 EOF
 }
 
@@ -45,6 +50,7 @@ cts_modules="$workspace_root/specs/VK-GL-CTS/build-appgl/external/openglcts/modu
 cluster_check_root=""
 sentinels=""
 notes=""
+diagnostic_label=""
 run_preflight=1
 
 while [ "$#" -gt 0 ]; do
@@ -60,6 +66,7 @@ while [ "$#" -gt 0 ]; do
         --cluster-check-root) cluster_check_root="${2:-}"; shift 2 ;;
         --sentinels) sentinels="${2:-}"; shift 2 ;;
         --notes) notes="${2:-}"; shift 2 ;;
+        --diagnostic-label) diagnostic_label="${2:-}"; shift 2 ;;
         --no-preflight) run_preflight=0; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown argument: $1" ;;
@@ -94,7 +101,8 @@ printf '[emit] cts data: %s\n' "$cts_data"
 
 rm -rf "$artifact_dir"
 mkdir -p "$artifact_dir/current-lib" "$artifact_dir/gl_cts" \
-         "$artifact_dir/qpa" "$artifact_dir/logs" "$artifact_dir/status"
+         "$artifact_dir/qpa" "$artifact_dir/logs" "$artifact_dir/status" \
+         "$artifact_dir/shape"
 
 cp -p "$dylib" "$artifact_dir/libAppGL.dylib"
 cp -p "$dylib" "$artifact_dir/current-lib/libAppGL.dylib"
@@ -108,6 +116,28 @@ dylib_sha="$(shasum -a 256 "$artifact_dir/libAppGL.dylib" | awk '{print $1}')"
 glcts_sha="$(shasum -a 256 "$artifact_dir/glcts" | awk '{print $1}')"
 dylib_uuid="$(dwarfdump --uuid "$artifact_dir/libAppGL.dylib" | awk '/UUID:/ {print $2; exit}')"
 dylib_size="$(stat -f '%z' "$artifact_dir/libAppGL.dylib")"
+shape_report="$artifact_dir/shape/binary-shape.txt"
+shape_args=(
+    "$repo_root/tools/appgl_binary_shape_report.sh"
+    --dylib "$artifact_dir/libAppGL.dylib"
+    --out "$shape_report"
+    --cmake-cache "$build_dir/CMakeCache.txt"
+    --artifact-id "$artifact_id"
+    --variant "$variant"
+    --source-commit "$source_commit"
+    --parent-commit "$parent_commit"
+    --require-release-shape
+)
+if [ -n "$diagnostic_label" ]; then
+    shape_args+=(--diagnostic-label "$diagnostic_label")
+fi
+"${shape_args[@]}"
+shape_sha="$(shasum -a 256 "$shape_report" | awk '{print $1}')"
+release_shape_status="$(awk -F': ' '/^release_shape_status:/ {print $2; exit}' "$shape_report")"
+nm_m_lines="$(awk -F': ' '/^nm_m_lines:/ {print $2; exit}' "$shape_report")"
+stubs_size="$(awk -F': ' '/^__stubs_size_bytes:/ {print $2; exit}' "$shape_report")"
+linkedit_filesize="$(awk -F': ' '/^__LINKEDIT_filesize:/ {print $2; exit}' "$shape_report")"
+linkedit_vmsize="$(awk -F': ' '/^__LINKEDIT_vmsize:/ {print $2; exit}' "$shape_report")"
 spirv_cross_head="unknown"
 if [ -d "$repo_root/third_party/SPIRV-Cross/.git" ]; then
     spirv_cross_head="$(git -C "$repo_root/third_party/SPIRV-Cross" rev-parse HEAD)"
@@ -133,6 +163,13 @@ source_commit: $source_commit
 dylib_sha256: $dylib_sha
 dylib_uuid: $dylib_uuid
 dylib_size_bytes: $dylib_size
+binary_shape_report: shape/binary-shape.txt
+binary_shape_sha256: $shape_sha
+release_shape_status: $release_shape_status
+nm_m_lines: $nm_m_lines
+__stubs_size_bytes: $stubs_size
+__LINKEDIT_filesize: $linkedit_filesize
+__LINKEDIT_vmsize: $linkedit_vmsize
 EOF
 cp -p "$artifact_dir/libAppGL.dylib.meta" "$artifact_dir/current-lib/libAppGL.dylib.meta"
 
@@ -178,6 +215,13 @@ meta_file="$artifact_dir/$artifact_id.meta"
     printf 'dylib_sha256: %s\n' "$dylib_sha"
     printf 'dylib_uuid: %s\n' "$dylib_uuid"
     printf 'dylib_size_bytes: %s\n' "$dylib_size"
+    printf 'binary_shape_report: %s\n' "shape/binary-shape.txt"
+    printf 'binary_shape_sha256: %s\n' "$shape_sha"
+    printf 'release_shape_status: "%s"\n' "$release_shape_status"
+    printf 'nm_m_lines: %s\n' "$nm_m_lines"
+    printf '__stubs_size_bytes: %s\n' "$stubs_size"
+    printf '__LINKEDIT_filesize: %s\n' "$linkedit_filesize"
+    printf '__LINKEDIT_vmsize: %s\n' "$linkedit_vmsize"
     printf 'glcts_sha256: %s\n' "$glcts_sha"
     printf 'cts_data_source: %s\n' "$cts_data"
     printf 'cts_data_file_count: %s\n' "$cts_data_file_count"
@@ -187,6 +231,7 @@ meta_file="$artifact_dir/$artifact_id.meta"
     [ -z "$cluster_check_root" ] || printf 'cluster_check_root: %s\n' "$cluster_check_root"
     [ -z "$sentinels" ] || printf 'sentinels: "%s"\n' "$sentinels"
     [ -z "$notes" ] || printf 'notes: "%s"\n' "$notes"
+    [ -z "$diagnostic_label" ] || printf 'diagnostic_label: "%s"\n' "$diagnostic_label"
 } > "$meta_file"
 
 {
@@ -194,6 +239,7 @@ meta_file="$artifact_dir/$artifact_id.meta"
     printf '%s  %s\n' "$dylib_sha" "$artifact_dir/current-lib/libAppGL.dylib"
     printf '%s  %s\n' "$glcts_sha" "$artifact_dir/glcts"
     printf '%s  %s\n' "$cts_data_manifest_sha" "$artifact_dir/gl_cts/data.sha256"
+    printf '%s  %s\n' "$shape_sha" "$shape_report"
 } > "$artifact_dir/SHA256SUMS"
 
 printf '[emit] complete: %s\n' "$artifact_dir"
