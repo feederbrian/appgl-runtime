@@ -1,7 +1,10 @@
 #pragma once
 
+#include <array>
+#include <atomic>
 #include <cassert>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -64,19 +67,49 @@ public:
     std::string fullyImplementedVersion() const;
     std::string buildSnapshotJson(std::string_view renderer, const std::vector<std::string>& traceTail) const;
 
-    const FunctionCoverage& status(FunctionId id) const;
+    FunctionCoverage status(FunctionId id) const;
 
 private:
+    struct CoverageEntry {
+        CoverageState state = CoverageState::Unimplemented;
+        std::string firstPassingTestId;
+        std::string firstPassingBenchmarkId;
+        std::string notes;
+        std::atomic<std::uint8_t> publishedState{
+            static_cast<std::uint8_t>(CoverageState::Unimplemented)};
+        std::atomic<bool> notesPublished{false};
+        std::atomic<std::uint64_t> callCount{0};
+        std::atomic<std::uint64_t> unimplementedHitCount{0};
+    };
+
     static constexpr std::size_t indexOf(FunctionId id) {
         return static_cast<std::size_t>(id);
     }
 
     static CoverageState maxState(CoverageState lhs, CoverageState rhs);
+    static constexpr std::uint8_t stateValue(CoverageState state) {
+        return static_cast<std::uint8_t>(state);
+    }
+    static bool fastPathSatisfied(
+        const CoverageEntry& entry,
+        CoverageState requested,
+        std::string_view note);
+    static bool shouldStoreNote(
+        const CoverageEntry& entry,
+        CoverageState previous,
+        CoverageState requested,
+        std::string_view note);
+    static void publishStateLocked(CoverageEntry& entry);
     static const char* stateName(CoverageState state);
     static bool isAtLeastImplemented(CoverageState state);
     static bool isAtLeastSmokeTested(CoverageState state);
+    static std::string fullyImplementedVersionForSnapshot(const std::vector<FunctionCoverage>& statuses);
 
-    std::vector<FunctionCoverage> statuses_;
+    FunctionCoverage statusSnapshotLocked(std::size_t index) const;
+    std::vector<FunctionCoverage> snapshotStatuses() const;
+
+    mutable std::mutex statusMutex_;
+    std::array<CoverageEntry, kGLFunctionCount> statuses_;
 };
 
 }  // namespace appgl

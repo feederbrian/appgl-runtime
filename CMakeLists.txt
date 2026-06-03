@@ -268,6 +268,16 @@ target_include_directories(appgl_memory_pressure_probe
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 
+add_executable(appgl_coverage_store_concurrency_probe
+  tests/CoverageStoreConcurrencyProbe.cpp
+  src/debug/CoverageStore.cpp
+)
+target_include_directories(appgl_coverage_store_concurrency_probe
+  PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
 if(APPGL_VENDOR_THIRD_PARTY)
   set(BUILD_EXTERNAL OFF CACHE BOOL "" FORCE)
   set(ENABLE_GLSLANG_BINARIES OFF CACHE BOOL "" FORCE)
