@@ -63,6 +63,24 @@ enum class MetalResidencyHeapClass : std::uint8_t {
     Unknown,
 };
 
+enum class MetalR5ResidencyClass : std::uint8_t {
+    Authoritative = 0,
+    Reconstructable,
+};
+
+enum class MetalR5ResidencyTouchKind : std::uint8_t {
+    BufferBind = 0,
+    TextureBind,
+    SamplerBind,
+    RenderbufferBind,
+    FramebufferBind,
+    VertexArrayBind,
+    VertexBufferBind,
+    ProgramBind,
+    Draw,
+    Dispatch,
+};
+
 struct ResourceResidencyRecord {
     std::uint64_t recordId = 0;
     MetalResidencyOwner owner = MetalResidencyOwner::Unknown;
@@ -81,6 +99,54 @@ struct ResourceResidencyRecord {
     MetalResidencyHeapClass heapClass = MetalResidencyHeapClass::Unknown;
     std::uint8_t purgeableEligible = 0;
     std::uint32_t diagnosticBucketId = 0;
+};
+
+struct MetalR5ResidencyDryRunSummary {
+    std::uint64_t dryRunPasses = 0;
+    std::uint64_t recordsSeen = 0;
+    std::uint64_t reconstructableRecords = 0;
+    std::uint64_t reconstructableBytes = 0;
+    std::uint64_t authoritativeRecords = 0;
+    std::uint64_t authoritativeBytes = 0;
+    std::uint64_t unknownKindRecords = 0;
+    std::uint64_t unknownKindBytes = 0;
+    std::uint64_t unknownAuthorityRecords = 0;
+    std::uint64_t unknownAuthorityBytes = 0;
+    std::uint64_t transientExcludedRecords = 0;
+    std::uint64_t transientExcludedBytes = 0;
+    std::uint64_t sparseExcludedRecords = 0;
+    std::uint64_t sparseExcludedBytes = 0;
+    std::uint64_t candidateRecords = 0;
+    std::uint64_t candidateBytes = 0;
+    std::uint64_t candidateHostBytes = 0;
+    std::uint64_t candidateMetalBytes = 0;
+    std::uint64_t candidateHostHeapBytes = 0;
+    std::uint64_t candidateMetalDeviceHeapBytes = 0;
+    std::uint64_t candidateFrameGraphHeapBytes = 0;
+    std::uint64_t candidateCacheHeapBytes = 0;
+    std::uint64_t candidateSidecarHeapBytes = 0;
+    std::uint64_t candidateSparseHeapBytes = 0;
+    std::uint64_t candidateUnknownHeapBytes = 0;
+    std::uint64_t futurePurgeableEligibleRecords = 0;
+    std::uint64_t futurePurgeableEligibleBytes = 0;
+    std::uint64_t pressureMutationAttempts = 0;
+    std::uint64_t purgeableStateCalls = 0;
+    std::uint64_t drainRequests = 0;
+};
+
+struct MetalR5ResidencyTouchSummary {
+    std::uint64_t serial = 0;
+    std::uint64_t totalTouches = 0;
+    std::uint64_t bufferBindTouches = 0;
+    std::uint64_t textureBindTouches = 0;
+    std::uint64_t samplerBindTouches = 0;
+    std::uint64_t renderbufferBindTouches = 0;
+    std::uint64_t framebufferBindTouches = 0;
+    std::uint64_t vertexArrayBindTouches = 0;
+    std::uint64_t vertexBufferBindTouches = 0;
+    std::uint64_t programBindTouches = 0;
+    std::uint64_t drawTouches = 0;
+    std::uint64_t dispatchTouches = 0;
 };
 
 struct MetalResourceResidencySummary {
@@ -139,6 +205,189 @@ struct MetalHostCacheSummary {
     std::uint64_t multisampleStorageImageSidecarBytes = 0;
 };
 
+inline bool metalResidencyKnownKind(MetalResidencyKind kind) {
+    switch (kind) {
+    case MetalResidencyKind::MetalBuffer:
+    case MetalResidencyKind::MetalTexture:
+    case MetalResidencyKind::TextureView:
+    case MetalResidencyKind::Sampler:
+    case MetalResidencyKind::RenderPipeline:
+    case MetalResidencyKind::ComputePipeline:
+    case MetalResidencyKind::Function:
+    case MetalResidencyKind::Library:
+    case MetalResidencyKind::HostShadow:
+    case MetalResidencyKind::ShaderSource:
+    case MetalResidencyKind::ShaderSpirv:
+    case MetalResidencyKind::ProgramMslSource:
+    case MetalResidencyKind::MslLibraryCacheSource:
+    case MetalResidencyKind::MslLibraryCacheSourceKey:
+    case MetalResidencyKind::MslLibraryCompileTransientSource:
+    case MetalResidencyKind::ExpandedIndexCache:
+    case MetalResidencyKind::Fp64SidecarCpu:
+    case MetalResidencyKind::Fp64SidecarMetal:
+    case MetalResidencyKind::TextureBufferExpansion:
+    case MetalResidencyKind::ImageAtomicSidecar:
+    case MetalResidencyKind::SparsePageTable:
+    case MetalResidencyKind::SparseHeap:
+    case MetalResidencyKind::SparseStorageSidecar:
+    case MetalResidencyKind::MultisampleStorageSidecar:
+    case MetalResidencyKind::FrameGraphResource:
+        return true;
+    case MetalResidencyKind::Unknown:
+        return false;
+    }
+    return false;
+}
+
+inline bool metalR5FuturePurgeableEligibleKind(MetalResidencyKind kind) {
+    switch (kind) {
+    case MetalResidencyKind::MetalBuffer:
+    case MetalResidencyKind::MetalTexture:
+    case MetalResidencyKind::TextureView:
+    case MetalResidencyKind::Fp64SidecarMetal:
+    case MetalResidencyKind::TextureBufferExpansion:
+        return true;
+    case MetalResidencyKind::Unknown:
+    case MetalResidencyKind::Sampler:
+    case MetalResidencyKind::RenderPipeline:
+    case MetalResidencyKind::ComputePipeline:
+    case MetalResidencyKind::Function:
+    case MetalResidencyKind::Library:
+    case MetalResidencyKind::HostShadow:
+    case MetalResidencyKind::ShaderSource:
+    case MetalResidencyKind::ShaderSpirv:
+    case MetalResidencyKind::ProgramMslSource:
+    case MetalResidencyKind::MslLibraryCacheSource:
+    case MetalResidencyKind::MslLibraryCacheSourceKey:
+    case MetalResidencyKind::MslLibraryCompileTransientSource:
+    case MetalResidencyKind::ExpandedIndexCache:
+    case MetalResidencyKind::Fp64SidecarCpu:
+    case MetalResidencyKind::ImageAtomicSidecar:
+    case MetalResidencyKind::SparsePageTable:
+    case MetalResidencyKind::SparseHeap:
+    case MetalResidencyKind::SparseStorageSidecar:
+    case MetalResidencyKind::MultisampleStorageSidecar:
+    case MetalResidencyKind::FrameGraphResource:
+        return false;
+    }
+    return false;
+}
+
+inline MetalR5ResidencyClass classifyMetalR5ResidencyRecord(
+    const ResourceResidencyRecord& record) {
+    if (!metalResidencyKnownKind(record.kind)) {
+        return MetalR5ResidencyClass::Authoritative;
+    }
+    if (record.authority != MetalResidencyAuthorityClass::Reconstructable) {
+        return MetalR5ResidencyClass::Authoritative;
+    }
+    return MetalR5ResidencyClass::Reconstructable;
+}
+
+inline void accumulateR5ResidencyDryRunRecord(
+    MetalR5ResidencyDryRunSummary& summary,
+    const ResourceResidencyRecord& record) {
+    ++summary.recordsSeen;
+    const bool knownKind = metalResidencyKnownKind(record.kind);
+    const std::uint64_t bytes = record.retainedBytes;
+    if (!knownKind) {
+        ++summary.unknownKindRecords;
+        summary.unknownKindBytes += bytes;
+    }
+    if (record.authority == MetalResidencyAuthorityClass::Unknown) {
+        ++summary.unknownAuthorityRecords;
+        summary.unknownAuthorityBytes += bytes;
+    }
+    if (record.authority == MetalResidencyAuthorityClass::Transient) {
+        ++summary.transientExcludedRecords;
+        summary.transientExcludedBytes += bytes;
+    }
+    if (record.authority == MetalResidencyAuthorityClass::SparseSpecial) {
+        ++summary.sparseExcludedRecords;
+        summary.sparseExcludedBytes += bytes;
+    }
+
+    if (classifyMetalR5ResidencyRecord(record) ==
+        MetalR5ResidencyClass::Reconstructable) {
+        ++summary.reconstructableRecords;
+        summary.reconstructableBytes += bytes;
+        ++summary.candidateRecords;
+        summary.candidateBytes += bytes;
+        summary.candidateHostBytes += record.hostBytes;
+        summary.candidateMetalBytes += record.metalBytes;
+        switch (record.heapClass) {
+        case MetalResidencyHeapClass::Host:
+            summary.candidateHostHeapBytes += bytes;
+            break;
+        case MetalResidencyHeapClass::MetalDevice:
+            summary.candidateMetalDeviceHeapBytes += bytes;
+            break;
+        case MetalResidencyHeapClass::FrameGraph:
+            summary.candidateFrameGraphHeapBytes += bytes;
+            break;
+        case MetalResidencyHeapClass::Cache:
+            summary.candidateCacheHeapBytes += bytes;
+            break;
+        case MetalResidencyHeapClass::Sidecar:
+            summary.candidateSidecarHeapBytes += bytes;
+            break;
+        case MetalResidencyHeapClass::Sparse:
+            summary.candidateSparseHeapBytes += bytes;
+            break;
+        case MetalResidencyHeapClass::Unknown:
+            summary.candidateUnknownHeapBytes += bytes;
+            break;
+        }
+        if (record.metalBytes != 0 &&
+            metalR5FuturePurgeableEligibleKind(record.kind)) {
+            ++summary.futurePurgeableEligibleRecords;
+            summary.futurePurgeableEligibleBytes += record.metalBytes;
+        }
+    } else {
+        ++summary.authoritativeRecords;
+        summary.authoritativeBytes += bytes;
+    }
+}
+
+inline void recordMetalR5ResidencyTouch(
+    MetalR5ResidencyTouchSummary& summary,
+    MetalR5ResidencyTouchKind kind) noexcept {
+    ++summary.serial;
+    ++summary.totalTouches;
+    switch (kind) {
+    case MetalR5ResidencyTouchKind::BufferBind:
+        ++summary.bufferBindTouches;
+        break;
+    case MetalR5ResidencyTouchKind::TextureBind:
+        ++summary.textureBindTouches;
+        break;
+    case MetalR5ResidencyTouchKind::SamplerBind:
+        ++summary.samplerBindTouches;
+        break;
+    case MetalR5ResidencyTouchKind::RenderbufferBind:
+        ++summary.renderbufferBindTouches;
+        break;
+    case MetalR5ResidencyTouchKind::FramebufferBind:
+        ++summary.framebufferBindTouches;
+        break;
+    case MetalR5ResidencyTouchKind::VertexArrayBind:
+        ++summary.vertexArrayBindTouches;
+        break;
+    case MetalR5ResidencyTouchKind::VertexBufferBind:
+        ++summary.vertexBufferBindTouches;
+        break;
+    case MetalR5ResidencyTouchKind::ProgramBind:
+        ++summary.programBindTouches;
+        break;
+    case MetalR5ResidencyTouchKind::Draw:
+        ++summary.drawTouches;
+        break;
+    case MetalR5ResidencyTouchKind::Dispatch:
+        ++summary.dispatchTouches;
+        break;
+    }
+}
+
 inline void accumulateResidencyRecord(
     MetalResourceResidencySummary& summary,
     const ResourceResidencyRecord& record) {
@@ -196,6 +445,10 @@ inline void accumulateResidencyRecord(
 
 static_assert(std::is_standard_layout<ResourceResidencyRecord>::value,
               "ResourceResidencyRecord must remain POD-shaped");
+static_assert(std::is_standard_layout<MetalR5ResidencyDryRunSummary>::value,
+              "MetalR5ResidencyDryRunSummary must remain POD-shaped");
+static_assert(std::is_standard_layout<MetalR5ResidencyTouchSummary>::value,
+              "MetalR5ResidencyTouchSummary must remain POD-shaped");
 static_assert(std::is_standard_layout<MetalResourceResidencySummary>::value,
               "MetalResourceResidencySummary must remain POD-shaped");
 static_assert(std::is_standard_layout<MetalHostCacheSummary>::value,

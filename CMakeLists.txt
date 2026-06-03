@@ -268,6 +268,15 @@ target_include_directories(appgl_memory_pressure_probe
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 
+add_executable(appgl_r5_residency_probe
+  tests/R5ResidencyDryRunProbe.cpp
+)
+target_include_directories(appgl_r5_residency_probe
+  PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
 add_executable(appgl_coverage_store_concurrency_probe
   tests/CoverageStoreConcurrencyProbe.cpp
   src/debug/CoverageStore.cpp

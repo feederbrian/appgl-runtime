@@ -21365,6 +21365,10 @@ struct GLContext::Impl {
             : AppGLCommandSubmissionDebugCounters{};
     }
 
+    void touchR5Residency(MetalR5ResidencyTouchKind kind) noexcept {
+        recordMetalR5ResidencyTouch(r5Touches, kind);
+    }
+
     CAMetalLayer* layer = nil;
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> commandQueue = nil;
@@ -21378,6 +21382,7 @@ struct GLContext::Impl {
     mutable GLDrawDetailProfile drawDetailProfile;
     mutable ColdPathDiagnosticProfile coldPathProfile;
     Phase2PlanKeyProfile phase2PlanKeyProfile;
+    MetalR5ResidencyTouchSummary r5Touches;
     std::unordered_map<std::uint64_t, TranslatedDrawPlan> translatedDrawPlanCache;
     Phase2PlanKeyMemo translatedDrawPlanKeyMemo;
     std::uint64_t translatedDrawPlanGeneration = 0;
@@ -24425,6 +24430,7 @@ bool GLContext::bindBuffer(GLenum target, GLuint buffer) {
                 vertexArray->elementArrayBuffer = 0;
             }
         }
+        impl_->touchR5Residency(MetalR5ResidencyTouchKind::BufferBind);
         return true;
     }
     GLBufferObject* object = impl_->objects->buffers().get(buffer);
@@ -24439,6 +24445,7 @@ bool GLContext::bindBuffer(GLenum target, GLuint buffer) {
             vertexArray->elementArrayBuffer = buffer;
         }
     }
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::BufferBind);
     return true;
 }
 
@@ -24504,6 +24511,7 @@ bool GLContext::bindBufferRange(GLenum target, GLuint index, GLuint buffer, GLin
         recordTfBinding(0, 0, 0);
         // Spec: bind* with buffer == 0 also resets the generic target binding.
         impl_->state->bindBuffer(target, 0);
+        impl_->touchR5Residency(MetalR5ResidencyTouchKind::BufferBind);
         return true;
     }
     GLBufferObject* object = impl_->objects->buffers().get(buffer);
@@ -24518,6 +24526,7 @@ bool GLContext::bindBufferRange(GLenum target, GLuint index, GLuint buffer, GLin
     // buffer binding point specified by target. Without this the generic UBO/SSBO
     // bindings would silently desync from the indexed table after a per-index bind.
     impl_->state->bindBuffer(target, buffer);
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::BufferBind);
     return true;
 }
 
@@ -24549,6 +24558,7 @@ bool GLContext::bindBufferBase(GLenum target, GLuint index, GLuint buffer) {
     }
     // Spec (4.6 §6.1.1): BindBufferBase also binds buffer to the generic target.
     impl_->state->bindBuffer(target, buffer);
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::BufferBind);
     return true;
 }
 
@@ -25095,6 +25105,7 @@ bool GLContext::bindVertexArray(GLuint array) {
     if (array == 0) {
         impl_->state->bindVertexArray(0);
         impl_->state->bindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+        impl_->touchR5Residency(MetalR5ResidencyTouchKind::VertexArrayBind);
         return true;
     }
     GLVertexArrayObject* object = impl_->vertexArray(array);
@@ -25119,6 +25130,7 @@ bool GLContext::bindVertexArray(GLuint array) {
     }
     impl_->state->bindVertexArray(array);
     impl_->state->bindBuffer(GL_ELEMENT_ARRAY_BUFFER, object->elementArrayBuffer);
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::VertexArrayBind);
     return true;
 }
 
@@ -25366,6 +25378,7 @@ bool GLContext::bindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr of
     bp.stride = stride;
     markVertexDescriptorDirty(*vertexArray);
     impl_->state->markDirty(DirtyBit::VertexInput);
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::VertexBufferBind);
     return true;
 }
 
@@ -25979,6 +25992,7 @@ bool GLContext::bindTexture(GLenum target, GLuint texture) {
     }
     if (texture == 0) {
         impl_->state->bindTexture(target, 0);
+        impl_->touchR5Residency(MetalR5ResidencyTouchKind::TextureBind);
         return true;
     }
     GLTextureObject* object = impl_->objects->textures().get(texture);
@@ -25994,6 +26008,7 @@ bool GLContext::bindTexture(GLenum target, GLuint texture) {
     object->desc.target = target;
     object->instantiated = true;
     impl_->state->bindTexture(target, texture);
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::TextureBind);
     return true;
 }
 
@@ -28238,6 +28253,7 @@ bool GLContext::bindRenderbuffer(GLenum target, GLuint renderbuffer) {
         object->instantiated = true;
     }
     impl_->state->bindRenderbuffer(renderbuffer);
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::RenderbufferBind);
     return true;
 }
 
@@ -28476,6 +28492,7 @@ bool GLContext::bindFramebuffer(GLenum target, GLuint framebuffer) {
     if (target == GL_FRAMEBUFFER || target == GL_READ_FRAMEBUFFER) {
         impl_->state->bindReadFramebuffer(framebuffer);
     }
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::FramebufferBind);
     return true;
 }
 
@@ -29431,6 +29448,7 @@ bool GLContext::bindSampler(GLuint unit, GLuint sampler) {
         return false;
     }
     impl_->state->bindSampler(unit, sampler);
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::SamplerBind);
     return true;
 }
 
@@ -30162,6 +30180,8 @@ std::uint64_t GLContext::metalAllocatedBytes() const {
 GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
     MetalResourceInventory inventory;
     inventory.deviceAllocatedBytes = metalAllocatedBytes();
+    inventory.r5DryRun.dryRunPasses = 1;
+    inventory.r5Touches = impl_->r5Touches;
     auto finalizePressureInputs = [&]() {
         inventory.pressure.currentAllocatedBytes = inventory.deviceAllocatedBytes;
         inventory.pressure.trackedHostHeapBytes = inventory.residency.hostBytes;
@@ -30287,7 +30307,14 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             record.recipeId = recipeId;
             record.sourceGeneration = sourceGeneration;
             record.heapClass = heapClass;
+            record.purgeableEligible =
+                (authority == MetalResidencyAuthorityClass::Reconstructable &&
+                 metalBytes != 0 &&
+                 metalR5FuturePurgeableEligibleKind(kind))
+                    ? 1
+                    : 0;
             accumulateResidencyRecord(inventory.residency, record);
+            accumulateR5ResidencyDryRunRecord(inventory.r5DryRun, record);
         };
     auto addHostCacheBytes = [&](std::uint64_t bytes) {
         inventory.hostCaches.totalBytes += bytes;
@@ -45871,6 +45898,7 @@ bool GLContext::useProgram(GLuint program) {
             resetProgramSubroutineSelections(*object, true);
         }
     }
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::ProgramBind);
     return true;
 }
 
@@ -52882,6 +52910,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             }
         }
     }
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::Draw);
     drawProfile.mark(GLDrawProfileBucket::Validation);
 
     if (impl_->frameGraph == nullptr) {
@@ -54387,6 +54416,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             impl_->updatePrimitiveCountersForNonGsDraw(mode, count, instancecount);
         }
     }
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::Draw);
     if (impl_->frameGraph == nullptr) {
         return false;
     }
@@ -55032,6 +55062,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     if (!impl_->validateCurrentProgramPipelineForDraw()) {
         return false;
     }
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::Draw);
     drawProfile.mark(GLDrawProfileBucket::Validation);
     // GL 4.6 §22.1 / §22.3 — pipeline-stats counter update for non-GS
     // indexed draws. GS path is handled by writeGsXfbAndCheckDiscard.
@@ -56319,6 +56350,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
             impl_->updatePrimitiveCountersForNonGsDraw(mode, count, instancecount, restartSkip);
         }
     }
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::Draw);
 
     if (impl_->frameGraph == nullptr) {
         return false;
@@ -57066,6 +57098,7 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
     if (impl_->shouldSkipDrawForConditionalRender()) {
         return true;
     }
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::Dispatch);
 
     // GL 4.6 §22.4 — credit COMPUTE_SHADER_INVOCATIONS for every
     // active query by the total workgroup-invocation count
@@ -57842,6 +57875,7 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
     if (impl_->shouldSkipDrawForConditionalRender()) {
         return true;
     }
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::Dispatch);
 
     // GL 4.6 §22.4 — credit COMPUTE_SHADER_INVOCATIONS for every
     // active query, mirroring the direct-dispatch path above. The
@@ -61991,6 +62025,7 @@ bool GLContext::bindTextures(GLuint first, GLsizei count, const GLuint* textures
             // Unbind every target on this unit (multi-bind unbinds
             // regardless of previously-bound target).
             unbindAllTextureTargetsOnActiveUnit(*impl_->state);
+            impl_->touchR5Residency(MetalR5ResidencyTouchKind::TextureBind);
             continue;
         }
         auto* obj = impl_->objects->textures().get(tex);
@@ -62000,6 +62035,7 @@ bool GLContext::bindTextures(GLuint first, GLsizei count, const GLuint* textures
         }
         GLenum target = obj->target != 0 ? obj->target : GL_TEXTURE_2D;
         impl_->state->bindTexture(target, tex);
+        impl_->touchR5Residency(MetalR5ResidencyTouchKind::TextureBind);
     }
     impl_->state->setActiveTextureUnit(savedActiveUnit);
     if (anyInvalid) pushError(GL_INVALID_OPERATION);
@@ -65794,11 +65830,13 @@ bool GLContext::bindTextureUnit(GLuint unit, GLuint texture) {
     if (texture == 0) {
         unbindAllTextureTargetsOnActiveUnit(*impl_->state);
         impl_->state->setActiveTextureUnit(savedActiveUnit);
+        impl_->touchR5Residency(MetalR5ResidencyTouchKind::TextureBind);
         return true;
     }
     GLenum target = obj->target ? obj->target : GL_TEXTURE_2D;
     impl_->state->bindTexture(target, texture);
     impl_->state->setActiveTextureUnit(savedActiveUnit);
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::TextureBind);
     return true;
 }
 
@@ -66488,6 +66526,7 @@ bool GLContext::transformFeedbackBufferBase(GLuint xfb, GLuint index, GLuint buf
                                         index, buffer, 0, 0);
         impl_->state->bindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buffer);
     }
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::BufferBind);
     return true;
 }
 
@@ -66519,6 +66558,7 @@ bool GLContext::transformFeedbackBufferRange(GLuint xfb, GLuint index, GLuint bu
                                         index, buffer, offset, size);
         impl_->state->bindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buffer);
     }
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::BufferBind);
     return true;
 }
 

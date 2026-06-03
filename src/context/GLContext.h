@@ -755,6 +755,8 @@ public:
         MetalMemoryPressureInputs pressure;
         MetalResourceResidencySummary residency;
         MetalHostCacheSummary hostCaches;
+        MetalR5ResidencyDryRunSummary r5DryRun;
+        MetalR5ResidencyTouchSummary r5Touches;
     };
     MetalResourceInventory metalResourceInventory() const;
 
