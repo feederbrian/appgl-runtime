@@ -595,6 +595,115 @@ bool lowerFp64VertexStageInputs(std::string& msl) {
     return true;
 }
 
+bool rewriteVertexMatrixArrayInputs(
+    std::string& msl,
+    spirv_cross::CompilerMSL& compiler,
+    const spirv_cross::ShaderResources& resources,
+    bool includeFp64LoweredInputs,
+    std::string* reason) {
+    struct MatrixArrayInput {
+        std::string name;
+        std::string sourcePrefix;
+        std::string reasonScope;
+        std::uint32_t arrayCount = 1;
+        std::uint32_t columnCount = 1;
+    };
+
+    std::vector<MatrixArrayInput> inputs;
+    for (const auto& input : resources.stage_inputs) {
+        const auto& type = compiler.get_type(input.type_id);
+        if (type.columns <= 1 || type.array.empty()) {
+            continue;
+        }
+
+        std::string sourcePrefix;
+        std::string reasonScope;
+        if (type.basetype == spirv_cross::SPIRType::Float) {
+            sourcePrefix = "in.";
+            reasonScope = "native";
+        } else if (includeFp64LoweredInputs &&
+                   type.basetype == spirv_cross::SPIRType::Double) {
+            reasonScope = "fp64 lowered";
+        } else {
+            continue;
+        }
+
+        std::uint32_t arrayCount = 1;
+        for (const auto dim : type.array) {
+            if (dim == 0) {
+                arrayCount = 0;
+                break;
+            }
+            arrayCount *= static_cast<std::uint32_t>(dim);
+        }
+        if (arrayCount == 0) {
+            continue;
+        }
+
+        MatrixArrayInput entry;
+        entry.name = input.name;
+        entry.sourcePrefix = std::move(sourcePrefix);
+        entry.reasonScope = std::move(reasonScope);
+        entry.arrayCount = arrayCount;
+        entry.columnCount = type.columns;
+        inputs.push_back(std::move(entry));
+    }
+    if (inputs.empty()) {
+        return true;
+    }
+
+    const std::size_t mainPos = msl.find("main0(");
+    if (mainPos == std::string::npos) {
+        if (reason != nullptr) {
+            *reason = "vertex matrix-array input rewrite: missing main0";
+        }
+        return false;
+    }
+    std::size_t paramEnd = mainPos;
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        if (reason != nullptr) {
+            *reason =
+                "vertex matrix-array input rewrite: malformed main0 params";
+        }
+        return false;
+    }
+    const std::size_t bodyOpen = msl.find('{', paramEnd);
+    if (bodyOpen == std::string::npos) {
+        if (reason != nullptr) {
+            *reason = "vertex matrix-array input rewrite: missing main0 body";
+        }
+        return false;
+    }
+
+    for (const auto& input : inputs) {
+        const std::uint32_t flatCount =
+            input.arrayCount * input.columnCount;
+        for (std::uint32_t flat = 0; flat < flatCount; ++flat) {
+            const std::string source =
+                input.sourcePrefix + input.name + "_" + std::to_string(flat);
+            const std::string expected =
+                "    " + input.name + "[" + std::to_string(flat) +
+                "] = " + source + ";";
+            const std::size_t pos = msl.find(expected, bodyOpen + 1);
+            if (pos == std::string::npos) {
+                if (reason != nullptr) {
+                    *reason =
+                        "vertex matrix-array input rewrite: missing exact " +
+                        input.reasonScope + " assignment `" + expected + "`";
+                }
+                return false;
+            }
+            const std::uint32_t arrayIndex = flat / input.columnCount;
+            const std::uint32_t columnIndex = flat % input.columnCount;
+            const std::string replacement =
+                "    " + input.name + "[" + std::to_string(arrayIndex) +
+                "][" + std::to_string(columnIndex) + "] = " + source + ";";
+            msl.replace(pos, expected.size(), replacement);
+        }
+    }
+    return true;
+}
+
 std::string fp64StageTransportType(const std::string& typeName) {
     if (typeName == "appgl_df64") return "float";
     if (typeName == "appgl_df64x2") return "float2";
@@ -6115,6 +6224,20 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         if (isVertex && mslOpts.appgl_fp64_emulation) {
             (void)lowerFp64VertexStageInputs(msl);
             (void)rewriteVertexFp64StageOutputTransport(msl);
+        }
+        if (isVertex) {
+            std::string matrixArrayRewriteReason;
+            if (!rewriteVertexMatrixArrayInputs(
+                    msl,
+                    compiler,
+                    resources,
+                    mslOpts.appgl_fp64_emulation,
+                    &matrixArrayRewriteReason)) {
+                if (log != nullptr) {
+                    *log = matrixArrayRewriteReason;
+                }
+                return {};
+            }
         }
         if (isVertex) {
             (void)injectPrimitiveFragmentShadingRateCombiner(msl);
