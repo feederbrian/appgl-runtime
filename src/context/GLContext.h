@@ -10,6 +10,7 @@
 
 #include "../../include/AppGL/glcorearb.h"
 #include "AppGLCommandReasons.h"
+#include "MetalMemoryPressure.h"
 #include "MetalResourceResidency.h"
 
 namespace appgl {
@@ -751,6 +752,7 @@ public:
         std::uint64_t cacheLiveTessVertexComputePso = 0;
         std::uint64_t cacheLiveVsTfComputePso = 0;
         std::uint64_t cacheLiveGsVsComputePso = 0;
+        MetalMemoryPressureInputs pressure;
         MetalResourceResidencySummary residency;
         MetalHostCacheSummary hostCaches;
     };

@@ -16285,6 +16285,13 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
     }
     MetalFrameGraph::InternalMetalResourceInventory getInternalMetalResourceInventory() const {
         MetalFrameGraph::InternalMetalResourceInventory inventory;
+        if (device != nil &&
+            [device respondsToSelector:@selector(recommendedMaxWorkingSetSize)]) {
+            inventory.recommendedWorkingSetBytes =
+                static_cast<std::uint64_t>(device.recommendedMaxWorkingSetSize);
+            inventory.recommendedWorkingSetAvailable =
+                inventory.recommendedWorkingSetBytes != 0 ? 1 : 0;
+        }
         auto addBuffer = [&inventory](id<MTLBuffer> buffer) {
             if (buffer != nil) {
                 ++inventory.bufferCount;

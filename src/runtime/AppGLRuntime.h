@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -14,6 +15,8 @@
 #include "../generated/gl_dispatch.gen.h"
 
 namespace appgl {
+
+class MemoryPressureObserver;
 
 namespace impl {
 void APIENTRY glClearColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
@@ -781,6 +784,7 @@ public:
 
 private:
     Runtime();
+    ~Runtime();
     void initializeDispatch();
     // Must be called with contextMutex_ held, and with `context` still pointing
     // at a live, fully-constructed GLContext. Refreshes lastKnownInventory_.
@@ -800,6 +804,7 @@ private:
     std::vector<ErrorRecord> errorLog_;
     std::uint64_t errorLogEventsObserved_ = 0;
     InventorySnapshot lastKnownInventory_;
+    std::unique_ptr<MemoryPressureObserver> memoryPressureObserver_;
 };
 
 template <typename ReturnType>

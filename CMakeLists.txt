@@ -79,6 +79,7 @@ set(APPGL_SOURCES
   src/runtime/AppGLGroup8.cpp
   src/runtime/AppGLDiagnostics.cpp
   src/runtime/AppGLFeatureFlags.mm
+  src/runtime/AppGLMemoryPressure.mm
   src/runtime/AppGLMatrixOverrides.cpp
   src/runtime/AppGLImmediateMode.cpp
   src/caps/GLCapabilities.mm
@@ -256,6 +257,16 @@ target_compile_definitions(appgl_feature_flags_probe PRIVATE
   APPGL_FP64_EMULATION=$<IF:$<BOOL:${APPGL_FP64_EMULATION}>,1,0>
 )
 target_link_libraries(appgl_feature_flags_probe PRIVATE "-framework Foundation")
+
+add_executable(appgl_memory_pressure_probe
+  tests/MemoryPressureProbe.cpp
+  src/runtime/AppGLMemoryPressure.mm
+)
+target_include_directories(appgl_memory_pressure_probe
+  PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
 
 if(APPGL_VENDOR_THIRD_PARTY)
   set(BUILD_EXTERNAL OFF CACHE BOOL "" FORCE)

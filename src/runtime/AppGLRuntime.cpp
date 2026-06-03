@@ -1,5 +1,7 @@
 #include "AppGLRuntime.h"
 
+#include "AppGLMemoryPressure.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -1695,6 +1697,7 @@ Runtime& Runtime::shared() {
 
 Runtime::Runtime() {
     initializeDispatch();
+    memoryPressureObserver_ = std::make_unique<MemoryPressureObserver>();
     // Install crash handlers that print a backtrace on SIGBUS/SIGSEGV so we
     // can diagnose deterministic late-sweep crashes (e.g. the 12648-test
     // SIGBUS on program_interface_query.subroutines-vertex).
@@ -1714,6 +1717,8 @@ Runtime::Runtime() {
     signal(SIGBUS, crashHandler);
     signal(SIGSEGV, crashHandler);
 }
+
+Runtime::~Runtime() = default;
 
 void Runtime::initializeDispatch() {
     installBootstrapDispatch(dispatch_, coverageStore_);
@@ -2298,8 +2303,86 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
     }
     stream << "},";
 
+    // R4 pressure observation is sampled only from the full diagnostics path.
+    // Lock order is contextMutex_ -> MemoryPressureObserver::stateMutex. The
+    // observer never calls Runtime/GLContext or takes contextMutex_, and the
+    // dispatch event handler writes atomics only, so this cannot invert with
+    // context teardown or live diagnostics.
+    MetalMemoryPressureStateMachine fallbackPressureMachine;
+    const auto pressureSnapshot = memoryPressureObserver_
+        ? memoryPressureObserver_->sample(metalInventory.pressure)
+        : sampleMetalMemoryPressure(fallbackPressureMachine,
+                                    metalInventory.pressure);
+    const auto& pressureInputs = pressureSnapshot.inputs;
+    const auto& pressureWatermarks = pressureSnapshot.watermarks;
+
     stream << "\"metalResources\":{"
            << "\"deviceAllocatedBytes\":" << metalInventory.deviceAllocatedBytes << ","
+           << "\"pressure\":{"
+           << "\"currentAllocatedBytes\":"
+           << pressureInputs.currentAllocatedBytes << ","
+           << "\"recommendedWorkingSetBytes\":"
+           << pressureInputs.recommendedWorkingSetBytes << ","
+           << "\"recommendedWorkingSetAvailable\":"
+           << pressureInputs.recommendedWorkingSetAvailable << ","
+           << "\"workingSetRatio\":"
+           << pressureSnapshot.workingSetRatio << ","
+           << "\"workingSetRatioValid\":"
+           << pressureSnapshot.workingSetRatioValid << ","
+           << "\"workingSetRatioPermyriad\":"
+           << pressureSnapshot.workingSetRatioPermyriad << ","
+           << "\"osPressure\":" << pressureInputs.osPressure << ","
+           << "\"state\":" << pressureSnapshot.state << ","
+           << "\"softTargetPermyriad\":"
+           << pressureWatermarks.softTargetPermyriad << ","
+           << "\"hardTargetPermyriad\":"
+           << pressureWatermarks.hardTargetPermyriad << ","
+           << "\"criticalTargetPermyriad\":"
+           << pressureWatermarks.criticalTargetPermyriad << ","
+           << "\"softExitPermyriad\":"
+           << pressureWatermarks.softExitPermyriad << ","
+           << "\"hardExitPermyriad\":"
+           << pressureWatermarks.hardExitPermyriad << ","
+           << "\"criticalExitPermyriad\":"
+           << pressureWatermarks.criticalExitPermyriad << ","
+           << "\"lastPressureEvent\":"
+           << pressureInputs.lastPressureEvent << ","
+           << "\"lastPressureEventSequence\":"
+           << pressureInputs.lastPressureEventSequence << ","
+           << "\"stateTransitionCount\":"
+           << pressureSnapshot.stateTransitionCount << ","
+           << "\"softTransitionCount\":"
+           << pressureSnapshot.softTransitionCount << ","
+           << "\"hardTransitionCount\":"
+           << pressureSnapshot.hardTransitionCount << ","
+           << "\"criticalTransitionCount\":"
+           << pressureSnapshot.criticalTransitionCount << ","
+           << "\"warningEventCount\":"
+           << pressureInputs.warningEventCount << ","
+           << "\"criticalEventCount\":"
+           << pressureInputs.criticalEventCount << ","
+           << "\"trackedHostHeapBytes\":"
+           << pressureInputs.trackedHostHeapBytes << ","
+           << "\"trackedHostCacheBytes\":"
+           << pressureInputs.trackedHostCacheBytes << ","
+           << "\"processResidentBytes\":"
+           << pressureInputs.processResidentBytes << ","
+           << "\"processResidentAvailable\":"
+           << pressureInputs.processResidentAvailable << ","
+           << "\"processHeapBytes\":"
+           << pressureInputs.processHeapBytes << ","
+           << "\"processHeapAvailable\":"
+           << pressureInputs.processHeapAvailable << ","
+           << "\"cbPressureReserveSlots\":"
+           << pressureInputs.cbPressureReserveSlots << ","
+           << "\"cbPressureSoftCapSlots\":"
+           << pressureInputs.cbPressureSoftCapSlots << ","
+           << "\"cbPressureFlushCount\":"
+           << pressureInputs.cbPressureFlushCount << ","
+           << "\"cbCurrentInFlight\":"
+           << pressureInputs.cbCurrentInFlight << ","
+           << "\"cbInFlightBound\":"
+           << pressureInputs.cbInFlightBound << "},"
            << "\"buffers\":" << metalInventory.bufferCount << ","
            << "\"bufferBytes\":" << metalInventory.bufferBytes << ","
            << "\"textures\":" << metalInventory.textureCount << ","

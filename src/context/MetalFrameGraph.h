@@ -1509,6 +1509,8 @@ public:
         std::uint64_t mslLibrarySourceNSStringCreations = 0;
         std::uint64_t translatedDrawMSLSlotCacheEntries = 0;
         std::uint64_t translatedDrawSampleMaskSlotCacheEntries = 0;
+        std::uint64_t recommendedWorkingSetBytes = 0;
+        std::uint64_t recommendedWorkingSetAvailable = 0;
     };
     InternalMetalResourceInventory internalMetalResourceInventory() const;
 

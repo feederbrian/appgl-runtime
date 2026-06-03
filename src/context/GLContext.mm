@@ -30162,6 +30162,18 @@ std::uint64_t GLContext::metalAllocatedBytes() const {
 GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
     MetalResourceInventory inventory;
     inventory.deviceAllocatedBytes = metalAllocatedBytes();
+    auto finalizePressureInputs = [&]() {
+        inventory.pressure.currentAllocatedBytes = inventory.deviceAllocatedBytes;
+        inventory.pressure.trackedHostHeapBytes = inventory.residency.hostBytes;
+        inventory.pressure.trackedHostCacheBytes =
+            inventory.hostCaches.totalBytes;
+        const auto counters = commandSubmissionDebugCounters();
+        inventory.pressure.cbPressureReserveSlots = counters.pressureReserve;
+        inventory.pressure.cbPressureSoftCapSlots = counters.pressureSoftCap;
+        inventory.pressure.cbPressureFlushCount = counters.pressureFlushCount;
+        inventory.pressure.cbCurrentInFlight = counters.currentInFlight;
+        inventory.pressure.cbInFlightBound = counters.inFlightBound;
+    };
     std::uint64_t frameGraphResidencyBufferBytes = 0;
     std::uint64_t frameGraphResidencyTextureBytes = 0;
     std::uint64_t frameGraphResidencyDrawableTextureBytes = 0;
@@ -30212,6 +30224,10 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             frameGraphMetal.translatedDrawMSLSlotCacheEntries;
         inventory.cacheLiveTranslatedSampleMaskSlots =
             frameGraphMetal.translatedDrawSampleMaskSlotCacheEntries;
+        inventory.pressure.recommendedWorkingSetBytes =
+            frameGraphMetal.recommendedWorkingSetBytes;
+        inventory.pressure.recommendedWorkingSetAvailable =
+            frameGraphMetal.recommendedWorkingSetAvailable;
     }
     inventory.cacheLimitTranslatedDrawPlans =
         static_cast<std::uint64_t>(Phase2PlanKeyProfile::kMaxTrackedKeys);
@@ -30482,6 +30498,7 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
 
     auto* store = impl_->objects.get();
     if (store == nullptr) {
+        finalizePressureInputs();
         return inventory;
     }
     store->buffers().forEach([&](GLuint bufferName, GLBufferObject& buffer) {
@@ -30767,6 +30784,7 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
     }
 #endif
 
+    finalizePressureInputs();
     return inventory;
 }
 
