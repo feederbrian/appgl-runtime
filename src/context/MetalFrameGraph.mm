@@ -109,6 +109,15 @@ static std::size_t mslLibraryCacheLimit() {
     return static_cast<std::size_t>(parsed);
 }
 
+static std::uint64_t stableMslSourceHash(const std::string& source) {
+    std::uint64_t hash = 1469598103934665603ull;
+    for (unsigned char c : source) {
+        hash ^= static_cast<std::uint64_t>(c);
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
 static bool appglEnvEnabledDefaultOn(const char* name) {
     const char* value = std::getenv(name);
     return value == nullptr || (value[0] != '0' && value[0] != '\0');
@@ -3747,11 +3756,15 @@ struct MetalFrameGraph::Impl {
             releaseOwnedObjCObject(entry.second);
         }
         tessDomainCapturePSOCache.clear();
-        for (auto& entry : mslLibraryCache) {
-            releaseOwnedObjCObject(entry.second);
+        for (auto& bucket : mslLibraryCache) {
+            for (auto& entry : bucket.second) {
+                releaseOwnedObjCObject(entry.library);
+            }
         }
         mslLibraryCache.clear();
-        mslLibraryCacheOrder.clear();
+        mslLibraryCacheEntryCount = 0;
+        mslLibraryCacheSourceBytes = 0;
+        mslLibraryCacheSourceKeyBytes = 0;
         releaseOwnedObjCObject(solidColorLibrary);
         releaseOwnedObjCObject(solidColorVertexFn);
         releaseOwnedObjCObject(solidColorFragmentFn);
@@ -16268,7 +16281,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         return 0;
     }
     std::uint64_t getMslLibraryCacheEntries() const {
-        return static_cast<std::uint64_t>(mslLibraryCache.size());
+        return mslLibraryCacheEntryCount;
     }
     MetalFrameGraph::InternalMetalResourceInventory getInternalMetalResourceInventory() const {
         MetalFrameGraph::InternalMetalResourceInventory inventory;
@@ -16349,8 +16362,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         for (const auto& entry : depthStencilUploadPSOCache) {
             addRenderPipeline(entry.second);
         }
-        for (const auto& entry : mslLibraryCache) {
-            addLibrary(entry.second);
+        for (const auto& bucket : mslLibraryCache) {
+            for (const auto& entry : bucket.second) {
+                addLibrary(entry.library);
+            }
         }
         for (const auto& entry : depthStencilCache) {
             addDepthStencil(entry.second);
@@ -16363,6 +16378,14 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         inventory.ringFallbackMaxBytes = ringFallbackMaxBytes;
         inventory.mslLibraryCacheLimit = mslLibraryCacheLimit();
         inventory.mslLibraryCacheEvictions = mslLibraryCacheEvictions;
+        inventory.mslLibraryCacheSourceBytes = mslLibraryCacheSourceBytes;
+        inventory.mslLibraryCacheSourceKeyBytes = mslLibraryCacheSourceKeyBytes;
+        inventory.mslLibraryCompileTransientSourceBytes =
+            mslLibraryCompileTransientSourceBytes;
+        inventory.mslLibraryCacheHits = mslLibraryCacheHits;
+        inventory.mslLibraryCacheMisses = mslLibraryCacheMisses;
+        inventory.mslLibrarySourceNSStringCreations =
+            mslLibrarySourceNSStringCreations;
         inventory.translatedDrawMSLSlotCacheEntries =
             static_cast<std::uint64_t>(translatedDrawMSLSlotCache.size());
         inventory.translatedDrawSampleMaskSlotCacheEntries =
@@ -16636,15 +16659,34 @@ private:
     double pendingClearDepth = 1.0;
     std::uint32_t pendingClearStencil = 0;
 
-    // ADV-2: MTLLibrary cache keyed by MSL source hash.  Avoids
-    // recompiling the same MSL text when multiple pipeline variants
-    // share the same vertex or fragment shader.  The hash is
-    // std::hash<std::string> (64-bit FNV on libc++); collisions would
-    // silently return the wrong library, but in practice MSL texts
-    // are unique-enough that this doesn't happen.
-    std::unordered_map<std::size_t, id<MTLLibrary>> mslLibraryCache;
-    std::vector<std::size_t> mslLibraryCacheOrder;
+    struct MslLibraryCacheLookupKey {
+        std::uint64_t sourceHash = 0;
+        std::uint64_t compileOptionsKey = 0;
+        std::uint64_t specializationKey = 0;
+        std::size_t sourceBytes = 0;
+    };
+
+    struct MslLibraryCacheEntry {
+        MslLibraryCacheLookupKey key;
+        std::string source;
+        id<MTLLibrary> library = nil;
+        std::uint64_t lastUse = 0;
+    };
+
+    // ADV-2: MTLLibrary cache bucketed by deterministic MSL source hash and
+    // resolved by exact source/options/spec equality. The hash selects a small
+    // bucket only; it is never sufficient to serve a library.
+    std::unordered_map<std::uint64_t, std::vector<MslLibraryCacheEntry>>
+        mslLibraryCache;
+    std::uint64_t mslLibraryCacheClock = 0;
+    std::uint64_t mslLibraryCacheEntryCount = 0;
     std::uint64_t mslLibraryCacheEvictions = 0;
+    std::uint64_t mslLibraryCacheSourceBytes = 0;
+    std::uint64_t mslLibraryCacheSourceKeyBytes = 0;
+    std::uint64_t mslLibraryCompileTransientSourceBytes = 0;
+    std::uint64_t mslLibraryCacheHits = 0;
+    std::uint64_t mslLibraryCacheMisses = 0;
+    std::uint64_t mslLibrarySourceNSStringCreations = 0;
 
     // Per-pipeline cache for fixed helper parameter slots discovered in
     // translated MSL. The pipeline key already fingerprints shader text, so
@@ -16725,35 +16767,168 @@ private:
         return inserted.first->second;
     }
 
-    // ADV-2: get-or-compile a Metal library from MSL source text,
-    // returning a cached copy if the same source was compiled before.
-    id<MTLLibrary> getOrCompileLibrary(const std::string& msl) {
-        const std::size_t hash = std::hash<std::string>{}(msl);
-        auto it = mslLibraryCache.find(hash);
-        if (it != mslLibraryCache.end()) return it->second;
+    static std::uint64_t mslLibraryScalarKeyBytes() {
+        return static_cast<std::uint64_t>(sizeof(MslLibraryCacheLookupKey));
+    }
 
-        NSString* src = [NSString stringWithUTF8String:msl.c_str()];
-        NSError* err = nil;
-        id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil error:&err];
-        if (lib != nil) {
-            mslLibraryCache[hash] = lib;
-            mslLibraryCacheOrder.push_back(hash);
-            const std::size_t limit = mslLibraryCacheLimit();
-            while (limit > 0 && mslLibraryCache.size() > limit &&
-                   !mslLibraryCacheOrder.empty()) {
-                const std::size_t evictHash = mslLibraryCacheOrder.front();
-                mslLibraryCacheOrder.erase(mslLibraryCacheOrder.begin());
-                auto evict = mslLibraryCache.find(evictHash);
-                if (evict == mslLibraryCache.end()) {
-                    continue;
+    static std::uint64_t mslLibraryEntrySourceKeyBytes(
+        const MslLibraryCacheEntry& entry) {
+        return static_cast<std::uint64_t>(entry.source.size()) +
+            mslLibraryScalarKeyBytes();
+    }
+
+    static bool mslLibraryEntryMatches(const MslLibraryCacheEntry& entry,
+                                       const MslLibraryCacheLookupKey& key,
+                                       const std::string& source) {
+        return entry.key.sourceHash == key.sourceHash &&
+               entry.key.compileOptionsKey == key.compileOptionsKey &&
+               entry.key.specializationKey == key.specializationKey &&
+               entry.key.sourceBytes == key.sourceBytes &&
+               entry.source == source;
+    }
+
+    MslLibraryCacheLookupKey makeMslLibraryCacheKey(
+        const std::string& msl,
+        std::uint64_t compileOptionsKey,
+        std::uint64_t specializationKey) const {
+        MslLibraryCacheLookupKey key;
+        key.sourceHash = stableMslSourceHash(msl);
+        key.compileOptionsKey = compileOptionsKey;
+        key.specializationKey = specializationKey;
+        key.sourceBytes = msl.size();
+        return key;
+    }
+
+    void addMslLibraryCacheAccounting(const MslLibraryCacheEntry& entry) {
+        ++mslLibraryCacheEntryCount;
+        mslLibraryCacheSourceBytes +=
+            static_cast<std::uint64_t>(entry.source.size());
+        mslLibraryCacheSourceKeyBytes += mslLibraryEntrySourceKeyBytes(entry);
+    }
+
+    void removeMslLibraryCacheAccounting(const MslLibraryCacheEntry& entry) {
+        if (mslLibraryCacheEntryCount > 0) {
+            --mslLibraryCacheEntryCount;
+        }
+        const auto sourceBytes =
+            static_cast<std::uint64_t>(entry.source.size());
+        mslLibraryCacheSourceBytes =
+            sourceBytes <= mslLibraryCacheSourceBytes
+                ? mslLibraryCacheSourceBytes - sourceBytes : 0;
+        const auto sourceKeyBytes = mslLibraryEntrySourceKeyBytes(entry);
+        mslLibraryCacheSourceKeyBytes =
+            sourceKeyBytes <= mslLibraryCacheSourceKeyBytes
+                ? mslLibraryCacheSourceKeyBytes - sourceKeyBytes : 0;
+    }
+
+    void evictMslLibraryCacheIfNeeded() {
+        const std::size_t limit = mslLibraryCacheLimit();
+        while (limit > 0 && mslLibraryCacheEntryCount > limit &&
+               !mslLibraryCache.empty()) {
+            auto evictBucket = mslLibraryCache.end();
+            std::size_t evictIndex = 0;
+            std::uint64_t oldestUse = std::numeric_limits<std::uint64_t>::max();
+            for (auto bucket = mslLibraryCache.begin();
+                 bucket != mslLibraryCache.end(); ++bucket) {
+                for (std::size_t i = 0; i < bucket->second.size(); ++i) {
+                    const auto& entry = bucket->second[i];
+                    if (entry.lastUse < oldestUse) {
+                        oldestUse = entry.lastUse;
+                        evictBucket = bucket;
+                        evictIndex = i;
+                    }
                 }
-                releaseOwnedObjCObject(evict->second);
-                mslLibraryCache.erase(evict);
-                ++mslLibraryCacheEvictions;
             }
-        } else if (std::getenv("APPGL_TRACE_SHADER_BUILD")) {
-            std::fprintf(stderr, "[APPGL] MSL library build failed: %s\n",
-                err ? err.localizedDescription.UTF8String : "(no err)");
+            if (evictBucket == mslLibraryCache.end()) {
+                break;
+            }
+            auto& entries = evictBucket->second;
+            auto& entry = entries[evictIndex];
+            releaseOwnedObjCObject(entry.library);
+            removeMslLibraryCacheAccounting(entry);
+            entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(evictIndex));
+            if (entries.empty()) {
+                mslLibraryCache.erase(evictBucket);
+            }
+            ++mslLibraryCacheEvictions;
+        }
+    }
+
+    class ScopedMslLibraryCompileSourceGauge {
+    public:
+        ScopedMslLibraryCompileSourceGauge(
+            std::uint64_t& gauge,
+            std::uint64_t bytes)
+            : gauge_(gauge), bytes_(bytes) {
+            gauge_ += bytes_;
+        }
+        ScopedMslLibraryCompileSourceGauge(
+            const ScopedMslLibraryCompileSourceGauge&) = delete;
+        ScopedMslLibraryCompileSourceGauge& operator=(
+            const ScopedMslLibraryCompileSourceGauge&) = delete;
+        ~ScopedMslLibraryCompileSourceGauge() {
+            gauge_ = bytes_ <= gauge_ ? gauge_ - bytes_ : 0;
+        }
+    private:
+        std::uint64_t& gauge_;
+        std::uint64_t bytes_ = 0;
+    };
+
+    // ADV-2: get-or-compile a Metal library from MSL source text,
+    // returning a cached copy if the same source/options/spec key was compiled
+    // before. Rung-1 keeps options/spec keys explicit at zero because the
+    // current call uses nil options and no function constants.
+    id<MTLLibrary> getOrCompileLibrary(const std::string& msl) {
+        const MslLibraryCacheLookupKey key =
+            makeMslLibraryCacheKey(msl, /*compileOptionsKey=*/0,
+                                   /*specializationKey=*/0);
+        auto bucketIt = mslLibraryCache.find(key.sourceHash);
+        if (bucketIt != mslLibraryCache.end()) {
+            for (auto& entry : bucketIt->second) {
+                if (mslLibraryEntryMatches(entry, key, msl)) {
+                    ++mslLibraryCacheHits;
+                    entry.lastUse = ++mslLibraryCacheClock;
+                    return entry.library;
+                }
+            }
+        }
+
+        ++mslLibraryCacheMisses;
+        id<MTLLibrary> lib = nil;
+        @autoreleasepool {
+            ScopedMslLibraryCompileSourceGauge sourceGauge(
+                mslLibraryCompileTransientSourceBytes,
+                static_cast<std::uint64_t>(msl.size()));
+            NSString* src =
+                [[NSString alloc] initWithBytes:msl.data()
+                                         length:static_cast<NSUInteger>(msl.size())
+                                       encoding:NSUTF8StringEncoding];
+            ScopedOwnedObjCObject srcRelease(src);
+            if (src == nil) {
+                if (std::getenv("APPGL_TRACE_SHADER_BUILD")) {
+                    std::fprintf(stderr,
+                        "[APPGL] MSL library build failed: invalid UTF-8 source\n");
+                }
+                return nil;
+            }
+            ++mslLibrarySourceNSStringCreations;
+            NSError* err = nil;
+            lib = [device newLibraryWithSource:src options:nil error:&err];
+            if (lib == nil && std::getenv("APPGL_TRACE_SHADER_BUILD")) {
+                std::fprintf(stderr, "[APPGL] MSL library build failed: %s\n",
+                    err ? err.localizedDescription.UTF8String : "(no err)");
+            }
+        }
+        if (lib != nil) {
+            MslLibraryCacheEntry entry;
+            entry.key = key;
+            entry.source = msl;
+            entry.library = lib;
+            entry.lastUse = ++mslLibraryCacheClock;
+            auto& bucket = mslLibraryCache[key.sourceHash];
+            bucket.push_back(std::move(entry));
+            addMslLibraryCacheAccounting(bucket.back());
+            evictMslLibraryCacheIfNeeded();
         }
         return lib;  // nil on failure; caller handles
     }

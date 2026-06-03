@@ -30188,6 +30188,16 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             frameGraphMetal.mslLibraryCacheLimit;
         inventory.cacheEvictionsMslLibraries =
             frameGraphMetal.mslLibraryCacheEvictions;
+        inventory.mslLibraryCacheSourceBytes =
+            frameGraphMetal.mslLibraryCacheSourceBytes;
+        inventory.mslLibraryCacheSourceKeyBytes =
+            frameGraphMetal.mslLibraryCacheSourceKeyBytes;
+        inventory.mslLibraryCompileTransientSourceBytes =
+            frameGraphMetal.mslLibraryCompileTransientSourceBytes;
+        inventory.mslLibraryCacheHits = frameGraphMetal.mslLibraryCacheHits;
+        inventory.mslLibraryCacheMisses = frameGraphMetal.mslLibraryCacheMisses;
+        inventory.mslLibrarySourceNSStringCreations =
+            frameGraphMetal.mslLibrarySourceNSStringCreations;
         inventory.cacheLiveMslLibraries =
             static_cast<std::uint64_t>(inventory.libraryCacheEntries);
         inventory.cacheLiveTranslatedDrawMSLSlots =

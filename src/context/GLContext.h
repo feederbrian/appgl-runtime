@@ -735,6 +735,12 @@ public:
         std::uint64_t cacheEvictionsTessVertexComputePso = 0;
         std::uint64_t cacheEvictionsVsTfComputePso = 0;
         std::uint64_t cacheEvictionsGsVsComputePso = 0;
+        std::uint64_t mslLibraryCacheSourceBytes = 0;
+        std::uint64_t mslLibraryCacheSourceKeyBytes = 0;
+        std::uint64_t mslLibraryCompileTransientSourceBytes = 0;
+        std::uint64_t mslLibraryCacheHits = 0;
+        std::uint64_t mslLibraryCacheMisses = 0;
+        std::uint64_t mslLibrarySourceNSStringCreations = 0;
         std::uint64_t cacheLiveMslLibraries = 0;
         std::uint64_t cacheLiveTranslatedDrawMSLSlots = 0;
         std::uint64_t cacheLiveTranslatedSampleMaskSlots = 0;

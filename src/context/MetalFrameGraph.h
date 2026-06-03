@@ -1501,6 +1501,12 @@ public:
         std::uint64_t ringFallbackMaxBytes = 0;
         std::uint64_t mslLibraryCacheLimit = 0;
         std::uint64_t mslLibraryCacheEvictions = 0;
+        std::uint64_t mslLibraryCacheSourceBytes = 0;
+        std::uint64_t mslLibraryCacheSourceKeyBytes = 0;
+        std::uint64_t mslLibraryCompileTransientSourceBytes = 0;
+        std::uint64_t mslLibraryCacheHits = 0;
+        std::uint64_t mslLibraryCacheMisses = 0;
+        std::uint64_t mslLibrarySourceNSStringCreations = 0;
         std::uint64_t translatedDrawMSLSlotCacheEntries = 0;
         std::uint64_t translatedDrawSampleMaskSlotCacheEntries = 0;
     };
