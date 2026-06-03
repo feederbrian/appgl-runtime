@@ -6968,10 +6968,11 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             result.usesFp64 && options.fp64EmulationAvailable;
 
         // Vertex inputs (stage_inputs). SPIR-V assigns one OpDecorate
-        // Location per input, but SPIRV-Cross MSL EXPANDS arrays into
-        // N individual `[[attribute(K)]]` slots (one per element).
-        // The reflection's .location must match the EXPANDED MSL slot
-        // numbers so getAttribLocation("arr[K]") resolves to the real
+        // Location per input, but SPIRV-Cross MSL EXPANDS arrays and
+        // matrix columns into individual `[[attribute(K)]]` slots. FP64
+        // dvec3/dvec4 columns are then lowered to two uint-backed Metal
+        // attributes. The reflection's .location must match those EXPANDED
+        // MSL slots so getAttribLocation("arr[K]") resolves to the real
         // Metal attribute — otherwise a later non-array input ends up
         // colliding with an earlier array's element slots. For example:
         //   in float clipdistance_data[1];  // SPIR-V loc 0 → MSL attr 0
@@ -6984,12 +6985,32 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         // Re-derive the expanded locations by sorting inputs by their
         // SPIR-V Location and walking them, accumulating per-array
         // slot counts so each subsequent input starts after the
-        // previous one's full size.
+        // previous one's full transport size.
         struct InputEntry {
             spirv_cross::Resource* res;
             std::uint32_t spirvLocation;
-            std::uint32_t slotCount;
+            std::uint32_t arrayCount;
+            std::uint32_t columnCount;
+            std::uint32_t metalSlotsPerColumn;
+            std::uint32_t metalSlotCount;
         };
+        auto vertexInputArrayCount =
+            [](const spirv_cross::SPIRType& type) -> std::uint32_t {
+                std::uint32_t count = 1;
+                for (const auto dim : type.array) {
+                    count *= dim > 0 ? static_cast<std::uint32_t>(dim) : 1u;
+                }
+                return count;
+            };
+        auto vertexInputColumnCount =
+            [](const spirv_cross::SPIRType& type) -> std::uint32_t {
+                return type.columns > 1 ? type.columns : 1u;
+            };
+        auto vertexInputMetalSlotsPerColumn =
+            [](const spirv_cross::SPIRType& type) -> std::uint32_t {
+                return (type.basetype == spirv_cross::SPIRType::Double &&
+                        type.vecsize > 2) ? 2u : 1u;
+            };
         std::vector<InputEntry> sortedInputs;
         sortedInputs.reserve(resources.stage_inputs.size());
         for (auto& input : resources.stage_inputs) {
@@ -6997,29 +7018,26 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             e.res = &input;
             e.spirvLocation = compiler.get_decoration(input.id, spv::DecorationLocation);
             const auto& type = compiler.get_type(input.type_id);
-            // Array inputs: each outer-dimension element consumes one
-            // location slot. FP64 dvec3/dvec4 lower to two uint-backed
-            // Metal attributes because Metal's largest integer vertex
-            // format carries four 32-bit lanes.
-            const std::uint32_t scalarSlots =
-                (type.basetype == spirv_cross::SPIRType::Double &&
-                 type.vecsize > 2) ? 2u : 1u;
-            const std::uint32_t arraySlots =
-                (!type.array.empty() && type.array[0] > 0)
-                    ? static_cast<std::uint32_t>(type.array[0]) : 1u;
-            e.slotCount = arraySlots * scalarSlots;
+            e.arrayCount = vertexInputArrayCount(type);
+            e.columnCount = vertexInputColumnCount(type);
+            e.metalSlotsPerColumn = vertexInputMetalSlotsPerColumn(type);
+            e.metalSlotCount =
+                e.arrayCount * e.columnCount * e.metalSlotsPerColumn;
             sortedInputs.push_back(e);
         }
-        std::sort(sortedInputs.begin(), sortedInputs.end(),
-                  [](const InputEntry& a, const InputEntry& b) {
-                      return a.spirvLocation < b.spirvLocation;
-                  });
+        std::stable_sort(sortedInputs.begin(), sortedInputs.end(),
+                         [](const InputEntry& a, const InputEntry& b) {
+                             return a.spirvLocation < b.spirvLocation;
+                         });
         // Walk in SPIR-V location order; emit MSL-remapped locations so
-        // each array takes contiguous slots and the next input starts
-        // after the previous input's final slot. Array inputs emit one
-        // VertexInput per element — this matches SPIRV-Cross MSL
-        // output, where `in float arr[8]` becomes 8 separate
-        // `[[attribute(N..N+7)]]` declarations. The pipeline builder
+        // each array/matrix aggregate takes contiguous transport slots and
+        // the next input starts after the previous input's final slot. Array
+        // inputs emit one source location per element; matrices emit one per
+        // column; fp64 dvec3/dvec4 columns emit two Metal transport slots for
+        // that same GL source location. This matches SPIRV-Cross MSL output
+        // after `rewriteFp64VertexInputs()`: `dmat3` is 3 GL source columns
+        // and 6 Metal attributes, while `mat3` is 3 source columns and 3
+        // Metal attributes. The pipeline builder
         // in MetalFrameGraph.mm iterates `vertexInputs` and sets
         // `vertexDescriptor.attributes[input.location].format`, so
         // missing per-element entries would leave Metal attributes
@@ -7032,22 +7050,31 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             const auto& type = compiler.get_type(entry.res->type_id);
             const GLenum glType = spirvBaseTypeToGL(type);
             const bool containsFp64 = spirvTypeUsesFp64(compiler, type);
-            const std::uint32_t scalarSlots =
-                (type.basetype == spirv_cross::SPIRType::Double &&
-                 type.vecsize > 2) ? 2u : 1u;
-            for (std::uint32_t slot = 0; slot < entry.slotCount; ++slot) {
-                ShaderReflection::VertexInput vi;
-                vi.location = nextMslLocation + slot;
-                vi.sourceLocation =
-                    entry.spirvLocation + (slot / scalarSlots);
-                vi.name = entry.slotCount > 1
-                    ? (entry.res->name + "[" + std::to_string(slot) + "]")
+            std::uint32_t metalSlotOffset = 0;
+            for (std::uint32_t arrayIndex = 0;
+                 arrayIndex < entry.arrayCount; ++arrayIndex) {
+                const std::string logicalName = entry.arrayCount > 1
+                    ? (entry.res->name + "[" + std::to_string(arrayIndex) + "]")
                     : entry.res->name;
-                vi.type = glType;
-                vi.containsFp64 = containsFp64;
-                result.vertexInputs.push_back(std::move(vi));
+                for (std::uint32_t column = 0;
+                     column < entry.columnCount; ++column) {
+                    const std::uint32_t sourceLocation =
+                        entry.spirvLocation +
+                        arrayIndex * entry.columnCount + column;
+                    for (std::uint32_t transportSlot = 0;
+                         transportSlot < entry.metalSlotsPerColumn;
+                         ++transportSlot) {
+                        ShaderReflection::VertexInput vi;
+                        vi.location = nextMslLocation + metalSlotOffset++;
+                        vi.sourceLocation = sourceLocation;
+                        vi.name = logicalName;
+                        vi.type = glType;
+                        vi.containsFp64 = containsFp64;
+                        result.vertexInputs.push_back(std::move(vi));
+                    }
+                }
             }
-            nextMslLocation += entry.slotCount;
+            nextMslLocation += entry.metalSlotCount;
         }
 
         // Uniform buffers — two-pass approach:

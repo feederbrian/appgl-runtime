@@ -15596,10 +15596,10 @@ struct GLContext::Impl {
         return sidecar;
     }
 
-    bool vertexInputLocationContainsFp64(const ShaderReflection& reflection,
-                                         GLuint location) const {
+    bool vertexInputSourceLocationContainsFp64(const ShaderReflection& reflection,
+                                               GLuint sourceLocation) const {
         for (const auto& input : reflection.vertexInputs) {
-            if (input.location == location && input.containsFp64) {
+            if (input.sourceLocation == sourceLocation && input.containsFp64) {
                 return true;
             }
         }
@@ -15654,11 +15654,13 @@ struct GLContext::Impl {
                                std::vector<Fp64VertexAttribRange>& ranges,
                                std::size_t sourceOffset,
                                std::size_t stride) {
+            const GLuint sourceLocation = layout.location;
+            const bool sourceContainsFp64 =
+                vertexInputSourceLocationContainsFp64(
+                    *info.vertexReflection, sourceLocation);
             layout.location = metalVertexInputLocationForSource(
-                *info.vertexReflection, layout.location);
-            if (layout.glType != GL_DOUBLE ||
-                !vertexInputLocationContainsFp64(*info.vertexReflection,
-                                                 layout.location)) {
+                *info.vertexReflection, sourceLocation);
+            if (layout.glType != GL_DOUBLE || !sourceContainsFp64) {
                 out.push_back(layout);
                 return;
             }
