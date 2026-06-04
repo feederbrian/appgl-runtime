@@ -10,10 +10,13 @@
 
 #include <AppGL/AppGL.h>
 
+#include "../src/context/MetalMemoryPressure.h"
 #include "../src/context/MetalResourceResidency.h"
 
 extern "C" std::uint64_t appglR5EvictDerivedCachesForTesting(
     std::uint64_t budget);
+extern "C" std::uint64_t appglR5ForceMemoryPressureForTesting(
+    std::uint64_t level);
 
 namespace {
 
@@ -75,6 +78,10 @@ std::uint64_t jsonCounter(const std::string& json, const std::string& key) {
         ++cursor;
     }
     return value;
+}
+
+bool jsonContainsToken(const std::string& json, const char* token) {
+    return json.find(token) != std::string::npos;
 }
 
 void expectNoGLError(ProbeState& state,
@@ -766,6 +773,111 @@ void runTextureViewEvictionProbe(ProbeState& state, const R5GL& gl) {
     gl.DeleteProgram(program);
 }
 
+void runForcedPressureEvictionProbe(ProbeState& state, const R5GL& gl) {
+    appglR5ForceMemoryPressureForTesting(
+        appgl::metalMemoryPressureStateValue(
+            appgl::MetalMemoryPressureState::Idle));
+    setenv("APPGL_R5_EVICTION", "1", 1);
+    const GLuint program = buildFlatProgram(state, gl, "0.0, 0.0, 1.0");
+    GLuint base = 0;
+    GLuint view = 0;
+    GLuint framebuffer = 0;
+    gl.GenTextures(1, &base);
+    gl.BindTexture(GL_TEXTURE_2D, base);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl.TexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 4, 4);
+    expectNoGLError(state, gl.GetError, "forced-pressure base storage setup");
+    gl.GenTextures(1, &view);
+    gl.TextureView(view, GL_TEXTURE_2D, base, GL_RGBA8, 0, 1, 0, 1);
+    expectNoGLError(state, gl.GetError, "forced-pressure texture view setup");
+    gl.GenFramebuffers(1, &framebuffer);
+    gl.BindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                            GL_TEXTURE_2D, view, 0);
+    expectNoGLError(state, gl.GetError, "forced-pressure FBO attachment");
+    expect(state,
+           gl.CheckFramebufferStatus(GL_FRAMEBUFFER) ==
+               GL_FRAMEBUFFER_COMPLETE,
+           "forced-pressure FBO is complete");
+    drawAndReadFBO(state, gl, framebuffer, program, 0, 0, 255,
+                   "pre-pressure rendered-to texture-view readback");
+
+    const std::string beforeDiag = diagnosticsJSON();
+    const std::uint64_t beforeTriggered =
+        jsonCounter(beforeDiag, "passesTriggered");
+    const std::uint64_t beforeTextureEvictions =
+        jsonCounter(beforeDiag, "recordsEvictedTextureView");
+    const std::uint64_t beforeDeviceBytesFreed =
+        jsonCounter(beforeDiag, "deviceBytesFreed");
+    const std::uint64_t beforeTextureRebuilds =
+        jsonCounter(beforeDiag, "textureViewRebuildsAfterR5Evict");
+
+    const std::uint64_t forced =
+        appglR5ForceMemoryPressureForTesting(
+            appgl::metalMemoryPressureStateValue(
+                appgl::MetalMemoryPressureState::Soft));
+    expect(state,
+           forced == appgl::metalMemoryPressureStateValue(
+                         appgl::MetalMemoryPressureState::Soft),
+           "forced pressure hook applies Soft");
+    gl.Finish();
+    expectNoGLError(state, gl.GetError, "forced-pressure boundary finish");
+
+    const std::string pressureDiag = diagnosticsJSON();
+    expect(state,
+           jsonContainsToken(pressureDiag, "\"metalResources\":{") &&
+               jsonContainsToken(pressureDiag, "\"pressure\":{") &&
+               jsonContainsToken(pressureDiag, "\"state\":") &&
+               jsonContainsToken(pressureDiag, "\"workingSetRatio\":") &&
+               jsonContainsToken(pressureDiag, "\"r5Eviction\":{") &&
+               jsonContainsToken(pressureDiag, "\"passesTriggered\":") &&
+               jsonContainsToken(pressureDiag, "\"pressureLevelAtEvict\":") &&
+               jsonContainsToken(pressureDiag, "\"mutatedRecords\":") &&
+               jsonContainsToken(pressureDiag, "\"recordsEvictedByBucket\":{") &&
+               jsonContainsToken(pressureDiag, "\"textureView\":") &&
+               jsonContainsToken(pressureDiag, "\"deviceBytesFreed\":"),
+           "full appglDiagnosticsJSON exposes R5 pressure integrity fields");
+    expect(state,
+           jsonCounter(pressureDiag, "passesTriggered") >
+               beforeTriggered,
+           "forced pressure triggers pressure eviction pass");
+    expect(state,
+           jsonCounter(pressureDiag, "pressureLevelAtEvict") ==
+               appgl::metalMemoryPressureStateValue(
+                   appgl::MetalMemoryPressureState::Soft),
+           "forced pressure records Soft level");
+    expect(state,
+           jsonCounter(pressureDiag, "recordsEvictedTextureView") >
+               beforeTextureEvictions,
+           "forced pressure evicts a texture-view bucket record");
+    expect(state,
+           jsonCounter(pressureDiag, "deviceBytesFreed") ==
+               beforeDeviceBytesFreed,
+           "P1 forced pressure reports no device-byte relief");
+
+    drawAndReadFBO(state, gl, framebuffer, program, 0, 0, 255,
+                   "post-pressure texture-view reconstruct AE=0");
+    const std::string rebuildDiag = diagnosticsJSON();
+    expect(state,
+           jsonCounter(rebuildDiag, "textureViewRebuildsAfterR5Evict") >
+               beforeTextureRebuilds,
+           "forced pressure texture-view rematerialized");
+
+    appglR5ForceMemoryPressureForTesting(
+        appgl::metalMemoryPressureStateValue(
+            appgl::MetalMemoryPressureState::Idle));
+    gl.Finish();
+    unsetenv("APPGL_R5_EVICTION");
+    unsetenv("APPGL_R5_EVICTION_ENABLE");
+
+    gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+    gl.DeleteFramebuffers(1, &framebuffer);
+    GLuint textures[2] = {view, base};
+    gl.DeleteTextures(2, textures);
+    gl.DeleteProgram(program);
+}
+
 void runSamplingProxySkipProbe(ProbeState& state, const R5GL& gl) {
     const GLuint program = buildCubeSampleProgram(state, gl);
     GLuint base = 0;
@@ -904,6 +1016,7 @@ void runLiveEvictionProbe(ProbeState& state) {
         return;
     }
     runSamplingProxySkipProbe(state, gl);
+    runForcedPressureEvictionProbe(state, gl);
     runTextureViewEvictionProbe(state, gl);
     runExpandedIndexEvictionProbe(state, gl);
 

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -611,6 +613,7 @@ public:
     GLContext* currentContext();
     MetalMemoryPressureSnapshot sampleMemoryPressure(
         MetalMemoryPressureInputs inputs);
+    std::uint64_t forceMemoryPressureLevelForTesting(std::uint64_t level);
 
     // Context liveness tracking. Every GLContext registers itself in construction
     // and unregisters in destruction. Callers that want to inspect the current
@@ -785,6 +788,9 @@ public:
     };
 
 private:
+    static constexpr std::uint64_t kMemoryPressureForceDisabled =
+        UINT64_MAX;
+
     Runtime();
     ~Runtime();
     void initializeDispatch();
@@ -807,6 +813,8 @@ private:
     std::uint64_t errorLogEventsObserved_ = 0;
     InventorySnapshot lastKnownInventory_;
     std::unique_ptr<MemoryPressureObserver> memoryPressureObserver_;
+    std::atomic<std::uint64_t> forcedMemoryPressureLevelForTesting_{
+        kMemoryPressureForceDisabled};
 };
 
 template <typename ReturnType>

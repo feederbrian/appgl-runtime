@@ -1688,6 +1688,50 @@ void markDebugFunction(FunctionId id, std::string_view note) {
     Runtime::shared().coverageStore().markSmokeTested(id, kPhaseADebugTestId, note);
     Runtime::shared().refreshCurrentContextClaimedVersion();
 }
+
+MetalMemoryPressureState memoryPressureStateFromTestingLevel(
+    std::uint64_t level) {
+    if (level >= metalMemoryPressureStateValue(
+            MetalMemoryPressureState::Critical)) {
+        return MetalMemoryPressureState::Critical;
+    }
+    if (level >= metalMemoryPressureStateValue(MetalMemoryPressureState::Hard)) {
+        return MetalMemoryPressureState::Hard;
+    }
+    if (level >= metalMemoryPressureStateValue(MetalMemoryPressureState::Soft)) {
+        return MetalMemoryPressureState::Soft;
+    }
+    return MetalMemoryPressureState::Idle;
+}
+
+MetalOSMemoryPressureLevel osPressureForForcedMemoryPressure(
+    MetalMemoryPressureState state) {
+    switch (state) {
+    case MetalMemoryPressureState::Soft:
+    case MetalMemoryPressureState::Hard:
+        return MetalOSMemoryPressureLevel::Warning;
+    case MetalMemoryPressureState::Critical:
+        return MetalOSMemoryPressureLevel::Critical;
+    case MetalMemoryPressureState::Idle:
+        return MetalOSMemoryPressureLevel::None;
+    }
+    return MetalOSMemoryPressureLevel::None;
+}
+
+std::uint64_t syntheticCurrentBytesForForcedMemoryPressure(
+    MetalMemoryPressureState state) {
+    switch (state) {
+    case MetalMemoryPressureState::Soft:
+        return 800;
+    case MetalMemoryPressureState::Hard:
+        return 1000;
+    case MetalMemoryPressureState::Critical:
+        return 1100;
+    case MetalMemoryPressureState::Idle:
+        return 0;
+    }
+    return 0;
+}
 }  // namespace
 
 Runtime& Runtime::shared() {
@@ -1890,9 +1934,48 @@ GLContext* Runtime::currentContext() {
 MetalMemoryPressureSnapshot Runtime::sampleMemoryPressure(
     MetalMemoryPressureInputs inputs) {
     MetalMemoryPressureStateMachine fallbackPressureMachine;
-    return memoryPressureObserver_
+    MetalMemoryPressureSnapshot snapshot = memoryPressureObserver_
         ? memoryPressureObserver_->sample(inputs)
         : sampleMetalMemoryPressure(fallbackPressureMachine, inputs);
+    const std::uint64_t forcedLevel =
+        forcedMemoryPressureLevelForTesting_.load(std::memory_order_acquire);
+    if (forcedLevel == kMemoryPressureForceDisabled) {
+        return snapshot;
+    }
+
+    const MetalMemoryPressureState forcedState =
+        memoryPressureStateFromTestingLevel(forcedLevel);
+    constexpr std::uint64_t kSyntheticRecommendedBytes = 1000;
+    const std::uint64_t currentBytes =
+        syntheticCurrentBytesForForcedMemoryPressure(forcedState);
+    snapshot.inputs.currentAllocatedBytes = currentBytes;
+    snapshot.inputs.recommendedWorkingSetBytes = kSyntheticRecommendedBytes;
+    snapshot.inputs.recommendedWorkingSetAvailable = 1;
+    snapshot.inputs.osPressure = static_cast<std::uint64_t>(
+        osPressureForForcedMemoryPressure(forcedState));
+    snapshot.workingSetRatioPermyriad =
+        metalMemoryPressurePermyriad(currentBytes,
+                                     kSyntheticRecommendedBytes);
+    snapshot.workingSetRatioValid = 1;
+    snapshot.workingSetRatio =
+        static_cast<double>(currentBytes) /
+        static_cast<double>(kSyntheticRecommendedBytes);
+    snapshot.state = metalMemoryPressureStateValue(forcedState);
+    return snapshot;
+}
+
+std::uint64_t Runtime::forceMemoryPressureLevelForTesting(
+    std::uint64_t level) {
+    const MetalMemoryPressureState forcedState =
+        memoryPressureStateFromTestingLevel(level);
+    forcedMemoryPressureLevelForTesting_.store(
+        metalMemoryPressureStateValue(forcedState),
+        std::memory_order_release);
+    if (memoryPressureObserver_) {
+        memoryPressureObserver_->injectOSPressureForTesting(
+            osPressureForForcedMemoryPressure(forcedState));
+    }
+    return metalMemoryPressureStateValue(forcedState);
 }
 
 void Runtime::registerContext(GLContext* context) {
@@ -2325,11 +2408,7 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
     // observer never calls Runtime/GLContext or takes contextMutex_, and the
     // dispatch event handler writes atomics only, so this cannot invert with
     // context teardown or live diagnostics.
-    MetalMemoryPressureStateMachine fallbackPressureMachine;
-    const auto pressureSnapshot = memoryPressureObserver_
-        ? memoryPressureObserver_->sample(metalInventory.pressure)
-        : sampleMetalMemoryPressure(fallbackPressureMachine,
-                                    metalInventory.pressure);
+    const auto pressureSnapshot = sampleMemoryPressure(metalInventory.pressure);
     const auto& pressureInputs = pressureSnapshot.inputs;
     const auto& pressureWatermarks = pressureSnapshot.watermarks;
 
@@ -10128,4 +10207,9 @@ extern "C" std::uint64_t appglR5EvictDerivedCachesForTesting(std::uint64_t budge
         return 0;
     }
     return context->evictR5DerivedCachesForTesting(budget);
+}
+
+extern "C" std::uint64_t appglR5ForceMemoryPressureForTesting(
+    std::uint64_t level) {
+    return appgl::Runtime::shared().forceMemoryPressureLevelForTesting(level);
 }
