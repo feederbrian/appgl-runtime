@@ -613,9 +613,12 @@ public:
     GLContext* currentContext();
     MetalMemoryPressureSnapshot sampleMemoryPressure(
         MetalMemoryPressureInputs inputs);
+    MetalMemoryPressureSnapshot sampleMemoryPressureForR5Boundary(
+        MetalMemoryPressureInputs inputs);
     bool r5EvictionEnabledCached();
     bool refreshR5EvictionEnabled();
     std::uint64_t forceMemoryPressureLevelForTesting(std::uint64_t level);
+    std::uint64_t forceMemoryClassForTesting(std::uint64_t memoryClass);
 
     // Context liveness tracking. Every GLContext registers itself in construction
     // and unregisters in destruction. Callers that want to inspect the current
@@ -792,12 +795,19 @@ public:
 private:
     static constexpr std::uint64_t kMemoryPressureForceDisabled =
         UINT64_MAX;
+    static constexpr std::uint64_t kMemoryClassForceDisabled = UINT64_MAX;
     static constexpr std::uint8_t kR5EvictionFlagDisabled = 0;
     static constexpr std::uint8_t kR5EvictionFlagEnabled = 1;
     static constexpr std::uint8_t kR5EvictionFlagUnknown = 2;
 
     Runtime();
     ~Runtime();
+
+    MetalMemoryPressureSnapshot applyForcedMemoryPressureForTesting(
+        MetalMemoryPressureSnapshot snapshot) const;
+    MetalMemoryPressureInputs applyForcedMemoryClassInputForTesting(
+        MetalMemoryPressureInputs inputs) const;
+    std::uint64_t forcedMemoryClassValueForTesting() const;
     void initializeDispatch();
     // Must be called with contextMutex_ held, and with `context` still pointing
     // at a live, fully-constructed GLContext. Refreshes lastKnownInventory_.
@@ -820,6 +830,8 @@ private:
     std::unique_ptr<MemoryPressureObserver> memoryPressureObserver_;
     std::atomic<std::uint64_t> forcedMemoryPressureLevelForTesting_{
         kMemoryPressureForceDisabled};
+    std::atomic<std::uint64_t> forcedMemoryClassForTesting_{
+        kMemoryClassForceDisabled};
     std::atomic<std::uint8_t> r5EvictionEnabledCache_{
         kR5EvictionFlagUnknown};
 };

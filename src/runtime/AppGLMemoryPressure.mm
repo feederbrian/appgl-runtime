@@ -15,6 +15,9 @@ struct AtomicPressureState {
         static_cast<std::uint64_t>(MetalOSMemoryPressureLevel::None)};
     std::atomic<std::uint64_t> lastEventMask{0};
     std::atomic<std::uint64_t> eventSequence{0};
+    std::atomic<std::uint64_t> pendingPressurePeak{
+        metalMemoryPressureStateValue(MetalMemoryPressureState::Idle)};
+    std::atomic<std::uint64_t> pendingPressureEventSequence{0};
     std::atomic<std::uint64_t> warningEventCount{0};
     std::atomic<std::uint64_t> criticalEventCount{0};
 };
@@ -59,13 +62,49 @@ std::uint64_t syntheticMaskForLevel(MetalOSMemoryPressureLevel level) {
     return 0;
 }
 
+MetalMemoryPressureState pressureStateForOSLevel(
+    MetalOSMemoryPressureLevel level) {
+    switch (level) {
+    case MetalOSMemoryPressureLevel::Warning:
+        return MetalMemoryPressureState::Soft;
+    case MetalOSMemoryPressureLevel::Critical:
+        return MetalMemoryPressureState::Critical;
+    case MetalOSMemoryPressureLevel::None:
+        return MetalMemoryPressureState::Idle;
+    }
+    return MetalMemoryPressureState::Idle;
+}
+
+void latchPendingPressurePeak(AtomicPressureState& state,
+                              MetalMemoryPressureState peak,
+                              std::uint64_t sequence) {
+    const std::uint64_t peakValue = metalMemoryPressureStateValue(peak);
+    if (peakValue == metalMemoryPressureStateValue(
+            MetalMemoryPressureState::Idle)) {
+        return;
+    }
+    state.pendingPressureEventSequence.store(sequence,
+                                             std::memory_order_release);
+    std::uint64_t current =
+        state.pendingPressurePeak.load(std::memory_order_acquire);
+    while (current < peakValue &&
+           !state.pendingPressurePeak.compare_exchange_weak(
+               current,
+               peakValue,
+               std::memory_order_acq_rel,
+               std::memory_order_acquire)) {
+    }
+}
+
 void recordPressureEvent(AtomicPressureState& state,
                          std::uint64_t eventMask,
                          MetalOSMemoryPressureLevel level) {
     state.lastEventMask.store(eventMask, std::memory_order_relaxed);
     state.osPressure.store(static_cast<std::uint64_t>(level),
                            std::memory_order_release);
-    state.eventSequence.fetch_add(1, std::memory_order_relaxed);
+    const std::uint64_t sequence =
+        state.eventSequence.fetch_add(1, std::memory_order_relaxed) + 1;
+    latchPendingPressurePeak(state, pressureStateForOSLevel(level), sequence);
     if (level == MetalOSMemoryPressureLevel::Critical) {
         state.criticalEventCount.fetch_add(1, std::memory_order_relaxed);
     } else if (level == MetalOSMemoryPressureLevel::Warning) {
@@ -160,24 +199,54 @@ struct MemoryPressureObserver::Impl {
         }
     }
 
-    MetalMemoryPressureSnapshot sample(MetalMemoryPressureInputs inputs) {
+    MetalMemoryPressureSnapshot sample(MetalMemoryPressureInputs inputs,
+                                       bool consumePending) {
         inputs.osPressure =
             atomicState.osPressure.load(std::memory_order_acquire);
         inputs.lastPressureEvent =
             atomicState.lastEventMask.load(std::memory_order_relaxed);
         inputs.lastPressureEventSequence =
             atomicState.eventSequence.load(std::memory_order_relaxed);
+        MetalMemoryPressureClass memoryClass =
+            metalMemoryPressureClassFromValue(inputs.memoryClass);
+        if (memoryClass == MetalMemoryPressureClass::Unknown) {
+            memoryClass = metalMemoryPressureClassForWorkingSet(
+                inputs.recommendedWorkingSetBytes,
+                inputs.recommendedWorkingSetAvailable != 0);
+        }
+        inputs.memoryClass = metalMemoryPressureClassValue(memoryClass);
+        inputs.pendingPressurePeak = consumePending
+            ? atomicState.pendingPressurePeak.exchange(
+                  metalMemoryPressureStateValue(MetalMemoryPressureState::Idle),
+                  std::memory_order_acq_rel)
+            : atomicState.pendingPressurePeak.load(std::memory_order_acquire);
+        inputs.pendingPressureEventSequence =
+            atomicState.pendingPressureEventSequence.load(
+                std::memory_order_acquire);
         inputs.warningEventCount =
             atomicState.warningEventCount.load(std::memory_order_relaxed);
         inputs.criticalEventCount =
             atomicState.criticalEventCount.load(std::memory_order_relaxed);
 
         std::lock_guard<std::mutex> lock(stateMutex);
-        return sampleMetalMemoryPressure(stateMachine, inputs, watermarks);
+        return sampleMetalMemoryPressure(stateMachine,
+                                         inputs,
+                                         watermarksForInputs(inputs));
     }
 
     void injectOSPressureForTesting(MetalOSMemoryPressureLevel level) {
         recordPressureEvent(atomicState, syntheticMaskForLevel(level), level);
+    }
+
+    MetalMemoryPressureWatermarks watermarksForInputs(
+        const MetalMemoryPressureInputs& inputs) const {
+        const MetalMemoryPressureClass memoryClass =
+            metalMemoryPressureClassFromValue(inputs.memoryClass);
+        if (memoryClass != MetalMemoryPressureClass::Unknown &&
+            memoryClass != MetalMemoryPressureClass::Mid) {
+            return metalMemoryPressureWatermarksForClass(memoryClass);
+        }
+        return watermarks;
     }
 
     AtomicPressureState atomicState;
@@ -196,7 +265,12 @@ MemoryPressureObserver::~MemoryPressureObserver() = default;
 
 MetalMemoryPressureSnapshot MemoryPressureObserver::sample(
     MetalMemoryPressureInputs inputs) {
-    return impl_->sample(inputs);
+    return impl_->sample(inputs, false);
+}
+
+MetalMemoryPressureSnapshot MemoryPressureObserver::sampleAndConsumePending(
+    MetalMemoryPressureInputs inputs) {
+    return impl_->sample(inputs, true);
 }
 
 void MemoryPressureObserver::injectOSPressureForTesting(

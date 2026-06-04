@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cctype>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -1733,6 +1734,67 @@ std::uint64_t syntheticCurrentBytesForForcedMemoryPressure(
     }
     return 0;
 }
+
+bool equalsIgnoreCase(const char* actual, const char* expectedLowercase) {
+    if (actual == nullptr || expectedLowercase == nullptr) {
+        return false;
+    }
+    while (*actual != '\0' && *expectedLowercase != '\0') {
+        const unsigned char actualChar =
+            static_cast<unsigned char>(*actual);
+        if (std::tolower(actualChar) != *expectedLowercase) {
+            return false;
+        }
+        ++actual;
+        ++expectedLowercase;
+    }
+    return *actual == '\0' && *expectedLowercase == '\0';
+}
+
+std::uint64_t memoryClassForceValueForTesting(std::uint64_t value) {
+    if (value == 0) {
+        return UINT64_MAX;
+    }
+    return metalMemoryPressureClassValue(
+        metalMemoryPressureClassFromValue(value));
+}
+
+std::uint64_t memoryClassForceValueFromString(const char* value) {
+    if (value == nullptr || value[0] == '\0' ||
+        equalsIgnoreCase(value, "auto") ||
+        equalsIgnoreCase(value, "off") ||
+        equalsIgnoreCase(value, "disabled")) {
+        return UINT64_MAX;
+    }
+    if (equalsIgnoreCase(value, "low")) {
+        return metalMemoryPressureClassValue(MetalMemoryPressureClass::Low);
+    }
+    if (equalsIgnoreCase(value, "mid") ||
+        equalsIgnoreCase(value, "medium")) {
+        return metalMemoryPressureClassValue(MetalMemoryPressureClass::Mid);
+    }
+    if (equalsIgnoreCase(value, "high")) {
+        return metalMemoryPressureClassValue(MetalMemoryPressureClass::High);
+    }
+
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(value, &end, 10);
+    if (end != value && end != nullptr && *end == '\0') {
+        return memoryClassForceValueForTesting(
+            static_cast<std::uint64_t>(parsed));
+    }
+    return UINT64_MAX;
+}
+
+std::uint64_t memoryClassForceValueFromEnvironmentForTesting() {
+    if (const char* value = std::getenv("APPGL_R5_FORCE_MEMORY_CLASS")) {
+        return memoryClassForceValueFromString(value);
+    }
+    if (const char* value = std::getenv("APPGL_FORCE_MEMORY_CLASS")) {
+        return memoryClassForceValueFromString(value);
+    }
+    return UINT64_MAX;
+}
 }  // namespace
 
 Runtime& Runtime::shared() {
@@ -1934,10 +1996,36 @@ GLContext* Runtime::currentContext() {
 
 MetalMemoryPressureSnapshot Runtime::sampleMemoryPressure(
     MetalMemoryPressureInputs inputs) {
+    inputs = applyForcedMemoryClassInputForTesting(inputs);
     MetalMemoryPressureStateMachine fallbackPressureMachine;
     MetalMemoryPressureSnapshot snapshot = memoryPressureObserver_
         ? memoryPressureObserver_->sample(inputs)
         : sampleMetalMemoryPressure(fallbackPressureMachine, inputs);
+    return applyForcedMemoryPressureForTesting(snapshot);
+}
+
+MetalMemoryPressureSnapshot Runtime::sampleMemoryPressureForR5Boundary(
+    MetalMemoryPressureInputs inputs) {
+    inputs = applyForcedMemoryClassInputForTesting(inputs);
+    MetalMemoryPressureStateMachine fallbackPressureMachine;
+    MetalMemoryPressureSnapshot snapshot = memoryPressureObserver_
+        ? memoryPressureObserver_->sampleAndConsumePending(inputs)
+        : sampleMetalMemoryPressure(fallbackPressureMachine, inputs);
+    return applyForcedMemoryPressureForTesting(snapshot);
+}
+
+MetalMemoryPressureSnapshot Runtime::applyForcedMemoryPressureForTesting(
+    MetalMemoryPressureSnapshot snapshot) const {
+    const std::uint64_t forcedClass = forcedMemoryClassValueForTesting();
+    if (forcedClass != kMemoryClassForceDisabled) {
+        const MetalMemoryPressureClass memoryClass =
+            metalMemoryPressureClassFromValue(forcedClass);
+        snapshot.inputs.memoryClass =
+            metalMemoryPressureClassValue(memoryClass);
+        snapshot.watermarks =
+            metalMemoryPressureWatermarksForClass(memoryClass);
+    }
+
     const std::uint64_t forcedLevel =
         forcedMemoryPressureLevelForTesting_.load(std::memory_order_acquire);
     if (forcedLevel == kMemoryPressureForceDisabled) {
@@ -1963,6 +2051,27 @@ MetalMemoryPressureSnapshot Runtime::sampleMemoryPressure(
         static_cast<double>(kSyntheticRecommendedBytes);
     snapshot.state = metalMemoryPressureStateValue(forcedState);
     return snapshot;
+}
+
+MetalMemoryPressureInputs Runtime::applyForcedMemoryClassInputForTesting(
+    MetalMemoryPressureInputs inputs) const {
+    const std::uint64_t forcedClass = forcedMemoryClassValueForTesting();
+    if (forcedClass == kMemoryClassForceDisabled) {
+        return inputs;
+    }
+    inputs.memoryClass =
+        metalMemoryPressureClassValue(
+            metalMemoryPressureClassFromValue(forcedClass));
+    return inputs;
+}
+
+std::uint64_t Runtime::forcedMemoryClassValueForTesting() const {
+    const std::uint64_t forcedClass =
+        forcedMemoryClassForTesting_.load(std::memory_order_acquire);
+    if (forcedClass != kMemoryClassForceDisabled) {
+        return forcedClass;
+    }
+    return memoryClassForceValueFromEnvironmentForTesting();
 }
 
 bool Runtime::r5EvictionEnabledCached() {
@@ -1995,6 +2104,17 @@ bool Runtime::refreshR5EvictionEnabled() {
 std::uint64_t Runtime::forceMemoryPressureLevelForTesting(
     std::uint64_t level) {
     refreshR5EvictionEnabled();
+    if (level == 0 || level == kMemoryPressureForceDisabled) {
+        forcedMemoryPressureLevelForTesting_.store(
+            kMemoryPressureForceDisabled,
+            std::memory_order_release);
+        if (memoryPressureObserver_) {
+            memoryPressureObserver_->injectOSPressureForTesting(
+                MetalOSMemoryPressureLevel::None);
+        }
+        return 0;
+    }
+
     const MetalMemoryPressureState forcedState =
         memoryPressureStateFromTestingLevel(level);
     forcedMemoryPressureLevelForTesting_.store(
@@ -2005,6 +2125,18 @@ std::uint64_t Runtime::forceMemoryPressureLevelForTesting(
             osPressureForForcedMemoryPressure(forcedState));
     }
     return metalMemoryPressureStateValue(forcedState);
+}
+
+std::uint64_t Runtime::forceMemoryClassForTesting(
+    std::uint64_t memoryClass) {
+    refreshR5EvictionEnabled();
+    const std::uint64_t forcedClass =
+        memoryClassForceValueForTesting(memoryClass);
+    forcedMemoryClassForTesting_.store(forcedClass, std::memory_order_release);
+    if (forcedClass == kMemoryClassForceDisabled) {
+        return 0;
+    }
+    return forcedClass;
 }
 
 void Runtime::registerContext(GLContext* context) {
@@ -2474,6 +2606,10 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << pressureInputs.lastPressureEvent << ","
            << "\"lastPressureEventSequence\":"
            << pressureInputs.lastPressureEventSequence << ","
+           << "\"pendingPressurePeak\":"
+           << pressureInputs.pendingPressurePeak << ","
+           << "\"pendingPressureEventSequence\":"
+           << pressureInputs.pendingPressureEventSequence << ","
            << "\"stateTransitionCount\":"
            << pressureSnapshot.stateTransitionCount << ","
            << "\"softTransitionCount\":"
@@ -2498,6 +2634,7 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << pressureInputs.processHeapBytes << ","
            << "\"processHeapAvailable\":"
            << pressureInputs.processHeapAvailable << ","
+           << "\"memoryClass\":" << pressureInputs.memoryClass << ","
            << "\"cbPressureReserveSlots\":"
            << pressureInputs.cbPressureReserveSlots << ","
            << "\"cbPressureSoftCapSlots\":"
@@ -2838,7 +2975,56 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << "\"primaryVolatileRestoreEmpty\":"
            << metalInventory.r5Eviction.primaryVolatileRestoreEmpty << ","
            << "\"reconstructionFailures\":"
-           << metalInventory.r5Eviction.reconstructionFailures
+           << metalInventory.r5Eviction.reconstructionFailures << ","
+           << "\"pendingPressureBoundaryConsumes\":"
+           << metalInventory.r5Eviction.pendingPressureBoundaryConsumes
+           << ","
+           << "\"pendingPressurePeakAtBoundary\":"
+           << metalInventory.r5Eviction.pendingPressurePeakAtBoundary << ","
+           << "\"criticalPressureExhaustionLatches\":"
+           << metalInventory.r5Eviction.criticalPressureExhaustionLatches
+           << ","
+           << "\"criticalPressureOOMErrors\":"
+           << metalInventory.r5Eviction.criticalPressureOOMErrors << ","
+           << "\"criticalPressureNoCandidateLatches\":"
+           << metalInventory.r5Eviction.criticalPressureNoCandidateLatches
+           << ","
+           << "\"criticalPressureNoReliefLatches\":"
+           << metalInventory.r5Eviction.criticalPressureNoReliefLatches
+           << ","
+           << "\"criticalPressureBudgetExhaustedLatches\":"
+           << metalInventory.r5Eviction.criticalPressureBudgetExhaustedLatches
+           << ","
+           << "\"criticalPressureStillCriticalLatches\":"
+           << metalInventory.r5Eviction.criticalPressureStillCriticalLatches
+           << ","
+           << "\"pressureMemoryClassAtEvict\":"
+           << metalInventory.r5Eviction.pressureMemoryClassAtEvict << ","
+           << "\"pressurePolicySoftBudget\":"
+           << metalInventory.r5Eviction.pressurePolicySoftBudget << ","
+           << "\"pressurePolicyHardBudget\":"
+           << metalInventory.r5Eviction.pressurePolicyHardBudget << ","
+           << "\"pressurePolicyCriticalBudget\":"
+           << metalInventory.r5Eviction.pressurePolicyCriticalBudget << ","
+           << "\"pressurePolicyMinIdleBoundaryAge\":"
+           << metalInventory.r5Eviction.pressurePolicyMinIdleBoundaryAge
+           << ","
+           << "\"policyRetentionSkippedRecords\":"
+           << metalInventory.r5Eviction.policyRetentionSkippedRecords << ","
+           << "\"lowMemoryPolicyPasses\":"
+           << metalInventory.r5Eviction.lowMemoryPolicyPasses << ","
+           << "\"midMemoryPolicyPasses\":"
+           << metalInventory.r5Eviction.midMemoryPolicyPasses << ","
+           << "\"highMemoryPolicyPasses\":"
+           << metalInventory.r5Eviction.highMemoryPolicyPasses << ","
+           << "\"highMemoryRetentionSkippedRecords\":"
+           << metalInventory.r5Eviction.highMemoryRetentionSkippedRecords
+           << ","
+           << "\"highMemoryCriticalReliefPasses\":"
+           << metalInventory.r5Eviction.highMemoryCriticalReliefPasses
+           << ","
+           << "\"highMemoryDeviceBytesFreed\":"
+           << metalInventory.r5Eviction.highMemoryDeviceBytesFreed
            << "},";
     stream << "\"r5Touches\":{"
            << "\"serial\":" << metalInventory.r5Touches.serial << ","
@@ -10273,4 +10459,9 @@ extern "C" std::uint64_t appglR5EvictDerivedCachesForTesting(std::uint64_t budge
 extern "C" std::uint64_t appglR5ForceMemoryPressureForTesting(
     std::uint64_t level) {
     return appgl::Runtime::shared().forceMemoryPressureLevelForTesting(level);
+}
+
+extern "C" std::uint64_t appglR5ForceMemoryClassForTesting(
+    std::uint64_t memoryClass) {
+    return appgl::Runtime::shared().forceMemoryClassForTesting(memoryClass);
 }

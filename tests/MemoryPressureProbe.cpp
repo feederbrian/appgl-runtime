@@ -176,6 +176,81 @@ void runObserverInjectionProbe(ProbeState& state) {
                 "observer clear injection");
     expect(state, snapshot.inputs.lastPressureEventSequence == 3,
            "observer clear increments sequence");
+    expect(state,
+           snapshot.inputs.pendingPressurePeak ==
+               appgl::metalMemoryPressureStateValue(
+                   appgl::MetalMemoryPressureState::Critical),
+           "observer retains pending critical peak across clear");
+
+    snapshot = observer.sampleAndConsumePending(inputs);
+    expectState(state, snapshot, appgl::MetalMemoryPressureState::Idle,
+                "observer consume leaves current state idle");
+    expect(state,
+           snapshot.inputs.pendingPressurePeak ==
+               appgl::metalMemoryPressureStateValue(
+                   appgl::MetalMemoryPressureState::Critical),
+           "observer consume reports pending critical peak");
+
+    snapshot = observer.sample(inputs);
+    expect(state,
+           snapshot.inputs.pendingPressurePeak ==
+               appgl::metalMemoryPressureStateValue(
+                   appgl::MetalMemoryPressureState::Idle),
+           "observer consume clears pending peak");
+}
+
+void runMemoryClassPolicyProbe(ProbeState& state) {
+    constexpr std::uint64_t kGiB = 1024ull * 1024ull * 1024ull;
+    appgl::MemoryPressureObserver observer(false);
+
+    auto inputs = ratioInput(0, 4ull * kGiB);
+    auto snapshot = observer.sample(inputs);
+    expect(state,
+           snapshot.inputs.memoryClass ==
+               appgl::metalMemoryPressureClassValue(
+                   appgl::MetalMemoryPressureClass::Low),
+           "low working-set memory class");
+    expect(state, snapshot.watermarks.softTargetPermyriad == 7000,
+           "low memory soft watermark");
+    expect(state, snapshot.watermarks.criticalTargetPermyriad == 10000,
+           "low memory critical watermark");
+
+    inputs = ratioInput(0, 16ull * kGiB);
+    snapshot = observer.sample(inputs);
+    expect(state,
+           snapshot.inputs.memoryClass ==
+               appgl::metalMemoryPressureClassValue(
+                   appgl::MetalMemoryPressureClass::Mid),
+           "mid working-set memory class");
+    expect(state, snapshot.watermarks.softTargetPermyriad == 8000,
+           "mid memory soft watermark");
+    expect(state, snapshot.watermarks.criticalTargetPermyriad == 11000,
+           "mid memory critical watermark");
+
+    inputs = ratioInput(0, 32ull * kGiB);
+    snapshot = observer.sample(inputs);
+    expect(state,
+           snapshot.inputs.memoryClass ==
+               appgl::metalMemoryPressureClassValue(
+                   appgl::MetalMemoryPressureClass::High),
+           "high working-set memory class");
+    expect(state, snapshot.watermarks.softTargetPermyriad == 8800,
+           "high memory soft watermark");
+    expect(state, snapshot.watermarks.criticalTargetPermyriad == 12500,
+           "high memory critical watermark");
+
+    inputs = ratioInput(0, 32ull * kGiB);
+    inputs.memoryClass =
+        appgl::metalMemoryPressureClassValue(
+            appgl::MetalMemoryPressureClass::Low);
+    snapshot = observer.sample(inputs);
+    expect(state,
+           snapshot.inputs.memoryClass ==
+               appgl::metalMemoryPressureClassValue(
+                   appgl::MetalMemoryPressureClass::Low),
+           "injected memory class overrides working-set classification");
+    expect(state, snapshot.watermarks.softTargetPermyriad == 7000,
+           "injected low memory class uses low watermarks");
 }
 
 }  // namespace
@@ -185,6 +260,7 @@ int main() {
     runHysteresisProbe(state);
     runOSOnlyProbe(state);
     runObserverInjectionProbe(state);
+    runMemoryClassPolicyProbe(state);
 
     if (state.failures != 0) {
         std::cerr << state.failures << " memory pressure probe failures\n";

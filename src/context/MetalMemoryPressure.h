@@ -19,6 +19,13 @@ enum class MetalOSMemoryPressureLevel : std::uint8_t {
     Critical = 2,
 };
 
+enum class MetalMemoryPressureClass : std::uint8_t {
+    Unknown = 0,
+    Low = 1,
+    Mid = 2,
+    High = 3,
+};
+
 struct MetalMemoryPressureWatermarks {
     std::uint64_t softTargetPermyriad = 8000;
     std::uint64_t hardTargetPermyriad = 10000;
@@ -38,9 +45,12 @@ struct MetalMemoryPressureInputs {
     std::uint64_t processResidentAvailable = 0;
     std::uint64_t processHeapBytes = 0;
     std::uint64_t processHeapAvailable = 0;
+    std::uint64_t memoryClass = 0;
     std::uint64_t osPressure = 0;
     std::uint64_t lastPressureEvent = 0;
     std::uint64_t lastPressureEventSequence = 0;
+    std::uint64_t pendingPressurePeak = 0;
+    std::uint64_t pendingPressureEventSequence = 0;
     std::uint64_t warningEventCount = 0;
     std::uint64_t criticalEventCount = 0;
     std::uint64_t cbPressureReserveSlots = 0;
@@ -87,6 +97,71 @@ inline MetalOSMemoryPressureLevel metalOSMemoryPressureLevel(
         return MetalOSMemoryPressureLevel::Warning;
     }
     return MetalOSMemoryPressureLevel::None;
+}
+
+inline std::uint64_t metalMemoryPressureClassValue(
+    MetalMemoryPressureClass memoryClass) {
+    return static_cast<std::uint64_t>(memoryClass);
+}
+
+inline MetalMemoryPressureClass metalMemoryPressureClassFromValue(
+    std::uint64_t value) {
+    if (value >= metalMemoryPressureClassValue(
+            MetalMemoryPressureClass::High)) {
+        return MetalMemoryPressureClass::High;
+    }
+    if (value >= metalMemoryPressureClassValue(MetalMemoryPressureClass::Mid)) {
+        return MetalMemoryPressureClass::Mid;
+    }
+    if (value >= metalMemoryPressureClassValue(MetalMemoryPressureClass::Low)) {
+        return MetalMemoryPressureClass::Low;
+    }
+    return MetalMemoryPressureClass::Unknown;
+}
+
+inline MetalMemoryPressureClass metalMemoryPressureClassForWorkingSet(
+    std::uint64_t recommendedWorkingSetBytes,
+    bool recommendedWorkingSetAvailable) {
+    if (!recommendedWorkingSetAvailable || recommendedWorkingSetBytes == 0) {
+        return MetalMemoryPressureClass::Unknown;
+    }
+    constexpr std::uint64_t kGiB = 1024ull * 1024ull * 1024ull;
+    constexpr std::uint64_t kLowWorkingSetCeiling = 8ull * kGiB;
+    constexpr std::uint64_t kHighWorkingSetFloor = 24ull * kGiB;
+    if (recommendedWorkingSetBytes < kLowWorkingSetCeiling) {
+        return MetalMemoryPressureClass::Low;
+    }
+    if (recommendedWorkingSetBytes >= kHighWorkingSetFloor) {
+        return MetalMemoryPressureClass::High;
+    }
+    return MetalMemoryPressureClass::Mid;
+}
+
+inline MetalMemoryPressureWatermarks metalMemoryPressureWatermarksForClass(
+    MetalMemoryPressureClass memoryClass) {
+    MetalMemoryPressureWatermarks watermarks;
+    switch (memoryClass) {
+    case MetalMemoryPressureClass::Low:
+        watermarks.softTargetPermyriad = 7000;
+        watermarks.hardTargetPermyriad = 9000;
+        watermarks.criticalTargetPermyriad = 10000;
+        watermarks.softExitPermyriad = 6200;
+        watermarks.hardExitPermyriad = 8000;
+        watermarks.criticalExitPermyriad = 9000;
+        break;
+    case MetalMemoryPressureClass::High:
+        watermarks.softTargetPermyriad = 8800;
+        watermarks.hardTargetPermyriad = 11000;
+        watermarks.criticalTargetPermyriad = 12500;
+        watermarks.softExitPermyriad = 8000;
+        watermarks.hardExitPermyriad = 10000;
+        watermarks.criticalExitPermyriad = 11000;
+        break;
+    case MetalMemoryPressureClass::Mid:
+    case MetalMemoryPressureClass::Unknown:
+        break;
+    }
+    return watermarks;
 }
 
 inline std::uint64_t metalMemoryPressurePermyriad(

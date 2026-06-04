@@ -178,11 +178,27 @@ struct R5EvictionRequest {
     MetalMemoryPressureState pressureLevel = MetalMemoryPressureState::Idle;
     std::uint64_t budgetRecords = 0;
     R5EvictionBucketMask bucketAllowlist = kR5EvictionBucketAll;
+    MetalMemoryPressureClass memoryClass = MetalMemoryPressureClass::Unknown;
+    std::uint64_t minIdleBoundaryAge = 0;
+    std::uint64_t policySoftBudgetRecords = 0;
+    std::uint64_t policyHardBudgetRecords = 0;
+    std::uint64_t policyCriticalBudgetRecords = 0;
 };
 
 struct R5EvictionCandidate {
     ResourceResidencyRecord record;
     R5EvictionBucketMask bucket = 0;
+};
+
+struct R5PressureEvictionPolicy {
+    MetalMemoryPressureClass memoryClass = MetalMemoryPressureClass::Unknown;
+    std::uint64_t softBudgetRecords = 8;
+    std::uint64_t hardBudgetRecords = 16;
+    std::uint64_t criticalBudgetRecords = kMetalR5ResidencyCandidateLimit;
+    std::uint64_t softMinIdleBoundaryAge = 0;
+    std::uint64_t hardMinIdleBoundaryAge = 0;
+    std::uint64_t criticalMinIdleBoundaryAge = 0;
+    R5EvictionBucketMask bucketAllowlist = kR5EvictionBucketAll;
 };
 
 R5EvictionBucketMask r5EvictionBucketForRecord(
@@ -222,14 +238,66 @@ MetalMemoryPressureState metalMemoryPressureStateFromValue(
     return MetalMemoryPressureState::Idle;
 }
 
-std::uint64_t r5PressureBudgetForLevel(MetalMemoryPressureState level) {
+MetalMemoryPressureState r5MaxPressureLevel(MetalMemoryPressureState lhs,
+                                            MetalMemoryPressureState rhs) {
+    return metalMemoryPressureStateValue(lhs) >=
+            metalMemoryPressureStateValue(rhs)
+        ? lhs
+        : rhs;
+}
+
+R5PressureEvictionPolicy r5PressureEvictionPolicyForSnapshot(
+    const MetalMemoryPressureSnapshot& snapshot) {
+    R5PressureEvictionPolicy policy;
+    policy.memoryClass =
+        metalMemoryPressureClassFromValue(snapshot.inputs.memoryClass);
+    switch (policy.memoryClass) {
+    case MetalMemoryPressureClass::Low:
+        policy.softBudgetRecords = 4;
+        policy.hardBudgetRecords = 8;
+        policy.criticalBudgetRecords = 32;
+        break;
+    case MetalMemoryPressureClass::High:
+        policy.softBudgetRecords = 12;
+        policy.hardBudgetRecords = 32;
+        policy.criticalBudgetRecords = kMetalR5ResidencyCandidateLimit;
+        policy.softMinIdleBoundaryAge = 4;
+        policy.hardMinIdleBoundaryAge = 2;
+        policy.criticalMinIdleBoundaryAge = 0;
+        break;
+    case MetalMemoryPressureClass::Mid:
+    case MetalMemoryPressureClass::Unknown:
+        break;
+    }
+    return policy;
+}
+
+std::uint64_t r5PressureBudgetForLevel(
+    MetalMemoryPressureState level,
+    const R5PressureEvictionPolicy& policy) {
     switch (level) {
     case MetalMemoryPressureState::Soft:
-        return 8;
+        return policy.softBudgetRecords;
     case MetalMemoryPressureState::Hard:
-        return 16;
+        return policy.hardBudgetRecords;
     case MetalMemoryPressureState::Critical:
-        return kMetalR5ResidencyCandidateLimit;
+        return policy.criticalBudgetRecords;
+    case MetalMemoryPressureState::Idle:
+        return 0;
+    }
+    return 0;
+}
+
+std::uint64_t r5PressureRetentionAgeForLevel(
+    MetalMemoryPressureState level,
+    const R5PressureEvictionPolicy& policy) {
+    switch (level) {
+    case MetalMemoryPressureState::Soft:
+        return policy.softMinIdleBoundaryAge;
+    case MetalMemoryPressureState::Hard:
+        return policy.hardMinIdleBoundaryAge;
+    case MetalMemoryPressureState::Critical:
+        return policy.criticalMinIdleBoundaryAge;
     case MetalMemoryPressureState::Idle:
         return 0;
     }
@@ -4536,6 +4604,21 @@ static MetalResidencyAuthorityClass r5PrimaryTextureAuthority(
         return MetalResidencyAuthorityClass::Reconstructable;
     }
     return MetalResidencyAuthorityClass::Authoritative;
+}
+
+static std::uint64_t metalDeviceCurrentAllocatedBytes(id<MTLDevice> device) {
+    if (device != nil && [device respondsToSelector:@selector(currentAllocatedSize)]) {
+        return static_cast<std::uint64_t>(device.currentAllocatedSize);
+    }
+    return 0;
+}
+
+static std::uint64_t metalDeviceRecommendedWorkingSetBytes(id<MTLDevice> device) {
+    if (device != nil &&
+        [device respondsToSelector:@selector(recommendedMaxWorkingSetSize)]) {
+        return static_cast<std::uint64_t>(device.recommendedMaxWorkingSetSize);
+    }
+    return 0;
 }
 
 static MTLSize sparsePageSizeForFormat(id<MTLDevice> device, GLenum target, GLenum internalformat) {
@@ -21680,6 +21763,7 @@ struct GLContext::Impl {
     void markR5Boundary() {
         ++r5BoundarySerial;
         maybeRunPressureEvictionPass();
+        emitR5PressureOOMIfPending();
     }
 
     bool r5TextureRecordLastUseMatches(const GLTextureObject& texture,
@@ -21716,6 +21800,20 @@ struct GLContext::Impl {
                    record.sourceGeneration &&
                buffer.cachedExpansionGeneration ==
                    buffer.indexExpansionGeneration;
+    }
+
+    bool r5PressureRetentionAllowsRecord(
+        const ResourceResidencyRecord& record,
+        const R5EvictionRequest& request) const noexcept {
+        if (request.reason != R5EvictionReason::Pressure ||
+            request.minIdleBoundaryAge == 0) {
+            return true;
+        }
+        if (r5BoundarySerial <= record.lastUseFrame) {
+            return false;
+        }
+        return r5BoundarySerial - record.lastUseFrame >=
+            request.minIdleBoundaryAge;
     }
 
     bool hasOutstandingCommandBuffers() const noexcept {
@@ -21803,6 +21901,13 @@ struct GLContext::Impl {
             }
             if (!metalR5LastUseKnown(record)) {
                 ++r5Eviction.unknownLastUseSkipped;
+                continue;
+            }
+            if (!r5PressureRetentionAllowsRecord(record, request)) {
+                ++r5Eviction.policyRetentionSkippedRecords;
+                if (request.memoryClass == MetalMemoryPressureClass::High) {
+                    ++r5Eviction.highMemoryRetentionSkippedRecords;
+                }
                 continue;
             }
 
@@ -22036,6 +22141,90 @@ struct GLContext::Impl {
         }
     }
 
+    void recordR5PressurePolicy(const R5EvictionRequest& request) noexcept {
+        r5Eviction.pressureMemoryClassAtEvict =
+            metalMemoryPressureClassValue(request.memoryClass);
+        r5Eviction.pressurePolicySoftBudget =
+            request.policySoftBudgetRecords;
+        r5Eviction.pressurePolicyHardBudget =
+            request.policyHardBudgetRecords;
+        r5Eviction.pressurePolicyCriticalBudget =
+            request.policyCriticalBudgetRecords;
+        r5Eviction.pressurePolicyMinIdleBoundaryAge =
+            request.minIdleBoundaryAge;
+        switch (request.memoryClass) {
+        case MetalMemoryPressureClass::Low:
+            ++r5Eviction.lowMemoryPolicyPasses;
+            break;
+        case MetalMemoryPressureClass::High:
+            ++r5Eviction.highMemoryPolicyPasses;
+            break;
+        case MetalMemoryPressureClass::Mid:
+        case MetalMemoryPressureClass::Unknown:
+            ++r5Eviction.midMemoryPolicyPasses;
+            break;
+        }
+    }
+
+    bool r5CriticalPressureStillActive(
+        const MetalResourceInventory& inventory) {
+        const auto snapshot =
+            Runtime::shared().sampleMemoryPressure(inventory.pressure);
+        return metalMemoryPressureStateFromValue(snapshot.state) ==
+            MetalMemoryPressureState::Critical;
+    }
+
+    void maybeLatchR5CriticalPressureOOM(
+        const R5EvictionRequest& request,
+        const MetalResourceInventory& pre,
+        const MetalResourceInventory& post,
+        std::size_t selectedCount,
+        std::uint64_t mutated) {
+        if (request.reason != R5EvictionReason::Pressure ||
+            request.pressureLevel != MetalMemoryPressureState::Critical ||
+            !r5CriticalPressureStillActive(post)) {
+            return;
+        }
+
+        const std::uint64_t deviceBytesFreed =
+            pre.deviceAllocatedBytes > post.deviceAllocatedBytes
+                ? pre.deviceAllocatedBytes - post.deviceAllocatedBytes
+                : 0;
+        const bool noCandidates = selectedCount == 0;
+        const bool noRelief = mutated == 0 || deviceBytesFreed == 0;
+        const bool budgetExhausted = request.budgetRecords != 0 &&
+            selectedCount >= request.budgetRecords;
+        if (!noCandidates && !noRelief && !budgetExhausted) {
+            return;
+        }
+
+        r5PressureOOMPending = true;
+        ++r5Eviction.criticalPressureExhaustionLatches;
+        ++r5Eviction.criticalPressureStillCriticalLatches;
+        if (noCandidates) {
+            ++r5Eviction.criticalPressureNoCandidateLatches;
+        }
+        if (noRelief) {
+            ++r5Eviction.criticalPressureNoReliefLatches;
+        }
+        if (budgetExhausted) {
+            ++r5Eviction.criticalPressureBudgetExhaustedLatches;
+        }
+    }
+
+    void emitR5PressureOOMIfPending() {
+        if (!r5PressureOOMPending || owner == nullptr) {
+            return;
+        }
+        r5PressureOOMPending = false;
+        ++r5Eviction.criticalPressureOOMErrors;
+        owner->pushError(
+            GL_OUT_OF_MEMORY,
+            "R5PressureEviction",
+            "Critical memory-pressure eviction exhausted reconstructable "
+            "R5 candidates without relieving pressure.");
+    }
+
     std::uint64_t evictR5DerivedCaches(const R5EvictionRequest& request) {
         if (r5EvictionInProgress) {
             return 0;
@@ -22051,6 +22240,7 @@ struct GLContext::Impl {
         } else {
             ++r5Eviction.passesTriggered;
             recordR5PressureRequest(request.pressureLevel);
+            recordR5PressurePolicy(request);
         }
         r5Eviction.lastBudget = request.budgetRecords;
         const bool enabled = request.reason == R5EvictionReason::Pressure
@@ -22106,9 +22296,24 @@ struct GLContext::Impl {
         r5Eviction.lastPostExpandedIndexBuffers = post.expandedIndexBuffers;
         r5Eviction.lastPostExpandedIndexBytes = post.expandedIndexBytes;
         if (pre.deviceAllocatedBytes > post.deviceAllocatedBytes) {
-            r5Eviction.deviceBytesFreed +=
+            const std::uint64_t freed =
                 pre.deviceAllocatedBytes - post.deviceAllocatedBytes;
+            r5Eviction.deviceBytesFreed +=
+                freed;
+            if (request.reason == R5EvictionReason::Pressure &&
+                request.memoryClass == MetalMemoryPressureClass::High) {
+                r5Eviction.highMemoryDeviceBytesFreed += freed;
+                if (request.pressureLevel ==
+                    MetalMemoryPressureState::Critical) {
+                    ++r5Eviction.highMemoryCriticalReliefPasses;
+                }
+            }
         }
+        maybeLatchR5CriticalPressureOOM(request,
+                                        pre,
+                                        post,
+                                        selected.size(),
+                                        mutated);
         return mutated;
     }
 
@@ -22120,14 +22325,30 @@ struct GLContext::Impl {
             ? owner->metalResourceInventory()
             : MetalResourceInventory{};
         const auto snapshot =
-            Runtime::shared().sampleMemoryPressure(inventory.pressure);
-        const MetalMemoryPressureState level =
+            Runtime::shared().sampleMemoryPressureForR5Boundary(
+                inventory.pressure);
+        const MetalMemoryPressureState sampledLevel =
             metalMemoryPressureStateFromValue(snapshot.state);
+        const MetalMemoryPressureState pendingLevel =
+            metalMemoryPressureStateFromValue(
+                snapshot.inputs.pendingPressurePeak);
+        const R5PressureEvictionPolicy pressurePolicy =
+            r5PressureEvictionPolicyForSnapshot(snapshot);
+        const MetalMemoryPressureState level =
+            r5MaxPressureLevel(sampledLevel, pendingLevel);
+        const bool consumedPendingPressure =
+            pendingLevel != MetalMemoryPressureState::Idle;
+        if (consumedPendingPressure) {
+            ++r5Eviction.pendingPressureBoundaryConsumes;
+            r5Eviction.pendingPressurePeakAtBoundary =
+                metalMemoryPressureStateValue(pendingLevel);
+        }
         if (level == MetalMemoryPressureState::Idle) {
             lastR5PressureEvictionLevel = MetalMemoryPressureState::Idle;
             return;
         }
-        if (level == lastR5PressureEvictionLevel) {
+        if (level == lastR5PressureEvictionLevel &&
+            !consumedPendingPressure) {
             ++r5Eviction.passesSkippedHysteresis;
             return;
         }
@@ -22135,12 +22356,28 @@ struct GLContext::Impl {
         R5EvictionRequest request;
         request.reason = R5EvictionReason::Pressure;
         request.pressureLevel = level;
-        request.budgetRecords = r5PressureBudgetForLevel(level);
-        request.bucketAllowlist = kR5EvictionBucketAll;
+        request.memoryClass = pressurePolicy.memoryClass;
+        request.minIdleBoundaryAge =
+            r5PressureRetentionAgeForLevel(level, pressurePolicy);
+        request.policySoftBudgetRecords = pressurePolicy.softBudgetRecords;
+        request.policyHardBudgetRecords = pressurePolicy.hardBudgetRecords;
+        request.policyCriticalBudgetRecords =
+            pressurePolicy.criticalBudgetRecords;
+        request.budgetRecords =
+            r5PressureBudgetForLevel(level, pressurePolicy);
+        request.bucketAllowlist = pressurePolicy.bucketAllowlist;
         const std::uint64_t skippedPressureBefore =
             r5Eviction.passSkippedPressure;
+        const std::uint64_t retentionSkippedBefore =
+            r5Eviction.policyRetentionSkippedRecords;
+        const std::uint64_t mutatedRecordsBefore = r5Eviction.mutatedRecords;
         evictR5DerivedCaches(request);
-        if (r5Eviction.passSkippedPressure == skippedPressureBefore) {
+        const bool skippedInFlight =
+            r5Eviction.passSkippedPressure != skippedPressureBefore;
+        const bool deferredByRetention =
+            r5Eviction.mutatedRecords == mutatedRecordsBefore &&
+            r5Eviction.policyRetentionSkippedRecords != retentionSkippedBefore;
+        if (!skippedInFlight && !deferredByRetention) {
             lastR5PressureEvictionLevel = level;
         }
     }
@@ -22173,6 +22410,7 @@ struct GLContext::Impl {
     MetalMemoryPressureState lastR5PressureEvictionLevel =
         MetalMemoryPressureState::Idle;
     bool r5EvictionInProgress = false;
+    bool r5PressureOOMPending = false;
     std::unordered_map<std::uint64_t, TranslatedDrawPlan> translatedDrawPlanCache;
     Phase2PlanKeyMemo translatedDrawPlanKeyMemo;
     std::uint64_t translatedDrawPlanGeneration = 0;
@@ -30972,6 +31210,11 @@ void GLContext::resetPipelineCacheMetrics() {
 }
 
 std::uint64_t GLContext::metalAllocatedBytes() const {
+    const std::uint64_t deviceBytes =
+        metalDeviceCurrentAllocatedBytes(impl_->device);
+    if (deviceBytes != 0) {
+        return deviceBytes;
+    }
     if (impl_->frameGraph) {
         return impl_->frameGraph->metalAllocatedBytes();
     }
@@ -30981,6 +31224,13 @@ std::uint64_t GLContext::metalAllocatedBytes() const {
 GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
     MetalResourceInventory inventory;
     inventory.deviceAllocatedBytes = metalAllocatedBytes();
+    const std::uint64_t directRecommendedWorkingSetBytes =
+        metalDeviceRecommendedWorkingSetBytes(impl_->device);
+    if (directRecommendedWorkingSetBytes != 0) {
+        inventory.pressure.recommendedWorkingSetBytes =
+            directRecommendedWorkingSetBytes;
+        inventory.pressure.recommendedWorkingSetAvailable = 1;
+    }
     inventory.r5DryRun.dryRunPasses = 1;
     inventory.r5Touches = impl_->r5Touches;
     inventory.r5Eviction = impl_->r5Eviction;
@@ -31050,10 +31300,13 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             frameGraphMetal.translatedDrawMSLSlotCacheEntries;
         inventory.cacheLiveTranslatedSampleMaskSlots =
             frameGraphMetal.translatedDrawSampleMaskSlotCacheEntries;
-        inventory.pressure.recommendedWorkingSetBytes =
-            frameGraphMetal.recommendedWorkingSetBytes;
-        inventory.pressure.recommendedWorkingSetAvailable =
-            frameGraphMetal.recommendedWorkingSetAvailable;
+        if (frameGraphMetal.recommendedWorkingSetAvailable != 0 &&
+            frameGraphMetal.recommendedWorkingSetBytes != 0) {
+            inventory.pressure.recommendedWorkingSetBytes =
+                frameGraphMetal.recommendedWorkingSetBytes;
+            inventory.pressure.recommendedWorkingSetAvailable =
+                frameGraphMetal.recommendedWorkingSetAvailable;
+        }
     }
     inventory.cacheLimitTranslatedDrawPlans =
         static_cast<std::uint64_t>(Phase2PlanKeyProfile::kMaxTrackedKeys);
@@ -31732,6 +31985,8 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
     }
 #endif
 
+    inventory.deviceAllocatedBytes =
+        std::max(inventory.deviceAllocatedBytes, inventory.residency.metalBytes);
     finalizePressureInputs();
     return inventory;
 }

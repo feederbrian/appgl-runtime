@@ -193,7 +193,7 @@ struct MetalR5ResidencyTouchSummary {
 };
 
 struct MetalR5EvictionSummary {
-    std::uint64_t version = 1;
+    std::uint64_t version = 3;
     std::uint64_t enabled = 0;
     std::uint64_t explicitTriggerRequests = 0;
     std::uint64_t softPressureRequests = 0;
@@ -260,6 +260,26 @@ struct MetalR5EvictionSummary {
     std::uint64_t primaryVolatileRestoreKept = 0;
     std::uint64_t primaryVolatileRestoreEmpty = 0;
     std::uint64_t reconstructionFailures = 0;
+    std::uint64_t pendingPressureBoundaryConsumes = 0;
+    std::uint64_t pendingPressurePeakAtBoundary = 0;
+    std::uint64_t criticalPressureExhaustionLatches = 0;
+    std::uint64_t criticalPressureOOMErrors = 0;
+    std::uint64_t criticalPressureNoCandidateLatches = 0;
+    std::uint64_t criticalPressureNoReliefLatches = 0;
+    std::uint64_t criticalPressureBudgetExhaustedLatches = 0;
+    std::uint64_t criticalPressureStillCriticalLatches = 0;
+    std::uint64_t pressureMemoryClassAtEvict = 0;
+    std::uint64_t pressurePolicySoftBudget = 0;
+    std::uint64_t pressurePolicyHardBudget = 0;
+    std::uint64_t pressurePolicyCriticalBudget = 0;
+    std::uint64_t pressurePolicyMinIdleBoundaryAge = 0;
+    std::uint64_t policyRetentionSkippedRecords = 0;
+    std::uint64_t lowMemoryPolicyPasses = 0;
+    std::uint64_t midMemoryPolicyPasses = 0;
+    std::uint64_t highMemoryPolicyPasses = 0;
+    std::uint64_t highMemoryRetentionSkippedRecords = 0;
+    std::uint64_t highMemoryCriticalReliefPasses = 0;
+    std::uint64_t highMemoryDeviceBytesFreed = 0;
 };
 
 struct MetalResourceResidencySummary {

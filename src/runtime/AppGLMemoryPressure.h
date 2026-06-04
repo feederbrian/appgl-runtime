@@ -15,6 +15,8 @@ public:
     MemoryPressureObserver& operator=(const MemoryPressureObserver&) = delete;
 
     MetalMemoryPressureSnapshot sample(MetalMemoryPressureInputs inputs);
+    MetalMemoryPressureSnapshot sampleAndConsumePending(
+        MetalMemoryPressureInputs inputs);
     void injectOSPressureForTesting(MetalOSMemoryPressureLevel level);
 
 private:

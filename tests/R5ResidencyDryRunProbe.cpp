@@ -17,6 +17,8 @@ extern "C" std::uint64_t appglR5EvictDerivedCachesForTesting(
     std::uint64_t budget);
 extern "C" std::uint64_t appglR5ForceMemoryPressureForTesting(
     std::uint64_t level);
+extern "C" std::uint64_t appglR5ForceMemoryClassForTesting(
+    std::uint64_t memoryClass);
 
 namespace {
 
@@ -93,6 +95,19 @@ void expectNoGLError(ProbeState& state,
     const GLenum error = getError();
     expect(state, error == GL_NO_ERROR,
            message + " GL error=" + std::to_string(error));
+}
+
+void expectGLError(ProbeState& state,
+                   PFNGLGETERRORPROC getError,
+                   GLenum expected,
+                   const std::string& message) {
+    if (getError == nullptr) {
+        return;
+    }
+    const GLenum error = getError();
+    expect(state, error == expected,
+           message + " GL error=" + std::to_string(error) +
+               " expected=" + std::to_string(expected));
 }
 
 struct R5GL {
@@ -896,6 +911,7 @@ void runPrimaryTextureEvictionProbe(ProbeState& state, const R5GL& gl) {
 }
 
 void runForcedPressureEvictionProbe(ProbeState& state, const R5GL& gl) {
+    appglR5ForceMemoryClassForTesting(0);
     appglR5ForceMemoryPressureForTesting(
         appgl::metalMemoryPressureStateValue(
             appgl::MetalMemoryPressureState::Idle));
@@ -934,6 +950,8 @@ void runForcedPressureEvictionProbe(ProbeState& state, const R5GL& gl) {
         jsonCounter(beforeDiag, "deviceBytesFreed");
     const std::uint64_t beforeTextureRebuilds =
         jsonCounter(beforeDiag, "textureViewRebuildsAfterR5Evict");
+    const std::uint64_t beforeRetentionSkips =
+        jsonCounter(beforeDiag, "policyRetentionSkippedRecords");
 
     const std::uint64_t forced =
         appglR5ForceMemoryPressureForTesting(
@@ -946,15 +964,46 @@ void runForcedPressureEvictionProbe(ProbeState& state, const R5GL& gl) {
     gl.Finish();
     expectNoGLError(state, gl.GetError, "forced-pressure boundary finish");
 
-    const std::string pressureDiag = diagnosticsJSON();
+    std::string pressureDiag = diagnosticsJSON();
+    const std::uint64_t pressureMemoryClass =
+        jsonCounter(pressureDiag, "pressureMemoryClassAtEvict");
+    if (pressureMemoryClass ==
+        appgl::metalMemoryPressureClassValue(
+            appgl::MetalMemoryPressureClass::High)) {
+        expect(state,
+               jsonCounter(pressureDiag, "policyRetentionSkippedRecords") >
+                   beforeRetentionSkips,
+               "high-memory Soft pressure retains fresh candidates");
+        expect(state,
+               jsonCounter(pressureDiag, "recordsEvictedTextureView") ==
+                   beforeTextureEvictions,
+               "high-memory Soft retention defers fresh texture-view eviction");
+    }
+    for (int retry = 0;
+         retry < 6 &&
+         jsonCounter(pressureDiag, "recordsEvictedTextureView") <=
+             beforeTextureEvictions;
+         ++retry) {
+        gl.Finish();
+        expectNoGLError(state, gl.GetError,
+                        "forced-pressure retained candidate retry");
+        pressureDiag = diagnosticsJSON();
+    }
     expect(state,
            jsonContainsToken(pressureDiag, "\"metalResources\":{") &&
                jsonContainsToken(pressureDiag, "\"pressure\":{") &&
                jsonContainsToken(pressureDiag, "\"state\":") &&
+               jsonContainsToken(pressureDiag, "\"memoryClass\":") &&
                jsonContainsToken(pressureDiag, "\"workingSetRatio\":") &&
                jsonContainsToken(pressureDiag, "\"r5Eviction\":{") &&
                jsonContainsToken(pressureDiag, "\"passesTriggered\":") &&
                jsonContainsToken(pressureDiag, "\"pressureLevelAtEvict\":") &&
+               jsonContainsToken(pressureDiag,
+                                 "\"pressureMemoryClassAtEvict\":") &&
+               jsonContainsToken(pressureDiag,
+                                 "\"pressurePolicySoftBudget\":") &&
+               jsonContainsToken(pressureDiag,
+                                 "\"pressurePolicyMinIdleBoundaryAge\":") &&
                jsonContainsToken(pressureDiag, "\"mutatedRecords\":") &&
                jsonContainsToken(pressureDiag, "\"recordsEvictedByBucket\":{") &&
                jsonContainsToken(pressureDiag, "\"textureView\":") &&
@@ -973,6 +1022,26 @@ void runForcedPressureEvictionProbe(ProbeState& state, const R5GL& gl) {
            jsonCounter(pressureDiag, "recordsEvictedTextureView") >
                beforeTextureEvictions,
            "forced pressure evicts a texture-view bucket record");
+    if (pressureMemoryClass ==
+        appgl::metalMemoryPressureClassValue(
+            appgl::MetalMemoryPressureClass::Low)) {
+        expect(state, jsonCounter(pressureDiag, "pressurePolicySoftBudget") == 4,
+               "low-memory Soft policy budget");
+    } else if (pressureMemoryClass ==
+               appgl::metalMemoryPressureClassValue(
+                   appgl::MetalMemoryPressureClass::High)) {
+        expect(state, jsonCounter(pressureDiag, "pressurePolicySoftBudget") == 12,
+               "high-memory Soft policy budget");
+        expect(state,
+               jsonCounter(pressureDiag, "pressurePolicyMinIdleBoundaryAge") ==
+                   4,
+               "high-memory Soft retention age");
+        expect(state, jsonCounter(pressureDiag, "highMemoryPolicyPasses") > 0,
+               "high-memory policy pass recorded");
+    } else {
+        expect(state, jsonCounter(pressureDiag, "pressurePolicySoftBudget") == 8,
+               "mid/unknown Soft policy budget");
+    }
     expect(state,
            jsonCounter(pressureDiag, "deviceBytesFreed") ==
                beforeDeviceBytesFreed,
@@ -990,6 +1059,10 @@ void runForcedPressureEvictionProbe(ProbeState& state, const R5GL& gl) {
         appgl::metalMemoryPressureStateValue(
             appgl::MetalMemoryPressureState::Idle));
     gl.Finish();
+    const std::string resetDiag = diagnosticsJSON();
+    expect(state,
+           jsonCounter(resetDiag, "recommendedWorkingSetBytes") != 1000,
+           "disabling forced pressure restores non-synthetic WSS input");
     unsetenv("APPGL_R5_EVICTION");
     unsetenv("APPGL_R5_EVICTION_ENABLE");
 
@@ -998,6 +1071,304 @@ void runForcedPressureEvictionProbe(ProbeState& state, const R5GL& gl) {
     GLuint textures[2] = {view, base};
     gl.DeleteTextures(2, textures);
     gl.DeleteProgram(program);
+}
+
+void expectForcedMemoryClassPolicy(ProbeState& state,
+                                   const R5GL& gl,
+                                   appgl::MetalMemoryPressureClass memoryClass,
+                                   std::uint64_t expectedSoftBudget,
+                                   std::uint64_t expectedHardBudget,
+                                   std::uint64_t expectedCriticalBudget,
+                                   std::uint64_t expectedSoftRetentionAge) {
+    const std::uint64_t classValue =
+        appgl::metalMemoryPressureClassValue(memoryClass);
+    const std::uint64_t forcedClass =
+        appglR5ForceMemoryClassForTesting(classValue);
+    expect(state, forcedClass == classValue,
+           "forced memory-class hook returns applied class");
+
+    appglR5ForceMemoryPressureForTesting(
+        appgl::metalMemoryPressureStateValue(
+            appgl::MetalMemoryPressureState::Idle));
+    gl.Finish();
+    expectNoGLError(state, gl.GetError,
+                    "forced memory-class idle boundary");
+
+    const std::string beforeDiag = diagnosticsJSON();
+    const std::uint64_t beforeTriggered =
+        jsonCounter(beforeDiag, "passesTriggered");
+    const std::uint64_t forcedPressure =
+        appglR5ForceMemoryPressureForTesting(
+            appgl::metalMemoryPressureStateValue(
+                appgl::MetalMemoryPressureState::Soft));
+    expect(state,
+           forcedPressure == appgl::metalMemoryPressureStateValue(
+                                 appgl::MetalMemoryPressureState::Soft),
+           "forced memory-class probe applies Soft pressure");
+    gl.Finish();
+    expectNoGLError(state, gl.GetError,
+                    "forced memory-class pressure boundary");
+
+    const std::string pressureDiag = diagnosticsJSON();
+    expect(state,
+           jsonCounter(pressureDiag, "passesTriggered") > beforeTriggered,
+           "forced memory-class pressure pass triggered");
+    expect(state, jsonCounter(pressureDiag, "memoryClass") == classValue,
+           "forced memory class is visible in pressure diagnostics");
+    expect(state,
+           jsonCounter(pressureDiag, "pressureMemoryClassAtEvict") ==
+               classValue,
+           "forced memory class reaches R5 pressure policy");
+    expect(state,
+           jsonCounter(pressureDiag, "pressurePolicySoftBudget") ==
+               expectedSoftBudget,
+           "forced memory-class Soft budget");
+    expect(state,
+           jsonCounter(pressureDiag, "pressurePolicyHardBudget") ==
+               expectedHardBudget,
+           "forced memory-class Hard budget");
+    expect(state,
+           jsonCounter(pressureDiag, "pressurePolicyCriticalBudget") ==
+               expectedCriticalBudget,
+           "forced memory-class Critical budget");
+    expect(state,
+           jsonCounter(pressureDiag, "pressurePolicyMinIdleBoundaryAge") ==
+               expectedSoftRetentionAge,
+           "forced memory-class Soft retention age");
+}
+
+void runForcedMemoryClassPolicyProbe(ProbeState& state, const R5GL& gl) {
+    setenv("APPGL_R5_EVICTION", "1", 1);
+    expectForcedMemoryClassPolicy(
+        state,
+        gl,
+        appgl::MetalMemoryPressureClass::Low,
+        4,
+        8,
+        32,
+        0);
+    expectForcedMemoryClassPolicy(
+        state,
+        gl,
+        appgl::MetalMemoryPressureClass::Mid,
+        8,
+        16,
+        appgl::kMetalR5ResidencyCandidateLimit,
+        0);
+    expectForcedMemoryClassPolicy(
+        state,
+        gl,
+        appgl::MetalMemoryPressureClass::High,
+        12,
+        32,
+        appgl::kMetalR5ResidencyCandidateLimit,
+        4);
+
+    const std::uint64_t apiResetClass = appglR5ForceMemoryClassForTesting(0);
+    expect(state, apiResetClass == 0,
+           "forced memory-class API reset before env override");
+    setenv("APPGL_R5_FORCE_MEMORY_CLASS", "low", 1);
+    appglR5ForceMemoryPressureForTesting(
+        appgl::metalMemoryPressureStateValue(
+            appgl::MetalMemoryPressureState::Idle));
+    gl.Finish();
+    expectNoGLError(state, gl.GetError,
+                    "forced memory-class env idle boundary");
+    const std::uint64_t beforeEnvTriggered =
+        jsonCounter(diagnosticsJSON(), "passesTriggered");
+    appglR5ForceMemoryPressureForTesting(
+        appgl::metalMemoryPressureStateValue(
+            appgl::MetalMemoryPressureState::Soft));
+    gl.Finish();
+    expectNoGLError(state, gl.GetError,
+                    "forced memory-class env pressure boundary");
+    const std::string envDiag = diagnosticsJSON();
+    expect(state,
+           jsonCounter(envDiag, "passesTriggered") > beforeEnvTriggered,
+           "forced memory-class env pressure pass triggered");
+    expect(state,
+           jsonCounter(envDiag, "pressureMemoryClassAtEvict") ==
+               appgl::metalMemoryPressureClassValue(
+                   appgl::MetalMemoryPressureClass::Low),
+           "APPGL_R5_FORCE_MEMORY_CLASS reaches R5 pressure policy");
+    expect(state, jsonCounter(envDiag, "pressurePolicySoftBudget") == 4,
+           "APPGL_R5_FORCE_MEMORY_CLASS uses low-class policy");
+
+    appglR5ForceMemoryPressureForTesting(
+        appgl::metalMemoryPressureStateValue(
+            appgl::MetalMemoryPressureState::Idle));
+    const std::uint64_t resetClass = appglR5ForceMemoryClassForTesting(0);
+    expect(state, resetClass == 0,
+           "forced memory-class hook resets to detected class");
+    gl.Finish();
+    unsetenv("APPGL_R5_FORCE_MEMORY_CLASS");
+    unsetenv("APPGL_FORCE_MEMORY_CLASS");
+    unsetenv("APPGL_R5_EVICTION");
+    unsetenv("APPGL_R5_EVICTION_ENABLE");
+}
+
+void runPendingPressureDirtyBitProbe(ProbeState& state, const R5GL& gl) {
+    setenv("APPGL_R5_EVICTION", "1", 1);
+    expectNoGLError(state, gl.GetError, "pending-pressure dirty setup");
+
+    const std::string beforeDiag = diagnosticsJSON();
+    const std::uint64_t beforeTriggered =
+        jsonCounter(beforeDiag, "passesTriggered");
+    const std::uint64_t beforeConsumes =
+        jsonCounter(beforeDiag, "pendingPressureBoundaryConsumes");
+
+    appglR5ForceMemoryPressureForTesting(
+        appgl::metalMemoryPressureStateValue(
+            appgl::MetalMemoryPressureState::Critical));
+    appglR5ForceMemoryPressureForTesting(
+        appgl::metalMemoryPressureStateValue(
+            appgl::MetalMemoryPressureState::Idle));
+    gl.Finish();
+    expectNoGLError(state, gl.GetError,
+                    "pending-pressure dirty boundary does not OOM");
+
+    const std::string dirtyDiag = diagnosticsJSON();
+    expect(state,
+           jsonCounter(dirtyDiag, "pendingPressureBoundaryConsumes") >
+               beforeConsumes,
+           "pending pressure dirty bit consumed at boundary");
+    expect(state,
+           jsonCounter(dirtyDiag, "pendingPressurePeakAtBoundary") ==
+               appgl::metalMemoryPressureStateValue(
+                   appgl::MetalMemoryPressureState::Critical),
+           "pending pressure dirty bit preserves critical peak");
+    expect(state,
+           jsonCounter(dirtyDiag, "passesTriggered") > beforeTriggered,
+           "pending critical peak triggers pressure eviction pass");
+    expect(state,
+           jsonCounter(dirtyDiag, "pressureLevelAtEvict") ==
+               appgl::metalMemoryPressureStateValue(
+                   appgl::MetalMemoryPressureState::Critical),
+           "pending critical peak drives critical eviction level");
+
+    unsetenv("APPGL_R5_EVICTION");
+    unsetenv("APPGL_R5_EVICTION_ENABLE");
+}
+
+void runCriticalPressureOOMLatchProbe(ProbeState& state, const R5GL& gl) {
+    setenv("APPGL_R5_EVICTION", "1", 1);
+    expectNoGLError(state, gl.GetError, "critical-pressure OOM setup");
+
+    const std::string beforeDiag = diagnosticsJSON();
+    const std::uint64_t beforeLatches =
+        jsonCounter(beforeDiag, "criticalPressureExhaustionLatches");
+    const std::uint64_t beforeOOMErrors =
+        jsonCounter(beforeDiag, "criticalPressureOOMErrors");
+    const std::uint64_t beforeNoCandidates =
+        jsonCounter(beforeDiag, "criticalPressureNoCandidateLatches");
+    const std::uint64_t beforeNoRelief =
+        jsonCounter(beforeDiag, "criticalPressureNoReliefLatches");
+
+    appglR5ForceMemoryPressureForTesting(
+        appgl::metalMemoryPressureStateValue(
+            appgl::MetalMemoryPressureState::Critical));
+    gl.Finish();
+    expectGLError(state, gl.GetError, GL_OUT_OF_MEMORY,
+                  "critical pressure exhaustion surfaces GL_OUT_OF_MEMORY");
+
+    const std::string oomDiag = diagnosticsJSON();
+    expect(state,
+           jsonCounter(oomDiag, "criticalPressureExhaustionLatches") >
+               beforeLatches,
+           "critical pressure exhaustion latch recorded");
+    expect(state,
+           jsonCounter(oomDiag, "criticalPressureOOMErrors") >
+               beforeOOMErrors,
+           "critical pressure OOM emission recorded");
+    expect(state,
+           jsonCounter(oomDiag, "criticalPressureNoCandidateLatches") >
+               beforeNoCandidates,
+           "critical pressure no-candidate latch recorded");
+    expect(state,
+           jsonCounter(oomDiag, "criticalPressureNoReliefLatches") >
+               beforeNoRelief,
+           "critical pressure no-relief latch recorded");
+
+    appglR5ForceMemoryPressureForTesting(
+        appgl::metalMemoryPressureStateValue(
+            appgl::MetalMemoryPressureState::Idle));
+    gl.Finish();
+    expectNoGLError(state, gl.GetError, "critical-pressure OOM cleanup");
+    unsetenv("APPGL_R5_EVICTION");
+    unsetenv("APPGL_R5_EVICTION_ENABLE");
+}
+
+void runCriticalPressurePrimaryReliefProbe(ProbeState& state, const R5GL& gl) {
+    setenv("APPGL_R5_EVICTION", "1", 1);
+    const GLuint program = buildTexture2DSampleProgram(state, gl);
+    GLuint texture = 0;
+    gl.GenTextures(1, &texture);
+    gl.BindTexture(GL_TEXTURE_2D, texture);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl.TexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 2048, 2048);
+    expectNoGLError(state, gl.GetError,
+                    "critical pressure primary relief storage setup");
+    drawDefaultTriangle(state, gl, program,
+                        "critical pressure primary relief seed draw");
+
+    const std::string beforeDiag = diagnosticsJSON();
+    const std::uint64_t beforePrimaryReleases =
+        jsonCounter(beforeDiag, "primaryTextureReleaseSuccesses");
+    const std::uint64_t beforeDeviceBytesFreed =
+        jsonCounter(beforeDiag, "deviceBytesFreed");
+    const std::uint64_t beforeOOMErrors =
+        jsonCounter(beforeDiag, "criticalPressureOOMErrors");
+    const std::uint64_t beforeHighCriticalRelief =
+        jsonCounter(beforeDiag, "highMemoryCriticalReliefPasses");
+
+    appglR5ForceMemoryPressureForTesting(
+        appgl::metalMemoryPressureStateValue(
+            appgl::MetalMemoryPressureState::Critical));
+    gl.Finish();
+    expectNoGLError(state, gl.GetError,
+                    "critical pressure primary relief does not OOM");
+
+    const std::string reliefDiag = diagnosticsJSON();
+    expect(state,
+           jsonCounter(reliefDiag, "pressureLevelAtEvict") ==
+               appgl::metalMemoryPressureStateValue(
+                   appgl::MetalMemoryPressureState::Critical),
+           "critical pressure primary relief records Critical level");
+    expect(state,
+           jsonCounter(reliefDiag, "pressurePolicyMinIdleBoundaryAge") == 0,
+           "critical pressure policy has no retention age");
+    expect(state,
+           jsonCounter(reliefDiag, "primaryTextureReleaseSuccesses") >
+               beforePrimaryReleases,
+           "critical pressure evicts reconstructable primary");
+    expect(state,
+           jsonCounter(reliefDiag, "deviceBytesFreed") >
+               beforeDeviceBytesFreed,
+           "critical pressure records device-byte relief");
+    expect(state,
+           jsonCounter(reliefDiag, "criticalPressureOOMErrors") ==
+               beforeOOMErrors,
+           "critical pressure relief avoids OOM latch");
+    if (jsonCounter(reliefDiag, "pressureMemoryClassAtEvict") ==
+        appgl::metalMemoryPressureClassValue(
+            appgl::MetalMemoryPressureClass::High)) {
+        expect(state,
+               jsonCounter(reliefDiag, "highMemoryCriticalReliefPasses") >
+                   beforeHighCriticalRelief,
+               "high-memory Critical pressure relief recorded");
+    }
+
+    appglR5ForceMemoryPressureForTesting(
+        appgl::metalMemoryPressureStateValue(
+            appgl::MetalMemoryPressureState::Idle));
+    gl.Finish();
+    expectNoGLError(state, gl.GetError,
+                    "critical pressure primary relief cleanup");
+    gl.DeleteTextures(1, &texture);
+    gl.DeleteProgram(program);
+    unsetenv("APPGL_R5_EVICTION");
+    unsetenv("APPGL_R5_EVICTION_ENABLE");
 }
 
 void runSamplingProxySkipProbe(ProbeState& state, const R5GL& gl) {
@@ -1140,6 +1511,10 @@ void runLiveEvictionProbe(ProbeState& state) {
     runPrimaryTextureEvictionProbe(state, gl);
     runSamplingProxySkipProbe(state, gl);
     runForcedPressureEvictionProbe(state, gl);
+    runForcedMemoryClassPolicyProbe(state, gl);
+    runPendingPressureDirtyBitProbe(state, gl);
+    runCriticalPressurePrimaryReliefProbe(state, gl);
+    runCriticalPressureOOMLatchProbe(state, gl);
     runTextureViewEvictionProbe(state, gl);
     runExpandedIndexEvictionProbe(state, gl);
 
