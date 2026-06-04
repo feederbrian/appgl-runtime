@@ -221,6 +221,9 @@ struct GLTextureObject {
     std::uint64_t r5TextureViewLastUseSerial = 0;
     std::uint64_t r5TextureViewLastUseBoundarySerial = 0;
     bool r5TextureViewEvicted = false;
+    std::uint64_t r5PrimaryTextureLastUseSerial = 0;
+    std::uint64_t r5PrimaryTextureLastUseBoundarySerial = 0;
+    bool r5PrimaryTextureEvicted = false;
 
     // Phase 8X Group 4d follow-up⁷ — lazy MTLSamplerState cached on the
     // texture object itself, rebuilt from `params` on demand. GL's
@@ -365,6 +368,7 @@ struct GLTextureObject {
     // instead of reinstating a draw-tail wait on every FBO draw.
     bool msaaFramebufferWriteNeedsSamplerFlush = false;
     GLProducerPendingState producerPending;
+    bool sparseTexture = false;
 };
 
 struct GLSamplerObject {

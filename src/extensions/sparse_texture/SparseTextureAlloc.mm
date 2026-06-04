@@ -445,6 +445,7 @@ GLint textureSparse(ExtensionContext& ctx, const GLTextureObject* texture) {
 void setTextureSparse(ExtensionContext& ctx, GLTextureObject& texture, GLint value) {
     std::lock_guard<std::mutex> lock(stateMutex());
     stateForLocked(ctx, texture).sparse = value;
+    texture.sparseTexture = (value == GL_TRUE);
 }
 
 GLint virtualPageSizeIndex(ExtensionContext& ctx, const GLTextureObject* texture) {

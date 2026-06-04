@@ -634,6 +634,40 @@ GLuint buildCubeSampleProgram(ProbeState& state, const R5GL& gl) {
     return program;
 }
 
+GLuint buildTexture2DSampleProgram(ProbeState& state, const R5GL& gl) {
+    const char* vertex =
+        "#version 330 core\n"
+        "layout(location=0) in vec2 a_pos;\n"
+        "out vec2 v_uv;\n"
+        "void main(){ v_uv = a_pos * 0.25 + vec2(0.5);"
+        " gl_Position = vec4(a_pos, 0.0, 1.0); }\n";
+    const char* fragment =
+        "#version 330 core\n"
+        "uniform sampler2D u_tex;\n"
+        "in vec2 v_uv;\n"
+        "out vec4 color;\n"
+        "void main(){ color = texture(u_tex, v_uv); }\n";
+    const GLuint vs = compileShader(state, gl, GL_VERTEX_SHADER, vertex);
+    const GLuint fs = compileShader(state, gl, GL_FRAGMENT_SHADER, fragment);
+    const GLuint program = gl.CreateProgram();
+    gl.AttachShader(program, vs);
+    gl.AttachShader(program, fs);
+    gl.LinkProgram(program);
+    GLint ok = GL_FALSE;
+    gl.GetProgramiv(program, GL_LINK_STATUS, &ok);
+    if (ok != GL_TRUE) {
+        char log[1024] = {};
+        gl.GetProgramInfoLog(program, static_cast<GLsizei>(sizeof(log)),
+                             nullptr, log);
+        ++state.failures;
+        std::cerr << "FAIL: texture2D sample program link failed: " << log
+                  << "\n";
+    }
+    gl.DeleteShader(vs);
+    gl.DeleteShader(fs);
+    return program;
+}
+
 void drawDefaultTriangle(ProbeState& state,
                          const R5GL& gl,
                          GLuint program,
@@ -740,6 +774,10 @@ void runTextureViewEvictionProbe(ProbeState& state, const R5GL& gl) {
     std::string disabledDiag = diagnosticsJSON();
     expect(state, jsonCounter(disabledDiag, "passSkippedDisabled") >= 1,
            "disabled negative control increments skip counter");
+    const std::uint64_t beforePrimaryReleaseAttempts =
+        jsonCounter(disabledDiag, "primaryTextureReleaseAttempts");
+    const std::uint64_t beforePurgeableStateCalls =
+        jsonCounter(disabledDiag, "setPurgeableStateCalls");
 
     setenv("APPGL_R5_EVICTION", "1", 1);
     const std::uint64_t enabledMutations =
@@ -754,10 +792,14 @@ void runTextureViewEvictionProbe(ProbeState& state, const R5GL& gl) {
            jsonCounter(evictDiag, "lastPostTextureViewCount") <
                jsonCounter(evictDiag, "lastPreTextureViewCount"),
            "texture-view accounting decreased after eviction");
-    expect(state, jsonCounter(evictDiag, "primaryTextureReleaseAttempts") == 0,
-           "no primary texture release attempts");
-    expect(state, jsonCounter(evictDiag, "setPurgeableStateCalls") == 0,
-           "no purgeable state calls");
+    expect(state,
+           jsonCounter(evictDiag, "primaryTextureReleaseAttempts") ==
+               beforePrimaryReleaseAttempts,
+           "texture-view eviction does not release primary textures");
+    expect(state,
+           jsonCounter(evictDiag, "setPurgeableStateCalls") ==
+               beforePurgeableStateCalls,
+           "texture-view eviction does not call purgeable state");
 
     drawAndReadFBO(state, gl, framebuffer, program, 255, 0, 0,
                    "post-evict rendered-to texture-view reconstruct AE=0");
@@ -770,6 +812,86 @@ void runTextureViewEvictionProbe(ProbeState& state, const R5GL& gl) {
     gl.DeleteFramebuffers(1, &framebuffer);
     GLuint textures[2] = {view, base};
     gl.DeleteTextures(2, textures);
+    gl.DeleteProgram(program);
+}
+
+void runPrimaryTextureEvictionProbe(ProbeState& state, const R5GL& gl) {
+    setenv("APPGL_R5_EVICTION", "1", 1);
+    const GLuint program = buildTexture2DSampleProgram(state, gl);
+    GLuint texture = 0;
+    gl.GenTextures(1, &texture);
+    gl.BindTexture(GL_TEXTURE_2D, texture);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl.TexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 2048, 2048);
+    expectNoGLError(state, gl.GetError, "primary texture storage setup");
+
+    drawDefaultTriangle(state, gl, program,
+                        "pre-evict primary texture sampler touch");
+    const std::string beforeDiag = diagnosticsJSON();
+    const std::uint64_t beforeReleaseAttempts =
+        jsonCounter(beforeDiag, "primaryTextureReleaseAttempts");
+    const std::uint64_t beforeReleaseSuccesses =
+        jsonCounter(beforeDiag, "primaryTextureReleaseSuccesses");
+    const std::uint64_t beforeEvicted =
+        jsonCounter(beforeDiag, "reconstructablePrimariesEvicted");
+    const std::uint64_t beforePurgeable =
+        jsonCounter(beforeDiag, "setPurgeableStateCalls");
+    const std::uint64_t beforeDeviceBytesFreed =
+        jsonCounter(beforeDiag, "deviceBytesFreed");
+    const std::uint64_t beforeReconstructions =
+        jsonCounter(beforeDiag, "primaryReconstructions");
+    const std::uint64_t beforeVolatileAttempts =
+        jsonCounter(beforeDiag, "primaryVolatileRestoreAttempts");
+    const std::uint64_t beforeReconstructionFailures =
+        jsonCounter(beforeDiag, "primaryReconstructionFailures");
+
+    const std::uint64_t mutations =
+        appglR5EvictDerivedCachesForTesting(1);
+    expect(state, mutations == 1,
+           "budget=1 primary texture eviction mutates one record");
+    const std::string evictDiag = diagnosticsJSON();
+    expect(state,
+           jsonCounter(evictDiag, "primaryTextureReleaseAttempts") >
+               beforeReleaseAttempts,
+           "primary texture release attempt was recorded");
+    expect(state,
+           jsonCounter(evictDiag, "primaryTextureReleaseSuccesses") >
+               beforeReleaseSuccesses,
+           "primary texture release success was recorded");
+    expect(state,
+           jsonCounter(evictDiag, "reconstructablePrimariesEvicted") >
+               beforeEvicted,
+           "reconstructable primary eviction was recorded");
+    expect(state,
+           jsonCounter(evictDiag, "authoritativePrimaryEvictAttempts") == 0,
+           "authoritative primary eviction attempts stay fail-closed");
+    expect(state,
+           jsonCounter(evictDiag, "deviceBytesFreed") >
+               beforeDeviceBytesFreed,
+           "primary texture hard release records device-byte relief");
+    expect(state,
+           jsonCounter(evictDiag, "setPurgeableStateCalls") ==
+               beforePurgeable,
+           "primary hard release does not use purgeable retention");
+
+    drawDefaultTriangle(state, gl, program,
+                        "post-evict primary texture sampler reconstruct");
+    const std::string restoreDiag = diagnosticsJSON();
+    expect(state,
+           jsonCounter(restoreDiag, "primaryReconstructions") >
+               beforeReconstructions,
+           "primary texture reconstructs from mirrors on next sampler use");
+    expect(state,
+           jsonCounter(restoreDiag, "primaryVolatileRestoreAttempts") ==
+               beforeVolatileAttempts,
+           "primary hard release leaves volatile restore path unused");
+    expect(state,
+           jsonCounter(restoreDiag, "primaryReconstructionFailures") ==
+               beforeReconstructionFailures,
+           "primary reconstruction failures remain zero");
+
+    gl.DeleteTextures(1, &texture);
     gl.DeleteProgram(program);
 }
 
@@ -1015,20 +1137,23 @@ void runLiveEvictionProbe(ProbeState& state) {
     if (state.failures != 0) {
         return;
     }
+    runPrimaryTextureEvictionProbe(state, gl);
     runSamplingProxySkipProbe(state, gl);
     runForcedPressureEvictionProbe(state, gl);
     runTextureViewEvictionProbe(state, gl);
     runExpandedIndexEvictionProbe(state, gl);
 
     const std::string finalDiag = diagnosticsJSON();
-    expect(state, jsonCounter(finalDiag, "primaryTextureReleaseAttempts") == 0,
-           "gate-wide primary texture release counter remains zero");
+    expect(state,
+           jsonCounter(finalDiag, "authoritativePrimaryEvictAttempts") == 0,
+           "gate-wide authoritative primary eviction attempts remain zero");
+    expect(state,
+           jsonCounter(finalDiag, "primaryReconstructionFailures") == 0,
+           "gate-wide primary reconstruction failures remain zero");
     expect(state, jsonCounter(finalDiag, "primaryBufferReleaseAttempts") == 0,
            "gate-wide primary buffer release counter remains zero");
     expect(state, jsonCounter(finalDiag, "hostShadowMutationAttempts") == 0,
            "gate-wide host-shadow mutation counter remains zero");
-    expect(state, jsonCounter(finalDiag, "setPurgeableStateCalls") == 0,
-           "gate-wide purgeable-state counter remains zero");
 }
 
 }  // namespace

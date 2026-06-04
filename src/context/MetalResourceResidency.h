@@ -87,6 +87,7 @@ enum class MetalR5EvictionScope : std::uint8_t {
     None = 0,
     TextureView,
     ExpandedIndexCache,
+    PrimaryTexture,
 };
 
 inline constexpr std::uint64_t kMetalR5ResidencyRawRowLimit = 256;
@@ -94,6 +95,7 @@ inline constexpr std::uint64_t kMetalR5ResidencyCandidateLimit = 64;
 inline constexpr std::uint32_t kMetalR5DiagnosticBucketTextureView = 1;
 inline constexpr std::uint32_t kMetalR5DiagnosticBucketSwizzledTextureView = 2;
 inline constexpr std::uint32_t kMetalR5DiagnosticBucketExpandedIndexCache = 3;
+inline constexpr std::uint32_t kMetalR5DiagnosticBucketPrimaryTexture = 4;
 
 struct ResourceResidencyRecord {
     std::uint64_t recordId = 0;
@@ -133,6 +135,8 @@ struct MetalR5ResidencyOrderingSummary {
     std::uint64_t textureViewCandidateBytes = 0;
     std::uint64_t expandedIndexCandidateRows = 0;
     std::uint64_t expandedIndexCandidateBytes = 0;
+    std::uint64_t primaryTextureCandidateRows = 0;
+    std::uint64_t primaryTextureCandidateBytes = 0;
     std::uint64_t missingLastUseCandidateRows = 0;
     std::uint64_t oldestLastUseCommandSerial = 0;
     std::uint64_t newestLastUseCommandSerial = 0;
@@ -223,6 +227,8 @@ struct MetalR5EvictionSummary {
     std::uint64_t expandedIndexClearAttempts = 0;
     std::uint64_t expandedIndexClearSuccesses = 0;
     std::uint64_t primaryTextureReleaseAttempts = 0;
+    std::uint64_t primaryTextureReleaseSuccesses = 0;
+    std::uint64_t authoritativePrimaryEvictAttempts = 0;
     std::uint64_t primaryBufferReleaseAttempts = 0;
     std::uint64_t hostShadowMutationAttempts = 0;
     std::uint64_t setPurgeableStateCalls = 0;
@@ -239,12 +245,20 @@ struct MetalR5EvictionSummary {
     std::uint64_t recordsEvictedTextureView = 0;
     std::uint64_t recordsEvictedSwizzledTextureView = 0;
     std::uint64_t recordsEvictedExpandedIndexCache = 0;
+    std::uint64_t reconstructablePrimariesEvicted = 0;
     std::uint64_t deviceBytesFreed = 0;
     std::uint64_t reclaimedMetalViewBytes = 0;
     std::uint64_t reclaimedHostCacheBytes = 0;
+    std::uint64_t evictedPrimaryReconstructableBytes = 0;
+    std::uint64_t evictedPrimaryAuthoritativeBytes = 0;
     std::uint64_t textureViewRebuildsAfterR5Evict = 0;
     std::uint64_t swizzledViewRebuildsAfterR5Evict = 0;
     std::uint64_t expandedIndexRebuildsAfterR5Evict = 0;
+    std::uint64_t primaryReconstructions = 0;
+    std::uint64_t primaryReconstructionFailures = 0;
+    std::uint64_t primaryVolatileRestoreAttempts = 0;
+    std::uint64_t primaryVolatileRestoreKept = 0;
+    std::uint64_t primaryVolatileRestoreEmpty = 0;
     std::uint64_t reconstructionFailures = 0;
 };
 
@@ -382,6 +396,8 @@ inline const char* metalR5EvictionScopeName(MetalR5EvictionScope scope) {
     case MetalR5EvictionScope::TextureView: return "texture-view";
     case MetalR5EvictionScope::ExpandedIndexCache:
         return "expanded-index-cache";
+    case MetalR5EvictionScope::PrimaryTexture:
+        return "primary-texture";
     }
     return "none";
 }
@@ -437,6 +453,11 @@ inline MetalR5EvictionScope metalR5EvictionScopeForRecord(
         record.diagnosticBucketId ==
             kMetalR5DiagnosticBucketExpandedIndexCache) {
         return MetalR5EvictionScope::ExpandedIndexCache;
+    }
+    if (record.owner == MetalResidencyOwner::Texture &&
+        record.kind == MetalResidencyKind::MetalTexture &&
+        record.diagnosticBucketId == kMetalR5DiagnosticBucketPrimaryTexture) {
+        return MetalR5EvictionScope::PrimaryTexture;
     }
     return MetalR5EvictionScope::None;
 }
@@ -528,6 +549,9 @@ inline void accumulateR5ResidencyOrderingRecord(
     } else if (scope == MetalR5EvictionScope::ExpandedIndexCache) {
         ++summary.expandedIndexCandidateRows;
         summary.expandedIndexCandidateBytes += record.retainedBytes;
+    } else if (scope == MetalR5EvictionScope::PrimaryTexture) {
+        ++summary.primaryTextureCandidateRows;
+        summary.primaryTextureCandidateBytes += record.retainedBytes;
     }
 
     if (!metalR5LastUseKnown(record)) {

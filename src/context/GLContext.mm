@@ -164,16 +164,20 @@ using R5EvictionBucketMask = std::uint32_t;
 constexpr R5EvictionBucketMask kR5EvictionBucketTextureView = 1u << 0;
 constexpr R5EvictionBucketMask kR5EvictionBucketSwizzledTextureView = 1u << 1;
 constexpr R5EvictionBucketMask kR5EvictionBucketExpandedIndexCache = 1u << 2;
+constexpr R5EvictionBucketMask kR5EvictionBucketPrimaryTexture = 1u << 3;
 constexpr R5EvictionBucketMask kR5EvictionBucketDerivedCaches =
     kR5EvictionBucketTextureView |
     kR5EvictionBucketSwizzledTextureView |
     kR5EvictionBucketExpandedIndexCache;
+constexpr R5EvictionBucketMask kR5EvictionBucketAll =
+    kR5EvictionBucketDerivedCaches |
+    kR5EvictionBucketPrimaryTexture;
 
 struct R5EvictionRequest {
     R5EvictionReason reason = R5EvictionReason::Test;
     MetalMemoryPressureState pressureLevel = MetalMemoryPressureState::Idle;
     std::uint64_t budgetRecords = 0;
-    R5EvictionBucketMask bucketAllowlist = kR5EvictionBucketDerivedCaches;
+    R5EvictionBucketMask bucketAllowlist = kR5EvictionBucketAll;
 };
 
 struct R5EvictionCandidate {
@@ -190,6 +194,8 @@ R5EvictionBucketMask r5EvictionBucketForRecord(
         return kR5EvictionBucketSwizzledTextureView;
     case kMetalR5DiagnosticBucketExpandedIndexCache:
         return kR5EvictionBucketExpandedIndexCache;
+    case kMetalR5DiagnosticBucketPrimaryTexture:
+        return kR5EvictionBucketPrimaryTexture;
     default:
         return 0;
     }
@@ -4452,6 +4458,86 @@ static bool sparseTextureTargetUsesSlices(GLenum target) {
     return extensions::sparse_texture::targetUsesSlices(target);
 }
 
+static bool r5PrimaryTextureTargetEligible(GLenum target) {
+    return target != 0 &&
+           target != GL_TEXTURE_BUFFER &&
+           target != GL_TEXTURE_2D_MULTISAMPLE &&
+           target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+}
+
+static bool r5TextureImageLevelHasValidMirror(
+    const GLTextureImageLevel& image) {
+    if (!image.defined ||
+        image.desc.width <= 0 ||
+        image.desc.height <= 0 ||
+        image.desc.depth <= 0 ||
+        isCompressedInternalFormat(image.desc.internalFormat)) {
+        return false;
+    }
+    if (!image.nativeData.empty() && image.nativeBpp > 0) {
+        return true;
+    }
+    return !image.rgba8.empty();
+}
+
+static bool r5PrimaryTextureMirrorsValid(
+    const GLTextureObject& texture) {
+    bool sawMirror = false;
+    auto visitLevel = [&](const GLTextureImageLevel& image) {
+        if (!image.defined) {
+            return true;
+        }
+        if (!r5TextureImageLevelHasValidMirror(image)) {
+            return false;
+        }
+        sawMirror = true;
+        return true;
+    };
+    for (const auto& [level, image] : texture.levels) {
+        (void)level;
+        if (!visitLevel(image)) {
+            return false;
+        }
+    }
+    for (const auto& faceLevels : texture.cubeFaceLevels) {
+        for (const auto& [level, image] : faceLevels) {
+            (void)level;
+            if (!visitLevel(image)) {
+                return false;
+            }
+        }
+    }
+    return sawMirror;
+}
+
+static bool r5PrimaryTextureHardExcluded(
+    const GLTextureObject& texture,
+    bool hasDependentTextureViews) {
+    return texture.viewSourceTexture != 0 ||
+           hasDependentTextureViews ||
+           !r5PrimaryTextureTargetEligible(texture.target) ||
+           isCompressedInternalFormat(texture.desc.internalFormat) ||
+           texture.sparseTexture ||
+           texture.producerPending.hasAny(kProducerAll) ||
+           texture.wasFramebufferRenderedTo ||
+           texture.wasViewportRenderedTo ||
+           texture.imageAtomicBufferDirtyToTexture ||
+           texture.msaaFramebufferWriteNeedsSamplerFlush ||
+           texture.colorShadowAuthoritative ||
+           texture.depthStencilShadowAuthoritative;
+}
+
+static MetalResidencyAuthorityClass r5PrimaryTextureAuthority(
+    const GLTextureObject& texture,
+    bool mirrorsValid,
+    bool hasDependentTextureViews = false) {
+    if (mirrorsValid &&
+        !r5PrimaryTextureHardExcluded(texture, hasDependentTextureViews)) {
+        return MetalResidencyAuthorityClass::Reconstructable;
+    }
+    return MetalResidencyAuthorityClass::Authoritative;
+}
+
 static MTLSize sparsePageSizeForFormat(id<MTLDevice> device, GLenum target, GLenum internalformat) {
     if (device == nil || !isSparseTextureAllocationTarget(target)) {
         return MTLSizeMake(0, 0, 0);
@@ -7458,6 +7544,9 @@ struct GLContext::Impl {
         drainPendingGpuProducers(object);
         releaseRetainedMetalObject(object.metalTexture);
         object.metalTexture = nullptr;
+        object.r5PrimaryTextureLastUseSerial = 0;
+        object.r5PrimaryTextureLastUseBoundarySerial = 0;
+        object.r5PrimaryTextureEvicted = false;
         object.r5TextureViewLastUseSerial = 0;
         object.r5TextureViewLastUseBoundarySerial = 0;
         object.r5TextureViewEvicted = false;
@@ -7490,6 +7579,7 @@ struct GLContext::Impl {
         object.msaaFramebufferWriteNeedsSamplerFlush = false;
         object.colorShadowAuthoritative = false;
         object.depthStencilShadowAuthoritative = false;
+        object.sparseTexture = false;
         clearAllPendingGpuProducers(object);
         object.desc = {};
         object.levels.clear();
@@ -9304,6 +9394,7 @@ struct GLContext::Impl {
     // uploaded data, not the initial upload from Recoil we want to
     // fingerprint.
     bool replaceMetalTexture(GLTextureObject& object, GLuint texName = 0) {
+        object.r5PrimaryTextureEvicted = false;
         releaseTextureBufferExpansion(object);
         const auto baseIt = object.levels.find(0);
         if (baseIt == object.levels.end()) {
@@ -11349,6 +11440,7 @@ struct GLContext::Impl {
             return nil;
         }
 
+        (void)restoreR5PrimaryTextureIfNeeded(*rootObj, rootName);
         if ((rootObj->metalTexture == nullptr || !rootObj->instantiated) &&
             !rootObj->levels.empty()) {
             (void)replaceMetalTexture(*rootObj, rootName);
@@ -11485,6 +11577,7 @@ struct GLContext::Impl {
             }
             return viewObj.metalTexture != nullptr;
         }
+        (void)restoreR5PrimaryTextureIfNeeded(*rootObj, rootName);
         if ((rootObj->metalTexture == nullptr || !rootObj->instantiated) &&
             !rootObj->levels.empty()) {
             (void)replaceMetalTexture(*rootObj, rootName);
@@ -11570,6 +11663,8 @@ struct GLContext::Impl {
     void* resolveSwizzledTexture(GLTextureObject& texObj) {
         if (texObj.viewSourceTexture != 0) {
             (void)materializeTextureView(texObj);
+        } else {
+            (void)restoreR5PrimaryTextureIfNeeded(texObj, 0);
         }
         const auto& sw = texObj.params.swizzle;
         void* baseTextureRaw = texObj.metalTexture;
@@ -12963,6 +13058,9 @@ struct GLContext::Impl {
                               texObject && texObject->metalTexture ? 1 : 0);
                     }
                     continue;  // malformed object store
+                }
+                if (texObject->viewSourceTexture == 0) {
+                    (void)restoreR5PrimaryTextureIfNeeded(*texObject, texName);
                 }
                 bool textureStorageReady =
                     texObject->instantiated && texObject->metalTexture != nullptr;
@@ -14796,6 +14894,10 @@ struct GLContext::Impl {
                         continue;
                     }
                     GLTextureObject* texObj = objects->textures().get(ib.texture);
+                    if (texObj != nullptr && texObj->viewSourceTexture == 0) {
+                        (void)restoreR5PrimaryTextureIfNeeded(*texObj,
+                                                              ib.texture);
+                    }
                     if (texObj == nullptr || texObj->metalTexture == nullptr) {
                         if (trace) std::fprintf(stderr, " SKIP=metalTexture_null tex=%u\n", ib.texture);
                         continue;
@@ -16368,6 +16470,10 @@ struct GLContext::Impl {
                 if (texObj != nullptr && texObj->viewSourceTexture != 0) {
                     (void)materializeTextureView(*texObj);
                 }
+                if (texObj != nullptr && texObj->viewSourceTexture == 0) {
+                    (void)restoreR5PrimaryTextureIfNeeded(*texObj,
+                                                          att->object);
+                }
                 if (texObj != nullptr && texObj->metalTexture != nullptr) {
                     tex = texObj->metalTexture;
                     const ResolvedTextureAttachment resolved =
@@ -16527,6 +16633,10 @@ struct GLContext::Impl {
                 GLTextureObject* tex = objects->textures().get(att->object);
                 if (tex != nullptr && tex->viewSourceTexture != 0) {
                     (void)materializeTextureView(*tex);
+                }
+                if (tex != nullptr && tex->viewSourceTexture == 0) {
+                    (void)restoreR5PrimaryTextureIfNeeded(*tex,
+                                                          att->object);
                 }
                 if (tex == nullptr || tex->metalTexture == nullptr) return nullptr;
                 if (!primarySet) {
@@ -21495,6 +21605,44 @@ struct GLContext::Impl {
         texture.r5TextureViewLastUseBoundarySerial = r5BoundarySerial;
     }
 
+    void touchR5PrimaryTexture(GLTextureObject& texture) noexcept {
+        texture.r5PrimaryTextureLastUseSerial = nextR5ResourceUseSerial();
+        texture.r5PrimaryTextureLastUseBoundarySerial = r5BoundarySerial;
+    }
+
+    bool restoreR5PrimaryTextureIfNeeded(GLTextureObject& texture,
+                                         GLuint textureName) {
+        if (!texture.r5PrimaryTextureEvicted) {
+            if (texture.viewSourceTexture == 0 &&
+                texture.metalTexture != nullptr) {
+                touchR5PrimaryTexture(texture);
+            }
+            return true;
+        }
+        if (texture.viewSourceTexture != 0) {
+            texture.r5PrimaryTextureEvicted = false;
+            return true;
+        }
+        if (texture.metalTexture != nullptr) {
+            texture.r5PrimaryTextureEvicted = false;
+            touchR5PrimaryTexture(texture);
+            return true;
+        }
+
+        if (replaceMetalTexture(texture, textureName) &&
+            texture.metalTexture != nullptr) {
+            texture.r5PrimaryTextureEvicted = false;
+            ++r5Eviction.primaryReconstructions;
+            touchR5PrimaryTexture(texture);
+            return true;
+        }
+
+        ++r5Eviction.primaryReconstructionFailures;
+        ++r5Eviction.reconstructionFailures;
+        texture.r5PrimaryTextureEvicted = true;
+        return false;
+    }
+
     void noteR5TextureViewRebuilt(GLTextureObject& texture) noexcept {
         if (!texture.r5TextureViewEvicted) {
             return;
@@ -21547,6 +21695,15 @@ struct GLContext::Impl {
                boundary == record.lastUseFrame;
     }
 
+    bool r5PrimaryTextureRecordLastUseMatches(
+        const GLTextureObject& texture,
+        const ResourceResidencyRecord& record) const noexcept {
+        return texture.r5PrimaryTextureLastUseSerial ==
+                   record.lastUseCommandSerial &&
+               texture.r5PrimaryTextureLastUseBoundarySerial ==
+                   record.lastUseFrame;
+    }
+
     bool r5ExpandedIndexRecordMatches(const GLBufferObject& buffer,
                                       const ResourceResidencyRecord& record) const noexcept {
         return buffer.r5ExpandedIndexLastUseSerial ==
@@ -21564,6 +21721,64 @@ struct GLContext::Impl {
     bool hasOutstandingCommandBuffers() const noexcept {
         return commandSubmission != nullptr &&
                commandSubmission->hasOutstandingCommandBuffers();
+    }
+
+    bool r5PrimaryTextureHasDependentView(GLuint textureName) const {
+        if (textureName == 0 || objects == nullptr) {
+            return false;
+        }
+        bool hasDependentView = false;
+        objects->textures().forEach(
+            [&](GLuint, const GLTextureObject& candidate) {
+                if (candidate.viewSourceTexture == textureName) {
+                    hasDependentView = true;
+                }
+            });
+        return hasDependentView;
+    }
+
+    bool evictReconstructablePrimaryTexture(
+        GLTextureObject& texture,
+        const ResourceResidencyRecord& record) {
+        if (record.authority !=
+            MetalResidencyAuthorityClass::Reconstructable) {
+            ++r5Eviction.authoritativePrimaryEvictAttempts;
+            r5Eviction.evictedPrimaryAuthoritativeBytes += record.metalBytes;
+            return false;
+        }
+        if (texture.viewSourceTexture != 0 ||
+            texture.metalTexture == nullptr ||
+            texture.r5PrimaryTextureEvicted) {
+            return false;
+        }
+        if (r5PrimaryTextureAuthority(
+                texture,
+                r5PrimaryTextureMirrorsValid(texture),
+                r5PrimaryTextureHasDependentView(record.glName)) !=
+            MetalResidencyAuthorityClass::Reconstructable) {
+            ++r5Eviction.authoritativePrimaryEvictAttempts;
+            r5Eviction.evictedPrimaryAuthoritativeBytes += record.metalBytes;
+            return false;
+        }
+
+        ++r5Eviction.primaryTextureReleaseAttempts;
+        releaseRetainedMetalObject(texture.metalSwizzledView);
+        texture.metalSwizzledView = nullptr;
+        texture.swizzleDirty = true;
+        releaseRetainedMetalObject(texture.metalSamplingProxy);
+        texture.metalSamplingProxy = nullptr;
+        releaseRetainedMetalObject(texture.metalTexture);
+        texture.metalTexture = nullptr;
+        texture.instantiated = false;
+        texture.r5PrimaryTextureLastUseSerial = 0;
+        texture.r5PrimaryTextureLastUseBoundarySerial = 0;
+        texture.r5PrimaryTextureEvicted = true;
+
+        ++r5Eviction.primaryTextureReleaseSuccesses;
+        ++r5Eviction.selectedRecords;
+        ++r5Eviction.reconstructablePrimariesEvicted;
+        r5Eviction.evictedPrimaryReconstructableBytes += record.metalBytes;
+        return true;
     }
 
     std::vector<R5EvictionCandidate> selectR5DerivedCacheEvictionCandidates(
@@ -21599,6 +21814,32 @@ struct GLContext::Impl {
                 continue;
             }
             ++r5Eviction.eligibleSeen;
+
+            if (scope == MetalR5EvictionScope::PrimaryTexture) {
+                if (objects == nullptr) {
+                    ++r5Eviction.objectMissingSkipped;
+                    continue;
+                }
+                GLTextureObject* texture =
+                    objects->textures().get(record.glName);
+                if (texture == nullptr) {
+                    ++r5Eviction.objectMissingSkipped;
+                    continue;
+                }
+                if (texture->viewSourceTexture != 0 ||
+                    texture->metalTexture == nullptr ||
+                    texture->r5PrimaryTextureEvicted) {
+                    ++r5Eviction.handleMissingSkipped;
+                    continue;
+                }
+                if (!r5PrimaryTextureRecordLastUseMatches(*texture,
+                                                          record)) {
+                    ++r5Eviction.lastUseMismatchSkipped;
+                    continue;
+                }
+                selected.push_back({record, kR5EvictionBucketPrimaryTexture});
+                continue;
+            }
 
             if (scope == MetalR5EvictionScope::TextureView) {
                 if (objects == nullptr) {
@@ -21733,6 +21974,21 @@ struct GLContext::Impl {
                 ++r5Eviction.recordsEvictedSwizzledTextureView;
                 ++mutated;
                 r5Eviction.reclaimedMetalViewBytes += record.metalBytes;
+                continue;
+            }
+
+            if (candidate.bucket == kR5EvictionBucketPrimaryTexture) {
+                if (objects == nullptr) {
+                    continue;
+                }
+                GLTextureObject* texture =
+                    objects->textures().get(record.glName);
+                if (texture == nullptr) {
+                    continue;
+                }
+                if (evictReconstructablePrimaryTexture(*texture, record)) {
+                    ++mutated;
+                }
                 continue;
             }
 
@@ -21880,7 +22136,7 @@ struct GLContext::Impl {
         request.reason = R5EvictionReason::Pressure;
         request.pressureLevel = level;
         request.budgetRecords = r5PressureBudgetForLevel(level);
-        request.bucketAllowlist = kR5EvictionBucketDerivedCaches;
+        request.bucketAllowlist = kR5EvictionBucketAll;
         const std::uint64_t skippedPressureBefore =
             r5Eviction.passSkippedPressure;
         evictR5DerivedCaches(request);
@@ -21893,7 +22149,7 @@ struct GLContext::Impl {
         R5EvictionRequest request;
         request.reason = R5EvictionReason::Test;
         request.budgetRecords = budget;
-        request.bucketAllowlist = kR5EvictionBucketDerivedCaches;
+        request.bucketAllowlist = kR5EvictionBucketAll;
         return evictR5DerivedCaches(request);
     }
 
@@ -22494,6 +22750,9 @@ struct GLContext::Impl {
     void* resolveImageMetalTexture(ImageBinding& ib,
                                    GLTextureObject* texObj,
                                    GLenum shaderTarget) {
+        if (texObj != nullptr && texObj->viewSourceTexture == 0) {
+            (void)restoreR5PrimaryTextureIfNeeded(*texObj, ib.texture);
+        }
         if (void* sidecar =
                 resolveImage3DLayerSidecarTexture(ib, texObj, shaderTarget)) {
             return sidecar;
@@ -26827,8 +27086,12 @@ bool GLContext::copyTexImage2D(
         NSUInteger srcSlice = 0;
         NSUInteger srcZ = 0;
         if (depthAttachment->kind == GLFramebufferAttachment::Kind::Texture) {
-            const GLTextureObject* srcObject =
+            GLTextureObject* srcObject =
                 impl_->objects->textures().get(depthAttachment->object);
+            if (srcObject != nullptr && srcObject->viewSourceTexture == 0) {
+                (void)impl_->restoreR5PrimaryTextureIfNeeded(
+                    *srcObject, depthAttachment->object);
+            }
             if (srcObject == nullptr || srcObject->metalTexture == nullptr) {
                 pushError(GL_INVALID_OPERATION);
                 return false;
@@ -30930,24 +31193,37 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             MetalResidencyAuthorityClass authority =
                 MetalResidencyAuthorityClass::Authoritative,
             MetalResidencyHeapClass heapClass =
-                MetalResidencyHeapClass::MetalDevice) {
+                MetalResidencyHeapClass::MetalDevice,
+            std::uint64_t lastUseFrame = 0,
+            std::uint64_t lastUseCommandSerial = 0,
+            std::uint32_t diagnosticBucketId = 0) {
         if (raw == nullptr || !textureResources.insert(raw).second) {
             return;
         }
         const std::uint64_t bytes = allocatedSize(raw);
         ++inventory.textureCount;
         inventory.textureBytes += bytes;
-        recordResidency(owner, glName, kind, authority, heapClass, bytes, 0);
+        recordResidency(owner, glName, kind, authority, heapClass, bytes, 0,
+                        0, 0, lastUseFrame, lastUseCommandSerial, 0,
+                        diagnosticBucketId);
     };
-    auto addGenericTexture = [&](void* raw, GLuint glName) {
+    auto addGenericTexture =
+        [&](void* raw,
+            GLuint glName,
+            MetalResidencyAuthorityClass authority,
+            std::uint64_t lastUseFrame,
+            std::uint64_t lastUseCommandSerial) {
         if (raw != nullptr && genericTextureResources.insert(raw).second) {
             ++inventory.genericTextureCount;
             inventory.genericTextureBytes += allocatedSize(raw);
         }
         addTexture(raw, MetalResidencyOwner::Texture, glName,
                    MetalResidencyKind::MetalTexture,
-                   MetalResidencyAuthorityClass::Authoritative,
-                   MetalResidencyHeapClass::MetalDevice);
+                   authority,
+                   MetalResidencyHeapClass::MetalDevice,
+                   lastUseFrame,
+                   lastUseCommandSerial,
+                   kMetalR5DiagnosticBucketPrimaryTexture);
     };
     auto addRenderbufferTexture = [&](void* raw, GLuint glName) {
         if (raw != nullptr && renderbufferTextureResources.insert(raw).second) {
@@ -31118,6 +31394,12 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         finalizePressureInputs();
         return inventory;
     }
+    std::unordered_set<GLuint> primaryTextureViewSources;
+    store->textures().forEach([&](GLuint, GLTextureObject& texture) {
+        if (texture.viewSourceTexture != 0) {
+            primaryTextureViewSources.insert(texture.viewSourceTexture);
+        }
+    });
     store->buffers().forEach([&](GLuint bufferName, GLBufferObject& buffer) {
         addBuffer(buffer.metalBuffer, MetalResidencyOwner::Buffer,
                   bufferName, MetalResidencyKind::MetalBuffer,
@@ -31213,8 +31495,22 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         }
     });
     store->textures().forEach([&](GLuint textureName, GLTextureObject& texture) {
+        bool primaryMirrorInvalid = false;
+        bool primarySawMirror = false;
+        auto observePrimaryMirror =
+            [&](const GLTextureImageLevel& image) {
+                if (!image.defined) {
+                    return;
+                }
+                if (!r5TextureImageLevelHasValidMirror(image)) {
+                    primaryMirrorInvalid = true;
+                    return;
+                }
+                primarySawMirror = true;
+            };
         for (const auto& [level, image] : texture.levels) {
             (void)level;
+            observePrimaryMirror(image);
             const std::uint64_t bytes = imageBytes(image);
             ++inventory.genericTextureLevelImages;
             inventory.genericTextureLevelBytes += bytes;
@@ -31231,6 +31527,7 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         for (const auto& faceLevels : texture.cubeFaceLevels) {
             for (const auto& [level, image] : faceLevels) {
                 (void)level;
+                observePrimaryMirror(image);
                 const std::uint64_t bytes = imageBytes(image);
                 ++inventory.cubeFaceLevelImages;
                 inventory.cubeFaceLevelBytes += bytes;
@@ -31245,13 +31542,24 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
                 }
             }
         }
+        const bool primaryMirrorsValid =
+            primarySawMirror && !primaryMirrorInvalid;
+        const MetalResidencyAuthorityClass primaryAuthority =
+            r5PrimaryTextureAuthority(
+                texture,
+                primaryMirrorsValid,
+                primaryTextureViewSources.find(textureName) !=
+                    primaryTextureViewSources.end());
         if (texture.viewSourceTexture != 0) {
             addTextureView(texture.metalTexture, textureName,
                            kMetalR5DiagnosticBucketTextureView,
                            texture.r5TextureViewLastUseSerial,
                            texture.r5TextureViewLastUseBoundarySerial);
         } else {
-            addGenericTexture(texture.metalTexture, textureName);
+            addGenericTexture(texture.metalTexture, textureName,
+                              primaryAuthority,
+                              texture.r5PrimaryTextureLastUseBoundarySerial,
+                              texture.r5PrimaryTextureLastUseSerial);
         }
         addTextureView(texture.metalSwizzledView, textureName,
                        kMetalR5DiagnosticBucketSwizzledTextureView,
@@ -58160,6 +58468,10 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
                 texObj->desc.sourceBuffer != 0) {
                 (void)impl_->refreshRGB32BufferTextureView(*texObj);
             }
+            if (texObj != nullptr && texObj->viewSourceTexture == 0) {
+                (void)impl_->restoreR5PrimaryTextureIfNeeded(*texObj,
+                                                             texName);
+            }
             if (texObj == nullptr || texObj->metalTexture == nullptr) {
                 if (traceCompSamp) std::fprintf(stderr, " SKIP=null_metalTexture\n");
                 continue;
@@ -58301,6 +58613,10 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             auto& ib = impl_->imageBindings[effectiveUnit];
             if (ib.texture == 0) continue;
             GLTextureObject* texObj = impl_->objects->textures().get(ib.texture);
+            if (texObj != nullptr && texObj->viewSourceTexture == 0) {
+                (void)impl_->restoreR5PrimaryTextureIfNeeded(*texObj,
+                                                             ib.texture);
+            }
             if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
             if (!impl_->imageBindingLevelAvailable(ib, texObj)) continue;
             const bool textureBufferImage =
@@ -58803,6 +59119,10 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
                 texObj->desc.sourceBuffer != 0) {
                 (void)impl_->refreshRGB32BufferTextureView(*texObj);
             }
+            if (texObj != nullptr && texObj->viewSourceTexture == 0) {
+                (void)impl_->restoreR5PrimaryTextureIfNeeded(*texObj,
+                                                             texName);
+            }
             if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
             computeReads.push_back({Impl::GpuResourceAccess::Kind::Texture,
                                     texName, kProducerAll});
@@ -58907,6 +59227,10 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             auto& ib = impl_->imageBindings[effectiveUnit];
             if (ib.texture == 0) continue;
             GLTextureObject* texObj = impl_->objects->textures().get(ib.texture);
+            if (texObj != nullptr && texObj->viewSourceTexture == 0) {
+                (void)impl_->restoreR5PrimaryTextureIfNeeded(*texObj,
+                                                             ib.texture);
+            }
             if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
             if (!impl_->imageBindingLevelAvailable(ib, texObj)) continue;
             const bool textureBufferImage =
