@@ -159,6 +159,82 @@ bool r5EvictionEnabled() {
         false);
 }
 
+enum class R5EvictionReason : std::uint8_t {
+    Test,
+    Pressure,
+};
+
+using R5EvictionBucketMask = std::uint32_t;
+
+constexpr R5EvictionBucketMask kR5EvictionBucketTextureView = 1u << 0;
+constexpr R5EvictionBucketMask kR5EvictionBucketSwizzledTextureView = 1u << 1;
+constexpr R5EvictionBucketMask kR5EvictionBucketExpandedIndexCache = 1u << 2;
+constexpr R5EvictionBucketMask kR5EvictionBucketDerivedCaches =
+    kR5EvictionBucketTextureView |
+    kR5EvictionBucketSwizzledTextureView |
+    kR5EvictionBucketExpandedIndexCache;
+
+struct R5EvictionRequest {
+    R5EvictionReason reason = R5EvictionReason::Test;
+    MetalMemoryPressureState pressureLevel = MetalMemoryPressureState::Idle;
+    std::uint64_t budgetRecords = 0;
+    R5EvictionBucketMask bucketAllowlist = kR5EvictionBucketDerivedCaches;
+};
+
+struct R5EvictionCandidate {
+    ResourceResidencyRecord record;
+    R5EvictionBucketMask bucket = 0;
+};
+
+R5EvictionBucketMask r5EvictionBucketForRecord(
+    const ResourceResidencyRecord& record) {
+    switch (record.diagnosticBucketId) {
+    case kMetalR5DiagnosticBucketTextureView:
+        return kR5EvictionBucketTextureView;
+    case kMetalR5DiagnosticBucketSwizzledTextureView:
+        return kR5EvictionBucketSwizzledTextureView;
+    case kMetalR5DiagnosticBucketExpandedIndexCache:
+        return kR5EvictionBucketExpandedIndexCache;
+    default:
+        return 0;
+    }
+}
+
+bool r5EvictionBucketAllowed(const ResourceResidencyRecord& record,
+                             R5EvictionBucketMask allowlist) {
+    const R5EvictionBucketMask bucket = r5EvictionBucketForRecord(record);
+    return bucket != 0 && (bucket & allowlist) != 0;
+}
+
+MetalMemoryPressureState metalMemoryPressureStateFromValue(
+    std::uint64_t value) {
+    if (value >= metalMemoryPressureStateValue(
+            MetalMemoryPressureState::Critical)) {
+        return MetalMemoryPressureState::Critical;
+    }
+    if (value >= metalMemoryPressureStateValue(MetalMemoryPressureState::Hard)) {
+        return MetalMemoryPressureState::Hard;
+    }
+    if (value >= metalMemoryPressureStateValue(MetalMemoryPressureState::Soft)) {
+        return MetalMemoryPressureState::Soft;
+    }
+    return MetalMemoryPressureState::Idle;
+}
+
+std::uint64_t r5PressureBudgetForLevel(MetalMemoryPressureState level) {
+    switch (level) {
+    case MetalMemoryPressureState::Soft:
+        return 8;
+    case MetalMemoryPressureState::Hard:
+        return 16;
+    case MetalMemoryPressureState::Critical:
+        return kMetalR5ResidencyCandidateLimit;
+    case MetalMemoryPressureState::Idle:
+        return 0;
+    }
+    return 0;
+}
+
 using GLDrawProfileClock = std::chrono::steady_clock;
 using GLDrawProfileTimePoint = GLDrawProfileClock::time_point;
 
@@ -21458,8 +21534,9 @@ struct GLContext::Impl {
         buffer.r5ExpandedIndexEvicted = false;
     }
 
-    void markR5Boundary() noexcept {
+    void markR5Boundary() {
         ++r5BoundarySerial;
+        maybeRunPressureEvictionPass();
     }
 
     bool r5TextureRecordLastUseMatches(const GLTextureObject& texture,
@@ -21489,40 +21566,28 @@ struct GLContext::Impl {
                    buffer.indexExpansionGeneration;
     }
 
-    std::uint64_t evictR5DerivedCachesForTesting(std::uint64_t budget) {
-        ++r5Eviction.explicitTriggerRequests;
-        r5Eviction.lastBudget = budget;
-        r5Eviction.enabled = r5EvictionEnabled() ? 1 : 0;
-        if (r5Eviction.enabled == 0) {
-            ++r5Eviction.passSkippedDisabled;
-            return 0;
-        }
+    bool hasOutstandingCommandBuffers() const noexcept {
+        return commandSubmission != nullptr &&
+               commandSubmission->hasOutstandingCommandBuffers();
+    }
 
-        ++r5Eviction.passAttempts;
-        const MetalResourceInventory pre = owner != nullptr
-            ? owner->metalResourceInventory()
-            : MetalResourceInventory{};
-        r5Eviction.lastPreTextureViewCount = pre.textureViewCount;
-        r5Eviction.lastPreTextureViewBytes = pre.textureViewBytes;
-        r5Eviction.lastPreExpandedIndexBuffers = pre.expandedIndexBuffers;
-        r5Eviction.lastPreExpandedIndexBytes = pre.expandedIndexBytes;
+    std::vector<R5EvictionCandidate> selectR5DerivedCacheEvictionCandidates(
+        const MetalResourceInventory& selection,
+        const R5EvictionRequest& request) {
+        std::vector<R5EvictionCandidate> selected;
+        selected.reserve(std::min<std::size_t>(
+            selection.r5OrderingCandidates.size(),
+            request.budgetRecords == 0
+                ? selection.r5OrderingCandidates.size()
+                : static_cast<std::size_t>(request.budgetRecords)));
 
-        ++r5Eviction.drainRequests;
-        if (!finishPendingWork()) {
-            ++r5Eviction.drainFailures;
-            return 0;
-        }
-
-        const MetalResourceInventory selection = owner != nullptr
-            ? owner->metalResourceInventory()
-            : MetalResourceInventory{};
         r5Eviction.candidatesSeen +=
             static_cast<std::uint64_t>(selection.r5OrderingCandidates.size());
 
-        std::uint64_t mutated = 0;
         for (const ResourceResidencyRecord& record :
              selection.r5OrderingCandidates) {
-            if (budget != 0 && mutated >= budget) {
+            if (request.budgetRecords != 0 &&
+                selected.size() >= request.budgetRecords) {
                 ++r5Eviction.budgetSkippedRecords;
                 continue;
             }
@@ -21533,7 +21598,8 @@ struct GLContext::Impl {
 
             const MetalR5EvictionScope scope =
                 metalR5EvictionScopeForRecord(record);
-            if (scope == MetalR5EvictionScope::None) {
+            if (scope == MetalR5EvictionScope::None ||
+                !r5EvictionBucketAllowed(record, request.bucketAllowlist)) {
                 ++r5Eviction.scopeSkipped;
                 continue;
             }
@@ -21567,18 +21633,7 @@ struct GLContext::Impl {
                         ++r5Eviction.lastUseMismatchSkipped;
                         continue;
                     }
-
-                    ++r5Eviction.textureViewBaseReleaseAttempts;
-                    releaseRetainedMetalObject(texture->metalTexture);
-                    texture->metalTexture = nullptr;
-                    texture->instantiated = false;
-                    texture->r5TextureViewLastUseSerial = 0;
-                    texture->r5TextureViewLastUseBoundarySerial = 0;
-                    texture->r5TextureViewEvicted = true;
-                    ++r5Eviction.textureViewBaseReleaseSuccesses;
-                    ++r5Eviction.selectedRecords;
-                    ++mutated;
-                    r5Eviction.reclaimedMetalViewBytes += record.metalBytes;
+                    selected.push_back({record, kR5EvictionBucketTextureView});
                     continue;
                 }
 
@@ -21593,18 +21648,8 @@ struct GLContext::Impl {
                         ++r5Eviction.lastUseMismatchSkipped;
                         continue;
                     }
-
-                    ++r5Eviction.swizzledViewReleaseAttempts;
-                    releaseRetainedMetalObject(texture->metalSwizzledView);
-                    texture->metalSwizzledView = nullptr;
-                    texture->swizzleDirty = true;
-                    texture->r5SwizzledViewLastUseSerial = 0;
-                    texture->r5SwizzledViewLastUseBoundarySerial = 0;
-                    texture->r5SwizzledViewEvicted = true;
-                    ++r5Eviction.swizzledViewReleaseSuccesses;
-                    ++r5Eviction.selectedRecords;
-                    ++mutated;
-                    r5Eviction.reclaimedMetalViewBytes += record.metalBytes;
+                    selected.push_back(
+                        {record, kR5EvictionBucketSwizzledTextureView});
                     continue;
                 }
 
@@ -21630,6 +21675,81 @@ struct GLContext::Impl {
                     ++r5Eviction.generationMismatchSkipped;
                     continue;
                 }
+                selected.push_back(
+                    {record, kR5EvictionBucketExpandedIndexCache});
+                continue;
+            }
+        }
+
+        return selected;
+    }
+
+    std::uint64_t mutateR5DerivedCacheEvictionCandidates(
+        const std::vector<R5EvictionCandidate>& selected,
+        const R5EvictionRequest&) {
+        std::uint64_t mutated = 0;
+        for (const R5EvictionCandidate& candidate : selected) {
+            const ResourceResidencyRecord& record = candidate.record;
+            if (candidate.bucket == kR5EvictionBucketTextureView) {
+                if (objects == nullptr) {
+                    continue;
+                }
+                GLTextureObject* texture =
+                    objects->textures().get(record.glName);
+                if (texture == nullptr || texture->metalTexture == nullptr) {
+                    continue;
+                }
+
+                ++r5Eviction.textureViewBaseReleaseAttempts;
+                releaseRetainedMetalObject(texture->metalTexture);
+                texture->metalTexture = nullptr;
+                texture->instantiated = false;
+                texture->r5TextureViewLastUseSerial = 0;
+                texture->r5TextureViewLastUseBoundarySerial = 0;
+                texture->r5TextureViewEvicted = true;
+                ++r5Eviction.textureViewBaseReleaseSuccesses;
+                ++r5Eviction.selectedRecords;
+                ++r5Eviction.recordsEvictedTextureView;
+                ++mutated;
+                r5Eviction.reclaimedMetalViewBytes += record.metalBytes;
+                continue;
+            }
+
+            if (candidate.bucket == kR5EvictionBucketSwizzledTextureView) {
+                if (objects == nullptr) {
+                    continue;
+                }
+                GLTextureObject* texture =
+                    objects->textures().get(record.glName);
+                if (texture == nullptr ||
+                    texture->metalSwizzledView == nullptr) {
+                    continue;
+                }
+
+                ++r5Eviction.swizzledViewReleaseAttempts;
+                releaseRetainedMetalObject(texture->metalSwizzledView);
+                texture->metalSwizzledView = nullptr;
+                texture->swizzleDirty = true;
+                texture->r5SwizzledViewLastUseSerial = 0;
+                texture->r5SwizzledViewLastUseBoundarySerial = 0;
+                texture->r5SwizzledViewEvicted = true;
+                ++r5Eviction.swizzledViewReleaseSuccesses;
+                ++r5Eviction.selectedRecords;
+                ++r5Eviction.recordsEvictedSwizzledTextureView;
+                ++mutated;
+                r5Eviction.reclaimedMetalViewBytes += record.metalBytes;
+                continue;
+            }
+
+            if (candidate.bucket == kR5EvictionBucketExpandedIndexCache) {
+                if (objects == nullptr) {
+                    continue;
+                }
+                GLBufferObject* buffer = objects->buffers().get(record.glName);
+                if (buffer == nullptr ||
+                    buffer->cachedExpandedIndices.empty()) {
+                    continue;
+                }
 
                 ++r5Eviction.expandedIndexClearAttempts;
                 std::vector<std::uint8_t>().swap(buffer->cachedExpandedIndices);
@@ -21639,12 +21759,88 @@ struct GLContext::Impl {
                 buffer->r5ExpandedIndexEvicted = true;
                 ++r5Eviction.expandedIndexClearSuccesses;
                 ++r5Eviction.selectedRecords;
+                ++r5Eviction.recordsEvictedExpandedIndexCache;
                 ++mutated;
                 r5Eviction.reclaimedHostCacheBytes += record.hostBytes;
                 continue;
             }
         }
+        return mutated;
+    }
 
+    void recordR5PressureRequest(MetalMemoryPressureState level) noexcept {
+        r5Eviction.pressureLevelAtEvict = metalMemoryPressureStateValue(level);
+        switch (level) {
+        case MetalMemoryPressureState::Soft:
+            ++r5Eviction.softPressureRequests;
+            break;
+        case MetalMemoryPressureState::Hard:
+            ++r5Eviction.hardPressureRequests;
+            break;
+        case MetalMemoryPressureState::Critical:
+            ++r5Eviction.criticalPressureRequests;
+            break;
+        case MetalMemoryPressureState::Idle:
+            break;
+        }
+    }
+
+    std::uint64_t evictR5DerivedCaches(const R5EvictionRequest& request) {
+        if (r5EvictionInProgress) {
+            return 0;
+        }
+        r5EvictionInProgress = true;
+        struct EvictionProgressGuard {
+            bool& value;
+            ~EvictionProgressGuard() { value = false; }
+        } guard{r5EvictionInProgress};
+
+        if (request.reason == R5EvictionReason::Test) {
+            ++r5Eviction.explicitTriggerRequests;
+        } else {
+            ++r5Eviction.passesTriggered;
+            recordR5PressureRequest(request.pressureLevel);
+        }
+        r5Eviction.lastBudget = request.budgetRecords;
+        r5Eviction.enabled = r5EvictionEnabled() ? 1 : 0;
+        if (r5Eviction.enabled == 0) {
+            ++r5Eviction.passSkippedDisabled;
+            return 0;
+        }
+
+        ++r5Eviction.passAttempts;
+        const MetalResourceInventory pre = owner != nullptr
+            ? owner->metalResourceInventory()
+            : MetalResourceInventory{};
+        r5Eviction.lastPreTextureViewCount = pre.textureViewCount;
+        r5Eviction.lastPreTextureViewBytes = pre.textureViewBytes;
+        r5Eviction.lastPreExpandedIndexBuffers = pre.expandedIndexBuffers;
+        r5Eviction.lastPreExpandedIndexBytes = pre.expandedIndexBytes;
+
+        if (request.reason == R5EvictionReason::Test) {
+            ++r5Eviction.drainRequests;
+            if (!finishPendingWork()) {
+                ++r5Eviction.drainFailures;
+                return 0;
+            }
+        }
+
+        const MetalResourceInventory selection = owner != nullptr
+            ? owner->metalResourceInventory()
+            : MetalResourceInventory{};
+        const std::vector<R5EvictionCandidate> selected =
+            selectR5DerivedCacheEvictionCandidates(selection, request);
+
+        if (request.reason == R5EvictionReason::Pressure &&
+            hasOutstandingCommandBuffers()) {
+            r5Eviction.candidatesGatedInFlight +=
+                static_cast<std::uint64_t>(selected.size());
+            ++r5Eviction.passSkippedPressure;
+            return 0;
+        }
+
+        const std::uint64_t mutated =
+            mutateR5DerivedCacheEvictionCandidates(selected, request);
         r5Eviction.mutatedRecords += mutated;
         ++r5Eviction.passCompleted;
 
@@ -21655,7 +21851,52 @@ struct GLContext::Impl {
         r5Eviction.lastPostTextureViewBytes = post.textureViewBytes;
         r5Eviction.lastPostExpandedIndexBuffers = post.expandedIndexBuffers;
         r5Eviction.lastPostExpandedIndexBytes = post.expandedIndexBytes;
+        if (pre.deviceAllocatedBytes > post.deviceAllocatedBytes) {
+            r5Eviction.deviceBytesFreed +=
+                pre.deviceAllocatedBytes - post.deviceAllocatedBytes;
+        }
         return mutated;
+    }
+
+    void maybeRunPressureEvictionPass() {
+        if (r5EvictionInProgress || !r5EvictionEnabled()) {
+            return;
+        }
+        const MetalResourceInventory inventory = owner != nullptr
+            ? owner->metalResourceInventory()
+            : MetalResourceInventory{};
+        const auto snapshot =
+            Runtime::shared().sampleMemoryPressure(inventory.pressure);
+        const MetalMemoryPressureState level =
+            metalMemoryPressureStateFromValue(snapshot.state);
+        if (level == MetalMemoryPressureState::Idle) {
+            lastR5PressureEvictionLevel = MetalMemoryPressureState::Idle;
+            return;
+        }
+        if (level == lastR5PressureEvictionLevel) {
+            ++r5Eviction.passesSkippedHysteresis;
+            return;
+        }
+
+        R5EvictionRequest request;
+        request.reason = R5EvictionReason::Pressure;
+        request.pressureLevel = level;
+        request.budgetRecords = r5PressureBudgetForLevel(level);
+        request.bucketAllowlist = kR5EvictionBucketDerivedCaches;
+        const std::uint64_t skippedPressureBefore =
+            r5Eviction.passSkippedPressure;
+        evictR5DerivedCaches(request);
+        if (r5Eviction.passSkippedPressure == skippedPressureBefore) {
+            lastR5PressureEvictionLevel = level;
+        }
+    }
+
+    std::uint64_t evictR5DerivedCachesForTesting(std::uint64_t budget) {
+        R5EvictionRequest request;
+        request.reason = R5EvictionReason::Test;
+        request.budgetRecords = budget;
+        request.bucketAllowlist = kR5EvictionBucketDerivedCaches;
+        return evictR5DerivedCaches(request);
     }
 
     CAMetalLayer* layer = nil;
@@ -21675,6 +21916,9 @@ struct GLContext::Impl {
     MetalR5EvictionSummary r5Eviction;
     std::uint64_t r5ResourceUseSerial = 0;
     std::uint64_t r5BoundarySerial = 0;
+    MetalMemoryPressureState lastR5PressureEvictionLevel =
+        MetalMemoryPressureState::Idle;
+    bool r5EvictionInProgress = false;
     std::unordered_map<std::uint64_t, TranslatedDrawPlan> translatedDrawPlanCache;
     Phase2PlanKeyMemo translatedDrawPlanKeyMemo;
     std::uint64_t translatedDrawPlanGeneration = 0;

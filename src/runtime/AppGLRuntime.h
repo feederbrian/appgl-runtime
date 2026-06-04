@@ -609,6 +609,8 @@ public:
 
     void makeCurrent(GLContext* context);
     GLContext* currentContext();
+    MetalMemoryPressureSnapshot sampleMemoryPressure(
+        MetalMemoryPressureInputs inputs);
 
     // Context liveness tracking. Every GLContext registers itself in construction
     // and unregisters in destruction. Callers that want to inspect the current

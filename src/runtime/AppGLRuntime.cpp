@@ -1887,6 +1887,14 @@ GLContext* Runtime::currentContext() {
     return gCurrentContext;
 }
 
+MetalMemoryPressureSnapshot Runtime::sampleMemoryPressure(
+    MetalMemoryPressureInputs inputs) {
+    MetalMemoryPressureStateMachine fallbackPressureMachine;
+    return memoryPressureObserver_
+        ? memoryPressureObserver_->sample(inputs)
+        : sampleMetalMemoryPressure(fallbackPressureMachine, inputs);
+}
+
 void Runtime::registerContext(GLContext* context) {
     if (context == nullptr) {
         return;
@@ -2576,10 +2584,16 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << "\"enabled\":" << metalInventory.r5Eviction.enabled << ","
            << "\"explicitTriggerRequests\":"
            << metalInventory.r5Eviction.explicitTriggerRequests << ","
+           << "\"softPressureRequests\":"
+           << metalInventory.r5Eviction.softPressureRequests << ","
            << "\"hardPressureRequests\":"
            << metalInventory.r5Eviction.hardPressureRequests << ","
            << "\"criticalPressureRequests\":"
            << metalInventory.r5Eviction.criticalPressureRequests << ","
+           << "\"passesTriggered\":"
+           << metalInventory.r5Eviction.passesTriggered << ","
+           << "\"passesSkippedHysteresis\":"
+           << metalInventory.r5Eviction.passesSkippedHysteresis << ","
            << "\"passAttempts\":"
            << metalInventory.r5Eviction.passAttempts << ","
            << "\"passCompleted\":"
@@ -2588,6 +2602,8 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << metalInventory.r5Eviction.passSkippedDisabled << ","
            << "\"passSkippedPressure\":"
            << metalInventory.r5Eviction.passSkippedPressure << ","
+           << "\"candidatesGatedInFlight\":"
+           << metalInventory.r5Eviction.candidatesGatedInFlight << ","
            << "\"drainRequests\":"
            << metalInventory.r5Eviction.drainRequests << ","
            << "\"drainFailures\":"
@@ -2654,6 +2670,27 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << metalInventory.r5Eviction.lastPreExpandedIndexBytes << ","
            << "\"lastPostExpandedIndexBytes\":"
            << metalInventory.r5Eviction.lastPostExpandedIndexBytes << ","
+           << "\"pressureLevelAtEvict\":"
+           << metalInventory.r5Eviction.pressureLevelAtEvict << ","
+           << "\"recordsEvictedByBucket\":{"
+           << "\"textureView\":"
+           << metalInventory.r5Eviction.recordsEvictedTextureView << ","
+           << "\"swizzledTextureView\":"
+           << metalInventory.r5Eviction.recordsEvictedSwizzledTextureView
+           << ","
+           << "\"expandedIndexCache\":"
+           << metalInventory.r5Eviction.recordsEvictedExpandedIndexCache
+           << "},"
+           << "\"recordsEvictedTextureView\":"
+           << metalInventory.r5Eviction.recordsEvictedTextureView << ","
+           << "\"recordsEvictedSwizzledTextureView\":"
+           << metalInventory.r5Eviction.recordsEvictedSwizzledTextureView
+           << ","
+           << "\"recordsEvictedExpandedIndexCache\":"
+           << metalInventory.r5Eviction.recordsEvictedExpandedIndexCache
+           << ","
+           << "\"deviceBytesFreed\":"
+           << metalInventory.r5Eviction.deviceBytesFreed << ","
            << "\"reclaimedMetalViewBytes\":"
            << metalInventory.r5Eviction.reclaimedMetalViewBytes << ","
            << "\"reclaimedHostCacheBytes\":"
