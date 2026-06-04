@@ -613,6 +613,8 @@ public:
     GLContext* currentContext();
     MetalMemoryPressureSnapshot sampleMemoryPressure(
         MetalMemoryPressureInputs inputs);
+    bool r5EvictionEnabledCached();
+    bool refreshR5EvictionEnabled();
     std::uint64_t forceMemoryPressureLevelForTesting(std::uint64_t level);
 
     // Context liveness tracking. Every GLContext registers itself in construction
@@ -790,6 +792,9 @@ public:
 private:
     static constexpr std::uint64_t kMemoryPressureForceDisabled =
         UINT64_MAX;
+    static constexpr std::uint8_t kR5EvictionFlagDisabled = 0;
+    static constexpr std::uint8_t kR5EvictionFlagEnabled = 1;
+    static constexpr std::uint8_t kR5EvictionFlagUnknown = 2;
 
     Runtime();
     ~Runtime();
@@ -815,6 +820,8 @@ private:
     std::unique_ptr<MemoryPressureObserver> memoryPressureObserver_;
     std::atomic<std::uint64_t> forcedMemoryPressureLevelForTesting_{
         kMemoryPressureForceDisabled};
+    std::atomic<std::uint8_t> r5EvictionEnabledCache_{
+        kR5EvictionFlagUnknown};
 };
 
 template <typename ReturnType>

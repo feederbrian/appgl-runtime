@@ -1,6 +1,5 @@
 #include "GLContext.h"
 #include "../runtime/AppGLDiagnostics.h"
-#include "../runtime/AppGLFeatureFlags.h"
 #include "../runtime/AppGLLog.h"
 #include "MetalFrameGraph.h"
 #include "MetalCommandSubmission.h"
@@ -152,11 +151,7 @@ bool liftTessUniformGuardEnabled() {
 }
 
 bool r5EvictionEnabled() {
-    return feature_flags::isBooleanFlagEnabled(
-        "r5_eviction",
-        {"R5Eviction", "r5-derived-cache-eviction"},
-        {"APPGL_R5_EVICTION", "APPGL_R5_EVICTION_ENABLE"},
-        false);
+    return Runtime::shared().r5EvictionEnabledCached();
 }
 
 enum class R5EvictionReason : std::uint8_t {
@@ -21802,7 +21797,10 @@ struct GLContext::Impl {
             recordR5PressureRequest(request.pressureLevel);
         }
         r5Eviction.lastBudget = request.budgetRecords;
-        r5Eviction.enabled = r5EvictionEnabled() ? 1 : 0;
+        const bool enabled = request.reason == R5EvictionReason::Pressure
+            ? Runtime::shared().r5EvictionEnabledCached()
+            : Runtime::shared().refreshR5EvictionEnabled();
+        r5Eviction.enabled = enabled ? 1 : 0;
         if (r5Eviction.enabled == 0) {
             ++r5Eviction.passSkippedDisabled;
             return 0;

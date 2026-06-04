@@ -1,5 +1,6 @@
 #include "AppGLRuntime.h"
 
+#include "AppGLFeatureFlags.h"
 #include "AppGLMemoryPressure.h"
 
 #include <algorithm>
@@ -1964,8 +1965,36 @@ MetalMemoryPressureSnapshot Runtime::sampleMemoryPressure(
     return snapshot;
 }
 
+bool Runtime::r5EvictionEnabledCached() {
+    const std::uint8_t cached =
+        r5EvictionEnabledCache_.load(std::memory_order_acquire);
+    if (cached == kR5EvictionFlagDisabled) {
+        return false;
+    }
+    // Keep the default-off present path to an atomic load. Enabled/unknown
+    // states refresh through the canonical feature-flag resolver so explicit
+    // test/app entry points can still observe at-call env changes.
+    if (cached == kR5EvictionFlagEnabled) {
+        return refreshR5EvictionEnabled();
+    }
+    return refreshR5EvictionEnabled();
+}
+
+bool Runtime::refreshR5EvictionEnabled() {
+    const bool enabled = feature_flags::isBooleanFlagEnabled(
+        "r5_eviction",
+        {"R5Eviction", "r5-derived-cache-eviction"},
+        {"APPGL_R5_EVICTION", "APPGL_R5_EVICTION_ENABLE"},
+        false);
+    r5EvictionEnabledCache_.store(enabled ? kR5EvictionFlagEnabled
+                                          : kR5EvictionFlagDisabled,
+                                  std::memory_order_release);
+    return enabled;
+}
+
 std::uint64_t Runtime::forceMemoryPressureLevelForTesting(
     std::uint64_t level) {
+    refreshR5EvictionEnabled();
     const MetalMemoryPressureState forcedState =
         memoryPressureStateFromTestingLevel(level);
     forcedMemoryPressureLevelForTesting_.store(
