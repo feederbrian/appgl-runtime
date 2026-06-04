@@ -22191,10 +22191,10 @@ struct GLContext::Impl {
                 ? pre.deviceAllocatedBytes - post.deviceAllocatedBytes
                 : 0;
         const bool noCandidates = selectedCount == 0;
-        const bool noRelief = mutated == 0 || deviceBytesFreed == 0;
+        const bool noRelief = mutated == 0 && deviceBytesFreed == 0;
         const bool budgetExhausted = request.budgetRecords != 0 &&
             selectedCount >= request.budgetRecords;
-        if (!noCandidates && !noRelief && !budgetExhausted) {
+        if (!noRelief) {
             return;
         }
 
