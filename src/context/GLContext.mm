@@ -154,6 +154,10 @@ bool r5EvictionEnabled() {
     return Runtime::shared().r5EvictionEnabledCached();
 }
 
+bool r8HeapSegmentationEnabled() {
+    return Runtime::shared().r8HeapSegmentationEnabledCached();
+}
+
 enum class R5EvictionReason : std::uint8_t {
     Test,
     Pressure,
@@ -31246,6 +31250,13 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
     inventory.r5Ordering.boundarySerial = impl_->r5BoundarySerial;
     inventory.r5Ordering.rowLimit = kMetalR5ResidencyRawRowLimit;
     inventory.r5Ordering.candidateLimit = kMetalR5ResidencyCandidateLimit;
+    const bool r8Enabled = r8HeapSegmentationEnabled();
+    if (r8Enabled) {
+        inventory.r8HeapSegmentation.enabled = 1;
+        inventory.r8HeapSegmentation.dryRunPasses = 1;
+        inventory.r8HeapBuckets.reserve(
+            static_cast<std::size_t>(kMetalR8HeapBucketLimit));
+    }
     auto finalizePressureInputs = [&]() {
         inventory.pressure.currentAllocatedBytes = inventory.deviceAllocatedBytes;
         inventory.pressure.trackedHostHeapBytes = inventory.residency.hostBytes;
@@ -31257,6 +31268,42 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         inventory.pressure.cbPressureFlushCount = counters.pressureFlushCount;
         inventory.pressure.cbCurrentInFlight = counters.currentInFlight;
         inventory.pressure.cbInFlightBound = counters.inFlightBound;
+    };
+    auto finalizeR8HeapSegmentation = [&]() {
+        if (!r8Enabled) {
+            return;
+        }
+        auto& r8 = inventory.r8HeapSegmentation;
+        r8.rowsTruncated = inventory.r5Ordering.rowsTruncated;
+        r8.reconstructionSuccesses =
+            inventory.r5Eviction.textureViewRebuildsAfterR5Evict +
+            inventory.r5Eviction.swizzledViewRebuildsAfterR5Evict +
+            inventory.r5Eviction.expandedIndexRebuildsAfterR5Evict +
+            inventory.r5Eviction.primaryReconstructions;
+        r8.reconstructionFailures =
+            inventory.r5Eviction.reconstructionFailures;
+        r8.deviceAllocatedBytesBefore = inventory.deviceAllocatedBytes;
+        r8.deviceAllocatedBytesAfter = inventory.deviceAllocatedBytes;
+        r8.deviceAllocatedBytesDelta = 0;
+        r8.deviceBytesFreed = 0;
+        r8.osPressure = inventory.pressure.osPressure;
+        r8.memoryClass = inventory.pressure.memoryClass;
+        r8.pendingPressurePeak = inventory.pressure.pendingPressurePeak;
+        r8.warningEventCount = inventory.pressure.warningEventCount;
+        r8.criticalEventCount = inventory.pressure.criticalEventCount;
+        r8.criticalPressureExhaustionLatches =
+            inventory.r5Eviction.criticalPressureExhaustionLatches;
+        r8.criticalPressureOOMErrors =
+            inventory.r5Eviction.criticalPressureOOMErrors;
+        r8.criticalPressureNoCandidateLatches =
+            inventory.r5Eviction.criticalPressureNoCandidateLatches;
+        r8.criticalPressureNoReliefLatches =
+            inventory.r5Eviction.criticalPressureNoReliefLatches;
+        r8.criticalPressureBudgetExhaustedLatches =
+            inventory.r5Eviction.criticalPressureBudgetExhaustedLatches;
+        r8.criticalPressureStillCriticalLatches =
+            inventory.r5Eviction.criticalPressureStillCriticalLatches;
+        finalizeR8HeapSegmentationSummary(r8, inventory.r8HeapBuckets);
     };
     std::uint64_t frameGraphResidencyBufferBytes = 0;
     std::uint64_t frameGraphResidencyTextureBytes = 0;
@@ -31347,6 +31394,78 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
     };
 
     std::uint64_t nextResidencyRecordId = 1;
+    auto depthStencilPixelFormat = [](NSUInteger pixelFormat) {
+        return pixelFormat == MTLPixelFormatDepth16Unorm ||
+               pixelFormat == MTLPixelFormatDepth32Float ||
+               pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ||
+               pixelFormat == MTLPixelFormatDepth24Unorm_Stencil8 ||
+               pixelFormat == MTLPixelFormatStencil8;
+    };
+    auto populateR8CommonResourceMetadata =
+        [&](ResourceResidencyRecord& record, id<MTLResource> resource) {
+            if (resource == nil) {
+                return;
+            }
+            record.r8StorageMode =
+                static_cast<std::uint32_t>(resource.storageMode);
+            record.r8CpuCacheMode =
+                static_cast<std::uint32_t>(resource.cpuCacheMode);
+            record.r8HazardTrackingMode =
+                static_cast<std::uint32_t>(resource.hazardTrackingMode);
+            record.r8ResourceOptions =
+                static_cast<std::uint64_t>(resource.resourceOptions);
+            record.r8CompatibilityKnown = 1;
+        };
+    auto populateR8BufferMetadata =
+        [&](ResourceResidencyRecord& record, void* raw) {
+            if (!r8Enabled || raw == nullptr || record.metalBytes == 0) {
+                return;
+            }
+            id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)raw;
+            populateR8CommonResourceMetadata(record,
+                                             (id<MTLResource>)buffer);
+            record.r8ResourceClass = MetalR8ResourceClass::Buffer;
+            if (record.kind == MetalResidencyKind::Fp64SidecarMetal) {
+                record.r8TextureClass = MetalR8TextureClass::Fp64Sidecar;
+            } else if (record.kind ==
+                       MetalResidencyKind::TextureBufferExpansion) {
+                record.r8TextureClass =
+                    MetalR8TextureClass::TextureBufferExpansion;
+            } else if (record.heapClass == MetalResidencyHeapClass::Sidecar) {
+                record.r8TextureClass = MetalR8TextureClass::Sidecar;
+            }
+        };
+    auto populateR8TextureMetadata =
+        [&](ResourceResidencyRecord& record, void* raw) {
+            if (!r8Enabled || raw == nullptr || record.metalBytes == 0) {
+                return;
+            }
+            id<MTLTexture> texture = (__bridge id<MTLTexture>)raw;
+            populateR8CommonResourceMetadata(record,
+                                             (id<MTLResource>)texture);
+            record.r8ResourceClass = MetalR8ResourceClass::Texture;
+            record.r8TextureUsage =
+                static_cast<std::uint64_t>(texture.usage);
+            record.r8TextureType =
+                static_cast<std::uint32_t>(texture.textureType);
+            record.r8PixelFormat =
+                static_cast<std::uint32_t>(texture.pixelFormat);
+            record.r8SampleCount =
+                static_cast<std::uint32_t>(texture.sampleCount);
+            record.r8MipmapLevels =
+                static_cast<std::uint32_t>(texture.mipmapLevelCount);
+            record.r8ArrayLength =
+                static_cast<std::uint32_t>(texture.arrayLength);
+            if (record.r8SampleCount > 1) {
+                record.r8TextureClass = MetalR8TextureClass::Multisample;
+            } else if (depthStencilPixelFormat(texture.pixelFormat)) {
+                record.r8TextureClass = MetalR8TextureClass::DepthStencil;
+            } else if (record.heapClass == MetalResidencyHeapClass::Sidecar) {
+                record.r8TextureClass = MetalR8TextureClass::Sidecar;
+            } else {
+                record.r8TextureClass = MetalR8TextureClass::Color;
+            }
+        };
     auto retainR5OrderingCandidate = [&](const ResourceResidencyRecord& record) {
         if (metalR5EvictionScopeForRecord(record) == MetalR5EvictionScope::None) {
             return;
@@ -31385,7 +31504,10 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             std::uint64_t lastUseFrame = 0,
             std::uint64_t lastUseCommandSerial = 0,
             std::uint64_t inFlightSerial = 0,
-            std::uint32_t diagnosticBucketId = 0) {
+            std::uint32_t diagnosticBucketId = 0,
+            void* r8Resource = nullptr,
+            MetalR8ResourceClass r8ResourceClass =
+                MetalR8ResourceClass::None) {
             const std::uint64_t retainedBytes = metalBytes + hostBytes;
             if (retainedBytes == 0) {
                 return;
@@ -31413,6 +31535,11 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
                     ? 1
                     : 0;
             record.diagnosticBucketId = diagnosticBucketId;
+            if (r8ResourceClass == MetalR8ResourceClass::Buffer) {
+                populateR8BufferMetadata(record, r8Resource);
+            } else if (r8ResourceClass == MetalR8ResourceClass::Texture) {
+                populateR8TextureMetadata(record, r8Resource);
+            }
             if (!metalR5AppendBoundedResidencyRow(
                     inventory.residencyRows, record,
                     inventory.r5Ordering.rowLimit)) {
@@ -31422,6 +31549,14 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             retainR5OrderingCandidate(record);
             accumulateResidencyRecord(inventory.residency, record);
             accumulateR5ResidencyDryRunRecord(inventory.r5DryRun, record);
+            if (r8Enabled) {
+                accumulateR8HeapSegmentationRecord(
+                    inventory.r8HeapSegmentation,
+                    inventory.r8HeapBuckets,
+                    record,
+                    impl_->r5BoundarySerial,
+                    kMetalR8HeapBucketLimit);
+            }
         };
     auto addHostCacheBytes = [&](std::uint64_t bytes) {
         inventory.hostCaches.totalBytes += bytes;
@@ -31444,7 +31579,8 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         ++inventory.bufferCount;
         inventory.bufferBytes += bytes;
         recordResidency(owner, glName, kind, authority, heapClass, bytes, 0,
-                        recipeId, sourceGeneration);
+                        recipeId, sourceGeneration, 0, 0, 0, 0, raw,
+                        MetalR8ResourceClass::Buffer);
     };
     auto addTexture =
         [&](void* raw,
@@ -31466,7 +31602,7 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         inventory.textureBytes += bytes;
         recordResidency(owner, glName, kind, authority, heapClass, bytes, 0,
                         0, 0, lastUseFrame, lastUseCommandSerial, 0,
-                        diagnosticBucketId);
+                        diagnosticBucketId, raw, MetalR8ResourceClass::Texture);
     };
     auto addGenericTexture =
         [&](void* raw,
@@ -31653,6 +31789,7 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
     auto* store = impl_->objects.get();
     if (store == nullptr) {
         finalizePressureInputs();
+        finalizeR8HeapSegmentation();
         return inventory;
     }
     std::unordered_set<GLuint> primaryTextureViewSources;
@@ -31996,6 +32133,7 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
     inventory.deviceAllocatedBytes =
         std::max(inventory.deviceAllocatedBytes, inventory.residency.metalBytes);
     finalizePressureInputs();
+    finalizeR8HeapSegmentation();
     return inventory;
 }
 

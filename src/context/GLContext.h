@@ -760,8 +760,10 @@ public:
         MetalR5ResidencyTouchSummary r5Touches;
         MetalR5ResidencyOrderingSummary r5Ordering;
         MetalR5EvictionSummary r5Eviction;
+        MetalR8HeapSegmentationSummary r8HeapSegmentation;
         std::vector<ResourceResidencyRecord> residencyRows;
         std::vector<ResourceResidencyRecord> r5OrderingCandidates;
+        std::vector<MetalR8HeapBucketSummary> r8HeapBuckets;
     };
     MetalResourceInventory metalResourceInventory() const;
     std::uint64_t evictR5DerivedCachesForTesting(std::uint64_t budget);

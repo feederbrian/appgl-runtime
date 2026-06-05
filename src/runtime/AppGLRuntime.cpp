@@ -2101,6 +2101,34 @@ bool Runtime::refreshR5EvictionEnabled() {
     return enabled;
 }
 
+bool Runtime::r8HeapSegmentationEnabledCached() {
+    const std::uint8_t cached =
+        r8HeapSegmentationEnabledCache_.load(std::memory_order_acquire);
+    if (cached == kR8HeapSegmentationFlagDisabled) {
+        return false;
+    }
+    if (cached == kR8HeapSegmentationFlagEnabled) {
+        return refreshR8HeapSegmentationEnabled();
+    }
+    return refreshR8HeapSegmentationEnabled();
+}
+
+bool Runtime::refreshR8HeapSegmentationEnabled() {
+    const bool enabled = feature_flags::isBooleanFlagEnabled(
+        "r8_heap_segmentation",
+        {"R8HeapSegmentation",
+         "r8-heap-segmentation",
+         "r8-heap-segmentation-model"},
+        {"APPGL_R8_HEAP_SEGMENTATION",
+         "APPGL_R8_HEAP_SEGMENTATION_ENABLE"},
+        false);
+    r8HeapSegmentationEnabledCache_.store(
+        enabled ? kR8HeapSegmentationFlagEnabled
+                : kR8HeapSegmentationFlagDisabled,
+        std::memory_order_release);
+    return enabled;
+}
+
 std::uint64_t Runtime::forceMemoryPressureLevelForTesting(
     std::uint64_t level) {
     refreshR5EvictionEnabled();
@@ -2572,6 +2600,22 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
     const auto pressureSnapshot = sampleMemoryPressure(metalInventory.pressure);
     const auto& pressureInputs = pressureSnapshot.inputs;
     const auto& pressureWatermarks = pressureSnapshot.watermarks;
+    if (metalInventory.r8HeapSegmentation.enabled != 0) {
+        metalInventory.r8HeapSegmentation.osPressure =
+            pressureInputs.osPressure;
+        metalInventory.r8HeapSegmentation.pressureState =
+            pressureSnapshot.state;
+        metalInventory.r8HeapSegmentation.workingSetRatioPermyriad =
+            pressureSnapshot.workingSetRatioPermyriad;
+        metalInventory.r8HeapSegmentation.memoryClass =
+            pressureInputs.memoryClass;
+        metalInventory.r8HeapSegmentation.pendingPressurePeak =
+            pressureInputs.pendingPressurePeak;
+        metalInventory.r8HeapSegmentation.warningEventCount =
+            pressureInputs.warningEventCount;
+        metalInventory.r8HeapSegmentation.criticalEventCount =
+            pressureInputs.criticalEventCount;
+    }
 
     stream << "\"metalResources\":{"
            << "\"deviceAllocatedBytes\":" << metalInventory.deviceAllocatedBytes << ","
@@ -3026,6 +3070,341 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << "\"highMemoryDeviceBytesFreed\":"
            << metalInventory.r5Eviction.highMemoryDeviceBytesFreed
            << "},";
+    stream << "\"r8HeapSegmentation\":{"
+           << "\"version\":" << metalInventory.r8HeapSegmentation.version
+           << ","
+           << "\"enabled\":" << metalInventory.r8HeapSegmentation.enabled
+           << ","
+           << "\"dryRunPasses\":"
+           << metalInventory.r8HeapSegmentation.dryRunPasses << ","
+           << "\"rowsSeen\":"
+           << metalInventory.r8HeapSegmentation.rowsSeen << ","
+           << "\"rowsClassified\":"
+           << metalInventory.r8HeapSegmentation.rowsClassified << ","
+           << "\"rowsTruncated\":"
+           << metalInventory.r8HeapSegmentation.rowsTruncated << ","
+           << "\"allocationChanges\":"
+           << metalInventory.r8HeapSegmentation.allocationChanges << ","
+           << "\"heapCreations\":"
+           << metalInventory.r8HeapSegmentation.heapCreations << ","
+           << "\"setPurgeableStateCalls\":"
+           << metalInventory.r8HeapSegmentation.setPurgeableStateCalls
+           << ","
+           << "\"drainRequests\":"
+           << metalInventory.r8HeapSegmentation.drainRequests << ","
+           << "\"reconstructableRecords\":"
+           << metalInventory.r8HeapSegmentation.reconstructableRecords
+           << ","
+           << "\"reconstructableBytes\":"
+           << metalInventory.r8HeapSegmentation.reconstructableBytes << ","
+           << "\"authoritativeRecords\":"
+           << metalInventory.r8HeapSegmentation.authoritativeRecords << ","
+           << "\"authoritativeBytes\":"
+           << metalInventory.r8HeapSegmentation.authoritativeBytes << ","
+           << "\"transientRecords\":"
+           << metalInventory.r8HeapSegmentation.transientRecords << ","
+           << "\"transientBytes\":"
+           << metalInventory.r8HeapSegmentation.transientBytes << ","
+           << "\"sparseSpecialRecords\":"
+           << metalInventory.r8HeapSegmentation.sparseSpecialRecords << ","
+           << "\"sparseSpecialBytes\":"
+           << metalInventory.r8HeapSegmentation.sparseSpecialBytes << ","
+           << "\"unknownRecords\":"
+           << metalInventory.r8HeapSegmentation.unknownRecords << ","
+           << "\"unknownBytes\":"
+           << metalInventory.r8HeapSegmentation.unknownBytes << ","
+           << "\"heapOccupancy\":{"
+           << "\"hostRecords\":"
+           << metalInventory.r8HeapSegmentation.hostHeapRecords << ","
+           << "\"hostBytes\":"
+           << metalInventory.r8HeapSegmentation.hostHeapBytes << ","
+           << "\"metalDeviceRecords\":"
+           << metalInventory.r8HeapSegmentation.metalDeviceHeapRecords
+           << ","
+           << "\"metalDeviceBytes\":"
+           << metalInventory.r8HeapSegmentation.metalDeviceHeapBytes
+           << ","
+           << "\"frameGraphRecords\":"
+           << metalInventory.r8HeapSegmentation.frameGraphHeapRecords
+           << ","
+           << "\"frameGraphBytes\":"
+           << metalInventory.r8HeapSegmentation.frameGraphHeapBytes
+           << ","
+           << "\"cacheRecords\":"
+           << metalInventory.r8HeapSegmentation.cacheHeapRecords << ","
+           << "\"cacheBytes\":"
+           << metalInventory.r8HeapSegmentation.cacheHeapBytes << ","
+           << "\"sidecarRecords\":"
+           << metalInventory.r8HeapSegmentation.sidecarHeapRecords << ","
+           << "\"sidecarBytes\":"
+           << metalInventory.r8HeapSegmentation.sidecarHeapBytes << ","
+           << "\"sparseRecords\":"
+           << metalInventory.r8HeapSegmentation.sparseHeapRecords << ","
+           << "\"sparseBytes\":"
+           << metalInventory.r8HeapSegmentation.sparseHeapBytes << ","
+           << "\"unknownRecords\":"
+           << metalInventory.r8HeapSegmentation.unknownHeapRecords << ","
+           << "\"unknownBytes\":"
+           << metalInventory.r8HeapSegmentation.unknownHeapBytes << "},"
+           << "\"frameGraphTransientExcludedRecords\":"
+           << metalInventory.r8HeapSegmentation
+                  .frameGraphTransientExcludedRecords
+           << ","
+           << "\"frameGraphTransientExcludedBytes\":"
+           << metalInventory.r8HeapSegmentation
+                  .frameGraphTransientExcludedBytes
+           << ","
+           << "\"sparseSpecialExcludedRecords\":"
+           << metalInventory.r8HeapSegmentation.sparseSpecialExcludedRecords
+           << ","
+           << "\"sparseSpecialExcludedBytes\":"
+           << metalInventory.r8HeapSegmentation.sparseSpecialExcludedBytes
+           << ","
+           << "\"unknownKindExcludedRecords\":"
+           << metalInventory.r8HeapSegmentation.unknownKindExcludedRecords
+           << ","
+           << "\"unknownKindExcludedBytes\":"
+           << metalInventory.r8HeapSegmentation.unknownKindExcludedBytes
+           << ","
+           << "\"unknownAuthorityExcludedRecords\":"
+           << metalInventory.r8HeapSegmentation
+                  .unknownAuthorityExcludedRecords
+           << ","
+           << "\"unknownAuthorityExcludedBytes\":"
+           << metalInventory.r8HeapSegmentation
+                  .unknownAuthorityExcludedBytes
+           << ","
+           << "\"authoritativeExcludedRecords\":"
+           << metalInventory.r8HeapSegmentation.authoritativeExcludedRecords
+           << ","
+           << "\"authoritativeExcludedBytes\":"
+           << metalInventory.r8HeapSegmentation.authoritativeExcludedBytes
+           << ","
+           << "\"exclusions\":{"
+           << "\"frameGraphTransientRecords\":"
+           << metalInventory.r8HeapSegmentation
+                  .frameGraphTransientExcludedRecords
+           << ","
+           << "\"frameGraphTransientBytes\":"
+           << metalInventory.r8HeapSegmentation
+                  .frameGraphTransientExcludedBytes
+           << ","
+           << "\"sparseSpecialRecords\":"
+           << metalInventory.r8HeapSegmentation.sparseSpecialExcludedRecords
+           << ","
+           << "\"sparseSpecialBytes\":"
+           << metalInventory.r8HeapSegmentation.sparseSpecialExcludedBytes
+           << ","
+           << "\"unknownKindRecords\":"
+           << metalInventory.r8HeapSegmentation.unknownKindExcludedRecords
+           << ","
+           << "\"unknownKindBytes\":"
+           << metalInventory.r8HeapSegmentation.unknownKindExcludedBytes
+           << ","
+           << "\"unknownAuthorityRecords\":"
+           << metalInventory.r8HeapSegmentation
+                  .unknownAuthorityExcludedRecords
+           << ","
+           << "\"unknownAuthorityBytes\":"
+           << metalInventory.r8HeapSegmentation
+                  .unknownAuthorityExcludedBytes
+           << ","
+           << "\"authoritativeRecords\":"
+           << metalInventory.r8HeapSegmentation.authoritativeExcludedRecords
+           << ","
+           << "\"authoritativeBytes\":"
+           << metalInventory.r8HeapSegmentation.authoritativeExcludedBytes
+           << "},"
+           << "\"candidateRecords\":"
+           << metalInventory.r8HeapSegmentation.candidateRecords << ","
+           << "\"candidateBytes\":"
+           << metalInventory.r8HeapSegmentation.candidateBytes << ","
+           << "\"candidateMetalBytes\":"
+           << metalInventory.r8HeapSegmentation.candidateMetalBytes << ","
+           << "\"candidateHostBytes\":"
+           << metalInventory.r8HeapSegmentation.candidateHostBytes << ","
+           << "\"prospectiveBucketCount\":"
+           << metalInventory.r8HeapSegmentation.prospectiveBucketCount
+           << ","
+           << "\"prospectiveBucketRecords\":"
+           << metalInventory.r8HeapSegmentation.prospectiveBucketRecords
+           << ","
+           << "\"prospectiveBucketBytes\":"
+           << metalInventory.r8HeapSegmentation.prospectiveBucketBytes
+           << ","
+           << "\"reconstructableUnbucketedRecords\":"
+           << metalInventory.r8HeapSegmentation
+                  .reconstructableUnbucketedRecords
+           << ","
+           << "\"reconstructableUnbucketedBytes\":"
+           << metalInventory.r8HeapSegmentation
+                  .reconstructableUnbucketedBytes
+           << ","
+           << "\"compatibilityUnknownRows\":"
+           << metalInventory.r8HeapSegmentation.compatibilityUnknownRows
+           << ","
+           << "\"compatibilityUnknownBytes\":"
+           << metalInventory.r8HeapSegmentation.compatibilityUnknownBytes
+           << ","
+           << "\"inFlightExcludedRows\":"
+           << metalInventory.r8HeapSegmentation.inFlightExcludedRows
+           << ","
+           << "\"inFlightExcludedBytes\":"
+           << metalInventory.r8HeapSegmentation.inFlightExcludedBytes
+           << ","
+           << "\"hotLifetimeRows\":"
+           << metalInventory.r8HeapSegmentation.hotLifetimeRows << ","
+           << "\"hotLifetimeBytes\":"
+           << metalInventory.r8HeapSegmentation.hotLifetimeBytes << ","
+           << "\"warmLifetimeRows\":"
+           << metalInventory.r8HeapSegmentation.warmLifetimeRows << ","
+           << "\"warmLifetimeBytes\":"
+           << metalInventory.r8HeapSegmentation.warmLifetimeBytes << ","
+           << "\"coldLifetimeRows\":"
+           << metalInventory.r8HeapSegmentation.coldLifetimeRows << ","
+           << "\"coldLifetimeBytes\":"
+           << metalInventory.r8HeapSegmentation.coldLifetimeBytes << ","
+           << "\"unknownLifetimeRows\":"
+           << metalInventory.r8HeapSegmentation.unknownLifetimeRows << ","
+           << "\"unknownLifetimeBytes\":"
+           << metalInventory.r8HeapSegmentation.unknownLifetimeBytes << ","
+           << "\"bucketRowsTruncated\":"
+           << metalInventory.r8HeapSegmentation.bucketRowsTruncated << ","
+           << "\"bucketBytesTruncated\":"
+           << metalInventory.r8HeapSegmentation.bucketBytesTruncated << ","
+           << "\"bucketTruncationPermyriad\":"
+           << metalInventory.r8HeapSegmentation.bucketTruncationPermyriad
+           << ","
+           << "\"purgeAttempts\":"
+           << metalInventory.r8HeapSegmentation.purgeAttempts << ","
+           << "\"purgeSuccesses\":"
+           << metalInventory.r8HeapSegmentation.purgeSuccesses << ","
+           << "\"purgeFailures\":"
+           << metalInventory.r8HeapSegmentation.purgeFailures << ","
+           << "\"purgeAffectedObjects\":"
+           << metalInventory.r8HeapSegmentation.purgeAffectedObjects << ","
+           << "\"purgeBytes\":"
+           << metalInventory.r8HeapSegmentation.purgeBytes << ","
+           << "\"purgeSkippedFlagOff\":"
+           << metalInventory.r8HeapSegmentation.purgeSkippedFlagOff << ","
+           << "\"purgeSkippedNoAllocator\":"
+           << metalInventory.r8HeapSegmentation.purgeSkippedNoAllocator
+           << ","
+           << "\"reconstructionSuccesses\":"
+           << metalInventory.r8HeapSegmentation.reconstructionSuccesses
+           << ","
+           << "\"reconstructionFailures\":"
+           << metalInventory.r8HeapSegmentation.reconstructionFailures
+           << ","
+           << "\"reconstructionLatencySamples\":"
+           << metalInventory.r8HeapSegmentation.reconstructionLatencySamples
+           << ","
+           << "\"reconstructionLatencyTotalNs\":"
+           << metalInventory.r8HeapSegmentation.reconstructionLatencyTotalNs
+           << ","
+           << "\"reconstructionLatencyMaxNs\":"
+           << metalInventory.r8HeapSegmentation.reconstructionLatencyMaxNs
+           << ","
+           << "\"deviceAllocatedBytesBefore\":"
+           << metalInventory.r8HeapSegmentation.deviceAllocatedBytesBefore
+           << ","
+           << "\"deviceAllocatedBytesAfter\":"
+           << metalInventory.r8HeapSegmentation.deviceAllocatedBytesAfter
+           << ","
+           << "\"deviceAllocatedBytesDelta\":"
+           << metalInventory.r8HeapSegmentation.deviceAllocatedBytesDelta
+           << ","
+           << "\"deviceBytesFreed\":"
+           << metalInventory.r8HeapSegmentation.deviceBytesFreed << ","
+           << "\"prospectivePurgeableMetalBytes\":"
+           << metalInventory.r8HeapSegmentation
+                  .prospectivePurgeableMetalBytes
+           << ","
+           << "\"osPressure\":"
+           << metalInventory.r8HeapSegmentation.osPressure << ","
+           << "\"pressureState\":"
+           << metalInventory.r8HeapSegmentation.pressureState << ","
+           << "\"workingSetRatioPermyriad\":"
+           << metalInventory.r8HeapSegmentation.workingSetRatioPermyriad
+           << ","
+           << "\"memoryClass\":"
+           << metalInventory.r8HeapSegmentation.memoryClass << ","
+           << "\"pendingPressurePeak\":"
+           << metalInventory.r8HeapSegmentation.pendingPressurePeak << ","
+           << "\"warningEventCount\":"
+           << metalInventory.r8HeapSegmentation.warningEventCount << ","
+           << "\"criticalEventCount\":"
+           << metalInventory.r8HeapSegmentation.criticalEventCount << ","
+           << "\"criticalPressureExhaustionLatches\":"
+           << metalInventory.r8HeapSegmentation
+                  .criticalPressureExhaustionLatches
+           << ","
+           << "\"criticalPressureOOMErrors\":"
+           << metalInventory.r8HeapSegmentation.criticalPressureOOMErrors
+           << ","
+           << "\"criticalPressureNoCandidateLatches\":"
+           << metalInventory.r8HeapSegmentation
+                  .criticalPressureNoCandidateLatches
+           << ","
+           << "\"criticalPressureNoReliefLatches\":"
+           << metalInventory.r8HeapSegmentation
+                  .criticalPressureNoReliefLatches
+           << ","
+           << "\"criticalPressureBudgetExhaustedLatches\":"
+           << metalInventory.r8HeapSegmentation
+                  .criticalPressureBudgetExhaustedLatches
+           << ","
+           << "\"criticalPressureStillCriticalLatches\":"
+           << metalInventory.r8HeapSegmentation
+                  .criticalPressureStillCriticalLatches
+           << "},";
+    stream << "\"r8HeapBuckets\":[";
+    for (std::size_t bucketIndex = 0;
+         bucketIndex < metalInventory.r8HeapBuckets.size();
+         ++bucketIndex) {
+        const auto& bucket = metalInventory.r8HeapBuckets[bucketIndex];
+        if (bucketIndex != 0) {
+            stream << ",";
+        }
+        stream << "{"
+               << "\"bucketId\":" << bucket.bucketId << ","
+               << "\"resourceClass\":"
+               << static_cast<unsigned>(bucket.resourceClass) << ","
+               << "\"resourceClassName\":\""
+               << metalR8ResourceClassName(bucket.resourceClass) << "\","
+               << "\"textureClass\":"
+               << static_cast<unsigned>(bucket.textureClass) << ","
+               << "\"textureClassName\":\""
+               << metalR8TextureClassName(bucket.textureClass) << "\","
+               << "\"lifetimeBucket\":"
+               << static_cast<unsigned>(bucket.lifetimeBucket) << ","
+               << "\"lifetimeBucketName\":\""
+               << metalR8LifetimeBucketName(bucket.lifetimeBucket) << "\","
+               << "\"storageMode\":" << bucket.storageMode << ","
+               << "\"cpuCacheMode\":" << bucket.cpuCacheMode << ","
+               << "\"hazardTrackingMode\":"
+               << bucket.hazardTrackingMode << ","
+               << "\"resourceOptions\":"
+               << bucket.resourceOptions << ","
+               << "\"textureUsage\":" << bucket.textureUsage << ","
+               << "\"textureType\":" << bucket.textureType << ","
+               << "\"pixelFormat\":" << bucket.pixelFormat << ","
+               << "\"sampleCount\":" << bucket.sampleCount << ","
+               << "\"mipmapLevels\":" << bucket.mipmapLevels << ","
+               << "\"arrayLength\":" << bucket.arrayLength << ","
+               << "\"sizeBucket\":" << bucket.sizeBucket << ","
+               << "\"records\":" << bucket.records << ","
+               << "\"retainedBytes\":" << bucket.retainedBytes << ","
+               << "\"metalBytes\":" << bucket.metalBytes << ","
+               << "\"hostBytes\":" << bucket.hostBytes << ","
+               << "\"oldestLastUseCommandSerial\":"
+               << bucket.oldestLastUseCommandSerial << ","
+               << "\"newestLastUseCommandSerial\":"
+               << bucket.newestLastUseCommandSerial << ","
+               << "\"inFlightRecords\":" << bucket.inFlightRecords
+               << "}";
+    }
+    stream << "],";
     stream << "\"r5Touches\":{"
            << "\"serial\":" << metalInventory.r5Touches.serial << ","
            << "\"totalTouches\":" << metalInventory.r5Touches.totalTouches
@@ -10464,4 +10843,8 @@ extern "C" std::uint64_t appglR5ForceMemoryPressureForTesting(
 extern "C" std::uint64_t appglR5ForceMemoryClassForTesting(
     std::uint64_t memoryClass) {
     return appgl::Runtime::shared().forceMemoryClassForTesting(memoryClass);
+}
+
+extern "C" std::uint64_t appglR8RefreshHeapSegmentationForTesting() {
+    return appgl::Runtime::shared().refreshR8HeapSegmentationEnabled() ? 1 : 0;
 }

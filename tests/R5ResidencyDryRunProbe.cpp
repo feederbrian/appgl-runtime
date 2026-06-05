@@ -19,6 +19,7 @@ extern "C" std::uint64_t appglR5ForceMemoryPressureForTesting(
     std::uint64_t level);
 extern "C" std::uint64_t appglR5ForceMemoryClassForTesting(
     std::uint64_t memoryClass);
+extern "C" std::uint64_t appglR8RefreshHeapSegmentationForTesting();
 
 namespace {
 
@@ -95,6 +96,12 @@ std::uint64_t jsonR5EvictionCounter(const std::string& json,
                                      ? 0
                                      : r5Eviction,
                            key);
+}
+
+std::uint64_t jsonR8Counter(const std::string& json,
+                            const std::string& key) {
+    const std::size_t r8 = json.find("\"r8HeapSegmentation\":");
+    return jsonCounterFrom(json, r8 == std::string::npos ? 0 : r8, key);
 }
 
 bool jsonContainsToken(const std::string& json, const char* token) {
@@ -298,6 +305,46 @@ appgl::ResourceResidencyRecord scopedRecord(
     return result;
 }
 
+void markR8BufferCompatible(appgl::ResourceResidencyRecord& result,
+                            std::uint32_t storageMode = 1,
+                            std::uint32_t cpuCacheMode = 1,
+                            std::uint32_t hazardTrackingMode = 1,
+                            std::uint64_t resourceOptions = 1) {
+    result.r8CompatibilityKnown = 1;
+    result.r8ResourceClass = appgl::MetalR8ResourceClass::Buffer;
+    result.r8StorageMode = storageMode;
+    result.r8CpuCacheMode = cpuCacheMode;
+    result.r8HazardTrackingMode = hazardTrackingMode;
+    result.r8ResourceOptions = resourceOptions;
+}
+
+void markR8TextureCompatible(appgl::ResourceResidencyRecord& result,
+                             std::uint64_t textureUsage = 1,
+                             std::uint32_t pixelFormat = 80,
+                             std::uint32_t textureType = 2,
+                             std::uint32_t storageMode = 1) {
+    result.r8CompatibilityKnown = 1;
+    result.r8ResourceClass = appgl::MetalR8ResourceClass::Texture;
+    result.r8TextureClass = appgl::MetalR8TextureClass::Color;
+    result.r8StorageMode = storageMode;
+    result.r8CpuCacheMode = 1;
+    result.r8HazardTrackingMode = 1;
+    result.r8ResourceOptions = storageMode;
+    result.r8TextureUsage = textureUsage;
+    result.r8TextureType = textureType;
+    result.r8PixelFormat = pixelFormat;
+    result.r8SampleCount = 1;
+    result.r8MipmapLevels = 1;
+    result.r8ArrayLength = 1;
+}
+
+bool r8RecordHasBucketCompatibleMetadata(
+    const appgl::ResourceResidencyRecord& result) {
+    return result.metalBytes != 0 &&
+           result.r8CompatibilityKnown != 0 &&
+           result.r8ResourceClass != appgl::MetalR8ResourceClass::None;
+}
+
 void runClassifierProbe(ProbeState& state) {
     using appgl::MetalR5ResidencyClass;
     using appgl::MetalResidencyAuthorityClass;
@@ -395,6 +442,255 @@ void runClassifierProbe(ProbeState& state) {
     expect(state, summary.purgeableStateCalls == 0,
            "R5-0 performs no purgeableState calls");
     expect(state, summary.drainRequests == 0, "R5-0 performs no drains");
+}
+
+void runR8HeapSegmentationStaticProbe(ProbeState& state) {
+    using appgl::MetalResidencyAuthorityClass;
+    using appgl::MetalResidencyHeapClass;
+    using appgl::MetalResidencyKind;
+    using appgl::MetalResidencyOwner;
+
+    appgl::MetalR8HeapSegmentationSummary summary;
+    summary.enabled = 1;
+    summary.dryRunPasses = 1;
+    std::vector<appgl::MetalR8HeapBucketSummary> buckets;
+    const std::uint64_t boundarySerial = 16;
+
+    auto add = [&](appgl::ResourceResidencyRecord result) {
+        appgl::accumulateR8HeapSegmentationRecord(summary,
+                                                  buckets,
+                                                  result,
+                                                  boundarySerial);
+    };
+    auto reconstructable = [&](MetalResidencyKind kind,
+                               MetalResidencyHeapClass heap,
+                               std::uint64_t metalBytes,
+                               std::uint64_t hostBytes,
+                               std::uint64_t lastUseFrame,
+                               std::uint64_t lastUseSerial) {
+        auto result = record(kind,
+                             MetalResidencyAuthorityClass::Reconstructable,
+                             heap,
+                             metalBytes,
+                             hostBytes);
+        result.lastUseFrame = lastUseFrame;
+        result.lastUseCommandSerial = lastUseSerial;
+        return result;
+    };
+
+    auto unknownKind = reconstructable(MetalResidencyKind::Unknown,
+                                       MetalResidencyHeapClass::Cache,
+                                       8,
+                                       0,
+                                       12,
+                                       12);
+    markR8BufferCompatible(unknownKind);
+    add(unknownKind);
+
+    auto unknownAuthority = record(MetalResidencyKind::MetalTexture,
+                                   MetalResidencyAuthorityClass::Unknown,
+                                   MetalResidencyHeapClass::MetalDevice,
+                                   16,
+                                   0);
+    unknownAuthority.lastUseFrame = 12;
+    unknownAuthority.lastUseCommandSerial = 12;
+    markR8TextureCompatible(unknownAuthority);
+    add(unknownAuthority);
+
+    auto transient = reconstructable(MetalResidencyKind::FrameGraphResource,
+                                     MetalResidencyHeapClass::FrameGraph,
+                                     32,
+                                     0,
+                                     12,
+                                     12);
+    transient.owner = MetalResidencyOwner::FrameGraph;
+    transient.authority = MetalResidencyAuthorityClass::Transient;
+    markR8BufferCompatible(transient);
+    add(transient);
+
+    auto sparse = record(MetalResidencyKind::SparseHeap,
+                         MetalResidencyAuthorityClass::SparseSpecial,
+                         MetalResidencyHeapClass::Sparse,
+                         64,
+                         0);
+    sparse.owner = MetalResidencyOwner::SparseTexture;
+    sparse.lastUseFrame = 12;
+    sparse.lastUseCommandSerial = 12;
+    markR8BufferCompatible(sparse);
+    add(sparse);
+
+    auto authoritative = record(MetalResidencyKind::MetalBuffer,
+                                MetalResidencyAuthorityClass::Authoritative,
+                                MetalResidencyHeapClass::MetalDevice,
+                                128,
+                                0);
+    authoritative.lastUseFrame = 12;
+    authoritative.lastUseCommandSerial = 12;
+    markR8BufferCompatible(authoritative);
+    expect(state,
+           r8RecordHasBucketCompatibleMetadata(authoritative),
+           "R8 negative control has compatible metadata before authority gate");
+    add(authoritative);
+
+    auto hostOnly = reconstructable(MetalResidencyKind::ProgramMslSource,
+                                    MetalResidencyHeapClass::Host,
+                                    0,
+                                    21,
+                                    12,
+                                    12);
+    markR8BufferCompatible(hostOnly);
+    add(hostOnly);
+
+    auto missingCompatibility =
+        reconstructable(MetalResidencyKind::MetalTexture,
+                        MetalResidencyHeapClass::MetalDevice,
+                        32,
+                        0,
+                        12,
+                        12);
+    add(missingCompatibility);
+
+    auto inFlight = reconstructable(MetalResidencyKind::MetalTexture,
+                                    MetalResidencyHeapClass::MetalDevice,
+                                    32,
+                                    0,
+                                    12,
+                                    12);
+    inFlight.inFlightSerial = 99;
+    markR8TextureCompatible(inFlight);
+    add(inFlight);
+
+    auto unknownLifetime =
+        reconstructable(MetalResidencyKind::MetalTexture,
+                        MetalResidencyHeapClass::MetalDevice,
+                        32,
+                        0,
+                        0,
+                        0);
+    markR8TextureCompatible(unknownLifetime);
+    add(unknownLifetime);
+
+    auto hotBuffer = reconstructable(MetalResidencyKind::MetalBuffer,
+                                     MetalResidencyHeapClass::MetalDevice,
+                                     64,
+                                     0,
+                                     15,
+                                     15);
+    markR8BufferCompatible(hotBuffer, 1);
+    add(hotBuffer);
+
+    auto warmBuffer = reconstructable(MetalResidencyKind::MetalBuffer,
+                                      MetalResidencyHeapClass::MetalDevice,
+                                      64,
+                                      0,
+                                      12,
+                                      12);
+    markR8BufferCompatible(warmBuffer, 1);
+    add(warmBuffer);
+
+    auto warmBufferSame = warmBuffer;
+    warmBufferSame.lastUseCommandSerial = 11;
+    add(warmBufferSame);
+
+    auto warmTextureA = reconstructable(MetalResidencyKind::MetalTexture,
+                                        MetalResidencyHeapClass::MetalDevice,
+                                        128,
+                                        0,
+                                        12,
+                                        12);
+    markR8TextureCompatible(warmTextureA, 1);
+    add(warmTextureA);
+
+    auto warmTextureB = warmTextureA;
+    markR8TextureCompatible(warmTextureB, 2);
+    add(warmTextureB);
+
+    auto coldTexture = reconstructable(MetalResidencyKind::MetalTexture,
+                                       MetalResidencyHeapClass::MetalDevice,
+                                       256,
+                                       0,
+                                       1,
+                                       1);
+    markR8TextureCompatible(coldTexture, 1);
+    add(coldTexture);
+
+    appgl::finalizeR8HeapSegmentationSummary(summary, buckets);
+
+    expect(state, summary.enabled == 1, "R8 static summary enabled");
+    expect(state, summary.dryRunPasses == 1,
+           "R8 static dry-run pass counted");
+    expect(state, summary.rowsSeen == 15, "R8 static rows seen");
+    expect(state, summary.frameGraphTransientExcludedRecords == 1,
+           "R8 excludes FrameGraph/transient before bucketing");
+    expect(state, summary.sparseSpecialExcludedRecords == 1,
+           "R8 excludes sparse-special before bucketing");
+    expect(state, summary.unknownKindExcludedRecords == 1,
+           "R8 excludes unknown kind fail-closed");
+    expect(state, summary.unknownAuthorityExcludedRecords == 1,
+           "R8 excludes unknown authority fail-closed");
+    expect(state, summary.authoritativeExcludedRecords == 1,
+           "R8 authoritative metadata is fail-closed");
+    expect(state, summary.candidateRecords == 10,
+           "R8 candidates only include reconstructable rows after authority");
+    expect(state, summary.reconstructableUnbucketedRecords == 4,
+           "R8 unbucketed tracks host-only, missing compat, in-flight, and unknown lifetime");
+    expect(state, summary.compatibilityUnknownRows == 1,
+           "R8 missing compatibility is unbucketed");
+    expect(state, summary.inFlightExcludedRows == 1,
+           "R8 in-flight reconstructables are unbucketed");
+    expect(state, summary.unknownLifetimeRows == 1,
+           "R8 unknown lifetime reconstructables are unbucketed");
+    expect(state, summary.hotLifetimeRows == 1,
+           "R8 hot lifetime bucket counted");
+    expect(state, summary.warmLifetimeRows == 5,
+           "R8 warm lifetime rows counted before compatibility gate");
+    expect(state, summary.coldLifetimeRows == 1,
+           "R8 cold lifetime bucket counted");
+    expect(state, summary.prospectiveBucketRecords == 6,
+           "R8 prospective records are bucketed only after all gates");
+    expect(state, summary.prospectiveBucketCount == 5,
+           "R8 identical compatibility keys coalesce");
+    expect(state, buckets.size() == 5, "R8 bucket vector size finalized");
+    expect(state,
+           buckets.size() > 1 &&
+               buckets[1].records == 2 &&
+               buckets[1].oldestLastUseCommandSerial == 11 &&
+               buckets[1].newestLastUseCommandSerial == 12,
+           "R8 bucket aggregates matching compatibility key");
+
+    appgl::MetalR8HeapSegmentationSummary truncated;
+    truncated.enabled = 1;
+    std::vector<appgl::MetalR8HeapBucketSummary> tinyBuckets;
+    for (std::uint32_t i = 0; i < 4; ++i) {
+        auto result = reconstructable(MetalResidencyKind::MetalBuffer,
+                                      MetalResidencyHeapClass::MetalDevice,
+                                      64 + i,
+                                      0,
+                                      12,
+                                      12);
+        markR8BufferCompatible(result, i + 1);
+        appgl::accumulateR8HeapSegmentationRecord(truncated,
+                                                  tinyBuckets,
+                                                  result,
+                                                  boundarySerial,
+                                                  2);
+    }
+    appgl::finalizeR8HeapSegmentationSummary(truncated, tinyBuckets);
+    expect(state, truncated.prospectiveBucketCount == 2,
+           "R8 bucket limit bounds exported bucket rows");
+    expect(state, truncated.prospectiveBucketRecords == 2,
+           "R8 bucket limit counts successful bucket records");
+    expect(state, truncated.bucketRowsTruncated == 2,
+           "R8 bucket truncation counts over-limit rows");
+    expect(state, truncated.bucketBytesTruncated > 0,
+           "R8 bucket truncation bytes are visible");
+    expect(state, truncated.bucketTruncationPermyriad == 5000,
+           "R8 bucket truncation rate is visible");
+    expect(state, truncated.allocationChanges == 0 &&
+                      truncated.heapCreations == 0 &&
+                      truncated.setPurgeableStateCalls == 0 &&
+                      truncated.drainRequests == 0,
+           "R8 static model is observe-only");
 }
 
 void runOrderingProbe(ProbeState& state) {
@@ -1246,6 +1542,130 @@ void createTouchedPrimaryTextures(ProbeState& state,
     }
 }
 
+void runR8HeapSegmentationRuntimeProbe(ProbeState& state, const R5GL& gl) {
+    unsetenv("APPGL_R5_EVICTION");
+    unsetenv("APPGL_R5_EVICTION_ENABLE");
+    appglR5ForceMemoryPressureForTesting(
+        appgl::metalMemoryPressureStateValue(
+            appgl::MetalMemoryPressureState::Idle));
+    unsetenv("APPGL_R8_HEAP_SEGMENTATION");
+    unsetenv("APPGL_R8_HEAP_SEGMENTATION_ENABLE");
+    expect(state,
+           appglR8RefreshHeapSegmentationForTesting() == 0,
+           "R8 test hook refreshes default-off flag");
+
+    const std::string disabledDiag = diagnosticsJSON();
+    expect(state, jsonContainsToken(disabledDiag, "\"r8HeapSegmentation\":{"),
+           "R8 diagnostics object is present when flag-off");
+    expect(state, jsonR8Counter(disabledDiag, "enabled") == 0,
+           "R8 flag-off diagnostics report disabled");
+    expect(state, jsonR8Counter(disabledDiag, "rowsSeen") == 0,
+           "R8 flag-off path does not classify inventory rows");
+    expect(state, jsonR8Counter(disabledDiag, "prospectiveBucketRecords") == 0,
+           "R8 flag-off path emits no prospective buckets");
+    expect(state, jsonR8Counter(disabledDiag, "allocationChanges") == 0 &&
+                      jsonR8Counter(disabledDiag, "heapCreations") == 0 &&
+                      jsonR8Counter(disabledDiag, "setPurgeableStateCalls") ==
+                          0 &&
+                      jsonR8Counter(disabledDiag, "drainRequests") == 0,
+           "R8 flag-off path is observe-only and inert");
+
+    setenv("APPGL_R8_HEAP_SEGMENTATION", "1", 1);
+    expect(state,
+           appglR8RefreshHeapSegmentationForTesting() == 1,
+           "R8 test hook refreshes flag-on env");
+    const std::string beforeDiag = diagnosticsJSON();
+    const std::uint64_t beforeProspective =
+        jsonR8Counter(beforeDiag, "prospectiveBucketRecords");
+    const std::uint64_t beforeProspectiveBytes =
+        jsonR8Counter(beforeDiag, "prospectiveBucketBytes");
+    const std::uint64_t beforeAuthoritativeExcluded =
+        jsonR8Counter(beforeDiag, "authoritativeExcludedRecords");
+
+    GLuint authoritativeBuffer = 0;
+    const std::uint8_t bufferBytes[64] = {};
+    gl.GenBuffers(1, &authoritativeBuffer);
+    gl.BindBuffer(GL_ARRAY_BUFFER, authoritativeBuffer);
+    gl.BufferData(GL_ARRAY_BUFFER,
+                  sizeof(bufferBytes),
+                  bufferBytes,
+                  GL_STATIC_DRAW);
+    expectNoGLError(state, gl.GetError,
+                    "R8 runtime authoritative buffer setup");
+
+    const GLuint sampleProgram = buildTexture2DSampleProgram(state, gl);
+    std::vector<GLuint> reconstructableTextures;
+    createTouchedPrimaryTextures(state,
+                                 gl,
+                                 sampleProgram,
+                                 reconstructableTextures,
+                                 3,
+                                 32,
+                                 "R8 runtime reconstructable texture");
+
+    const std::string enabledDiag = diagnosticsJSON();
+    expect(state, jsonR8Counter(enabledDiag, "enabled") == 1,
+           "R8 flag-on diagnostics report enabled");
+    expect(state, jsonR8Counter(enabledDiag, "rowsSeen") > 0,
+           "R8 flag-on diagnostics classify inventory rows");
+    expect(state,
+           jsonR8Counter(enabledDiag, "prospectiveBucketRecords") >
+               beforeProspective,
+           "R8 flag-on reconstructable resources populate buckets");
+    expect(state,
+           jsonR8Counter(enabledDiag, "prospectiveBucketBytes") >
+               beforeProspectiveBytes,
+           "R8 flag-on bucket bytes are reconstructable");
+    expect(state,
+           jsonR8Counter(enabledDiag, "authoritativeExcludedRecords") >
+               beforeAuthoritativeExcluded,
+           "R8 runtime authoritative Metal resource is excluded");
+    expect(state, jsonR8Counter(enabledDiag, "prospectiveBucketCount") > 0,
+           "R8 flag-on bucket count is exported");
+    expect(state, jsonContainsToken(enabledDiag, "\"r8HeapBuckets\":[{"),
+           "R8 flag-on bucket rows are exported");
+    expect(state,
+           jsonR8Counter(enabledDiag, "allocationChanges") == 0 &&
+               jsonR8Counter(enabledDiag, "heapCreations") == 0 &&
+               jsonR8Counter(enabledDiag, "setPurgeableStateCalls") == 0 &&
+               jsonR8Counter(enabledDiag, "drainRequests") == 0 &&
+               jsonR8Counter(enabledDiag, "deviceBytesFreed") == 0,
+           "R8 runtime diagnostics remain observe-only");
+
+    const std::string beforeMutationDiag = diagnosticsJSON();
+    const std::uint64_t beforeMutated =
+        jsonR5EvictionCounter(beforeMutationDiag, "mutatedRecords");
+    const std::uint64_t beforePurgeable =
+        jsonR5EvictionCounter(beforeMutationDiag, "setPurgeableStateCalls");
+    const std::uint64_t beforeDrain =
+        jsonR5EvictionCounter(beforeMutationDiag, "drainRequests");
+    const std::uint64_t beforeOOM =
+        jsonR5EvictionCounter(beforeMutationDiag, "criticalPressureOOMErrors");
+    const std::string afterMutationDiag = diagnosticsJSON();
+    expect(state,
+           jsonR5EvictionCounter(afterMutationDiag, "mutatedRecords") ==
+                   beforeMutated &&
+               jsonR5EvictionCounter(afterMutationDiag,
+                                     "setPurgeableStateCalls") ==
+                   beforePurgeable &&
+               jsonR5EvictionCounter(afterMutationDiag, "drainRequests") ==
+                   beforeDrain &&
+               jsonR5EvictionCounter(afterMutationDiag,
+                                     "criticalPressureOOMErrors") ==
+                   beforeOOM,
+           "R8 diagnostics do not alter R5 eviction counters");
+
+    if (!reconstructableTextures.empty()) {
+        gl.DeleteTextures(static_cast<GLsizei>(reconstructableTextures.size()),
+                          reconstructableTextures.data());
+    }
+    gl.DeleteProgram(sampleProgram);
+    gl.DeleteBuffers(1, &authoritativeBuffer);
+    unsetenv("APPGL_R8_HEAP_SEGMENTATION");
+    unsetenv("APPGL_R8_HEAP_SEGMENTATION_ENABLE");
+    appglR8RefreshHeapSegmentationForTesting();
+}
+
 void createTouchedPrimaryTexturesNoFinish(ProbeState& state,
                                           const R5GL& gl,
                                           GLuint program,
@@ -1800,6 +2220,7 @@ void runLiveEvictionProbe(ProbeState& state) {
     if (state.failures != 0) {
         return;
     }
+    runR8HeapSegmentationRuntimeProbe(state, gl);
     runPrimaryTextureEvictionProbe(state, gl);
     runSamplingProxySkipProbe(state, gl);
     runForcedPressureEvictionProbe(state, gl);
@@ -1831,6 +2252,7 @@ void runLiveEvictionProbe(ProbeState& state) {
 int main() {
     ProbeState state;
     runClassifierProbe(state);
+    runR8HeapSegmentationStaticProbe(state);
     runOrderingProbe(state);
     runTouchProbe(state);
     runLiveEvictionProbe(state);

@@ -617,6 +617,8 @@ public:
         MetalMemoryPressureInputs inputs);
     bool r5EvictionEnabledCached();
     bool refreshR5EvictionEnabled();
+    bool r8HeapSegmentationEnabledCached();
+    bool refreshR8HeapSegmentationEnabled();
     std::uint64_t forceMemoryPressureLevelForTesting(std::uint64_t level);
     std::uint64_t forceMemoryClassForTesting(std::uint64_t memoryClass);
 
@@ -799,6 +801,9 @@ private:
     static constexpr std::uint8_t kR5EvictionFlagDisabled = 0;
     static constexpr std::uint8_t kR5EvictionFlagEnabled = 1;
     static constexpr std::uint8_t kR5EvictionFlagUnknown = 2;
+    static constexpr std::uint8_t kR8HeapSegmentationFlagDisabled = 0;
+    static constexpr std::uint8_t kR8HeapSegmentationFlagEnabled = 1;
+    static constexpr std::uint8_t kR8HeapSegmentationFlagUnknown = 2;
 
     Runtime();
     ~Runtime();
@@ -834,6 +839,8 @@ private:
         kMemoryClassForceDisabled};
     std::atomic<std::uint8_t> r5EvictionEnabledCache_{
         kR5EvictionFlagUnknown};
+    std::atomic<std::uint8_t> r8HeapSegmentationEnabledCache_{
+        kR8HeapSegmentationFlagUnknown};
 };
 
 template <typename ReturnType>
