@@ -62,9 +62,11 @@ std::string diagnosticsJSON() {
     return payload;
 }
 
-std::uint64_t jsonCounter(const std::string& json, const std::string& key) {
+std::uint64_t jsonCounterFrom(const std::string& json,
+                              std::size_t start,
+                              const std::string& key) {
     const std::string needle = "\"" + key + "\":";
-    const std::size_t pos = json.find(needle);
+    const std::size_t pos = json.find(needle, start);
     if (pos == std::string::npos) {
         return 0;
     }
@@ -80,6 +82,19 @@ std::uint64_t jsonCounter(const std::string& json, const std::string& key) {
         ++cursor;
     }
     return value;
+}
+
+std::uint64_t jsonCounter(const std::string& json, const std::string& key) {
+    return jsonCounterFrom(json, 0, key);
+}
+
+std::uint64_t jsonR5EvictionCounter(const std::string& json,
+                                    const std::string& key) {
+    const std::size_t r5Eviction = json.find("\"r5Eviction\":");
+    return jsonCounterFrom(json, r5Eviction == std::string::npos
+                                     ? 0
+                                     : r5Eviction,
+                           key);
 }
 
 bool jsonContainsToken(const std::string& json, const char* token) {
@@ -686,7 +701,8 @@ GLuint buildTexture2DSampleProgram(ProbeState& state, const R5GL& gl) {
 void drawDefaultTriangle(ProbeState& state,
                          const R5GL& gl,
                          GLuint program,
-                         const std::string& label) {
+                         const std::string& label,
+                         bool finish = true) {
     GLuint vao = 0;
     GLuint vbo = 0;
     gl.GenVertexArrays(1, &vao);
@@ -707,7 +723,9 @@ void drawDefaultTriangle(ProbeState& state,
     gl.Viewport(0, 0, 4, 4);
     gl.UseProgram(program);
     gl.DrawArrays(GL_TRIANGLES, 0, 3);
-    gl.Finish();
+    if (finish) {
+        gl.Finish();
+    }
     expectNoGLError(state, gl.GetError, label);
     gl.DeleteBuffers(1, &vbo);
     gl.DeleteVertexArrays(1, &vao);
@@ -1228,6 +1246,38 @@ void createTouchedPrimaryTextures(ProbeState& state,
     }
 }
 
+void createTouchedPrimaryTexturesNoFinish(ProbeState& state,
+                                          const R5GL& gl,
+                                          GLuint program,
+                                          std::vector<GLuint>& textures,
+                                          std::size_t count,
+                                          GLsizei edge,
+                                          const std::string& label) {
+    textures.assign(count, 0);
+    gl.GenTextures(static_cast<GLsizei>(textures.size()), textures.data());
+    for (std::size_t i = 0; i < textures.size(); ++i) {
+        gl.BindTexture(GL_TEXTURE_2D, textures[i]);
+        gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.TexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, edge, edge);
+        expectNoGLError(state, gl.GetError,
+                        label + " storage " + std::to_string(i));
+        drawDefaultTriangle(state,
+                            gl,
+                            program,
+                            label + " sampler touch " + std::to_string(i),
+                            false);
+    }
+}
+
+void runSwapOnlyBoundary(ProbeState& state,
+                         const R5GL& gl,
+                         AppGLContext* context,
+                         const std::string& label) {
+    appglSwapBuffers(context);
+    expectNoGLError(state, gl.GetError, label);
+}
+
 void runMidSoftPrimaryEvictionProbe(ProbeState& state, const R5GL& gl) {
     setenv("APPGL_R5_EVICTION", "1", 1);
     appglR5ForceMemoryClassForTesting(
@@ -1280,6 +1330,100 @@ void runMidSoftPrimaryEvictionProbe(ProbeState& state, const R5GL& gl) {
     expectNoGLError(state, gl.GetError, "Mid Soft pressure cleanup");
     gl.DeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
     gl.DeleteProgram(program);
+    unsetenv("APPGL_R5_EVICTION");
+    unsetenv("APPGL_R5_EVICTION_ENABLE");
+}
+
+void runMidSoftRetentionSwapOnlyProbe(ProbeState& state,
+                                      const R5GL& gl,
+                                      AppGLContext* context) {
+    setenv("APPGL_R5_EVICTION", "1", 1);
+    appglR5ForceMemoryClassForTesting(
+        appgl::metalMemoryPressureClassValue(
+            appgl::MetalMemoryPressureClass::Mid));
+    appglR5ForceMemoryPressureForTesting(
+        appgl::metalMemoryPressureStateValue(
+            appgl::MetalMemoryPressureState::Idle));
+
+    const GLuint sampleProgram = buildTexture2DSampleProgram(state, gl);
+    std::vector<GLuint> reconstructableTextures;
+    createTouchedPrimaryTexturesNoFinish(state,
+                                         gl,
+                                         sampleProgram,
+                                         reconstructableTextures,
+                                         16,
+                                         1024,
+                                         "mid-soft swap-only");
+    runSwapOnlyBoundary(state,
+                        gl,
+                        context,
+                        "Mid Soft swap-only idle boundary 1");
+    runSwapOnlyBoundary(state,
+                        gl,
+                        context,
+                        "Mid Soft swap-only idle boundary 2");
+
+    const std::string beforeDiag = diagnosticsJSON();
+    const std::uint64_t beforePrimaryEvicted =
+        jsonCounter(beforeDiag, "reconstructablePrimariesEvicted");
+    const std::uint64_t beforeReleaseSuccesses =
+        jsonCounter(beforeDiag, "primaryTextureReleaseSuccesses");
+    const std::uint64_t beforePolicySkipped =
+        jsonR5EvictionCounter(beforeDiag, "policyRetentionSkippedRecords");
+    const std::uint64_t beforePressureSkipped =
+        jsonR5EvictionCounter(beforeDiag, "passSkippedPressure");
+    const std::uint64_t beforeDrainRequests =
+        jsonR5EvictionCounter(beforeDiag, "drainRequests");
+
+    appglR5ForceMemoryPressureForTesting(
+        appgl::metalMemoryPressureStateValue(
+            appgl::MetalMemoryPressureState::Soft));
+    runSwapOnlyBoundary(state,
+                        gl,
+                        context,
+                        "Mid Soft swap-only pressure boundary");
+
+    const std::string softDiag = diagnosticsJSON();
+    expect(state,
+           jsonCounter(softDiag, "pressureMemoryClassAtEvict") ==
+               appgl::metalMemoryPressureClassValue(
+                   appgl::MetalMemoryPressureClass::Mid),
+           "Mid Soft swap-only records Mid class");
+    expect(state, jsonCounter(softDiag, "pressurePolicySoftBudget") == 8,
+           "Mid Soft swap-only keeps the 8-record budget");
+    expect(state,
+           jsonR5EvictionCounter(softDiag, "policyRetentionSkippedRecords") ==
+               beforePolicySkipped,
+           "Mid Soft swap-only has no retention skip");
+    expect(state,
+           jsonR5EvictionCounter(softDiag, "passSkippedPressure") ==
+               beforePressureSkipped,
+           "Mid Soft swap-only does not skip on outstanding command buffers");
+    expect(state,
+           jsonR5EvictionCounter(softDiag, "drainRequests") >
+               beforeDrainRequests,
+           "Mid Soft swap-only drains candidate-bearing pressure work");
+    expect(state,
+           jsonCounter(softDiag, "reconstructablePrimariesEvicted") >=
+               beforePrimaryEvicted + 8,
+           "Mid Soft swap-only evicts the reconstructable budget");
+    expect(state,
+           jsonCounter(softDiag, "primaryTextureReleaseSuccesses") >=
+               beforeReleaseSuccesses + 8,
+           "Mid Soft swap-only mutates reconstructable primaries");
+
+    appglR5ForceMemoryPressureForTesting(
+        appgl::metalMemoryPressureStateValue(
+            appgl::MetalMemoryPressureState::Idle));
+    appglR5ForceMemoryClassForTesting(0);
+    gl.Finish();
+    expectNoGLError(state, gl.GetError,
+                    "Mid Soft swap-only cleanup");
+    if (!reconstructableTextures.empty()) {
+        gl.DeleteTextures(static_cast<GLsizei>(reconstructableTextures.size()),
+                          reconstructableTextures.data());
+    }
+    gl.DeleteProgram(sampleProgram);
     unsetenv("APPGL_R5_EVICTION");
     unsetenv("APPGL_R5_EVICTION_ENABLE");
 }
@@ -1661,6 +1805,7 @@ void runLiveEvictionProbe(ProbeState& state) {
     runForcedPressureEvictionProbe(state, gl);
     runForcedMemoryClassPolicyProbe(state, gl);
     runMidSoftPrimaryEvictionProbe(state, gl);
+    runMidSoftRetentionSwapOnlyProbe(state, gl, context.context);
     runPendingPressureDirtyBitProbe(state, gl);
     runCriticalPressurePrimaryReliefProbe(state, gl);
     runCriticalPressureBudgetReliefNoOOMProbe(state, gl);

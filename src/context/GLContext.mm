@@ -22277,10 +22277,18 @@ struct GLContext::Impl {
 
         if (request.reason == R5EvictionReason::Pressure &&
             hasOutstandingCommandBuffers()) {
-            r5Eviction.candidatesGatedInFlight +=
-                static_cast<std::uint64_t>(selected.size());
-            ++r5Eviction.passSkippedPressure;
-            return 0;
+            if (selected.empty()) {
+                ++r5Eviction.passSkippedPressure;
+                return 0;
+            }
+            ++r5Eviction.drainRequests;
+            if (!finishPendingWork()) {
+                ++r5Eviction.drainFailures;
+                r5Eviction.candidatesGatedInFlight +=
+                    static_cast<std::uint64_t>(selected.size());
+                ++r5Eviction.passSkippedPressure;
+                return 0;
+            }
         }
 
         const std::uint64_t mutated =
