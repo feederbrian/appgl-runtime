@@ -3691,6 +3691,9 @@ struct MetalFrameGraph::Impl {
           device((__bridge id<MTLDevice>)rawDevice),
           commandQueue((__bridge id<MTLCommandQueue>)rawCommandQueue),
           commandSubmission(rawCommandSubmission) {
+#if !__has_feature(objc_arc)
+        [layer retain];
+#endif
         if (commandSubmission != nullptr) {
             commandSubmission->setPressureFlushCallback(
                 [this](AppGLCommandReason reason) {
@@ -3792,6 +3795,8 @@ struct MetalFrameGraph::Impl {
         depthStencilUploadPSOCache.clear();
         releaseOwnedObjCObject(reusablePassDescriptor);
         releaseOwnedObjCObject(pipelineArchive);
+        releaseOwnedObjCObject(layer);
+        layer = nil;
     }
 
     void releaseDefaultFramebufferTextures() {

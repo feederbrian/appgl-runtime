@@ -4061,6 +4061,36 @@ MTLTextureType metalTextureTypeForTarget(GLenum target) {
     }
 }
 
+NSUInteger metalMaxMipLevelsForDimensions(NSUInteger width,
+                                           NSUInteger height,
+                                           NSUInteger depth) {
+    NSUInteger maxDimension = std::max(width, std::max(height, depth));
+    maxDimension = std::max<NSUInteger>(maxDimension, 1u);
+    NSUInteger levels = 1;
+    while (maxDimension > 1) {
+        maxDimension >>= 1;
+        ++levels;
+    }
+    return levels;
+}
+
+NSUInteger metalMipLevelCountForTexture(GLenum target,
+                                        bool use2DFor1D,
+                                        NSUInteger requestedLevels,
+                                        NSUInteger width,
+                                        NSUInteger height,
+                                        NSUInteger depth) {
+    const bool metalRequiresSingleLevel =
+        ((target == GL_TEXTURE_1D ||
+          target == GL_TEXTURE_1D_ARRAY) && !use2DFor1D) ||
+        target == GL_TEXTURE_BUFFER;
+    if (metalRequiresSingleLevel) {
+        return 1u;
+    }
+    return std::min(requestedLevels,
+                    metalMaxMipLevelsForDimensions(width, height, depth));
+}
+
 id<MTLTexture> metalTextureFromRaw(void* object) {
     if (object == nullptr) {
         return nil;
@@ -9758,9 +9788,13 @@ struct GLContext::Impl {
                     }
                 }
             }
-            const NSUInteger wantMipCount = (object.target == GL_TEXTURE_1D && !use2DFor1D)
-                ? 1u
-                : static_cast<NSUInteger>(maxLevelExisting + 1);
+            const NSUInteger wantMipCount = metalMipLevelCountForTexture(
+                object.target,
+                use2DFor1D,
+                static_cast<NSUInteger>(maxLevelExisting + 1),
+                wantWidth,
+                wantHeight,
+                wantDepth);
             const bool shapeMatches =
                 existing.width == wantWidth &&
                 existing.height == wantHeight &&
@@ -9816,6 +9850,9 @@ struct GLContext::Impl {
                         continue;
                     }
                     const NSUInteger mipLevel = static_cast<NSUInteger>(levelIndex);
+                    if (mipLevel >= existing.mipmapLevelCount) {
+                        continue;
+                    }
                     const NSUInteger rowStride = static_cast<NSUInteger>(safeDimension(image.desc.width)) * bpp;
                     const NSUInteger imageStride = rowStride * static_cast<NSUInteger>(
                         object.target == GL_TEXTURE_1D ? 1 : safeDimension(image.desc.height));
@@ -10096,11 +10133,13 @@ struct GLContext::Impl {
         // GL_ARB_texture_view trip a Metal hard assertion at descriptor
         // creation (CKPT156 Day 3 experiment).
         const NSUInteger requestedLevels = static_cast<NSUInteger>(highestDefinedLevel + 1);
-        const bool metalRequiresSingleLevel =
-            ((object.target == GL_TEXTURE_1D ||
-              object.target == GL_TEXTURE_1D_ARRAY) && !use2DFor1D) ||
-             object.target == GL_TEXTURE_BUFFER;
-        descriptor.mipmapLevelCount = metalRequiresSingleLevel ? 1u : requestedLevels;
+        descriptor.mipmapLevelCount = metalMipLevelCountForTexture(
+            object.target,
+            use2DFor1D,
+            requestedLevels,
+            descriptor.width,
+            descriptor.height,
+            descriptor.depth);
         // Include MTLTextureUsageShaderWrite for non-MSAA textures so
         // imageStore in compute / graphics shaders actually lands.
         // GL has no separate "this texture will be used as storage image"
@@ -10231,6 +10270,9 @@ struct GLContext::Impl {
                 continue;
             }
             const NSUInteger mipLevel = static_cast<NSUInteger>(levelIndex);
+            if (mipLevel >= descriptor.mipmapLevelCount) {
+                continue;
+            }
             // Sprint 8 B Cluster F F1 Day 10 (CKPT82): Metal requires
             // bytesPerRow == 0 (and bytesPerImage == 0 on the slice
             // overload) for MTLTextureType1D and MTLTextureType1DArray
