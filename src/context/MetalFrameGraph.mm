@@ -4462,6 +4462,11 @@ struct MetalFrameGraph::Impl {
         // Lazily create the MTLRenderPipelineState from translated MSL.
         id<MTLTexture> colorTexture = isFBODraw ? fboColorTex
             : (usesOffscreenTarget ? offscreenColorTexture : nil);
+        if (!isFBODraw && colorTexture == nil && currentRenderEncoder != nil) {
+            colorTexture = readbackSourceTexture != nil
+                ? readbackSourceTexture
+                : (currentDrawable != nil ? currentDrawable.texture : nil);
+        }
         const MTLPixelFormat colorFormat = colorTexture != nil
             ? colorTexture.pixelFormat
             : MTLPixelFormatBGRA8Unorm;
