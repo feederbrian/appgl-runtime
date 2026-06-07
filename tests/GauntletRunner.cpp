@@ -4961,6 +4961,12 @@ public:
         gl.glGetTextureSubImage(tex2d, 0, 0, 0, 0, 4, 4, 1, GL_RGBA, GL_UNSIGNED_BYTE, sizeof(imgBuf), imgBuf);
         gl.glGetCompressedTextureImage(tex2d, 0, sizeof(imgBuf), imgBuf);
         gl.glGetCompressedTextureSubImage(tex2d, 0, 0, 0, 0, 4, 4, 1, sizeof(imgBuf), imgBuf);
+        while (gl.glGetError() != GL_NO_ERROR) {}
+        constexpr GLint oversizedMipLevel = 1000;
+        gl.glGetTextureSubImage(tex2d, oversizedMipLevel, 0, 0, 0, 4, 4, 1, GL_RGBA, GL_UNSIGNED_BYTE, sizeof(imgBuf), imgBuf);
+        expectGLError(gl, GL_INVALID_VALUE, "glGetTextureSubImage oversized level rejects without UB");
+        gl.glGetCompressedTextureSubImage(tex2d, oversizedMipLevel, 0, 0, 0, 4, 4, 1, sizeof(imgBuf), imgBuf);
+        expectGLError(gl, GL_INVALID_VALUE, "glGetCompressedTextureSubImage oversized level rejects without UB");
 
         gl.glGenerateTextureMipmap(tex2d);
         while (gl.glGetError() != GL_NO_ERROR) {}
@@ -12427,6 +12433,51 @@ TestResult runS22LivePresentTessFurPathSentinel() {
     return result;
 }
 
+TestResult runMipOversizedLevelProbe() {
+    auto result = runDirectSentinel("mip.oversized-level-subimage", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& gl = scoped.gl();
+
+        GLuint texture = 0;
+        gl.glCreateTextures(GL_TEXTURE_2D, 1, &texture);
+        gl.glTextureStorage2D(texture, 1, GL_RGBA8, 8, 8);
+
+        std::uint8_t pixels[8 * 8 * 4] = {};
+        std::uint8_t readback[8 * 8 * 4] = {};
+        gl.glTextureSubImage2D(texture, 0, 0, 0, 8, 8, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        while (gl.glGetError() != GL_NO_ERROR) {}
+
+        constexpr GLint oversizedMipLevel = 1000;
+        gl.glGetTextureSubImage(
+            texture,
+            oversizedMipLevel,
+            0, 0, 0,
+            4, 4, 1,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            sizeof(readback),
+            readback);
+        expectGLError(gl, GL_INVALID_VALUE, "glGetTextureSubImage oversized level");
+
+        gl.glGetCompressedTextureSubImage(
+            texture,
+            oversizedMipLevel,
+            0, 0, 0,
+            4, 4, 1,
+            sizeof(readback),
+            readback);
+        expectGLError(gl, GL_INVALID_VALUE, "glGetCompressedTextureSubImage oversized level");
+
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "mip oversized-level probe cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "oversized texture subimage mip levels reject with GL_INVALID_VALUE before any UB shift";
+    }
+    return result;
+}
+
 void appendCoverageDelta(TestResult& result, const std::string& phase) {
     // Bootstrap coverage checks only apply to phase-a scenes. Phase-c and later
     // scenes validate their own scenarioCoverage() list; requiring the full
@@ -12605,6 +12656,11 @@ std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tes
 std::string runGauntletJSON(std::string_view phaseFilter) {
     const std::string normalizedPhase = phaseFilter.empty() ? "phase-a" : std::string(phaseFilter);
     std::vector<TestResult> tests;
+
+    if (normalizedPhase == "mip-ub-probe") {
+        tests.push_back(runMipOversizedLevelProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
 
     if (normalizedPhase == "dcr2-sentinels") {
         tests.push_back(runDCR2FlushFinishSentinel());

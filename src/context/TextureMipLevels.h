@@ -3,6 +3,7 @@
 #include "../../include/AppGL/glcorearb.h"
 
 #include <algorithm>
+#include <climits>
 #include <cstddef>
 #include <type_traits>
 
@@ -37,6 +38,9 @@ inline Dimension mipDimensionAtLevel(Dimension base, Level level) {
         if (level <= 0) {
             return nonZeroMipLevelCount(base);
         }
+    }
+    if (static_cast<std::size_t>(level) >= sizeof(Dimension) * CHAR_BIT) {
+        return singleMipLevelCount<Dimension>();
     }
     return std::max<Dimension>(
         static_cast<Dimension>(base >> level),
