@@ -84,6 +84,7 @@ set(APPGL_SOURCES
   src/runtime/AppGLImmediateMode.cpp
   src/caps/GLCapabilities.mm
   src/context/GLContext.mm
+  src/context/GLContextTextureHelpers.mm
   src/context/MetalFrameGraph.mm
   src/extensions/ExtensionContext.mm
   src/extensions/ExtensionRegistry.mm
