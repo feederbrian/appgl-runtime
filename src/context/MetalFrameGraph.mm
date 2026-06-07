@@ -4,6 +4,7 @@
 #include "../extensions/ExtensionContext.h"
 #include "../extensions/ExtensionRegistry.h"
 #include "../objects/GLObjectStore.h"
+#include "../runtime/AppGLEnv.h"
 #include "../runtime/AppGLLog.h"
 #include "../shader/TessellationEmulator.h"
 #include "../state/GLStateTracker.h"
@@ -172,16 +173,6 @@ static bool shouldEmitDrawTargetTrace(GLuint program) {
         traceDrawTargetsLimit();
 }
 
-static bool appglEnvEnabledDefaultOn(const char* name) {
-    const char* value = std::getenv(name);
-    return value == nullptr || (value[0] != '0' && value[0] != '\0');
-}
-
-static bool appglEnvEnabledDefaultOff(const char* name) {
-    const char* value = std::getenv(name);
-    return value != nullptr && value[0] != '0' && value[0] != '\0';
-}
-
 static bool metalTessTFEnabled() {
     return appglEnvEnabledDefaultOn("APPGL_ENABLE_METAL_TESS_TF");
 }
@@ -200,11 +191,6 @@ static DrawProfileTimePoint drawProfileNow() {
 static double drawProfileElapsedUs(DrawProfileTimePoint start,
                                    DrawProfileTimePoint end) {
     return std::chrono::duration<double, std::micro>(end - start).count();
-}
-
-static bool envEnabled(const char* name) {
-    const char* value = std::getenv(name);
-    return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
 struct DrawSubmitProfileSample {
@@ -540,10 +526,10 @@ struct ThreadedDeferredAsyncChunk {
 };
 
 struct ParallelEncodeFoundationProfile {
-    bool enabled = envEnabled("APPGL_PARALLEL_ENCODE");
+    bool enabled = appglEnvEnabledDefaultOff("APPGL_PARALLEL_ENCODE");
     bool dumpEnabled = enabled && (
-        envEnabled("APPGL_PARALLEL_ENCODE_PROFILE") ||
-        envEnabled("APPGL_DRAW_PROFILE"));
+        appglEnvEnabledDefaultOff("APPGL_PARALLEL_ENCODE_PROFILE") ||
+        appglEnvEnabledDefaultOff("APPGL_DRAW_PROFILE"));
     std::uint32_t configuredWorkerCount = parallelEncodeConfiguredWorkerCount();
     std::uint32_t configuredMinBatch = parallelEncodeConfiguredMinBatch();
     std::uint32_t configuredLeanMaxBatch =
@@ -911,16 +897,16 @@ struct ParallelEncodeFoundationProfile {
 };
 
 struct ThreadedDeferredRecordProfile {
-    bool enabled = envEnabled("APPGL_7K_THREADED_DEFERRED_RECORD");
+    bool enabled = appglEnvEnabledDefaultOff("APPGL_7K_THREADED_DEFERRED_RECORD");
     bool asyncEnabled =
-        enabled && envEnabled("APPGL_7K_DEFERRED_RECORD_ASYNC");
+        enabled && appglEnvEnabledDefaultOff("APPGL_7K_DEFERRED_RECORD_ASYNC");
     // Descriptor-fast records the immutable lean descriptor itself. Set
     // APPGL_7K_DEFERRED_RECORD_DESCRIPTOR_FAST=0 to use copied-TDI records.
     bool descriptorFastEnabled =
         enabled && !asyncEnabled &&
         appglEnvEnabledDefaultOn("APPGL_7K_DEFERRED_RECORD_DESCRIPTOR_FAST");
     bool dumpEnabled =
-        enabled || envEnabled("APPGL_7K_THREADED_DEFERRED_RECORD_PROFILE");
+        enabled || appglEnvEnabledDefaultOff("APPGL_7K_THREADED_DEFERRED_RECORD_PROFILE");
     std::uint32_t configuredWorkerCount =
         threadedDeferredRecordWorkerCount();
     std::uint32_t configuredMinBatch = threadedDeferredRecordMinBatch();
@@ -1154,8 +1140,8 @@ struct FrameAttributionTimingBucket {
 };
 
 struct FrameAttributionProfile {
-    bool enabled = envEnabled("APPGL_FRAME_ATTRIBUTION_PROFILE") ||
-        envEnabled("APPGL_PARALLEL_ENCODE_ATTRIBUTION");
+    bool enabled = appglEnvEnabledDefaultOff("APPGL_FRAME_ATTRIBUTION_PROFILE") ||
+        appglEnvEnabledDefaultOff("APPGL_PARALLEL_ENCODE_ATTRIBUTION");
     std::array<FrameAttributionTimingBucket,
                static_cast<std::size_t>(ParallelEncodeBoundaryReason::Count)>
         descriptorFlushByReason{};
@@ -1786,7 +1772,7 @@ static bool translatedDrawParallelCaptureEligible(
         return false;
     }
     if (info.submissionGroup.argumentBuffersEnabled ||
-        envEnabled("APPGL_ENABLE_ARGUMENT_BUFFERS")) {
+        appglEnvEnabledDefaultOff("APPGL_ENABLE_ARGUMENT_BUFFERS")) {
         reason = ParallelEncodeBoundaryReason::ArgumentBuffers;
         return false;
     }

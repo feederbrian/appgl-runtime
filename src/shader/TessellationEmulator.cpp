@@ -19,6 +19,7 @@
 #include <unordered_set>
 
 #include "../objects/GLObjectStore.h"
+#include "../runtime/AppGLEnv.h"
 #include "../state/GLStateTracker.h"
 #include "GeometryShaderEmulator.h"   // runVsForVertex + EmulatedVertex
 #include "ShaderInterpreter.h"
@@ -143,11 +144,6 @@ void appendTessStageSlotWidthsForType(
             break;
         }
     }
-}
-
-bool appglEnvEnabledDefaultOn(const char* name) {
-    const char* v = std::getenv(name);
-    return v == nullptr || (v[0] != '0' && v[0] != '\0');
 }
 
 bool spirvContainsOpcode(const std::vector<std::uint32_t>& words,

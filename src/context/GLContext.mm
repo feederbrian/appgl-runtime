@@ -1,5 +1,6 @@
 #include "GLContext.h"
 #include "../runtime/AppGLDiagnostics.h"
+#include "../runtime/AppGLEnv.h"
 #include "../runtime/AppGLLog.h"
 #include "MetalFrameGraph.h"
 #include "MetalCommandSubmission.h"
@@ -138,11 +139,6 @@ public:
 // output when debugging a specific program.
 
 namespace {
-
-bool appglEnvEnabledDefaultOn(const char* name) {
-    const char* value = std::getenv(name);
-    return value == nullptr || (value[0] != '0' && value[0] != '\0');
-}
 
 bool metalTessTFEnabled() {
     return appglEnvEnabledDefaultOn("APPGL_ENABLE_METAL_TESS_TF");
