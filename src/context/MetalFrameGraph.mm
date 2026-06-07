@@ -12,6 +12,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cctype>
@@ -116,6 +117,59 @@ static std::uint64_t stableMslSourceHash(const std::string& source) {
         hash *= 1099511628211ull;
     }
     return hash;
+}
+
+static bool traceDrawTargetsProgramMatches(const char* raw, GLuint program) {
+    if (raw == nullptr || raw[0] == '\0') {
+        return false;
+    }
+    if (std::strcmp(raw, "1") == 0 ||
+        std::strcmp(raw, "all") == 0 ||
+        std::strcmp(raw, "*") == 0) {
+        return true;
+    }
+    const char* cursor = raw;
+    while (*cursor != '\0') {
+        while (*cursor == ',' || std::isspace(static_cast<unsigned char>(*cursor))) {
+            ++cursor;
+        }
+        if (*cursor == '\0') {
+            break;
+        }
+        char* end = nullptr;
+        const unsigned long value = std::strtoul(cursor, &end, 10);
+        if (end != cursor && value == static_cast<unsigned long>(program)) {
+            return true;
+        }
+        cursor = (end != cursor) ? end : cursor + 1;
+        while (*cursor != '\0' && *cursor != ',') {
+            ++cursor;
+        }
+    }
+    return false;
+}
+
+static std::uint32_t traceDrawTargetsLimit() {
+    const char* raw = std::getenv("APPGL_TRACE_DRAW_TARGET_LIMIT");
+    if (raw == nullptr || raw[0] == '\0') {
+        return 512u;
+    }
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(raw, &end, 10);
+    if (end == raw || parsed == 0ul) {
+        return 512u;
+    }
+    return static_cast<std::uint32_t>(parsed);
+}
+
+static bool shouldEmitDrawTargetTrace(GLuint program) {
+    const char* raw = std::getenv("APPGL_TRACE_DRAW_TARGETS");
+    if (!traceDrawTargetsProgramMatches(raw, program)) {
+        return false;
+    }
+    static std::atomic<std::uint32_t> emitted{0u};
+    return emitted.fetch_add(1u, std::memory_order_relaxed) <
+        traceDrawTargetsLimit();
 }
 
 static bool appglEnvEnabledDefaultOn(const char* name) {
@@ -4537,6 +4591,12 @@ struct MetalFrameGraph::Impl {
         bool vertexUsesMultiviewViewMask = false;
         bool fragmentUsesMultiviewViewMask = false;
         bool usedTranslatedPlan = false;
+        bool traceOpenedRenderEncoder = false;
+        MTLLoadAction traceColorLoadAction = MTLLoadActionLoad;
+        MTLLoadAction traceDepthLoadAction = MTLLoadActionLoad;
+        MTLLoadAction traceStencilLoadAction = MTLLoadActionLoad;
+        MTLStoreAction traceColorStoreAction = MTLStoreActionStore;
+        NSUInteger traceRenderTargetArrayLength = 0;
 
         const TranslatedDrawPlan* translatedPlan = info.translatedPlan;
         if (translatedPlan != nullptr) {
@@ -4738,24 +4798,41 @@ struct MetalFrameGraph::Impl {
             // PipelineCacheMetrics::buildFailures stays in lockstep with
             // the number of populated records (modulo first-time gating on
             // the GLContext side).
-            auto recordBuildFailure = [&info, this](const char* stageTag, NSError* err) {
+            auto recordBuildFailure =
+                [&info, this, pipelineCacheKey](const char* stageTag, NSError* err) {
                 ++pipelineBuildFailures;
+                const char* errText = "(nil error)";
+                if (err != nil) {
+                    NSString* desc = [err localizedDescription];
+                    if (desc != nil && [desc UTF8String] != nullptr) {
+                        errText = [desc UTF8String];
+                    } else {
+                        errText = "(nil description)";
+                    }
+                }
+                if (std::getenv("APPGL_TRACE_SHADER_BUILD")) {
+                    std::fprintf(stderr,
+                        "[APPGL_PIPELINE] program=%u key=0x%llx build=fail "
+                        "stage=%s mode=0x%X verts=%d indices=%d instances=%d "
+                        "attrs=%zu error=%s\n",
+                        static_cast<unsigned>(info.program),
+                        static_cast<unsigned long long>(pipelineCacheKey),
+                        stageTag,
+                        static_cast<unsigned>(info.mode),
+                        static_cast<int>(info.vertexCount),
+                        static_cast<int>(info.indexCount),
+                        static_cast<int>(info.instanceCount),
+                        info.vertexAttributeLayouts.size(),
+                        errText);
+                    std::fflush(stderr);
+                }
                 if (info.pipelineBuildErrorOut == nullptr) {
                     return;
                 }
                 std::string& out = *info.pipelineBuildErrorOut;
                 out.assign(stageTag);
                 out.append(": ");
-                if (err != nil) {
-                    NSString* desc = [err localizedDescription];
-                    if (desc != nil) {
-                        out.append([desc UTF8String] ? [desc UTF8String] : "(nil description)");
-                    } else {
-                        out.append("(nil description)");
-                    }
-                } else {
-                    out.append("(nil error)");
-                }
+                out.append(errText);
             };
 
             // ADV-2: compile vertex MSL via the library cache.
@@ -4876,6 +4953,7 @@ struct MetalFrameGraph::Impl {
             // attributes (buffer 0) are per-vertex.  Extra vertex buffers
             // (buffer 1+) may use per-instance stepping (glVertexAttribDivisor).
             MTLVertexDescriptor* vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
+            std::array<bool, 31> vertexDescriptorBufferUsed{};
 
             // Helper: map shader-reflected scalar type to MTLVertexFormat.
             // Phase 8X Group 4d follow-up¹⁴ — ONLY used as a fallback
@@ -4952,6 +5030,9 @@ struct MetalFrameGraph::Impl {
                     vertexDescriptor.attributes[input.location].format = format;
                     vertexDescriptor.attributes[input.location].offset = attrOffset;
                     vertexDescriptor.attributes[input.location].bufferIndex = metalBuf;
+                    if (metalBuf < vertexDescriptorBufferUsed.size()) {
+                        vertexDescriptorBufferUsed[metalBuf] = true;
+                    }
                 }
             }
 
@@ -4965,16 +5046,7 @@ struct MetalFrameGraph::Impl {
             // setting an unused layout[0].stride triggers Metal's
             // "None of the attributes set bufferIndex to 0, but layout[0]
             // stride was set" assertion.
-            bool anyAttrOnBuffer0 = false;
-            if (info.vertexReflection != nullptr) {
-                for (const auto& in : info.vertexReflection->vertexInputs) {
-                    if (vertexDescriptor.attributes[in.location].format != MTLVertexFormatInvalid &&
-                        vertexDescriptor.attributes[in.location].bufferIndex == 0) {
-                        anyAttrOnBuffer0 = true;
-                        break;
-                    }
-                }
-            }
+            const bool anyAttrOnBuffer0 = vertexDescriptorBufferUsed[0];
             if (!attributelessDraw && anyAttrOnBuffer0) {
                 const NSUInteger stride = info.vertexStride > 0
                     ? info.vertexStride
@@ -4988,6 +5060,10 @@ struct MetalFrameGraph::Impl {
             for (std::size_t ei = 0; ei < info.extraVertexBuffers.size(); ++ei) {
                 const auto& evb = info.extraVertexBuffers[ei];
                 NSUInteger metalBuf = static_cast<NSUInteger>(ei + 1);
+                if (metalBuf >= vertexDescriptorBufferUsed.size() ||
+                    !vertexDescriptorBufferUsed[metalBuf]) {
+                    continue;
+                }
                 if (evb.constantStep) {
                     vertexDescriptor.layouts[metalBuf].stride =
                         static_cast<NSUInteger>(evb.stride > 0 ? evb.stride : evb.byteCount);
@@ -5435,6 +5511,22 @@ struct MetalFrameGraph::Impl {
                 recordBuildFailure("pipeline-state", error);
                 return false;
             }
+            if (std::getenv("APPGL_TRACE_SHADER_BUILD")) {
+                std::fprintf(stderr,
+                    "[APPGL_PIPELINE] program=%u key=0x%llx build=success "
+                    "mode=0x%X verts=%d indices=%d instances=%d attrs=%zu "
+                    "colorFormat=0x%lX depthFormat=0x%lX\n",
+                    static_cast<unsigned>(info.program),
+                    static_cast<unsigned long long>(pipelineCacheKey),
+                    static_cast<unsigned>(info.mode),
+                    static_cast<int>(info.vertexCount),
+                    static_cast<int>(info.indexCount),
+                    static_cast<int>(info.instanceCount),
+                    info.vertexAttributeLayouts.size(),
+                    static_cast<unsigned long>(desc.colorAttachments[0].pixelFormat),
+                    static_cast<unsigned long>(desc.depthAttachmentPixelFormat));
+                std::fflush(stderr);
+            }
             ownedPipelineState.reset(pipelineState);
             // addPipelineToArchive(desc);  // ADV-14: disabled pending investigation
 
@@ -5823,10 +5915,16 @@ struct MetalFrameGraph::Impl {
             }
 
             attachFragmentShadingRateMap(pass, info.fragmentShadingRate, colorTexture, rateMapLayerCount);
+            traceColorLoadAction = pass.colorAttachments[0].loadAction;
+            traceColorStoreAction = pass.colorAttachments[0].storeAction;
+            traceDepthLoadAction = pass.depthAttachment.loadAction;
+            traceStencilLoadAction = pass.stencilAttachment.loadAction;
+            traceRenderTargetArrayLength = pass.renderTargetArrayLength;
             currentRenderEncoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
             if (currentRenderEncoder == nil) {
                 return false;
             }
+            traceOpenedRenderEncoder = true;
             activeRenderPassFragmentShadingRate = info.fragmentShadingRate;
             readbackSourceTexture = colorTexture;
             readbackSourceIsBGRA = colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
@@ -5955,6 +6053,15 @@ struct MetalFrameGraph::Impl {
             [currentRenderEncoder setDepthBias:bias slopeScale:slope clamp:clampV];
         }
 
+        MTLViewport traceViewport = {0.0, 0.0, 0.0, 0.0, 0.0, 1.0};
+        MTLScissorRect traceScissor = {0, 0, 0, 0};
+        bool traceViewportSet = false;
+        bool traceScissorSet = false;
+        bool traceViewportArray = false;
+        bool traceScissorArray = false;
+        std::size_t traceViewportCount = 0;
+        std::size_t traceScissorCount = 0;
+
         // RC-A02: set Metal viewport from GL viewport state.
         // Metal framebuffer Y is top-down while OpenGL viewport Y is
         // bottom-up.  Convert: metalOriginY = renderTargetH - glY - glH.
@@ -5994,6 +6101,12 @@ struct MetalFrameGraph::Impl {
             }
             [currentRenderEncoder setViewports:vps
                                          count:info.viewportArrayCount];
+            if (info.viewportArrayCount > 0) {
+                traceViewport = vps[0];
+                traceViewportSet = true;
+                traceViewportArray = true;
+                traceViewportCount = info.viewportArrayCount;
+            }
         } else if (info.viewportWidth > 0 && info.viewportHeight > 0) {
             // Sprint 16 Day 4 [layered_rendering]: clamp viewport to
             // render target bounds. The Y-flip computation
@@ -6047,6 +6160,9 @@ struct MetalFrameGraph::Impl {
             vp.zfar    = info.depthRangeFar;
             if (vp.width > 0 && vp.height > 0) {
                 [currentRenderEncoder setViewport:vp];
+                traceViewport = vp;
+                traceViewportSet = true;
+                traceViewportCount = 1;
             }
         }
 
@@ -6135,6 +6251,12 @@ struct MetalFrameGraph::Impl {
                 }
                 [currentRenderEncoder setScissorRects:srs
                                                 count:info.viewportArrayCount];
+                if (info.viewportArrayCount > 0) {
+                    traceScissor = srs[0];
+                    traceScissorSet = true;
+                    traceScissorArray = true;
+                    traceScissorCount = info.viewportArrayCount;
+                }
             } else {
                 // Single-viewport path: original logic.
                 MTLScissorRect sr = makeMetalScissor(info.scissorTestEnabled,
@@ -6142,7 +6264,203 @@ struct MetalFrameGraph::Impl {
                                                      info.scissorWidth,
                                                      info.scissorHeight);
                 [currentRenderEncoder setScissorRect:sr];
+                traceScissor = sr;
+                traceScissorSet = true;
+                traceScissorCount = 1;
             }
+        }
+
+        if (shouldEmitDrawTargetTrace(info.program)) {
+            const char* targetKind = isFBODraw
+                ? "fbo"
+                : (usesOffscreenTarget ? "offscreen" : "drawable");
+            std::fprintf(stderr,
+                "[APPGL_DRAW_TARGET] program=%u key=0x%llx target=%s "
+                "opened=%d mode=0x%X verts=%d indices=%d instances=%d "
+                "attrs=%zu fragTex=%zu vertTex=%zu targetTex=%p "
+                "targetSize=%lux%lu targetFmt=0x%lX samples=%lu "
+                "fboColor=%p fboDS=%p fboSize=%dx%d fboArray=%u "
+                "drawable=%p offscreen=%p readback=%p "
+                "loadColor=%lu storeColor=%lu loadDepth=%lu loadStencil=%lu rtArray=%lu "
+                "vpGL=%d,%d %dx%d vpMTL=%s%.1f,%.1f %.1fx%.1f "
+                "vpCount=%zu vpArray=%d scGL=%d,%d %dx%d scissorEnabled=%d "
+                "scMTL=%s%lu,%lu %lux%lu scCount=%zu scArray=%d "
+                "depth=%d func=0x%X write=%d cull=%d cullMode=0x%X "
+                "front=0x%X blend=%d mask=%d%d%d%d rasterDiscard=%d\n",
+                static_cast<unsigned>(info.program),
+                static_cast<unsigned long long>(pipelineCacheKey),
+                targetKind,
+                traceOpenedRenderEncoder ? 1 : 0,
+                static_cast<unsigned>(info.mode),
+                static_cast<int>(info.vertexCount),
+                static_cast<int>(info.indexCount),
+                static_cast<int>(effectiveInstanceCount),
+                info.vertexAttributeLayouts.size(),
+                info.fragmentTextures.size(),
+                info.vertexTextures.size(),
+                colorTexture != nil ? (__bridge void*)colorTexture : nullptr,
+                colorTexture != nil ? static_cast<unsigned long>(colorTexture.width) : 0ul,
+                colorTexture != nil ? static_cast<unsigned long>(colorTexture.height) : 0ul,
+                colorTexture != nil ? static_cast<unsigned long>(colorTexture.pixelFormat) : 0ul,
+                colorTexture != nil ? static_cast<unsigned long>(colorTexture.sampleCount) : 0ul,
+                info.fboColorTexture,
+                info.fboDepthStencilTexture,
+                static_cast<int>(info.fboWidth),
+                static_cast<int>(info.fboHeight),
+                static_cast<unsigned>(info.fboColorArrayLength),
+                currentDrawable != nil ? (__bridge void*)currentDrawable : nullptr,
+                offscreenColorTexture != nil ? (__bridge void*)offscreenColorTexture : nullptr,
+                readbackSourceTexture != nil ? (__bridge void*)readbackSourceTexture : nullptr,
+                static_cast<unsigned long>(traceColorLoadAction),
+                static_cast<unsigned long>(traceColorStoreAction),
+                static_cast<unsigned long>(traceDepthLoadAction),
+                static_cast<unsigned long>(traceStencilLoadAction),
+                static_cast<unsigned long>(traceRenderTargetArrayLength),
+                static_cast<int>(info.viewportX),
+                static_cast<int>(info.viewportY),
+                static_cast<int>(info.viewportWidth),
+                static_cast<int>(info.viewportHeight),
+                traceViewportSet ? "" : "unset:",
+                traceViewport.originX,
+                traceViewport.originY,
+                traceViewport.width,
+                traceViewport.height,
+                traceViewportCount,
+                traceViewportArray ? 1 : 0,
+                static_cast<int>(info.scissorX),
+                static_cast<int>(info.scissorY),
+                static_cast<int>(info.scissorWidth),
+                static_cast<int>(info.scissorHeight),
+                info.scissorTestEnabled ? 1 : 0,
+                traceScissorSet ? "" : "unset:",
+                static_cast<unsigned long>(traceScissor.x),
+                static_cast<unsigned long>(traceScissor.y),
+                static_cast<unsigned long>(traceScissor.width),
+                static_cast<unsigned long>(traceScissor.height),
+                traceScissorCount,
+                traceScissorArray ? 1 : 0,
+                info.depthTestEnabled ? 1 : 0,
+                static_cast<unsigned>(info.depthFunc),
+                info.depthWriteMask ? 1 : 0,
+                info.cullFaceEnabled ? 1 : 0,
+                static_cast<unsigned>(info.cullFaceMode),
+                static_cast<unsigned>(info.frontFace),
+                info.blend.enabled ? 1 : 0,
+                info.blend.colorMaskR ? 1 : 0,
+                info.blend.colorMaskG ? 1 : 0,
+                info.blend.colorMaskB ? 1 : 0,
+                info.blend.colorMaskA ? 1 : 0,
+                info.rasterizerDiscard ? 1 : 0);
+            if (std::getenv("APPGL_TRACE_VERTEX_BINDINGS") != nullptr) {
+                const std::size_t reflectedInputCount =
+                    info.vertexReflection != nullptr
+                        ? info.vertexReflection->vertexInputs.size()
+                        : 0;
+                std::fprintf(stderr,
+                    "[APPGL_VERTEX_BINDINGS] program=%u primaryBuf=%u "
+                    "primaryMetal=%d primaryOffset=%zu primaryStride=%zu "
+                    "primaryAttrs=%zu extraBufs=%zu reflectedInputs=%zu\n",
+                    static_cast<unsigned>(info.program),
+                    static_cast<unsigned>(info.glVertexBuffer),
+                    info.metalVertexBuffer != nullptr ? 1 : 0,
+                    info.metalVertexBufferOffset,
+                    info.vertexStride,
+                    info.vertexAttributeLayouts.size(),
+                    info.extraVertexBuffers.size(),
+                    reflectedInputCount);
+                if (info.vertexReflection != nullptr) {
+                    const std::size_t inputTraceCount =
+                        std::min<std::size_t>(reflectedInputCount, 16);
+                    for (std::size_t i = 0; i < inputTraceCount; ++i) {
+                        const auto& input = info.vertexReflection->vertexInputs[i];
+                        std::fprintf(stderr,
+                            "[APPGL_VERTEX_INPUT] program=%u input[%zu] "
+                            "location=%u source=%u type=0x%X fp64=%d name=%s\n",
+                            static_cast<unsigned>(info.program),
+                            i,
+                            static_cast<unsigned>(input.location),
+                            static_cast<unsigned>(input.sourceLocation),
+                            static_cast<unsigned>(input.type),
+                            input.containsFp64 ? 1 : 0,
+                            input.name.c_str());
+                    }
+                }
+                for (std::size_t i = 0; i < info.vertexAttributeLayouts.size(); ++i) {
+                    const auto& attr = info.vertexAttributeLayouts[i];
+                    std::fprintf(stderr,
+                        "[APPGL_VERTEX_ATTR] program=%u primary[%zu] "
+                        "location=%u offset=%zu glType=0x%X comps=%d "
+                        "norm=%d integer=%d\n",
+                        static_cast<unsigned>(info.program),
+                        i,
+                        static_cast<unsigned>(attr.location),
+                        attr.offset,
+                        static_cast<unsigned>(attr.glType),
+                        static_cast<int>(attr.glComponentCount),
+                        attr.glNormalized ? 1 : 0,
+                        attr.glIsInteger ? 1 : 0);
+                }
+                for (std::size_t ei = 0; ei < info.extraVertexBuffers.size(); ++ei) {
+                    const auto& evb = info.extraVertexBuffers[ei];
+                    std::fprintf(stderr,
+                        "[APPGL_VERTEX_EXTRA] program=%u extra[%zu] "
+                        "glBuffer=%u metal=%d data=%d owned=%zu offset=%zu "
+                        "byteCount=%zu stride=%zu divisor=%u constant=%d "
+                        "attrs=%zu\n",
+                        static_cast<unsigned>(info.program),
+                        ei,
+                        static_cast<unsigned>(evb.glBuffer),
+                        evb.metalBuffer != nullptr ? 1 : 0,
+                        evb.data != nullptr ? 1 : 0,
+                        evb.ownedData.size(),
+                        evb.metalBufferOffset,
+                        evb.byteCount,
+                        evb.stride,
+                        static_cast<unsigned>(evb.divisor),
+                        evb.constantStep ? 1 : 0,
+                        evb.attributes.size());
+                    for (std::size_t ai = 0; ai < evb.attributes.size(); ++ai) {
+                        const auto& attr = evb.attributes[ai];
+                        std::fprintf(stderr,
+                            "[APPGL_VERTEX_ATTR] program=%u extra[%zu].attr[%zu] "
+                            "location=%u offset=%zu glType=0x%X comps=%d "
+                            "norm=%d integer=%d\n",
+                            static_cast<unsigned>(info.program),
+                            ei,
+                            ai,
+                            static_cast<unsigned>(attr.location),
+                            attr.offset,
+                            static_cast<unsigned>(attr.glType),
+                            static_cast<int>(attr.glComponentCount),
+                            attr.glNormalized ? 1 : 0,
+                            attr.glIsInteger ? 1 : 0);
+                    }
+                }
+            }
+            const std::size_t textureTraceCount =
+                std::min<std::size_t>(info.fragmentTextures.size(), 6);
+            for (std::size_t i = 0; i < textureTraceCount; ++i) {
+                const auto& binding = info.fragmentTextures[i];
+                id<MTLTexture> sampled = binding.metalTexture != nullptr
+                    ? (__bridge id<MTLTexture>)binding.metalTexture
+                    : nil;
+                std::fprintf(stderr,
+                    "[APPGL_DRAW_TEXTURE] program=%u frag[%zu] slot=%u "
+                    "tex=%p size=%lux%lu fmt=0x%lX samples=%lu sampler=%p "
+                    "lodBias=%.3f borderMask=0x%X\n",
+                    static_cast<unsigned>(info.program),
+                    i,
+                    static_cast<unsigned>(binding.metalSlot),
+                    sampled != nil ? (__bridge void*)sampled : nullptr,
+                    sampled != nil ? static_cast<unsigned long>(sampled.width) : 0ul,
+                    sampled != nil ? static_cast<unsigned long>(sampled.height) : 0ul,
+                    sampled != nil ? static_cast<unsigned long>(sampled.pixelFormat) : 0ul,
+                    sampled != nil ? static_cast<unsigned long>(sampled.sampleCount) : 0ul,
+                    binding.metalSamplerState,
+                    static_cast<double>(binding.lodBias),
+                    static_cast<unsigned>(binding.borderClampMask));
+            }
+            std::fflush(stderr);
         }
 
         DrawProfileTimePoint profileBindingStart = profileRenderStateStart;

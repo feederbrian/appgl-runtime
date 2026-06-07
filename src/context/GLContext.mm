@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cctype>
 #include <chrono>
@@ -156,6 +157,77 @@ bool r5EvictionEnabled() {
 
 bool r8HeapSegmentationEnabled() {
     return Runtime::shared().r8HeapSegmentationEnabledCached();
+}
+
+bool traceSamplerBindingsProgramMatches(const char* raw, GLuint program) {
+    if (raw == nullptr || raw[0] == '\0') {
+        return false;
+    }
+    if (std::strcmp(raw, "1") == 0 ||
+        std::strcmp(raw, "all") == 0 ||
+        std::strcmp(raw, "*") == 0) {
+        return true;
+    }
+    const char* cursor = raw;
+    while (*cursor != '\0') {
+        while (*cursor == ',' ||
+               std::isspace(static_cast<unsigned char>(*cursor))) {
+            ++cursor;
+        }
+        if (*cursor == '\0') {
+            break;
+        }
+        char* end = nullptr;
+        const unsigned long value = std::strtoul(cursor, &end, 10);
+        if (end != cursor && value == static_cast<unsigned long>(program)) {
+            return true;
+        }
+        cursor = (end != cursor) ? end : cursor + 1;
+        while (*cursor != '\0' && *cursor != ',') {
+            ++cursor;
+        }
+    }
+    return false;
+}
+
+std::uint32_t traceSamplerBindingsLimit() {
+    const char* raw = std::getenv("APPGL_TRACE_SAMPLER_BINDINGS_LIMIT");
+    if (raw == nullptr || raw[0] == '\0') {
+        return 512u;
+    }
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(raw, &end, 10);
+    if (end == raw || parsed == 0ul) {
+        return 512u;
+    }
+    return static_cast<std::uint32_t>(parsed);
+}
+
+bool shouldTraceSamplerBinding(GLuint program) {
+    const char* raw = std::getenv("APPGL_TRACE_SAMPLER_BINDINGS");
+    if (!traceSamplerBindingsProgramMatches(raw, program)) {
+        return false;
+    }
+    static std::atomic<std::uint32_t> emitted{0u};
+    return emitted.fetch_add(1u, std::memory_order_relaxed) <
+        traceSamplerBindingsLimit();
+}
+
+const char* traceTextureTargetName(GLenum target) {
+    switch (target) {
+        case GL_TEXTURE_1D: return "GL_TEXTURE_1D";
+        case GL_TEXTURE_2D: return "GL_TEXTURE_2D";
+        case GL_TEXTURE_3D: return "GL_TEXTURE_3D";
+        case GL_TEXTURE_CUBE_MAP: return "GL_TEXTURE_CUBE_MAP";
+        case GL_TEXTURE_1D_ARRAY: return "GL_TEXTURE_1D_ARRAY";
+        case GL_TEXTURE_2D_ARRAY: return "GL_TEXTURE_2D_ARRAY";
+        case GL_TEXTURE_CUBE_MAP_ARRAY: return "GL_TEXTURE_CUBE_MAP_ARRAY";
+        case GL_TEXTURE_RECTANGLE: return "GL_TEXTURE_RECTANGLE";
+        case GL_TEXTURE_BUFFER: return "GL_TEXTURE_BUFFER";
+        case GL_TEXTURE_2D_MULTISAMPLE: return "GL_TEXTURE_2D_MULTISAMPLE";
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY: return "GL_TEXTURE_2D_MULTISAMPLE_ARRAY";
+        default: return "unknown";
+    }
 }
 
 enum class R5EvictionReason : std::uint8_t {
@@ -13101,6 +13173,263 @@ struct GLContext::Impl {
                     }
                     const bool collapsedDirectSamplerArray =
                         sampledTex.collapsedDirectSamplerArray;
+                    const bool traceThisSampler =
+                        shouldTraceSamplerBinding(info.program);
+                    const GLuint traceBoundSamplerName =
+                        glUnit >= 0
+                            ? state->boundSampler(static_cast<GLuint>(glUnit))
+                            : 0u;
+                    auto baseLevelForTrace =
+                        [](const GLTextureObject* object) -> const GLTextureImageLevel* {
+                        if (object == nullptr) {
+                            return nullptr;
+                        }
+                        const GLint baseLevel = std::max<GLint>(object->params.baseLevel, 0);
+                        auto levelIt = object->levels.find(baseLevel);
+                        if (levelIt != object->levels.end()) {
+                            return &levelIt->second;
+                        }
+                        if (object->target == GL_TEXTURE_CUBE_MAP) {
+                            for (const auto& faceLevels : object->cubeFaceLevels) {
+                                auto faceIt = faceLevels.find(baseLevel);
+                                if (faceIt != faceLevels.end()) {
+                                    return &faceIt->second;
+                                }
+                            }
+                        }
+                        return nullptr;
+                    };
+                    auto emitSamplerCandidate =
+                        [&](GLenum candidateTarget) {
+                        if (!traceThisSampler || glUnit < 0 || candidateTarget == 0) {
+                            return;
+                        }
+                        const GLuint candidateName = state->boundTextureOnUnit(
+                            static_cast<GLuint>(glUnit), candidateTarget);
+                        const GLTextureObject* candidateObject =
+                            candidateName != 0
+                                ? objects->textures().get(candidateName)
+                                : nullptr;
+                        const GLTextureImageLevel* baseLevel =
+                            baseLevelForTrace(candidateObject);
+                        id<MTLTexture> candidateMetal =
+                            candidateObject != nullptr
+                                ? metalTextureFromRaw(candidateObject->metalTexture)
+                                : nil;
+                        std::fprintf(stderr,
+                            "[APPGL_SAMPLER_CANDIDATE] program=%u stage=%s "
+                            "sampler='%s' array=%d/%d glUnit=%d "
+                            "target=0x%X targetName=%s texName=%u hasObject=%d "
+                            "objTarget=0x%X objTargetName=%s descTarget=0x%X "
+                            "descTargetName=%s desc=%dx%dx%d levels=%d layers=%d "
+                            "samples=%d internal=0x%X instantiated=%d metal=%p "
+                            "mtlSize=%lux%lux%lu mtlFmt=%lu mtlType=%lu "
+                            "mtlMips=%lu mtlSamples=%lu baseDefined=%d "
+                            "baseDesc=%dx%dx%d\n",
+                            info.program,
+                            stageTag,
+                            sampledTex.name.c_str(),
+                            arrayElement,
+                            samplerArraySize,
+                            glUnit,
+                            static_cast<unsigned>(candidateTarget),
+                            traceTextureTargetName(candidateTarget),
+                            candidateName,
+                            candidateObject != nullptr ? 1 : 0,
+                            candidateObject != nullptr
+                                ? static_cast<unsigned>(candidateObject->target)
+                                : 0u,
+                            candidateObject != nullptr
+                                ? traceTextureTargetName(candidateObject->target)
+                                : "none",
+                            candidateObject != nullptr
+                                ? static_cast<unsigned>(candidateObject->desc.target)
+                                : 0u,
+                            candidateObject != nullptr
+                                ? traceTextureTargetName(candidateObject->desc.target)
+                                : "none",
+                            candidateObject != nullptr ? candidateObject->desc.width : 0,
+                            candidateObject != nullptr ? candidateObject->desc.height : 0,
+                            candidateObject != nullptr ? candidateObject->desc.depth : 0,
+                            candidateObject != nullptr ? candidateObject->desc.levels : 0,
+                            candidateObject != nullptr ? candidateObject->desc.layers : 0,
+                            candidateObject != nullptr ? candidateObject->desc.samples : 0,
+                            candidateObject != nullptr
+                                ? static_cast<unsigned>(candidateObject->desc.internalFormat)
+                                : 0u,
+                            candidateObject != nullptr && candidateObject->instantiated ? 1 : 0,
+                            candidateObject != nullptr ? candidateObject->metalTexture : nullptr,
+                            candidateMetal != nil
+                                ? static_cast<unsigned long>(candidateMetal.width)
+                                : 0ul,
+                            candidateMetal != nil
+                                ? static_cast<unsigned long>(candidateMetal.height)
+                                : 0ul,
+                            candidateMetal != nil
+                                ? static_cast<unsigned long>(candidateMetal.depth)
+                                : 0ul,
+                            candidateMetal != nil
+                                ? static_cast<unsigned long>(candidateMetal.pixelFormat)
+                                : 0ul,
+                            candidateMetal != nil
+                                ? static_cast<unsigned long>(candidateMetal.textureType)
+                                : 0ul,
+                            candidateMetal != nil
+                                ? static_cast<unsigned long>(candidateMetal.mipmapLevelCount)
+                                : 0ul,
+                            candidateMetal != nil
+                                ? static_cast<unsigned long>(candidateMetal.sampleCount)
+                                : 0ul,
+                            baseLevel != nullptr && baseLevel->defined ? 1 : 0,
+                            baseLevel != nullptr ? baseLevel->desc.width : 0,
+                            baseLevel != nullptr ? baseLevel->desc.height : 0,
+                            baseLevel != nullptr ? baseLevel->desc.depth : 0);
+                        std::fflush(stderr);
+                    };
+                    auto emitSamplerCandidates = [&]() {
+                        const GLenum candidateTargets[] = {
+                            preferredTarget,
+                            GL_TEXTURE_2D,
+                            GL_TEXTURE_2D_ARRAY,
+                            GL_TEXTURE_CUBE_MAP,
+                            GL_TEXTURE_CUBE_MAP_ARRAY,
+                            GL_TEXTURE_3D,
+                            GL_TEXTURE_RECTANGLE,
+                            GL_TEXTURE_BUFFER,
+                            GL_TEXTURE_1D,
+                            GL_TEXTURE_1D_ARRAY,
+                            GL_TEXTURE_2D_MULTISAMPLE,
+                            GL_TEXTURE_2D_MULTISAMPLE_ARRAY,
+                        };
+                        for (std::size_t i = 0;
+                             i < sizeof(candidateTargets) / sizeof(candidateTargets[0]);
+                             ++i) {
+                            const GLenum target = candidateTargets[i];
+                            if (target == 0) {
+                                continue;
+                            }
+                            bool duplicate = false;
+                            for (std::size_t j = 0; j < i; ++j) {
+                                if (candidateTargets[j] == target) {
+                                    duplicate = true;
+                                    break;
+                                }
+                            }
+                            if (!duplicate) {
+                                emitSamplerCandidate(target);
+                            }
+                        }
+                    };
+                    auto emitSamplerTrace =
+                        [&](const char* outcome,
+                            GLuint resolvedTexName,
+                            GLenum discoveredTargetForLog,
+                            GLenum resolvedTargetForLog,
+                            const GLTextureObject* objectForLog,
+                            void* finalMetalTexture,
+                            bool textureStorageReadyForLog,
+                            bool sampledCompleteForLog,
+                            bool usedIncompleteFallbackForLog,
+                            GLuint samplerNameForLog,
+                            void* metalSamplerForLog,
+                            const char* note) {
+                        if (!traceThisSampler) {
+                            return;
+                        }
+                        const GLTextureImageLevel* baseLevel =
+                            baseLevelForTrace(objectForLog);
+                        id<MTLTexture> finalMetal =
+                            metalTextureFromRaw(finalMetalTexture);
+                        std::fprintf(stderr,
+                            "[APPGL_SAMPLER_BIND] program=%u stage=%s "
+                            "sampler='%s' outcome=%s array=%d/%d "
+                            "uniformLoc=%d valueSet=%d glUnit=%d metalSlot=%u "
+                            "samplerGLType=0x%X preferred=0x%X preferredName=%s "
+                            "discovered=0x%X discoveredName=%s "
+                            "resolvedTarget=0x%X resolvedName=%s texName=%u "
+                            "objTarget=0x%X objTargetName=%s descTarget=0x%X "
+                            "descTargetName=%s desc=%dx%dx%d levels=%d "
+                            "layers=%d samples=%d internal=0x%X instantiated=%d "
+                            "storageReady=%d baseDefined=%d baseDesc=%dx%dx%d "
+                            "complete=%d fallback=%d finalTex=%p "
+                            "finalSize=%lux%lux%lu finalFmt=%lu finalType=%lu "
+                            "finalMips=%lu finalSamples=%lu samplerName=%u "
+                            "mtlSampler=%p note=%s\n",
+                            info.program,
+                            stageTag,
+                            sampledTex.name.c_str(),
+                            outcome,
+                            arrayElement,
+                            samplerArraySize,
+                            uniformLocation,
+                            uniformValueWasSet ? 1 : 0,
+                            glUnit,
+                            sampledTex.metalBinding +
+                                static_cast<std::uint32_t>(arrayElement),
+                            static_cast<unsigned>(samplerGLType),
+                            static_cast<unsigned>(preferredTarget),
+                            traceTextureTargetName(preferredTarget),
+                            static_cast<unsigned>(discoveredTargetForLog),
+                            traceTextureTargetName(discoveredTargetForLog),
+                            static_cast<unsigned>(resolvedTargetForLog),
+                            traceTextureTargetName(resolvedTargetForLog),
+                            resolvedTexName,
+                            objectForLog != nullptr
+                                ? static_cast<unsigned>(objectForLog->target)
+                                : 0u,
+                            objectForLog != nullptr
+                                ? traceTextureTargetName(objectForLog->target)
+                                : "none",
+                            objectForLog != nullptr
+                                ? static_cast<unsigned>(objectForLog->desc.target)
+                                : 0u,
+                            objectForLog != nullptr
+                                ? traceTextureTargetName(objectForLog->desc.target)
+                                : "none",
+                            objectForLog != nullptr ? objectForLog->desc.width : 0,
+                            objectForLog != nullptr ? objectForLog->desc.height : 0,
+                            objectForLog != nullptr ? objectForLog->desc.depth : 0,
+                            objectForLog != nullptr ? objectForLog->desc.levels : 0,
+                            objectForLog != nullptr ? objectForLog->desc.layers : 0,
+                            objectForLog != nullptr ? objectForLog->desc.samples : 0,
+                            objectForLog != nullptr
+                                ? static_cast<unsigned>(objectForLog->desc.internalFormat)
+                                : 0u,
+                            objectForLog != nullptr && objectForLog->instantiated ? 1 : 0,
+                            textureStorageReadyForLog ? 1 : 0,
+                            baseLevel != nullptr && baseLevel->defined ? 1 : 0,
+                            baseLevel != nullptr ? baseLevel->desc.width : 0,
+                            baseLevel != nullptr ? baseLevel->desc.height : 0,
+                            baseLevel != nullptr ? baseLevel->desc.depth : 0,
+                            sampledCompleteForLog ? 1 : 0,
+                            usedIncompleteFallbackForLog ? 1 : 0,
+                            finalMetalTexture,
+                            finalMetal != nil
+                                ? static_cast<unsigned long>(finalMetal.width)
+                                : 0ul,
+                            finalMetal != nil
+                                ? static_cast<unsigned long>(finalMetal.height)
+                                : 0ul,
+                            finalMetal != nil
+                                ? static_cast<unsigned long>(finalMetal.depth)
+                                : 0ul,
+                            finalMetal != nil
+                                ? static_cast<unsigned long>(finalMetal.pixelFormat)
+                                : 0ul,
+                            finalMetal != nil
+                                ? static_cast<unsigned long>(finalMetal.textureType)
+                                : 0ul,
+                            finalMetal != nil
+                                ? static_cast<unsigned long>(finalMetal.mipmapLevelCount)
+                                : 0ul,
+                            finalMetal != nil
+                                ? static_cast<unsigned long>(finalMetal.sampleCount)
+                                : 0ul,
+                            samplerNameForLog,
+                            metalSamplerForLog,
+                            note != nullptr ? note : "none");
+                        std::fflush(stderr);
+                    };
                     // Note: GL 4.2 layout(binding=N) default-unit is
                     // baked into `samplerValue->ints[arrayElement]`
                     // at link time (see the samplerExplicitBindings
@@ -13108,6 +13437,18 @@ struct GLContext::Impl {
                     // naturally when the app hasn't called
                     // glUniform1i.
                 if (glUnit < 0) {
+                    emitSamplerTrace("skip-negative-unit",
+                                     0u,
+                                     0u,
+                                     preferredTarget,
+                                     nullptr,
+                                     nullptr,
+                                     false,
+                                     false,
+                                     false,
+                                     traceBoundSamplerName,
+                                     nullptr,
+                                     "negative-unit");
                     if (logThisCall) {
                         APPGL_LOG(TEXTURE, @"[GL]   %s sampler='%s' metalSlot=%u"
                               @" SKIP reason=negative-unit glUnit=%d",
@@ -13116,6 +13457,7 @@ struct GLContext::Impl {
                     }
                     continue;  // malformed app state; skip silently
                 }
+                emitSamplerCandidates();
 
                 // Step 3: look up the texture object bound to that unit.
                 // Phase 6-4: probe in order:
@@ -13168,6 +13510,20 @@ struct GLContext::Impl {
                     }
                 }
                 if (texName == 0) {
+                    const GLenum resolvedTargetForLog =
+                        preferredTarget != 0 ? preferredTarget : discoveredTarget;
+                    emitSamplerTrace("skip-unit-empty",
+                                     0u,
+                                     discoveredTarget,
+                                     resolvedTargetForLog,
+                                     nullptr,
+                                     nullptr,
+                                     false,
+                                     false,
+                                     false,
+                                     traceBoundSamplerName,
+                                     nullptr,
+                                     "no-bound-texture");
                     if (logThisCall) {
                         APPGL_LOG(TEXTURE, @"[GL]   %s sampler='%s' metalSlot=%u"
                               @" SKIP reason=unit-empty glUnit=%d uniformLoc=%d"
@@ -13183,6 +13539,20 @@ struct GLContext::Impl {
                     (void)materializeTextureView(*texObject);
                 }
                 if (texObject == nullptr) {
+                    const GLenum resolvedTargetForLog =
+                        preferredTarget != 0 ? preferredTarget : discoveredTarget;
+                    emitSamplerTrace("skip-missing-object",
+                                     texName,
+                                     discoveredTarget,
+                                     resolvedTargetForLog,
+                                     nullptr,
+                                     nullptr,
+                                     false,
+                                     false,
+                                     false,
+                                     traceBoundSamplerName,
+                                     nullptr,
+                                     "texture-object-missing");
                     if (logThisCall) {
                         APPGL_LOG(TEXTURE, @"[GL]   %s sampler='%s' metalSlot=%u"
                               @" SKIP reason=tex-not-ready glUnit=%d texName=%u"
@@ -13209,7 +13579,7 @@ struct GLContext::Impl {
                 const GLTextureParameters* samplerParamsForCompleteness =
                     &texObject->params;
                 GLint effectiveReductionMode = texObject->params.reductionMode;
-                const GLuint samplerName = state->boundSampler(static_cast<GLuint>(glUnit));
+                const GLuint samplerName = traceBoundSamplerName;
                 if (samplerName != 0) {
                     GLSamplerObject* samplerObj = objects->samplers().get(samplerName);
                     if (samplerObj != nullptr) {
@@ -13228,6 +13598,20 @@ struct GLContext::Impl {
                     metalSamplerState = texObject->metalSampler;
                 }
                 if (metalSamplerState == nullptr) {
+                    const GLenum resolvedTargetForLog =
+                        preferredTarget != 0 ? preferredTarget : discoveredTarget;
+                    emitSamplerTrace("skip-sampler-build-failed",
+                                     texName,
+                                     discoveredTarget,
+                                     resolvedTargetForLog,
+                                     texObject,
+                                     nullptr,
+                                     textureStorageReady,
+                                     false,
+                                     false,
+                                     samplerName,
+                                     nullptr,
+                                     "sampler-build-failed");
                     if (logThisCall) {
                         APPGL_LOG(TEXTURE, @"[GL]   %s sampler='%s' metalSlot=%u"
                               @" SKIP reason=sampler-build-failed glUnit=%d"
@@ -13307,6 +13691,7 @@ struct GLContext::Impl {
                         sparseSampledFeedback && sparseSampledTexture;
                 }
                 binding.metalTexture = nullptr;
+                bool usedIncompleteFallback = false;
                 if (!sampledComplete &&
                     !sparseSampledTexture &&
                     supportsIncompleteSampledColorFallback(samplerGLType,
@@ -13314,11 +13699,24 @@ struct GLContext::Impl {
                                                            *texObject)) {
                     binding.metalTexture =
                         resolveIncompleteSampledColorFallbackTexture(resolvedTarget);
+                    usedIncompleteFallback = binding.metalTexture != nullptr;
                 }
                 if (binding.metalTexture == nullptr && textureStorageReady) {
                     binding.metalTexture = resolveSwizzledTexture(*texObject);
                 }
                 if (binding.metalTexture == nullptr) {
+                    emitSamplerTrace("skip-texture-not-ready",
+                                     texName,
+                                     discoveredTarget,
+                                     resolvedTarget,
+                                     texObject,
+                                     nullptr,
+                                     textureStorageReady,
+                                     sampledComplete,
+                                     usedIncompleteFallback,
+                                     samplerName,
+                                     metalSamplerState,
+                                     "final-metal-texture-null");
                     if (logThisCall) {
                         APPGL_LOG(TEXTURE, @"[GL]   %s sampler='%s' metalSlot=%u"
                               @" SKIP reason=tex-not-ready glUnit=%d texName=%u"
@@ -13353,6 +13751,18 @@ struct GLContext::Impl {
                 }
                 binding.reductionMode = static_cast<std::uint32_t>(effectiveReductionMode);
                 binding.lodBias = samplerParamsForCompleteness->lodBias;
+                emitSamplerTrace("bound",
+                                 texName,
+                                 discoveredTarget,
+                                 resolvedTarget,
+                                 texObject,
+                                 binding.metalTexture,
+                                 textureStorageReady,
+                                 sampledComplete,
+                                 usedIncompleteFallback,
+                                 samplerName,
+                                 binding.metalSamplerState,
+                                 "resolved");
                 outBindings.push_back(binding);
                 const GLenum sparseSidecarTarget =
                     resolvedTarget;
@@ -27895,10 +28305,16 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
     // and expected GL_INVALID_OPERATION on bufSize-too-small.
     object->target = effectiveTarget;
     object->desc.target = effectiveTarget;
-    object->desc.width = width;
-    object->desc.height = (effectiveTarget == GL_TEXTURE_1D) ? 1 : height;
-    object->desc.depth = (effectiveTarget == GL_TEXTURE_CUBE_MAP) ? 6 : depth;
     object->desc.internalFormat = internalformat;
+    object->desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
+    if (level == 0 || object->desc.width <= 0) {
+        object->desc.width = width;
+        object->desc.height = (effectiveTarget == GL_TEXTURE_1D) ? 1 : height;
+        object->desc.depth = (effectiveTarget == GL_TEXTURE_CUBE_MAP) ? 6 : depth;
+        object->desc.layers = (effectiveTarget == GL_TEXTURE_2D_ARRAY ||
+                               effectiveTarget == GL_TEXTURE_CUBE_MAP_ARRAY ||
+                               effectiveTarget == GL_TEXTURE_CUBE_MAP) ? object->desc.depth : 1;
+    }
     if (impl_->capabilities == nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
@@ -27938,17 +28354,23 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
     }
     // Record dimensions on the GL texture object so subsequent queries
     // (glGetCompressedTextureSubImage bounds, glGetTexLevelParameter)
-    // see the right values.
+    // see the right values. Keep the object-level descriptor anchored to
+    // level 0; per-mip dimensions live in object->levels[level]. Shrinking
+    // object->desc on each mip upload reallocates the Metal texture down to
+    // the final 1x1 mip, leaving terrain samplers bound to placeholder-sized
+    // BC textures.
     object->target = effectiveTarget;
     object->desc.target = effectiveTarget;
-    object->desc.width = width;
-    object->desc.height = (effectiveTarget == GL_TEXTURE_1D) ? 1 : height;
-    object->desc.depth = (effectiveTarget == GL_TEXTURE_CUBE_MAP) ? 6 : depth;
-    object->desc.layers = (effectiveTarget == GL_TEXTURE_2D_ARRAY ||
-                           effectiveTarget == GL_TEXTURE_CUBE_MAP_ARRAY ||
-                           effectiveTarget == GL_TEXTURE_CUBE_MAP) ? object->desc.depth : 1;
     object->desc.internalFormat = internalformat;
     object->desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
+    if (level == 0 || object->desc.width <= 0) {
+        object->desc.width = width;
+        object->desc.height = (effectiveTarget == GL_TEXTURE_1D) ? 1 : height;
+        object->desc.depth = (effectiveTarget == GL_TEXTURE_CUBE_MAP) ? 6 : depth;
+        object->desc.layers = (effectiveTarget == GL_TEXTURE_2D_ARRAY ||
+                               effectiveTarget == GL_TEXTURE_CUBE_MAP_ARRAY ||
+                               effectiveTarget == GL_TEXTURE_CUBE_MAP) ? object->desc.depth : 1;
+    }
 
     GLTextureImageLevel image;
     image.desc = object->desc;
@@ -27969,39 +28391,61 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
     }
     object->levels[level] = std::move(image);
 
-    // Allocate Metal texture if missing OR if format/size changed.
+    const auto baseImageIt = object->levels.find(0);
+    const GLTextureDesc& baseDesc =
+        (baseImageIt != object->levels.end() && baseImageIt->second.defined)
+            ? baseImageIt->second.desc
+            : object->desc;
+    const GLsizei allocationWidth = std::max<GLsizei>(baseDesc.width, 1);
+    const GLsizei allocationHeight = std::max<GLsizei>(
+        (effectiveTarget == GL_TEXTURE_1D) ? 1 : baseDesc.height,
+        1);
+    const GLsizei allocationDepth = std::max<GLsizei>(
+        (effectiveTarget == GL_TEXTURE_CUBE_MAP) ? 6 : baseDesc.depth,
+        1);
+
+    // Allocate Metal texture if missing OR if format/shape changed. The
+    // allocation shape must come from level 0, not the currently uploaded
+    // mip level. Native compressed uploads write each mip into the same
+    // Metal texture; reallocating from level N's dimensions loses earlier
+    // mip data and leaves only the final 1x1 level resident.
     id<MTLTexture> existing = (__bridge id<MTLTexture>)object->metalTexture;
     const bool arrayTexture = effectiveTarget == GL_TEXTURE_2D_ARRAY;
     const bool cubeArrayTexture = effectiveTarget == GL_TEXTURE_CUBE_MAP_ARRAY;
     const bool slicedTexture = arrayTexture || cubeArrayTexture;
     const NSUInteger uploadSlices = slicedTexture ? static_cast<NSUInteger>(depth) : 1u;
     const NSUInteger arrayLength = cubeArrayTexture
-        ? static_cast<NSUInteger>(std::max<GLsizei>(depth, 6) / 6)
-        : (arrayTexture ? static_cast<NSUInteger>(depth) : 1u);
+        ? static_cast<NSUInteger>(std::max<GLsizei>(allocationDepth, 6) / 6)
+        : (arrayTexture ? static_cast<NSUInteger>(allocationDepth) : 1u);
     const MTLTextureType textureType = cubeArrayTexture
         ? MTLTextureTypeCubeArray
         : (arrayTexture ? MTLTextureType2DArray : MTLTextureType2D);
+    const NSUInteger allocationMipCount = metalMipLevelCountForTexture(
+        effectiveTarget,
+        /*use2DFor1D=*/false,
+        metalMaxMipLevelsForDimensions(
+            static_cast<NSUInteger>(allocationWidth),
+            static_cast<NSUInteger>(allocationHeight),
+            1u),
+        static_cast<NSUInteger>(allocationWidth),
+        static_cast<NSUInteger>(allocationHeight),
+        1u);
     bool needAlloc = (existing == nil) ||
                      existing.textureType != textureType ||
                      existing.pixelFormat != pf ||
-                     existing.width != static_cast<NSUInteger>(width) ||
-                     existing.height != static_cast<NSUInteger>(height) ||
-                     existing.arrayLength != arrayLength;
+                     existing.width != static_cast<NSUInteger>(allocationWidth) ||
+                     existing.height != static_cast<NSUInteger>(allocationHeight) ||
+                     existing.arrayLength != arrayLength ||
+                     existing.mipmapLevelCount != allocationMipCount;
     if (needAlloc) {
         MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
         desc.textureType = textureType;
         desc.pixelFormat = pf;
-        desc.width = static_cast<NSUInteger>(width);
-        desc.height = static_cast<NSUInteger>(height);
+        desc.width = static_cast<NSUInteger>(allocationWidth);
+        desc.height = static_cast<NSUInteger>(allocationHeight);
         desc.depth = 1;
         desc.arrayLength = arrayLength;
-        desc.mipmapLevelCount = metalMipLevelCountForTexture(
-            effectiveTarget,
-            /*use2DFor1D=*/false,
-            static_cast<NSUInteger>(level + 1),
-            desc.width,
-            desc.height,
-            desc.depth);
+        desc.mipmapLevelCount = allocationMipCount;
         desc.usage = MTLTextureUsageShaderRead;
         desc.storageMode = MTLStorageModeShared;
         id<MTLTexture> newTex = [mtlDevice newTextureWithDescriptor:desc];
@@ -35777,9 +36221,25 @@ bool sourceDeclaresTransformFeedbackLayout(const std::string& source) {
     return false;
 }
 
+struct VertexAttribInjectionTrace {
+    std::size_t resolvedCount = 0;
+    std::size_t explicitCount = 0;
+    std::size_t locationMapCount = 0;
+    std::size_t matchedDeclarationCount = 0;
+    std::size_t injectedCount = 0;
+    std::vector<std::string> matchedNames;
+    std::vector<std::string> injectedNames;
+};
+
 std::string injectResolvedVertexAttribLocationsForSpirv(
     std::string source,
-    const std::vector<GLProgramAttributeInfo>& resolvedAttributes) {
+    const std::vector<GLProgramAttributeInfo>& resolvedAttributes,
+    bool includeImplicitLocations,
+    VertexAttribInjectionTrace* trace = nullptr) {
+    if (trace != nullptr) {
+        *trace = VertexAttribInjectionTrace{};
+        trace->resolvedCount = resolvedAttributes.size();
+    }
     if (source.empty() || resolvedAttributes.empty()) {
         return source;
     }
@@ -35792,11 +36252,17 @@ std::string injectResolvedVertexAttribLocationsForSpirv(
     std::vector<Injection> injections;
     std::unordered_map<std::string, GLint> locationsByName;
     for (const auto& attrib : resolvedAttributes) {
+        if (trace != nullptr && attrib.locationExplicit) {
+            ++trace->explicitCount;
+        }
         if (attrib.name.empty() || attrib.location < 0 ||
-            !attrib.locationExplicit) {
+            (!includeImplicitLocations && !attrib.locationExplicit)) {
             continue;
         }
         locationsByName.emplace(attrib.name, attrib.location);
+    }
+    if (trace != nullptr) {
+        trace->locationMapCount = locationsByName.size();
     }
     if (locationsByName.empty()) {
         return source;
@@ -35839,6 +36305,10 @@ std::string injectResolvedVertexAttribLocationsForSpirv(
             !statementContainsPunctuation(tokens, "}") &&
             !statementContainsIdentifier(tokens, "layout") &&
             resolvedVertexInputDeclarationName(tokens, name)) {
+            if (trace != nullptr) {
+                ++trace->matchedDeclarationCount;
+                trace->matchedNames.push_back(name);
+            }
             const auto locationIt = locationsByName.find(name);
             if (locationIt != locationsByName.end()) {
                 injections.push_back({
@@ -35846,6 +36316,11 @@ std::string injectResolvedVertexAttribLocationsForSpirv(
                     "layout(location = " +
                         std::to_string(locationIt->second) + ") "
                 });
+                if (trace != nullptr) {
+                    ++trace->injectedCount;
+                    trace->injectedNames.push_back(
+                        name + "@" + std::to_string(locationIt->second));
+                }
             }
         }
         stmtBegin = pos + 1;
@@ -40541,6 +41016,45 @@ bool GLContext::linkProgram(GLuint program) {
             programObject->attributes.push_back(std::move(attrib));
         }
     }
+    const bool traceAttribInjection =
+        std::getenv("APPGL_TRACE_ATTRIB_INJECTION") != nullptr;
+    auto countExplicitResolvedVertexAttribLocations =
+        [&programObject]() -> std::size_t {
+            std::size_t count = 0;
+            for (const auto& attrib : programObject->attributes) {
+                if (attrib.location >= 0 && attrib.locationExplicit) {
+                    ++count;
+                }
+            }
+            return count;
+        };
+    if (traceAttribInjection) {
+        std::fprintf(stderr,
+            "[APPGL_ATTRIB] program=%u resolved-attrs=%zu explicit=%zu "
+            "requested-binds=%zu\n",
+            static_cast<unsigned>(program),
+            programObject->attributes.size(),
+            countExplicitResolvedVertexAttribLocations(),
+            programObject->requestedAttribLocations.size());
+        for (const auto& requested : programObject->requestedAttribLocations) {
+            std::fprintf(stderr,
+                "[APPGL_ATTRIB]   bind name=%s location=%u\n",
+                requested.first.c_str(),
+                static_cast<unsigned>(requested.second));
+        }
+        for (const auto& attrib : programObject->attributes) {
+            std::fprintf(stderr,
+                "[APPGL_ATTRIB]   attr name=%s location=%d explicit=%d "
+                "type=0x%X arraySize=%d isArray=%d\n",
+                attrib.name.c_str(),
+                static_cast<int>(attrib.location),
+                attrib.locationExplicit ? 1 : 0,
+                static_cast<unsigned>(attrib.type),
+                static_cast<int>(attrib.arraySize),
+                attrib.isArray ? 1 : 0);
+        }
+        std::fflush(stderr);
+    }
 
     // Stage combination must be one of:
     //   - Compute-only                          (one or more GL_COMPUTE_SHADER objects)
@@ -43767,18 +44281,68 @@ bool GLContext::linkProgram(GLuint program) {
         fs420packLinkSource =
             rewrite420packQualifierOrderInvariantInputsForSpirv(
                 fs420packLinkSource);
+        const std::size_t explicitAttribLocationCount =
+            countExplicitResolvedVertexAttribLocations();
+        const bool hasTransformFeedbackVaryings =
+            !programObject->transformFeedbackVaryingNames.empty();
+        const bool vsDeclaresXfbLayout =
+            sourceDeclaresTransformFeedbackLayout(vs420packLinkSource);
+        const bool fsDeclaresXfbLayout =
+            sourceDeclaresTransformFeedbackLayout(fs420packLinkSource);
         const bool mayInjectResolvedVertexAttribLocations =
-            programObject->transformFeedbackVaryingNames.empty() &&
-            !sourceDeclaresTransformFeedbackLayout(vs420packLinkSource) &&
-            !sourceDeclaresTransformFeedbackLayout(fs420packLinkSource) &&
+            explicitAttribLocationCount > 0 &&
+            !hasTransformFeedbackVaryings &&
+            !vsDeclaresXfbLayout &&
+            !fsDeclaresXfbLayout &&
             geometryShader == nullptr &&
             tessControlShader == nullptr &&
             tessEvalShader == nullptr;
+        VertexAttribInjectionTrace attribInjectionTrace;
         if (mayInjectResolvedVertexAttribLocations) {
             vs420packLinkSource =
                 injectResolvedVertexAttribLocationsForSpirv(
                     std::move(vs420packLinkSource),
-                    programObject->attributes);
+                    programObject->attributes,
+                    true,
+                    &attribInjectionTrace);
+        }
+        if (traceAttribInjection) {
+            std::fprintf(stderr,
+                "[APPGL_ATTRIB] program=%u link-gate mayInject=%d "
+                "explicit=%zu attrs=%zu tfVaryings=%zu vsXfb=%d fsXfb=%d "
+                "gs=%d tcs=%d tes=%d vsHash=%s fsHash=%s\n",
+                static_cast<unsigned>(program),
+                mayInjectResolvedVertexAttribLocations ? 1 : 0,
+                explicitAttribLocationCount,
+                programObject->attributes.size(),
+                programObject->transformFeedbackVaryingNames.size(),
+                vsDeclaresXfbLayout ? 1 : 0,
+                fsDeclaresXfbLayout ? 1 : 0,
+                geometryShader != nullptr ? 1 : 0,
+                tessControlShader != nullptr ? 1 : 0,
+                tessEvalShader != nullptr ? 1 : 0,
+                linkVertexHash.c_str(),
+                linkFragmentHash.c_str());
+            std::fprintf(stderr,
+                "[APPGL_ATTRIB] program=%u inject-result resolved=%zu "
+                "explicit=%zu map=%zu matched=%zu injected=%zu\n",
+                static_cast<unsigned>(program),
+                attribInjectionTrace.resolvedCount,
+                attribInjectionTrace.explicitCount,
+                attribInjectionTrace.locationMapCount,
+                attribInjectionTrace.matchedDeclarationCount,
+                attribInjectionTrace.injectedCount);
+            for (const auto& name : attribInjectionTrace.matchedNames) {
+                std::fprintf(stderr,
+                    "[APPGL_ATTRIB]   matched-decl name=%s\n",
+                    name.c_str());
+            }
+            for (const auto& name : attribInjectionTrace.injectedNames) {
+                std::fprintf(stderr,
+                    "[APPGL_ATTRIB]   injected name=%s\n",
+                    name.c_str());
+            }
+            std::fflush(stderr);
         }
         // Phase 8X Group 4d follow-up²³ — sub-step marker before the
         // glslang cross-stage link. First candidate on the abort-site ladder
@@ -43792,6 +44356,14 @@ bool GLContext::linkProgram(GLuint program) {
         APPGL_LOG(SHADER, @"[GL] compileGLSLProgram: program=%u success=%d log=%s",
               program, linked.linkSucceeded ? 1 : 0,
               linkErrorLog.c_str());
+        if (traceAttribInjection) {
+            std::fprintf(stderr,
+                "[APPGL_ATTRIB] program=%u linked-spirv success=%d log=%s\n",
+                static_cast<unsigned>(program),
+                linked.linkSucceeded ? 1 : 0,
+                linkErrorLog.empty() ? "(empty)" : linkErrorLog.c_str());
+            std::fflush(stderr);
+        }
         fflush(stderr);
         if (!linked.linkSucceeded) {
             // Record the cross-stage link failure so BAR can see why the
