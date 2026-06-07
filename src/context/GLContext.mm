@@ -11632,7 +11632,14 @@ struct GLContext::Impl {
         descriptor.width = baseWidth;
         descriptor.height = baseHeight;
         descriptor.depth = 1u;
-        descriptor.mipmapLevelCount = levelCount;
+        const NSUInteger proxyLevelCount = metalMipLevelCountForTexture(
+            viewObj.target,
+            /*use2DFor1D=*/false,
+            levelCount,
+            descriptor.width,
+            descriptor.height,
+            descriptor.depth);
+        descriptor.mipmapLevelCount = proxyLevelCount;
         descriptor.arrayLength =
             viewObj.target == GL_TEXTURE_CUBE_MAP_ARRAY
                 ? std::max<NSUInteger>(sliceCount / 6u, 1u)
@@ -11656,7 +11663,7 @@ struct GLContext::Impl {
             return nil;
         }
 
-        for (NSUInteger mip = 0; mip < levelCount; ++mip) {
+        for (NSUInteger mip = 0; mip < proxyLevelCount; ++mip) {
             const NSUInteger sourceLevel = levelStart + mip;
             const NSUInteger mipWidth =
                 std::max<NSUInteger>(sourceTex.width >> sourceLevel, 1u);
@@ -27988,7 +27995,13 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
         desc.height = static_cast<NSUInteger>(height);
         desc.depth = 1;
         desc.arrayLength = arrayLength;
-        desc.mipmapLevelCount = static_cast<NSUInteger>(level + 1);
+        desc.mipmapLevelCount = metalMipLevelCountForTexture(
+            effectiveTarget,
+            /*use2DFor1D=*/false,
+            static_cast<NSUInteger>(level + 1),
+            desc.width,
+            desc.height,
+            desc.depth);
         desc.usage = MTLTextureUsageShaderRead;
         desc.storageMode = MTLStorageModeShared;
         id<MTLTexture> newTex = [mtlDevice newTextureWithDescriptor:desc];
@@ -28042,6 +28055,18 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
             static_cast<NSUInteger>(width),
             static_cast<NSUInteger>(height));
         const NSUInteger mipLevel = static_cast<NSUInteger>(level);
+        if (mipLevel >= existing.mipmapLevelCount) {
+            return true;
+        }
+        const NSUInteger mipWidth =
+            std::max<NSUInteger>(existing.width >> mipLevel, 1u);
+        const NSUInteger mipHeight =
+            std::max<NSUInteger>(existing.height >> mipLevel, 1u);
+        region.size.width = std::min<NSUInteger>(region.size.width, mipWidth);
+        region.size.height = std::min<NSUInteger>(region.size.height, mipHeight);
+        if (region.size.width == 0 || region.size.height == 0) {
+            return true;
+        }
         if (slicedTexture) {
             for (NSUInteger slice = 0; slice < uploadSlices; ++slice) {
                 const std::uint8_t* sliceBytes = baseBytes + slice * srcImageBytes;
