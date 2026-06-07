@@ -3980,10 +3980,10 @@ bool injectTextureReductionMinmax(std::string& msl) {
 }
 
 bool rewriteTextureSampleLodBiasArg(const std::string& arg,
-                                    const std::string& bufferName,
-                                    const std::string& implicitCorrectionName,
-                                    const std::string& slot,
-                                    std::string& replacement,
+                                     const std::string& bufferName,
+                                     const std::string& implicitCorrectionName,
+                                     const std::string& slot,
+                                     std::string& replacement,
                                     bool* usedImplicitCorrection) {
     const std::string trimmed = trimCopy(arg);
     const bool isLevel = trimmed.rfind("level", 0) == 0;
@@ -4035,6 +4035,135 @@ bool rewriteTextureSampleLodBiasArg(const std::string& arg,
     return true;
 }
 
+void threadTextureLodBiasParamsThroughHelpers(
+    std::string& msl,
+    const std::string& lodBiasesName,
+    const std::string& implicitCorrectionName) {
+    const std::vector<MslFunctionDefinition> functions =
+        findTopLevelFunctionDefinitions(msl);
+    if (functions.empty()) {
+        return;
+    }
+
+    const bool hasImplicitCorrection = !implicitCorrectionName.empty();
+    std::unordered_set<std::string> needsParams;
+    for (const auto& fn : functions) {
+        const std::string body =
+            msl.substr(fn.bodyOpen + 1, fn.bodyClose - fn.bodyOpen - 1);
+        if (body.find(lodBiasesName) != std::string::npos ||
+            (hasImplicitCorrection &&
+             body.find(implicitCorrectionName) != std::string::npos)) {
+            needsParams.insert(fn.name);
+        }
+    }
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto& fn : functions) {
+            if (needsParams.find(fn.name) != needsParams.end()) {
+                continue;
+            }
+            for (const auto& callee : needsParams) {
+                if (containsFunctionCallInRange(
+                        msl, fn.bodyOpen + 1, fn.bodyClose, callee)) {
+                    needsParams.insert(fn.name);
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (needsParams.empty()) {
+        return;
+    }
+
+    struct Insertion {
+        std::size_t pos = 0;
+        std::string text;
+    };
+    std::vector<Insertion> insertions;
+    std::string helperParams = "constant float* " + lodBiasesName;
+    std::string callParams = ", " + lodBiasesName;
+    if (hasImplicitCorrection) {
+        helperParams += ", constant float& " + implicitCorrectionName;
+        callParams += ", " + implicitCorrectionName;
+    }
+
+    for (const auto& fn : functions) {
+        for (const auto& callee : needsParams) {
+            if (callee == fn.name && callee != "main0") {
+                continue;
+            }
+            std::size_t pos = fn.bodyOpen + 1;
+            while ((pos = msl.find(callee, pos)) != std::string::npos &&
+                   pos < fn.bodyClose) {
+                const std::size_t afterName = pos + callee.size();
+                if ((pos > 0 && isIdentifierChar(msl[pos - 1])) ||
+                    (afterName < msl.size() && isIdentifierChar(msl[afterName]))) {
+                    pos = afterName;
+                    continue;
+                }
+                std::size_t open = afterName;
+                while (open < fn.bodyClose &&
+                       std::isspace(static_cast<unsigned char>(msl[open]))) {
+                    ++open;
+                }
+                if (open >= fn.bodyClose || msl[open] != '(') {
+                    pos = afterName;
+                    continue;
+                }
+                std::size_t close = 0;
+                if (!findMatchingParen(msl, open, close) || close > fn.bodyClose) {
+                    break;
+                }
+                const std::string args = msl.substr(open + 1, close - open - 1);
+                const bool alreadyThreaded =
+                    args.find(lodBiasesName) != std::string::npos ||
+                    (hasImplicitCorrection &&
+                     args.find(implicitCorrectionName) != std::string::npos);
+                if (!alreadyThreaded) {
+                    const std::string trimmed = trimCopy(args);
+                    const std::string emptyArgs =
+                        lodBiasesName +
+                        (hasImplicitCorrection
+                             ? ", " + implicitCorrectionName
+                             : std::string());
+                    insertions.push_back({
+                        close,
+                        trimmed.empty() ? emptyArgs : callParams});
+                }
+                pos = close + 1;
+            }
+        }
+
+        if (fn.name == "main0" ||
+            needsParams.find(fn.name) == needsParams.end()) {
+            continue;
+        }
+        const std::string params =
+            msl.substr(fn.paramOpen + 1, fn.paramClose - fn.paramOpen - 1);
+        const bool alreadyThreaded =
+            params.find(lodBiasesName) != std::string::npos ||
+            (hasImplicitCorrection &&
+             params.find(implicitCorrectionName) != std::string::npos);
+        if (alreadyThreaded) {
+            continue;
+        }
+        insertions.push_back({
+            fn.paramClose,
+            trimCopy(params).empty() ? helperParams : ", " + helperParams});
+    }
+
+    std::sort(insertions.begin(), insertions.end(),
+              [](const Insertion& a, const Insertion& b) {
+                  return a.pos > b.pos;
+              });
+    for (const auto& insertion : insertions) {
+        msl.insert(insertion.pos, insertion.text);
+    }
+}
+
 bool injectTextureLodBiases(std::string& msl) {
     static constexpr const char* kParamName = "_appgl_TextureLodBiases";
     static constexpr const char* kImplicitCorrectionName =
@@ -4043,6 +4172,7 @@ bool injectTextureLodBiases(std::string& msl) {
         msl.find(".sample(") == std::string::npos) {
         return false;
     }
+    const std::string originalMsl = msl;
     const std::vector<TextureReductionParam> params =
         textureReductionParams(msl);
     if (params.empty()) {
@@ -4117,6 +4247,7 @@ bool injectTextureLodBiases(std::string& msl) {
 
     std::size_t paramEnd = 0;
     if (!findMain0ParameterEnd(msl, paramEnd)) {
+        msl = originalMsl;
         return false;
     }
     const std::uint32_t bufferSlot =
@@ -4135,6 +4266,10 @@ bool injectTextureLodBiases(std::string& msl) {
             " [[buffer(" + std::to_string(correctionSlot) + ")]]";
     }
     msl.insert(paramEnd, param);
+    threadTextureLodBiasParamsThroughHelpers(
+        msl,
+        kParamName,
+        needsImplicitCorrection ? kImplicitCorrectionName : "");
     return true;
 }
 

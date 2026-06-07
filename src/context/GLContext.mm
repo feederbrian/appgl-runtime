@@ -35604,6 +35604,112 @@ bool tokenAt(const std::string& s, std::size_t pos, const char* token) {
     return leftOk && rightOk;
 }
 
+bool tokenAtString(const std::string& s,
+                   std::size_t pos,
+                   const std::string& token) {
+    if (token.empty() ||
+        pos + token.size() > s.size() ||
+        s.compare(pos, token.size(), token) != 0) {
+        return false;
+    }
+    const bool leftOk = pos == 0 || !isGlslIdentChar(s[pos - 1]);
+    const bool rightOk = pos + token.size() >= s.size() ||
+                         !isGlslIdentChar(s[pos + token.size()]);
+    return leftOk && rightOk;
+}
+
+bool rangeContainsToken(const std::string& s,
+                        std::size_t begin,
+                        std::size_t end,
+                        const char* token) {
+    const std::size_t tokenLen = std::strlen(token);
+    if (begin >= end || tokenLen == 0) {
+        return false;
+    }
+    std::size_t pos = begin;
+    while ((pos = s.find(token, pos)) != std::string::npos && pos < end) {
+        if (pos + tokenLen <= end && tokenAt(s, pos, token)) {
+            return true;
+        }
+        pos += tokenLen;
+    }
+    return false;
+}
+
+std::string injectResolvedVertexAttribLocationsForSpirv(
+    std::string source,
+    const std::vector<GLProgramAttributeInfo>& resolvedAttributes) {
+    if (source.empty() || resolvedAttributes.empty()) {
+        return source;
+    }
+
+    struct Injection {
+        std::size_t pos = 0;
+        std::string text;
+    };
+
+    std::vector<Injection> injections;
+    std::unordered_map<std::string, GLint> locationsByName;
+    for (const auto& attrib : resolvedAttributes) {
+        if (attrib.name.empty() || attrib.location < 0) {
+            continue;
+        }
+        locationsByName.emplace(attrib.name, attrib.location);
+    }
+
+    for (const auto& entry : locationsByName) {
+        const std::string& name = entry.first;
+        std::size_t pos = 0;
+        while ((pos = source.find(name, pos)) != std::string::npos) {
+            if (!tokenAtString(source, pos, name)) {
+                pos += name.size();
+                continue;
+            }
+            std::size_t stmtBegin = pos;
+            while (stmtBegin > 0) {
+                const char c = source[stmtBegin - 1];
+                if (c == ';' || c == '{' || c == '}' || c == '\n') {
+                    break;
+                }
+                --stmtBegin;
+            }
+            const std::size_t stmtEnd = source.find(';', pos);
+            if (stmtEnd == std::string::npos) {
+                break;
+            }
+            if (rangeContainsToken(source, stmtBegin, stmtEnd, "layout")) {
+                pos = stmtEnd + 1;
+                continue;
+            }
+            if (!rangeContainsToken(source, stmtBegin, stmtEnd, "in") &&
+                !rangeContainsToken(source, stmtBegin, stmtEnd, "attribute")) {
+                pos += name.size();
+                continue;
+            }
+
+            std::size_t insertAt = stmtBegin;
+            while (insertAt < stmtEnd &&
+                   std::isspace(static_cast<unsigned char>(source[insertAt]))) {
+                ++insertAt;
+            }
+            injections.push_back({
+                insertAt,
+                "layout(location = " + std::to_string(entry.second) + ") "
+            });
+            break;
+        }
+    }
+
+    std::sort(injections.begin(), injections.end(),
+              [](const Injection& a, const Injection& b) {
+                  return a.pos > b.pos;
+              });
+    for (const auto& injection : injections) {
+        source.insert(injection.pos, injection.text);
+    }
+    return source;
+}
+
 std::string stripGlslCommentsForAppglValidation(std::string_view src) {
     std::string out;
     out.reserve(src.size());
@@ -43508,6 +43614,10 @@ bool GLContext::linkProgram(GLuint program) {
         fs420packLinkSource =
             rewrite420packQualifierOrderInvariantInputsForSpirv(
                 fs420packLinkSource);
+        vs420packLinkSource =
+            injectResolvedVertexAttribLocationsForSpirv(
+                std::move(vs420packLinkSource),
+                programObject->attributes);
         // Phase 8X Group 4d follow-up²³ — sub-step marker before the
         // glslang cross-stage link. First candidate on the abort-site ladder
         // is glslang's TProgram::link re-entry, since that's the first heavy
