@@ -36175,7 +36175,9 @@ bool resolvedVertexInputDeclarationName(
         ++pos;
     }
     if (pos >= tokens.size() || !tokens[pos].ident ||
-        (tokens[pos].text != "in" && tokens[pos].text != "attribute")) {
+        (tokens[pos].text != "in" &&
+         tokens[pos].text != "attribute" &&
+         tokens[pos].text != "VERTEX_INPUT")) {
         return false;
     }
     ++pos;
@@ -40951,7 +40953,6 @@ bool GLContext::linkProgram(GLuint program) {
     // glBindAttribLocation requests (via requestedAttribLocations) which
     // SPIRV-Cross reflection cannot see, so we keep it as the authoritative
     // source for attribute locations.
-    GLuint nextAttribLocation = 0;
     auto vertexInputLocationSlotCount = [](GLenum type, GLint arraySize) -> GLuint {
         GLuint columns = 1;
         switch (type) {
@@ -40976,22 +40977,76 @@ bool GLContext::linkProgram(GLuint program) {
         return columns * static_cast<GLuint>(std::max<GLint>(1, arraySize));
     };
     if (vertexShader != nullptr) {
+        std::unordered_set<GLuint> usedAttribLocations;
+        auto reserveAttribLocationRange = [&usedAttribLocations](
+            GLint location, GLuint slotCount) {
+            if (location < 0) {
+                return;
+            }
+            for (GLuint slot = 0; slot < std::max<GLuint>(1u, slotCount); ++slot) {
+                usedAttribLocations.insert(static_cast<GLuint>(location) + slot);
+            }
+        };
+        auto requestedLocationForInput =
+            [&programObject](const std::string& name) -> GLint {
+            const auto requested =
+                programObject->requestedAttribLocations.find(name);
+            if (requested == programObject->requestedAttribLocations.end()) {
+                return -1;
+            }
+            return static_cast<GLint>(requested->second);
+        };
+        auto findFreeAttribLocation =
+            [&usedAttribLocations](GLuint slotCount, GLuint& next) -> GLuint {
+            slotCount = std::max<GLuint>(1u, slotCount);
+            for (;;) {
+                bool freeRange = true;
+                for (GLuint slot = 0; slot < slotCount; ++slot) {
+                    if (usedAttribLocations.count(next + slot) != 0) {
+                        freeRange = false;
+                        next += slot + 1u;
+                        break;
+                    }
+                }
+                if (freeRange) {
+                    return next;
+                }
+            }
+        };
+
+        for (const auto& input : vertexShader->declaredInputs) {
+            const GLuint slotCount =
+                vertexInputLocationSlotCount(input.type, input.arraySize);
+            if (input.explicitLocation >= 0) {
+                reserveAttribLocationRange(input.explicitLocation, slotCount);
+                continue;
+            }
+            const GLint requested = requestedLocationForInput(input.name);
+            if (requested >= 0) {
+                reserveAttribLocationRange(requested, slotCount);
+            }
+        }
+
+        GLuint nextAttribLocation = 0;
         for (const auto& input : vertexShader->declaredInputs) {
             GLProgramAttributeInfo attrib;
             attrib.name = input.name;
             attrib.type = input.type;
             attrib.arraySize = input.arraySize;
             attrib.isArray = input.isArray;
+            const GLuint slotCount =
+                vertexInputLocationSlotCount(input.type, input.arraySize);
             if (input.explicitLocation >= 0) {
                 attrib.location = input.explicitLocation;
                 attrib.locationExplicit = true;
             } else {
-                auto requested = programObject->requestedAttribLocations.find(input.name);
-                if (requested != programObject->requestedAttribLocations.end()) {
-                    attrib.location = static_cast<GLint>(requested->second);
+                const GLint requested = requestedLocationForInput(input.name);
+                if (requested >= 0) {
+                    attrib.location = requested;
                     attrib.locationExplicit = true;
                 } else {
-                    attrib.location = static_cast<GLint>(nextAttribLocation);
+                    attrib.location = static_cast<GLint>(
+                        findFreeAttribLocation(slotCount, nextAttribLocation));
                 }
             }
             // GL 4.6 §11.1.1: array vertex inputs consume arraySize
@@ -41008,9 +41063,9 @@ bool GLContext::linkProgram(GLuint program) {
             // and expect position at MSL attribute(9), not (2). Before
             // this fix, getAttribLocation("position")=2 collided with
             // culldistance_data[1]'s MSL slot.
-            const GLuint slotCount =
-                vertexInputLocationSlotCount(input.type, input.arraySize);
-            if (static_cast<GLuint>(attrib.location) + slotCount > nextAttribLocation) {
+            reserveAttribLocationRange(attrib.location, slotCount);
+            if (!attrib.locationExplicit &&
+                static_cast<GLuint>(attrib.location) + slotCount > nextAttribLocation) {
                 nextAttribLocation = static_cast<GLuint>(attrib.location) + slotCount;
             }
             programObject->attributes.push_back(std::move(attrib));

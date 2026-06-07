@@ -1085,7 +1085,8 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
         }
         const std::string keyword = tokens.front();
         if (keyword != "uniform" && keyword != "in" && keyword != "out" &&
-            keyword != "attribute" && keyword != "varying") {
+            keyword != "attribute" && keyword != "varying" &&
+            keyword != "VERTEX_INPUT" && keyword != "VERTEX_OUTPUT") {
             return;
         }
         tokens.erase(tokens.begin());
@@ -1119,7 +1120,8 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
         auto addDecl = [&](GLShaderDeclaration d) {
             if (keyword == "uniform") {
                 result.uniforms.push_back(std::move(d));
-            } else if (keyword == "in" || keyword == "attribute") {
+            } else if (keyword == "in" || keyword == "attribute" ||
+                       keyword == "VERTEX_INPUT") {
                 // GL 4.6 §4.3.4: `in` is valid in every stage. The
                 // VS reads external vertex attributes; every later
                 // stage reads outputs from the stage ahead of it.
@@ -1138,7 +1140,8 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
                     stage == GL_TESS_EVALUATION_SHADER) {
                     result.inputs.push_back(std::move(d));
                 }
-            } else if (keyword == "out" || keyword == "varying") {
+            } else if (keyword == "out" || keyword == "varying" ||
+                       keyword == "VERTEX_OUTPUT") {
                 if (stage == GL_FRAGMENT_SHADER || stage == GL_VERTEX_SHADER ||
                     stage == GL_GEOMETRY_SHADER || stage == GL_TESS_EVALUATION_SHADER ||
                     stage == GL_TESS_CONTROL_SHADER) {
