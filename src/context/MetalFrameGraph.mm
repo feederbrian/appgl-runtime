@@ -6447,7 +6447,7 @@ struct MetalFrameGraph::Impl {
                 std::fprintf(stderr,
                     "[APPGL_DRAW_TEXTURE] program=%u frag[%zu] slot=%u "
                     "tex=%p size=%lux%lu fmt=0x%lX samples=%lu sampler=%p "
-                    "lodBias=%.3f borderMask=0x%X\n",
+                    "reduction=0x%X lodBias=%.3f borderMask=0x%X\n",
                     static_cast<unsigned>(info.program),
                     i,
                     static_cast<unsigned>(binding.metalSlot),
@@ -6457,6 +6457,7 @@ struct MetalFrameGraph::Impl {
                     sampled != nil ? static_cast<unsigned long>(sampled.pixelFormat) : 0ul,
                     sampled != nil ? static_cast<unsigned long>(sampled.sampleCount) : 0ul,
                     binding.metalSamplerState,
+                    static_cast<unsigned>(binding.reductionMode),
                     static_cast<double>(binding.lodBias),
                     static_cast<unsigned>(binding.borderClampMask));
             }

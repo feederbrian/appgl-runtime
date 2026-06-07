@@ -13653,6 +13653,7 @@ struct GLContext::Impl {
                 // consecutive Metal slot starting at metalBinding.
                 TranslatedDrawInfo::TextureBinding binding;
                 binding.metalSlot = sampledTex.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                binding.textureName = texName;
                 if (samplerParamsForCompleteness->wrapS == GL_CLAMP_TO_BORDER) {
                     binding.borderClampMask |= 0x1u;
                 }
@@ -54186,6 +54187,50 @@ static bool translatedDrawUsesFragCoordParams(const TranslatedDrawInfo& tdi) {
         tdi.fragmentMSL->find("_appgl_FragCoordParams") != std::string::npos;
 }
 
+static bool textureTargetUsesNormalized2DSampling(const GLTextureObject& texture) {
+    const GLenum target = texture.desc.target != 0 ? texture.desc.target : texture.target;
+    return target == GL_TEXTURE_2D;
+}
+
+static bool textureNeedsDefaultFramebufferSampleYFlip(
+    const GLTextureObject& sampled,
+    const GLTextureObject* producer)
+{
+    const GLTextureObject& source = producer != nullptr ? *producer : sampled;
+    return textureTargetUsesNormalized2DSampling(sampled) &&
+           isColorFormat(sampled.desc.internalFormat) &&
+           (sampled.wasFramebufferRenderedTo || sampled.wasViewportRenderedTo ||
+            source.wasFramebufferRenderedTo || source.wasViewportRenderedTo);
+}
+
+static void markDefaultFramebufferFboColorSampleYFlip(
+    TranslatedDrawInfo& tdi,
+    GLObjectStore* objects,
+    GLuint drawFboName)
+{
+    if (drawFboName != 0 || objects == nullptr) {
+        return;
+    }
+    for (auto& binding : tdi.fragmentTextures) {
+        if (binding.textureName == 0 ||
+            binding.metalTexture == nullptr ||
+            binding.metalSamplerState == nullptr) {
+            continue;
+        }
+        GLTextureObject* sampled = objects->textures().get(binding.textureName);
+        if (sampled == nullptr) {
+            continue;
+        }
+        const GLTextureObject* producer = nullptr;
+        if (sampled->viewSourceTexture != 0) {
+            producer = objects->textures().get(sampled->viewSourceTexture);
+        }
+        if (textureNeedsDefaultFramebufferSampleYFlip(*sampled, producer)) {
+            binding.reductionMode |= kTextureReductionModeSampleYFlipBit;
+        }
+    }
+}
+
 static bool programHasSubroutineUniformStateForStage(
     const GLProgramObject* program,
     std::size_t stage)
@@ -54416,6 +54461,8 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
             phase2PlanSetFixedStateBool(
                 tdi, tdi.markColorAttachmentReadbackFlip, true);
         }
+        markDefaultFramebufferFboColorSampleYFlip(
+            tdi, objects.get(), drawFboName);
     }
 
     if (drawPathProfile.enabled) {

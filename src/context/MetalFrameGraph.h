@@ -266,6 +266,7 @@ struct TranslatedDrawInfo {
     // `[[texture(N)]]` / `[[sampler(N)]]` arguments.
     struct TextureBinding {
         std::uint32_t metalSlot = 0;
+        GLuint textureName = 0;
         void* metalTexture = nullptr;       // id<MTLTexture>
         void* metalSamplerState = nullptr;  // id<MTLSamplerState>
         // Non-owning backing buffer for buffer-texture MTLTexture views.

@@ -11,6 +11,9 @@
 
 namespace appgl {
 
+inline constexpr std::uint32_t kTextureReductionModeSampleYFlipBit = 0x80000000u;
+inline constexpr std::uint32_t kTextureReductionModeMask = 0x7fffffffu;
+
 // Metal exposes 31 buffer slots per shader stage (indices 0..30). Vertex
 // buffers must live in the low half so they fit MTLVertexDescriptor's
 // bufferIndex range, with uniform/storage buffers stacked above them. This

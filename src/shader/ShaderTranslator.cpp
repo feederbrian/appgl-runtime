@@ -3741,8 +3741,16 @@ static inline float appgl_texred_center(int i, uint size) {
     return (float(i) + 0.5f) / float(safeSize);
 }
 
+static inline uint appgl_texred_mode(uint packedMode) {
+    return packedMode & 0x7fffffffu;
+}
+
+static inline float2 appgl_texred_sample_coord_2d(float2 coord, uint packedMode) {
+    return (packedMode & 0x80000000u) != 0u ? float2(coord.x, 1.0f - coord.y) : coord;
+}
+
 static inline float4 appgl_texture_minmax_1d(texture1d<float> tex, sampler smp, float coord, constant uint* modes, uint slot) {
-    uint mode = modes[slot];
+    uint mode = appgl_texred_mode(modes[slot]);
     if (mode == 0x9367u) return tex.sample(smp, coord);
     uint w = tex.get_width();
     float p = coord * float(w == 0u ? 1u : w) - 0.5f;
@@ -3753,7 +3761,7 @@ static inline float4 appgl_texture_minmax_1d(texture1d<float> tex, sampler smp, 
 }
 
 static inline float4 appgl_texture_minmax_1d_array(texture1d_array<float> tex, sampler smp, float coord, uint layer, constant uint* modes, uint slot) {
-    uint mode = modes[slot];
+    uint mode = appgl_texred_mode(modes[slot]);
     if (mode == 0x9367u) return tex.sample(smp, coord, layer);
     uint w = tex.get_width();
     float p = coord * float(w == 0u ? 1u : w) - 0.5f;
@@ -3764,7 +3772,9 @@ static inline float4 appgl_texture_minmax_1d_array(texture1d_array<float> tex, s
 }
 
 static inline float4 appgl_texture_minmax_2d(texture2d<float> tex, sampler smp, float2 coord, constant uint* modes, uint slot) {
-    uint mode = modes[slot];
+    uint packedMode = modes[slot];
+    uint mode = appgl_texred_mode(packedMode);
+    coord = appgl_texred_sample_coord_2d(coord, packedMode);
     if (mode == 0x9367u) return tex.sample(smp, coord);
     uint w = tex.get_width();
     uint h = tex.get_height();
@@ -3782,7 +3792,9 @@ static inline float4 appgl_texture_minmax_2d(texture2d<float> tex, sampler smp, 
 }
 
 static inline float4 appgl_texture_minmax_2d_array(texture2d_array<float> tex, sampler smp, float2 coord, uint layer, constant uint* modes, uint slot) {
-    uint mode = modes[slot];
+    uint packedMode = modes[slot];
+    uint mode = appgl_texred_mode(packedMode);
+    coord = appgl_texred_sample_coord_2d(coord, packedMode);
     if (mode == 0x9367u) return tex.sample(smp, coord, layer);
     uint w = tex.get_width();
     uint h = tex.get_height();
@@ -3800,7 +3812,7 @@ static inline float4 appgl_texture_minmax_2d_array(texture2d_array<float> tex, s
 }
 
 static inline float4 appgl_texture_minmax_3d(texture3d<float> tex, sampler smp, float3 coord, constant uint* modes, uint slot) {
-    uint mode = modes[slot];
+    uint mode = appgl_texred_mode(modes[slot]);
     if (mode == 0x9367u) return tex.sample(smp, coord);
     uint w = tex.get_width();
     uint h = tex.get_height();
@@ -3855,7 +3867,7 @@ static inline float3 appgl_texred_cube_dir(uint face, float2 uv) {
 }
 
 static inline float4 appgl_texture_minmax_cube(texturecube<float> tex, sampler smp, float3 coord, constant uint* modes, uint slot) {
-    uint mode = modes[slot];
+    uint mode = appgl_texred_mode(modes[slot]);
     if (mode == 0x9367u) return tex.sample(smp, coord);
     uint w = tex.get_width();
     appgl_texred_cube_coord fc = appgl_texred_cube_face(coord);
