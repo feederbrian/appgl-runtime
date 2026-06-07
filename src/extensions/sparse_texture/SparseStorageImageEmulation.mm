@@ -4,6 +4,7 @@
 #include "SparseTextureAlloc.h"
 #include "../ExtensionContext.h"
 #include "../../context/MetalCommandSubmission.h"
+#include "../../context/TextureMipLevels.h"
 #include "../../objects/GLObjectStore.h"
 
 #include <CoreFoundation/CoreFoundation.h>
@@ -173,7 +174,7 @@ MTLTextureDescriptor* newProbeDescriptor(GLenum target) {
     desc.depth = target == GL_TEXTURE_3D ? 4u : 1u;
     desc.arrayLength = target == GL_TEXTURE_2D_ARRAY ? 4u
         : (target == GL_TEXTURE_CUBE_MAP_ARRAY ? 2u : 1u);
-    desc.mipmapLevelCount = 1;
+    desc.mipmapLevelCount = singleMipLevelCount<NSUInteger>();
     desc.sampleCount = 1;
     desc.storageMode = MTLStorageModePrivate;
     desc.usage = MTLTextureUsageShaderRead |
@@ -261,7 +262,7 @@ bool requestForTexture(ExtensionContext& ctx,
     request.height = metalTexture.height;
     request.depth = 1u;
     request.layers = 1u;
-    request.levels = std::max<NSUInteger>(metalTexture.mipmapLevelCount, 1u);
+    request.levels = nonZeroMipLevelCount(metalTexture.mipmapLevelCount);
     request.arrayLength = 1u;
 
     switch (texture.target) {
@@ -338,7 +339,7 @@ id<MTLTexture> createSidecarTexture(id<MTLDevice> device,
     desc.height = request.height;
     desc.depth = request.depth;
     desc.arrayLength = request.arrayLength;
-    desc.mipmapLevelCount = request.levels;
+    desc.mipmapLevelCount = nonZeroMipLevelCount(request.levels);
     desc.sampleCount = 1;
     desc.storageMode = MTLStorageModePrivate;
     desc.usage = MTLTextureUsageShaderRead |

@@ -2,6 +2,7 @@
 
 #include "../ExtensionContext.h"
 #include "../../caps/GLCapabilities.h"
+#include "../../context/TextureMipLevels.h"
 #include "../../objects/GLObjectStore.h"
 
 #include <CoreFoundation/CoreFoundation.h>
@@ -124,7 +125,7 @@ bool probeSidecarCapability(id<MTLDevice> device) {
     desc.height = 4;
     desc.depth = 1;
     desc.arrayLength = 4;
-    desc.mipmapLevelCount = 1;
+    desc.mipmapLevelCount = singleMipLevelCount<NSUInteger>();
     desc.sampleCount = 1;
     desc.storageMode = MTLStorageModePrivate;
     desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
@@ -246,7 +247,7 @@ id<MTLTexture> createSidecarTexture(id<MTLDevice> device,
     desc.height = request.height;
     desc.depth = 1;
     desc.arrayLength = request.arrayLength;
-    desc.mipmapLevelCount = 1;
+    desc.mipmapLevelCount = singleMipLevelCount<NSUInteger>();
     desc.sampleCount = 1;
     desc.storageMode = MTLStorageModePrivate;
     desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;

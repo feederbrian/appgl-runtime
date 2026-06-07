@@ -27,6 +27,7 @@
 #include "../state/IndexExpansion.h"
 #include "../state/MatrixStateMirror.h"
 #include "../state/MetalVertexDescriptorBuilder.h"
+#include "TextureMipLevels.h"
 
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
@@ -4133,36 +4134,6 @@ MTLTextureType metalTextureTypeForTarget(GLenum target) {
     }
 }
 
-NSUInteger metalMaxMipLevelsForDimensions(NSUInteger width,
-                                           NSUInteger height,
-                                           NSUInteger depth) {
-    NSUInteger maxDimension = std::max(width, std::max(height, depth));
-    maxDimension = std::max<NSUInteger>(maxDimension, 1u);
-    NSUInteger levels = 1;
-    while (maxDimension > 1) {
-        maxDimension >>= 1;
-        ++levels;
-    }
-    return levels;
-}
-
-NSUInteger metalMipLevelCountForTexture(GLenum target,
-                                        bool use2DFor1D,
-                                        NSUInteger requestedLevels,
-                                        NSUInteger width,
-                                        NSUInteger height,
-                                        NSUInteger depth) {
-    const bool metalRequiresSingleLevel =
-        ((target == GL_TEXTURE_1D ||
-          target == GL_TEXTURE_1D_ARRAY) && !use2DFor1D) ||
-        target == GL_TEXTURE_BUFFER;
-    if (metalRequiresSingleLevel) {
-        return 1u;
-    }
-    return std::min(requestedLevels,
-                    metalMaxMipLevelsForDimensions(width, height, depth));
-}
-
 id<MTLTexture> metalTextureFromRaw(void* object) {
     if (object == nullptr) {
         return nil;
@@ -5021,8 +4992,8 @@ bool textureViewCubeTargetRequiresSquareLevels(
     for (GLuint offset = 0; offset < numlevels; ++offset) {
         const GLint level = static_cast<GLint>(minlevel + offset);
         const auto found = object.levels.find(level);
-        GLsizei width = std::max<GLsizei>(object.desc.width >> level, 1);
-        GLsizei height = std::max<GLsizei>(object.desc.height >> level, 1);
+        GLsizei width = glMipDimensionAtLevel(object.desc.width, level);
+        GLsizei height = glMipDimensionAtLevel(object.desc.height, level);
         if (found != object.levels.end() && found->second.defined) {
             width = found->second.desc.width;
             height = found->second.desc.height;
@@ -5544,23 +5515,6 @@ AdvancedBlendColor advancedBlendEvaluate(GLenum mode,
             break;
     }
     return advancedBlendCompose(rgb, src, dst);
-}
-
-GLsizei mipDimension(GLsizei base, GLint levelOffset) {
-    if (levelOffset <= 0) {
-        return std::max<GLsizei>(base, 1);
-    }
-    return std::max<GLsizei>(base >> levelOffset, 1);
-}
-
-GLint mipTailOffset(GLsizei width, GLsizei height, GLsizei depth) {
-    std::size_t maxDimension = std::max({safeDimension(width), safeDimension(height), safeDimension(depth)});
-    GLint offset = 0;
-    while (maxDimension > 1) {
-        maxDimension >>= 1;
-        ++offset;
-    }
-    return offset;
 }
 
 // Box-filter downsample for typed native-format texel data.
@@ -9728,7 +9682,7 @@ struct GLContext::Impl {
             desc.arrayLength = isArray
                 ? static_cast<NSUInteger>(std::max<GLsizei>(baseLevel.desc.depth, 1))
                 : 1;
-            desc.mipmapLevelCount = 1;
+            desc.mipmapLevelCount = singleMipLevelCount<NSUInteger>();
             desc.sampleCount = samples;
             // MSAA textures: no ShaderWrite (Metal rejects imageStore on
             // MS texture types). ShaderRead is still required for
@@ -9872,7 +9826,7 @@ struct GLContext::Impl {
                 existing.height == wantHeight &&
                 existing.depth == wantDepth &&
                 existing.arrayLength == wantArray &&
-                existing.mipmapLevelCount == wantMipCount &&
+                nonZeroMipLevelCount(existing.mipmapLevelCount) == wantMipCount &&
                 existing.pixelFormat == wantFormat;
             if (shapeMatches) {
                 const bool useNativePath = (wantFormat != MTLPixelFormatRGBA8Unorm);
@@ -9922,7 +9876,7 @@ struct GLContext::Impl {
                         continue;
                     }
                     const NSUInteger mipLevel = static_cast<NSUInteger>(levelIndex);
-                    if (mipLevel >= existing.mipmapLevelCount) {
+                    if (mipLevel >= nonZeroMipLevelCount(existing.mipmapLevelCount)) {
                         continue;
                     }
                     const NSUInteger rowStride = static_cast<NSUInteger>(safeDimension(image.desc.width)) * bpp;
@@ -10786,7 +10740,7 @@ struct GLContext::Impl {
         drainPendingGpuProducers(object);
 
         const GLTextureImageLevel baseLevel = baseIt->second;
-        const GLint tailOffset = mipTailOffset(
+        const GLint tailOffset = mipTailOffsetForDimensions(
             baseLevel.desc.width,
             object.target == GL_TEXTURE_1D ? 1 : baseLevel.desc.height,
             object.target == GL_TEXTURE_3D ? baseLevel.desc.depth : 1
@@ -10834,10 +10788,10 @@ struct GLContext::Impl {
             const GLint offsetFromBase = levelIndex - baseLevelIndex;
             GLTextureImageLevel generated;
             generated.desc = baseLevel.desc;
-            generated.desc.width = mipDimension(baseLevel.desc.width, offsetFromBase);
-            generated.desc.height = object.target == GL_TEXTURE_1D ? 1 : mipDimension(baseLevel.desc.height, offsetFromBase);
+            generated.desc.width = glMipDimensionAtLevel(baseLevel.desc.width, offsetFromBase);
+            generated.desc.height = object.target == GL_TEXTURE_1D ? 1 : glMipDimensionAtLevel(baseLevel.desc.height, offsetFromBase);
             generated.desc.depth = object.target == GL_TEXTURE_3D
-                ? mipDimension(baseLevel.desc.depth, offsetFromBase)
+                ? glMipDimensionAtLevel(baseLevel.desc.depth, offsetFromBase)
                 : baseLevel.desc.depth;
             generated.desc.levels = std::max<GLsizei>(object.desc.levels, levelIndex + 1);
             generated.defined = true;
@@ -11402,7 +11356,7 @@ struct GLContext::Impl {
         desc.height = baseTex.height;
         desc.depth = baseTex.depth;
         desc.arrayLength = baseTex.arrayLength;
-        desc.mipmapLevelCount = baseTex.mipmapLevelCount;
+        desc.mipmapLevelCount = nonZeroMipLevelCount(baseTex.mipmapLevelCount);
         desc.sampleCount = 1;
         desc.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
         desc.storageMode = MTLStorageModeShared;
@@ -11666,7 +11620,7 @@ struct GLContext::Impl {
                 viewObj.viewNumLevels > 0 ? viewObj.viewNumLevels : viewObj.desc.levels,
                 1));
         const NSUInteger sourceLevels =
-            std::max<NSUInteger>(sourceTex.mipmapLevelCount, 1u);
+            nonZeroMipLevelCount(sourceTex.mipmapLevelCount);
         if (levelStart >= sourceLevels ||
             levelCount > sourceLevels - levelStart) {
             return nil;
@@ -11687,9 +11641,9 @@ struct GLContext::Impl {
         }
 
         const NSUInteger baseWidth =
-            std::max<NSUInteger>(sourceTex.width >> levelStart, 1u);
+            mipDimensionAtLevel(sourceTex.width, levelStart);
         const NSUInteger baseHeight =
-            std::max<NSUInteger>(sourceTex.height >> levelStart, 1u);
+            mipDimensionAtLevel(sourceTex.height, levelStart);
         if (baseWidth != baseHeight) {
             return nil;
         }
@@ -11738,9 +11692,9 @@ struct GLContext::Impl {
         for (NSUInteger mip = 0; mip < proxyLevelCount; ++mip) {
             const NSUInteger sourceLevel = levelStart + mip;
             const NSUInteger mipWidth =
-                std::max<NSUInteger>(sourceTex.width >> sourceLevel, 1u);
+                mipDimensionAtLevel(sourceTex.width, sourceLevel);
             const NSUInteger mipHeight =
-                std::max<NSUInteger>(sourceTex.height >> sourceLevel, 1u);
+                mipDimensionAtLevel(sourceTex.height, sourceLevel);
             const MTLSize sourceSize = MTLSizeMake(mipWidth, mipHeight, 1u);
             for (NSUInteger slice = 0; slice < sliceCount; ++slice) {
                 [blit copyFromTexture:sourceTex
@@ -11808,7 +11762,7 @@ struct GLContext::Impl {
                 viewObj.viewNumLevels > 0 ? viewObj.viewNumLevels : viewObj.desc.levels,
                 1));
         const NSUInteger sourceLevels =
-            std::max<NSUInteger>(baseTex.mipmapLevelCount, 1u);
+            nonZeroMipLevelCount(baseTex.mipmapLevelCount);
         if (levelStart >= sourceLevels ||
             levelCount > sourceLevels - levelStart) {
             return false;
@@ -11919,7 +11873,7 @@ struct GLContext::Impl {
         const bool depthStencilNeedsSwizzleProxy =
             !depthStencilNeedsSamplingFlip &&
             needsDepthStencilSwizzleProxy(texObj, baseTex);
-        const NSUInteger mipCount = baseTex.mipmapLevelCount;
+        const NSUInteger mipCount = nonZeroMipLevelCount(baseTex.mipmapLevelCount);
         const GLint requestedBaseLevel = std::max<GLint>(texObj.params.baseLevel, 0);
         const bool validMipRange =
             mipCount > 0 &&
@@ -12027,7 +11981,7 @@ struct GLContext::Impl {
                     swizzledProxy = [proxy
                         newTextureViewWithPixelFormat:proxy.pixelFormat
                                          textureType:proxy.textureType
-                                              levels:NSMakeRange(0, proxy.mipmapLevelCount)
+                                         levels:NSMakeRange(0, nonZeroMipLevelCount(proxy.mipmapLevelCount))
                                               slices:textureViewSliceRange(proxy)
                                              swizzle:channels];
                 }
@@ -12134,9 +12088,9 @@ struct GLContext::Impl {
             effectiveMax = std::min(
                 texObj.params.maxLevel,
                 texObj.params.baseLevel +
-                    mipTailOffset(base.desc.width,
-                                  target == GL_TEXTURE_1D ? 1 : base.desc.height,
-                                  target == GL_TEXTURE_3D ? base.desc.depth : 1));
+                    mipTailOffsetForDimensions(base.desc.width,
+                                               target == GL_TEXTURE_1D ? 1 : base.desc.height,
+                                               target == GL_TEXTURE_3D ? base.desc.depth : 1));
             if (texObj.desc.immutable && texObj.desc.levels > 0) {
                 effectiveMax = std::min<GLint>(
                     effectiveMax,
@@ -12148,16 +12102,16 @@ struct GLContext::Impl {
                                  GLint levelOffset) -> bool {
             if (!level.defined) return false;
             if (level.desc.internalFormat != base.desc.internalFormat) return false;
-            if (level.desc.width != mipDimension(base.desc.width, levelOffset)) {
+            if (level.desc.width != glMipDimensionAtLevel(base.desc.width, levelOffset)) {
                 return false;
             }
             const GLsizei expectedHeight =
-                target == GL_TEXTURE_1D ? 1 : mipDimension(base.desc.height, levelOffset);
+                target == GL_TEXTURE_1D ? 1 : glMipDimensionAtLevel(base.desc.height, levelOffset);
             if (level.desc.height != expectedHeight) {
                 return false;
             }
             const GLsizei expectedDepth =
-                target == GL_TEXTURE_3D ? mipDimension(base.desc.depth, levelOffset) : base.desc.depth;
+                target == GL_TEXTURE_3D ? glMipDimensionAtLevel(base.desc.depth, levelOffset) : base.desc.depth;
             return level.desc.depth == expectedDepth;
         };
 
@@ -14584,7 +14538,7 @@ struct GLContext::Impl {
                         std::max<NSUInteger>(mtlTex.height, 1u));
                 slot.bytesPerImage = slot.bytesPerRow * storageHeight;
                 const NSUInteger mipCount =
-                    std::max<NSUInteger>(mtlTex.mipmapLevelCount, 1u);
+                    nonZeroMipLevelCount(mtlTex.mipmapLevelCount);
                 slot.mipOffsets.clear();
                 slot.mipWidths.clear();
                 slot.mipHeights.clear();
@@ -14602,10 +14556,10 @@ struct GLContext::Impl {
                     for (NSUInteger level = 0; level < mipCount; ++level) {
                         const std::uint32_t mipWidth =
                             static_cast<std::uint32_t>(
-                                std::max<NSUInteger>(mtlTex.width >> level, 1u));
+                                mipDimensionAtLevel(mtlTex.width, level));
                         const std::uint32_t mipHeight =
                             static_cast<std::uint32_t>(
-                                std::max<NSUInteger>(mtlTex.height >> level, 1u));
+                                mipDimensionAtLevel(mtlTex.height, level));
                         const std::uint32_t mipBytesPerRow = mipWidth * bpp;
                         const std::uint32_t mipBytesPerImage =
                             mipBytesPerRow * mipHeight;
@@ -14614,7 +14568,7 @@ struct GLContext::Impl {
                             : 1u;
                         if (mtlTex.textureType == MTLTextureType3D) {
                             mipLayerFaces = static_cast<std::uint32_t>(
-                                std::max<NSUInteger>(mtlTex.depth >> level, 1u));
+                                mipDimensionAtLevel(mtlTex.depth, level));
                         }
                         const std::size_t offset = slot.data.size();
                         const std::size_t byteCount =
@@ -16124,7 +16078,7 @@ struct GLContext::Impl {
         desc.width = rowTexels;
         desc.height = rowCount;
         desc.depth = 1;
-        desc.mipmapLevelCount = 1;
+        desc.mipmapLevelCount = singleMipLevelCount<NSUInteger>();
         desc.arrayLength = 1;
         desc.resourceOptions = expandedBuffer.resourceOptions;
         desc.usage = MTLTextureUsageShaderRead;
@@ -17043,7 +16997,7 @@ struct GLContext::Impl {
                             if (base <= 0) return 1;
                             if (mipLevel <= 0) return std::max<GLsizei>(base, 1);
                             if (mipLevel >= 31) return 1;
-                            return std::max<GLsizei>(base >> mipLevel, 1);
+                            return glMipDimensionAtLevel(base, mipLevel);
                         };
                         w = mipDim(texObj->desc.width);
                         h = (texObj->target == GL_TEXTURE_1D ||
@@ -19315,8 +19269,8 @@ struct GLContext::Impl {
                                    bool yFlipDepthReadback) const {
         if (metalTex == nil) return false;
         const MTLPixelFormat pf = metalTex.pixelFormat;
-        const NSUInteger texWidth = std::max<NSUInteger>(metalTex.width >> mipLevel, 1);
-        const NSUInteger texHeight = std::max<NSUInteger>(metalTex.height >> mipLevel, 1);
+        const NSUInteger texWidth = mipDimensionAtLevel(metalTex.width, mipLevel);
+        const NSUInteger texHeight = mipDimensionAtLevel(metalTex.height, mipLevel);
         // Raw-bytes read depends on the extracted depth-plane width. Metal
         // depth-stencil textures must be blitted with the depth-plane option;
         // copying them as an interleaved texture gives undefined packed bytes
@@ -19492,9 +19446,9 @@ struct GLContext::Impl {
             return false;
         }
         const NSUInteger texWidth =
-            std::max<NSUInteger>(metalTex.width >> mipLevel, 1);
+            mipDimensionAtLevel(metalTex.width, mipLevel);
         const NSUInteger texHeight =
-            std::max<NSUInteger>(metalTex.height >> mipLevel, 1);
+            mipDimensionAtLevel(metalTex.height, mipLevel);
         NSUInteger readX = 0;
         NSUInteger readY = 0;
         NSUInteger readWidth = texWidth;
@@ -23298,16 +23252,16 @@ struct GLContext::Impl {
             srcTex.textureType != MTLTextureType3D ||
             ib.layer3DSidecarLevel < 0 ||
             static_cast<NSUInteger>(ib.layer3DSidecarLevel) >=
-                srcTex.mipmapLevelCount) {
+                nonZeroMipLevelCount(srcTex.mipmapLevelCount)) {
             ib.layer3DSidecarDirty = false;
             return;
         }
 
         const NSUInteger mip =
             static_cast<NSUInteger>(ib.layer3DSidecarLevel);
-        const NSUInteger width = std::max<NSUInteger>(srcTex.width >> mip, 1);
-        const NSUInteger height = std::max<NSUInteger>(srcTex.height >> mip, 1);
-        const NSUInteger depth = std::max<NSUInteger>(srcTex.depth >> mip, 1);
+        const NSUInteger width = mipDimensionAtLevel(srcTex.width, mip);
+        const NSUInteger height = mipDimensionAtLevel(srcTex.height, mip);
+        const NSUInteger depth = mipDimensionAtLevel(srcTex.depth, mip);
         if (ib.layer3DSidecarLayer < 0 ||
             static_cast<NSUInteger>(ib.layer3DSidecarLayer) >= depth ||
             sidecar.width != width ||
@@ -23359,13 +23313,14 @@ struct GLContext::Impl {
         if (srcTex == nil ||
             srcTex.textureType != MTLTextureType3D ||
             ib.level < 0 ||
-            static_cast<NSUInteger>(ib.level) >= srcTex.mipmapLevelCount) {
+            static_cast<NSUInteger>(ib.level) >=
+                nonZeroMipLevelCount(srcTex.mipmapLevelCount)) {
             return nullptr;
         }
         const NSUInteger mip = static_cast<NSUInteger>(ib.level);
-        const NSUInteger width = std::max<NSUInteger>(srcTex.width >> mip, 1);
-        const NSUInteger height = std::max<NSUInteger>(srcTex.height >> mip, 1);
-        const NSUInteger depth = std::max<NSUInteger>(srcTex.depth >> mip, 1);
+        const NSUInteger width = mipDimensionAtLevel(srcTex.width, mip);
+        const NSUInteger height = mipDimensionAtLevel(srcTex.height, mip);
+        const NSUInteger depth = mipDimensionAtLevel(srcTex.depth, mip);
         if (ib.layer < 0 || static_cast<NSUInteger>(ib.layer) >= depth) {
             return nullptr;
         }
@@ -23670,7 +23625,8 @@ struct GLContext::Impl {
         }
         id<MTLTexture> baseTex = (__bridge id<MTLTexture>)texObj->metalTexture;
         return baseTex != nil &&
-               static_cast<NSUInteger>(ib.level) < baseTex.mipmapLevelCount;
+               static_cast<NSUInteger>(ib.level) <
+                   nonZeroMipLevelCount(baseTex.mipmapLevelCount);
     }
     static constexpr std::size_t kMaxImageUnits = 16;
     std::array<ImageBinding, kMaxImageUnits> imageBindings{};
@@ -27990,8 +27946,12 @@ bool GLContext::texSubImage(
         GLint maxTex = 0;
         impl_->capabilities->queryInteger(GL_MAX_TEXTURE_SIZE, &maxTex);
         if (maxTex > 0) {
-            int maxLevel = 0;
-            for (GLint dim = maxTex; dim > 1; dim >>= 1) ++maxLevel;
+            const int maxLevel = static_cast<int>(
+                mipLevelCountForDimensions(
+                    static_cast<std::size_t>(maxTex),
+                    1u,
+                    1u) -
+                1u);
             if (level > maxLevel) {
                 pushError(GL_INVALID_VALUE);
                 return false;
@@ -28421,13 +28381,9 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
     const MTLTextureType textureType = cubeArrayTexture
         ? MTLTextureTypeCubeArray
         : (arrayTexture ? MTLTextureType2DArray : MTLTextureType2D);
-    const NSUInteger allocationMipCount = metalMipLevelCountForTexture(
+    const NSUInteger allocationMipCount = metalNaturalMipLevelCountForTexture(
         effectiveTarget,
         /*use2DFor1D=*/false,
-        metalMaxMipLevelsForDimensions(
-            static_cast<NSUInteger>(allocationWidth),
-            static_cast<NSUInteger>(allocationHeight),
-            1u),
         static_cast<NSUInteger>(allocationWidth),
         static_cast<NSUInteger>(allocationHeight),
         1u);
@@ -28437,7 +28393,8 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
                      existing.width != static_cast<NSUInteger>(allocationWidth) ||
                      existing.height != static_cast<NSUInteger>(allocationHeight) ||
                      existing.arrayLength != arrayLength ||
-                     existing.mipmapLevelCount != allocationMipCount;
+                     nonZeroMipLevelCount(existing.mipmapLevelCount) !=
+                         allocationMipCount;
     if (needAlloc) {
         MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
         desc.textureType = textureType;
@@ -28500,13 +28457,13 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
             static_cast<NSUInteger>(width),
             static_cast<NSUInteger>(height));
         const NSUInteger mipLevel = static_cast<NSUInteger>(level);
-        if (mipLevel >= existing.mipmapLevelCount) {
+        if (mipLevel >= nonZeroMipLevelCount(existing.mipmapLevelCount)) {
             return true;
         }
         const NSUInteger mipWidth =
-            std::max<NSUInteger>(existing.width >> mipLevel, 1u);
+            mipDimensionAtLevel(existing.width, mipLevel);
         const NSUInteger mipHeight =
-            std::max<NSUInteger>(existing.height >> mipLevel, 1u);
+            mipDimensionAtLevel(existing.height, mipLevel);
         region.size.width = std::min<NSUInteger>(region.size.width, mipWidth);
         region.size.height = std::min<NSUInteger>(region.size.height, mipHeight);
         if (region.size.width == 0 || region.size.height == 0) {
@@ -28577,9 +28534,11 @@ bool GLContext::texStorage(
     // cap but the Metal allocator historically clamped levels down,
     // so CTS didn't fire this error on them.
     if (target == GL_TEXTURE_CUBE_MAP_ARRAY) {
-        const GLsizei maxDim = std::max(width, height);
-        GLsizei maxLevels = 1;
-        for (GLsizei d = maxDim; d > 1; d >>= 1) ++maxLevels;
+        const GLsizei maxLevels = static_cast<GLsizei>(
+            mipLevelCountForDimensions(
+                static_cast<std::size_t>(std::max(width, height)),
+                1u,
+                1u));
         if (levels > maxLevels) {
             pushError(GL_INVALID_OPERATION);
             return false;
@@ -28732,11 +28691,11 @@ bool GLContext::texStorage(
     for (GLsizei lvl = 0; lvl < levels; ++lvl) {
         GLTextureImageLevel image;
         image.desc = object->desc;
-        image.desc.width = std::max(1, width >> lvl);
+        image.desc.width = glMipDimensionAtLevel(width, lvl);
         image.desc.height = (target == GL_TEXTURE_1D)
-            ? 1 : std::max(1, height >> lvl);
+            ? 1 : glMipDimensionAtLevel(height, lvl);
         image.desc.depth = (target == GL_TEXTURE_3D)
-            ? std::max(1, depth >> lvl)
+            ? glMipDimensionAtLevel(depth, lvl)
             : object->desc.depth;  // array / cube depth doesn't scale
         image.defined = true;
         const std::size_t lvlPixels =
@@ -29196,7 +29155,7 @@ bool GLContext::texBufferRange(
                     desc.width = rowTexels;
                     desc.height = rowCount;
                     desc.depth = 1;
-                    desc.mipmapLevelCount = 1;
+                    desc.mipmapLevelCount = singleMipLevelCount<NSUInteger>();
                     desc.arrayLength = 1;
                     desc.resourceOptions = mtlBuffer.resourceOptions;
                     desc.usage = MTLTextureUsageShaderRead;
@@ -32721,7 +32680,7 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
     }
     id<MTLTexture> baseTex = (__bridge id<MTLTexture>)baseMetalTexture;
     if (baseTex == nil) return nullptr;
-    const NSUInteger maxLevels = baseTex.mipmapLevelCount;
+    const NSUInteger maxLevels = nonZeroMipLevelCount(baseTex.mipmapLevelCount);
     if (static_cast<NSUInteger>(level) >= maxLevels) {
         return nullptr;
     }
@@ -62859,9 +62818,8 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         const GLsizei baseW = baseIt->second.desc.width;
         const GLsizei baseH = baseIt->second.desc.height;
         const GLsizei baseD = baseIt->second.desc.depth;
-        const GLsizei maxDim = std::max({baseW, baseH, baseD, GLsizei{1}});
-        GLint naturalMax = baseLevel;
-        for (GLsizei m = maxDim; m > 1; m >>= 1) ++naturalMax;
+        const GLint naturalMax =
+            baseLevel + mipTailOffsetForDimensions(baseW, baseH, baseD);
         const GLint effectiveMax = std::min(tex->params.maxLevel, naturalMax);
         for (GLint lvl = baseLevel; lvl <= effectiveMax; ++lvl) {
             auto it = tex->levels.find(lvl);
@@ -63743,7 +63701,7 @@ bool GLContext::textureView(GLuint texture, GLenum target, GLuint origtexture, G
         const NSRange sliceRange =
             NSMakeRange(static_cast<NSUInteger>(minlayer),
                         static_cast<NSUInteger>(effectiveNumLayers));
-        const NSUInteger sourceLevels = baseTex.mipmapLevelCount;
+        const NSUInteger sourceLevels = nonZeroMipLevelCount(baseTex.mipmapLevelCount);
         const bool levelRangeFits =
             levelRange.location < sourceLevels &&
             levelRange.length <= sourceLevels - levelRange.location;
@@ -66504,7 +66462,8 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
     if (pixels != nullptr || packPBOBound) {
         id<MTLTexture> probeTex = (__bridge id<MTLTexture>)obj->metalTexture;
         if (probeTex == nil ||
-            static_cast<NSUInteger>(level) >= probeTex.mipmapLevelCount) {
+            static_cast<NSUInteger>(level) >=
+                nonZeroMipLevelCount(probeTex.mipmapLevelCount)) {
             pushError(GL_INVALID_VALUE);
             return false;
         }
@@ -66527,8 +66486,8 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
 
     id<MTLTexture> metalTex = (__bridge id<MTLTexture>)obj->metalTexture;
     NSUInteger mipLevel = static_cast<NSUInteger>(level);
-    NSUInteger texWidth  = std::max<NSUInteger>(metalTex.width  >> mipLevel, 1);
-    NSUInteger texHeight = std::max<NSUInteger>(metalTex.height >> mipLevel, 1);
+    NSUInteger texWidth  = mipDimensionAtLevel(metalTex.width, mipLevel);
+    NSUInteger texHeight = mipDimensionAtLevel(metalTex.height, mipLevel);
     auto cubeFaceSliceForTarget = [](GLenum target) -> NSInteger {
         switch (target) {
             case GL_TEXTURE_CUBE_MAP_POSITIVE_X: return 0;
@@ -66548,7 +66507,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
                                         NSUInteger mip) -> NSUInteger {
         switch (tex.textureType) {
             case MTLTextureType3D:
-                return std::max<NSUInteger>(tex.depth >> mip, 1);
+                return mipDimensionAtLevel(tex.depth, mip);
             case MTLTextureType1DArray:
             case MTLTextureType2DArray:
             case MTLTextureType2DMultisampleArray:
@@ -67767,10 +67726,7 @@ static bool validateGetTextureSubImageCommon(GLContext* ctx,
     const GLsizei baseH = std::max<GLsizei>(obj.desc.height, 1);
     const GLsizei baseD = std::max<GLsizei>(obj.desc.depth, 1);
     auto mipExtent = [level](GLsizei base) -> GLsizei {
-        if (level <= 0) return base;
-        GLsizei v = base;
-        for (GLint i = 0; i < level; ++i) v = std::max<GLsizei>(1, v >> 1);
-        return v;
+        return glMipDimensionAtLevel(base, level);
     };
     GLsizei texW = mipExtent(baseW);
     GLsizei texH = mipExtent(baseH);
@@ -68039,7 +67995,8 @@ bool GLContext::getCompressedTextureImage(GLuint texture, GLint level, GLsizei b
     // GL 4.6 §8.11.4: level above the texture's max LOD is INVALID_VALUE.
     if (obj->metalTexture != nullptr) {
         id<MTLTexture> probeTex = (__bridge id<MTLTexture>)obj->metalTexture;
-        if (static_cast<NSUInteger>(level) >= probeTex.mipmapLevelCount) {
+        if (static_cast<NSUInteger>(level) >=
+            nonZeroMipLevelCount(probeTex.mipmapLevelCount)) {
             pushError(GL_INVALID_VALUE);
             return false;
         }
@@ -68068,8 +68025,8 @@ bool GLContext::getCompressedTextureImage(GLuint texture, GLint level, GLsizei b
     {
         const GLuint pboName = impl_->state->boundBuffer(GL_PIXEL_PACK_BUFFER);
         if (pboName != 0) {
-            const GLsizei w = std::max<GLsizei>(obj->desc.width >> level, 1);
-            const GLsizei h = std::max<GLsizei>(obj->desc.height >> level, 1);
+            const GLsizei w = glMipDimensionAtLevel(obj->desc.width, level);
+            const GLsizei h = glMipDimensionAtLevel(obj->desc.height, level);
             const std::size_t blocksX = ceilDivBlocks(static_cast<NSUInteger>(w), blockW);
             const std::size_t blocksY = ceilDivBlocks(static_cast<NSUInteger>(h), blockH);
             const std::size_t slices = std::max<GLsizei>(obj->desc.depth, 1);
@@ -68099,8 +68056,8 @@ bool GLContext::getCompressedTextureImage(GLuint texture, GLint level, GLsizei b
         id<MTLTexture> metalTex = (__bridge id<MTLTexture>)obj->metalTexture;
         if (block.bytes != 0) {
             const NSUInteger lvl = static_cast<NSUInteger>(level);
-            const NSUInteger w = std::max<NSUInteger>(metalTex.width >> lvl, 1);
-            const NSUInteger h = std::max<NSUInteger>(metalTex.height >> lvl, 1);
+            const NSUInteger w = mipDimensionAtLevel(metalTex.width, lvl);
+            const NSUInteger h = mipDimensionAtLevel(metalTex.height, lvl);
             const NSUInteger blocksX = ceilDivBlocks(w, block.width);
             const NSUInteger blocksY = ceilDivBlocks(h, block.height);
             const NSUInteger bytesPerRow = blocksX * block.bytes;

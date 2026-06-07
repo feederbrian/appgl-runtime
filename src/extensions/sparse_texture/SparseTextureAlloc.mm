@@ -6,6 +6,7 @@
 #include "../../caps/GLCapabilities.h"
 #include "../../context/GLContext.h"
 #include "../../context/MetalCommandSubmission.h"
+#include "../../context/TextureMipLevels.h"
 #include "../../objects/GLObjectStore.h"
 
 #include <CoreFoundation/CoreFoundation.h>
@@ -590,10 +591,10 @@ GLsizei levelCountForStorage(ExtensionContext& ctx,
     const GLsizei pageZ = static_cast<GLsizei>(std::max<NSUInteger>(page.depth, 1u));
     GLsizei count = 0;
     for (GLsizei level = 0; level < levels; ++level) {
-        const GLsizei levelWidth = std::max<GLsizei>(1, width >> level);
-        const GLsizei levelHeight = std::max<GLsizei>(1, height >> level);
+        const GLsizei levelWidth = glMipDimensionAtLevel(width, level);
+        const GLsizei levelHeight = glMipDimensionAtLevel(height, level);
         const GLsizei levelDepth = target == GL_TEXTURE_3D
-            ? std::max<GLsizei>(1, depth >> level)
+            ? glMipDimensionAtLevel(depth, level)
             : storedDepthForTarget(target, depth);
         if (levelWidth < pageX || levelHeight < pageY || levelDepth < pageZ) {
             break;
@@ -647,8 +648,11 @@ bool allocateStorage(ExtensionContext& ctx, GLTextureObject& textureObject) {
         textureDesc.arrayLength =
             static_cast<NSUInteger>(std::max<GLsizei>(textureObject.desc.depth, 6) / 6);
     }
-    textureDesc.mipmapLevelCount = isMSTarget ? 1u : static_cast<NSUInteger>(
-        std::max<GLsizei>(textureObject.desc.levels, 1));
+    textureDesc.mipmapLevelCount = isMSTarget
+        ? singleMipLevelCount<NSUInteger>()
+        : nonZeroMipLevelCount(
+              static_cast<NSUInteger>(
+                  std::max<GLsizei>(textureObject.desc.levels, 1)));
     textureDesc.sampleCount = isMSTarget ? static_cast<NSUInteger>(sparseSamples) : 1u;
     if (isMSTarget && textureObject.desc.samples < static_cast<GLsizei>(sparseSamples)) {
         textureObject.desc.samples = static_cast<GLsizei>(sparseSamples);
