@@ -687,6 +687,9 @@ struct GLProgramAttributeInfo {
     std::string name;
     GLenum type = 0;
     GLint location = -1;
+    // True when location came from GLSL layout(location=N) or
+    // glBindAttribLocation rather than link-time auto assignment.
+    bool locationExplicit = false;
     // Array dimension from the GLSL declaration. `in float c[2]`
     // sets arraySize=2, plain `in float c` sets arraySize=1.
     // Carried through so `glGetProgramResourceName(GL_PROGRAM_INPUT,

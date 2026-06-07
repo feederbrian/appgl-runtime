@@ -35604,34 +35604,175 @@ bool tokenAt(const std::string& s, std::size_t pos, const char* token) {
     return leftOk && rightOk;
 }
 
-bool tokenAtString(const std::string& s,
-                   std::size_t pos,
-                   const std::string& token) {
-    if (token.empty() ||
-        pos + token.size() > s.size() ||
-        s.compare(pos, token.size(), token) != 0) {
-        return false;
+std::size_t skipGlslComment(const std::string& source, std::size_t pos) {
+    if (pos + 1 >= source.size() || source[pos] != '/') {
+        return pos;
     }
-    const bool leftOk = pos == 0 || !isGlslIdentChar(s[pos - 1]);
-    const bool rightOk = pos + token.size() >= s.size() ||
-                         !isGlslIdentChar(s[pos + token.size()]);
-    return leftOk && rightOk;
+    if (source[pos + 1] == '/') {
+        pos += 2;
+        while (pos < source.size() && source[pos] != '\n') {
+            ++pos;
+        }
+        return pos;
+    }
+    if (source[pos + 1] == '*') {
+        pos += 2;
+        while (pos + 1 < source.size() &&
+               !(source[pos] == '*' && source[pos + 1] == '/')) {
+            ++pos;
+        }
+        return pos + (pos + 1 < source.size() ? 2 : 0);
+    }
+    return pos;
 }
 
-bool rangeContainsToken(const std::string& s,
-                        std::size_t begin,
-                        std::size_t end,
-                        const char* token) {
-    const std::size_t tokenLen = std::strlen(token);
-    if (begin >= end || tokenLen == 0) {
+std::size_t skipGlslTriviaAndPreprocessor(const std::string& source,
+                                          std::size_t pos,
+                                          std::size_t end) {
+    while (pos < end) {
+        const char c = source[pos];
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            ++pos;
+            continue;
+        }
+        const std::size_t commentEnd = skipGlslComment(source, pos);
+        if (commentEnd != pos) {
+            pos = commentEnd;
+            continue;
+        }
+        if (c == '#') {
+            while (pos < end && source[pos] != '\n') {
+                ++pos;
+            }
+            continue;
+        }
+        break;
+    }
+    return pos;
+}
+
+struct GlslToken {
+    std::string text;
+    std::size_t pos = 0;
+    bool ident = false;
+};
+
+std::vector<GlslToken> collectGlslStatementTokens(const std::string& source,
+                                                  std::size_t begin,
+                                                  std::size_t end) {
+    std::vector<GlslToken> tokens;
+    for (std::size_t pos = begin; pos < end;) {
+        if (std::isspace(static_cast<unsigned char>(source[pos]))) {
+            ++pos;
+            continue;
+        }
+        const std::size_t commentEnd = skipGlslComment(source, pos);
+        if (commentEnd != pos) {
+            pos = commentEnd;
+            continue;
+        }
+        if (source[pos] == '#') {
+            while (pos < end && source[pos] != '\n') {
+                ++pos;
+            }
+            continue;
+        }
+        if (std::isalpha(static_cast<unsigned char>(source[pos])) ||
+            source[pos] == '_') {
+            const std::size_t tokenBegin = pos++;
+            while (pos < end && isGlslIdentChar(source[pos])) {
+                ++pos;
+            }
+            tokens.push_back({
+                source.substr(tokenBegin, pos - tokenBegin),
+                tokenBegin,
+                true
+            });
+            continue;
+        }
+        tokens.push_back({source.substr(pos, 1), pos, false});
+        ++pos;
+    }
+    return tokens;
+}
+
+bool isResolvedAttribQualifier(const std::string& token) {
+    static const std::unordered_set<std::string> qualifiers = {
+        "centroid", "const", "flat", "highp", "invariant", "lowp",
+        "mediump", "noperspective", "patch", "precise", "sample",
+        "smooth", "volatile"
+    };
+    return qualifiers.find(token) != qualifiers.end();
+}
+
+bool statementContainsPunctuation(const std::vector<GlslToken>& tokens,
+                                  const char* punct) {
+    return std::any_of(tokens.begin(), tokens.end(),
+                       [punct](const GlslToken& token) {
+                           return !token.ident && token.text == punct;
+                       });
+}
+
+bool statementContainsIdentifier(const std::vector<GlslToken>& tokens,
+                                 const char* ident) {
+    return std::any_of(tokens.begin(), tokens.end(),
+                       [ident](const GlslToken& token) {
+                           return token.ident && token.text == ident;
+                       });
+}
+
+bool resolvedVertexInputDeclarationName(
+    const std::vector<GlslToken>& tokens,
+    std::string& nameOut) {
+    std::size_t pos = 0;
+    while (pos < tokens.size() &&
+           tokens[pos].ident &&
+           isResolvedAttribQualifier(tokens[pos].text)) {
+        ++pos;
+    }
+    if (pos >= tokens.size() || !tokens[pos].ident ||
+        (tokens[pos].text != "in" && tokens[pos].text != "attribute")) {
         return false;
     }
-    std::size_t pos = begin;
-    while ((pos = s.find(token, pos)) != std::string::npos && pos < end) {
-        if (pos + tokenLen <= end && tokenAt(s, pos, token)) {
+    ++pos;
+    while (pos < tokens.size() &&
+           tokens[pos].ident &&
+           isResolvedAttribQualifier(tokens[pos].text)) {
+        ++pos;
+    }
+    if (pos >= tokens.size() || !tokens[pos].ident) {
+        return false;
+    }
+    ++pos;  // type
+    while (pos < tokens.size() &&
+           tokens[pos].ident &&
+           isResolvedAttribQualifier(tokens[pos].text)) {
+        ++pos;
+    }
+    if (pos >= tokens.size() || !tokens[pos].ident) {
+        return false;
+    }
+    nameOut = tokens[pos].text;
+    for (++pos; pos < tokens.size(); ++pos) {
+        if (!tokens[pos].ident && tokens[pos].text == ",") {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool sourceDeclaresTransformFeedbackLayout(const std::string& source) {
+    for (std::size_t pos = 0; pos < source.size(); ++pos) {
+        const std::size_t commentEnd = skipGlslComment(source, pos);
+        if (commentEnd != pos) {
+            pos = commentEnd == 0 ? 0 : commentEnd - 1;
+            continue;
+        }
+        if (tokenAt(source, pos, "xfb_buffer") ||
+            tokenAt(source, pos, "xfb_offset") ||
+            tokenAt(source, pos, "xfb_stride")) {
             return true;
         }
-        pos += tokenLen;
     }
     return false;
 }
@@ -35651,53 +35792,63 @@ std::string injectResolvedVertexAttribLocationsForSpirv(
     std::vector<Injection> injections;
     std::unordered_map<std::string, GLint> locationsByName;
     for (const auto& attrib : resolvedAttributes) {
-        if (attrib.name.empty() || attrib.location < 0) {
+        if (attrib.name.empty() || attrib.location < 0 ||
+            !attrib.locationExplicit) {
             continue;
         }
         locationsByName.emplace(attrib.name, attrib.location);
     }
+    if (locationsByName.empty()) {
+        return source;
+    }
 
-    for (const auto& entry : locationsByName) {
-        const std::string& name = entry.first;
-        std::size_t pos = 0;
-        while ((pos = source.find(name, pos)) != std::string::npos) {
-            if (!tokenAtString(source, pos, name)) {
-                pos += name.size();
-                continue;
-            }
-            std::size_t stmtBegin = pos;
-            while (stmtBegin > 0) {
-                const char c = source[stmtBegin - 1];
-                if (c == ';' || c == '{' || c == '}' || c == '\n') {
-                    break;
-                }
-                --stmtBegin;
-            }
-            const std::size_t stmtEnd = source.find(';', pos);
-            if (stmtEnd == std::string::npos) {
-                break;
-            }
-            if (rangeContainsToken(source, stmtBegin, stmtEnd, "layout")) {
-                pos = stmtEnd + 1;
-                continue;
-            }
-            if (!rangeContainsToken(source, stmtBegin, stmtEnd, "in") &&
-                !rangeContainsToken(source, stmtBegin, stmtEnd, "attribute")) {
-                pos += name.size();
-                continue;
-            }
-
-            std::size_t insertAt = stmtBegin;
-            while (insertAt < stmtEnd &&
-                   std::isspace(static_cast<unsigned char>(source[insertAt]))) {
-                ++insertAt;
-            }
-            injections.push_back({
-                insertAt,
-                "layout(location = " + std::to_string(entry.second) + ") "
-            });
-            break;
+    std::size_t stmtBegin = 0;
+    std::size_t depth = 0;
+    for (std::size_t pos = 0; pos < source.size(); ++pos) {
+        const std::size_t commentEnd = skipGlslComment(source, pos);
+        if (commentEnd != pos) {
+            pos = commentEnd == 0 ? 0 : commentEnd - 1;
+            continue;
         }
+        const char c = source[pos];
+        if (c == '{') {
+            ++depth;
+            continue;
+        }
+        if (c == '}') {
+            if (depth > 0) {
+                --depth;
+            }
+            continue;
+        }
+        if (c != ';' || depth != 0) {
+            continue;
+        }
+
+        const std::size_t effectiveBegin =
+            skipGlslTriviaAndPreprocessor(source, stmtBegin, pos);
+        if (effectiveBegin >= pos) {
+            stmtBegin = pos + 1;
+            continue;
+        }
+        const std::vector<GlslToken> tokens =
+            collectGlslStatementTokens(source, effectiveBegin, pos);
+        std::string name;
+        if (!tokens.empty() &&
+            !statementContainsPunctuation(tokens, "{") &&
+            !statementContainsPunctuation(tokens, "}") &&
+            !statementContainsIdentifier(tokens, "layout") &&
+            resolvedVertexInputDeclarationName(tokens, name)) {
+            const auto locationIt = locationsByName.find(name);
+            if (locationIt != locationsByName.end()) {
+                injections.push_back({
+                    effectiveBegin,
+                    "layout(location = " +
+                        std::to_string(locationIt->second) + ") "
+                });
+            }
+        }
+        stmtBegin = pos + 1;
     }
 
     std::sort(injections.begin(), injections.end(),
@@ -40358,10 +40509,12 @@ bool GLContext::linkProgram(GLuint program) {
             attrib.isArray = input.isArray;
             if (input.explicitLocation >= 0) {
                 attrib.location = input.explicitLocation;
+                attrib.locationExplicit = true;
             } else {
                 auto requested = programObject->requestedAttribLocations.find(input.name);
                 if (requested != programObject->requestedAttribLocations.end()) {
                     attrib.location = static_cast<GLint>(requested->second);
+                    attrib.locationExplicit = true;
                 } else {
                     attrib.location = static_cast<GLint>(nextAttribLocation);
                 }
@@ -43614,10 +43767,19 @@ bool GLContext::linkProgram(GLuint program) {
         fs420packLinkSource =
             rewrite420packQualifierOrderInvariantInputsForSpirv(
                 fs420packLinkSource);
-        vs420packLinkSource =
-            injectResolvedVertexAttribLocationsForSpirv(
-                std::move(vs420packLinkSource),
-                programObject->attributes);
+        const bool mayInjectResolvedVertexAttribLocations =
+            programObject->transformFeedbackVaryingNames.empty() &&
+            !sourceDeclaresTransformFeedbackLayout(vs420packLinkSource) &&
+            !sourceDeclaresTransformFeedbackLayout(fs420packLinkSource) &&
+            geometryShader == nullptr &&
+            tessControlShader == nullptr &&
+            tessEvalShader == nullptr;
+        if (mayInjectResolvedVertexAttribLocations) {
+            vs420packLinkSource =
+                injectResolvedVertexAttribLocationsForSpirv(
+                    std::move(vs420packLinkSource),
+                    programObject->attributes);
+        }
         // Phase 8X Group 4d follow-up²³ — sub-step marker before the
         // glslang cross-stage link. First candidate on the abort-site ladder
         // is glslang's TProgram::link re-entry, since that's the first heavy
