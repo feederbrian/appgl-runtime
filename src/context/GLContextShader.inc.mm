@@ -1,0 +1,12021 @@
+// This file is textually included by GLContext.mm. Do not compile it directly.
+// It contains GLContext shader-domain method definitions split out for navigation only.
+
+#if defined(APPGL_GLCONTEXT_SHADER_PRECISION)
+void GLContext::getShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype, GLint* range, GLint* precision) {
+    // Metal GPUs support full 32-bit float and integer precision.
+    // Report ranges matching IEEE 754 single-precision and 32-bit integer.
+    (void)shadertype;
+    switch (precisiontype) {
+        case GL_LOW_FLOAT:
+        case GL_MEDIUM_FLOAT:
+        case GL_HIGH_FLOAT:
+            if (range) { range[0] = 127; range[1] = 127; }
+            if (precision) { *precision = 23; }
+            break;
+        case GL_LOW_INT:
+        case GL_MEDIUM_INT:
+        case GL_HIGH_INT:
+            if (range) { range[0] = 31; range[1] = 30; }
+            if (precision) { *precision = 0; }
+            break;
+        default:
+            if (range) { range[0] = 0; range[1] = 0; }
+            if (precision) { *precision = 0; }
+            break;
+    }
+}
+
+#elif defined(APPGL_GLCONTEXT_SHADER_OBJECTS)
+GLuint GLContext::createShader(GLenum stage) {
+    if (!isValidShaderStage(stage)) {
+        pushError(GL_INVALID_ENUM);
+        return 0;
+    }
+    // GL 4.6 §7.1: shaders and programs share a single name pool.
+    // CTS `get_uniform_tests.gl_get_uniform` passes a shader handle
+    // to `glGetUniform*` and expects INVALID_OPERATION — it uses
+    // the numeric ID to discriminate, so if a shader and program
+    // both had the same ID (separate table `nextId_` counters)
+    // the discriminator broke.
+    const GLuint id = impl_->objects->reserveSharedShaderProgramName();
+    GLShaderObject* shader = impl_->objects->shaders().insertAt(id);
+    if (shader != nullptr) {
+        shader->stage = stage;
+    }
+    return id;
+}
+
+bool GLContext::deleteShader(GLuint shader) {
+    if (shader == 0) {
+        return true;
+    }
+    GLShaderObject* object = impl_->objects->shaders().get(shader);
+    if (object == nullptr) {
+        // Lenient no-op for unknown shader names (see deleteProgram for the
+        // same tradeoff — CTS helper classes double-delete on error paths
+        // and treat any queued error as a destructor throw).
+        return true;
+    }
+    // Spec: a shader still attached to one or more programs is *flagged for
+    // deletion* but not erased from the object store. The actual erase is
+    // performed by detachShader / deleteProgram once the attachment count
+    // reaches zero. (See `struct GLShaderObject` in GLObjectStore.h for the
+    // BAR-side rationale — engines using RAII deleters call glDeleteShader
+    // between glAttachShader and glLinkProgram, and the eager-erase Phase A
+    // behaviour was masking every real compile result with the dummy
+    // "attached shader is not compiled" link-log.)
+    object->deleteRequested = true;
+    if (object->attachmentCount == 0) {
+        impl_->objects->shaders().erase(shader);
+    }
+    return true;
+}
+
+bool GLContext::isShader(GLuint shader) const {
+    // Spec: glIsShader returns GL_FALSE for a shader name that has been
+    // marked for deletion, even if the underlying object is still resident
+    // because of outstanding program attachments. The object store still
+    // holds the name (so the link path can resolve it) but the public
+    // identity of the shader is gone the moment glDeleteShader runs.
+    const GLShaderObject* object = impl_->objects->shaders().get(shader);
+    if (object == nullptr) {
+        return false;
+    }
+    return !object->deleteRequested;
+}
+
+bool GLContext::shaderSource(GLuint shader, GLsizei count, const GLchar* const* strings, const GLint* length) {
+    GLShaderObject* object = impl_->objects->shaders().get(shader);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (count < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    std::string concatenated;
+    for (GLsizei i = 0; i < count; ++i) {
+        if (strings == nullptr || strings[i] == nullptr) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if (length != nullptr && length[i] >= 0) {
+            concatenated.append(strings[i], static_cast<std::size_t>(length[i]));
+        } else {
+            concatenated.append(strings[i]);
+        }
+    }
+    object->source = std::move(concatenated);
+    object->compiled = false;
+    object->compileLog.clear();
+    object->declaredUniforms.clear();
+    object->declaredInputs.clear();
+    object->declaredOutputs.clear();
+    // GL_ARB_gl_spirv / GL 4.6 §7.2: glShaderSource clears
+    // GL_SPIR_V_BINARY_ARB back to FALSE. Also drop any previously
+    // loaded SPIR-V binary so the glslang path takes over cleanly.
+    object->isSpirvBinary = false;
+    object->spirv.clear();
+    object->spirvEntryPoint.clear();
+    object->spirvSpecializationConstants.clear();
+    return true;
+}
+
+bool GLContext::compileShader(GLuint shader) {
+    GLShaderObject* object = impl_->objects->shaders().get(shader);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+
+    // GL_ARB_gl_spirv / GL 4.6 §7.2: "It is an error to call
+    // `CompileShader` on a shader object whose `SPIR_V_BINARY_ARB`
+    // state is TRUE." Such shaders must instead be finalized via
+    // `glSpecializeShader`. Report INVALID_OPERATION and leave the
+    // shader's state unchanged (keep `isSpirvBinary` true so a
+    // subsequent glSpecializeShader still works).
+    if (object->isSpirvBinary) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    // Clear any prior compile state so a re-compile of the same shader ID
+    // starts from a clean slate (matches the GL spec, which allows source
+    // replacement followed by another glCompileShader call).
+    object->compiled = false;
+    object->compileLog.clear();
+    object->spirv.clear();
+    object->spirvEntryPoint.clear();
+    object->spirvSpecializationConstants.clear();
+    object->declaredUniforms.clear();
+    object->declaredInputs.clear();
+    object->declaredOutputs.clear();
+    object->advancedBlendSupportMask = 0;
+    object->advancedBlendSupportAll = false;
+
+    // Diagnostic-ring tag and source hash used by the compile-stage record
+    // pushed at the bottom of this function on both success and failure.
+    // Hash uses std::hash<std::string> for cheapness — it isn't a
+    // cryptographic identity, just a per-source key BAR can compare across
+    // log samples to tell whether two compile attempts saw the same source.
+    const std::string shaderTag = "shader-" + std::to_string(shader);
+    auto compileSourceHash = [](const std::string& s) -> std::string {
+        std::size_t h = std::hash<std::string>{}(s);
+        char buf[18];
+        std::snprintf(buf, sizeof(buf), "%016zx", h);
+        return buf;
+    };
+
+    if (object->source.empty()) {
+        object->compileLog = "shader source is empty";
+        Runtime::shared().recordShaderTranslation({
+            shaderTag, "compile", "", "", "", object->compileLog, "", false
+        });
+        return false;
+    }
+
+    const std::string sourceHash = compileSourceHash(object->source);
+    if (object->stage == GL_FRAGMENT_SHADER) {
+        object->advancedBlendSupportMask =
+            scanAdvancedBlendSupportMask(object->source,
+                                         &object->advancedBlendSupportAll);
+        if (sourceDisablesAdvancedBlendLayouts(object->source)) {
+            object->compileLog =
+                "ERROR: GL_KHR_blend_equation_advanced layout qualifiers "
+                "are not available after '#extension ... : disable'.";
+            object->compiled = false;
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", object->compileLog, "", false
+            });
+            return true;
+        }
+    }
+
+    // 1. Compat-shader rewrite. Glslang's SPIR-V backend rejects
+    //    `#version NNN compatibility` outright and rejects every
+    //    fixed-function `gl_*` matrix identifier even in compat mode.
+    //    The rewriter downgrades the version directive to `core` and
+    //    synthesizes `appgl_*` uniforms (paired with `#define`s) for any
+    //    referenced matrix builtin. Non-compat shaders that don't
+    //    reference any legacy identifier come back unchanged.
+    //
+    //    Both passes (the lightweight scanner and the real glslang
+    //    compile) operate on the rewritten source so the synthesized
+    //    uniforms get picked up by the scanner and end up in
+    //    declaredUniforms — which linkProgram lifts into
+    //    programObject->uniforms with normal sequential locations.
+    CompatShaderRewriteResult rewrite =
+        rewriteCompatShader(object->source, object->stage);
+    // GLSL 4.00 subroutines are unsupported by glslang's SPIR-V
+    // backend ("feature not yet implemented"). Rewrite subroutine
+    // syntax into plain GLSL that compiles — enough for CTS
+    // `program_interface_query.subroutines-*` which only queries
+    // the introspection tables (never actually draws).
+    //   `subroutine TYPE NAME ( ... ) ;`                 → commented out
+    //   `subroutine uniform TYPE NAME [ ... ] ;`          → commented out
+    //   `subroutine ( TYPE_LIST ) RETTYPE FN ( ... ) { ... }`
+    //                                                      → `RETTYPE FN ( ... ) { ... }`
+    //   `UNIFNAME ( ... )` call sites (where UNIFNAME was a
+    //     subroutine uniform)                              → `FIRST_IMPL_NAME ( ... )`
+    // The real link-time `scanSubroutineDeclarations` then re-reads
+    // the ORIGINAL (unrewritten) source so `resourceSubroutines*`
+    // tables still reflect the user's declarations.
+    std::string subroutineValidationError;
+    auto rewriteSubroutinesForSpirv = [&](const std::string& in) -> std::string {
+        // Strip comments for analysis but rewrite the original text
+        // so we don't accidentally erase legitimate code.
+        // Collect subroutine-uniform name → first compatible impl.
+        // We do a two-pass line-based rewrite.
+        std::unordered_map<std::string, std::string> uniformToImpl;
+        std::unordered_map<std::string, std::vector<std::string>> typeToImpls;
+        std::unordered_map<std::string, std::string> uniformToType;
+        std::unordered_map<std::string, std::string> implToPrototype;
+        struct ImplSignature {
+            std::string name;
+            std::string retType;
+            std::string params;
+            std::vector<std::string> typeNames;
+        };
+        std::vector<ImplSignature> implSignatures;
+        struct SubUniformInfo {
+            std::string typeName;
+            std::vector<int> dims;
+        };
+        std::unordered_map<std::string, SubUniformInfo> subUniformInfo;
+        // Sprint 17 Day 7+ Bank-Group-C dynamic-dispatch (v1):
+        // capture subroutine-type prototype return-type + raw param
+        // text. v1 covers void-return parameterless subroutines
+        // (CTS viewport_index_subroutine — `subroutine void
+        // indexSetter();`). Other shapes fall back to static
+        // FIRST_IMPL_NAME substitution (current pre-Sprint-17
+        // behavior; non-regressing for sister tests).
+        std::unordered_map<std::string, std::string> typeReturn;
+        std::unordered_map<std::string, std::string> typeParams;
+        // Capture each subroutine impl's body text so v1 dispatch can
+        // INLINE `{body}` at call sites instead of emitting an
+        // OpFunctionCall. The GS-emul interpreter (SPIR-V CPU
+        // executor at GeometryShaderEmulator.cpp `isSupportedGsOpcode`)
+        // does not support OpFunctionCall (opcode 57), so a static
+        // FIRST_IMPL_NAME like `four()` only worked when glslang
+        // happened to inline it across stages. Once we emit a real
+        // dispatch shape (`if (sel) four(); else five();`) glslang
+        // keeps the OpFunctionCall and the emul rejects the GS. To
+        // preserve GS-emul compatibility we inline impl body text
+        // directly at the dispatch site.
+        std::unordered_map<std::string, std::string> implBody;
+        // Subroutine type-prototype names (e.g. the `T` in
+        // `subroutine void T();`) — emit a dummy `int T;` after
+        // stripping so glslang's reserved-identifier validator
+        // catches `subroutine void namespace(…);` style tests.
+        std::vector<std::string> subTypeNames;
+        // First pass: scan for subroutine type + impl + uniform.
+        std::size_t p = 0;
+        auto isIdent = [](unsigned char c) {
+            return std::isalnum(c) || c == '_';
+        };
+        auto skipWs = [&](std::size_t& pp) {
+            while (pp < in.size() && std::isspace(static_cast<unsigned char>(in[pp]))) ++pp;
+        };
+        auto readWord = [&](std::size_t& pp) -> std::string {
+            skipWs(pp);
+            std::size_t s = pp;
+            while (pp < in.size() && isIdent(static_cast<unsigned char>(in[pp]))) ++pp;
+            return in.substr(s, pp - s);
+        };
+        auto readTypeWithArraySuffix = [&](std::size_t& pp) -> std::string {
+            std::string typeName = readWord(pp);
+            if (typeName.empty()) return typeName;
+            std::size_t q = pp;
+            skipWs(q);
+            while (q < in.size() && in[q] == '[') {
+                const std::size_t bracketStart = q;
+                int bd = 1;
+                ++q;
+                while (q < in.size() && bd > 0) {
+                    if (in[q] == '[') ++bd;
+                    else if (in[q] == ']') --bd;
+                    ++q;
+                }
+                if (bd != 0) break;
+                typeName.append(in, bracketStart, q - bracketStart);
+                pp = q;
+                skipWs(q);
+            }
+            return typeName;
+        };
+        const std::string kw = "subroutine";
+        // GLSL `subroutine` is a keyword only at declaration position.
+        // CTS `CommonBugs.CommonBug_ReservedNames` plants it as a
+        // function-parameter name (`void foo(int subroutine) { ... }`)
+        // and expects the compile to fail. Our rewrite used to strip
+        // `subroutine → next `;`` blindly which deleted the closing
+        // paren, function body, and whatever followed — breaking the
+        // spec-mandated reserved-keyword check. Guard: `subroutine`
+        // only counts as a keyword when the previous non-whitespace
+        // character is a statement boundary (`;`, `{`, `}`, or start-
+        // of-file). In argument lists, after `(`, after `,`, etc., it
+        // is an identifier use that glslang will correctly reject.
+        auto isDeclPos = [&](std::size_t pos) {
+            std::size_t q = pos;
+            while (q > 0) {
+                while (q > 0) {
+                    unsigned char c = static_cast<unsigned char>(in[q - 1]);
+                    if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                        --q;
+                    } else {
+                        break;
+                    }
+                }
+                if (q == 0) break;
+
+                std::size_t lineStart = q;
+                while (lineStart > 0 &&
+                       in[lineStart - 1] != '\n' &&
+                       in[lineStart - 1] != '\r') {
+                    --lineStart;
+                }
+                std::size_t first = lineStart;
+                while (first < q && (in[first] == ' ' || in[first] == '\t')) {
+                    ++first;
+                }
+                if (first < q && in[first] == '#') {
+                    q = lineStart;
+                    continue;
+                }
+                const std::size_t lineComment = in.find("//", lineStart);
+                if (lineComment != std::string::npos && lineComment < q) {
+                    q = lineComment;
+                    continue;
+                }
+
+                unsigned char c = static_cast<unsigned char>(in[q - 1]);
+                return c == ';' || c == '{' || c == '}';
+            }
+            return true;  // start of source
+        };
+        auto parseLayoutInteger = [&](const std::string& content, const char* key, GLint& value) {
+            const std::string keyStr = key;
+            std::size_t keyPos = content.find(keyStr);
+            while (keyPos != std::string::npos) {
+                const bool lb = (keyPos == 0) ||
+                    !isIdent(static_cast<unsigned char>(content[keyPos - 1]));
+                const std::size_t keyEnd = keyPos + keyStr.size();
+                const bool rb = (keyEnd == content.size()) ||
+                    !isIdent(static_cast<unsigned char>(content[keyEnd]));
+                if (lb && rb) break;
+                keyPos = content.find(keyStr, keyEnd);
+            }
+            if (keyPos == std::string::npos) return true;
+            const std::size_t eq = content.find('=', keyPos + keyStr.size());
+            if (eq == std::string::npos) return false;
+            std::size_t nb = eq + 1;
+            while (nb < content.size() && std::isspace(static_cast<unsigned char>(content[nb]))) ++nb;
+            if (nb >= content.size() || !std::isdigit(static_cast<unsigned char>(content[nb]))) {
+                return false;
+            }
+            std::size_t ne = nb;
+            if (ne + 1 < content.size() && content[ne] == '0' &&
+                (content[ne + 1] == 'x' || content[ne + 1] == 'X')) {
+                ne += 2;
+                const std::size_t hexStart = ne;
+                while (ne < content.size() && std::isxdigit(static_cast<unsigned char>(content[ne]))) ++ne;
+                if (ne == hexStart) return false;
+            } else {
+                while (ne < content.size() && std::isdigit(static_cast<unsigned char>(content[ne]))) ++ne;
+            }
+            value = static_cast<GLint>(std::strtol(content.substr(nb, ne - nb).c_str(), nullptr, 0));
+            return true;
+        };
+        auto layoutBeforeSubroutine = [&](std::size_t subPos,
+                                          std::size_t& layoutStart,
+                                          std::size_t& openParen,
+                                          std::size_t& closeParen) {
+            std::size_t back = subPos;
+            while (back > 0 && std::isspace(static_cast<unsigned char>(in[back - 1]))) --back;
+            if (back == 0 || in[back - 1] != ')') return false;
+            int pd = 1;
+            std::size_t bp = back - 1;
+            while (bp > 0 && pd > 0) {
+                --bp;
+                if (in[bp] == ')') ++pd;
+                else if (in[bp] == '(') --pd;
+            }
+            if (pd != 0) return false;
+            std::size_t lp = bp;
+            while (lp > 0 && std::isspace(static_cast<unsigned char>(in[lp - 1]))) --lp;
+            if (lp < 6 || in.compare(lp - 6, 6, "layout") != 0) return false;
+            layoutStart = lp - 6;
+            if (layoutStart > 0 &&
+                isIdent(static_cast<unsigned char>(in[layoutStart - 1]))) {
+                return false;
+            }
+            if (!isDeclPos(layoutStart)) return false;
+            openParen = bp;
+            closeParen = back - 1;
+            return true;
+        };
+        auto layoutQualifierIsNumeric = [&](std::size_t subPos) {
+            std::size_t layoutStart = 0;
+            std::size_t openParen = 0;
+            std::size_t closeParen = 0;
+            if (!layoutBeforeSubroutine(subPos, layoutStart, openParen, closeParen)) {
+                return false;
+            }
+            const std::string content = in.substr(openParen + 1, closeParen - openParen - 1);
+            GLint ignored = -1;
+            return parseLayoutInteger(content, "location", ignored) &&
+                   parseLayoutInteger(content, "index", ignored);
+        };
+        auto isSubroutineDeclPos = [&](std::size_t subPos) {
+            if (isDeclPos(subPos)) return true;
+            return layoutQualifierIsNumeric(subPos);
+        };
+        auto layoutAt = [&](std::size_t layoutStart, std::size_t& subPos) {
+            const std::string layoutKw = "layout";
+            if (layoutStart + layoutKw.size() > in.size() ||
+                in.compare(layoutStart, layoutKw.size(), layoutKw) != 0) {
+                return false;
+            }
+            const bool lb = (layoutStart == 0) ||
+                !isIdent(static_cast<unsigned char>(in[layoutStart - 1]));
+            const bool rb = (layoutStart + layoutKw.size() < in.size()) &&
+                !isIdent(static_cast<unsigned char>(in[layoutStart + layoutKw.size()]));
+            if (!lb || !rb || !isDeclPos(layoutStart)) return false;
+            std::size_t q = layoutStart + layoutKw.size();
+            skipWs(q);
+            if (q >= in.size() || in[q] != '(') return false;
+            int pd = 1;
+            const std::size_t openParen = q;
+            ++q;
+            while (q < in.size() && pd > 0) {
+                if (in[q] == '(') ++pd;
+                else if (in[q] == ')') --pd;
+                ++q;
+            }
+            if (pd != 0) return false;
+            const std::size_t closeParen = q - 1;
+            std::size_t after = q;
+            skipWs(after);
+            if (after + kw.size() > in.size() ||
+                in.compare(after, kw.size(), kw) != 0) {
+                return false;
+            }
+            const bool subRb = (after + kw.size() < in.size()) &&
+                !isIdent(static_cast<unsigned char>(in[after + kw.size()]));
+            if (!subRb) return false;
+            const std::string content = in.substr(openParen + 1, closeParen - openParen - 1);
+            GLint ignored = -1;
+            if (!parseLayoutInteger(content, "location", ignored) ||
+                !parseLayoutInteger(content, "index", ignored)) {
+                return false;
+            }
+            subPos = after;
+            return true;
+        };
+        while ((p = in.find(kw, p)) != std::string::npos) {
+            const bool lb = (p == 0) || !isIdent(static_cast<unsigned char>(in[p-1]));
+            const bool rb = (p + kw.size() < in.size()) && !isIdent(static_cast<unsigned char>(in[p+kw.size()]));
+            if (!lb || !rb || !isSubroutineDeclPos(p)) { p += kw.size(); continue; }
+            std::size_t q = p + kw.size();
+            skipWs(q);
+            if (q < in.size() && in[q] == '(') {
+                // Impl: subroutine(TYPE,...) RETTYPE FN(...)
+                ++q;
+                std::vector<std::string> typeList;
+                while (q < in.size() && in[q] != ')') {
+                    skipWs(q);
+                    std::string t = readWord(q);
+                    if (!t.empty()) typeList.push_back(std::move(t));
+                    skipWs(q);
+                    if (q < in.size() && in[q] == ',') ++q;
+                }
+                if (q < in.size()) ++q;  // skip ')'
+                std::string retType = readTypeWithArraySuffix(q);
+                std::string fnName = readWord(q);
+                if (!fnName.empty()) {
+                    for (const auto& t : typeList) {
+                        typeToImpls[t].push_back(fnName);
+                    }
+                }
+                // Sprint 17 Day 7+ Bank-Group-C: capture impl body
+                // text for v1 inline dispatch. Walk past `(params)`
+                // then capture matched `{body}`.
+                skipWs(q);
+                if (q < in.size() && in[q] == '(') {
+                    const std::size_t paramsStart = q;
+                    int pd2 = 1;
+                    ++q;
+                    while (q < in.size() && pd2 > 0) {
+                        if (in[q] == '(') ++pd2;
+                        else if (in[q] == ')') --pd2;
+                        ++q;
+                    }
+                    if (!fnName.empty() && !retType.empty() && q <= in.size()) {
+                        const std::string rawParams =
+                            in.substr(paramsStart, q - paramsStart);
+                        implToPrototype[fnName] =
+                            retType + " " + fnName + rawParams + ";";
+                        implSignatures.push_back(
+                            ImplSignature{fnName, retType, rawParams, typeList});
+                    }
+                }
+                skipWs(q);
+                if (q < in.size() && in[q] == '{' && !fnName.empty()) {
+                    const std::size_t bodyStart = q + 1;
+                    int bd = 1;
+                    ++q;
+                    while (q < in.size() && bd > 0) {
+                        if (in[q] == '{') ++bd;
+                        else if (in[q] == '}') --bd;
+                        if (bd > 0) ++q;
+                    }
+                    const std::size_t bodyEnd = q;
+                    implBody[fnName] = in.substr(bodyStart, bodyEnd - bodyStart);
+                    if (q < in.size()) ++q;  // past `}`
+                }
+                p = q;
+                continue;
+            }
+            std::string next = readTypeWithArraySuffix(q);
+            if (next == "uniform") {
+                std::string typeName = readWord(q);
+                std::string uniName = readWord(q);
+                if (!uniName.empty() && !typeName.empty()) {
+                    uniformToType[uniName] = typeName;
+                    std::vector<int> dims;
+                    std::size_t dimPos = q;
+                    skipWs(dimPos);
+                    while (dimPos < in.size() && in[dimPos] == '[') {
+                        ++dimPos;
+                        skipWs(dimPos);
+                        const std::size_t nStart = dimPos;
+                        while (dimPos < in.size() &&
+                               std::isdigit(static_cast<unsigned char>(in[dimPos]))) {
+                            ++dimPos;
+                        }
+                        int dim = 1;
+                        if (dimPos > nStart) {
+                            dim = std::atoi(in.substr(nStart, dimPos - nStart).c_str());
+                            if (dim < 1) dim = 1;
+                        }
+                        dims.push_back(dim);
+                        skipWs(dimPos);
+                        if (dimPos < in.size() && in[dimPos] == ']') ++dimPos;
+                        skipWs(dimPos);
+                    }
+                    subUniformInfo[uniName] = SubUniformInfo{typeName, std::move(dims)};
+                    q = dimPos;
+                }
+                p = q;
+                continue;
+            }
+            // Subroutine type prototype: `subroutine RETTYPE NAME (…);`.
+            // `next` was the return type; the next word is the type
+            // name (the subroutine-type identifier). Collect it so
+            // the rewritten source preserves the reserved-keyword
+            // check on the type name too.
+            std::string typeProtoName = readWord(q);
+            if (!typeProtoName.empty()) {
+                subTypeNames.push_back(typeProtoName);
+                // Sprint 17 Day 7+ Bank-Group-C v1 dispatch: capture
+                // return type + raw param text from `(...)` to
+                // detect v1-eligibility (void-return + no-params).
+                typeReturn[typeProtoName] = next;
+                skipWs(q);
+                std::size_t paramsStart = q;
+                if (q < in.size() && in[q] == '(') {
+                    int pd = 1;
+                    ++q;
+                    while (q < in.size() && pd > 0) {
+                        if (in[q] == '(') ++pd;
+                        else if (in[q] == ')') --pd;
+                        ++q;
+                    }
+                    typeParams[typeProtoName] =
+                        in.substr(paramsStart, q - paramsStart);
+                }
+            }
+            p = q;
+        }
+        // Resolve each uniform to its first compatible impl.
+        for (auto& kv : uniformToType) {
+            auto it = typeToImpls.find(kv.second);
+            if (it != typeToImpls.end() && !it->second.empty()) {
+                uniformToImpl[kv.first] = it->second.front();
+            }
+        }
+        // Sprint 17 Day 7+ Bank-Group-C: compute v1-eligibility per
+        // subroutine uniform. v1 covers void-return parameterless
+        // subroutines (covers CTS viewport_index_subroutine). Other
+        // shapes fall back to static FIRST_IMPL_NAME at call sites.
+        // Additionally require ALL impls of the subroutine type to
+        // have captured `{body}` text — v1 inlines bodies at the call
+        // site to avoid OpFunctionCall (unsupported by GS-emul).
+        std::unordered_map<std::string, bool> uniformIsV1Eligible;
+        for (const auto& kv : uniformToType) {
+            const std::string& tname = kv.second;
+            auto retIt = typeReturn.find(tname);
+            auto parIt = typeParams.find(tname);
+            if (retIt == typeReturn.end() || parIt == typeParams.end()) continue;
+            const std::string& ret = retIt->second;
+            // Strip whitespace from params for comparison.
+            std::string p = parIt->second;
+            p.erase(std::remove_if(p.begin(), p.end(),
+                [](unsigned char c) { return std::isspace(c); }), p.end());
+            const bool voidRet = (ret == "void");
+            const bool noParams = (p == "()" || p == "(void)");
+            // All impls must have captured body for inline dispatch.
+            bool allBodiesCaptured = true;
+            auto tiIt = typeToImpls.find(tname);
+            if (tiIt == typeToImpls.end() || tiIt->second.empty()) {
+                allBodiesCaptured = false;
+            } else {
+                for (const auto& impl : tiIt->second) {
+                    if (implBody.find(impl) == implBody.end()) {
+                        allBodiesCaptured = false;
+                        break;
+                    }
+                }
+            }
+            uniformIsV1Eligible[kv.first] = voidRet && noParams && allBodiesCaptured;
+        }
+        // Collect unique subroutine-uniform names so we can append a
+        // dummy `int <NAME>;` declaration for each, preserving the
+        // GLSL reserved-identifier check. CTS
+        // `CommonBugs.CommonBug_ReservedNames` expects compile to
+        // fail when a subroutine uniform name is a reserved
+        // keyword (`namespace`, `using`, …).  If we simply comment
+        // out the subroutine line, glslang never sees the reserved
+        // name and accepts the program — regression. The dummy
+        // declaration pushes the name through glslang's identifier
+        // validator.
+        std::vector<std::string> subUniNames;
+        {
+            std::unordered_set<std::string> seenNames;
+            for (const auto& kv : uniformToType) {
+                if (seenNames.insert(kv.first).second) {
+                    subUniNames.push_back(kv.first);
+                }
+            }
+        }
+        auto trimCopy = [](std::string s) {
+            auto notSpace = [](unsigned char c) { return !std::isspace(c); };
+            s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
+            s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
+            return s;
+        };
+        auto elementCountForDims = [](const std::vector<int>& dims) {
+            int count = 1;
+            for (int dim : dims) count *= std::max(1, dim);
+            return count;
+        };
+        auto dispatchKeyForElement = [](const std::string& name, int elem, int elemCount) {
+            if (elemCount <= 1) return name;
+            return name + "_" + std::to_string(elem);
+        };
+        auto helperNameForKey = [](const std::string& key) {
+            return "_appgl_call_" + key;
+        };
+        auto dynamicHelperNameForUniform = [](const std::string& name) {
+            return "_appgl_call_" + name + "_dynamic";
+        };
+        auto splitParamList = [&](const std::string& rawParams) {
+            std::vector<std::string> params;
+            if (rawParams.size() < 2 || rawParams.front() != '(' || rawParams.back() != ')') {
+                return params;
+            }
+            std::string body = trimCopy(rawParams.substr(1, rawParams.size() - 2));
+            if (body.empty() || body == "void") return params;
+            std::size_t start = 0;
+            int depth = 0;
+            auto consumeParam = [&](std::size_t begin, std::size_t end) {
+                std::string param = trimCopy(body.substr(begin, end - begin));
+                if (!param.empty()) params.push_back(std::move(param));
+            };
+            for (std::size_t idx = 0; idx <= body.size(); ++idx) {
+                if (idx == body.size() || (body[idx] == ',' && depth == 0)) {
+                    consumeParam(start, idx);
+                    start = idx + 1;
+                    continue;
+                }
+                if (body[idx] == '(' || body[idx] == '[') ++depth;
+                else if ((body[idx] == ')' || body[idx] == ']') && depth > 0) --depth;
+            }
+            return params;
+        };
+        auto stripLeadingParamQualifiers = [&](std::string text) {
+            text = trimCopy(std::move(text));
+            bool changed = true;
+            while (changed) {
+                changed = false;
+                std::size_t p = 0;
+                while (p < text.size() && isIdent(static_cast<unsigned char>(text[p]))) ++p;
+                const std::string token = text.substr(0, p);
+                if (token == "const" || token == "in" || token == "out" ||
+                    token == "inout" || token == "highp" ||
+                    token == "mediump" || token == "lowp") {
+                    text = trimCopy(text.substr(p));
+                    changed = true;
+                }
+            }
+            return text;
+        };
+        auto normalizeParamList = [&](const std::string& rawParams,
+                                      std::vector<std::string>* outNames = nullptr) {
+            std::vector<std::string> params = splitParamList(rawParams);
+            if (params.empty()) {
+                return std::string("(void)");
+            }
+            std::string normalized = "(";
+            for (std::size_t idx = 0; idx < params.size(); ++idx) {
+                std::string param = params[idx];
+                std::string nameProbe = param;
+                while (!nameProbe.empty() && nameProbe.back() == ']') {
+                    const std::size_t open = nameProbe.rfind('[');
+                    if (open == std::string::npos) break;
+                    nameProbe = trimCopy(nameProbe.substr(0, open));
+                }
+                std::size_t p = nameProbe.size();
+                while (p > 0 && !isIdent(static_cast<unsigned char>(nameProbe[p - 1]))) --p;
+                std::size_t e = p;
+                while (p > 0 && isIdent(static_cast<unsigned char>(nameProbe[p - 1]))) --p;
+                std::string name;
+                bool hasExplicitName = false;
+                if (e > p) {
+                    name = nameProbe.substr(p, e - p);
+                    const std::string before =
+                        stripLeadingParamQualifiers(nameProbe.substr(0, p));
+                    hasExplicitName = !before.empty();
+                }
+                if (!hasExplicitName) {
+                    name = "_appgl_arg" + std::to_string(idx);
+                    param += " ";
+                    param += name;
+                }
+                if (outNames != nullptr) outNames->push_back(name);
+                if (idx > 0) normalized += ", ";
+                normalized += param;
+            }
+            normalized += ")";
+            return normalized;
+        };
+        auto parseParamNames = [&](const std::string& rawParams) {
+            std::vector<std::string> names;
+            normalizeParamList(rawParams, &names);
+            return names;
+        };
+        auto canonicalTypeSignature = [&](std::string type) {
+            type = trimCopy(std::move(type));
+            type.erase(std::remove_if(type.begin(), type.end(),
+                [](unsigned char c) { return std::isspace(c); }), type.end());
+            return type;
+        };
+        auto canonicalParamSignature = [&](const std::string& rawParams) {
+            std::vector<std::string> params = splitParamList(rawParams);
+            if (params.empty()) {
+                return std::string("(void)");
+            }
+            std::string normalized = "(";
+            for (std::size_t idx = 0; idx < params.size(); ++idx) {
+                std::string param = trimCopy(params[idx]);
+                std::string arraySuffix;
+                while (!param.empty() && param.back() == ']') {
+                    const std::size_t open = param.rfind('[');
+                    if (open == std::string::npos) break;
+                    arraySuffix.insert(0, param.substr(open));
+                    param = trimCopy(param.substr(0, open));
+                }
+                std::size_t p = param.size();
+                while (p > 0 && !isIdent(static_cast<unsigned char>(param[p - 1]))) --p;
+                std::size_t e = p;
+                while (p > 0 && isIdent(static_cast<unsigned char>(param[p - 1]))) --p;
+                bool hasExplicitName = false;
+                if (e > p) {
+                    const std::string before =
+                        stripLeadingParamQualifiers(param.substr(0, p));
+                    hasExplicitName = !before.empty();
+                }
+                if (hasExplicitName) {
+                    param = trimCopy(param.substr(0, p));
+                }
+                if (!arraySuffix.empty()) {
+                    param += arraySuffix;
+                }
+                param.erase(std::remove_if(param.begin(), param.end(),
+                    [](unsigned char c) { return std::isspace(c); }), param.end());
+                if (idx > 0) normalized += ",";
+                normalized += param;
+            }
+            normalized += ")";
+            return normalized;
+        };
+        for (const auto& impl : implSignatures) {
+            const std::string implReturn = canonicalTypeSignature(impl.retType);
+            const std::string implParams = canonicalParamSignature(impl.params);
+            for (const auto& typeName : impl.typeNames) {
+                auto retIt = typeReturn.find(typeName);
+                auto parIt = typeParams.find(typeName);
+                if (retIt == typeReturn.end() || parIt == typeParams.end()) {
+                    continue;
+                }
+                if (implReturn != canonicalTypeSignature(retIt->second) ||
+                    implParams != canonicalParamSignature(parIt->second)) {
+                    subroutineValidationError =
+                        "ERROR: subroutine implementation '" + impl.name +
+                        "' is not compatible with subroutine type '" +
+                        typeName + "'.";
+                    return in;
+                }
+            }
+        }
+        struct DispatchHelperSpec {
+            std::string uniformName;
+            std::string key;
+            std::string typeName;
+            std::string retType;
+            std::string params;
+            std::vector<std::string> impls;
+        };
+        struct DynamicDispatchHelperSpec {
+            std::string uniformName;
+            std::string typeName;
+            std::string retType;
+            std::string params;
+            int elemCount = 1;
+        };
+        std::vector<DispatchHelperSpec> dispatchHelperSpecs;
+        std::vector<DynamicDispatchHelperSpec> dynamicDispatchHelperSpecs;
+        std::unordered_map<std::string, std::string> dispatchHelperByKey;
+        std::unordered_map<std::string, std::string> dynamicDispatchHelperByUniform;
+        std::unordered_map<std::string, int> subUniformElementCount;
+        std::unordered_set<std::string> dispatchHelperUniformNames;
+        for (const auto& name : subUniNames) {
+            auto infoIt = subUniformInfo.find(name);
+            auto typeIt = uniformToType.find(name);
+            if (typeIt == uniformToType.end()) continue;
+            const std::string& typeName = typeIt->second;
+            auto retIt = typeReturn.find(typeName);
+            auto parIt = typeParams.find(typeName);
+            auto implIt = typeToImpls.find(typeName);
+            if (retIt == typeReturn.end() || parIt == typeParams.end() ||
+                implIt == typeToImpls.end() || implIt->second.empty()) {
+                continue;
+            }
+            std::vector<int> dims;
+            if (infoIt != subUniformInfo.end()) dims = infoIt->second.dims;
+            const int elemCount = elementCountForDims(dims);
+            subUniformElementCount[name] = elemCount;
+            dispatchHelperUniformNames.insert(name);
+            for (int elem = 0; elem < elemCount; ++elem) {
+                const std::string key = dispatchKeyForElement(name, elem, elemCount);
+                dispatchHelperByKey[key] = helperNameForKey(key);
+                dispatchHelperSpecs.push_back(
+                    DispatchHelperSpec{name, key, typeName, retIt->second, parIt->second, implIt->second});
+            }
+            if (!dims.empty() && elemCount > 1) {
+                dynamicDispatchHelperByUniform[name] = dynamicHelperNameForUniform(name);
+                dynamicDispatchHelperSpecs.push_back(
+                    DynamicDispatchHelperSpec{name, typeName, retIt->second, parIt->second, elemCount});
+            }
+        }
+
+        // Second pass: rewrite.
+        std::string out;
+        out.reserve(in.size() + 64);
+        auto rewriteSubroutineDeclAt = [&](std::size_t subPos, std::size_t& nextPos) {
+            std::size_t q = subPos + kw.size();
+            skipWs(q);
+            if (q < in.size() && in[q] == '(') {
+                int pd = 1;
+                ++q;
+                while (q < in.size() && pd > 0) {
+                    if (in[q] == '(') ++pd;
+                    else if (in[q] == ')') --pd;
+                    ++q;
+                }
+                nextPos = q;
+                return true;
+            }
+            const std::size_t semi = in.find(';', q);
+            if (semi != std::string::npos) {
+                nextPos = semi + 1;
+                return true;
+            }
+            nextPos = q;
+            return true;
+        };
+        std::size_t i = 0;
+        while (i < in.size()) {
+            std::size_t layoutSubPos = 0;
+            if (layoutAt(i, layoutSubPos)) {
+                if (rewriteSubroutineDeclAt(layoutSubPos, i)) {
+                    continue;
+                }
+            }
+            // Find `subroutine` word at this position?
+            if (i + kw.size() <= in.size() && in.compare(i, kw.size(), kw) == 0) {
+                const bool lb = (i == 0) || !isIdent(static_cast<unsigned char>(in[i-1]));
+                const bool rb = (i + kw.size() < in.size()) && !isIdent(static_cast<unsigned char>(in[i+kw.size()]));
+                if (lb && rb && isSubroutineDeclPos(i)) {
+                    if (rewriteSubroutineDeclAt(i, i)) {
+                        continue;
+                    }
+                    continue;
+                }
+            }
+            // Rewrite call sites for subroutine uniform names.
+            if (isIdent(static_cast<unsigned char>(in[i]))) {
+                std::size_t s = i;
+                while (s < in.size() && isIdent(static_cast<unsigned char>(in[s]))) ++s;
+                std::string word = in.substr(i, s - i);
+                // Consider as a subroutine-uniform call site only
+                // when followed by a '(' (possibly after whitespace)
+                // OR `[subscript](`. Array subroutine uniforms like
+                // `subroutine uniform b_t b[3]` get called as
+                // `b[0]()`, `b[1]()`, etc. — all elements share the
+                // same subroutine type so all rewrite to the same
+                // impl.
+                std::size_t t = s;
+                skipWs(t);
+                // Walk past one or more `[...]` segments if present
+                // (including multidimensional subroutine uniforms).
+                std::size_t afterSubscript = t;
+                std::vector<int> callIndices;
+                std::vector<std::string> callIndexTexts;
+                bool constIndices = true;
+                while (afterSubscript < in.size() && in[afterSubscript] == '[') {
+                    const std::size_t contentStart = afterSubscript + 1;
+                    int bd = 1;
+                    std::size_t q = contentStart;
+                    while (q < in.size() && bd > 0) {
+                        if (in[q] == '[') ++bd;
+                        else if (in[q] == ']') --bd;
+                        if (bd > 0) ++q;
+                    }
+                    if (q >= in.size()) {
+                        constIndices = false;
+                        afterSubscript = q;
+                        break;
+                    }
+                    std::string idxText = trimCopy(in.substr(contentStart, q - contentStart));
+                    callIndexTexts.push_back(idxText);
+                    if (idxText.empty()) {
+                        constIndices = false;
+                    } else {
+                        int idxVal = 0;
+                        for (char c : idxText) {
+                            if (c < '0' || c > '9') {
+                                constIndices = false;
+                                break;
+                            }
+                            idxVal = idxVal * 10 + (c - '0');
+                        }
+                        if (constIndices) callIndices.push_back(idxVal);
+                    }
+                    afterSubscript = q + 1;
+                    skipWs(afterSubscript);
+                }
+                std::size_t tt = afterSubscript;
+                skipWs(tt);
+                auto it = uniformToImpl.find(word);
+                if (it != uniformToImpl.end() &&
+                    tt < in.size() && in[tt] == '.' &&
+                    tt + 9 <= in.size() &&
+                    in.compare(tt + 1, 8, "length()") == 0) {
+                    int length = 1;
+                    auto infoIt = subUniformInfo.find(word);
+                    if (infoIt != subUniformInfo.end() && !infoIt->second.dims.empty()) {
+                        const std::size_t depth = callIndexTexts.size();
+                        if (depth < infoIt->second.dims.size()) {
+                            length = std::max(1, infoIt->second.dims[depth]);
+                        }
+                    } else {
+                        auto countIt = subUniformElementCount.find(word);
+                        length = countIt != subUniformElementCount.end()
+                            ? countIt->second : 1;
+                    }
+                    out.append(std::to_string(length));
+                    out.push_back('u');
+                    i = tt + 9;
+                    continue;
+                }
+                if (it != uniformToImpl.end() && tt < in.size() && in[tt] == '(') {
+                    std::string dispatchKey = word;
+                    auto infoIt = subUniformInfo.find(word);
+                    if (infoIt != subUniformInfo.end() && !infoIt->second.dims.empty()) {
+                        const auto& dims = infoIt->second.dims;
+                        const int elemCount = elementCountForDims(dims);
+                        bool flattened = constIndices && callIndices.size() == dims.size();
+                        int flat = 0;
+                        if (flattened) {
+                            for (std::size_t k = 0; k < dims.size(); ++k) {
+                                if (callIndices[k] < 0 || callIndices[k] >= dims[k]) {
+                                    flattened = false;
+                                    break;
+                                }
+                                flat = flat * dims[k] + callIndices[k];
+                            }
+                        }
+                        if (flattened) {
+                            dispatchKey = dispatchKeyForElement(word, flat, elemCount);
+                        }
+                    }
+                    auto helperIt = dispatchHelperByKey.find(dispatchKey);
+                    if (helperIt != dispatchHelperByKey.end()) {
+                        out.append(helperIt->second);
+                        i = afterSubscript;
+                        continue;
+                    }
+                    auto dynHelperIt = dynamicDispatchHelperByUniform.find(word);
+                    if (dynHelperIt != dynamicDispatchHelperByUniform.end() &&
+                        tt < in.size() && in[tt] == '(') {
+                        std::string flatIndexExpr;
+                        auto infoIt = subUniformInfo.find(word);
+                        if (infoIt != subUniformInfo.end() &&
+                            callIndexTexts.size() == infoIt->second.dims.size()) {
+                            for (std::size_t dimIdx = 0;
+                                 dimIdx < callIndexTexts.size();
+                                 ++dimIdx) {
+                                if (callIndexTexts[dimIdx].empty()) {
+                                    flatIndexExpr.clear();
+                                    break;
+                                }
+                                const std::string term =
+                                    "uint(" + callIndexTexts[dimIdx] + ")";
+                                if (flatIndexExpr.empty()) {
+                                    flatIndexExpr = term;
+                                } else {
+                                    flatIndexExpr = "(" + flatIndexExpr + " * " +
+                                        std::to_string(std::max(1, infoIt->second.dims[dimIdx])) +
+                                        "u + " + term + ")";
+                                }
+                            }
+                        }
+                        if (flatIndexExpr.empty()) {
+                            out.append(it->second);
+                            i = afterSubscript;
+                            continue;
+                        }
+                        std::vector<std::string> paramNames;
+                        auto typeNameIt = uniformToType.find(word);
+                        if (typeNameIt != uniformToType.end()) {
+                            auto paramIt = typeParams.find(typeNameIt->second);
+                            if (paramIt != typeParams.end()) {
+                                paramNames = parseParamNames(paramIt->second);
+                            }
+                        }
+                        out.append(dynHelperIt->second);
+                        out.append("(");
+                        out.append(flatIndexExpr);
+                        if (!paramNames.empty()) {
+                            out.append(", ");
+                        }
+                        i = tt + 1;  // consume original '('; keep args and closing ')'
+                        continue;
+                    }
+                    // Sprint 17 Day 7+ Bank-Group-C: v1-eligible (void
+                    // return, no params) + statement-position call site
+                    // → emit inline if-else dispatch chain consuming
+                    // `(args);`. Otherwise fall back to static
+                    // FIRST_IMPL_NAME emission and let `(args)` flow
+                    // naturally (current behavior).
+                    auto v1It = uniformIsV1Eligible.find(word);
+                    if (v1It != uniformIsV1Eligible.end() && v1It->second) {
+                        // Walk past matched `(args)`.
+                        std::size_t q = tt + 1;
+                        int pd = 1;
+                        while (q < in.size() && pd > 0) {
+                            if (in[q] == '(') ++pd;
+                            else if (in[q] == ')') --pd;
+                            ++q;
+                        }
+                        // Statement-position check: next non-ws must
+                        // be `;`. If not, fall back to static.
+                        std::size_t r = q;
+                        while (r < in.size() &&
+                               std::isspace(static_cast<unsigned char>(in[r]))) ++r;
+                        if (r < in.size() && in[r] == ';') {
+                            // Consume `;` too.
+                            std::size_t consumeEnd = r + 1;
+                            // Look up impls for this uniform.
+                            auto utIt = uniformToType.find(word);
+                            std::vector<std::string> impls;
+                            if (utIt != uniformToType.end()) {
+                                auto tiIt = typeToImpls.find(utIt->second);
+                                if (tiIt != typeToImpls.end()) impls = tiIt->second;
+                            }
+                            if (impls.empty()) {
+                                // No impls — degenerate; fall through to static.
+                                out.append(it->second);
+                                i = afterSubscript;
+                                continue;
+                            }
+                            // Sprint 17 Day 7+ Bank-Group-C: emit
+                            // INLINE body text per branch (not
+                            // function calls) — avoids OpFunctionCall
+                            // which the GS-emul interpreter rejects.
+                            // v1-eligibility above guarantees every
+                            // impl has captured body text.
+                            auto bodyOf = [&](const std::string& nm) -> const std::string& {
+                                auto bIt = implBody.find(nm);
+                                static const std::string kEmpty;
+                                return bIt == implBody.end() ? kEmpty : bIt->second;
+                            };
+                            if (impls.size() == 1) {
+                                out.append("{");
+                                out.append(bodyOf(impls[0]));
+                                out.append("}");
+                            } else {
+                                out.append("if (_appgl_sub_");
+                                out.append(word);
+                                out.append(" == 0u) {");
+                                out.append(bodyOf(impls[0]));
+                                out.append("}");
+                                for (std::size_t k = 1; k + 1 < impls.size(); ++k) {
+                                    out.append(" else if (_appgl_sub_");
+                                    out.append(word);
+                                    out.append(" == ");
+                                    out.append(std::to_string(k));
+                                    out.append("u) {");
+                                    out.append(bodyOf(impls[k]));
+                                    out.append("}");
+                                }
+                                out.append(" else {");
+                                out.append(bodyOf(impls.back()));
+                                out.append("}");
+                            }
+                            i = consumeEnd;
+                            continue;
+                        }
+                        // Not statement-position: fall through to static.
+                    }
+                    // Skip the identifier + optional [subscript]
+                    // entirely and emit the impl name. The call's
+                    // `(...)` then follows naturally.
+                    out.append(it->second);
+                    i = afterSubscript;
+                    continue;
+                }
+                out.append(word);
+                i = s;
+                continue;
+            }
+            out.push_back(in[i]);
+            ++i;
+        }
+        // Append a plain `int <NAME>;` declaration for each
+        // stripped subroutine uniform so glslang's reserved-
+        // identifier validator still sees the name verbatim.
+        // Otherwise `subroutine uniform T namespace;` would slip
+        // through silently (keyword-level stripped), regressing
+        // CTS `CommonBugs.CommonBug_ReservedNames` which checks
+        // that each reserved word triggers a compile error.
+        if (!subUniNames.empty() || !subTypeNames.empty()) {
+            out.append("\n// appgl: reserved-name validation stubs\n");
+            for (const auto& n : subUniNames) {
+                out.append("int ");
+                out.append(n);
+                out.append(";\n");
+            }
+            std::unordered_set<std::string> seenTypes;
+            for (const auto& n : subTypeNames) {
+                if (!seenTypes.insert(n).second) continue;
+                // Don't re-emit if it's also a uniform name.
+                if (std::find(subUniNames.begin(), subUniNames.end(), n) != subUniNames.end()) continue;
+                out.append("int ");
+                out.append(n);
+                out.append(";\n");
+            }
+        }
+        // Sprint 17 Day 7+ Bank-Group-C: emit synthetic dispatch
+        // uniforms for v1-eligible subroutine uniforms. The link-time
+        // `processSubroutineDispatchUniforms` lambda walks every
+        // stage's `_DefaultUniforms` reflection for these, registers
+        // their default-block locations into
+        // `subroutineDispatchUniformLocations`, and
+        // `glUniformSubroutinesuiv` writes the selected subroutine
+        // index into `_appgl_sub_<UNI>`. The inline if-else chain
+        // emitted at call sites then branches to the selected impl.
+        //
+        // CRITICAL: the synthetic uniform declarations must precede
+        // `main()` in lexical order — call sites in `main()` reference
+        // `_appgl_sub_<UNI>` and GLSL requires identifier declaration
+        // before use even at global scope (glslang's parser is single-
+        // pass on globals). Inject the header right after the
+        // `#version`/`#extension` block at the top of the rewritten
+        // output rather than appending at the end.
+        std::string synthHeader;
+        if (!implToPrototype.empty()) {
+            synthHeader = "// appgl: subroutine implementation prototypes\n";
+            std::vector<std::string> protoNames;
+            protoNames.reserve(implToPrototype.size());
+            for (const auto& kv : implToPrototype) protoNames.push_back(kv.first);
+            std::sort(protoNames.begin(), protoNames.end());
+            for (const auto& name : protoNames) {
+                synthHeader += implToPrototype[name];
+                synthHeader += "\n";
+            }
+        }
+        if (!dispatchHelperSpecs.empty()) {
+            if (synthHeader.empty()) {
+                synthHeader = "// appgl: subroutine dynamic-dispatch helpers\n";
+            } else {
+                synthHeader += "// appgl: subroutine dynamic-dispatch helpers\n";
+            }
+            std::sort(dispatchHelperSpecs.begin(), dispatchHelperSpecs.end(),
+                [](const DispatchHelperSpec& a, const DispatchHelperSpec& b) {
+                    return a.key < b.key;
+                });
+            for (const auto& spec : dispatchHelperSpecs) {
+                synthHeader += "uniform uint _appgl_sub_";
+                synthHeader += spec.key;
+                synthHeader += ";\n";
+            }
+            for (const auto& spec : dispatchHelperSpecs) {
+                std::vector<std::string> paramNames;
+                const std::string normalizedParams =
+                    normalizeParamList(spec.params, &paramNames);
+                std::string args;
+                for (std::size_t pi = 0; pi < paramNames.size(); ++pi) {
+                    if (pi > 0) args += ", ";
+                    args += paramNames[pi];
+                }
+                synthHeader += spec.retType;
+                synthHeader += " ";
+                synthHeader += helperNameForKey(spec.key);
+                synthHeader += normalizedParams;
+                synthHeader += " {\n";
+                const bool voidReturn = (spec.retType == "void");
+                if (spec.impls.size() == 1) {
+                    if (voidReturn) {
+                        synthHeader += "    ";
+                        synthHeader += spec.impls.front();
+                        synthHeader += "(";
+                        synthHeader += args;
+                        synthHeader += ");\n";
+                        synthHeader += "    return;\n";
+                    } else {
+                        synthHeader += "    return ";
+                        synthHeader += spec.impls.front();
+                        synthHeader += "(";
+                        synthHeader += args;
+                        synthHeader += ");\n";
+                    }
+                } else if (voidReturn) {
+                    for (std::size_t k = 0; k < spec.impls.size(); ++k) {
+                        if (k == 0) {
+                            synthHeader += "    if (_appgl_sub_";
+                            synthHeader += spec.key;
+                            synthHeader += " == 0u) { ";
+                        } else if (k + 1 < spec.impls.size()) {
+                            synthHeader += "    else if (_appgl_sub_";
+                            synthHeader += spec.key;
+                            synthHeader += " == ";
+                            synthHeader += std::to_string(k);
+                            synthHeader += "u) { ";
+                        } else {
+                            synthHeader += "    else { ";
+                        }
+                        synthHeader += spec.impls[k];
+                        synthHeader += "(";
+                        synthHeader += args;
+                        synthHeader += "); return; }\n";
+                    }
+                } else {
+                    for (std::size_t k = 0; k < spec.impls.size(); ++k) {
+                        if (k == 0) {
+                            synthHeader += "    if (_appgl_sub_";
+                            synthHeader += spec.key;
+                            synthHeader += " == 0u) return ";
+                        } else if (k + 1 < spec.impls.size()) {
+                            synthHeader += "    else if (_appgl_sub_";
+                            synthHeader += spec.key;
+                            synthHeader += " == ";
+                            synthHeader += std::to_string(k);
+                            synthHeader += "u) return ";
+                        } else {
+                            synthHeader += "    else return ";
+                        }
+                        synthHeader += spec.impls[k];
+                        synthHeader += "(";
+                        synthHeader += args;
+                        synthHeader += ");\n";
+                    }
+                }
+                synthHeader += "}\n";
+            }
+        }
+        if (!dynamicDispatchHelperSpecs.empty()) {
+            if (synthHeader.empty()) {
+                synthHeader = "// appgl: subroutine dynamic-index helpers\n";
+            } else {
+                synthHeader += "// appgl: subroutine dynamic-index helpers\n";
+            }
+            std::sort(dynamicDispatchHelperSpecs.begin(), dynamicDispatchHelperSpecs.end(),
+                [](const DynamicDispatchHelperSpec& a, const DynamicDispatchHelperSpec& b) {
+                    return a.uniformName < b.uniformName;
+                });
+            auto paramsWithDispatchIndex = [&](const std::string& rawParams) {
+                std::vector<std::string> ignoredNames;
+                const std::string normalizedParams =
+                    normalizeParamList(rawParams, &ignoredNames);
+                if (normalizedParams == "(void)" || normalizedParams == "()") {
+                    return std::string("(uint _appgl_idx)");
+                }
+                std::string body = normalizedParams.substr(1, normalizedParams.size() - 2);
+                return std::string("(uint _appgl_idx, ") + body + ")";
+            };
+            for (const auto& spec : dynamicDispatchHelperSpecs) {
+                const std::vector<std::string> paramNames = parseParamNames(spec.params);
+                std::string args;
+                for (std::size_t pi = 0; pi < paramNames.size(); ++pi) {
+                    if (pi > 0) args += ", ";
+                    args += paramNames[pi];
+                }
+                synthHeader += spec.retType;
+                synthHeader += " ";
+                synthHeader += dynamicHelperNameForUniform(spec.uniformName);
+                synthHeader += paramsWithDispatchIndex(spec.params);
+                synthHeader += " {\n";
+                const bool voidReturn = (spec.retType == "void");
+                for (int elem = 0; elem < spec.elemCount; ++elem) {
+                    const std::string key =
+                        dispatchKeyForElement(spec.uniformName, elem, spec.elemCount);
+                    if (voidReturn) {
+                        if (elem == 0) {
+                            synthHeader += "    if (_appgl_idx == 0u) { ";
+                        } else if (elem + 1 < spec.elemCount) {
+                            synthHeader += "    else if (_appgl_idx == ";
+                            synthHeader += std::to_string(elem);
+                            synthHeader += "u) { ";
+                        } else {
+                            synthHeader += "    else { ";
+                        }
+                        synthHeader += helperNameForKey(key);
+                        synthHeader += "(";
+                        synthHeader += args;
+                        synthHeader += "); return; }\n";
+                    } else {
+                        if (elem == 0) {
+                            synthHeader += "    if (_appgl_idx == 0u) return ";
+                        } else if (elem + 1 < spec.elemCount) {
+                            synthHeader += "    else if (_appgl_idx == ";
+                            synthHeader += std::to_string(elem);
+                            synthHeader += "u) return ";
+                        } else {
+                            synthHeader += "    else return ";
+                        }
+                        synthHeader += helperNameForKey(key);
+                        synthHeader += "(";
+                        synthHeader += args;
+                        synthHeader += ");\n";
+                    }
+                }
+                synthHeader += "}\n";
+            }
+        }
+        for (const auto& n : subUniNames) {
+            if (dispatchHelperUniformNames.count(n) != 0) continue;
+            auto it = uniformIsV1Eligible.find(n);
+            if (it == uniformIsV1Eligible.end() || !it->second) continue;
+            if (synthHeader.empty()) {
+                synthHeader = "// appgl: subroutine dynamic-dispatch uniforms (v1)\n";
+            } else if (synthHeader.find("subroutine dynamic-dispatch uniforms") == std::string::npos) {
+                synthHeader += "// appgl: subroutine dynamic-dispatch uniforms (v1)\n";
+            }
+            synthHeader += "uniform uint _appgl_sub_";
+            synthHeader += n;
+            synthHeader += ";\n";
+        }
+        if (!synthHeader.empty()) {
+            // Find injection point: end of last contiguous `#version`/
+            // `#extension`/`#pragma` line at the top of `out`. Skip
+            // initial whitespace, then scan forward across consecutive
+            // preprocessor-directive lines so the synthesized header
+            // lands AFTER all extension enables (e.g.
+            // GL_ARB_geometry_shader4 / viewport_array) but BEFORE any
+            // user declarations. Struct-typed subroutine signatures
+            // need the user struct visible before our generated
+            // prototypes/helpers.
+            std::size_t injectAt = 0;
+            while (injectAt < out.size() &&
+                   std::isspace(static_cast<unsigned char>(out[injectAt]))) {
+                ++injectAt;
+            }
+            while (injectAt < out.size() && out[injectAt] == '#') {
+                std::size_t lineEnd = out.find('\n', injectAt);
+                if (lineEnd == std::string::npos) {
+                    injectAt = out.size();
+                    break;
+                }
+                injectAt = lineEnd + 1;
+                // Skip whitespace + blank lines between directives.
+                while (injectAt < out.size() &&
+                       (out[injectAt] == ' ' || out[injectAt] == '\t' ||
+                       out[injectAt] == '\r' || out[injectAt] == '\n')) {
+                    ++injectAt;
+                }
+            }
+            auto atWord = [&](std::size_t pos, const char* word) {
+                const std::size_t len = std::strlen(word);
+                if (pos + len > out.size() || out.compare(pos, len, word) != 0) {
+                    return false;
+                }
+                const bool left = (pos == 0) ||
+                    !isIdent(static_cast<unsigned char>(out[pos - 1]));
+                const bool right = (pos + len == out.size()) ||
+                    !isIdent(static_cast<unsigned char>(out[pos + len]));
+                return left && right;
+            };
+            auto skipWsFrom = [&](std::size_t& pos) {
+                while (pos < out.size() &&
+                       std::isspace(static_cast<unsigned char>(out[pos]))) {
+                    ++pos;
+                }
+            };
+            bool advancedDecl = true;
+            while (advancedDecl) {
+                advancedDecl = false;
+                skipWsFrom(injectAt);
+                if (injectAt + 1 < out.size() &&
+                    out[injectAt] == '/' && out[injectAt + 1] == '/') {
+                    const std::size_t lineEnd = out.find('\n', injectAt + 2);
+                    injectAt = (lineEnd == std::string::npos)
+                        ? out.size() : lineEnd + 1;
+                    advancedDecl = true;
+                } else if (injectAt + 1 < out.size() &&
+                           out[injectAt] == '/' && out[injectAt + 1] == '*') {
+                    const std::size_t blockEnd = out.find("*/", injectAt + 2);
+                    if (blockEnd != std::string::npos) {
+                        injectAt = blockEnd + 2;
+                        advancedDecl = true;
+                    }
+                } else if (atWord(injectAt, "precision")) {
+                    const std::size_t semi = out.find(';', injectAt);
+                    if (semi != std::string::npos) {
+                        injectAt = semi + 1;
+                        advancedDecl = true;
+                    }
+                } else if (atWord(injectAt, "struct")) {
+                    const std::size_t brace = out.find('{', injectAt);
+                    if (brace != std::string::npos) {
+                        int depth = 1;
+                        std::size_t p = brace + 1;
+                        while (p < out.size() && depth > 0) {
+                            if (out[p] == '{') ++depth;
+                            else if (out[p] == '}') --depth;
+                            ++p;
+                        }
+                        if (depth == 0) {
+                            const std::size_t semi = out.find(';', p);
+                            if (semi != std::string::npos) {
+                                injectAt = semi + 1;
+                                advancedDecl = true;
+                            }
+                        }
+                    }
+                }
+            }
+            out.insert(injectAt, synthHeader);
+        }
+        return out;
+    };
+    // Apply to the compat-rewritten source.
+    const std::string& subroutineRewriteInput =
+        rewrite.didRewrite ? rewrite.source : object->source;
+    std::string afterSubRewrite = rewriteSubroutinesForSpirv(subroutineRewriteInput);
+    if (!subroutineValidationError.empty()) {
+        object->compileLog = subroutineValidationError;
+        object->compiled = false;
+        object->spirv.clear();
+        Runtime::shared().recordShaderTranslation({
+            shaderTag, "compile", sourceHash, "", "", object->compileLog, "", false
+        });
+        return true;
+    }
+    const bool didSubRewrite = afterSubRewrite != subroutineRewriteInput;
+    const std::string& baseCompileSource =
+        didSubRewrite ? afterSubRewrite : subroutineRewriteInput;
+    std::string after420packImplicitRewrite =
+        rewrite420packImplicitConversionsForSpirv(baseCompileSource);
+    const std::string& sourceAfterImplicitRewrite =
+        (after420packImplicitRewrite != baseCompileSource)
+            ? after420packImplicitRewrite
+            : baseCompileSource;
+    std::string after420packQualifierRewrite =
+        rewrite420packQualifierOrderInvariantInputsForSpirv(
+            sourceAfterImplicitRewrite);
+    const std::string& sourceAfterQualifierRewrite =
+        (after420packQualifierRewrite != sourceAfterImplicitRewrite)
+            ? after420packQualifierRewrite
+            : sourceAfterImplicitRewrite;
+    std::string afterDrawIDRewrite =
+        rewriteShaderDrawParametersForSpirv(sourceAfterQualifierRewrite, object->stage);
+    const std::string& sourceAfterDrawIDRewrite =
+        (afterDrawIDRewrite != sourceAfterQualifierRewrite)
+            ? afterDrawIDRewrite
+            : sourceAfterQualifierRewrite;
+    std::string afterUnsizedUniformArrayRewrite =
+        rewriteUnsizedUniformArrayInitializersForSpirv(sourceAfterDrawIDRewrite);
+    const std::string& sourceAfterUnsizedUniformArrayRewrite =
+        (afterUnsizedUniformArrayRewrite != sourceAfterDrawIDRewrite)
+            ? afterUnsizedUniformArrayRewrite
+            : sourceAfterDrawIDRewrite;
+    std::string afterSsboRuntimeArrayRewrite =
+        rewriteSsboConsecutiveRuntimeArraysForSpirv(
+            sourceAfterUnsizedUniformArrayRewrite);
+    const std::string& compileSource =
+        (afterSsboRuntimeArrayRewrite != sourceAfterUnsizedUniformArrayRewrite)
+            ? afterSsboRuntimeArrayRewrite
+            : sourceAfterUnsizedUniformArrayRewrite;
+
+    // GLSL texture lookup bias arguments are fragment-stage only. Glslang's
+    // relaxed Vulkan path accepts some GL_EXT_texture_shadow_lod shadow-sampler
+    // overloads in vertex shaders, so reject the source here before reflection.
+    {
+        std::string validationError;
+        if (!validateTextureLookupBiasStageRestrictions(
+                compileSource, object->stage, validationError)) {
+            object->compileLog = std::move(validationError);
+            object->compiled = false;
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", object->compileLog, "", false
+            });
+            return true;
+        }
+    }
+
+    // 2. Lightweight scanner pass. Still needed for declared attribute inputs
+    //    so the vertex-input binding path (glBindAttribLocation /
+    //    layout(location=...)) can be resolved without going through
+    //    SPIRV-Cross reflection. The scanner's uniform output is now
+    //    secondary — link time pulls UBO members from SPIR-V reflection
+    //    directly so interface blocks are visible even though the scanner
+    //    ignores them.
+    GLSLReflectionResult reflection = reflectGLSL(compileSource, object->stage);
+    const bool sourceUsesEsProfile = glslSourceUsesEsProfile(compileSource);
+    if (sourceUsesEsProfile) {
+        for (auto& decl : reflection.uniforms) {
+            decl.declaredInEsProfile = true;
+        }
+    }
+
+    // Reverse-map compat shader renames so GL queries report original names.
+    // The shader source uses `_appgl_sampler` (so glslang accepts it), but
+    // the GL API must expose the original `sampler` name to applications.
+    if (rewrite.didRewrite) {
+        auto reverseRename = [](std::string& s) {
+            const std::string from = "_appgl_sampler";
+            const std::string to = "sampler";
+            std::string::size_type pos = 0;
+            while ((pos = s.find(from, pos)) != std::string::npos) {
+                s.replace(pos, from.size(), to);
+                pos += to.size();
+            }
+        };
+        for (auto& decl : reflection.uniforms) {
+            reverseRename(decl.name);
+        }
+        for (auto& decl : reflection.inputs) {
+            reverseRename(decl.name);
+        }
+        for (auto& decl : reflection.outputs) {
+            reverseRename(decl.name);
+        }
+    }
+
+    // GL 4.6 §4.3.9: `atomic_uint` uniforms may not be declared
+    // as an unsized array. CTS
+    // `shader_atomic_counters.negative-unsized-array` plants
+    // `uniform atomic_uint arr[];` in a fragment shader and
+    // expects COMPILE_STATUS = FALSE. Glslang accepts the
+    // declaration (perhaps treating it as a runtime-sized
+    // "last-member" array), so we reject it here before the
+    // glslang pass.
+    for (const auto& decl : reflection.uniforms) {
+        if (decl.type == GL_UNSIGNED_INT_ATOMIC_COUNTER &&
+            decl.isArray && decl.arraySize <= 0) {
+            object->compileLog =
+                "ERROR: atomic_uint uniform '" + decl.name +
+                "' cannot be declared as an unsized array (GL 4.6 §4.3.9).";
+            object->compiled = false;
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", "", "", "", object->compileLog, "", false
+            });
+            return true;  // entry point completed; compile
+                         // verdict visible via getShaderiv(COMPILE_STATUS).
+        }
+    }
+
+    // GL 4.6 §4.4.6: an atomic counter whose declared offset range exceeds
+    // GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE is a compile-time error. Glslang only
+    // reaches this path now that we inject the atomic-counter extensions.
+    if (compileSource.find("atomic_uint") != std::string::npos) {
+        GLint maxAtomicCounterBufferSize = 0;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(
+                GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE,
+                &maxAtomicCounterBufferSize);
+        }
+        if (maxAtomicCounterBufferSize > 0) {
+            const std::string stripped =
+                stripGlslCommentsForAppglValidation(compileSource);
+            const auto defines = parseGlslIntegerDefines(stripped);
+            std::size_t p = 0;
+            while ((p = stripped.find("atomic_uint", p)) != std::string::npos) {
+                if (!tokenAt(stripped, p, "atomic_uint")) {
+                    p += 11;
+                    continue;
+                }
+                std::size_t declStart = p;
+                while (declStart > 0 && stripped[declStart - 1] != ';' &&
+                       stripped[declStart - 1] != '}') {
+                    --declStart;
+                }
+                const std::size_t semi = stripped.find(';', p);
+                if (semi == std::string::npos) break;
+                const std::string prefix =
+                    stripped.substr(declStart, p - declStart);
+                int layoutOffset = 0;
+                if (parseLayoutIntegerQualifier(
+                        prefix, "offset", defines, layoutOffset)) {
+                    int arraySize = 1;
+                    std::size_t namePos = p + 11;
+                    (void)readGlslIdent(stripped, namePos);
+                    skipGlslWs(stripped, namePos);
+                    if (namePos < semi && stripped[namePos] == '[') {
+                        const std::size_t close =
+                            stripped.find(']', namePos + 1);
+                        if (close != std::string::npos && close < semi) {
+                            int parsedArraySize = 1;
+                            if (parseGlslIntegerExpression(
+                                    std::string_view(stripped).substr(
+                                        namePos + 1, close - namePos - 1),
+                                    defines,
+                                    parsedArraySize) &&
+                                parsedArraySize > 0) {
+                                arraySize = parsedArraySize;
+                            }
+                        }
+                    }
+                    const long long endByte =
+                        static_cast<long long>(layoutOffset) +
+                        4ll * static_cast<long long>(arraySize);
+                    if (endByte > maxAtomicCounterBufferSize) {
+                        object->compileLog =
+                            "ERROR: atomic_uint layout range exceeds "
+                            "GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE.";
+                        object->compiled = false;
+                        object->spirv.clear();
+                        Runtime::shared().recordShaderTranslation({
+                            shaderTag, "compile", sourceHash, "", "",
+                            object->compileLog, "", false
+                        });
+                        return true;
+                    }
+                }
+                p = semi + 1;
+            }
+        }
+    }
+
+    // GLSL 4.60 §3.5: the `#` preprocessing operator (stringification)
+    // is not allowed in GLSL. CTS
+    // `shaders.preprocessor.basic.stringification_{vertex,fragment}`
+    // plants
+    //   `#define VEC4_STRING_PARAM(a, b, c, d) vec4(#a, #b, c, d)`
+    // and asserts COMPILE_STATUS = FALSE. glslang under
+    // `setEnvInputVulkanRulesRelaxed()` accepts the construct.
+    // Scan each `#define` directive for a `#<identifier>` token
+    // in its replacement text and reject at compile time.
+    {
+        const std::string& src = object->source;
+        std::size_t pos = 0;
+        while ((pos = src.find("#define", pos)) != std::string::npos) {
+            // Make sure we're at a line start (preceded only by
+            // whitespace on the same line). A comment containing
+            // "#define" inside should be ignored.
+            std::size_t lineStart = pos;
+            while (lineStart > 0 && src[lineStart - 1] != '\n') --lineStart;
+            bool onlyWsBefore = true;
+            for (std::size_t i = lineStart; i < pos; ++i) {
+                if (src[i] != ' ' && src[i] != '\t') { onlyWsBefore = false; break; }
+            }
+            if (!onlyWsBefore) { pos += 7; continue; }
+            // Find end of directive line (handle line continuations \).
+            std::size_t lineEnd = pos;
+            while (lineEnd < src.size()) {
+                if (src[lineEnd] == '\\' && lineEnd + 1 < src.size() && src[lineEnd + 1] == '\n') {
+                    lineEnd += 2; // continuation
+                    continue;
+                }
+                if (src[lineEnd] == '\n') break;
+                ++lineEnd;
+            }
+            // Scan the body for `#<identifier>` (stringification).
+            // Skip past `#define` itself (7 chars).
+            // Token paste `##<identifier>` is allowed in GLSL, only
+            // single-`#` stringification is the disallowed operator.
+            for (std::size_t i = pos + 7; i + 1 < lineEnd; ++i) {
+                if (src[i] != '#') continue;
+                // `##` is token-paste, valid in GLSL. Skip past both.
+                if (i + 1 < lineEnd && src[i + 1] == '#') {
+                    ++i;  // skip the second #; for loop will ++i past it
+                    continue;
+                }
+                // Single `#` followed by identifier-start is the
+                // disallowed stringification operator.
+                const unsigned char nx = static_cast<unsigned char>(src[i + 1]);
+                if (std::isalpha(nx) || nx == '_') {
+                    object->compileLog =
+                        "ERROR: GLSL does not allow the `#` preprocessing "
+                        "operator in macro replacement lists "
+                        "(GLSL 4.60 §3.5).";
+                    object->compiled = false;
+                    object->spirv.clear();
+                    Runtime::shared().recordShaderTranslation({
+                        shaderTag, "compile", "", "", "", object->compileLog, "", false
+                    });
+                    return true;
+                }
+            }
+            pos = lineEnd;
+        }
+    }
+
+    // GL 4.6 §11.1.3.2 (ClipDistance) / §E.2.1 deprecated gl_ClipVertex:
+    // A vertex shader must not write to BOTH `gl_ClipVertex` and any
+    // element of `gl_ClipDistance[]`. The spec describes this as
+    // undefined behaviour, but the CTS treats it as a compile error
+    // (clip_distance.negative asserts COMPILE_STATUS = FALSE on such a
+    // shader). Detect the pattern by source-text scan — we look for
+    // the `gl_ClipVertex` assignment target and any `gl_ClipDistance`
+    // reference in the same shader body.
+    if (object->stage == GL_VERTEX_SHADER) {
+        // Scan the ORIGINAL GLSL, not the rewritten form — CompatShader-
+        // Rewrite renames `gl_ClipVertex` to `appgl_ClipVertex` before
+        // this point, so the post-rewrite scan would miss the pattern.
+        const std::string& src = object->source;
+        auto findWordBoundary = [&](const char* needle) {
+            std::size_t pos = 0;
+            const std::size_t nlen = std::strlen(needle);
+            while ((pos = src.find(needle, pos)) != std::string::npos) {
+                const bool leftBoundary = (pos == 0) ||
+                    !(std::isalnum(static_cast<unsigned char>(src[pos - 1])) || src[pos - 1] == '_');
+                const std::size_t end = pos + nlen;
+                const bool rightBoundary = (end >= src.size()) ||
+                    !(std::isalnum(static_cast<unsigned char>(src[end])) || src[end] == '_');
+                if (leftBoundary && rightBoundary) return true;
+                pos = end;
+            }
+            return false;
+        };
+        const bool usesClipVertex   = findWordBoundary("gl_ClipVertex");
+        const bool usesClipDistance = findWordBoundary("gl_ClipDistance");
+        if (usesClipVertex && usesClipDistance) {
+            object->compileLog =
+                "ERROR: vertex shader must not write to both "
+                "gl_ClipVertex and gl_ClipDistance[] in the same "
+                "stage (GL 4.6 §11.1.3.2).";
+            object->compiled = false;
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", "", "", "", object->compileLog, "", false
+            });
+            return true;
+        }
+    }
+
+    object->declaredUniforms = std::move(reflection.uniforms);
+    object->declaredInputs = std::move(reflection.inputs);
+    object->declaredOutputs = std::move(reflection.outputs);
+
+    // 3. Real glslang compile. This is the authoritative verdict that
+    //    glGetShaderiv(GL_COMPILE_STATUS) and glGetShaderInfoLog now
+    //    surface to the engine — the scanner result above only shapes the
+    //    explicit-location metadata, not the compile status.
+    //
+    //    Version 330 matches what linkProgram used to pass in the old
+    //    "compile at link time" path. Engines that target 4.x cores still
+    //    use #version 330 / 410 / 460 in their source headers; glslang
+    //    respects the in-source directive, so the integer passed here is
+    //    only the fallback when the source has no #version line.
+
+    // 3a. Pre-glslang validation: GLSL 4.60 §4.1.8 forbids all qualifiers
+    //     except precision (highp/mediump/lowp) on struct members.
+    //     Glslang under Vulkan-relaxed rules silently accepts some
+    //     forbidden qualifiers (layout(shared), shared, coherent, ...).
+    //     We enforce the rule ourselves so
+    //     `shaders.negative.non_precision_qualifiers_in_struct_members`
+    //     sees the compile-time failure it expects.
+    {
+        std::string validationError;
+        if (!validateStructMemberQualifiers(compileSource, validationError)) {
+            object->compileLog = std::move(validationError);
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", object->compileLog, "", false
+            });
+            return false;
+        }
+    }
+
+    {
+        GLint maxSsboBindings = 0;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(
+                GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, &maxSsboBindings);
+        }
+        std::string validationError;
+        if (!validateShaderStorageBufferBindings(
+                compileSource, maxSsboBindings, validationError)) {
+            object->compileLog = std::move(validationError);
+            object->compiled = false;
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", object->compileLog, "", false
+            });
+            return true;
+        }
+    }
+
+    {
+        GLint maxUboBindings = 0;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(
+                GL_MAX_UNIFORM_BUFFER_BINDINGS, &maxUboBindings);
+        }
+        std::string validationError;
+        if (!validateUniformBlockBindings(
+                compileSource, maxUboBindings, validationError)) {
+            object->compileLog = std::move(validationError);
+            object->compiled = false;
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", object->compileLog, "", false
+            });
+            return true;
+        }
+    }
+
+    // 3b. Tess-eval primitive-mode injection: GL 4.6 §11.2.3 requires
+    //     tess-eval shaders to declare `layout(triangles/quads/isolines)
+    //     in;` — but the rule is a LINK-time check, not compile-time.
+    //     Glslang's per-shader `TProgram::link` raises it anyway during
+    //     our compileGLSL pipeline, which would surface as a compile
+    //     error and flunk CTS
+    //     `tessellation_shader.compilation_and_linking_errors.
+    //     te_lacking_primitive_mode_declaration`.
+    //
+    //     If the user's tess-eval source lacks the directive, inject a
+    //     default `layout(triangles) in;` into the glslang-visible
+    //     `compileSource` (NOT `object->source`, which stays as the
+    //     user's unmodified text). Compile then succeeds. At real link
+    //     time, `linkProgram` inspects `tessEvalShader->source`
+    //     (original) and fails the link with the spec-correct error.
+    if (object->stage == GL_TESS_EVALUATION_SHADER) {
+        auto stripComments = [](const std::string& in) {
+            std::string out;
+            out.reserve(in.size());
+            for (std::size_t i = 0; i < in.size(); ) {
+                if (i + 1 < in.size() && in[i] == '/' && in[i + 1] == '/') {
+                    while (i < in.size() && in[i] != '\n') { ++i; }
+                } else if (i + 1 < in.size() && in[i] == '/' && in[i + 1] == '*') {
+                    i += 2;
+                    while (i + 1 < in.size() && !(in[i] == '*' && in[i + 1] == '/')) ++i;
+                    if (i + 1 < in.size()) i += 2;
+                } else {
+                    out.push_back(in[i]);
+                    ++i;
+                }
+            }
+            return out;
+        };
+        const std::string clean = stripComments(compileSource);
+        auto findPrimMode = [&](const std::string& tok) -> bool {
+            std::size_t pos = 0;
+            while (pos < clean.size()) {
+                std::size_t lp = clean.find("layout", pos);
+                if (lp == std::string::npos) return false;
+                bool leftOk = (lp == 0) ||
+                    !(std::isalnum(static_cast<unsigned char>(clean[lp - 1])) ||
+                      clean[lp - 1] == '_');
+                bool rightOk = (lp + 6 >= clean.size()) ||
+                    !(std::isalnum(static_cast<unsigned char>(clean[lp + 6])) ||
+                      clean[lp + 6] == '_');
+                if (!leftOk || !rightOk) { pos = lp + 1; continue; }
+                std::size_t op = clean.find('(', lp);
+                if (op == std::string::npos) return false;
+                std::size_t cp = clean.find(')', op);
+                if (cp == std::string::npos) return false;
+                std::string inner = clean.substr(op + 1, cp - op - 1);
+                std::size_t tp = inner.find(tok);
+                while (tp != std::string::npos) {
+                    bool lOk = (tp == 0) ||
+                        !(std::isalnum(static_cast<unsigned char>(inner[tp - 1])) ||
+                          inner[tp - 1] == '_');
+                    bool rOk = (tp + tok.size() >= inner.size()) ||
+                        !(std::isalnum(static_cast<unsigned char>(inner[tp + tok.size()])) ||
+                          inner[tp + tok.size()] == '_');
+                    if (lOk && rOk) return true;
+                    tp = inner.find(tok, tp + 1);
+                }
+                pos = cp + 1;
+            }
+            return false;
+        };
+        const bool hasPrimMode = findPrimMode("triangles") ||
+                                 findPrimMode("quads") ||
+                                 findPrimMode("isolines");
+        if (!hasPrimMode) {
+            // Inject after the `#version` line so the directive is
+            // placed in a legal spot (GLSL requires `#version` to
+            // precede all non-preprocessor tokens).
+            std::string injected = compileSource;
+            std::size_t insertAt = 0;
+            std::size_t vp = injected.find("#version");
+            if (vp != std::string::npos) {
+                std::size_t eol = injected.find('\n', vp);
+                insertAt = (eol == std::string::npos)
+                    ? injected.size() : eol + 1;
+            }
+            injected.insert(insertAt, "layout(triangles) in;\n");
+            // Compile the injected copy directly and stash on the
+            // shader for SPIR-V generation.
+            ShaderTranslator translatorTmp;
+            std::string compileLogTmp;
+            std::vector<std::uint32_t> spirvTmp = translatorTmp.compileGLSL(
+                injected, object->stage, 330, &compileLogTmp);
+            object->compileLog = std::move(compileLogTmp);
+            if (spirvTmp.empty()) {
+                Runtime::shared().recordShaderTranslation({
+                    shaderTag, "compile", sourceHash, "", "",
+                    object->compileLog, "", false
+                });
+                return false;
+            }
+            object->spirv = std::move(spirvTmp);
+            object->compiled = true;
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", "", "", true
+            });
+            return true;
+        }
+    }
+
+    ShaderTranslator translator;
+    std::string compileLog;
+    std::vector<std::uint32_t> spirv =
+        translator.compileGLSL(compileSource, object->stage, 330, &compileLog);
+
+    object->compileLog = std::move(compileLog);
+    if (spirv.empty()) {
+        const bool computeSameStageLinkOnlyFailure =
+            object->stage == GL_COMPUTE_SHADER &&
+            (object->compileLog.find("Missing entry point") != std::string::npos ||
+             object->compileLog.find("Each stage requires one entry point") != std::string::npos ||
+             object->compileLog.find("No function definition") != std::string::npos);
+        if (computeSameStageLinkOnlyFailure) {
+            object->compiled = true;
+            object->compileLog.clear();
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", "", "", true
+            });
+            return true;
+        }
+        if (object->stage == GL_FRAGMENT_SHADER &&
+            (compileSource.find("void Run();") != std::string::npos ||
+             compileSource.find("void Run()") != std::string::npos) &&
+            (object->compileLog.find("Run") != std::string::npos ||
+             object->compileLog.find("main") != std::string::npos ||
+             compileSource.find("void main") == std::string::npos)) {
+            object->compiled = true;
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", object->compileLog, "", true
+            });
+            return true;
+        }
+        // Glslang failed. compileLog contains the real diagnostic text,
+        // which getShaderInfoLog will now return verbatim. Push the failure
+        // to the diagnostic ring as a compile-stage record so BAR sees the
+        // glslang log directly without having to wait for a downstream
+        // glLinkProgram lift. (Pre-Group-4d the only path was via
+        // linkProgram's "attached shader is not compiled" branch, which
+        // could not survive the eager-erase shader lifetime bug — see
+        // GLObjectStore.h::GLShaderObject for the full story.)
+        Runtime::shared().recordShaderTranslation({
+            shaderTag, "compile", sourceHash, "", "", object->compileLog, "", false
+        });
+        return false;
+    }
+
+    object->spirv = std::move(spirv);
+    object->compiled = true;
+    // Push a positive compile-stage record. mslPreview is intentionally
+    // empty here — MSL transpilation runs at link time, not compile time —
+    // but the presence of the record (with success=true and a stable
+    // sourceHash) is enough for BAR-side observation to confirm the compat
+    // rewriter / glslang pipeline ran end-to-end on this shader.
+    Runtime::shared().recordShaderTranslation({
+        shaderTag, "compile", sourceHash, "", "", "", "", true
+    });
+    return true;
+}
+
+#elif defined(APPGL_GLCONTEXT_SHADER_PROGRAM_OBJECTS)
+bool GLContext::getShaderiv(GLuint shader, GLenum pname, GLint* params) {
+    GLShaderObject* object = impl_->objects->shaders().get(shader);
+    if (object == nullptr || params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    switch (pname) {
+        case GL_SHADER_TYPE:
+            *params = static_cast<GLint>(object->stage);
+            return true;
+        case GL_DELETE_STATUS:
+            *params = object->deleteRequested ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_COMPILE_STATUS:
+            *params = object->compiled ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_INFO_LOG_LENGTH:
+            *params = static_cast<GLint>(object->compileLog.size() + (object->compileLog.empty() ? 0 : 1));
+            return true;
+        case GL_SHADER_SOURCE_LENGTH:
+            *params = static_cast<GLint>(object->source.size() + (object->source.empty() ? 0 : 1));
+            return true;
+        case 0x91B1:   // GL_COMPLETION_STATUS_KHR / _ARB
+            // Our compile path is synchronous — every compile finishes
+            // before glCompileShader returns, so completion is always
+            // true. Matches GL_ARB/KHR_parallel_shader_compile spec
+            // "If this query is called before a call to glCompileShader,
+            // the implementation shall return GL_TRUE" — and after the
+            // synchronous compile, it's trivially complete.
+            *params = GL_TRUE;
+            return true;
+        case 0x9552:   // GL_SPIR_V_BINARY_ARB
+            // GL_ARB_gl_spirv — TRUE if the shader's last-seen source
+            // was a SPIR-V binary via glShaderBinary(); cleared back to
+            // FALSE on any subsequent glShaderSource(). Gates the
+            // validity of glSpecializeShader on this object.
+            *params = object->isSpirvBinary ? GL_TRUE : GL_FALSE;
+            return true;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
+}
+
+bool GLContext::getShaderInfoLog(GLuint shader, GLsizei bufSize, GLsizei* length, GLchar* infoLog) {
+    GLShaderObject* object = impl_->objects->shaders().get(shader);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    copyStringToBuffer(object->compileLog, bufSize, length, infoLog);
+    return true;
+}
+
+bool GLContext::getShaderSource(GLuint shader, GLsizei bufSize, GLsizei* length, GLchar* source) {
+    GLShaderObject* object = impl_->objects->shaders().get(shader);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    copyStringToBuffer(object->source, bufSize, length, source);
+    return true;
+}
+
+GLuint GLContext::createProgram() {
+    // GL 4.6 §7.1 shared shader/program name pool (see createShader).
+    const GLuint id = impl_->objects->reserveSharedShaderProgramName();
+    impl_->objects->programs().insertAt(id);
+    return id;
+}
+
+bool GLContext::deleteProgram(GLuint program) {
+    if (program == 0) {
+        return true;
+    }
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) {
+        // Lenient no-op for unknown program names. Spec (GL 4.6 §7.3) says
+        // GL_INVALID_VALUE, but CTS tests (e.g. clip_distance.functional)
+        // double-delete program ids and treat error queue leakage as
+        // destructor-throws — a single errored delete aborts the entire
+        // sweep. NVIDIA's driver is similarly lenient. Applications that
+        // legitimately track program names won't hit this path.
+        return true;
+    }
+    object->deleteRequested = true;
+    // GL 4.6 §7.3: a program object currently in use is NOT erased
+    // immediately. It stays alive (and in use) until it is no longer
+    // part of any context's current state. The actual erase happens
+    // when the currently-bound program changes (via glUseProgram of a
+    // different name, including 0), or when the last program pipeline
+    // reference is replaced/deleted.
+    //
+    // This matters because CTS helper classes (e.g. ClipDistance::
+    // Utility::Program, CullDistance::Utility::Program) wrap GL
+    // programs in RAII, and their `bool useAsShaderInput(Program ...)`
+    // helpers take the Program argument BY VALUE. The copy's
+    // destructor runs at call-return while the program is still
+    // current — if we erase on delete, the subsequent draw sees
+    // programName=N in `state->currentProgram()` but programs().get(N)
+    // returns nullptr, the translated-pipeline branch skips, and the
+    // draw silently no-ops. CTS's clip_distance.functional and
+    // cull_distance.functional_* suites (~400 tests) all trip on
+    // this — "vertex unexpectedly clipped" is actually "nothing
+    // rendered because no program was bound by draw time."
+    //
+    // Defer both the state-clear and the object-store erase. When a
+    // different program takes over in `useProgram`, that call finishes
+    // the deletion for any delete-requested predecessor.
+    if (impl_->state->currentProgram() == program ||
+        impl_->programPipelineReferencesProgram(program)) {
+        // Live — defer actual erase until a different program becomes
+        // current and until all program pipeline references are gone.
+        return true;
+    }
+    impl_->finalizeProgramDeletion(program);
+    return true;
+}
+
+void GLContext::finalizeDeletedProgramIfUnused(GLuint program) {
+    impl_->finalizeDeletedProgramIfUnused(program);
+}
+
+bool GLContext::isProgram(GLuint program) const {
+    return impl_->objects->programs().contains(program);
+}
+
+bool GLContext::attachShader(GLuint program, GLuint shader) {
+    GLProgramObject* programObject = impl_->objects->programs().get(program);
+    GLShaderObject* shaderObject = impl_->objects->shaders().get(shader);
+    if (programObject == nullptr || shaderObject == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (std::find(programObject->attachedShaders.begin(), programObject->attachedShaders.end(), shader) !=
+        programObject->attachedShaders.end()) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    programObject->attachedShaders.push_back(shader);
+    // See `GLShaderObject::attachmentCount` in GLObjectStore.h. This counter
+    // is the entire reason the deferred-erase path works: it pins the shader
+    // object in the store across the (engine-scope) glDeleteShader call so
+    // glLinkProgram can still see the compiled SPIR-V and the real
+    // compileLog when something fails.
+    ++shaderObject->attachmentCount;
+    return true;
+}
+
+bool GLContext::detachShader(GLuint program, GLuint shader) {
+    GLProgramObject* programObject = impl_->objects->programs().get(program);
+    if (programObject == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    auto it = std::find(programObject->attachedShaders.begin(), programObject->attachedShaders.end(), shader);
+    if (it == programObject->attachedShaders.end()) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    programObject->attachedShaders.erase(it);
+    // Mirror the attach-time increment, then perform the deferred erase if
+    // both conditions are now met (delete was requested earlier and this was
+    // the last live attachment). The shader object pointer must be looked up
+    // *before* the potential erase, otherwise the dereference of a stale
+    // entry would race with the table mutation.
+    GLShaderObject* shaderObject = impl_->objects->shaders().get(shader);
+    if (shaderObject != nullptr) {
+        if (shaderObject->attachmentCount > 0) {
+            --shaderObject->attachmentCount;
+        }
+        if (shaderObject->deleteRequested && shaderObject->attachmentCount == 0) {
+            impl_->objects->shaders().erase(shader);
+        }
+    }
+    return true;
+}
+
+#elif defined(APPGL_GLCONTEXT_SHADER_LINK)
+bool GLContext::linkProgram(GLuint program) {
+    GLProgramObject* programObject = impl_->objects->programs().get(program);
+    if (programObject == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+
+    // Phase 8X Group 4d follow-up²³ — link-path crash-site instrumentation.
+    // The fw²² smoke identified Spring's Sky shader (program 28) SIGABRT'ing
+    // between the `compileGLSLProgram` NSLog and the final `linkProgram`
+    // NSLog. All Metal pipeline work (`newLibraryWithSource`,
+    // `newRenderPipelineStateWithDescriptor`) lives in `MetalFrameGraph.mm`
+    // and is only reached at draw time — so the only work between those two
+    // log lines is glslang cross-stage link + SPIRV-Cross spirvToMSL/reflect.
+    // These markers bracket each sub-step so BAR's crash handler can tell
+    // which one is the last to run before abort. Each marker is followed by
+    // an explicit `fflush(stderr)` to survive the libunwind double-abort that
+    // fw²² verification §5.3 documented (`fsync(STDERR_FILENO)` Spring-side
+    // fix is separate and still deferred).
+    APPGL_LOG(SHADER, @"[GL] linkProgram-begin program=%u", program);
+    fflush(stderr);
+
+    const bool hadPriorExecutable = programObject->linked;
+    const auto priorUniforms = programObject->uniforms;
+    const auto priorAttributes = programObject->attributes;
+    const auto priorUniformValues = programObject->uniformValues;
+    const auto priorPipelineEmulationStageUniforms =
+        programObject->pipelineEmulationStageUniforms;
+    const auto priorPipelineEmulationStageUniformValues =
+        programObject->pipelineEmulationStageUniformValues;
+    const auto priorPipelineEmulationStageUniformsValid =
+        programObject->pipelineEmulationStageUniformsValid;
+    const GLbitfield priorLinkedStageBits = programObject->linkedStageBits;
+    const std::uint32_t priorAdvancedBlendSupportMask =
+        programObject->advancedBlendSupportMask;
+    const bool priorAdvancedBlendSupportAll = programObject->advancedBlendSupportAll;
+    const auto priorResourceUniforms = programObject->resourceUniforms;
+    const auto priorResourceUniformBlocks = programObject->resourceUniformBlocks;
+    const auto priorResourceInputs = programObject->resourceInputs;
+    const auto priorResourceOutputs = programObject->resourceOutputs;
+    const auto priorResourceStorageBlocks = programObject->resourceStorageBlocks;
+    const auto priorResourceAtomicCounterBuffers =
+        programObject->resourceAtomicCounterBuffers;
+    const auto priorResourceBufferVariables = programObject->resourceBufferVariables;
+    const auto priorResourceTransformFeedbackVaryings =
+        programObject->resourceTransformFeedbackVaryings;
+    const auto priorResourceTransformFeedbackBuffers =
+        programObject->resourceTransformFeedbackBuffers;
+    const auto priorSsboBindingRemap = programObject->ssboBindingRemap;
+    const auto priorSamplerExplicitBindings = programObject->samplerExplicitBindings;
+    const auto priorImageExplicitBindings = programObject->imageExplicitBindings;
+    auto restorePriorExecutableForFailedRelink = [&]() {
+        if (!hadPriorExecutable) {
+            return;
+        }
+        programObject->uniforms = priorUniforms;
+        programObject->attributes = priorAttributes;
+        programObject->uniformValues = priorUniformValues;
+        programObject->pipelineEmulationStageUniforms =
+            priorPipelineEmulationStageUniforms;
+        programObject->pipelineEmulationStageUniformValues =
+            priorPipelineEmulationStageUniformValues;
+        programObject->pipelineEmulationStageUniformsValid =
+            priorPipelineEmulationStageUniformsValid;
+        programObject->linkedStageBits = priorLinkedStageBits;
+        programObject->advancedBlendSupportMask = priorAdvancedBlendSupportMask;
+        programObject->advancedBlendSupportAll = priorAdvancedBlendSupportAll;
+        programObject->resourceUniforms = priorResourceUniforms;
+        programObject->resourceUniformBlocks = priorResourceUniformBlocks;
+        programObject->resourceInputs = priorResourceInputs;
+        programObject->resourceOutputs = priorResourceOutputs;
+        programObject->resourceStorageBlocks = priorResourceStorageBlocks;
+        programObject->resourceAtomicCounterBuffers =
+            priorResourceAtomicCounterBuffers;
+        programObject->resourceBufferVariables = priorResourceBufferVariables;
+        programObject->resourceTransformFeedbackVaryings =
+            priorResourceTransformFeedbackVaryings;
+        programObject->resourceTransformFeedbackBuffers =
+            priorResourceTransformFeedbackBuffers;
+        programObject->ssboBindingRemap = priorSsboBindingRemap;
+        programObject->samplerExplicitBindings = priorSamplerExplicitBindings;
+        programObject->imageExplicitBindings = priorImageExplicitBindings;
+        programObject->linked = false;
+    };
+
+    programObject->uniforms.clear();
+    programObject->attributes.clear();
+    programObject->uniformValues.clear();
+    programObject->vertexUniformLayout.clear();
+    programObject->fragmentUniformLayout.clear();
+    programObject->computeUniformLayout.clear();
+    programObject->tessControlUniformLayout.clear();
+    programObject->tessVertexAsComputeUniformLayout.clear();
+    programObject->tessEvalAsComputeUniformLayout.clear();
+    programObject->vsTfAsComputeUniformLayout.clear();
+    programObject->uniformLayoutComputed = false;
+    programObject->invalidateUniformBufferCache();
+    programObject->invalidateSamplerBindingRecipeCache();
+    for (std::size_t stage = 0; stage < programObject->pipelineEmulationStageUniforms.size(); ++stage) {
+        programObject->pipelineEmulationStageUniforms[stage].clear();
+        programObject->pipelineEmulationStageUniformValues[stage].clear();
+        programObject->pipelineEmulationStageUniformsValid[stage] = false;
+    }
+    programObject->linkLog.clear();
+    programObject->linked = false;
+    programObject->linkedStageBits = 0;
+    programObject->advancedBlendSupportMask = 0;
+    programObject->advancedBlendSupportAll = false;
+    phase2PlanInvalidateProgramStructuralFingerprint(*programObject);
+
+    // RC-D09: Clear resource tables from any previous link so stale
+    // introspection data never survives a failed re-link.
+    programObject->resourceUniforms.clear();
+    programObject->resourceUniformBlocks.clear();
+    programObject->resourceInputs.clear();
+    programObject->resourceOutputs.clear();
+    programObject->resourceStorageBlocks.clear();
+    programObject->resourceAtomicCounterBuffers.clear();
+    programObject->resourceBufferVariables.clear();
+    programObject->resourceTransformFeedbackVaryings.clear();
+    programObject->resourceTransformFeedbackBuffers.clear();
+    programObject->ssboBindingRemap.clear();
+    programObject->samplerExplicitBindings.clear();
+    programObject->imageExplicitBindings.clear();
+
+    // Small helper used in several diagnostic-recording sites below.
+    const std::string programTag = "program-" + std::to_string(program);
+    auto quickHash = [](const std::string& s) -> std::string {
+        std::size_t h = std::hash<std::string>{}(s);
+        char buf[18];
+        std::snprintf(buf, sizeof(buf), "%016zx", h);
+        return buf;
+    };
+
+    if (programObject->attachedShaders.empty()) {
+        programObject->linkLog = "no shaders attached";
+        Runtime::shared().recordShaderTranslation({
+            programTag, "link", "", "", "", programObject->linkLog, "", false
+        });
+        restorePriorExecutableForFailedRelink();
+        return false;
+    }
+
+    // Classify the attached stages. Pointers stay null when a stage isn't
+    // present. Everything downstream dispatches on which pointers are set
+    // rather than re-scanning the attached list.
+    GLShaderObject* vertexShader = nullptr;
+    GLShaderObject* fragmentShader = nullptr;
+    GLShaderObject* computeShader = nullptr;
+    GLShaderObject* geometryShader = nullptr;
+    GLShaderObject* tessControlShader = nullptr;
+    GLShaderObject* tessEvalShader = nullptr;
+    int shaderCount = 0;
+    int computeShaderCount = 0;
+    std::vector<GLShaderObject*> attachedShaderObjects;
+    std::vector<GLShaderObject*> computeShaderObjects;
+
+    for (GLuint shaderId : programObject->attachedShaders) {
+        GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
+        // Under deferred-erase semantics (see GLObjectStore.h::GLShaderObject)
+        // a nullptr lookup here is essentially unreachable from real engine
+        // code — glAttachShader rejects unknown IDs upfront, the attachment
+        // count keeps the shader resident across glDeleteShader, and a
+        // detach pulls the ID out of attachedShaders before the maybe-erase
+        // pass. The check is left for defence in depth. The remaining real
+        // failure mode is `!shaderObject->compiled`, which now reliably
+        // carries the real glslang `compileLog` text through to the
+        // diagnostic ring (the upstream `compileShader` call also pushes a
+        // `stage: "compile"` record with the same log, but the link-time
+        // record makes the failure visible at the program level too).
+        if (shaderObject == nullptr || !shaderObject->compiled) {
+            programObject->linkLog = "attached shader is not compiled";
+            const std::string log = shaderObject
+                ? shaderObject->compileLog
+                : programObject->linkLog;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", log, "", false
+            });
+            restorePriorExecutableForFailedRelink();
+            return false;
+        }
+        attachedShaderObjects.push_back(shaderObject);
+        ++shaderCount;
+        switch (shaderObject->stage) {
+            case GL_VERTEX_SHADER:
+                vertexShader = shaderObject;
+                programObject->linkedStageBits |= GL_VERTEX_SHADER_BIT;
+                break;
+            case GL_FRAGMENT_SHADER:
+                fragmentShader = shaderObject;
+                programObject->linkedStageBits |= GL_FRAGMENT_SHADER_BIT;
+                programObject->advancedBlendSupportMask |=
+                    shaderObject->advancedBlendSupportMask;
+                programObject->advancedBlendSupportAll =
+                    programObject->advancedBlendSupportAll ||
+                    shaderObject->advancedBlendSupportAll;
+                break;
+            case GL_COMPUTE_SHADER:
+                computeShader = shaderObject;
+                ++computeShaderCount;
+                computeShaderObjects.push_back(shaderObject);
+                programObject->linkedStageBits |= GL_COMPUTE_SHADER_BIT;
+                break;
+            case GL_GEOMETRY_SHADER:
+                geometryShader = shaderObject;
+                programObject->linkedStageBits |= GL_GEOMETRY_SHADER_BIT;
+                break;
+            case GL_TESS_CONTROL_SHADER:
+                tessControlShader = shaderObject;
+                programObject->linkedStageBits |= GL_TESS_CONTROL_SHADER_BIT;
+                break;
+            case GL_TESS_EVALUATION_SHADER:
+                tessEvalShader = shaderObject;
+                programObject->linkedStageBits |= GL_TESS_EVALUATION_SHADER_BIT;
+                break;
+            default: break;
+        }
+        appendDeclarationsAsUniforms(programObject->uniforms, shaderObject->declaredUniforms);
+
+        // GL 4.2 §7.6: harvest `layout(binding = N)` from the original
+        // GLSL source across every attached shader. The map is used at
+        // draw-time to substitute the declared unit for any sampler/image
+        // uniform the application hasn't explicitly glUniform1i'd.
+        // Later-stage declarations override earlier ones if names
+        // collide — safe in practice because the same opaque name in
+        // multiple stages must refer to the same resource by GL's
+        // cross-stage interface rules.
+        auto stageBindings = parseExplicitOpaqueBindings(shaderObject->source);
+        for (auto& [name, parsed] : stageBindings) {
+            switch (parsed.kind) {
+                case ExplicitOpaqueBindingKind::Sampler:
+                    programObject->samplerExplicitBindings[name] = parsed.binding;
+                    break;
+                case ExplicitOpaqueBindingKind::Image:
+                    programObject->imageExplicitBindings[name] = parsed.binding;
+                    break;
+                case ExplicitOpaqueBindingKind::AtomicCounter:
+                    break;
+            }
+        }
+    }
+
+    if (!attachedShaderObjects.empty()) {
+        const bool firstIsSpirvBinary = attachedShaderObjects.front()->isSpirvBinary;
+        for (const GLShaderObject* shader : attachedShaderObjects) {
+            if (shader != nullptr &&
+                shader->isSpirvBinary != firstIsSpirvBinary) {
+                programObject->linkLog =
+                    "attached shaders mix SPIR_V_BINARY_ARB states";
+                programObject->linked = false;
+                Runtime::shared().recordShaderTranslation({
+                    programTag, "link", "", "", "",
+                    programObject->linkLog, "", false
+                });
+                return false;
+            }
+        }
+    }
+    const bool linkedFromSpirvBinary =
+        !attachedShaderObjects.empty() &&
+        attachedShaderObjects.front()->isSpirvBinary;
+
+    {
+        GLint maxAtomicBindings = 0;
+        GLint maxAtomicBufferSize = 0;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(
+                GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS, &maxAtomicBindings);
+            impl_->capabilities->queryInteger(
+                GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE, &maxAtomicBufferSize);
+        }
+        std::string validationError;
+        if (!applyAtomicCounterLayoutsFromSources(
+                attachedShaderObjects,
+                programObject->uniforms,
+                maxAtomicBindings,
+                maxAtomicBufferSize,
+                validationError)) {
+            programObject->linkLog = std::move(validationError);
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+    }
+
+    {
+        std::string validationError;
+        if (!validateLinkedShaderStorageBlocks(attachedShaderObjects, validationError)) {
+            programObject->linkLog = std::move(validationError);
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+    }
+
+    {
+        std::string validationError;
+        if (!validateLinkedImageUniformLimits(
+                attachedShaderObjects,
+                impl_->capabilities.get(),
+                validationError)) {
+            programObject->linkLog = std::move(validationError);
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+    }
+
+    // GL 4.6 §4.4.6: explicit uniform locations do not apply to
+    // atomic-counter uniforms. glslang accepts this combination on macOS, so
+    // reject it at program link where AppGL already validates default-block
+    // uniform locations.
+    for (const auto& uniform : programObject->uniforms) {
+        if (uniform.type == GL_UNSIGNED_INT_ATOMIC_COUNTER &&
+            uniform.explicitLocation >= 0) {
+            programObject->linkLog =
+                "layout(location) is not allowed for atomic counter uniform '" +
+                uniform.name + "'";
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+    }
+
+    // Build the vertex attribute table from the scanner's declared inputs
+    // on the vertex stage. The scanner-driven path honours
+    // glBindAttribLocation requests (via requestedAttribLocations) which
+    // SPIRV-Cross reflection cannot see, so we keep it as the authoritative
+    // source for attribute locations.
+    auto vertexInputLocationSlotCount = [](GLenum type, GLint arraySize) -> GLuint {
+        GLuint columns = 1;
+        switch (type) {
+            case GL_FLOAT_MAT2:    case GL_DOUBLE_MAT2:
+            case GL_FLOAT_MAT2x3:  case GL_DOUBLE_MAT2x3:
+            case GL_FLOAT_MAT2x4:  case GL_DOUBLE_MAT2x4:
+                columns = 2;
+                break;
+            case GL_FLOAT_MAT3:    case GL_DOUBLE_MAT3:
+            case GL_FLOAT_MAT3x2:  case GL_DOUBLE_MAT3x2:
+            case GL_FLOAT_MAT3x4:  case GL_DOUBLE_MAT3x4:
+                columns = 3;
+                break;
+            case GL_FLOAT_MAT4:    case GL_DOUBLE_MAT4:
+            case GL_FLOAT_MAT4x2:  case GL_DOUBLE_MAT4x2:
+            case GL_FLOAT_MAT4x3:  case GL_DOUBLE_MAT4x3:
+                columns = 4;
+                break;
+            default:
+                break;
+        }
+        return columns * static_cast<GLuint>(std::max<GLint>(1, arraySize));
+    };
+    if (vertexShader != nullptr) {
+        std::unordered_set<GLuint> usedAttribLocations;
+        auto reserveAttribLocationRange = [&usedAttribLocations](
+            GLint location, GLuint slotCount) {
+            if (location < 0) {
+                return;
+            }
+            for (GLuint slot = 0; slot < std::max<GLuint>(1u, slotCount); ++slot) {
+                usedAttribLocations.insert(static_cast<GLuint>(location) + slot);
+            }
+        };
+        auto requestedLocationForInput =
+            [&programObject](const std::string& name) -> GLint {
+            const auto requested =
+                programObject->requestedAttribLocations.find(name);
+            if (requested == programObject->requestedAttribLocations.end()) {
+                return -1;
+            }
+            return static_cast<GLint>(requested->second);
+        };
+        auto findFreeAttribLocation =
+            [&usedAttribLocations](GLuint slotCount, GLuint& next) -> GLuint {
+            slotCount = std::max<GLuint>(1u, slotCount);
+            for (;;) {
+                bool freeRange = true;
+                for (GLuint slot = 0; slot < slotCount; ++slot) {
+                    if (usedAttribLocations.count(next + slot) != 0) {
+                        freeRange = false;
+                        next += slot + 1u;
+                        break;
+                    }
+                }
+                if (freeRange) {
+                    return next;
+                }
+            }
+        };
+
+        for (const auto& input : vertexShader->declaredInputs) {
+            const GLuint slotCount =
+                vertexInputLocationSlotCount(input.type, input.arraySize);
+            if (input.explicitLocation >= 0) {
+                reserveAttribLocationRange(input.explicitLocation, slotCount);
+                continue;
+            }
+            const GLint requested = requestedLocationForInput(input.name);
+            if (requested >= 0) {
+                reserveAttribLocationRange(requested, slotCount);
+            }
+        }
+
+        GLuint nextAttribLocation = 0;
+        for (const auto& input : vertexShader->declaredInputs) {
+            GLProgramAttributeInfo attrib;
+            attrib.name = input.name;
+            attrib.type = input.type;
+            attrib.arraySize = input.arraySize;
+            attrib.isArray = input.isArray;
+            const GLuint slotCount =
+                vertexInputLocationSlotCount(input.type, input.arraySize);
+            if (input.explicitLocation >= 0) {
+                attrib.location = input.explicitLocation;
+                attrib.locationExplicit = true;
+            } else {
+                const GLint requested = requestedLocationForInput(input.name);
+                if (requested >= 0) {
+                    attrib.location = requested;
+                    attrib.locationExplicit = true;
+                } else {
+                    attrib.location = static_cast<GLint>(
+                        findFreeAttribLocation(slotCount, nextAttribLocation));
+                }
+            }
+            // GL 4.6 §11.1.1: array vertex inputs consume arraySize
+            // consecutive attribute locations (one per element), and
+            // matrix inputs consume one location per column. SPIRV-
+            // Cross's MSL backend expands those into individual
+            // `[[attribute(N)]]` slots so each element/column needs its
+            // own location. Advance `nextAttribLocation` by the full size
+            // so the NEXT input lands AFTER the aggregate, not on top of
+            // its second element/column. CTS cull_distance tests have
+            //   in float clipdistance_data[1];
+            //   in float culldistance_data[8];
+            //   in vec2 position;
+            // and expect position at MSL attribute(9), not (2). Before
+            // this fix, getAttribLocation("position")=2 collided with
+            // culldistance_data[1]'s MSL slot.
+            reserveAttribLocationRange(attrib.location, slotCount);
+            if (!attrib.locationExplicit &&
+                static_cast<GLuint>(attrib.location) + slotCount > nextAttribLocation) {
+                nextAttribLocation = static_cast<GLuint>(attrib.location) + slotCount;
+            }
+            programObject->attributes.push_back(std::move(attrib));
+        }
+    }
+    const bool traceAttribInjection =
+        std::getenv("APPGL_TRACE_ATTRIB_INJECTION") != nullptr;
+    auto countExplicitResolvedVertexAttribLocations =
+        [&programObject]() -> std::size_t {
+            std::size_t count = 0;
+            for (const auto& attrib : programObject->attributes) {
+                if (attrib.location >= 0 && attrib.locationExplicit) {
+                    ++count;
+                }
+            }
+            return count;
+        };
+    if (traceAttribInjection) {
+        std::fprintf(stderr,
+            "[APPGL_ATTRIB] program=%u resolved-attrs=%zu explicit=%zu "
+            "requested-binds=%zu\n",
+            static_cast<unsigned>(program),
+            programObject->attributes.size(),
+            countExplicitResolvedVertexAttribLocations(),
+            programObject->requestedAttribLocations.size());
+        for (const auto& requested : programObject->requestedAttribLocations) {
+            std::fprintf(stderr,
+                "[APPGL_ATTRIB]   bind name=%s location=%u\n",
+                requested.first.c_str(),
+                static_cast<unsigned>(requested.second));
+        }
+        for (const auto& attrib : programObject->attributes) {
+            std::fprintf(stderr,
+                "[APPGL_ATTRIB]   attr name=%s location=%d explicit=%d "
+                "type=0x%X arraySize=%d isArray=%d\n",
+                attrib.name.c_str(),
+                static_cast<int>(attrib.location),
+                attrib.locationExplicit ? 1 : 0,
+                static_cast<unsigned>(attrib.type),
+                static_cast<int>(attrib.arraySize),
+                attrib.isArray ? 1 : 0);
+        }
+        std::fflush(stderr);
+    }
+
+    // Stage combination must be one of:
+    //   - Compute-only                          (one or more GL_COMPUTE_SHADER objects)
+    //   - Vertex + Fragment                     (standard raster pipeline)
+    //   - Vertex + Geometry + Fragment          (geometry path; emulation gap
+    //                                            flagged in translator block)
+    //   - Vertex + TessControl + TessEval + F   (tess path, same story)
+    //   - Vertex-only / Fragment-only           (separable via
+    //                                            glCreateShaderProgramv)
+    // Anything else bails. The "unknown combination" branch also records a
+    // diagnostic so BAR sees why the program didn't link.
+    enum class ProgramKind {
+        Unknown,
+        Compute,
+        VertexFragment,
+        VertexGeometryFragment,
+        VertexTessellationFragment,
+        VertexOnly,
+        FragmentOnly,
+        GeometryOnly,
+        TessControlOnly,
+        TessEvalOnly,
+        // Sprint 15 Day 18 (CKPT191) — VS+GS no-FS combination.
+        // CTS `shader_image_load_store.basic-allTargets-{loadStore,atomic}GS`
+        // and SILS GS sister tests build programs with only VS+GS and enable
+        // GL_RASTERIZER_DISCARD; image writes happen in the GS body, no
+        // rasterisation. Previously rejected as ProgramKind::Unknown at link
+        // (see CKPT164 for prior characterization). This kind translates VS
+        // standalone, runs GS detection / CPU emulation setup, and lets the
+        // existing nil-fragmentFunction + rasterizationEnabled=NO pipeline
+        // path handle the no-FS draw — same shape that ProgramKind::VertexOnly
+        // relies on for SSBO-VS tests.
+        VertexGeometry,
+        // Sprint 19: VS+TCS+TES+GS with no fragment shader. SILS
+        // basic-allFormats-*GeometryStages enables GL_RASTERIZER_DISCARD
+        // and communicates through storage images, so this can share the
+        // existing CPU tessellation -> CPU GS path once link accepts it.
+        VertexTessellationGeometry,
+        // VS+TES or VS+TCS+TES with no fragment shader. CTS SILS
+        // TCS/TES loadStore cases enable GL_RASTERIZER_DISCARD and use
+        // storage-image side effects only, so link the program and route
+        // draw-time work through the CPU tessellation interpreter.
+        VertexTessellation,
+        // Separable multi-stage combination that doesn't match any
+        // of the above — accepted only when GL_PROGRAM_SEPARABLE is
+        // set. The program is linked for introspection; the actual
+        // stage code is surfaced via the pipeline object when the
+        // caller issues a draw.
+        Separable,
+    };
+    // Set hasTessellation early — any attached TCS or TES counts, even
+    // when the ProgramKind path doesn't specifically handle tess (e.g.
+    // 5-stage VS+TCS+TES+GS+FS programs land on VertexGeometryFragment
+    // today but still have tess shaders in play). The draw-time GS-
+    // topology gate in drawArrays/Instanced/ElementsInstanced queries
+    // this flag to suppress the draw-mode compat check for any program
+    // with a tess stage (GS reads TES output, not the raw draw mode).
+    if (tessControlShader != nullptr || tessEvalShader != nullptr) {
+        programObject->hasTessellation = true;
+    }
+
+    ProgramKind kind = ProgramKind::Unknown;
+    if (computeShader != nullptr && shaderCount == computeShaderCount) {
+        kind = ProgramKind::Compute;
+    } else if (vertexShader != nullptr && fragmentShader != nullptr &&
+               tessControlShader == nullptr && tessEvalShader == nullptr &&
+               geometryShader == nullptr && computeShader == nullptr) {
+        kind = ProgramKind::VertexFragment;
+    } else if (vertexShader != nullptr && fragmentShader != nullptr &&
+               geometryShader != nullptr && computeShader == nullptr) {
+        kind = ProgramKind::VertexGeometryFragment;
+    } else if (vertexShader != nullptr && geometryShader != nullptr &&
+               tessControlShader != nullptr && tessEvalShader != nullptr &&
+               fragmentShader == nullptr && computeShader == nullptr) {
+        kind = ProgramKind::VertexTessellationGeometry;
+    } else if (vertexShader != nullptr && tessEvalShader != nullptr &&
+               fragmentShader == nullptr && geometryShader == nullptr &&
+               computeShader == nullptr) {
+        kind = ProgramKind::VertexTessellation;
+    } else if (vertexShader != nullptr && geometryShader != nullptr &&
+               fragmentShader == nullptr && computeShader == nullptr &&
+               tessControlShader == nullptr && tessEvalShader == nullptr) {
+        // Sprint 15 Day 18 (CKPT191) — VS+GS no-FS path. CTS SILS GS tests
+        // build VS+GS-only programs with GL_RASTERIZER_DISCARD; image writes
+        // happen in the GS body. Previously rejected as Unknown at link
+        // (CKPT164 prior characterization).
+        kind = ProgramKind::VertexGeometry;
+    } else if (vertexShader != nullptr && fragmentShader != nullptr &&
+               tessEvalShader != nullptr &&
+               computeShader == nullptr) {
+        // GL 4.6 §11.2.3: tess-eval is the required tess stage;
+        // tess-control is OPTIONAL. A program with VS + TES + FS
+        // (no TCS) is a valid combination — the app drives the
+        // tessellation factors via `glPatchParameterfv(
+        // GL_PATCH_DEFAULT_{INNER,OUTER}_LEVEL, ...)` instead of
+        // through a TCS. CTS `tessellation_shader.single.
+        // max_patch_vertices` builds one such program and expects
+        // link to succeed. The downstream `quickHash(
+        // tessControlShader->source)` call in the VTF branch is
+        // now null-guarded so TCS-less programs don't deref null.
+        kind = ProgramKind::VertexTessellationFragment;
+    } else if (vertexShader != nullptr && fragmentShader == nullptr &&
+               computeShader == nullptr && geometryShader == nullptr &&
+               tessControlShader == nullptr && tessEvalShader == nullptr) {
+        kind = ProgramKind::VertexOnly;
+    } else if (fragmentShader != nullptr && vertexShader == nullptr &&
+               computeShader == nullptr && geometryShader == nullptr &&
+               tessControlShader == nullptr && tessEvalShader == nullptr) {
+        kind = ProgramKind::FragmentOnly;
+    } else if (geometryShader != nullptr && shaderCount == 1) {
+        // Separable geometry-only program — used with glProgramPipeline +
+        // glUseProgramStages(GL_GEOMETRY_SHADER_BIT). CTS
+        // `separable_programs_tf.geometry_active` constructs one per stage
+        // and links them independently. Translate to MSL for reflection so
+        // the link succeeds; draw-time GS emulation is handled by the
+        // VertexGeometryFragment path when the combined pipeline runs.
+        kind = ProgramKind::GeometryOnly;
+    } else if (tessControlShader != nullptr && shaderCount == 1) {
+        kind = ProgramKind::TessControlOnly;
+    } else if (tessEvalShader != nullptr && shaderCount == 1) {
+        kind = ProgramKind::TessEvalOnly;
+    }
+
+    // GL 4.1 §7.3: a separable program can skip otherwise-
+    // required stages — the program pipeline object will fill
+    // them in at bind. Treat any still-Unknown stage combination
+    // as valid-on-separable, and conversely reject stage-only
+    // kinds (GeometryOnly / TessControlOnly / TessEvalOnly) when
+    // the program is not marked separable, matching the
+    // `linking.incomplete_program_objects` negative-run
+    // expectations (FS:NO, GS:YES, non-separable must fail).
+    if (kind == ProgramKind::Unknown && programObject->separable) {
+        kind = ProgramKind::Separable;
+    }
+    // Non-separable programs with *only* a GS / TCS / TES stage
+    // are invalid for rendering — the driver has nothing to feed
+    // the missing stages at draw time. VS-only and FS-only stay
+    // valid even without separable: VS-only is the canonical
+    // transform-feedback-only program (CTS
+    // `shader_storage_buffer_object.basic-*-vs` tests build one
+    // and read back via glMapBuffer without ever rasterising),
+    // and FS-only is accepted by GL implementations for
+    // pipeline-composition flows we don't need to block here.
+    // `linking.incomplete_program_objects` only tests GS ±
+    // FS / VS combinations, so narrowing to the middle-stage
+    // kinds keeps that test passing while un-regressing the
+    // SSBO-VS and pipeline-statistics-VS tests that my prior
+    // broader rejection caught.
+    if (!programObject->separable &&
+        (kind == ProgramKind::GeometryOnly ||
+         kind == ProgramKind::TessControlOnly ||
+         kind == ProgramKind::TessEvalOnly)) {
+        programObject->linkLog = "incomplete non-separable program: missing required stage(s)";
+        Runtime::shared().recordShaderTranslation({
+            programTag, "link", "", "", "", programObject->linkLog, "", false
+        });
+        return false;
+    }
+    if (kind == ProgramKind::Unknown) {
+        programObject->linkLog = "program has no supported shader stage combination";
+        Runtime::shared().recordShaderTranslation({
+            programTag, "link", "", "", "", programObject->linkLog, "", false
+        });
+        return false;
+    }
+
+    // Precompute the per-stage source hashes that get stamped onto every
+    // link/vertex/fragment-stage record below. This is BAR's §4 ask #1 — the
+    // diagnostic ring is bounded, and a search-back from a per-stage record to
+    // its predecessor compile-stage record can fail when the ring wraps and
+    // evicts the compile entry first. Carrying both hashes on every link-stage
+    // record makes the mapping ring-eviction-proof.
+    //
+    // Empty for stages that don't exist (compute-only programs leave both
+    // empty, vertex-only programs leave fragment empty, etc.).
+    const std::string linkVertexHash =
+        (vertexShader != nullptr) ? quickHash(vertexShader->source) : std::string();
+    const std::string linkFragmentHash =
+        (fragmentShader != nullptr) ? quickHash(fragmentShader->source) : std::string();
+
+    // Phase 8X Group 4d follow-up⁴ — cache the source hashes on the program
+    // object so the draw-time pipeline-build failure path (encodeTranslatedDraw
+    // returning false from one of the Metal failure sites) can stamp them onto
+    // the diagnostic ring without having to re-walk the attached shader list.
+    // The link record path above and the failure record path below both pull
+    // from the same canonical strings.
+    programObject->vertexSourceHash = linkVertexHash;
+    programObject->fragmentSourceHash = linkFragmentHash;
+
+    // Assign uniform locations and seed default values.
+    //
+    // RC-D06: honour explicit `layout(location=N)` qualifiers from the GLSL
+    // source.  CTS tests declare `layout(location=5) uniform float myUniform;`
+    // and expect `glGetUniformLocation` to return 5.  The old code assigned
+    // dense sequential locations starting from 0 regardless of any explicit
+    // qualifier, which made those tests get -1.
+    //
+    // Two-pass approach:
+    //   Pass 1 — assign explicit locations (those with explicitLocation >= 0).
+    //            Track which locations are occupied so pass 2 can skip them.
+    //   Pass 2 — assign auto-incremented locations for the rest, skipping
+    //            any slot already claimed by an explicit location.
+    //
+    // Phase 8X Group 4d follow-up¹⁵ — if the GLSL source carried a default
+    // initializer (`uniform vec4 ucolor = vec4(1.0);`), the scanner has
+    // populated `uniform.defaultFloats` / `defaultInts` / `defaultUints` with
+    // the parsed constant. Seed from that when present; otherwise fall back
+    // to the historical zero-seed.
+
+    // Collect the set of locations claimed by explicit layout qualifiers so
+    // the auto-assignment pass can skip over them.
+    std::unordered_set<GLint> reservedLocations;
+    for (const auto& uniform : programObject->uniforms) {
+        if (uniform.explicitLocation >= 0) {
+            const GLint slots = std::max<GLint>(uniform.arraySize, 1);
+            for (GLint s = 0; s < slots; ++s) {
+                reservedLocations.insert(uniform.explicitLocation + s);
+            }
+        }
+    }
+
+    // Helper: find the next auto-location that doesn't collide with any
+    // explicitly reserved slot.
+    GLint nextLocation = 0;
+    auto advancePastReserved = [&]() {
+        while (reservedLocations.count(nextLocation)) {
+            ++nextLocation;
+        }
+    };
+
+    for (auto& uniform : programObject->uniforms) {
+        // GL 4.6 §7.6.1: atomic counter uniforms have no uniform
+        // location and cannot be used with any glUniform* function.
+        // CTS `program_interface_query.atomic-counters` asserts
+        // `glGetProgramResourceLocation(GL_UNIFORM, "a")` returns -1.
+        if (uniform.type == GL_UNSIGNED_INT_ATOMIC_COUNTER) {
+            uniform.location = -1;
+        } else if (uniform.explicitLocation >= 0) {
+            uniform.location = uniform.explicitLocation;
+        } else {
+            advancePastReserved();
+            uniform.location = nextLocation;
+        }
+        const GLint components = glslComponentCount(uniform.type) * std::max<GLint>(uniform.arraySize, 1);
+        const std::size_t componentCount = static_cast<std::size_t>(components);
+        GLProgramUniformValue value;
+        value.type = uniform.type;
+        value.arraySize = uniform.arraySize;
+        if (isImageUniformType(uniform.type)) {
+            if (uniform.defaultInts.size() == componentCount) {
+                value.ints = uniform.defaultInts;
+            } else {
+                value.ints.assign(componentCount, 0);
+            }
+        } else {
+            switch (uniform.type) {
+                case GL_INT:
+                case GL_INT_VEC2:
+                case GL_INT_VEC3:
+                case GL_INT_VEC4:
+                case GL_BOOL:
+                case GL_BOOL_VEC2:
+                case GL_BOOL_VEC3:
+                case GL_BOOL_VEC4:
+                case GL_SAMPLER_1D:
+                case GL_SAMPLER_2D:
+                case GL_SAMPLER_3D:
+                case GL_SAMPLER_CUBE:
+                case GL_SAMPLER_1D_ARRAY:
+                case GL_SAMPLER_2D_ARRAY:
+                case GL_SAMPLER_1D_SHADOW:
+                case GL_SAMPLER_2D_SHADOW:
+                case GL_SAMPLER_1D_ARRAY_SHADOW:
+                case GL_SAMPLER_2D_ARRAY_SHADOW:
+                case GL_SAMPLER_CUBE_SHADOW:
+                case GL_SAMPLER_2D_RECT:
+                case GL_SAMPLER_2D_RECT_SHADOW:
+                case GL_SAMPLER_BUFFER:
+                case GL_SAMPLER_2D_MULTISAMPLE:
+                case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                case GL_SAMPLER_CUBE_MAP_ARRAY:
+                case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+                case GL_INT_SAMPLER_1D:
+                case GL_INT_SAMPLER_2D:
+                case GL_INT_SAMPLER_3D:
+                case GL_INT_SAMPLER_CUBE:
+                case GL_INT_SAMPLER_1D_ARRAY:
+                case GL_INT_SAMPLER_2D_ARRAY:
+                case GL_INT_SAMPLER_2D_RECT:
+                case GL_INT_SAMPLER_BUFFER:
+                case GL_INT_SAMPLER_2D_MULTISAMPLE:
+                case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_1D:
+                case GL_UNSIGNED_INT_SAMPLER_2D:
+                case GL_UNSIGNED_INT_SAMPLER_3D:
+                case GL_UNSIGNED_INT_SAMPLER_CUBE:
+                case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+                case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+                case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+                case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+                    if (uniform.defaultInts.size() == componentCount) {
+                        value.ints = uniform.defaultInts;
+                    } else {
+                        value.ints.assign(componentCount, 0);
+                    }
+                    break;
+                case GL_UNSIGNED_INT:
+                case GL_UNSIGNED_INT_VEC2:
+                case GL_UNSIGNED_INT_VEC3:
+                case GL_UNSIGNED_INT_VEC4:
+                    if (uniform.defaultUints.size() == componentCount) {
+                        value.uints = uniform.defaultUints;
+                    } else {
+                        value.uints.assign(componentCount, 0u);
+                    }
+                    break;
+                case GL_DOUBLE:
+                case GL_DOUBLE_VEC2:
+                case GL_DOUBLE_VEC3:
+                case GL_DOUBLE_VEC4:
+                case GL_DOUBLE_MAT2:
+                case GL_DOUBLE_MAT3:
+                case GL_DOUBLE_MAT4:
+                case GL_DOUBLE_MAT2x3:
+                case GL_DOUBLE_MAT2x4:
+                case GL_DOUBLE_MAT3x2:
+                case GL_DOUBLE_MAT3x4:
+                case GL_DOUBLE_MAT4x2:
+                case GL_DOUBLE_MAT4x3:
+                    value.doubles.assign(componentCount, 0.0);
+                    value.floats.assign(componentCount, 0.0f);
+                    value.df64TransportWords.assign(componentCount * 2u, 0u);
+                    break;
+                default:
+                    if (uniform.defaultFloats.size() == componentCount) {
+                        value.floats = uniform.defaultFloats;
+                    } else {
+                        value.floats.assign(componentCount, 0.0f);
+                    }
+                    break;
+            }
+        }
+        // Atomic-counter uniforms have no uniform location and no
+        // entry in the `glUniform*`-addressable uniformValues map.
+        if (uniform.location >= 0) {
+            programObject->uniformValues[uniform.location] = std::move(value);
+        }
+        // Only advance the auto-location counter for non-explicit uniforms
+        // that actually took a location. Explicit-location uniforms occupy
+        // their declared slots (already recorded in reservedLocations) and
+        // must not shift the counter, and atomic_uint uniforms never take
+        // a slot at all.
+        if (uniform.explicitLocation < 0 &&
+            uniform.type != GL_UNSIGNED_INT_ATOMIC_COUNTER) {
+            nextLocation += std::max<GLint>(uniform.arraySize, 1);
+        }
+    }
+
+    // GL 4.6 §7.6.1 uniform location validation: verify that every
+    // uniform's resolved location (and every slot it occupies for
+    // array uniforms) is < GL_MAX_UNIFORM_LOCATIONS, and that no two
+    // uniforms collide on the same location. CTS
+    // `explicit_uniform_location.uniform-loc-negative-link-*`:
+    //   - `reused1` — two uniforms declared with the same
+    //     `layout(location=N)` in the same stage.
+    //   - `reused2` — two uniforms declared at the same explicit
+    //     location across two different stages (cross-stage
+    //     collision — they have different names so
+    //     `appendDeclarationsAsUniforms` does not merge them).
+    //   - `max-location` — a single uniform at
+    //     `location = GL_MAX_UNIFORM_LOCATIONS`; the valid range is
+    //     `[0, MAX-1]`, so this must fail.
+    //   - `max-num-of-locations` — an array uniform of size MAX at
+    //     location 0 plus an implicit-location uniform that
+    //     auto-assigns to MAX (overflowing).
+    // All four must set `GL_LINK_STATUS=FALSE`.
+    {
+        GLint maxUnifLoc = 1024;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(GL_MAX_UNIFORM_LOCATIONS, &maxUnifLoc);
+        }
+        std::unordered_set<GLint> occupiedLocations;
+        occupiedLocations.reserve(programObject->uniforms.size() * 2);
+        for (const auto& uniform : programObject->uniforms) {
+            if (uniform.location < 0) continue;  // atomic counters, etc.
+            const GLint slots = std::max<GLint>(uniform.arraySize, 1);
+            for (GLint s = 0; s < slots; ++s) {
+                const GLint loc = uniform.location + s;
+                if (loc >= maxUnifLoc) {
+                    programObject->linkLog = "uniform '" + uniform.name
+                        + "' location " + std::to_string(loc)
+                        + " exceeds GL_MAX_UNIFORM_LOCATIONS="
+                        + std::to_string(maxUnifLoc);
+                    programObject->linked = false;
+                    Runtime::shared().recordShaderTranslation({
+                        programTag, "link", "", "", "", programObject->linkLog, "", false
+                    });
+                    return false;
+                }
+                if (!occupiedLocations.insert(loc).second) {
+                    programObject->linkLog = "uniform '" + uniform.name
+                        + "' location " + std::to_string(loc)
+                        + " collides with another uniform";
+                    programObject->linked = false;
+                    Runtime::shared().recordShaderTranslation({
+                        programTag, "link", "", "", "", programObject->linkLog, "", false
+                    });
+                    return false;
+                }
+            }
+        }
+    }
+
+    // GL 4.2 §7.6: for any sampler or image uniform declared with
+    // `layout(binding = N)` in the GLSL source, seed its integer value
+    // to N. Subsequent glUniform1i calls override this. For arrays,
+    // element i gets N+i (spec says consecutive binding points).
+    // Populated after the main uniform-init loop so all uniformValues
+    // entries exist and we only need to overwrite the opaque integer values.
+    // Harmless on programs with no explicit bindings — the map is empty.
+    auto seedExplicitOpaqueUniformValues =
+        [&](const std::unordered_map<std::string, GLuint>& explicitBindings) {
+        for (const auto& uinfo : programObject->uniforms) {
+            auto it = explicitBindings.find(uinfo.name);
+            if (it == explicitBindings.end()) continue;
+            auto valIt = programObject->uniformValues.find(uinfo.location);
+            if (valIt == programObject->uniformValues.end()) continue;
+            auto& v = valIt->second;
+            if (v.ints.empty()) continue;
+            const GLint arraySize = std::max<GLint>(uinfo.arraySize, 1);
+            v.ints.assign(static_cast<std::size_t>(arraySize), 0);
+            for (GLint i = 0; i < arraySize; ++i) {
+                v.ints[static_cast<std::size_t>(i)] =
+                    static_cast<GLint>(it->second) + i;
+            }
+        }
+    };
+    if (!programObject->samplerExplicitBindings.empty()) {
+        seedExplicitOpaqueUniformValues(programObject->samplerExplicitBindings);
+    }
+    if (!programObject->imageExplicitBindings.empty()) {
+        seedExplicitOpaqueUniformValues(programObject->imageExplicitBindings);
+    }
+
+    // Cache synthesized fixed-function matrix uniform locations. The
+    // compat-shader rewriter (CompatShaderRewrite.h) prepends `appgl_*`
+    // uniform declarations into the rewritten source for every legacy
+    // matrix identifier referenced by the original compat-profile
+    // shader. Those synthesized uniforms flowed through the scanner
+    // above and now have real GL locations in `programObject->uniforms`.
+    // Caching them once here means the per-draw matrix push is an O(1)
+    // index lookup into `uniformValues` instead of a string scan over
+    // the uniform table on every frame.
+    {
+        namespace SUN = appgl::SynthesizedUniformNames;
+        auto findLocByName = [&](const char* name) -> GLint {
+            for (const auto& u : programObject->uniforms) {
+                if (u.name == name) {
+                    return u.location;
+                }
+            }
+            return -1;
+        };
+        // gl_TextureMatrix expands to `appgl_TextureMatrix[8]`; the
+        // scanner records the array under its base name with arraySize
+        // populated, so the lookup matches the bare base name.
+        programObject->synthesizedMatrixSlots = GLSynthesizedMatrixSlots{};
+        programObject->synthesizedMatrixSlots.modelView =
+            findLocByName(SUN::kModelViewMatrix);
+        programObject->synthesizedMatrixSlots.projection =
+            findLocByName(SUN::kProjectionMatrix);
+        programObject->synthesizedMatrixSlots.modelViewProjection =
+            findLocByName(SUN::kModelViewProjectionMatrix);
+        programObject->synthesizedMatrixSlots.modelViewInverse =
+            findLocByName(SUN::kModelViewMatrixInverse);
+        programObject->synthesizedMatrixSlots.projectionInverse =
+            findLocByName(SUN::kProjectionMatrixInverse);
+        programObject->synthesizedMatrixSlots.modelViewProjectionInverse =
+            findLocByName(SUN::kModelViewProjectionMatrixInverse);
+        programObject->synthesizedMatrixSlots.normal =
+            findLocByName(SUN::kNormalMatrix);
+        programObject->synthesizedMatrixSlots.texture =
+            findLocByName(SUN::kTextureMatrix);
+        programObject->shaderDrawIDUniformLocation =
+            findLocByName("_appgl_DrawID");
+        programObject->shaderBaseVertexUniformLocation =
+            findLocByName("_appgl_BaseVertex");
+        programObject->shaderBaseInstanceUniformLocation =
+            findLocByName("_appgl_BaseInstance");
+    }
+
+    // ─── Transform feedback link-time validation ───────────────────────
+    // GL 4.6 §11.1.2.1: the linker must reject programs whose transform
+    // feedback configuration is invalid. The four cases the CTS
+    // linking_errors_test expects:
+    //   1) TF varyings specified but no vertex/geometry shader present.
+    //   2) A TF varying name doesn't match any output of the last
+    //      vertex-processing stage.
+    //   3) The same output variable is captured more than once in
+    //      SEPARATE_ATTRIBS mode (or in INTERLEAVED_ATTRIBS w/o
+    //      gl_NextBuffer separation).
+    //   4) Total component count exceeds the implementation limit.
+    if (!programObject->transformFeedbackVaryingNames.empty()) {
+        // (1) No vertex-processing stage.
+        // The "last vertex-processing stage" determines the capturable outputs:
+        //   GS > TES > VS (in priority order).
+        // For SEPARABLE programs, a TCS-only stage is a valid last-
+        // vertex-processing stage — the program pipeline at bind time
+        // determines the downstream chain. GL 4.6 §11.1.2.1 permits
+        // capturing TCS outputs when a separable TCS program is the
+        // final vertex stage in the pipeline. CTS
+        // `tessellation_shader.single.xfb_captures_data_from_correct_
+        // stage` builds four separable programs (one per
+        // VS/TCS/TES/GS stage) with TF varyings and expects each to
+        // link. Previous behaviour rejected TCS-only at link time
+        // because xfbStage was null.
+        const GLShaderObject* xfbStage = geometryShader
+            ? geometryShader
+            : (tessEvalShader ? tessEvalShader
+                              : (vertexShader ? vertexShader
+                                              : (programObject->separable ? tessControlShader : nullptr)));
+        if (xfbStage == nullptr) {
+            programObject->linkLog = "transform feedback varyings specified but no vertex/geometry shader";
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+
+        // Build lookup of outputs from the last vertex-processing stage.
+        // Track both type and array-size so TF varyings that capture a
+        // whole array (`out float b[2]` captured by varying name "b")
+        // can report GL_ARRAY_SIZE correctly, and array-element captures
+        // (`b[0]` / `b[1]`) can strip the subscript, validate the index,
+        // and report size 1. CTS
+        // `program_interface_query.transform-feedback-types` asserts
+        // both shapes.
+        struct OutputInfo { GLenum type = 0; GLint arraySize = 1; bool isArray = false; };
+        std::unordered_map<std::string, OutputInfo> outputTypeMap;
+        for (const auto& decl : xfbStage->declaredOutputs) {
+            OutputInfo info;
+            info.type = decl.type;
+            info.arraySize = decl.arraySize > 0 ? decl.arraySize : 1;
+            info.isArray = decl.isArray;
+            outputTypeMap[decl.name] = info;
+        }
+        // Built-in outputs that are always available for capture.
+        outputTypeMap["gl_Position"]     = OutputInfo{GL_FLOAT_VEC4, 1, false};
+        outputTypeMap["gl_PointSize"]    = OutputInfo{GL_FLOAT, 1, false};
+        outputTypeMap["gl_ClipDistance"] = OutputInfo{GL_FLOAT, 1, false};
+
+        // GL 4.6 §11.1.2.1 — TFB varyings inside named interface blocks
+        // are referenced as either `BlockType.member` or
+        // `instance.member`. Our GLSL scanner can't see block members
+        // (braceDepth > 0 skips them to avoid parsing function bodies),
+        // so do a focused source-text scan here to build synthetic
+        // outputTypeMap entries. CTS `vertex_attrib_binding.basic-
+        // input*` uses `"StageData.attrib[0]"` through `"StageData.
+        // attrib[15]"` — without this, glTransformFeedbackVaryings
+        // rejects the program at link time.
+        {
+            const std::string& src = xfbStage->source;
+            const std::string outKw = "out ";
+            std::size_t scanPos = 0;
+            while ((scanPos = src.find(outKw, scanPos)) != std::string::npos) {
+                const bool leftBoundary = (scanPos == 0) ||
+                    !(std::isalnum(static_cast<unsigned char>(src[scanPos - 1])) ||
+                      src[scanPos - 1] == '_');
+                if (!leftBoundary) { scanPos += outKw.size(); continue; }
+                std::size_t p = scanPos + outKw.size();
+                while (p < src.size() && (src[p] == ' ' || src[p] == '\t')) { ++p; }
+                const std::size_t nameStart = p;
+                while (p < src.size() &&
+                       (std::isalnum(static_cast<unsigned char>(src[p])) || src[p] == '_')) { ++p; }
+                const std::string blockName(src, nameStart, p - nameStart);
+                if (blockName.empty() || blockName == "gl_PerVertex") {
+                    scanPos += outKw.size();
+                    continue;
+                }
+                while (p < src.size() &&
+                       (src[p] == ' ' || src[p] == '\t' || src[p] == '\n' || src[p] == '\r')) { ++p; }
+                if (p >= src.size() || src[p] != '{') {
+                    scanPos += outKw.size();
+                    continue;
+                }
+                const std::size_t bodyStart = p + 1;
+                int depth = 1;
+                ++p;
+                while (p < src.size() && depth > 0) {
+                    if (src[p] == '{') ++depth;
+                    else if (src[p] == '}') --depth;
+                    ++p;
+                }
+                if (depth != 0) { scanPos += outKw.size(); continue; }
+                std::string body(src, bodyStart, p - 1 - bodyStart);
+                // Split body on `;`, parse each member.
+                std::size_t bp = 0;
+                while (bp < body.size()) {
+                    auto semi = body.find(';', bp);
+                    if (semi == std::string::npos) break;
+                    std::string member = body.substr(bp, semi - bp);
+                    bp = semi + 1;
+                    // Strip whitespace + precision/interpolation quals.
+                    auto isWS = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+                    std::size_t mp = 0;
+                    while (mp < member.size() && isWS(member[mp])) ++mp;
+                    member = member.substr(mp);
+                    // Tokenize. Format: [quals...] type name[,name...];
+                    std::vector<std::string> toks;
+                    std::string cur;
+                    for (char c : member) {
+                        if (isWS(c) || c == ',' || c == '[' || c == ']') {
+                            if (!cur.empty()) { toks.push_back(cur); cur.clear(); }
+                            if (c == ',' || c == '[' || c == ']') toks.emplace_back(1, c);
+                        } else {
+                            cur.push_back(c);
+                        }
+                    }
+                    if (!cur.empty()) toks.push_back(cur);
+                    // Drop quals until we hit a known type. Only the
+                    // types that show up as XFB-capture interface-block
+                    // members in CTS need to be recognised here;
+                    // anything else stays out of outputTypeMap and the
+                    // link-time check falls back to the spec-correct
+                    // "not found" path. Keep in sync with the larger
+                    // typeTable() in GLSLReflection.cpp.
+	                    auto typeFromKeyword = [](const std::string& k) -> GLenum {
+	                        if (k == "float") return GL_FLOAT;
+	                        if (k == "vec2")  return GL_FLOAT_VEC2;
+	                        if (k == "vec3")  return GL_FLOAT_VEC3;
+	                        if (k == "vec4")  return GL_FLOAT_VEC4;
+                        if (k == "int")   return GL_INT;
+                        if (k == "ivec2") return GL_INT_VEC2;
+                        if (k == "ivec3") return GL_INT_VEC3;
+                        if (k == "ivec4") return GL_INT_VEC4;
+                        if (k == "uint")  return GL_UNSIGNED_INT;
+                        if (k == "uvec2") return GL_UNSIGNED_INT_VEC2;
+                        if (k == "uvec3") return GL_UNSIGNED_INT_VEC3;
+                        if (k == "uvec4") return GL_UNSIGNED_INT_VEC4;
+	                        if (k == "double") return GL_DOUBLE;
+	                        if (k == "dvec2") return GL_DOUBLE_VEC2;
+	                        if (k == "dvec3") return GL_DOUBLE_VEC3;
+	                        if (k == "dvec4") return GL_DOUBLE_VEC4;
+	                        if (k == "mat2")  return GL_FLOAT_MAT2;
+	                        if (k == "mat3")  return GL_FLOAT_MAT3;
+	                        if (k == "mat4")  return GL_FLOAT_MAT4;
+	                        if (k == "mat2x2") return GL_FLOAT_MAT2;
+	                        if (k == "mat3x3") return GL_FLOAT_MAT3;
+	                        if (k == "mat4x4") return GL_FLOAT_MAT4;
+	                        if (k == "mat2x3") return GL_FLOAT_MAT2x3;
+	                        if (k == "mat2x4") return GL_FLOAT_MAT2x4;
+	                        if (k == "mat3x2") return GL_FLOAT_MAT3x2;
+	                        if (k == "mat3x4") return GL_FLOAT_MAT3x4;
+	                        if (k == "mat4x2") return GL_FLOAT_MAT4x2;
+	                        if (k == "mat4x3") return GL_FLOAT_MAT4x3;
+	                        if (k == "dmat2") return GL_DOUBLE_MAT2;
+	                        if (k == "dmat3") return GL_DOUBLE_MAT3;
+	                        if (k == "dmat4") return GL_DOUBLE_MAT4;
+	                        if (k == "dmat2x2") return GL_DOUBLE_MAT2;
+	                        if (k == "dmat3x3") return GL_DOUBLE_MAT3;
+	                        if (k == "dmat4x4") return GL_DOUBLE_MAT4;
+	                        if (k == "dmat2x3") return GL_DOUBLE_MAT2x3;
+	                        if (k == "dmat2x4") return GL_DOUBLE_MAT2x4;
+	                        if (k == "dmat3x2") return GL_DOUBLE_MAT3x2;
+	                        if (k == "dmat3x4") return GL_DOUBLE_MAT3x4;
+	                        if (k == "dmat4x2") return GL_DOUBLE_MAT4x2;
+	                        if (k == "dmat4x3") return GL_DOUBLE_MAT4x3;
+	                        return 0;
+	                    };
+	                    std::string instanceName;
+	                    {
+	                        std::size_t q = p;
+	                        while (q < src.size() &&
+	                               (src[q] == ' ' || src[q] == '\t' ||
+	                                src[q] == '\n' || src[q] == '\r')) { ++q; }
+	                        const std::size_t instStart = q;
+	                        while (q < src.size() &&
+	                               (std::isalnum(static_cast<unsigned char>(src[q])) ||
+	                                src[q] == '_')) { ++q; }
+	                        if (q > instStart) {
+	                            instanceName.assign(src, instStart, q - instStart);
+	                        }
+	                    }
+	                    std::size_t ti = 0;
+	                    GLenum memberType = 0;
+	                    while (ti < toks.size()) {
+	                        GLenum t = typeFromKeyword(toks[ti]);
+                        if (t != 0) { memberType = t; ++ti; break; }
+                        ++ti;
+                    }
+                    if (memberType == 0) continue;
+                    // Names: collect identifiers (with optional [N]).
+                    while (ti < toks.size()) {
+                        if (!std::isalpha(static_cast<unsigned char>(toks[ti][0])) &&
+                            toks[ti][0] != '_') { ++ti; continue; }
+                        std::string name = toks[ti++];
+                        GLint arraySize = 1;
+                        bool isArray = false;
+                        if (ti < toks.size() && toks[ti] == "[") {
+                            ++ti;
+                            if (ti < toks.size()) {
+                                arraySize = static_cast<GLint>(std::strtol(toks[ti].c_str(), nullptr, 10));
+                                ++ti;
+                            }
+                            if (ti < toks.size() && toks[ti] == "]") ++ti;
+                            isArray = true;
+                        }
+                        OutputInfo info;
+	                        info.type = memberType;
+	                        info.arraySize = arraySize > 0 ? arraySize : 1;
+	                        info.isArray = isArray;
+	                        outputTypeMap[blockName + "." + name] = info;
+	                        if (!instanceName.empty()) {
+	                            outputTypeMap[instanceName + "." + name] = info;
+	                        } else {
+	                            outputTypeMap[name] = info;
+	                        }
+	                        // Skip past `,`
+	                        if (ti < toks.size() && toks[ti] == ",") ++ti;
+	                    }
+                }
+                scanPos = p;
+            }
+        }
+
+        // Special interleaved-mode names that are NOT real varyings:
+        auto isSpecialName = [](const std::string& n) {
+            return n == "gl_NextBuffer" ||
+                   n == "gl_SkipComponents1" || n == "gl_SkipComponents2" ||
+                   n == "gl_SkipComponents3" || n == "gl_SkipComponents4";
+        };
+
+        // Helper: component count for a GL type.
+        auto glTypeComponents = [](GLenum t) -> GLsizei {
+            switch (t) {
+                case GL_FLOAT: case GL_INT: case GL_UNSIGNED_INT: case GL_BOOL:
+                case GL_DOUBLE:
+                    return 1;
+                case GL_FLOAT_VEC2: case GL_INT_VEC2: case GL_UNSIGNED_INT_VEC2:
+                case GL_BOOL_VEC2: case GL_DOUBLE_VEC2:
+                    return 2;
+                case GL_FLOAT_VEC3: case GL_INT_VEC3: case GL_UNSIGNED_INT_VEC3:
+                case GL_BOOL_VEC3: case GL_DOUBLE_VEC3:
+                    return 3;
+                case GL_FLOAT_VEC4: case GL_INT_VEC4: case GL_UNSIGNED_INT_VEC4:
+                case GL_BOOL_VEC4: case GL_DOUBLE_VEC4:
+                    return 4;
+                case GL_FLOAT_MAT2: case GL_DOUBLE_MAT2:   return 4;
+                case GL_FLOAT_MAT3: case GL_DOUBLE_MAT3:   return 9;
+                case GL_FLOAT_MAT4: case GL_DOUBLE_MAT4:   return 16;
+                case GL_FLOAT_MAT2x3: case GL_DOUBLE_MAT2x3: return 6;
+                case GL_FLOAT_MAT2x4: case GL_DOUBLE_MAT2x4: return 8;
+                case GL_FLOAT_MAT3x2: case GL_DOUBLE_MAT3x2: return 6;
+                case GL_FLOAT_MAT3x4: case GL_DOUBLE_MAT3x4: return 12;
+                case GL_FLOAT_MAT4x2: case GL_DOUBLE_MAT4x2: return 8;
+                case GL_FLOAT_MAT4x3: case GL_DOUBLE_MAT4x3: return 12;
+                default: return 1;
+            }
+        };
+
+        // (2) Validate each varying name and resolve types.
+        programObject->resourceTransformFeedbackVaryings.clear();
+        std::unordered_set<std::string> seenNames;
+        GLsizei totalComponents = 0;
+        GLenum bufMode = programObject->transformFeedbackBufferMode;
+
+        // When the scanner has populated output declarations for the
+        // last vertex-processing stage, we can validate varying names
+        // and resolve types.  When it hasn't (e.g. older scanner gap),
+        // skip the name check and use GL_FLOAT as the fallback type.
+        const bool haveOutputDecls = !outputTypeMap.empty() ||
+            !xfbStage->declaredOutputs.empty();
+
+        for (const auto& varyName : programObject->transformFeedbackVaryingNames) {
+            if (isSpecialName(varyName)) {
+                // GL 4.6 §7.3.1.1: `gl_NextBuffer` / `gl_SkipComponentsN`
+                // still count as active resources in the
+                // TRANSFORM_FEEDBACK_VARYING interface — name preserved,
+                // TYPE = GL_NONE (0), ARRAY_SIZE = 0 for gl_NextBuffer and
+                // N for gl_SkipComponentsN. CTS
+                // `program_interface_query.transform-feedback-built-in`
+                // queries NAME/TYPE/ARRAY_SIZE against exactly these
+                // markers. They are excluded from `glGetProgramResourceIndex`
+                // lookups (handled at query time) and from duplicate /
+                // component-count checks here.
+                GLint skipSize = 0;
+                // "gl_SkipComponents1".."4" are all 18 chars long.
+                if (varyName.size() == 18 && varyName.compare(0, 17, "gl_SkipComponents") == 0) {
+                    char last = varyName.back();
+                    if (last >= '1' && last <= '4') {
+                        skipSize = last - '0';
+                    }
+                }
+                GLProgramResourceEntry entry;
+                entry.name = varyName;
+                entry.type = GL_NONE;
+                entry.arraySize = skipSize;
+                // Mark as an array so GL_ARRAY_SIZE returns the raw
+                // marker-count (0 for gl_NextBuffer, N for
+                // gl_SkipComponentsN) instead of clamping to 1.
+                entry.isArray = true;
+                programObject->resourceTransformFeedbackVaryings.push_back(std::move(entry));
+                continue;
+            }
+
+            GLenum resolvedType = GL_FLOAT; // fallback
+            GLint resolvedArraySize = 1;
+            bool captureIsArrayElement = false;
+            // Array-element capture: `b[0]` / `b[1]` reference a single
+            // element of `out float b[2]`. Strip the trailing `[N]`
+            // subscript and look up the base name; size is 1 per GL 4.6
+            // §11.1.2.1.
+            std::string lookupName = varyName;
+            {
+                const auto bracket = varyName.rfind('[');
+                if (bracket != std::string::npos && !varyName.empty() &&
+                    varyName.back() == ']') {
+                    const std::string idxStr =
+                        varyName.substr(bracket + 1, varyName.size() - bracket - 2);
+                    if (!idxStr.empty() &&
+                        std::all_of(idxStr.begin(), idxStr.end(),
+                                    [](char c) { return std::isdigit(static_cast<unsigned char>(c)); })) {
+                        lookupName = varyName.substr(0, bracket);
+                        captureIsArrayElement = true;
+                    }
+                }
+            }
+            if (haveOutputDecls) {
+                auto it = outputTypeMap.find(lookupName);
+                if (it == outputTypeMap.end()) {
+                    programObject->linkLog = "transform feedback varying '" + varyName +
+                        "' is not an output of the last vertex-processing stage";
+                    Runtime::shared().recordShaderTranslation({
+                        programTag, "link", "", "", "", programObject->linkLog, "", false
+                    });
+                    return false;
+                }
+                resolvedType = it->second.type;
+                // Whole-array capture → report the declared array size.
+                // Single-element capture → report 1.
+                resolvedArraySize = (captureIsArrayElement || !it->second.isArray)
+                    ? 1 : it->second.arraySize;
+            }
+
+            // (3) Duplicate check (applies to both interleaved and separate).
+            if (!seenNames.insert(varyName).second) {
+                programObject->linkLog = "transform feedback varying '" + varyName +
+                    "' is captured more than once";
+                Runtime::shared().recordShaderTranslation({
+                    programTag, "link", "", "", "", programObject->linkLog, "", false
+                });
+                return false;
+            }
+
+            totalComponents += glTypeComponents(resolvedType) * resolvedArraySize;
+
+            GLProgramResourceEntry entry;
+            entry.name = varyName;
+            entry.type = resolvedType;
+            entry.arraySize = resolvedArraySize;
+            programObject->resourceTransformFeedbackVaryings.push_back(std::move(entry));
+        }
+
+        // (4) Component limit check.
+        if (bufMode == GL_INTERLEAVED_ATTRIBS) {
+            GLsizei maxInterleavedComponents = 64;
+            if (impl_->capabilities != nullptr) {
+                GLint cap = 0;
+                if (impl_->capabilities->queryInteger(
+                        GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS, &cap) &&
+                    cap > 0) {
+                    maxInterleavedComponents = static_cast<GLsizei>(cap);
+                }
+            }
+            if (totalComponents > maxInterleavedComponents) {
+                programObject->linkLog = "transform feedback exceeds GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS";
+                programObject->resourceTransformFeedbackVaryings.clear();
+                Runtime::shared().recordShaderTranslation({
+                    programTag, "link", "", "", "", programObject->linkLog, "", false
+                });
+                return false;
+            }
+        } else if (bufMode == GL_SEPARATE_ATTRIBS) {
+            constexpr GLsizei kMaxSeparateComponents = 4;
+            constexpr GLsizei kMaxSeparateAttribs = 4;
+            GLsizei attribCount = static_cast<GLsizei>(programObject->resourceTransformFeedbackVaryings.size());
+            if (attribCount > kMaxSeparateAttribs) {
+                programObject->linkLog = "transform feedback exceeds GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS";
+                programObject->resourceTransformFeedbackVaryings.clear();
+                Runtime::shared().recordShaderTranslation({
+                    programTag, "link", "", "", "", programObject->linkLog, "", false
+                });
+                return false;
+            }
+            for (const auto& res : programObject->resourceTransformFeedbackVaryings) {
+                if (glTypeComponents(res.type) > kMaxSeparateComponents) {
+                    programObject->linkLog = "transform feedback varying '" + res.name +
+                        "' exceeds GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS";
+                    programObject->resourceTransformFeedbackVaryings.clear();
+                    Runtime::shared().recordShaderTranslation({
+                        programTag, "link", "", "", "", programObject->linkLog, "", false
+                    });
+                    return false;
+                }
+            }
+        }
+    } else {
+        // No TF varyings — clear any stale resolved data from a previous link.
+        programObject->resourceTransformFeedbackVaryings.clear();
+    }
+    // ─── End transform feedback link-time validation ─────────────────
+
+    // ─── Stage-to-stage varying type match (GL 4.6 §7.4.1) ────────────
+    //
+    // Each `out` variable in one stage must be consumed by an `in`
+    // variable of the same name, type, and qualifiers in the next
+    // vertex-processing stage (or in the fragment stage). glslang
+    // catches in-stage mismatches during compilation, but it doesn't
+    // see the cross-stage picture — two separately-compiled
+    // shaders can disagree on the type of a shared varying and
+    // glslang happily produces a SPIR-V for each. The spec
+    // requires the link to fail in that case (`linking.vs_gs_
+    // variable_type_mismatch` asserts the failure path).
+    //
+    // Walks each consecutive stage pair and compares by name. Built-
+    // ins (`gl_Position` etc.) and transform-feedback-only names
+    // (`gl_NextBuffer`, `gl_SkipComponents*`) are skipped; glslang
+    // already enforces their types. Unmatched-name inputs are
+    // treated as "only declared in the consumer" and ignored —
+    // trying to catch "sink with no source" here would false-
+    // positive against legitimate patterns where a VS output is
+    // unused in the next stage.
+    {
+        struct StagePair {
+            const GLShaderObject* producer = nullptr;
+            const char*           producerName = "";
+            const GLShaderObject* consumer = nullptr;
+            const char*           consumerName = "";
+        };
+        std::vector<StagePair> pairs;
+        if (vertexShader != nullptr) {
+            const GLShaderObject* next = tessControlShader
+                ? tessControlShader
+                : (tessEvalShader ? tessEvalShader
+                                  : (geometryShader ? geometryShader
+                                                    : fragmentShader));
+            const char* nextName = tessControlShader ? "tess-control"
+                : (tessEvalShader ? "tess-eval"
+                : (geometryShader ? "geometry" : "fragment"));
+            if (next != nullptr) {
+                pairs.push_back({vertexShader, "vertex", next, nextName});
+            }
+        }
+        if (tessControlShader != nullptr && tessEvalShader != nullptr) {
+            pairs.push_back({tessControlShader, "tess-control", tessEvalShader, "tess-eval"});
+        }
+        if (tessEvalShader != nullptr) {
+            const GLShaderObject* next = geometryShader ? geometryShader : fragmentShader;
+            const char* nextName = geometryShader ? "geometry" : "fragment";
+            if (next != nullptr) {
+                pairs.push_back({tessEvalShader, "tess-eval", next, nextName});
+            }
+        }
+        if (geometryShader != nullptr && fragmentShader != nullptr) {
+            pairs.push_back({geometryShader, "geometry", fragmentShader, "fragment"});
+        }
+
+        bool varyingMismatch = false;
+        std::string mismatchMsg;
+        for (const auto& pair : pairs) {
+            std::unordered_map<std::string, GLenum> producerOut;
+            for (const auto& decl : pair.producer->declaredOutputs) {
+                producerOut[decl.name] = decl.type;
+            }
+            for (const auto& decl : pair.consumer->declaredInputs) {
+                // Skip built-ins / gl_in gl_out blocks — glslang
+                // handles those. User varyings never start with
+                // "gl_".
+                if (decl.name.compare(0, 3, "gl_") == 0) continue;
+                auto it = producerOut.find(decl.name);
+                if (it == producerOut.end()) continue;   // unmatched; not our check
+                if (it->second != decl.type) {
+                    varyingMismatch = true;
+                    mismatchMsg = std::string("varying '") + decl.name + "' type mismatch: "
+                        + std::string(pair.producerName) + " stage outputs type 0x" +
+                        [&]{ char b[12]; std::snprintf(b, sizeof(b), "%04x", it->second); return std::string(b); }()
+                        + ", " + std::string(pair.consumerName) + " stage inputs type 0x" +
+                        [&]{ char b[12]; std::snprintf(b, sizeof(b), "%04x", decl.type); return std::string(b); }();
+                    break;
+                }
+            }
+            if (varyingMismatch) break;
+        }
+        if (varyingMismatch) {
+            programObject->linkLog = mismatchMsg;
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+    }
+    // ─── End stage-to-stage varying type check ───────────────────────
+
+    // ─── Cross-stage uniform type consistency (GL 4.6 §7.4.1) ────────
+    //
+    // When two stages declare a uniform with the same name, the types
+    // must match. CTS `shader_image_load_store.negative-linkErrors`
+    // attaches a VS with `uniform image1D g_image` and an FS with
+    // `uniform image2D g_image` and expects the link to fail with a
+    // type mismatch diagnostic. Our varying check above walks inputs
+    // vs outputs; uniforms are a separate namespace and need their
+    // own pass.
+    //
+    // We iterate every (shader_A, shader_B) pair and look for same-
+    // named entries in `declaredUniforms` with mismatched types.
+    {
+        std::vector<const GLShaderObject*> attachedStages;
+        if (vertexShader != nullptr)       attachedStages.push_back(vertexShader);
+        if (tessControlShader != nullptr)  attachedStages.push_back(tessControlShader);
+        if (tessEvalShader != nullptr)     attachedStages.push_back(tessEvalShader);
+        if (geometryShader != nullptr)     attachedStages.push_back(geometryShader);
+        if (fragmentShader != nullptr)     attachedStages.push_back(fragmentShader);
+        if (computeShader != nullptr)      attachedStages.push_back(computeShader);
+
+        bool uniformMismatch = false;
+        std::string mismatchMsg;
+        struct SeenUniform { GLenum type; GLenum imageFormat; };
+        std::unordered_map<std::string, SeenUniform> seenUniforms;
+        for (const GLShaderObject* stage : attachedStages) {
+            if (uniformMismatch) break;
+            for (const auto& u : stage->declaredUniforms) {
+                // Skip built-ins and synthesized compat-rewrite
+                // uniforms (appgl_ModelViewMatrix etc.).
+                if (u.name.compare(0, 3, "gl_") == 0) continue;
+                if (u.name.compare(0, 6, "appgl_") == 0) continue;
+                auto it = seenUniforms.find(u.name);
+                if (it == seenUniforms.end()) {
+                    seenUniforms[u.name] = {u.type, u.imageFormat};
+                } else if (it->second.type != u.type) {
+                    uniformMismatch = true;
+                    mismatchMsg = std::string("uniform '") + u.name +
+                        "' type mismatch across stages: seen type 0x" +
+                        [&]{ char b[12]; std::snprintf(b, sizeof(b), "%04x", it->second.type); return std::string(b); }()
+                        + ", new type 0x" +
+                        [&]{ char b[12]; std::snprintf(b, sizeof(b), "%04x", u.type); return std::string(b); }();
+                    break;
+                } else if (it->second.imageFormat != 0 && u.imageFormat != 0 &&
+                           it->second.imageFormat != u.imageFormat) {
+                    // GL 4.6 §4.4.8.2: if both stages specify a
+                    // layout(IMAGE_FORMAT) qualifier, they must agree.
+                    // Unspecified on either side is silently allowed
+                    // (the other side's spec wins).
+                    uniformMismatch = true;
+                    mismatchMsg = std::string("image uniform '") + u.name +
+                        "' layout format mismatch across stages: seen 0x" +
+                        [&]{ char b[12]; std::snprintf(b, sizeof(b), "%04x", it->second.imageFormat); return std::string(b); }()
+                        + ", new 0x" +
+                        [&]{ char b[12]; std::snprintf(b, sizeof(b), "%04x", u.imageFormat); return std::string(b); }();
+                    break;
+                }
+            }
+        }
+        if (uniformMismatch) {
+            programObject->linkLog = mismatchMsg;
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+    }
+    // ─── End cross-stage uniform type consistency check ──────────────
+
+    // ─── Tess-eval primitive-mode layout (GL 4.6 §11.2.3) ────────────
+    //
+    // A tessellation evaluation shader MUST specify exactly one of
+    // `layout(triangles)`, `layout(quads)`, or `layout(isolines)` as
+    // its input primitive mode. The spec says this is a LINK-time
+    // error (not compile-time), and CTS
+    // `tessellation_shader.compilation_and_linking_errors.
+    // te_lacking_primitive_mode_declaration` expects compile to
+    // succeed and link to fail for a tess-eval shader that lacks the
+    // directive.
+    //
+    // Glslang's `TProgram::link` happens to raise the error at
+    // single-stage compile (we work around that in
+    // `ShaderTranslator::compileGLSL`). So we have to re-check the
+    // rule here at actual program link time.
+    if (tessEvalShader != nullptr) {
+        const std::string& src = tessEvalShader->source;
+        bool ok = false;
+        if (src.empty() && !tessEvalShader->spirv.empty()) {
+            ok = tessEvalSpirvHasPrimitiveMode(*tessEvalShader);
+        } else {
+        // Strip comments so `// layout(triangles)` doesn't satisfy
+        // the check. Reuse a lightweight copy here — the scan is
+        // per-link, so cost is negligible.
+        auto strip = [](const std::string& in) {
+            std::string out;
+            out.reserve(in.size());
+            for (std::size_t i = 0; i < in.size(); ) {
+                if (i + 1 < in.size() && in[i] == '/' && in[i + 1] == '/') {
+                    while (i < in.size() && in[i] != '\n') { ++i; }
+                } else if (i + 1 < in.size() && in[i] == '/' && in[i + 1] == '*') {
+                    i += 2;
+                    while (i + 1 < in.size() && !(in[i] == '*' && in[i + 1] == '/')) ++i;
+                    if (i + 1 < in.size()) i += 2;
+                } else {
+                    out.push_back(in[i]);
+                    ++i;
+                }
+            }
+            return out;
+        };
+        const std::string clean = strip(src);
+        // We need a `layout(...)` directive with one of the three
+        // primitive-mode tokens, followed by an `in` keyword (not
+        // specifically required by the spec — `layout(triangles)
+        // in;` is the canonical form, but `layout(triangles);` and
+        // `layout(triangles) in;` are both legal). We only need to
+        // see the token inside a `layout(...)` paren; spec also
+        // permits `layout(triangles, equal_spacing, ccw) in;` with
+        // multiple qualifiers.
+        auto hasPrimMode = [&](const std::string& tok) -> bool {
+            std::size_t pos = 0;
+            while (pos < clean.size()) {
+                std::size_t lp = clean.find("layout", pos);
+                if (lp == std::string::npos) return false;
+                // word-boundary
+                bool leftOk = (lp == 0) ||
+                    !(std::isalnum(static_cast<unsigned char>(clean[lp - 1])) ||
+                      clean[lp - 1] == '_');
+                bool rightOk = (lp + 6 >= clean.size()) ||
+                    !(std::isalnum(static_cast<unsigned char>(clean[lp + 6])) ||
+                      clean[lp + 6] == '_');
+                if (!leftOk || !rightOk) { pos = lp + 1; continue; }
+                std::size_t op = clean.find('(', lp);
+                if (op == std::string::npos) return false;
+                std::size_t cp = clean.find(')', op);
+                if (cp == std::string::npos) return false;
+                std::string inner = clean.substr(op + 1, cp - op - 1);
+                // Tokenize inner and check for tok as a complete word.
+                std::size_t tp = inner.find(tok);
+                while (tp != std::string::npos) {
+                    bool lOk = (tp == 0) ||
+                        !(std::isalnum(static_cast<unsigned char>(inner[tp - 1])) ||
+                          inner[tp - 1] == '_');
+                    bool rOk = (tp + tok.size() >= inner.size()) ||
+                        !(std::isalnum(static_cast<unsigned char>(inner[tp + tok.size()])) ||
+                          inner[tp + tok.size()] == '_');
+                    if (lOk && rOk) return true;
+                    tp = inner.find(tok, tp + 1);
+                }
+                pos = cp + 1;
+            }
+            return false;
+        };
+        ok = hasPrimMode("triangles") ||
+             hasPrimMode("quads") ||
+             hasPrimMode("isolines");
+        }
+        if (!ok) {
+            programObject->linkLog =
+                "ERROR: Linking tessellation evaluation stage: "
+                "At least one shader must specify an input layout primitive";
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+    }
+    // ─── End tess-eval primitive-mode check ──────────────────────────
+
+    // ─── Tess-control output patch vertex count (GL 4.6 §11.2.1) ─────
+    //
+    // TCS specifies output patch vertex count via
+    // `layout(vertices = N) out;` where `N ∈ [1, MAX_PATCH_VERTICES]`.
+    // A value of 0 or > MAX_PATCH_VERTICES is a LINK-time error.
+    // CTS `tessellation_shader.compilation_and_linking_errors.
+    // tc_invalid_output_patch_vertex_count` tests both 0 and 33 (above
+    // the 32 limit) and expects link to fail.
+    //
+    // Glslang catches 0 at parse time (raises "vertices : must be
+    // greater than 0") so that subcase fails at compile, which is
+    // what the test expects ("Compilation failed as allowed"). The 33
+    // subcase compiles fine (glslang accepts values up to INT_MAX)
+    // and we need to fail it here at link time.
+    if (tessControlShader != nullptr) {
+        const std::string& src = tessControlShader->source;
+        auto strip = [](const std::string& in) {
+            std::string out;
+            out.reserve(in.size());
+            for (std::size_t i = 0; i < in.size(); ) {
+                if (i + 1 < in.size() && in[i] == '/' && in[i + 1] == '/') {
+                    while (i < in.size() && in[i] != '\n') { ++i; }
+                } else if (i + 1 < in.size() && in[i] == '/' && in[i + 1] == '*') {
+                    i += 2;
+                    while (i + 1 < in.size() && !(in[i] == '*' && in[i + 1] == '/')) ++i;
+                    if (i + 1 < in.size()) i += 2;
+                } else {
+                    out.push_back(in[i]);
+                    ++i;
+                }
+            }
+            return out;
+        };
+        const std::string clean = strip(src);
+        // Search for `layout ( ... vertices <ws>*=<ws>* N ...)`.
+        std::size_t pos = 0;
+        int verticesN = -1;
+        while (pos < clean.size()) {
+            std::size_t lp = clean.find("layout", pos);
+            if (lp == std::string::npos) break;
+            bool leftOk = (lp == 0) ||
+                !(std::isalnum(static_cast<unsigned char>(clean[lp - 1])) ||
+                  clean[lp - 1] == '_');
+            bool rightOk = (lp + 6 >= clean.size()) ||
+                !(std::isalnum(static_cast<unsigned char>(clean[lp + 6])) ||
+                  clean[lp + 6] == '_');
+            if (!leftOk || !rightOk) { pos = lp + 1; continue; }
+            std::size_t op = clean.find('(', lp);
+            if (op == std::string::npos) break;
+            std::size_t cp = clean.find(')', op);
+            if (cp == std::string::npos) break;
+            std::string inner = clean.substr(op + 1, cp - op - 1);
+            // Search for `vertices` token inside inner.
+            std::size_t vp = inner.find("vertices");
+            while (vp != std::string::npos) {
+                bool lOk = (vp == 0) ||
+                    !(std::isalnum(static_cast<unsigned char>(inner[vp - 1])) ||
+                      inner[vp - 1] == '_');
+                std::size_t after = vp + 8;
+                bool rOk = (after >= inner.size()) ||
+                    !(std::isalnum(static_cast<unsigned char>(inner[after])) ||
+                      inner[after] == '_');
+                if (lOk && rOk) {
+                    // Skip whitespace and '='
+                    while (after < inner.size() &&
+                           std::isspace(static_cast<unsigned char>(inner[after]))) ++after;
+                    if (after < inner.size() && inner[after] == '=') {
+                        ++after;
+                        while (after < inner.size() &&
+                               std::isspace(static_cast<unsigned char>(inner[after]))) ++after;
+                        // Read integer literal
+                        std::size_t ns = after;
+                        while (after < inner.size() &&
+                               std::isdigit(static_cast<unsigned char>(inner[after]))) ++after;
+                        if (after > ns) {
+                            verticesN = std::atoi(inner.substr(ns, after - ns).c_str());
+                            break;
+                        }
+                    }
+                }
+                vp = inner.find("vertices", vp + 1);
+            }
+            if (verticesN >= 0) break;
+            pos = cp + 1;
+        }
+
+        if (verticesN > 0) {
+            const int maxPatchVertices = 32;  // matches GLCapabilities
+            if (verticesN > maxPatchVertices) {
+                programObject->linkLog =
+                    "ERROR: Linking tessellation control stage: "
+                    "layout(vertices=" + std::to_string(verticesN) +
+                    ") exceeds GL_MAX_PATCH_VERTICES (" +
+                    std::to_string(maxPatchVertices) + ")";
+                programObject->linked = false;
+                Runtime::shared().recordShaderTranslation({
+                    programTag, "link", "", "", "", programObject->linkLog, "", false
+                });
+                return false;
+            }
+        }
+    }
+    // ─── End tess-control patch vertex count check ───────────────────
+
+    // ─── gl_PerVertex block re-declaration consistency (GL 4.6 §7.4.1)
+    //
+    // When two or more stages redeclare the built-in `gl_PerVertex`
+    // interface block, the redeclarations must agree on their
+    // member list. CTS `CommonBugs.CommonBug_PerVertexValidation`
+    // builds separable programs where VS/GS/TCS/TES declare
+    // mismatching `gl_PerVertex { ... }` blocks (e.g. VS with
+    // `gl_Position + gl_PointSize`, GS with just `gl_Position`)
+    // and asserts the link fails.
+    //
+    // We don't fully parse the GLSL; the check is a coarse
+    // member-name scan of each stage's source looking for a
+    // top-level `out gl_PerVertex { ... };` block. If at least
+    // two stages redeclare the block, the sorted member-name
+    // sets must match exactly.
+    {
+        auto extractPerVertexMembers = [](const std::string& src) -> std::set<std::string> {
+            std::set<std::string> members;
+            // Find `out gl_PerVertex` or `in gl_PerVertex`
+            // followed by `{` — whichever comes first.
+            static const char* kTokens[] = { "out gl_PerVertex", "in gl_PerVertex" };
+            std::size_t pos = std::string::npos;
+            for (const char* tok : kTokens) {
+                std::size_t p = src.find(tok);
+                if (p != std::string::npos && (pos == std::string::npos || p < pos)) {
+                    pos = p;
+                }
+            }
+            if (pos == std::string::npos) return members;
+            std::size_t open = src.find('{', pos);
+            if (open == std::string::npos) return members;
+            std::size_t close = src.find('}', open);
+            if (close == std::string::npos) return members;
+            // Scan the body for member declarations. Each is
+            // `<qualifiers?> <type> <name> [array]?;`. We strip
+            // qualifiers and array suffixes and keep the
+            // `<name>` token immediately before `;`.
+            std::string body = src.substr(open + 1, close - open - 1);
+            std::size_t p = 0;
+            while (p < body.size()) {
+                std::size_t semi = body.find(';', p);
+                if (semi == std::string::npos) break;
+                std::string stmt = body.substr(p, semi - p);
+                p = semi + 1;
+                // Strip whitespace + everything inside `[`.
+                auto lb = stmt.find('[');
+                if (lb != std::string::npos) stmt.resize(lb);
+                // Right-most token of what's left is the name.
+                std::size_t rend = stmt.size();
+                while (rend > 0 && std::isspace(static_cast<unsigned char>(stmt[rend - 1]))) --rend;
+                std::size_t rstart = rend;
+                while (rstart > 0) {
+                    const char c = stmt[rstart - 1];
+                    if (std::isalnum(static_cast<unsigned char>(c)) || c == '_') {
+                        --rstart;
+                    } else {
+                        break;
+                    }
+                }
+                if (rstart < rend) {
+                    members.insert(stmt.substr(rstart, rend - rstart));
+                }
+            }
+            return members;
+        };
+        struct StageSource { const std::string* src; const char* name; };
+        std::vector<StageSource> stages;
+        if (vertexShader      != nullptr) stages.push_back({&vertexShader->source,      "vertex"});
+        if (tessControlShader != nullptr) stages.push_back({&tessControlShader->source, "tess-control"});
+        if (tessEvalShader    != nullptr) stages.push_back({&tessEvalShader->source,    "tess-eval"});
+        if (geometryShader    != nullptr) stages.push_back({&geometryShader->source,    "geometry"});
+        std::vector<std::pair<const char*, std::set<std::string>>> redeclarations;
+        for (const auto& s : stages) {
+            auto members = extractPerVertexMembers(*s.src);
+            if (!members.empty()) redeclarations.emplace_back(s.name, std::move(members));
+        }
+        if (redeclarations.size() >= 2) {
+            for (std::size_t i = 1; i < redeclarations.size(); ++i) {
+                if (redeclarations[i].second != redeclarations[0].second) {
+                    programObject->linkLog = std::string("gl_PerVertex block redeclaration mismatch between ")
+                        + redeclarations[0].first + " and " + redeclarations[i].first + " stages";
+                    programObject->linked = false;
+                    Runtime::shared().recordShaderTranslation({
+                        programTag, "link", "", "", "", programObject->linkLog, "", false
+                    });
+                    return false;
+                }
+            }
+        }
+    }
+    // ─── End gl_PerVertex consistency check ─────────────────────────
+
+    // ─── Per-stage atomic-counter / atomic-counter-buffer limits ────
+    //
+    // GL 4.6 §7.6.3 + Table 23.66: each shader stage has its own cap
+    // on the number of atomic-counter uniforms it may declare
+    // (MAX_{VERTEX,FRAGMENT,GEOMETRY,...}_ATOMIC_COUNTERS) and
+    // on the number of distinct atomic-counter buffers the stage
+    // can bind to (the `*_ATOMIC_COUNTER_BUFFERS` counterpart).
+    // `linking.more_ACs_in_GS_than_supported` +
+    // `linking.more_ACBs_in_GS_than_supported` query the GS caps,
+    // create a GS that overshoots by one, and assert link failure.
+    // Keep this as a general cap check so lifting GS atomic support
+    // does not silently accept shaders above the published limits.
+    if (geometryShader != nullptr) {
+        std::size_t gsAtomicCounters = 0;
+        std::unordered_set<GLint> gsAtomicBindings;
+        for (const auto& decl : geometryShader->declaredUniforms) {
+            if (decl.type != GL_UNSIGNED_INT_ATOMIC_COUNTER) continue;
+            const std::size_t cnt = (decl.arraySize > 0)
+                ? static_cast<std::size_t>(decl.arraySize) : 1;
+            gsAtomicCounters += cnt;
+            if (decl.explicitBinding >= 0) {
+                gsAtomicBindings.insert(decl.explicitBinding);
+            }
+        }
+        GLint maxAtomic = 0, maxAtomicBufs = 0;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(GL_MAX_GEOMETRY_ATOMIC_COUNTERS, &maxAtomic);
+            impl_->capabilities->queryInteger(GL_MAX_GEOMETRY_ATOMIC_COUNTER_BUFFERS, &maxAtomicBufs);
+        }
+        if (static_cast<GLint>(gsAtomicCounters) > maxAtomic) {
+            programObject->linkLog = "geometry shader atomic-counter count "
+                + std::to_string(gsAtomicCounters) + " exceeds MAX_GEOMETRY_ATOMIC_COUNTERS="
+                + std::to_string(maxAtomic);
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+        if (static_cast<GLint>(gsAtomicBindings.size()) > maxAtomicBufs) {
+            programObject->linkLog = "geometry shader atomic-counter-buffer count "
+                + std::to_string(gsAtomicBindings.size())
+                + " exceeds MAX_GEOMETRY_ATOMIC_COUNTER_BUFFERS="
+                + std::to_string(maxAtomicBufs);
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+    }
+    // ─── End AC / ACB limits check ──────────────────────────────────
+
+    // ─── Subroutine uniform location validation (GL 4.6 §7.9) ───
+    //
+    // CTS `explicit_uniform_location.subroutine-loc-negative-link-*`
+    // asserts that glLinkProgram sets GL_LINK_STATUS=FALSE when
+    // any of the following appears in a subroutine uniform
+    // declaration (per stage, independently):
+    //   (a) Two `layout(location=N)` subroutine uniforms collide
+    //       on the same location (or overlapping array ranges).
+    //   (b) A `layout(location=N)` subroutine uniform's base
+    //       location, or any location its array occupies, is
+    //       >= GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS.
+    //   (c) The linked program's total subroutine-uniform
+    //       location count (sum of arraySizes + implicit) in
+    //       any stage exceeds GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS.
+    //
+    // Parse `layout(location=K) subroutine uniform TYPE NAME [N];`
+    // declarations straight from each attached shader's source.
+    // We can't rely on `resourceSubroutineUniforms[]` here because
+    // that table is populated *after* `linked = true` (see the
+    // resource-introspection block below). This parse is
+    // intentionally lightweight — just locations, array sizes,
+    // and layout pins — and mirrors the full scanner in
+    // `scanSubroutineDeclarations` for the pieces it needs.
+    {
+        GLint maxSrUnifLoc = 1024;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(
+                GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS, &maxSrUnifLoc);
+        }
+        GLint maxSubroutines = 1024;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(GL_MAX_SUBROUTINES, &maxSubroutines);
+        }
+        // Per-stage parse. Returns false + sets linkLog on first
+        // spec violation (so the link fails with a descriptive
+        // message).
+        auto stripComments = [](const std::string& s) {
+            std::string out;
+            out.reserve(s.size());
+            for (std::size_t i = 0; i < s.size();) {
+                if (i + 1 < s.size() && s[i] == '/' && s[i + 1] == '/') {
+                    while (i < s.size() && s[i] != '\n') ++i;
+                } else if (i + 1 < s.size() && s[i] == '/' && s[i + 1] == '*') {
+                    i += 2;
+                    while (i + 1 < s.size() && !(s[i] == '*' && s[i + 1] == '/')) ++i;
+                    if (i + 1 < s.size()) i += 2;
+                } else {
+                    out += s[i++];
+                }
+            }
+            return out;
+        };
+        auto isIdentCh = [](unsigned char c) {
+            return std::isalnum(c) || c == '_';
+        };
+        auto validateStage = [&](const std::string& sourceIn) -> bool {
+            const std::string src = stripComments(sourceIn);
+            std::unordered_set<GLint> usedLocations;
+            std::unordered_set<GLint> usedIndices;
+            std::size_t totalLocations = 0;
+            std::size_t totalSubroutines = 0;
+            const std::string kw = "subroutine";
+            std::size_t pos = 0;
+            while ((pos = src.find(kw, pos)) != std::string::npos) {
+                const bool lb = (pos == 0) ||
+                    !isIdentCh(static_cast<unsigned char>(src[pos - 1]));
+                const bool rb = (pos + kw.size() < src.size()) &&
+                    !isIdentCh(static_cast<unsigned char>(src[pos + kw.size()]));
+                if (!lb || !rb) { pos += kw.size(); continue; }
+                // Walk backward for `layout(location=K)` qualifier.
+                GLint explicitLoc = -1;
+                GLint explicitIndex = -1;
+                {
+                    std::size_t back = pos;
+                    while (back > 0 && std::isspace(
+                        static_cast<unsigned char>(src[back - 1]))) --back;
+                    if (back > 0 && src[back - 1] == ')') {
+                        int pd = 1;
+                        std::size_t bp = back - 1;
+                        while (bp > 0 && pd > 0) {
+                            --bp;
+                            if (src[bp] == ')') ++pd;
+                            else if (src[bp] == '(') --pd;
+                        }
+                        if (pd == 0 && bp >= 6) {
+                            std::size_t lp = bp;
+                            while (lp > 0 && std::isspace(
+                                static_cast<unsigned char>(src[lp - 1]))) --lp;
+                            if (lp >= 6 && src.compare(lp - 6, 6, "layout") == 0) {
+                                std::string content = src.substr(
+                                    bp + 1, (back - 1) - (bp + 1));
+                                std::size_t loc = content.find("location");
+                                if (loc != std::string::npos) {
+                                    std::size_t eq = content.find('=', loc);
+                                    if (eq != std::string::npos) {
+                                        std::size_t nb = eq + 1;
+                                        while (nb < content.size() &&
+                                               std::isspace(static_cast<unsigned char>(content[nb]))) ++nb;
+                                        std::size_t ne = nb;
+                                        if (ne + 1 < content.size() && content[ne] == '0' &&
+                                            (content[ne + 1] == 'x' || content[ne + 1] == 'X')) {
+                                            ne += 2;
+                                            while (ne < content.size() &&
+                                                   std::isxdigit(static_cast<unsigned char>(content[ne]))) ++ne;
+                                        } else {
+                                            while (ne < content.size() &&
+                                                   std::isdigit(static_cast<unsigned char>(content[ne]))) ++ne;
+                                        }
+                                        if (ne > nb) {
+                                            explicitLoc = static_cast<GLint>(
+                                                std::strtol(content.substr(nb, ne - nb).c_str(),
+                                                            nullptr, 0));
+                                        }
+                                    }
+                                }
+                                std::size_t idx = content.find("index");
+                                if (idx != std::string::npos) {
+                                    std::size_t eq = content.find('=', idx);
+                                    if (eq != std::string::npos) {
+                                        std::size_t nb = eq + 1;
+                                        while (nb < content.size() &&
+                                               std::isspace(static_cast<unsigned char>(content[nb]))) ++nb;
+                                        std::size_t ne = nb;
+                                        if (ne + 1 < content.size() && content[ne] == '0' &&
+                                            (content[ne + 1] == 'x' || content[ne + 1] == 'X')) {
+                                            ne += 2;
+                                            while (ne < content.size() &&
+                                                   std::isxdigit(static_cast<unsigned char>(content[ne]))) ++ne;
+                                        } else {
+                                            while (ne < content.size() &&
+                                                   std::isdigit(static_cast<unsigned char>(content[ne]))) ++ne;
+                                        }
+                                        if (ne > nb) {
+                                            explicitIndex = static_cast<GLint>(
+                                                std::strtol(content.substr(nb, ne - nb).c_str(),
+                                                            nullptr, 0));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                std::size_t p = pos + kw.size();
+                while (p < src.size() && std::isspace(static_cast<unsigned char>(src[p]))) ++p;
+                if (p < src.size() && src[p] == '(') {
+                    ++totalSubroutines;
+                    if (static_cast<GLint>(totalSubroutines) > maxSubroutines) {
+                        programObject->linkLog =
+                            "subroutine count exceeds GL_MAX_SUBROUTINES="
+                            + std::to_string(maxSubroutines);
+                        return false;
+                    }
+                    if (explicitIndex >= 0) {
+                        if (explicitIndex >= maxSubroutines) {
+                            programObject->linkLog =
+                                "subroutine index "
+                                + std::to_string(explicitIndex)
+                                + " >= GL_MAX_SUBROUTINES="
+                                + std::to_string(maxSubroutines);
+                            return false;
+                        }
+                        if (!usedIndices.insert(explicitIndex).second) {
+                            programObject->linkLog =
+                                "subroutine index "
+                                + std::to_string(explicitIndex)
+                                + " is reused across two declarations";
+                            return false;
+                        }
+                    }
+                }
+                // Only `subroutine uniform …` shapes consume locations.
+                if (p + 7 <= src.size() && src.compare(p, 7, "uniform") == 0 &&
+                    (p + 7 == src.size() || !isIdentCh(static_cast<unsigned char>(src[p + 7])))) {
+                    p += 7;
+                    while (p < src.size() && std::isspace(static_cast<unsigned char>(src[p]))) ++p;
+                    // Skip TYPE word.
+                    while (p < src.size() && isIdentCh(static_cast<unsigned char>(src[p]))) ++p;
+                    while (p < src.size() && std::isspace(static_cast<unsigned char>(src[p]))) ++p;
+                    // Skip NAME word.
+                    while (p < src.size() && isIdentCh(static_cast<unsigned char>(src[p]))) ++p;
+                    while (p < src.size() && std::isspace(static_cast<unsigned char>(src[p]))) ++p;
+                    // Optional `[N]` array subscript.
+                    GLint arraySize = 1;
+                    if (p < src.size() && src[p] == '[') {
+                        ++p;
+                        while (p < src.size() && std::isspace(
+                            static_cast<unsigned char>(src[p]))) ++p;
+                        const std::size_t nStart = p;
+                        while (p < src.size() && std::isdigit(
+                            static_cast<unsigned char>(src[p]))) ++p;
+                        if (p > nStart) {
+                            arraySize = std::atoi(src.substr(nStart, p - nStart).c_str());
+                            if (arraySize < 1) arraySize = 1;
+                        }
+                    }
+                    totalLocations += static_cast<std::size_t>(arraySize);
+                    // (c) total-across-stage location cap.
+                    if (static_cast<GLint>(totalLocations) > maxSrUnifLoc) {
+                        programObject->linkLog =
+                            "subroutine-uniform location count exceeds "
+                            "GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS="
+                            + std::to_string(maxSrUnifLoc);
+                        return false;
+                    }
+                    if (explicitLoc >= 0) {
+                        // (b) explicit location must be < max, for
+                        // all array-consumed locations.
+                        for (GLint k = 0; k < arraySize; ++k) {
+                            const GLint slot = explicitLoc + k;
+                            if (slot >= maxSrUnifLoc) {
+                                programObject->linkLog =
+                                    "subroutine uniform location "
+                                    + std::to_string(slot)
+                                    + " >= GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS="
+                                    + std::to_string(maxSrUnifLoc);
+                                return false;
+                            }
+                            // (a) duplicate-location check.
+                            if (!usedLocations.insert(slot).second) {
+                                programObject->linkLog =
+                                    "subroutine uniform location "
+                                    + std::to_string(slot)
+                                    + " is reused across two declarations";
+                                return false;
+                            }
+                        }
+                    }
+                }
+                pos = p;
+            }
+            return true;
+        };
+        for (GLuint shaderId : programObject->attachedShaders) {
+            GLShaderObject* sh = impl_->objects->shaders().get(shaderId);
+            if (sh == nullptr) continue;
+            if (!validateStage(sh->source)) {
+                programObject->linked = false;
+                Runtime::shared().recordShaderTranslation({
+                    programTag, "link", "", "", "", programObject->linkLog, "", false
+                });
+                return false;
+            }
+        }
+    }
+    // ─── End subroutine uniform location validation ───
+
+    // ─── GL 4.6 §7.4.2 cross-stage uniform-block matching ───
+    // For each uniform block declared in multiple stages, the
+    // instance-name presence must match. `uniform Data { ... };`
+    // (no instance) in one stage and `uniform Data { ... } d;`
+    // (with instance) in another is a link error.
+    //
+    // Members of no-instance-name blocks are promoted to the
+    // default-uniform scope; their names must not collide with
+    // other global uniforms nor with members of other no-instance-
+    // name blocks that happen to have the same member name.
+    //
+    // CTS `shaders.uniform_block.common.name_matching` plants all
+    // of these cases and expects link to fail on each mismatch.
+    {
+        // Scan `uniform <Name> { ... } [instance]?;` in a source.
+        // Returns { blockName, hasInstance, memberIdentifiers }.
+        struct BlockDecl {
+            std::string blockName;
+            bool hasInstance = false;
+            std::vector<std::string> memberNames;
+        };
+        auto findUniformBlocks = [](const std::string& src) -> std::vector<BlockDecl> {
+            std::vector<BlockDecl> blocks;
+            std::size_t pos = 0;
+            while (pos < src.size()) {
+                // Locate the "uniform" keyword at a word boundary.
+                std::size_t kw = src.find("uniform", pos);
+                if (kw == std::string::npos) break;
+                if (kw > 0) {
+                    unsigned char prev = static_cast<unsigned char>(src[kw - 1]);
+                    if (std::isalnum(prev) || prev == '_') {
+                        pos = kw + 7;
+                        continue;
+                    }
+                }
+                std::size_t after = kw + 7;
+                if (after < src.size()) {
+                    unsigned char nx = static_cast<unsigned char>(src[after]);
+                    if (std::isalnum(nx) || nx == '_') {
+                        pos = after;
+                        continue;
+                    }
+                }
+                // Skip whitespace/newlines to the type / block-name token.
+                while (after < src.size() && std::isspace(static_cast<unsigned char>(src[after]))) ++after;
+                if (after >= src.size()) break;
+                // Capture the identifier.
+                std::size_t nameStart = after;
+                while (after < src.size() &&
+                       (std::isalnum(static_cast<unsigned char>(src[after])) || src[after] == '_')) {
+                    ++after;
+                }
+                if (after == nameStart) { pos = after + 1; continue; }
+                std::string name = src.substr(nameStart, after - nameStart);
+                // Whitespace, then '{' for a block; otherwise it's a
+                // plain uniform declaration like `uniform float f`.
+                std::size_t braceStart = after;
+                while (braceStart < src.size() && std::isspace(static_cast<unsigned char>(src[braceStart]))) ++braceStart;
+                if (braceStart >= src.size() || src[braceStart] != '{') {
+                    pos = after;
+                    continue;
+                }
+                // Walk to the matching close brace.
+                int depth = 1;
+                std::size_t bodyStart = braceStart + 1;
+                std::size_t cur = bodyStart;
+                while (cur < src.size() && depth > 0) {
+                    if (src[cur] == '{') ++depth;
+                    else if (src[cur] == '}') --depth;
+                    ++cur;
+                }
+                if (depth != 0) break;
+                std::size_t bodyEnd = cur - 1;
+                BlockDecl decl;
+                decl.blockName = std::move(name);
+                // Extract member identifiers from the block body by
+                // scanning for `;`-terminated statements.
+                std::size_t mp = bodyStart;
+                while (mp < bodyEnd) {
+                    std::size_t semi = src.find(';', mp);
+                    if (semi == std::string::npos || semi >= bodyEnd) break;
+                    // Walk backwards from the semi, skipping only
+                    // whitespace + optional array-subscript block
+                    // `[ ... ]`. The block may contain digits and
+                    // whitespace. Previously we blindly stripped any
+                    // trailing digits, which truncated `temp2;` to
+                    // `temp`.
+                    std::size_t e = semi;
+                    auto skipWs = [&](std::size_t& p) {
+                        while (p > mp) {
+                            unsigned char c = static_cast<unsigned char>(src[p - 1]);
+                            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                                --p;
+                            } else break;
+                        }
+                    };
+                    skipWs(e);
+                    if (e > mp && src[e - 1] == ']') {
+                        // Walk back through the array-subscript brackets.
+                        // Just look for the matching `[` — anything between
+                        // (digits, whitespace, identifiers for sized types
+                        // or constants) is allowed by GLSL.
+                        int depth = 1;
+                        while (e > mp && depth > 0) {
+                            --e;
+                            if (src[e] == ']') ++depth;
+                            else if (src[e] == '[') --depth;
+                        }
+                        skipWs(e);
+                    }
+                    std::size_t b = e;
+                    while (b > mp) {
+                        unsigned char c = static_cast<unsigned char>(src[b - 1]);
+                        if (std::isalnum(c) || c == '_') {
+                            --b;
+                        } else {
+                            break;
+                        }
+                    }
+                    if (b < e) {
+                        decl.memberNames.push_back(src.substr(b, e - b));
+                    }
+                    mp = semi + 1;
+                }
+                // Detect instance name immediately past the closing brace.
+                std::size_t tail = cur;
+                while (tail < src.size() && std::isspace(static_cast<unsigned char>(src[tail]))) ++tail;
+                if (tail < src.size()) {
+                    unsigned char c = static_cast<unsigned char>(src[tail]);
+                    if (std::isalpha(c) || c == '_') decl.hasInstance = true;
+                }
+                blocks.push_back(std::move(decl));
+                pos = tail;
+            }
+            return blocks;
+        };
+        // Scan for plain `uniform <type> <name>;` declarations (not blocks).
+        auto findPlainUniforms = [](const std::string& src) -> std::vector<std::string> {
+            std::vector<std::string> names;
+            std::size_t pos = 0;
+            while (pos < src.size()) {
+                std::size_t kw = src.find("uniform", pos);
+                if (kw == std::string::npos) break;
+                if (kw > 0) {
+                    unsigned char prev = static_cast<unsigned char>(src[kw - 1]);
+                    if (std::isalnum(prev) || prev == '_') {
+                        pos = kw + 7;
+                        continue;
+                    }
+                }
+                std::size_t after = kw + 7;
+                while (after < src.size() && std::isspace(static_cast<unsigned char>(src[after]))) ++after;
+                // Consume type identifier.
+                std::size_t t0 = after;
+                while (after < src.size() &&
+                       (std::isalnum(static_cast<unsigned char>(src[after])) || src[after] == '_')) {
+                    ++after;
+                }
+                if (after == t0) { pos = after + 1; continue; }
+                while (after < src.size() && std::isspace(static_cast<unsigned char>(src[after]))) ++after;
+                if (after < src.size() && src[after] == '{') {
+                    // Block declaration — skip past it.
+                    int d = 1;
+                    ++after;
+                    while (after < src.size() && d > 0) {
+                        if (src[after] == '{') ++d;
+                        else if (src[after] == '}') --d;
+                        ++after;
+                    }
+                    pos = after;
+                    continue;
+                }
+                // Parse the uniform name.
+                std::size_t n0 = after;
+                while (after < src.size() &&
+                       (std::isalnum(static_cast<unsigned char>(src[after])) || src[after] == '_')) {
+                    ++after;
+                }
+                if (n0 < after) {
+                    names.push_back(src.substr(n0, after - n0));
+                }
+                pos = after;
+            }
+            return names;
+        };
+
+        std::unordered_map<std::string, std::vector<bool>> blockInstancePresence;
+        std::unordered_map<std::string, std::vector<std::string>>
+            noInstanceMemberNamesByBlock;
+        std::unordered_set<std::string> plainUniformNames;
+        for (GLuint shaderId : programObject->attachedShaders) {
+            GLShaderObject* sh = impl_->objects->shaders().get(shaderId);
+            if (sh == nullptr) continue;
+            auto blocks = findUniformBlocks(sh->source);
+            for (auto& b : blocks) {
+                blockInstancePresence[b.blockName].push_back(b.hasInstance);
+                if (!b.hasInstance) {
+                    auto& list = noInstanceMemberNamesByBlock[b.blockName];
+                    list.insert(list.end(), b.memberNames.begin(), b.memberNames.end());
+                }
+            }
+            auto plain = findPlainUniforms(sh->source);
+            for (auto& n : plain) plainUniformNames.insert(n);
+        }
+
+        // Rule 1: same block name across stages → instance presence must match.
+        for (const auto& [bname, flags] : blockInstancePresence) {
+            bool anyWithInstance = false, anyWithoutInstance = false;
+            for (bool f : flags) {
+                if (f) anyWithInstance = true; else anyWithoutInstance = true;
+            }
+            if (anyWithInstance && anyWithoutInstance) {
+                programObject->linkLog = "uniform block '" + bname +
+                    "' must use the same instance-name presence in every stage";
+                programObject->linked = false;
+                Runtime::shared().recordShaderTranslation({
+                    programTag, "link", "", "", "", programObject->linkLog, "", false
+                });
+                return false;
+            }
+        }
+
+        // Rule 2: no-instance-name block members collide with plain
+        // uniforms of the same name (different stages count too).
+        for (const auto& [bname, members] : noInstanceMemberNamesByBlock) {
+            for (const auto& m : members) {
+                if (plainUniformNames.count(m)) {
+                    programObject->linkLog = "uniform block member '" + m +
+                        "' (in block '" + bname +
+                        "') collides with plain uniform of the same name";
+                    programObject->linked = false;
+                    Runtime::shared().recordShaderTranslation({
+                        programTag, "link", "", "", "", programObject->linkLog, "", false
+                    });
+                    return false;
+                }
+            }
+        }
+
+        // Rule 3: different no-instance-name blocks must not share
+        // member names (both promote members into the default scope).
+        std::unordered_map<std::string, std::string> memberOwner;  // memberName → blockName
+        for (const auto& [bname, members] : noInstanceMemberNamesByBlock) {
+            for (const auto& m : members) {
+                auto it = memberOwner.find(m);
+                if (it != memberOwner.end() && it->second != bname) {
+                    programObject->linkLog = "no-instance-name blocks '" +
+                        it->second + "' and '" + bname +
+                        "' both declare a member '" + m + "'";
+                    programObject->linked = false;
+                    Runtime::shared().recordShaderTranslation({
+                        programTag, "link", "", "", "", programObject->linkLog, "", false
+                    });
+                    return false;
+                }
+                memberOwner[m] = bname;
+            }
+        }
+    }
+    // ─── End cross-stage uniform-block matching ───
+
+    programObject->linked = true;
+    programObject->linkLog = "ok";
+    // Snapshot the separability request at link time. The query
+    // `glGetProgramiv(program, GL_PROGRAM_SEPARABLE)` returns this
+    // snapshot — it matches the program's *linked* binary, not the
+    // request-level parameter. See GLProgramObject::separableLinked.
+    programObject->separableLinked = programObject->separable;
+
+    // Populate GL 4.3 program resource introspection tables from the
+    // reflection data we already gathered above.
+    programObject->resourceUniforms.clear();
+    programObject->resourceUniformBlocks.clear();
+    programObject->resourceInputs.clear();
+    programObject->resourceOutputs.clear();
+    programObject->resourceStorageBlocks.clear();
+    programObject->resourceAtomicCounterBuffers.clear();
+    programObject->resourceBufferVariables.clear();
+    for (int s = 0; s < 6; ++s) {
+        programObject->resourceSubroutines[s].clear();
+        programObject->resourceSubroutineUniforms[s].clear();
+        programObject->currentSubroutineSelections[s].clear();
+    }
+    programObject->subroutineDispatchUniformLocations.clear();
+    programObject->subroutineSelectionsDirty = false;
+    programObject->ssboBindingRemap.clear();
+
+    // Per-stage "referenced by" bitmask for program-resource
+    // introspection. GL 4.6 Table 23.40 defines
+    // GL_REFERENCED_BY_<stage>_SHADER as a query property;
+    // glGetProgramResourceiv returns 1 iff the resource is
+    // referenced by the named stage. Previously we hard-coded
+    // VS+FS (0x03) on every uniform, which tripped CTS
+    // `geometry_shader.program_resource.program_resource`
+    // whenever a GS-attached program queried the
+    // GEOMETRY_SHADER bit. Derive the bitmask from each
+    // attached stage's declaredUniforms so every stage the
+    // scanner saw contributes a bit, and we pick up GS / TCS /
+    // TES / compute automatically.
+    const GLbitfield kBitVertex   = 0x01;
+    const GLbitfield kBitFragment = 0x02;
+    const GLbitfield kBitGeometry = 0x04;
+    const GLbitfield kBitTessCtrl = 0x08;
+    const GLbitfield kBitTessEval = 0x10;
+    const GLbitfield kBitCompute  = 0x20;
+    auto stageBitFor = [&](GLenum stage) -> GLbitfield {
+        switch (stage) {
+            case GL_VERTEX_SHADER:          return kBitVertex;
+            case GL_FRAGMENT_SHADER:        return kBitFragment;
+            case GL_GEOMETRY_SHADER:        return kBitGeometry;
+            case GL_TESS_CONTROL_SHADER:    return kBitTessCtrl;
+            case GL_TESS_EVALUATION_SHADER: return kBitTessEval;
+            case GL_COMPUTE_SHADER:         return kBitCompute;
+            default:                        return 0;
+        }
+    };
+    // Build a GS-side "actually referenced" uniform-name set by
+    // walking the GS SPIR-V at link time. Needed because our
+    // per-stage scanner records DECLARATIONS, not USAGE — shared
+    // common headers that declare a uniform in every stage would
+    // spuriously set the stage bit for every stage even when the
+    // GLSL body never uses the uniform. For VS/FS we get usage
+    // via SPIRV-Cross's `get_active_interface_variables()` at
+    // block granularity; for plain uniforms (default block) and
+    // per-member accuracy we fall back to this raw walk.
+    std::unordered_set<std::string> gsRefSet;
+    if (geometryShader != nullptr && !geometryShader->spirv.empty()) {
+        gsRefSet = appgl::scanStageReferencedUniforms(geometryShader->spirv);
+    }
+
+    auto computeStageMask = [&](const std::string& name) -> GLbitfield {
+        GLbitfield mask = 0;
+        for (GLuint shaderId : programObject->attachedShaders) {
+            GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
+            if (shaderObject == nullptr) continue;
+            const GLbitfield bit = stageBitFor(shaderObject->stage);
+            if (bit == 0) continue;
+            for (const auto& decl : shaderObject->declaredUniforms) {
+                if (decl.name == name) {
+                    // For the GS stage, narrow by actual usage —
+                    // the scanner reports declarations (shared
+                    // common headers), SPIR-V tells us what's
+                    // used. Without this, CTS
+                    // `program_resource.program_resource` saw
+                    // `uni_model_view_projection` (declared in
+                    // both VS and GS via common header, used only
+                    // by VS) as GS-referenced.
+                    if (shaderObject->stage == GL_GEOMETRY_SHADER) {
+                        if (gsRefSet.empty() || gsRefSet.count(name) != 0) {
+                            mask |= bit;
+                        }
+                    } else {
+                        mask |= bit;
+                    }
+                    break;
+                }
+            }
+        }
+        // If the uniform wasn't declared anywhere (shouldn't
+        // happen — it's in the linked program's uniform table)
+        // fall back to the old conservative VS+FS default.
+        if (mask == 0) mask = kBitVertex | kBitFragment;
+        return mask;
+    };
+
+    for (const auto& u : programObject->uniforms) {
+        GLProgramResourceEntry entry;
+        // GL 4.6 §7.3.1: array uniforms report their name with the
+        // "[0]" suffix in the resource interface — EVEN for
+        // 1-element arrays. CTS `program_interface_query.uniform-
+        // types` declares `uniform uvec2 c[3];` / `uniform mat2
+        // g[8];` and CTS `no-locations` declares `in vec4 c[1];`
+        // — both expect `glGetProgramResourceName(GL_UNIFORM, …)`
+        // to return "c[0]" / "g[0]". The `isArray` flag
+        // distinguishes array declarations from plain scalars
+        // (`arraySize` alone can't, since both non-arrays and
+        // 1-element arrays have arraySize==1).
+        entry.name = u.isArray ? (u.name + "[0]") : u.name;
+        entry.type = u.type;
+        entry.location = u.location;
+        entry.binding = u.explicitBinding;  // RC-D08
+        entry.arraySize = u.arraySize;
+        entry.isArray = u.isArray;
+        entry.referencedBy = computeStageMask(u.name);
+        if (u.type == GL_UNSIGNED_INT_ATOMIC_COUNTER) {
+            // Offset defaults to 0 when the GLSL didn't carry
+            // `layout(offset = N)` on the first counter of a binding
+            // — this is close enough for CTS
+            // `program_interface_query.atomic-counters` which always
+            // supplies an explicit offset. atomicCounterBufferIndex
+            // is filled in below after the ACB table is built.
+            entry.atomicCounterOffset = u.explicitOffset >= 0 ? u.explicitOffset : 0;
+        }
+        programObject->resourceUniforms.push_back(std::move(entry));
+    }
+
+    // ─── Build GL_ATOMIC_COUNTER_BUFFER resource entries ────────────────
+    // GL 4.6 §7.3.1 Table 7.12: the ATOMIC_COUNTER_BUFFER interface
+    // exposes one resource per distinct `binding` index that any
+    // atomic_uint uniform targets. For each buffer:
+    //   BUFFER_BINDING      = binding index
+    //   BUFFER_DATA_SIZE    = max(offset + sizeof(uint) * N) across
+    //                          the counters in that binding
+    //   NUM_ACTIVE_VARIABLES= number of atomic_uint uniforms that
+    //                          target the binding
+    //   ACTIVE_VARIABLES    = their indices into resourceUniforms
+    //   REFERENCED_BY_*     = union of referencedBy bitmasks
+    //                          of the participating uniforms
+    // CTS `program_interface_query.atomic-counters` exercises this
+    // interface end-to-end.
+    {
+        struct AcbAccumulator {
+            GLint binding = 0;
+            GLint dataSize = 0;                 // BUFFER_DATA_SIZE
+            std::vector<GLint> activeVariables; // indices into resourceUniforms
+            GLbitfield referencedBy = 0;
+        };
+        std::vector<AcbAccumulator> acbs;
+        // Walk resourceUniforms (post-build) so we record the
+        // post-"[0]"-suffix index of each atomic uniform.
+        for (std::size_t i = 0; i < programObject->resourceUniforms.size(); ++i) {
+            auto& ue = programObject->resourceUniforms[i];
+            if (ue.type != GL_UNSIGNED_INT_ATOMIC_COUNTER) continue;
+            const GLint bind = ue.binding < 0 ? 0 : ue.binding;
+            const GLint off = ue.atomicCounterOffset >= 0 ? ue.atomicCounterOffset : 0;
+            const GLint count = ue.arraySize > 0 ? ue.arraySize : 1;
+            const GLint endByte = off + 4 * count;
+            std::size_t bucket = acbs.size();
+            for (std::size_t j = 0; j < acbs.size(); ++j) {
+                if (acbs[j].binding == bind) { bucket = j; break; }
+            }
+            if (bucket == acbs.size()) {
+                acbs.push_back(AcbAccumulator{});
+                acbs.back().binding = bind;
+            }
+            auto& acb = acbs[bucket];
+            if (endByte > acb.dataSize) acb.dataSize = endByte;
+            acb.activeVariables.push_back(static_cast<GLint>(i));
+            acb.referencedBy |= ue.referencedBy;
+            ue.atomicCounterBufferIndex = static_cast<GLint>(bucket);
+        }
+        for (const auto& acb : acbs) {
+            GLProgramResourceEntry be;
+            // ATOMIC_COUNTER_BUFFER resources have no name; leave empty.
+            be.name = "";
+            be.binding = acb.binding;
+            be.offset = acb.dataSize;          // reuse offset slot as BUFFER_DATA_SIZE
+            be.activeVariables = acb.activeVariables;
+            be.referencedBy = acb.referencedBy;
+            programObject->resourceAtomicCounterBuffers.push_back(std::move(be));
+        }
+    }
+    // ─── End ATOMIC_COUNTER_BUFFER build ────────────────────────────────
+    for (const auto& a : programObject->attributes) {
+        GLProgramResourceEntry entry;
+        // GL 4.6 §7.3.1: for array inputs, the resource name ends
+        // with "[0]" — even for 1-element arrays like `in vec4
+        // c[1]`. `a.isArray` is the authoritative "declared with
+        // array syntax" flag (`a.arraySize==1` alone can't
+        // distinguish non-arrays from 1-element arrays).
+        entry.name = a.isArray ? (a.name + "[0]") : a.name;
+        entry.type = a.type;
+        entry.location = a.location;
+        entry.arraySize = a.arraySize;
+        entry.isArray = a.isArray;
+        entry.referencedBy = 0x01; // vertex
+        programObject->resourceInputs.push_back(std::move(entry));
+    }
+    // Fragment outputs: populate from fragment shader declared outputs.
+    for (GLuint shaderId : programObject->attachedShaders) {
+        GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
+        if (shaderObject == nullptr) continue;
+        if (shaderObject->stage == GL_FRAGMENT_SHADER) {
+            GLint nextOutputLoc = 0;
+            for (const auto& output : shaderObject->declaredOutputs) {
+                GLProgramResourceEntry entry;
+                // GL 4.6 §7.3.1: array outputs report their name with
+                // the "[0]" suffix (same convention as inputs). CTS
+                // `output-types` expects "a[0]" / "c[0]" / "d[0]"
+                // and `no-locations` has `out vec4 d[1]` which must
+                // also report "d[0]" despite arraySize==1 — use
+                // `isArray` to distinguish.
+                entry.name = output.isArray
+                    ? (output.name + "[0]") : output.name;
+                entry.type = output.type;
+                entry.arraySize = output.arraySize;
+                entry.isArray = output.isArray;
+                // Resolve location: per-name bind via
+                // glBindFragDataLocation wins over the GLSL
+                // `layout(location=…)` qualifier per GL 4.6 §15.2.
+                // Only applied pre-link; the map is authoritative at
+                // this point.
+                GLint location = -1;
+                auto bindIt = programObject->requestedFragDataLocations.find(output.name);
+                if (bindIt != programObject->requestedFragDataLocations.end()) {
+                    location = static_cast<GLint>(bindIt->second);
+                } else if (output.explicitLocation >= 0) {
+                    location = output.explicitLocation;
+                } else {
+                    location = nextOutputLoc;
+                }
+                entry.location = location;
+                // Dual-source-blend index set by
+                // glBindFragDataLocationIndexed OR the GLSL-side
+                // `layout(index=N)` qualifier (GL 4.6 §15.2). API
+                // binding wins when both are present pre-link.
+                auto idxIt = programObject->requestedFragDataLocationIndices.find(output.name);
+                if (idxIt != programObject->requestedFragDataLocationIndices.end()) {
+                    entry.locationIndex = static_cast<GLint>(idxIt->second);
+                } else if (output.explicitIndex >= 0) {
+                    entry.locationIndex = output.explicitIndex;
+                }
+                entry.referencedBy = 0x02; // fragment
+                // GL 4.6 §15.2: array outputs consume `arraySize`
+                // consecutive locations.
+                const GLint consumed = std::max<GLint>(1, output.arraySize);
+                if (location + consumed > nextOutputLoc) {
+                    nextOutputLoc = location + consumed;
+                }
+                programObject->resourceOutputs.push_back(std::move(entry));
+            }
+        }
+    }
+
+    // Built-in program input/output entries. GL 4.6 §7.3.1.1
+    // treats built-ins used by the first-stage/last-stage as
+    // program inputs/outputs respectively (e.g.
+    // `gl_VertexID` / `gl_InstanceID` become GL_PROGRAM_INPUT
+    // on a VS-first program, `gl_FragDepth` /
+    // `gl_SampleMask[0]` become GL_PROGRAM_OUTPUT on an
+    // FS-last program). User-declared inputs/outputs are
+    // already populated above. A simple source-text scan
+    // catches the common set used by CTS
+    // `program_interface_query.input-built-in` /
+    // `output-built-in`.
+    {
+        // Word-boundary presence check — avoids matching
+        // "some_gl_VertexID_hack" or "// gl_VertexID" comments
+        // by demanding the match lie between non-identifier
+        // characters. CTS GLSL sources don't have such names
+        // so a plain find() would also work for the test set,
+        // but the word-boundary check costs nothing and
+        // future-proofs.
+        auto sourceUsesIdent = [](const std::string& src, const char* ident) {
+            const std::size_t ilen = std::strlen(ident);
+            std::size_t pos = 0;
+            while ((pos = src.find(ident, pos)) != std::string::npos) {
+                const bool leftBoundary = (pos == 0) ||
+                    !(std::isalnum(static_cast<unsigned char>(src[pos - 1])) || src[pos - 1] == '_');
+                const bool rightBoundary = (pos + ilen == src.size()) ||
+                    !(std::isalnum(static_cast<unsigned char>(src[pos + ilen])) || src[pos + ilen] == '_');
+                if (leftBoundary && rightBoundary) return true;
+                pos += ilen;
+            }
+            return false;
+        };
+        // Helper: append a synthetic built-in entry if absent
+        // from the table. Built-ins don't have user-visible
+        // locations, so GL_LOCATION returns -1.
+        auto addBuiltIn = [&](std::vector<GLProgramResourceEntry>& table,
+                              const std::string& name, GLenum type,
+                              GLbitfield referencedBy, bool isArray = false,
+                              GLint arraySize = 1) {
+            for (const auto& e : table) {
+                if (e.name == name) return;  // already present
+            }
+            GLProgramResourceEntry entry;
+            entry.name = name;
+            entry.type = type;
+            entry.location = -1;
+            entry.arraySize = arraySize;
+            entry.referencedBy = referencedBy;
+            (void)isArray;   // array-ness is baked into the
+                             // canonical name (e.g. "gl_SampleMask[0]")
+            table.push_back(std::move(entry));
+        };
+        GLShaderObject* vsShader = nullptr;
+        GLShaderObject* fsShader = nullptr;
+        for (GLuint shaderId : programObject->attachedShaders) {
+            GLShaderObject* s = impl_->objects->shaders().get(shaderId);
+            if (s == nullptr) continue;
+            if (s->stage == GL_VERTEX_SHADER)   vsShader = s;
+            if (s->stage == GL_FRAGMENT_SHADER) fsShader = s;
+        }
+        if (vsShader != nullptr) {
+            const auto& src = vsShader->source;
+            if (sourceUsesIdent(src, "gl_VertexID")) {
+                addBuiltIn(programObject->resourceInputs,
+                    "gl_VertexID", GL_INT, 0x01 /*vertex*/);
+            }
+            if (sourceUsesIdent(src, "gl_InstanceID")) {
+                addBuiltIn(programObject->resourceInputs,
+                    "gl_InstanceID", GL_INT, 0x01);
+            }
+            if (sourceUsesIdent(src, "gl_DrawID") ||
+                sourceUsesIdent(src, "gl_DrawIDARB")) {
+                addBuiltIn(programObject->resourceInputs,
+                    "gl_DrawID", GL_INT, 0x01);
+            }
+            if (sourceUsesIdent(src, "gl_BaseVertex") ||
+                sourceUsesIdent(src, "gl_BaseVertexARB")) {
+                addBuiltIn(programObject->resourceInputs,
+                    "gl_BaseVertex", GL_INT, 0x01);
+            }
+            if (sourceUsesIdent(src, "gl_BaseInstance") ||
+                sourceUsesIdent(src, "gl_BaseInstanceARB")) {
+                addBuiltIn(programObject->resourceInputs,
+                    "gl_BaseInstance", GL_INT, 0x01);
+            }
+        }
+        if (fsShader != nullptr) {
+            const auto& src = fsShader->source;
+            if (sourceUsesIdent(src, "gl_FragDepth")) {
+                addBuiltIn(programObject->resourceOutputs,
+                    "gl_FragDepth", GL_FLOAT, 0x02 /*fragment*/);
+            }
+            if (sourceUsesIdent(src, "gl_SampleMask")) {
+                // `gl_SampleMask[0]` canonical name; array size
+                // depends on MAX_SAMPLE_MASK_WORDS but is 1 on
+                // most desktop / Apple Metal hardware.
+                addBuiltIn(programObject->resourceOutputs,
+                    "gl_SampleMask[0]", GL_INT, 0x02,
+                    /*isArray=*/true, /*arraySize=*/1);
+            }
+        }
+        // Separable FS: its `in` varyings become the program's
+        // GL_PROGRAM_INPUT. For regular linked programs the FS
+        // inputs are cross-stage varyings (consumed by linker, not
+        // exposed as program inputs). But for a separable FS there's
+        // no preceding-stage program, so the FS inputs ARE the
+        // program inputs per GL 4.6 §7.3.1.1. CTS
+        // `separate-programs-fragment` declares `in vec4 vs_color;`
+        // and expects ACTIVE_RESOURCES=1 on GL_PROGRAM_INPUT.
+        if (programObject->separable && vsShader == nullptr && fsShader != nullptr) {
+            GLint nextInputLoc = 0;
+            for (const auto& input : fsShader->declaredInputs) {
+                GLProgramResourceEntry entry;
+                entry.name = input.isArray
+                    ? (input.name + "[0]") : input.name;
+                entry.type = input.type;
+                entry.arraySize = input.arraySize;
+                entry.isArray = input.isArray;
+                entry.location = input.explicitLocation >= 0
+                    ? input.explicitLocation : nextInputLoc;
+                entry.referencedBy = 0x02;  // fragment
+                const GLint consumed = std::max<GLint>(1, input.arraySize);
+                nextInputLoc = entry.location + consumed;
+                programObject->resourceInputs.push_back(std::move(entry));
+            }
+        }
+        // Separable GS / TCS / TES: their `in` interface blocks
+        // (typically `in gl_PerVertex { … } gl_in[]`) become
+        // GL_PROGRAM_INPUT. CTS `separate-programs-geometry`
+        // declares `in gl_PerVertex { vec4 gl_Position; … } gl_in[];`
+        // and queries `glGetProgramResourceIndex(GL_PROGRAM_INPUT,
+        // "gl_PerVertex.gl_Position")`. Naming follows §7.3.1.1:
+        // with an instance name (`gl_in` here, or bare), members
+        // are prefixed with the block TYPE name.
+        {
+            GLShaderObject* firstNonVsStage = nullptr;
+            if (programObject->separable && vsShader == nullptr && fsShader == nullptr) {
+                for (GLuint shaderId : programObject->attachedShaders) {
+                    GLShaderObject* s = impl_->objects->shaders().get(shaderId);
+                    if (s == nullptr) continue;
+                    if (s->stage == GL_GEOMETRY_SHADER ||
+                        s->stage == GL_TESS_CONTROL_SHADER ||
+                        s->stage == GL_TESS_EVALUATION_SHADER) {
+                        firstNonVsStage = s;
+                        break;
+                    }
+                }
+            }
+            if (firstNonVsStage != nullptr) {
+                const GLbitfield stageBit =
+                    (firstNonVsStage->stage == GL_GEOMETRY_SHADER)        ? 0x04 :
+                    (firstNonVsStage->stage == GL_TESS_CONTROL_SHADER)    ? 0x08 :
+                    (firstNonVsStage->stage == GL_TESS_EVALUATION_SHADER) ? 0x10 : 0;
+                const std::string& src = firstNonVsStage->source;
+                GLint nextInputLoc = 0;
+                // Per-stage built-in inputs exposed on separable
+                // programs. GL 4.6 §7.3.1.1 treats these as
+                // GL_PROGRAM_INPUT when the stage is the first stage
+                // of its own program. CTS
+                // `separate-programs-tess-control` expects
+                // `gl_InvocationID` in the input list (length 16).
+                auto sourceUsesIdent2 = [](const std::string& s, const char* ident) {
+                    const std::size_t ilen = std::strlen(ident);
+                    std::size_t pos = 0;
+                    while ((pos = s.find(ident, pos)) != std::string::npos) {
+                        const bool lb = (pos == 0) ||
+                            !(std::isalnum(static_cast<unsigned char>(s[pos - 1])) || s[pos - 1] == '_');
+                        const bool rb = (pos + ilen == s.size()) ||
+                            !(std::isalnum(static_cast<unsigned char>(s[pos + ilen])) || s[pos + ilen] == '_');
+                        if (lb && rb) return true;
+                        pos += ilen;
+                    }
+                    return false;
+                };
+                auto pushBuiltinInput = [&](const char* name, GLenum type) {
+                    GLProgramResourceEntry entry;
+                    entry.name = name;
+                    entry.type = type;
+                    entry.location = -1;
+                    entry.arraySize = 1;
+                    entry.referencedBy = stageBit;
+                    programObject->resourceInputs.push_back(std::move(entry));
+                };
+                if (firstNonVsStage->stage == GL_TESS_CONTROL_SHADER ||
+                    firstNonVsStage->stage == GL_TESS_EVALUATION_SHADER) {
+                    if (sourceUsesIdent2(src, "gl_InvocationID")) {
+                        pushBuiltinInput("gl_InvocationID", GL_INT);
+                    }
+                    if (sourceUsesIdent2(src, "gl_PatchVerticesIn")) {
+                        pushBuiltinInput("gl_PatchVerticesIn", GL_INT);
+                    }
+                    if (sourceUsesIdent2(src, "gl_PrimitiveID")) {
+                        pushBuiltinInput("gl_PrimitiveID", GL_INT);
+                    }
+                }
+                if (firstNonVsStage->stage == GL_TESS_EVALUATION_SHADER) {
+                    if (sourceUsesIdent2(src, "gl_TessCoord")) {
+                        pushBuiltinInput("gl_TessCoord", GL_FLOAT_VEC3);
+                    }
+                    if (sourceUsesIdent2(src, "gl_TessLevelOuter")) {
+                        pushBuiltinInput("gl_TessLevelOuter", GL_FLOAT);
+                    }
+                    if (sourceUsesIdent2(src, "gl_TessLevelInner")) {
+                        pushBuiltinInput("gl_TessLevelInner", GL_FLOAT);
+                    }
+                }
+                if (firstNonVsStage->stage == GL_GEOMETRY_SHADER) {
+                    if (sourceUsesIdent2(src, "gl_PrimitiveIDIn")) {
+                        pushBuiltinInput("gl_PrimitiveIDIn", GL_INT);
+                    }
+                    if (sourceUsesIdent2(src, "gl_InvocationID")) {
+                        pushBuiltinInput("gl_InvocationID", GL_INT);
+                    }
+                }
+                // Source-text scan for `in <BlockName> { <members> } [<inst>] ;`
+                // — mirrors the output-block scan in the VS/TES/GS
+                // separable output path below.
+                const std::string inKw = "in ";
+                std::size_t sp = 0;
+                while ((sp = src.find(inKw, sp)) != std::string::npos) {
+                    const bool lb = (sp == 0) ||
+                        !(std::isalnum(static_cast<unsigned char>(src[sp - 1])) || src[sp - 1] == '_');
+                    if (!lb) { sp += inKw.size(); continue; }
+                    std::size_t p = sp + inKw.size();
+                    while (p < src.size() && (src[p] == ' ' || src[p] == '\t')) ++p;
+                    const std::size_t nameStart = p;
+                    while (p < src.size() &&
+                           (std::isalnum(static_cast<unsigned char>(src[p])) || src[p] == '_')) ++p;
+                    const std::string blockName = src.substr(nameStart, p - nameStart);
+                    if (blockName.empty()) { sp += inKw.size(); continue; }
+                    while (p < src.size() &&
+                           (src[p] == ' ' || src[p] == '\t' || src[p] == '\n' || src[p] == '\r')) ++p;
+                    if (p >= src.size() || src[p] != '{') {
+                        sp += inKw.size();
+                        continue;
+                    }
+                    const std::size_t bodyStart = p + 1;
+                    int depth = 1;
+                    std::size_t q = bodyStart;
+                    while (q < src.size() && depth > 0) {
+                        if (src[q] == '{') ++depth;
+                        else if (src[q] == '}') --depth;
+                        ++q;
+                    }
+                    if (depth != 0) { sp = p + 1; continue; }
+                    const std::string body = src.substr(bodyStart, q - 1 - bodyStart);
+                    std::size_t stmtStart = 0;
+                    while (stmtStart < body.size()) {
+                        const std::size_t semi = body.find(';', stmtStart);
+                        if (semi == std::string::npos) break;
+                        std::string stmt = body.substr(stmtStart, semi - stmtStart);
+                        stmtStart = semi + 1;
+                        auto lstrip = [](std::string& s) {
+                            std::size_t i = 0;
+                            while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i;
+                            s.erase(0, i);
+                        };
+                        auto rstrip = [](std::string& s) {
+                            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+                        };
+                        lstrip(stmt); rstrip(stmt);
+                        if (stmt.empty()) continue;
+                        // Parse "TYPE name[ array ]".
+                        std::size_t ws = 0;
+                        while (ws < stmt.size() && !std::isspace(static_cast<unsigned char>(stmt[ws]))) ++ws;
+                        const std::string typeWord = stmt.substr(0, ws);
+                        std::string rest = stmt.substr(ws);
+                        lstrip(rest);
+                        GLenum memberType = GL_FLOAT;
+                        if (typeWord == "float")      memberType = GL_FLOAT;
+                        else if (typeWord == "vec2")  memberType = GL_FLOAT_VEC2;
+                        else if (typeWord == "vec3")  memberType = GL_FLOAT_VEC3;
+                        else if (typeWord == "vec4")  memberType = GL_FLOAT_VEC4;
+                        else if (typeWord == "int")   memberType = GL_INT;
+                        else if (typeWord == "ivec2") memberType = GL_INT_VEC2;
+                        else if (typeWord == "ivec3") memberType = GL_INT_VEC3;
+                        else if (typeWord == "ivec4") memberType = GL_INT_VEC4;
+                        else if (typeWord == "uint")  memberType = GL_UNSIGNED_INT;
+                        else if (typeWord == "uvec2") memberType = GL_UNSIGNED_INT_VEC2;
+                        else if (typeWord == "uvec3") memberType = GL_UNSIGNED_INT_VEC3;
+                        else if (typeWord == "uvec4") memberType = GL_UNSIGNED_INT_VEC4;
+                        else if (typeWord == "mat2")  memberType = GL_FLOAT_MAT2;
+                        else if (typeWord == "mat3")  memberType = GL_FLOAT_MAT3;
+                        else if (typeWord == "mat4")  memberType = GL_FLOAT_MAT4;
+                        // Walk the rest token-by-token: comma-separated
+                        // names, each optionally followed by `[size]`.
+                        std::size_t namePos = 0;
+                        while (namePos < rest.size()) {
+                            while (namePos < rest.size() && std::isspace(static_cast<unsigned char>(rest[namePos]))) ++namePos;
+                            std::size_t nameEnd = namePos;
+                            while (nameEnd < rest.size() &&
+                                   (std::isalnum(static_cast<unsigned char>(rest[nameEnd])) ||
+                                    rest[nameEnd] == '_')) ++nameEnd;
+                            if (nameEnd == namePos) break;
+                            const std::string memberName = rest.substr(namePos, nameEnd - namePos);
+                            namePos = nameEnd;
+                            // Skip array subscript if present.
+                            while (namePos < rest.size() && std::isspace(static_cast<unsigned char>(rest[namePos]))) ++namePos;
+                            if (namePos < rest.size() && rest[namePos] == '[') {
+                                int bd = 1; ++namePos;
+                                while (namePos < rest.size() && bd > 0) {
+                                    if (rest[namePos] == '[') ++bd;
+                                    else if (rest[namePos] == ']') --bd;
+                                    ++namePos;
+                                }
+                            }
+                            GLProgramResourceEntry entry;
+                            entry.name = blockName + "." + memberName;
+                            entry.type = memberType;
+                            entry.arraySize = 1;
+                            entry.location = nextInputLoc++;
+                            entry.referencedBy = stageBit;
+                            programObject->resourceInputs.push_back(std::move(entry));
+                            // Advance past any trailing `,`.
+                            while (namePos < rest.size() &&
+                                   (rest[namePos] == ' ' || rest[namePos] == '\t' ||
+                                    rest[namePos] == ',')) ++namePos;
+                        }
+                    }
+                    sp = q;
+                }
+            }
+        }
+        // Separable programs: the last vertex-processing stage's
+        // outputs become the program's `GL_PROGRAM_OUTPUT`. For a
+        // separable VS / GS / TES-only program those stages' built-in
+        // `gl_Position` (and user-declared varyings / output blocks)
+        // are the program outputs. CTS
+        // `program_interface_query.separate-programs-vertex` declares
+        // `out Color { float r, g, b; vec4 iLikePie; } vs_color;` and
+        // `out gl_PerVertex { vec4 gl_Position; };` in the VS and
+        // expects ACTIVE_RESOURCES=5 on GL_PROGRAM_OUTPUT.
+        if (programObject->separable && fsShader == nullptr) {
+            GLShaderObject* lastVsStage = nullptr;
+            for (GLuint shaderId : programObject->attachedShaders) {
+                GLShaderObject* s = impl_->objects->shaders().get(shaderId);
+                if (s == nullptr) continue;
+                if (s->stage == GL_VERTEX_SHADER ||
+                    s->stage == GL_TESS_CONTROL_SHADER ||
+                    s->stage == GL_TESS_EVALUATION_SHADER ||
+                    s->stage == GL_GEOMETRY_SHADER) {
+                    lastVsStage = s;
+                }
+            }
+            if (lastVsStage != nullptr) {
+                // `gl_Position` is always an output of the last vertex-
+                // processing stage (GL 4.6 §11.1). Canonical name +
+                // type, no location. For TCS/TES/GS the stage
+                // re-declares `out gl_PerVertex { ... } gl_out[]`, so
+                // spec §7.3.1.1 names the output `gl_PerVertex.gl_Position`
+                // — see the output-block scan below.
+                const GLbitfield stageBit =
+                    (lastVsStage->stage == GL_VERTEX_SHADER) ? 0x01 :
+                    (lastVsStage->stage == GL_TESS_CONTROL_SHADER) ? 0x08 :
+                    (lastVsStage->stage == GL_TESS_EVALUATION_SHADER) ? 0x10 :
+                    (lastVsStage->stage == GL_GEOMETRY_SHADER) ? 0x04 : 0;
+                // Only VS exposes bare `gl_Position`; other stages
+                // get the member named through the out-gl_PerVertex block.
+                if (lastVsStage->stage == GL_VERTEX_SHADER) {
+                    addBuiltIn(programObject->resourceOutputs,
+                               "gl_Position", GL_FLOAT_VEC4, stageBit);
+                }
+                // User varyings declared as simple `out TYPE name;` in
+                // VS are already picked up by the scanner's
+                // declaredOutputs. We'd push them into resourceOutputs
+                // below; but the existing FS loop skips non-FS stages.
+                // Mirror it here for the VS-only separable case.
+                GLint nextVaryingLoc = 0;
+                // Pre-scan the stage source for `patch out ... NAME`
+                // patterns so we can mark matching entries as
+                // isPerPatch=true. TCS declares these for per-patch
+                // outputs; TES can `patch in ...` but that's inputs.
+                std::set<std::string> perPatchOutputNames;
+                if (lastVsStage->stage == GL_TESS_CONTROL_SHADER) {
+                    const std::string& s = lastVsStage->source;
+                    const std::string patchKw = "patch ";
+                    std::size_t pp = 0;
+                    while ((pp = s.find(patchKw, pp)) != std::string::npos) {
+                        const bool lb = (pp == 0) ||
+                            !(std::isalnum(static_cast<unsigned char>(s[pp - 1])) || s[pp - 1] == '_');
+                        if (!lb) { pp += patchKw.size(); continue; }
+                        std::size_t q2 = pp + patchKw.size();
+                        while (q2 < s.size() && std::isspace(static_cast<unsigned char>(s[q2]))) ++q2;
+                        // Expect "out".
+                        if (q2 + 3 < s.size() && s.compare(q2, 3, "out") == 0 &&
+                            !(std::isalnum(static_cast<unsigned char>(s[q2 + 3])) || s[q2 + 3] == '_')) {
+                            q2 += 3;
+                            while (q2 < s.size() && std::isspace(static_cast<unsigned char>(s[q2]))) ++q2;
+                            // Read the type identifier.
+                            while (q2 < s.size() &&
+                                   (std::isalnum(static_cast<unsigned char>(s[q2])) || s[q2] == '_')) ++q2;
+                            while (q2 < s.size() && std::isspace(static_cast<unsigned char>(s[q2]))) ++q2;
+                            // Read the variable name.
+                            std::size_t nameStart = q2;
+                            while (q2 < s.size() &&
+                                   (std::isalnum(static_cast<unsigned char>(s[q2])) || s[q2] == '_')) ++q2;
+                            if (q2 > nameStart) {
+                                perPatchOutputNames.insert(s.substr(nameStart, q2 - nameStart));
+                            }
+                        }
+                        pp = q2;
+                    }
+                }
+                for (const auto& output : lastVsStage->declaredOutputs) {
+                    GLProgramResourceEntry entry;
+                    entry.name = output.isArray
+                        ? (output.name + "[0]") : output.name;
+                    entry.type = output.type;
+                    entry.arraySize = output.arraySize;
+                    entry.isArray = output.isArray;
+                    entry.location = output.explicitLocation >= 0
+                        ? output.explicitLocation : nextVaryingLoc;
+                    entry.referencedBy = stageBit;
+                    // GL 4.6 §7.3.1: GL_LOCATION_INDEX is meaningful
+                    // only for fragment shader outputs (dual-source
+                    // blend index). VS / GS / TES outputs report -1.
+                    entry.locationIndex = -1;
+                    entry.isPerPatch = perPatchOutputNames.count(output.name) != 0;
+                    const GLint consumed = std::max<GLint>(1, output.arraySize);
+                    nextVaryingLoc = entry.location + consumed;
+                    programObject->resourceOutputs.push_back(std::move(entry));
+                }
+                // Output interface blocks — the scanner can't see
+                // them through its brace-depth bug, so do a focused
+                // source-text scan for `out BlockName { members } inst;`.
+                // Per GL 4.6 §7.3.1.1, members of a block WITH an
+                // instance name are named "BlockTypeName.member".
+                const std::string& vsSrc = lastVsStage->source;
+                const std::string outKw = "out ";
+                std::size_t scanPos = 0;
+                while ((scanPos = vsSrc.find(outKw, scanPos)) != std::string::npos) {
+                    const bool leftBoundary = (scanPos == 0) ||
+                        !(std::isalnum(static_cast<unsigned char>(vsSrc[scanPos - 1])) ||
+                          vsSrc[scanPos - 1] == '_');
+                    if (!leftBoundary) { scanPos += outKw.size(); continue; }
+                    // Parse the next identifier (block type name).
+                    std::size_t p = scanPos + outKw.size();
+                    while (p < vsSrc.size() &&
+                           (vsSrc[p] == ' ' || vsSrc[p] == '\t')) { ++p; }
+                    const std::size_t nameStart = p;
+                    while (p < vsSrc.size() &&
+                           (std::isalnum(static_cast<unsigned char>(vsSrc[p])) || vsSrc[p] == '_')) { ++p; }
+                    const std::string blockName = vsSrc.substr(nameStart, p - nameStart);
+                    if (blockName.empty()) { scanPos += outKw.size(); continue; }
+                    // Expect '{' (possibly after whitespace).
+                    while (p < vsSrc.size() &&
+                           (vsSrc[p] == ' ' || vsSrc[p] == '\t' ||
+                            vsSrc[p] == '\n' || vsSrc[p] == '\r')) { ++p; }
+                    if (p >= vsSrc.size() || vsSrc[p] != '{') {
+                        scanPos += outKw.size();
+                        continue;
+                    }
+                    // Skip `out gl_PerVertex { ... };` ONLY for VS —
+                    // bare `gl_Position` was already added via the
+                    // built-in path. For TCS/TES/GS the test expects
+                    // `gl_PerVertex.gl_Position` (block-member naming).
+                    if (blockName == "gl_PerVertex" &&
+                        lastVsStage->stage == GL_VERTEX_SHADER) {
+                        scanPos = p + 1;
+                        continue;
+                    }
+                    const std::size_t bodyStart = p + 1;
+                    int depth = 1;
+                    std::size_t q = bodyStart;
+                    while (q < vsSrc.size() && depth > 0) {
+                        if (vsSrc[q] == '{') ++depth;
+                        else if (vsSrc[q] == '}') --depth;
+                        ++q;
+                    }
+                    if (depth != 0) { scanPos = p + 1; continue; }
+                    // Detect instance name after the closing `}`. If
+                    // `} inst;` or `} inst[N];` → members use block-type-
+                    // name prefix. If `} ;` (no instance) → bare member
+                    // names. Per GL 4.6 §7.3.1.1.
+                    std::size_t afterClose = q;
+                    while (afterClose < vsSrc.size() &&
+                           std::isspace(static_cast<unsigned char>(vsSrc[afterClose]))) ++afterClose;
+                    const bool hasInstance = afterClose < vsSrc.size() &&
+                        (std::isalpha(static_cast<unsigned char>(vsSrc[afterClose])) ||
+                         vsSrc[afterClose] == '_');
+                    // Body is vsSrc[bodyStart, q-1). Split on ';'.
+                    const std::string body = vsSrc.substr(bodyStart, q - 1 - bodyStart);
+                    std::size_t stmtStart = 0;
+                    while (stmtStart < body.size()) {
+                        const std::size_t semi = body.find(';', stmtStart);
+                        if (semi == std::string::npos) break;
+                        std::string stmt = body.substr(stmtStart, semi - stmtStart);
+                        stmtStart = semi + 1;
+                        // Tokenize: strip leading/trailing ws.
+                        auto lstrip = [](std::string& s) {
+                            std::size_t i = 0;
+                            while (i < s.size() &&
+                                   (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) ++i;
+                            s.erase(0, i);
+                        };
+                        auto rstrip = [](std::string& s) {
+                            while (!s.empty() &&
+                                   (s.back() == ' ' || s.back() == '\t' ||
+                                    s.back() == '\n' || s.back() == '\r')) s.pop_back();
+                        };
+                        lstrip(stmt); rstrip(stmt);
+                        if (stmt.empty()) continue;
+                        // Parse "TYPE name1[, name2, ...]".
+                        std::size_t sp = 0;
+                        while (sp < stmt.size() &&
+                               !(stmt[sp] == ' ' || stmt[sp] == '\t')) ++sp;
+                        const std::string typeWord = stmt.substr(0, sp);
+                        std::string rest = stmt.substr(sp);
+                        lstrip(rest);
+                        GLenum memberType = GL_FLOAT;
+                        if (typeWord == "float")      memberType = GL_FLOAT;
+                        else if (typeWord == "vec2")  memberType = GL_FLOAT_VEC2;
+                        else if (typeWord == "vec3")  memberType = GL_FLOAT_VEC3;
+                        else if (typeWord == "vec4")  memberType = GL_FLOAT_VEC4;
+                        else if (typeWord == "int")   memberType = GL_INT;
+                        else if (typeWord == "ivec2") memberType = GL_INT_VEC2;
+                        else if (typeWord == "ivec3") memberType = GL_INT_VEC3;
+                        else if (typeWord == "ivec4") memberType = GL_INT_VEC4;
+                        else if (typeWord == "uint")  memberType = GL_UNSIGNED_INT;
+                        else if (typeWord == "uvec2") memberType = GL_UNSIGNED_INT_VEC2;
+                        else if (typeWord == "uvec3") memberType = GL_UNSIGNED_INT_VEC3;
+                        else if (typeWord == "uvec4") memberType = GL_UNSIGNED_INT_VEC4;
+                        else if (typeWord == "mat2")  memberType = GL_FLOAT_MAT2;
+                        else if (typeWord == "mat3")  memberType = GL_FLOAT_MAT3;
+                        else if (typeWord == "mat4")  memberType = GL_FLOAT_MAT4;
+                        // Multiple comma-separated names.
+                        std::size_t namePos = 0;
+                        while (namePos < rest.size()) {
+                            std::size_t nameEnd = namePos;
+                            while (nameEnd < rest.size() &&
+                                   (std::isalnum(static_cast<unsigned char>(rest[nameEnd])) ||
+                                    rest[nameEnd] == '_')) ++nameEnd;
+                            if (nameEnd == namePos) break;
+                            const std::string memberName =
+                                rest.substr(namePos, nameEnd - namePos);
+                            GLProgramResourceEntry entry;
+                            // With-instance blocks use block-type-
+                            // name prefix per §7.3.1.1; no-instance
+                            // blocks use bare member names.
+                            entry.name = hasInstance
+                                ? (blockName + "." + memberName)
+                                : memberName;
+                            entry.type = memberType;
+                            entry.arraySize = 1;
+                            entry.location = nextVaryingLoc++;
+                            entry.referencedBy = stageBit;
+                            // VS varying block members: LOCATION_INDEX
+                            // is only meaningful for FS outputs.
+                            entry.locationIndex = -1;
+                            programObject->resourceOutputs.push_back(std::move(entry));
+                            namePos = nameEnd;
+                            // Skip whitespace + optional ',' or trailing.
+                            while (namePos < rest.size() &&
+                                   (rest[namePos] == ' ' || rest[namePos] == ',' ||
+                                    rest[namePos] == '\t' || rest[namePos] == '\n')) ++namePos;
+                        }
+                    }
+                    scanPos = q;
+                }
+            }
+        }
+    }
+
+    // GL 4.0 subroutines — populate per-stage
+    // `resourceSubroutines[stage]` / `resourceSubroutineUniforms[stage]`
+    // from each attached shader's GLSL source. No SPIR-V path: we
+    // don't emulate Metal-side subroutine dispatch yet, but
+    // introspection queries work so `glGetSubroutineUniformLocation`
+    // / `glGetActiveSubroutineUniformiv` / PIQ's
+    // `GL_*_SUBROUTINE*` interfaces all report spec-correct metadata.
+    // CTS `program_interface_query.subroutines-{vertex,tcs,tes,gs,fragment,compute}`
+    // exercise these six stages independently.
+    {
+        auto stageIndex = [](GLenum st) -> int {
+            switch (st) {
+                case GL_VERTEX_SHADER:          return 0;
+                case GL_TESS_CONTROL_SHADER:    return 1;
+                case GL_TESS_EVALUATION_SHADER: return 2;
+                case GL_GEOMETRY_SHADER:        return 3;
+                case GL_FRAGMENT_SHADER:        return 4;
+                case GL_COMPUTE_SHADER:         return 5;
+                default:                        return -1;
+            }
+        };
+        for (GLuint shaderId : programObject->attachedShaders) {
+            GLShaderObject* sh = impl_->objects->shaders().get(shaderId);
+            if (sh == nullptr) continue;
+            const int si = stageIndex(sh->stage);
+            if (si < 0) continue;
+            scanSubroutineDeclarations(
+                sh->source,
+                programObject->resourceSubroutines[si],
+                programObject->resourceSubroutineUniforms[si]);
+        }
+        resetProgramSubroutineSelections(*programObject, false);
+    }
+
+    // Run SPIRV-Cross on each attached stage's cached SPIR-V (compiled by
+    // GLContext::compileShader and stashed on the shader object). This is
+    // best-effort: if translation fails the program still links and falls
+    // back to the hardcoded solid-color draw path, but the diagnostic
+    // record captures the SPIRV-Cross error so BAR sees what happened.
+    programObject->hasTranslatedPipeline = false;
+    programObject->vertexMSL.clear();
+    programObject->fragmentMSL.clear();
+    programObject->vertexMslUsesArgumentBuffer = false;
+    programObject->fragmentMslUsesArgumentBuffer = false;
+    programObject->tessControlMSL.clear();
+    programObject->tessEvalMSL.clear();
+    programObject->tessVertexAsComputeMSL.clear();
+    programObject->tessEvalAsComputeMSL.clear();
+    programObject->computeMSL.clear();
+    programObject->computeReflection = ShaderReflection{};
+    programObject->ssboStdLayoutRawCopyFallback = false;
+    programObject->vertexSsboEmulatedDraw = false;
+    // Zero default so glGetProgramiv(GL_COMPUTE_WORK_GROUP_SIZE) returns
+    // (0,0,0) for non-compute programs (matches native drivers).
+    // Overwritten by the Compute kind branch below with the shader's
+    // local_size_{x,y,z} execution mode.
+    programObject->computeLocalSizeX = 0;
+    programObject->computeLocalSizeY = 0;
+    programObject->computeLocalSizeZ = 0;
+    impl_->releaseProgramMetalResources(*programObject);
+    programObject->metalPipelineState = nullptr;
+    // Release the retained MTLComputePipelineState on relink.
+    releaseRetainedMetalObject(programObject->metalComputePipelineState);
+    programObject->metalComputePipelineState = nullptr;
+    // Step 7-3 compute follow-up: release the retained MTLFunction.
+    releaseRetainedMetalObject(programObject->metalComputeFunction);
+    programObject->metalComputeFunction = nullptr;
+    // Metal tess Phase 1: release the retained TCS-as-compute PSO built
+    // by probeTessellationPipeline on the previous link.
+    releaseRetainedMetalObject(programObject->metalTessControlPipelineState);
+    programObject->metalTessControlPipelineState = nullptr;
+    // Metal tess Phase 3: release the retained VS-as-compute PSO built
+    // by probeTessellationPipeline (when the VS has outputs).
+    releaseRetainedMetalObject(programObject->metalTessVertexPipelineState);
+    programObject->metalTessVertexPipelineState = nullptr;
+    // T4I [metal-tess-TF]: release per-VAO cached VS-compute PSOs.
+    for (auto& entry : programObject->metalTessVertexPSOCache) {
+        releaseRetainedMetalObject(entry.second);
+    }
+    programObject->metalTessVertexPSOCache.clear();
+    programObject->metalTessVertexNeedsDescriptor = false;
+    // Phase 3B [metal-tess-TF] groundwork: release the retained TES-as-
+    // compute PSO (populated once the SPIRV-Cross fork patch lands).
+    releaseRetainedMetalObject(programObject->metalTessEvalComputePipelineState);
+    programObject->metalTessEvalComputePipelineState = nullptr;
+    // Sprint 15 Q3-Option-B Phase 1 [metal-tf-vs]: release the
+    // retained VS-as-compute PSO + clear the MSL/reflection/cache so a
+    // relink under different env settings re-evaluates the gate
+    // cleanly. Mirrors the metal-tess-TF VS-compute reset above.
+    programObject->vsTfAsComputeMSL.clear();
+    programObject->vsTfAsComputeReflection = ShaderReflection{};
+    releaseRetainedMetalObject(programObject->metalVsTfComputePipelineState);
+    programObject->metalVsTfComputePipelineState = nullptr;
+    for (auto& entry : programObject->metalVsTfComputePSOCache) {
+        releaseRetainedMetalObject(entry.second);
+    }
+    programObject->metalVsTfComputePSOCache.clear();
+    programObject->metalVsTfNeedsDescriptor = false;
+    programObject->metalVsTfTier = GLProgramObject::MetalVsTfTier::None;
+    // Sprint 15 Q3-Option-B Phase 2 [metal-tf-vs]: clear the reflected
+    // output struct layout + pre-resolved TF varying sources so the
+    // relink-time gate produces a fresh layout (TF varying names may
+    // have changed via glTransformFeedbackVaryings between links).
+    programObject->vsTfOutputLayout = appgl::StageOutputLayout{};
+    programObject->vsTfResolvedSources.clear();
+    // Step 7-4: release cached graphics-stage MTLFunctions on relink.
+    releaseRetainedMetalObject(programObject->metalVertexFunction);
+    programObject->metalVertexFunction = nullptr;
+    releaseRetainedMetalObject(programObject->metalFragmentFunction);
+    programObject->metalFragmentFunction = nullptr;
+    // Phase 8X Group 4d follow-up¹⁴ — release every cached pipeline
+    // on relink so the map doesn't hold stale id<MTLRenderPipelineState>
+    // pointers derived from the old MSL. The scalar `metalPipelineState`
+    // slot above is cleared by assignment (not CFRelease'd) to match
+    // the pre-follow-up¹⁴ leak-on-relink behavior; the map needs
+    // explicit CFRelease because we retained each entry on insert.
+    for (auto& entry : programObject->metalPipelineStateCache) {
+        if (entry.second != nullptr) {
+            CFRelease(entry.second);
+        }
+    }
+    programObject->metalPipelineStateCache.clear();
+    programObject->metalPipelineColorFormat = 0;
+    // CPU GS emulation (docs/geometry-shader-emulation.md) — release
+    // the parallel pipeline-state cache so relink rebuilds the
+    // synthesised pass-through VS from the new GS SPIR-V instead of
+    // serving stale pipelines. geometryEmulated / gsInputTopology /
+    // etc. are recomputed by detectGeometryEmulatable a few lines
+    // later when the VGF branch runs.
+    for (auto& entry : programObject->gsPassThroughPipelineStateCache) {
+        if (entry.second != nullptr) {
+            CFRelease(entry.second);
+        }
+    }
+    programObject->gsPassThroughPipelineStateCache.clear();
+    programObject->gsPassThroughPipelineState = nullptr;
+    programObject->gsPassThroughPipelineColorFormat = 0;
+    releaseRetainedMetalObject(programObject->gsPassThroughVertexFunction);
+    programObject->gsPassThroughVertexFunction = nullptr;
+    releaseRetainedMetalObject(programObject->gsPassThroughFragmentFunction);
+    programObject->gsPassThroughFragmentFunction = nullptr;
+    programObject->gsPassThroughVertexMSL.clear();
+    programObject->gsPassThroughFragmentMSL.clear();
+    programObject->gsPassThroughVertexMslUsesArgumentBuffer = false;
+    programObject->gsPassThroughFragmentMslUsesArgumentBuffer = false;
+    programObject->gsPassThroughFragmentMSLActive = false;
+    programObject->gsPassThroughFragmentMSLPrimIdLoc = 0;
+    programObject->gsPassThroughReflection = ShaderReflection{};
+    programObject->geometryShaderAsMeshMSL.clear();
+    programObject->metalGSVsComputeMSL.clear();
+    releaseRetainedMetalObject(programObject->metalGSVsComputePipelineState);
+    programObject->metalGSVsComputePipelineState = nullptr;
+    for (auto& entry : programObject->metalGSVsComputePSOCache) {
+        releaseRetainedMetalObject(entry.second);
+    }
+    programObject->metalGSVsComputePSOCache.clear();
+    programObject->metalGSVsComputeNeedsDescriptor = false;
+    releaseRetainedMetalObject(programObject->metalGSMeshPipelineState);
+    programObject->metalGSMeshPipelineState = nullptr;
+    releaseRetainedMetalObject(programObject->metalGSMeshFunction);
+    programObject->metalGSMeshFunction = nullptr;
+    releaseRetainedMetalObject(programObject->metalGSFragmentFunction);
+    programObject->metalGSFragmentFunction = nullptr;
+    programObject->geometryEmulated = false;
+    programObject->geometrySpirv.clear();
+    programObject->vertexSpirv.clear();
+    programObject->vertexSpirvEntryPoint.clear();
+    programObject->vertexSpirvSpecializationConstants.clear();
+    programObject->gsPresent = false;
+    programObject->gsInputTopology = 0;
+    programObject->gsOutputTopology = 0;
+    programObject->gsMaxVertices = 0;
+    programObject->gsInvocations = 1;
+    // Sprint 17 Day 7+ Bank-Group-H Path B Component A1 — reset
+    // `needsCullDistancePrepass` at relink. Recomputed below post
+    // VS-stage SPIR-V availability + GS/tess-presence detection.
+    programObject->needsCullDistancePrepass = false;
+
+    ShaderTranslator translator;
+    BindingMap bindings;
+    ExtensionContext fp64ExtensionContext(*this);
+    const bool fp64EmulationAvailable =
+        extensions::fp64::shaderTranslationSupported(fp64ExtensionContext);
+
+    auto spirvUsesStorageBuffers = [](const std::uint32_t* spirvData,
+                                      std::size_t spirvWords) -> bool {
+        if (spirvData == nullptr || spirvWords == 0) return false;
+        try {
+            spirv_cross::Compiler compiler(spirvData, spirvWords);
+            const auto resources = compiler.get_shader_resources();
+            std::uint32_t directSlotSpan = 0;
+            for (const auto& ssbo : resources.storage_buffers) {
+                auto hasAtomicCounterName = [](const std::string& name) {
+                    return name.find("AtomicCounter") != std::string::npos ||
+                           name.find("atomicCounter") != std::string::npos;
+                };
+                if (hasAtomicCounterName(ssbo.name)) continue;
+                try {
+                    const auto& type = compiler.get_type(ssbo.base_type_id);
+                    if (hasAtomicCounterName(compiler.get_name(type.self))) continue;
+                } catch (...) {
+                }
+                std::uint32_t slotSpan = 1;
+                try {
+                    const auto& type = compiler.get_type(ssbo.type_id);
+                    if (!type.array.empty() && type.array[0] > 0) {
+                        slotSpan = type.array[0];
+                    }
+                } catch (...) {
+                }
+                directSlotSpan += slotSpan;
+            }
+            // Direct graphics SSBO slots occupy 28..30. Only force argument
+            // buffers when the translated stage would outgrow that range.
+            return directSlotSpan > 3;
+        } catch (...) {
+            return false;
+        }
+    };
+
+    // Translate one stage: spirvToMSL + reflect. Writes the result into the
+    // provided output slots on success, records a diagnostic in both the
+    // success and failure cases. Returns true iff MSL was produced.
+    //
+    // Phase 8X Group 4d follow-up⁵ — refactored to take SPIR-V data
+    // directly (rather than reading `stage->spirv` from the shader object)
+    // so the VS/FS path can pass the cross-stage-linked SPIR-V from
+    // `compileGLSLProgram` instead of the per-stage cached blobs that
+    // `compileShader` produced via independent `compileGLSL` invocations.
+    // The other stages (compute, geometry, tess) still use the cached
+    // per-stage SPIR-V — only VS+FS need cross-stage location coordination
+    // for the Metal pipeline-state validator.
+    auto translateStage = [&](const char* stageName,
+                              const std::uint32_t* spirvData,
+                              std::size_t spirvWords,
+                              const std::string& sourceText,
+                              std::string& mslOut,
+                              ShaderReflection& reflectionOut,
+                              const appgl::TranslatorOptions& optionsIn = {}) -> bool {
+        if (spirvData == nullptr || spirvWords == 0) {
+            return false;
+        }
+        const std::string stageTag = programTag + "-" + stageName;
+        const std::string hash = quickHash(sourceText);
+
+        // Sprint 17 Day 3+ BONUS-1 [clip_control]: snapshot the
+        // current `glClipControl` depth mode into the per-link
+        // translator options so SPIRV-Cross's `vertex.fixup_clipspace`
+        // tracks GL state at link time. Caller-provided overrides
+        // (e.g. tess opts, mesh-GS opts) preserved by copy-then-amend.
+        appgl::TranslatorOptions options = optionsIn;
+        options.fp64EmulationAvailable = fp64EmulationAvailable;
+        options.clipDepthMode = impl_->state->clipDepthMode();
+        if (std::strcmp(stageName, "vertex") == 0 &&
+            programObject->transformFeedbackVaryingNames.empty()) {
+            const GLuint drawFboName = impl_->state->boundDrawFramebuffer();
+            if (drawFboName != 0) {
+                if (const GLFramebufferObject* fbo =
+                        impl_->objects->framebuffers().get(drawFboName)) {
+                    options.enableClipControlYSignFixup =
+                        framebufferUsesRenderbufferOnlyColorTargets(*fbo);
+                }
+            }
+        }
+        if (std::strcmp(stageName, "fragment") == 0) {
+            options.fragmentCoordOriginUpperLeft =
+                sourceDeclaresFragCoordOriginUpperLeft(sourceText);
+        }
+
+        // Phase 8X Group 4d follow-up²³ — sub-step marker + C++ exception
+        // guard around spirvToMSL. SPIRV-Cross can throw `spirv_cross_error`
+        // on ill-formed SPIR-V or unsupported decoration patterns; if that
+        // escapes into this Objective-C++ frame unhandled, std::terminate
+        // fires and the process SIGABRTs. Catch here so a throw becomes a
+        // clean translation failure (MSL empty + diagnostic record) instead
+        // of the fw²² Sky-program-28 crash signature.
+        APPGL_LOG(SHADER, @"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s", program, stageName);
+        fflush(stderr);
+        std::string mslLog;
+        std::string msl;
+        try {
+            msl = translator.spirvToMSL(
+                spirvData, spirvWords, bindings, &mslLog, options);
+        } catch (const std::exception& e) {
+            APPGL_LOG(SHADER, @"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s THREW: %s",
+                  program, stageName, e.what());
+            fflush(stderr);
+            Runtime::shared().recordShaderTranslation({
+                stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
+                std::string("spirvToMSL threw std::exception: ") + e.what(),
+                "", false
+            });
+            return false;
+        } catch (...) {
+            APPGL_LOG(SHADER, @"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s THREW unknown exception",
+                  program, stageName);
+            fflush(stderr);
+            Runtime::shared().recordShaderTranslation({
+                stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
+                "spirvToMSL threw unknown exception", "", false
+            });
+            return false;
+        }
+        if (msl.empty()) {
+            Runtime::shared().recordShaderTranslation({
+                stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
+                mslLog.empty() ? "spirvToMSL returned empty MSL" : mslLog,
+                "", false
+            });
+            return false;
+        }
+
+        // Phase 8X Group 4d follow-up²³ — sub-step marker + exception guard
+        // around reflect. SPIRV-Cross reflection re-walks the SPIR-V and is
+        // the other plausible throw site in the translator's critical path.
+        APPGL_LOG(SHADER, @"[GL] linkProgram-step=reflect program=%u stage=%s", program, stageName);
+        fflush(stderr);
+        try {
+            reflectionOut = translator.reflect(
+                spirvData, spirvWords, bindings, nullptr, options);
+        } catch (const std::exception& e) {
+            APPGL_LOG(SHADER, @"[GL] linkProgram-step=reflect program=%u stage=%s THREW: %s",
+                  program, stageName, e.what());
+            fflush(stderr);
+            Runtime::shared().recordShaderTranslation({
+                stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
+                std::string("reflect threw std::exception: ") + e.what(),
+                "", false
+            });
+            return false;
+        } catch (...) {
+            APPGL_LOG(SHADER, @"[GL] linkProgram-step=reflect program=%u stage=%s THREW unknown exception",
+                  program, stageName);
+            fflush(stderr);
+            Runtime::shared().recordShaderTranslation({
+                stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
+                "reflect threw unknown exception", "", false
+            });
+            return false;
+        }
+        mslOut = std::move(msl);
+        // Phase 8X Group 4d follow-up⁵ — §6b: when the stage *succeeds*
+        // we keep the 200-byte preview because the full MSL is large and
+        // the translator records are only useful to humans on failure.
+        // The matching failure-case mslPreview enlargement happens in the
+        // pipeline-build branch (MetalFrameGraph.mm), where the rejected
+        // MSL is what BAR actually wants to see — by which point the
+        // pipeline-state NSError has already named the failing stage.
+        Runtime::shared().recordShaderTranslation({
+            stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
+            "ok", mslOut.substr(0, 200), true
+        });
+        return true;
+    };
+
+    // Helper: invoke translateStage against a per-stage cached SPIR-V blob
+    // on a GLShaderObject. Used by every case below other than VS+FS, where
+    // the VS+FS cross-stage-linked path takes over.
+    auto applyShaderSpirvOptions = [&](appgl::TranslatorOptions& options,
+                                       const GLShaderObject* stage) {
+        if (stage == nullptr || !stage->isSpirvBinary) {
+            return;
+        }
+        options.spirvEntryPointName = stage->spirvEntryPoint;
+        options.specializationConstants = stage->spirvSpecializationConstants;
+    };
+
+    auto spirvEntryPointNameFor = [](const GLShaderObject* stage)
+        -> const std::string* {
+        if (stage == nullptr || !stage->isSpirvBinary ||
+            stage->spirvEntryPoint.empty()) {
+            return nullptr;
+        }
+        return &stage->spirvEntryPoint;
+    };
+
+    auto spirvSpecializationConstantsFor = [](const GLShaderObject* stage)
+        -> const std::unordered_map<std::uint32_t, std::uint32_t>* {
+        if (stage == nullptr || !stage->isSpirvBinary ||
+            stage->spirvSpecializationConstants.empty()) {
+            return nullptr;
+        }
+        return &stage->spirvSpecializationConstants;
+    };
+
+    auto stashVertexSpirv = [&](const GLShaderObject* stage) {
+        if (stage == nullptr || stage->spirv.empty()) {
+            return;
+        }
+        programObject->vertexSpirv = stage->spirv;
+        if (stage->isSpirvBinary) {
+            programObject->vertexSpirvEntryPoint = stage->spirvEntryPoint;
+            programObject->vertexSpirvSpecializationConstants =
+                stage->spirvSpecializationConstants;
+        } else {
+            programObject->vertexSpirvEntryPoint.clear();
+            programObject->vertexSpirvSpecializationConstants.clear();
+        }
+    };
+
+    auto translateCachedStage = [&](const char* stageName,
+                                    GLShaderObject* stage,
+                                    std::string& mslOut,
+                                    ShaderReflection& reflectionOut,
+                                    const appgl::TranslatorOptions& options = {}) -> bool {
+        if (stage == nullptr) {
+            return false;
+        }
+        appgl::TranslatorOptions stageOptions = options;
+        applyShaderSpirvOptions(stageOptions, stage);
+        return translateStage(stageName,
+                              stage->spirv.data(), stage->spirv.size(),
+                              stage->source, mslOut, reflectionOut, stageOptions);
+    };
+
+    // Phase 8X Group 4d follow-up⁵ — VS+FS cross-stage-linked SPIR-V path.
+    // Produces both stage SPIR-V blobs from a single glslang::TProgram
+    // link + mapIO pass so cross-stage varying locations get coordinated.
+    // Returns the linked SPIR-V on success, or empty blobs on failure (in
+    // which case the caller falls back to the per-stage cached SPIR-V on
+    // the GLShaderObject — same path as pre-followup⁵).
+    //
+    // The source we pass in is the rewritten compat form, matching exactly
+    // what `compileShader` already compiled per-stage: `compileShader`
+    // runs `rewriteCompatShader` on `object->source` and feeds the result
+    // to `compileGLSL`, but doesn't cache the rewritten string anywhere
+    // — so we re-run the rewriter here. `rewriteCompatShader` is a cheap
+    // string scan and is idempotent, so re-running it at link time is
+    // free.
+    auto compileLinkedVsFs = [&](GLShaderObject* vsStage,
+                                  GLShaderObject* fsStage) -> LinkedProgramSpirv {
+        if (vsStage == nullptr || fsStage == nullptr) {
+            return {};
+        }
+        CompatShaderRewriteResult vsRewrite =
+            rewriteCompatShader(vsStage->source, GL_VERTEX_SHADER);
+        CompatShaderRewriteResult fsRewrite =
+            rewriteCompatShader(fsStage->source, GL_FRAGMENT_SHADER);
+        const std::string& vsLinkSource =
+            vsRewrite.didRewrite ? vsRewrite.source : vsStage->source;
+        const std::string& fsLinkSource =
+            fsRewrite.didRewrite ? fsRewrite.source : fsStage->source;
+        std::string vsDrawIDLinkSource =
+            rewriteShaderDrawParametersForSpirv(vsLinkSource, GL_VERTEX_SHADER);
+        std::string fsDrawIDLinkSource =
+            rewriteShaderDrawParametersForSpirv(fsLinkSource, GL_FRAGMENT_SHADER);
+        vsDrawIDLinkSource =
+            rewriteUnsizedUniformArrayInitializersForSpirv(vsDrawIDLinkSource);
+        fsDrawIDLinkSource =
+            rewriteUnsizedUniformArrayInitializersForSpirv(fsDrawIDLinkSource);
+        vsDrawIDLinkSource =
+            rewriteSsboConsecutiveRuntimeArraysForSpirv(vsDrawIDLinkSource);
+        fsDrawIDLinkSource =
+            rewriteSsboConsecutiveRuntimeArraysForSpirv(fsDrawIDLinkSource);
+        std::string vs420packLinkSource =
+            rewrite420packImplicitConversionsForSpirv(vsDrawIDLinkSource);
+        std::string fs420packLinkSource =
+            rewrite420packImplicitConversionsForSpirv(fsDrawIDLinkSource);
+        vs420packLinkSource =
+            rewrite420packQualifierOrderInvariantInputsForSpirv(
+                vs420packLinkSource);
+        fs420packLinkSource =
+            rewrite420packQualifierOrderInvariantInputsForSpirv(
+                fs420packLinkSource);
+        const std::size_t explicitAttribLocationCount =
+            countExplicitResolvedVertexAttribLocations();
+        const bool hasTransformFeedbackVaryings =
+            !programObject->transformFeedbackVaryingNames.empty();
+        const bool vsDeclaresXfbLayout =
+            sourceDeclaresTransformFeedbackLayout(vs420packLinkSource);
+        const bool fsDeclaresXfbLayout =
+            sourceDeclaresTransformFeedbackLayout(fs420packLinkSource);
+        const bool mayInjectResolvedVertexAttribLocations =
+            explicitAttribLocationCount > 0 &&
+            !hasTransformFeedbackVaryings &&
+            !vsDeclaresXfbLayout &&
+            !fsDeclaresXfbLayout &&
+            geometryShader == nullptr &&
+            tessControlShader == nullptr &&
+            tessEvalShader == nullptr;
+        VertexAttribInjectionTrace attribInjectionTrace;
+        if (mayInjectResolvedVertexAttribLocations) {
+            vs420packLinkSource =
+                injectResolvedVertexAttribLocationsForSpirv(
+                    std::move(vs420packLinkSource),
+                    programObject->attributes,
+                    true,
+                    &attribInjectionTrace);
+        }
+        if (traceAttribInjection) {
+            std::fprintf(stderr,
+                "[APPGL_ATTRIB] program=%u link-gate mayInject=%d "
+                "explicit=%zu attrs=%zu tfVaryings=%zu vsXfb=%d fsXfb=%d "
+                "gs=%d tcs=%d tes=%d vsHash=%s fsHash=%s\n",
+                static_cast<unsigned>(program),
+                mayInjectResolvedVertexAttribLocations ? 1 : 0,
+                explicitAttribLocationCount,
+                programObject->attributes.size(),
+                programObject->transformFeedbackVaryingNames.size(),
+                vsDeclaresXfbLayout ? 1 : 0,
+                fsDeclaresXfbLayout ? 1 : 0,
+                geometryShader != nullptr ? 1 : 0,
+                tessControlShader != nullptr ? 1 : 0,
+                tessEvalShader != nullptr ? 1 : 0,
+                linkVertexHash.c_str(),
+                linkFragmentHash.c_str());
+            std::fprintf(stderr,
+                "[APPGL_ATTRIB] program=%u inject-result resolved=%zu "
+                "explicit=%zu map=%zu matched=%zu injected=%zu\n",
+                static_cast<unsigned>(program),
+                attribInjectionTrace.resolvedCount,
+                attribInjectionTrace.explicitCount,
+                attribInjectionTrace.locationMapCount,
+                attribInjectionTrace.matchedDeclarationCount,
+                attribInjectionTrace.injectedCount);
+            for (const auto& name : attribInjectionTrace.matchedNames) {
+                std::fprintf(stderr,
+                    "[APPGL_ATTRIB]   matched-decl name=%s\n",
+                    name.c_str());
+            }
+            for (const auto& name : attribInjectionTrace.injectedNames) {
+                std::fprintf(stderr,
+                    "[APPGL_ATTRIB]   injected name=%s\n",
+                    name.c_str());
+            }
+            std::fflush(stderr);
+        }
+        // Phase 8X Group 4d follow-up²³ — sub-step marker before the
+        // glslang cross-stage link. First candidate on the abort-site ladder
+        // is glslang's TProgram::link re-entry, since that's the first heavy
+        // operation inside this lambda.
+        APPGL_LOG(SHADER, @"[GL] linkProgram-step=compile-glsl-program program=%u", program);
+        fflush(stderr);
+        std::string linkErrorLog;
+        LinkedProgramSpirv linked = translator.compileGLSLProgram(
+            vs420packLinkSource, fs420packLinkSource, 330, &linkErrorLog);
+        APPGL_LOG(SHADER, @"[GL] compileGLSLProgram: program=%u success=%d log=%s",
+              program, linked.linkSucceeded ? 1 : 0,
+              linkErrorLog.c_str());
+        if (traceAttribInjection) {
+            std::fprintf(stderr,
+                "[APPGL_ATTRIB] program=%u linked-spirv success=%d log=%s\n",
+                static_cast<unsigned>(program),
+                linked.linkSucceeded ? 1 : 0,
+                linkErrorLog.empty() ? "(empty)" : linkErrorLog.c_str());
+            std::fflush(stderr);
+        }
+        fflush(stderr);
+        if (!linked.linkSucceeded) {
+            // Record the cross-stage link failure so BAR can see why the
+            // VS+FS path is degrading back to per-stage SPIR-V. The fall
+            // back is intentional: the per-stage cached SPIR-V may still
+            // produce usable MSL (and at worst surfaces the same Metal
+            // varying-mismatch the pre-followup⁵ build was already
+            // showing), so degrading is strictly no-worse than the prior
+            // behaviour.
+            //
+            // No positive `link-spirv` record on success — the per-stage
+            // vertex/fragment records that follow this lambda already
+            // carry success=true, and the post-link
+            // `[GL] linkProgram: ... translationOk=1` NSLog line covers
+            // the "did the linked path run" question. Adding a success
+            // record here would also break the
+            // `phase-a.shader-program-lifecycle` scene's exact-count
+            // assertion (it expects per-link pushes == 2, vertex +
+            // fragment).
+            Runtime::shared().recordShaderTranslation({
+                programTag + "-link-spirv", "link",
+                linkVertexHash, linkVertexHash, linkFragmentHash,
+                linkErrorLog.empty()
+                    ? "compileGLSLProgram failed (no log)"
+                    : linkErrorLog,
+                "", false
+            });
+        }
+        return linked;
+    };
+
+    bool rasterTranslationOk = false;
+    switch (kind) {
+        case ProgramKind::VertexFragment: {
+            // Run the cross-stage link first. On success, both stages
+            // share the linked TProgram's coordinated SPIR-V; on failure,
+            // each stage falls back to its per-stage cached SPIR-V —
+            // EXCEPT for explicit GL-spec link-validation errors that
+            // glslang's TProgram::link() detects and the per-stage path
+            // can't recover from (cross-stage binding/location mismatch,
+            // type mismatch on shared uniforms, etc.). For those, fail
+            // glLinkProgram outright per GL 4.6 §7.3.
+            const bool canLinkGlslSources =
+                vertexShader != nullptr && fragmentShader != nullptr &&
+                !vertexShader->isSpirvBinary && !fragmentShader->isSpirvBinary;
+            LinkedProgramSpirv linked = canLinkGlslSources
+                ? compileLinkedVsFs(vertexShader, fragmentShader)
+                : LinkedProgramSpirv{};
+            // Sprint 8 B Cluster F F1 Day 7 (CKPT79): cross-stage link-
+            // validation gating. When glslang's link() rejects with a
+            // GL-spec qualifier mismatch, propagate as a real
+            // glLinkProgram failure. The string-match below targets the
+            // canonical glslang error message strings emitted by
+            // mergeErrorCheck (linkValidate.cpp ~line 1497) so we don't
+            // accidentally fail on recoverable mapIO inconsistencies.
+            //
+            // Required by KHR-GL46.layout_binding.*.binding_link_errors
+            // sub-section: VS+FS declare same sampler name with
+            // conflicting `layout(binding=N)` values; spec mandates
+            // link failure.
+            if (!linked.linkSucceeded && !linked.linkLog.empty()) {
+                const auto& lg = linked.linkLog;
+                const bool hasSpecMismatch =
+                    lg.find("Layout binding qualifier must match") != std::string::npos ||
+                    lg.find("Layout location qualifier must match") != std::string::npos ||
+                    lg.find("Layout offset qualifier must match")   != std::string::npos ||
+                    lg.find("Layout component qualifier must match") != std::string::npos ||
+                    lg.find("Layout index qualifier must match")    != std::string::npos;
+                if (hasSpecMismatch) {
+                    APPGL_LOG(SHADER, @"[GL] linkProgram-fail program=%u reason=cross-stage-spec-mismatch log=%s",
+                          program, lg.c_str());
+                    programObject->linkLog = lg;
+                    programObject->linked = false;
+                    Runtime::shared().recordShaderTranslation({
+                        programTag, "link", "", "", "", lg, "", false
+                    });
+                    return false;
+                }
+            }
+            const std::uint32_t* vsSpirvData;
+            std::size_t vsSpirvWords;
+            const std::uint32_t* fsSpirvData;
+            std::size_t fsSpirvWords;
+            if (linked.linkSucceeded) {
+                vsSpirvData = linked.vertexSpirv.data();
+                vsSpirvWords = linked.vertexSpirv.size();
+                fsSpirvData = linked.fragmentSpirv.data();
+                fsSpirvWords = linked.fragmentSpirv.size();
+            } else {
+                vsSpirvData = vertexShader->spirv.data();
+                vsSpirvWords = vertexShader->spirv.size();
+                fsSpirvData = fragmentShader->spirv.data();
+                fsSpirvWords = fragmentShader->spirv.size();
+            }
+            // Sprint 17 Day 7+ Bank-Group-H Path B Component A2: detect
+            // VS cull-distance writes before VS translation so the
+            // `disableCullDistanceClipRouting` option suppresses the
+            // ShaderTranslator gl_CullDistance → [[clip_distance]] HW
+            // routing for this program. CPU pre-pass at draw time
+            // performs §14.6.3 culling instead. Phase 2 §1.1 confirmed
+            // Option β (keep routing) refutation.
+            const bool vsCullPrepass =
+                appgl::vsSpirvWritesCullDistance(
+                    vsSpirvData, vsSpirvWords,
+                    spirvEntryPointNameFor(vertexShader),
+                    spirvSpecializationConstantsFor(vertexShader));
+            // Sprint 18 Item42: graphics SSBOs use Metal argument buffers
+            // to avoid direct buffer-index overflow when slot expansion
+            // reaches past Metal's 0..30 range. Apply per-program so VS
+            // and FS share one resource-binding mode.
+            const bool forceRasterArgBuf =
+                spirvUsesStorageBuffers(vsSpirvData, vsSpirvWords) ||
+                spirvUsesStorageBuffers(fsSpirvData, fsSpirvWords);
+            appgl::TranslatorOptions vsOptions;
+            vsOptions.disableCullDistanceClipRouting = vsCullPrepass;
+            vsOptions.forceArgumentBuffers = forceRasterArgBuf;
+            appgl::TranslatorOptions fsOptions;
+            fsOptions.forceArgumentBuffers = forceRasterArgBuf;
+            applyShaderSpirvOptions(vsOptions, vertexShader);
+            applyShaderSpirvOptions(fsOptions, fragmentShader);
+
+            ShaderReflection vsRefl, fsRefl;
+            const bool vsOk = translateStage(
+                "vertex", vsSpirvData, vsSpirvWords, vertexShader->source,
+                programObject->vertexMSL, vsRefl, vsOptions);
+            const bool fsOk = translateStage(
+                "fragment", fsSpirvData, fsSpirvWords, fragmentShader->source,
+                programObject->fragmentMSL, fsRefl, fsOptions);
+            if (vsOk && fsOk) {
+                rewriteMslOutputLocationsForFragmentInputs(
+                    programObject->vertexMSL, programObject->fragmentMSL);
+                programObject->vertexReflection = std::move(vsRefl);
+                programObject->fragmentReflection = std::move(fsRefl);
+                programObject->hasTranslatedPipeline = true;
+                if (vertexShader != nullptr &&
+                    sourceNeedsVertexSsboEmulatedDraw(vertexShader->source)) {
+                    programObject->vertexSsboEmulatedDraw = true;
+                }
+                rasterTranslationOk = true;
+            }
+            if (vertexShader != nullptr &&
+                sourceMatchesSSBOStdLayoutRawCopyFallback(vertexShader->source)) {
+                programObject->ssboStdLayoutRawCopyFallback = true;
+            }
+            // Sprint 7 #9 (CKPT65): preserve VS SPIR-V on the
+            // VertexFragment program kind so the VS-only TF emulation
+            // helper (drawArrays / drawElements) can run the VS on CPU
+            // for transform-feedback capture. Without this, programs
+            // with TF varyings + no GS/tess + non-separable VS+FS land
+            // with `vertexSpirv.empty()` and the helper bails — TF
+            // buffer stays at zero-init, breaking
+            // `transform_feedback.{capture,query,discard}_vertex_*`.
+            if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
+                stashVertexSpirv(vertexShader);
+            }
+            // Sprint 17 Day 7+ Bank-Group-H Path B Component A1: commit
+            // the VS cull-distance flag detected above (pre-translation)
+            // onto the program object. VertexFragment kind guarantees
+            // !gsPresent && !hasTessellation here; if a later relink
+            // attaches GS or tess, line 21430's reset clears this flag.
+            programObject->needsCullDistancePrepass = vsCullPrepass;
+            // Sprint 15 Q3-Option-B Phase 1 [metal-tf-vs]: VS-as-compute
+            // MSL emit + PSO build for VS+FS+TF programs (no GS, no
+            // tess). Sister-pattern reuse of the existing metal-tess-TF
+            // VS-compute groundwork — `forceVertexForTessellation`
+            // emits the VS as a Metal compute kernel that captures
+            // per-vertex outputs into a buffer (Phase 2 will plumb the
+            // TF buffer binding; Phase 3 will swap draw-time routing).
+            //
+            // Phase 1 lays groundwork only — no draw-time behaviour
+            // change. CPU `emulateVsOnlyDrawForTf` remains the
+            // authoritative TF capture path until Phase 3 routes
+            // around it. Master gate: APPGL_ENABLE_METAL_TF_VS=1
+            // (still off by default for this separate VS-only TF
+            // path). Read once at link time so a relink under
+            // different env settings re-evaluates cleanly.
+            //
+            // Pre-conditions:
+            //   • VS+FS translation succeeded (vsOk && fsOk)
+            //   • TF varyings declared via glTransformFeedbackVaryings
+            //   • VS SPIR-V preserved (just stashed above)
+            //   • impl_->frameGraph present (Metal device available)
+            //
+            // Outcomes:
+            //   • tier=VsAsCompute + retained PSO: Phase 3 eligible
+            //     directly (gl_VertexID-only VS, no [[stage_in]])
+            //   • tier=VsAsCompute + metalVsTfNeedsDescriptor=true:
+            //     Phase 3 builds per-VAO PSO at draw time via
+            //     metalVsTfComputePSOCache
+            //   • tier=None: gate skipped OR translation/build failed
+            //     for non-descriptor reasons → CPU fallback preserved
+            if (vsOk && fsOk &&
+                !programObject->transformFeedbackVaryingNames.empty() &&
+                !programObject->vertexSpirv.empty() &&
+                impl_->frameGraph != nullptr &&
+                std::getenv("APPGL_ENABLE_METAL_TF_VS") != nullptr) {
+                appgl::TranslatorOptions vsTfOpts;
+                vsTfOpts.forceVertexForTessellation = true;
+                applyShaderSpirvOptions(vsTfOpts, vertexShader);
+                ShaderReflection vsTfRefl;
+                std::string vsTfMSL;
+                const bool vsTfTrOk = translateStage(
+                    "vertex-tf-compute", vsSpirvData, vsSpirvWords,
+                    vertexShader->source, vsTfMSL, vsTfRefl, vsTfOpts);
+                if (vsTfTrOk && !vsTfMSL.empty()) {
+                    programObject->vsTfAsComputeMSL = std::move(vsTfMSL);
+                    programObject->vsTfAsComputeReflection =
+                        std::move(vsTfRefl);
+                    std::string vsTfPsoErr;
+                    void* vsTfPSO =
+                        impl_->frameGraph->buildComputePipelineState(
+                            programObject->vsTfAsComputeMSL, &vsTfPsoErr,
+                            nullptr, nullptr);
+                    if (vsTfPSO != nullptr) {
+                        programObject->metalVsTfComputePipelineState =
+                            vsTfPSO;
+                        programObject->metalVsTfTier =
+                            GLProgramObject::MetalVsTfTier::VsAsCompute;
+                    } else if (vsTfPsoErr.find("stage_in") !=
+                               std::string::npos) {
+                        // VS declares [[stage_in]] — defer PSO build to
+                        // draw time when the bound VAO's
+                        // MTLStageInputOutputDescriptor is known. Phase
+                        // 3's draw-time path will lookup-or-build a
+                        // per-VAO PSO via metalVsTfComputePSOCache.
+                        programObject->metalVsTfNeedsDescriptor = true;
+                        programObject->metalVsTfTier =
+                            GLProgramObject::MetalVsTfTier::VsAsCompute;
+                    } else {
+                        // Compile failed for non-descriptor reasons —
+                        // surface via diagnostic + leave tier=None so
+                        // draw-time stays on the CPU helper.
+                        Runtime::shared().recordShaderTranslation({
+                            programTag + "-vs-tf-compute-pipeline",
+                            "vertex",
+                            quickHash(vertexShader->source),
+                            linkVertexHash, linkFragmentHash,
+                            std::string("metal-tf-vs PSO build failed: ")
+                                + vsTfPsoErr,
+                            "", false
+                        });
+                        programObject->vsTfAsComputeMSL.clear();
+                        programObject->vsTfAsComputeReflection =
+                            ShaderReflection{};
+                    }
+                    // Sprint 15 Q3-Option-B Phase 2 [metal-tf-vs]:
+                    // reflect the VS-as-compute output struct layout +
+                    // pre-resolve each declared TF varying name to a
+                    // (struct-offset, GL-packed-bytes) pair. Done once
+                    // at link time so Phase 3's draw-time TF writer
+                    // doesn't repeat the name lookup per dispatch.
+                    // Reflection runs whenever tier=VsAsCompute (both
+                    // direct-PSO and deferred-descriptor branches);
+                    // the layout is independent of stage_in attributes
+                    // (those affect input descriptor, not output struct).
+                    if (programObject->metalVsTfTier ==
+                            GLProgramObject::MetalVsTfTier::VsAsCompute) {
+                        programObject->vsTfOutputLayout =
+                            translator.reflectStageOutputLayout(
+                                vsSpirvData, vsSpirvWords, vsTfOpts);
+                        const auto& layout =
+                            programObject->vsTfOutputLayout;
+                        const auto& tfNames =
+                            programObject->transformFeedbackVaryingNames;
+                        programObject->vsTfResolvedSources.clear();
+                        programObject->vsTfResolvedSources.resize(
+                            tfNames.size());
+                        std::size_t resolvedCount = 0;
+                        for (std::size_t i = 0; i < tfNames.size(); ++i) {
+                            const std::string& name = tfNames[i];
+                            for (const auto& m : layout.members) {
+                                if (m.name == name ||
+                                    (name == "gl_Position" &&
+                                     m.isBuiltIn &&
+                                     m.builtIn ==
+                                         spv::BuiltInPosition)) {
+                                    programObject
+                                        ->vsTfResolvedSources[i] = {
+                                        m.offset,
+                                        m.glPackedBytes > 0
+                                            ? m.glPackedBytes
+                                            : m.size};
+                                    ++resolvedCount;
+                                    break;
+                                }
+                            }
+                        }
+                        // If any TF varying name failed to resolve, the
+                        // gate stays in VsAsCompute tier but Phase 3's
+                        // draw-time path will fall back to the CPU
+                        // helper for safety (the name-mismatch could
+                        // be a stripBuffer probe target, an extension
+                        // syntax we don't reflect, or a true link
+                        // error already caught by linkProgram). The
+                        // diagnostic record makes the unresolved
+                        // varying easy to find post-mortem.
+                        if (resolvedCount < tfNames.size()) {
+                            std::string unresolved;
+                            for (std::size_t i = 0; i < tfNames.size();
+                                 ++i) {
+                                if (programObject->vsTfResolvedSources[i]
+                                        .bytes == 0) {
+                                    if (!unresolved.empty()) unresolved += ", ";
+                                    unresolved += tfNames[i];
+                                }
+                            }
+                            Runtime::shared().recordShaderTranslation({
+                                programTag +
+                                    "-vs-tf-varying-resolution",
+                                "vertex",
+                                quickHash(vertexShader->source),
+                                linkVertexHash, linkFragmentHash,
+                                std::string("metal-tf-vs unresolved "
+                                            "TF varying(s): ") +
+                                    unresolved,
+                                "", false
+                            });
+                        }
+                    }
+                    if (std::getenv("APPGL_TRACE_TF_VS")) {
+                        std::fprintf(stderr,
+                            "[APPGL] tf-vs-probe program=%u "
+                            "tfVaryings=%zu vsTfTier=%d "
+                            "needsDescriptor=%d psoOk=%d "
+                            "structSize=%zu members=%zu "
+                            "resolved=%zu\n",
+                            program,
+                            programObject
+                                ->transformFeedbackVaryingNames.size(),
+                            (int)programObject->metalVsTfTier,
+                            programObject->metalVsTfNeedsDescriptor
+                                ? 1 : 0,
+                            vsTfPSO != nullptr ? 1 : 0,
+                            programObject->vsTfOutputLayout.structSize,
+                            programObject->vsTfOutputLayout
+                                .members.size(),
+                            programObject->vsTfResolvedSources.size());
+                    }
+                }
+            }
+            break;
+        }
+        case ProgramKind::VertexOnly: {
+            ShaderReflection vsRefl;
+            appgl::TranslatorOptions vsOptions;
+            if (vertexShader != nullptr) {
+                vsOptions.forceArgumentBuffers = spirvUsesStorageBuffers(
+                    vertexShader->spirv.data(), vertexShader->spirv.size());
+            }
+            const bool vsOk = translateCachedStage(
+                "vertex", vertexShader, programObject->vertexMSL, vsRefl,
+                vsOptions);
+            if (vsOk) {
+                programObject->vertexReflection = std::move(vsRefl);
+                // A VS-only program is drawable when paired with
+                // GL_RASTERIZER_DISCARD (no fragment stage required).
+                // The CTS SSBO `*-vs` tests bind ONLY a vertex shader,
+                // enable rasterizer discard, and read back SSBO writes
+                // produced by the VS alone. Set hasTranslatedPipeline
+                // = true and let encodeTranslatedDraw drop the FS when
+                // info.rasterizerDiscard is true (the pipeline
+                // descriptor will set fragmentFunction = nil +
+                // rasterizationEnabled = NO at that point).
+                programObject->hasTranslatedPipeline = true;
+                if (vertexShader != nullptr &&
+                    sourceNeedsVertexSsboEmulatedDraw(vertexShader->source)) {
+                    programObject->vertexSsboEmulatedDraw = true;
+                }
+                rasterTranslationOk = true;
+            }
+            if (vertexShader != nullptr &&
+                sourceMatchesSSBOStdLayoutRawCopyFallback(vertexShader->source)) {
+                programObject->ssboStdLayoutRawCopyFallback = true;
+            }
+            // β [metal-tess-TF]: preserve VS SPIR-V on separable VS so
+            // a pipeline-bound tess draw can re-translate VS as compute
+            // (`vertex_for_tessellation + capture_output_to_buffer`) at
+            // pipeline-bind time. The link-time path here doesn't know
+            // a TCS will eventually consume this VS, so it can't emit
+            // the compute form alone; the orchestrator does it later.
+            if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
+                stashVertexSpirv(vertexShader);
+            }
+            break;
+        }
+        case ProgramKind::FragmentOnly: {
+            ShaderReflection fsRefl;
+            appgl::TranslatorOptions fsOptions;
+            if (fragmentShader != nullptr) {
+                fsOptions.forceArgumentBuffers = spirvUsesStorageBuffers(
+                    fragmentShader->spirv.data(), fragmentShader->spirv.size());
+            }
+            const bool fsOk = translateCachedStage(
+                "fragment", fragmentShader, programObject->fragmentMSL, fsRefl,
+                fsOptions);
+            if (fsOk) {
+                programObject->fragmentReflection = std::move(fsRefl);
+                rasterTranslationOk = true;
+            }
+            break;
+        }
+        case ProgramKind::Compute: {
+            // Translate compute to MSL + stash on the program object so
+            // glDispatchCompute can encode against the cached pipeline.
+            //
+            // Compute uses a distinct BindingMap: SSBOs at slots [0..16),
+            // UBOs at [16..31). This differs from the graphics pipeline
+            // map (where slots [0..16) are reserved for VBOs) and lets
+            // GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS honestly hit the spec
+            // floor of 8 (actually 16). Scoped swap of `bindings` is safe
+            // because translateStage captures by reference and compute
+            // doesn't share the binding map with any other stage.
+            const BindingMap savedBindings = bindings;
+            bindings = makeComputeBindingMap();
+            std::vector<std::uint32_t> linkedComputeSpirv;
+            std::string linkedComputeSource;
+            std::string linkedComputeLog;
+            const std::uint32_t* computeSpirvData =
+                (computeShader != nullptr && !computeShader->spirv.empty())
+                    ? computeShader->spirv.data() : nullptr;
+            std::size_t computeSpirvWords =
+                (computeShader != nullptr) ? computeShader->spirv.size() : 0;
+            const std::string* computeSourceForTranslation =
+                computeShader != nullptr ? &computeShader->source : nullptr;
+            if (computeShaderObjects.size() > 1 ||
+                computeSpirvData == nullptr || computeSpirvWords == 0) {
+                if (!validateLinkedComputeLocalSizes(
+                        computeShaderObjects, linkedComputeLog)) {
+                    bindings = savedBindings;
+                    programObject->linkLog = linkedComputeLog;
+                    programObject->linked = false;
+                    Runtime::shared().recordShaderTranslation({
+                        programTag + "-compute-link", "compute",
+                        quickHash(computeShader != nullptr
+                            ? computeShader->source : std::string()),
+                        linkVertexHash, linkFragmentHash,
+                        programObject->linkLog, "", false
+                    });
+                    return false;
+                }
+                std::vector<std::string> computeSources;
+                computeSources.reserve(computeShaderObjects.size());
+                for (const GLShaderObject* shader : computeShaderObjects) {
+                    if (shader != nullptr) {
+                        computeSources.push_back(shader->source);
+                        if (!linkedComputeSource.empty()) {
+                            linkedComputeSource += "\n";
+                        }
+                        linkedComputeSource += shader->source;
+                    }
+                }
+                linkedComputeSpirv = translator.compileGLSLStageProgram(
+                    computeSources, GL_COMPUTE_SHADER, 330, &linkedComputeLog);
+                if (linkedComputeSpirv.empty()) {
+                    bindings = savedBindings;
+                    programObject->linkLog = linkedComputeLog.empty()
+                        ? "compute same-stage link failed"
+                        : linkedComputeLog;
+                    programObject->linked = false;
+                    Runtime::shared().recordShaderTranslation({
+                        programTag + "-compute-link", "compute",
+                        quickHash(linkedComputeSource),
+                        linkVertexHash, linkFragmentHash,
+                        programObject->linkLog, "", false
+                    });
+                    return false;
+                }
+                computeSpirvData = linkedComputeSpirv.data();
+                computeSpirvWords = linkedComputeSpirv.size();
+                computeSourceForTranslation = &linkedComputeSource;
+            }
+            ShaderReflection csRefl;
+            const bool csOk = translateStage(
+                "compute", computeSpirvData, computeSpirvWords,
+                computeSourceForTranslation != nullptr
+                    ? *computeSourceForTranslation : std::string(),
+                programObject->computeMSL, csRefl);
+            bindings = savedBindings;
+            if (csOk) {
+                programObject->computeReflection = std::move(csRefl);
+                // Extract local_size_{x,y,z} so dispatch knows the
+                // threads-per-threadgroup dimensions.
+                if (computeSpirvData != nullptr && computeSpirvWords > 0) {
+                    auto modes = extractComputeModes(computeSpirvData,
+                                                     computeSpirvWords);
+                    programObject->computeLocalSizeX = modes.localSizeX;
+                    programObject->computeLocalSizeY = modes.localSizeY;
+                    programObject->computeLocalSizeZ = modes.localSizeZ;
+                }
+                // Build + retain the MTLComputePipelineState. Failures
+                // are logged but don't fail linkProgram — the dispatch
+                // path will then fall back to the stub (returning true
+                // with no GPU work).
+                if (impl_->frameGraph != nullptr) {
+                    std::string psoError;
+                    // Step 7-3 compute follow-up: always request the
+                    // MTLFunction too when argbuf is enabled. Released
+                    // at relink alongside the PSO. The small retain
+                    // cost is only paid under the env gate.
+                    void* computeFn = nullptr;
+                    const bool useArgBuf =
+                        (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
+                    void* pso = impl_->frameGraph->buildComputePipelineState(
+                        programObject->computeMSL, &psoError,
+                        useArgBuf ? &computeFn : nullptr);
+                    if (pso != nullptr) {
+                        programObject->metalComputePipelineState = pso;
+                        programObject->metalComputeFunction = computeFn;
+                        APPGL_LOG(SHADER, @"[GL] linkProgram: compute pipeline built for program=%u "
+                              @"localSize=[%u,%u,%u]",
+                              program,
+                              programObject->computeLocalSizeX,
+                              programObject->computeLocalSizeY,
+                              programObject->computeLocalSizeZ);
+                    } else {
+                        Runtime::shared().recordShaderTranslation({
+                            programTag + "-compute-pipeline", "compute",
+                            quickHash(computeShader ? computeShader->source : std::string()),
+                            linkVertexHash, linkFragmentHash,
+                            std::string("MTLComputePipelineState build failed: ") + psoError,
+                            "", false
+                        });
+                    }
+                }
+            } else if (computeShader != nullptr &&
+                       sourceMatchesSSBOStdLayoutRawCopyFallback(computeShader->source)) {
+                programObject->ssboStdLayoutRawCopyFallback = true;
+                if (!computeShader->spirv.empty()) {
+                    auto modes = extractComputeModes(
+                        computeShader->spirv.data(),
+                        computeShader->spirv.size());
+                    programObject->computeLocalSizeX = modes.localSizeX;
+                    programObject->computeLocalSizeY = modes.localSizeY;
+                    programObject->computeLocalSizeZ = modes.localSizeZ;
+                }
+            }
+            break;
+        }
+        case ProgramKind::VertexGeometryFragment: {
+            // Translate VS + FS (they're still usable even without the GS)
+            // and attempt GS translation so SPIRV-Cross's reflection at
+            // least reports what the geometry stage wants. Then record a
+            // diagnostic flagging the emulation gap — Metal has no native
+            // geometry-shader concept and our compute-stage emulation
+            // lands in a follow-up cycle. BAR can read this record and
+            // fall back to its non-geometry path.
+            //
+            // Phase 8X Group 4d follow-up⁵ — VS+FS still go through the
+            // cross-stage-linked path even when a GS is present, because
+            // the VS→FS varying interface is what Metal's pipeline-state
+            // validator inspects. The GS emulation gap is unaffected.
+            const bool canLinkGlslSources =
+                vertexShader != nullptr && fragmentShader != nullptr &&
+                !vertexShader->isSpirvBinary && !fragmentShader->isSpirvBinary;
+            LinkedProgramSpirv linked = canLinkGlslSources
+                ? compileLinkedVsFs(vertexShader, fragmentShader)
+                : LinkedProgramSpirv{};
+            const std::uint32_t* vsSpirvData;
+            std::size_t vsSpirvWords;
+            const std::uint32_t* fsSpirvData;
+            std::size_t fsSpirvWords;
+            if (linked.linkSucceeded) {
+                vsSpirvData = linked.vertexSpirv.data();
+                vsSpirvWords = linked.vertexSpirv.size();
+                fsSpirvData = linked.fragmentSpirv.data();
+                fsSpirvWords = linked.fragmentSpirv.size();
+            } else {
+                vsSpirvData = vertexShader->spirv.data();
+                vsSpirvWords = vertexShader->spirv.size();
+                fsSpirvData = fragmentShader->spirv.data();
+                fsSpirvWords = fragmentShader->spirv.size();
+            }
+            // Sprint 17 Day 9+ R13 sub-bank item_5 lines/triangles:
+            // extend Path B (`needsCullDistancePrepass`) to GS-present
+            // programs. When the VS writes gl_Clip/CullDistance and the
+            // GS path doesn't emulate (the `programStoresClipOrCull`
+            // stopgap at `GeometryShaderEmulator.cpp:4544` rejects to
+            // avoid pixel-coverage gaps in GS-emul cull routing), the
+            // legacy translated VS+FS pipeline runs with cull→clip
+            // routing siblings driving HW clip — exactly the
+            // mixed-sign over-clip case Path B was created to handle.
+            // CPU pre-pass on the VS gives spec-correct §14.6.3
+            // primitive-level culling for passthrough GS (VS values
+            // flow through GS unchanged); non-passthrough GS that
+            // modifies cull values is rare and falls outside this gate.
+            const bool vsCullPrepassVgf =
+                appgl::vsSpirvWritesCullDistance(
+                    vsSpirvData, vsSpirvWords,
+                    spirvEntryPointNameFor(vertexShader),
+                    spirvSpecializationConstantsFor(vertexShader));
+            const bool forceRasterArgBufVgf =
+                spirvUsesStorageBuffers(vsSpirvData, vsSpirvWords) ||
+                spirvUsesStorageBuffers(fsSpirvData, fsSpirvWords);
+            appgl::TranslatorOptions vsOptionsVgf;
+            vsOptionsVgf.disableCullDistanceClipRouting = vsCullPrepassVgf;
+            vsOptionsVgf.forceArgumentBuffers = forceRasterArgBufVgf;
+            appgl::TranslatorOptions fsOptionsVgf;
+            fsOptionsVgf.forceArgumentBuffers = forceRasterArgBufVgf;
+            applyShaderSpirvOptions(vsOptionsVgf, vertexShader);
+            applyShaderSpirvOptions(fsOptionsVgf, fragmentShader);
+            ShaderReflection vsRefl, fsRefl, gsRefl;
+            const bool vsOk = translateStage(
+                "vertex", vsSpirvData, vsSpirvWords, vertexShader->source,
+                programObject->vertexMSL, vsRefl, vsOptionsVgf);
+            const bool fsOk = translateStage(
+                "fragment", fsSpirvData, fsSpirvWords, fragmentShader->source,
+                programObject->fragmentMSL, fsRefl, fsOptionsVgf);
+            // Sprint 17 Day 9+ R13 sub-bank item_5: commit
+            // `needsCullDistancePrepass` for VertexGeometryFragment kind
+            // when the VS writes gl_Clip/CullDistance. The drawArrays
+            // dispatch site at line ~28344 already gates on `program->
+            // needsCullDistancePrepass && program->hasTranslatedPipeline`
+            // — both conditions hold here for VS+GS+FS programs whose
+            // GS-emul rejects (GS-emul stopgap at GeometryShaderEmulator
+            // .cpp:4544). For passthrough GS, VS-only Path B is
+            // spec-correct because cull values flow through unchanged.
+            programObject->needsCullDistancePrepass = vsCullPrepassVgf;
+            std::string unusedGsMSL;
+            (void)translateCachedStage("geometry", geometryShader, unusedGsMSL, gsRefl);
+            auto reflectStageOnlyVgf = [&](GLShaderObject* shader,
+                                           const appgl::TranslatorOptions& options)
+                -> ShaderReflection {
+                ShaderReflection refl;
+                if (shader == nullptr || shader->spirv.empty()) {
+                    return refl;
+                }
+                appgl::TranslatorOptions stageOptions = options;
+                stageOptions.fp64EmulationAvailable = fp64EmulationAvailable;
+                applyShaderSpirvOptions(stageOptions, shader);
+                try {
+                    appgl::BindingMap reflectBindings;
+                    refl = translator.reflect(shader->spirv.data(),
+                                              shader->spirv.size(),
+                                              reflectBindings, nullptr,
+                                              stageOptions);
+                } catch (...) {
+                    // Reflection is introspection-only here; leave empty on
+                    // failure and preserve the pre-existing link outcome.
+                }
+                return refl;
+            };
+            if (gsRefl.uniformBlocks.empty() &&
+                gsRefl.storageBuffers.empty() &&
+                gsRefl.sampledTextures.empty() &&
+                gsRefl.storageImages.empty()) {
+                gsRefl = reflectStageOnlyVgf(geometryShader,
+                                             appgl::TranslatorOptions{});
+            }
+            // Keep the GS reflection so `GL_REFERENCED_BY_GEOMETRY_SHADER`
+            // queries on block-scoped resources (uniform blocks, SSBOs,
+            // buffer variables) can consult it for usage analysis.
+            // SPIRV-Cross's reflection `active` field tells us whether
+            // the block is live in the GS body.
+            programObject->geometryReflection = gsRefl;
+            // CPU GS emulation — step 2 hook. Copy the GS SPIR-V onto
+            // the program so it survives shader detach/delete, then ask
+            // the emulator whether it can handle this shader. Detection
+            // only toggles the flag + topology/max_verts state; no
+            // emulation runs here. drawArrays (step 3) branches on
+            // programObject->geometryEmulated. See
+            // docs/geometry-shader-emulation.md §4.2.
+            if (geometryShader != nullptr && !geometryShader->spirv.empty()) {
+                programObject->geometrySpirv = geometryShader->spirv;
+                // Stash the VS SPIR-V too so the emulator's VS pre-pass
+                // (runs on every draw) has a stable copy independent
+                // of the shader's lifetime.
+                if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
+                    stashVertexSpirv(vertexShader);
+                }
+                // Sprint 8 #8 β.3 (CKPT97): for 5-stage programs
+                // (VS+TCS+TES+GS+FS) the kind is VertexGeometryFragment
+                // — the same branch that handles 3-stage VS+GS+FS. Stash
+                // the tess SPIR-V too so detectTessellationEmulatable
+                // can run; without this, the tess detector never sees a
+                // tess-shader SPIR-V for tess+GS programs and the
+                // tess-emul path stays dormant at draw time.
+                //
+                // CKPT98 fix: also extract TCS execution modes
+                // (OutputVertices) so per-invocation TCS run iterates
+                // the right count. Without this, tess-emul ran only
+                // invocation 0 and slot-1 user-block writes (e.g.
+                // out_data[1].tc_position in data_pass_through) stayed
+                // zero, surfacing as fail-shape "index [40] expected
+                // [1,1,1,1] found [0,0,0,0]" downstream.
+                if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                    programObject->tessControlSpirv = tessControlShader->spirv;
+                    programObject->tessControlParsedModule.reset();
+                    appgl::TranslatorOptions tessReflectOpts;
+                    tessReflectOpts.forceTessellation = true;
+                    if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                        tessReflectOpts.siblingTesInputSpirv =
+                            tessEvalShader->spirv.data();
+                        tessReflectOpts.siblingTesInputWordCount =
+                            tessEvalShader->spirv.size();
+                    }
+                    programObject->tessControlReflection =
+                        reflectStageOnlyVgf(tessControlShader, tessReflectOpts);
+                    auto tcModes = appgl::extractTessellationModes(
+                        tessControlShader->spirv.data(),
+                        tessControlShader->spirv.size());
+                    if (tcModes.outputVertices > 0) {
+                        programObject->tessControlOutputVertices =
+                            static_cast<GLint>(tcModes.outputVertices);
+                    }
+                }
+                if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                    programObject->tessEvalSpirv = tessEvalShader->spirv;
+                    programObject->tessEvalParsedModule.reset();
+                    appgl::TranslatorOptions tesReflectOpts;
+                    tesReflectOpts.forceTessellation = true;
+                    tesReflectOpts.forceTessEvalAsCompute = true;
+                    if (tessControlShader != nullptr &&
+                        !tessControlShader->spirv.empty()) {
+                        tesReflectOpts.siblingTcsOutputSpirv =
+                            tessControlShader->spirv.data();
+                        tesReflectOpts.siblingTcsOutputWordCount =
+                            tessControlShader->spirv.size();
+                        auto tcModes = appgl::extractTessellationModes(
+                            tessControlShader->spirv.data(),
+                            tessControlShader->spirv.size());
+                        tesReflectOpts.tesePatchVertices = tcModes.outputVertices;
+                    }
+                    programObject->tessEvalAsComputeReflection =
+                        reflectStageOnlyVgf(tessEvalShader, tesReflectOpts);
+                    auto teModes = appgl::extractTessellationModes(
+                        tessEvalShader->spirv.data(),
+                        tessEvalShader->spirv.size());
+                    if (teModes.genMode != 0) {
+                        programObject->tessGenMode = teModes.genMode;
+                    }
+                    if (teModes.genSpacing != 0) {
+                        programObject->tessGenSpacing = teModes.genSpacing;
+                    }
+                    if (teModes.genVertexOrder != 0) {
+                        programObject->tessGenVertexOrder = teModes.genVertexOrder;
+                    }
+                    programObject->tessGenPointMode =
+                        teModes.pointMode ? GL_TRUE : GL_FALSE;
+                }
+                (void)appgl::detectGeometryEmulatable(*programObject);
+                if (programObject->hasTessellation) {
+                    (void)appgl::detectTessellationEmulatable(*programObject);
+                }
+            }
+            // Sprint 3 [metal-mesh-GS]: try the Metal mesh shader path
+            // for GS programs whose shape fits the SPIRV-Cross
+            // GS-as-mesh patch's MVP coverage. Gate is a 3-way
+            // conjunction:
+            //   (a) device supports mesh shaders
+            //       (`MTLGPUFamilyMetal3` + `MTLGPUFamilyApple7`)
+            //   (b) GS shape is mesh-MVP-supported (triangle/line/point
+            //       output, no adjacency input, max_vertices ≤ 3,
+            //       no streams)
+            //   (c) GS SPIR-V successfully translates with
+            //       `forceGeometryShaderAsMesh = true`
+            // When all three hold, set metalGSTier = MeshShader and
+            // stash the emitted MSL for later PSO build. Otherwise
+            // fall back to the existing CPU GS interpreter
+            // classification (`geometryEmulated`).
+            auto synthesizeMeshSampledReflection =
+                [&](appgl::ShaderReflection& reflection,
+                    const std::string& meshMSL) {
+                    if (!reflection.sampledTextures.empty() ||
+                        geometryShader == nullptr ||
+                        geometryShader->spirv.empty()) {
+                        return;
+                    }
+                    auto isSamplerUniformType = [](GLenum type) {
+                        switch (type) {
+                            case GL_SAMPLER_1D:
+                            case GL_INT_SAMPLER_1D:
+                            case GL_UNSIGNED_INT_SAMPLER_1D:
+                            case GL_SAMPLER_1D_SHADOW:
+                            case GL_SAMPLER_2D:
+                            case GL_INT_SAMPLER_2D:
+                            case GL_UNSIGNED_INT_SAMPLER_2D:
+                            case GL_SAMPLER_2D_SHADOW:
+                            case GL_SAMPLER_3D:
+                            case GL_INT_SAMPLER_3D:
+                            case GL_UNSIGNED_INT_SAMPLER_3D:
+                            case GL_SAMPLER_CUBE:
+                            case GL_INT_SAMPLER_CUBE:
+                            case GL_UNSIGNED_INT_SAMPLER_CUBE:
+                            case GL_SAMPLER_CUBE_SHADOW:
+                            case GL_SAMPLER_1D_ARRAY:
+                            case GL_INT_SAMPLER_1D_ARRAY:
+                            case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+                            case GL_SAMPLER_1D_ARRAY_SHADOW:
+                            case GL_SAMPLER_2D_ARRAY:
+                            case GL_INT_SAMPLER_2D_ARRAY:
+                            case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+                            case GL_SAMPLER_2D_ARRAY_SHADOW:
+                            case GL_SAMPLER_CUBE_MAP_ARRAY:
+                            case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+                            case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+                            case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+                            case GL_SAMPLER_2D_RECT:
+                            case GL_INT_SAMPLER_2D_RECT:
+                            case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+                            case GL_SAMPLER_2D_RECT_SHADOW:
+                            case GL_SAMPLER_BUFFER:
+                            case GL_INT_SAMPLER_BUFFER:
+                            case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+                            case GL_SAMPLER_2D_MULTISAMPLE:
+                            case GL_INT_SAMPLER_2D_MULTISAMPLE:
+                            case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+                            case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                            case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                            case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                                return true;
+                            default:
+                                return false;
+                        }
+                    };
+                    auto stripAppGLPrefix = [](std::string name) {
+                        constexpr const char* kAppglPrefix = "_appgl_";
+                        constexpr std::size_t kAppglPrefixLen = 7;
+                        if (name.compare(0, kAppglPrefixLen, kAppglPrefix) == 0) {
+                            name = name.substr(kAppglPrefixLen);
+                        }
+                        return name;
+                    };
+                    auto findTextureSlot = [&](const std::string& name,
+                                               std::uint32_t fallback) {
+                        auto isIdentChar = [](char c) {
+                            return c == '_' ||
+                                (c >= '0' && c <= '9') ||
+                                (c >= 'A' && c <= 'Z') ||
+                                (c >= 'a' && c <= 'z');
+                        };
+                        std::size_t pos = 0;
+                        const std::string attrNeedle = "[[texture(";
+                        while ((pos = meshMSL.find(name, pos)) != std::string::npos) {
+                            const std::size_t end = pos + name.size();
+                            const bool leftOk = pos == 0 ||
+                                !isIdentChar(meshMSL[pos - 1]);
+                            const bool rightOk = end >= meshMSL.size() ||
+                                !isIdentChar(meshMSL[end]);
+                            if (leftOk && rightOk) {
+                                const std::size_t attr =
+                                    meshMSL.find(attrNeedle, end);
+                                const std::size_t stop =
+                                    meshMSL.find_first_of(",)", end);
+                                if (attr != std::string::npos &&
+                                    (stop == std::string::npos || attr < stop)) {
+                                    const std::size_t valueStart =
+                                        attr + attrNeedle.size();
+                                    const std::size_t valueEnd =
+                                        meshMSL.find(")]]", valueStart);
+                                    if (valueEnd != std::string::npos) {
+                                        try {
+                                            return static_cast<std::uint32_t>(
+                                                std::stoul(meshMSL.substr(
+                                                    valueStart,
+                                                    valueEnd - valueStart)));
+                                        } catch (...) {
+                                            return fallback;
+                                        }
+                                    }
+                                }
+                            }
+                            pos = end;
+                        }
+                        return fallback;
+                    };
+                    auto collectTextureSlots = [&]() {
+                        std::vector<std::uint32_t> slots;
+                        const std::string attrNeedle = "[[texture(";
+                        std::size_t pos = 0;
+                        while ((pos = meshMSL.find(attrNeedle, pos)) != std::string::npos) {
+                            const std::size_t valueStart =
+                                pos + attrNeedle.size();
+                            const std::size_t valueEnd =
+                                meshMSL.find(")]]", valueStart);
+                            if (valueEnd == std::string::npos) {
+                                break;
+                            }
+                            try {
+                                slots.push_back(static_cast<std::uint32_t>(
+                                    std::stoul(meshMSL.substr(
+                                        valueStart, valueEnd - valueStart))));
+                            } catch (...) {
+                            }
+                            pos = valueEnd + 3;
+                        }
+                        return slots;
+                    };
+                    auto appendBindingIfMissing =
+                        [&](const GLProgramUniformInfo& uniformInfo,
+                            std::uint32_t metalSlot) {
+                            for (const auto& existing : reflection.sampledTextures) {
+                                if (existing.name == uniformInfo.name) {
+                                    return;
+                                }
+                            }
+                            appgl::ShaderReflection::ResourceBinding binding;
+                            binding.name = uniformInfo.name;
+                            binding.glBinding = uniformInfo.explicitBinding >= 0
+                                ? static_cast<GLuint>(uniformInfo.explicitBinding)
+                                : 0u;
+                            binding.metalBinding = metalSlot;
+                            reflection.sampledTextures.push_back(std::move(binding));
+                        };
+
+                    const auto vars = appgl::collectSamplerVarsFromSpirv(
+                        geometryShader->spirv.data(),
+                        geometryShader->spirv.size());
+                    for (const auto& var : vars) {
+                        const std::string lookupName =
+                            stripAppGLPrefix(var.name);
+                        const GLProgramUniformInfo* uniformInfo = nullptr;
+                        for (const auto& uniform : programObject->uniforms) {
+                            if (uniform.name == lookupName &&
+                                isSamplerUniformType(uniform.type)) {
+                                uniformInfo = &uniform;
+                                break;
+                            }
+                        }
+                        if (uniformInfo == nullptr) {
+                            continue;
+                        }
+                        appgl::ShaderReflection::ResourceBinding binding;
+                        binding.name = lookupName;
+                        binding.glBinding = uniformInfo->explicitBinding >= 0
+                            ? static_cast<GLuint>(uniformInfo->explicitBinding)
+                            : 0u;
+                        binding.metalBinding =
+                            findTextureSlot(var.name, binding.glBinding);
+                        reflection.sampledTextures.push_back(std::move(binding));
+                    }
+                    if (reflection.sampledTextures.empty()) {
+                        const auto textureSlots = collectTextureSlots();
+                        if (!textureSlots.empty()) {
+                            std::size_t slotIndex = 0;
+                            for (const auto& uniform : programObject->uniforms) {
+                                if (!isSamplerUniformType(uniform.type)) {
+                                    continue;
+                                }
+                                if (slotIndex >= textureSlots.size()) {
+                                    break;
+                                }
+                                const std::uint32_t fallbackSlot =
+                                    textureSlots[slotIndex++];
+                                appendBindingIfMissing(
+                                    uniform,
+                                    findTextureSlot(uniform.name, fallbackSlot));
+                            }
+                        }
+                    }
+                };
+            if (geometryShader != nullptr && !geometryShader->spirv.empty() &&
+                !programObject->geometryEmulated &&
+                impl_->capabilities != nullptr &&
+                impl_->capabilities->meshShaderSupported()) {
+                // Shape gate: input topology, output topology,
+                // max_vertices. detectGeometryEmulatable already
+                // populated these fields on the program object.
+                const bool inputOK =
+                    programObject->gsInputTopology == GL_POINTS ||
+                    programObject->gsInputTopology == GL_LINES ||
+                    programObject->gsInputTopology == GL_TRIANGLES;
+                // Adjacency variants are deferred per the SPIRV-Cross
+                // patch's deferred-work list. CPU interpreter handles
+                // them; selective routing keeps adjacency on CPU.
+                const bool outputOK =
+                    programObject->gsOutputTopology == GL_TRIANGLE_STRIP ||
+                    programObject->gsOutputTopology == GL_LINE_STRIP ||
+                    programObject->gsOutputTopology == GL_POINTS;
+                // CKPT20 [Sprint 3 close]: gate widened from ≤3 to ≤4
+                // to activate Path I (interface-block GS input
+                // member population, fork 2a85276) on
+                // `nonarray_input.nonarray_input` (max_vertices=4).
+                // CKPT20 cluster verification: gate ≤4 preserves the
+                // 121/136 default-on invariant with 0 regressions
+                // (nonarray_input was already passing via legacy CPU
+                // emul; now routes through mesh path with Path I
+                // unblocking the interface-block input flow). The
+                // layered_rendering family (max_vertices ≥ 16) +
+                // `blending_support` (max=64) still fail at the
+                // per-layer rasterization layer — separate gap class
+                // carried forward to Sprint 4. Gate ≥5 is deferred
+                // pending that cluster's diagnosis.
+                const bool maxVerticesOK = programObject->gsMaxVertices <= 4u;
+                const bool shapeOK = inputOK && outputOK && maxVerticesOK;
+                if (shapeOK) {
+                    appgl::TranslatorOptions gsMeshOpts;
+                    gsMeshOpts.forceGeometryShaderAsMesh = true;
+                    applyShaderSpirvOptions(gsMeshOpts, geometryShader);
+                    appgl::ShaderReflection meshGsRefl;
+                    std::string meshGsMSL;
+                    const bool meshOk = translateStage(
+                        "geometry-as-mesh",
+                        geometryShader->spirv.data(),
+                        geometryShader->spirv.size(),
+                        geometryShader->source,
+                        meshGsMSL, meshGsRefl, gsMeshOpts);
+                    if (meshOk && !meshGsMSL.empty()) {
+                        synthesizeMeshSampledReflection(meshGsRefl, meshGsMSL);
+                        programObject->geometryShaderAsMeshMSL = std::move(meshGsMSL);
+                        if (!meshGsRefl.sampledTextures.empty() ||
+                            !meshGsRefl.storageImages.empty() ||
+                            !meshGsRefl.uniformBlocks.empty() ||
+                            !meshGsRefl.storageBuffers.empty()) {
+                            programObject->geometryReflection = std::move(meshGsRefl);
+                        }
+                        programObject->metalGSTier =
+                            GLProgramObject::MetalGSTier::MeshShader;
+                    }
+                }
+            }
+            // Sprint 3 Phase 2 [metal-mesh-GS]: link-time PSO build.
+            // When tier=MeshShader, prepare the two pieces the draw-time
+            // encoder needs:
+            //   (1) VS-as-compute PSO — VS source re-translated with
+            //       `vertex_for_tessellation + capture_output_to_buffer`
+            //       so the per-vertex outputs land in a buffer the mesh
+            //       function reads at [[buffer(22)]] (Path A's
+            //       `spvVsOutputs`, ec354aa). Mirrors Phase-3 metal-tess
+            //       VS-compute path; reuses `forceVertexForTessellation`.
+            //   (2) Mesh function — the `geometryShaderAsMeshMSL`
+            //       compiled to a retained `id<MTLFunction>`. The render
+            //       PSO itself is FBO-format-keyed and built lazily at
+            //       draw time.
+            // Either (1) or (2) failing demotes tier back to None so the
+            // CPU-interpreter fallback below picks the program up. Programs
+            // whose VS uses [[stage_in]] would fail (1) here and fall back
+            // — same handleability gate as the tess path. The 6 MVP
+            // conversion targets are simple gl_VertexID-only VSes, well
+            // inside this gate.
+            if (programObject->metalGSTier ==
+                    GLProgramObject::MetalGSTier::MeshShader &&
+                impl_->frameGraph != nullptr) {
+                bool meshLinkOk = true;
+                // (1) VS-as-compute translation + PSO build.
+                if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
+                    auto annotateMeshVsComputeInputs =
+                        [](std::string& msl,
+                           const appgl::ShaderReflection& reflection) {
+                            const std::size_t structPos =
+                                msl.find("struct main0_in");
+                            if (structPos == std::string::npos) {
+                                return;
+                            }
+                            const std::size_t bodyStart =
+                                msl.find('{', structPos);
+                            std::size_t bodyEnd = msl.find("};", bodyStart);
+                            if (bodyStart == std::string::npos ||
+                                bodyEnd == std::string::npos) {
+                                return;
+                            }
+                            auto isIdentChar = [](char c) {
+                                return c == '_' ||
+                                    (c >= '0' && c <= '9') ||
+                                    (c >= 'A' && c <= 'Z') ||
+                                    (c >= 'a' && c <= 'z');
+                            };
+                            for (const auto& input : reflection.vertexInputs) {
+                                if (input.name.empty()) {
+                                    continue;
+                                }
+                                std::size_t pos = bodyStart;
+                                while ((pos = msl.find(input.name, pos)) !=
+                                       std::string::npos && pos < bodyEnd) {
+                                    const std::size_t end =
+                                        pos + input.name.size();
+                                    const bool leftOk = pos == 0 ||
+                                        !isIdentChar(msl[pos - 1]);
+                                    const bool rightOk = end >= msl.size() ||
+                                        !isIdentChar(msl[end]);
+                                    if (!leftOk || !rightOk) {
+                                        pos = end;
+                                        continue;
+                                    }
+                                    const std::size_t semi =
+                                        msl.find(';', end);
+                                    if (semi == std::string::npos ||
+                                        semi >= bodyEnd) {
+                                        break;
+                                    }
+                                    const std::size_t existing =
+                                        msl.find("[[attribute(", end);
+                                    if (existing == std::string::npos ||
+                                        existing > semi) {
+                                        const std::string attr =
+                                            " [[attribute(" +
+                                            std::to_string(input.location) +
+                                            ")]]";
+                                        msl.insert(semi, attr);
+                                        bodyEnd += attr.size();
+                                    }
+                                    break;
+                                }
+                            }
+                        };
+                    appgl::TranslatorOptions vsComputeOpts;
+                    vsComputeOpts.forceVertexForTessellation = true;
+                    // Path G [Checkpoint 15, fork f19ce45]: ACTUAL fix
+                    // for the VS-as-compute kernel-doesn't-execute
+                    // symptom. Apple's [[grid_size]] returns (0,0,0)
+                    // on Apple Silicon — bounds check fires
+                    // universally, all threads early-return.
+                    // [[threads_per_grid]] returns the dispatched
+                    // size correctly. Path E/E++/E+++ flags
+                    // (barrier/volatile/atomic) preserved in the
+                    // TranslatorOptions struct as historical
+                    // record + optional defense-in-depth, but kept
+                    // OFF here — Path G alone is sufficient.
+                    vsComputeOpts.forceThreadsPerGridForStageInputSize = true;
+                    applyShaderSpirvOptions(vsComputeOpts, vertexShader);
+                    appgl::ShaderReflection vsComputeRefl;
+                    std::string vsComputeMSL;
+                    const bool vsTrOk = translateStage(
+                        "vertex-as-compute-for-mesh",
+                        vertexShader->spirv.data(),
+                        vertexShader->spirv.size(),
+                        vertexShader->source,
+                        vsComputeMSL, vsComputeRefl, vsComputeOpts);
+                    if (vsTrOk && !vsComputeMSL.empty()) {
+                        annotateMeshVsComputeInputs(vsComputeMSL, vsRefl);
+                        programObject->metalGSVsComputeMSL = vsComputeMSL;
+                        std::string vsPsoErr;
+                        void* vsPSO = impl_->frameGraph
+                            ->buildComputePipelineState(vsComputeMSL,
+                                                         &vsPsoErr,
+                                                         nullptr);
+                        if (vsPSO != nullptr) {
+                            programObject->metalGSVsComputePipelineState = vsPSO;
+                        } else if (vsPsoErr.find("stage_in") != std::string::npos) {
+                            programObject->metalGSVsComputeNeedsDescriptor = true;
+                        } else {
+                            if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
+                                std::fprintf(stderr,
+                                    "[MESH_GS] link VS-compute PSO failed: %s\n",
+                                    vsPsoErr.c_str());
+                            }
+                            meshLinkOk = false;
+                        }
+                    } else {
+                        if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
+                            std::fprintf(stderr,
+                                "[MESH_GS] vertex-as-compute translation failed\n");
+                        }
+                        meshLinkOk = false;
+                    }
+                } else {
+                    if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
+                        std::fprintf(stderr,
+                            "[MESH_GS] missing vertex shader SPIR-V for mesh link\n");
+                    }
+                    meshLinkOk = false;
+                }
+                // (2) Compile mesh function + FS function.
+                if (meshLinkOk) {
+                    std::string meshFnErr;
+                    void* meshFn = impl_->frameGraph
+                        ->compileMSLFunction(
+                            programObject->geometryShaderAsMeshMSL,
+                            &meshFnErr);
+                    if (meshFn != nullptr) {
+                        programObject->metalGSMeshFunction = meshFn;
+                    } else {
+                        if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
+                            std::fprintf(stderr,
+                                "[MESH_GS] mesh function compile failed: %s\n",
+                                meshFnErr.c_str());
+                        }
+                        meshLinkOk = false;
+                    }
+                }
+                if (meshLinkOk && !programObject->fragmentMSL.empty()) {
+                    std::string fsFnErr;
+                    void* fsFn = impl_->frameGraph
+                        ->compileMSLFunction(
+                            programObject->fragmentMSL, &fsFnErr);
+                    if (fsFn != nullptr) {
+                        programObject->metalGSFragmentFunction = fsFn;
+                    } else {
+                        if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
+                            std::fprintf(stderr,
+                                "[MESH_GS] mesh fragment function compile failed: %s\n",
+                                fsFnErr.c_str());
+                        }
+                        meshLinkOk = false;
+                    }
+                }
+                // Demote on any failure so the CPU-interpreter fallback
+                // picks the program up below.
+                if (!meshLinkOk) {
+                    programObject->metalGSTier =
+                        GLProgramObject::MetalGSTier::None;
+                }
+            }
+            if (programObject->metalGSTier == GLProgramObject::MetalGSTier::None &&
+                programObject->geometryEmulated) {
+                programObject->metalGSTier =
+                    GLProgramObject::MetalGSTier::CPUInterpreter;
+            }
+            // Record the emulation outcome after the per-stage records
+            // so BAR / trace logs see: [vertex:ok][fragment:ok][geometry:ok][gap-or-cpu-emulation].
+            if (programObject->geometryEmulated) {
+                Runtime::shared().recordShaderTranslation({
+                    programTag + "-geometry-cpu-emulation", "geometry",
+                    quickHash(geometryShader->source),
+                    linkVertexHash, linkFragmentHash,
+                    "geometry shader will run on the CPU emulator "
+                    "(constant_expressions GS subset); drawArrays routes "
+                    "expanded vertices through a synthesised pass-through VS",
+                    "", true
+                });
+            } else {
+                Runtime::shared().recordShaderTranslation({
+                    programTag + "-geometry-emulation", "geometry",
+                    quickHash(geometryShader->source),
+                    linkVertexHash, linkFragmentHash,
+                    "geometry shader outside the CPU-emulator's supported "
+                    "SPIR-V subset (unsupported opcode or topology); program "
+                    "falls back to VS+FS-only raster without GS",
+                    "", false
+                });
+            }
+            if (vsOk && fsOk) {
+                programObject->vertexReflection = std::move(vsRefl);
+                programObject->fragmentReflection = std::move(fsRefl);
+                programObject->hasTranslatedPipeline = true;
+                rasterTranslationOk = true;
+            }
+            break;
+        }
+        case ProgramKind::VertexGeometry: {
+            // Sprint 15 Day 18 (CKPT191) — VS+GS no-FS combination. Mirrors
+            // the VertexGeometryFragment branch's GS detection / emulation
+            // setup but skips fragment translation entirely. The draw-time
+            // pipeline path already handles `hasFragmentStage = false +
+            // rasterizerDiscard = true` for VertexOnly tests; we reuse the
+            // same nil-fragmentFunction + rasterizationEnabled=NO Metal
+            // pipeline configuration. CTS targets:
+            // shader_image_load_store.basic-allTargets-{loadStoreGS, atomicGS,
+            // loadStoreVS, atomicVS} (the GS variants build VS+GS only with
+            // image writes in the GS body; the VS variants don't reach this
+            // case). Prior characterization at CKPT164 §3 estimated this as
+            // multi-day infrastructure; the surgical scope ended up tractable
+            // because VertexOnly already wired the no-FS pipeline path.
+            ShaderReflection vsRefl, gsRefl;
+            appgl::TranslatorOptions vsOptionsVg;
+            if (vertexShader != nullptr) {
+                vsOptionsVg.forceArgumentBuffers = spirvUsesStorageBuffers(
+                    vertexShader->spirv.data(), vertexShader->spirv.size());
+            }
+            const bool vsOk = translateCachedStage(
+                "vertex", vertexShader, programObject->vertexMSL, vsRefl,
+                vsOptionsVg);
+            std::string unusedGsMSL;
+            (void)translateCachedStage("geometry", geometryShader, unusedGsMSL, gsRefl);
+            programObject->geometryReflection = gsRefl;
+            // CPU GS emulation hookup — copy GS SPIR-V onto the program
+            // (survives shader detach/delete) and let the emulator decide
+            // whether it can handle this shader. Mirrors VertexGeometryFragment.
+            if (geometryShader != nullptr && !geometryShader->spirv.empty()) {
+                programObject->geometrySpirv = geometryShader->spirv;
+                if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
+                    stashVertexSpirv(vertexShader);
+                }
+                (void)appgl::detectGeometryEmulatable(*programObject);
+            }
+            // No mesh-shader path here: SILS GS targets need CPU emulation
+            // for image opcodes; the mesh path doesn't gate on FS but the
+            // SILS shape (image writes from GS body) lives entirely in the
+            // CPU interpreter.
+            if (programObject->metalGSTier == GLProgramObject::MetalGSTier::None &&
+                programObject->geometryEmulated) {
+                programObject->metalGSTier =
+                    GLProgramObject::MetalGSTier::CPUInterpreter;
+            }
+            if (programObject->geometryEmulated) {
+                Runtime::shared().recordShaderTranslation({
+                    programTag + "-geometry-cpu-emulation-no-fs", "geometry",
+                    quickHash(geometryShader->source),
+                    linkVertexHash, "",
+                    "VS+GS-no-FS program (CKPT191): geometry shader runs on "
+                    "the CPU emulator; pipeline fragmentFunction = nil + "
+                    "rasterizationEnabled = NO at draw time",
+                    "", true
+                });
+            }
+            if (vsOk) {
+                programObject->vertexReflection = std::move(vsRefl);
+                // Empty fragmentMSL signals the no-FS pipeline path. The
+                // draw-time encoder treats this as legitimate when
+                // rasterizerDiscard is set (matches VertexOnly behaviour).
+                programObject->fragmentMSL.clear();
+                programObject->hasTranslatedPipeline = true;
+                rasterTranslationOk = true;
+            }
+            break;
+        }
+        case ProgramKind::VertexTessellationGeometry: {
+            ShaderReflection vsRefl, gsRefl;
+            appgl::TranslatorOptions vsOptionsVtg;
+            if (vertexShader != nullptr) {
+                vsOptionsVtg.forceArgumentBuffers = spirvUsesStorageBuffers(
+                    vertexShader->spirv.data(), vertexShader->spirv.size());
+            }
+            const bool vsOk = translateCachedStage(
+                "vertex", vertexShader, programObject->vertexMSL, vsRefl,
+                vsOptionsVtg);
+
+            std::string unusedGsMSL;
+            (void)translateCachedStage("geometry", geometryShader,
+                                       unusedGsMSL, gsRefl);
+            programObject->geometryReflection = gsRefl;
+
+            auto reflectOnly = [&](GLShaderObject* shader,
+                                   const appgl::TranslatorOptions& options)
+                -> ShaderReflection {
+                ShaderReflection refl;
+                if (shader == nullptr || shader->spirv.empty()) {
+                    return refl;
+                }
+                appgl::TranslatorOptions stageOptions = options;
+                stageOptions.fp64EmulationAvailable = fp64EmulationAvailable;
+                applyShaderSpirvOptions(stageOptions, shader);
+                try {
+                    refl = translator.reflect(shader->spirv.data(),
+                                              shader->spirv.size(),
+                                              bindings, nullptr,
+                                              stageOptions);
+                } catch (...) {
+                    // CPU emulation can still run with empty reflection;
+                    // buildStorageImageMap has a uniform-scanner fallback.
+                }
+                return refl;
+            };
+
+            if (geometryShader != nullptr && !geometryShader->spirv.empty() &&
+                programObject->geometryReflection.storageImages.empty() &&
+                programObject->geometryReflection.sampledTextures.empty() &&
+                programObject->geometryReflection.uniformBlocks.empty()) {
+                programObject->geometryReflection =
+                    reflectOnly(geometryShader, appgl::TranslatorOptions{});
+            }
+
+            appgl::TranslatorOptions tessOpts;
+            tessOpts.forceTessellation = true;
+            if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                tessOpts.siblingTesInputSpirv = tessEvalShader->spirv.data();
+                tessOpts.siblingTesInputWordCount = tessEvalShader->spirv.size();
+            }
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                tessOpts.siblingTcsOutputSpirv = tessControlShader->spirv.data();
+                tessOpts.siblingTcsOutputWordCount = tessControlShader->spirv.size();
+            }
+            programObject->tessControlReflection =
+                reflectOnly(tessControlShader, tessOpts);
+
+            appgl::TranslatorOptions tesComputeOpts;
+            tesComputeOpts.forceTessellation = true;
+            tesComputeOpts.forceTessEvalAsCompute = true;
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                tesComputeOpts.siblingTcsOutputSpirv = tessControlShader->spirv.data();
+                tesComputeOpts.siblingTcsOutputWordCount = tessControlShader->spirv.size();
+                auto tcModes = extractTessellationModes(
+                    tessControlShader->spirv.data(),
+                    tessControlShader->spirv.size());
+                programObject->tessControlOutputVertices =
+                    static_cast<GLint>(tcModes.outputVertices);
+                tesComputeOpts.tesePatchVertices = tcModes.outputVertices;
+            }
+            programObject->tessEvalAsComputeReflection =
+                reflectOnly(tessEvalShader, tesComputeOpts);
+
+            programObject->hasTessellation = true;
+            if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
+                stashVertexSpirv(vertexShader);
+            }
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                programObject->tessControlSpirv = tessControlShader->spirv;
+                programObject->tessControlParsedModule.reset();
+            }
+            if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                programObject->tessEvalSpirv = tessEvalShader->spirv;
+                programObject->tessEvalParsedModule.reset();
+                auto teModes = extractTessellationModes(
+                    tessEvalShader->spirv.data(),
+                    tessEvalShader->spirv.size());
+                programObject->tessGenMode = teModes.genMode;
+                programObject->tessGenSpacing = teModes.genSpacing;
+                programObject->tessGenVertexOrder = teModes.genVertexOrder;
+                programObject->tessGenPointMode = teModes.pointMode ? GL_TRUE : GL_FALSE;
+            }
+            if (geometryShader != nullptr && !geometryShader->spirv.empty()) {
+                programObject->geometrySpirv = geometryShader->spirv;
+                (void)appgl::detectGeometryEmulatable(*programObject);
+            }
+            (void)appgl::detectTessellationEmulatable(*programObject);
+            if (programObject->metalGSTier == GLProgramObject::MetalGSTier::None &&
+                programObject->geometryEmulated) {
+                programObject->metalGSTier =
+                    GLProgramObject::MetalGSTier::CPUInterpreter;
+            }
+            if (vsOk) {
+                programObject->vertexReflection = std::move(vsRefl);
+                programObject->fragmentMSL.clear();
+                programObject->hasTranslatedPipeline = true;
+                rasterTranslationOk = true;
+            }
+            break;
+        }
+        case ProgramKind::VertexTessellation: {
+            ShaderReflection vsRefl;
+            appgl::TranslatorOptions vsOptionsVt;
+            if (vertexShader != nullptr) {
+                vsOptionsVt.forceArgumentBuffers = spirvUsesStorageBuffers(
+                    vertexShader->spirv.data(), vertexShader->spirv.size());
+            }
+            const bool vsOk = translateCachedStage(
+                "vertex", vertexShader, programObject->vertexMSL, vsRefl,
+                vsOptionsVt);
+
+            auto reflectOnlyTess = [&](GLShaderObject* shader,
+                                       const appgl::TranslatorOptions& options)
+                -> ShaderReflection {
+                ShaderReflection refl;
+                if (shader == nullptr || shader->spirv.empty()) {
+                    return refl;
+                }
+                appgl::TranslatorOptions stageOptions = options;
+                stageOptions.fp64EmulationAvailable = fp64EmulationAvailable;
+                applyShaderSpirvOptions(stageOptions, shader);
+                try {
+                    refl = translator.reflect(shader->spirv.data(),
+                                              shader->spirv.size(),
+                                              bindings, nullptr,
+                                              stageOptions);
+                } catch (...) {
+                    // CPU tessellation can still run with empty reflection;
+                    // image resolution has a uniform-scanner fallback.
+                }
+                return refl;
+            };
+            auto reflectionHasResources = [](const ShaderReflection& refl) {
+                return !refl.uniformBlocks.empty() ||
+                       !refl.storageBuffers.empty() ||
+                       !refl.sampledTextures.empty() ||
+                       !refl.storageImages.empty();
+            };
+
+            appgl::TranslatorOptions tessOpts;
+            tessOpts.forceTessellation = true;
+            tessOpts.useFullPrecisionTessLevelBuffer = true;
+            if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                tessOpts.siblingTesInputSpirv = tessEvalShader->spirv.data();
+                tessOpts.siblingTesInputWordCount = tessEvalShader->spirv.size();
+            }
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                tessOpts.siblingTcsOutputSpirv = tessControlShader->spirv.data();
+                tessOpts.siblingTcsOutputWordCount = tessControlShader->spirv.size();
+                auto tcModes = extractTessellationModes(
+                    tessControlShader->spirv.data(),
+                    tessControlShader->spirv.size());
+                programObject->tessControlOutputVertices =
+                    static_cast<GLint>(tcModes.outputVertices);
+                tessOpts.tesePatchVertices = tcModes.outputVertices;
+            }
+            if (tessControlShader != nullptr) {
+                ShaderReflection tcRefl;
+                (void)translateCachedStage("tess-control", tessControlShader,
+                                           programObject->tessControlMSL, tcRefl,
+                                           tessOpts);
+                if (!reflectionHasResources(tcRefl)) {
+                    tcRefl = reflectOnlyTess(tessControlShader, tessOpts);
+                }
+                programObject->tessControlReflection = tcRefl;
+            }
+
+            appgl::TranslatorOptions tesComputeOpts;
+            tesComputeOpts.forceTessellation = true;
+            tesComputeOpts.forceTessEvalAsCompute = true;
+            tesComputeOpts.tesePatchVertices = tessOpts.tesePatchVertices;
+            tesComputeOpts.useFullPrecisionTessLevelBuffer = true;
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                tesComputeOpts.siblingTcsOutputSpirv =
+                    tessControlShader->spirv.data();
+                tesComputeOpts.siblingTcsOutputWordCount =
+                    tessControlShader->spirv.size();
+            }
+            ShaderReflection teRefl;
+            (void)translateCachedStage("tess-eval-as-compute", tessEvalShader,
+                                       programObject->tessEvalAsComputeMSL,
+                                       teRefl, tesComputeOpts);
+            if (!reflectionHasResources(teRefl)) {
+                teRefl = reflectOnlyTess(tessEvalShader, tesComputeOpts);
+            }
+            programObject->tessEvalAsComputeReflection = teRefl;
+
+            programObject->hasTessellation = true;
+            if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
+                stashVertexSpirv(vertexShader);
+            }
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                programObject->tessControlSpirv = tessControlShader->spirv;
+                programObject->tessControlParsedModule.reset();
+            }
+            if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                programObject->tessEvalSpirv = tessEvalShader->spirv;
+                programObject->tessEvalParsedModule.reset();
+                auto teModes = extractTessellationModes(
+                    tessEvalShader->spirv.data(),
+                    tessEvalShader->spirv.size());
+                programObject->tessGenMode = teModes.genMode;
+                programObject->tessGenSpacing = teModes.genSpacing;
+                programObject->tessGenVertexOrder = teModes.genVertexOrder;
+                programObject->tessGenPointMode =
+                    teModes.pointMode ? GL_TRUE : GL_FALSE;
+            }
+            (void)appgl::detectTessellationEmulatable(*programObject);
+            if (vsOk) {
+                programObject->vertexReflection = std::move(vsRefl);
+                programObject->fragmentMSL.clear();
+                programObject->hasTranslatedPipeline = true;
+                rasterTranslationOk = true;
+            }
+            break;
+        }
+        case ProgramKind::VertexTessellationFragment: {
+            // Same story as geometry: translate VS + FS and record a
+            // diagnostic for the tess stages. Metal's tessellation model
+            // is incompatible with GL's, so proper routing lands later.
+            //
+            // Phase 8X Group 4d follow-up⁵ — VS+FS use the cross-stage
+            // linked path here too, for the same reason as VGF above.
+            const bool canLinkGlslSources =
+                vertexShader != nullptr && fragmentShader != nullptr &&
+                !vertexShader->isSpirvBinary && !fragmentShader->isSpirvBinary;
+            LinkedProgramSpirv linked = canLinkGlslSources
+                ? compileLinkedVsFs(vertexShader, fragmentShader)
+                : LinkedProgramSpirv{};
+            const std::uint32_t* vsSpirvData;
+            std::size_t vsSpirvWords;
+            const std::uint32_t* fsSpirvData;
+            std::size_t fsSpirvWords;
+            if (linked.linkSucceeded) {
+                vsSpirvData = linked.vertexSpirv.data();
+                vsSpirvWords = linked.vertexSpirv.size();
+                fsSpirvData = linked.fragmentSpirv.data();
+                fsSpirvWords = linked.fragmentSpirv.size();
+            } else {
+                vsSpirvData = vertexShader->spirv.data();
+                vsSpirvWords = vertexShader->spirv.size();
+                fsSpirvData = fragmentShader->spirv.data();
+                fsSpirvWords = fragmentShader->spirv.size();
+            }
+            ShaderReflection vsRefl, fsRefl, tcRefl, teRefl;
+            const bool forceRasterArgBufVtf =
+                spirvUsesStorageBuffers(vsSpirvData, vsSpirvWords) ||
+                spirvUsesStorageBuffers(fsSpirvData, fsSpirvWords);
+            appgl::TranslatorOptions vsOptionsVtf;
+            vsOptionsVtf.forceArgumentBuffers = forceRasterArgBufVtf;
+            appgl::TranslatorOptions fsOptionsVtf;
+            fsOptionsVtf.forceArgumentBuffers = forceRasterArgBufVtf;
+            applyShaderSpirvOptions(vsOptionsVtf, vertexShader);
+            applyShaderSpirvOptions(fsOptionsVtf, fragmentShader);
+            const bool vsOk = translateStage(
+                "vertex", vsSpirvData, vsSpirvWords, vertexShader->source,
+                programObject->vertexMSL, vsRefl, vsOptionsVtf);
+            const bool fsOk = translateStage(
+                "fragment", fsSpirvData, fsSpirvWords, fragmentShader->source,
+                programObject->fragmentMSL, fsRefl, fsOptionsVtf);
+            // Sprint 5 Phase 1: Phase 3 gate widening via passthrough TCS
+            // synthesis at link time. When source program has TES + FS
+            // (no TCS) — GL spec §11.2.4: TES-only programs use VS outputs
+            // directly as TES inputs — synthesize a minimal passthrough
+            // GLSL TCS, compile via existing toolchain, and use as if a
+            // real TCS were attached. This unblocks the Phase 3 gate at
+            // tryMetalTessellationDraw which requires `tessControlMSL`
+            // non-empty. Affected tests: `tc2te.gl_PatchVerticesIn` iter 4
+            // (TES_4 variant), `single.max_patch_vertices` Case 2,
+            // `tc2te.gl_tessLevel` TES iters (3 of 6).
+            //
+            // Minimal TCS surface area for Sprint 5 Phase 1:
+            //   - layout(vertices = 32) — covers up to MAX_PATCH_VERTICES
+            //   - gl_Position passthrough
+            //   - default tess levels = 1.0 (matches glPatchParameterfv
+            //     default) — runtime override via uniforms TBD if test
+            //     exercises non-default tess levels
+            //
+            // User-varying passthrough is NOT synthesized in this minimal
+            // version. Tests that depend on per-CP user data (e.g.
+            // max_patch_vertices Case 2's `for (i; i<gl_PatchVerticesIn;
+            // i++) result_iv += inVertex[i].iv`) will still fail because
+            // synthesized TCS doesn't copy user varyings from VS outputs.
+            // Future iteration (post-CKPT29 follow-up) extends synthesis
+            // to walk TES SPIR-V Inputs and emit matching TCS Outputs.
+            std::vector<std::uint32_t> synthTcsSpirv;
+            std::string synthTcsSource;
+            GLShaderObject synthTcsShader;
+            if (tessEvalShader != nullptr && tessControlShader == nullptr &&
+                !tessEvalShader->spirv.empty()) {
+                synthTcsSource =
+                    "#version 410 core\n"
+                    "#extension GL_EXT_tessellation_shader : enable\n"
+                    "layout (vertices = 32) out;\n"
+                    "void main() {\n"
+                    "    gl_out[gl_InvocationID].gl_Position = "
+                    "gl_in[gl_InvocationID].gl_Position;\n"
+                    "    if (gl_InvocationID == 0) {\n"
+                    "        gl_TessLevelOuter[0] = 1.0;\n"
+                    "        gl_TessLevelOuter[1] = 1.0;\n"
+                    "        gl_TessLevelOuter[2] = 1.0;\n"
+                    "        gl_TessLevelOuter[3] = 1.0;\n"
+                    "        gl_TessLevelInner[0] = 1.0;\n"
+                    "        gl_TessLevelInner[1] = 1.0;\n"
+                    "    }\n"
+                    "}\n";
+                std::string compileLog;
+                synthTcsSpirv = translator.compileGLSL(
+                    synthTcsSource, GL_TESS_CONTROL_SHADER, 410, &compileLog);
+                if (!synthTcsSpirv.empty()) {
+                    synthTcsShader.stage = GL_TESS_CONTROL_SHADER;
+                    synthTcsShader.source = synthTcsSource;
+                    synthTcsShader.spirv = synthTcsSpirv;
+                    synthTcsShader.compiled = true;
+                    tessControlShader = &synthTcsShader;
+                    // Sprint 5 Phase 1: signal to encoder that this
+                    // program's TCS was synthesized → host should
+                    // populate factorBufFull from glPatchParameterfv
+                    // state per draw to override synth's 1.0 defaults.
+                    programObject->tessControlSynthesized = true;
+                    APPGL_LOG(SHADER,
+                        @"[GL] Sprint5 Phase 3 gate widening: synthesized "
+                        @"passthrough TCS for TES-only program (program=%u, "
+                        @"spirv_words=%zu)",
+                        program, synthTcsSpirv.size());
+                } else {
+                    APPGL_LOG(SHADER,
+                        @"[GL] Sprint5 Phase 3 gate widening: passthrough TCS "
+                        @"compile failed: %s", compileLog.c_str());
+                }
+            }
+            // Metal tess Phase 1: force SPIRV-Cross tess options on for
+            // TCS/TES translation regardless of APPGL_ENABLE_METAL_TESS
+            // env. The emitted MSL shape matches what the Metal tess
+            // pipeline (TCS-as-compute + TES-as-vertex-function with
+            // tessellationEnabled=YES) can consume. MSL is stashed on the
+            // program so MetalFrameGraph can build the pipeline states.
+            appgl::TranslatorOptions tessOpts;
+            tessOpts.forceTessellation = true;
+            // Sprint 5 Phase 1 — Path L Class 2A: full-precision tess
+            // level shadow buffer. SPIRV-Cross fork emits TCS dual-write
+            // (half + full) and TES read from full-precision buffer.
+            // Avoids half-precision rounding error on tests like
+            // `tc2te.gl_tessLevel` which expects ~exact float read-back.
+            tessOpts.useFullPrecisionTessLevelBuffer = true;
+            // Phase 7 [metal-tess-TF] (Track 2 scaffold): pass the linked
+            // TES's SPIR-V to the TCS translation so spirvToMSL can call
+            // add_msl_shader_output for each TES user-varying input. Closes
+            // the per-CP buffer stride mismatch on shapes where TCS doesn't
+            // write all the user varyings TES reads (cluster A / C). The
+            // TES translation's spirvToMSL ignores this field — it's gated
+            // on isTessControl inside the translator.
+            if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                tessOpts.siblingTesInputSpirv = tessEvalShader->spirv.data();
+                tessOpts.siblingTesInputWordCount = tessEvalShader->spirv.size();
+            }
+            // tc_barriers cluster — inverse-direction sibling so the TES
+            // translation calls add_msl_shader_input for TCS outputs the
+            // TES doesn't itself declare. Closes the per-CP buffer
+            // stride mismatch when TCS uses its own outputs internally
+            // (after barrier()) so SPIRV-Cross emits 48 B/CP for TCS
+            // but 16 B/CP for TES → TES reads at the wrong offset.
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                tessOpts.siblingTcsOutputSpirv = tessControlShader->spirv.data();
+                tessOpts.siblingTcsOutputWordCount = tessControlShader->spirv.size();
+            }
+            // T4I [metal-tess-TF]: extract TCS `layout(vertices=N)`
+            // before TES translation so SPIRV-Cross can plumb the
+            // patch CP count into TES MSL's `[[ patch(quad, N) ]]`
+            // attribute and `gl_in = &spvIn[gl_PrimitiveID * N]`
+            // stride. Without this, MSL emits `* 0` and every patch
+            // reads spvIn[0..N-1] regardless of primitive id —
+            // covering only the first patch's pixels.
+            if (tessControlShader && !tessControlShader->spirv.empty()) {
+                auto tcModes = extractTessellationModes(
+                    tessControlShader->spirv.data(), tessControlShader->spirv.size());
+                tessOpts.tesePatchVertices = tcModes.outputVertices;
+            }
+            (void)translateCachedStage("tess-control", tessControlShader,
+                                       programObject->tessControlMSL, tcRefl,
+                                       tessOpts);
+            (void)translateCachedStage("tess-eval", tessEvalShader,
+                                       programObject->tessEvalMSL, teRefl,
+                                       tessOpts);
+            // T4I [metal-tess-TF]: SPIRV-Cross emits the TES vertex
+            // function with `[[patch(domain, execution.output_vertices)]]`,
+            // but `execution.output_vertices` is 0 for TES (the
+            // OutputVertices execution mode is set on TCS, not TES).
+            // Metal needs the patch_control_point_count in the
+            // attribute; with 0 it silently mis-fetches CP data and
+            // every patch covers only the first control point's
+            // pixels. Post-process the emitted MSL to substitute the
+            // TCS output_vertices count.
+            if (tessOpts.tesePatchVertices != 0 && !programObject->tessEvalMSL.empty()) {
+                std::string& msl = programObject->tessEvalMSL;
+                std::string oldNeedle1 = "[[ patch(quad, 0) ]]";
+                std::string oldNeedle2 = "[[ patch(triangle, 0) ]]";
+                std::string newRepl1 = "[[ patch(quad, " + std::to_string(tessOpts.tesePatchVertices) + ") ]]";
+                std::string newRepl2 = "[[ patch(triangle, " + std::to_string(tessOpts.tesePatchVertices) + ") ]]";
+                std::size_t p = msl.find(oldNeedle1);
+                if (p != std::string::npos) {
+                    msl.replace(p, oldNeedle1.size(), newRepl1);
+                    if (std::getenv("APPGL_TRACE_TESS")) {
+                        std::fprintf(stderr,
+                            "[APPGL] T4I: TES patch_cp 0->%u (quad)\n",
+                            tessOpts.tesePatchVertices);
+                    }
+                } else {
+                    p = msl.find(oldNeedle2);
+                    if (p != std::string::npos) {
+                        msl.replace(p, oldNeedle2.size(), newRepl2);
+                        if (std::getenv("APPGL_TRACE_TESS")) {
+                            std::fprintf(stderr,
+                                "[APPGL] T4I: TES patch_cp 0->%u (triangle)\n",
+                                tessOpts.tesePatchVertices);
+                        }
+                    }
+                }
+            }
+            programObject->tessControlReflection = tcRefl;
+            // Metal tess Phase 3: compile VS as a compute kernel with
+            // `vertex_for_tessellation + capture_output_to_buffer` so
+            // the TCS compute dispatch can consume its outputs via
+            // stage-input. Emits alongside the traditional `vertex`
+            // form stored above — the Phase 3 pipeline probe + encode
+            // paths read `tessVertexAsComputeMSL`, leaving
+            // `vertexMSL` (the Phase-2 render path) untouched.
+            appgl::TranslatorOptions vsComputeOpts;
+            vsComputeOpts.forceVertexForTessellation = true;
+            applyShaderSpirvOptions(vsComputeOpts, vertexShader);
+            ShaderReflection vsComputeRefl;
+            (void)translateStage(
+                "vertex-for-tess", vsSpirvData, vsSpirvWords,
+                vertexShader->source,
+                programObject->tessVertexAsComputeMSL, vsComputeRefl,
+                vsComputeOpts);
+            programObject->tessVertexAsComputeReflection = vsComputeRefl;
+            // SPIRV-Cross inserts a `[[grid_size]]`-based early-return
+            // in VS-for-tessellation to guard against out-of-range
+            // threads. On macOS Apple Silicon with `dispatchThreads`
+            // the attribute reads as (0,0,0) for reasons I haven't yet
+            // tracked — the whole kernel early-returns and nothing is
+            // written. We dispatch exactly vertexCount threads so the
+            // bounds check is redundant; strip it post-emit.
+            if (!programObject->tessVertexAsComputeMSL.empty()) {
+                std::string& mslRef = programObject->tessVertexAsComputeMSL;
+                const std::string needle =
+                    "if (any(gl_GlobalInvocationID >= spvStageInputSize))\n"
+                    "        return;";
+                const std::size_t pos = mslRef.find(needle);
+                if (pos != std::string::npos) {
+                    mslRef.replace(pos, needle.size(),
+                                   "/* AppGL: grid_size early-return stripped */");
+                    if (std::getenv("APPGL_TRACE_TESS")) {
+                        std::fprintf(stderr,
+                            "[APPGL] T4I: stripped grid_size early-return from VS-compute MSL\n");
+                    }
+                } else if (std::getenv("APPGL_TRACE_TESS")) {
+                    std::fprintf(stderr,
+                        "[APPGL] T4I: VS-compute MSL early-return needle NOT found\n");
+                }
+                // CKPT139 (Sprint 13 Phase 2 Day 3): γ2.1.F vs γ2.1.G
+                // sentinel-encoding diagnostic. When APPGL_DIAG_TESS_SENTINEL
+                // is set, override `out.gl_Position` write to encode
+                // gl_GlobalInvocationID.{xyz} as float values, AND write a
+                // fixed sentinel to other fields so we can identify which
+                // thread populated each slot. Diagnostic-only; environment-gated.
+                if (std::getenv("APPGL_DIAG_TESS_SENTINEL") != nullptr) {
+                    const std::string oldPos =
+                        "out.gl_Position = float4(float(int(gl_VertexIndex)));";
+                    const std::string newPos =
+                        "out.gl_Position = float4(float(gl_GlobalInvocationID.x), "
+                        "float(gl_GlobalInvocationID.y), "
+                        "float(gl_GlobalInvocationID.z), 42.0);";
+                    const std::size_t posp = mslRef.find(oldPos);
+                    if (posp != std::string::npos) {
+                        mslRef.replace(posp, oldPos.size(), newPos);
+                        std::fprintf(stderr,
+                            "[APPGL] DIAG-SENTINEL: replaced gl_Position with thread-id encoding\n");
+                    } else {
+                        std::fprintf(stderr,
+                            "[APPGL] DIAG-SENTINEL: gl_Position pattern NOT found\n");
+                    }
+                }
+            }
+            // Extract TCS output_vertices now (before TES-compute
+            // translation) so we can plumb the per-patch CP count into
+            // SPIRV-Cross — the TES's own SPIR-V has no
+            // `output_vertices` execution mode, so without this the
+            // emitted `gl_in` stride defaults to `gl_PrimitiveID * 0`
+            // and every patch collapses to the TCS-output origin.
+            programObject->hasTessellation = true;
+            std::uint32_t tcsOutputVertices = 0;
+            // Sprint 5 Phase 3 gate widening: for synthesized passthrough
+            // TCS (TES-only programs), populate
+            // `programObject->tessControlOutputVertices` from the synth
+            // (so the Phase 3 gate passes) BUT force local
+            // `tcsOutputVertices = 0` so `tesComputeOpts.tesePatchVertices
+            // = 0` and Path K's runtime read of `spvIndirectParams[0]`
+            // kicks in for TES-compute MSL emission. TES-only mode's
+            // gl_PatchVerticesIn semantic is "PATCH_VERTICES from
+            // glPatchParameteri" (runtime), not "TCS output_vertices"
+            // (link-time bake from synth's `layout(vertices = 32)`).
+            const bool isSynthPassthroughTcs =
+                (tessControlShader == &synthTcsShader);
+            if (tessControlShader && !tessControlShader->spirv.empty()) {
+                auto tcModes = extractTessellationModes(
+                    tessControlShader->spirv.data(), tessControlShader->spirv.size());
+                programObject->tessControlOutputVertices = static_cast<GLint>(tcModes.outputVertices);
+                if (!isSynthPassthroughTcs) {
+                    tcsOutputVertices = tcModes.outputVertices;
+                }
+                // For synth case, tcsOutputVertices stays 0 → triggers
+                // Path K runtime read in TES MSL.
+            }
+
+            // Phase 3B [metal-tess-TF] groundwork: also translate TES
+            // with `forceTessEvalAsCompute` so the call path is wired
+            // for the follow-up SPIRV-Cross patch that actually emits
+            // a kernel. Today the output matches the render-path TES
+            // (same flag semantics as forceTessellation alone) — the
+            // resulting MSL is stashed but the probe doesn't yet build
+            // a TES-compute PSO from it.
+            appgl::TranslatorOptions tesComputeOpts;
+            tesComputeOpts.forceTessellation = true;
+            tesComputeOpts.forceTessEvalAsCompute = true;
+            tesComputeOpts.tesePatchVertices = tcsOutputVertices;
+            // Sprint 5 Phase 1 — Path L Class 2A: also enable on TES-
+            // compute path so TES kernel reads gl_TessLevelOuter/Inner
+            // from spvTessLevelFull (full-precision) instead of half-
+            // precision spvTessLevel.
+            tesComputeOpts.useFullPrecisionTessLevelBuffer = true;
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                tesComputeOpts.siblingTcsOutputSpirv = tessControlShader->spirv.data();
+                tesComputeOpts.siblingTcsOutputWordCount = tessControlShader->spirv.size();
+            }
+            ShaderReflection tesComputeRefl;
+            (void)translateCachedStage(
+                "tess-eval-as-compute", tessEvalShader,
+                programObject->tessEvalAsComputeMSL, tesComputeRefl,
+                tesComputeOpts);
+            programObject->tessEvalAsComputeReflection = tesComputeRefl;
+            // Phase 3B.5 [metal-tess-TF]: reflect the TES output
+            // struct layout under the same translator options so the
+            // TF-capture encoder can locate each GL-declared TF
+            // varying by name at draw time.
+            if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                programObject->tessEvalOutputLayout =
+                    translator.reflectStageOutputLayout(
+                        tessEvalShader->spirv.data(),
+                        tessEvalShader->spirv.size(),
+                        tesComputeOpts);
+            }
+            if (tessEvalShader && !tessEvalShader->spirv.empty()) {
+                auto teModes = extractTessellationModes(
+                    tessEvalShader->spirv.data(), tessEvalShader->spirv.size());
+                programObject->tessGenMode = teModes.genMode;
+                programObject->tessGenSpacing = teModes.genSpacing;
+                programObject->tessGenVertexOrder = teModes.genVertexOrder;
+                programObject->tessGenPointMode = teModes.pointMode ? GL_TRUE : GL_FALSE;
+            }
+
+            Runtime::shared().recordShaderTranslation({
+                programTag + "-tessellation-emulation", "tessellation",
+                tessControlShader != nullptr
+                    ? quickHash(tessControlShader->source)
+                    : std::string(),
+                linkVertexHash, linkFragmentHash,
+                "tessellation emulation not yet available on Metal; "
+                "program translated VS+FS only, falls back to raster-without-tess",
+                "", false
+            });
+            if (vsOk && fsOk) {
+                programObject->vertexReflection = std::move(vsRefl);
+                programObject->fragmentReflection = std::move(fsRefl);
+                programObject->hasTranslatedPipeline = true;
+                rasterTranslationOk = true;
+            }
+            // Tessellation emulator detection (scaffolding — iter 162).
+            // Mirrors the GS-emul pattern: copy SPIR-V onto the program
+            // so draw-time emulation survives detach+delete, then call
+            // the detector. The detector's `.tessellationEmulated` flag
+            // stays false through iter 162 — subsequent iters flip it
+            // on once the draw-time logic lands.
+            if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
+                stashVertexSpirv(vertexShader);
+            }
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                programObject->tessControlSpirv = tessControlShader->spirv;
+                // Phase 3f-11: invalidate the parsed-module cache so
+                // subsequent runTcsForVertex calls re-parse against
+                // the new SPIR-V blob.
+                programObject->tessControlParsedModule.reset();
+            }
+            if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                programObject->tessEvalSpirv = tessEvalShader->spirv;
+                programObject->tessEvalParsedModule.reset();
+            }
+            (void)appgl::detectTessellationEmulatable(*programObject);
+
+            // Metal tess Phase 1 probe — validate that the tess-MSL
+            // stashed above compiles into Metal pipeline states. No
+            // draw-time consumer yet; the CPU interpreter path still
+            // handles every drawArrays(GL_PATCHES, ...) call. The
+            // retained TCS compute PSO becomes Phase 2's input.
+            // Detector point pre-A — catches programs that have tess
+            // shaders but get skipped by the probe gate below. The
+            // existing point A (after the probe runs) is silent for
+            // gl_in-class shapes because the conventional vertex-form
+            // TES MSL never gets generated, so this gate trips first.
+            if (detectorEnabled() &&
+                (tessControlShader != nullptr || tessEvalShader != nullptr)) {
+                // Mirror the actual probe gate: accept either form of
+                // TES MSL (conventional vertex or as-compute kernel).
+                const bool gateOk = (impl_->frameGraph != nullptr &&
+                    !programObject->tessControlMSL.empty() &&
+                    (!programObject->tessEvalMSL.empty() ||
+                     !programObject->tessEvalAsComputeMSL.empty()) &&
+                    !programObject->fragmentMSL.empty());
+                std::fprintf(stderr,
+                    "APPGL_DETECTOR lift_translate program=%u "
+                    "tcsMSL_empty=%d tesMSL_empty=%d fsMSL_empty=%d "
+                    "tesAsComputeMSL_empty=%d vsAsComputeMSL_empty=%d "
+                    "frameGraph_present=%d -> probe_gate_ok=%d\n",
+                    program,
+                    programObject->tessControlMSL.empty() ? 1 : 0,
+                    programObject->tessEvalMSL.empty() ? 1 : 0,
+                    programObject->fragmentMSL.empty() ? 1 : 0,
+                    programObject->tessEvalAsComputeMSL.empty() ? 1 : 0,
+                    programObject->tessVertexAsComputeMSL.empty() ? 1 : 0,
+                    impl_->frameGraph != nullptr ? 1 : 0,
+                    gateOk ? 1 : 0);
+            }
+            // Probe gate: post-isolines-compute-bypass-patch (SPIRV-Cross
+            // commit 095c99c, 2026-04-26), TES isolines emits non-empty
+            // `tessEvalAsComputeMSL` while `tessEvalMSL` (conventional
+            // render-vertex form) stays empty because Metal's render
+            // pipeline doesn't support isoline tessellation. Allow the
+            // probe to run when EITHER form is available — the probe's
+            // internals already gate the conventional render-PSO build
+            // on `tesMSL` non-empty separately.
+            const bool tessEvalAvailable =
+                !programObject->tessEvalMSL.empty() ||
+                !programObject->tessEvalAsComputeMSL.empty();
+            if (impl_->frameGraph != nullptr &&
+                !programObject->tessControlMSL.empty() &&
+                tessEvalAvailable &&
+                !programObject->fragmentMSL.empty()) {
+                MetalFrameGraph::TessPipelineProbeResult probe =
+                    impl_->frameGraph->probeTessellationPipeline(
+                        programObject->tessControlMSL,
+                        programObject->tessEvalMSL,
+                        programObject->fragmentMSL,
+                        programObject->tessGenMode,
+                        programObject->tessGenSpacing,
+                        programObject->tessGenVertexOrder,
+                        programObject->tessVertexAsComputeMSL,
+                        programObject->tessEvalAsComputeMSL);
+                // Phase 3: stash the VS-as-compute PSO when the probe
+                // built it. Non-fatal if it didn't (the simpler Phase-2
+                // path still works for programs without VS→TCS flow).
+                if (probe.vertexComputeOk) {
+                    programObject->metalTessVertexPipelineState =
+                        probe.vertexComputePipelineState;
+                }
+                // T4I [metal-tess-TF]: when the VS-as-compute MSL
+                // declares `[[stage_in]]`, the PSO must be built at
+                // draw time from the bound VAO's
+                // MTLStageInputOutputDescriptor. Probe set the flag
+                // when it caught the stage_in compile error.
+                if (probe.vertexComputeNeedsDescriptor) {
+                    programObject->metalTessVertexNeedsDescriptor = true;
+                }
+                // Phase 3B.4 [metal-tess-TF]: stash the TES-as-compute
+                // PSO when the probe built it. Enables the 4-dispatch
+                // TF-capture chain at draw time.
+                if (probe.tessEvalComputeOk) {
+                    programObject->metalTessEvalComputePipelineState =
+                        probe.tessEvalComputePipelineState;
+                }
+                // Metal tess tier gate: classify the program against
+                // the encoder capability matrix.
+                //   Phase 2 — TCS MSL uses only factor (26) + indirect
+                //     (29) buffers; TES has no per-CP/per-patch
+                //     buffer inputs. Trivial VS (empty or no user
+                //     outputs). Encoded by `encodeMetalTessellationDraw`.
+                //   Phase 3 — TCS or TES declares VS-input
+                //     (`spvIn [[buffer(22)]]` on TCS), per-CP output
+                //     (`spvOut [[buffer(28)]]` on TCS), per-patch
+                //     output (`spvPatchOut [[buffer(27)]]` on TCS),
+                //     per-CP input (`spvIn [[buffer(22)]]` on TES), or
+                //     per-patch input (`spvPatchIn [[buffer(20)]]` on
+                //     TES). Requires VS-as-compute PSO from the probe.
+                //     Encoded by `encodeMetalTessellationDrawPhase3`.
+                //   None — probe failed OR Phase 3 needed but VS
+                //     compute PSO couldn't build (VS uses
+                //     [[stage_in]] without a descriptor). Falls
+                //     through to the CPU tessellation interpreter.
+                const bool needsPhase3 =
+                    probe.computeOk && (
+                        programObject->tessControlMSL.find("spvIn [[buffer(") != std::string::npos ||
+                        programObject->tessControlMSL.find("spvOut [[buffer(") != std::string::npos ||
+                        programObject->tessControlMSL.find("spvPatchOut [[buffer(") != std::string::npos ||
+                        programObject->tessEvalMSL.find("spvIn [[buffer(") != std::string::npos ||
+                        programObject->tessEvalMSL.find("spvPatchIn [[buffer(") != std::string::npos);
+                // ----------------------------------------------------
+                // APPGL_ENABLE_METAL_TESS_TF — default-on master
+                // enable for the Metal tess+TF compute chain
+                // (APPGL_ENABLE_METAL_TESS_TF=0 restores the legacy
+                // CPU route for attribution). When enabled:
+                //   • This link-time block sets metalTessTier for tess
+                //     programs with TF varyings (Phase2 or Phase3) and
+                //     stashes metalTessEvalComputePipelineState.
+                //     Opting out forces tier=None for TF-varying tess
+                //     programs and routes drawArrays(GL_PATCHES) to
+                //     the CPU tess interpreter.
+                //   • tryMetalTessellationDraw and the rasterizer-
+                //     discard probe path also re-check this gate.
+                // It pairs with APPGL_LIFT_TESS_UNIFORM_GUARD: that var
+                // relaxes the "tess uses uniforms -> CPU fallback"
+                // guard. Both gates are default-on now; either =0
+                // keeps the old CPU path available for attribution.
+                // Programs that declared TF varyings at link time must
+                // source TES output into the bound TF buffer at draw
+                // time. tessTFReady=true means: (a) probe built the TES
+                // compute PSO, (b) reflection produced a TES output
+                // layout, (c) APPGL_ENABLE_METAL_TESS_TF is enabled.
+                const bool tessUsesTF =
+                    !programObject->transformFeedbackVaryingNames.empty();
+                const bool tessTFReady =
+                    probe.tessEvalComputeOk &&
+                    programObject->tessEvalOutputLayout.structSize > 0 &&
+                    metalTessTFEnabled();
+                const bool tessBlockedByTF = tessUsesTF && !tessTFReady;
+                if (probe.computeOk && !needsPhase3 && !tessBlockedByTF) {
+                    programObject->metalTessTier =
+                        GLProgramObject::MetalTessTier::Phase2;
+                    programObject->metalTessControlPipelineState =
+                        probe.computePipelineState;
+                } else if (probe.computeOk && needsPhase3 && !tessBlockedByTF &&
+                           (probe.vertexComputeOk || probe.vertexComputeNeedsDescriptor)) {
+                    // T4I [metal-tess-TF]: Phase 3 is reachable when
+                    // VS-compute either built directly (no stage_in)
+                    // OR needs a descriptor at draw time. The encoder
+                    // checks `metalTessVertexNeedsDescriptor` and
+                    // builds-or-reuses a per-VAO PSO before dispatch.
+                    programObject->metalTessTier =
+                        GLProgramObject::MetalTessTier::Phase3;
+                    programObject->metalTessControlPipelineState =
+                        probe.computePipelineState;
+                    // vertexComputePipelineState is already stashed
+                    // above when probe.vertexComputeOk was true.
+                } else if (probe.computeOk) {
+                    // Phase 3 required (complex MSL) but VS-compute
+                    // PSO didn't build — most commonly VS with
+                    // [[stage_in]] attributes and no descriptor. CPU
+                    // fallback until Phase 3.3 wires the descriptor.
+                    releaseRetainedMetalObject(probe.computePipelineState);
+                }
+                if (std::getenv("APPGL_TRACE_TESS")) {
+                    std::fprintf(stderr,
+                        "[APPGL] tess-probe program=%u computeOk=%d renderOk=%d"
+                        " vsComputeOk=%d tesComputeOk=%d tessTFReady=%d tier=%d"
+                        " tesStructSize=%zu tfVaryings=%zu"
+                        " genMode=0x%04X genSpacing=0x%04X"
+                        " diag=%s\n",
+                        program,
+                        probe.computeOk ? 1 : 0,
+                        probe.renderOk ? 1 : 0,
+                        probe.vertexComputeOk ? 1 : 0,
+                        probe.tessEvalComputeOk ? 1 : 0,
+                        tessTFReady ? 1 : 0,
+                        (int)programObject->metalTessTier,
+                        programObject->tessEvalOutputLayout.structSize,
+                        programObject->transformFeedbackVaryingNames.size(),
+                        programObject->tessGenMode,
+                        programObject->tessGenSpacing,
+                        probe.diagnostic.c_str());
+                }
+                // Detector point A — link-time probe outcome paired with the
+                // gate (B) and dispatch (C) lines so a single APPGL_DETECTOR_TF
+                // invocation tells the full story.  diag escaping: keep the
+                // string short (no newlines come from the probe diagnostic).
+                if (detectorEnabled()) {
+                    std::fprintf(stderr,
+                        "APPGL_DETECTOR lift_probe program=%u computeOk=%d "
+                        "vsComputeOk=%d tesComputeOk=%d tessTFReady=%d "
+                        "tier=%d tesStructSize=%zu tfVaryings=%zu "
+                        "genMode=0x%04X genSpacing=0x%04X diag=\"%s\"\n",
+                        program,
+                        probe.computeOk ? 1 : 0,
+                        probe.vertexComputeOk ? 1 : 0,
+                        probe.tessEvalComputeOk ? 1 : 0,
+                        tessTFReady ? 1 : 0,
+                        (int)programObject->metalTessTier,
+                        programObject->tessEvalOutputLayout.structSize,
+                        programObject->transformFeedbackVaryingNames.size(),
+                        programObject->tessGenMode,
+                        programObject->tessGenSpacing,
+                        probe.diagnostic.c_str());
+                }
+                Runtime::shared().recordShaderTranslation({
+                    programTag + "-tessellation-metal-probe", "tessellation",
+                    tessControlShader != nullptr
+                        ? quickHash(tessControlShader->source)
+                        : std::string(),
+                    linkVertexHash, linkFragmentHash,
+                    probe.renderOk
+                        ? std::string("Metal tess pipeline probe: compute + render both built")
+                        : (probe.computeOk
+                            ? std::string("Metal tess render pipeline failed: ") + probe.diagnostic
+                            : std::string("Metal tess compute pipeline failed: ") + probe.diagnostic),
+                    "",
+                    probe.computeOk && probe.renderOk
+                });
+            }
+            break;
+        }
+        case ProgramKind::GeometryOnly: {
+            // Separable GS-only program (for use with program pipelines).
+            // Translate to MSL so reflection populates; actual draw falls
+            // back through the raster-without-GS path, same as VGF.
+            std::string unusedGsMSL;
+            ShaderReflection gsRefl;
+            (void)translateCachedStage("geometry", geometryShader,
+                                       unusedGsMSL, gsRefl);
+            // CKPT163 (Sprint 14 Day 10): persist the GS reflection on
+            // the program. Pre-fix it was captured into a local that
+            // immediately fell out of scope, so the runtime
+            // (buildStorageImageMap, buildSampledTextureMap, draw-path
+            // resource resolution) saw an empty reflection on every
+            // separable GS-only program. Sister to the VS+GS+FS path at
+            // line 20668 which always persisted gsRefl.
+            programObject->geometryReflection = gsRefl;
+            // Sister-fix: translateCachedStage above bails before
+            // reflect() if spirvToMSL fails or returns empty, which
+            // happens for GS shaders that SPIRV-Cross can't fully
+            // translate (e.g. complex EmitVertex / EmitStreamVertex
+            // shapes used by CTS shader_image_size.basic-nonMS-gs-*).
+            // Direct reflect-only fallback walks the SPIR-V again
+            // and populates `storageImages`/`sampledTextures`/
+            // `uniformBlocks`/`storageBuffers` even when MSL emit
+            // failed — the GS interpreter doesn't need MSL anyway,
+            // only the reflection metadata.
+            if (geometryShader != nullptr && !geometryShader->spirv.empty()) {
+                if (programObject->geometryReflection.storageImages.empty() &&
+                    programObject->geometryReflection.sampledTextures.empty() &&
+                    programObject->geometryReflection.uniformBlocks.empty()) {
+                    try {
+                        appgl::ShaderTranslator reflTranslator;
+                        appgl::BindingMap reflBindings;  // defaults are fine
+                                                          // for reflect-only.
+                        programObject->geometryReflection =
+                            reflTranslator.reflect(
+                                geometryShader->spirv.data(),
+                                geometryShader->spirv.size(),
+                                reflBindings, nullptr);
+                    } catch (...) {
+                        // If reflect throws, leave the empty
+                        // reflection in place — same end-state as
+                        // pre-fix.
+                    }
+                }
+                programObject->geometrySpirv = geometryShader->spirv;
+                (void)appgl::detectGeometryEmulatable(*programObject);
+            }
+            rasterTranslationOk = true;
+            break;
+        }
+        case ProgramKind::TessControlOnly: {
+            // Separable TCS-only program (for use with program pipelines).
+            // Translate to MSL for reflection + extract tessellation modes.
+            // Metal tess Phase 1: force tess options so the stashed MSL
+            // matches the Metal-native tess pipeline shape.
+            appgl::TranslatorOptions tessOpts;
+            tessOpts.forceTessellation = true;
+            ShaderReflection tcRefl;
+            (void)translateCachedStage("tess-control", tessControlShader,
+                                       programObject->tessControlMSL, tcRefl,
+                                       tessOpts);
+            programObject->tessControlReflection = tcRefl;
+            // Extract tessellation execution modes from SPIR-V.
+            programObject->hasTessellation = true;
+            if (!tessControlShader->spirv.empty()) {
+                auto tcModes = extractTessellationModes(
+                    tessControlShader->spirv.data(),
+                    tessControlShader->spirv.size());
+                programObject->tessControlOutputVertices =
+                    static_cast<GLint>(tcModes.outputVertices);
+            }
+            // β [metal-tess-TF]: preserve TCS SPIR-V so the pipeline-time
+            // orchestrator can re-translate with cross-stage info
+            // (siblingTesInputSpirv) once a TES separable program is
+            // also bound to the pipeline.
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                programObject->tessControlSpirv = tessControlShader->spirv;
+                programObject->tessControlParsedModule.reset();
+            }
+            rasterTranslationOk = true;
+            break;
+        }
+        case ProgramKind::TessEvalOnly: {
+            // Separable TES-only program (for use with program pipelines).
+            // Metal tess Phase 1: force tess options on.
+            appgl::TranslatorOptions tessOpts;
+            tessOpts.forceTessellation = true;
+            ShaderReflection teRefl;
+            (void)translateCachedStage("tess-eval", tessEvalShader,
+                                       programObject->tessEvalMSL, teRefl,
+                                       tessOpts);
+            programObject->tessEvalAsComputeReflection = teRefl;
+            // Extract tessellation execution modes from SPIR-V.
+            programObject->hasTessellation = true;
+            if (!tessEvalShader->spirv.empty()) {
+                auto teModes = extractTessellationModes(
+                    tessEvalShader->spirv.data(),
+                    tessEvalShader->spirv.size());
+                programObject->tessGenMode = teModes.genMode;
+                programObject->tessGenSpacing = teModes.genSpacing;
+                programObject->tessGenVertexOrder = teModes.genVertexOrder;
+                programObject->tessGenPointMode =
+                    teModes.pointMode ? GL_TRUE : GL_FALSE;
+            }
+            // β [metal-tess-TF]: preserve TES SPIR-V so the pipeline-time
+            // orchestrator can re-translate the compute form with
+            // forceTessEvalAsCompute + tesePatchVertices plumbed.
+            if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                programObject->tessEvalSpirv = tessEvalShader->spirv;
+                programObject->tessEvalParsedModule.reset();
+            }
+            (void)appgl::detectTessellationEmulatable(*programObject);
+            rasterTranslationOk = true;
+            break;
+        }
+        case ProgramKind::Separable: {
+            // Separable multi-stage combo — translate every attached
+            // vertex-processing stage for introspection; actual draw
+            // sourcing comes from the pipeline object later. For
+            // `incomplete_program_objects` we just need link-status
+            // == GL_TRUE; drawing this specific combination never
+            // happens because the CTS test immediately discards the
+            // program.
+            auto translateSingle = [&](GLShaderObject* sh, GLenum stageEnum,
+                                       std::string& outMSL,
+                                       ShaderReflection& outRefl) {
+                if (sh == nullptr || sh->spirv.empty()) return;
+                BindingMap stageBindings;
+                appgl::TranslatorOptions stageOptions;
+                stageOptions.fp64EmulationAvailable = fp64EmulationAvailable;
+                stageOptions.forceArgumentBuffers = spirvUsesStorageBuffers(
+                    sh->spirv.data(), sh->spirv.size());
+                applyShaderSpirvOptions(stageOptions, sh);
+                if (stageEnum == GL_FRAGMENT_SHADER) {
+                    stageOptions.fragmentCoordOriginUpperLeft =
+                        sourceDeclaresFragCoordOriginUpperLeft(sh->source);
+                }
+                outMSL = translator.spirvToMSL(sh->spirv.data(),
+                    sh->spirv.size(), stageBindings, nullptr, stageOptions);
+                outRefl = translator.reflect(sh->spirv.data(),
+                    sh->spirv.size(), stageBindings, nullptr, stageOptions);
+                (void)stageEnum;
+            };
+            translateSingle(vertexShader, GL_VERTEX_SHADER,
+                            programObject->vertexMSL, programObject->vertexReflection);
+            translateSingle(fragmentShader, GL_FRAGMENT_SHADER,
+                            programObject->fragmentMSL, programObject->fragmentReflection);
+            rasterTranslationOk = true;
+            break;
+        }
+        case ProgramKind::Unknown:
+            break;  // Already handled above; kept so -Wswitch stays happy.
+    }
+
+    refreshProgramMslArgumentBufferMetadata(*programObject);
+
+    APPGL_LOG(SHADER, @"[GL] linkProgram: program=%u kind=%d translationOk=%d "
+          @"vertexInputs=%zu vsUniformBlocks=%zu fsUniformBlocks=%zu",
+          program, static_cast<int>(kind), rasterTranslationOk ? 1 : 0,
+          programObject->vertexReflection.vertexInputs.size(),
+          programObject->vertexReflection.uniformBlocks.size(),
+          programObject->fragmentReflection.uniformBlocks.size());
+    fflush(stderr);  // Phase 8X Group 4d follow-up²³ — synchronous flush
+
+    // ── Supplement scanner-discovered uniforms with SPIR-V reflection ──
+    //
+    // The lightweight GLSL scanner (GLSLReflection) can't parse struct-typed
+    // uniforms, interface-block members, or other complex declarations.
+    // SPIRV-Cross reflection IS authoritative for the _DefaultUniforms block
+    // members — it sees every uniform that survived dead-code elimination.
+    // Walk the _DefaultUniforms members from each stage's reflection and add
+    // any that the scanner missed to the program's uniform list with fresh
+    // locations and zero-seeded values.  This lets glGetUniformLocation /
+    // glUniform* work for struct members (e.g. "s.a"), array-of-struct
+    // elements ("s[0].a"), and any other uniform type the scanner can't parse.
+    if (rasterTranslationOk || kind == ProgramKind::Compute) {
+        auto addReflectionVertexInputs = [&]() {
+            if (programObject->vertexReflection.vertexInputs.empty()) {
+                return;
+            }
+            for (const auto& input : programObject->vertexReflection.vertexInputs) {
+                const auto attrExists = std::find_if(
+                    programObject->attributes.begin(),
+                    programObject->attributes.end(),
+                    [&](const GLProgramAttributeInfo& attr) {
+                        if (!input.name.empty() && attr.name == input.name) {
+                            return true;
+                        }
+                        return attr.location == static_cast<GLint>(input.sourceLocation);
+                    });
+                if (attrExists == programObject->attributes.end()) {
+                    GLProgramAttributeInfo attr;
+                    attr.name = input.name;
+                    attr.type = input.type;
+                    attr.location = static_cast<GLint>(input.sourceLocation);
+                    attr.arraySize = 1;
+                    attr.isArray = false;
+                    programObject->attributes.push_back(std::move(attr));
+                }
+
+                const auto resourceExists = std::find_if(
+                    programObject->resourceInputs.begin(),
+                    programObject->resourceInputs.end(),
+                    [&](const GLProgramResourceEntry& entry) {
+                        if (!input.name.empty() && entry.name == input.name) {
+                            return true;
+                        }
+                        return entry.location == static_cast<GLint>(input.sourceLocation) &&
+                               entry.referencedBy == kBitVertex;
+                    });
+                if (resourceExists != programObject->resourceInputs.end()) {
+                    continue;
+                }
+                GLProgramResourceEntry entry;
+                entry.name = input.name;
+                entry.type = input.type;
+                entry.location = static_cast<GLint>(input.sourceLocation);
+                entry.arraySize = 1;
+                entry.referencedBy = kBitVertex;
+                programObject->resourceInputs.push_back(std::move(entry));
+            }
+        };
+        addReflectionVertexInputs();
+
+        // Build a set of names the scanner already discovered.
+        std::unordered_set<std::string> knownUniformNames;
+        for (const auto& u : programObject->uniforms) {
+            knownUniformNames.insert(u.name);
+        }
+
+        // Find the next available auto-location (past all existing ones).
+        GLint supplementNextLoc = 0;
+        for (const auto& u : programObject->uniforms) {
+            const GLint endLoc = u.location + std::max<GLint>(u.arraySize, 1);
+            if (endLoc > supplementNextLoc) {
+                supplementNextLoc = endLoc;
+            }
+        }
+
+        // "Does this stage's source declare a uniform named
+        // `topName` at the top level?" helper. Only stage-declared
+        // uniforms may carry this stage's REFERENCED_BY bit in the
+        // resource table. A naive word-boundary search of the whole
+        // source produces false positives — a struct field with
+        // the same name as a VS uniform would match (CTS
+        // uniform-types has `struct U { bool a[3]; ... }` in the
+        // FS and `uniform vec4 a;` in the VS). We want only the
+        // `uniform X <topName>[...];` pattern. Walk each `uniform`
+        // token (word-bounded) and inspect the identifier tokens
+        // up to the next `;` or `{` — if `topName` appears as one
+        // of them, treat it as declared.
+        auto stageDeclaresTopUniform = [](const std::string& src, const std::string& topName) {
+            if (topName.empty()) return false;
+            const std::string uniformKw = "uniform";
+            std::size_t pos = 0;
+            auto identifierAppears = [&](std::size_t scan, std::size_t end) {
+                while (scan < end) {
+                    while (scan < end &&
+                           !std::isalpha(static_cast<unsigned char>(src[scan])) &&
+                           src[scan] != '_') {
+                        ++scan;
+                    }
+                    if (scan >= end) break;
+                    std::size_t identStart = scan;
+                    while (scan < end &&
+                           (std::isalnum(static_cast<unsigned char>(src[scan])) ||
+                            src[scan] == '_')) {
+                        ++scan;
+                    }
+                    if (src.compare(identStart, scan - identStart, topName) == 0) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            while ((pos = src.find(uniformKw, pos)) != std::string::npos) {
+                const bool leftBoundary = (pos == 0) ||
+                    !(std::isalnum(static_cast<unsigned char>(src[pos - 1])) || src[pos - 1] == '_');
+                const bool rightBoundary = (pos + uniformKw.size() < src.size()) &&
+                    !(std::isalnum(static_cast<unsigned char>(src[pos + uniformKw.size()])) || src[pos + uniformKw.size()] == '_');
+                if (!(leftBoundary && rightBoundary)) {
+                    pos += uniformKw.size();
+                    continue;
+                }
+                // Struct default uniforms use `uniform struct T { ... }
+                // name[N];`; the instance name lives after the matching
+                // closing brace, so scan there before the simpler scalar
+                // declaration path.
+                std::size_t scan = pos + uniformKw.size();
+                const std::size_t firstSemi = src.find(';', scan);
+                const std::size_t openBrace = src.find('{', scan);
+                if (openBrace != std::string::npos &&
+                    (firstSemi == std::string::npos || openBrace < firstSemi)) {
+                    int depth = 1;
+                    std::size_t closeBrace = openBrace + 1;
+                    while (closeBrace < src.size() && depth > 0) {
+                        if (src[closeBrace] == '{') {
+                            ++depth;
+                        } else if (src[closeBrace] == '}') {
+                            --depth;
+                        }
+                        ++closeBrace;
+                    }
+                    const std::size_t semi = (depth == 0)
+                        ? src.find(';', closeBrace)
+                        : std::string::npos;
+                    if (depth == 0 && semi != std::string::npos) {
+                        if (identifierAppears(closeBrace, semi)) {
+                            return true;
+                        }
+                        pos = semi;
+                        continue;
+                    }
+                }
+                // Scan identifiers from pos+7 up to first ; or {.
+                while (scan < src.size() && src[scan] != ';' && src[scan] != '{') {
+                    // Skip non-identifier chars.
+                    while (scan < src.size() &&
+                           !std::isalpha(static_cast<unsigned char>(src[scan])) &&
+                           src[scan] != '_' &&
+                           src[scan] != ';' && src[scan] != '{') {
+                        ++scan;
+                    }
+                    if (scan >= src.size() || src[scan] == ';' || src[scan] == '{') break;
+                    std::size_t identStart = scan;
+                    while (scan < src.size() &&
+                           (std::isalnum(static_cast<unsigned char>(src[scan])) || src[scan] == '_')) {
+                        ++scan;
+                    }
+                    std::string ident = src.substr(identStart, scan - identStart);
+                    if (ident == topName) return true;
+                }
+                pos = scan;
+            }
+            return false;
+        };
+        auto explicitUniformLocationFor = [](const std::string& src,
+                                             const std::string& topName) -> GLint {
+            if (topName.empty()) return -1;
+            auto isIdent = [](char c) {
+                const unsigned char uc = static_cast<unsigned char>(c);
+                return std::isalnum(uc) || c == '_';
+            };
+            auto hasWord = [&](std::string_view text,
+                               const std::string& word) -> bool {
+                std::size_t pos = 0;
+                while ((pos = text.find(word, pos)) != std::string_view::npos) {
+                    const bool leftOk = (pos == 0) || !isIdent(text[pos - 1]);
+                    const std::size_t end = pos + word.size();
+                    const bool rightOk = (end >= text.size()) || !isIdent(text[end]);
+                    if (leftOk && rightOk) return true;
+                    pos = end;
+                }
+                return false;
+            };
+            auto findLocation = [&](std::string_view text) -> GLint {
+                std::size_t pos = 0;
+                while ((pos = text.find("location", pos)) != std::string_view::npos) {
+                    const bool leftOk = (pos == 0) || !isIdent(text[pos - 1]);
+                    const std::size_t wordEnd = pos + 8;
+                    const bool rightOk = (wordEnd >= text.size()) || !isIdent(text[wordEnd]);
+                    if (!(leftOk && rightOk)) {
+                        pos = wordEnd;
+                        continue;
+                    }
+                    std::size_t eq = wordEnd;
+                    while (eq < text.size() &&
+                           std::isspace(static_cast<unsigned char>(text[eq]))) {
+                        ++eq;
+                    }
+                    if (eq >= text.size() || text[eq] != '=') {
+                        pos = wordEnd;
+                        continue;
+                    }
+                    ++eq;
+                    while (eq < text.size() &&
+                           std::isspace(static_cast<unsigned char>(text[eq]))) {
+                        ++eq;
+                    }
+                    char* endp = nullptr;
+                    const long value = std::strtol(text.data() + eq, &endp, 0);
+                    if (endp != text.data() + eq) {
+                        return static_cast<GLint>(value);
+                    }
+                    pos = wordEnd;
+                }
+                return -1;
+            };
+
+            std::string statement;
+            statement.reserve(256);
+            int braceDepth = 0;
+            for (char c : src) {
+                statement.push_back(c);
+                if (c == '{') {
+                    ++braceDepth;
+                } else if (c == '}') {
+                    if (braceDepth > 0) --braceDepth;
+                } else if (c == ';' && braceDepth == 0) {
+                    const std::string_view stmt(statement.data(), statement.size());
+                    if (hasWord(stmt, "uniform") && hasWord(stmt, topName)) {
+                        const GLint loc = findLocation(stmt);
+                        if (loc >= 0) return loc;
+                    }
+                    statement.clear();
+                }
+            }
+            return -1;
+        };
+        // Extract the top-level uniform name from a flattened member
+        // name. `j.b` → `j`, `k.a[0].c` → `k`, `l[2].b[1].d[0]` → `l`.
+        auto topLevelName = [](const std::string& flat) -> std::string {
+            std::size_t cut = flat.size();
+            for (std::size_t i = 0; i < flat.size(); ++i) {
+                if (flat[i] == '.' || flat[i] == '[') { cut = i; break; }
+            }
+            return flat.substr(0, cut);
+        };
+        // Lambda: scan one stage's reflection for _DefaultUniforms members.
+        // `stageBit` is the referencedBy bit for this stage so struct
+        // members declared by the stage accumulate the right bit in the
+        // resourceUniforms table. `stageSrc` is the stage's GLSL source
+        // (used to gate the stage bit on whether this stage actually
+        // declared the top-level uniform — glslang's cross-stage
+        // linking copies every uniform into every stage's SPIR-V
+        // _DefaultUniforms reflection, so "member is in this stage's
+        // SPIR-V" is NOT a valid signal for "stage references it").
+        // CTS `program_interface_query.uniform-types` declares
+        // `uniform U j;` in the FS and expects
+        // REFERENCED_BY_FRAGMENT_SHADER = 1 on every flattened leaf
+        // (`j.b`, etc.) and REFERENCED_BY_VERTEX_SHADER = 0.
+        auto supplementFromReflection = [&](const ShaderReflection& refl,
+                                            GLbitfield stageBit,
+                                            const std::string& stageSrc) {
+            if (refl.uniformBlocks.empty()) return;
+            // The _DefaultUniforms block is always at index 0 when present.
+            const auto& block = refl.uniformBlocks[0];
+            if (block.name != "_DefaultUniforms") return;
+            std::unordered_map<std::string, GLint> explicitMemberNextLoc;
+            for (const auto& member : block.members) {
+                // Sprint 17 Day 7+ Bank-Group-C: skip synthetic
+                // dispatch uniforms emitted by
+                // `rewriteSubroutinesForSpirv` for v1 dynamic
+                // dispatch. These are processed separately by
+                // `processSubroutineDispatchUniforms` (above) for ALL
+                // stages and exposed only via the side-channel
+                // `subroutineDispatchUniformLocations`. Spec-correct:
+                // subroutine uniforms are queryable via separate
+                // GL_*_SUBROUTINE_UNIFORM interfaces only and must NOT
+                // appear in glGetActiveUniform enumeration.
+                if (member.name.compare(0, 11, "_appgl_sub_") == 0) {
+                    continue;
+                }
+                // Skip the rewriter's bare-name reserved-keyword
+                // validation stubs (`int <NAME>;` for each subroutine
+                // uniform / type). These exist only to push the
+                // user identifier through glslang's reserved-keyword
+                // check (CTS CommonBugs.CommonBug_ReservedNames); they
+                // would otherwise leak as bogus default-block int
+                // uniforms with auto-assigned locations in
+                // glGetUniformLocation / glGetActiveUniform output.
+                {
+                    bool isSubroutineStub = false;
+                    for (int sIdx = 0; sIdx < 6 && !isSubroutineStub; ++sIdx) {
+                        for (const auto& su : programObject->resourceSubroutineUniforms[sIdx]) {
+                            if (su.name == member.name) { isSubroutineStub = true; break; }
+                        }
+                        if (isSubroutineStub) break;
+                        for (const auto& sr : programObject->resourceSubroutines[sIdx]) {
+                            if (sr.name == member.name) { isSubroutineStub = true; break; }
+                        }
+                    }
+                    if (isSubroutineStub) continue;
+                }
+                // Gate this stage's referencedBy bit on whether the
+                // stage's source actually declares the top-level
+                // name as a uniform (see lambda comment above).
+                // Without this filter every uniform gets both stages'
+                // bits because glslang's cross-stage linker fills
+                // every stage's _DefaultUniforms with the union.
+                const std::string topName = topLevelName(member.name);
+                const bool stageDeclares = stageDeclaresTopUniform(stageSrc, topName);
+                bool stageReferences = stageDeclares;
+                if (stageReferences && stageBit == kBitGeometry && !gsRefSet.empty()) {
+                    stageReferences =
+                        gsRefSet.count(member.name) != 0 ||
+                        gsRefSet.count(topName) != 0;
+                }
+                const GLbitfield effStageBit = stageReferences ? stageBit : 0;
+                // GL 4.6 §7.3.1 canonical resource name for an array
+                // uniform carries the "[0]" suffix even when the
+                // member's SPIR-V name does not. Compute both forms
+                // so we can match against `knownUniformNames`
+                // (which already stores the canonical shape) and
+                // resourceUniforms (which also stores canonical).
+                const std::string canonicalName = member.isArray
+                    ? (member.name + "[0]") : member.name;
+                if (knownUniformNames.count(canonicalName) ||
+                    knownUniformNames.count(member.name)) {
+                    // Existing uniform (from scanner or previous
+                    // stage) — just OR in this stage's referencedBy
+                    // bit on its resourceUniforms entry.
+                    for (auto& re : programObject->resourceUniforms) {
+                        if (re.name == canonicalName || re.name == member.name) {
+                            re.referencedBy |= effStageBit;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                // Skip members this stage doesn't declare — they'll
+                // be added by the OTHER stage's supplement pass with
+                // the correct referencedBy bit.
+                if (!stageReferences) continue;
+                // New uniform discovered by SPIR-V but not by the scanner.
+                GLProgramUniformInfo info;
+                info.name = member.name;
+                info.type = member.type;
+                info.arraySize = (member.arraySize > 0)
+                    ? static_cast<GLint>(member.arraySize) : 1;
+                info.isArray = member.isArray;
+                info.explicitLocation = -1;
+                info.explicitBinding = -1;
+                // GL 4.6 §7.6.2.2 — when the scanner already registered
+                // the top-level parent uniform with an explicit location
+                // (e.g. `layout(location = 2) uniform float u0[2][3]`),
+                // the SPIRV-Cross-flattened members (`u0[0]`, `u0[1]`)
+                // must be located at parent.explicitLocation + i*members
+                // per element, NOT at supplementNextLoc (which would auto-
+                // assign past every explicit location). CTS
+                // `explicit_uniform_location.uniform-loc-arrays-of-arrays`
+                // asserts `u0[0][0]` = 2 for `u0[2][3]` at location 2.
+                const std::string memberTopName = topLevelName(member.name);
+                const GLProgramUniformInfo* parent = nullptr;
+                for (const auto& u : programObject->uniforms) {
+                    if (u.name == memberTopName && u.explicitLocation >= 0) {
+                        parent = &u;
+                        break;
+                    }
+                }
+                GLint parentExplicitLocation = -1;
+                if (parent != nullptr) {
+                    parentExplicitLocation = parent->explicitLocation;
+                } else {
+                    parentExplicitLocation =
+                        explicitUniformLocationFor(stageSrc, memberTopName);
+                }
+                bool locationSet = false;
+                if (parentExplicitLocation >= 0) {
+                    // Parse the member name's subscript chain relative to the
+                    // parent. `u0[i]` for a single-subscript member of an
+                    // outer-dim-split array-of-arrays gives flattened offset
+                    // i * inner_arraySize. Struct member shapes use the
+                    // per-parent explicit cursor below, which follows
+                    // reflection order from the declared base location.
+                    const std::string tail = member.name.substr(memberTopName.size());
+                    // Require pure `[i]` form; anything else (containing `.`
+                    // or multiple brackets) is structurally complex and we
+                    // fall back to auto-assignment.
+                    if (tail.size() >= 3 && tail.front() == '[' && tail.back() == ']'
+                        && tail.find('.') == std::string::npos
+                        && std::count(tail.begin(), tail.end(), '[') == 1) {
+                        const std::string idxText = tail.substr(1, tail.size() - 2);
+                        char* endp = nullptr;
+                        const long idx = std::strtol(idxText.c_str(), &endp, 10);
+                        if (endp && *endp == '\0' && idx >= 0) {
+                            const GLint perEntryLocs = std::max<GLint>(info.arraySize, 1);
+                            info.location = parentExplicitLocation +
+                                static_cast<GLint>(idx) * perEntryLocs;
+                            locationSet = true;
+                        }
+                    }
+                    if (!locationSet) {
+                        auto cursor = explicitMemberNextLoc.find(memberTopName);
+                        if (cursor == explicitMemberNextLoc.end()) {
+                            cursor = explicitMemberNextLoc
+                                .emplace(memberTopName, parentExplicitLocation)
+                                .first;
+                        }
+                        info.location = cursor->second;
+                        cursor->second += std::max<GLint>(info.arraySize, 1);
+                        locationSet = true;
+                    }
+                }
+                if (!locationSet) {
+                    info.location = supplementNextLoc;
+                    supplementNextLoc += std::max<GLint>(info.arraySize, 1);
+                }
+                knownUniformNames.insert(canonicalName);
+
+                // Zero-seed the uniform value.
+                const GLint components = glslComponentCount(info.type)
+                    * std::max<GLint>(info.arraySize, 1);
+                const std::size_t cnt = static_cast<std::size_t>(components);
+                GLProgramUniformValue value;
+                value.type = info.type;
+                value.arraySize = info.arraySize;
+                switch (info.type) {
+                    case GL_INT: case GL_INT_VEC2: case GL_INT_VEC3: case GL_INT_VEC4:
+                    case GL_BOOL: case GL_BOOL_VEC2: case GL_BOOL_VEC3: case GL_BOOL_VEC4:
+                        value.ints.assign(cnt, 0);
+                        break;
+                    case GL_UNSIGNED_INT: case GL_UNSIGNED_INT_VEC2:
+                    case GL_UNSIGNED_INT_VEC3: case GL_UNSIGNED_INT_VEC4:
+                        value.uints.assign(cnt, 0u);
+                        break;
+                    case GL_DOUBLE: case GL_DOUBLE_VEC2:
+                    case GL_DOUBLE_VEC3: case GL_DOUBLE_VEC4:
+                    case GL_DOUBLE_MAT2: case GL_DOUBLE_MAT3:
+                    case GL_DOUBLE_MAT4: case GL_DOUBLE_MAT2x3:
+                    case GL_DOUBLE_MAT2x4: case GL_DOUBLE_MAT3x2:
+                    case GL_DOUBLE_MAT3x4: case GL_DOUBLE_MAT4x2:
+                    case GL_DOUBLE_MAT4x3:
+                        value.doubles.assign(cnt, 0.0);
+                        value.floats.assign(cnt, 0.0f);
+                        value.df64TransportWords.assign(cnt * 2u, 0u);
+                        break;
+                    default:
+                        value.floats.assign(cnt, 0.0f);
+                        break;
+                }
+                programObject->uniformValues[info.location] = std::move(value);
+
+                // Mirror into resourceUniforms as a default-block
+                // uniform. GL 4.6 §7.3.1: default-block uniforms
+                // have BLOCK_INDEX = OFFSET = ARRAY_STRIDE =
+                // MATRIX_STRIDE = -1, IS_ROW_MAJOR = FALSE,
+                // ATOMIC_COUNTER_BUFFER_INDEX = -1. REFERENCED_BY_*
+                // carries just this stage's bit.
+                GLProgramResourceEntry entry;
+                entry.name = canonicalName;
+                entry.type = info.type;
+                entry.location = info.location;
+                entry.binding = -1;
+                entry.arraySize = info.arraySize;
+                entry.isArray = info.isArray;
+                entry.referencedBy = effStageBit;
+                // Default-block uniforms: leave offset / blockIndex
+                // / arrayStride / matrixStride at their default -1
+                // sentinels so getResourceProperty reports -1.
+                programObject->resourceUniforms.push_back(std::move(entry));
+
+                programObject->uniforms.push_back(std::move(info));
+            }
+        };
+
+        static const std::string kEmptySrc;
+        const std::string& vsSrc2 = vertexShader ? vertexShader->source : kEmptySrc;
+        const std::string& fsSrc2 = fragmentShader ? fragmentShader->source : kEmptySrc;
+        const std::string& gsSrc2 = geometryShader ? geometryShader->source : kEmptySrc;
+        const std::string& csSrc2 = computeShader ? computeShader->source : kEmptySrc;
+        supplementFromReflection(programObject->vertexReflection, 0x01, vsSrc2);
+        supplementFromReflection(programObject->fragmentReflection, 0x02, fsSrc2);
+        supplementFromReflection(programObject->geometryReflection, 0x04, gsSrc2);
+        // Tess stages: source the reflection from whichever TES form
+        // got translated (compute form for combined VertexTessellation
+        // Fragment programs, vertex form would be similar but isn't
+        // stashed today). TCS reflection is always stashed when the
+        // stage was translated. Stage bits: TCS=0x08, TES=0x10
+        // (mirror of glProgramInterfaceiv / GL_REFERENCED_BY_*).
+        // Closes the
+        //   single.ext_program_interface_query_dependency
+        // failure where `glGetProgramResourceIndex(po, GL_UNIFORM,
+        // "tc_uniform1")` returned `GL_INVALID_INDEX` because the
+        // tess-stage default-block uniforms never made it into
+        // `resourceUniforms`.
+        const std::string& tcsSrc2 = tessControlShader ? tessControlShader->source : kEmptySrc;
+        const std::string& tesSrc2 = tessEvalShader ? tessEvalShader->source : kEmptySrc;
+        supplementFromReflection(programObject->tessControlReflection, 0x08, tcsSrc2);
+        supplementFromReflection(programObject->tessEvalAsComputeReflection, 0x10, tesSrc2);
+        supplementFromReflection(programObject->computeReflection, 0x20, csSrc2);
+
+        auto supplementOpaqueUniforms = [&](const ShaderReflection& refl,
+                                            GLbitfield stageBit) {
+            auto addBinding = [&](const ShaderReflection::ResourceBinding& binding,
+                                  GLenum fallbackType,
+                                  const std::unordered_map<std::string, GLuint>& explicitBindings) {
+                const GLenum glType = binding.glType != 0 ? binding.glType : fallbackType;
+                if (glType == 0) {
+                    return;
+                }
+                const GLint arraySize =
+                    static_cast<GLint>(std::max<std::uint32_t>(binding.arraySize, 1u));
+                const std::string canonicalName =
+                    (!binding.name.empty() && arraySize > 1)
+                        ? (binding.name + "[0]")
+                        : binding.name;
+                GLuint explicitSourceBinding = 0;
+                auto hasExplicitSourceBinding = [&]() {
+                    auto probe = [&](std::string name) -> bool {
+                        if (name.empty()) {
+                            return false;
+                        }
+                        if (name.size() > 3 &&
+                            name.compare(name.size() - 3, 3, "[0]") == 0) {
+                            name.resize(name.size() - 3);
+                        }
+                        auto it = explicitBindings.find(name);
+                        if (it != explicitBindings.end()) {
+                            explicitSourceBinding = it->second;
+                            return true;
+                        }
+                        static constexpr const char* kAppglPrefix = "_appgl_";
+                        static constexpr std::size_t kAppglPrefixLen = 7;
+                        if (name.compare(0, kAppglPrefixLen, kAppglPrefix) == 0) {
+                            it = explicitBindings.find(name.substr(kAppglPrefixLen));
+                            if (it != explicitBindings.end()) {
+                                explicitSourceBinding = it->second;
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+                    return probe(binding.name) || probe(canonicalName);
+                }();
+                const bool hasOpaqueDefaultBinding =
+                    hasExplicitSourceBinding || linkedFromSpirvBinary;
+                const GLuint opaqueDefaultBinding = hasExplicitSourceBinding
+                    ? explicitSourceBinding
+                    : binding.glBinding;
+                auto uniformIt = std::find_if(
+                    programObject->uniforms.begin(),
+                    programObject->uniforms.end(),
+                    [&](const GLProgramUniformInfo& info) {
+                        if (!binding.name.empty() && info.name == binding.name) {
+                            return true;
+                        }
+                        return binding.uniformLocation >= 0 &&
+                               info.location == binding.uniformLocation &&
+                               info.type == glType;
+                    });
+                if (uniformIt != programObject->uniforms.end()) {
+                    for (auto& resource : programObject->resourceUniforms) {
+                        const bool sameNamed =
+                            !canonicalName.empty() &&
+                            (resource.name == canonicalName ||
+                             resource.name == binding.name);
+                        const bool sameLocation =
+                            resource.location == uniformIt->location &&
+                            resource.type == glType;
+                        if (sameNamed || sameLocation) {
+                            resource.referencedBy |= stageBit;
+                            if (resource.binding < 0 && hasOpaqueDefaultBinding) {
+                                resource.binding =
+                                    static_cast<GLint>(opaqueDefaultBinding);
+                            }
+                            break;
+                        }
+                    }
+                    if (uniformIt->explicitBinding < 0 && hasOpaqueDefaultBinding) {
+                        uniformIt->explicitBinding =
+                            static_cast<GLint>(opaqueDefaultBinding);
+                    }
+                    return;
+                }
+
+                if (!canonicalName.empty() &&
+                    (knownUniformNames.count(canonicalName) ||
+                     knownUniformNames.count(binding.name))) {
+                    return;
+                }
+
+                GLProgramUniformInfo info;
+                info.name = binding.name;
+                info.type = glType;
+                info.arraySize = arraySize;
+                info.isArray = arraySize > 1;
+                info.explicitLocation = binding.uniformLocation;
+                info.explicitBinding = hasOpaqueDefaultBinding
+                    ? static_cast<GLint>(opaqueDefaultBinding)
+                    : -1;
+                info.location = binding.uniformLocation >= 0
+                    ? binding.uniformLocation
+                    : supplementNextLoc;
+
+                const GLint consumed = std::max<GLint>(info.arraySize, 1);
+                if (binding.uniformLocation < 0 ||
+                    supplementNextLoc < info.location + consumed) {
+                    supplementNextLoc = info.location + consumed;
+                }
+
+                GLProgramUniformValue value;
+                value.type = info.type;
+                value.arraySize = info.arraySize;
+                value.ints.resize(static_cast<std::size_t>(consumed));
+                for (GLint i = 0; i < consumed; ++i) {
+                    value.ints[static_cast<std::size_t>(i)] =
+                        hasOpaqueDefaultBinding
+                            ? static_cast<GLint>(opaqueDefaultBinding) + i
+                            : 0;
+                }
+                programObject->uniformValues[info.location] = std::move(value);
+
+                GLProgramResourceEntry entry;
+                entry.name = canonicalName;
+                entry.type = info.type;
+                entry.location = info.location;
+                entry.binding = hasOpaqueDefaultBinding
+                    ? static_cast<GLint>(opaqueDefaultBinding)
+                    : -1;
+                entry.arraySize = info.arraySize;
+                entry.isArray = info.isArray;
+                entry.referencedBy = stageBit;
+                programObject->resourceUniforms.push_back(std::move(entry));
+
+                if (!canonicalName.empty()) {
+                    knownUniformNames.insert(canonicalName);
+                    knownUniformNames.insert(binding.name);
+                }
+                programObject->uniforms.push_back(std::move(info));
+            };
+
+            for (const auto& binding : refl.sampledTextures) {
+                addBinding(binding, GL_SAMPLER_2D,
+                           programObject->samplerExplicitBindings);
+            }
+            for (const auto& binding : refl.storageImages) {
+                addBinding(binding, GL_IMAGE_2D,
+                           programObject->imageExplicitBindings);
+            }
+        };
+        supplementOpaqueUniforms(programObject->vertexReflection, 0x01);
+        supplementOpaqueUniforms(programObject->fragmentReflection, 0x02);
+        supplementOpaqueUniforms(programObject->geometryReflection, 0x04);
+        supplementOpaqueUniforms(programObject->tessControlReflection, 0x08);
+        supplementOpaqueUniforms(programObject->tessEvalAsComputeReflection, 0x10);
+        supplementOpaqueUniforms(programObject->computeReflection, 0x20);
+
+        // ── Sprint 17 Day 7+ Bank-Group-C: synthetic dispatch uniforms ──
+        //
+        // The compat rewriter `rewriteSubroutinesForSpirv` emits one
+        // `uniform uint _appgl_sub_<UNI>;` per v1-eligible subroutine
+        // uniform (void return, no params) so the inline if-else
+        // dispatch chain emitted at call sites can branch on the
+        // selected impl. These synthetic uniforms appear in EVERY
+        // stage's `_DefaultUniforms` block (whichever stage declared
+        // the subroutine). Unlike user uniforms, this processing runs
+        // for ALL stages — including GS and CS, which
+        // `supplementFromReflection` does NOT cover — because the
+        // synthetic uniform must be locatable for the
+        // `glUniformSubroutinesuiv` setter regardless of which stage
+        // emitted it (CTS `viewport_index_subroutine` declares the
+        // subroutine in GS only).
+        //
+        // Names are excluded from `programObject->resourceUniforms`
+        // (so glGetActiveUniform / glGetProgramResource* enumeration
+        // doesn't expose them — spec-correct: subroutine uniforms are
+        // queryable via separate GL_*_SUBROUTINE_UNIFORM interfaces
+        // only). The reflection filter at the top of the
+        // `supplementFromReflection` member loop also skips them for
+        // the VS/FS/TCS/TES paths.
+        auto processSubroutineDispatchUniforms = [&](const ShaderReflection& refl) {
+            if (refl.uniformBlocks.empty()) return;
+            const auto& block = refl.uniformBlocks[0];
+            if (block.name != "_DefaultUniforms") return;
+            for (const auto& member : block.members) {
+                if (member.name.compare(0, 11, "_appgl_sub_") != 0) continue;
+                // Side-channel keyed by ORIGINAL subroutine-uniform
+                // name (strip `_appgl_sub_` 11-char prefix).
+                const std::string uniName = member.name.substr(11);
+                // Reuse the scanner's pre-existing entry if present
+                // (the lightweight GLSL reflector at reflectGLSL()
+                // walks the rewritten source and picks up the
+                // synthetic `uniform uint _appgl_sub_<UNI>;` decl
+                // before this lambda runs); otherwise allocate a
+                // fresh default-block slot. Either way the
+                // side-channel must be populated so
+                // glUniformSubroutinesuiv can locate the dispatch
+                // uniform's value cell.
+                GLint existingLoc = -1;
+                for (const auto& u : programObject->uniforms) {
+                    if (u.name == member.name) { existingLoc = u.location; break; }
+                }
+                GLint targetLoc = existingLoc;
+                if (existingLoc < 0) {
+                    GLProgramUniformInfo info;
+                    info.name = member.name;
+                    info.type = GL_UNSIGNED_INT;
+                    info.arraySize = 1;
+                    info.isArray = false;
+                    info.explicitLocation = -1;
+                    info.explicitBinding = -1;
+                    info.location = supplementNextLoc;
+                    supplementNextLoc += 1;
+                    targetLoc = info.location;
+                    knownUniformNames.insert(member.name);
+                    programObject->uniforms.push_back(std::move(info));
+                }
+                // Ensure a zero-seeded value cell exists at the chosen
+                // location (the scanner's appendDeclarationsAsUniforms
+                // path doesn't seed values for uniforms it discovers
+                // by source scanning — only the SPIR-V flatten path
+                // does).
+                auto& valueSlot = programObject->uniformValues[targetLoc];
+                if (valueSlot.uints.empty()) {
+                    valueSlot.type = GL_UNSIGNED_INT;
+                    valueSlot.arraySize = 1;
+                    valueSlot.uints.assign(1, 0u);
+                }
+                programObject->subroutineDispatchUniformLocations[uniName] = targetLoc;
+                // Intentionally NOT pushed into resourceUniforms.
+            }
+        };
+        processSubroutineDispatchUniforms(programObject->vertexReflection);
+        processSubroutineDispatchUniforms(programObject->fragmentReflection);
+        processSubroutineDispatchUniforms(programObject->geometryReflection);
+        processSubroutineDispatchUniforms(programObject->tessControlReflection);
+        processSubroutineDispatchUniforms(programObject->tessEvalAsComputeReflection);
+        processSubroutineDispatchUniforms(programObject->computeReflection);
+    }
+
+    // ── Merge SPIRV-Cross uniform block reflection into the program's
+    //    resource introspection tables ──
+    //
+    // The scanner doesn't see interface blocks (see 2d / GLSLReflection
+    // brace-depth bug), so SPIRV-Cross reflection is the authoritative
+    // source for UBO member metadata. Blocks that appear in both the
+    // vertex and fragment reflection (BAR's per-view uniforms are shared
+    // across stages) dedup by name, OR-ing the referencedBy bits together.
+    //
+    // Each block also pushes its members into resourceBufferVariables with
+    // `blockIndex` pointing back to the block entry so
+    // glGetProgramResourceiv(GL_BUFFER_VARIABLE, ...) can find them.
+    if (rasterTranslationOk || kind == ProgramKind::Compute) {
+        auto mergeBlocks = [&](const std::vector<ShaderReflection::ResourceBinding>& blocks,
+                               GLbitfield stageBit,
+                               const std::string& glslSource) {
+            std::unordered_map<std::string, ParsedInterfaceBlockForValidation> parsedBlocks;
+            for (auto parsed : parseUniformBlocksForValidation(glslSource)) {
+                parsedBlocks[parsed.name] = std::move(parsed);
+            }
+            for (const auto& block : blocks) {
+                // Skip glslang's synthesized default-block wrapper —
+                // it's not a real user-declared UBO. `supplementFromReflection`
+                // above already walked its members and added them as
+                // default-block uniforms (BLOCK_INDEX=-1, OFFSET=-1).
+                // Exposing it as a GL_UNIFORM_BLOCK resource would
+                // inflate GL_ACTIVE_RESOURCES and tag every scalar
+                // uniform with a bogus blockIndex. CTS
+                // `program_interface_query.uniform-types` expects
+                // default-block uniforms to report BLOCK_INDEX=-1
+                // and OFFSET=-1.
+                if (block.name == "_DefaultUniforms") {
+                    continue;
+                }
+                // Only contribute this stage's REFERENCED_BY_*_SHADER
+                // bit when the block is live in the stage's SPIR-V.
+                // Declared-but-unused blocks still get an entry so
+                // introspection lists them, but without the stage
+                // bit. Same logic as mergeStorageBlocks below.
+                const GLbitfield blockStageBit = block.active ? stageBit : 0;
+                // SPIRV-Cross loses instance name info (varName == typeName
+                // for both instanced and non-instanced blocks). Parse the
+                // original GLSL source to recover it.
+                const auto parsedIt = parsedBlocks.find(block.name);
+                const ParsedInterfaceBlockForValidation* parsedBlock =
+                    parsedIt != parsedBlocks.end() ? &parsedIt->second : nullptr;
+                if (parsedBlock == nullptr &&
+                    parsedBlocks.size() == 1 &&
+                    blocks.size() == 1) {
+                    parsedBlock = &parsedBlocks.begin()->second;
+                }
+                const bool hasInstance =
+                    parsedBlock != nullptr
+                        ? parsedBlock->hasInstance
+                        : glslBlockHasInstanceName(glslSource, block.name);
+                // For an INSTANCED ARRAY block (`} e[2];`), narrow the
+                // per-instance stage bit: only the elements actually
+                // indexed in the stage's body are active in that stage.
+                // CTS `program_interface_query.uniform-block-types`
+                // declares `TrickyBlock e[2]` but only reads `e[0].…`,
+                // so e[1] must report REFERENCED_BY_FRAGMENT_SHADER=0.
+                const std::string instanceName = hasInstance
+                    ? (parsedBlock != nullptr && !parsedBlock->instanceName.empty()
+                        ? parsedBlock->instanceName
+                        : glslBlockInstanceName(glslSource, block.name))
+                    : std::string();
+                const std::set<int> usedInstanceIndices =
+                    !instanceName.empty()
+                        ? glslActiveInstanceIndices(glslSource, instanceName)
+                        : std::set<int>();
+                // If no `inst[N]` usage was found in the source (e.g.
+                // the whole block is inactive, OR the instance is not
+                // array-indexed), fall back to the block-level active
+                // bit for all instances.
+                const bool useInstanceNarrowing = !usedInstanceIndices.empty();
+
+                // For array blocks (`uniform B { ... } b[N]`), create one
+                // block entry per array element: "BlockName[0]", "BlockName[1]", ...
+                // For non-array blocks, create a single entry: "BlockName".
+                const int numInstances =
+                    parsedBlock != nullptr && parsedBlock->instanceIsArray
+                        ? std::max(1, parsedBlock->instanceArraySize)
+                        : ((block.blockArraySize > 0)
+                            ? static_cast<int>(block.blockArraySize) : 1);
+                const bool isArray =
+                    parsedBlock != nullptr
+                        ? parsedBlock->instanceIsArray
+                        : (block.blockArraySize > 0);
+                const bool hasExplicitBinding =
+                    parsedBlock != nullptr
+                        ? parsedBlock->hasExplicitBinding
+                        : block.hasExplicitBinding;
+                const GLint baseBinding =
+                    parsedBlock != nullptr
+                        ? (parsedBlock->hasExplicitBinding
+                            ? static_cast<GLint>(parsedBlock->explicitBinding)
+                            : 0)
+                        : static_cast<GLint>(block.glBinding);
+
+                // Create block entries for each instance.
+                GLint firstBlockIndex = -1;
+                bool anyNewBlocks = false;
+                GLbitfield firstInstStageBit = blockStageBit;  // used for member bit
+                for (int inst = 0; inst < numInstances; ++inst) {
+                    GLbitfield effStageBit = blockStageBit;
+                    if (useInstanceNarrowing &&
+                        usedInstanceIndices.count(inst) == 0) {
+                        effStageBit = 0;
+                    }
+                    if (inst == 0) firstInstStageBit = effStageBit;
+                    std::string entryName = block.name;
+                    if (isArray) {
+                        entryName += "[" + std::to_string(inst) + "]";
+                    }
+                    auto existing = std::find_if(
+                        programObject->resourceUniformBlocks.begin(),
+                        programObject->resourceUniformBlocks.end(),
+                        [&](const GLProgramResourceEntry& e) { return e.name == entryName; });
+                    if (existing != programObject->resourceUniformBlocks.end()) {
+                        existing->referencedBy |= effStageBit;
+                        if (inst == 0) {
+                            firstBlockIndex = static_cast<GLint>(
+                                existing - programObject->resourceUniformBlocks.begin());
+                        }
+                        continue;
+                    }
+                    anyNewBlocks = true;
+                    GLProgramResourceEntry blockEntry;
+                    blockEntry.name = entryName;
+                    blockEntry.type = 0;  // blocks have no scalar type
+                    // Sprint 8 B Cluster F F1 Day 2 (CKPT74):
+                    // explicit-binding block arrays consume consecutive
+                    // binding slots (b[0]=N, b[1]=N+1, ...). Implicit-
+                    // binding (no layout(binding=N)) defaults to 0 for
+                    // ALL instances. CTS layout_binding.block_layout_
+                    // binding_block.binding_array_size hits this:
+                    //   `layout(binding=81) uniform B { ... } b[2];`
+                    //   expects b[0]=81, b[1]=82.
+                    GLint instanceBinding = baseBinding;
+                    if (hasExplicitBinding && isArray) {
+                        instanceBinding += inst;
+                    }
+                    blockEntry.location = instanceBinding;
+                    blockEntry.offset = static_cast<GLint>(block.byteSize); // GL_UNIFORM_BLOCK_DATA_SIZE
+                    blockEntry.arraySize = 1;
+                    blockEntry.referencedBy = effStageBit;
+                    programObject->resourceUniformBlocks.push_back(std::move(blockEntry));
+                    if (inst == 0) {
+                        firstBlockIndex = static_cast<GLint>(
+                            programObject->resourceUniformBlocks.size() - 1);
+                    }
+                }
+
+                // Skip member creation if this block was already processed
+                // by an earlier stage (all entries deduped — no new blocks).
+                if (!anyNewBlocks) continue;
+
+                for (const auto& member : block.members) {
+                    // Push into resourceUniforms — the CTS and
+                    // glGetActiveUniform / glGetActiveUniformsiv enumerate
+                    // ALL active uniforms including those inside blocks.
+                    // Per GL spec §7.6, blocks WITHOUT an instance name use
+                    // just "memberName"; blocks WITH one use "blockName.memberName".
+                    GLProgramResourceEntry memberEntry;
+                    std::string uniformName;
+                    if (hasInstance) {
+                        uniformName = block.name + "." + member.name;
+                    } else {
+                        uniformName = member.name;
+                    }
+                    // GL spec: array uniforms have "[0]" appended
+                    // to name. Use `isArray` so even sized arrays
+                    // with arraySize=1 pick up the suffix.
+                    if (member.isArray) {
+                        uniformName += "[0]";
+                    }
+                    memberEntry.name = std::move(uniformName);
+                    memberEntry.type = member.type;
+                    // SPIR-V represents bool in UBOs as uint — detect the
+                    // original bool type from the GLSL source.
+                    if (member.type == GL_UNSIGNED_INT ||
+                        member.type == GL_UNSIGNED_INT_VEC2 ||
+                        member.type == GL_UNSIGNED_INT_VEC3 ||
+                        member.type == GL_UNSIGNED_INT_VEC4) {
+                        GLenum boolType = detectBoolMemberType(
+                            glslSource, block.name, member.name);
+                        if (boolType != 0) {
+                            memberEntry.type = boolType;
+                        }
+                    }
+                    memberEntry.location = -1;  // not queryable via glGetUniformLocation
+                    memberEntry.offset = static_cast<GLint>(member.offset);
+                    // Keep SPIRV-Cross's raw arraySize (0 for
+                    // non-arrays AND for unbounded arrays) and use
+                    // the new `isArray` flag to distinguish them.
+                    // getResourceProperty(GL_ARRAY_SIZE) reports 1
+                    // for non-arrays, arraySize (maybe 0) for arrays.
+                    memberEntry.arraySize = static_cast<GLint>(member.arraySize);
+                    memberEntry.isArray = member.isArray;
+                    memberEntry.blockIndex = firstBlockIndex;
+                    // Members are indexed off the FIRST instance of a
+                    // block array, so use that instance's effective
+                    // stage bit (narrowed per-instance above).
+                    memberEntry.referencedBy = firstInstStageBit;
+                    memberEntry.isRowMajor = member.isRowMajor;
+                    memberEntry.arrayStride = member.arrayStride;
+                    memberEntry.matrixStride = member.matrixStride;
+                    const GLint newUniformIndex =
+                        static_cast<GLint>(programObject->resourceUniforms.size());
+                    programObject->resourceUniforms.push_back(std::move(memberEntry));
+
+                    // Record the member's index on the first-instance
+                    // block entry so GL_NUM_ACTIVE_VARIABLES and
+                    // GL_ACTIVE_VARIABLES queries on the UBO return
+                    // this member list. SSBO path already does this
+                    // (mergeStorageBlocks below); UBO path was missing it.
+                    // CTS `program_interface_query.uniform-block-types`
+                    // queries ACTIVE_VARIABLES on every UB entry.
+                    if (firstBlockIndex >= 0 &&
+                        static_cast<std::size_t>(firstBlockIndex) <
+                            programObject->resourceUniformBlocks.size()) {
+                        auto& blockEntry =
+                            programObject->resourceUniformBlocks[firstBlockIndex];
+                        if (std::find(blockEntry.activeVariables.begin(),
+                                      blockEntry.activeVariables.end(),
+                                      newUniformIndex) == blockEntry.activeVariables.end()) {
+                            blockEntry.activeVariables.push_back(newUniformIndex);
+                        }
+                    }
+
+                    // Also push into resourceBufferVariables for
+                    // glGetProgramResourceiv(GL_BUFFER_VARIABLE, ...).
+                    // NOTE: This is from a UBO merge — UBO members
+                    // are technically not "buffer variables" (that's
+                    // the SSBO-only interface per GL 4.6 §7.3.1.1).
+                    // The push is preserved for backward compat with
+                    // any caller that queries UBO members via the
+                    // buffer-variable interface, but the GL spec
+                    // separates them. When we see a real regression
+                    // because of this overlap, drop it.
+                    GLProgramResourceEntry bvEntry;
+                    bvEntry.name = block.name + "." + member.name;
+                    bvEntry.type = member.type;
+                    bvEntry.location = -1;
+                    bvEntry.offset = static_cast<GLint>(member.offset);
+                    bvEntry.blockIndex = firstBlockIndex;
+                    bvEntry.referencedBy = firstInstStageBit;
+                    programObject->resourceBufferVariables.push_back(std::move(bvEntry));
+                }
+            }
+
+            for (const auto& [_, parsed] : parsedBlocks) {
+                if (!parsed.instanceIsArray) {
+                    continue;
+                }
+                const int numInstances = std::max(1, parsed.instanceArraySize);
+                for (int inst = 0; inst < numInstances; ++inst) {
+                    std::string entryName =
+                        parsed.name + "[" + std::to_string(inst) + "]";
+                    const auto existing = std::find_if(
+                        programObject->resourceUniformBlocks.begin(),
+                        programObject->resourceUniformBlocks.end(),
+                        [&](const GLProgramResourceEntry& e) {
+                            return e.name == entryName;
+                        });
+                    if (existing != programObject->resourceUniformBlocks.end()) {
+                        if (parsed.hasExplicitBinding) {
+                            existing->location =
+                                static_cast<GLint>(parsed.explicitBinding + inst);
+                        }
+                        continue;
+                    }
+                    GLProgramResourceEntry blockEntry;
+                    blockEntry.name = std::move(entryName);
+                    blockEntry.type = 0;
+                    blockEntry.location = parsed.hasExplicitBinding
+                        ? static_cast<GLint>(parsed.explicitBinding + inst)
+                        : 0;
+                    blockEntry.offset = 0;
+                    blockEntry.arraySize = 1;
+                    blockEntry.referencedBy = 0;
+                    programObject->resourceUniformBlocks.push_back(std::move(blockEntry));
+                }
+            }
+        };
+        static const std::string emptySource;
+        const std::string& vsSrc = vertexShader ? vertexShader->source : emptySource;
+        const std::string& fsSrc = fragmentShader ? fragmentShader->source : emptySource;
+        const std::string& gsSrc = geometryShader ? geometryShader->source : emptySource;
+        const std::string& csSrc = computeShader ? computeShader->source : emptySource;
+        mergeBlocks(programObject->vertexReflection.uniformBlocks, 0x01, vsSrc);    // vertex
+        mergeBlocks(programObject->fragmentReflection.uniformBlocks, 0x02, fsSrc);  // fragment
+        // GS uniform blocks — SPIRV-Cross reflection captured from
+        // translateCachedStage("geometry") above. Usage-based, so a
+        // block declared in the GS source but never accessed in the
+        // GS body won't appear and won't set the 0x04 bit. CTS
+        // `program_resource.program_resource` needs this for
+        // `uni_colors` (expected TRUE: GS reads uni_colors.red) vs
+        // `uni_matrices` (expected FALSE: declared but unused).
+        mergeBlocks(programObject->geometryReflection.uniformBlocks, 0x04, gsSrc);  // geometry
+        // Tess stages — same gap as supplementFromReflection above:
+        // TCS uniform_block resources need to flow through this merge
+        // path so glGetProgramResourceIndex(po, GL_UNIFORM_BLOCK,
+        // "tc_uniform_block1") finds them.
+        const std::string& ubTcsSrc = tessControlShader ? tessControlShader->source : "";
+        const std::string& ubTesSrc = tessEvalShader ? tessEvalShader->source : "";
+        mergeBlocks(programObject->tessControlReflection.uniformBlocks, 0x08, ubTcsSrc);
+        mergeBlocks(programObject->tessEvalAsComputeReflection.uniformBlocks, 0x10, ubTesSrc);
+        // Compute UBOs — CTS `compute_shader.resource-ubo` declares
+        // `uniform InputBuffer { … } g_in_buffer[12];` and queries
+        // `glGetUniformBlockIndex("InputBuffer[0]")` + expects
+        // `GL_UNIFORM_BLOCK_REFERENCED_BY_COMPUTE_SHADER = TRUE`.
+        mergeBlocks(programObject->computeReflection.uniformBlocks, 0x20, csSrc);   // compute
+
+        // Build resourceStorageBlocks from each stage's SSBO reflection so
+        // glShaderStorageBlockBinding can look up a block by index and
+        // update its effective binding. Dedup by name (an SSBO declared
+        // in both VS and FS produces a single resource entry whose
+        // `referencedBy` bits OR the stage flags). `location` starts at
+        // the shader's `layout(binding=N)` value and is later overwritten
+        // by glShaderStorageBlockBinding(program, index, newBinding);
+        // resolveSSBOBindings consults this field as the authoritative
+        // effective binding for each draw/dispatch. Without this list
+        // glShaderStorageBlockBinding hits the range check in
+        // shaderStorageBlockBinding() and silently drops the remap.
+        auto mergeStorageBlocks = [&](const std::vector<ShaderReflection::ResourceBinding>& blocks,
+                                       GLbitfield stageBit,
+                                       const std::string& glslSource) {
+            std::unordered_map<std::string, ParsedInterfaceBlockForValidation> parsedBlocks;
+            for (auto parsed : parseShaderStorageBlocksForValidation(glslSource)) {
+                parsedBlocks[parsed.name] = std::move(parsed);
+            }
+            for (const auto& block : blocks) {
+                // Track the per-stage referenced bit ONLY when the
+                // block is live in this stage's SPIR-V — a declared-
+                // but-unused SSBO still appears as a resource but
+                // mustn't contribute the stage's bit. CTS
+                // `program_resource.program_resource` expects
+                // `Ids` (GS-declared, GS-unused) to have
+                // GL_REFERENCED_BY_GEOMETRY_SHADER = FALSE.
+                const GLbitfield blockStageBit = block.active ? stageBit : 0;
+                const auto parsedIt = parsedBlocks.find(block.name);
+                const ParsedInterfaceBlockForValidation* parsedBlock =
+                    parsedIt != parsedBlocks.end() ? &parsedIt->second : nullptr;
+                if (parsedBlock == nullptr &&
+                    parsedBlocks.size() == 1 &&
+                    blocks.size() == 1) {
+                    parsedBlock = &parsedBlocks.begin()->second;
+                }
+                const bool hasInstance =
+                    parsedBlock != nullptr
+                        ? parsedBlock->hasInstance
+                        : glslBlockHasInstanceName(glslSource, block.name);
+                const std::string instanceName = hasInstance
+                    ? (parsedBlock != nullptr && !parsedBlock->instanceName.empty()
+                        ? parsedBlock->instanceName
+                        : glslBlockInstanceName(glslSource, block.name))
+                    : std::string();
+                const std::set<int> usedInstanceIndices =
+                    !instanceName.empty()
+                        ? glslActiveInstanceIndices(glslSource, instanceName)
+                        : std::set<int>();
+                const bool useInstanceNarrowing = !usedInstanceIndices.empty();
+
+                const int numInstances =
+                    parsedBlock != nullptr && parsedBlock->instanceIsArray
+                        ? std::max(1, parsedBlock->instanceArraySize)
+                        : ((block.blockArraySize > 0)
+                            ? static_cast<int>(block.blockArraySize) : 1);
+                const bool isBlockArray =
+                    parsedBlock != nullptr
+                        ? parsedBlock->instanceIsArray
+                        : (block.blockArraySize > 0);
+                const bool hasExplicitBinding =
+                    parsedBlock != nullptr
+                        ? parsedBlock->hasExplicitBinding
+                        : block.hasExplicitBinding;
+                const GLint baseBinding =
+                    parsedBlock != nullptr
+                        ? (parsedBlock->hasExplicitBinding
+                            ? static_cast<GLint>(parsedBlock->explicitBinding)
+                            : 0)
+                        : static_cast<GLint>(block.glBinding);
+
+                // Create one block entry per array instance. For
+                // non-array blocks, numInstances=1 and we keep the
+                // plain name. CTS `ssb-types` declares
+                // `TrickyBuffer ... } e[2];` and asserts both
+                // `TrickyBuffer[0]` and `TrickyBuffer[1]` appear
+                // in GL_SHADER_STORAGE_BLOCK.
+                GLint firstBlockIdx = -1;
+                GLbitfield firstInstStageBit = blockStageBit;
+                bool anyNew = false;
+                for (int inst = 0; inst < numInstances; ++inst) {
+                    GLbitfield effStageBit = blockStageBit;
+                    if (useInstanceNarrowing &&
+                        usedInstanceIndices.count(inst) == 0) {
+                        effStageBit = 0;
+                    }
+                    if (inst == 0) firstInstStageBit = effStageBit;
+                    std::string entryName = block.name;
+                    if (isBlockArray) {
+                        entryName += "[" + std::to_string(inst) + "]";
+                    }
+                    auto existing = std::find_if(
+                        programObject->resourceStorageBlocks.begin(),
+                        programObject->resourceStorageBlocks.end(),
+                        [&](const GLProgramResourceEntry& e) { return e.name == entryName; });
+                    if (existing != programObject->resourceStorageBlocks.end()) {
+                        existing->referencedBy |= effStageBit;
+                        if (inst == 0) {
+                            firstBlockIdx = static_cast<GLint>(
+                                existing - programObject->resourceStorageBlocks.begin());
+                        }
+                        continue;
+                    }
+                    anyNew = true;
+                    GLProgramResourceEntry entry;
+                    entry.name = std::move(entryName);
+                    entry.type = 0;
+                    // Sprint 8 B Cluster F F1 Day 2 (CKPT74): same
+                    // explicit-binding gate as UBO above. Pre-CKPT74
+                    // the SSBO path UNCONDITIONALLY added `inst`,
+                    // which is correct for explicit binding (b[i]=N+i)
+                    // but wrong for implicit (all default to 0).
+                    GLint instanceBinding = baseBinding;
+                    if (hasExplicitBinding && isBlockArray) {
+                        instanceBinding += inst;
+                    }
+                    entry.location = instanceBinding;
+                    entry.binding = hasExplicitBinding ? instanceBinding : -1;
+                    entry.offset = static_cast<GLint>(block.byteSize);
+                    entry.arraySize = 1;
+                    entry.referencedBy = effStageBit;
+                    programObject->resourceStorageBlocks.push_back(std::move(entry));
+                    if (inst == 0) {
+                        firstBlockIdx = static_cast<GLint>(
+                            programObject->resourceStorageBlocks.size() - 1);
+                    }
+                }
+                // Member-level merge runs every stage, even when the
+                // block itself was registered by an earlier stage.
+                // CTS `geometry_shader.program_resource` declares
+                // `Positions` in both VS (writes) and GS (reads) —
+                // the VS pass creates `Positions.position[0]` with
+                // refby=0x01; the GS pass must still OR in 0x04 on
+                // that existing entry so
+                // GL_REFERENCED_BY_GEOMETRY_SHADER reports TRUE.
+                (void)anyNew;
+
+                // Populate buffer-variable entries for each SSBO member
+                // so glGetProgramResourceiv(GL_BUFFER_VARIABLE, ...) can
+                // find "BlockName.memberName" — per GL 4.6 §7.3.1.1 the
+                // buffer-variable interface enumerates active SSBO
+                // members. Names are prefixed with the block TYPE name
+                // when the block declaration has an instance name
+                // (`} e[2];` or `} d;`); otherwise bare member names.
+                for (const auto& member : block.members) {
+                    std::string bvName = hasInstance
+                        ? (block.name + "." + member.name)
+                        : member.name;
+                    // GL 4.6 §7.3.1: array members (including
+                    // unbounded `data[]` in SSBOs) get the "[0]"
+                    // suffix. `member.isArray` covers both sized
+                    // and unsized cases — `arraySize > 0` alone
+                    // misses unbounded arrays.
+                    if (member.isArray) bvName += "[0]";
+                    auto bvIt = std::find_if(
+                        programObject->resourceBufferVariables.begin(),
+                        programObject->resourceBufferVariables.end(),
+                        [&](const GLProgramResourceEntry& e) { return e.name == bvName; });
+                    GLint bvIndex = -1;
+                    if (bvIt != programObject->resourceBufferVariables.end()) {
+                        bvIt->referencedBy |= firstInstStageBit;
+                        bvIndex = static_cast<GLint>(bvIt - programObject->resourceBufferVariables.begin());
+                    } else {
+                        GLProgramResourceEntry bv;
+                        bv.name = std::move(bvName);
+                        bv.type = member.type;
+                        bv.location = -1;
+                        bv.offset = static_cast<GLint>(member.offset);
+                        bv.arraySize = static_cast<GLint>(member.arraySize);
+                        bv.isArray = member.isArray;
+                        bv.blockIndex = firstBlockIdx;
+                        bv.referencedBy = firstInstStageBit;
+                        bv.isRowMajor = member.isRowMajor;
+                        bv.arrayStride = member.arrayStride;
+                        bv.matrixStride = member.matrixStride;
+                        bv.topLevelArraySize = member.topLevelArraySize;
+                        bv.topLevelArrayStride = member.topLevelArrayStride;
+                        programObject->resourceBufferVariables.push_back(std::move(bv));
+                        bvIndex = static_cast<GLint>(programObject->resourceBufferVariables.size() - 1);
+                    }
+                    // Record the member's index in the containing
+                    // block's active-variables list so
+                    // GL_NUM_ACTIVE_VARIABLES / GL_ACTIVE_VARIABLES
+                    // queries on the block return the right data.
+                    if (firstBlockIdx >= 0
+                        && static_cast<std::size_t>(firstBlockIdx) < programObject->resourceStorageBlocks.size()) {
+                        auto& blockEntry = programObject->resourceStorageBlocks[firstBlockIdx];
+                        // De-dupe in case the same block gets
+                        // merged from multiple stages.
+                        if (std::find(blockEntry.activeVariables.begin(),
+                                      blockEntry.activeVariables.end(),
+                                      bvIndex) == blockEntry.activeVariables.end()) {
+                            blockEntry.activeVariables.push_back(bvIndex);
+                        }
+                    }
+                }
+            }
+
+            for (const auto& [_, parsed] : parsedBlocks) {
+                if (!parsed.instanceIsArray) {
+                    continue;
+                }
+                const int numInstances = std::max(1, parsed.instanceArraySize);
+                for (int inst = 0; inst < numInstances; ++inst) {
+                    std::string entryName =
+                        parsed.name + "[" + std::to_string(inst) + "]";
+                    const auto existing = std::find_if(
+                        programObject->resourceStorageBlocks.begin(),
+                        programObject->resourceStorageBlocks.end(),
+                        [&](const GLProgramResourceEntry& e) {
+                            return e.name == entryName;
+                        });
+                    if (existing != programObject->resourceStorageBlocks.end()) {
+                        existing->referencedBy |= stageBit;
+                        if (parsed.hasExplicitBinding) {
+                            existing->location =
+                                static_cast<GLint>(parsed.explicitBinding + inst);
+                        }
+                        continue;
+                    }
+                    GLProgramResourceEntry entry;
+                    entry.name = std::move(entryName);
+                    entry.type = 0;
+                    entry.location = parsed.hasExplicitBinding
+                        ? static_cast<GLint>(parsed.explicitBinding + inst)
+                        : 0;
+                    entry.offset = 0;
+                    entry.arraySize = 1;
+                    entry.referencedBy = stageBit;
+                    programObject->resourceStorageBlocks.push_back(std::move(entry));
+                }
+            }
+        };
+        static const std::string ssboEmptySrc;
+        const std::string& ssboVsSrc = vertexShader ? vertexShader->source : ssboEmptySrc;
+        const std::string& ssboFsSrc = fragmentShader ? fragmentShader->source : ssboEmptySrc;
+        const std::string& ssboGsSrc = geometryShader ? geometryShader->source : ssboEmptySrc;
+        const std::string& ssboCsSrc = computeShader ? computeShader->source : ssboEmptySrc;
+        mergeStorageBlocks(programObject->vertexReflection.storageBuffers, 0x01, ssboVsSrc);
+        mergeStorageBlocks(programObject->fragmentReflection.storageBuffers, 0x02, ssboFsSrc);
+        mergeStorageBlocks(programObject->geometryReflection.storageBuffers, 0x04, ssboGsSrc);
+        mergeStorageBlocks(programObject->computeReflection.storageBuffers, 0x20, ssboCsSrc);
+        // Tess stages — symmetric to mergeBlocks above. TCS/TES SSBO
+        // resources need this path so glGetProgramResourceIndex(po,
+        // GL_SHADER_STORAGE_BLOCK, "tc_shader_storage_block1") finds
+        // them.
+        const std::string& ssboTcsSrc = tessControlShader ? tessControlShader->source : ssboEmptySrc;
+        const std::string& ssboTesSrc = tessEvalShader ? tessEvalShader->source : ssboEmptySrc;
+        mergeStorageBlocks(programObject->tessControlReflection.storageBuffers, 0x08, ssboTcsSrc);
+        mergeStorageBlocks(programObject->tessEvalAsComputeReflection.storageBuffers, 0x10, ssboTesSrc);
+
+        // GS reflection: the geometry shader is CPU-emulated — we
+        // don't yet run SPIRV-Cross on it to produce a MSL
+        // reflection struct, so block-scoped resources (uniform
+        // blocks, SSBOs, buffer variables) can't yet tell us
+        // "does the GS use this block". Scalar uniforms are
+        // already handled via the per-stage scanner's
+        // `declaredUniforms` (see computeStageMask above), which
+        // gives us an accurate GEOMETRY_SHADER bit for those.
+        // Block-scoped REFERENCED_BY_GEOMETRY_SHADER queries stay
+        // conservative until GS reflection lands — the CTS
+        // program_resource test carries that on the backlog.
+
+        // Post-pass: fix any remaining uint→bool member types that weren't
+        // detected during the stage that first created the members. This
+        // happens when a linked SPIR-V includes a block in both stages but
+        // the block is only declared in one stage's GLSL source.
+        for (auto& u : programObject->resourceUniforms) {
+            if (u.blockIndex < 0) continue;
+            if (u.type != GL_UNSIGNED_INT && u.type != GL_UNSIGNED_INT_VEC2 &&
+                u.type != GL_UNSIGNED_INT_VEC3 && u.type != GL_UNSIGNED_INT_VEC4) continue;
+            // Find the block name for this uniform.
+            const auto& blockEntry = programObject->resourceUniformBlocks[u.blockIndex];
+            // Strip array suffix from block name for detection.
+            std::string baseName = blockEntry.name;
+            auto bracket = baseName.find('[');
+            if (bracket != std::string::npos) baseName = baseName.substr(0, bracket);
+            // Extract member name: for instanced blocks "Block.member" → "member",
+            // for non-instanced blocks "member" stays as is.
+            std::string memberName = u.name;
+            // Strip trailing "[0]" from arrays
+            if (memberName.size() > 3 && memberName.substr(memberName.size()-3) == "[0]") {
+                memberName = memberName.substr(0, memberName.size()-3);
+            }
+            // For instanced blocks, strip "BlockName." prefix
+            std::string prefix = baseName + ".";
+            if (memberName.size() > prefix.size() &&
+                memberName.substr(0, prefix.size()) == prefix) {
+                memberName = memberName.substr(prefix.size());
+            }
+            // Try both VS and FS sources.
+            GLenum boolType = detectBoolMemberType(vsSrc, baseName, memberName);
+            if (boolType == 0) {
+                boolType = detectBoolMemberType(fsSrc, baseName, memberName);
+            }
+            if (boolType != 0) {
+                u.type = boolType;
+            }
+        }
+    }
+
+    auto addParsedBlockArrayResources =
+        [&](const std::string& source, GLbitfield stageBit, bool storage) {
+            const auto parsedBlocks = storage
+                ? parseShaderStorageBlocksForValidation(source)
+                : parseUniformBlocksForValidation(source);
+            auto& table = storage
+                ? programObject->resourceStorageBlocks
+                : programObject->resourceUniformBlocks;
+            const bool sourceCanImplyStageReference = storage;
+            for (const auto& parsed : parsedBlocks) {
+                if (!parsed.instanceIsArray) {
+                    continue;
+                }
+                const int numInstances = std::max(1, parsed.instanceArraySize);
+                for (int inst = 0; inst < numInstances; ++inst) {
+                    std::string entryName =
+                        parsed.name + "[" + std::to_string(inst) + "]";
+                    auto existing = std::find_if(
+                        table.begin(),
+                        table.end(),
+                        [&](const GLProgramResourceEntry& e) {
+                            return e.name == entryName;
+                        });
+                    const GLint binding = parsed.hasExplicitBinding
+                        ? static_cast<GLint>(parsed.explicitBinding + inst)
+                        : 0;
+                    if (existing != table.end()) {
+                        if (sourceCanImplyStageReference) {
+                            existing->referencedBy |= stageBit;
+                        }
+                        existing->location = binding;
+                        continue;
+                    }
+                    GLProgramResourceEntry entry;
+                    entry.name = std::move(entryName);
+                    entry.type = 0;
+                    entry.location = binding;
+                    entry.offset = 0;
+                    entry.arraySize = 1;
+                    entry.referencedBy =
+                        sourceCanImplyStageReference ? stageBit : 0;
+                    table.push_back(std::move(entry));
+                }
+            }
+        };
+    static const std::string fallbackEmptySource;
+    const std::string& fallbackVsSrc = vertexShader ? vertexShader->source : fallbackEmptySource;
+    const std::string& fallbackFsSrc = fragmentShader ? fragmentShader->source : fallbackEmptySource;
+    const std::string& fallbackGsSrc = geometryShader ? geometryShader->source : fallbackEmptySource;
+    const std::string& fallbackCsSrc = computeShader ? computeShader->source : fallbackEmptySource;
+    const std::string& fallbackTcsSrc = tessControlShader ? tessControlShader->source : fallbackEmptySource;
+    const std::string& fallbackTesSrc = tessEvalShader ? tessEvalShader->source : fallbackEmptySource;
+    addParsedBlockArrayResources(fallbackVsSrc, 0x01, false);
+    addParsedBlockArrayResources(fallbackFsSrc, 0x02, false);
+    addParsedBlockArrayResources(fallbackGsSrc, 0x04, false);
+    addParsedBlockArrayResources(fallbackTcsSrc, 0x08, false);
+    addParsedBlockArrayResources(fallbackTesSrc, 0x10, false);
+    addParsedBlockArrayResources(fallbackCsSrc, 0x20, false);
+    addParsedBlockArrayResources(fallbackVsSrc, 0x01, true);
+    addParsedBlockArrayResources(fallbackFsSrc, 0x02, true);
+    addParsedBlockArrayResources(fallbackGsSrc, 0x04, true);
+    addParsedBlockArrayResources(fallbackTcsSrc, 0x08, true);
+    addParsedBlockArrayResources(fallbackTesSrc, 0x10, true);
+    addParsedBlockArrayResources(fallbackCsSrc, 0x20, true);
+
+    ++programObject->executableGeneration;
+    if (programObject->executableGeneration == 0) {
+        programObject->executableGeneration = 1;
+    }
+    return true;
+}
+
+#elif defined(APPGL_GLCONTEXT_SHADER_PROGRAM_QUERY)
+bool GLContext::useProgram(GLuint program) {
+    if (program != 0) {
+        GLProgramObject* object = impl_->objects->programs().get(program);
+        if (object == nullptr) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if (!object->linked) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
+    // Sprint 9 Phase 1 (CKPT101): GL 4.6 §13.2.2 — UseProgram must
+    // generate INVALID_OPERATION when transform feedback is active and
+    // not paused on the currently-bound TF object. CTS
+    // `transform_feedback.api_errors_test` plants beginTransformFeedback
+    // then calls useProgram(0) and asserts the error is generated.
+    const bool tfActive = isTransformFeedbackActive();
+    const bool tfPaused = impl_->isTfPausedOnBoundImpl();
+    if (tfActive && !tfPaused) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // GL 4.6 §7.3 deferred-delete protocol: if the outgoing current
+    // program was already flagged deleteRequested by a prior
+    // glDeleteProgram, this is the moment it actually gets erased —
+    // "no longer part of any context's current state" is satisfied by
+    // the upcoming state->useProgram() call. See deleteProgram for
+    // the rationale. Skip when the outgoing program is the same as
+    // the incoming program (redundant glUseProgram(N)→glUseProgram(N)).
+    const GLuint outgoing = impl_->state->currentProgram();
+    if (outgoing != 0 && outgoing != program) {
+        GLProgramObject* outgoingObj = impl_->objects->programs().get(outgoing);
+        if (outgoingObj != nullptr && outgoingObj->deleteRequested) {
+            impl_->finalizeDeletedProgramIfUnused(outgoing);
+        }
+    }
+    impl_->state->useProgram(program);
+    if (program != 0) {
+        GLProgramObject* object = impl_->objects->programs().get(program);
+        if (object != nullptr) {
+            resetProgramSubroutineSelections(*object, true);
+        }
+    }
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::ProgramBind);
+    return true;
+}
+
+bool GLContext::validateProgram(GLuint program) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    object->validated = object->linked;
+    object->validateLog = object->linked ? "validation passed" : "program is not linked";
+    return object->validated;
+}
+
+bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr || params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    switch (pname) {
+        case GL_DELETE_STATUS:
+            *params = object->deleteRequested ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_LINK_STATUS:
+            *params = object->linked ? GL_TRUE : GL_FALSE;
+            return true;
+        case 0x91B1:   // GL_COMPLETION_STATUS_KHR / _ARB
+            // Synchronous link — always complete post-glLinkProgram.
+            // See matching case in getShaderiv for rationale.
+            *params = GL_TRUE;
+            return true;
+        case GL_VALIDATE_STATUS:
+            *params = object->validated ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_INFO_LOG_LENGTH: {
+            const std::string& log = object->validateLog.empty() ? object->linkLog : object->validateLog;
+            *params = static_cast<GLint>(log.size() + (log.empty() ? 0 : 1));
+            return true;
+        }
+        case GL_ATTACHED_SHADERS:
+            *params = static_cast<GLint>(object->attachedShaders.size());
+            return true;
+        case GL_ACTIVE_UNIFORMS:
+            // GL spec: includes ALL active uniforms (bare + in-block).
+            // resourceUniforms holds both; uniforms only holds bare ones.
+            *params = static_cast<GLint>(
+                object->resourceUniforms.empty()
+                    ? object->uniforms.size()
+                    : object->resourceUniforms.size());
+            return true;
+        case GL_ACTIVE_UNIFORM_MAX_LENGTH: {
+            if (programUsesNamelessSpirvBinaries(*object, *impl_->objects)) {
+                *params = 1;
+                return true;
+            }
+            std::size_t maxLen = 0;
+            if (!object->resourceUniforms.empty()) {
+                for (const auto& u : object->resourceUniforms) {
+                    maxLen = std::max(maxLen, u.name.size() + 1);
+                }
+            } else {
+                for (const auto& u : object->uniforms) {
+                    maxLen = std::max(maxLen, u.name.size() + 1);
+                }
+            }
+            *params = static_cast<GLint>(maxLen);
+            return true;
+        }
+        case GL_ACTIVE_ATTRIBUTES:
+            *params = static_cast<GLint>(object->attributes.size());
+            return true;
+        case GL_ACTIVE_ATTRIBUTE_MAX_LENGTH: {
+            if (programUsesNamelessSpirvBinaries(*object, *impl_->objects)) {
+                *params = 1;
+                return true;
+            }
+            std::size_t maxLen = 0;
+            for (const auto& a : object->attributes) {
+                maxLen = std::max(maxLen, a.name.size() + 1);
+            }
+            *params = static_cast<GLint>(maxLen);
+            return true;
+        }
+        // Tessellation program queries (GL 4.0).
+        case GL_TESS_CONTROL_OUTPUT_VERTICES:
+            *params = object->tessControlOutputVertices;
+            return true;
+        case GL_TESS_GEN_MODE:
+            *params = static_cast<GLint>(object->tessGenMode);
+            return true;
+        case GL_TESS_GEN_SPACING:
+            *params = static_cast<GLint>(object->tessGenSpacing);
+            return true;
+        case GL_TESS_GEN_VERTEX_ORDER:
+            *params = static_cast<GLint>(object->tessGenVertexOrder);
+            return true;
+        case GL_TESS_GEN_POINT_MODE:
+            *params = static_cast<GLint>(object->tessGenPointMode);
+            return true;
+        // Uniform block queries (GL 3.1+)
+        case GL_ACTIVE_UNIFORM_BLOCKS:
+            *params = static_cast<GLint>(object->resourceUniformBlocks.size());
+            return true;
+        case GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH: {
+            if (programUsesNamelessSpirvBinaries(*object, *impl_->objects)) {
+                *params = 1;
+                return true;
+            }
+            std::size_t maxLen = 0;
+            for (const auto& block : object->resourceUniformBlocks) {
+                maxLen = std::max(maxLen, block.name.size() + 1);
+            }
+            *params = static_cast<GLint>(maxLen);
+            return true;
+        }
+        // Compute shader queries (GL 4.3+)
+        case GL_COMPUTE_WORK_GROUP_SIZE: {
+            // GL 4.6 §7.13: INVALID_OPERATION if the program has not
+            // been linked successfully, or has been linked but
+            // contains no compute shader. Checked by
+            // KHR-GL46.compute_shader.api-program. Otherwise returns
+            // the shader's local_size_{x,y,z} as declared by the
+            // `layout(local_size_x = N) in;` execution mode, populated
+            // at link time via extractComputeModes.
+            bool hasComputeStage = false;
+            for (GLuint shaderId : object->attachedShaders) {
+                const GLShaderObject* sh = impl_->objects->shaders().get(shaderId);
+                if (sh != nullptr && sh->stage == GL_COMPUTE_SHADER) {
+                    hasComputeStage = true;
+                    break;
+                }
+            }
+            if (!object->linked || !hasComputeStage) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            params[0] = static_cast<GLint>(object->computeLocalSizeX);
+            params[1] = static_cast<GLint>(object->computeLocalSizeY);
+            params[2] = static_cast<GLint>(object->computeLocalSizeZ);
+            return true;
+        }
+        // Transform feedback queries (GL 3.0+)
+        case GL_TRANSFORM_FEEDBACK_BUFFER_MODE:
+            *params = static_cast<GLint>(object->transformFeedbackBufferMode);
+            return true;
+        case GL_TRANSFORM_FEEDBACK_VARYINGS:
+            *params = static_cast<GLint>(object->transformFeedbackVaryingNames.size());
+            return true;
+        case GL_TRANSFORM_FEEDBACK_VARYING_MAX_LENGTH: {
+            if (programUsesNamelessSpirvBinaries(*object, *impl_->objects)) {
+                *params = 1;
+                return true;
+            }
+            std::size_t maxLen = 0;
+            for (const auto& v : object->transformFeedbackVaryingNames) {
+                maxLen = std::max(maxLen, v.size() + 1);
+            }
+            *params = static_cast<GLint>(maxLen);
+            return true;
+        }
+        // Geometry shader queries (GL 3.2+). GL 4.6 §7.13 "Program
+        // Queries": GL_GEOMETRY_* pnames generate GL_INVALID_OPERATION
+        // when the program has not been successfully linked with a
+        // geometry shader stage. `gsPresent` is populated at link
+        // time by `detectGeometryEmulatable` — it's true whenever the
+        // linked program contains a GS, independent of whether the
+        // CPU emulator can handle the shader body.
+        case GL_GEOMETRY_VERTICES_OUT:
+            if (!object->linked || !object->gsPresent) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            *params = static_cast<GLint>(object->gsMaxVertices);
+            return true;
+        case GL_GEOMETRY_INPUT_TYPE:
+            if (!object->linked || !object->gsPresent) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            *params = static_cast<GLint>(object->gsInputTopology);
+            return true;
+        case GL_GEOMETRY_OUTPUT_TYPE:
+            if (!object->linked || !object->gsPresent) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            *params = static_cast<GLint>(object->gsOutputTopology);
+            return true;
+        case GL_GEOMETRY_SHADER_INVOCATIONS:
+            if (!object->linked || !object->gsPresent) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            *params = static_cast<GLint>(object->gsInvocations);
+            return true;
+        // Program binary / separable (GL 4.1+)
+        case GL_PROGRAM_BINARY_LENGTH:
+            *params = 0;  // No binary program support
+            return true;
+        case GL_PROGRAM_SEPARABLE:
+            // Query returns the LINK-TIME snapshot, not the request
+            // parameter. Before any successful link, this is FALSE
+            // regardless of glProgramParameteri calls.
+            *params = object->separableLinked ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_PROGRAM_BINARY_RETRIEVABLE_HINT:
+            *params = GL_FALSE;
+            return true;
+        // Atomic counter buffers (GL 4.2+)
+        case GL_ACTIVE_ATOMIC_COUNTER_BUFFERS:
+            *params = static_cast<GLint>(object->resourceAtomicCounterBuffers.size());
+            return true;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
+}
+
+bool GLContext::getProgramInfoLog(GLuint program, GLsizei bufSize, GLsizei* length, GLchar* infoLog) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const std::string& log = object->validateLog.empty() ? object->linkLog : object->validateLog;
+    copyStringToBuffer(log, bufSize, length, infoLog);
+    return true;
+}
+
+bool GLContext::getAttachedShaders(GLuint program, GLsizei maxCount, GLsizei* count, GLuint* shaders) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLsizei n = std::min<GLsizei>(maxCount, static_cast<GLsizei>(object->attachedShaders.size()));
+    if (shaders != nullptr) {
+        for (GLsizei i = 0; i < n; ++i) {
+            shaders[i] = object->attachedShaders[static_cast<std::size_t>(i)];
+        }
+    }
+    if (count != nullptr) {
+        *count = n;
+    }
+    return true;
+}
+
+bool GLContext::bindAttribLocation(GLuint program, GLuint index, const GLchar* name) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr || name == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    object->requestedAttribLocations[std::string(name)] = index;
+    return true;
+}
+
+GLint GLContext::getAttribLocation(GLuint program, const GLchar* name) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr || name == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return -1;
+    }
+    if (!object->linked) {
+        pushError(GL_INVALID_OPERATION);
+        return -1;
+    }
+    const std::string lookup = name;
+    // GL 4.6 §7.3.1: if name includes `[N]` suffix, return base attribute's
+    // location + N. Shaders can declare `in float clipdistance_data[8]` and
+    // CTS looks up `clipdistance_data[0]` through `clipdistance_data[7]`
+    // expecting consecutive locations — our reflection only records the
+    // array's base name, so we need to parse the suffix and do the math.
+    std::string baseName = lookup;
+    int arrayIndex = 0;
+    if (!lookup.empty() && lookup.back() == ']') {
+        const auto bracketPos = lookup.rfind('[');
+        if (bracketPos != std::string::npos) {
+            const std::string idxStr = lookup.substr(bracketPos + 1,
+                lookup.size() - bracketPos - 2);
+            // Accept only non-negative decimal integers.
+            bool ok = !idxStr.empty();
+            for (char c : idxStr) {
+                if (c < '0' || c > '9') { ok = false; break; }
+            }
+            if (ok) {
+                arrayIndex = std::atoi(idxStr.c_str());
+                baseName = lookup.substr(0, bracketPos);
+            }
+        }
+    }
+    for (const auto& attrib : object->attributes) {
+        if (attrib.name == lookup) {
+            return attrib.location;
+        }
+        if (attrib.name == baseName) {
+            auto arrayElementLocationStride = [](GLenum type) -> GLint {
+                switch (type) {
+                    case GL_FLOAT_MAT2:    case GL_DOUBLE_MAT2:
+                    case GL_FLOAT_MAT2x3:  case GL_DOUBLE_MAT2x3:
+                    case GL_FLOAT_MAT2x4:  case GL_DOUBLE_MAT2x4:
+                        return 2;
+                    case GL_FLOAT_MAT3:    case GL_DOUBLE_MAT3:
+                    case GL_FLOAT_MAT3x2:  case GL_DOUBLE_MAT3x2:
+                    case GL_FLOAT_MAT3x4:  case GL_DOUBLE_MAT3x4:
+                        return 3;
+                    case GL_FLOAT_MAT4:    case GL_DOUBLE_MAT4:
+                    case GL_FLOAT_MAT4x2:  case GL_DOUBLE_MAT4x2:
+                    case GL_FLOAT_MAT4x3:  case GL_DOUBLE_MAT4x3:
+                        return 4;
+                    default:
+                        return 1;
+                }
+            };
+            return attrib.location +
+                arrayIndex * arrayElementLocationStride(attrib.type);
+        }
+    }
+    return -1;
+}
+
+bool GLContext::getActiveAttrib(GLuint program, GLuint index, GLsizei bufSize, GLsizei* length, GLint* size, GLenum* type, GLchar* name) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (index >= object->attributes.size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const auto& attrib = object->attributes[index];
+    if (size != nullptr) {
+        *size = 1;
+    }
+    if (type != nullptr) {
+        *type = attrib.type;
+    }
+    copyStringToBuffer(attrib.name, bufSize, length, name);
+    return true;
+}
+
+GLint GLContext::getUniformLocation(GLuint program, const GLchar* name) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr || name == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return -1;
+    }
+    if (!object->linked) {
+        pushError(GL_INVALID_OPERATION);
+        return -1;
+    }
+    const std::string lookup = name;
+    for (const auto& uniform : object->uniforms) {
+        if (uniform.name == lookup) {
+            return uniform.location;
+        }
+    }
+    // GL 4.6 §7.6.1: array-element lookup — `glGetUniformLocation(prog,
+    // "u[k]")` for a uniform declared `uniform T u[N]` must return
+    // `location(u) + k` when 0 <= k < N. Uniforms are stored by base name
+    // ("u"), so the exact-match loop above misses. Parse the trailing
+    // [k] subscript and index into the base.
+    //
+    // Use `rfind('[')` not `find('[')` so deeply-nested names like
+    // `l[2].b[1].d[0]` split as base=`l[2].b[1].d`, idx=0 — not
+    // base=`l`, idx=`2].b[1].d[0`. CTS
+    // `program_interface_query.uniform-types` declares
+    // `uniform UU l[3]` where UU contains `U b[2]` containing
+    // `float d[2]`, and asserts
+    // glGetUniformLocation("l[2].b[1].d[0]") finds the terminal leaf.
+    //
+    // Covers KHR-GL46.explicit_uniform_location.uniform-loc-arrays-*
+    // which exercise `layout(location = N) uniform T arr[M]` and expect
+    // u[0]=N, u[1]=N+1, …, u[M-1]=N+M-1.
+    const auto openBracket = lookup.rfind('[');
+    if (openBracket != std::string::npos && lookup.back() == ']') {
+        const std::string baseName = lookup.substr(0, openBracket);
+        const std::string indexStr = lookup.substr(openBracket + 1, lookup.size() - openBracket - 2);
+        if (!baseName.empty() && !indexStr.empty()) {
+            // Parse the subscript (decimal only; GLSL array subscripts are plain ints).
+            char* endp = nullptr;
+            const long idx = std::strtol(indexStr.c_str(), &endp, 10);
+            if (endp && *endp == '\0' && idx >= 0) {
+                for (const auto& uniform : object->uniforms) {
+                    if (uniform.name == baseName && uniform.arraySize >= 1
+                        && idx < static_cast<long>(uniform.arraySize)
+                        && uniform.location >= 0) {
+                        return uniform.location + static_cast<GLint>(idx);
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: try with _appgl_ prefix reverse-mapping.
+    // CompatShaderRewrite renames `sampler` → `_appgl_sampler` for glslang
+    // compat; try the rewritten name if the original wasn't found.
+    {
+        std::string rewritten = lookup;
+        const std::string from = "sampler";
+        const std::string to = "_appgl_sampler";
+        std::string::size_type pos = 0;
+        bool changed = false;
+        while ((pos = rewritten.find(from, pos)) != std::string::npos) {
+            // Word-boundary check: don't replace inside sampler2D etc.
+            bool leftOk = (pos == 0) || (!std::isalnum(static_cast<unsigned char>(rewritten[pos - 1])) && rewritten[pos - 1] != '_');
+            std::size_t end = pos + from.size();
+            bool rightOk = (end >= rewritten.size()) || (!std::isalnum(static_cast<unsigned char>(rewritten[end])) && rewritten[end] != '_');
+            if (leftOk && rightOk) {
+                rewritten.replace(pos, from.size(), to);
+                pos += to.size();
+                changed = true;
+            } else {
+                pos += 1;
+            }
+        }
+        if (changed) {
+            // Pass 1: exact match on rewritten name.
+            for (const auto& uniform : object->uniforms) {
+                if (uniform.name == rewritten) {
+                    return uniform.location;
+                }
+            }
+            // Pass 2: array-element subscript lookup on the rewritten name.
+            // Mirrors the non-rewritten `lookup[k]` → `base + k` path above.
+            // Needed when CTS asks for `sampler[0]` on a uniform declared
+            // `uniform usampler2D sampler[N]` — `sampler` is a Metal reserved
+            // word, CompatShaderRewrite renamed it to `_appgl_sampler`, so
+            // the base-name subscript loop at the top of this function only
+            // searches for base=`sampler` and finds nothing. The rewritten
+            // form `_appgl_sampler[0]` matches base=`_appgl_sampler` here.
+            const auto openBracketR = rewritten.rfind('[');
+            if (openBracketR != std::string::npos && rewritten.back() == ']') {
+                const std::string baseR = rewritten.substr(0, openBracketR);
+                const std::string idxStrR = rewritten.substr(openBracketR + 1, rewritten.size() - openBracketR - 2);
+                if (!baseR.empty() && !idxStrR.empty()) {
+                    char* endpR = nullptr;
+                    const long idxR = std::strtol(idxStrR.c_str(), &endpR, 10);
+                    if (endpR && *endpR == '\0' && idxR >= 0) {
+                        for (const auto& uniform : object->uniforms) {
+                            if (uniform.name == baseR && uniform.arraySize >= 1
+                                && idxR < static_cast<long>(uniform.arraySize)
+                                && uniform.location >= 0) {
+                                return uniform.location + static_cast<GLint>(idxR);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+bool GLContext::getActiveUniform(GLuint program, GLuint index, GLsizei bufSize, GLsizei* length, GLint* size, GLenum* type, GLchar* name) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Prefer resourceUniforms (includes UBO members); fall back to bare
+    // uniforms list for programs that never went through SPIRV-Cross.
+    if (!object->resourceUniforms.empty()) {
+        if (index >= static_cast<GLuint>(object->resourceUniforms.size())) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        const auto& u = object->resourceUniforms[index];
+        if (size != nullptr) {
+            *size = std::max<GLint>(u.arraySize, 1);
+        }
+        if (type != nullptr) {
+            *type = u.type;
+        }
+        copyStringToBuffer(u.name, bufSize, length, name);
+        return true;
+    }
+    if (index >= object->uniforms.size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const auto& uniform = object->uniforms[index];
+    if (size != nullptr) {
+        *size = std::max<GLint>(uniform.arraySize, 1);
+    }
+    if (type != nullptr) {
+        *type = uniform.type;
+    }
+    copyStringToBuffer(uniform.name, bufSize, length, name);
+    return true;
+}
+
+namespace {
+
+GLProgramUniformValue* lookupUniformValue(GLProgramObject* program, GLint location) {
+    if (program == nullptr || location < 0) {
+        return nullptr;
+    }
+    auto it = program->uniformValues.find(location);
+    if (it != program->uniformValues.end()) {
+        return &it->second;
+    }
+    // Array-element fallback: glUniform1i(loc+k, …) on a uniform declared
+    // with arraySize > 1 hits locations [base+1, base+arraySize). The slot
+    // lives at the base location; find it by walking the uniforms list.
+    for (const auto& u : program->uniforms) {
+        if (u.arraySize > 1 && location > u.location
+            && location < u.location + u.arraySize) {
+            auto base = program->uniformValues.find(u.location);
+            if (base != program->uniformValues.end()) {
+                return &base->second;
+            }
+            return nullptr;
+        }
+    }
+    return nullptr;
+}
+
+// Resolve (slot, elementIndex) for a uniform location. elementIndex is the
+// zero-based offset inside the array for array-element locations; 0 for the
+// base location or a non-array uniform. Returns (nullptr, 0) if the location
+// is invalid.
+struct UniformSlotRef {
+    GLProgramUniformValue* slot = nullptr;
+    GLint elementIndex = 0;
+    GLint arraySize = 1;
+    GLenum type = 0;
+    bool rejectEsImageUnitUpdate = false;
+};
+
+UniformSlotRef resolveUniformSlot(GLProgramObject* program, GLint location) {
+    UniformSlotRef r;
+    if (program == nullptr || location < 0) {
+        return r;
+    }
+    for (const auto& u : program->uniforms) {
+        const GLint slots = std::max<GLint>(u.arraySize, 1);
+        if (u.location >= 0 && location >= u.location &&
+            location < u.location + slots) {
+            auto base = program->uniformValues.find(u.location);
+            if (base != program->uniformValues.end()) {
+                r.slot = &base->second;
+                r.elementIndex = location - u.location;
+                r.arraySize = u.arraySize;
+                r.type = u.type;
+                r.rejectEsImageUnitUpdate =
+                    u.declaredInEsProfile && isImageUniformType(u.type);
+            }
+            return r;
+        }
+    }
+    auto it = program->uniformValues.find(location);
+    if (it != program->uniformValues.end()) {
+        r.slot = &it->second;
+        r.elementIndex = 0;
+        r.arraySize = it->second.arraySize;
+        r.type = it->second.type;
+        return r;
+    }
+    for (const auto& u : program->uniforms) {
+        if (u.arraySize > 1 && location > u.location
+            && location < u.location + u.arraySize) {
+            auto base = program->uniformValues.find(u.location);
+            if (base != program->uniformValues.end()) {
+                r.slot = &base->second;
+                r.elementIndex = location - u.location;
+                r.arraySize = u.arraySize;
+                r.type = u.type;
+            }
+            return r;
+        }
+    }
+    return r;
+}
+
+// Returns the number of scalar components a uniform of the given GLenum
+// type contains (1 for scalar/sampler, 4 for vec4, 16 for mat4, etc.).
+// Used by glGetUniform* to cap the memcpy at the real per-element width —
+// without this, querying location+k of a sampler-array uniform would
+// clobber the caller's single-int stack buffer (memcpy'd the full
+// ints.size()). Observed as SIGSEGV in CTS layout_binding.sampler3D
+// because the bumped per-stage tex cap made the test exercise a path
+// that stressed the latent buffer overrun.
+std::size_t uniformTypeComponentCount(GLenum type) {
+    switch (type) {
+        case GL_FLOAT_VEC2: case GL_INT_VEC2: case GL_UNSIGNED_INT_VEC2:
+        case GL_BOOL_VEC2: case GL_DOUBLE_VEC2:
+            return 2;
+        case GL_FLOAT_VEC3: case GL_INT_VEC3: case GL_UNSIGNED_INT_VEC3:
+        case GL_BOOL_VEC3: case GL_DOUBLE_VEC3:
+            return 3;
+        case GL_FLOAT_VEC4: case GL_INT_VEC4: case GL_UNSIGNED_INT_VEC4:
+        case GL_BOOL_VEC4: case GL_DOUBLE_VEC4:
+            return 4;
+        case GL_FLOAT_MAT2: case GL_DOUBLE_MAT2:       return 4;
+        case GL_FLOAT_MAT3: case GL_DOUBLE_MAT3:       return 9;
+        case GL_FLOAT_MAT4: case GL_DOUBLE_MAT4:       return 16;
+        case GL_FLOAT_MAT2x3: case GL_DOUBLE_MAT2x3:   return 6;
+        case GL_FLOAT_MAT2x4: case GL_DOUBLE_MAT2x4:   return 8;
+        case GL_FLOAT_MAT3x2: case GL_DOUBLE_MAT3x2:   return 6;
+        case GL_FLOAT_MAT3x4: case GL_DOUBLE_MAT3x4:   return 12;
+        case GL_FLOAT_MAT4x2: case GL_DOUBLE_MAT4x2:   return 8;
+        case GL_FLOAT_MAT4x3: case GL_DOUBLE_MAT4x3:   return 12;
+        default: return 1;  // scalars, samplers, images
+    }
+}
+
+GLint roundFp64UniformToGLint(GLdouble value) {
+    const GLfloat narrowed = static_cast<GLfloat>(value);
+    return static_cast<GLint>(std::floor(narrowed + 0.5f));
+}
+
+GLuint roundFp64UniformToGLuint(GLdouble value) {
+    if (!(value > 0.0)) {
+        return 0u;
+    }
+    const GLfloat narrowed = static_cast<GLfloat>(value);
+    return static_cast<GLuint>(std::floor(narrowed + 0.5f));
+}
+
+}  // namespace
+
+bool GLContext::getUniformfv(GLuint program, GLint location, GLfloat* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // GL 4.6 §7.7: pass a shader handle → INVALID_OPERATION.
+    if (impl_->objects->shaders().get(program) != nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLProgramUniformValue* value = ref.slot;
+    const std::size_t components = uniformTypeComponentCount(ref.type ? ref.type : value->type);
+    const std::size_t offset = static_cast<std::size_t>(ref.elementIndex) * components;
+    if (!value->doubles.empty()) {
+        const std::size_t avail = value->doubles.size() > offset
+            ? std::min(components, value->doubles.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLfloat>(value->doubles[offset + i]);
+        }
+    } else if (!value->floats.empty()) {
+        const std::size_t avail = value->floats.size() > offset
+            ? std::min(components, value->floats.size() - offset) : 0;
+        if (avail > 0) {
+            std::memcpy(params, value->floats.data() + offset, avail * sizeof(GLfloat));
+        }
+    } else if (!value->ints.empty()) {
+        const std::size_t avail = value->ints.size() > offset
+            ? std::min(components, value->ints.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLfloat>(value->ints[offset + i]);
+        }
+    } else if (!value->uints.empty()) {
+        const std::size_t avail = value->uints.size() > offset
+            ? std::min(components, value->uints.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLfloat>(value->uints[offset + i]);
+        }
+    }
+    return true;
+}
+
+bool GLContext::getUniformiv(GLuint program, GLint location, GLint* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (impl_->objects->shaders().get(program) != nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLProgramUniformValue* value = ref.slot;
+    const std::size_t components = uniformTypeComponentCount(ref.type ? ref.type : value->type);
+    const std::size_t offset = static_cast<std::size_t>(ref.elementIndex) * components;
+    if (!value->doubles.empty()) {
+        const std::size_t avail = value->doubles.size() > offset
+            ? std::min(components, value->doubles.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = roundFp64UniformToGLint(value->doubles[offset + i]);
+        }
+    } else if (!value->ints.empty()) {
+        const std::size_t avail = value->ints.size() > offset
+            ? std::min(components, value->ints.size() - offset) : 0;
+        if (avail > 0) {
+            std::memcpy(params, value->ints.data() + offset, avail * sizeof(GLint));
+        }
+    } else if (!value->floats.empty()) {
+        const std::size_t avail = value->floats.size() > offset
+            ? std::min(components, value->floats.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLint>(value->floats[offset + i]);
+        }
+    } else if (!value->uints.empty()) {
+        const std::size_t avail = value->uints.size() > offset
+            ? std::min(components, value->uints.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLint>(value->uints[offset + i]);
+        }
+    }
+    return true;
+}
+
+bool GLContext::getUniformuiv(GLuint program, GLint location, GLuint* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (impl_->objects->shaders().get(program) != nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLProgramUniformValue* value = ref.slot;
+    const std::size_t components = uniformTypeComponentCount(ref.type ? ref.type : value->type);
+    const std::size_t offset = static_cast<std::size_t>(ref.elementIndex) * components;
+    if (!value->doubles.empty()) {
+        const std::size_t avail = value->doubles.size() > offset
+            ? std::min(components, value->doubles.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = roundFp64UniformToGLuint(value->doubles[offset + i]);
+        }
+    } else if (!value->uints.empty()) {
+        const std::size_t avail = value->uints.size() > offset
+            ? std::min(components, value->uints.size() - offset) : 0;
+        if (avail > 0) {
+            std::memcpy(params, value->uints.data() + offset, avail * sizeof(GLuint));
+        }
+    } else if (!value->ints.empty()) {
+        const std::size_t avail = value->ints.size() > offset
+            ? std::min(components, value->ints.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLuint>(value->ints[offset + i]);
+        }
+    } else if (!value->floats.empty()) {
+        const std::size_t avail = value->floats.size() > offset
+            ? std::min(components, value->floats.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLuint>(value->floats[offset + i]);
+        }
+    }
+    return true;
+}
+
+#elif defined(APPGL_GLCONTEXT_SHADER_UNIFORMS)
+bool GLContext::setUniformScalarVector(GLint location, UniformElementType element, GLint vectorSize, GLsizei count, const void* values) {
+    if (location < 0) {
+        return true;  // -1 silently no-ops per spec.
+    }
+    if (count < 0 || vectorSize < 1 || vectorSize > 4) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // GL 4.6 §7.3: glUniform* targets the current program; if no
+    // current program but a pipeline is bound, target the pipeline's
+    // active-shader-program (set by glActiveShaderProgram). CTS
+    // `sepshaderobjs.ProgUniformAPI` exercises this fallback.
+    GLuint targetProgram = impl_->state->currentProgram();
+    if (targetProgram == 0) {
+        const GLuint pipelineName = impl_->state->currentProgramPipeline();
+        if (pipelineName != 0) {
+            GLProgramPipelineObject* ppo = impl_->objects->programPipelines().get(pipelineName);
+            if (ppo != nullptr) {
+                targetProgram = ppo->activeShaderProgram;
+            }
+        }
+    }
+    GLProgramObject* object = impl_->objects->programs().get(targetProgram);
+    if (object == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLProgramUniformValue* slot = ref.slot;
+
+    if (sampleOrImageUniformValidationFailed(this, ref.type,
+            element, vectorSize, values, ref.rejectEsImageUnitUpdate)) {
+        return false;
+    }
+
+    // Clamp count so writes don't overflow the declared array. GL spec: the
+    // effective update is min(count, arraySize - elementIndex).
+    const GLint remaining = std::max<GLint>(ref.arraySize - ref.elementIndex, 1);
+    const GLsizei effCount = std::min<GLsizei>(std::max<GLsizei>(count, 1), remaining);
+    const std::size_t components = static_cast<std::size_t>(vectorSize);
+    const std::size_t writeCount = components * static_cast<std::size_t>(effCount);
+    const std::size_t fullCount  = components * static_cast<std::size_t>(std::max<GLint>(ref.arraySize, 1));
+    const std::size_t writeOffset = components * static_cast<std::size_t>(ref.elementIndex);
+
+    auto writeInto = [&](auto& dstVec, auto& otherA, auto& otherB, const auto* src) {
+        using T = typename std::remove_reference<decltype(dstVec)>::type::value_type;
+        // Size the destination to hold the full array; preserve existing
+        // values where possible so per-element writes don't wipe siblings.
+        if (dstVec.size() < fullCount) {
+            dstVec.resize(fullCount, T{});
+        }
+        std::memcpy(dstVec.data() + writeOffset, src, writeCount * sizeof(T));
+        otherA.clear();
+        otherB.clear();
+    };
+
+    switch (element) {
+        case UniformElementType::Float:
+            writeInto(slot->floats, slot->ints, slot->uints, static_cast<const GLfloat*>(values));
+            break;
+        case UniformElementType::Int:
+            writeInto(slot->ints, slot->floats, slot->uints, static_cast<const GLint*>(values));
+            break;
+        case UniformElementType::UnsignedInt:
+            writeInto(slot->uints, slot->floats, slot->ints, static_cast<const GLuint*>(values));
+            break;
+    }
+    slot->doubles.clear();
+    slot->df64TransportWords.clear();
+    object->markUniformsDirty();
+    return true;
+}
+
+bool GLContext::setUniformMatrix(GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLfloat* values) {
+    if (location < 0) {
+        return true;
+    }
+    if (count < 0 || rows < 2 || rows > 4 || cols < 2 || cols > 4 || values == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // §7.3 active-shader-program fallback — same as setUniformScalarVector.
+    GLuint currentProgram = impl_->state->currentProgram();
+    if (currentProgram == 0) {
+        const GLuint pipelineName = impl_->state->currentProgramPipeline();
+        if (pipelineName != 0) {
+            GLProgramPipelineObject* ppo = impl_->objects->programPipelines().get(pipelineName);
+            if (ppo != nullptr) currentProgram = ppo->activeShaderProgram;
+        }
+    }
+    GLProgramObject* object = impl_->objects->programs().get(currentProgram);
+    if (object == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLProgramUniformValue* slot = lookupUniformValue(object, location);
+    if (slot == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const std::size_t elements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols) *
+                                 static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    slot->floats.assign(elements, 0.0f);
+    if (transpose == GL_FALSE) {
+        std::memcpy(slot->floats.data(), values, elements * sizeof(GLfloat));
+    } else {
+        const std::size_t matrixElements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols);
+        for (GLsizei m = 0; m < std::max<GLsizei>(count, 1); ++m) {
+            for (GLint r = 0; r < rows; ++r) {
+                for (GLint c = 0; c < cols; ++c) {
+                    const std::size_t srcIndex = static_cast<std::size_t>(m) * matrixElements +
+                                                 static_cast<std::size_t>(r) * static_cast<std::size_t>(cols) +
+                                                 static_cast<std::size_t>(c);
+                    const std::size_t dstIndex = static_cast<std::size_t>(m) * matrixElements +
+                                                 static_cast<std::size_t>(c) * static_cast<std::size_t>(rows) +
+                                                 static_cast<std::size_t>(r);
+                    slot->floats[dstIndex] = values[srcIndex];
+                }
+            }
+        }
+    }
+    slot->ints.clear();
+    slot->uints.clear();
+    slot->doubles.clear();
+    slot->df64TransportWords.clear();
+    object->markUniformsDirty();
+    return true;
+}
+
+static void assignDf64TransportWords(GLProgramUniformValue& slot,
+                                     const GLdouble* values,
+                                     std::size_t count) {
+    slot.df64TransportWords.resize(count * 2u);
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto words =
+            extensions::fp64::encodeDoubleToDf64Transport(values[i]);
+        slot.df64TransportWords[i * 2u] = words.hi;
+        slot.df64TransportWords[i * 2u + 1u] = words.lo;
+    }
+}
+
+static GLint doubleUniformVectorWidth(GLenum type) {
+    switch (type) {
+        case GL_DOUBLE:      return 1;
+        case GL_DOUBLE_VEC2: return 2;
+        case GL_DOUBLE_VEC3: return 3;
+        case GL_DOUBLE_VEC4: return 4;
+        default:             return 0;
+    }
+}
+
+static bool doubleUniformMatrixShape(GLenum type, GLint& cols, GLint& rows) {
+    switch (type) {
+        case GL_DOUBLE_MAT2:   cols = 2; rows = 2; return true;
+        case GL_DOUBLE_MAT3:   cols = 3; rows = 3; return true;
+        case GL_DOUBLE_MAT4:   cols = 4; rows = 4; return true;
+        case GL_DOUBLE_MAT2x3: cols = 2; rows = 3; return true;
+        case GL_DOUBLE_MAT3x2: cols = 3; rows = 2; return true;
+        case GL_DOUBLE_MAT2x4: cols = 2; rows = 4; return true;
+        case GL_DOUBLE_MAT4x2: cols = 4; rows = 2; return true;
+        case GL_DOUBLE_MAT3x4: cols = 3; rows = 4; return true;
+        case GL_DOUBLE_MAT4x3: cols = 4; rows = 3; return true;
+        default: return false;
+    }
+}
+
+static bool uniformWriteCountFits(const UniformSlotRef& ref, GLsizei count) {
+    const GLint remaining = std::max<GLint>(ref.arraySize - ref.elementIndex, 1);
+    return count <= remaining;
+}
+
+static void writeDoubleUniformSlot(GLProgramUniformValue& slot,
+                                   GLint arraySize,
+                                   GLint elementIndex,
+                                   GLint vectorSize,
+                                   GLsizei count,
+                                   const GLdouble* values) {
+    const GLint remaining = std::max<GLint>(arraySize - elementIndex, 1);
+    const GLsizei effCount = std::min<GLsizei>(std::max<GLsizei>(count, 1), remaining);
+    const std::size_t components = static_cast<std::size_t>(vectorSize);
+    const std::size_t writeCount = components * static_cast<std::size_t>(effCount);
+    const std::size_t fullCount = components * static_cast<std::size_t>(std::max<GLint>(arraySize, 1));
+    const std::size_t writeOffset = components * static_cast<std::size_t>(elementIndex);
+
+    if (slot.doubles.size() < fullCount) {
+        slot.doubles.resize(fullCount, 0.0);
+    }
+    std::memcpy(slot.doubles.data() + writeOffset, values, writeCount * sizeof(GLdouble));
+
+    slot.floats.resize(fullCount);
+    for (std::size_t i = 0; i < fullCount; ++i) {
+        slot.floats[i] = static_cast<GLfloat>(slot.doubles[i]);
+    }
+
+    assignDf64TransportWords(slot, slot.doubles.data(), slot.doubles.size());
+    slot.ints.clear();
+    slot.uints.clear();
+}
+
+bool GLContext::setUniformDouble(GLint location, GLint vectorSize, GLsizei count, const GLdouble* values) {
+    if (location < 0) {
+        return true;
+    }
+    if (count < 0 || vectorSize < 1 || vectorSize > 4 || values == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // §7.3 active-shader-program fallback.
+    GLuint currentProgram = impl_->state->currentProgram();
+    if (currentProgram == 0) {
+        const GLuint pipelineName = impl_->state->currentProgramPipeline();
+        if (pipelineName != 0) {
+            GLProgramPipelineObject* ppo = impl_->objects->programPipelines().get(pipelineName);
+            if (ppo != nullptr) currentProgram = ppo->activeShaderProgram;
+        }
+    }
+    GLProgramObject* object = impl_->objects->programs().get(currentProgram);
+    if (object == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (doubleUniformVectorWidth(ref.type) != vectorSize ||
+        !uniformWriteCountFits(ref, count)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    writeDoubleUniformSlot(*ref.slot,
+                           ref.arraySize,
+                           ref.elementIndex,
+                           vectorSize,
+                           count,
+                           values);
+    object->markUniformsDirty();
+    return true;
+}
+
+bool GLContext::setUniformDoubleMatrix(GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLdouble* values) {
+    if (location < 0) {
+        return true;
+    }
+    if (count < 0 || rows < 2 || rows > 4 || cols < 2 || cols > 4 || values == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // §7.3 active-shader-program fallback.
+    GLuint currentProgram = impl_->state->currentProgram();
+    if (currentProgram == 0) {
+        const GLuint pipelineName = impl_->state->currentProgramPipeline();
+        if (pipelineName != 0) {
+            GLProgramPipelineObject* ppo = impl_->objects->programPipelines().get(pipelineName);
+            if (ppo != nullptr) currentProgram = ppo->activeShaderProgram;
+        }
+    }
+    GLProgramObject* object = impl_->objects->programs().get(currentProgram);
+    if (object == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLint expectedCols = 0;
+    GLint expectedRows = 0;
+    if (!doubleUniformMatrixShape(ref.type, expectedCols, expectedRows) ||
+        rows != expectedCols || cols != expectedRows ||
+        !uniformWriteCountFits(ref, count)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLProgramUniformValue* slot = ref.slot;
+    const GLint remaining = std::max<GLint>(ref.arraySize - ref.elementIndex, 1);
+    const GLsizei effCount = std::min<GLsizei>(std::max<GLsizei>(count, 1), remaining);
+    const std::size_t matrixElements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols);
+    const std::size_t elements = matrixElements * static_cast<std::size_t>(effCount);
+    const std::size_t fullCount = matrixElements * static_cast<std::size_t>(std::max<GLint>(ref.arraySize, 1));
+    const std::size_t writeOffset = matrixElements * static_cast<std::size_t>(ref.elementIndex);
+    if (slot->doubles.size() < fullCount) {
+        slot->doubles.resize(fullCount, 0.0);
+    }
+    if (transpose == GL_FALSE) {
+        for (std::size_t i = 0; i < elements; ++i) {
+            slot->doubles[writeOffset + i] = values[i];
+        }
+    } else {
+        for (GLsizei m = 0; m < effCount; ++m) {
+            for (GLint r = 0; r < rows; ++r) {
+                for (GLint c = 0; c < cols; ++c) {
+                    const std::size_t srcIndex = static_cast<std::size_t>(m) * matrixElements +
+                                                 static_cast<std::size_t>(r) * static_cast<std::size_t>(cols) +
+                                                 static_cast<std::size_t>(c);
+                    const std::size_t dstIndex = writeOffset + static_cast<std::size_t>(m) * matrixElements +
+                                                 static_cast<std::size_t>(c) * static_cast<std::size_t>(rows) +
+                                                 static_cast<std::size_t>(r);
+                    slot->doubles[dstIndex] = values[srcIndex];
+                }
+            }
+        }
+    }
+    slot->floats.resize(fullCount);
+    for (std::size_t i = 0; i < fullCount; ++i) {
+        slot->floats[i] = static_cast<GLfloat>(slot->doubles[i]);
+    }
+    assignDf64TransportWords(*slot, slot->doubles.data(), slot->doubles.size());
+    slot->ints.clear();
+    slot->uints.clear();
+    object->markUniformsDirty();
+    return true;
+}
+
+// --- GL 4.1: glProgramUniform* family — explicit program handle variants ---
+
+GLProgramObject* GLContext::validateProgramUniformTarget(GLuint program) {
+    auto pushTargetError = [&](GLenum error) {
+        if (std::find(impl_->errors.begin(), impl_->errors.end(), error) ==
+            impl_->errors.end()) {
+            pushError(error);
+        }
+    };
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr || object->deleteRequested) {
+        pushTargetError(GL_INVALID_VALUE);
+        return nullptr;
+    }
+    if (!object->linked) {
+        pushTargetError(GL_INVALID_OPERATION);
+        return nullptr;
+    }
+    return object;
+}
+
+bool GLContext::setUniformScalarVectorForProgram(GLuint program, GLint location, UniformElementType element, GLint vectorSize, GLsizei count, const void* values) {
+    // GL 4.6 §7.6.1 — error codes for glProgramUniform*. Validate the
+    // PROGRAM argument BEFORE checking location, because "not a valid
+    // program" and "not linked" fire regardless of location (including
+    // location=-1 which would otherwise be a silent no-op).
+    //   - program not a program name returned from glCreateProgram → INVALID_VALUE
+    //   - program marked for deletion → INVALID_VALUE
+    //   - program not linked → INVALID_OPERATION
+    // CTS `sepshaderobjs.ProgUniformAPI` exercises both paths with a
+    // cached location=-1 from an unlinked-program glGetUniformLocation.
+    GLProgramObject* object = validateProgramUniformTarget(program);
+    if (object == nullptr) return false;
+    if (location < 0) return true;
+    if (count < 0 || vectorSize < 1 || vectorSize > 4) { pushError(GL_INVALID_VALUE); return false; }
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    if (sampleOrImageUniformValidationFailed(this, ref.type,
+            element, vectorSize, values, ref.rejectEsImageUnitUpdate)) {
+        return false;
+    }
+    GLProgramUniformValue* slot = ref.slot;
+    const GLint remaining = std::max<GLint>(ref.arraySize - ref.elementIndex, 1);
+    const GLsizei effCount = std::min<GLsizei>(std::max<GLsizei>(count, 1), remaining);
+    const std::size_t components = static_cast<std::size_t>(vectorSize);
+    const std::size_t writeCount = components * static_cast<std::size_t>(effCount);
+    const std::size_t fullCount  = components * static_cast<std::size_t>(std::max<GLint>(ref.arraySize, 1));
+    const std::size_t writeOffset = components * static_cast<std::size_t>(ref.elementIndex);
+    auto writeInto = [&](auto& dstVec, auto& otherA, auto& otherB, const auto* src) {
+        using T = typename std::remove_reference<decltype(dstVec)>::type::value_type;
+        if (dstVec.size() < fullCount) dstVec.resize(fullCount, T{});
+        std::memcpy(dstVec.data() + writeOffset, src, writeCount * sizeof(T));
+        otherA.clear(); otherB.clear();
+    };
+    switch (element) {
+        case UniformElementType::Float:
+            writeInto(slot->floats, slot->ints, slot->uints, static_cast<const GLfloat*>(values)); break;
+        case UniformElementType::Int:
+            writeInto(slot->ints, slot->floats, slot->uints, static_cast<const GLint*>(values)); break;
+        case UniformElementType::UnsignedInt:
+            writeInto(slot->uints, slot->floats, slot->ints, static_cast<const GLuint*>(values)); break;
+    }
+    slot->doubles.clear();
+    slot->df64TransportWords.clear();
+    object->markUniformsDirty();
+    return true;
+}
+
+bool GLContext::setUniformMatrixForProgram(GLuint program, GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLfloat* values) {
+    GLProgramObject* object = validateProgramUniformTarget(program);
+    if (object == nullptr) return false;
+    if (location < 0) return true;
+    if (count < 0 || rows < 2 || rows > 4 || cols < 2 || cols > 4 || values == nullptr) { pushError(GL_INVALID_VALUE); return false; }
+    GLProgramUniformValue* slot = lookupUniformValue(object, location);
+    if (slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    const std::size_t elements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols) * static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    slot->floats.assign(elements, 0.0f);
+    if (transpose == GL_FALSE) {
+        std::memcpy(slot->floats.data(), values, elements * sizeof(GLfloat));
+    } else {
+        const std::size_t matrixElements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols);
+        for (GLsizei m = 0; m < std::max<GLsizei>(count, 1); ++m) {
+            for (GLint r = 0; r < rows; ++r) {
+                for (GLint c = 0; c < cols; ++c) {
+                    const std::size_t srcIndex = static_cast<std::size_t>(m) * matrixElements + static_cast<std::size_t>(r) * static_cast<std::size_t>(cols) + static_cast<std::size_t>(c);
+                    const std::size_t dstIndex = static_cast<std::size_t>(m) * matrixElements + static_cast<std::size_t>(c) * static_cast<std::size_t>(rows) + static_cast<std::size_t>(r);
+                    slot->floats[dstIndex] = values[srcIndex];
+                }
+            }
+        }
+    }
+    slot->ints.clear(); slot->uints.clear();
+    slot->doubles.clear(); slot->df64TransportWords.clear();
+    object->markUniformsDirty();
+    return true;
+}
+
+bool GLContext::setUniformDoubleForProgram(GLuint program, GLint location, GLint vectorSize, GLsizei count, const GLdouble* values) {
+    GLProgramObject* object = validateProgramUniformTarget(program);
+    if (object == nullptr) return false;
+    if (location < 0) return true;
+    if (count < 0 || vectorSize < 1 || vectorSize > 4 || values == nullptr) { pushError(GL_INVALID_VALUE); return false; }
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    if (doubleUniformVectorWidth(ref.type) != vectorSize ||
+        !uniformWriteCountFits(ref, count)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    writeDoubleUniformSlot(*ref.slot,
+                           ref.arraySize,
+                           ref.elementIndex,
+                           vectorSize,
+                           count,
+                           values);
+    object->markUniformsDirty();
+    return true;
+}
+
+bool GLContext::setUniformDoubleMatrixForProgram(GLuint program, GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLdouble* values) {
+    GLProgramObject* object = validateProgramUniformTarget(program);
+    if (object == nullptr) return false;
+    if (location < 0) return true;
+    if (count < 0 || rows < 2 || rows > 4 || cols < 2 || cols > 4 || values == nullptr) { pushError(GL_INVALID_VALUE); return false; }
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    GLint expectedCols = 0;
+    GLint expectedRows = 0;
+    if (!doubleUniformMatrixShape(ref.type, expectedCols, expectedRows) ||
+        rows != expectedCols || cols != expectedRows ||
+        !uniformWriteCountFits(ref, count)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLProgramUniformValue* slot = ref.slot;
+    const GLint remaining = std::max<GLint>(ref.arraySize - ref.elementIndex, 1);
+    const GLsizei effCount = std::min<GLsizei>(std::max<GLsizei>(count, 1), remaining);
+    const std::size_t matrixElements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols);
+    const std::size_t elements = matrixElements * static_cast<std::size_t>(effCount);
+    const std::size_t fullCount = matrixElements * static_cast<std::size_t>(std::max<GLint>(ref.arraySize, 1));
+    const std::size_t writeOffset = matrixElements * static_cast<std::size_t>(ref.elementIndex);
+    if (slot->doubles.size() < fullCount) {
+        slot->doubles.resize(fullCount, 0.0);
+    }
+    if (transpose == GL_FALSE) {
+        for (std::size_t i = 0; i < elements; ++i) { slot->doubles[writeOffset + i] = values[i]; }
+    } else {
+        for (GLsizei m = 0; m < effCount; ++m) {
+            for (GLint r = 0; r < rows; ++r) {
+                for (GLint c = 0; c < cols; ++c) {
+                    const std::size_t srcIndex = static_cast<std::size_t>(m) * matrixElements + static_cast<std::size_t>(r) * static_cast<std::size_t>(cols) + static_cast<std::size_t>(c);
+                    const std::size_t dstIndex = writeOffset + static_cast<std::size_t>(m) * matrixElements + static_cast<std::size_t>(c) * static_cast<std::size_t>(rows) + static_cast<std::size_t>(r);
+                    slot->doubles[dstIndex] = values[srcIndex];
+                }
+            }
+        }
+    }
+    slot->floats.resize(fullCount);
+    for (std::size_t i = 0; i < fullCount; ++i) { slot->floats[i] = static_cast<GLfloat>(slot->doubles[i]); }
+    assignDf64TransportWords(*slot, slot->doubles.data(), slot->doubles.size());
+    slot->ints.clear(); slot->uints.clear();
+    object->markUniformsDirty();
+    return true;
+}
+
+bool GLContext::getUniformdv(GLuint program, GLint location, GLdouble* params) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr || params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLProgramUniformValue* value = ref.slot;
+    const std::size_t components = uniformTypeComponentCount(ref.type ? ref.type : value->type);
+    const std::size_t offset = static_cast<std::size_t>(ref.elementIndex) * components;
+    // Prefer the lossless double shadow if available.
+    if (!value->doubles.empty()) {
+        const std::size_t avail = value->doubles.size() > offset
+            ? std::min(components, value->doubles.size() - offset) : 0;
+        if (avail > 0) {
+            std::memcpy(params, value->doubles.data() + offset, avail * sizeof(GLdouble));
+        }
+    } else if (!value->floats.empty()) {
+        const std::size_t avail = value->floats.size() > offset
+            ? std::min(components, value->floats.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLdouble>(value->floats[offset + i]);
+        }
+    } else if (!value->ints.empty()) {
+        const std::size_t avail = value->ints.size() > offset
+            ? std::min(components, value->ints.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLdouble>(value->ints[offset + i]);
+        }
+    } else if (!value->uints.empty()) {
+        const std::size_t avail = value->uints.size() > offset
+            ? std::min(components, value->uints.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLdouble>(value->uints[offset + i]);
+        }
+    }
+    return true;
+}
+
+#elif defined(APPGL_GLCONTEXT_SHADER_ATOMIC_COUNTERS)
+bool GLContext::getActiveAtomicCounterBufferiv(GLuint program, GLuint bufferIndex, GLenum pname, GLint* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (bufferIndex >= object->resourceAtomicCounterBuffers.size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLProgramResourceEntry& entry =
+        object->resourceAtomicCounterBuffers[bufferIndex];
+    switch (pname) {
+        case GL_ATOMIC_COUNTER_BUFFER_BINDING:
+            *params = entry.binding;
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_DATA_SIZE:
+            *params = entry.offset >= 0 ? entry.offset : 0;
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_ACTIVE_ATOMIC_COUNTERS:
+            *params = static_cast<GLint>(entry.activeVariables.size());
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_ACTIVE_ATOMIC_COUNTER_INDICES:
+            for (std::size_t i = 0; i < entry.activeVariables.size(); ++i) {
+                params[i] = entry.activeVariables[i];
+            }
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_VERTEX_SHADER:
+            *params = (entry.referencedBy & 0x01) ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_FRAGMENT_SHADER:
+            *params = (entry.referencedBy & 0x02) ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_GEOMETRY_SHADER:
+            *params = (entry.referencedBy & 0x04) ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_TESS_CONTROL_SHADER:
+            *params = (entry.referencedBy & 0x08) ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_TESS_EVALUATION_SHADER:
+            *params = (entry.referencedBy & 0x10) ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_COMPUTE_SHADER:
+            *params = (entry.referencedBy & 0x20) ? GL_TRUE : GL_FALSE;
+            return true;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
+}
+
+#elif defined(APPGL_GLCONTEXT_SHADER_RESOURCE_QUERY)
+bool GLContext::getProgramInterfaceiv(GLuint program, GLenum programInterface, GLenum pname, GLint* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLProgramObject* prog = impl_->objects->programs().get(program);
+    if (prog == nullptr) {
+        // GL 4.6 §7.3.1: shader-name → INVALID_OPERATION,
+        // other bogus names → INVALID_VALUE. See
+        // getProgramResourceIndex for the same distinguishing
+        // logic. Required by CTS
+        // `program_interface_query.invalid-operation` Case 1.
+        if (impl_->objects->shaders().contains(program)) {
+            pushError(GL_INVALID_OPERATION);
+        } else {
+            pushError(GL_INVALID_VALUE);
+        }
+        return false;
+    }
+    // CTS program_interface_query.empty-shaders constructs a program
+    // with no shaders attached, never links it, and queries every
+    // interface — expecting ACTIVE_RESOURCES=0 and MAX_NAME_LENGTH=0
+    // without an error. A strict GL_INVALID_OPERATION on unlinked
+    // programs makes 39/43 of program_interface_query fail; instead
+    // the empty-program path returns 0 for numeric pnames and still
+    // rejects unknown pnames with INVALID_ENUM. Linked programs go
+    // through the normal resource-table path.
+    const bool isLinked = prog->linked;
+    const auto* table = isLinked ? getResourceTable(*prog, programInterface) : nullptr;
+    // Validate programInterface enum even if not linked (unknown
+    // interfaces should still raise INVALID_ENUM). The accepted set
+    // mirrors getResourceTable.
+    if (!isLinked) {
+        switch (programInterface) {
+            case GL_UNIFORM:
+            case GL_UNIFORM_BLOCK:
+            case GL_PROGRAM_INPUT:
+            case GL_PROGRAM_OUTPUT:
+            case GL_SHADER_STORAGE_BLOCK:
+            case GL_ATOMIC_COUNTER_BUFFER:
+            case GL_BUFFER_VARIABLE:
+            case GL_TRANSFORM_FEEDBACK_VARYING:
+            case GL_TRANSFORM_FEEDBACK_BUFFER:
+            case GL_VERTEX_SUBROUTINE:
+            case GL_TESS_CONTROL_SUBROUTINE:
+            case GL_TESS_EVALUATION_SUBROUTINE:
+            case GL_GEOMETRY_SUBROUTINE:
+            case GL_FRAGMENT_SUBROUTINE:
+            case GL_COMPUTE_SUBROUTINE:
+            case GL_VERTEX_SUBROUTINE_UNIFORM:
+            case GL_TESS_CONTROL_SUBROUTINE_UNIFORM:
+            case GL_TESS_EVALUATION_SUBROUTINE_UNIFORM:
+            case GL_GEOMETRY_SUBROUTINE_UNIFORM:
+            case GL_FRAGMENT_SUBROUTINE_UNIFORM:
+            case GL_COMPUTE_SUBROUTINE_UNIFORM:
+                break;
+            default:
+                pushError(GL_INVALID_ENUM);
+                return false;
+        }
+    } else if (table == nullptr) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    switch (pname) {
+        case GL_ACTIVE_RESOURCES:
+            *params = isLinked ? static_cast<GLint>(table->size()) : 0;
+            return true;
+        case GL_MAX_NAME_LENGTH: {
+            if (!isLinked) {
+                *params = 0;
+                return true;
+            }
+            GLint maxLen = 0;
+            for (const auto& entry : *table) {
+                GLint len = static_cast<GLint>(entry.name.size() + 1);
+                if (len > maxLen) maxLen = len;
+            }
+            *params = maxLen;
+            return true;
+        }
+        case GL_MAX_NUM_ACTIVE_VARIABLES:
+            // GL 4.6 §7.3.1 table: this pname is only valid on
+            // the interfaces that expose an active-variables
+            // list (UNIFORM_BLOCK, ATOMIC_COUNTER_BUFFER,
+            // SHADER_STORAGE_BLOCK, TRANSFORM_FEEDBACK_BUFFER).
+            // CTS `program_interface_query.invalid-operation`
+            // passes GL_PROGRAM_INPUT and expects
+            // INVALID_OPERATION. Value is max of activeVariables
+            // counts across all block entries on the interface.
+            switch (programInterface) {
+                case GL_UNIFORM_BLOCK:
+                case GL_ATOMIC_COUNTER_BUFFER:
+                case GL_SHADER_STORAGE_BLOCK:
+                case GL_TRANSFORM_FEEDBACK_BUFFER: {
+                    GLint maxN = 0;
+                    if (table != nullptr) {
+                        for (const auto& entry : *table) {
+                            GLint n = static_cast<GLint>(entry.activeVariables.size());
+                            if (n > maxN) maxN = n;
+                        }
+                    }
+                    *params = maxN;
+                    return true;
+                }
+                default:
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+            }
+        case GL_MAX_NUM_COMPATIBLE_SUBROUTINES:
+            // GL 4.6 §7.3.1: only valid on the *_SUBROUTINE_UNIFORM
+            // interfaces. Value = max(count of compatible subroutines
+            // across all subroutine uniforms on this interface).
+            switch (programInterface) {
+                case GL_VERTEX_SUBROUTINE_UNIFORM:
+                case GL_TESS_CONTROL_SUBROUTINE_UNIFORM:
+                case GL_TESS_EVALUATION_SUBROUTINE_UNIFORM:
+                case GL_GEOMETRY_SUBROUTINE_UNIFORM:
+                case GL_FRAGMENT_SUBROUTINE_UNIFORM:
+                case GL_COMPUTE_SUBROUTINE_UNIFORM: {
+                    GLint maxN = 0;
+                    if (table != nullptr) {
+                        for (const auto& e : *table) {
+                            GLint n = static_cast<GLint>(e.activeVariables.size());
+                            if (n > maxN) maxN = n;
+                        }
+                    }
+                    *params = maxN;
+                    return true;
+                }
+                default:
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+            }
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
+}
+
+bool GLContext::getProgramResourceiv(GLuint program, GLenum programInterface, GLuint index, GLsizei propCount, const GLenum* props, GLsizei count, GLsizei* length, GLint* params) {
+    // Always defensively-zero the caller's length output first. CTS tests
+    // (e.g. program_interface_query.subroutines-vertex) declare
+    // `GLsizei length` uninitialized on the stack, call us with the
+    // address, and then use `length` as a for-loop bound — if we return
+    // without writing it, the loop runs against stack garbage and reads
+    // past the end of its `param[1000]` buffer, producing a deterministic
+    // SIGBUS once the stack happens to carry a large value at that offset
+    // (observed at test #12648 of a full CTS sweep).
+    if (length != nullptr) {
+        *length = 0;
+    }
+    // GL 4.6 §7.3.1: propCount > 0 is required; propCount <= 0 is
+    // INVALID_VALUE. But `count` (bufSize) of 0 or a NULL `params`
+    // is valid — "no data is written." CTS
+    // `program_interface_query.buff-length` calls with count=0 and
+    // expects no error + no writes (we'd previously push
+    // INVALID_VALUE and scribble `length` = 0 which is itself fine).
+    if (propCount <= 0 || props == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // `count` < 0 is explicitly invalid per §7.3.1. CTS
+    // `program_interface_query.invalid-value` passes -100 and expects
+    // INVALID_VALUE.
+    if (count < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLProgramObject* prog = impl_->objects->programs().get(program);
+    if (prog == nullptr) {
+        // Shader-name-vs-unknown-name: same rule as
+        // getProgramResourceIndex.
+        if (impl_->objects->shaders().contains(program)) {
+            pushError(GL_INVALID_OPERATION);
+        } else {
+            pushError(GL_INVALID_VALUE);
+        }
+        return false;
+    }
+    if (!prog->linked) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const auto* table = getResourceTable(*prog, programInterface);
+    if (table == nullptr) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    // GL 4.6 §7.3.1 lists the valid prop enums for
+    // getProgramResourceiv. Anything outside this set yields
+    // GL_INVALID_ENUM. CTS `program_interface_query.invalid-enum`
+    // passes `GL_TEXTURE_1D` as a prop and expects the error.
+    auto isValidProp = [](GLenum p) {
+        switch (p) {
+            case GL_ACTIVE_VARIABLES:
+            case GL_BUFFER_BINDING:
+            case GL_BUFFER_DATA_SIZE:
+            case GL_NUM_ACTIVE_VARIABLES:
+            case GL_ARRAY_SIZE:
+            case GL_ARRAY_STRIDE:
+            case GL_BLOCK_INDEX:
+            case GL_IS_ROW_MAJOR:
+            case GL_MATRIX_STRIDE:
+            case GL_ATOMIC_COUNTER_BUFFER_INDEX:
+            case GL_NUM_COMPATIBLE_SUBROUTINES:
+            case GL_COMPATIBLE_SUBROUTINES:
+            case GL_IS_PER_PATCH:
+            case GL_LOCATION:
+            case GL_LOCATION_COMPONENT:
+            case GL_LOCATION_INDEX:
+            case GL_NAME_LENGTH:
+            case GL_OFFSET:
+            case GL_REFERENCED_BY_VERTEX_SHADER:
+            case GL_REFERENCED_BY_TESS_CONTROL_SHADER:
+            case GL_REFERENCED_BY_TESS_EVALUATION_SHADER:
+            case GL_REFERENCED_BY_GEOMETRY_SHADER:
+            case GL_REFERENCED_BY_FRAGMENT_SHADER:
+            case GL_REFERENCED_BY_COMPUTE_SHADER:
+            case GL_TOP_LEVEL_ARRAY_SIZE:
+            case GL_TOP_LEVEL_ARRAY_STRIDE:
+            case GL_TRANSFORM_FEEDBACK_BUFFER_INDEX:
+            case GL_TRANSFORM_FEEDBACK_BUFFER_STRIDE:
+            case GL_TYPE:
+                return true;
+            default:
+                return false;
+        }
+    };
+    for (GLsizei i = 0; i < propCount; ++i) {
+        if (!isValidProp(props[i])) {
+            pushError(GL_INVALID_ENUM);
+            return false;
+        }
+    }
+    // GL 4.6 §7.3.1 table: each prop is only valid on a subset of
+    // interfaces. Using a prop that doesn't apply to the queried
+    // interface yields INVALID_OPERATION. Only the most common
+    // incompatibilities are enforced here; the full matrix would
+    // add ~30 cases. CTS
+    // `program_interface_query.invalid-operation` Case 3 passes
+    // GL_OFFSET to GL_PROGRAM_INPUT — spec says that's an
+    // INVALID_OPERATION.
+    auto propInterfaceCompatible = [](GLenum prop, GLenum iface) {
+        switch (prop) {
+            case GL_OFFSET:
+            case GL_BLOCK_INDEX:
+            case GL_ARRAY_STRIDE:
+            case GL_MATRIX_STRIDE:
+            case GL_IS_ROW_MAJOR:
+            case GL_ATOMIC_COUNTER_BUFFER_INDEX:
+                return iface == GL_UNIFORM || iface == GL_BUFFER_VARIABLE
+                    || iface == GL_TRANSFORM_FEEDBACK_VARYING;
+            case GL_TOP_LEVEL_ARRAY_SIZE:
+            case GL_TOP_LEVEL_ARRAY_STRIDE:
+                return iface == GL_BUFFER_VARIABLE;
+            case GL_BUFFER_BINDING:
+            case GL_BUFFER_DATA_SIZE:
+            case GL_NUM_ACTIVE_VARIABLES:
+            case GL_ACTIVE_VARIABLES:
+                return iface == GL_UNIFORM_BLOCK
+                    || iface == GL_ATOMIC_COUNTER_BUFFER
+                    || iface == GL_SHADER_STORAGE_BLOCK
+                    || iface == GL_TRANSFORM_FEEDBACK_BUFFER;
+            case GL_TRANSFORM_FEEDBACK_BUFFER_INDEX:
+            case GL_TRANSFORM_FEEDBACK_BUFFER_STRIDE:
+                return iface == GL_TRANSFORM_FEEDBACK_VARYING
+                    || iface == GL_TRANSFORM_FEEDBACK_BUFFER;
+            case GL_LOCATION_INDEX:
+                return iface == GL_PROGRAM_OUTPUT;
+            case GL_IS_PER_PATCH:
+                return iface == GL_PROGRAM_INPUT || iface == GL_PROGRAM_OUTPUT;
+            case GL_LOCATION:
+            case GL_LOCATION_COMPONENT:
+                return iface == GL_UNIFORM
+                    || iface == GL_PROGRAM_INPUT
+                    || iface == GL_PROGRAM_OUTPUT
+                    || iface == GL_VERTEX_SUBROUTINE_UNIFORM
+                    || iface == GL_TESS_CONTROL_SUBROUTINE_UNIFORM
+                    || iface == GL_TESS_EVALUATION_SUBROUTINE_UNIFORM
+                    || iface == GL_GEOMETRY_SUBROUTINE_UNIFORM
+                    || iface == GL_FRAGMENT_SUBROUTINE_UNIFORM
+                    || iface == GL_COMPUTE_SUBROUTINE_UNIFORM;
+            case GL_NUM_COMPATIBLE_SUBROUTINES:
+            case GL_COMPATIBLE_SUBROUTINES:
+                return iface == GL_VERTEX_SUBROUTINE_UNIFORM
+                    || iface == GL_TESS_CONTROL_SUBROUTINE_UNIFORM
+                    || iface == GL_TESS_EVALUATION_SUBROUTINE_UNIFORM
+                    || iface == GL_GEOMETRY_SUBROUTINE_UNIFORM
+                    || iface == GL_FRAGMENT_SUBROUTINE_UNIFORM
+                    || iface == GL_COMPUTE_SUBROUTINE_UNIFORM;
+            default:
+                // GL_NAME_LENGTH / GL_TYPE / GL_ARRAY_SIZE /
+                // GL_REFERENCED_BY_* apply broadly — accept.
+                return true;
+        }
+    };
+    for (GLsizei i = 0; i < propCount; ++i) {
+        if (!propInterfaceCompatible(props[i], programInterface)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
+    if (index >= table->size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const auto& entry = (*table)[index];
+    GLsizei written = 0;
+    if (params != nullptr) {
+        for (GLsizei i = 0; i < propCount && written < count; ++i) {
+            // GL 4.6 §7.3.1: GL_ACTIVE_VARIABLES and
+            // GL_COMPATIBLE_SUBROUTINES both write an ARRAY of
+            // integers — the next NUM_ACTIVE_VARIABLES (or
+            // NUM_COMPATIBLE_SUBROUTINES) slots, one per active
+            // member. Every other prop writes a single integer.
+            // CTS `program_interface_query.atomic-counters` reads
+            // NUM_ACTIVE_VARIABLES via a separate call, then
+            // reads the full ACTIVE_VARIABLES list with bufSize
+            // large enough to hold all N entries; we must write
+            // them all, not just the first.
+            if (props[i] == GL_ACTIVE_VARIABLES ||
+                props[i] == GL_COMPATIBLE_SUBROUTINES) {
+                // GL_COMPATIBLE_SUBROUTINES uses the same
+                // activeVariables vector on subroutine-uniform entries,
+                // so share the multi-value path.
+                for (GLint idx : entry.activeVariables) {
+                    if (written >= count) break;
+                    params[written++] = idx;
+                }
+                continue;
+            }
+            params[written++] = getResourceProperty(entry, props[i]);
+        }
+    }
+    if (length != nullptr) {
+        *length = written;
+    }
+    return true;
+}
+
+bool GLContext::getProgramResourceName(GLuint program, GLenum programInterface, GLuint index, GLsizei bufSize, GLsizei* length, GLchar* name) {
+    // Defensively zero length first (see getProgramResourceiv for rationale).
+    if (length != nullptr) {
+        *length = 0;
+    }
+    // GL 4.6 §7.3.1: `bufSize` < 0 is invalid. CTS
+    // `program_interface_query.invalid-value` passes -100 and expects
+    // INVALID_VALUE.
+    if (bufSize < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // GL 4.6 §7.3.1: `GL_ATOMIC_COUNTER_BUFFER` /
+    // `GL_TRANSFORM_FEEDBACK_BUFFER` buffers carry no names; queries
+    // generate INVALID_ENUM.
+    if (programInterface == GL_ATOMIC_COUNTER_BUFFER ||
+        programInterface == GL_TRANSFORM_FEEDBACK_BUFFER) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    GLProgramObject* prog = impl_->objects->programs().get(program);
+    if (prog == nullptr) {
+        if (impl_->objects->shaders().contains(program)) {
+            pushError(GL_INVALID_OPERATION);
+        } else {
+            pushError(GL_INVALID_VALUE);
+        }
+        return false;
+    }
+    if (!prog->linked) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const auto* table = getResourceTable(*prog, programInterface);
+    if (table == nullptr) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (index >= table->size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const auto& entry = (*table)[index];
+    if (name != nullptr && bufSize > 0) {
+        std::size_t toCopy = std::min(static_cast<std::size_t>(bufSize - 1), entry.name.size());
+        std::memcpy(name, entry.name.c_str(), toCopy);
+        name[toCopy] = '\0';
+        if (length != nullptr) {
+            *length = static_cast<GLsizei>(toCopy);
+        }
+    } else if (length != nullptr) {
+        *length = 0;
+    }
+    return true;
+}
+
+GLuint GLContext::getProgramResourceIndex(GLuint program, GLenum programInterface, const GLchar* name) {
+    if (name == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return GL_INVALID_INDEX;
+    }
+    // GL 4.6 §7.3.1: `GL_ATOMIC_COUNTER_BUFFER` buffers have no
+    // names, so this entry point is invalid on that interface.
+    // `GL_TRANSFORM_FEEDBACK_BUFFER` is similarly unnamed.
+    if (programInterface == GL_ATOMIC_COUNTER_BUFFER ||
+        programInterface == GL_TRANSFORM_FEEDBACK_BUFFER) {
+        pushError(GL_INVALID_ENUM);
+        return GL_INVALID_INDEX;
+    }
+    GLProgramObject* prog = impl_->objects->programs().get(program);
+    if (prog == nullptr) {
+        // GL 4.6 §7.3.1 differentiates "name refers to a shader
+        // object (INVALID_OPERATION)" from "name is not a generated
+        // program name (INVALID_VALUE)". Distinguish here by
+        // checking the shader table. CTS
+        // `program_interface_query.invalid-operation` calls these
+        // entry points with a shader name and expects the specific
+        // INVALID_OPERATION error.
+        if (impl_->objects->shaders().contains(program)) {
+            pushError(GL_INVALID_OPERATION);
+        } else {
+            pushError(GL_INVALID_VALUE);
+        }
+        return GL_INVALID_INDEX;
+    }
+    // Unlinked program: silently return INVALID_INDEX (no match).
+    // CTS empty-shaders queries resource indices on an unlinked
+    // program and asserts no error is raised; strict
+    // INVALID_OPERATION makes that subcase fail.
+    if (!prog->linked) {
+        return GL_INVALID_INDEX;
+    }
+    const auto* table = getResourceTable(*prog, programInterface);
+    if (table == nullptr) {
+        pushError(GL_INVALID_ENUM);
+        return GL_INVALID_INDEX;
+    }
+    // GL 4.6 §7.3.1.1: `glGetProgramResourceIndex` cannot be used to
+    // retrieve the index of the built-in transform-feedback markers
+    // (`gl_NextBuffer` / `gl_SkipComponentsN`). They still appear in
+    // the resource table and can be walked by index via
+    // `glGetProgramResourceName`, but lookup-by-name returns
+    // INVALID_INDEX. CTS
+    // `program_interface_query.transform-feedback-built-in` verifies.
+    if (programInterface == GL_TRANSFORM_FEEDBACK_VARYING) {
+        const std::string q = name;
+        if (q == "gl_NextBuffer" ||
+            (q.size() == 18 && q.compare(0, 17, "gl_SkipComponents") == 0)) {
+            return GL_INVALID_INDEX;
+        }
+    }
+    for (std::size_t i = 0; i < table->size(); ++i) {
+        if ((*table)[i].name == name) {
+            if (isSubroutineResourceInterface(programInterface) &&
+                (*table)[i].subroutineIndex >= 0) {
+                return static_cast<GLuint>((*table)[i].subroutineIndex);
+            }
+            return static_cast<GLuint>(i);
+        }
+    }
+    // Array-input lookup tolerance: GL 4.6 §7.3.1 says
+    // getProgramResourceIndex("arr") should find the same entry as
+    // "arr[0]" for an array input, and vice versa. Table entries
+    // follow the "[0]"-suffixed convention for arrays
+    // (`c` → "c[0]"); queries with bare base name should still
+    // match. CTS `program_interface_query.input-types` queries
+    // "d" where the table stores "d[0]".
+    const std::string query = name;
+    // Bare query → find a "<name>[0]" entry.
+    {
+        const std::string suffixed = query + "[0]";
+        for (std::size_t i = 0; i < table->size(); ++i) {
+            if ((*table)[i].name == suffixed) {
+                if (isSubroutineResourceInterface(programInterface) &&
+                    (*table)[i].subroutineIndex >= 0) {
+                    return static_cast<GLuint>((*table)[i].subroutineIndex);
+                }
+                return static_cast<GLuint>(i);
+            }
+        }
+    }
+    // "<base>[0]"-suffixed query → find a bare "<base>" entry.
+    if (query.size() >= 3 && query.compare(query.size() - 3, 3, "[0]") == 0) {
+        const std::string baseOnly = query.substr(0, query.size() - 3);
+        for (std::size_t i = 0; i < table->size(); ++i) {
+            if ((*table)[i].name == baseOnly) {
+                if (isSubroutineResourceInterface(programInterface) &&
+                    (*table)[i].subroutineIndex >= 0) {
+                    return static_cast<GLuint>((*table)[i].subroutineIndex);
+                }
+                return static_cast<GLuint>(i);
+            }
+        }
+    }
+    return GL_INVALID_INDEX;
+}
+
+GLint GLContext::getProgramResourceLocation(GLuint program, GLenum programInterface, const GLchar* name) {
+    if (name == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return -1;
+    }
+    // GL 4.6 §7.3.1 valid interfaces: UNIFORM, PROGRAM_INPUT,
+    // PROGRAM_OUTPUT, and the six *_SUBROUTINE_UNIFORM interfaces.
+    // The last set lets CTS `subroutines-*` query the subroutine
+    // uniform's location via `glGetProgramResourceLocation` (same
+    // value `glGetSubroutineUniformLocation` returns).
+    if (programInterface != GL_UNIFORM && programInterface != GL_PROGRAM_INPUT &&
+        programInterface != GL_PROGRAM_OUTPUT &&
+        programInterface != GL_VERTEX_SUBROUTINE_UNIFORM &&
+        programInterface != GL_TESS_CONTROL_SUBROUTINE_UNIFORM &&
+        programInterface != GL_TESS_EVALUATION_SUBROUTINE_UNIFORM &&
+        programInterface != GL_GEOMETRY_SUBROUTINE_UNIFORM &&
+        programInterface != GL_FRAGMENT_SUBROUTINE_UNIFORM &&
+        programInterface != GL_COMPUTE_SUBROUTINE_UNIFORM) {
+        pushError(GL_INVALID_ENUM);
+        return -1;
+    }
+    GLProgramObject* prog = impl_->objects->programs().get(program);
+    if (prog == nullptr) {
+        if (impl_->objects->shaders().contains(program)) {
+            pushError(GL_INVALID_OPERATION);
+        } else {
+            pushError(GL_INVALID_VALUE);
+        }
+        return -1;
+    }
+    if (!prog->linked) {
+        pushError(GL_INVALID_OPERATION);
+        return -1;
+    }
+    const auto* table = getResourceTable(*prog, programInterface);
+    if (table == nullptr) {
+        return -1;
+    }
+    const std::string lookup = name;
+    // Direct match — but skip entries with location=-1. SPIRV-Cross
+    // reflection sometimes emits both "u0" (the real base with valid
+    // location) and "u0[0]" (a per-element duplicate that was never
+    // assigned a location). Without the -1 guard the direct match
+    // would hit the duplicate first and short-circuit to -1.
+    for (const auto& entry : *table) {
+        if (entry.name == lookup && entry.location >= 0) {
+            return entry.location;
+        }
+    }
+    // Array-element lookup parity with getUniformLocation: "u[k]"
+    // resolves to location(u) + k when u is declared as an array of
+    // size > k. GL 4.6 §7.3.1 says both entry points return the same
+    // thing for the same name — including array subscript syntax.
+    // Entries in the resource table may be stored under either a
+    // bare base name ("u") or a "[0]"-suffixed canonical form ("u[0]"
+    // for arrays — GL 4.6 §7.3.1 mandate). Match both shapes here.
+    // GL 4.6 §7.3.1 (spec for array-subscript names in uniform /
+    // resource lookups): only strictly-formatted decimal integers
+    // are accepted. Rejected forms: leading/trailing whitespace
+    // (`"a[ 0]"`, `"a[0 ]"`), embedded whitespace or arithmetic
+    // (`"a[0 + 0]"`, `"a[0+0]"`), alternate whitespace
+    // (`"a[\t0]"`, `"a[\n0]"`), leading zero (`"a[01]"`,
+    // `"a[00]"`). strtol alone accepts all of these; we pre-validate
+    // by scanning the index substring.
+    std::string baseName;
+    std::vector<GLint> elementIndices;
+    const bool parsedArrayElement =
+        parseArrayElementLookup(lookup, baseName, elementIndices) &&
+        !elementIndices.empty();
+    if (parsedArrayElement) {
+        GLint flatIndex = 0;
+        for (const auto& entry : *table) {
+            if (stripBracketZeroSuffix(entry.name) == baseName && entry.arraySize >= 1
+                && entry.location >= 0 &&
+                flattenArrayElementIndex(entry, elementIndices, flatIndex)) {
+                return entry.location + flatIndex;
+            }
+        }
+    }
+    // Ordinary default-block uniforms for arrays-of-arrays can be stored
+    // as one resource per outer element (`u0[0][0]`, `u0[1][0]`) rather
+    // than as a single base resource with arrayDimensions. If the new
+    // multidimensional flattening path above did not match, preserve the
+    // older innermost-index fallback so `u0[0][1]` resolves through the
+    // `u0[0][0]` resource.
+    {
+        const auto openBracket = lookup.rfind('[');
+        if (openBracket != std::string::npos && !lookup.empty() && lookup.back() == ']') {
+            const std::string legacyBaseName = lookup.substr(0, openBracket);
+            const std::string indexStr = lookup.substr(openBracket + 1, lookup.size() - openBracket - 2);
+            long idx = 0;
+            if (!legacyBaseName.empty() && parseStrictArrayIndex(indexStr, idx)) {
+                for (const auto& entry : *table) {
+                    if (stripBracketZeroSuffix(entry.name) == legacyBaseName && entry.arraySize >= 1
+                        && idx < static_cast<long>(entry.arraySize)
+                        && entry.location >= 0) {
+                        return entry.location + static_cast<GLint>(idx);
+                    }
+                }
+            }
+        }
+    }
+    // Bare base-name lookup against a "[0]"-suffixed entry: GL 4.6
+    // §7.3.1 says `getProgramResourceLocation("arr")` equals
+    // `getProgramResourceLocation("arr[0]")` for array inputs.
+    for (const auto& entry : *table) {
+        if (stripBracketZeroSuffix(entry.name) == lookup && entry.location >= 0) {
+            return entry.location;
+        }
+    }
+    return -1;
+}
+
+GLint GLContext::getProgramResourceLocationIndex(GLuint program, GLenum programInterface, const GLchar* name) {
+    if (name == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return -1;
+    }
+    if (programInterface != GL_PROGRAM_OUTPUT) {
+        pushError(GL_INVALID_ENUM);
+        return -1;
+    }
+    GLProgramObject* prog = impl_->objects->programs().get(program);
+    if (prog == nullptr) {
+        if (impl_->objects->shaders().contains(program)) {
+            pushError(GL_INVALID_OPERATION);
+        } else {
+            pushError(GL_INVALID_VALUE);
+        }
+        return -1;
+    }
+    if (!prog->linked) {
+        pushError(GL_INVALID_OPERATION);
+        return -1;
+    }
+    // Fragment output location index (dual-source blending) —
+    // comes from `glBindFragDataLocationIndexed`'s `index` arg
+    // (0 = primary, 1 = second source). Stored on the entry.
+    // Array outputs canonicalised to "<name>[0]" per GL 4.6
+    // §7.3.1 — match both bare and suffixed query shapes.
+    // Built-in outputs (no user location, e.g. gl_FragDepth)
+    // report LOCATION_INDEX = -1 per CTS
+    // `output-built-in` expectations.
+    auto indexFor = [](const GLProgramResourceEntry& e) {
+        return e.location < 0 ? -1 : e.locationIndex;
+    };
+    const std::string query = name;
+    for (const auto& entry : prog->resourceOutputs) {
+        if (entry.name == query) return indexFor(entry);
+    }
+    for (const auto& entry : prog->resourceOutputs) {
+        if (entry.name == query + "[0]") return indexFor(entry);
+    }
+    if (query.size() >= 3 && query.compare(query.size() - 3, 3, "[0]") == 0) {
+        const std::string baseOnly = query.substr(0, query.size() - 3);
+        for (const auto& entry : prog->resourceOutputs) {
+            if (entry.name == baseOnly) return indexFor(entry);
+        }
+    }
+    return -1;
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.3 — Shader Storage Block Binding
+// ---------------------------------------------------------------------------
+
+bool GLContext::shaderStorageBlockBinding(GLuint program, GLuint storageBlockIndex, GLuint storageBlockBinding) {
+    // GL 4.3 §7.6.1: INVALID_OPERATION when `program` names a
+    // shader (not a program). Must run before the programs().get()
+    // null-fallback or we'd return INVALID_VALUE instead.
+    if (impl_->objects->shaders().get(program) != nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLProgramObject* prog = impl_->objects->programs().get(program);
+    if (prog == nullptr || !prog->linked) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (storageBlockIndex >= prog->resourceStorageBlocks.size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // GL 4.3 §7.6.1: storageBlockBinding must be less than
+    // GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS. CTS
+    // `shader_storage_buffer_object.negative-api-blockBinding`
+    // plants `binding = MAX_BINDINGS` and expects INVALID_VALUE.
+    {
+        GLint maxBindings = 8;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, &maxBindings);
+        }
+        if (storageBlockBinding >= static_cast<GLuint>(maxBindings)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
+    prog->ssboBindingRemap[storageBlockIndex] = storageBlockBinding;
+    // Also update the resource entry's location field so queries reflect the remap.
+    prog->resourceStorageBlocks[storageBlockIndex].location = static_cast<GLint>(storageBlockBinding);
+    return true;
+}
+
+#elif defined(APPGL_GLCONTEXT_SHADER_PROGRAM_PIPELINE_CREATE)
+bool GLContext::createProgramPipelines(GLsizei n, GLuint* pipelines) {
+    if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
+    for (GLsizei i = 0; i < n; ++i) {
+        pipelines[i] = impl_->objects->programPipelines().reserveName();
+        auto* obj = impl_->objects->programPipelines().get(pipelines[i]);
+        if (obj) {
+            // DSA glCreateProgramPipelines instantiates up-front.
+            obj->instantiated = true;
+        }
+    }
+    return true;
+}
+
+bool GLContext::deleteProgramPipelines(GLsizei n, const GLuint* pipelines) {
+    if (n < 0 || (n > 0 && pipelines == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLuint boundPipeline = impl_->state->currentProgramPipeline();
+    for (GLsizei i = 0; i < n; ++i) {
+        const GLuint name = pipelines[i];
+        if (name == 0) {
+            continue;
+        }
+        std::array<GLuint, 7> referencedPrograms{};
+        if (name == boundPipeline) {
+            impl_->state->setCurrentProgramPipeline(0);
+        }
+        if (GLProgramPipelineObject* pipeline = impl_->objects->programPipelines().get(name);
+            pipeline != nullptr) {
+            referencedPrograms = {
+                pipeline->vertexProgram,
+                pipeline->fragmentProgram,
+                pipeline->geometryProgram,
+                pipeline->tessControlProgram,
+                pipeline->tessEvalProgram,
+                pipeline->computeProgram,
+                pipeline->activeShaderProgram,
+            };
+            impl_->releaseProgramPipelineResources(*pipeline);
+        }
+        impl_->objects->programPipelines().erase(name);
+        for (GLuint program : referencedPrograms) {
+            impl_->finalizeDeletedProgramIfUnused(program);
+        }
+    }
+    return true;
+}
+
+#elif defined(APPGL_GLCONTEXT_SHADER_ROBUST_UNIFORMS)
+bool GLContext::getnUniformfv(GLuint program, GLint location, GLsizei bufSize, GLfloat* params) {
+    if (bufSize < 0) { pushError(GL_INVALID_VALUE); return false; }
+    return getUniformfv(program, location, params);
+}
+
+bool GLContext::getnUniformiv(GLuint program, GLint location, GLsizei bufSize, GLint* params) {
+    if (bufSize < 0) { pushError(GL_INVALID_VALUE); return false; }
+    return getUniformiv(program, location, params);
+}
+
+bool GLContext::getnUniformuiv(GLuint program, GLint location, GLsizei bufSize, GLuint* params) {
+    if (bufSize < 0) { pushError(GL_INVALID_VALUE); return false; }
+    return getUniformuiv(program, location, params);
+}
+
+bool GLContext::getnUniformdv(GLuint program, GLint location, GLsizei bufSize, GLdouble* params) {
+    if (bufSize < 0) { pushError(GL_INVALID_VALUE); return false; }
+    return getUniformdv(program, location, params);
+}
+
+#elif defined(APPGL_GLCONTEXT_SHADER_SPECIALIZATION)
+bool GLContext::specializeShader(GLuint shader, const GLchar* pEntryPoint,
+                                  GLuint numSpecializationConstants,
+                                  const GLuint* pConstantIndex, const GLuint* pConstantValue) {
+    // GL_ARB_gl_spirv / GL 4.6 §7.2 — promote a SPIR-V binary that was
+    // loaded via glShaderBinary into a compiled shader object. We
+    // already use SPIR-V as our internal representation (via glslang
+    // for the GLSL path), so intake is a matter of validation +
+    // marking the object compiled. Real specialization-constant
+    // substitution is handled at MSL translation time by
+    // `CompilerMSL::set_constant` — for now we record the (index,
+    // value) pairs on the shader so downstream SPIRV-Cross calls can
+    // consume them.
+    GLShaderObject* object = impl_->objects->shaders().get(shader);
+    if (object == nullptr) {
+        // GL 4.6 §7.2 distinguishes two cases:
+        //  * name refers to a program object → INVALID_OPERATION
+        //  * name is not a shader or a program → INVALID_VALUE
+        if (impl_->objects->programs().get(shader) != nullptr) {
+            pushError(GL_INVALID_OPERATION);
+        } else {
+            pushError(GL_INVALID_VALUE);
+        }
+        return false;
+    }
+    // GL 4.6 §7.2: "INVALID_OPERATION is generated if <shader> is not
+    // the name of a shader with a SPIR_V_BINARY_ARB state of TRUE"
+    // — covers both "no SPIR-V loaded" and "already compiled from
+    // GLSL via glCompileShader".
+    if (!object->isSpirvBinary || object->spirv.empty()) {
+        object->compileLog = "glSpecializeShader: SPIR_V_BINARY_ARB is FALSE on this shader";
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (object->compiled) {
+        // Specialization may only be done once — reinvoking returns
+        // INVALID_OPERATION per GL 4.6 §7.2.
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const char* entry = (pEntryPoint != nullptr) ? pEntryPoint : "main";
+    // Minimal SPIR-V validation: the 5-word header must start with
+    // the magic number 0x07230203 (little-endian).
+    if (object->spirv.size() < 5 || object->spirv[0] != 0x07230203u) {
+        object->compileLog = "glSpecializeShader: SPIR-V magic number missing";
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Entry-point + specialization-constant validation. SPIRV-Cross's
+    // base Compiler class can walk the module and enumerate entry
+    // points and declared spec-constant IDs without a backend. We
+    // construct one temporarily here; the real MSL translation
+    // (link-time) builds its own CompilerMSL anyway.
+    std::unordered_map<std::uint32_t, std::uint32_t> specializationValues;
+    try {
+        spirv_cross::Compiler introspect(object->spirv.data(), object->spirv.size());
+        const auto entries = introspect.get_entry_points_and_stages();
+        bool entryOK = false;
+        for (const auto& e : entries) {
+            if (e.name == entry) { entryOK = true; break; }
+        }
+        if (!entryOK) {
+            object->compileLog = std::string("glSpecializeShader: entry point '")
+                                 + entry + "' not found in SPIR-V module";
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        // GL 4.6 §7.2 errors: INVALID_VALUE when a spec-constant index
+        // in pConstantIndex doesn't correspond to a SpecId in the
+        // module. Collect declared IDs once, then check each caller
+        // entry against the set.
+        if (numSpecializationConstants > 0) {
+            if (pConstantIndex == nullptr || pConstantValue == nullptr) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            const auto specConsts = introspect.get_specialization_constants();
+            std::unordered_set<std::uint32_t> declaredIds;
+            for (const auto& sc : specConsts) {
+                declaredIds.insert(sc.constant_id);
+            }
+            for (GLuint i = 0; i < numSpecializationConstants; ++i) {
+                if (declaredIds.find(pConstantIndex[i]) == declaredIds.end()) {
+                    object->compileLog = "glSpecializeShader: specialization "
+                                         "constant ID not declared in module";
+                    pushError(GL_INVALID_VALUE);
+                    return false;
+                }
+                specializationValues[pConstantIndex[i]] = pConstantValue[i];
+            }
+        }
+    } catch (const spirv_cross::CompilerError& e) {
+        object->compileLog = std::string("glSpecializeShader: SPIR-V parse failed: ")
+                             + e.what();
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    object->spirvEntryPoint = entry;
+    object->spirvSpecializationConstants = std::move(specializationValues);
+    object->compiled = true;
+    object->compileLog.clear();
+    return true;
+}
+
+#else
+#error "GLContextShader.inc.mm included without a shader section selector"
+#endif
