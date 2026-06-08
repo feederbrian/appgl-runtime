@@ -37700,15 +37700,37 @@ bool GLContext::createTransformFeedbacks(GLsizei n, GLuint* ids) {
 // All delegate to existing bind-target implementations via save/restore.
 // ---------------------------------------------------------------------------
 
+struct ScopedTextureBindingRestore {
+    GLStateTracker* state = nullptr;
+    GLenum target = 0;
+    GLuint previous = 0;
+
+    ScopedTextureBindingRestore(GLStateTracker* tracker, GLenum textureTarget, GLuint texture)
+        : state(tracker),
+          target(textureTarget),
+          previous(tracker != nullptr ? tracker->boundTexture(textureTarget) : 0) {
+        if (state != nullptr) {
+            state->bindTexture(target, texture);
+        }
+    }
+
+    ~ScopedTextureBindingRestore() {
+        if (state != nullptr) {
+            state->bindTexture(target, previous);
+        }
+    }
+
+    ScopedTextureBindingRestore(const ScopedTextureBindingRestore&) = delete;
+    ScopedTextureBindingRestore& operator=(const ScopedTextureBindingRestore&) = delete;
+};
+
 // Helper: save/restore texture binding around a DSA call.
 #define DSA_TEX_WRAP(texName, body) \
     auto* _obj = impl_->objects->textures().get(texName); \
     if (!_obj) { pushError(GL_INVALID_OPERATION); return false; } \
     GLenum _target = _obj->target ? _obj->target : GL_TEXTURE_2D; \
-    GLuint _prevTex = impl_->state->boundTexture(_target); \
-    impl_->state->bindTexture(_target, texName); \
-    body \
-    impl_->state->bindTexture(_target, _prevTex);
+    ScopedTextureBindingRestore _dsaTextureBindingRestore(impl_->state.get(), _target, texName); \
+    return [&]() -> bool body();
 
 // Sprint 17 Day 5+ DSA Phase 5-2 [textures_parameter_setup_errors]:
 // GL 4.6 §8.11 — the DSA `glTextureParameter*` family demands
@@ -37814,12 +37836,32 @@ static GLsizei log2Floor(GLsizei x) {
     auto* _vao = impl_->objects->vertexArrays().get(vaobj); \
     if (!_vao) { pushError(GL_INVALID_OPERATION); return false; }
 
+struct ScopedVertexArrayBindingRestore {
+    GLStateTracker* state = nullptr;
+    GLuint previous = 0;
+
+    ScopedVertexArrayBindingRestore(GLStateTracker* tracker, GLuint vertexArray)
+        : state(tracker),
+          previous(tracker != nullptr ? tracker->boundVertexArray() : 0) {
+        if (state != nullptr) {
+            state->bindVertexArray(vertexArray);
+        }
+    }
+
+    ~ScopedVertexArrayBindingRestore() {
+        if (state != nullptr) {
+            state->bindVertexArray(previous);
+        }
+    }
+
+    ScopedVertexArrayBindingRestore(const ScopedVertexArrayBindingRestore&) = delete;
+    ScopedVertexArrayBindingRestore& operator=(const ScopedVertexArrayBindingRestore&) = delete;
+};
+
 #define DSA_VAO_WRAP(vaobj, body) \
     DSA_VAO_CHECK(vaobj) \
-    GLuint _prevVAO = impl_->state->boundVertexArray(); \
-    impl_->state->bindVertexArray(vaobj); \
-    body \
-    impl_->state->bindVertexArray(_prevVAO);
+    ScopedVertexArrayBindingRestore _dsaVertexArrayBindingRestore(impl_->state.get(), vaobj); \
+    return [&]() -> bool body();
 
 #define APPGL_GLCONTEXT_VERTEX_ARRAY_DSA_CORE
 #include "GLContextVertexArray.inc.mm"

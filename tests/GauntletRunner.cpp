@@ -12478,6 +12478,153 @@ TestResult runMipOversizedLevelProbe() {
     return result;
 }
 
+TestResult runDSAStatePreservationSentinel() {
+    auto result = runDirectSentinel("dsa.state-preservation", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& gl = scoped.gl();
+
+        const auto expectIntegerBinding = [&](GLenum pname, GLint expected, std::string_view label) {
+            GLint actual = -1;
+            gl.glGetIntegerv(pname, &actual);
+            expectGLError(gl, GL_NO_ERROR, std::string(label) + " query");
+            expectCondition(actual == expected, label);
+        };
+
+        GLuint textures2D[2] = {};
+        gl.glCreateTextures(GL_TEXTURE_2D, 2, textures2D);
+        expectGLError(gl, GL_NO_ERROR, "DSA state texture2D create");
+        const GLuint sentinelTexture2D = textures2D[0];
+        const GLuint dsaTexture2D = textures2D[1];
+
+        gl.glBindTexture(GL_TEXTURE_2D, sentinelTexture2D);
+        expectGLError(gl, GL_NO_ERROR, "DSA state bind sentinel texture2D");
+        expectIntegerBinding(GL_TEXTURE_BINDING_2D, static_cast<GLint>(sentinelTexture2D),
+                             "sentinel texture2D binding before DSA");
+
+        gl.glTextureStorage2D(dsaTexture2D, 1, GL_RGBA8, 4, 4);
+        expectGLError(gl, GL_NO_ERROR, "DSA state textureStorage2D success");
+        expectIntegerBinding(GL_TEXTURE_BINDING_2D, static_cast<GLint>(sentinelTexture2D),
+                             "textureStorage2D preserves GL_TEXTURE_BINDING_2D");
+
+        std::uint8_t pixels[4 * 4 * 4] = {};
+        gl.glTextureSubImage2D(dsaTexture2D, 0, 0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        expectGLError(gl, GL_NO_ERROR, "DSA state textureSubImage2D success");
+        expectIntegerBinding(GL_TEXTURE_BINDING_2D, static_cast<GLint>(sentinelTexture2D),
+                             "textureSubImage2D preserves GL_TEXTURE_BINDING_2D");
+
+        gl.glTextureParameteri(dsaTexture2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        expectGLError(gl, GL_NO_ERROR, "DSA state textureParameteri success");
+        expectIntegerBinding(GL_TEXTURE_BINDING_2D, static_cast<GLint>(sentinelTexture2D),
+                             "textureParameteri preserves GL_TEXTURE_BINDING_2D");
+
+        GLint textureParam = 0;
+        gl.glGetTextureParameteriv(dsaTexture2D, GL_TEXTURE_MIN_FILTER, &textureParam);
+        expectGLError(gl, GL_NO_ERROR, "DSA state getTextureParameteriv success");
+        expectCondition(textureParam == GL_NEAREST, "getTextureParameteriv returns DSA texture state");
+        expectIntegerBinding(GL_TEXTURE_BINDING_2D, static_cast<GLint>(sentinelTexture2D),
+                             "getTextureParameteriv preserves GL_TEXTURE_BINDING_2D");
+
+        gl.glTextureParameteri(dsaTexture2D, GL_TEXTURE_SWIZZLE_RGBA, GL_NEAREST);
+        expectGLError(gl, GL_INVALID_ENUM, "DSA state textureParameteri scalar error");
+        expectIntegerBinding(GL_TEXTURE_BINDING_2D, static_cast<GLint>(sentinelTexture2D),
+                             "textureParameteri error preserves GL_TEXTURE_BINDING_2D");
+
+        gl.glTextureStorage1D(dsaTexture2D, 1, GL_RGBA8, 4);
+        expectGLError(gl, GL_INVALID_OPERATION, "DSA state textureStorage1D target error");
+        expectIntegerBinding(GL_TEXTURE_BINDING_2D, static_cast<GLint>(sentinelTexture2D),
+                             "textureStorage1D error preserves GL_TEXTURE_BINDING_2D");
+
+        GLuint textureBufferObjects[2] = {};
+        gl.glCreateTextures(GL_TEXTURE_BUFFER, 2, textureBufferObjects);
+        expectGLError(gl, GL_NO_ERROR, "DSA state texture buffer create");
+        const GLuint sentinelTextureBuffer = textureBufferObjects[0];
+        const GLuint dsaTextureBuffer = textureBufferObjects[1];
+
+        GLuint backingBuffer = 0;
+        gl.glCreateBuffers(1, &backingBuffer);
+        gl.glNamedBufferData(backingBuffer, 64, nullptr, GL_STATIC_DRAW);
+        expectGLError(gl, GL_NO_ERROR, "DSA state texture buffer backing create");
+
+        gl.glBindTexture(GL_TEXTURE_BUFFER, sentinelTextureBuffer);
+        expectGLError(gl, GL_NO_ERROR, "DSA state bind sentinel texture buffer");
+        expectIntegerBinding(GL_TEXTURE_BINDING_BUFFER, static_cast<GLint>(sentinelTextureBuffer),
+                             "sentinel texture buffer binding before DSA");
+
+        gl.glTextureBuffer(dsaTextureBuffer, GL_RGBA32F, backingBuffer);
+        expectGLError(gl, GL_NO_ERROR, "DSA state textureBuffer success");
+        expectIntegerBinding(GL_TEXTURE_BINDING_BUFFER, static_cast<GLint>(sentinelTextureBuffer),
+                             "textureBuffer preserves GL_TEXTURE_BINDING_BUFFER");
+
+        gl.glGetTextureParameteriv(dsaTextureBuffer, GL_TEXTURE_MIN_FILTER, &textureParam);
+        expectGLError(gl, GL_INVALID_OPERATION, "DSA state getTextureParameteriv buffer-target error");
+        expectIntegerBinding(GL_TEXTURE_BINDING_BUFFER, static_cast<GLint>(sentinelTextureBuffer),
+                             "getTextureParameteriv error preserves GL_TEXTURE_BINDING_BUFFER");
+
+        GLuint vertexArrays[2] = {};
+        gl.glCreateVertexArrays(2, vertexArrays);
+        expectGLError(gl, GL_NO_ERROR, "DSA state VAO create");
+        const GLuint sentinelVertexArray = vertexArrays[0];
+        const GLuint dsaVertexArray = vertexArrays[1];
+
+        GLuint vertexBuffer = 0;
+        gl.glCreateBuffers(1, &vertexBuffer);
+        gl.glNamedBufferData(vertexBuffer, 64, nullptr, GL_STATIC_DRAW);
+        expectGLError(gl, GL_NO_ERROR, "DSA state vertex buffer create");
+
+        gl.glBindVertexArray(sentinelVertexArray);
+        expectGLError(gl, GL_NO_ERROR, "DSA state bind sentinel VAO");
+        expectIntegerBinding(GL_VERTEX_ARRAY_BINDING, static_cast<GLint>(sentinelVertexArray),
+                             "sentinel VAO binding before DSA");
+
+        gl.glVertexArrayAttribFormat(dsaVertexArray, 0, 2, GL_FLOAT, GL_FALSE, 0);
+        expectGLError(gl, GL_NO_ERROR, "DSA state vertexArrayAttribFormat success");
+        expectIntegerBinding(GL_VERTEX_ARRAY_BINDING, static_cast<GLint>(sentinelVertexArray),
+                             "vertexArrayAttribFormat preserves GL_VERTEX_ARRAY_BINDING");
+
+        gl.glVertexArrayAttribBinding(dsaVertexArray, 0, 0);
+        expectGLError(gl, GL_NO_ERROR, "DSA state vertexArrayAttribBinding success");
+        expectIntegerBinding(GL_VERTEX_ARRAY_BINDING, static_cast<GLint>(sentinelVertexArray),
+                             "vertexArrayAttribBinding preserves GL_VERTEX_ARRAY_BINDING");
+
+        gl.glVertexArrayVertexBuffer(dsaVertexArray, 0, vertexBuffer, 0, 8);
+        expectGLError(gl, GL_NO_ERROR, "DSA state vertexArrayVertexBuffer success");
+        expectIntegerBinding(GL_VERTEX_ARRAY_BINDING, static_cast<GLint>(sentinelVertexArray),
+                             "vertexArrayVertexBuffer preserves GL_VERTEX_ARRAY_BINDING");
+
+        gl.glEnableVertexArrayAttrib(dsaVertexArray, 0);
+        expectGLError(gl, GL_NO_ERROR, "DSA state enableVertexArrayAttrib success");
+        expectIntegerBinding(GL_VERTEX_ARRAY_BINDING, static_cast<GLint>(sentinelVertexArray),
+                             "enableVertexArrayAttrib preserves GL_VERTEX_ARRAY_BINDING");
+
+        gl.glDisableVertexArrayAttrib(dsaVertexArray, 0);
+        expectGLError(gl, GL_NO_ERROR, "DSA state disableVertexArrayAttrib success");
+        expectIntegerBinding(GL_VERTEX_ARRAY_BINDING, static_cast<GLint>(sentinelVertexArray),
+                             "disableVertexArrayAttrib preserves GL_VERTEX_ARRAY_BINDING");
+
+        gl.glVertexArrayAttribFormat(dsaVertexArray, 9999, 2, GL_FLOAT, GL_FALSE, 0);
+        expectGLError(gl, GL_INVALID_VALUE, "DSA state vertexArrayAttribFormat index error");
+        expectIntegerBinding(GL_VERTEX_ARRAY_BINDING, static_cast<GLint>(sentinelVertexArray),
+                             "vertexArrayAttribFormat error preserves GL_VERTEX_ARRAY_BINDING");
+
+        gl.glVertexArrayVertexBuffer(dsaVertexArray, 0, 999999u, 0, 8);
+        expectGLError(gl, GL_INVALID_OPERATION, "DSA state vertexArrayVertexBuffer buffer error");
+        expectIntegerBinding(GL_VERTEX_ARRAY_BINDING, static_cast<GLint>(sentinelVertexArray),
+                             "vertexArrayVertexBuffer error preserves GL_VERTEX_ARRAY_BINDING");
+
+        gl.glDeleteBuffers(1, &vertexBuffer);
+        gl.glDeleteVertexArrays(2, vertexArrays);
+        gl.glDeleteBuffers(1, &backingBuffer);
+        gl.glDeleteTextures(2, textureBufferObjects);
+        gl.glDeleteTextures(2, textures2D);
+        expectGLError(gl, GL_NO_ERROR, "DSA state preservation cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "DSA texture and vertex-array calls preserve current non-DSA bindings on success and error paths";
+    }
+    return result;
+}
+
 void appendCoverageDelta(TestResult& result, const std::string& phase) {
     // Bootstrap coverage checks only apply to phase-a scenes. Phase-c and later
     // scenes validate their own scenarioCoverage() list; requiring the full
@@ -12659,6 +12806,11 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
 
     if (normalizedPhase == "mip-ub-probe") {
         tests.push_back(runMipOversizedLevelProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "dsa-state-preservation") {
+        tests.push_back(runDSAStatePreservationSentinel());
         return buildJSON(normalizedPhase, tests);
     }
 
