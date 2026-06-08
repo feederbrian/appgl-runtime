@@ -11,49 +11,7 @@
 #include "GLContextDrawBaseVertex.inc.mm"
 
 #elif defined(APPGL_GLCONTEXT_DRAW_BASE_INSTANCE)
-bool GLContext::drawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count, GLsizei instancecount, GLuint baseinstance, GLuint drawID) {
-    if (count < 0 || instancecount < 0) {
-        pushError(GL_INVALID_VALUE);
-        return false;
-    }
-    if (count == 0 || instancecount == 0) {
-        return true; // valid no-op
-    }
-    return drawArraysInstanced(mode, first, count, instancecount, baseinstance, drawID);
-}
-
-bool GLContext::drawElementsInstancedBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLuint baseinstance, GLuint drawID) {
-    if (count < 0 || instancecount < 0) {
-        pushError(GL_INVALID_VALUE);
-        return false;
-    }
-    if (type != GL_UNSIGNED_BYTE && type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_INT) {
-        pushError(GL_INVALID_ENUM);
-        return false;
-    }
-    if (count == 0 || instancecount == 0) {
-        return true;
-    }
-    return drawElementsInstancedBaseVertex(mode, count, type, indices,
-                                           instancecount, 0, baseinstance, drawID);
-}
-
-bool GLContext::drawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance, GLuint drawID) {
-    if (count < 0 || instancecount < 0) {
-        pushError(GL_INVALID_VALUE);
-        return false;
-    }
-    if (type != GL_UNSIGNED_BYTE && type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_INT) {
-        pushError(GL_INVALID_ENUM);
-        return false;
-    }
-    if (count == 0 || instancecount == 0) {
-        return true;
-    }
-    return drawElementsInstancedBaseVertex(mode, count, type, indices,
-                                           instancecount, basevertex,
-                                           baseinstance, drawID);
-}
+#include "GLContextDrawBaseInstance.inc.mm"
 
 #elif defined(APPGL_GLCONTEXT_DRAW_INDIRECT)
 GLuint GLContext::getBoundVertexArray() const {
