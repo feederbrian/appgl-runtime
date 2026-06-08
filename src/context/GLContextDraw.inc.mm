@@ -23,19 +23,7 @@
 #include "GLContextDrawIndirectCountHelpers.inc.mm"
 
 #elif defined(APPGL_GLCONTEXT_DRAW_INDIRECT_COUNT)
-bool GLContext::multiDrawArraysIndirectCount(GLenum mode, const void* indirect,
-                                              GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride) {
-    GLsizei actualDrawcount = 0;
-    if (!resolveIndirectDrawCount(drawcount, maxdrawcount, actualDrawcount)) return false;
-    return multiDrawArraysIndirect(mode, indirect, actualDrawcount, stride);
-}
-
-bool GLContext::multiDrawElementsIndirectCount(GLenum mode, GLenum type, const void* indirect,
-                                                GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride) {
-    GLsizei actualDrawcount = 0;
-    if (!resolveIndirectDrawCount(drawcount, maxdrawcount, actualDrawcount)) return false;
-    return multiDrawElementsIndirect(mode, type, indirect, actualDrawcount, stride);
-}
+#include "GLContextDrawIndirectCount.inc.mm"
 
 #else
 #error "GLContextDraw.inc.mm included without a draw section selector"
