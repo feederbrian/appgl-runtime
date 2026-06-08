@@ -1,7 +1,7 @@
 // This file is textually included by GLContextTexture.inc.mm. Do not compile it directly.
 // It contains the GLContext texture samplers method definitions split out for navigation only.
 
-#line 7 "src/context/GLContextTexture.inc.mm" // Preserve source identity so this relocation stays codegen-neutral; __FILE__/__LINE__/debug-info intentionally report the original GLContextTexture.inc.mm.
+#line 7 "/private/tmp/appgl-bug3-clean/src/context/GLContextTexture.inc.mm" // Preserve source identity so this relocation stays codegen-neutral; __FILE__/__LINE__/debug-info intentionally report the original GLContextTexture.inc.mm.
 bool GLContext::genSamplers(GLsizei count, GLuint* samplers) {
     if (count < 0 || (count > 0 && samplers == nullptr)) {
         pushError(GL_INVALID_VALUE);
@@ -161,4 +161,3 @@ bool GLContext::getSamplerParameterFloat(GLuint sampler, GLenum pname, GLfloat* 
     }
     return true;
 }
-

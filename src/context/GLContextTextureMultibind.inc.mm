@@ -1,7 +1,7 @@
 // This file is textually included by GLContextTexture.inc.mm. Do not compile it directly.
 // It contains the GLContext texture multibind method definitions split out for navigation only.
 
-#line 13 "src/context/GLContextTexture.inc.mm" // Preserve source identity so this relocation stays codegen-neutral; __FILE__/__LINE__/debug-info intentionally report the original GLContextTexture.inc.mm.
+#line 13 "/private/tmp/appgl-bug3-clean/src/context/GLContextTexture.inc.mm" // Preserve source identity so this relocation stays codegen-neutral; __FILE__/__LINE__/debug-info intentionally report the original GLContextTexture.inc.mm.
 bool GLContext::bindTextures(GLuint first, GLsizei count, const GLuint* textures) {
     if (count < 0) {
         pushError(GL_INVALID_VALUE);
@@ -152,4 +152,3 @@ bool GLContext::bindImageTextures(GLuint first, GLsizei count, const GLuint* tex
     }
     return true;
 }
-

@@ -1,7 +1,7 @@
 // This file is textually included by GLContextTexture.inc.mm. Do not compile it directly.
 // It contains the GLContext texture bind-image method definitions split out for navigation only.
 
-#line 9 "src/context/GLContextTexture.inc.mm" // Preserve source identity so this relocation stays codegen-neutral; __FILE__/__LINE__/debug-info intentionally report the original GLContextTexture.inc.mm.
+#line 9 "/private/tmp/appgl-bug3-clean/src/context/GLContextTexture.inc.mm" // Preserve source identity so this relocation stays codegen-neutral; __FILE__/__LINE__/debug-info intentionally report the original GLContextTexture.inc.mm.
 bool GLContext::bindImageTexture(GLuint unit, GLuint texture, GLint level, GLboolean layered, GLint layer, GLenum access, GLenum format) {
     if (unit >= Impl::kMaxImageUnits) {
         pushError(GL_INVALID_VALUE);
@@ -104,4 +104,3 @@ bool GLContext::bindImageTexture(GLuint unit, GLuint texture, GLint level, GLboo
     }
     return true;
 }
-

@@ -1,7 +1,7 @@
 // This file is textually included by GLContextTexture.inc.mm. Do not compile it directly.
 // It contains the GLContext texture-core method definitions split out for navigation only.
 
-#line 5 "src/context/GLContextTexture.inc.mm" // Preserve source identity so this relocation stays codegen-neutral; __FILE__/__LINE__/debug-info intentionally report the original GLContextTexture.inc.mm.
+#line 5 "/private/tmp/appgl-bug3-clean/src/context/GLContextTexture.inc.mm" // Preserve source identity so this relocation stays codegen-neutral; __FILE__/__LINE__/debug-info intentionally report the original GLContextTexture.inc.mm.
 bool GLContext::activeTexture(GLenum texture) {
     // Must match GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS in GLCapabilities.
     // CTS state reset iterates that cap — a stricter gate breaks state reset.
