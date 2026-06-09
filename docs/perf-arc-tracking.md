@@ -3196,12 +3196,12 @@ C46 layered-clear async CPU-lane prototype:
     highground autogame route. The autogame path still ended early
     (`Game ended (duration: 4/5)`), so treat this as a smoke/profile signal,
     not as a manual-gameplay FPS verdict.
-  - Averaged profile-on result: opt-in reached bridge frame `120` in all three
-    runs versus default-off average `80` (`60/90/90`). Opt-in replaced
-    sync reasons with async reasons (`LayeredClearAsync` average `406.667`,
-    `LayeredClearDrainCurrentAsync` average `162.667`) while default-off still
-    used sync `LayeredClear` average `338.333` and
-    `LayeredClearDrainCurrent` average `135.333`.
+  - Averaged profile-on analyzer-window result: opt-in reached bridge frame
+    `120` in all three runs versus default-off average `80` (`60/90/90`).
+    Opt-in replaced sync reasons with async reasons (`LayeredClearAsync`
+    average `396.667`, `LayeredClearDrainCurrentAsync` average `158.667`)
+    while default-off still used sync `LayeredClear` average `198.333` and
+    `LayeredClearDrainCurrent` average `79.333`.
   - Completion-wait movement: default-off averaged `354,470.741 us` in
     `LayeredClear` + `LayeredClearDrainCurrent` completion waits; opt-in
     recorded `0` for those sync waits.
