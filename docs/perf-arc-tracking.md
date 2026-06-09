@@ -1,6 +1,6 @@
 # AppGL Perf ARC Tracking
 
-Status: C45 is crowned as the Step 7 rung 3 memory/Mach-port stability checkpoint. C46 is now the active CPU-bound performance lane: a default-off layered-clear async prototype has passed local synthetic/correctness gates and needs live Warzone A/B before any launcher/default change.
+Status: C45 is crowned as the Step 7 rung 3 memory/Mach-port stability checkpoint. C46 is the active CPU-bound performance lane: the default-off layered-clear async prototype is committed and live-pinned for opt-in testing, local gates are green, and short autogame A/B suggests a frame-count lift but still needs manual gameplay validation before any default-on/crown claim.
 Date: 2026-06-09
 Owner: AppGL-Foreman
 
@@ -3171,9 +3171,65 @@ C46 layered-clear async CPU-lane prototype:
     opt-in layered-clear slice.
   - Final logs had no failed/timeout markers, no non-4 Metal completion
     statuses, and no `allocWaitTimeouts>0`.
-- Disposition: local gate is green, but this is not crowned and not a launcher
-  change. Next gate is a short live Warzone default-off vs opt-in A/B through
-  the existing live route, collecting command-buffer reason deltas,
-  backpressure/peak in-flight, RSS/ports sanity, present attribution, and
-  FPS/CPU/GPU evidence. Only after live value and stability are shown should
-  the team consider a manual gameplay soak or default behavior change.
+- Commit: `97164c3` (`Add C46 layered-clear async experiment`).
+- Live pin:
+  - Rotated `libAppGL-pinned.dylib` to the C46-capable build after the local
+    gate so live A/B can use the canonical route.
+  - UUID `A8483891-2FC0-3D00-BE42-94978B713DB0`, SHA256
+    `da11d5d25072d313b7d845d6b421b12557056cefdb282a13fd8a060c5cb915db`,
+    codesign valid.
+  - C45 backup:
+    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/pin-backups/libAppGL-pinned-20260609T205432Z-C45-85C5B354-pre-C46-A8483891.dylib`.
+  - The canonical launcher still leaves C46 disabled unless
+    `APPGL_ENABLE_LAYERED_CLEAR_ASYNC=1` is explicitly exported.
+- Profile-on live autogame A/B artifacts:
+  - Default/opt-in first pair:
+    `memory-runs/c46-layered-clear-async-ab/20260609T205521Z-c46-default`
+    and
+    `memory-runs/c46-layered-clear-async-ab/20260609T205542Z-c46-async`.
+  - Alternating repeat pair set:
+    `memory-runs/c46-layered-clear-async-ab-repeat/20260609T205736Z-c46-async`,
+    `20260609T205749Z-c46-default`,
+    `20260609T205802Z-c46-default`, and
+    `20260609T205815Z-c46-async`.
+  - All six runs exited `0`; all used live pin UUID `A8483891` and the same
+    highground autogame route. The autogame path still ended early
+    (`Game ended (duration: 4/5)`), so treat this as a smoke/profile signal,
+    not as a manual-gameplay FPS verdict.
+  - Averaged profile-on result: opt-in reached bridge frame `120` in all three
+    runs versus default-off average `80` (`60/90/90`). Opt-in replaced
+    sync reasons with async reasons (`LayeredClearAsync` average `406.667`,
+    `LayeredClearDrainCurrentAsync` average `162.667`) while default-off still
+    used sync `LayeredClear` average `338.333` and
+    `LayeredClearDrainCurrent` average `135.333`.
+  - Completion-wait movement: default-off averaged `354,470.741 us` in
+    `LayeredClear` + `LayeredClearDrainCurrent` completion waits; opt-in
+    recorded `0` for those sync waits.
+  - Stability counters stayed clean: present commit failures `0`, no retained
+    object growth, no alloc-wait timeouts. Peak in-flight rose from default
+    `2` to opt-in `5`, still under the bound.
+  - CPU/per-draw read is mixed: opt-in averaged sampled CPU `87.741%` versus
+    default `82.655%`, and `framegraph_encode` profile average was higher
+    (`48.486` vs `42.034 us/draw`). The higher frame count may explain some
+    of the CPU load, but this is not enough for default-on.
+- No-profile live autogame A/B artifacts:
+  - Runs:
+    `memory-runs/c46-layered-clear-async-ab-noprofile/20260609T210032Z-c46-default`,
+    `20260609T210045Z-c46-async`,
+    `20260609T210058Z-c46-async`, and
+    `20260609T210110Z-c46-default`.
+  - Average bridge-frame result: opt-in `120`, default-off `90`. Present
+    failures remained `0`; retained object delta `0`; peak in-flight remained
+    bounded at opt-in `5` versus default `2`.
+  - Average sampled CPU was still higher for opt-in (`87.410%` versus
+    `83.733%`). Ports/RSS stayed within the short-run stability envelope:
+    opt-in average ports delta `+10.5`, default `+12.5`; opt-in peak RSS
+    `969.461 MiB`, default `963.078 MiB`.
+- Current disposition: C46 is a promising opt-in candidate because it removes
+  the LC/LCDC CPU completion waits and consistently increases autogame bridge
+  frames without reopening the C45 stability blocker. It is not crowned and
+  should not be made default-on yet because CPU does not drop and peak in-flight
+  rises. Next gate is manual gameplay A/B using the C46-capable live pin:
+  run default-off and opt-in with the same map/scene, collect FPS/CPU/GPU,
+  command-buffer reason deltas, present failures, RSS/ports, and check whether
+  frame-count/FPS gains hold under normal play rather than highground autogame.
