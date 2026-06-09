@@ -50,10 +50,8 @@ void GLContext::setViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
     impl_->viewportWidth = width > 0 ? width : 1;
     impl_->viewportHeight = height > 0 ? height : 1;
     impl_->state->setViewport(x, y, width, height);
-    if (impl_->frameGraph != nullptr) {
-        // RC-A02: ensure the drawable covers the full viewport extent.
-        impl_->frameGraph->resizeDrawable(impl_->drawableSurfaceWidth(), impl_->drawableSurfaceHeight());
-    }
+    // RC-A02: ensure the drawable covers the full viewport extent.
+    impl_->ensureDefaultDrawableForViewportExtent();
 }
 
 void GLContext::setScissor(GLint x, GLint y, GLsizei width, GLsizei height) {

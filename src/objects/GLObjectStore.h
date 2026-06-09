@@ -43,6 +43,23 @@ enum GLProducerPendingBits : std::uint32_t {
     kProducerAll                  = 0xFFFFFFFFu,
 };
 
+enum class GLProducerTokenResourceKind : std::uint8_t {
+    Texture,
+    Renderbuffer,
+    Buffer,
+};
+
+struct GLProducerToken {
+    std::uint64_t epoch = 0;
+    std::uint32_t producerBits = 0;
+    GLProducerTokenResourceKind resourceKind =
+        GLProducerTokenResourceKind::Texture;
+    GLuint resourceName = 0;
+    std::uint64_t commandBufferSequence = 0;
+    bool sameQueueOrdered = false;
+    bool completed = false;
+};
+
 class GLProducerPendingState {
 public:
     bool hasAny(std::uint32_t mask = kProducerAll) const {
@@ -53,22 +70,51 @@ public:
         return bits_;
     }
 
+    const GLProducerToken& token() const {
+        return latestToken_;
+    }
+
 private:
     friend class GLProducerPendingAccess;
 
     void mark(std::uint32_t bits) {
         bits_ |= bits;
+        latestToken_ = {};
+    }
+
+    bool mark(const GLProducerToken& token) {
+        bits_ |= token.producerBits;
+        if (token.epoch != 0 &&
+            latestToken_.epoch != 0 &&
+            latestToken_.resourceKind == token.resourceKind &&
+            latestToken_.resourceName == token.resourceName &&
+            latestToken_.sameQueueOrdered &&
+            token.sameQueueOrdered) {
+            latestToken_.producerBits |= token.producerBits;
+            latestToken_.epoch = token.epoch;
+            latestToken_.commandBufferSequence = token.commandBufferSequence;
+            latestToken_.completed = latestToken_.completed && token.completed;
+            return true;
+        }
+        latestToken_ = token;
+        return false;
     }
 
     void clear(std::uint32_t bits) {
         bits_ &= ~bits;
+        latestToken_.producerBits &= bits_;
+        if (latestToken_.producerBits == 0) {
+            latestToken_ = {};
+        }
     }
 
     void clearAll() {
         bits_ = 0;
+        latestToken_ = {};
     }
 
     std::uint32_t bits_ = 0;
+    GLProducerToken latestToken_{};
 };
 
 template <typename T>
@@ -174,6 +220,11 @@ struct GLTextureImageLevel {
     std::vector<std::uint8_t> nativeData;
     std::size_t nativeBpp = 0; // bytes-per-pixel for nativeData (0 = not available)
     bool defined = false;
+    bool generatedMipLevel = false;
+    bool immutableStorageLevel = false;
+    bool mipShadowEvicted = false;
+    std::uint64_t mipShadowEvictedRgba8Bytes = 0;
+    std::uint64_t mipShadowEvictedNativeBytes = 0;
 };
 
 struct GLTextureParameters {
@@ -1168,6 +1219,13 @@ struct GLProgramObject {
     void* gsPassThroughPipelineState = nullptr;
     std::uint32_t gsPassThroughPipelineColorFormat = 0;
     std::unordered_map<std::uint64_t, void*> gsPassThroughPipelineStateCache;
+    std::unordered_map<std::uint64_t, std::uint64_t>
+        gsPassThroughPipelineStateCacheLastUse;
+    std::uint64_t gsPassThroughPipelineStateCacheHighWater = 0;
+    std::uint64_t gsPassThroughPipelineStateCacheHits = 0;
+    std::uint64_t gsPassThroughPipelineStateCacheMisses = 0;
+    std::uint64_t gsPassThroughPipelineStateCacheEvictions = 0;
+    std::uint64_t gsPassThroughPipelineStateCacheGlobalEvictions = 0;
     // Retained MTLFunction pair for the GS-emulation pass-through render path.
     // Argument-buffer binding needs these functions on pipeline-cache hits to
     // create per-stage MTLArgumentEncoders, just like the regular translated
@@ -1436,6 +1494,12 @@ struct GLProgramObject {
     // — program deletion is rare, and the static table for this
     // process lifetime is tens of entries at most.
     std::unordered_map<std::uint64_t, void*> metalPipelineStateCache;
+    std::unordered_map<std::uint64_t, std::uint64_t> metalPipelineStateCacheLastUse;
+    std::uint64_t metalPipelineStateCacheHighWater = 0;
+    std::uint64_t metalPipelineStateCacheHits = 0;
+    std::uint64_t metalPipelineStateCacheMisses = 0;
+    std::uint64_t metalPipelineStateCacheEvictions = 0;
+    std::uint64_t metalPipelineStateCacheGlobalEvictions = 0;
 
     // Phase 8X Group 4d follow-up³ — diagnostic instrumentation for the
     // translated-draw fall-through path. Each bit corresponds to a

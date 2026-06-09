@@ -589,6 +589,12 @@ struct TranslatedDrawInfo {
     // slot also updated so the first-draw-per-program diagnostic
     // bookkeeping keeps working.
     std::unordered_map<std::uint64_t, void*>* pipelineStateCacheOut = nullptr;
+    std::unordered_map<std::uint64_t, std::uint64_t>*
+        pipelineStateCacheLastUseOut = nullptr;
+    std::uint64_t* pipelineStateCacheHighWaterOut = nullptr;
+    std::uint64_t* pipelineStateCacheHitsOut = nullptr;
+    std::uint64_t* pipelineStateCacheMissesOut = nullptr;
+    std::uint64_t* pipelineStateCacheEvictionsOut = nullptr;
 
     // Phase 2 / Lever A Slice 2: optional structural state-resolve recipe.
     // On a plan hit, encodeTranslatedDraw uses this payload to skip
@@ -1029,6 +1035,7 @@ public:
     MetalFrameGraph& operator=(const MetalFrameGraph&) = delete;
 
     void resizeDrawable(GLsizei width, GLsizei height);
+    void ensureDrawableSizeAtLeast(GLsizei width, GLsizei height);
     void enableOffscreenDrawable(GLsizei width, GLsizei height);
     void encodeDefaultFramebufferClear(
         GLbitfield mask,
@@ -1449,6 +1456,9 @@ public:
     // Called before FBO readback to ensure data written by prior draws is
     // visible to [MTLTexture getBytes:].
     void flushForReadback();
+    // Lightweight rollover used by hot-path guards that need transient
+    // command-buffer resources to drain without forcing a CPU wait.
+    bool flushCurrentForPressure();
     bool hasValidAttachments() const;
 
     // Pipeline cache metrics for benchmarking.
@@ -1488,6 +1498,87 @@ public:
         std::uint64_t textureBytes = 0;
         std::uint64_t drawableCount = 0;
         std::uint64_t drawableTextureBytes = 0;
+        std::uint64_t drawableAcquireCalls = 0;
+        std::uint64_t drawableAcquireHits = 0;
+        std::uint64_t drawableAcquireSuccesses = 0;
+        std::uint64_t drawableAcquireFailures = 0;
+        std::uint64_t drawablePresentCalls = 0;
+        std::uint64_t presentCalls = 0;
+        std::uint64_t presentFromFlushCalls = 0;
+        std::uint64_t presentFromSwapBuffersCalls = 0;
+        std::uint64_t presentInternalCalls = 0;
+        std::uint64_t presentPendingTrueCalls = 0;
+        std::uint64_t presentPendingFalseCalls = 0;
+        std::uint64_t presentCommandBufferPresentCalls = 0;
+        std::uint64_t presentCommandBufferNilCalls = 0;
+        std::uint64_t presentNoWorkReturns = 0;
+        std::uint64_t presentCommitAttempts = 0;
+        std::uint64_t presentCommitSuccesses = 0;
+        std::uint64_t presentCommitFailures = 0;
+        std::uint64_t drawableNilAfterPresent = 0;
+        std::uint64_t drawableResizeCalls = 0;
+        std::uint64_t drawableResizeNoops = 0;
+        std::uint64_t drawableResizeGrowOnlySkips = 0;
+        std::uint64_t drawableResizeDepthTextureReleases = 0;
+        std::uint64_t drawableResizeOffscreenTextureReleases = 0;
+        std::uint64_t drawableResizeLastRequestedWidth = 0;
+        std::uint64_t drawableResizeLastRequestedHeight = 0;
+        std::uint64_t drawableResizeLastEffectiveWidth = 0;
+        std::uint64_t drawableResizeLastEffectiveHeight = 0;
+        std::uint64_t drawableRetainCalls = 0;
+        std::uint64_t drawableReleaseCalls = 0;
+        std::uint64_t drawableLiveRetains = 0;
+        std::uint64_t drawablePeakLiveRetains = 0;
+        std::uint64_t renderEncoderOpenCalls = 0;
+        std::uint64_t renderEncoderReleaseCalls = 0;
+        std::uint64_t renderEncoderLiveRetains = 0;
+        std::uint64_t renderEncoderPeakLiveRetains = 0;
+        std::uint64_t currentDrawablePresent = 0;
+        std::uint64_t currentDrawableTextureBytes = 0;
+        std::uint64_t currentDrawableWidth = 0;
+        std::uint64_t currentDrawableHeight = 0;
+        std::uint64_t currentDrawablePixelFormat = 0;
+        std::uint64_t currentDrawableStorageMode = 0;
+        std::uint64_t currentDrawableUsage = 0;
+        std::uint64_t currentDrawableSampleCount = 0;
+        std::uint64_t observedDrawableTextures = 0;
+        std::uint64_t observedDrawableTexturePeak = 0;
+        std::uint64_t observedDrawableTextureBytes = 0;
+        std::uint64_t observedDrawableTextureBytesPeak = 0;
+        std::uint64_t observedDrawableTextureLimit = 0;
+        std::uint64_t observedDrawableTextureTruncated = 0;
+        std::uint64_t layerDrawableWidth = 0;
+        std::uint64_t layerDrawableHeight = 0;
+        std::uint64_t layerPixelFormat = 0;
+        std::uint64_t layerFramebufferOnly = 0;
+        std::uint64_t layerMaximumDrawableCount = 0;
+        std::uint64_t layerMaximumDrawableCountAvailable = 0;
+        std::uint64_t layerDisplaySyncEnabled = 0;
+        std::uint64_t layerDisplaySyncEnabledAvailable = 0;
+        std::uint64_t depthStencilTextureBytes = 0;
+        std::uint64_t depthStencilTextureWidth = 0;
+        std::uint64_t depthStencilTextureHeight = 0;
+        std::uint64_t depthStencilTextureSampleCount = 0;
+        std::uint64_t depthStencilTexturePixelFormat = 0;
+        std::uint64_t depthStencilRebuilds = 0;
+        std::uint64_t depthStencilReleases = 0;
+        std::uint64_t depthStencilAllocatedBytes = 0;
+        std::uint64_t depthStencilRebuildsFromEnsure = 0;
+        std::uint64_t depthStencilRebuildsFromColorSizeMismatch = 0;
+        std::uint64_t depthStencilRebuildsFromSampleMismatch = 0;
+        std::uint64_t offscreenColorTextureBytes = 0;
+        std::uint64_t offscreenColorTextureWidth = 0;
+        std::uint64_t offscreenColorTextureHeight = 0;
+        std::uint64_t offscreenColorTextureSampleCount = 0;
+        std::uint64_t offscreenColorTexturePixelFormat = 0;
+        std::uint64_t offscreenColorRebuilds = 0;
+        std::uint64_t offscreenColorReleases = 0;
+        std::uint64_t offscreenColorAllocatedBytes = 0;
+        std::uint64_t dummyColorTextureAllocations = 0;
+        std::uint64_t dummyColorTextureAllocatedBytes = 0;
+        std::uint64_t dummyColorTextureCacheHits = 0;
+        std::uint64_t dummyColorTextureCacheTextures = 0;
+        std::uint64_t dummyColorTextureCacheBytes = 0;
         std::uint64_t samplerCount = 0;
         std::uint64_t renderPipelineCount = 0;
         std::uint64_t computePipelineCount = 0;
@@ -1508,8 +1599,12 @@ public:
         std::uint64_t mslLibraryCacheHits = 0;
         std::uint64_t mslLibraryCacheMisses = 0;
         std::uint64_t mslLibrarySourceNSStringCreations = 0;
+        std::uint64_t translatedDrawMSLSlotCacheLimit = 0;
+        std::uint64_t translatedDrawMSLSlotCacheEvictions = 0;
         std::uint64_t translatedDrawMSLSlotCacheEntries = 0;
         std::uint64_t translatedDrawSampleMaskSlotCacheEntries = 0;
+        std::uint64_t renderPsoCacheLimitPerProgram = 0;
+        std::uint64_t renderPsoCacheEvictions = 0;
         std::uint64_t recommendedWorkingSetBytes = 0;
         std::uint64_t recommendedWorkingSetAvailable = 0;
     };

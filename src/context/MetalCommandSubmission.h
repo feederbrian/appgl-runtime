@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -74,7 +75,11 @@ public:
         if (object == nil || !retainedObjects_) {
             return;
         }
+        const std::uint64_t approxBytes = retainedObjectApproxBytes(object);
         retainedObjects_->objects.push_back((__bridge void*)object);
+        retainedObjects_->adoptedObjectCount += 1;
+        retainedObjects_->adoptedApproxBytes += approxBytes;
+        recordRetainedObjectAdopted(retainedObjects_->state.lock(), approxBytes);
     }
 
     void retainObjectUntilCompleted(id object) {
@@ -156,9 +161,26 @@ private:
               pressureReserve(reserve),
               pressureSoftCap(computePressureSoftCap(inFlightBound, reserve)),
               inFlightSemaphore(dispatch_semaphore_create(static_cast<long>(inFlightBound))) {
+            for (auto& allocationCount : allocatedByReason) {
+                allocationCount.store(0);
+            }
+            for (auto& submissionCount : submittedByReason) {
+                submissionCount.store(0);
+            }
+            for (auto& completionCount : completedByReason) {
+                completionCount.store(0);
+            }
             for (auto& timeoutCount : allocWaitTimeoutsByReason) {
                 timeoutCount.store(0);
             }
+        }
+
+        ~SharedState() {
+#if !__has_feature(objc_arc)
+            if (inFlightSemaphore != nullptr) {
+                dispatch_release(inFlightSemaphore);
+            }
+#endif
         }
 
         std::uint32_t inFlightBound = 0;
@@ -172,8 +194,33 @@ private:
         std::atomic<std::uint64_t> totalCompleted{0};
         std::atomic<std::uint64_t> submittedCommandBuffers{0};
         std::atomic<std::uint64_t> completedCommandBuffers{0};
+        std::array<std::atomic<std::uint64_t>,
+                   static_cast<std::size_t>(AppGLCommandReason::Count)>
+            allocatedByReason;
+        std::array<std::atomic<std::uint64_t>,
+                   static_cast<std::size_t>(AppGLCommandReason::Count)>
+            submittedByReason;
+        std::array<std::atomic<std::uint64_t>,
+                   static_cast<std::size_t>(AppGLCommandReason::Count)>
+            completedByReason;
         std::atomic<std::uint64_t> backpressureWaits{0};
         std::atomic<std::uint64_t> waitReasonLogEntries{0};
+        std::atomic<std::uint64_t> plainCommandBufferAllocations{0};
+        std::atomic<std::uint64_t> autoreleaseDrainedCommandBufferAllocations{0};
+        std::atomic<std::uint64_t> retainedObjectsAdopted{0};
+        std::atomic<std::uint64_t> retainedObjectsReleased{0};
+        std::atomic<std::uint64_t> retainedObjectsLive{0};
+        std::atomic<std::uint64_t> retainedObjectsPeakLive{0};
+        std::atomic<std::uint64_t> retainedObjectApproxBytesAdopted{0};
+        std::atomic<std::uint64_t> retainedObjectApproxBytesReleased{0};
+        std::atomic<std::uint64_t> retainedObjectApproxBytesLive{0};
+        std::atomic<std::uint64_t> retainedObjectApproxBytesPeakLive{0};
+        std::atomic<std::uint64_t> retainedCommandBuffersLive{0};
+        std::atomic<std::uint64_t> retainedCommandBuffersPeakLive{0};
+        std::atomic<std::uint64_t> retainedCommandBuffersReleased{0};
+        std::atomic<std::uint64_t> retainedReleaseCalls{0};
+        std::atomic<std::uint64_t> retainedReleaseObjectMaxCount{0};
+        std::atomic<std::uint64_t> retainedReleaseObjectMaxBytes{0};
         std::atomic<std::uint32_t> lastWaitReason{static_cast<std::uint32_t>(AppGLCommandReason::Legacy)};
         std::atomic<std::uint32_t> lastWaitMode{static_cast<std::uint32_t>(AppGLSubmitMode::WaitOnly)};
         std::atomic<std::uint32_t> lastWaitDependencyClass{static_cast<std::uint32_t>(AppGLDependencyClass::Legacy)};
@@ -188,8 +235,12 @@ private:
     };
 
     struct RetainedObjects {
+        std::weak_ptr<SharedState> state;
         id<MTLCommandBuffer> commandBuffer = nil;
         std::vector<void*> objects;
+        std::uint64_t adoptedObjectCount = 0;
+        std::uint64_t adoptedApproxBytes = 0;
+        bool commandBufferRetained = false;
     };
 
     friend class MetalCommandSubmission;
@@ -200,9 +251,12 @@ private:
           retainedObjects_(std::make_shared<RetainedObjects>()),
           commandBuffer_(commandBuffer),
           ownsToken_(commandBuffer != nil) {
+        retainedObjects_->state = state_;
         if (commandBuffer_ != nil) {
             [commandBuffer_ retain];
             retainedObjects_->commandBuffer = commandBuffer_;
+            retainedObjects_->commandBufferRetained = true;
+            recordCommandBufferRetained(state_);
         }
     }
 
@@ -220,19 +274,99 @@ private:
         other.retainedReleaseTransferred_ = false;
     }
 
+    static std::uint64_t retainedObjectApproxBytes(id object) {
+        if (object == nil || ![object respondsToSelector:@selector(allocatedSize)]) {
+            return 0;
+        }
+        return static_cast<std::uint64_t>([(id<MTLResource>)object allocatedSize]);
+    }
+
+    static void updatePeak(std::atomic<std::uint64_t>& peak,
+                           std::uint64_t value) {
+        std::uint64_t observed = peak.load();
+        while (value > observed &&
+               !peak.compare_exchange_weak(observed, value)) {}
+    }
+
+    static void boundedSubtract(std::atomic<std::uint64_t>& value,
+                                std::uint64_t amount) {
+        if (amount == 0) {
+            return;
+        }
+        std::uint64_t observed = value.load();
+        while (observed != 0) {
+            const std::uint64_t next = observed > amount
+                ? observed - amount
+                : 0;
+            if (value.compare_exchange_weak(observed, next)) {
+                return;
+            }
+        }
+    }
+
+    static void recordRetainedObjectAdopted(
+        const std::shared_ptr<SharedState>& state,
+        std::uint64_t approxBytes) {
+        if (!state) {
+            return;
+        }
+        state->retainedObjectsAdopted.fetch_add(1);
+        const std::uint64_t live =
+            state->retainedObjectsLive.fetch_add(1) + 1;
+        updatePeak(state->retainedObjectsPeakLive, live);
+        if (approxBytes != 0) {
+            state->retainedObjectApproxBytesAdopted.fetch_add(approxBytes);
+            const std::uint64_t liveBytes =
+                state->retainedObjectApproxBytesLive.fetch_add(approxBytes) +
+                approxBytes;
+            updatePeak(state->retainedObjectApproxBytesPeakLive, liveBytes);
+        }
+    }
+
+    static void recordCommandBufferRetained(
+        const std::shared_ptr<SharedState>& state) {
+        if (!state) {
+            return;
+        }
+        const std::uint64_t live =
+            state->retainedCommandBuffersLive.fetch_add(1) + 1;
+        updatePeak(state->retainedCommandBuffersPeakLive, live);
+    }
+
     static void releaseRetainedObjects(const std::shared_ptr<RetainedObjects>& retainedObjects) {
         if (!retainedObjects) {
             return;
         }
+        const auto state = retainedObjects->state.lock();
+        const std::uint64_t releaseCount = retainedObjects->adoptedObjectCount;
+        const std::uint64_t releaseBytes = retainedObjects->adoptedApproxBytes;
         for (void* object : retainedObjects->objects) {
             if (object != nullptr) {
                 [(__bridge id)object release];
             }
         }
         retainedObjects->objects.clear();
+        retainedObjects->adoptedObjectCount = 0;
+        retainedObjects->adoptedApproxBytes = 0;
+        if (state && releaseCount != 0) {
+            state->retainedObjectsReleased.fetch_add(releaseCount);
+            boundedSubtract(state->retainedObjectsLive, releaseCount);
+            state->retainedReleaseCalls.fetch_add(1);
+            updatePeak(state->retainedReleaseObjectMaxCount, releaseCount);
+            if (releaseBytes != 0) {
+                state->retainedObjectApproxBytesReleased.fetch_add(releaseBytes);
+                boundedSubtract(state->retainedObjectApproxBytesLive, releaseBytes);
+                updatePeak(state->retainedReleaseObjectMaxBytes, releaseBytes);
+            }
+        }
         if (retainedObjects->commandBuffer != nil) {
             [retainedObjects->commandBuffer release];
             retainedObjects->commandBuffer = nil;
+            if (state && retainedObjects->commandBufferRetained) {
+                state->retainedCommandBuffersReleased.fetch_add(1);
+                boundedSubtract(state->retainedCommandBuffersLive, 1);
+            }
+            retainedObjects->commandBufferRetained = false;
         }
     }
 
@@ -243,6 +377,9 @@ private:
             return;
         }
         const std::uint64_t submitted = state->submittedCommandBuffers.fetch_add(1) + 1;
+        if (static_cast<std::size_t>(reason) < state->submittedByReason.size()) {
+            state->submittedByReason[static_cast<std::size_t>(reason)].fetch_add(1);
+        }
         if (state->profileEnabled) {
             const auto& record = appGLCommandReasonRecord(reason);
             std::fprintf(stderr,
@@ -266,6 +403,9 @@ private:
             return;
         }
         const std::uint64_t completed = state->completedCommandBuffers.fetch_add(1) + 1;
+        if (static_cast<std::size_t>(reason) < state->completedByReason.size()) {
+            state->completedByReason[static_cast<std::size_t>(reason)].fetch_add(1);
+        }
         if (state->profileEnabled) {
             const auto& record = appGLCommandReasonRecord(reason);
             std::fprintf(stderr,
@@ -404,6 +544,19 @@ private:
         return std::make_shared<MetalCommandBufferLease::SharedState>(bound, reserve);
     }
 
+    static bool forceDrainAutoreleasedCommandBuffers() {
+        static const bool enabled = [] {
+            const char* raw = std::getenv("APPGL_COMMAND_BUFFER_FORCE_DRAIN_AUTORELEASE");
+            return raw != nullptr && raw[0] != '\0' && std::strcmp(raw, "0") != 0;
+        }();
+        return enabled;
+    }
+
+    explicit MetalCommandSubmission(
+        std::shared_ptr<MetalCommandBufferLease::SharedState> state)
+        : commandQueue_(nil),
+          state_(std::move(state)) {}
+
 public:
     explicit MetalCommandSubmission(id<MTLCommandQueue> commandQueue,
                                     std::uint32_t inFlightBound = kDefaultInFlightBound)
@@ -437,8 +590,46 @@ public:
         }
         counters.submittedCommandBuffers = state_->submittedCommandBuffers.load();
         counters.completedCommandBuffers = state_->completedCommandBuffers.load();
+        for (std::size_t index = 0; index < counters.allocatedByReason.size(); ++index) {
+            counters.allocatedByReason[index] =
+                state_->allocatedByReason[index].load();
+            counters.submittedByReason[index] =
+                state_->submittedByReason[index].load();
+            counters.completedByReason[index] =
+                state_->completedByReason[index].load();
+        }
         counters.waitReasonLogEntries = state_->waitReasonLogEntries.load();
         counters.pressureFlushCount = state_->pressureFlushCount.load();
+        counters.plainCommandBufferAllocations =
+            state_->plainCommandBufferAllocations.load();
+        counters.autoreleaseDrainedCommandBufferAllocations =
+            state_->autoreleaseDrainedCommandBufferAllocations.load();
+        counters.retainedObjectsAdopted =
+            state_->retainedObjectsAdopted.load();
+        counters.retainedObjectsReleased =
+            state_->retainedObjectsReleased.load();
+        counters.retainedObjectsLive = state_->retainedObjectsLive.load();
+        counters.retainedObjectsPeakLive =
+            state_->retainedObjectsPeakLive.load();
+        counters.retainedObjectApproxBytesAdopted =
+            state_->retainedObjectApproxBytesAdopted.load();
+        counters.retainedObjectApproxBytesReleased =
+            state_->retainedObjectApproxBytesReleased.load();
+        counters.retainedObjectApproxBytesLive =
+            state_->retainedObjectApproxBytesLive.load();
+        counters.retainedObjectApproxBytesPeakLive =
+            state_->retainedObjectApproxBytesPeakLive.load();
+        counters.retainedCommandBuffersLive =
+            state_->retainedCommandBuffersLive.load();
+        counters.retainedCommandBuffersPeakLive =
+            state_->retainedCommandBuffersPeakLive.load();
+        counters.retainedCommandBuffersReleased =
+            state_->retainedCommandBuffersReleased.load();
+        counters.retainedReleaseCalls = state_->retainedReleaseCalls.load();
+        counters.retainedReleaseObjectMaxCount =
+            state_->retainedReleaseObjectMaxCount.load();
+        counters.retainedReleaseObjectMaxBytes =
+            state_->retainedReleaseObjectMaxBytes.load();
         counters.currentInFlight = state_->inFlightCount.load();
         counters.peakInFlight = state_->peakInFlight.load();
         counters.inFlightBound = state_->inFlightBound;
@@ -570,12 +761,17 @@ private:
         if (commandQueue_ == nil || !state_) {
             return {};
         }
+        drainAutoreleasedCommandBuffer =
+            drainAutoreleasedCommandBuffer || forceDrainAutoreleasedCommandBuffers();
         maybeFlushCurrentForPressure(reason);
         if (!waitOnSemaphore(state_->inFlightSemaphore, WaitKind::InFlightToken, reason, label)) {
             return {};
         }
         const std::uint32_t afterAcquire = state_->inFlightCount.fetch_add(1) + 1;
         const std::uint64_t totalAllocated = state_->totalAllocated.fetch_add(1) + 1;
+        if (static_cast<std::size_t>(reason) < state_->allocatedByReason.size()) {
+            state_->allocatedByReason[static_cast<std::size_t>(reason)].fetch_add(1);
+        }
         std::uint32_t observedPeak = state_->peakInFlight.load();
         while (afterAcquire > observedPeak
                && !state_->peakInFlight.compare_exchange_weak(observedPeak, afterAcquire)) {}
@@ -598,6 +794,11 @@ private:
             assert(previous > 0 && "Metal command buffer in-flight count underflow after allocation failure");
             dispatch_semaphore_signal(state_->inFlightSemaphore);
             return {};
+        }
+        if (drainAutoreleasedCommandBuffer) {
+            state_->autoreleaseDrainedCommandBufferAllocations.fetch_add(1);
+        } else {
+            state_->plainCommandBufferAllocations.fetch_add(1);
         }
         if (label != nil) {
             commandBuffer.label = label;
@@ -814,6 +1015,12 @@ inline bool MetalCommandBufferLease::commitAndWaitImpl(NSString* label, AppGLCom
         return false;
     }
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    if (done == nullptr) {
+        return false;
+    }
+#if !__has_feature(objc_arc)
+    dispatch_retain(done);
+#endif
     __block MTLCommandBufferStatus finalStatus = MTLCommandBufferStatusNotEnqueued;
     auto state = state_;
     auto released = released_;
@@ -831,6 +1038,9 @@ inline bool MetalCommandBufferLease::commitAndWaitImpl(NSString* label, AppGLCom
         releaseToken(state, released, releaseLabel.UTF8String);
         releaseRetainedObjects(retainedObjects);
         dispatch_semaphore_signal(done);
+#if !__has_feature(objc_arc)
+        dispatch_release(done);
+#endif
     }];
     tokenReleaseTransferred_ = true;
     retainedReleaseTransferred_ = true;
@@ -844,9 +1054,13 @@ inline bool MetalCommandBufferLease::commitAndWaitImpl(NSString* label, AppGLCom
     commandBuffer_ = nil;
     ownsToken_ = false;
 
-    MetalCommandSubmission waiter(nil, state->inFlightBound);
-    waiter.state_ = state;
-    if (!waiter.waitOnSemaphore(done, MetalCommandSubmission::WaitKind::Completion, reason, releaseLabel)) {
+    MetalCommandSubmission waiter(state);
+    const bool waitCompleted =
+        waiter.waitOnSemaphore(done, MetalCommandSubmission::WaitKind::Completion, reason, releaseLabel);
+#if !__has_feature(objc_arc)
+    dispatch_release(done);
+#endif
+    if (!waitCompleted) {
         return false;
     }
     return finalStatus == MTLCommandBufferStatusCompleted;

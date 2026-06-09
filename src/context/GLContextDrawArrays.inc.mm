@@ -110,7 +110,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     // viewport BEFORE we flush the pending clear. Resizing invalidates any
     // unflushed command buffer, so doing it after the clear would drop the
     // clear on the floor and leave the offscreen attachment uninitialized.
-    impl_->frameGraph->resizeDrawable(impl_->drawableSurfaceWidth(), impl_->drawableSurfaceHeight());
+    impl_->ensureDefaultDrawableForViewportExtent();
     // Flush any pending clear before we start the draw render pass; otherwise
     // the draw would run against an uncleared default attachment.
     impl_->encodePendingWork();
@@ -1193,6 +1193,15 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             tdi.pipelineStateOut = &program->metalPipelineState;
             tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
             tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+            tdi.pipelineStateCacheLastUseOut =
+                &program->metalPipelineStateCacheLastUse;
+            tdi.pipelineStateCacheHighWaterOut =
+                &program->metalPipelineStateCacheHighWater;
+            tdi.pipelineStateCacheHitsOut = &program->metalPipelineStateCacheHits;
+            tdi.pipelineStateCacheMissesOut =
+                &program->metalPipelineStateCacheMisses;
+            tdi.pipelineStateCacheEvictionsOut =
+                &program->metalPipelineStateCacheEvictions;
             tdi.metalVertexFunction = program->metalVertexFunction;
             tdi.metalFragmentFunction = program->metalFragmentFunction;
             tdi.metalVertexFunctionOut = &program->metalVertexFunction;
@@ -1288,6 +1297,16 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 tdi.pipelineStateOut = &program->metalPipelineState;
                 tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
                 tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+                tdi.pipelineStateCacheLastUseOut =
+                    &program->metalPipelineStateCacheLastUse;
+                tdi.pipelineStateCacheHighWaterOut =
+                    &program->metalPipelineStateCacheHighWater;
+                tdi.pipelineStateCacheHitsOut =
+                    &program->metalPipelineStateCacheHits;
+                tdi.pipelineStateCacheMissesOut =
+                    &program->metalPipelineStateCacheMisses;
+                tdi.pipelineStateCacheEvictionsOut =
+                    &program->metalPipelineStateCacheEvictions;
                 tdi.metalVertexFunction = program->metalVertexFunction;
                 tdi.metalFragmentFunction = program->metalFragmentFunction;
                 tdi.metalVertexFunctionOut = &program->metalVertexFunction;
@@ -1404,6 +1423,16 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     // so spring's 15×/frame blend toggle doesn't thrash
                     // the single-slot scalar cache above.
                     tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+                    tdi.pipelineStateCacheLastUseOut =
+                        &program->metalPipelineStateCacheLastUse;
+                    tdi.pipelineStateCacheHighWaterOut =
+                        &program->metalPipelineStateCacheHighWater;
+                    tdi.pipelineStateCacheHitsOut =
+                        &program->metalPipelineStateCacheHits;
+                    tdi.pipelineStateCacheMissesOut =
+                        &program->metalPipelineStateCacheMisses;
+                    tdi.pipelineStateCacheEvictionsOut =
+                        &program->metalPipelineStateCacheEvictions;
                     tdi.metalVertexFunction = program->metalVertexFunction;
                     tdi.metalFragmentFunction = program->metalFragmentFunction;
                     tdi.metalVertexFunctionOut = &program->metalVertexFunction;
@@ -1610,7 +1639,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
     if (impl_->frameGraph == nullptr) {
         return false;
     }
-    impl_->frameGraph->resizeDrawable(impl_->drawableSurfaceWidth(), impl_->drawableSurfaceHeight());
+    impl_->ensureDefaultDrawableForViewportExtent();
     impl_->encodePendingWork();
 
     // Translated shader pipeline with instancing.
@@ -1986,6 +2015,15 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             tdi.pipelineStateOut = &program->metalPipelineState;
             tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
             tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+            tdi.pipelineStateCacheLastUseOut =
+                &program->metalPipelineStateCacheLastUse;
+            tdi.pipelineStateCacheHighWaterOut =
+                &program->metalPipelineStateCacheHighWater;
+            tdi.pipelineStateCacheHitsOut = &program->metalPipelineStateCacheHits;
+            tdi.pipelineStateCacheMissesOut =
+                &program->metalPipelineStateCacheMisses;
+            tdi.pipelineStateCacheEvictionsOut =
+                &program->metalPipelineStateCacheEvictions;
             tdi.metalVertexFunction = program->metalVertexFunction;
             tdi.metalFragmentFunction = program->metalFragmentFunction;
             tdi.metalVertexFunctionOut = &program->metalVertexFunction;
@@ -2133,6 +2171,16 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     // so spring's 15×/frame blend toggle doesn't thrash
                     // the single-slot scalar cache above.
                     tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+                    tdi.pipelineStateCacheLastUseOut =
+                        &program->metalPipelineStateCacheLastUse;
+                    tdi.pipelineStateCacheHighWaterOut =
+                        &program->metalPipelineStateCacheHighWater;
+                    tdi.pipelineStateCacheHitsOut =
+                        &program->metalPipelineStateCacheHits;
+                    tdi.pipelineStateCacheMissesOut =
+                        &program->metalPipelineStateCacheMisses;
+                    tdi.pipelineStateCacheEvictionsOut =
+                        &program->metalPipelineStateCacheEvictions;
                     tdi.metalVertexFunction = program->metalVertexFunction;
                     tdi.metalFragmentFunction = program->metalFragmentFunction;
                     tdi.metalVertexFunctionOut = &program->metalVertexFunction;
@@ -2223,4 +2271,3 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
     );
     return false;
 }
-

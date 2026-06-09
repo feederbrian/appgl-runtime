@@ -478,12 +478,24 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
             pushError(GL_INVALID_VALUE);
             return false;
         }
-        const GLTextureImageLevel* srcImgPtr = &it->second;
+        GLTextureImageLevel* srcImgPtr = &it->second;
         if (srcCubeMap && srcZ >= 0 && srcZ < 6) {
             if (GLTextureImageLevel* faceImg =
                     textureLevelForCopyLayer(srcTex, srcTarget, srcLevel, srcZ)) {
                 srcImgPtr = faceImg;
             }
+        }
+        if (srcTex->desc.internalFormat == GL_DEPTH_COMPONENT32F &&
+            !srcTex->depthStencilShadowAuthoritative) {
+            (void)impl_->syncDepth32FTextureLevelNativeFromMetal(
+                *srcTex, srcLevel);
+        }
+        if (!impl_->materializeTextureMipShadowFromMetal(
+                *srcTex,
+                srcLevel,
+                Impl::TextureMipShadowMaterializeConsumer::CopyImageSubData)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
         }
         const GLTextureImageLevel& srcImg = *srcImgPtr;
         srcImgW = srcImg.desc.width;
@@ -586,6 +598,14 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
             }
             dstImg = &faceIt->second;
         }
+        if (!impl_->materializeTextureMipShadowFromMetal(
+                *dstTex,
+                dstLevel,
+                Impl::TextureMipShadowMaterializeConsumer::CopyImageSubData)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        dstImg->generatedMipLevel = false;
         dstImgW = dstImg->desc.width;
         dstImgH = dstImg->desc.height;
         dstImgD = dstCubeMap ? 6 : dstImg->desc.depth;
@@ -746,6 +766,9 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         if (srcIsTex) {
             GLTextureObject* srcTex = impl_->objects->textures().get(srcName);
             auto it = srcTex->levels.find(srcLevel);
+            if (it != srcTex->levels.end() && it->second.rgba8.empty()) {
+                (void)materializeRedR8TextureShadowFromNativeData(it->second);
+            }
             if (it != srcTex->levels.end() && !it->second.rgba8.empty()) {
                 srcRGBA = it->second.rgba8.data();
             }
@@ -754,6 +777,9 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
             if (srcRB && !srcRB->rgba8.empty()) srcRGBA = srcRB->rgba8.data();
         }
 
+        if (dstImg && dstImg->rgba8.empty()) {
+            (void)materializeRedR8TextureShadowFromNativeData(*dstImg);
+        }
         if (dstImg && !dstImg->rgba8.empty()) {
             dstRGBA = dstImg->rgba8.data();
         } else if (dstRB && !dstRB->rgba8.empty()) {

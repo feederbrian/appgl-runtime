@@ -3,7 +3,7 @@
 
 #if defined(APPGL_GLCONTEXT_READBACK_PRESENT)
 void GLContext::flush() {
-    impl_->presentPendingWork();
+    impl_->presentPendingWork(AppGLCommandReason::PresentFromFlush);
 }
 
 void GLContext::finish() {
@@ -11,7 +11,7 @@ void GLContext::finish() {
 }
 
 void GLContext::swapBuffers() {
-    impl_->presentPendingWork();
+    impl_->presentPendingWork(AppGLCommandReason::PresentFromSwapBuffers);
 }
 
 #elif defined(APPGL_GLCONTEXT_READBACK_READ_PIXELS)

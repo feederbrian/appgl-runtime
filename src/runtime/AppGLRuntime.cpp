@@ -21,6 +21,7 @@
 
 #include "../../include/AppGL/AppGL.h"
 #include "../caps/GLCapabilities.h"
+#include "../context/AppGLCommandReasons.h"
 #include "../loader/DispatchInstall.h"
 #include "../objects/GLObjectStore.h"
 #include "../shared/JsonUtil.h"
@@ -2483,7 +2484,101 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
                    << ",\"sparseTextureStates\":"
                    << inventory.sparseTextureStates
                    << ",\"sparseTextureCommittedRegions\":"
-                   << inventory.sparseTextureCommittedRegions;
+                   << inventory.sparseTextureCommittedRegions
+                   << ",\"bufferStorageObjects\":"
+                   << inventory.bufferStorageObjects
+                   << ",\"bufferMetalObjects\":"
+                   << inventory.bufferMetalObjects
+                   << ",\"bufferReservedOnlyObjects\":"
+                   << inventory.bufferReservedOnlyObjects
+                   << ",\"textureInstantiatedObjects\":"
+                   << inventory.textureInstantiatedObjects
+                   << ",\"textureDefinedObjects\":"
+                   << inventory.textureDefinedObjects
+                   << ",\"textureViewObjects\":"
+                   << inventory.textureViewObjects
+                   << ",\"textureSparseObjects\":"
+                   << inventory.textureSparseObjects
+                   << ",\"textureReservedOnlyObjects\":"
+                   << inventory.textureReservedOnlyObjects
+                   << ",\"textureShadowHotspots\":{"
+                   << "\"limit\":" << inventory.textureShadowHotspotLimit
+                   << ",\"rows\":" << inventory.textureShadowHotspotRows
+                   << ",\"truncated\":"
+                   << inventory.textureShadowHotspotsTruncated
+                   << ",\"textures\":[";
+            for (std::size_t i = 0;
+                 i < inventory.topTextureShadows.size(); ++i) {
+                if (i != 0) {
+                    stream << ",";
+                }
+                const auto& entry = inventory.topTextureShadows[i];
+                stream << "{"
+                       << "\"name\":" << entry.name << ","
+                       << "\"target\":"
+                       << static_cast<unsigned>(entry.target) << ","
+                       << "\"viewSourceTexture\":"
+                       << entry.viewSourceTexture << ","
+                       << "\"shadowBytes\":" << entry.shadowBytes << ","
+                       << "\"rgba8Bytes\":" << entry.rgba8Bytes << ","
+                       << "\"nativeBytes\":" << entry.nativeBytes << ","
+                       << "\"metalBytes\":" << entry.metalBytes << ","
+                       << "\"swizzledViewBytes\":"
+                       << entry.swizzledViewBytes << ","
+                       << "\"samplingProxyBytes\":"
+                       << entry.samplingProxyBytes << ","
+                       << "\"imageLevels\":" << entry.imageLevels << ","
+                       << "\"shadowImages\":" << entry.shadowImages << ","
+                       << "\"definedImages\":" << entry.definedImages << ","
+                       << "\"cubeFaceImages\":"
+                       << entry.cubeFaceImages << ","
+                       << "\"largestImageBytes\":"
+                       << entry.largestImageBytes << ","
+                       << "\"minLevel\":" << entry.minLevel << ","
+                       << "\"maxLevel\":" << entry.maxLevel << ","
+                       << "\"largestLevel\":" << entry.largestLevel << ","
+                       << "\"internalFormat\":"
+                       << static_cast<unsigned>(entry.internalFormat) << ","
+                       << "\"sourceFormat\":"
+                       << static_cast<unsigned>(entry.sourceFormat) << ","
+                       << "\"sourceType\":"
+                       << static_cast<unsigned>(entry.sourceType) << ","
+                       << "\"width\":" << entry.width << ","
+                       << "\"height\":" << entry.height << ","
+                       << "\"depth\":" << entry.depth << ","
+                       << "\"layers\":" << entry.layers << ","
+                       << "\"samples\":" << entry.samples << ","
+                       << "\"producerPendingBits\":"
+                       << entry.producerPendingBits << ","
+                       << "\"instantiated\":"
+                       << static_cast<unsigned>(entry.instantiated) << ","
+                       << "\"hasMetalTexture\":"
+                       << static_cast<unsigned>(entry.hasMetalTexture) << ","
+                       << "\"hasSwizzledView\":"
+                       << static_cast<unsigned>(entry.hasSwizzledView) << ","
+                       << "\"hasSamplingProxy\":"
+                       << static_cast<unsigned>(entry.hasSamplingProxy) << ","
+                       << "\"wasViewportRenderedTo\":"
+                       << static_cast<unsigned>(
+                              entry.wasViewportRenderedTo)
+                       << ","
+                       << "\"wasFramebufferRenderedTo\":"
+                       << static_cast<unsigned>(
+                              entry.wasFramebufferRenderedTo)
+                       << ","
+                       << "\"colorShadowAuthoritative\":"
+                       << static_cast<unsigned>(
+                              entry.colorShadowAuthoritative)
+                       << ","
+                       << "\"depthStencilShadowAuthoritative\":"
+                       << static_cast<unsigned>(
+                              entry.depthStencilShadowAuthoritative)
+                       << ","
+                       << "\"sparseTexture\":"
+                       << static_cast<unsigned>(entry.sparseTexture)
+                       << "}";
+            }
+            stream << "]}";
         };
     if (contextIsLive) {
         auto& store = currentContext->objects();
@@ -2674,10 +2769,77 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << pressureInputs.processResidentBytes << ","
            << "\"processResidentAvailable\":"
            << pressureInputs.processResidentAvailable << ","
+           << "\"processPhysicalFootprintBytes\":"
+           << pressureInputs.processPhysicalFootprintBytes << ","
+           << "\"processPhysicalFootprintAvailable\":"
+           << pressureInputs.processPhysicalFootprintAvailable << ","
            << "\"processHeapBytes\":"
            << pressureInputs.processHeapBytes << ","
            << "\"processHeapAvailable\":"
            << pressureInputs.processHeapAvailable << ","
+           << "\"processHeapBlocksInUse\":"
+           << pressureInputs.processHeapBlocksInUse << ","
+           << "\"processHeapMaxBytesInUse\":"
+           << pressureInputs.processHeapMaxBytesInUse << ","
+           << "\"processHeapAllocatedBytes\":"
+           << pressureInputs.processHeapAllocatedBytes << ","
+           << "\"processHeapMinusTrackedHostCacheBytes\":"
+           << pressureInputs.processHeapMinusTrackedHostCacheBytes << ","
+           << "\"processHeapAllocatedMinusTrackedHostCacheBytes\":"
+           << pressureInputs.processHeapAllocatedMinusTrackedHostCacheBytes
+           << ","
+           << "\"processHeapAllZonesBytes\":"
+           << pressureInputs.processHeapAllZonesBytes << ","
+           << "\"processHeapAllZonesBlocksInUse\":"
+           << pressureInputs.processHeapAllZonesBlocksInUse << ","
+           << "\"processHeapAllZonesMaxBytesInUse\":"
+           << pressureInputs.processHeapAllZonesMaxBytesInUse << ","
+           << "\"processHeapAllZonesAllocatedBytes\":"
+           << pressureInputs.processHeapAllZonesAllocatedBytes << ","
+           << "\"processHeapAllZonesCount\":"
+           << pressureInputs.processHeapAllZonesCount << ","
+           << "\"processHeapNonDefaultZoneBytes\":"
+           << pressureInputs.processHeapNonDefaultZoneBytes << ","
+           << "\"processHeapNonDefaultZoneBlocksInUse\":"
+           << pressureInputs.processHeapNonDefaultZoneBlocksInUse << ","
+           << "\"processHeapNonDefaultZoneAllocatedBytes\":"
+           << pressureInputs.processHeapNonDefaultZoneAllocatedBytes << ","
+           << "\"processMachPortsEnabled\":"
+           << pressureInputs.processMachPortsEnabled << ","
+           << "\"processMachPortsAvailable\":"
+           << pressureInputs.processMachPortsAvailable << ","
+           << "\"processMachPortSampleKernReturn\":"
+           << pressureInputs.processMachPortSampleKernReturn << ","
+           << "\"processMachPortNames\":"
+           << pressureInputs.processMachPortNames << ","
+           << "\"processMachPortTypeNames\":"
+           << pressureInputs.processMachPortTypeNames << ","
+           << "\"processMachPortTypeCountMismatch\":"
+           << pressureInputs.processMachPortTypeCountMismatch << ","
+           << "\"processMachPortSendNames\":"
+           << pressureInputs.processMachPortSendNames << ","
+           << "\"processMachPortReceiveNames\":"
+           << pressureInputs.processMachPortReceiveNames << ","
+           << "\"processMachPortSendOnceNames\":"
+           << pressureInputs.processMachPortSendOnceNames << ","
+           << "\"processMachPortPortSetNames\":"
+           << pressureInputs.processMachPortPortSetNames << ","
+           << "\"processMachPortDeadNameNames\":"
+           << pressureInputs.processMachPortDeadNameNames << ","
+           << "\"processMachPortDnRequestNames\":"
+           << pressureInputs.processMachPortDnRequestNames << ","
+           << "\"processMachPortSpRequestNames\":"
+           << pressureInputs.processMachPortSpRequestNames << ","
+           << "\"processMachPortSpRequestDelayedNames\":"
+           << pressureInputs.processMachPortSpRequestDelayedNames << ","
+           << "\"processMachPortGuardedNames\":"
+           << pressureInputs.processMachPortGuardedNames << ","
+           << "\"processMachPortImmovableReceiveNames\":"
+           << pressureInputs.processMachPortImmovableReceiveNames << ","
+           << "\"processMachPortUnknownTypeNames\":"
+           << pressureInputs.processMachPortUnknownTypeNames << ","
+           << "\"processMachPortUnknownTypeMask\":"
+           << pressureInputs.processMachPortUnknownTypeMask << ","
            << "\"memoryClass\":" << pressureInputs.memoryClass << ","
            << "\"cbPressureReserveSlots\":"
            << pressureInputs.cbPressureReserveSlots << ","
@@ -2688,7 +2850,120 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << "\"cbCurrentInFlight\":"
            << pressureInputs.cbCurrentInFlight << ","
            << "\"cbInFlightBound\":"
-           << pressureInputs.cbInFlightBound << "},"
+           << pressureInputs.cbInFlightBound << "},";
+    stream << "\"mallocZones\":{"
+           << "\"limit\":" << metalInventory.mallocZoneLimit << ","
+           << "\"rows\":" << metalInventory.mallocZoneRows << ","
+           << "\"truncated\":" << metalInventory.mallocZonesTruncated
+           << ",\"zones\":[";
+    for (std::size_t i = 0; i < metalInventory.topMallocZones.size(); ++i) {
+        if (i != 0) {
+            stream << ",";
+        }
+        const auto& zone = metalInventory.topMallocZones[i];
+        stream << "{"
+               << "\"name\":\"" << jsonEscape(zone.name) << "\","
+               << "\"bytesInUse\":" << zone.bytesInUse << ","
+               << "\"blocksInUse\":" << zone.blocksInUse << ","
+               << "\"maxBytesInUse\":" << zone.maxBytesInUse << ","
+               << "\"allocatedBytes\":" << zone.allocatedBytes << ","
+               << "\"isDefaultZone\":" << zone.isDefaultZone
+               << "}";
+    }
+    stream << "]},";
+    auto emitCommandReasonCounts = [&](const char* name,
+                                       const auto& counts) {
+        stream << "\"" << name << "\":[";
+        bool firstRow = true;
+        for (std::size_t i = 0;
+             i < static_cast<std::size_t>(AppGLCommandReason::Count);
+             ++i) {
+            const std::uint64_t count = counts[i];
+            if (count == 0) {
+                continue;
+            }
+            if (!firstRow) {
+                stream << ",";
+            }
+            firstRow = false;
+            const auto reason = static_cast<AppGLCommandReason>(i);
+            const auto& record = appGLCommandReasonRecord(reason);
+            stream << "{"
+                   << "\"reason\":\"" << record.name << "\","
+                   << "\"submitMode\":\""
+                   << appGLSubmitModeName(record.submitMode) << "\","
+                   << "\"dependencyClass\":\""
+                   << appGLDependencyClassName(record.dependencyClass) << "\","
+                   << "\"count\":" << count
+                   << "}";
+        }
+        stream << "]";
+    };
+
+    stream << "\"commandBuffers\":{"
+           << "\"submittedCommandBuffers\":"
+           << metalInventory.commandBuffers.submittedCommandBuffers << ","
+           << "\"completedCommandBuffers\":"
+           << metalInventory.commandBuffers.completedCommandBuffers << ",";
+    emitCommandReasonCounts(
+        "allocatedByReason",
+        metalInventory.commandBuffers.allocatedByReason);
+    stream << ",";
+    emitCommandReasonCounts(
+        "submittedByReason",
+        metalInventory.commandBuffers.submittedByReason);
+    stream << ",";
+    emitCommandReasonCounts(
+        "completedByReason",
+        metalInventory.commandBuffers.completedByReason);
+    stream << ","
+           << "\"currentInFlight\":"
+           << metalInventory.commandBuffers.currentInFlight << ","
+           << "\"peakInFlight\":"
+           << metalInventory.commandBuffers.peakInFlight << ","
+           << "\"inFlightBound\":"
+           << metalInventory.commandBuffers.inFlightBound << ","
+           << "\"plainCommandBufferAllocations\":"
+           << metalInventory.commandBuffers.plainCommandBufferAllocations << ","
+           << "\"autoreleaseDrainedCommandBufferAllocations\":"
+           << metalInventory.commandBuffers
+                  .autoreleaseDrainedCommandBufferAllocations << ","
+           << "\"retainedObjectsAdopted\":"
+           << metalInventory.commandBuffers.retainedObjectsAdopted << ","
+           << "\"retainedObjectsReleased\":"
+           << metalInventory.commandBuffers.retainedObjectsReleased << ","
+           << "\"retainedObjectsLive\":"
+           << metalInventory.commandBuffers.retainedObjectsLive << ","
+           << "\"retainedObjectsPeakLive\":"
+           << metalInventory.commandBuffers.retainedObjectsPeakLive << ","
+           << "\"retainedObjectApproxBytesAdopted\":"
+           << metalInventory.commandBuffers.retainedObjectApproxBytesAdopted
+           << ","
+           << "\"retainedObjectApproxBytesReleased\":"
+           << metalInventory.commandBuffers.retainedObjectApproxBytesReleased
+           << ","
+           << "\"retainedObjectApproxBytesLive\":"
+           << metalInventory.commandBuffers.retainedObjectApproxBytesLive
+           << ","
+           << "\"retainedObjectApproxBytesPeakLive\":"
+           << metalInventory.commandBuffers.retainedObjectApproxBytesPeakLive
+           << ","
+           << "\"retainedCommandBuffersLive\":"
+           << metalInventory.commandBuffers.retainedCommandBuffersLive << ","
+           << "\"retainedCommandBuffersPeakLive\":"
+           << metalInventory.commandBuffers.retainedCommandBuffersPeakLive
+           << ","
+           << "\"retainedCommandBuffersReleased\":"
+           << metalInventory.commandBuffers.retainedCommandBuffersReleased
+           << ","
+           << "\"retainedReleaseCalls\":"
+           << metalInventory.commandBuffers.retainedReleaseCalls << ","
+           << "\"retainedReleaseObjectMaxCount\":"
+           << metalInventory.commandBuffers.retainedReleaseObjectMaxCount
+           << ","
+           << "\"retainedReleaseObjectMaxBytes\":"
+           << metalInventory.commandBuffers.retainedReleaseObjectMaxBytes
+           << "},"
            << "\"buffers\":" << metalInventory.bufferCount << ","
            << "\"bufferBytes\":" << metalInventory.bufferBytes << ","
            << "\"textures\":" << metalInventory.textureCount << ","
@@ -2753,6 +3028,176 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << "\"textureBytes\":" << metalInventory.frameGraphTextureBytes << ","
            << "\"drawables\":" << metalInventory.frameGraphDrawableCount << ","
            << "\"drawableTextureBytes\":" << metalInventory.frameGraphDrawableTextureBytes << ","
+           << "\"drawableAcquireCalls\":"
+           << metalInventory.frameGraphDrawableAcquireCalls << ","
+           << "\"drawableAcquireHits\":"
+           << metalInventory.frameGraphDrawableAcquireHits << ","
+           << "\"drawableAcquireSuccesses\":"
+           << metalInventory.frameGraphDrawableAcquireSuccesses << ","
+           << "\"drawableAcquireFailures\":"
+           << metalInventory.frameGraphDrawableAcquireFailures << ","
+           << "\"drawablePresentCalls\":"
+           << metalInventory.frameGraphDrawablePresentCalls << ","
+           << "\"presentCalls\":"
+           << metalInventory.frameGraphPresentCalls << ","
+           << "\"presentFromFlushCalls\":"
+           << metalInventory.frameGraphPresentFromFlushCalls << ","
+           << "\"presentFromSwapBuffersCalls\":"
+           << metalInventory.frameGraphPresentFromSwapBuffersCalls << ","
+           << "\"presentInternalCalls\":"
+           << metalInventory.frameGraphPresentInternalCalls << ","
+           << "\"presentPendingTrueCalls\":"
+           << metalInventory.frameGraphPresentPendingTrueCalls << ","
+           << "\"presentPendingFalseCalls\":"
+           << metalInventory.frameGraphPresentPendingFalseCalls << ","
+           << "\"presentCommandBufferPresentCalls\":"
+           << metalInventory.frameGraphPresentCommandBufferPresentCalls << ","
+           << "\"presentCommandBufferNilCalls\":"
+           << metalInventory.frameGraphPresentCommandBufferNilCalls << ","
+           << "\"presentNoWorkReturns\":"
+           << metalInventory.frameGraphPresentNoWorkReturns << ","
+           << "\"presentCommitAttempts\":"
+           << metalInventory.frameGraphPresentCommitAttempts << ","
+           << "\"presentCommitSuccesses\":"
+           << metalInventory.frameGraphPresentCommitSuccesses << ","
+           << "\"presentCommitFailures\":"
+           << metalInventory.frameGraphPresentCommitFailures << ","
+           << "\"drawableNilAfterPresent\":"
+           << metalInventory.frameGraphDrawableNilAfterPresent << ","
+           << "\"drawableResizeCalls\":"
+           << metalInventory.frameGraphDrawableResizeCalls << ","
+           << "\"drawableResizeNoops\":"
+           << metalInventory.frameGraphDrawableResizeNoops << ","
+           << "\"drawableResizeGrowOnlySkips\":"
+           << metalInventory.frameGraphDrawableResizeGrowOnlySkips << ","
+           << "\"drawableResizeDepthTextureReleases\":"
+           << metalInventory.frameGraphDrawableResizeDepthTextureReleases
+           << ","
+           << "\"drawableResizeOffscreenTextureReleases\":"
+           << metalInventory.frameGraphDrawableResizeOffscreenTextureReleases
+           << ","
+           << "\"drawableResizeLastRequestedWidth\":"
+           << metalInventory.frameGraphDrawableResizeLastRequestedWidth
+           << ","
+           << "\"drawableResizeLastRequestedHeight\":"
+           << metalInventory.frameGraphDrawableResizeLastRequestedHeight
+           << ","
+           << "\"drawableResizeLastEffectiveWidth\":"
+           << metalInventory.frameGraphDrawableResizeLastEffectiveWidth
+           << ","
+           << "\"drawableResizeLastEffectiveHeight\":"
+           << metalInventory.frameGraphDrawableResizeLastEffectiveHeight
+           << ","
+           << "\"drawableRetainCalls\":"
+           << metalInventory.frameGraphDrawableRetainCalls << ","
+           << "\"drawableReleaseCalls\":"
+           << metalInventory.frameGraphDrawableReleaseCalls << ","
+           << "\"drawableLiveRetains\":"
+           << metalInventory.frameGraphDrawableLiveRetains << ","
+           << "\"drawablePeakLiveRetains\":"
+           << metalInventory.frameGraphDrawablePeakLiveRetains << ","
+           << "\"renderEncoderOpenCalls\":"
+           << metalInventory.frameGraphRenderEncoderOpenCalls << ","
+           << "\"renderEncoderReleaseCalls\":"
+           << metalInventory.frameGraphRenderEncoderReleaseCalls << ","
+           << "\"renderEncoderLiveRetains\":"
+           << metalInventory.frameGraphRenderEncoderLiveRetains << ","
+           << "\"renderEncoderPeakLiveRetains\":"
+           << metalInventory.frameGraphRenderEncoderPeakLiveRetains << ","
+           << "\"currentDrawablePresent\":"
+           << metalInventory.frameGraphCurrentDrawablePresent << ","
+           << "\"currentDrawableTextureBytes\":"
+           << metalInventory.frameGraphCurrentDrawableTextureBytes << ","
+           << "\"currentDrawableWidth\":"
+           << metalInventory.frameGraphCurrentDrawableWidth << ","
+           << "\"currentDrawableHeight\":"
+           << metalInventory.frameGraphCurrentDrawableHeight << ","
+           << "\"currentDrawablePixelFormat\":"
+           << metalInventory.frameGraphCurrentDrawablePixelFormat << ","
+           << "\"currentDrawableStorageMode\":"
+           << metalInventory.frameGraphCurrentDrawableStorageMode << ","
+           << "\"currentDrawableUsage\":"
+           << metalInventory.frameGraphCurrentDrawableUsage << ","
+           << "\"currentDrawableSampleCount\":"
+           << metalInventory.frameGraphCurrentDrawableSampleCount << ","
+           << "\"observedDrawableTextures\":"
+           << metalInventory.frameGraphObservedDrawableTextures << ","
+           << "\"observedDrawableTexturePeak\":"
+           << metalInventory.frameGraphObservedDrawableTexturePeak << ","
+           << "\"observedDrawableTextureBytes\":"
+           << metalInventory.frameGraphObservedDrawableTextureBytes << ","
+           << "\"observedDrawableTextureBytesPeak\":"
+           << metalInventory.frameGraphObservedDrawableTextureBytesPeak << ","
+           << "\"observedDrawableTextureLimit\":"
+           << metalInventory.frameGraphObservedDrawableTextureLimit << ","
+           << "\"observedDrawableTextureTruncated\":"
+           << metalInventory.frameGraphObservedDrawableTextureTruncated << ","
+           << "\"layerDrawableWidth\":"
+           << metalInventory.frameGraphLayerDrawableWidth << ","
+           << "\"layerDrawableHeight\":"
+           << metalInventory.frameGraphLayerDrawableHeight << ","
+           << "\"layerPixelFormat\":"
+           << metalInventory.frameGraphLayerPixelFormat << ","
+           << "\"layerFramebufferOnly\":"
+           << metalInventory.frameGraphLayerFramebufferOnly << ","
+           << "\"layerMaximumDrawableCount\":"
+           << metalInventory.frameGraphLayerMaximumDrawableCount << ","
+           << "\"layerMaximumDrawableCountAvailable\":"
+           << metalInventory.frameGraphLayerMaximumDrawableCountAvailable << ","
+           << "\"layerDisplaySyncEnabled\":"
+           << metalInventory.frameGraphLayerDisplaySyncEnabled << ","
+           << "\"layerDisplaySyncEnabledAvailable\":"
+           << metalInventory.frameGraphLayerDisplaySyncEnabledAvailable << ","
+           << "\"depthStencilTextureBytes\":"
+           << metalInventory.frameGraphDepthStencilTextureBytes << ","
+           << "\"depthStencilTextureWidth\":"
+           << metalInventory.frameGraphDepthStencilTextureWidth << ","
+           << "\"depthStencilTextureHeight\":"
+           << metalInventory.frameGraphDepthStencilTextureHeight << ","
+           << "\"depthStencilTextureSampleCount\":"
+           << metalInventory.frameGraphDepthStencilTextureSampleCount << ","
+           << "\"depthStencilTexturePixelFormat\":"
+           << metalInventory.frameGraphDepthStencilTexturePixelFormat << ","
+           << "\"depthStencilRebuilds\":"
+           << metalInventory.frameGraphDepthStencilRebuilds << ","
+           << "\"depthStencilReleases\":"
+           << metalInventory.frameGraphDepthStencilReleases << ","
+           << "\"depthStencilAllocatedBytes\":"
+           << metalInventory.frameGraphDepthStencilAllocatedBytes << ","
+           << "\"depthStencilRebuildsFromEnsure\":"
+           << metalInventory.frameGraphDepthStencilRebuildsFromEnsure << ","
+           << "\"depthStencilRebuildsFromColorSizeMismatch\":"
+           << metalInventory.frameGraphDepthStencilRebuildsFromColorSizeMismatch
+           << ","
+           << "\"depthStencilRebuildsFromSampleMismatch\":"
+           << metalInventory.frameGraphDepthStencilRebuildsFromSampleMismatch
+           << ","
+           << "\"offscreenColorTextureBytes\":"
+           << metalInventory.frameGraphOffscreenColorTextureBytes << ","
+           << "\"offscreenColorTextureWidth\":"
+           << metalInventory.frameGraphOffscreenColorTextureWidth << ","
+           << "\"offscreenColorTextureHeight\":"
+           << metalInventory.frameGraphOffscreenColorTextureHeight << ","
+           << "\"offscreenColorTextureSampleCount\":"
+           << metalInventory.frameGraphOffscreenColorTextureSampleCount << ","
+           << "\"offscreenColorTexturePixelFormat\":"
+           << metalInventory.frameGraphOffscreenColorTexturePixelFormat << ","
+           << "\"offscreenColorRebuilds\":"
+           << metalInventory.frameGraphOffscreenColorRebuilds << ","
+           << "\"offscreenColorReleases\":"
+           << metalInventory.frameGraphOffscreenColorReleases << ","
+           << "\"offscreenColorAllocatedBytes\":"
+           << metalInventory.frameGraphOffscreenColorAllocatedBytes << ","
+           << "\"dummyColorTextureAllocations\":"
+           << metalInventory.frameGraphDummyColorTextureAllocations << ","
+           << "\"dummyColorTextureAllocatedBytes\":"
+           << metalInventory.frameGraphDummyColorTextureAllocatedBytes << ","
+           << "\"dummyColorTextureCacheHits\":"
+           << metalInventory.frameGraphDummyColorTextureCacheHits << ","
+           << "\"dummyColorTextureCacheTextures\":"
+           << metalInventory.frameGraphDummyColorTextureCacheTextures << ","
+           << "\"dummyColorTextureCacheBytes\":"
+           << metalInventory.frameGraphDummyColorTextureCacheBytes << ","
            << "\"samplers\":" << metalInventory.frameGraphSamplerCount << ","
            << "\"renderPipelines\":" << metalInventory.frameGraphRenderPipelineCount << ","
            << "\"computePipelines\":" << metalInventory.frameGraphComputePipelineCount << ","
@@ -3541,14 +3986,252 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << metalInventory.hostCaches.textureShadowImages << ","
            << "\"textureShadowBytes\":"
            << metalInventory.hostCaches.textureShadowBytes << ","
+           << "\"textureShadowRgba8Bytes\":"
+           << metalInventory.hostCaches.textureShadowRgba8Bytes << ","
+           << "\"textureShadowNativeBytes\":"
+           << metalInventory.hostCaches.textureShadowNativeBytes << ","
+           << "\"textureShadowCapacityBytes\":"
+           << metalInventory.hostCaches.textureShadowCapacityBytes << ","
+           << "\"textureShadowPrimaryImages\":"
+           << metalInventory.hostCaches.textureShadowPrimaryImages << ","
+           << "\"textureShadowPrimaryBytes\":"
+           << metalInventory.hostCaches.textureShadowPrimaryBytes << ","
+           << "\"textureShadowPrimaryRgba8Bytes\":"
+           << metalInventory.hostCaches.textureShadowPrimaryRgba8Bytes << ","
+           << "\"textureShadowPrimaryNativeBytes\":"
+           << metalInventory.hostCaches.textureShadowPrimaryNativeBytes << ","
+           << "\"textureShadowPrimaryCapacityBytes\":"
+           << metalInventory.hostCaches.textureShadowPrimaryCapacityBytes
+           << ","
+           << "\"textureShadowMipImages\":"
+           << metalInventory.hostCaches.textureShadowMipImages << ","
+           << "\"textureShadowMipBytes\":"
+           << metalInventory.hostCaches.textureShadowMipBytes << ","
+           << "\"textureShadowMipRgba8Bytes\":"
+           << metalInventory.hostCaches.textureShadowMipRgba8Bytes << ","
+           << "\"textureShadowMipNativeBytes\":"
+           << metalInventory.hostCaches.textureShadowMipNativeBytes << ","
+           << "\"textureShadowMipCapacityBytes\":"
+           << metalInventory.hostCaches.textureShadowMipCapacityBytes << ","
+           << "\"textureMipShadowEviction\":{"
+           << "\"enabled\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.enabled
+           << ","
+           << "\"uploadedMipDropEnabled\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.uploadedMipDropEnabled
+           << ","
+           << "\"evictCalls\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.evictCalls
+           << ","
+           << "\"evictedImages\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.evictedImages
+           << ","
+           << "\"evictedRgba8Bytes\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.evictedRgba8Bytes
+           << ","
+           << "\"evictedNativeBytes\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.evictedNativeBytes
+           << ","
+           << "\"evictedBytes\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.evictedBytes
+           << ","
+           << "\"liveEvictedImages\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.liveEvictedImages
+           << ","
+           << "\"liveEvictedRgba8Bytes\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.liveEvictedRgba8Bytes
+           << ","
+           << "\"liveEvictedNativeBytes\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.liveEvictedNativeBytes
+           << ","
+           << "\"liveEvictedBytes\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.liveEvictedBytes
+           << ","
+           << "\"materializeCalls\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.materializeCalls
+           << ","
+           << "\"materializeBytes\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.materializeBytes
+           << ","
+           << "\"materializeFailures\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.materializeFailures
+           << ","
+           << "\"materializeGetTextureImageCalls\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.materializeGetTextureImageCalls
+           << ","
+           << "\"materializeGetTextureSubImageCalls\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.materializeGetTextureSubImageCalls
+           << ","
+           << "\"materializeCopyImageSubDataCalls\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.materializeCopyImageSubDataCalls
+           << ","
+           << "\"materializeTexSubImageCalls\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.materializeTexSubImageCalls
+           << ","
+           << "\"materializeClearTexCalls\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.materializeClearTexCalls
+           << ","
+           << "\"materializeGenerateMipmapCalls\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.materializeGenerateMipmapCalls
+           << ","
+           << "\"materializeUploadRebuildCalls\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.materializeUploadRebuildCalls
+           << ","
+           << "\"blockLevelZeroOrNegative\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.blockLevelZeroOrNegative
+           << ","
+           << "\"blockNotGeneratedOrImmutable\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.blockNotGeneratedOrImmutable
+           << ","
+           << "\"blockNotInstantiated\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.blockNotInstantiated
+           << ","
+           << "\"blockNoMetalTexture\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.blockNoMetalTexture
+           << ","
+           << "\"blockObjectState\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.blockObjectState
+           << ","
+           << "\"blockViewSource\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.blockViewSource
+           << ","
+           << "\"blockDependentView\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.blockDependentView
+           << ","
+           << "\"blockSparse\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.blockSparse
+           << ","
+           << "\"blockImageAtomic\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.blockImageAtomic
+           << ","
+           << "\"blockAuthoritative\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.blockAuthoritative
+           << ","
+           << "\"blockRendered\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.blockRendered
+           << ","
+           << "\"blockPending\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.blockPending
+           << ","
+           << "\"blockSamplingProxy\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.blockSamplingProxy
+           << ","
+           << "\"blockUnsupportedTarget\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.blockUnsupportedTarget
+           << ","
+           << "\"blockUnsupportedFormat\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.blockUnsupportedFormat
+           << ","
+           << "\"blockPrivateStorage\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.blockPrivateStorage
+           << ","
+           << "\"blockNoShadowBytes\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.blockNoShadowBytes
+           << ","
+           << "\"blockMetalLevelOob\":"
+           << metalInventory.hostCaches.textureMipShadowEviction.blockMetalLevelOob
+           << "},"
+           << "\"depth32fDropDryRun\":{"
+           << "\"candidateTextures\":"
+           << metalInventory.hostCaches.depth32fDropDryRunCandidateTextures
+           << ","
+           << "\"candidateRgba8Bytes\":"
+           << metalInventory.hostCaches.depth32fDropDryRunCandidateRgba8Bytes
+           << ","
+           << "\"eligibleTextures\":"
+           << metalInventory.hostCaches.depth32fDropDryRunEligibleTextures
+           << ","
+           << "\"eligibleRgba8Bytes\":"
+           << metalInventory.hostCaches.depth32fDropDryRunEligibleRgba8Bytes
+           << ","
+           << "\"blockedTextures\":"
+           << metalInventory.hostCaches.depth32fDropDryRunBlockedTextures
+           << ","
+           << "\"blockedRgba8Bytes\":"
+           << metalInventory.hostCaches.depth32fDropDryRunBlockedRgba8Bytes
+           << ","
+           << "\"flagViewTextures\":"
+           << metalInventory.hostCaches.depth32fDropDryRunFlagViewTextures
+           << ","
+           << "\"flagViewRgba8Bytes\":"
+           << metalInventory.hostCaches.depth32fDropDryRunFlagViewRgba8Bytes
+           << ","
+           << "\"flagSparseTextures\":"
+           << metalInventory.hostCaches.depth32fDropDryRunFlagSparseTextures
+           << ","
+           << "\"flagSparseRgba8Bytes\":"
+           << metalInventory.hostCaches.depth32fDropDryRunFlagSparseRgba8Bytes
+           << ","
+           << "\"flagImageAtomicTextures\":"
+           << metalInventory.hostCaches.depth32fDropDryRunFlagImageAtomicTextures
+           << ","
+           << "\"flagImageAtomicRgba8Bytes\":"
+           << metalInventory.hostCaches.depth32fDropDryRunFlagImageAtomicRgba8Bytes
+           << ","
+           << "\"flagColorAuthoritativeTextures\":"
+           << metalInventory.hostCaches
+                  .depth32fDropDryRunFlagColorAuthoritativeTextures
+           << ","
+           << "\"flagColorAuthoritativeRgba8Bytes\":"
+           << metalInventory.hostCaches
+                  .depth32fDropDryRunFlagColorAuthoritativeRgba8Bytes
+           << ","
+           << "\"flagDepthAuthoritativeTextures\":"
+           << metalInventory.hostCaches
+                  .depth32fDropDryRunFlagDepthAuthoritativeTextures
+           << ","
+           << "\"flagDepthAuthoritativeRgba8Bytes\":"
+           << metalInventory.hostCaches
+                  .depth32fDropDryRunFlagDepthAuthoritativeRgba8Bytes
+           << ","
+           << "\"flagRenderedTextures\":"
+           << metalInventory.hostCaches
+                  .depth32fDropDryRunFlagRenderedTextures
+           << ","
+           << "\"flagRenderedRgba8Bytes\":"
+           << metalInventory.hostCaches
+                  .depth32fDropDryRunFlagRenderedRgba8Bytes
+           << ","
+           << "\"flagPendingTextures\":"
+           << metalInventory.hostCaches.depth32fDropDryRunFlagPendingTextures
+           << ","
+           << "\"flagPendingRgba8Bytes\":"
+           << metalInventory.hostCaches
+                  .depth32fDropDryRunFlagPendingRgba8Bytes
+           << ","
+           << "\"flagSamplingProxyTextures\":"
+           << metalInventory.hostCaches
+                  .depth32fDropDryRunFlagSamplingProxyTextures
+           << ","
+           << "\"flagSamplingProxyRgba8Bytes\":"
+           << metalInventory.hostCaches
+                  .depth32fDropDryRunFlagSamplingProxyRgba8Bytes
+           << "},"
            << "\"cubeFaceShadowImages\":"
            << metalInventory.hostCaches.cubeFaceShadowImages << ","
            << "\"cubeFaceShadowBytes\":"
            << metalInventory.hostCaches.cubeFaceShadowBytes << ","
+           << "\"cubeFaceShadowRgba8Bytes\":"
+           << metalInventory.hostCaches.cubeFaceShadowRgba8Bytes << ","
+           << "\"cubeFaceShadowNativeBytes\":"
+           << metalInventory.hostCaches.cubeFaceShadowNativeBytes << ","
+           << "\"cubeFaceShadowCapacityBytes\":"
+           << metalInventory.hostCaches.cubeFaceShadowCapacityBytes << ","
            << "\"renderbufferShadowObjects\":"
            << metalInventory.hostCaches.renderbufferShadowObjects << ","
            << "\"renderbufferShadowBytes\":"
            << metalInventory.hostCaches.renderbufferShadowBytes << ","
+           << "\"renderbufferShadowRgba8Bytes\":"
+           << metalInventory.hostCaches.renderbufferShadowRgba8Bytes << ","
+           << "\"renderbufferShadowNativeBytes\":"
+           << metalInventory.hostCaches.renderbufferShadowNativeBytes << ","
+           << "\"renderbufferShadowDepth32Bytes\":"
+           << metalInventory.hostCaches.renderbufferShadowDepth32Bytes << ","
+           << "\"renderbufferShadowStencil8Bytes\":"
+           << metalInventory.hostCaches.renderbufferShadowStencil8Bytes
+           << ","
+           << "\"renderbufferShadowCapacityBytes\":"
+           << metalInventory.hostCaches.renderbufferShadowCapacityBytes << ","
            << "\"expandedIndexBuffers\":"
            << metalInventory.hostCaches.expandedIndexBuffers << ","
            << "\"expandedIndexBytes\":"
@@ -3597,6 +4280,56 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << metalInventory.hostCaches.multisampleStorageImageSidecarBytes
            << "}"
            << "},";
+    {
+        const auto& depth32f = metalInventory.depth32fReadback;
+        stream << "\"depth32fReadback\":{"
+               << "\"readbackCalls\":" << depth32f.readbackCalls << ","
+               << "\"readbackDepth32FCalls\":"
+               << depth32f.readbackDepth32FCalls << ","
+               << "\"readbackDepth32FS8Calls\":"
+               << depth32f.readbackDepth32FS8Calls << ","
+               << "\"readbackRawBytes\":" << depth32f.readbackRawBytes << ","
+               << "\"readbackRawMaxBytes\":"
+               << depth32f.readbackRawMaxBytes << ","
+               << "\"readbackStagingCalls\":"
+               << depth32f.readbackStagingCalls << ","
+               << "\"readbackStagingBytes\":"
+               << depth32f.readbackStagingBytes << ","
+               << "\"readbackStagingMaxBytes\":"
+               << depth32f.readbackStagingMaxBytes << ","
+               << "\"readbackConsumerSyncCalls\":"
+               << depth32f.readbackConsumerSyncCalls << ","
+               << "\"readbackConsumerRgba8SubImageCalls\":"
+               << depth32f.readbackConsumerRgba8SubImageCalls << ","
+               << "\"readbackConsumerAttachmentCalls\":"
+               << depth32f.readbackConsumerAttachmentCalls << ","
+               << "\"readbackConsumerOtherCalls\":"
+               << depth32f.readbackConsumerOtherCalls << ","
+               << "\"syncCalls\":" << depth32f.syncCalls << ","
+               << "\"syncSuccesses\":" << depth32f.syncSuccesses << ","
+               << "\"syncFailures\":" << depth32f.syncFailures << ","
+               << "\"syncNativeBytes\":" << depth32f.syncNativeBytes << ","
+               << "\"syncNativeMaxBytes\":"
+               << depth32f.syncNativeMaxBytes << ","
+               << "\"syncDepthValueBytes\":"
+               << depth32f.syncDepthValueBytes << ","
+               << "\"syncDepthValueMaxBytes\":"
+               << depth32f.syncDepthValueMaxBytes << ","
+               << "\"syncSlices\":" << depth32f.syncSlices << ","
+               << "\"rgba8SubImageCalls\":"
+               << depth32f.rgba8SubImageCalls << ","
+               << "\"rgba8SubImageSuccesses\":"
+               << depth32f.rgba8SubImageSuccesses << ","
+               << "\"rgba8SubImageFailures\":"
+               << depth32f.rgba8SubImageFailures << ","
+               << "\"rgba8SubImageOutputBytes\":"
+               << depth32f.rgba8SubImageOutputBytes << ","
+               << "\"rgba8SubImageDepthValueBytes\":"
+               << depth32f.rgba8SubImageDepthValueBytes << ","
+               << "\"rgba8SubImageSlices\":"
+               << depth32f.rgba8SubImageSlices
+               << "},";
+    }
 
     // ── Pipeline cache metrics ──
     // Entries remains the lifetime success count for compatibility with
@@ -3629,6 +4362,8 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << metalInventory.cacheLimitTranslatedDrawMSLSlots << ","
            << "\"translatedSampleMaskSlots\":"
            << metalInventory.cacheLimitTranslatedSampleMaskSlots << ","
+           << "\"renderPsoTotal\":"
+           << metalInventory.cacheLimitRenderPsoTotal << ","
            << "\"renderPsoPerProgram\":"
            << metalInventory.cacheLimitRenderPsoPerProgram << ","
            << "\"gsPassThroughPsoPerProgram\":"
@@ -3646,6 +4381,8 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << metalInventory.cacheEvictionsTranslatedDrawMSLSlots << ","
            << "\"translatedSampleMaskSlots\":"
            << metalInventory.cacheEvictionsTranslatedSampleMaskSlots << ","
+           << "\"renderPsoGlobal\":"
+           << metalInventory.cacheEvictionsRenderPsoGlobal << ","
            << "\"renderPso\":" << metalInventory.cacheEvictionsRenderPso << ","
            << "\"gsPassThroughPso\":"
            << metalInventory.cacheEvictionsGsPassThroughPso << ","
@@ -3664,6 +4401,12 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << metalInventory.cacheLiveTranslatedSampleMaskSlots << ","
            << "\"translatedDrawPlans\":"
            << metalInventory.cacheLiveTranslatedDrawPlans << ","
+           << "\"translatedDrawPlanBuckets\":"
+           << metalInventory.cacheLiveTranslatedDrawPlanBuckets << ","
+           << "\"translatedDrawPlanApproxBytes\":"
+           << metalInventory.cacheLiveTranslatedDrawPlanApproxBytes << ","
+           << "\"renderPsoTotal\":"
+           << metalInventory.cacheLiveRenderPsoTotal << ","
            << "\"renderPso\":" << metalInventory.cacheLiveRenderPso << ","
            << "\"gsPassThroughPso\":"
            << metalInventory.cacheLiveGsPassThroughPso << ","
@@ -3673,7 +4416,61 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << metalInventory.cacheLiveVsTfComputePso << ","
            << "\"gsVsComputePso\":"
            << metalInventory.cacheLiveGsVsComputePso
-           << "}"
+           << "},"
+           << "\"highWater\":{"
+           << "\"renderPsoTotal\":"
+           << metalInventory.cacheHighWaterRenderPsoTotal
+           << "},"
+           << "\"topRenderPsoPrograms\":{"
+           << "\"limit\":" << metalInventory.renderPsoProgramHotspotLimit << ","
+           << "\"rows\":" << metalInventory.renderPsoProgramHotspotRows << ","
+           << "\"truncated\":"
+           << metalInventory.renderPsoProgramHotspotsTruncated << ","
+           << "\"programs\":[";
+    for (std::size_t i = 0;
+         i < metalInventory.topRenderPsoPrograms.size(); ++i) {
+        if (i != 0) {
+            stream << ",";
+        }
+        const auto& row = metalInventory.topRenderPsoPrograms[i];
+        stream << "{"
+               << "\"program\":" << row.program << ","
+               << "\"renderPsoLive\":" << row.renderPsoLive << ","
+               << "\"renderPsoHighWater\":" << row.renderPsoHighWater << ","
+               << "\"renderPsoHits\":" << row.renderPsoHits << ","
+               << "\"renderPsoMisses\":" << row.renderPsoMisses << ","
+               << "\"renderPsoEvictions\":" << row.renderPsoEvictions << ","
+               << "\"renderPsoGlobalEvictions\":"
+               << row.renderPsoGlobalEvictions << ","
+               << "\"renderPsoLastUseMin\":" << row.renderPsoLastUseMin << ","
+               << "\"renderPsoLastUseMax\":" << row.renderPsoLastUseMax << ","
+               << "\"renderPsoScalarMirrorPresent\":"
+               << row.renderPsoScalarMirrorPresent << ","
+               << "\"gsPassThroughPsoLive\":"
+               << row.gsPassThroughPsoLive << ","
+               << "\"gsPassThroughPsoHighWater\":"
+               << row.gsPassThroughPsoHighWater << ","
+               << "\"gsPassThroughPsoHits\":"
+               << row.gsPassThroughPsoHits << ","
+               << "\"gsPassThroughPsoMisses\":"
+               << row.gsPassThroughPsoMisses << ","
+               << "\"gsPassThroughPsoEvictions\":"
+               << row.gsPassThroughPsoEvictions << ","
+               << "\"gsPassThroughPsoGlobalEvictions\":"
+               << row.gsPassThroughPsoGlobalEvictions << ","
+               << "\"gsPassThroughPsoLastUseMin\":"
+               << row.gsPassThroughPsoLastUseMin << ","
+               << "\"gsPassThroughPsoLastUseMax\":"
+               << row.gsPassThroughPsoLastUseMax << ","
+               << "\"gsPassThroughPsoScalarMirrorPresent\":"
+               << row.gsPassThroughPsoScalarMirrorPresent << ","
+               << "\"vertexSourceHash\":\""
+               << jsonEscape(row.vertexSourceHash) << "\","
+               << "\"fragmentSourceHash\":\""
+               << jsonEscape(row.fragmentSourceHash) << "\""
+               << "}";
+    }
+    stream << "]}"
            << "},";
 
     // ── Shader translation log ──

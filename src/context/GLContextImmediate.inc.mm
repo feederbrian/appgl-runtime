@@ -123,7 +123,7 @@ void GLContext::endImmediate() {
     }
 
     // Ensure any pending clear is flushed before the encode.
-    impl_->frameGraph->resizeDrawable(impl_->drawableSurfaceWidth(), impl_->drawableSurfaceHeight());
+    impl_->ensureDefaultDrawableForViewportExtent();
     impl_->encodePendingWork();
 
     // Resolve the texture bound to unit 0 GL_TEXTURE_2D, if any.

@@ -64,7 +64,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     }
     // Size the drawable before flushing the clear — see glDrawArrays for the
     // rationale.
-    impl_->frameGraph->resizeDrawable(impl_->drawableSurfaceWidth(), impl_->drawableSurfaceHeight());
+    impl_->ensureDefaultDrawableForViewportExtent();
     impl_->encodePendingWork();
     drawProfile.mark(GLDrawProfileBucket::DrawablePrep);
 
@@ -636,6 +636,15 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         tdi.pipelineStateOut = &program->metalPipelineState;
         tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
         tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+        tdi.pipelineStateCacheLastUseOut =
+            &program->metalPipelineStateCacheLastUse;
+        tdi.pipelineStateCacheHighWaterOut =
+            &program->metalPipelineStateCacheHighWater;
+        tdi.pipelineStateCacheHitsOut = &program->metalPipelineStateCacheHits;
+        tdi.pipelineStateCacheMissesOut =
+            &program->metalPipelineStateCacheMisses;
+        tdi.pipelineStateCacheEvictionsOut =
+            &program->metalPipelineStateCacheEvictions;
         tdi.metalVertexFunction = program->metalVertexFunction;
         tdi.metalFragmentFunction = program->metalFragmentFunction;
         tdi.metalVertexFunctionOut = &program->metalVertexFunction;
@@ -797,6 +806,16 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     // so spring's 15×/frame blend toggle doesn't thrash
                     // the single-slot scalar cache above.
                     tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+                    tdi.pipelineStateCacheLastUseOut =
+                        &program->metalPipelineStateCacheLastUse;
+                    tdi.pipelineStateCacheHighWaterOut =
+                        &program->metalPipelineStateCacheHighWater;
+                    tdi.pipelineStateCacheHitsOut =
+                        &program->metalPipelineStateCacheHits;
+                    tdi.pipelineStateCacheMissesOut =
+                        &program->metalPipelineStateCacheMisses;
+                    tdi.pipelineStateCacheEvictionsOut =
+                        &program->metalPipelineStateCacheEvictions;
                     tdi.metalVertexFunction = program->metalVertexFunction;
                     tdi.metalFragmentFunction = program->metalFragmentFunction;
                     tdi.metalVertexFunctionOut = &program->metalVertexFunction;

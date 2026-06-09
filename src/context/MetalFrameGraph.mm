@@ -61,6 +61,30 @@ static void releaseOwnedObjCObject(id object) {
 #endif
 }
 
+static id retainOwnedObjCObject(id object) {
+#if __has_feature(objc_arc)
+    return object;
+#else
+    return [object retain];
+#endif
+}
+
+static id<MTLRenderCommandEncoder> createRetainedRenderCommandEncoder(
+    id<MTLCommandBuffer> commandBuffer,
+    MTLRenderPassDescriptor* descriptor) {
+    if (commandBuffer == nil || descriptor == nil) {
+        return nil;
+    }
+    id<MTLRenderCommandEncoder> encoder = nil;
+    @autoreleasepool {
+        encoder = [commandBuffer renderCommandEncoderWithDescriptor:descriptor];
+        if (encoder != nil) {
+            encoder = (id<MTLRenderCommandEncoder>)retainOwnedObjCObject(encoder);
+        }
+    }
+    return encoder;
+}
+
 static std::uint64_t metalAllocatedSize(id object) {
     if (object == nil || ![object respondsToSelector:@selector(allocatedSize)]) {
         return 0;
@@ -98,17 +122,29 @@ private:
     id object_ = nil;
 };
 
-static std::size_t mslLibraryCacheLimit() {
-    const char* raw = std::getenv("APPGL_MSL_LIBRARY_CACHE_LIMIT");
+static std::size_t envSizeLimit(const char* name, std::size_t fallback) {
+    const char* raw = std::getenv(name);
     if (raw == nullptr || raw[0] == '\0') {
-        return 512;
+        return fallback;
     }
     char* end = nullptr;
     const unsigned long long parsed = std::strtoull(raw, &end, 10);
     if (end == raw) {
-        return 512;
+        return fallback;
     }
     return static_cast<std::size_t>(parsed);
+}
+
+static std::size_t mslLibraryCacheLimit() {
+    return envSizeLimit("APPGL_MSL_LIBRARY_CACHE_LIMIT", 512);
+}
+
+static std::size_t renderPsoCacheLimitPerProgram() {
+    return envSizeLimit("APPGL_RENDER_PSO_CACHE_LIMIT_PER_PROGRAM", 0);
+}
+
+static std::size_t translatedDrawMSLSlotCacheLimit() {
+    return envSizeLimit("APPGL_TRANSLATED_DRAW_MSL_SLOT_CACHE_LIMIT", 0);
 }
 
 static std::uint64_t stableMslSourceHash(const std::string& source) {
@@ -3786,6 +3822,7 @@ struct MetalFrameGraph::Impl {
         // next launch gets pre-compiled GPU binaries.
         savePipelineArchive();
         releaseDefaultFramebufferTextures();
+        clearDummyColorTextureCache();
         readbackSourceTexture = nil;
         for (id<MTLBuffer>& buffer : ringBuffers) {
             releaseOwnedMetalResource(buffer);
@@ -3840,8 +3877,8 @@ struct MetalFrameGraph::Impl {
     }
 
     void releaseDefaultFramebufferTextures() {
-        releaseOwnedTexture(depthStencilTexture);
-        releaseOwnedTexture(offscreenColorTexture);
+        releaseDepthStencilTexture();
+        releaseOffscreenColorTexture();
     }
 
     void releaseOwnedTexture(id<MTLTexture>& texture) {
@@ -3861,6 +3898,146 @@ struct MetalFrameGraph::Impl {
         }
         releaseOwnedTexture(slot);
         slot = replacement;
+    }
+
+    id<MTLTexture> newDepthStencilTexture(MTLTextureDescriptor* descriptor) {
+        id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
+        if (texture != nil) {
+            ++depthStencilTextureRebuilds;
+            depthStencilTextureAllocatedBytes += metalAllocatedSize(texture);
+        }
+        return texture;
+    }
+
+    id<MTLTexture> newOffscreenColorTexture(MTLTextureDescriptor* descriptor) {
+        id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
+        if (texture != nil) {
+            ++offscreenColorTextureRebuilds;
+            offscreenColorTextureAllocatedBytes += metalAllocatedSize(texture);
+        }
+        return texture;
+    }
+
+    id<MTLTexture> newDummyColorTexture(MTLTextureDescriptor* descriptor) {
+        id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
+        if (texture != nil) {
+            ++dummyColorTextureAllocations;
+            dummyColorTextureAllocatedBytes += metalAllocatedSize(texture);
+        }
+        return texture;
+    }
+
+    struct DummyColorTextureCacheKey {
+        MTLPixelFormat pixelFormat = MTLPixelFormatInvalid;
+        NSUInteger width = 0;
+        NSUInteger height = 0;
+        NSUInteger sampleCount = 1;
+        NSUInteger arrayLength = 1;
+        MTLTextureType textureType = MTLTextureType2D;
+        MTLStorageMode storageMode = MTLStorageModePrivate;
+        MTLTextureUsage usage = MTLTextureUsageRenderTarget;
+
+        bool operator==(const DummyColorTextureCacheKey& other) const {
+            return pixelFormat == other.pixelFormat &&
+                width == other.width &&
+                height == other.height &&
+                sampleCount == other.sampleCount &&
+                arrayLength == other.arrayLength &&
+                textureType == other.textureType &&
+                storageMode == other.storageMode &&
+                usage == other.usage;
+        }
+    };
+
+    struct DummyColorTextureCacheKeyHash {
+        std::size_t operator()(const DummyColorTextureCacheKey& key) const {
+            std::size_t seed = static_cast<std::size_t>(key.pixelFormat);
+            auto mix = [&](std::size_t value) {
+                seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
+            };
+            mix(static_cast<std::size_t>(key.width));
+            mix(static_cast<std::size_t>(key.height));
+            mix(static_cast<std::size_t>(key.sampleCount));
+            mix(static_cast<std::size_t>(key.arrayLength));
+            mix(static_cast<std::size_t>(key.textureType));
+            mix(static_cast<std::size_t>(key.storageMode));
+            mix(static_cast<std::size_t>(key.usage));
+            return seed;
+        }
+    };
+
+    struct DummyColorTextureCacheBucket {
+        std::vector<id<MTLTexture>> textures;
+        std::size_t next = 0;
+    };
+
+    DummyColorTextureCacheKey dummyColorTextureCacheKey(
+        MTLTextureDescriptor* descriptor) const {
+        DummyColorTextureCacheKey key;
+        key.pixelFormat = descriptor.pixelFormat;
+        key.width = descriptor.width;
+        key.height = descriptor.height;
+        key.sampleCount = std::max<NSUInteger>(descriptor.sampleCount, 1);
+        key.arrayLength = std::max<NSUInteger>(descriptor.arrayLength, 1);
+        key.textureType = descriptor.textureType;
+        key.storageMode = descriptor.storageMode;
+        key.usage = descriptor.usage;
+        return key;
+    }
+
+    id<MTLTexture> reusableDummyColorTexture(MTLTextureDescriptor* descriptor) {
+        static constexpr std::size_t kReusableDummyTexturesPerShape = 3;
+        const DummyColorTextureCacheKey key = dummyColorTextureCacheKey(descriptor);
+        auto& bucket = dummyColorTextureCache[key];
+        if (bucket.textures.size() < kReusableDummyTexturesPerShape) {
+            id<MTLTexture> texture = newDummyColorTexture(descriptor);
+            if (texture == nil) {
+                return nil;
+            }
+            bucket.textures.push_back(texture);
+            return texture;
+        }
+        id<MTLTexture> texture = bucket.textures[bucket.next];
+        bucket.next = (bucket.next + 1u) % bucket.textures.size();
+        ++dummyColorTextureCacheHits;
+        return texture;
+    }
+
+    void clearDummyColorTextureCache() {
+        for (auto& entry : dummyColorTextureCache) {
+            for (id<MTLTexture> texture : entry.second.textures) {
+                releaseOwnedMetalResource(texture);
+            }
+        }
+        dummyColorTextureCache.clear();
+    }
+
+    void releaseDepthStencilTexture() {
+        if (depthStencilTexture != nil) {
+            ++depthStencilTextureReleases;
+        }
+        releaseOwnedTexture(depthStencilTexture);
+    }
+
+    void releaseOffscreenColorTexture() {
+        if (offscreenColorTexture != nil) {
+            ++offscreenColorTextureReleases;
+        }
+        releaseOwnedTexture(offscreenColorTexture);
+    }
+
+    void replaceDepthStencilTexture(id<MTLTexture> replacement) {
+        if (depthStencilTexture != replacement && depthStencilTexture != nil) {
+            ++depthStencilTextureReleases;
+        }
+        replaceOwnedTexture(depthStencilTexture, replacement);
+    }
+
+    void replaceOffscreenColorTexture(id<MTLTexture> replacement) {
+        if (offscreenColorTexture != replacement && offscreenColorTexture != nil) {
+            ++offscreenColorTextureReleases;
+        }
+        replaceOwnedTexture(offscreenColorTexture, replacement);
     }
 
     void replaceOwnedObjCObject(id& slot, id replacement) {
@@ -3893,9 +4070,17 @@ struct MetalFrameGraph::Impl {
     }
 
     void resize(GLsizei width, GLsizei height) {
+        ++drawableResizeCalls;
+        drawableResizeLastRequestedWidth =
+            static_cast<std::uint64_t>(width > 0 ? width : 1);
+        drawableResizeLastRequestedHeight =
+            static_cast<std::uint64_t>(height > 0 ? height : 1);
         GLsizei newW = width > 0 ? width : 1;
         GLsizei newH = height > 0 ? height : 1;
+        drawableResizeLastEffectiveWidth = static_cast<std::uint64_t>(newW);
+        drawableResizeLastEffectiveHeight = static_cast<std::uint64_t>(newH);
         if (newW == drawableWidth && newH == drawableHeight) {
+            ++drawableResizeNoops;
             return;  // No-op when size is unchanged.
         }
         flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason::Resize);
@@ -3908,7 +4093,47 @@ struct MetalFrameGraph::Impl {
         }
         endRenderPass();
         invalidateTransientState();
+        if (depthStencilTexture != nil) {
+            ++drawableResizeDepthTextureReleases;
+        }
+        if (offscreenColorTexture != nil) {
+            ++drawableResizeOffscreenTextureReleases;
+        }
         releaseDefaultFramebufferTextures();
+    }
+
+    void ensureSizeAtLeast(GLsizei width, GLsizei height) {
+        const GLsizei requestedW = width > 0 ? width : 1;
+        const GLsizei requestedH = height > 0 ? height : 1;
+        if (requestedW <= drawableWidth && requestedH <= drawableHeight) {
+            const bool requestedChanged =
+                drawableResizeLastRequestedWidth !=
+                    static_cast<std::uint64_t>(requestedW) ||
+                drawableResizeLastRequestedHeight !=
+                    static_cast<std::uint64_t>(requestedH);
+            ++drawableResizeCalls;
+            ++drawableResizeNoops;
+            ++drawableResizeGrowOnlySkips;
+            drawableResizeLastRequestedWidth =
+                static_cast<std::uint64_t>(requestedW);
+            drawableResizeLastRequestedHeight =
+                static_cast<std::uint64_t>(requestedH);
+            drawableResizeLastEffectiveWidth =
+                static_cast<std::uint64_t>(drawableWidth);
+            drawableResizeLastEffectiveHeight =
+                static_cast<std::uint64_t>(drawableHeight);
+            if (requestedChanged) {
+                flushParallelTranslatedDrawBatch(
+                    ParallelEncodeBoundaryReason::Resize);
+                headlessReadbackRGBA.clear();
+                hasHeadlessReadback = false;
+                endRenderPass();
+                invalidateTransientState();
+            }
+            return;
+        }
+        resize(std::max(requestedW, drawableWidth),
+               std::max(requestedH, drawableHeight));
     }
 
     void enableOffscreen(GLsizei width, GLsizei height) {
@@ -3946,7 +4171,7 @@ struct MetalFrameGraph::Impl {
         if (currentCommandBuffer != nil) {
             commitWithFrameSignal(currentCommandBufferLease, AppGLCommandReason::FrameCommandBuffer);
             currentCommandBuffer = nil;
-            currentDrawable = nil;
+            clearCurrentDrawable();
             pendingPresent = false;
             advanceRingBuffer();
             acquireRingSlot();  // OPT-8: acquire the next slot for this frame
@@ -3997,7 +4222,7 @@ struct MetalFrameGraph::Impl {
         pass.stencilAttachment.storeAction = MTLStoreActionStore;
         const GLenum fragmentRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
         attachFragmentShadingRateMap(pass, fragmentRate, colorTexture, 1);
-        currentRenderEncoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
+        openCurrentRenderEncoder(pass);
         activeRenderPassFragmentShadingRate = fragmentRate;
         resetCachedEncoderState();
     }
@@ -4066,11 +4291,35 @@ struct MetalFrameGraph::Impl {
         return false;
     }
 
+    bool openCurrentRenderEncoder(MTLRenderPassDescriptor* pass) {
+        currentRenderEncoder =
+            createRetainedRenderCommandEncoder(currentCommandBuffer, pass);
+        if (currentRenderEncoder != nil) {
+            ++renderEncoderOpenCalls;
+            ++renderEncoderLiveRetains;
+            renderEncoderPeakLiveRetains =
+                std::max(renderEncoderPeakLiveRetains,
+                         renderEncoderLiveRetains);
+        }
+        return currentRenderEncoder != nil;
+    }
+
+    void releaseCurrentRenderEncoder() {
+        if (currentRenderEncoder != nil) {
+            ++renderEncoderReleaseCalls;
+            if (renderEncoderLiveRetains > 0) {
+                --renderEncoderLiveRetains;
+            }
+        }
+        releaseOwnedObjCObject(currentRenderEncoder);
+        currentRenderEncoder = nil;
+    }
+
     void endCurrentRenderPassOnly() {
         if (currentRenderEncoder != nil) {
             FG_TRACE(@"endRenderPass: ending encoder %p on cmdBuf %p", currentRenderEncoder, currentCommandBuffer);
             [currentRenderEncoder endEncoding];
-            currentRenderEncoder = nil;
+            releaseCurrentRenderEncoder();
             activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
             pendingPresent = true;
         }
@@ -4101,9 +4350,7 @@ struct MetalFrameGraph::Impl {
             }
             return false;
         }
-        if (!usesOffscreenTarget && currentDrawable != nil && pendingPresent) {
-            [currentCommandBuffer presentDrawable:currentDrawable];
-        }
+        presentCurrentDrawable(currentCommandBuffer);
         commitWithFrameSignal(currentCommandBufferLease, reason);
         invalidateTransientState();
         advanceRingBuffer();
@@ -4142,12 +4389,10 @@ struct MetalFrameGraph::Impl {
         if (shouldStubCommitBeforeAbandon()) {
             return false;
         }
-        if (!usesOffscreenTarget && currentDrawable != nil && pendingPresent) {
-            [currentCommandBuffer presentDrawable:currentDrawable];
-        }
+        presentCurrentDrawable(currentCommandBuffer);
         commitWithFrameSignal(currentCommandBufferLease, reason);
         currentCommandBuffer = nil;
-        currentDrawable = nil;
+        clearCurrentDrawable();
         pendingPresent = false;
         advanceRingBuffer();
         return true;
@@ -4186,7 +4431,8 @@ struct MetalFrameGraph::Impl {
             pass.stencilAttachment.clearStencil = pendingClearStencil;
         }
 
-        id<MTLRenderCommandEncoder> encoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
+        id<MTLRenderCommandEncoder> encoder =
+            [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
         [encoder endEncoding];
         readbackSourceTexture = colorTexture;
         readbackSourceIsBGRA = colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
@@ -4281,7 +4527,8 @@ struct MetalFrameGraph::Impl {
         hasPendingClear = false;
 
         attachFragmentShadingRateMap(pass, info.fragmentShadingRate, colorTexture, 1);
-        id<MTLRenderCommandEncoder> encoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
+        id<MTLRenderCommandEncoder> encoder =
+            [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
         if (encoder == nil) {
             return false;
         }
@@ -4435,8 +4682,6 @@ struct MetalFrameGraph::Impl {
             return false;
         }
 
-        ensureDrawableResources();
-
         // RC-A02: when an FBO render target is provided, use it instead of
         // the default framebuffer texture.
         const bool isAttachmentlessFBODraw =
@@ -4451,8 +4696,10 @@ struct MetalFrameGraph::Impl {
             ? (__bridge id<MTLTexture>)info.fboColorTexture : nil;
         id<MTLTexture> fboDepthStencilTex = (info.fboDepthStencilTexture != nullptr)
             ? (__bridge id<MTLTexture>)info.fboDepthStencilTexture : nil;
+        if (!isFBODraw) {
+            ensureDrawableResources();
+        }
         id<MTLTexture> attachmentlessColorTex = nil;
-        ScopedOwnedObjCObject attachmentlessColorTexRelease;
         if (isAttachmentlessFBODraw) {
             const NSUInteger fboWidth =
                 static_cast<NSUInteger>(std::max<GLsizei>(info.fboWidth, 1));
@@ -4460,37 +4707,38 @@ struct MetalFrameGraph::Impl {
                 static_cast<NSUInteger>(std::max<GLsizei>(info.fboHeight, 1));
             const NSUInteger fboLayers =
                 static_cast<NSUInteger>(std::max<std::uint32_t>(info.fboDefaultLayers, 1u));
-            MTLTextureDescriptor* dummyDesc =
-                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                                    width:fboWidth
-                                                                   height:fboHeight
-                                                                mipmapped:NO];
-            dummyDesc.storageMode = MTLStorageModePrivate;
-            dummyDesc.usage = MTLTextureUsageRenderTarget;
-            if (fboLayers > 1) {
-                dummyDesc.textureType = MTLTextureType2DArray;
-                dummyDesc.arrayLength = fboLayers;
+            @autoreleasepool {
+                MTLTextureDescriptor* dummyDesc =
+                    [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                        width:fboWidth
+                                                                       height:fboHeight
+                                                                    mipmapped:NO];
+                dummyDesc.storageMode = MTLStorageModePrivate;
+                dummyDesc.usage = MTLTextureUsageRenderTarget;
+                if (fboLayers > 1) {
+                    dummyDesc.textureType = MTLTextureType2DArray;
+                    dummyDesc.arrayLength = fboLayers;
+                }
+                attachmentlessColorTex = reusableDummyColorTexture(dummyDesc);
             }
-            attachmentlessColorTex = [device newTextureWithDescriptor:dummyDesc];
-            attachmentlessColorTexRelease.reset(attachmentlessColorTex);
             fboColorTex = attachmentlessColorTex;
         }
         id<MTLTexture> dsOnlyColorTex = nil;
-        ScopedOwnedObjCObject dsOnlyColorTexRelease;
         if (isFBODraw && fboColorTex == nil && fboDepthStencilTex != nil) {
-            MTLTextureDescriptor* dummyDesc =
-                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                                    width:fboDepthStencilTex.width
-                                                                   height:fboDepthStencilTex.height
-                                                                mipmapped:NO];
-            dummyDesc.storageMode = MTLStorageModePrivate;
-            dummyDesc.usage = MTLTextureUsageRenderTarget;
-            if (fboDepthStencilTex.sampleCount > 1) {
-                dummyDesc.textureType = MTLTextureType2DMultisample;
-                dummyDesc.sampleCount = fboDepthStencilTex.sampleCount;
+            @autoreleasepool {
+                MTLTextureDescriptor* dummyDesc =
+                    [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                        width:fboDepthStencilTex.width
+                                                                       height:fboDepthStencilTex.height
+                                                                    mipmapped:NO];
+                dummyDesc.storageMode = MTLStorageModePrivate;
+                dummyDesc.usage = MTLTextureUsageRenderTarget;
+                if (fboDepthStencilTex.sampleCount > 1) {
+                    dummyDesc.textureType = MTLTextureType2DMultisample;
+                    dummyDesc.sampleCount = fboDepthStencilTex.sampleCount;
+                }
+                dsOnlyColorTex = reusableDummyColorTexture(dummyDesc);
             }
-            dsOnlyColorTex = [device newTextureWithDescriptor:dummyDesc];
-            dsOnlyColorTexRelease.reset(dsOnlyColorTex);
             fboColorTex = dsOnlyColorTex;
         }
         if (profileDraw) {
@@ -4745,6 +4993,13 @@ struct MetalFrameGraph::Impl {
             auto it = info.pipelineStateCacheOut->find(pipelineCacheKey);
             if (it != info.pipelineStateCacheOut->end() && it->second != nullptr) {
                 pipelineState = (__bridge id<MTLRenderPipelineState>)(it->second);
+                if (info.pipelineStateCacheLastUseOut != nullptr) {
+                    (*info.pipelineStateCacheLastUseOut)[pipelineCacheKey] =
+                        ++renderPsoCacheClock;
+                }
+                if (info.pipelineStateCacheHitsOut != nullptr) {
+                    ++(*info.pipelineStateCacheHitsOut);
+                }
                 ++pipelineCacheHits;
             }
         }
@@ -4938,7 +5193,8 @@ struct MetalFrameGraph::Impl {
             // Build vertex descriptor from reflection data.  Primary vertex
             // attributes (buffer 0) are per-vertex.  Extra vertex buffers
             // (buffer 1+) may use per-instance stepping (glVertexAttribDivisor).
-            MTLVertexDescriptor* vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
+            MTLVertexDescriptor* vertexDescriptor = [[MTLVertexDescriptor alloc] init];
+            ScopedOwnedObjCObject vertexDescriptorRelease(vertexDescriptor);
             std::array<bool, 31> vertexDescriptorBufferUsed{};
 
             // Helper: map shader-reflected scalar type to MTLVertexFormat.
@@ -5522,6 +5778,9 @@ struct MetalFrameGraph::Impl {
                 profilePipelineBuildUs += drawProfileElapsedUs(buildStart, buildEnd);
             }
             ++pipelineCacheMisses;
+            if (info.pipelineStateCacheMissesOut != nullptr) {
+                ++(*info.pipelineStateCacheMissesOut);
+            }
 
             // Phase 8X Group 4d follow-up¹⁴ — insert into the
             // map-based cache first. The old scalar
@@ -5533,6 +5792,17 @@ struct MetalFrameGraph::Impl {
             if (info.pipelineStateCacheOut != nullptr) {
                 void* retained = (void*)CFBridgingRetain(pipelineState);
                 auto inserted = info.pipelineStateCacheOut->emplace(pipelineCacheKey, retained);
+                if (info.pipelineStateCacheLastUseOut != nullptr) {
+                    (*info.pipelineStateCacheLastUseOut)[pipelineCacheKey] =
+                        ++renderPsoCacheClock;
+                }
+                if (info.pipelineStateCacheHighWaterOut != nullptr) {
+                    *info.pipelineStateCacheHighWaterOut =
+                        std::max<std::uint64_t>(
+                            *info.pipelineStateCacheHighWaterOut,
+                            static_cast<std::uint64_t>(
+                                info.pipelineStateCacheOut->size()));
+                }
                 if (!inserted.second) {
                     // Key collided with an existing entry — release the
                     // old one and swap in the new. Shouldn't happen in
@@ -5543,6 +5813,7 @@ struct MetalFrameGraph::Impl {
                     }
                     inserted.first->second = retained;
                 }
+                evictRenderPsoCacheIfNeeded(info);
             }
             if (info.pipelineStateOut != nullptr) {
                 // The scalar slot is a secondary mirror of the most
@@ -5632,7 +5903,7 @@ struct MetalFrameGraph::Impl {
         // texture.  If a default-framebuffer encoder is open, close it first.
         if (isFBODraw && currentRenderEncoder != nil) {
             [currentRenderEncoder endEncoding];
-            currentRenderEncoder = nil;
+            releaseCurrentRenderEncoder();
             activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
             resetCachedEncoderState();
         }
@@ -5685,14 +5956,21 @@ struct MetalFrameGraph::Impl {
                       (unsigned long)depthStencilTexture.height,
                       (unsigned long)colorTexture.width,
                       (unsigned long)colorTexture.height);
-                MTLTextureDescriptor* dd = [MTLTextureDescriptor
-                    texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
-                                                width:colorTexture.width
-                                               height:colorTexture.height
-                                            mipmapped:NO];
-                dd.storageMode = MTLStorageModePrivate;
-                dd.usage = MTLTextureUsageRenderTarget;
-                replaceOwnedTexture(depthStencilTexture, [device newTextureWithDescriptor:dd]);
+                id<MTLTexture> replacement = nil;
+                @autoreleasepool {
+                    MTLTextureDescriptor* dd = [MTLTextureDescriptor
+                        texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                                    width:colorTexture.width
+                                                   height:colorTexture.height
+                                                mipmapped:NO];
+                    dd.storageMode = MTLStorageModePrivate;
+                    dd.usage = MTLTextureUsageRenderTarget;
+                    replacement = newDepthStencilTexture(dd);
+                }
+                if (replacement != nil) {
+                    ++depthStencilRebuildsFromColorSizeMismatch;
+                }
+                replaceDepthStencilTexture(replacement);
                 passDepthStencil = depthStencilTexture;
                 drawableWidth = static_cast<GLsizei>(colorTexture.width);
                 drawableHeight = static_cast<GLsizei>(colorTexture.height);
@@ -5717,18 +5995,25 @@ struct MetalFrameGraph::Impl {
                     APPGL_LOG(PIPELINE, @"[FG] depth/color sample-count MISMATCH: depth=%lu color=%lu — rebuilding depth with matching MS",
                           (unsigned long)passDepthStencil.sampleCount,
                           (unsigned long)colorTexture.sampleCount);
-                    MTLTextureDescriptor* dd = [MTLTextureDescriptor
-                        texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
-                                                    width:colorTexture.width
-                                                   height:colorTexture.height
-                                                mipmapped:NO];
-                    dd.storageMode = MTLStorageModePrivate;
-                    dd.usage = MTLTextureUsageRenderTarget;
-                    if (colorTexture.sampleCount > 1) {
-                        dd.textureType = MTLTextureType2DMultisample;
-                        dd.sampleCount = colorTexture.sampleCount;
+                    id<MTLTexture> replacement = nil;
+                    @autoreleasepool {
+                        MTLTextureDescriptor* dd = [MTLTextureDescriptor
+                            texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                                        width:colorTexture.width
+                                                       height:colorTexture.height
+                                                    mipmapped:NO];
+                        dd.storageMode = MTLStorageModePrivate;
+                        dd.usage = MTLTextureUsageRenderTarget;
+                        if (colorTexture.sampleCount > 1) {
+                            dd.textureType = MTLTextureType2DMultisample;
+                            dd.sampleCount = colorTexture.sampleCount;
+                        }
+                        replacement = newDepthStencilTexture(dd);
                     }
-                    replaceOwnedTexture(depthStencilTexture, [device newTextureWithDescriptor:dd]);
+                    if (replacement != nil) {
+                        ++depthStencilRebuildsFromSampleMismatch;
+                    }
+                    replaceDepthStencilTexture(replacement);
                     passDepthStencil = depthStencilTexture;
                 } else {
                     APPGL_LOG(PIPELINE, @"[FG] FBO depth/color sample-count MISMATCH: depth=%lu color=%lu — dropping depth",
@@ -5906,8 +6191,7 @@ struct MetalFrameGraph::Impl {
             traceDepthLoadAction = pass.depthAttachment.loadAction;
             traceStencilLoadAction = pass.stencilAttachment.loadAction;
             traceRenderTargetArrayLength = pass.renderTargetArrayLength;
-            currentRenderEncoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
-            if (currentRenderEncoder == nil) {
+            if (!openCurrentRenderEncoder(pass)) {
                 return false;
             }
             traceOpenedRenderEncoder = true;
@@ -7668,7 +7952,7 @@ struct MetalFrameGraph::Impl {
             profileDraw ? drawProfileNow() : DrawProfileTimePoint{};
         if (isFBODraw) {
             [currentRenderEncoder endEncoding];
-            currentRenderEncoder = nil;
+            releaseCurrentRenderEncoder();
             activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
             resetCachedEncoderState();
         }
@@ -8567,34 +8851,46 @@ struct MetalFrameGraph::Impl {
         if (depthStencilTexture != nil &&
             (depthStencilTexture.width != colorTexture.width ||
              depthStencilTexture.height != colorTexture.height)) {
-            MTLTextureDescriptor* dd = [MTLTextureDescriptor
-                texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
-                                            width:colorTexture.width
-                                           height:colorTexture.height
-                                        mipmapped:NO];
-            dd.storageMode = MTLStorageModePrivate;
-            dd.usage = MTLTextureUsageRenderTarget;
-            replaceOwnedTexture(depthStencilTexture,
-                                [device newTextureWithDescriptor:dd]);
+            id<MTLTexture> replacement = nil;
+            @autoreleasepool {
+                MTLTextureDescriptor* dd = [MTLTextureDescriptor
+                    texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                                width:colorTexture.width
+                                               height:colorTexture.height
+                                            mipmapped:NO];
+                dd.storageMode = MTLStorageModePrivate;
+                dd.usage = MTLTextureUsageRenderTarget;
+                replacement = newDepthStencilTexture(dd);
+            }
+            if (replacement != nil) {
+                ++depthStencilRebuildsFromColorSizeMismatch;
+            }
+            replaceDepthStencilTexture(replacement);
             passDepthStencil = depthStencilTexture;
             drawableWidth = static_cast<GLsizei>(colorTexture.width);
             drawableHeight = static_cast<GLsizei>(colorTexture.height);
         }
         if (colorTexture != nil && passDepthStencil != nil &&
             colorTexture.sampleCount != passDepthStencil.sampleCount) {
-            MTLTextureDescriptor* dd = [MTLTextureDescriptor
-                texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
-                                            width:colorTexture.width
-                                           height:colorTexture.height
-                                        mipmapped:NO];
-            dd.storageMode = MTLStorageModePrivate;
-            dd.usage = MTLTextureUsageRenderTarget;
-            if (colorTexture.sampleCount > 1) {
-                dd.textureType = MTLTextureType2DMultisample;
-                dd.sampleCount = colorTexture.sampleCount;
+            id<MTLTexture> replacement = nil;
+            @autoreleasepool {
+                MTLTextureDescriptor* dd = [MTLTextureDescriptor
+                    texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                                width:colorTexture.width
+                                               height:colorTexture.height
+                                            mipmapped:NO];
+                dd.storageMode = MTLStorageModePrivate;
+                dd.usage = MTLTextureUsageRenderTarget;
+                if (colorTexture.sampleCount > 1) {
+                    dd.textureType = MTLTextureType2DMultisample;
+                    dd.sampleCount = colorTexture.sampleCount;
+                }
+                replacement = newDepthStencilTexture(dd);
             }
-            replaceOwnedTexture(depthStencilTexture,
-                                [device newTextureWithDescriptor:dd]);
+            if (replacement != nil) {
+                ++depthStencilRebuildsFromSampleMismatch;
+            }
+            replaceDepthStencilTexture(replacement);
             passDepthStencil = depthStencilTexture;
         }
 
@@ -8662,9 +8958,7 @@ struct MetalFrameGraph::Impl {
                                             passDepthStencilOut)) {
             return false;
         }
-        currentRenderEncoder =
-            [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
-        if (currentRenderEncoder == nil) {
+        if (!openCurrentRenderEncoder(pass)) {
             return false;
         }
         hasPendingClear = false;
@@ -9794,7 +10088,7 @@ struct MetalFrameGraph::Impl {
 
         if (currentRenderEncoder != nil) {
             [currentRenderEncoder endEncoding];
-            currentRenderEncoder = nil;
+            releaseCurrentRenderEncoder();
             activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
             resetCachedEncoderState();
         }
@@ -9811,9 +10105,7 @@ struct MetalFrameGraph::Impl {
             return false;
         }
 
-        currentRenderEncoder =
-            [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
-        if (currentRenderEncoder == nil) {
+        if (!openCurrentRenderEncoder(pass)) {
             return false;
         }
         hasPendingClear = false;
@@ -9839,7 +10131,7 @@ struct MetalFrameGraph::Impl {
             }
         }
         [currentRenderEncoder endEncoding];
-        currentRenderEncoder = nil;
+        releaseCurrentRenderEncoder();
         activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
         resetCachedEncoderState();
         pendingPresent = true;
@@ -12304,7 +12596,7 @@ fragment float4 appgl_immediate_textured_fs(
         // encoders open on the same command buffer.
         if (currentRenderEncoder != nil) {
             [currentRenderEncoder endEncoding];
-            currentRenderEncoder = nil;
+            releaseCurrentRenderEncoder();
             activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
             resetCachedEncoderState();
         }
@@ -12312,9 +12604,7 @@ fragment float4 appgl_immediate_textured_fs(
             if (currentCommandBuffer == nil) {
                 return true;
             }
-            if (!usesOffscreenTarget && currentDrawable != nil && pendingPresent) {
-                [currentCommandBuffer presentDrawable:currentDrawable];
-            }
+            presentCurrentDrawable(currentCommandBuffer);
             const bool completed =
                 currentCommandBufferLease.commitAndWait(AppGLCommandReason::LayeredClearDrainCurrent);
             if (ringSlotAcquired) {
@@ -12322,7 +12612,7 @@ fragment float4 appgl_immediate_textured_fs(
                 advanceRingBuffer();
             }
             currentCommandBuffer = nil;
-            currentDrawable = nil;
+            clearCurrentDrawable();
             pendingPresent = false;
             resetCachedEncoderState();
             return completed;
@@ -12647,20 +12937,22 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             fallbackDepth
         };
 
-        MTLTextureDescriptor* dummyDesc =
-            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                               width:tex.width
-                                                              height:tex.height
-                                                           mipmapped:NO];
-        dummyDesc.textureType = MTLTextureType2DMultisample;
-        dummyDesc.sampleCount = tex.sampleCount;
-        dummyDesc.storageMode = MTLStorageModePrivate;
-        dummyDesc.usage = MTLTextureUsageRenderTarget;
-        id<MTLTexture> dummyColor = [device newTextureWithDescriptor:dummyDesc];
+        id<MTLTexture> dummyColor = nil;
+        @autoreleasepool {
+            MTLTextureDescriptor* dummyDesc =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                   width:tex.width
+                                                                  height:tex.height
+                                                               mipmapped:NO];
+            dummyDesc.textureType = MTLTextureType2DMultisample;
+            dummyDesc.sampleCount = tex.sampleCount;
+            dummyDesc.storageMode = MTLStorageModePrivate;
+            dummyDesc.usage = MTLTextureUsageRenderTarget;
+            dummyColor = reusableDummyColorTexture(dummyDesc);
+        }
         if (dummyColor == nil) {
             return false;
         }
-        ScopedOwnedObjCObject dummyColorRelease(dummyColor);
 
         flushForReadback();
         auto lease = makeCommandBufferDrainingAutorelease(
@@ -12807,7 +13099,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         hasPendingClear = false;
 
         attachFragmentShadingRateMap(pass, info.fragmentShadingRate, colorTexture, 1);
-        id<MTLRenderCommandEncoder> encoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
+        id<MTLRenderCommandEncoder> encoder =
+            [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
         if (encoder == nil) {
             return false;
         }
@@ -13006,15 +13299,42 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         if (hasPendingClear) {
             flushPendingClear();
         }
+        ++presentCalls;
+        switch (reason) {
+            case AppGLCommandReason::PresentFromFlush:
+                ++presentFromFlushCalls;
+                break;
+            case AppGLCommandReason::PresentFromSwapBuffers:
+                ++presentFromSwapBuffersCalls;
+                break;
+            default:
+                ++presentInternalCalls;
+                break;
+        }
+        if (pendingPresent) {
+            ++presentPendingTrueCalls;
+        } else {
+            ++presentPendingFalseCalls;
+        }
+        if (currentCommandBuffer != nil) {
+            ++presentCommandBufferPresentCalls;
+        } else {
+            ++presentCommandBufferNilCalls;
+        }
         if (!pendingPresent || currentCommandBuffer == nil) {
+            ++presentNoWorkReturns;
             return;
         }
         // OPT-8: async commit — the completion handler signals the frame
         // semaphore, allowing the CPU to encode the next frame while the GPU
         // processes this one.  Replaces the old waitUntilCompleted which
         // serialised CPU and GPU completely for offscreen targets.
+        ++presentCommitAttempts;
         if (!commitCurrentAsync(reason)) {
+            ++presentCommitFailures;
             attributionScope.markFailed();
+        } else {
+            ++presentCommitSuccesses;
         }
     }
 
@@ -13224,9 +13544,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             return true;
         }
 
-        if (!usesOffscreenTarget && currentDrawable != nil && pendingPresent) {
-            [currentCommandBuffer presentDrawable:currentDrawable];
-        }
+        presentCurrentDrawable(currentCommandBuffer);
         if (!currentCommandBufferLease.commitAndWait(reason)) {
             if (diagnostic != nullptr) {
                 *diagnostic = "prior command buffer failed or timed out";
@@ -13238,7 +13556,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             advanceRingBuffer();
         }
         currentCommandBuffer = nil;
-        currentDrawable = nil;
+        clearCurrentDrawable();
         pendingPresent = false;
         resetCachedEncoderState();
 
@@ -15635,7 +15953,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         }
         currentCommandBuffer = nil;
         if (isDefaultTarget) {
-            currentDrawable = nil;
+            clearCurrentDrawable();
             pendingPresent = false;
         }
         resetCachedEncoderState();
@@ -15850,7 +16168,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         // this branch.
         if (currentRenderEncoder != nil) {
             [currentRenderEncoder endEncoding];
-            currentRenderEncoder = nil;
+            releaseCurrentRenderEncoder();
             activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
         }
         auto renderLease = makeCommandBuffer(AppGLCommandReason::MeshDraw);
@@ -16649,10 +16967,156 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 inventory.ringBufferBytes += metalAllocatedSize(buffer);
             }
         };
+        auto snapshotTexture = [](id<MTLTexture> texture,
+                                  std::uint64_t& bytes,
+                                  std::uint64_t& width,
+                                  std::uint64_t& height,
+                                  std::uint64_t& sampleCount,
+                                  std::uint64_t& pixelFormat) {
+            if (texture == nil) {
+                return;
+            }
+            bytes = metalAllocatedSize(texture);
+            width = static_cast<std::uint64_t>(texture.width);
+            height = static_cast<std::uint64_t>(texture.height);
+            sampleCount = static_cast<std::uint64_t>(texture.sampleCount);
+            pixelFormat = static_cast<std::uint64_t>(texture.pixelFormat);
+        };
 
         addTexture(depthStencilTexture);
         addTexture(offscreenColorTexture);
         addDrawable(currentDrawable);
+        inventory.drawableAcquireCalls = drawableAcquireCalls;
+        inventory.drawableAcquireHits = drawableAcquireHits;
+        inventory.drawableAcquireSuccesses = drawableAcquireSuccesses;
+        inventory.drawableAcquireFailures = drawableAcquireFailures;
+        inventory.drawablePresentCalls = drawablePresentCalls;
+        inventory.presentCalls = presentCalls;
+        inventory.presentFromFlushCalls = presentFromFlushCalls;
+        inventory.presentFromSwapBuffersCalls = presentFromSwapBuffersCalls;
+        inventory.presentInternalCalls = presentInternalCalls;
+        inventory.presentPendingTrueCalls = presentPendingTrueCalls;
+        inventory.presentPendingFalseCalls = presentPendingFalseCalls;
+        inventory.presentCommandBufferPresentCalls =
+            presentCommandBufferPresentCalls;
+        inventory.presentCommandBufferNilCalls =
+            presentCommandBufferNilCalls;
+        inventory.presentNoWorkReturns = presentNoWorkReturns;
+        inventory.presentCommitAttempts = presentCommitAttempts;
+        inventory.presentCommitSuccesses = presentCommitSuccesses;
+        inventory.presentCommitFailures = presentCommitFailures;
+        inventory.drawableNilAfterPresent = drawableNilAfterPresent;
+        inventory.drawableResizeCalls = drawableResizeCalls;
+        inventory.drawableResizeNoops = drawableResizeNoops;
+        inventory.drawableResizeGrowOnlySkips =
+            drawableResizeGrowOnlySkips;
+        inventory.drawableResizeDepthTextureReleases =
+            drawableResizeDepthTextureReleases;
+        inventory.drawableResizeOffscreenTextureReleases =
+            drawableResizeOffscreenTextureReleases;
+        inventory.drawableResizeLastRequestedWidth =
+            drawableResizeLastRequestedWidth;
+        inventory.drawableResizeLastRequestedHeight =
+            drawableResizeLastRequestedHeight;
+        inventory.drawableResizeLastEffectiveWidth =
+            drawableResizeLastEffectiveWidth;
+        inventory.drawableResizeLastEffectiveHeight =
+            drawableResizeLastEffectiveHeight;
+        inventory.drawableRetainCalls = drawableRetainCalls;
+        inventory.drawableReleaseCalls = drawableReleaseCalls;
+        inventory.drawableLiveRetains = drawableLiveRetains;
+        inventory.drawablePeakLiveRetains = drawablePeakLiveRetains;
+        inventory.renderEncoderOpenCalls = renderEncoderOpenCalls;
+        inventory.renderEncoderReleaseCalls = renderEncoderReleaseCalls;
+        inventory.renderEncoderLiveRetains = renderEncoderLiveRetains;
+        inventory.renderEncoderPeakLiveRetains = renderEncoderPeakLiveRetains;
+        inventory.currentDrawablePresent = currentDrawable != nil ? 1 : 0;
+        if (currentDrawable != nil && currentDrawable.texture != nil) {
+            id<MTLTexture> drawableTexture = currentDrawable.texture;
+            inventory.currentDrawableTextureBytes =
+                metalAllocatedSize(drawableTexture);
+            inventory.currentDrawableWidth =
+                static_cast<std::uint64_t>(drawableTexture.width);
+            inventory.currentDrawableHeight =
+                static_cast<std::uint64_t>(drawableTexture.height);
+            inventory.currentDrawablePixelFormat =
+                static_cast<std::uint64_t>(drawableTexture.pixelFormat);
+            inventory.currentDrawableStorageMode =
+                static_cast<std::uint64_t>(drawableTexture.storageMode);
+            inventory.currentDrawableUsage =
+                static_cast<std::uint64_t>(drawableTexture.usage);
+            inventory.currentDrawableSampleCount =
+                static_cast<std::uint64_t>(drawableTexture.sampleCount);
+        }
+        inventory.observedDrawableTextures =
+            static_cast<std::uint64_t>(observedDrawableTextures.size());
+        inventory.observedDrawableTexturePeak =
+            static_cast<std::uint64_t>(observedDrawableTextures.size());
+        inventory.observedDrawableTextureBytes = observedDrawableTextureBytes;
+        inventory.observedDrawableTextureBytesPeak =
+            observedDrawableTextureBytesPeak;
+        inventory.observedDrawableTextureLimit =
+            static_cast<std::uint64_t>(kObservedDrawableTextureLimit);
+        inventory.observedDrawableTextureTruncated =
+            observedDrawableTextureTruncated;
+        if (layer != nil) {
+            inventory.layerDrawableWidth =
+                static_cast<std::uint64_t>(layer.drawableSize.width);
+            inventory.layerDrawableHeight =
+                static_cast<std::uint64_t>(layer.drawableSize.height);
+            inventory.layerPixelFormat =
+                static_cast<std::uint64_t>(layer.pixelFormat);
+            inventory.layerFramebufferOnly = layer.framebufferOnly ? 1 : 0;
+            if ([layer respondsToSelector:@selector(maximumDrawableCount)]) {
+                inventory.layerMaximumDrawableCount =
+                    static_cast<std::uint64_t>(layer.maximumDrawableCount);
+                inventory.layerMaximumDrawableCountAvailable = 1;
+            }
+            if ([layer respondsToSelector:@selector(displaySyncEnabled)]) {
+                inventory.layerDisplaySyncEnabled =
+                    layer.displaySyncEnabled ? 1 : 0;
+                inventory.layerDisplaySyncEnabledAvailable = 1;
+            }
+        }
+        snapshotTexture(depthStencilTexture,
+                        inventory.depthStencilTextureBytes,
+                        inventory.depthStencilTextureWidth,
+                        inventory.depthStencilTextureHeight,
+                        inventory.depthStencilTextureSampleCount,
+                        inventory.depthStencilTexturePixelFormat);
+        inventory.depthStencilRebuilds = depthStencilTextureRebuilds;
+        inventory.depthStencilReleases = depthStencilTextureReleases;
+        inventory.depthStencilAllocatedBytes = depthStencilTextureAllocatedBytes;
+        inventory.depthStencilRebuildsFromEnsure =
+            depthStencilRebuildsFromEnsure;
+        inventory.depthStencilRebuildsFromColorSizeMismatch =
+            depthStencilRebuildsFromColorSizeMismatch;
+        inventory.depthStencilRebuildsFromSampleMismatch =
+            depthStencilRebuildsFromSampleMismatch;
+        snapshotTexture(offscreenColorTexture,
+                        inventory.offscreenColorTextureBytes,
+                        inventory.offscreenColorTextureWidth,
+                        inventory.offscreenColorTextureHeight,
+                        inventory.offscreenColorTextureSampleCount,
+                        inventory.offscreenColorTexturePixelFormat);
+        inventory.offscreenColorRebuilds = offscreenColorTextureRebuilds;
+        inventory.offscreenColorReleases = offscreenColorTextureReleases;
+        inventory.offscreenColorAllocatedBytes =
+            offscreenColorTextureAllocatedBytes;
+        inventory.dummyColorTextureAllocations = dummyColorTextureAllocations;
+        inventory.dummyColorTextureAllocatedBytes =
+            dummyColorTextureAllocatedBytes;
+        inventory.dummyColorTextureCacheHits = dummyColorTextureCacheHits;
+        for (const auto& entry : dummyColorTextureCache) {
+            for (id<MTLTexture> texture : entry.second.textures) {
+                if (texture == nil) {
+                    continue;
+                }
+                ++inventory.dummyColorTextureCacheTextures;
+                inventory.dummyColorTextureCacheBytes += metalAllocatedSize(texture);
+                addTexture(texture);
+            }
+        }
         for (id<MTLBuffer> buffer : ringBuffers) {
             addBuffer(buffer);
             addRingBuffer(buffer);
@@ -16708,10 +17172,17 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         inventory.mslLibraryCacheMisses = mslLibraryCacheMisses;
         inventory.mslLibrarySourceNSStringCreations =
             mslLibrarySourceNSStringCreations;
+        inventory.translatedDrawMSLSlotCacheLimit =
+            translatedDrawMSLSlotCacheLimit();
+        inventory.translatedDrawMSLSlotCacheEvictions =
+            translatedDrawMSLSlotCacheEvictions;
         inventory.translatedDrawMSLSlotCacheEntries =
             static_cast<std::uint64_t>(translatedDrawMSLSlotCache.size());
         inventory.translatedDrawSampleMaskSlotCacheEntries =
             static_cast<std::uint64_t>(translatedDrawSampleMaskSlotCache.size());
+        inventory.renderPsoCacheLimitPerProgram =
+            renderPsoCacheLimitPerProgram();
+        inventory.renderPsoCacheEvictions = renderPsoCacheEvictions;
         return inventory;
     }
 
@@ -16742,13 +17213,20 @@ private:
             || depthStencilTexture.height != static_cast<NSUInteger>(drawableHeight);
 
         if (needsDepthRebuild) {
-            MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
-                                                                                                   width:static_cast<NSUInteger>(drawableWidth)
-                                                                                                  height:static_cast<NSUInteger>(drawableHeight)
-                                                                                               mipmapped:NO];
-            descriptor.storageMode = MTLStorageModePrivate;
-            descriptor.usage = MTLTextureUsageRenderTarget;
-            replaceOwnedTexture(depthStencilTexture, [device newTextureWithDescriptor:descriptor]);
+            id<MTLTexture> replacement = nil;
+            @autoreleasepool {
+                MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                                                                                      width:static_cast<NSUInteger>(drawableWidth)
+                                                                                                     height:static_cast<NSUInteger>(drawableHeight)
+                                                                                                  mipmapped:NO];
+                descriptor.storageMode = MTLStorageModePrivate;
+                descriptor.usage = MTLTextureUsageRenderTarget;
+                replacement = newDepthStencilTexture(descriptor);
+            }
+            if (replacement != nil) {
+                ++depthStencilRebuildsFromEnsure;
+            }
+            replaceDepthStencilTexture(replacement);
         }
 
         const bool needsOffscreenRebuild =
@@ -16757,13 +17235,17 @@ private:
                 || offscreenColorTexture.width != static_cast<NSUInteger>(drawableWidth)
                 || offscreenColorTexture.height != static_cast<NSUInteger>(drawableHeight));
         if (needsOffscreenRebuild) {
-            MTLTextureDescriptor* colorDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                                                                       width:static_cast<NSUInteger>(drawableWidth)
-                                                                                                      height:static_cast<NSUInteger>(drawableHeight)
-                                                                                                   mipmapped:NO];
-            colorDescriptor.storageMode = MTLStorageModePrivate;
-            colorDescriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-            replaceOwnedTexture(offscreenColorTexture, [device newTextureWithDescriptor:colorDescriptor]);
+            id<MTLTexture> replacement = nil;
+            @autoreleasepool {
+                MTLTextureDescriptor* colorDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                                          width:static_cast<NSUInteger>(drawableWidth)
+                                                                                                         height:static_cast<NSUInteger>(drawableHeight)
+                                                                                                      mipmapped:NO];
+                colorDescriptor.storageMode = MTLStorageModePrivate;
+                colorDescriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+                replacement = newOffscreenColorTexture(colorDescriptor);
+            }
+            replaceOffscreenColorTexture(replacement);
         }
     }
 
@@ -16880,7 +17362,7 @@ private:
         endRenderPass();
         currentCommandBufferLease.abandon("invalidate-transient-state");
         currentCommandBuffer = nil;
-        currentDrawable = nil;
+        clearCurrentDrawable();
         pendingPresent = false;
         hasPendingClear = false;
         resetCachedEncoderState();
@@ -16899,6 +17381,7 @@ private:
     id<MTLRenderCommandEncoder> currentRenderEncoder = nil;
     GLenum activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
     id<CAMetalDrawable> currentDrawable = nil;
+    bool currentDrawablePresented = false;
     id<MTLLibrary> solidColorLibrary = nil;
     id<MTLFunction> solidColorVertexFn = nil;
     id<MTLFunction> solidColorFragmentFn = nil;
@@ -16971,6 +17454,62 @@ private:
     bool readbackSourceIsBGRA = false;
     bool hasHeadlessReadback = false;
 
+    static constexpr std::size_t kObservedDrawableTextureLimit = 128;
+    std::uint64_t drawableAcquireCalls = 0;
+    std::uint64_t drawableAcquireHits = 0;
+    std::uint64_t drawableAcquireSuccesses = 0;
+    std::uint64_t drawableAcquireFailures = 0;
+    std::uint64_t drawablePresentCalls = 0;
+    std::uint64_t presentCalls = 0;
+    std::uint64_t presentFromFlushCalls = 0;
+    std::uint64_t presentFromSwapBuffersCalls = 0;
+    std::uint64_t presentInternalCalls = 0;
+    std::uint64_t presentPendingTrueCalls = 0;
+    std::uint64_t presentPendingFalseCalls = 0;
+    std::uint64_t presentCommandBufferPresentCalls = 0;
+    std::uint64_t presentCommandBufferNilCalls = 0;
+    std::uint64_t presentNoWorkReturns = 0;
+    std::uint64_t presentCommitAttempts = 0;
+    std::uint64_t presentCommitSuccesses = 0;
+    std::uint64_t presentCommitFailures = 0;
+    std::uint64_t drawableNilAfterPresent = 0;
+    std::uint64_t drawableResizeCalls = 0;
+    std::uint64_t drawableResizeNoops = 0;
+    std::uint64_t drawableResizeGrowOnlySkips = 0;
+    std::uint64_t drawableResizeDepthTextureReleases = 0;
+    std::uint64_t drawableResizeOffscreenTextureReleases = 0;
+    std::uint64_t drawableResizeLastRequestedWidth = 0;
+    std::uint64_t drawableResizeLastRequestedHeight = 0;
+    std::uint64_t drawableResizeLastEffectiveWidth = 0;
+    std::uint64_t drawableResizeLastEffectiveHeight = 0;
+    std::uint64_t drawableRetainCalls = 0;
+    std::uint64_t drawableReleaseCalls = 0;
+    std::uint64_t drawableLiveRetains = 0;
+    std::uint64_t drawablePeakLiveRetains = 0;
+    std::uint64_t renderEncoderOpenCalls = 0;
+    std::uint64_t renderEncoderReleaseCalls = 0;
+    std::uint64_t renderEncoderLiveRetains = 0;
+    std::uint64_t renderEncoderPeakLiveRetains = 0;
+    std::uint64_t observedDrawableTextureBytes = 0;
+    std::uint64_t observedDrawableTextureBytesPeak = 0;
+    std::uint64_t observedDrawableTextureTruncated = 0;
+    std::unordered_set<std::uintptr_t> observedDrawableTextures;
+    std::uint64_t depthStencilTextureRebuilds = 0;
+    std::uint64_t depthStencilTextureReleases = 0;
+    std::uint64_t depthStencilTextureAllocatedBytes = 0;
+    std::uint64_t depthStencilRebuildsFromEnsure = 0;
+    std::uint64_t depthStencilRebuildsFromColorSizeMismatch = 0;
+    std::uint64_t depthStencilRebuildsFromSampleMismatch = 0;
+    std::uint64_t offscreenColorTextureRebuilds = 0;
+    std::uint64_t offscreenColorTextureReleases = 0;
+    std::uint64_t offscreenColorTextureAllocatedBytes = 0;
+    std::uint64_t dummyColorTextureAllocations = 0;
+    std::uint64_t dummyColorTextureAllocatedBytes = 0;
+    std::uint64_t dummyColorTextureCacheHits = 0;
+    std::unordered_map<DummyColorTextureCacheKey,
+                       DummyColorTextureCacheBucket,
+                       DummyColorTextureCacheKeyHash> dummyColorTextureCache;
+
     // Deferred clear state (OPT-4). Stored by encodeClear(), consumed by
     // the next render pass that opens in encodeTranslatedDraw or
     // encodeSolidColorDraw. Flushed standalone by copyPixels/present
@@ -17015,8 +17554,14 @@ private:
     // repeated draws skip rescanning the same source for helper buffers.
     std::unordered_map<std::uint64_t, TranslatedDrawMSLSlots>
         translatedDrawMSLSlotCache;
+    std::unordered_map<std::uint64_t, std::uint64_t>
+        translatedDrawMSLSlotCacheLastUse;
+    std::uint64_t translatedDrawMSLSlotCacheClock = 0;
+    std::uint64_t translatedDrawMSLSlotCacheEvictions = 0;
     std::unordered_map<std::uint64_t, NSInteger>
         translatedDrawSampleMaskSlotCache;
+    std::uint64_t renderPsoCacheClock = 0;
+    std::uint64_t renderPsoCacheEvictions = 0;
 
     // ADV-4: reusable render pass descriptor. Avoids allocating a fresh
     // autoreleased ObjC object at each render-pass setup site.
@@ -17068,11 +17613,155 @@ private:
 
     // ADV-7: consolidated drawable acquisition.  Every render path
     // calls this instead of inlining `[layer nextDrawable]`.
+    void observeDrawableTexture(id<MTLTexture> texture) {
+        if (texture == nil) {
+            return;
+        }
+        const auto key =
+            reinterpret_cast<std::uintptr_t>((__bridge void*)texture);
+        const std::uint64_t bytes = metalAllocatedSize(texture);
+        if (observedDrawableTextures.find(key) != observedDrawableTextures.end()) {
+            return;
+        }
+        if (observedDrawableTextures.size() >= kObservedDrawableTextureLimit) {
+            ++observedDrawableTextureTruncated;
+            return;
+        }
+        observedDrawableTextures.insert(key);
+        observedDrawableTextureBytes += bytes;
+        observedDrawableTextureBytesPeak =
+            std::max(observedDrawableTextureBytesPeak,
+                     observedDrawableTextureBytes);
+    }
+
     bool acquireDrawableIfNeeded() {
         if (usesOffscreenTarget) return true;
-        if (currentDrawable != nil) return true;
-        currentDrawable = [layer nextDrawable];
-        return currentDrawable != nil;
+        ++drawableAcquireCalls;
+        if (currentDrawable != nil) {
+            ++drawableAcquireHits;
+            observeDrawableTexture(currentDrawable.texture);
+            return true;
+        }
+        @autoreleasepool {
+            currentDrawable = retainOwnedObjCObject([layer nextDrawable]);
+        }
+        currentDrawablePresented = false;
+        if (currentDrawable != nil) {
+            ++drawableRetainCalls;
+            ++drawableLiveRetains;
+            drawablePeakLiveRetains =
+                std::max(drawablePeakLiveRetains, drawableLiveRetains);
+            ++drawableAcquireSuccesses;
+            observeDrawableTexture(currentDrawable.texture);
+            return true;
+        }
+        ++drawableAcquireFailures;
+        return false;
+    }
+
+    void presentCurrentDrawable(id<MTLCommandBuffer> commandBuffer) {
+        if (commandBuffer == nil || usesOffscreenTarget || currentDrawable == nil ||
+            !pendingPresent) {
+            return;
+        }
+        [commandBuffer presentDrawable:currentDrawable];
+        currentDrawablePresented = true;
+        ++drawablePresentCalls;
+        observeDrawableTexture(currentDrawable.texture);
+    }
+
+    void clearCurrentDrawable() {
+        if (currentDrawable != nil && currentDrawablePresented) {
+            ++drawableNilAfterPresent;
+        }
+        if (currentDrawable != nil) {
+            releaseOwnedObjCObject(currentDrawable);
+            ++drawableReleaseCalls;
+            if (drawableLiveRetains > 0) {
+                --drawableLiveRetains;
+            }
+        }
+        currentDrawable = nil;
+        currentDrawablePresented = false;
+    }
+
+    void evictRenderPsoCacheIfNeeded(TranslatedDrawInfo& info) {
+        const std::size_t limit = renderPsoCacheLimitPerProgram();
+        if (limit == 0 || info.pipelineStateCacheOut == nullptr) {
+            return;
+        }
+        auto& cache = *info.pipelineStateCacheOut;
+        auto* lastUse = info.pipelineStateCacheLastUseOut;
+        while (cache.size() > limit && !cache.empty()) {
+            auto evictIt = cache.end();
+            std::uint64_t oldestUse = std::numeric_limits<std::uint64_t>::max();
+            for (auto it = cache.begin(); it != cache.end(); ++it) {
+                std::uint64_t use = 0;
+                if (lastUse != nullptr) {
+                    auto useIt = lastUse->find(it->first);
+                    if (useIt != lastUse->end()) {
+                        use = useIt->second;
+                    }
+                }
+                if (evictIt == cache.end() || use < oldestUse) {
+                    oldestUse = use;
+                    evictIt = it;
+                }
+            }
+            if (evictIt == cache.end()) {
+                break;
+            }
+            void* evicted = evictIt->second;
+            if (info.pipelineStateOut != nullptr &&
+                *info.pipelineStateOut == evicted) {
+                if (*info.pipelineStateOut != nullptr) {
+                    CFRelease(*info.pipelineStateOut);
+                }
+                *info.pipelineStateOut = nullptr;
+                if (info.pipelineColorFormatOut != nullptr) {
+                    *info.pipelineColorFormatOut = 0;
+                }
+            }
+            if (evicted != nullptr) {
+                CFRelease(evicted);
+            }
+            if (lastUse != nullptr) {
+                lastUse->erase(evictIt->first);
+            }
+            cache.erase(evictIt);
+            ++renderPsoCacheEvictions;
+            if (info.pipelineStateCacheEvictionsOut != nullptr) {
+                ++(*info.pipelineStateCacheEvictionsOut);
+            }
+        }
+    }
+
+    void evictTranslatedDrawMSLSlotsIfNeeded() {
+        const std::size_t limit = translatedDrawMSLSlotCacheLimit();
+        while (limit > 0 && translatedDrawMSLSlotCache.size() > limit &&
+               !translatedDrawMSLSlotCache.empty()) {
+            auto evictIt = translatedDrawMSLSlotCache.end();
+            std::uint64_t oldestUse = std::numeric_limits<std::uint64_t>::max();
+            for (auto it = translatedDrawMSLSlotCache.begin();
+                 it != translatedDrawMSLSlotCache.end(); ++it) {
+                std::uint64_t use = 0;
+                auto useIt = translatedDrawMSLSlotCacheLastUse.find(it->first);
+                if (useIt != translatedDrawMSLSlotCacheLastUse.end()) {
+                    use = useIt->second;
+                }
+                if (evictIt == translatedDrawMSLSlotCache.end() ||
+                    use < oldestUse) {
+                    oldestUse = use;
+                    evictIt = it;
+                }
+            }
+            if (evictIt == translatedDrawMSLSlotCache.end()) {
+                break;
+            }
+            translatedDrawMSLSlotCacheLastUse.erase(evictIt->first);
+            translatedDrawMSLSlotCache.erase(evictIt);
+            ++translatedDrawMSLSlotCacheEvictions;
+        }
     }
 
     const TranslatedDrawMSLSlots& translatedDrawMSLSlots(
@@ -17081,11 +17770,16 @@ private:
         bool hasFragmentStage) {
         auto it = translatedDrawMSLSlotCache.find(pipelineCacheKey);
         if (it != translatedDrawMSLSlotCache.end()) {
+            translatedDrawMSLSlotCacheLastUse[pipelineCacheKey] =
+                ++translatedDrawMSLSlotCacheClock;
             return it->second;
         }
         auto inserted = translatedDrawMSLSlotCache.emplace(
             pipelineCacheKey,
             buildTranslatedDrawMSLSlots(info, hasFragmentStage));
+        translatedDrawMSLSlotCacheLastUse[pipelineCacheKey] =
+            ++translatedDrawMSLSlotCacheClock;
+        evictTranslatedDrawMSLSlotsIfNeeded();
         return inserted.first->second;
     }
 
@@ -18151,6 +18845,10 @@ void MetalFrameGraph::resizeDrawable(GLsizei width, GLsizei height) {
     impl_->resize(width, height);
 }
 
+void MetalFrameGraph::ensureDrawableSizeAtLeast(GLsizei width, GLsizei height) {
+    impl_->ensureSizeAtLeast(width, height);
+}
+
 void MetalFrameGraph::enableOffscreenDrawable(GLsizei width, GLsizei height) {
     impl_->enableOffscreen(width, height);
 }
@@ -18185,6 +18883,10 @@ void MetalFrameGraph::flushParallelEncodeBoundary() {
 
 void MetalFrameGraph::flushForReadback() {
     impl_->flushForReadback();
+}
+
+bool MetalFrameGraph::flushCurrentForPressure() {
+    return impl_->maybeFlushCurrentForPressure(AppGLCommandReason::PressureFlush);
 }
 
 bool MetalFrameGraph::finish() {

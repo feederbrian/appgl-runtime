@@ -44,6 +44,8 @@ enum class AppGLCommandReason : std::uint8_t {
     ImmediateModeDraw,
     FrameCommandBuffer,
     PresentPendingWork,
+    PresentFromFlush,
+    PresentFromSwapBuffers,
     EndFrame,
     FlushForReadback,
     DrainCurrentStandalone,
@@ -106,6 +108,10 @@ inline constexpr std::array<AppGLCommandReasonRecord,
          "FrameCommandBuffer", "frame-command-buffer"},
         {AppGLCommandReason::PresentPendingWork, AppGLSubmitMode::AsyncCommit, AppGLDependencyClass::Present,
          "PresentPendingWork", "frame-command-buffer"},
+        {AppGLCommandReason::PresentFromFlush, AppGLSubmitMode::AsyncCommit, AppGLDependencyClass::Present,
+         "PresentFromFlush", "frame-command-buffer"},
+        {AppGLCommandReason::PresentFromSwapBuffers, AppGLSubmitMode::AsyncCommit, AppGLDependencyClass::Present,
+         "PresentFromSwapBuffers", "frame-command-buffer"},
         {AppGLCommandReason::EndFrame, AppGLSubmitMode::AsyncCommit, AppGLDependencyClass::FrameSignal,
          "EndFrame", "frame-command-buffer"},
         {AppGLCommandReason::FlushForReadback, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::Readback,
@@ -222,8 +228,27 @@ inline const char* appGLDependencyClassName(AppGLDependencyClass dependencyClass
 struct AppGLCommandSubmissionDebugCounters {
     std::uint64_t submittedCommandBuffers = 0;
     std::uint64_t completedCommandBuffers = 0;
+    std::array<std::uint64_t, static_cast<std::size_t>(AppGLCommandReason::Count)> allocatedByReason{};
+    std::array<std::uint64_t, static_cast<std::size_t>(AppGLCommandReason::Count)> submittedByReason{};
+    std::array<std::uint64_t, static_cast<std::size_t>(AppGLCommandReason::Count)> completedByReason{};
     std::uint64_t waitReasonLogEntries = 0;
     std::uint64_t pressureFlushCount = 0;
+    std::uint64_t plainCommandBufferAllocations = 0;
+    std::uint64_t autoreleaseDrainedCommandBufferAllocations = 0;
+    std::uint64_t retainedObjectsAdopted = 0;
+    std::uint64_t retainedObjectsReleased = 0;
+    std::uint64_t retainedObjectsLive = 0;
+    std::uint64_t retainedObjectsPeakLive = 0;
+    std::uint64_t retainedObjectApproxBytesAdopted = 0;
+    std::uint64_t retainedObjectApproxBytesReleased = 0;
+    std::uint64_t retainedObjectApproxBytesLive = 0;
+    std::uint64_t retainedObjectApproxBytesPeakLive = 0;
+    std::uint64_t retainedCommandBuffersLive = 0;
+    std::uint64_t retainedCommandBuffersPeakLive = 0;
+    std::uint64_t retainedCommandBuffersReleased = 0;
+    std::uint64_t retainedReleaseCalls = 0;
+    std::uint64_t retainedReleaseObjectMaxCount = 0;
+    std::uint64_t retainedReleaseObjectMaxBytes = 0;
     std::uint32_t currentInFlight = 0;
     std::uint32_t peakInFlight = 0;
     std::uint32_t inFlightBound = 0;

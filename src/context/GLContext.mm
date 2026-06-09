@@ -35,6 +35,9 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 
+#include <mach/mach.h>
+#include <malloc/malloc.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -42,6 +45,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -50,12 +54,16 @@
 #include <initializer_list>
 #include <iterator>
 #include <limits>
+#include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include <unistd.h>
 
 #ifndef APPGL_ENABLE_DCR_SENTINEL_HOOKS
 #define APPGL_ENABLE_DCR_SENTINEL_HOOKS 0
@@ -123,6 +131,11 @@ public:
         state.mark(bits);
     }
 
+    static bool mark(GLProducerPendingState& state,
+                     const GLProducerToken& token) {
+        return state.mark(token);
+    }
+
     static void clear(GLProducerPendingState& state, std::uint32_t bits) {
         state.clear(bits);
     }
@@ -141,6 +154,9 @@ public:
 
 namespace {
 
+static int gProfileDumpSignalPipeReadFd = -1;
+static int gProfileDumpSignalPipeWriteFd = -1;
+
 bool metalTessTFEnabled() {
     return appglEnvEnabledDefaultOn("APPGL_ENABLE_METAL_TESS_TF");
 }
@@ -155,6 +171,447 @@ bool r5EvictionEnabled() {
 
 bool r8HeapSegmentationEnabled() {
     return Runtime::shared().r8HeapSegmentationEnabledCached();
+}
+
+struct ProcessMemorySnapshot {
+    std::uint64_t residentBytes = 0;
+    std::uint64_t residentAvailable = 0;
+    std::uint64_t physicalFootprintBytes = 0;
+    std::uint64_t physicalFootprintAvailable = 0;
+    std::uint64_t heapBytes = 0;
+    std::uint64_t heapAvailable = 0;
+    std::uint64_t heapBlocksInUse = 0;
+    std::uint64_t heapMaxBytesInUse = 0;
+    std::uint64_t heapAllocatedBytes = 0;
+    std::uint64_t heapAllZonesBytes = 0;
+    std::uint64_t heapAllZonesBlocksInUse = 0;
+    std::uint64_t heapAllZonesMaxBytesInUse = 0;
+    std::uint64_t heapAllZonesAllocatedBytes = 0;
+    std::uint64_t heapAllZonesCount = 0;
+    std::uint64_t heapNonDefaultZoneBytes = 0;
+    std::uint64_t heapNonDefaultZoneBlocksInUse = 0;
+    std::uint64_t heapNonDefaultZoneAllocatedBytes = 0;
+    std::uint64_t mallocZoneLimit = 0;
+    std::uint64_t mallocZoneRows = 0;
+    std::uint64_t mallocZonesTruncated = 0;
+    std::vector<GLContext::MetalResourceInventory::MallocZoneSummary>
+        topMallocZones;
+};
+
+bool processMachPortDiagnosticsEnabled() {
+    static const bool enabled =
+        appglEnvEnabledDefaultOff("APPGL_DIAG_MACH_PORTS");
+    return enabled;
+}
+
+struct ProcessMachPortSnapshot {
+    std::uint64_t enabled = 0;
+    std::uint64_t available = 0;
+    std::uint64_t kernReturn = 0;
+    std::uint64_t names = 0;
+    std::uint64_t typeNames = 0;
+    std::uint64_t typeCountMismatch = 0;
+    std::uint64_t sendNames = 0;
+    std::uint64_t receiveNames = 0;
+    std::uint64_t sendOnceNames = 0;
+    std::uint64_t portSetNames = 0;
+    std::uint64_t deadNameNames = 0;
+    std::uint64_t dnRequestNames = 0;
+    std::uint64_t spRequestNames = 0;
+    std::uint64_t spRequestDelayedNames = 0;
+    std::uint64_t guardedNames = 0;
+    std::uint64_t immovableReceiveNames = 0;
+    std::uint64_t unknownTypeNames = 0;
+    std::uint64_t unknownTypeMask = 0;
+};
+
+ProcessMachPortSnapshot sampleProcessMachPortSnapshot() {
+    ProcessMachPortSnapshot snapshot;
+    if (!processMachPortDiagnosticsEnabled()) {
+        return snapshot;
+    }
+    snapshot.enabled = 1;
+
+    mach_port_name_array_t names = nullptr;
+    mach_msg_type_number_t nameCount = 0;
+    mach_port_type_array_t types = nullptr;
+    mach_msg_type_number_t typeCount = 0;
+    const kern_return_t result =
+        mach_port_names(mach_task_self(), &names, &nameCount, &types,
+                        &typeCount);
+    snapshot.kernReturn = static_cast<std::uint64_t>(result);
+    if (result != KERN_SUCCESS) {
+        return snapshot;
+    }
+
+    snapshot.available = 1;
+    snapshot.names = static_cast<std::uint64_t>(nameCount);
+    snapshot.typeNames = static_cast<std::uint64_t>(typeCount);
+    snapshot.typeCountMismatch = nameCount != typeCount ? 1 : 0;
+    const mach_msg_type_number_t count = std::min(nameCount, typeCount);
+    for (mach_msg_type_number_t i = 0; i < count; ++i) {
+        const mach_port_type_t type = types[i];
+        mach_port_type_t knownMask = 0;
+        if ((type & MACH_PORT_TYPE_SEND) != 0) {
+            ++snapshot.sendNames;
+            knownMask |= MACH_PORT_TYPE_SEND;
+        }
+        if ((type & MACH_PORT_TYPE_RECEIVE) != 0) {
+            ++snapshot.receiveNames;
+            knownMask |= MACH_PORT_TYPE_RECEIVE;
+        }
+        if ((type & MACH_PORT_TYPE_SEND_ONCE) != 0) {
+            ++snapshot.sendOnceNames;
+            knownMask |= MACH_PORT_TYPE_SEND_ONCE;
+        }
+        if ((type & MACH_PORT_TYPE_PORT_SET) != 0) {
+            ++snapshot.portSetNames;
+            knownMask |= MACH_PORT_TYPE_PORT_SET;
+        }
+        if ((type & MACH_PORT_TYPE_DEAD_NAME) != 0) {
+            ++snapshot.deadNameNames;
+            knownMask |= MACH_PORT_TYPE_DEAD_NAME;
+        }
+        if ((type & MACH_PORT_TYPE_DNREQUEST) != 0) {
+            ++snapshot.dnRequestNames;
+            knownMask |= MACH_PORT_TYPE_DNREQUEST;
+        }
+        if ((type & MACH_PORT_TYPE_SPREQUEST) != 0) {
+            ++snapshot.spRequestNames;
+            knownMask |= MACH_PORT_TYPE_SPREQUEST;
+        }
+        if ((type & MACH_PORT_TYPE_SPREQUEST_DELAYED) != 0) {
+            ++snapshot.spRequestDelayedNames;
+            knownMask |= MACH_PORT_TYPE_SPREQUEST_DELAYED;
+        }
+#ifdef MACH_PORT_TYPE_GUARDED
+        if ((type & MACH_PORT_TYPE_GUARDED) != 0) {
+            ++snapshot.guardedNames;
+            knownMask |= MACH_PORT_TYPE_GUARDED;
+        }
+#endif
+#ifdef MACH_PORT_TYPE_IMMOVABLE_RECEIVE
+        if ((type & MACH_PORT_TYPE_IMMOVABLE_RECEIVE) != 0) {
+            ++snapshot.immovableReceiveNames;
+            knownMask |= MACH_PORT_TYPE_IMMOVABLE_RECEIVE;
+        }
+#endif
+        const mach_port_type_t unknownMask =
+            static_cast<mach_port_type_t>(type & ~knownMask);
+        if (unknownMask != 0) {
+            ++snapshot.unknownTypeNames;
+            snapshot.unknownTypeMask |=
+                static_cast<std::uint64_t>(unknownMask);
+        }
+    }
+
+    if (names != nullptr && nameCount != 0) {
+        vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(names),
+                      static_cast<vm_size_t>(
+                          nameCount * sizeof(mach_port_name_t)));
+    }
+    if (types != nullptr && typeCount != 0) {
+        vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(types),
+                      static_cast<vm_size_t>(
+                          typeCount * sizeof(mach_port_type_t)));
+    }
+    return snapshot;
+}
+
+ProcessMemorySnapshot sampleProcessMemorySnapshot() {
+    constexpr std::size_t kMallocZoneDiagnosticLimit = 16;
+    ProcessMemorySnapshot snapshot;
+    snapshot.mallocZoneLimit =
+        static_cast<std::uint64_t>(kMallocZoneDiagnosticLimit);
+    task_vm_info_data_t vmInfo{};
+    mach_msg_type_number_t vmCount = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(),
+                  TASK_VM_INFO,
+                  reinterpret_cast<task_info_t>(&vmInfo),
+                  &vmCount) == KERN_SUCCESS) {
+        snapshot.residentBytes =
+            static_cast<std::uint64_t>(vmInfo.resident_size);
+        snapshot.residentAvailable = 1;
+        snapshot.physicalFootprintBytes =
+            static_cast<std::uint64_t>(vmInfo.phys_footprint);
+        snapshot.physicalFootprintAvailable = 1;
+    } else {
+        mach_task_basic_info_data_t basicInfo{};
+        mach_msg_type_number_t basicCount = MACH_TASK_BASIC_INFO_COUNT;
+        if (task_info(mach_task_self(),
+                      MACH_TASK_BASIC_INFO,
+                      reinterpret_cast<task_info_t>(&basicInfo),
+                      &basicCount) == KERN_SUCCESS) {
+            snapshot.residentBytes =
+                static_cast<std::uint64_t>(basicInfo.resident_size);
+            snapshot.residentAvailable = 1;
+        }
+    }
+
+    malloc_statistics_t mallocStats{};
+    malloc_zone_statistics(malloc_default_zone(), &mallocStats);
+    snapshot.heapBytes = static_cast<std::uint64_t>(mallocStats.size_in_use);
+    snapshot.heapAvailable = 1;
+    snapshot.heapBlocksInUse =
+        static_cast<std::uint64_t>(mallocStats.blocks_in_use);
+    snapshot.heapMaxBytesInUse =
+        static_cast<std::uint64_t>(mallocStats.max_size_in_use);
+    snapshot.heapAllocatedBytes =
+        static_cast<std::uint64_t>(mallocStats.size_allocated);
+
+    using MallocZoneSummary =
+        GLContext::MetalResourceInventory::MallocZoneSummary;
+    std::vector<MallocZoneSummary> mallocZones;
+    auto observeMallocZone = [&](malloc_zone_t* zone, bool isDefaultZone) {
+        if (zone == nullptr) {
+            return;
+        }
+        malloc_statistics_t zoneStats{};
+        malloc_zone_statistics(zone, &zoneStats);
+        MallocZoneSummary summary;
+        const char* name = malloc_get_zone_name(zone);
+        const bool detectedDefaultZone =
+            isDefaultZone ||
+            (name != nullptr &&
+             std::strcmp(name, "DefaultMallocZone") == 0);
+        if (name != nullptr && name[0] != '\0') {
+            summary.name = name;
+        } else if (detectedDefaultZone) {
+            summary.name = "DefaultMalloc";
+        } else {
+            summary.name = "unknown";
+        }
+        summary.bytesInUse =
+            static_cast<std::uint64_t>(zoneStats.size_in_use);
+        summary.blocksInUse =
+            static_cast<std::uint64_t>(zoneStats.blocks_in_use);
+        summary.maxBytesInUse =
+            static_cast<std::uint64_t>(zoneStats.max_size_in_use);
+        summary.allocatedBytes =
+            static_cast<std::uint64_t>(zoneStats.size_allocated);
+        summary.isDefaultZone = detectedDefaultZone ? 1 : 0;
+
+        snapshot.heapAllZonesBytes += summary.bytesInUse;
+        snapshot.heapAllZonesBlocksInUse += summary.blocksInUse;
+        snapshot.heapAllZonesMaxBytesInUse += summary.maxBytesInUse;
+        snapshot.heapAllZonesAllocatedBytes += summary.allocatedBytes;
+        ++snapshot.heapAllZonesCount;
+        if (!detectedDefaultZone) {
+            snapshot.heapNonDefaultZoneBytes += summary.bytesInUse;
+            snapshot.heapNonDefaultZoneBlocksInUse += summary.blocksInUse;
+            snapshot.heapNonDefaultZoneAllocatedBytes +=
+                summary.allocatedBytes;
+        }
+        mallocZones.push_back(std::move(summary));
+    };
+
+    malloc_zone_t* defaultZone = malloc_default_zone();
+    vm_address_t* zoneAddresses = nullptr;
+    unsigned zoneCount = 0;
+    const kern_return_t zoneResult = malloc_get_all_zones(
+        mach_task_self(), nullptr, &zoneAddresses, &zoneCount);
+    if (zoneResult == KERN_SUCCESS && zoneAddresses != nullptr) {
+        for (unsigned i = 0; i < zoneCount; ++i) {
+            auto* zone =
+                reinterpret_cast<malloc_zone_t*>(zoneAddresses[i]);
+            observeMallocZone(zone, zone == defaultZone);
+        }
+    } else {
+        observeMallocZone(defaultZone, true);
+    }
+    snapshot.mallocZoneRows = snapshot.heapAllZonesCount;
+    std::sort(mallocZones.begin(), mallocZones.end(),
+              [](const MallocZoneSummary& lhs,
+                 const MallocZoneSummary& rhs) {
+                  if (lhs.bytesInUse != rhs.bytesInUse) {
+                      return lhs.bytesInUse > rhs.bytesInUse;
+                  }
+                  if (lhs.blocksInUse != rhs.blocksInUse) {
+                      return lhs.blocksInUse > rhs.blocksInUse;
+                  }
+                  return lhs.name < rhs.name;
+              });
+    if (mallocZones.size() > kMallocZoneDiagnosticLimit) {
+        snapshot.mallocZonesTruncated =
+            static_cast<std::uint64_t>(mallocZones.size() -
+                                       kMallocZoneDiagnosticLimit);
+        mallocZones.resize(kMallocZoneDiagnosticLimit);
+    }
+    snapshot.topMallocZones = std::move(mallocZones);
+    return snapshot;
+}
+
+std::uint64_t envUInt64OrDefault(const char* primaryName,
+                                 const char* aliasName,
+                                 std::uint64_t fallback) {
+    const char* raw = std::getenv(primaryName);
+    if ((raw == nullptr || raw[0] == '\0') && aliasName != nullptr) {
+        raw = std::getenv(aliasName);
+    }
+    if (raw == nullptr || raw[0] == '\0') {
+        return fallback;
+    }
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(raw, &end, 10);
+    if (end == raw) {
+        return fallback;
+    }
+    return static_cast<std::uint64_t>(parsed);
+}
+
+bool samplerGpuOrderSkipEnabled() {
+    if (appglEnvEnabledDefaultOff("APPGL_DISABLE_SAMPLER_GPU_ORDER_SKIP")) {
+        return false;
+    }
+    return appglEnvEnabledDefaultOff("APPGL_ENABLE_SAMPLER_GPU_ORDER_SKIP");
+}
+
+std::uint64_t renderPsoTotalCacheLimit() {
+    static const std::uint64_t limit = envUInt64OrDefault(
+        "APPGL_RENDER_PSO_CACHE_LIMIT_TOTAL", nullptr, 0);
+    return limit;
+}
+
+std::uint64_t samplerGpuOrderSkipPeriodicPressureFlushInterval() {
+    return envUInt64OrDefault(
+        "APPGL_SAMPLER_GPU_ORDER_SKIP_PERIODIC_PRESSURE_FLUSH",
+        nullptr,
+        256);
+}
+
+std::uint64_t samplerGpuOrderSkipPeriodicDrainInterval() {
+    return envUInt64OrDefault(
+        "APPGL_SAMPLER_GPU_ORDER_SKIP_PERIODIC_DRAIN",
+        nullptr,
+        0);
+}
+
+std::uint64_t samplerGpuOrderSkipMaxInFlight() {
+    return envUInt64OrDefault(
+        "APPGL_SAMPLER_GPU_ORDER_SKIP_MAX_INFLIGHT",
+        nullptr,
+        0);
+}
+
+std::uint64_t samplerGpuOrderSkipMaxMetalBytes() {
+    return envUInt64OrDefault(
+        "APPGL_SAMPLER_GPU_ORDER_SKIP_MAX_METAL_BYTES",
+        nullptr,
+        0);
+}
+
+bool textureShadowDropRedundantRgba8Enabled() {
+    return appglEnvEnabledDefaultOff(
+        "APPGL_TEXTURE_SHADOW_DROP_REDUNDANT_RGBA8");
+}
+
+bool textureShadowDropStaleDepth32fRgba8Enabled() {
+    return appglEnvEnabledDefaultOff(
+        "APPGL_TEXTURE_SHADOW_DROP_STALE_DEPTH32F_RGBA8");
+}
+
+bool textureShadowDropMipLevelsEnabled() {
+    return appglEnvEnabledDefaultOff(
+        "APPGL_TEXTURE_SHADOW_DROP_MIP_LEVELS");
+}
+
+bool textureShadowDropUploadedMipLevelsEnabled() {
+    return appglEnvEnabledDefaultOff(
+        "APPGL_TEXTURE_SHADOW_DROP_UPLOADED_MIP_LEVELS");
+}
+
+bool defaultDrawableGrowOnlyEnabled() {
+    return appglEnvEnabledDefaultOff(
+        "APPGL_DEFAULT_DRAWABLE_GROW_ONLY");
+}
+
+bool isRedR8TextureShadowDropShape(const GLTextureImageLevel& image) {
+    return image.defined &&
+        image.desc.internalFormat == GL_R8 &&
+        image.desc.sourceFormat == GL_RED &&
+        image.desc.sourceType == GL_UNSIGNED_BYTE &&
+        image.nativeBpp == 1 &&
+        !image.nativeData.empty();
+}
+
+bool isDepth32FTextureShadowDropShape(const GLTextureImageLevel& image) {
+    const std::size_t texelCount =
+        static_cast<std::size_t>(std::max<GLsizei>(image.desc.width, 1)) *
+        static_cast<std::size_t>(std::max<GLsizei>(image.desc.height, 1)) *
+        static_cast<std::size_t>(std::max<GLsizei>(image.desc.depth, 1));
+    return image.defined &&
+        image.desc.internalFormat == GL_DEPTH_COMPONENT32F &&
+        image.nativeBpp == sizeof(float) &&
+        image.nativeData.size() >= texelCount * sizeof(float);
+}
+
+bool isDefaultTextureSwizzle(const std::array<GLint, 4>& swizzle) {
+    return swizzle[0] == GL_RED &&
+        swizzle[1] == GL_GREEN &&
+        swizzle[2] == GL_BLUE &&
+        swizzle[3] == GL_ALPHA;
+}
+
+bool depth32FTextureShadowDropUsesSamplingProxy(const GLTextureObject& object) {
+    return object.params.depthStencilTextureMode == GL_STENCIL_INDEX ||
+        !isDefaultTextureSwizzle(object.params.swizzle);
+}
+
+bool materializeRedR8TextureShadowFromNativeData(GLTextureImageLevel& image) {
+    if (!isRedR8TextureShadowDropShape(image)) {
+        return false;
+    }
+    const std::size_t texelCount =
+        static_cast<std::size_t>(std::max<GLsizei>(image.desc.width, 1)) *
+        static_cast<std::size_t>(std::max<GLsizei>(image.desc.height, 1)) *
+        static_cast<std::size_t>(std::max<GLsizei>(image.desc.depth, 1));
+    if (image.nativeData.size() < texelCount) {
+        return false;
+    }
+    const std::size_t rgba8Bytes = texelCount * 4u;
+    if (image.rgba8.size() != rgba8Bytes) {
+        image.rgba8.assign(rgba8Bytes, 0);
+    }
+    for (std::size_t texel = 0; texel < texelCount; ++texel) {
+        const std::uint8_t r = image.nativeData[texel];
+        const std::size_t rgbaOffset = texel * 4u;
+        image.rgba8[rgbaOffset + 0u] = r;
+        image.rgba8[rgbaOffset + 1u] = 0u;
+        image.rgba8[rgbaOffset + 2u] = 0u;
+        image.rgba8[rgbaOffset + 3u] = 255u;
+    }
+    return true;
+}
+
+bool materializeDepth32FTextureShadowFromNativeData(GLTextureImageLevel& image) {
+    if (!isDepth32FTextureShadowDropShape(image)) {
+        return false;
+    }
+    const std::size_t texelCount =
+        static_cast<std::size_t>(std::max<GLsizei>(image.desc.width, 1)) *
+        static_cast<std::size_t>(std::max<GLsizei>(image.desc.height, 1)) *
+        static_cast<std::size_t>(std::max<GLsizei>(image.desc.depth, 1));
+    if (image.nativeData.size() < texelCount * sizeof(float)) {
+        return false;
+    }
+    const std::size_t rgba8Bytes = texelCount * 4u;
+    if (image.rgba8.size() != rgba8Bytes) {
+        image.rgba8.assign(rgba8Bytes, 0);
+    }
+    for (std::size_t texel = 0; texel < texelCount; ++texel) {
+        float depthValue = 0.0f;
+        std::memcpy(&depthValue,
+                    image.nativeData.data() + texel * sizeof(float),
+                    sizeof(depthValue));
+        const GLfloat clamped = std::clamp(depthValue, 0.0f, 1.0f);
+        const std::size_t rgbaOffset = texel * 4u;
+        image.rgba8[rgbaOffset + 0u] = static_cast<std::uint8_t>(
+            clamped * 255.0f + 0.5f);
+        image.rgba8[rgbaOffset + 1u] = 0u;
+        image.rgba8[rgbaOffset + 2u] = 0u;
+        image.rgba8[rgbaOffset + 3u] = 255u;
+    }
+    return true;
 }
 
 bool traceSamplerBindingsProgramMatches(const char* raw, GLuint program) {
@@ -746,6 +1203,331 @@ private:
     GLDrawDetailProfile* profile_ = nullptr;
     GLDrawDetailBucket bucket_ = GLDrawDetailBucket::Count;
     GLDrawProfileTimePoint start_{};
+};
+
+static std::size_t glProducerTokenKindIndex(
+    GLProducerTokenResourceKind kind) {
+    switch (kind) {
+        case GLProducerTokenResourceKind::Texture: return 0;
+        case GLProducerTokenResourceKind::Renderbuffer: return 1;
+        case GLProducerTokenResourceKind::Buffer: return 2;
+    }
+    return 0;
+}
+
+static const char* glProducerTokenKindName(
+    GLProducerTokenResourceKind kind) {
+    switch (kind) {
+        case GLProducerTokenResourceKind::Texture: return "texture";
+        case GLProducerTokenResourceKind::Renderbuffer: return "renderbuffer";
+        case GLProducerTokenResourceKind::Buffer: return "buffer";
+    }
+    return "unknown";
+}
+
+enum class SamplerGpuOrderSkipBlockReason {
+    None,
+    LegacyMsaa,
+    NonTexture,
+    NoToken,
+    TokenKind,
+    TokenName,
+    Ordering,
+    ProducerBits,
+};
+
+struct GLProducerTokenProfile {
+    bool enabled =
+        std::getenv("APPGL_GL_DRAW_PROFILE") != nullptr ||
+        std::getenv("APPGL_GL_PRODUCER_TOKEN_PROFILE") != nullptr;
+
+    std::uint64_t markEntries = 0;
+    std::uint64_t markSkippedZero = 0;
+    std::uint64_t tokensMarked = 0;
+    std::uint64_t tokenMergedMarks = 0;
+    std::uint64_t textureAliasMarks = 0;
+    std::uint64_t textureAliasFanout = 0;
+    std::uint64_t bufferGpuAuthoredMarks = 0;
+
+    std::uint64_t drainCalls = 0;
+    std::uint64_t drainNoops = 0;
+    std::uint64_t drainFlushes = 0;
+    std::uint64_t drainNoFrameGraph = 0;
+    std::uint64_t drainResourcesScanned = 0;
+    std::uint64_t drainPendingHits = 0;
+    std::uint64_t drainLegacyMsaaHits = 0;
+    std::uint64_t drainCompletedSkipCandidates = 0;
+    std::uint64_t drainGpuOrderedCandidates = 0;
+    std::uint64_t drainUnmodeledTokenHits = 0;
+    std::uint64_t drainResourcesCleared = 0;
+
+    std::uint64_t directDrainCalls = 0;
+    std::uint64_t directDrainNoops = 0;
+    std::uint64_t directDrainFlushes = 0;
+    std::uint64_t directDrainLegacyMsaaHits = 0;
+
+    std::uint64_t samplerReadSets = 0;
+    std::uint64_t samplerPendingReadSets = 0;
+    std::uint64_t samplerFlushCandidates = 0;
+    std::uint64_t samplerResourcesScanned = 0;
+    std::uint64_t samplerPendingHits = 0;
+    std::uint64_t samplerLegacyMsaaHits = 0;
+    std::uint64_t samplerCompletedSkipCandidates = 0;
+    std::uint64_t samplerGpuOrderedCandidates = 0;
+    std::uint64_t samplerUnmodeledTokenHits = 0;
+    std::uint64_t samplerGpuOrderSkips = 0;
+    std::uint64_t samplerGpuOrderSkipResources = 0;
+    std::uint64_t samplerGpuOrderSkipBlocked = 0;
+    std::uint64_t samplerGpuOrderSkipBlockedLegacyMsaa = 0;
+    std::uint64_t samplerGpuOrderSkipBlockedNonTexture = 0;
+    std::uint64_t samplerGpuOrderSkipBlockedNoToken = 0;
+    std::uint64_t samplerGpuOrderSkipBlockedTokenKind = 0;
+    std::uint64_t samplerGpuOrderSkipBlockedTokenName = 0;
+    std::uint64_t samplerGpuOrderSkipBlockedOrdering = 0;
+    std::uint64_t samplerGpuOrderSkipBlockedProducerBits = 0;
+    std::uint64_t samplerGpuOrderSkipPressureFlushes = 0;
+    std::uint64_t samplerGpuOrderSkipGuardedInflight = 0;
+    std::uint64_t samplerGpuOrderSkipGuardedPeriodic = 0;
+    std::uint64_t samplerGpuOrderSkipGuardedMemory = 0;
+
+    std::uint64_t translatedDrawFboWrites = 0;
+    std::uint64_t translatedDrawStorageImageWrites = 0;
+    std::uint64_t translatedDrawSsboWrites = 0;
+    std::uint64_t translatedDrawAtomicCounterWrites = 0;
+
+    std::array<std::uint64_t, 3> marksByKind{};
+    std::array<std::uint64_t, 3> drainPendingHitsByKind{};
+    std::array<std::uint64_t, 3> drainCompletedSkipCandidatesByKind{};
+    std::array<std::uint64_t, 3> drainGpuOrderedCandidatesByKind{};
+    std::array<std::uint64_t, 3> drainClearsByKind{};
+    std::array<std::uint64_t, 3> samplerPendingHitsByKind{};
+    std::array<std::uint64_t, 3> samplerCompletedSkipCandidatesByKind{};
+    std::array<std::uint64_t, 3> samplerGpuOrderedCandidatesByKind{};
+
+    void recordMark(GLProducerTokenResourceKind kind) {
+        if (!enabled) return;
+        ++tokensMarked;
+        ++marksByKind[glProducerTokenKindIndex(kind)];
+    }
+
+    void recordDrainPendingHit(GLProducerTokenResourceKind kind,
+                               bool knownCompleted,
+                               bool sameQueueOrdered,
+                               bool hasToken) {
+        if (!enabled) return;
+        const std::size_t idx = glProducerTokenKindIndex(kind);
+        ++drainPendingHits;
+        ++drainPendingHitsByKind[idx];
+        if (!hasToken) {
+            ++drainUnmodeledTokenHits;
+        }
+        if (knownCompleted) {
+            ++drainCompletedSkipCandidates;
+            ++drainCompletedSkipCandidatesByKind[idx];
+        }
+        if (sameQueueOrdered) {
+            ++drainGpuOrderedCandidates;
+            ++drainGpuOrderedCandidatesByKind[idx];
+        }
+    }
+
+    void recordSamplerPendingHit(GLProducerTokenResourceKind kind,
+                                 bool knownCompleted,
+                                 bool sameQueueOrdered,
+                                 bool hasToken) {
+        if (!enabled) return;
+        const std::size_t idx = glProducerTokenKindIndex(kind);
+        ++samplerPendingHits;
+        ++samplerPendingHitsByKind[idx];
+        if (!hasToken) {
+            ++samplerUnmodeledTokenHits;
+        }
+        if (knownCompleted) {
+            ++samplerCompletedSkipCandidates;
+            ++samplerCompletedSkipCandidatesByKind[idx];
+        }
+        if (sameQueueOrdered) {
+            ++samplerGpuOrderedCandidates;
+            ++samplerGpuOrderedCandidatesByKind[idx];
+        }
+    }
+
+    void recordClear(GLProducerTokenResourceKind kind) {
+        if (!enabled) return;
+        ++drainResourcesCleared;
+        ++drainClearsByKind[glProducerTokenKindIndex(kind)];
+    }
+
+    void recordSamplerGpuOrderSkipBlock(
+        SamplerGpuOrderSkipBlockReason reason) {
+        if (!enabled) return;
+        switch (reason) {
+            case SamplerGpuOrderSkipBlockReason::LegacyMsaa:
+                ++samplerGpuOrderSkipBlockedLegacyMsaa;
+                break;
+            case SamplerGpuOrderSkipBlockReason::NonTexture:
+                ++samplerGpuOrderSkipBlockedNonTexture;
+                break;
+            case SamplerGpuOrderSkipBlockReason::NoToken:
+                ++samplerGpuOrderSkipBlockedNoToken;
+                break;
+            case SamplerGpuOrderSkipBlockReason::TokenKind:
+                ++samplerGpuOrderSkipBlockedTokenKind;
+                break;
+            case SamplerGpuOrderSkipBlockReason::TokenName:
+                ++samplerGpuOrderSkipBlockedTokenName;
+                break;
+            case SamplerGpuOrderSkipBlockReason::Ordering:
+                ++samplerGpuOrderSkipBlockedOrdering;
+                break;
+            case SamplerGpuOrderSkipBlockReason::ProducerBits:
+                ++samplerGpuOrderSkipBlockedProducerBits;
+                break;
+            case SamplerGpuOrderSkipBlockReason::None:
+                break;
+        }
+    }
+
+    void dump(std::uint64_t tokenEpoch,
+              std::uint64_t knownCompletedEpoch) const {
+        if (!enabled) {
+            return;
+        }
+        const bool hasSamples =
+            markEntries != 0 ||
+            tokensMarked != 0 ||
+            drainCalls != 0 ||
+            directDrainCalls != 0 ||
+            samplerReadSets != 0;
+        if (!hasSamples && tokenEpoch == 0) {
+            return;
+        }
+        std::fprintf(stderr,
+            "[APPGL_GL_PRODUCER_TOKEN_PROFILE] summary "
+            "token_epoch=%llu known_completed_epoch=%llu "
+            "mark_entries=%llu mark_skipped_zero=%llu tokens_marked=%llu "
+            "token_merged_marks=%llu texture_alias_marks=%llu "
+            "texture_alias_fanout=%llu "
+            "buffer_gpu_authored_marks=%llu drain_calls=%llu "
+            "drain_noops=%llu drain_flushes=%llu drain_no_framegraph=%llu "
+            "drain_scanned=%llu drain_pending_hits=%llu "
+            "drain_legacy_msaa_hits=%llu completed_skip_candidates=%llu "
+            "gpu_ordered_candidates=%llu unmodeled_token_hits=%llu "
+            "drain_cleared=%llu direct_drain_calls=%llu "
+            "direct_drain_noops=%llu direct_drain_flushes=%llu "
+            "direct_drain_legacy_msaa_hits=%llu\n",
+            static_cast<unsigned long long>(tokenEpoch),
+            static_cast<unsigned long long>(knownCompletedEpoch),
+            static_cast<unsigned long long>(markEntries),
+            static_cast<unsigned long long>(markSkippedZero),
+            static_cast<unsigned long long>(tokensMarked),
+            static_cast<unsigned long long>(tokenMergedMarks),
+            static_cast<unsigned long long>(textureAliasMarks),
+            static_cast<unsigned long long>(textureAliasFanout),
+            static_cast<unsigned long long>(bufferGpuAuthoredMarks),
+            static_cast<unsigned long long>(drainCalls),
+            static_cast<unsigned long long>(drainNoops),
+            static_cast<unsigned long long>(drainFlushes),
+            static_cast<unsigned long long>(drainNoFrameGraph),
+            static_cast<unsigned long long>(drainResourcesScanned),
+            static_cast<unsigned long long>(drainPendingHits),
+            static_cast<unsigned long long>(drainLegacyMsaaHits),
+            static_cast<unsigned long long>(drainCompletedSkipCandidates),
+            static_cast<unsigned long long>(drainGpuOrderedCandidates),
+            static_cast<unsigned long long>(drainUnmodeledTokenHits),
+            static_cast<unsigned long long>(drainResourcesCleared),
+            static_cast<unsigned long long>(directDrainCalls),
+            static_cast<unsigned long long>(directDrainNoops),
+            static_cast<unsigned long long>(directDrainFlushes),
+            static_cast<unsigned long long>(directDrainLegacyMsaaHits));
+        std::fprintf(stderr,
+            "[APPGL_GL_PRODUCER_TOKEN_PROFILE] sampler read_sets=%llu "
+            "pending_read_sets=%llu flush_candidates=%llu scanned=%llu "
+            "pending_hits=%llu legacy_msaa_hits=%llu "
+            "completed_skip_candidates=%llu gpu_ordered_candidates=%llu "
+            "unmodeled_token_hits=%llu gpu_order_skips=%llu "
+            "gpu_order_skip_resources=%llu gpu_order_skip_blocked=%llu "
+            "gpu_order_skip_blocked_legacy_msaa=%llu "
+            "gpu_order_skip_blocked_non_texture=%llu "
+            "gpu_order_skip_blocked_no_token=%llu "
+            "gpu_order_skip_blocked_token_kind=%llu "
+            "gpu_order_skip_blocked_token_name=%llu "
+            "gpu_order_skip_blocked_ordering=%llu "
+            "gpu_order_skip_blocked_producer_bits=%llu "
+            "gpu_order_skip_pressure_flushes=%llu "
+            "gpu_order_skip_guarded_inflight=%llu "
+            "gpu_order_skip_guarded_periodic=%llu "
+            "gpu_order_skip_guarded_memory=%llu\n",
+            static_cast<unsigned long long>(samplerReadSets),
+            static_cast<unsigned long long>(samplerPendingReadSets),
+            static_cast<unsigned long long>(samplerFlushCandidates),
+            static_cast<unsigned long long>(samplerResourcesScanned),
+            static_cast<unsigned long long>(samplerPendingHits),
+            static_cast<unsigned long long>(samplerLegacyMsaaHits),
+            static_cast<unsigned long long>(samplerCompletedSkipCandidates),
+            static_cast<unsigned long long>(samplerGpuOrderedCandidates),
+            static_cast<unsigned long long>(samplerUnmodeledTokenHits),
+            static_cast<unsigned long long>(samplerGpuOrderSkips),
+            static_cast<unsigned long long>(samplerGpuOrderSkipResources),
+            static_cast<unsigned long long>(samplerGpuOrderSkipBlocked),
+            static_cast<unsigned long long>(
+                samplerGpuOrderSkipBlockedLegacyMsaa),
+            static_cast<unsigned long long>(
+                samplerGpuOrderSkipBlockedNonTexture),
+            static_cast<unsigned long long>(
+                samplerGpuOrderSkipBlockedNoToken),
+            static_cast<unsigned long long>(
+                samplerGpuOrderSkipBlockedTokenKind),
+            static_cast<unsigned long long>(
+                samplerGpuOrderSkipBlockedTokenName),
+            static_cast<unsigned long long>(
+                samplerGpuOrderSkipBlockedOrdering),
+            static_cast<unsigned long long>(
+                samplerGpuOrderSkipBlockedProducerBits),
+            static_cast<unsigned long long>(
+                samplerGpuOrderSkipPressureFlushes),
+            static_cast<unsigned long long>(
+                samplerGpuOrderSkipGuardedInflight),
+            static_cast<unsigned long long>(
+                samplerGpuOrderSkipGuardedPeriodic),
+            static_cast<unsigned long long>(
+                samplerGpuOrderSkipGuardedMemory));
+        std::fprintf(stderr,
+            "[APPGL_GL_PRODUCER_TOKEN_PROFILE] translated_draw_writes "
+            "fbo=%llu storage_image=%llu ssbo=%llu atomic_counter=%llu\n",
+            static_cast<unsigned long long>(translatedDrawFboWrites),
+            static_cast<unsigned long long>(translatedDrawStorageImageWrites),
+            static_cast<unsigned long long>(translatedDrawSsboWrites),
+            static_cast<unsigned long long>(translatedDrawAtomicCounterWrites));
+        for (GLProducerTokenResourceKind kind : {
+                 GLProducerTokenResourceKind::Texture,
+                 GLProducerTokenResourceKind::Renderbuffer,
+                 GLProducerTokenResourceKind::Buffer}) {
+            const std::size_t idx = glProducerTokenKindIndex(kind);
+            std::fprintf(stderr,
+                "[APPGL_GL_PRODUCER_TOKEN_PROFILE] resource_kind=%s "
+                "marks=%llu drain_pending_hits=%llu "
+                "drain_completed_skip_candidates=%llu "
+                "drain_gpu_ordered_candidates=%llu drain_cleared=%llu "
+                "sampler_pending_hits=%llu "
+                "sampler_completed_skip_candidates=%llu "
+                "sampler_gpu_ordered_candidates=%llu\n",
+                glProducerTokenKindName(kind),
+                static_cast<unsigned long long>(marksByKind[idx]),
+                static_cast<unsigned long long>(drainPendingHitsByKind[idx]),
+                static_cast<unsigned long long>(
+                    drainCompletedSkipCandidatesByKind[idx]),
+                static_cast<unsigned long long>(
+                    drainGpuOrderedCandidatesByKind[idx]),
+                static_cast<unsigned long long>(drainClearsByKind[idx]),
+                static_cast<unsigned long long>(samplerPendingHitsByKind[idx]),
+                static_cast<unsigned long long>(
+                    samplerCompletedSkipCandidatesByKind[idx]),
+                static_cast<unsigned long long>(
+                    samplerGpuOrderedCandidatesByKind[idx]));
+        }
+        std::fflush(stderr);
+    }
 };
 
 enum class ColdPathDiagnosticBucket : std::size_t {
@@ -4048,6 +4830,27 @@ void releaseRetainedMetalObject(void* object) {
 #endif
 }
 
+void releaseOwnedMetalObject(id object) {
+#if __has_feature(objc_arc)
+    (void)object;
+#else
+    [object release];
+#endif
+}
+
+class ScopedOwnedMetalObject {
+public:
+    explicit ScopedOwnedMetalObject(id object = nil) : object_(object) {}
+    ScopedOwnedMetalObject(const ScopedOwnedMetalObject&) = delete;
+    ScopedOwnedMetalObject& operator=(const ScopedOwnedMetalObject&) = delete;
+    ~ScopedOwnedMetalObject() {
+        releaseOwnedMetalObject(object_);
+    }
+
+private:
+    id object_ = nil;
+};
+
 id<MTLBuffer> metalBufferFromRaw(void* object) {
     if (object == nullptr) {
         return nil;
@@ -6477,11 +7280,8 @@ static constexpr std::uint64_t kSubmittedPipelineStatsQueryMask =
 
 struct GLContext::Impl {
     ~Impl() {
-        coldPathProfile.dump();
-        phase2PlanKeyProfile.dump();
-        drawPathProfile.dump();
-        serialDeferredRecordProfile.dump();
-        drawDetailProfile.dump();
+        dumpProfilesOnce();
+        unregisterProfileContext(this);
         for (auto& entry : incompleteSampledColorTextures) {
             releaseRetainedMetalObject(entry.second);
         }
@@ -6512,12 +7312,132 @@ struct GLContext::Impl {
         });
     }
 
+    void dumpProfilesOnce() {
+        bool expected = false;
+        if (!profilesDumped.compare_exchange_strong(expected, true)) {
+            return;
+        }
+        coldPathProfile.dump();
+        phase2PlanKeyProfile.dump();
+        drawPathProfile.dump();
+        producerTokenProfile.dump(producerTokenEpoch,
+                                  producerTokenKnownCompletedEpoch);
+        serialDeferredRecordProfile.dump();
+        drawDetailProfile.dump();
+    }
+
+    static bool profileDumpHandlersNeeded() {
+        return std::getenv("APPGL_GL_DRAW_PROFILE") != nullptr ||
+            std::getenv("APPGL_GL_DRAW_DETAIL_PROFILE") != nullptr ||
+            std::getenv("APPGL_GL_PRODUCER_TOKEN_PROFILE") != nullptr ||
+            std::getenv("APPGL_SERIAL_DEFERRED_RECORD_PROFILE") != nullptr ||
+            std::getenv("APPGL_7G_COLD_PATH_PROFILE") != nullptr ||
+            std::getenv("APPGL_PHASE2_PLAN_KEY_PROFILE") != nullptr;
+    }
+
+    static std::vector<Impl*>& activeProfileContexts() {
+        static auto* contexts = new std::vector<Impl*>();
+        return *contexts;
+    }
+
+    static std::mutex& activeProfileContextsMutex() {
+        static auto* mutex = new std::mutex();
+        return *mutex;
+    }
+
+    static bool& profileDumpHandlersInstalled() {
+        static bool installed = false;
+        return installed;
+    }
+
+    static void dumpActiveProfiles() {
+        std::vector<Impl*> contexts;
+        {
+            std::lock_guard<std::mutex> lock(activeProfileContextsMutex());
+            contexts = activeProfileContexts();
+        }
+        for (Impl* impl : contexts) {
+            if (impl != nullptr) {
+                impl->dumpProfilesOnce();
+            }
+        }
+        std::fflush(stderr);
+    }
+
+    static void dumpActiveProfilesAtExit() {
+        dumpActiveProfiles();
+    }
+
+    static void profileDumpSignalThreadMain() {
+        for (;;) {
+            int signalNumber = 0;
+            const ssize_t n = ::read(gProfileDumpSignalPipeReadFd,
+                                     &signalNumber,
+                                     sizeof(signalNumber));
+            if (n != static_cast<ssize_t>(sizeof(signalNumber))) {
+                continue;
+            }
+            dumpActiveProfiles();
+            std::signal(signalNumber, SIG_DFL);
+            std::raise(signalNumber);
+        }
+    }
+
+    static void profileDumpSignalHandler(int signalNumber) {
+        if (gProfileDumpSignalPipeWriteFd >= 0) {
+            const int signalToWrite = signalNumber;
+            (void)::write(gProfileDumpSignalPipeWriteFd,
+                          &signalToWrite,
+                          sizeof(signalToWrite));
+        }
+    }
+
+    static void installProfileDumpHandlersOnce() {
+        if (!profileDumpHandlersNeeded() ||
+            profileDumpHandlersInstalled()) {
+            return;
+        }
+        int fds[2] = {-1, -1};
+        if (::pipe(fds) != 0) {
+            return;
+        }
+        gProfileDumpSignalPipeReadFd = fds[0];
+        gProfileDumpSignalPipeWriteFd = fds[1];
+        std::thread(&profileDumpSignalThreadMain).detach();
+        profileDumpHandlersInstalled() = true;
+        std::atexit(&dumpActiveProfilesAtExit);
+        std::signal(SIGTERM, &profileDumpSignalHandler);
+        std::signal(SIGINT, &profileDumpSignalHandler);
+        std::signal(SIGHUP, &profileDumpSignalHandler);
+    }
+
+    static void registerProfileContext(Impl* impl) {
+        installProfileDumpHandlersOnce();
+        if (!profileDumpHandlersInstalled()) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(activeProfileContextsMutex());
+        activeProfileContexts().push_back(impl);
+    }
+
+    static void unregisterProfileContext(Impl* impl) {
+        if (!profileDumpHandlersInstalled()) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(activeProfileContextsMutex());
+        auto& contexts = activeProfileContexts();
+        contexts.erase(
+            std::remove(contexts.begin(), contexts.end(), impl),
+            contexts.end());
+    }
+
     Impl(GLContext* ownerContext,
          void* rawLayer,
          GLsizei initialWidth,
          GLsizei initialHeight,
          bool offscreen)
         : owner(ownerContext) {
+        registerProfileContext(this);
         layer = (__bridge CAMetalLayer*)rawLayer;
         appgl::diagnostics::diagnosticOptions();
         device = MTLCreateSystemDefaultDevice();
@@ -6596,6 +7516,19 @@ struct GLContext::Impl {
     using GpuResourceWriteSet = std::vector<GpuResourceAccess>;
     using GpuResourceReadSet = std::vector<GpuResourceAccess>;
 
+    static GLProducerTokenResourceKind producerTokenResourceKind(
+        GpuResourceAccess::Kind kind) {
+        switch (kind) {
+            case GpuResourceAccess::Kind::Texture:
+                return GLProducerTokenResourceKind::Texture;
+            case GpuResourceAccess::Kind::Renderbuffer:
+                return GLProducerTokenResourceKind::Renderbuffer;
+            case GpuResourceAccess::Kind::Buffer:
+                return GLProducerTokenResourceKind::Buffer;
+        }
+        return GLProducerTokenResourceKind::Texture;
+    }
+
     GLProducerPendingState* pendingStateForResource(GpuResourceAccess::Kind kind,
                                                     GLuint name) const {
         if (name == 0 || objects == nullptr) return nullptr;
@@ -6662,6 +7595,271 @@ struct GLContext::Impl {
         return names;
     }
 
+    template <typename Fn>
+    bool forEachGpuResourceReadName(const GpuResourceAccess& read,
+                                    Fn&& fn) const {
+        if (read.kind == GpuResourceAccess::Kind::Texture) {
+            return forEachTextureStorageAliasName(
+                read.name, std::forward<Fn>(fn));
+        }
+        if (read.name != 0) {
+            return fn(read.name);
+        }
+        return true;
+    }
+
+    GLProducerToken makeProducerToken(GpuResourceAccess::Kind kind,
+                                      GLuint name,
+                                      std::uint32_t bits) const {
+        GLProducerToken token;
+        token.epoch = ++producerTokenEpoch;
+        token.producerBits = bits;
+        token.resourceKind = producerTokenResourceKind(kind);
+        token.resourceName = name;
+        token.sameQueueOrdered = commandQueue != nil;
+        return token;
+    }
+
+    bool producerTokenKnownCompleted(
+        const GLProducerPendingState& state) const {
+        const GLProducerToken& token = state.token();
+        return token.completed ||
+            (token.epoch != 0 &&
+             token.epoch <= producerTokenKnownCompletedEpoch);
+    }
+
+    void recordProducerDrainWaitCompleted() const {
+        producerTokenKnownCompletedEpoch =
+            std::max(producerTokenKnownCompletedEpoch, producerTokenEpoch);
+    }
+
+    void recordProducerPendingHit(GpuResourceAccess::Kind kind,
+                                  const GLProducerPendingState& state) const {
+        if (!producerTokenProfile.enabled) {
+            return;
+        }
+        const GLProducerToken& token = state.token();
+        producerTokenProfile.recordDrainPendingHit(
+            producerTokenResourceKind(kind),
+            producerTokenKnownCompleted(state),
+            token.epoch != 0 && token.sameQueueOrdered,
+            token.epoch != 0);
+    }
+
+    void recordSamplerProducerPendingHit(
+        GpuResourceAccess::Kind kind,
+        const GLProducerPendingState& state) const {
+        if (!producerTokenProfile.enabled) {
+            return;
+        }
+        const GLProducerToken& token = state.token();
+        producerTokenProfile.recordSamplerPendingHit(
+            producerTokenResourceKind(kind),
+            producerTokenKnownCompleted(state),
+            token.epoch != 0 && token.sameQueueOrdered,
+            token.epoch != 0);
+    }
+
+    void recordProducerClear(GpuResourceAccess::Kind kind,
+                             std::uint32_t beforeBits,
+                             std::uint32_t clearBits) const {
+        if (producerTokenProfile.enabled &&
+            (beforeBits & clearBits) != 0) {
+            producerTokenProfile.recordClear(
+                producerTokenResourceKind(kind));
+        }
+    }
+
+    bool producerTokenTrackingEnabled() const {
+        return producerTokenProfile.enabled || samplerGpuOrderSkipEnabled();
+    }
+
+    void recordSamplerProducerDrainReadSet(
+        const GpuResourceReadSet& reads) const {
+        if (!producerTokenProfile.enabled) {
+            return;
+        }
+        ++producerTokenProfile.samplerReadSets;
+        bool pendingReadSet = false;
+        for (const auto& read : reads) {
+            if (read.name == 0 || read.bits == 0) continue;
+            forEachGpuResourceReadName(read, [&](GLuint name) {
+                if (name == 0) return true;
+                ++producerTokenProfile.samplerResourcesScanned;
+                const GLProducerPendingState* state =
+                    pendingStateForResource(read.kind, name);
+                if (state != nullptr && state->hasAny(read.bits)) {
+                    pendingReadSet = true;
+                    recordSamplerProducerPendingHit(read.kind, *state);
+                }
+                if (read.kind == GpuResourceAccess::Kind::Texture &&
+                    legacyMsaaSamplerFlushPending(name)) {
+                    pendingReadSet = true;
+                    ++producerTokenProfile.samplerLegacyMsaaHits;
+                }
+                return true;
+            });
+        }
+        if (pendingReadSet) {
+            ++producerTokenProfile.samplerPendingReadSets;
+            ++producerTokenProfile.samplerFlushCandidates;
+        }
+    }
+
+    bool producerTokenAllowsSamplerGpuOrderSkip(
+        GpuResourceAccess::Kind kind,
+        GLuint name,
+        std::uint32_t pendingBits,
+        const GLProducerPendingState& state,
+        SamplerGpuOrderSkipBlockReason* blockReason = nullptr) const {
+        auto block = [&](SamplerGpuOrderSkipBlockReason reason) {
+            if (blockReason != nullptr) {
+                *blockReason = reason;
+            }
+            return false;
+        };
+        if (kind != GpuResourceAccess::Kind::Texture) {
+            return block(SamplerGpuOrderSkipBlockReason::NonTexture);
+        }
+        const GLProducerToken& token = state.token();
+        if (token.epoch == 0) {
+            return block(SamplerGpuOrderSkipBlockReason::NoToken);
+        }
+        if (token.resourceKind != GLProducerTokenResourceKind::Texture) {
+            return block(SamplerGpuOrderSkipBlockReason::TokenKind);
+        }
+        if (token.resourceName != name) {
+            return block(SamplerGpuOrderSkipBlockReason::TokenName);
+        }
+        if (!token.sameQueueOrdered) {
+            return block(SamplerGpuOrderSkipBlockReason::Ordering);
+        }
+        if (token.producerBits != pendingBits) {
+            return block(SamplerGpuOrderSkipBlockReason::ProducerBits);
+        }
+        if (blockReason != nullptr) {
+            *blockReason = SamplerGpuOrderSkipBlockReason::None;
+        }
+        return true;
+    }
+
+    bool samplerReadSetCanUseGpuOrderSkip(
+        const GpuResourceReadSet& reads) const {
+        if (!samplerGpuOrderSkipEnabled() || frameGraph == nullptr) {
+            return false;
+        }
+
+        bool sawPending = false;
+        bool blocked = false;
+        SamplerGpuOrderSkipBlockReason blockReason =
+            SamplerGpuOrderSkipBlockReason::None;
+        std::uint64_t pendingResources = 0;
+        for (const auto& read : reads) {
+            if (read.name == 0 || read.bits == 0) continue;
+            forEachGpuResourceReadName(read, [&](GLuint name) {
+                if (name == 0) return true;
+                if (read.kind == GpuResourceAccess::Kind::Texture &&
+                    legacyMsaaSamplerFlushPending(name)) {
+                    sawPending = true;
+                    blocked = true;
+                    blockReason =
+                        SamplerGpuOrderSkipBlockReason::LegacyMsaa;
+                    return false;
+                }
+                const GLProducerPendingState* state =
+                    pendingStateForResource(read.kind, name);
+                if (state == nullptr) return true;
+                const std::uint32_t pendingBits = state->bits() & read.bits;
+                if (pendingBits == 0) return true;
+                sawPending = true;
+                ++pendingResources;
+                if (!producerTokenAllowsSamplerGpuOrderSkip(
+                        read.kind, name, pendingBits, *state,
+                        &blockReason)) {
+                    blocked = true;
+                    return false;
+                }
+                return true;
+            });
+            if (blocked) break;
+        }
+
+        if (!sawPending) {
+            return false;
+        }
+        if (blocked) {
+            if (producerTokenProfile.enabled) {
+                ++producerTokenProfile.samplerGpuOrderSkipBlocked;
+                producerTokenProfile.recordSamplerGpuOrderSkipBlock(
+                    blockReason);
+            }
+            return false;
+        }
+
+        ++samplerGpuOrderSkipDecisionCount;
+        const AppGLCommandSubmissionDebugCounters counters =
+            commandSubmissionDebugCounters();
+        const std::uint64_t maxInFlight =
+            samplerGpuOrderSkipMaxInFlight();
+        const bool atConfiguredInFlight =
+            maxInFlight != 0 &&
+            counters.currentInFlight >= maxInFlight;
+        const bool atPressureSoftCap =
+            counters.pressureSoftCap != 0 &&
+            counters.currentInFlight >= counters.pressureSoftCap;
+        if (atConfiguredInFlight || atPressureSoftCap) {
+            if (producerTokenProfile.enabled) {
+                ++producerTokenProfile.samplerGpuOrderSkipGuardedInflight;
+            }
+            return false;
+        }
+
+        const std::uint64_t maxMetalBytes =
+            samplerGpuOrderSkipMaxMetalBytes();
+        if (maxMetalBytes != 0 &&
+            metalDeviceCurrentAllocatedBytes(device) >= maxMetalBytes) {
+            if (producerTokenProfile.enabled) {
+                ++producerTokenProfile.samplerGpuOrderSkipGuardedMemory;
+            }
+            return false;
+        }
+
+        const std::uint64_t drainInterval =
+            samplerGpuOrderSkipPeriodicDrainInterval();
+        if (drainInterval != 0 &&
+            (samplerGpuOrderSkipDecisionCount % drainInterval) == 0) {
+            if (producerTokenProfile.enabled) {
+                ++producerTokenProfile.samplerGpuOrderSkipGuardedPeriodic;
+            }
+            return false;
+        }
+
+        const std::uint64_t pressureFlushInterval =
+            samplerGpuOrderSkipPeriodicPressureFlushInterval();
+        if (pressureFlushInterval != 0 &&
+            (samplerGpuOrderSkipDecisionCount % pressureFlushInterval) == 0 &&
+            frameGraph->flushCurrentForPressure()) {
+            if (producerTokenProfile.enabled) {
+                ++producerTokenProfile.samplerGpuOrderSkipPressureFlushes;
+            }
+        }
+
+        if (producerTokenProfile.enabled) {
+            ++producerTokenProfile.samplerGpuOrderSkips;
+            producerTokenProfile.samplerGpuOrderSkipResources +=
+                pendingResources;
+        }
+        return true;
+    }
+
+    void drainSamplerGpuProducers(const GpuResourceReadSet& reads) const {
+        recordSamplerProducerDrainReadSet(reads);
+        if (samplerReadSetCanUseGpuOrderSkip(reads)) {
+            return;
+        }
+        drainPendingGpuProducers(reads);
+    }
+
     void clearLegacyMsaaSamplerFlushIfTexture(GLuint textureName) const {
         if (textureName == 0 || objects == nullptr) return;
         if (GLTextureObject* tex = objects->textures().get(textureName)) {
@@ -6683,10 +7881,25 @@ struct GLContext::Impl {
             GLProducerPendingState* state =
                 pendingStateForResource(kind, name);
             if (state == nullptr) return;
-            GLProducerPendingAccess::mark(*state, bits);
+            if (producerTokenTrackingEnabled()) {
+                GLProducerToken token = makeProducerToken(kind, name, bits);
+                const bool mergedToken =
+                    GLProducerPendingAccess::mark(*state, token);
+                if (producerTokenProfile.enabled) {
+                    producerTokenProfile.recordMark(token.resourceKind);
+                    if (mergedToken) {
+                        ++producerTokenProfile.tokenMergedMarks;
+                    }
+                }
+            } else {
+                GLProducerPendingAccess::mark(*state, bits);
+            }
             if (kind == GpuResourceAccess::Kind::Buffer && objects != nullptr) {
                 if (GLBufferObject* buf = objects->buffers().get(name)) {
                     buf->gpuAuthoredSinceCpuWrite = true;
+                    if (producerTokenProfile.enabled) {
+                        ++producerTokenProfile.bufferGpuAuthoredMarks;
+                    }
                     if (std::getenv("APPGL_TRACE_MDI_PRODUCER")) {
                         std::fprintf(stderr,
                             "[APPGL] producer-mark buffer=%u bits=0x%08x "
@@ -6697,12 +7910,28 @@ struct GLContext::Impl {
             }
         };
         for (const auto& write : writes) {
-            if (write.name == 0 || write.bits == 0) continue;
+            if (producerTokenProfile.enabled) {
+                ++producerTokenProfile.markEntries;
+            }
+            if (write.name == 0 || write.bits == 0) {
+                if (producerTokenProfile.enabled) {
+                    ++producerTokenProfile.markSkippedZero;
+                }
+                continue;
+            }
             if (write.kind == GpuResourceAccess::Kind::Texture) {
+                std::uint64_t aliasMarks = 0;
                 forEachTextureStorageAliasName(write.name, [&](GLuint name) {
+                    ++aliasMarks;
                     markOne(write.kind, name, write.bits);
                     return true;
                 });
+                if (producerTokenProfile.enabled) {
+                    if (aliasMarks > 1) {
+                        ++producerTokenProfile.textureAliasMarks;
+                    }
+                    producerTokenProfile.textureAliasFanout += aliasMarks;
+                }
             } else {
                 markOne(write.kind, write.name, write.bits);
             }
@@ -6720,29 +7949,29 @@ struct GLContext::Impl {
 
     template <typename Reads>
     void drainPendingGpuProducersRange(const Reads& reads) const {
-        auto forEachReadName = [&](const GpuResourceAccess& read, auto&& fn) {
-            if (read.kind == GpuResourceAccess::Kind::Texture) {
-                return forEachTextureStorageAliasName(
-                    read.name, std::forward<decltype(fn)>(fn));
-            } else if (read.name != 0) {
-                return fn(read.name);
-            }
-            return true;
-        };
-
+        if (producerTokenProfile.enabled) {
+            ++producerTokenProfile.drainCalls;
+        }
         bool needsDrain = false;
         for (const auto& read : reads) {
             if (read.name == 0 || read.bits == 0) continue;
-            forEachReadName(read, [&](GLuint name) {
+            forEachGpuResourceReadName(read, [&](GLuint name) {
                 if (name == 0) return true;
+                if (producerTokenProfile.enabled) {
+                    ++producerTokenProfile.drainResourcesScanned;
+                }
                 const GLProducerPendingState* state =
                     pendingStateForResource(read.kind, name);
                 if (state != nullptr && state->hasAny(read.bits)) {
+                    recordProducerPendingHit(read.kind, *state);
                     needsDrain = true;
                     return false;
                 }
                 if (read.kind == GpuResourceAccess::Kind::Texture &&
                     legacyMsaaSamplerFlushPending(name)) {
+                    if (producerTokenProfile.enabled) {
+                        ++producerTokenProfile.drainLegacyMsaaHits;
+                    }
                     needsDrain = true;
                     return false;
                 }
@@ -6751,19 +7980,30 @@ struct GLContext::Impl {
             if (needsDrain) break;
         }
         if (!needsDrain) {
+            if (producerTokenProfile.enabled) {
+                ++producerTokenProfile.drainNoops;
+            }
             return;
         }
         if (frameGraph != nullptr) {
+            if (producerTokenProfile.enabled) {
+                ++producerTokenProfile.drainFlushes;
+            }
             frameGraph->flushForReadback();
+            recordProducerDrainWaitCompleted();
+        } else if (producerTokenProfile.enabled) {
+            ++producerTokenProfile.drainNoFrameGraph;
         }
         for (const auto& read : reads) {
             if (read.name == 0 || read.bits == 0) continue;
-            forEachReadName(read, [&](GLuint name) {
+            forEachGpuResourceReadName(read, [&](GLuint name) {
                 if (name == 0) return true;
                 GLProducerPendingState* state =
                     pendingStateForResource(read.kind, name);
                 if (state == nullptr) return true;
+                const std::uint32_t beforeBits = state->bits();
                 GLProducerPendingAccess::clear(*state, read.bits);
+                recordProducerClear(read.kind, beforeBits, read.bits);
                 if (read.kind == GpuResourceAccess::Kind::Texture) {
                     clearLegacyMsaaSamplerFlushIfTexture(name);
                 }
@@ -6783,37 +8023,86 @@ struct GLContext::Impl {
 
     void drainPendingGpuProducers(GLBufferObject& object,
                                   std::uint32_t bits = kProducerAll) const {
+        if (producerTokenProfile.enabled) {
+            ++producerTokenProfile.directDrainCalls;
+        }
         if (!object.producerPending.hasAny(bits)) {
+            if (producerTokenProfile.enabled) {
+                ++producerTokenProfile.directDrainNoops;
+            }
             return;
         }
+        recordProducerPendingHit(GpuResourceAccess::Kind::Buffer,
+                                 object.producerPending);
         if (frameGraph != nullptr) {
+            if (producerTokenProfile.enabled) {
+                ++producerTokenProfile.directDrainFlushes;
+            }
             frameGraph->flushForReadback();
+            recordProducerDrainWaitCompleted();
         }
+        const std::uint32_t beforeBits = object.producerPending.bits();
         GLProducerPendingAccess::clear(object.producerPending, bits);
+        recordProducerClear(GpuResourceAccess::Kind::Buffer, beforeBits, bits);
     }
 
     void drainPendingGpuProducers(GLTextureObject& object,
                                   std::uint32_t bits = kProducerAll) const {
+        if (producerTokenProfile.enabled) {
+            ++producerTokenProfile.directDrainCalls;
+        }
         if (!object.producerPending.hasAny(bits) &&
             !object.msaaFramebufferWriteNeedsSamplerFlush) {
+            if (producerTokenProfile.enabled) {
+                ++producerTokenProfile.directDrainNoops;
+            }
             return;
         }
-        if (frameGraph != nullptr) {
-            frameGraph->flushForReadback();
+        if (object.producerPending.hasAny(bits)) {
+            recordProducerPendingHit(GpuResourceAccess::Kind::Texture,
+                                     object.producerPending);
         }
+        if (object.msaaFramebufferWriteNeedsSamplerFlush &&
+            producerTokenProfile.enabled) {
+            ++producerTokenProfile.directDrainLegacyMsaaHits;
+        }
+        if (frameGraph != nullptr) {
+            if (producerTokenProfile.enabled) {
+                ++producerTokenProfile.directDrainFlushes;
+            }
+            frameGraph->flushForReadback();
+            recordProducerDrainWaitCompleted();
+        }
+        const std::uint32_t beforeBits = object.producerPending.bits();
         GLProducerPendingAccess::clear(object.producerPending, bits);
+        recordProducerClear(GpuResourceAccess::Kind::Texture, beforeBits, bits);
         object.msaaFramebufferWriteNeedsSamplerFlush = false;
     }
 
     void drainPendingGpuProducers(GLRenderbufferObject& object,
                                   std::uint32_t bits = kProducerAll) const {
+        if (producerTokenProfile.enabled) {
+            ++producerTokenProfile.directDrainCalls;
+        }
         if (!object.producerPending.hasAny(bits)) {
+            if (producerTokenProfile.enabled) {
+                ++producerTokenProfile.directDrainNoops;
+            }
             return;
         }
+        recordProducerPendingHit(GpuResourceAccess::Kind::Renderbuffer,
+                                 object.producerPending);
         if (frameGraph != nullptr) {
+            if (producerTokenProfile.enabled) {
+                ++producerTokenProfile.directDrainFlushes;
+            }
             frameGraph->flushForReadback();
+            recordProducerDrainWaitCompleted();
         }
+        const std::uint32_t beforeBits = object.producerPending.bits();
         GLProducerPendingAccess::clear(object.producerPending, bits);
+        recordProducerClear(
+            GpuResourceAccess::Kind::Renderbuffer, beforeBits, bits);
     }
 
     void clearAllPendingGpuProducers(GLBufferObject& object) const {
@@ -6827,6 +8116,50 @@ struct GLContext::Impl {
 
     void clearAllPendingGpuProducers(GLRenderbufferObject& object) const {
         GLProducerPendingAccess::clearAll(object.producerPending);
+    }
+
+    GLTextureImageLevel* framebufferAttachmentImage(
+        GLTextureObject& texture,
+        const GLFramebufferAttachment& attachment) const {
+        if (attachment.level < 0) {
+            return nullptr;
+        }
+        if (texture.target == GL_TEXTURE_CUBE_MAP) {
+            const GLsizei face =
+                textureFramebufferLayerIndex(texture, attachment);
+            if (face < 0 || face >= 6) {
+                return nullptr;
+            }
+            auto& faceLevels =
+                texture.cubeFaceLevels[static_cast<std::size_t>(face)];
+            const auto it = faceLevels.find(attachment.level);
+            return it != faceLevels.end() ? &it->second : nullptr;
+        }
+        const auto it = texture.levels.find(attachment.level);
+        return it != texture.levels.end() ? &it->second : nullptr;
+    }
+
+    void maybeDropStaleDepth32FRgba8ShadowForAttachment(
+        GLTextureObject& texture,
+        const GLFramebufferAttachment& attachment) const {
+        if (!textureShadowDropStaleDepth32fRgba8Enabled() ||
+            texture.viewSourceTexture != 0 ||
+            texture.sparseTexture ||
+            texture.imageAtomicBufferDirtyToTexture ||
+            texture.colorShadowAuthoritative ||
+            texture.depthStencilShadowAuthoritative ||
+            texture.metalSamplingProxy != nullptr ||
+            depth32FTextureShadowDropUsesSamplingProxy(texture)) {
+            return;
+        }
+        GLTextureImageLevel* image =
+            framebufferAttachmentImage(texture, attachment);
+        if (image == nullptr ||
+            !isDepth32FTextureShadowDropShape(*image) ||
+            image->rgba8.empty()) {
+            return;
+        }
+        std::vector<std::uint8_t>().swap(image->rgba8);
     }
 
     void appendAttachmentRead(GpuResourceReadSet& reads,
@@ -6910,6 +8243,8 @@ struct GLContext::Impl {
                 texture->colorShadowAuthoritative = false;
             } else {
                 texture->depthStencilShadowAuthoritative = false;
+                maybeDropStaleDepth32FRgba8ShadowForAttachment(
+                    *texture, attachment);
             }
         }
         for (const auto& kv : fbo->attachments) {
@@ -7450,12 +8785,24 @@ struct GLContext::Impl {
         releaseRetainedMetalObject(object.metalPipelineState);
         object.metalPipelineState = nullptr;
         releaseMap(object.metalPipelineStateCache);
+        object.metalPipelineStateCacheLastUse.clear();
+        object.metalPipelineStateCacheHighWater = 0;
+        object.metalPipelineStateCacheHits = 0;
+        object.metalPipelineStateCacheMisses = 0;
+        object.metalPipelineStateCacheEvictions = 0;
+        object.metalPipelineStateCacheGlobalEvictions = 0;
         object.metalPipelineColorFormat = 0;
         translatedDrawPlanCache.clear();
         translatedDrawPlanKeyMemo.invalidate();
         releaseRetainedMetalObject(object.gsPassThroughPipelineState);
         object.gsPassThroughPipelineState = nullptr;
         releaseMap(object.gsPassThroughPipelineStateCache);
+        object.gsPassThroughPipelineStateCacheLastUse.clear();
+        object.gsPassThroughPipelineStateCacheHighWater = 0;
+        object.gsPassThroughPipelineStateCacheHits = 0;
+        object.gsPassThroughPipelineStateCacheMisses = 0;
+        object.gsPassThroughPipelineStateCacheEvictions = 0;
+        object.gsPassThroughPipelineStateCacheGlobalEvictions = 0;
         object.gsPassThroughPipelineColorFormat = 0;
         releaseRetainedMetalObject(object.gsPassThroughVertexFunction);
         object.gsPassThroughVertexFunction = nullptr;
@@ -9180,6 +10527,329 @@ struct GLContext::Impl {
         return true;
     }
 
+    enum class TextureMipShadowMaterializeConsumer {
+        GetTextureImage,
+        GetTextureSubImage,
+        CopyImageSubData,
+        TexSubImage,
+        ClearTex,
+        GenerateMipmap,
+        UploadRebuild,
+    };
+
+    void recordTextureMipShadowMaterializeConsumer(
+        TextureMipShadowMaterializeConsumer consumer) {
+        auto& summary = textureMipShadowEviction;
+        switch (consumer) {
+            case TextureMipShadowMaterializeConsumer::GetTextureImage:
+                ++summary.materializeGetTextureImageCalls;
+                break;
+            case TextureMipShadowMaterializeConsumer::GetTextureSubImage:
+                ++summary.materializeGetTextureSubImageCalls;
+                break;
+            case TextureMipShadowMaterializeConsumer::CopyImageSubData:
+                ++summary.materializeCopyImageSubDataCalls;
+                break;
+            case TextureMipShadowMaterializeConsumer::TexSubImage:
+                ++summary.materializeTexSubImageCalls;
+                break;
+            case TextureMipShadowMaterializeConsumer::ClearTex:
+                ++summary.materializeClearTexCalls;
+                break;
+            case TextureMipShadowMaterializeConsumer::GenerateMipmap:
+                ++summary.materializeGenerateMipmapCalls;
+                break;
+            case TextureMipShadowMaterializeConsumer::UploadRebuild:
+                ++summary.materializeUploadRebuildCalls;
+                break;
+        }
+    }
+
+    GLuint textureNameForObject(const GLTextureObject& object,
+                                GLuint knownName = 0) const {
+        if (knownName != 0 || objects == nullptr) {
+            return knownName;
+        }
+        GLuint foundName = 0;
+        objects->textures().forEach([&](GLuint name, GLTextureObject& stored) {
+            if (foundName == 0 && &stored == &object) {
+                foundName = name;
+            }
+        });
+        return foundName;
+    }
+
+    bool hasDependentTextureView(GLuint textureName,
+                                 const GLTextureObject& object) const {
+        if (objects == nullptr) {
+            return false;
+        }
+        const GLuint resolvedName = textureNameForObject(object, textureName);
+        if (resolvedName == 0) {
+            return false;
+        }
+        bool found = false;
+        objects->textures().forEach([&](GLuint, GLTextureObject& candidate) {
+            if (&candidate != &object &&
+                candidate.viewSourceTexture == resolvedName) {
+                found = true;
+            }
+        });
+        return found;
+    }
+
+    static bool mipShadowEvictionTargetSupported(GLenum target) {
+        return target == GL_TEXTURE_2D || target == GL_TEXTURE_2D_ARRAY;
+    }
+
+    static bool mipShadowEvictionFormatSupported(const GLTextureImageLevel& image,
+                                                 MTLPixelFormat pixelFormat) {
+        if (pixelFormat == MTLPixelFormatR8Unorm &&
+            image.nativeBpp == 1 &&
+            !image.nativeData.empty()) {
+            return true;
+        }
+        const bool rgba8Metal =
+            pixelFormat == MTLPixelFormatRGBA8Unorm ||
+            pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB;
+        return rgba8Metal && !image.rgba8.empty() && image.nativeData.empty();
+    }
+
+    bool materializeTextureMipShadowFromMetal(
+        GLTextureObject& object,
+        GLint level,
+        TextureMipShadowMaterializeConsumer consumer) {
+        auto levelIt = object.levels.find(level);
+        if (levelIt == object.levels.end() ||
+            !levelIt->second.defined ||
+            !levelIt->second.mipShadowEvicted) {
+            return true;
+        }
+
+        auto& summary = textureMipShadowEviction;
+        ++summary.materializeCalls;
+        recordTextureMipShadowMaterializeConsumer(consumer);
+
+        GLTextureImageLevel& image = levelIt->second;
+        id<MTLTexture> texture = (__bridge id<MTLTexture>)object.metalTexture;
+        const GLenum target = object.target != 0 ? object.target : object.desc.target;
+        if (texture == nil ||
+            !mipShadowEvictionTargetSupported(target) ||
+            static_cast<NSUInteger>(level) >=
+                nonZeroMipLevelCount(texture.mipmapLevelCount)) {
+            ++summary.materializeFailures;
+            return false;
+        }
+
+        const MTLPixelFormat pixelFormat = texture.pixelFormat;
+        const bool readR8 = pixelFormat == MTLPixelFormatR8Unorm;
+        const bool readRgba8 =
+            pixelFormat == MTLPixelFormatRGBA8Unorm ||
+            pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB;
+        if (!readR8 && !readRgba8) {
+            ++summary.materializeFailures;
+            return false;
+        }
+
+        const NSUInteger width =
+            static_cast<NSUInteger>(safeDimension(image.desc.width));
+        const NSUInteger height =
+            static_cast<NSUInteger>(safeDimension(image.desc.height));
+        const NSUInteger layers =
+            target == GL_TEXTURE_2D_ARRAY
+                ? static_cast<NSUInteger>(safeDimension(image.desc.depth))
+                : 1u;
+        const NSUInteger bpp = readR8 ? 1u : 4u;
+        const NSUInteger bytesPerRow = width * bpp;
+        const NSUInteger bytesPerImage = bytesPerRow * height;
+        const std::size_t totalBytes =
+            static_cast<std::size_t>(bytesPerImage) *
+            static_cast<std::size_t>(std::max<NSUInteger>(layers, 1));
+        if (width == 0 || height == 0 || totalBytes == 0) {
+            ++summary.materializeFailures;
+            return false;
+        }
+
+        drainPendingGpuProducers(object);
+        std::vector<std::uint8_t> materialized(totalBytes, 0u);
+        @autoreleasepool {
+            const NSUInteger mipLevel = static_cast<NSUInteger>(level);
+            if (target == GL_TEXTURE_2D_ARRAY) {
+                const MTLRegion region = MTLRegionMake2D(0, 0, width, height);
+                for (NSUInteger layer = 0; layer < layers; ++layer) {
+                    std::uint8_t* layerBytes =
+                        materialized.data() +
+                        static_cast<std::size_t>(layer * bytesPerImage);
+                    [texture getBytes:layerBytes
+                          bytesPerRow:bytesPerRow
+                        bytesPerImage:bytesPerImage
+                           fromRegion:region
+                          mipmapLevel:mipLevel
+                                slice:layer];
+                }
+            } else {
+                const MTLRegion region = MTLRegionMake2D(0, 0, width, height);
+                [texture getBytes:materialized.data()
+                      bytesPerRow:bytesPerRow
+                        fromRegion:region
+                       mipmapLevel:mipLevel];
+            }
+        }
+
+        if (readR8) {
+            image.nativeBpp = 1;
+            image.nativeData.swap(materialized);
+            (void)materializeRedR8TextureShadowFromNativeData(image);
+        } else {
+            image.rgba8.swap(materialized);
+            image.nativeData.clear();
+            image.nativeBpp = 0;
+        }
+        image.mipShadowEvicted = false;
+        image.mipShadowEvictedRgba8Bytes = 0;
+        image.mipShadowEvictedNativeBytes = 0;
+        summary.materializeBytes +=
+            static_cast<std::uint64_t>(image.rgba8.size()) +
+            static_cast<std::uint64_t>(image.nativeData.size());
+        return true;
+    }
+
+    bool materializeAllTextureMipShadowsFromMetal(
+        GLTextureObject& object,
+        TextureMipShadowMaterializeConsumer consumer) {
+        std::vector<GLint> levels;
+        levels.reserve(object.levels.size());
+        for (const auto& [level, image] : object.levels) {
+            if (image.mipShadowEvicted) {
+                levels.push_back(level);
+            }
+        }
+        for (GLint level : levels) {
+            if (!materializeTextureMipShadowFromMetal(object, level, consumer)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void maybeDropMipLevelShadows(GLTextureObject& object,
+                                  GLuint texName = 0) {
+        auto& summary = textureMipShadowEviction;
+        if (!textureShadowDropMipLevelsEnabled()) {
+            return;
+        }
+        ++summary.evictCalls;
+        const bool allowUploadedMipDrop =
+            textureShadowDropUploadedMipLevelsEnabled();
+        const GLenum target = object.target != 0 ? object.target : object.desc.target;
+        id<MTLTexture> texture = (__bridge id<MTLTexture>)object.metalTexture;
+        const bool unsupportedTarget =
+            !mipShadowEvictionTargetSupported(target);
+        const bool hasViewSource = object.viewSourceTexture != 0;
+        const bool hasDependentView = hasDependentTextureView(texName, object);
+        const bool hasSparse = object.sparseTexture;
+        const bool hasImageAtomic = object.imageAtomicBufferDirtyToTexture;
+        const bool hasAuthoritative =
+            object.colorShadowAuthoritative ||
+            object.depthStencilShadowAuthoritative;
+        const bool hasRendered =
+            object.wasFramebufferRenderedTo ||
+            object.wasViewportRenderedTo;
+        const bool hasPending = object.producerPending.hasAny(kProducerAll);
+        const bool hasSamplingProxy = object.metalSamplingProxy != nullptr;
+        const bool objectBlocked =
+            hasViewSource || hasDependentView || hasSparse ||
+            hasImageAtomic || hasAuthoritative || hasRendered ||
+            hasPending || hasSamplingProxy;
+
+        for (auto& [level, image] : object.levels) {
+            if (!image.defined || image.mipShadowEvicted) {
+                continue;
+            }
+            const std::uint64_t rgba8Bytes =
+                static_cast<std::uint64_t>(image.rgba8.size());
+            const std::uint64_t nativeBytes =
+                static_cast<std::uint64_t>(image.nativeData.size());
+            const std::uint64_t bytes = rgba8Bytes + nativeBytes;
+            if (level <= 0) {
+                if (bytes != 0) {
+                    ++summary.blockLevelZeroOrNegative;
+                }
+                continue;
+            }
+            if (!image.generatedMipLevel && !image.immutableStorageLevel &&
+                !allowUploadedMipDrop) {
+                if (bytes != 0) {
+                    ++summary.blockNotGeneratedOrImmutable;
+                }
+                continue;
+            }
+            if (!object.instantiated) {
+                if (bytes != 0) {
+                    ++summary.blockNotInstantiated;
+                }
+                continue;
+            }
+            if (texture == nil) {
+                if (bytes != 0) {
+                    ++summary.blockNoMetalTexture;
+                }
+                continue;
+            }
+            if (objectBlocked) {
+                if (bytes != 0) {
+                    ++summary.blockObjectState;
+                    if (hasViewSource) ++summary.blockViewSource;
+                    if (hasDependentView) ++summary.blockDependentView;
+                    if (hasSparse) ++summary.blockSparse;
+                    if (hasImageAtomic) ++summary.blockImageAtomic;
+                    if (hasAuthoritative) ++summary.blockAuthoritative;
+                    if (hasRendered) ++summary.blockRendered;
+                    if (hasPending) ++summary.blockPending;
+                    if (hasSamplingProxy) ++summary.blockSamplingProxy;
+                }
+                continue;
+            }
+            if (unsupportedTarget) {
+                if (bytes != 0) {
+                    ++summary.blockUnsupportedTarget;
+                }
+                continue;
+            }
+            if (texture.storageMode == MTLStorageModePrivate) {
+                if (bytes != 0) {
+                    ++summary.blockPrivateStorage;
+                }
+                continue;
+            }
+            if (static_cast<NSUInteger>(level) >=
+                nonZeroMipLevelCount(texture.mipmapLevelCount)) {
+                if (bytes != 0) {
+                    ++summary.blockMetalLevelOob;
+                }
+                continue;
+            }
+            if (bytes == 0) {
+                ++summary.blockNoShadowBytes;
+                continue;
+            }
+            if (!mipShadowEvictionFormatSupported(image, texture.pixelFormat)) {
+                ++summary.blockUnsupportedFormat;
+                continue;
+            }
+
+            image.mipShadowEvicted = true;
+            image.mipShadowEvictedRgba8Bytes = rgba8Bytes;
+            image.mipShadowEvictedNativeBytes = nativeBytes;
+            std::vector<std::uint8_t>().swap(image.rgba8);
+            std::vector<std::uint8_t>().swap(image.nativeData);
+            ++summary.evictedImages;
+            summary.evictedRgba8Bytes += rgba8Bytes;
+            summary.evictedNativeBytes += nativeBytes;
+            summary.evictedBytes += bytes;
+        }
+    }
+
     // Phase 8X Group 4d follow-up¹⁰ — `texName` is diagnostic-only and
     // defaults to 0 (no log). The four user-facing upload call sites
     // (`texImage` / `texSubImage` / `texStorage` / `texStorageMultisample`)
@@ -9211,6 +10881,49 @@ struct GLContext::Impl {
         if (device == nil || !baseLevel.defined || baseLevel.desc.width <= 0 || baseLevel.desc.height <= 0 || baseLevel.desc.depth <= 0) {
             return true;
         }
+        auto maybeDropRedundantRgba8Shadows = [&](bool useNativePathForUpload) {
+            if (!useNativePathForUpload ||
+                !textureShadowDropRedundantRgba8Enabled()) {
+                return;
+            }
+            auto imageEligibleForRgba8Drop = [](const GLTextureImageLevel& image) {
+                return isRedR8TextureShadowDropShape(image) &&
+                    !image.rgba8.empty();
+            };
+            if (object.viewSourceTexture != 0 ||
+                object.sparseTexture ||
+                object.imageAtomicBufferDirtyToTexture ||
+                object.colorShadowAuthoritative ||
+                object.depthStencilShadowAuthoritative ||
+                object.wasFramebufferRenderedTo ||
+                object.wasViewportRenderedTo ||
+                object.producerPending.hasAny(kProducerAll) ||
+                object.metalSamplingProxy != nullptr) {
+                return;
+            }
+            auto dropImageRgba8 = [](GLTextureImageLevel& image) {
+                std::vector<std::uint8_t>().swap(image.rgba8);
+            };
+            if (!imageEligibleForRgba8Drop(baseLevel)) {
+                return;
+            }
+            for (auto& [levelIndex, image] : object.levels) {
+                (void)levelIndex;
+                if (!imageEligibleForRgba8Drop(image)) {
+                    continue;
+                }
+                dropImageRgba8(image);
+            }
+            for (auto& faceLevels : object.cubeFaceLevels) {
+                for (auto& [levelIndex, image] : faceLevels) {
+                    (void)levelIndex;
+                    if (!imageEligibleForRgba8Drop(image)) {
+                        continue;
+                    }
+                    dropImageRgba8(image);
+                }
+            }
+        };
         auto cubeFaceLevel = [&](NSUInteger face, GLint level) -> const GLTextureImageLevel* {
             if (object.target == GL_TEXTURE_CUBE_MAP && face < object.cubeFaceLevels.size()) {
                 const auto& faceLevels = object.cubeFaceLevels[face];
@@ -9326,6 +11039,7 @@ struct GLContext::Impl {
             }
 
             MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+            ScopedOwnedMetalObject descRelease(desc);
             desc.textureType = isArray ? MTLTextureType2DMultisampleArray
                                        : MTLTextureType2DMultisample;
             desc.pixelFormat = chosenFormat;
@@ -9688,6 +11402,8 @@ struct GLContext::Impl {
                     object.swizzleDirty = true;
                 }
                 object.instantiated = true;
+                maybeDropRedundantRgba8Shadows(useNativePath);
+                maybeDropMipLevelShadows(object, texName);
                 (void)texName;
                 return true;
             }
@@ -9709,6 +11425,11 @@ struct GLContext::Impl {
             }
         }
 
+        if (!materializeAllTextureMipShadowsFromMetal(
+                object,
+                TextureMipShadowMaterializeConsumer::UploadRebuild)) {
+            return false;
+        }
         releaseRetainedMetalObject(object.metalTexture);
         object.metalTexture = nullptr;
         if (owner != nullptr) {
@@ -9778,6 +11499,7 @@ struct GLContext::Impl {
         }
 
         MTLTextureDescriptor* descriptor = [[MTLTextureDescriptor alloc] init];
+        ScopedOwnedMetalObject descriptorRelease(descriptor);
         descriptor.textureType = metalTextureTypeForTarget(object.target);
         descriptor.pixelFormat = chosenFormat;
         descriptor.width = static_cast<NSUInteger>(baseLevel.desc.width);
@@ -10280,6 +12002,8 @@ struct GLContext::Impl {
                   nonzeroQuartiles[2], nonzeroQuartiles[3],
                   hexPeek);
         }
+        maybeDropRedundantRgba8Shadows(useNativePath);
+        maybeDropMipLevelShadows(object, texName);
         return true;
     }
 
@@ -10295,28 +12019,30 @@ struct GLContext::Impl {
         void* retainedTexture = nullptr;
         if (device != nil && width > 0 && height > 0) {
             const MTLPixelFormat pixelFormat = metalRenderbufferFormat(internalFormat);
-            MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pixelFormat
-                                                                                                   width:static_cast<NSUInteger>(width)
-                                                                                                  height:static_cast<NSUInteger>(height)
-                                                                                               mipmapped:NO];
-            // Use Shared storage so CPU can read back rendered data via
-            // [MTLTexture getBytes:].  On Apple Silicon the unified memory
-            // architecture makes Shared equivalent to Private in performance.
-            descriptor.storageMode = MTLStorageModeShared;
-            // Enable ShaderWrite for non-MSAA renderbuffers as well so the
-            // renderbuffer can back a storage image binding through a
-            // framebuffer view later (imageStore from fragment stages).
-            MTLTextureUsage rbUsage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-            if (samples <= 1) {
-                rbUsage |= MTLTextureUsageShaderWrite;
+            id<MTLTexture> texture = nil;
+            @autoreleasepool {
+                MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pixelFormat
+                                                                                                      width:static_cast<NSUInteger>(width)
+                                                                                                     height:static_cast<NSUInteger>(height)
+                                                                                                  mipmapped:NO];
+                // Use Shared storage so CPU can read back rendered data via
+                // [MTLTexture getBytes:].  On Apple Silicon the unified memory
+                // architecture makes Shared equivalent to Private in performance.
+                descriptor.storageMode = MTLStorageModeShared;
+                // Enable ShaderWrite for non-MSAA renderbuffers as well so the
+                // renderbuffer can back a storage image binding through a
+                // framebuffer view later (imageStore from fragment stages).
+                MTLTextureUsage rbUsage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+                if (samples <= 1) {
+                    rbUsage |= MTLTextureUsageShaderWrite;
+                }
+                descriptor.usage = rbUsage;
+                if (samples > 1) {
+                    descriptor.textureType = MTLTextureType2DMultisample;
+                    descriptor.sampleCount = static_cast<NSUInteger>(samples);
+                }
+                texture = [device newTextureWithDescriptor:descriptor];
             }
-            descriptor.usage = rbUsage;
-            if (samples > 1) {
-                descriptor.textureType = MTLTextureType2DMultisample;
-                descriptor.sampleCount = static_cast<NSUInteger>(samples);
-            }
-
-            id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
             if (texture == nil) {
                 if (!deferHugeShadow) {
                     return false;
@@ -10384,7 +12110,27 @@ struct GLContext::Impl {
     bool generateMipmaps(GLTextureObject& object) {
         const GLint baseLevelIndex = object.params.baseLevel;
         const auto baseIt = object.levels.find(baseLevelIndex);
-        if (baseIt == object.levels.end() || !baseIt->second.defined || baseIt->second.rgba8.empty()) {
+        if (baseIt == object.levels.end() || !baseIt->second.defined) {
+            return false;
+        }
+        if (baseIt->second.mipShadowEvicted &&
+            !materializeTextureMipShadowFromMetal(
+                object,
+                baseLevelIndex,
+                TextureMipShadowMaterializeConsumer::GenerateMipmap)) {
+            return false;
+        }
+        if (baseIt->second.desc.internalFormat == GL_DEPTH_COMPONENT32F &&
+            !object.depthStencilShadowAuthoritative) {
+            (void)syncDepth32FTextureLevelNativeFromMetal(object, baseLevelIndex);
+        }
+        if (baseIt->second.rgba8.empty()) {
+            if (!materializeRedR8TextureShadowFromNativeData(baseIt->second) &&
+                !materializeDepth32FTextureShadowFromNativeData(baseIt->second)) {
+                return false;
+            }
+        }
+        if (baseIt->second.rgba8.empty()) {
             return false;
         }
         if (object.params.maxLevel < baseLevelIndex) {
@@ -10448,6 +12194,8 @@ struct GLContext::Impl {
                 : baseLevel.desc.depth;
             generated.desc.levels = std::max<GLsizei>(object.desc.levels, levelIndex + 1);
             generated.defined = true;
+            generated.generatedMipLevel = true;
+            generated.immutableStorageLevel = baseLevel.immutableStorageLevel;
             generated.rgba8 = downsampleRGBA8(
                 previousLevel.rgba8,
                 previousLevel.desc.width,
@@ -10502,6 +12250,7 @@ struct GLContext::Impl {
         }
 
         MTLSamplerDescriptor* descriptor = [[MTLSamplerDescriptor alloc] init];
+        ScopedOwnedMetalObject descriptorRelease(descriptor);
         descriptor.minFilter = metalMinMagFilter(object.params.minFilter);
         descriptor.magFilter = metalMinMagFilter(object.params.magFilter);
         descriptor.mipFilter = metalMipFilter(object.params.minFilter);
@@ -10580,6 +12329,7 @@ struct GLContext::Impl {
         }
 
         MTLSamplerDescriptor* descriptor = [[MTLSamplerDescriptor alloc] init];
+        ScopedOwnedMetalObject descriptorRelease(descriptor);
         descriptor.minFilter = metalMinMagFilter(object.params.minFilter);
         descriptor.magFilter = metalMinMagFilter(object.params.magFilter);
         descriptor.mipFilter = metalMipFilter(object.params.minFilter);
@@ -11003,6 +12753,7 @@ struct GLContext::Impl {
         }
 
         MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+        ScopedOwnedMetalObject descRelease(desc);
         desc.textureType = baseTex.textureType;
         desc.pixelFormat = proxyFormat;
         desc.width = baseTex.width;
@@ -11017,6 +12768,16 @@ struct GLContext::Impl {
         id<MTLTexture> proxy = [device newTextureWithDescriptor:desc];
         if (proxy == nil) {
             return nil;
+        }
+
+        if (texObj.desc.internalFormat == GL_DEPTH_COMPONENT32F &&
+            !texObj.depthStencilShadowAuthoritative) {
+            for (const auto& [levelIndex, image] : texObj.levels) {
+                if (image.defined) {
+                    (void)syncDepth32FTextureLevelNativeFromMetal(
+                        texObj, levelIndex);
+                }
+            }
         }
 
         const std::size_t proxyBpp = (proxyFormat == MTLPixelFormatR8Uint)
@@ -11177,14 +12938,17 @@ struct GLContext::Impl {
             }
         }
 
-        MTLTextureDescriptor* desc =
-            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf
-                                                               width:width
-                                                              height:height
-                                                           mipmapped:NO];
-        desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
-        desc.storageMode = MTLStorageModePrivate;
-        id<MTLTexture> flippedTex = [device newTextureWithDescriptor:desc];
+        id<MTLTexture> flippedTex = nil;
+        @autoreleasepool {
+            MTLTextureDescriptor* desc =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf
+                                                                   width:width
+                                                                  height:height
+                                                               mipmapped:NO];
+            desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+            desc.storageMode = MTLStorageModePrivate;
+            flippedTex = [device newTextureWithDescriptor:desc];
+        }
         if (flippedTex == nil) return nil;
 
         auto uploadLease = makeCommandBuffer(AppGLCommandReason::DepthStencilFlip);
@@ -11306,6 +13070,7 @@ struct GLContext::Impl {
             proxyFormat = sourceTex.pixelFormat;
         }
         MTLTextureDescriptor* descriptor = [[MTLTextureDescriptor alloc] init];
+        ScopedOwnedMetalObject descriptorRelease(descriptor);
         descriptor.textureType = metalTextureTypeForTarget(viewObj.target);
         descriptor.pixelFormat = proxyFormat;
         descriptor.width = baseWidth;
@@ -11832,6 +13597,7 @@ struct GLContext::Impl {
         }
 
         MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+        ScopedOwnedMetalObject descRelease(desc);
         desc.textureType = textureType;
         desc.pixelFormat = MTLPixelFormatRGBA32Float;
         desc.width = 1;
@@ -13241,7 +15007,7 @@ struct GLContext::Impl {
                 }
                 const auto producerDrainStart =
                     drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
-                drainPendingGpuProducers(samplerReads);
+                drainSamplerGpuProducers(samplerReads);
                 if (drawPathProfile.enabled) {
                     drawPathProfile.record(GLDrawProfileBucket::SamplerProducerDrain,
                                            producerDrainStart,
@@ -15726,6 +17492,7 @@ struct GLContext::Impl {
             return false;
         }
         MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+        ScopedOwnedMetalObject descRelease(desc);
         desc.textureType = MTLTextureType2D;
         desc.pixelFormat = pf;
         desc.width = rowTexels;
@@ -18253,6 +20020,8 @@ struct GLContext::Impl {
             }
             if (frameGraph != nullptr && texture->metalTexture != nullptr) {
                 texture->depthStencilShadowAuthoritative = false;
+                maybeDropStaleDepth32FRgba8ShadowForAttachment(
+                    *texture, attachment);
                 return frameGraph->clearTextureDepth(
                     texture->metalTexture, mipLevel, slice, arrayLen, depth);
             }
@@ -18448,6 +20217,8 @@ struct GLContext::Impl {
             }
             if (frameGraph != nullptr && texture->metalTexture != nullptr) {
                 texture->depthStencilShadowAuthoritative = false;
+                maybeDropStaleDepth32FRgba8ShadowForAttachment(
+                    *texture, attachment);
                 return frameGraph->clearTextureStencil(
                     texture->metalTexture, mipLevel, slice, arrayLen,
                     static_cast<std::uint32_t>(value));
@@ -18771,14 +20542,17 @@ struct GLContext::Impl {
         if (metalTex.sampleCount > 1 && device != nil && commandQueue != nil) {
             const bool sourceIsArray =
                 metalTex.textureType == MTLTextureType2DMultisampleArray;
-            MTLTextureDescriptor* tempDesc = [MTLTextureDescriptor
-                texture2DDescriptorWithPixelFormat:metalTex.pixelFormat
-                                            width:metalTex.width
-                                           height:metalTex.height
-                                        mipmapped:NO];
-            tempDesc.storageMode = MTLStorageModeShared;
-            tempDesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-            id<MTLTexture> resolvedTex = [device newTextureWithDescriptor:tempDesc];
+            id<MTLTexture> resolvedTex = nil;
+            @autoreleasepool {
+                MTLTextureDescriptor* tempDesc = [MTLTextureDescriptor
+                    texture2DDescriptorWithPixelFormat:metalTex.pixelFormat
+                                                width:metalTex.width
+                                               height:metalTex.height
+                                            mipmapped:NO];
+                tempDesc.storageMode = MTLStorageModeShared;
+                tempDesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+                resolvedTex = [device newTextureWithDescriptor:tempDesc];
+            }
             if (resolvedTex != nil) {
                 MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
                 rpd.colorAttachments[0].texture = metalTex;
@@ -18908,6 +20682,51 @@ struct GLContext::Impl {
         return true;
     }
 
+    enum class DepthReadbackConsumer : std::uint8_t {
+        Other,
+        SyncNative,
+        Rgba8SubImage,
+        AttachmentReadback
+    };
+
+    void recordDepthReadbackCall(MTLPixelFormat pixelFormat,
+                                 std::uint64_t rawBytes,
+                                 DepthReadbackConsumer consumer) const {
+        auto& diag = depth32fReadback;
+        ++diag.readbackCalls;
+        if (pixelFormat == MTLPixelFormatDepth32Float) {
+            ++diag.readbackDepth32FCalls;
+        } else if (pixelFormat == MTLPixelFormatDepth32Float_Stencil8) {
+            ++diag.readbackDepth32FS8Calls;
+        }
+        diag.readbackRawBytes += rawBytes;
+        diag.readbackRawMaxBytes =
+            std::max(diag.readbackRawMaxBytes, rawBytes);
+        switch (consumer) {
+            case DepthReadbackConsumer::SyncNative:
+                ++diag.readbackConsumerSyncCalls;
+                break;
+            case DepthReadbackConsumer::Rgba8SubImage:
+                ++diag.readbackConsumerRgba8SubImageCalls;
+                break;
+            case DepthReadbackConsumer::AttachmentReadback:
+                ++diag.readbackConsumerAttachmentCalls;
+                break;
+            case DepthReadbackConsumer::Other:
+            default:
+                ++diag.readbackConsumerOtherCalls;
+                break;
+        }
+    }
+
+    void recordDepthReadbackStaging(std::uint64_t stagingBytes) const {
+        auto& diag = depth32fReadback;
+        ++diag.readbackStagingCalls;
+        diag.readbackStagingBytes += stagingBytes;
+        diag.readbackStagingMaxBytes =
+            std::max(diag.readbackStagingMaxBytes, stagingBytes);
+    }
+
     // Sprint 17 Day 7+ Bank-Group-A B-revised: shared depth-readback
     // helper for both Renderbuffer-kind and Texture-kind paths. Handles
     // Metal-texture getBytes (Shared/Managed) or blit-to-staging
@@ -18919,7 +20738,9 @@ struct GLContext::Impl {
                                    GLint x, GLint y,
                                    GLsizei width, GLsizei height,
                                    void* pixels,
-                                   bool yFlipDepthReadback) const {
+                                   bool yFlipDepthReadback,
+                                   DepthReadbackConsumer consumer =
+                                       DepthReadbackConsumer::Other) const {
         if (metalTex == nil) return false;
         const MTLPixelFormat pf = metalTex.pixelFormat;
         const NSUInteger texWidth = mipDimensionAtLevel(metalTex.width, mipLevel);
@@ -18962,7 +20783,12 @@ struct GLContext::Impl {
             readHeight = static_cast<NSUInteger>(height);
         }
         const NSUInteger bytesPerRow = readWidth * srcBpp;
-        std::vector<std::uint8_t> raw(bytesPerRow * readHeight);
+        const NSUInteger rawByteCount = bytesPerRow * readHeight;
+        recordDepthReadbackCall(
+            pf,
+            static_cast<std::uint64_t>(rawByteCount),
+            consumer);
+        std::vector<std::uint8_t> raw(rawByteCount);
         const bool requiresDepthPlaneBlit = (depthStencilBlitOptions != 0);
         // Two read paths depending on the Metal storage mode:
         //   - Shared/Managed: direct `getBytes:` works.
@@ -18996,10 +20822,12 @@ struct GLContext::Impl {
             if (mtlDevice == nil || mtlQueue == nil) {
                 return false;
             }
-            const NSUInteger stagingSize = bytesPerRow * readHeight;
+            const NSUInteger stagingSize = rawByteCount;
             id<MTLBuffer> staging = [mtlDevice newBufferWithLength:stagingSize
                                                           options:MTLResourceStorageModeShared];
             if (staging == nil) return false;
+            recordDepthReadbackStaging(
+                static_cast<std::uint64_t>(stagingSize));
             auto readbackLease = makeCommandBuffer(AppGLCommandReason::FlushForReadback);
             id<MTLCommandBuffer> cmd = readbackLease.get();
             if (cmd == nil) return false;
@@ -19072,6 +20900,253 @@ struct GLContext::Impl {
                                            static_cast<NSUInteger>(srcY));
             }
         }
+        return true;
+    }
+
+    bool syncDepth32FTextureLevelNativeFromMetal(GLTextureObject& object,
+                                                 GLint level) {
+        if (object.desc.internalFormat != GL_DEPTH_COMPONENT32F ||
+            object.metalTexture == nullptr) {
+            return false;
+        }
+        if (object.target == GL_TEXTURE_3D ||
+            object.target == GL_TEXTURE_CUBE_MAP ||
+            object.target == GL_TEXTURE_CUBE_MAP_ARRAY) {
+            return false;
+        }
+        auto levelIt = object.levels.find(level);
+        if (levelIt == object.levels.end() || !levelIt->second.defined) {
+            return false;
+        }
+        GLTextureImageLevel& image = levelIt->second;
+        if (!isDepth32FTextureShadowDropShape(image)) {
+            return false;
+        }
+        id<MTLTexture> metalTex = (__bridge id<MTLTexture>)object.metalTexture;
+        if (metalTex == nil ||
+            static_cast<NSUInteger>(level) >=
+                nonZeroMipLevelCount(metalTex.mipmapLevelCount)) {
+            return false;
+        }
+
+        GLsizei width = std::max<GLsizei>(image.desc.width, 1);
+        GLsizei height = std::max<GLsizei>(image.desc.height, 1);
+        GLsizei slices = 1;
+        switch (object.target) {
+            case GL_TEXTURE_1D:
+            case GL_TEXTURE_RECTANGLE:
+            case GL_TEXTURE_2D:
+                height = object.target == GL_TEXTURE_1D ? 1 : height;
+                slices = 1;
+                break;
+            case GL_TEXTURE_1D_ARRAY:
+                height = 1;
+                slices = std::max<GLsizei>(
+                    std::max<GLsizei>(image.desc.height, image.desc.layers), 1);
+                break;
+            case GL_TEXTURE_2D_ARRAY:
+                slices = std::max<GLsizei>(
+                    std::max<GLsizei>(image.desc.depth, image.desc.layers), 1);
+                break;
+            default:
+                return false;
+        }
+
+        const std::size_t requiredBytes =
+            static_cast<std::size_t>(width) *
+            static_cast<std::size_t>(height) *
+            static_cast<std::size_t>(slices) * sizeof(float);
+        auto& diag = depth32fReadback;
+        ++diag.syncCalls;
+        auto failSync = [&]() {
+            ++diag.syncFailures;
+            return false;
+        };
+        if (image.nativeData.size() < requiredBytes) {
+            return failSync();
+        }
+
+        drainPendingGpuProducers(object);
+        const std::uint64_t nativeBytes =
+            static_cast<std::uint64_t>(requiredBytes);
+        const std::uint64_t depthValueBytes =
+            static_cast<std::uint64_t>(width) *
+            static_cast<std::uint64_t>(height) *
+            static_cast<std::uint64_t>(sizeof(GLfloat));
+        diag.syncNativeBytes += nativeBytes;
+        diag.syncNativeMaxBytes =
+            std::max(diag.syncNativeMaxBytes, nativeBytes);
+        diag.syncDepthValueBytes += depthValueBytes;
+        diag.syncDepthValueMaxBytes =
+            std::max(diag.syncDepthValueMaxBytes, depthValueBytes);
+        diag.syncSlices += static_cast<std::uint64_t>(slices);
+        std::vector<GLfloat> depthValues(
+            static_cast<std::size_t>(width) *
+            static_cast<std::size_t>(height),
+            0.0f);
+        const bool slicedTarget =
+            object.target == GL_TEXTURE_1D_ARRAY ||
+            object.target == GL_TEXTURE_2D_ARRAY;
+        for (GLsizei slice = 0; slice < slices; ++slice) {
+            const NSUInteger sourceSlice =
+                slicedTarget ? static_cast<NSUInteger>(slice) : 0u;
+            if (!readDepthFromMetalTexture(metalTex,
+                                           static_cast<NSUInteger>(level),
+                                           sourceSlice,
+                                           0,
+                                           0,
+                                           width,
+                                           height,
+                                           depthValues.data(),
+                                           false,
+                                           DepthReadbackConsumer::SyncNative)) {
+                return failSync();
+            }
+            for (GLsizei row = 0; row < height; ++row) {
+                for (GLsizei col = 0; col < width; ++col) {
+                    const std::size_t nativeOffset =
+                        nativeShadowOffset(image, width, height, slice, col, row);
+                    if (nativeOffset + sizeof(float) > image.nativeData.size()) {
+                        return failSync();
+                    }
+                    const GLfloat depthValue =
+                        depthValues[static_cast<std::size_t>(row * width + col)];
+                    std::memcpy(image.nativeData.data() + nativeOffset,
+                                &depthValue,
+                                sizeof(depthValue));
+                }
+            }
+        }
+        object.depthStencilShadowAuthoritative = true;
+        ++diag.syncSuccesses;
+        return true;
+    }
+
+    bool copyDepth32FTextureSubImageMetalAsRGBA8(
+        GLTextureObject& object,
+        GLint level,
+        GLint xoffset,
+        GLint yoffset,
+        GLint zoffset,
+        GLsizei width,
+        GLsizei height,
+        GLsizei depth,
+        const GLPixelStoreState& packStore,
+        void* pixels) const {
+        if (width == 0 || height == 0 || depth == 0) {
+            return true;
+        }
+        if (pixels == nullptr || object.metalTexture == nullptr) {
+            return false;
+        }
+        switch (object.target) {
+            case GL_TEXTURE_3D:
+            case GL_TEXTURE_1D_ARRAY:
+                return false;
+            default:
+                break;
+        }
+        id<MTLTexture> metalTex = (__bridge id<MTLTexture>)object.metalTexture;
+        if (metalTex == nil ||
+            static_cast<NSUInteger>(level) >=
+                nonZeroMipLevelCount(metalTex.mipmapLevelCount)) {
+            return false;
+        }
+        drainPendingGpuProducers(object);
+        const std::size_t dstPixelBytes = 4u;
+        const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+            ? static_cast<std::size_t>(packStore.packRowLength)
+            : static_cast<std::size_t>(width);
+        const std::size_t dstRowBytes = alignByteCount(
+            dstRowStridePixels * dstPixelBytes, packStore.packAlignment);
+        const std::size_t dstImageHeight = packStore.packImageHeight > 0
+            ? static_cast<std::size_t>(packStore.packImageHeight)
+            : static_cast<std::size_t>(height);
+        const std::size_t dstSliceBytes = dstRowBytes * dstImageHeight;
+        auto& diag = depth32fReadback;
+        ++diag.rgba8SubImageCalls;
+        auto failRgba8SubImage = [&]() {
+            ++diag.rgba8SubImageFailures;
+            return false;
+        };
+        const std::uint64_t rgba8OutputBytes =
+            static_cast<std::uint64_t>(dstSliceBytes) *
+            static_cast<std::uint64_t>(depth);
+        const std::uint64_t rgba8DepthValueBytes =
+            static_cast<std::uint64_t>(width) *
+            static_cast<std::uint64_t>(height) *
+            static_cast<std::uint64_t>(depth) *
+            static_cast<std::uint64_t>(sizeof(GLfloat));
+        diag.rgba8SubImageOutputBytes += rgba8OutputBytes;
+        diag.rgba8SubImageDepthValueBytes += rgba8DepthValueBytes;
+        diag.rgba8SubImageSlices += static_cast<std::uint64_t>(depth);
+        auto* dstBase = static_cast<std::uint8_t*>(pixels) +
+            static_cast<std::size_t>(packStore.packSkipImages) * dstSliceBytes +
+            static_cast<std::size_t>(packStore.packSkipRows) * dstRowBytes +
+            static_cast<std::size_t>(packStore.packSkipPixels) * dstPixelBytes;
+        const bool yFlipDepthReadback =
+            (object.wasFramebufferRenderedTo ||
+             object.wasViewportRenderedTo) &&
+            state->clipOrigin() != GL_UPPER_LEFT;
+        auto copySlice = [&](NSUInteger sourceSlice, GLsizei dstZ) {
+            std::vector<GLfloat> depthValues(
+                static_cast<std::size_t>(width) *
+                static_cast<std::size_t>(height),
+                0.0f);
+            if (!readDepthFromMetalTexture(
+                    metalTex,
+                    static_cast<NSUInteger>(level),
+                    sourceSlice,
+                    xoffset,
+                    yoffset,
+                    width,
+                    height,
+                    depthValues.data(),
+                    yFlipDepthReadback,
+                    DepthReadbackConsumer::Rgba8SubImage)) {
+                return false;
+            }
+            for (GLsizei row = 0; row < height; ++row) {
+                std::uint8_t* dstRow = dstBase +
+                    static_cast<std::size_t>(dstZ) * dstSliceBytes +
+                    static_cast<std::size_t>(row) * dstRowBytes;
+                for (GLsizei col = 0; col < width; ++col) {
+                    const GLfloat depthValue =
+                        depthValues[static_cast<std::size_t>(
+                            row * width + col)];
+                    std::uint8_t* dstPixel =
+                        dstRow + static_cast<std::size_t>(col) * dstPixelBytes;
+                    dstPixel[0] = normalizedByte(depthValue);
+                    dstPixel[1] = 0u;
+                    dstPixel[2] = 0u;
+                    dstPixel[3] = 255u;
+                }
+            }
+            return true;
+        };
+        if (object.target == GL_TEXTURE_CUBE_MAP) {
+            for (GLsizei slice = 0; slice < depth; ++slice) {
+                const GLint face = zoffset + slice;
+                if (face < 0 || face >= 6 ||
+                    !copySlice(static_cast<NSUInteger>(face), slice)) {
+                    return failRgba8SubImage();
+                }
+            }
+            ++diag.rgba8SubImageSuccesses;
+            return true;
+        }
+        const bool slicedTarget =
+            object.target == GL_TEXTURE_2D_ARRAY ||
+            object.target == GL_TEXTURE_CUBE_MAP_ARRAY;
+        for (GLsizei slice = 0; slice < depth; ++slice) {
+            const NSUInteger sourceSlice = slicedTarget
+                ? static_cast<NSUInteger>(zoffset + slice)
+                : 0u;
+            if (!copySlice(sourceSlice, slice)) {
+                return failRgba8SubImage();
+            }
+        }
+        ++diag.rgba8SubImageSuccesses;
         return true;
     }
 
@@ -19225,7 +21300,8 @@ struct GLContext::Impl {
                     state->clipOrigin() != GL_UPPER_LEFT;
                 if (readDepthFromMetalTexture(metalTex, /*mipLevel*/0, /*sourceSlice*/0,
                                               x, y, width, height, pixels,
-                                              yFlipDepthReadback)) {
+                                              yFlipDepthReadback,
+                                              DepthReadbackConsumer::AttachmentReadback)) {
                     return true;
                 }
                 // Fall through to CPU shadow path on Metal-readback
@@ -19324,7 +21400,8 @@ struct GLContext::Impl {
                 state->clipOrigin() != GL_UPPER_LEFT;
             return readDepthFromMetalTexture(metalTex, mipLevel, sourceSlice,
                                              x, y, width, height, pixels,
-                                             yFlipDepthReadback);
+                                             yFlipDepthReadback,
+                                             DepthReadbackConsumer::AttachmentReadback);
         }
         return false;
     }
@@ -20342,6 +22419,8 @@ struct GLContext::Impl {
                 const MetalAttachmentBlitView& dstView) {
             if (dstView.textureObject != nullptr) {
                 dstView.textureObject->depthStencilShadowAuthoritative = false;
+                maybeDropStaleDepth32FRgba8ShadowForAttachment(
+                    *dstView.textureObject, attachment);
                 if (state->clipOrigin() != GL_UPPER_LEFT) {
                     dstView.textureObject->wasFramebufferRenderedTo = true;
                 }
@@ -21542,6 +23621,7 @@ struct GLContext::Impl {
     bool encodeTranslatedDrawAndMarkFbo(
         TranslatedDrawInfo& tdi,
         const TranslatedDrawPreflightSnapshot* preflight = nullptr);
+    void evictRenderPsoTotalCacheIfNeeded();
 
     // Metal-native tessellation draw path (Phase 2 of the metal-tess
     // project). When the program has been identified as a tess program
@@ -21665,7 +23745,7 @@ struct GLContext::Impl {
             return;
         }
 
-        frameGraph->resizeDrawable(drawableSurfaceWidth(), drawableSurfaceHeight());
+        ensureDefaultDrawableForViewportExtent();
         frameGraph->encodeDefaultFramebufferClear(
             pendingMask,
             state->clearState().color[0],
@@ -21679,10 +23759,12 @@ struct GLContext::Impl {
         pendingClear = false;
     }
 
-    void presentPendingWork() {
+    void presentPendingWork(
+        AppGLCommandReason reason = AppGLCommandReason::PresentPendingWork)
+    {
         encodePendingWork();
         if (frameGraph != nullptr) {
-            frameGraph->present(AppGLCommandReason::PresentPendingWork);
+            frameGraph->present(reason);
         }
         markR5Boundary();
     }
@@ -22478,14 +24560,21 @@ struct GLContext::Impl {
     std::unique_ptr<GLObjectStore> objects;
     std::unique_ptr<GLStateTracker> state;
     GLDrawPathProfile drawPathProfile;
+    mutable GLProducerTokenProfile producerTokenProfile;
+    mutable std::uint64_t samplerGpuOrderSkipDecisionCount = 0;
     SerialDeferredRecordProfile serialDeferredRecordProfile;
     mutable GLDrawDetailProfile drawDetailProfile;
     mutable ColdPathDiagnosticProfile coldPathProfile;
+    mutable MetalResourceInventory::Depth32FReadbackDiagnostics depth32fReadback;
+    MetalTextureMipShadowEvictionSummary textureMipShadowEviction;
     Phase2PlanKeyProfile phase2PlanKeyProfile;
+    std::atomic_bool profilesDumped{false};
     MetalR5ResidencyTouchSummary r5Touches;
     MetalR5EvictionSummary r5Eviction;
     std::uint64_t r5ResourceUseSerial = 0;
     std::uint64_t r5BoundarySerial = 0;
+    mutable std::uint64_t producerTokenEpoch = 0;
+    mutable std::uint64_t producerTokenKnownCompletedEpoch = 0;
     MetalMemoryPressureState lastR5PressureEvictionLevel =
         MetalMemoryPressureState::Idle;
     bool r5EvictionInProgress = false;
@@ -22493,6 +24582,8 @@ struct GLContext::Impl {
     std::unordered_map<std::uint64_t, TranslatedDrawPlan> translatedDrawPlanCache;
     Phase2PlanKeyMemo translatedDrawPlanKeyMemo;
     std::uint64_t translatedDrawPlanGeneration = 0;
+    std::uint64_t renderPsoTotalCacheEvictions = 0;
+    std::uint64_t renderPsoTotalCacheHighWater = 0;
     std::unordered_map<NSUInteger, void*> incompleteSampledColorTextures;
     // Slice-B [A]: sparse-buffer MDI can expose stale sampler recipe metadata
     // when the persistent recipe is reused. Bypass it only while decomposing
@@ -22603,25 +24694,72 @@ struct GLContext::Impl {
     GLsizei drawableSurfaceHeight() const {
         return static_cast<GLsizei>(std::max(0, viewportY)) + viewportHeight;
     }
+    GLsizei defaultDrawableRequestWidth() const {
+        return defaultDrawableGrowOnlyEnabled()
+            ? std::max<GLsizei>(viewportWidth, 1)
+            : drawableSurfaceWidth();
+    }
+    GLsizei defaultDrawableRequestHeight() const {
+        return defaultDrawableGrowOnlyEnabled()
+            ? std::max<GLsizei>(viewportHeight, 1)
+            : drawableSurfaceHeight();
+    }
 
     void invalidateDefaultFramebufferShadow() {
         defaultFramebufferShadowValid = false;
     }
 
     void ensureDefaultFramebufferShadow() {
-        const GLsizei width = std::max<GLsizei>(drawableSurfaceWidth(), 1);
-        const GLsizei height = std::max<GLsizei>(drawableSurfaceHeight(), 1);
+        const GLsizei requestedWidth =
+            std::max<GLsizei>(defaultDrawableRequestWidth(), 1);
+        const GLsizei requestedHeight =
+            std::max<GLsizei>(defaultDrawableRequestHeight(), 1);
+        const GLsizei width = defaultDrawableGrowOnlyEnabled()
+            ? std::max<GLsizei>(requestedWidth, defaultFramebufferShadowWidth)
+            : requestedWidth;
+        const GLsizei height = defaultDrawableGrowOnlyEnabled()
+            ? std::max<GLsizei>(requestedHeight, defaultFramebufferShadowHeight)
+            : requestedHeight;
         const std::size_t byteCount =
             static_cast<std::size_t>(width) *
             static_cast<std::size_t>(height) * 4u;
         if (defaultFramebufferShadowWidth != width ||
             defaultFramebufferShadowHeight != height ||
             defaultFramebufferRGBA8.size() != byteCount) {
-            defaultFramebufferRGBA8.assign(byteCount, 0);
+            std::vector<std::uint8_t> resized(byteCount, 0);
+            const GLsizei copyWidth =
+                std::min(defaultFramebufferShadowWidth, width);
+            const GLsizei copyHeight =
+                std::min(defaultFramebufferShadowHeight, height);
+            for (GLsizei row = 0; row < copyHeight; ++row) {
+                const std::size_t srcOffset =
+                    static_cast<std::size_t>(row) *
+                    static_cast<std::size_t>(defaultFramebufferShadowWidth) * 4u;
+                const std::size_t dstOffset =
+                    static_cast<std::size_t>(row) *
+                    static_cast<std::size_t>(width) * 4u;
+                std::memcpy(resized.data() + dstOffset,
+                            defaultFramebufferRGBA8.data() + srcOffset,
+                            static_cast<std::size_t>(copyWidth) * 4u);
+            }
+            defaultFramebufferRGBA8.swap(resized);
             defaultFramebufferShadowWidth = width;
             defaultFramebufferShadowHeight = height;
         }
         defaultFramebufferShadowValid = true;
+    }
+
+    void ensureDefaultDrawableForViewportExtent() {
+        if (frameGraph == nullptr) {
+            return;
+        }
+        const GLsizei width = defaultDrawableRequestWidth();
+        const GLsizei height = defaultDrawableRequestHeight();
+        if (defaultDrawableGrowOnlyEnabled()) {
+            frameGraph->ensureDrawableSizeAtLeast(width, height);
+        } else {
+            frameGraph->resizeDrawable(width, height);
+        }
     }
 
     void applyDefaultFramebufferColorClear() {
@@ -22676,6 +24814,12 @@ struct GLContext::Impl {
     ) const {
         if (!defaultFramebufferShadowValid || outPixels == nullptr ||
             width < 0 || height < 0) {
+            return false;
+        }
+        if (defaultDrawableGrowOnlyEnabled() &&
+            (x < 0 || y < 0 ||
+             x + width > defaultFramebufferShadowWidth ||
+             y + height > defaultFramebufferShadowHeight)) {
             return false;
         }
         auto* bytes = static_cast<std::uint8_t*>(outPixels);
@@ -23001,14 +25145,17 @@ struct GLContext::Impl {
             ib.layer3DSidecarFormat = 0;
             ib.layer3DSidecarDirty = false;
 
-            MTLTextureDescriptor* desc =
-                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:imagePixelFormat
-                                                                    width:width
-                                                                   height:height
-                                                                mipmapped:NO];
-            desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
-            desc.storageMode = MTLStorageModeShared;
-            id<MTLTexture> sidecar = [device newTextureWithDescriptor:desc];
+            id<MTLTexture> sidecar = nil;
+            @autoreleasepool {
+                MTLTextureDescriptor* desc =
+                    [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:imagePixelFormat
+                                                                        width:width
+                                                                       height:height
+                                                                    mipmapped:NO];
+                desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+                desc.storageMode = MTLStorageModeShared;
+                sidecar = [device newTextureWithDescriptor:desc];
+            }
             if (sidecar == nil) {
                 return nullptr;
             }
@@ -24211,7 +26358,88 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         inventory.pressure.trackedHostHeapBytes = inventory.residency.hostBytes;
         inventory.pressure.trackedHostCacheBytes =
             inventory.hostCaches.totalBytes;
+        const auto processMemory = sampleProcessMemorySnapshot();
+        inventory.pressure.processResidentBytes =
+            processMemory.residentBytes;
+        inventory.pressure.processResidentAvailable =
+            processMemory.residentAvailable;
+        inventory.pressure.processPhysicalFootprintBytes =
+            processMemory.physicalFootprintBytes;
+        inventory.pressure.processPhysicalFootprintAvailable =
+            processMemory.physicalFootprintAvailable;
+        inventory.pressure.processHeapBytes = processMemory.heapBytes;
+        inventory.pressure.processHeapAvailable =
+            processMemory.heapAvailable;
+        inventory.pressure.processHeapBlocksInUse =
+            processMemory.heapBlocksInUse;
+        inventory.pressure.processHeapMaxBytesInUse =
+            processMemory.heapMaxBytesInUse;
+        inventory.pressure.processHeapAllocatedBytes =
+            processMemory.heapAllocatedBytes;
+        auto saturatedSubtract = [](std::uint64_t lhs,
+                                    std::uint64_t rhs) {
+            return lhs > rhs ? lhs - rhs : 0;
+        };
+        inventory.pressure.processHeapMinusTrackedHostCacheBytes =
+            saturatedSubtract(processMemory.heapBytes,
+                              inventory.hostCaches.totalBytes);
+        inventory.pressure.processHeapAllocatedMinusTrackedHostCacheBytes =
+            saturatedSubtract(processMemory.heapAllocatedBytes,
+                              inventory.hostCaches.totalBytes);
+        inventory.pressure.processHeapAllZonesBytes =
+            processMemory.heapAllZonesBytes;
+        inventory.pressure.processHeapAllZonesBlocksInUse =
+            processMemory.heapAllZonesBlocksInUse;
+        inventory.pressure.processHeapAllZonesMaxBytesInUse =
+            processMemory.heapAllZonesMaxBytesInUse;
+        inventory.pressure.processHeapAllZonesAllocatedBytes =
+            processMemory.heapAllZonesAllocatedBytes;
+        inventory.pressure.processHeapAllZonesCount =
+            processMemory.heapAllZonesCount;
+        inventory.pressure.processHeapNonDefaultZoneBytes =
+            processMemory.heapNonDefaultZoneBytes;
+        inventory.pressure.processHeapNonDefaultZoneBlocksInUse =
+            processMemory.heapNonDefaultZoneBlocksInUse;
+        inventory.pressure.processHeapNonDefaultZoneAllocatedBytes =
+            processMemory.heapNonDefaultZoneAllocatedBytes;
+        const auto machPorts = sampleProcessMachPortSnapshot();
+        inventory.pressure.processMachPortsEnabled = machPorts.enabled;
+        inventory.pressure.processMachPortsAvailable = machPorts.available;
+        inventory.pressure.processMachPortSampleKernReturn =
+            machPorts.kernReturn;
+        inventory.pressure.processMachPortNames = machPorts.names;
+        inventory.pressure.processMachPortTypeNames = machPorts.typeNames;
+        inventory.pressure.processMachPortTypeCountMismatch =
+            machPorts.typeCountMismatch;
+        inventory.pressure.processMachPortSendNames = machPorts.sendNames;
+        inventory.pressure.processMachPortReceiveNames =
+            machPorts.receiveNames;
+        inventory.pressure.processMachPortSendOnceNames =
+            machPorts.sendOnceNames;
+        inventory.pressure.processMachPortPortSetNames =
+            machPorts.portSetNames;
+        inventory.pressure.processMachPortDeadNameNames =
+            machPorts.deadNameNames;
+        inventory.pressure.processMachPortDnRequestNames =
+            machPorts.dnRequestNames;
+        inventory.pressure.processMachPortSpRequestNames =
+            machPorts.spRequestNames;
+        inventory.pressure.processMachPortSpRequestDelayedNames =
+            machPorts.spRequestDelayedNames;
+        inventory.pressure.processMachPortGuardedNames =
+            machPorts.guardedNames;
+        inventory.pressure.processMachPortImmovableReceiveNames =
+            machPorts.immovableReceiveNames;
+        inventory.pressure.processMachPortUnknownTypeNames =
+            machPorts.unknownTypeNames;
+        inventory.pressure.processMachPortUnknownTypeMask =
+            machPorts.unknownTypeMask;
+        inventory.mallocZoneLimit = processMemory.mallocZoneLimit;
+        inventory.mallocZoneRows = processMemory.mallocZoneRows;
+        inventory.mallocZonesTruncated = processMemory.mallocZonesTruncated;
+        inventory.topMallocZones = processMemory.topMallocZones;
         const auto counters = commandSubmissionDebugCounters();
+        inventory.commandBuffers = counters;
         inventory.pressure.cbPressureReserveSlots = counters.pressureReserve;
         inventory.pressure.cbPressureSoftCapSlots = counters.pressureSoftCap;
         inventory.pressure.cbPressureFlushCount = counters.pressureFlushCount;
@@ -24270,6 +26498,168 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         inventory.frameGraphTextureBytes = frameGraphMetal.textureBytes;
         inventory.frameGraphDrawableCount = frameGraphMetal.drawableCount;
         inventory.frameGraphDrawableTextureBytes = frameGraphMetal.drawableTextureBytes;
+        inventory.frameGraphDrawableAcquireCalls =
+            frameGraphMetal.drawableAcquireCalls;
+        inventory.frameGraphDrawableAcquireHits =
+            frameGraphMetal.drawableAcquireHits;
+        inventory.frameGraphDrawableAcquireSuccesses =
+            frameGraphMetal.drawableAcquireSuccesses;
+        inventory.frameGraphDrawableAcquireFailures =
+            frameGraphMetal.drawableAcquireFailures;
+        inventory.frameGraphDrawablePresentCalls =
+            frameGraphMetal.drawablePresentCalls;
+        inventory.frameGraphPresentCalls =
+            frameGraphMetal.presentCalls;
+        inventory.frameGraphPresentFromFlushCalls =
+            frameGraphMetal.presentFromFlushCalls;
+        inventory.frameGraphPresentFromSwapBuffersCalls =
+            frameGraphMetal.presentFromSwapBuffersCalls;
+        inventory.frameGraphPresentInternalCalls =
+            frameGraphMetal.presentInternalCalls;
+        inventory.frameGraphPresentPendingTrueCalls =
+            frameGraphMetal.presentPendingTrueCalls;
+        inventory.frameGraphPresentPendingFalseCalls =
+            frameGraphMetal.presentPendingFalseCalls;
+        inventory.frameGraphPresentCommandBufferPresentCalls =
+            frameGraphMetal.presentCommandBufferPresentCalls;
+        inventory.frameGraphPresentCommandBufferNilCalls =
+            frameGraphMetal.presentCommandBufferNilCalls;
+        inventory.frameGraphPresentNoWorkReturns =
+            frameGraphMetal.presentNoWorkReturns;
+        inventory.frameGraphPresentCommitAttempts =
+            frameGraphMetal.presentCommitAttempts;
+        inventory.frameGraphPresentCommitSuccesses =
+            frameGraphMetal.presentCommitSuccesses;
+        inventory.frameGraphPresentCommitFailures =
+            frameGraphMetal.presentCommitFailures;
+        inventory.frameGraphDrawableNilAfterPresent =
+            frameGraphMetal.drawableNilAfterPresent;
+        inventory.frameGraphDrawableResizeCalls =
+            frameGraphMetal.drawableResizeCalls;
+        inventory.frameGraphDrawableResizeNoops =
+            frameGraphMetal.drawableResizeNoops;
+        inventory.frameGraphDrawableResizeGrowOnlySkips =
+            frameGraphMetal.drawableResizeGrowOnlySkips;
+        inventory.frameGraphDrawableResizeDepthTextureReleases =
+            frameGraphMetal.drawableResizeDepthTextureReleases;
+        inventory.frameGraphDrawableResizeOffscreenTextureReleases =
+            frameGraphMetal.drawableResizeOffscreenTextureReleases;
+        inventory.frameGraphDrawableResizeLastRequestedWidth =
+            frameGraphMetal.drawableResizeLastRequestedWidth;
+        inventory.frameGraphDrawableResizeLastRequestedHeight =
+            frameGraphMetal.drawableResizeLastRequestedHeight;
+        inventory.frameGraphDrawableResizeLastEffectiveWidth =
+            frameGraphMetal.drawableResizeLastEffectiveWidth;
+        inventory.frameGraphDrawableResizeLastEffectiveHeight =
+            frameGraphMetal.drawableResizeLastEffectiveHeight;
+        inventory.frameGraphDrawableRetainCalls =
+            frameGraphMetal.drawableRetainCalls;
+        inventory.frameGraphDrawableReleaseCalls =
+            frameGraphMetal.drawableReleaseCalls;
+        inventory.frameGraphDrawableLiveRetains =
+            frameGraphMetal.drawableLiveRetains;
+        inventory.frameGraphDrawablePeakLiveRetains =
+            frameGraphMetal.drawablePeakLiveRetains;
+        inventory.frameGraphRenderEncoderOpenCalls =
+            frameGraphMetal.renderEncoderOpenCalls;
+        inventory.frameGraphRenderEncoderReleaseCalls =
+            frameGraphMetal.renderEncoderReleaseCalls;
+        inventory.frameGraphRenderEncoderLiveRetains =
+            frameGraphMetal.renderEncoderLiveRetains;
+        inventory.frameGraphRenderEncoderPeakLiveRetains =
+            frameGraphMetal.renderEncoderPeakLiveRetains;
+        inventory.frameGraphCurrentDrawablePresent =
+            frameGraphMetal.currentDrawablePresent;
+        inventory.frameGraphCurrentDrawableTextureBytes =
+            frameGraphMetal.currentDrawableTextureBytes;
+        inventory.frameGraphCurrentDrawableWidth =
+            frameGraphMetal.currentDrawableWidth;
+        inventory.frameGraphCurrentDrawableHeight =
+            frameGraphMetal.currentDrawableHeight;
+        inventory.frameGraphCurrentDrawablePixelFormat =
+            frameGraphMetal.currentDrawablePixelFormat;
+        inventory.frameGraphCurrentDrawableStorageMode =
+            frameGraphMetal.currentDrawableStorageMode;
+        inventory.frameGraphCurrentDrawableUsage =
+            frameGraphMetal.currentDrawableUsage;
+        inventory.frameGraphCurrentDrawableSampleCount =
+            frameGraphMetal.currentDrawableSampleCount;
+        inventory.frameGraphObservedDrawableTextures =
+            frameGraphMetal.observedDrawableTextures;
+        inventory.frameGraphObservedDrawableTexturePeak =
+            frameGraphMetal.observedDrawableTexturePeak;
+        inventory.frameGraphObservedDrawableTextureBytes =
+            frameGraphMetal.observedDrawableTextureBytes;
+        inventory.frameGraphObservedDrawableTextureBytesPeak =
+            frameGraphMetal.observedDrawableTextureBytesPeak;
+        inventory.frameGraphObservedDrawableTextureLimit =
+            frameGraphMetal.observedDrawableTextureLimit;
+        inventory.frameGraphObservedDrawableTextureTruncated =
+            frameGraphMetal.observedDrawableTextureTruncated;
+        inventory.frameGraphLayerDrawableWidth =
+            frameGraphMetal.layerDrawableWidth;
+        inventory.frameGraphLayerDrawableHeight =
+            frameGraphMetal.layerDrawableHeight;
+        inventory.frameGraphLayerPixelFormat =
+            frameGraphMetal.layerPixelFormat;
+        inventory.frameGraphLayerFramebufferOnly =
+            frameGraphMetal.layerFramebufferOnly;
+        inventory.frameGraphLayerMaximumDrawableCount =
+            frameGraphMetal.layerMaximumDrawableCount;
+        inventory.frameGraphLayerMaximumDrawableCountAvailable =
+            frameGraphMetal.layerMaximumDrawableCountAvailable;
+        inventory.frameGraphLayerDisplaySyncEnabled =
+            frameGraphMetal.layerDisplaySyncEnabled;
+        inventory.frameGraphLayerDisplaySyncEnabledAvailable =
+            frameGraphMetal.layerDisplaySyncEnabledAvailable;
+        inventory.frameGraphDepthStencilTextureBytes =
+            frameGraphMetal.depthStencilTextureBytes;
+        inventory.frameGraphDepthStencilTextureWidth =
+            frameGraphMetal.depthStencilTextureWidth;
+        inventory.frameGraphDepthStencilTextureHeight =
+            frameGraphMetal.depthStencilTextureHeight;
+        inventory.frameGraphDepthStencilTextureSampleCount =
+            frameGraphMetal.depthStencilTextureSampleCount;
+        inventory.frameGraphDepthStencilTexturePixelFormat =
+            frameGraphMetal.depthStencilTexturePixelFormat;
+        inventory.frameGraphDepthStencilRebuilds =
+            frameGraphMetal.depthStencilRebuilds;
+        inventory.frameGraphDepthStencilReleases =
+            frameGraphMetal.depthStencilReleases;
+        inventory.frameGraphDepthStencilAllocatedBytes =
+            frameGraphMetal.depthStencilAllocatedBytes;
+        inventory.frameGraphDepthStencilRebuildsFromEnsure =
+            frameGraphMetal.depthStencilRebuildsFromEnsure;
+        inventory.frameGraphDepthStencilRebuildsFromColorSizeMismatch =
+            frameGraphMetal.depthStencilRebuildsFromColorSizeMismatch;
+        inventory.frameGraphDepthStencilRebuildsFromSampleMismatch =
+            frameGraphMetal.depthStencilRebuildsFromSampleMismatch;
+        inventory.frameGraphOffscreenColorTextureBytes =
+            frameGraphMetal.offscreenColorTextureBytes;
+        inventory.frameGraphOffscreenColorTextureWidth =
+            frameGraphMetal.offscreenColorTextureWidth;
+        inventory.frameGraphOffscreenColorTextureHeight =
+            frameGraphMetal.offscreenColorTextureHeight;
+        inventory.frameGraphOffscreenColorTextureSampleCount =
+            frameGraphMetal.offscreenColorTextureSampleCount;
+        inventory.frameGraphOffscreenColorTexturePixelFormat =
+            frameGraphMetal.offscreenColorTexturePixelFormat;
+        inventory.frameGraphOffscreenColorRebuilds =
+            frameGraphMetal.offscreenColorRebuilds;
+        inventory.frameGraphOffscreenColorReleases =
+            frameGraphMetal.offscreenColorReleases;
+        inventory.frameGraphOffscreenColorAllocatedBytes =
+            frameGraphMetal.offscreenColorAllocatedBytes;
+        inventory.frameGraphDummyColorTextureAllocations =
+            frameGraphMetal.dummyColorTextureAllocations;
+        inventory.frameGraphDummyColorTextureAllocatedBytes =
+            frameGraphMetal.dummyColorTextureAllocatedBytes;
+        inventory.frameGraphDummyColorTextureCacheHits =
+            frameGraphMetal.dummyColorTextureCacheHits;
+        inventory.frameGraphDummyColorTextureCacheTextures =
+            frameGraphMetal.dummyColorTextureCacheTextures;
+        inventory.frameGraphDummyColorTextureCacheBytes =
+            frameGraphMetal.dummyColorTextureCacheBytes;
         inventory.frameGraphSamplerCount = frameGraphMetal.samplerCount;
         inventory.frameGraphRenderPipelineCount = frameGraphMetal.renderPipelineCount;
         inventory.frameGraphComputePipelineCount = frameGraphMetal.computePipelineCount;
@@ -24300,10 +26690,18 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             frameGraphMetal.mslLibrarySourceNSStringCreations;
         inventory.cacheLiveMslLibraries =
             static_cast<std::uint64_t>(inventory.libraryCacheEntries);
+        inventory.cacheLimitTranslatedDrawMSLSlots =
+            frameGraphMetal.translatedDrawMSLSlotCacheLimit;
+        inventory.cacheEvictionsTranslatedDrawMSLSlots =
+            frameGraphMetal.translatedDrawMSLSlotCacheEvictions;
         inventory.cacheLiveTranslatedDrawMSLSlots =
             frameGraphMetal.translatedDrawMSLSlotCacheEntries;
         inventory.cacheLiveTranslatedSampleMaskSlots =
             frameGraphMetal.translatedDrawSampleMaskSlotCacheEntries;
+        inventory.cacheLimitRenderPsoPerProgram =
+            frameGraphMetal.renderPsoCacheLimitPerProgram;
+        inventory.cacheEvictionsRenderPso =
+            frameGraphMetal.renderPsoCacheEvictions;
         if (frameGraphMetal.recommendedWorkingSetAvailable != 0 &&
             frameGraphMetal.recommendedWorkingSetBytes != 0) {
             inventory.pressure.recommendedWorkingSetBytes =
@@ -24316,6 +26714,30 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         static_cast<std::uint64_t>(Phase2PlanKeyProfile::kMaxTrackedKeys);
     inventory.cacheLiveTranslatedDrawPlans =
         static_cast<std::uint64_t>(impl_->translatedDrawPlanCache.size());
+    inventory.cacheLiveTranslatedDrawPlanBuckets =
+        static_cast<std::uint64_t>(
+            impl_->translatedDrawPlanCache.bucket_count());
+    inventory.cacheLiveTranslatedDrawPlanApproxBytes =
+        inventory.cacheLiveTranslatedDrawPlans *
+            static_cast<std::uint64_t>(
+                sizeof(std::uint64_t) + sizeof(TranslatedDrawPlan) +
+                sizeof(void*) * 2u) +
+        inventory.cacheLiveTranslatedDrawPlanBuckets *
+            static_cast<std::uint64_t>(sizeof(void*));
+    inventory.cacheLimitRenderPsoTotal = renderPsoTotalCacheLimit();
+    inventory.cacheEvictionsRenderPsoGlobal =
+        impl_->renderPsoTotalCacheEvictions;
+    inventory.depth32fReadback = impl_->depth32fReadback;
+    inventory.hostCaches.textureMipShadowEviction =
+        impl_->textureMipShadowEviction;
+    inventory.hostCaches.textureMipShadowEviction.enabled =
+        textureShadowDropMipLevelsEnabled() ? 1u : 0u;
+    inventory.hostCaches.textureMipShadowEviction.uploadedMipDropEnabled =
+        textureShadowDropUploadedMipLevelsEnabled() ? 1u : 0u;
+    inventory.hostCaches.textureMipShadowEviction.liveEvictedImages = 0;
+    inventory.hostCaches.textureMipShadowEviction.liveEvictedRgba8Bytes = 0;
+    inventory.hostCaches.textureMipShadowEviction.liveEvictedNativeBytes = 0;
+    inventory.hostCaches.textureMipShadowEviction.liveEvictedBytes = 0;
 
     std::unordered_set<void*> bufferResources;
     std::unordered_set<void*> textureResources;
@@ -24341,6 +26763,90 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         return static_cast<std::uint64_t>(image.rgba8.size())
             + static_cast<std::uint64_t>(image.nativeData.size());
     };
+    auto imageCapacityBytes =
+        [](const GLTextureImageLevel& image) -> std::uint64_t {
+        return static_cast<std::uint64_t>(image.rgba8.capacity())
+            + static_cast<std::uint64_t>(image.nativeData.capacity());
+    };
+    inventory.textureShadowHotspotLimit = 32;
+    inventory.renderPsoProgramHotspotLimit = 16;
+    auto textureHotspotLowerPriority =
+        [](const MetalResourceInventory::TextureShadowHotspot& lhs,
+           const MetalResourceInventory::TextureShadowHotspot& rhs) {
+            if (lhs.shadowBytes != rhs.shadowBytes) {
+                return lhs.shadowBytes < rhs.shadowBytes;
+            }
+            if (lhs.metalBytes != rhs.metalBytes) {
+                return lhs.metalBytes < rhs.metalBytes;
+            }
+            return lhs.name > rhs.name;
+        };
+
+    auto renderPsoLastUseRange =
+        [](const auto& cache,
+           const auto& lastUse,
+           std::uint64_t& outMin,
+           std::uint64_t& outMax) {
+        outMin = 0;
+        outMax = 0;
+        bool seen = false;
+        for (const auto& entry : cache) {
+            auto useIt = lastUse.find(entry.first);
+            if (useIt == lastUse.end() || useIt->second == 0) {
+                continue;
+            }
+            if (!seen) {
+                outMin = useIt->second;
+                outMax = useIt->second;
+                seen = true;
+            } else {
+                outMin = std::min(outMin, useIt->second);
+                outMax = std::max(outMax, useIt->second);
+            }
+        }
+    };
+
+    auto retainRenderPsoHotspot =
+        [&](MetalResourceInventory::RenderPsoProgramHotspot hotspot) {
+        const std::uint64_t regularSignal =
+            hotspot.renderPsoLive + hotspot.renderPsoHighWater +
+            hotspot.renderPsoHits + hotspot.renderPsoMisses +
+            hotspot.renderPsoEvictions;
+        const std::uint64_t gsSignal =
+            hotspot.gsPassThroughPsoLive +
+            hotspot.gsPassThroughPsoHighWater +
+            hotspot.gsPassThroughPsoHits +
+            hotspot.gsPassThroughPsoMisses +
+            hotspot.gsPassThroughPsoEvictions;
+        if (regularSignal == 0 && gsSignal == 0) {
+            return;
+        }
+        ++inventory.renderPsoProgramHotspotRows;
+        inventory.topRenderPsoPrograms.push_back(std::move(hotspot));
+    };
+    auto retainTextureShadowHotspot =
+        [&](const MetalResourceInventory::TextureShadowHotspot& hotspot) {
+            if (hotspot.shadowBytes == 0) {
+                return;
+            }
+            ++inventory.textureShadowHotspotRows;
+            const auto limit =
+                static_cast<std::size_t>(inventory.textureShadowHotspotLimit);
+            if (limit == 0) {
+                return;
+            }
+            auto& top = inventory.topTextureShadows;
+            if (top.size() < limit) {
+                top.push_back(hotspot);
+                return;
+            }
+            auto lowest = std::min_element(top.begin(), top.end(),
+                                           textureHotspotLowerPriority);
+            if (lowest != top.end() &&
+                textureHotspotLowerPriority(*lowest, hotspot)) {
+                *lowest = hotspot;
+            }
+        };
 
     std::uint64_t nextResidencyRecordId = 1;
     auto depthStencilPixelFormat = [](NSUInteger pixelFormat) {
@@ -24725,6 +27231,48 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         inventory.cacheLiveGsPassThroughPso +=
             static_cast<std::uint64_t>(
                 program.gsPassThroughPipelineStateCache.size());
+        MetalResourceInventory::RenderPsoProgramHotspot psoHotspot;
+        psoHotspot.program = programName;
+        psoHotspot.renderPsoLive =
+            static_cast<std::uint64_t>(program.metalPipelineStateCache.size());
+        psoHotspot.renderPsoHighWater =
+            std::max(psoHotspot.renderPsoLive,
+                     program.metalPipelineStateCacheHighWater);
+        psoHotspot.renderPsoHits = program.metalPipelineStateCacheHits;
+        psoHotspot.renderPsoMisses = program.metalPipelineStateCacheMisses;
+        psoHotspot.renderPsoEvictions =
+            program.metalPipelineStateCacheEvictions;
+        psoHotspot.renderPsoGlobalEvictions =
+            program.metalPipelineStateCacheGlobalEvictions;
+        psoHotspot.renderPsoScalarMirrorPresent =
+            program.metalPipelineState != nullptr ? 1u : 0u;
+        renderPsoLastUseRange(program.metalPipelineStateCache,
+                              program.metalPipelineStateCacheLastUse,
+                              psoHotspot.renderPsoLastUseMin,
+                              psoHotspot.renderPsoLastUseMax);
+        psoHotspot.gsPassThroughPsoLive =
+            static_cast<std::uint64_t>(
+                program.gsPassThroughPipelineStateCache.size());
+        psoHotspot.gsPassThroughPsoHighWater =
+            std::max(psoHotspot.gsPassThroughPsoLive,
+                     program.gsPassThroughPipelineStateCacheHighWater);
+        psoHotspot.gsPassThroughPsoHits =
+            program.gsPassThroughPipelineStateCacheHits;
+        psoHotspot.gsPassThroughPsoMisses =
+            program.gsPassThroughPipelineStateCacheMisses;
+        psoHotspot.gsPassThroughPsoEvictions =
+            program.gsPassThroughPipelineStateCacheEvictions;
+        psoHotspot.gsPassThroughPsoGlobalEvictions =
+            program.gsPassThroughPipelineStateCacheGlobalEvictions;
+        psoHotspot.gsPassThroughPsoScalarMirrorPresent =
+            program.gsPassThroughPipelineState != nullptr ? 1u : 0u;
+        renderPsoLastUseRange(program.gsPassThroughPipelineStateCache,
+                              program.gsPassThroughPipelineStateCacheLastUse,
+                              psoHotspot.gsPassThroughPsoLastUseMin,
+                              psoHotspot.gsPassThroughPsoLastUseMax);
+        psoHotspot.vertexSourceHash = program.vertexSourceHash;
+        psoHotspot.fragmentSourceHash = program.fragmentSourceHash;
+        retainRenderPsoHotspot(std::move(psoHotspot));
         addRenderPipeline(program.metalGSMeshPipelineState);
         addFunction(program.metalComputeFunction);
         addFunction(program.metalVertexFunction);
@@ -24748,6 +27296,17 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         }
     });
     store->buffers().forEach([&](GLuint bufferName, GLBufferObject& buffer) {
+        if (buffer.size > 0) {
+            ++inventory.bufferStorageObjects;
+        }
+        if (buffer.metalBuffer != nullptr) {
+            ++inventory.bufferMetalObjects;
+        }
+        if (buffer.size <= 0 && buffer.metalBuffer == nullptr &&
+            buffer.shadowBytes.empty() && buffer.cachedExpandedIndices.empty() &&
+            !buffer.sparseStorage && buffer.fp64TransportSidecars.empty()) {
+            ++inventory.bufferReservedOnlyObjects;
+        }
         addBuffer(buffer.metalBuffer, MetalResidencyOwner::Buffer,
                   bufferName, MetalResidencyKind::MetalBuffer,
                   MetalResidencyAuthorityClass::Authoritative,
@@ -24842,8 +27401,96 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         }
     });
     store->textures().forEach([&](GLuint textureName, GLTextureObject& texture) {
+        if (texture.instantiated) {
+            ++inventory.textureInstantiatedObjects;
+        }
+        if (texture.viewSourceTexture != 0) {
+            ++inventory.textureViewObjects;
+        }
+        if (texture.sparseTexture) {
+            ++inventory.textureSparseObjects;
+        }
         bool primaryMirrorInvalid = false;
         bool primarySawMirror = false;
+        MetalResourceInventory::TextureShadowHotspot hotspot;
+        hotspot.name = textureName;
+        hotspot.target = texture.target != 0 ? texture.target : texture.desc.target;
+        hotspot.viewSourceTexture = texture.viewSourceTexture;
+        hotspot.metalBytes = allocatedSize(texture.metalTexture);
+        hotspot.swizzledViewBytes = allocatedSize(texture.metalSwizzledView);
+        hotspot.samplingProxyBytes = allocatedSize(texture.metalSamplingProxy);
+        hotspot.producerPendingBits = texture.producerPending.bits();
+        hotspot.instantiated = texture.instantiated ? 1 : 0;
+        hotspot.hasMetalTexture = texture.metalTexture != nullptr ? 1 : 0;
+        hotspot.hasSwizzledView = texture.metalSwizzledView != nullptr ? 1 : 0;
+        hotspot.hasSamplingProxy = texture.metalSamplingProxy != nullptr ? 1 : 0;
+        hotspot.wasViewportRenderedTo =
+            texture.wasViewportRenderedTo ? 1 : 0;
+        hotspot.wasFramebufferRenderedTo =
+            texture.wasFramebufferRenderedTo ? 1 : 0;
+        hotspot.colorShadowAuthoritative =
+            texture.colorShadowAuthoritative ? 1 : 0;
+        hotspot.depthStencilShadowAuthoritative =
+            texture.depthStencilShadowAuthoritative ? 1 : 0;
+        hotspot.sparseTexture = texture.sparseTexture ? 1 : 0;
+        hotspot.internalFormat = texture.desc.internalFormat;
+        hotspot.sourceFormat = texture.desc.sourceFormat;
+        hotspot.sourceType = texture.desc.sourceType;
+        hotspot.width = texture.desc.width;
+        hotspot.height = texture.desc.height;
+        hotspot.depth = texture.desc.depth;
+        hotspot.layers = texture.desc.layers;
+        hotspot.samples = texture.desc.samples;
+        std::uint64_t depth32fDropCandidateRgba8Bytes = 0;
+        bool hotspotSawLevel = false;
+        auto observeHotspotImage =
+            [&](GLint level, const GLTextureImageLevel& image,
+                bool cubeFaceImage) {
+                ++hotspot.imageLevels;
+                if (image.defined) {
+                    ++hotspot.definedImages;
+                }
+                if (cubeFaceImage) {
+                    ++hotspot.cubeFaceImages;
+                }
+                if (!hotspotSawLevel) {
+                    hotspot.minLevel = level;
+                    hotspot.maxLevel = level;
+                    hotspotSawLevel = true;
+                } else {
+                    hotspot.minLevel = std::min(hotspot.minLevel, level);
+                    hotspot.maxLevel = std::max(hotspot.maxLevel, level);
+                }
+                const std::uint64_t rgba8Bytes =
+                    static_cast<std::uint64_t>(image.rgba8.size());
+                const std::uint64_t nativeBytes =
+                    static_cast<std::uint64_t>(image.nativeData.size());
+                const std::uint64_t bytes = rgba8Bytes + nativeBytes;
+                hotspot.rgba8Bytes += rgba8Bytes;
+                hotspot.nativeBytes += nativeBytes;
+                hotspot.shadowBytes += bytes;
+                if (isDepth32FTextureShadowDropShape(image) &&
+                    rgba8Bytes != 0) {
+                    depth32fDropCandidateRgba8Bytes += rgba8Bytes;
+                }
+                if (bytes != 0) {
+                    ++hotspot.shadowImages;
+                }
+                if (bytes > hotspot.largestImageBytes) {
+                    hotspot.largestImageBytes = bytes;
+                    hotspot.largestLevel = level;
+                    hotspot.internalFormat = image.desc.internalFormat != 0
+                        ? image.desc.internalFormat
+                        : texture.desc.internalFormat;
+                    hotspot.sourceFormat = image.desc.sourceFormat;
+                    hotspot.sourceType = image.desc.sourceType;
+                    hotspot.width = image.desc.width;
+                    hotspot.height = image.desc.height;
+                    hotspot.depth = image.desc.depth;
+                    hotspot.layers = image.desc.layers;
+                    hotspot.samples = image.desc.samples;
+                }
+            };
         auto observePrimaryMirror =
             [&](const GLTextureImageLevel& image) {
                 if (!image.defined) {
@@ -24854,16 +27501,60 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
                     return;
                 }
                 primarySawMirror = true;
-            };
+        };
         for (const auto& [level, image] : texture.levels) {
-            (void)level;
+            observeHotspotImage(level, image, false);
             observePrimaryMirror(image);
+            const std::uint64_t rgba8Bytes =
+                static_cast<std::uint64_t>(image.rgba8.size());
+            const std::uint64_t nativeBytes =
+                static_cast<std::uint64_t>(image.nativeData.size());
             const std::uint64_t bytes = imageBytes(image);
+            const std::uint64_t capacityBytes = imageCapacityBytes(image);
+            if (image.mipShadowEvicted) {
+                ++inventory.hostCaches.textureMipShadowEviction
+                      .liveEvictedImages;
+                inventory.hostCaches.textureMipShadowEviction
+                    .liveEvictedRgba8Bytes +=
+                    image.mipShadowEvictedRgba8Bytes;
+                inventory.hostCaches.textureMipShadowEviction
+                    .liveEvictedNativeBytes +=
+                    image.mipShadowEvictedNativeBytes;
+                inventory.hostCaches.textureMipShadowEviction
+                    .liveEvictedBytes +=
+                    image.mipShadowEvictedRgba8Bytes +
+                    image.mipShadowEvictedNativeBytes;
+            }
             ++inventory.genericTextureLevelImages;
             inventory.genericTextureLevelBytes += bytes;
+            inventory.hostCaches.textureShadowRgba8Bytes += rgba8Bytes;
+            inventory.hostCaches.textureShadowNativeBytes += nativeBytes;
+            inventory.hostCaches.textureShadowCapacityBytes += capacityBytes;
+            if (level == 0) {
+                inventory.hostCaches.textureShadowPrimaryRgba8Bytes +=
+                    rgba8Bytes;
+                inventory.hostCaches.textureShadowPrimaryNativeBytes +=
+                    nativeBytes;
+                inventory.hostCaches.textureShadowPrimaryCapacityBytes +=
+                    capacityBytes;
+            } else {
+                inventory.hostCaches.textureShadowMipRgba8Bytes +=
+                    rgba8Bytes;
+                inventory.hostCaches.textureShadowMipNativeBytes +=
+                    nativeBytes;
+                inventory.hostCaches.textureShadowMipCapacityBytes +=
+                    capacityBytes;
+            }
             if (bytes != 0) {
                 ++inventory.hostCaches.textureShadowImages;
                 inventory.hostCaches.textureShadowBytes += bytes;
+                if (level == 0) {
+                    ++inventory.hostCaches.textureShadowPrimaryImages;
+                    inventory.hostCaches.textureShadowPrimaryBytes += bytes;
+                } else {
+                    ++inventory.hostCaches.textureShadowMipImages;
+                    inventory.hostCaches.textureShadowMipBytes += bytes;
+                }
                 addHostCacheBytes(bytes);
                 recordResidency(MetalResidencyOwner::Texture, textureName,
                                 MetalResidencyKind::HostShadow,
@@ -24873,11 +27564,23 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         }
         for (const auto& faceLevels : texture.cubeFaceLevels) {
             for (const auto& [level, image] : faceLevels) {
-                (void)level;
+                observeHotspotImage(level, image, true);
                 observePrimaryMirror(image);
+                const std::uint64_t rgba8Bytes =
+                    static_cast<std::uint64_t>(image.rgba8.size());
+                const std::uint64_t nativeBytes =
+                    static_cast<std::uint64_t>(image.nativeData.size());
                 const std::uint64_t bytes = imageBytes(image);
+                const std::uint64_t capacityBytes =
+                    imageCapacityBytes(image);
                 ++inventory.cubeFaceLevelImages;
                 inventory.cubeFaceLevelBytes += bytes;
+                inventory.hostCaches.cubeFaceShadowRgba8Bytes +=
+                    rgba8Bytes;
+                inventory.hostCaches.cubeFaceShadowNativeBytes +=
+                    nativeBytes;
+                inventory.hostCaches.cubeFaceShadowCapacityBytes +=
+                    capacityBytes;
                 if (bytes != 0) {
                     ++inventory.hostCaches.cubeFaceShadowImages;
                     inventory.hostCaches.cubeFaceShadowBytes += bytes;
@@ -24889,6 +27592,105 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
                 }
             }
         }
+        if (hotspot.definedImages != 0) {
+            ++inventory.textureDefinedObjects;
+        }
+        if (!texture.instantiated && texture.viewSourceTexture == 0 &&
+            texture.metalTexture == nullptr && texture.metalSwizzledView == nullptr &&
+            texture.metalSamplingProxy == nullptr && texture.metalSampler == nullptr &&
+            texture.textureBufferExpandedMetalBuffer == nullptr &&
+            texture.imageAtomicBuffer == nullptr && hotspot.definedImages == 0 &&
+            hotspot.shadowBytes == 0 && !texture.sparseTexture) {
+            ++inventory.textureReservedOnlyObjects;
+        }
+        const auto baseIt = texture.levels.find(0);
+        const bool depth32fBaseCandidate =
+            baseIt != texture.levels.end() &&
+            isDepth32FTextureShadowDropShape(baseIt->second) &&
+            !baseIt->second.rgba8.empty();
+        if (depth32fBaseCandidate &&
+            depth32fDropCandidateRgba8Bytes != 0) {
+            ++inventory.hostCaches.depth32fDropDryRunCandidateTextures;
+            inventory.hostCaches.depth32fDropDryRunCandidateRgba8Bytes +=
+                depth32fDropCandidateRgba8Bytes;
+            const bool hasView = texture.viewSourceTexture != 0;
+            const bool hasSparse = texture.sparseTexture;
+            const bool hasImageAtomicDirty =
+                texture.imageAtomicBufferDirtyToTexture;
+            const bool hasColorAuthoritative =
+                texture.colorShadowAuthoritative;
+            const bool hasDepthAuthoritative =
+                texture.depthStencilShadowAuthoritative;
+            const bool hasRendered =
+                texture.wasFramebufferRenderedTo ||
+                texture.wasViewportRenderedTo;
+            const bool hasPending =
+                texture.producerPending.hasAny(kProducerAll);
+            const bool hasSamplingProxy =
+                texture.metalSamplingProxy != nullptr;
+            const bool blocked =
+                hasView || hasSparse || hasImageAtomicDirty ||
+                hasColorAuthoritative || hasDepthAuthoritative ||
+                hasRendered || hasPending || hasSamplingProxy;
+            if (!blocked) {
+                ++inventory.hostCaches.depth32fDropDryRunEligibleTextures;
+                inventory.hostCaches.depth32fDropDryRunEligibleRgba8Bytes +=
+                    depth32fDropCandidateRgba8Bytes;
+            } else {
+                ++inventory.hostCaches.depth32fDropDryRunBlockedTextures;
+                inventory.hostCaches.depth32fDropDryRunBlockedRgba8Bytes +=
+                    depth32fDropCandidateRgba8Bytes;
+            }
+            auto accumulateFlag =
+                [&](bool flag,
+                    std::uint64_t& textureCounter,
+                    std::uint64_t& byteCounter) {
+                    if (!flag) {
+                        return;
+                    }
+                    ++textureCounter;
+                    byteCounter += depth32fDropCandidateRgba8Bytes;
+                };
+            accumulateFlag(
+                hasView,
+                inventory.hostCaches.depth32fDropDryRunFlagViewTextures,
+                inventory.hostCaches.depth32fDropDryRunFlagViewRgba8Bytes);
+            accumulateFlag(
+                hasSparse,
+                inventory.hostCaches.depth32fDropDryRunFlagSparseTextures,
+                inventory.hostCaches.depth32fDropDryRunFlagSparseRgba8Bytes);
+            accumulateFlag(
+                hasImageAtomicDirty,
+                inventory.hostCaches.depth32fDropDryRunFlagImageAtomicTextures,
+                inventory.hostCaches.depth32fDropDryRunFlagImageAtomicRgba8Bytes);
+            accumulateFlag(
+                hasColorAuthoritative,
+                inventory.hostCaches
+                    .depth32fDropDryRunFlagColorAuthoritativeTextures,
+                inventory.hostCaches
+                    .depth32fDropDryRunFlagColorAuthoritativeRgba8Bytes);
+            accumulateFlag(
+                hasDepthAuthoritative,
+                inventory.hostCaches
+                    .depth32fDropDryRunFlagDepthAuthoritativeTextures,
+                inventory.hostCaches
+                    .depth32fDropDryRunFlagDepthAuthoritativeRgba8Bytes);
+            accumulateFlag(
+                hasRendered,
+                inventory.hostCaches.depth32fDropDryRunFlagRenderedTextures,
+                inventory.hostCaches.depth32fDropDryRunFlagRenderedRgba8Bytes);
+            accumulateFlag(
+                hasPending,
+                inventory.hostCaches.depth32fDropDryRunFlagPendingTextures,
+                inventory.hostCaches.depth32fDropDryRunFlagPendingRgba8Bytes);
+            accumulateFlag(
+                hasSamplingProxy,
+                inventory.hostCaches
+                    .depth32fDropDryRunFlagSamplingProxyTextures,
+                inventory.hostCaches
+                    .depth32fDropDryRunFlagSamplingProxyRgba8Bytes);
+        }
+        retainTextureShadowHotspot(hotspot);
         const bool primaryMirrorsValid =
             primarySawMirror && !primaryMirrorInvalid;
         const MetalResidencyAuthorityClass primaryAuthority =
@@ -24959,11 +27761,28 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         }
     });
     store->renderbuffers().forEach([&](GLuint renderbufferName, GLRenderbufferObject& renderbuffer) {
-        const std::uint64_t shadowBytes =
-            static_cast<std::uint64_t>(renderbuffer.rgba8.size()) +
-            static_cast<std::uint64_t>(renderbuffer.nativeData.size()) +
-            static_cast<std::uint64_t>(renderbuffer.depth32.size() * sizeof(GLfloat)) +
+        const std::uint64_t rgba8Bytes =
+            static_cast<std::uint64_t>(renderbuffer.rgba8.size());
+        const std::uint64_t nativeBytes =
+            static_cast<std::uint64_t>(renderbuffer.nativeData.size());
+        const std::uint64_t depth32Bytes =
+            static_cast<std::uint64_t>(renderbuffer.depth32.size() *
+                                       sizeof(GLfloat));
+        const std::uint64_t stencil8Bytes =
             static_cast<std::uint64_t>(renderbuffer.stencil8.size());
+        const std::uint64_t capacityBytes =
+            static_cast<std::uint64_t>(renderbuffer.rgba8.capacity()) +
+            static_cast<std::uint64_t>(renderbuffer.nativeData.capacity()) +
+            static_cast<std::uint64_t>(renderbuffer.depth32.capacity() *
+                                       sizeof(GLfloat)) +
+            static_cast<std::uint64_t>(renderbuffer.stencil8.capacity());
+        const std::uint64_t shadowBytes =
+            rgba8Bytes + nativeBytes + depth32Bytes + stencil8Bytes;
+        inventory.hostCaches.renderbufferShadowRgba8Bytes += rgba8Bytes;
+        inventory.hostCaches.renderbufferShadowNativeBytes += nativeBytes;
+        inventory.hostCaches.renderbufferShadowDepth32Bytes += depth32Bytes;
+        inventory.hostCaches.renderbufferShadowStencil8Bytes += stencil8Bytes;
+        inventory.hostCaches.renderbufferShadowCapacityBytes += capacityBytes;
         if (shadowBytes != 0) {
             ++inventory.hostCaches.renderbufferShadowObjects;
             inventory.hostCaches.renderbufferShadowBytes += shadowBytes;
@@ -25012,6 +27831,63 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             addProgram(0, *pipeline.syntheticTessProgram);
         }
     });
+    inventory.cacheLiveRenderPsoTotal =
+        inventory.cacheLiveRenderPso + inventory.cacheLiveGsPassThroughPso;
+    inventory.cacheHighWaterRenderPsoTotal =
+        std::max(impl_->renderPsoTotalCacheHighWater,
+                 inventory.cacheLiveRenderPsoTotal);
+    std::sort(inventory.topRenderPsoPrograms.begin(),
+              inventory.topRenderPsoPrograms.end(),
+              [](const MetalResourceInventory::RenderPsoProgramHotspot& lhs,
+                 const MetalResourceInventory::RenderPsoProgramHotspot& rhs) {
+                  const std::uint64_t lhsLive =
+                      lhs.renderPsoLive + lhs.gsPassThroughPsoLive;
+                  const std::uint64_t rhsLive =
+                      rhs.renderPsoLive + rhs.gsPassThroughPsoLive;
+                  if (lhsLive != rhsLive) {
+                      return lhsLive > rhsLive;
+                  }
+                  const std::uint64_t lhsHighWater =
+                      lhs.renderPsoHighWater + lhs.gsPassThroughPsoHighWater;
+                  const std::uint64_t rhsHighWater =
+                      rhs.renderPsoHighWater + rhs.gsPassThroughPsoHighWater;
+                  if (lhsHighWater != rhsHighWater) {
+                      return lhsHighWater > rhsHighWater;
+                  }
+                  const std::uint64_t lhsMisses =
+                      lhs.renderPsoMisses + lhs.gsPassThroughPsoMisses;
+                  const std::uint64_t rhsMisses =
+                      rhs.renderPsoMisses + rhs.gsPassThroughPsoMisses;
+                  if (lhsMisses != rhsMisses) {
+                      return lhsMisses > rhsMisses;
+                  }
+                  const std::uint64_t lhsEvictions =
+                      lhs.renderPsoEvictions +
+                      lhs.renderPsoGlobalEvictions +
+                      lhs.gsPassThroughPsoEvictions +
+                      lhs.gsPassThroughPsoGlobalEvictions;
+                  const std::uint64_t rhsEvictions =
+                      rhs.renderPsoEvictions +
+                      rhs.renderPsoGlobalEvictions +
+                      rhs.gsPassThroughPsoEvictions +
+                      rhs.gsPassThroughPsoGlobalEvictions;
+                  if (lhsEvictions != rhsEvictions) {
+                      return lhsEvictions > rhsEvictions;
+                  }
+                  return lhs.program < rhs.program;
+              });
+    const auto renderPsoHotspotLimit =
+        static_cast<std::size_t>(inventory.renderPsoProgramHotspotLimit);
+    if (renderPsoHotspotLimit != 0 &&
+        inventory.topRenderPsoPrograms.size() > renderPsoHotspotLimit) {
+        inventory.topRenderPsoPrograms.resize(renderPsoHotspotLimit);
+    }
+    inventory.renderPsoProgramHotspotsTruncated =
+        inventory.renderPsoProgramHotspotRows >
+                static_cast<std::uint64_t>(inventory.topRenderPsoPrograms.size())
+            ? inventory.renderPsoProgramHotspotRows -
+                  static_cast<std::uint64_t>(inventory.topRenderPsoPrograms.size())
+            : 0;
 
     const auto sparseTextureInventory =
         extensions::sparse_texture::sparseTextureMemoryInventory(*this);
@@ -25059,6 +27935,19 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
                     MetalResidencyAuthorityClass::SparseSpecial,
                     MetalResidencyHeapClass::Sparse,
                     multisampleStorageSidecars.sidecarBytes, 0);
+
+    std::sort(inventory.topTextureShadows.begin(),
+              inventory.topTextureShadows.end(),
+              [&](const MetalResourceInventory::TextureShadowHotspot& lhs,
+                  const MetalResourceInventory::TextureShadowHotspot& rhs) {
+                  return textureHotspotLowerPriority(rhs, lhs);
+              });
+    inventory.textureShadowHotspotsTruncated =
+        inventory.textureShadowHotspotRows >
+                static_cast<std::uint64_t>(inventory.topTextureShadows.size())
+            ? inventory.textureShadowHotspotRows -
+                  static_cast<std::uint64_t>(inventory.topTextureShadows.size())
+            : 0;
 
     std::sort(inventory.r5OrderingCandidates.begin(),
               inventory.r5OrderingCandidates.end(),
@@ -32709,6 +35598,12 @@ GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
             }
         }
         program->gsPassThroughPipelineStateCache.clear();
+        program->gsPassThroughPipelineStateCacheLastUse.clear();
+        program->gsPassThroughPipelineStateCacheHighWater = 0;
+        program->gsPassThroughPipelineStateCacheHits = 0;
+        program->gsPassThroughPipelineStateCacheMisses = 0;
+        program->gsPassThroughPipelineStateCacheEvictions = 0;
+        program->gsPassThroughPipelineStateCacheGlobalEvictions = 0;
         releaseRetainedMetalObject(program->gsPassThroughPipelineState);
         program->gsPassThroughPipelineState = nullptr;
         program->gsPassThroughPipelineColorFormat = 0;
@@ -35090,6 +37985,12 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             releaseRetainedMetalObject(entry.second);
         }
         program.gsPassThroughPipelineStateCache.clear();
+        program.gsPassThroughPipelineStateCacheLastUse.clear();
+        program.gsPassThroughPipelineStateCacheHighWater = 0;
+        program.gsPassThroughPipelineStateCacheHits = 0;
+        program.gsPassThroughPipelineStateCacheMisses = 0;
+        program.gsPassThroughPipelineStateCacheEvictions = 0;
+        program.gsPassThroughPipelineStateCacheGlobalEvictions = 0;
         releaseRetainedMetalObject(program.gsPassThroughPipelineState);
         program.gsPassThroughPipelineState = nullptr;
         program.gsPassThroughPipelineColorFormat = 0;
@@ -35347,6 +38248,12 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                 releaseRetainedMetalObject(entry.second);
             }
             program.gsPassThroughPipelineStateCache.clear();
+            program.gsPassThroughPipelineStateCacheLastUse.clear();
+            program.gsPassThroughPipelineStateCacheHighWater = 0;
+            program.gsPassThroughPipelineStateCacheHits = 0;
+            program.gsPassThroughPipelineStateCacheMisses = 0;
+            program.gsPassThroughPipelineStateCacheEvictions = 0;
+            program.gsPassThroughPipelineStateCacheGlobalEvictions = 0;
             releaseRetainedMetalObject(program.gsPassThroughPipelineState);
             program.gsPassThroughPipelineState = nullptr;
             program.gsPassThroughPipelineColorFormat = 0;
@@ -35373,6 +38280,16 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     tdi.pipelineStateOut = &program.gsPassThroughPipelineState;
     tdi.pipelineColorFormatOut = &program.gsPassThroughPipelineColorFormat;
     tdi.pipelineStateCacheOut = &program.gsPassThroughPipelineStateCache;
+    tdi.pipelineStateCacheLastUseOut =
+        &program.gsPassThroughPipelineStateCacheLastUse;
+    tdi.pipelineStateCacheHighWaterOut =
+        &program.gsPassThroughPipelineStateCacheHighWater;
+    tdi.pipelineStateCacheHitsOut =
+        &program.gsPassThroughPipelineStateCacheHits;
+    tdi.pipelineStateCacheMissesOut =
+        &program.gsPassThroughPipelineStateCacheMisses;
+    tdi.pipelineStateCacheEvictionsOut =
+        &program.gsPassThroughPipelineStateCacheEvictions;
     tdi.metalVertexFunction = program.gsPassThroughVertexFunction;
     tdi.metalFragmentFunction = program.gsPassThroughFragmentFunction;
     tdi.metalVertexFunctionOut = &program.gsPassThroughVertexFunction;
@@ -35515,6 +38432,13 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
     tdi.pipelineStateOut = &program.metalPipelineState;
     tdi.pipelineColorFormatOut = &program.metalPipelineColorFormat;
     tdi.pipelineStateCacheOut = &program.metalPipelineStateCache;
+    tdi.pipelineStateCacheLastUseOut = &program.metalPipelineStateCacheLastUse;
+    tdi.pipelineStateCacheHighWaterOut =
+        &program.metalPipelineStateCacheHighWater;
+    tdi.pipelineStateCacheHitsOut = &program.metalPipelineStateCacheHits;
+    tdi.pipelineStateCacheMissesOut = &program.metalPipelineStateCacheMisses;
+    tdi.pipelineStateCacheEvictionsOut =
+        &program.metalPipelineStateCacheEvictions;
     tdi.metalVertexFunction = program.metalVertexFunction;
     tdi.metalFragmentFunction = program.metalFragmentFunction;
     tdi.metalVertexFunctionOut = &program.metalVertexFunction;
@@ -35730,6 +38654,121 @@ static bool anyQueryObjectActive(GLObjectStore* objects)
         active = active || query.active;
     });
     return active;
+}
+
+void GLContext::Impl::evictRenderPsoTotalCacheIfNeeded() {
+    const std::uint64_t limit = renderPsoTotalCacheLimit();
+    if (limit == 0 || objects == nullptr) {
+        return;
+    }
+
+    auto forEachRenderPsoOwner = [&](auto&& fn) {
+        objects->programs().forEach([&](GLuint, GLProgramObject& program) {
+            fn(program);
+        });
+        objects->programPipelines().forEach(
+            [&](GLuint, GLProgramPipelineObject& pipeline) {
+                if (pipeline.syntheticTessProgram != nullptr) {
+                    fn(*pipeline.syntheticTessProgram);
+                }
+            });
+    };
+
+    auto liveEntries = [&]() {
+        std::uint64_t total = 0;
+        forEachRenderPsoOwner([&](GLProgramObject& program) {
+            total += static_cast<std::uint64_t>(
+                program.metalPipelineStateCache.size());
+            total += static_cast<std::uint64_t>(
+                program.gsPassThroughPipelineStateCache.size());
+        });
+        return total;
+    };
+
+    std::uint64_t live = liveEntries();
+    renderPsoTotalCacheHighWater =
+        std::max(renderPsoTotalCacheHighWater, live);
+    while (live > limit) {
+        struct EvictionCandidate {
+            GLProgramObject* program = nullptr;
+            std::uint64_t key = 0;
+            std::uint64_t lastUse = std::numeric_limits<std::uint64_t>::max();
+            bool gsPassThrough = false;
+        } candidate;
+
+        auto considerCache =
+            [&](GLProgramObject& program,
+                const std::unordered_map<std::uint64_t, void*>& cache,
+                const std::unordered_map<std::uint64_t, std::uint64_t>& lastUse,
+                bool gsPassThrough) {
+                for (const auto& entry : cache) {
+                    std::uint64_t use = 0;
+                    auto useIt = lastUse.find(entry.first);
+                    if (useIt != lastUse.end()) {
+                        use = useIt->second;
+                    }
+                    if (candidate.program == nullptr ||
+                        use < candidate.lastUse) {
+                        candidate.program = &program;
+                        candidate.key = entry.first;
+                        candidate.lastUse = use;
+                        candidate.gsPassThrough = gsPassThrough;
+                    }
+                }
+            };
+
+        forEachRenderPsoOwner([&](GLProgramObject& program) {
+            considerCache(program,
+                          program.metalPipelineStateCache,
+                          program.metalPipelineStateCacheLastUse,
+                          false);
+            considerCache(program,
+                          program.gsPassThroughPipelineStateCache,
+                          program.gsPassThroughPipelineStateCacheLastUse,
+                          true);
+        });
+        if (candidate.program == nullptr) {
+            break;
+        }
+
+        auto& cache = candidate.gsPassThrough
+            ? candidate.program->gsPassThroughPipelineStateCache
+            : candidate.program->metalPipelineStateCache;
+        auto& lastUse = candidate.gsPassThrough
+            ? candidate.program->gsPassThroughPipelineStateCacheLastUse
+            : candidate.program->metalPipelineStateCacheLastUse;
+        void*& scalarState = candidate.gsPassThrough
+            ? candidate.program->gsPassThroughPipelineState
+            : candidate.program->metalPipelineState;
+        std::uint32_t& scalarColorFormat = candidate.gsPassThrough
+            ? candidate.program->gsPassThroughPipelineColorFormat
+            : candidate.program->metalPipelineColorFormat;
+
+        auto evictIt = cache.find(candidate.key);
+        if (evictIt == cache.end()) {
+            break;
+        }
+        void* evicted = evictIt->second;
+        if (scalarState == evicted) {
+            if (scalarState != nullptr) {
+                CFRelease(scalarState);
+            }
+            scalarState = nullptr;
+            scalarColorFormat = 0;
+        }
+        if (evicted != nullptr) {
+            CFRelease(evicted);
+        }
+        lastUse.erase(candidate.key);
+        cache.erase(evictIt);
+        if (candidate.gsPassThrough) {
+            ++candidate.program->gsPassThroughPipelineStateCacheGlobalEvictions;
+        } else {
+            ++candidate.program->metalPipelineStateCacheGlobalEvictions;
+        }
+        ++renderPsoTotalCacheEvictions;
+        --live;
+    }
 }
 
 // Sprint 17 Day 7+ Bank-Group-H Path B Phase 3 day 4 — see header
@@ -36086,27 +39125,42 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
     }
     const auto postMarkStart = drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
     if (ok) {
+        evictRenderPsoTotalCacheIfNeeded();
         GpuResourceWriteSet producerWrites;
         if (drawFboName != 0) {
             if (const GLFramebufferObject* drawFbo =
                     objects->framebuffers().get(drawFboName)) {
+                const std::size_t beforeFboWrites = producerWrites.size();
                 appendFramebufferAttachmentWrites(producerWrites, *drawFbo);
+                if (producerTokenProfile.enabled) {
+                    producerTokenProfile.translatedDrawFboWrites +=
+                        producerWrites.size() - beforeFboWrites;
+                }
             }
         }
         for (GLuint texName : tdi.writtenImageTextureNames) {
             producerWrites.push_back(
                 {GpuResourceAccess::Kind::Texture, texName,
                  kProducerStorageImageWrite});
+            if (producerTokenProfile.enabled) {
+                ++producerTokenProfile.translatedDrawStorageImageWrites;
+            }
         }
         for (const auto& ssbo : tdi.ssboBindings) {
             producerWrites.push_back(
                 {GpuResourceAccess::Kind::Buffer, ssbo.glBufferName,
                  kProducerShaderStorageWrite});
+            if (producerTokenProfile.enabled) {
+                ++producerTokenProfile.translatedDrawSsboWrites;
+            }
         }
         for (const auto& atomic : tdi.atomicCounterBindings) {
             producerWrites.push_back(
                 {GpuResourceAccess::Kind::Buffer, atomic.glBufferName,
                  kProducerAtomicCounterWrite});
+            if (producerTokenProfile.enabled) {
+                ++producerTokenProfile.translatedDrawAtomicCounterWrites;
+            }
         }
         markGpuResourceWrites(producerWrites);
         if (!pendingFp64GraphicsSsboSidecars.empty()) {
@@ -36235,6 +39289,8 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                     if (GLTextureObject* tex =
                             objects->textures().get(it->second.object)) {
                         tex->depthStencilShadowAuthoritative = false;
+                        maybeDropStaleDepth32FRgba8ShadowForAttachment(
+                            *tex, it->second);
                         if (tdi.clipOrigin == GL_LOWER_LEFT ||
                             clipControlShaderYFixup) {
                             tex->wasFramebufferRenderedTo = true;
@@ -37419,7 +40475,8 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
                                          GLenum type,
                                          GLsizei bufSize,
                                          const GLPixelStoreState& packStore,
-                                         void* pixels) {
+                                         void* pixels,
+                                         bool yFlipDepthReadback) {
     if (pixels == nullptr || !image.defined) {
         return false;
     }
@@ -37430,6 +40487,12 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
     const std::size_t dstPixelBytes = bytesPerPixel(format, type);
     const std::size_t dstBpc = bytesPerComponent(type);
     const std::size_t dstComponents = componentCountForFormat(format);
+    const bool useNativeDepth32FAsRgba8 =
+        format == GL_RGBA &&
+        type == GL_UNSIGNED_BYTE &&
+        image.rgba8.empty() &&
+        object.depthStencilShadowAuthoritative &&
+        isDepth32FTextureShadowDropShape(image);
     if (dstPixelBytes == 0 || dstBpc == 0 || dstComponents == 0) {
         return false;
     }
@@ -37441,6 +40504,10 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
         sourceBytes = image.rgba8.data();
         sourceBpp = 4;
         sourceByteCount = image.rgba8.size();
+    } else if (useNativeDepth32FAsRgba8) {
+        sourceBytes = image.nativeData.data();
+        sourceBpp = image.nativeBpp;
+        sourceByteCount = image.nativeData.size();
     } else if ((format == GL_RGBA || format == GL_RGB || format == GL_DEPTH_COMPONENT) &&
                image.nativeBpp >= dstPixelBytes &&
                !image.nativeData.empty()) {
@@ -37509,6 +40576,10 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
 
     auto* dstBase = static_cast<std::uint8_t*>(pixels) + dstSkipBytes;
     const bool packSwapBytes = (packStore.packSwapBytes == GL_TRUE);
+    const bool applyDepthYFlip =
+        useNativeDepth32FAsRgba8 &&
+        yFlipDepthReadback &&
+        object.target != GL_TEXTURE_1D_ARRAY;
     for (GLsizei z = 0; z < texD; ++z) {
         for (GLsizei y = 0; y < texH; ++y) {
             const std::uint8_t* srcRow = sourceBytes +
@@ -37518,6 +40589,36 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
             std::uint8_t* dstRow = dstBase +
                 static_cast<std::size_t>(z) * dstSliceBytes +
                 static_cast<std::size_t>(y) * dstRowBytes;
+            if (useNativeDepth32FAsRgba8) {
+                const GLsizei sourceY = applyDepthYFlip
+                    ? (texH - 1 - y)
+                    : y;
+                for (GLsizei x = 0; x < texW; ++x) {
+                    const std::size_t texelIndex =
+                        (static_cast<std::size_t>(z) *
+                         static_cast<std::size_t>(texH) +
+                         static_cast<std::size_t>(sourceY)) *
+                        static_cast<std::size_t>(texW) +
+                        static_cast<std::size_t>(x);
+                    const std::size_t srcOffset = texelIndex * sourceBpp;
+                    float depthValue = 0.0f;
+                    if (srcOffset + sizeof(depthValue) <= sourceByteCount) {
+                        std::memcpy(&depthValue,
+                                    sourceBytes + srcOffset,
+                                    sizeof(depthValue));
+                    }
+                    std::uint8_t* dstPixel =
+                        dstRow + static_cast<std::size_t>(x) * dstPixelBytes;
+                    const GLfloat clamped =
+                        std::clamp(depthValue, 0.0f, 1.0f);
+                    dstPixel[0] = static_cast<std::uint8_t>(
+                        clamped * 255.0f + 0.5f);
+                    dstPixel[1] = 0u;
+                    dstPixel[2] = 0u;
+                    dstPixel[3] = 255u;
+                }
+                continue;
+            }
             if (sourceBpp == dstPixelBytes && !packSwapBytes) {
                 std::memcpy(dstRow, srcRow, static_cast<std::size_t>(texW) * dstPixelBytes);
                 continue;

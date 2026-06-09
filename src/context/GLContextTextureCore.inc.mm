@@ -668,6 +668,19 @@ bool GLContext::texSubImage(
         imagePtr = &faceIt->second;
     }
     GLTextureImageLevel& image = *imagePtr;
+    if (storageObject->desc.internalFormat == GL_DEPTH_COMPONENT32F &&
+        !storageObject->depthStencilShadowAuthoritative) {
+        (void)impl_->syncDepth32FTextureLevelNativeFromMetal(
+            *storageObject, storageLevel);
+    }
+    if (!impl_->materializeTextureMipShadowFromMetal(
+            *storageObject,
+            storageLevel,
+            Impl::TextureMipShadowMaterializeConsumer::TexSubImage)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    image.generatedMipLevel = false;
     GLint effectiveZoffset = zoffset;
     if (sparseCubeFace >= 0) {
         effectiveZoffset = sparseCubeFace;
@@ -717,6 +730,16 @@ bool GLContext::texSubImage(
     }
     if (impl_->frameGraph != nullptr) {
         impl_->frameGraph->flushParallelEncodeBoundary();
+    }
+    const std::size_t imageRgba8Bytes =
+        rgba8ByteCount(image.desc.width,
+                       image.desc.height,
+                       image.desc.depth);
+    if (image.rgba8.size() < imageRgba8Bytes) {
+        if (!materializeRedR8TextureShadowFromNativeData(image) ||
+            image.rgba8.size() < imageRgba8Bytes) {
+            image.rgba8.resize(imageRgba8Bytes, 0);
+        }
     }
     for (GLsizei z = 0; z < depth; ++z) {
         for (GLsizei y = 0; y < height; ++y) {
@@ -1026,6 +1049,7 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
                          allocationMipCount;
     if (needAlloc) {
         MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+        ScopedOwnedMetalObject descRelease(desc);
         desc.textureType = textureType;
         desc.pixelFormat = pf;
         desc.width = static_cast<NSUInteger>(allocationWidth);
@@ -1327,6 +1351,7 @@ bool GLContext::texStorage(
             ? glMipDimensionAtLevel(depth, lvl)
             : object->desc.depth;  // array / cube depth doesn't scale
         image.defined = true;
+        image.immutableStorageLevel = true;
         const std::size_t lvlPixels =
             static_cast<std::size_t>(image.desc.width)
             * static_cast<std::size_t>(image.desc.height)
@@ -1745,6 +1770,7 @@ bool GLContext::texBufferRange(
         MTLPixelFormat pf = metalRenderbufferFormat(internalformat);
         if (pf != MTLPixelFormatInvalid) {
             MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+            ScopedOwnedMetalObject descRelease(desc);
             desc.textureType = MTLTextureType2D;
             desc.pixelFormat = pf;
             const NSUInteger bpp = [&](MTLPixelFormat p) -> NSUInteger {

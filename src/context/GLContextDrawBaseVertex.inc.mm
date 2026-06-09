@@ -48,7 +48,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
     if (impl_->frameGraph == nullptr) {
         return false;
     }
-    impl_->frameGraph->resizeDrawable(impl_->drawableSurfaceWidth(), impl_->drawableSurfaceHeight());
+    impl_->ensureDefaultDrawableForViewportExtent();
     impl_->encodePendingWork();
 
     // Resolve element buffer — same as drawElements.
@@ -218,6 +218,16 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     tdi.pipelineStateOut = &program->metalPipelineState;
                     tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
                     tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+                    tdi.pipelineStateCacheLastUseOut =
+                        &program->metalPipelineStateCacheLastUse;
+                    tdi.pipelineStateCacheHighWaterOut =
+                        &program->metalPipelineStateCacheHighWater;
+                    tdi.pipelineStateCacheHitsOut =
+                        &program->metalPipelineStateCacheHits;
+                    tdi.pipelineStateCacheMissesOut =
+                        &program->metalPipelineStateCacheMisses;
+                    tdi.pipelineStateCacheEvictionsOut =
+                        &program->metalPipelineStateCacheEvictions;
                     tdi.metalVertexFunction = program->metalVertexFunction;
                     tdi.metalFragmentFunction = program->metalFragmentFunction;
                     tdi.metalVertexFunctionOut = &program->metalVertexFunction;
@@ -397,7 +407,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
     if (impl_->frameGraph == nullptr) {
         return false;
     }
-    impl_->frameGraph->resizeDrawable(impl_->drawableSurfaceWidth(), impl_->drawableSurfaceHeight());
+    impl_->ensureDefaultDrawableForViewportExtent();
     impl_->encodePendingWork();
 
     // Resolve element buffer.
@@ -802,6 +812,16 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     tdi.pipelineStateOut = &program->metalPipelineState;
                     tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
                     tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+                    tdi.pipelineStateCacheLastUseOut =
+                        &program->metalPipelineStateCacheLastUse;
+                    tdi.pipelineStateCacheHighWaterOut =
+                        &program->metalPipelineStateCacheHighWater;
+                    tdi.pipelineStateCacheHitsOut =
+                        &program->metalPipelineStateCacheHits;
+                    tdi.pipelineStateCacheMissesOut =
+                        &program->metalPipelineStateCacheMisses;
+                    tdi.pipelineStateCacheEvictionsOut =
+                        &program->metalPipelineStateCacheEvictions;
                     tdi.metalVertexFunction = program->metalVertexFunction;
                     tdi.metalFragmentFunction = program->metalFragmentFunction;
                     tdi.metalVertexFunctionOut = &program->metalVertexFunction;

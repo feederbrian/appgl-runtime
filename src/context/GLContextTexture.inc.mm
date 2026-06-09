@@ -25,6 +25,14 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
     if (level < 0) {
         for (auto& [lvl, img] : tex->levels) {
             if (img.defined) {
+                if (!impl_->materializeTextureMipShadowFromMetal(
+                        *tex,
+                        lvl,
+                        Impl::TextureMipShadowMaterializeConsumer::ClearTex)) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
+                img.generatedMipLevel = false;
                 fillLevelWithClearValue_T(impl_.get(), *tex, img,
                                           0, 0, 0,
                                           img.desc.width, img.desc.height, img.desc.depth,
@@ -55,6 +63,14 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
     if (impl_->frameGraph != nullptr) {
         impl_->frameGraph->flushParallelEncodeBoundary();
     }
+    if (!impl_->materializeTextureMipShadowFromMetal(
+            *tex,
+            level,
+            Impl::TextureMipShadowMaterializeConsumer::ClearTex)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    it->second.generatedMipLevel = false;
     fillLevelWithClearValue_T(impl_.get(), *tex, it->second,
                             0, 0, 0,
                             it->second.desc.width,
@@ -98,6 +114,14 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (!impl_->materializeTextureMipShadowFromMetal(
+            *tex,
+            level,
+            Impl::TextureMipShadowMaterializeConsumer::ClearTex)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    it->second.generatedMipLevel = false;
     fillLevelWithClearValue_T(impl_.get(), *tex, it->second,
                             xoffset, yoffset, zoffset,
                             width, height, depth,
@@ -1272,7 +1296,15 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
                                              type,
                                              bufSize,
                                              impl_->state->pixelStore(),
-                                             pixels)) {
+                                             pixels,
+                                             (obj->wasFramebufferRenderedTo ||
+                                              obj->wasViewportRenderedTo) &&
+                                                 impl_->state->clipOrigin() != GL_UPPER_LEFT)) {
+                impl_->drainPendingGpuProducers({
+                    {Impl::GpuResourceAccess::Kind::Texture,
+                     texture,
+                     kProducerAll},
+                });
                 return true;
             }
         }
@@ -1284,6 +1316,13 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
             pushError(GL_INVALID_OPERATION);
             return false;
         }
+    }
+    if (!impl_->materializeTextureMipShadowFromMetal(
+            *obj,
+            level,
+            Impl::TextureMipShadowMaterializeConsumer::GetTextureImage)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
     }
     // Level must be in-range relative to the texture's mipmap count.
     // CTS `textures_image_query_errors` passes level = MAX_TEXTURE_SIZE
@@ -2677,7 +2716,8 @@ static bool copyRGBA8TextureSubImageShadow(const GLTextureObject& obj,
                                            GLsizei height,
                                            GLsizei depth,
                                            const GLPixelStoreState& packStore,
-                                           void* pixels) {
+                                           void* pixels,
+                                           bool yFlipDepthReadback) {
     if (pixels == nullptr) {
         return true;
     }
@@ -2703,7 +2743,17 @@ static bool copyRGBA8TextureSubImageShadow(const GLTextureObject& obj,
     auto copyFromImage = [&](const GLTextureImageLevel& image,
                              GLsizei srcZ,
                              GLsizei dstZ) -> bool {
-        if (!image.defined || image.rgba8.empty()) {
+        const bool useNativeR8Shadow =
+            image.rgba8.empty() &&
+            isRedR8TextureShadowDropShape(image);
+        const bool useNativeDepth32FShadow =
+            image.rgba8.empty() &&
+            obj.depthStencilShadowAuthoritative &&
+            isDepth32FTextureShadowDropShape(image);
+        if (!image.defined ||
+            (!useNativeR8Shadow &&
+             !useNativeDepth32FShadow &&
+             image.rgba8.empty())) {
             return false;
         }
         const GLsizei srcW = std::max<GLsizei>(image.desc.width, 1);
@@ -2735,21 +2785,84 @@ static bool copyRGBA8TextureSubImageShadow(const GLTextureObject& obj,
             static_cast<std::size_t>(srcW) *
             static_cast<std::size_t>(srcH) *
             static_cast<std::size_t>(srcD) * dstPixelBytes;
-        if (image.rgba8.size() < required) {
+        if (!useNativeR8Shadow &&
+            !useNativeDepth32FShadow &&
+            image.rgba8.size() < required) {
             return false;
         }
+        if (useNativeR8Shadow &&
+            image.nativeData.size() < (required / dstPixelBytes)) {
+            return false;
+        }
+        if (useNativeDepth32FShadow &&
+            image.nativeData.size() < required) {
+            return false;
+        }
+        const bool applyDepthYFlip =
+            useNativeDepth32FShadow &&
+            yFlipDepthReadback &&
+            obj.target != GL_TEXTURE_1D_ARRAY;
         for (GLsizei row = 0; row < height; ++row) {
-            const std::size_t srcOffset =
-                ((static_cast<std::size_t>(srcZ) * static_cast<std::size_t>(srcH) +
-                  static_cast<std::size_t>(yoffset + row)) *
-                 static_cast<std::size_t>(srcW) +
-                 static_cast<std::size_t>(xoffset)) * dstPixelBytes;
             std::uint8_t* dstRow = dstBase +
                 static_cast<std::size_t>(dstZ) * dstSliceBytes +
                 static_cast<std::size_t>(row) * dstRowBytes;
-            std::memcpy(dstRow,
-                        image.rgba8.data() + srcOffset,
-                        static_cast<std::size_t>(width) * dstPixelBytes);
+            if (useNativeR8Shadow) {
+                for (GLsizei col = 0; col < width; ++col) {
+                    const std::size_t texelIndex =
+                        ((static_cast<std::size_t>(srcZ) *
+                          static_cast<std::size_t>(srcH) +
+                          static_cast<std::size_t>(yoffset + row)) *
+                         static_cast<std::size_t>(srcW) +
+                         static_cast<std::size_t>(xoffset + col));
+                    const std::uint8_t r = image.nativeData[texelIndex];
+                    const std::size_t dstOffset =
+                        static_cast<std::size_t>(col) * dstPixelBytes;
+                    dstRow[dstOffset + 0u] = r;
+                    dstRow[dstOffset + 1u] = 0u;
+                    dstRow[dstOffset + 2u] = 0u;
+                    dstRow[dstOffset + 3u] = 255u;
+                }
+            } else if (useNativeDepth32FShadow) {
+                const GLint glY = yoffset + row;
+                const GLint srcY = applyDepthYFlip
+                    ? (srcH - 1 - glY)
+                    : glY;
+                for (GLsizei col = 0; col < width; ++col) {
+                    const std::size_t texelIndex =
+                        ((static_cast<std::size_t>(srcZ) *
+                          static_cast<std::size_t>(srcH) +
+                          static_cast<std::size_t>(srcY)) *
+                         static_cast<std::size_t>(srcW) +
+                         static_cast<std::size_t>(xoffset + col));
+                    float depthValue = 0.0f;
+                    const std::size_t nativeOffset =
+                        texelIndex * image.nativeBpp;
+                    if (nativeOffset + sizeof(depthValue) <=
+                        image.nativeData.size()) {
+                        std::memcpy(&depthValue,
+                                    image.nativeData.data() + nativeOffset,
+                                    sizeof(depthValue));
+                    }
+                    const std::size_t dstOffset =
+                        static_cast<std::size_t>(col) * dstPixelBytes;
+                    const GLfloat clamped =
+                        std::clamp(depthValue, 0.0f, 1.0f);
+                    dstRow[dstOffset + 0u] = static_cast<std::uint8_t>(
+                        clamped * 255.0f + 0.5f);
+                    dstRow[dstOffset + 1u] = 0u;
+                    dstRow[dstOffset + 2u] = 0u;
+                    dstRow[dstOffset + 3u] = 255u;
+                }
+            } else {
+                const std::size_t srcOffset =
+                    ((static_cast<std::size_t>(srcZ) * static_cast<std::size_t>(srcH) +
+                      static_cast<std::size_t>(yoffset + row)) *
+                     static_cast<std::size_t>(srcW) +
+                     static_cast<std::size_t>(xoffset)) * dstPixelBytes;
+                std::memcpy(dstRow,
+                            image.rgba8.data() + srcOffset,
+                            static_cast<std::size_t>(width) * dstPixelBytes);
+            }
         }
         return true;
     };
@@ -2783,6 +2896,151 @@ static bool copyRGBA8TextureSubImageShadow(const GLTextureObject& obj,
     return true;
 }
 
+static bool copyDepth32FTextureSubImageNativeFloat(const GLTextureObject& obj,
+                                                   GLint level,
+                                                   GLint xoffset,
+                                                   GLint yoffset,
+                                                   GLint zoffset,
+                                                   GLsizei width,
+                                                   GLsizei height,
+                                                   GLsizei depth,
+                                                   const GLPixelStoreState& packStore,
+                                                   void* pixels,
+                                                   bool yFlipDepthReadback) {
+    if (pixels == nullptr) {
+        return true;
+    }
+    if (width == 0 || height == 0 || depth == 0) {
+        return true;
+    }
+
+    const std::size_t dstPixelBytes = sizeof(GLfloat);
+    const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+        ? static_cast<std::size_t>(packStore.packRowLength)
+        : static_cast<std::size_t>(width);
+    const std::size_t dstRowBytes = alignByteCount(
+        dstRowStridePixels * dstPixelBytes, packStore.packAlignment);
+    const std::size_t dstImageHeight = packStore.packImageHeight > 0
+        ? static_cast<std::size_t>(packStore.packImageHeight)
+        : static_cast<std::size_t>(height);
+    const std::size_t dstSliceBytes = dstRowBytes * dstImageHeight;
+    auto* dstBase = static_cast<std::uint8_t*>(pixels) +
+        static_cast<std::size_t>(packStore.packSkipImages) * dstSliceBytes +
+        static_cast<std::size_t>(packStore.packSkipRows) * dstRowBytes +
+        static_cast<std::size_t>(packStore.packSkipPixels) * dstPixelBytes;
+    const bool packSwapBytes = (packStore.packSwapBytes == GL_TRUE);
+
+    auto copyFromImage = [&](const GLTextureImageLevel& image,
+                             GLsizei srcZ,
+                             GLsizei dstZ) -> bool {
+        if (!image.defined ||
+            !obj.depthStencilShadowAuthoritative ||
+            !isDepth32FTextureShadowDropShape(image)) {
+            return false;
+        }
+        const GLsizei srcW = std::max<GLsizei>(image.desc.width, 1);
+        GLsizei srcH = std::max<GLsizei>(image.desc.height, 1);
+        GLsizei srcD = std::max<GLsizei>(image.desc.depth, 1);
+        if (obj.target == GL_TEXTURE_1D) {
+            srcH = 1;
+            srcD = 1;
+        } else if (obj.target == GL_TEXTURE_1D_ARRAY) {
+            srcH = 1;
+            srcD = std::max<GLsizei>(
+                std::max<GLsizei>(image.desc.height, image.desc.layers), 1);
+        } else if (obj.target == GL_TEXTURE_2D ||
+                   obj.target == GL_TEXTURE_RECTANGLE ||
+                   obj.target == GL_TEXTURE_CUBE_MAP) {
+            srcD = 1;
+        } else if (obj.target == GL_TEXTURE_2D_ARRAY ||
+                   obj.target == GL_TEXTURE_CUBE_MAP_ARRAY) {
+            srcD = std::max<GLsizei>(
+                std::max<GLsizei>(image.desc.depth, image.desc.layers), 1);
+        }
+        if (xoffset < 0 || yoffset < 0 || srcZ < 0 ||
+            xoffset + width > srcW ||
+            yoffset + height > srcH ||
+            srcZ >= srcD) {
+            return false;
+        }
+        const std::size_t required =
+            static_cast<std::size_t>(srcW) *
+            static_cast<std::size_t>(srcH) *
+            static_cast<std::size_t>(srcD) * sizeof(GLfloat);
+        if (image.nativeData.size() < required) {
+            return false;
+        }
+        const bool applyDepthYFlip =
+            yFlipDepthReadback &&
+            obj.target != GL_TEXTURE_1D_ARRAY;
+        for (GLsizei row = 0; row < height; ++row) {
+            std::uint8_t* dstRow = dstBase +
+                static_cast<std::size_t>(dstZ) * dstSliceBytes +
+                static_cast<std::size_t>(row) * dstRowBytes;
+            const GLint glY = yoffset + row;
+            const GLint srcY = applyDepthYFlip
+                ? (srcH - 1 - glY)
+                : glY;
+            for (GLsizei col = 0; col < width; ++col) {
+                const std::size_t texelIndex =
+                    ((static_cast<std::size_t>(srcZ) *
+                      static_cast<std::size_t>(srcH) +
+                      static_cast<std::size_t>(srcY)) *
+                     static_cast<std::size_t>(srcW) +
+                     static_cast<std::size_t>(xoffset + col));
+                const std::size_t nativeOffset =
+                    texelIndex * image.nativeBpp;
+                if (nativeOffset + sizeof(GLfloat) > image.nativeData.size()) {
+                    return false;
+                }
+                GLfloat depthValue = 0.0f;
+                std::memcpy(&depthValue,
+                            image.nativeData.data() + nativeOffset,
+                            sizeof(depthValue));
+                std::uint8_t* dstPixel =
+                    dstRow + static_cast<std::size_t>(col) * dstPixelBytes;
+                std::memcpy(dstPixel, &depthValue, sizeof(depthValue));
+                if (packSwapBytes) {
+                    std::reverse(dstPixel, dstPixel + sizeof(depthValue));
+                }
+            }
+        }
+        return true;
+    };
+
+    if (obj.target == GL_TEXTURE_CUBE_MAP) {
+        for (GLsizei slice = 0; slice < depth; ++slice) {
+            const GLint face = zoffset + slice;
+            if (face < 0 || face >= 6) {
+                return false;
+            }
+            const auto& faceLevels = obj.cubeFaceLevels[static_cast<std::size_t>(face)];
+            const auto faceIt = faceLevels.find(level);
+            if (faceIt == faceLevels.end() ||
+                !copyFromImage(faceIt->second, 0, slice)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    const auto levelIt = obj.levels.find(level);
+    if (levelIt == obj.levels.end()) {
+        return false;
+    }
+    for (GLsizei slice = 0; slice < depth; ++slice) {
+        const GLsizei srcZ = (obj.target == GL_TEXTURE_1D_ARRAY ||
+                              obj.target == GL_TEXTURE_2D_ARRAY ||
+                              obj.target == GL_TEXTURE_CUBE_MAP_ARRAY)
+            ? (zoffset + slice)
+            : 0;
+        if (!copyFromImage(levelIt->second, srcZ, slice)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool GLContext::getTextureSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
                                     GLsizei width, GLsizei height, GLsizei depth,
                                     GLenum format, GLenum type, GLsizei bufSize, void* pixels) {
@@ -2799,6 +3057,36 @@ bool GLContext::getTextureSubImage(GLuint texture, GLint level, GLint xoffset, G
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    const bool yFlipDepthReadback =
+        (obj->wasFramebufferRenderedTo ||
+         obj->wasViewportRenderedTo) &&
+        impl_->state->clipOrigin() != GL_UPPER_LEFT;
+    if (!impl_->materializeTextureMipShadowFromMetal(
+            *obj,
+            level,
+            Impl::TextureMipShadowMaterializeConsumer::GetTextureSubImage)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (obj->desc.internalFormat == GL_DEPTH_COMPONENT32F &&
+        !obj->depthStencilShadowAuthoritative) {
+        (void)impl_->syncDepth32FTextureLevelNativeFromMetal(*obj, level);
+    }
+    if (format == GL_DEPTH_COMPONENT &&
+        type == GL_FLOAT &&
+        copyDepth32FTextureSubImageNativeFloat(*obj,
+                                               level,
+                                               xoffset,
+                                               yoffset,
+                                               zoffset,
+                                               width,
+                                               height,
+                                               depth,
+                                               impl_->state->pixelStore(),
+                                               pixels,
+                                               yFlipDepthReadback)) {
+        return true;
+    }
     if (format == GL_RGBA && type == GL_UNSIGNED_BYTE &&
         copyRGBA8TextureSubImageShadow(*obj,
                                        level,
@@ -2809,7 +3097,24 @@ bool GLContext::getTextureSubImage(GLuint texture, GLint level, GLint xoffset, G
                                        height,
                                        depth,
                                        impl_->state->pixelStore(),
-                                       pixels)) {
+                                       pixels,
+                                       yFlipDepthReadback)) {
+        return true;
+    }
+    if (format == GL_RGBA &&
+        type == GL_UNSIGNED_BYTE &&
+        obj->desc.internalFormat == GL_DEPTH_COMPONENT32F &&
+        impl_->copyDepth32FTextureSubImageMetalAsRGBA8(
+            *obj,
+            level,
+            xoffset,
+            yoffset,
+            zoffset,
+            width,
+            height,
+            depth,
+            impl_->state->pixelStore(),
+            pixels)) {
         return true;
     }
     (void)pixels;

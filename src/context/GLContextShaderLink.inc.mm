@@ -3379,6 +3379,12 @@ bool GLContext::linkProgram(GLuint program) {
         }
     }
     programObject->metalPipelineStateCache.clear();
+    programObject->metalPipelineStateCacheLastUse.clear();
+    programObject->metalPipelineStateCacheHighWater = 0;
+    programObject->metalPipelineStateCacheHits = 0;
+    programObject->metalPipelineStateCacheMisses = 0;
+    programObject->metalPipelineStateCacheEvictions = 0;
+    programObject->metalPipelineStateCacheGlobalEvictions = 0;
     programObject->metalPipelineColorFormat = 0;
     // CPU GS emulation (docs/geometry-shader-emulation.md) — release
     // the parallel pipeline-state cache so relink rebuilds the
@@ -3392,6 +3398,12 @@ bool GLContext::linkProgram(GLuint program) {
         }
     }
     programObject->gsPassThroughPipelineStateCache.clear();
+    programObject->gsPassThroughPipelineStateCacheLastUse.clear();
+    programObject->gsPassThroughPipelineStateCacheHighWater = 0;
+    programObject->gsPassThroughPipelineStateCacheHits = 0;
+    programObject->gsPassThroughPipelineStateCacheMisses = 0;
+    programObject->gsPassThroughPipelineStateCacheEvictions = 0;
+    programObject->gsPassThroughPipelineStateCacheGlobalEvictions = 0;
     programObject->gsPassThroughPipelineState = nullptr;
     programObject->gsPassThroughPipelineColorFormat = 0;
     releaseRetainedMetalObject(programObject->gsPassThroughVertexFunction);

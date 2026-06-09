@@ -8959,6 +8959,10 @@ TestResult runDCR2FlushFinishSentinel() {
         auto& context = scoped.context();
         auto& gl = scoped.gl();
         std::vector<std::string> failures;
+        const auto reasonCount = [](const AppGLCommandSubmissionDebugCounters& counters,
+                                    AppGLCommandReason reason) {
+            return counters.submittedByReason[static_cast<std::size_t>(reason)];
+        };
 
         gl.glFinish();
         const auto initial = context.commandSubmissionDebugCounters();
@@ -8991,6 +8995,14 @@ TestResult runDCR2FlushFinishSentinel() {
             recordSentinelFailure(
                 failures,
                 "clear+glFlush did not submit exactly one command buffer",
+                "before{" + countersSummary(afterNoWorkFinish) + "} after{" + countersSummary(afterClearFlush) + "}"
+            );
+        }
+        if (reasonCount(afterClearFlush, AppGLCommandReason::PresentFromFlush) !=
+            reasonCount(afterNoWorkFinish, AppGLCommandReason::PresentFromFlush) + 1) {
+            recordSentinelFailure(
+                failures,
+                "clear+glFlush was not attributed to PresentFromFlush",
                 "before{" + countersSummary(afterNoWorkFinish) + "} after{" + countersSummary(afterClearFlush) + "}"
             );
         }
@@ -9044,9 +9056,14 @@ TestResult runDCR2PresentLifecycleSentinel() {
         auto& context = scoped.context();
         auto& gl = scoped.gl();
         std::vector<std::string> failures;
+        const auto reasonCount = [](const AppGLCommandSubmissionDebugCounters& counters,
+                                    AppGLCommandReason reason) {
+            return counters.submittedByReason[static_cast<std::size_t>(reason)];
+        };
 
         gl.glFinish();
         const auto initial = context.commandSubmissionDebugCounters();
+        const auto initialInventory = context.metalResourceInventory();
 
         gl.glFlush();
         const auto afterNoWorkFlush = context.commandSubmissionDebugCounters();
@@ -9055,6 +9072,22 @@ TestResult runDCR2PresentLifecycleSentinel() {
                 failures,
                 "idle present sentinel glFlush changed counters",
                 "before{" + countersSummary(initial) + "} after{" + countersSummary(afterNoWorkFlush) + "}"
+            );
+        }
+        const auto afterNoWorkFlushInventory = context.metalResourceInventory();
+        if (afterNoWorkFlushInventory.frameGraphPresentFromFlushCalls !=
+                initialInventory.frameGraphPresentFromFlushCalls + 1 ||
+            afterNoWorkFlushInventory.frameGraphPresentNoWorkReturns !=
+                initialInventory.frameGraphPresentNoWorkReturns + 1 ||
+            afterNoWorkFlushInventory.frameGraphPresentPendingFalseCalls !=
+                initialInventory.frameGraphPresentPendingFalseCalls + 1) {
+            recordSentinelFailure(
+                failures,
+                "idle glFlush was not recorded as a no-work present",
+                "beforeFlushCalls=" + std::to_string(initialInventory.frameGraphPresentFromFlushCalls) +
+                    " afterFlushCalls=" + std::to_string(afterNoWorkFlushInventory.frameGraphPresentFromFlushCalls) +
+                    " beforeNoWork=" + std::to_string(initialInventory.frameGraphPresentNoWorkReturns) +
+                    " afterNoWork=" + std::to_string(afterNoWorkFlushInventory.frameGraphPresentNoWorkReturns)
             );
         }
 
@@ -9066,6 +9099,14 @@ TestResult runDCR2PresentLifecycleSentinel() {
             recordSentinelFailure(
                 failures,
                 "clear+flush did not submit one command buffer",
+                "before{" + countersSummary(afterNoWorkFlush) + "} after{" + countersSummary(afterClearFlush) + "}"
+            );
+        }
+        if (reasonCount(afterClearFlush, AppGLCommandReason::PresentFromFlush) !=
+            reasonCount(afterNoWorkFlush, AppGLCommandReason::PresentFromFlush) + 1) {
+            recordSentinelFailure(
+                failures,
+                "clear+flush did not submit as PresentFromFlush",
                 "before{" + countersSummary(afterNoWorkFlush) + "} after{" + countersSummary(afterClearFlush) + "}"
             );
         }
@@ -9092,8 +9133,27 @@ TestResult runDCR2PresentLifecycleSentinel() {
                 "before{" + countersSummary(beforeSwap) + "} after{" + countersSummary(afterSwap) + "}"
             );
         }
+        if (reasonCount(afterSwap, AppGLCommandReason::PresentFromSwapBuffers) !=
+            reasonCount(beforeSwap, AppGLCommandReason::PresentFromSwapBuffers) + 1) {
+            recordSentinelFailure(
+                failures,
+                "offscreen swapBuffers did not submit as PresentFromSwapBuffers",
+                "before{" + countersSummary(beforeSwap) + "} after{" + countersSummary(afterSwap) + "}"
+            );
+        }
 
         const auto inventory = context.metalResourceInventory();
+        if (inventory.frameGraphPresentFromSwapBuffersCalls !=
+                afterNoWorkFlushInventory.frameGraphPresentFromSwapBuffersCalls + 1 ||
+            inventory.frameGraphPresentCommitSuccesses <
+                afterNoWorkFlushInventory.frameGraphPresentCommitSuccesses + 2) {
+            recordSentinelFailure(
+                failures,
+                "present diagnostics did not record flush and swap commit successes",
+                "swapCalls=" + std::to_string(inventory.frameGraphPresentFromSwapBuffersCalls) +
+                    " commitSuccesses=" + std::to_string(inventory.frameGraphPresentCommitSuccesses)
+            );
+        }
         if (inventory.frameGraphDrawableCount != 0 || inventory.frameGraphDrawableTextureBytes != 0) {
             recordSentinelFailure(
                 failures,
@@ -10311,6 +10371,59 @@ void setupDCR3CRGBA8Texture(GLDispatchTable& gl,
     gl.glTexStorage2D(GL_TEXTURE_2D, levels, GL_RGBA8, width, height);
 }
 
+void setupDCR3CDepth32FTexture(GLDispatchTable& gl,
+                               GLuint texture,
+                               GLsizei width,
+                               GLsizei height,
+                               GLsizei levels = 1) {
+    gl.glBindTexture(GL_TEXTURE_2D, texture);
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                       levels > 1 ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST);
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+    gl.glTexStorage2D(GL_TEXTURE_2D, levels, GL_DEPTH_COMPONENT32F,
+                      width, height);
+}
+
+void setupDCR3CDepth32FArrayTexture(GLDispatchTable& gl,
+                                    GLuint texture,
+                                    GLsizei width,
+                                    GLsizei height,
+                                    GLsizei layers,
+                                    GLsizei levels = 1) {
+    gl.glBindTexture(GL_TEXTURE_2D_ARRAY, texture);
+    gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER,
+                       levels > 1 ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST);
+    gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+    gl.glTexStorage3D(GL_TEXTURE_2D_ARRAY, levels, GL_DEPTH_COMPONENT32F,
+                      width, height, layers);
+}
+
+void primeDCR3CDepth32FTexture(GLDispatchTable& gl,
+                               GLuint texture,
+                               GLsizei width,
+                               GLsizei height,
+                               GLsizei layers = 1) {
+    const std::size_t texelCount =
+        static_cast<std::size_t>(width) *
+        static_cast<std::size_t>(height) *
+        static_cast<std::size_t>(layers);
+    std::vector<GLfloat> zeros(texelCount, 0.0f);
+    if (layers == 1) {
+        gl.glTextureSubImage2D(texture, 0, 0, 0, width, height,
+                               GL_DEPTH_COMPONENT, GL_FLOAT, zeros.data());
+    } else {
+        gl.glTextureSubImage3D(texture, 0, 0, 0, 0, width, height, layers,
+                               GL_DEPTH_COMPONENT, GL_FLOAT, zeros.data());
+    }
+}
+
 void setupDCR3CTextureFbo(GLDispatchTable& gl,
                           GLuint& fbo,
                           GLuint texture,
@@ -10324,6 +10437,158 @@ void setupDCR3CTextureFbo(GLDispatchTable& gl,
     expectCondition(gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
                         GL_FRAMEBUFFER_COMPLETE,
                     "dcr3c sentinel framebuffer complete");
+}
+
+void setupDCR3CDepthTextureFbo(GLDispatchTable& gl,
+                               GLuint& fbo,
+                               GLuint depthTexture,
+                               GLint level = 0) {
+    gl.glGenFramebuffers(1, &fbo);
+    gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                              GL_TEXTURE_2D, depthTexture, level);
+    gl.glDrawBuffer(GL_NONE);
+    gl.glReadBuffer(GL_NONE);
+    expectCondition(gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
+                        GL_FRAMEBUFFER_COMPLETE,
+                    "depth32f sentinel framebuffer complete");
+}
+
+void setupDCR3CDepthArrayLayerFbo(GLDispatchTable& gl,
+                                  GLuint& fbo,
+                                  GLuint depthTexture,
+                                  GLint layer,
+                                  GLint level = 0) {
+    gl.glGenFramebuffers(1, &fbo);
+    gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    gl.glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                 depthTexture, level, layer);
+    gl.glDrawBuffer(GL_NONE);
+    gl.glReadBuffer(GL_NONE);
+    expectCondition(gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
+                        GL_FRAMEBUFFER_COMPLETE,
+                    "depth32f array sentinel framebuffer complete");
+}
+
+void seedDepthAttachmentWithDraw(GLDispatchTable& gl,
+                                 GLuint framebuffer,
+                                 GLsizei width,
+                                 GLsizei height,
+                                 GLfloat depthValue) {
+    static constexpr const char* kDepthWriteVS =
+        "#version 330 core\n"
+        "layout(location = 0) in vec2 aPos;\n"
+        "void main() {\n"
+        "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+        "}\n";
+    static constexpr const char* kDepthWriteFS =
+        "#version 330 core\n"
+        "uniform float uDepth;\n"
+        "void main() {\n"
+        "    gl_FragDepth = uDepth;\n"
+        "}\n";
+
+    const GLuint program = buildBenchProgram(kDepthWriteVS, kDepthWriteFS);
+    GLint linked = GL_FALSE;
+    gl.glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    expectCondition(linked == GL_TRUE, "depth32f seed program links");
+    const GLint depthLocation = gl.glGetUniformLocation(program, "uDepth");
+    expectCondition(depthLocation >= 0, "depth32f seed uniform exists");
+
+    GLuint vao = 0;
+    GLuint vbo = 0;
+    setupDCR3CFullscreenTriangle(gl, vao, vbo);
+
+    gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    gl.glViewport(0, 0, width, height);
+    gl.glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    gl.glDisable(GL_BLEND);
+    gl.glDisable(GL_CULL_FACE);
+    gl.glDisable(GL_STENCIL_TEST);
+    gl.glDisable(GL_SCISSOR_TEST);
+    gl.glEnable(GL_DEPTH_TEST);
+    gl.glDepthMask(GL_TRUE);
+    gl.glDepthFunc(GL_ALWAYS);
+    gl.glUseProgram(program);
+    gl.glUniform1f(depthLocation, depthValue);
+    gl.glBindVertexArray(vao);
+    gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    gl.glBindVertexArray(0);
+    gl.glUseProgram(0);
+    gl.glDisable(GL_DEPTH_TEST);
+    gl.glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    gl.glDeleteBuffers(1, &vbo);
+    gl.glDeleteVertexArrays(1, &vao);
+    gl.glDeleteProgram(program);
+}
+
+void expectApproxFloat(GLfloat actual,
+                       GLfloat expected,
+                       GLfloat tolerance,
+                       std::string_view label) {
+    if (std::fabs(actual - expected) > tolerance) {
+        std::ostringstream stream;
+        stream << label << " expected=" << expected
+               << " actual=" << actual
+               << " tolerance=" << tolerance;
+        throw std::runtime_error(stream.str());
+    }
+}
+
+void expectApproxByte(std::uint8_t actual,
+                      std::uint8_t expected,
+                      std::uint8_t tolerance,
+                      std::string_view label) {
+    const int delta =
+        std::abs(static_cast<int>(actual) - static_cast<int>(expected));
+    if (delta > static_cast<int>(tolerance)) {
+        std::ostringstream stream;
+        stream << label << " expected=" << static_cast<int>(expected)
+               << " actual=" << static_cast<int>(actual)
+               << " tolerance=" << static_cast<int>(tolerance);
+        throw std::runtime_error(stream.str());
+    }
+}
+
+const GLTextureImageLevel& expectTextureLevel(GLContext& context,
+                                              GLuint texture,
+                                              GLint level,
+                                              std::string_view label) {
+    const GLTextureObject* object = context.objects().textures().get(texture);
+    expectCondition(object != nullptr,
+                    std::string(label) + " texture object exists");
+    const auto it = object->levels.find(level);
+    expectCondition(it != object->levels.end(),
+                    std::string(label) + " texture level exists");
+    return it->second;
+}
+
+std::string textureStateSummary(const GLTextureObject& object,
+                                const GLTextureImageLevel& image) {
+    std::ostringstream stream;
+    stream << "target=0x" << std::hex << object.target
+           << " internalFormat=0x" << image.desc.internalFormat
+           << " sourceFormat=0x" << image.desc.sourceFormat
+           << " sourceType=0x" << image.desc.sourceType
+           << std::dec
+           << " rgba8Bytes=" << image.rgba8.size()
+           << " nativeBytes=" << image.nativeData.size()
+           << " nativeBpp=" << image.nativeBpp
+           << " generatedMipLevel=" << image.generatedMipLevel
+           << " immutableStorageLevel=" << image.immutableStorageLevel
+           << " mipShadowEvicted=" << image.mipShadowEvicted
+           << " evictedRgba8Bytes=" << image.mipShadowEvictedRgba8Bytes
+           << " evictedNativeBytes=" << image.mipShadowEvictedNativeBytes
+           << " metalTexture=" << (object.metalTexture != nullptr)
+           << " metalSamplingProxy=" << (object.metalSamplingProxy != nullptr)
+           << " colorShadowAuthoritative=" << object.colorShadowAuthoritative
+           << " depthStencilShadowAuthoritative=" << object.depthStencilShadowAuthoritative
+           << " wasFramebufferRenderedTo=" << object.wasFramebufferRenderedTo
+           << " wasViewportRenderedTo=" << object.wasViewportRenderedTo
+           << " viewSourceTexture=" << object.viewSourceTexture
+           << " producerPending=0x" << std::hex << object.producerPending.bits();
+    return stream.str();
 }
 
 constexpr GLsizei kDCR4CMeshGsSize = 32;
@@ -11644,6 +11909,8 @@ TestResult runDCR3CProducerInventorySentinel() {
         ScopedSentinelContext scoped(64, 64);
         auto& context = scoped.context();
         auto& gl = scoped.gl();
+        const bool samplerGpuOrderSkip =
+            std::getenv("APPGL_ENABLE_SAMPLER_GPU_ORDER_SKIP") != nullptr;
 
         const GLuint colorProgram = buildBenchProgram(kFullscreenVS, kColorFS);
         const GLuint sampleProgram = buildBenchProgram(kFullscreenVS, kSampleFS);
@@ -11694,9 +11961,15 @@ TestResult runDCR3CProducerInventorySentinel() {
         gl.glBindVertexArray(vao);
         gl.glDrawArrays(GL_TRIANGLES, 0, 3);
         expectGLError(gl, GL_NO_ERROR, "dcr3c inventory sampler consumer draw");
-        expectPendingClear(texturePendingBits(context, sourceTex),
-                           kProducerFboColorWrite,
-                           "sampler consumer drain");
+        if (samplerGpuOrderSkip) {
+            expectPendingHas(texturePendingBits(context, sourceTex),
+                             kProducerFboColorWrite,
+                             "sampler GPU-order skip preserves source producer");
+        } else {
+            expectPendingClear(texturePendingBits(context, sourceTex),
+                               kProducerFboColorWrite,
+                               "sampler consumer drain");
+        }
         expectPendingHas(texturePendingBits(context, sampledTex),
                          kProducerFboColorWrite,
                          "sampled FBO destination producer");
@@ -11708,6 +11981,25 @@ TestResult runDCR3CProducerInventorySentinel() {
         expectPendingClear(texturePendingBits(context, sampledTex),
                            kProducerFboColorWrite,
                            "FBO readback drain");
+        if (samplerGpuOrderSkip) {
+            std::array<std::uint8_t, kSize * kSize * 4> sourceReadback = {};
+            gl.glGetTextureImage(sourceTex, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                                 static_cast<GLsizei>(sourceReadback.size()),
+                                 sourceReadback.data());
+            expectGLError(gl, GL_NO_ERROR,
+                          "dcr3c inventory source readback after sampler skip");
+            if (sourceReadback[0] < 200 ||
+                sourceReadback[1] > 40 ||
+                sourceReadback[2] > 40 ||
+                sourceReadback[3] < 250) {
+                throw std::runtime_error(
+                    "sampler GPU-order skip source readback was not red");
+            }
+            expectPendingClear(
+                texturePendingBits(context, sourceTex),
+                kProducerFboColorWrite,
+                "source readback after sampler GPU-order skip");
+        }
 
         const GLfloat clearGreen[] = {0.0f, 1.0f, 0.0f, 1.0f};
         gl.glClearBufferfv(GL_COLOR, 0, clearGreen);
@@ -12172,6 +12464,1143 @@ TestResult runDCR3CBufferRoleSentinel() {
     });
     if (result.status == "passed") {
         result.message = "SSBO-produced buffer drained when rebound as texture-buffer sampler input";
+    }
+    return result;
+}
+
+void expectMipShadowEvicted(GLContext& context,
+                            GLuint texture,
+                            GLint level,
+                            std::string_view label) {
+    const GLTextureObject* textureObject =
+        context.objects().textures().get(texture);
+    expectCondition(textureObject != nullptr,
+                    std::string(label) + " texture object exists");
+    const auto& image = expectTextureLevel(context, texture, level, label);
+    if (!image.mipShadowEvicted || !image.rgba8.empty() ||
+        !image.nativeData.empty()) {
+        throw std::runtime_error(
+            std::string(label) + " mip shadow was not evicted: " +
+            textureStateSummary(*textureObject, image));
+    }
+}
+
+std::vector<std::uint8_t> uniformRGBA8Pixels(GLsizei width,
+                                             GLsizei height,
+                                             GLsizei layers,
+                                             std::uint8_t r,
+                                             std::uint8_t g,
+                                             std::uint8_t b,
+                                             std::uint8_t a = 255u) {
+    std::vector<std::uint8_t> pixels(
+        static_cast<std::size_t>(width) *
+        static_cast<std::size_t>(height) *
+        static_cast<std::size_t>(layers) * 4u,
+        0u);
+    for (std::size_t i = 0; i < pixels.size(); i += 4u) {
+        pixels[i + 0u] = r;
+        pixels[i + 1u] = g;
+        pixels[i + 2u] = b;
+        pixels[i + 3u] = a;
+    }
+    return pixels;
+}
+
+void createGeneratedRGBA8MipTexture(GLDispatchTable& gl,
+                                    GLuint texture,
+                                    std::uint8_t r,
+                                    std::uint8_t g,
+                                    std::uint8_t b) {
+    const auto pixels = uniformRGBA8Pixels(4, 4, 1, r, g, b);
+    gl.glBindTexture(GL_TEXTURE_2D, texture);
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                       GL_NEAREST_MIPMAP_NEAREST);
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0,
+                    GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    gl.glGenerateMipmap(GL_TEXTURE_2D);
+}
+
+TestResult runDefaultDrawableGrowOnlyReadbackProbe() {
+    auto result = runDirectSentinel("default-drawable.grow-only-readback", [&] {
+        ScopedEnvVar growOnly("APPGL_DEFAULT_DRAWABLE_GROW_ONLY", "1");
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        gl.glViewport(0, 0, 32, 32);
+        gl.glClearColor(0.25f, 0.0f, 0.0f, 1.0f);
+        gl.glClearDepth(1.0);
+        gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        std::array<std::uint8_t, 4> pixel = {};
+        gl.glReadPixels(31, 31, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                        pixel.data());
+        expectGLError(gl, GL_NO_ERROR, "grow-only full-size readback");
+        expectApproxByte(pixel[0], 64u, 1u, "grow-only full red");
+        expectApproxByte(pixel[1], 0u, 0u, "grow-only full green");
+        expectApproxByte(pixel[2], 0u, 0u, "grow-only full blue");
+        expectApproxByte(pixel[3], 255u, 0u, "grow-only full alpha");
+
+        const auto beforeShrink = context.metalResourceInventory();
+        gl.glViewport(0, 0, 8, 8);
+        expectGLError(gl, GL_NO_ERROR, "grow-only small viewport");
+        const auto afterViewport = context.metalResourceInventory();
+        expectCondition(
+            afterViewport.frameGraphDrawableResizeGrowOnlySkips >
+                beforeShrink.frameGraphDrawableResizeGrowOnlySkips,
+            "small viewport used grow-only drawable skip");
+        expectCondition(
+            afterViewport.frameGraphDrawableResizeDepthTextureReleases ==
+                beforeShrink.frameGraphDrawableResizeDepthTextureReleases,
+            "small viewport did not release retained depth texture");
+
+        gl.glClearColor(0.0f, 0.75f, 0.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        pixel = {};
+        gl.glReadPixels(31, 31, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                        pixel.data());
+        expectGLError(gl, GL_NO_ERROR,
+                      "grow-only retained extent readback");
+        expectApproxByte(pixel[0], 0u, 0u, "grow-only retained red");
+        expectApproxByte(pixel[1], 191u, 1u, "grow-only retained green");
+        expectApproxByte(pixel[2], 0u, 0u, "grow-only retained blue");
+        expectApproxByte(pixel[3], 255u, 0u, "grow-only retained alpha");
+
+        const auto afterReadback = context.metalResourceInventory();
+        expectCondition(
+            afterReadback.frameGraphDrawableResizeLastRequestedWidth == 8,
+            "grow-only reports small requested width");
+        expectCondition(
+            afterReadback.frameGraphDrawableResizeLastRequestedHeight == 8,
+            "grow-only reports small requested height");
+        expectCondition(
+            afterReadback.frameGraphDrawableResizeLastEffectiveWidth >= 32,
+            "grow-only retained effective width");
+        expectCondition(
+            afterReadback.frameGraphDrawableResizeLastEffectiveHeight >= 32,
+            "grow-only retained effective height");
+        expectCondition(
+            afterReadback.frameGraphDrawableResizeDepthTextureReleases ==
+                beforeShrink.frameGraphDrawableResizeDepthTextureReleases,
+            "readback did not release retained depth texture");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "grow-only default drawable kept retained extent and readback outside a smaller viewport";
+    }
+    return result;
+}
+
+TestResult runTextureMipShadowEvictionRGBA8ReadbackProbe() {
+    auto result = runDirectSentinel("texture-mip-shadow.rgba8-readback", [&] {
+        ScopedEnvVar mipDrop("APPGL_TEXTURE_SHADOW_DROP_MIP_LEVELS", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint texture = 0;
+        gl.glGenTextures(1, &texture);
+        createGeneratedRGBA8MipTexture(gl, texture, 40u, 80u, 120u);
+        expectGLError(gl, GL_NO_ERROR, "rgba8 mip setup");
+        expectMipShadowEvicted(context, texture, 1,
+                               "rgba8 getTextureImage");
+
+        std::array<std::uint8_t, 2 * 2 * 4> readback = {};
+        gl.glGetTextureImage(texture, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                             static_cast<GLsizei>(readback.size()),
+                             readback.data());
+        expectGLError(gl, GL_NO_ERROR, "rgba8 mip getTextureImage");
+        for (std::size_t pixel = 0; pixel < readback.size() / 4u; ++pixel) {
+            const std::size_t offset = pixel * 4u;
+            expectApproxByte(readback[offset + 0u], 40u, 0u,
+                             "rgba8 mip red");
+            expectApproxByte(readback[offset + 1u], 80u, 0u,
+                             "rgba8 mip green");
+            expectApproxByte(readback[offset + 2u], 120u, 0u,
+                             "rgba8 mip blue");
+            expectApproxByte(readback[offset + 3u], 255u, 0u,
+                             "rgba8 mip alpha");
+        }
+
+        gl.glBindTexture(GL_TEXTURE_2D, texture);
+        gl.glGenerateMipmap(GL_TEXTURE_2D);
+        expectGLError(gl, GL_NO_ERROR, "rgba8 mip regenerate");
+        expectMipShadowEvicted(context, texture, 1,
+                               "rgba8 getTextureSubImage");
+        readback.fill(0u);
+        gl.glGetTextureSubImage(texture, 1, 0, 0, 0, 2, 2, 1,
+                                GL_RGBA, GL_UNSIGNED_BYTE,
+                                static_cast<GLsizei>(readback.size()),
+                                readback.data());
+        expectGLError(gl, GL_NO_ERROR, "rgba8 mip getTextureSubImage");
+        for (std::size_t pixel = 0; pixel < readback.size() / 4u; ++pixel) {
+            const std::size_t offset = pixel * 4u;
+            expectApproxByte(readback[offset + 0u], 40u, 0u,
+                             "rgba8 subimage red");
+            expectApproxByte(readback[offset + 1u], 80u, 0u,
+                             "rgba8 subimage green");
+            expectApproxByte(readback[offset + 2u], 120u, 0u,
+                             "rgba8 subimage blue");
+            expectApproxByte(readback[offset + 3u], 255u, 0u,
+                             "rgba8 subimage alpha");
+        }
+
+        gl.glBindTexture(GL_TEXTURE_2D, 0);
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "rgba8 mip cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "generated RGBA8 mip shadow evicted and rematerialized for full/subimage readback";
+    }
+    return result;
+}
+
+TestResult runTextureMipShadowEvictionArrayProbe() {
+    auto result = runDirectSentinel("texture-mip-shadow.array-subimage", [&] {
+        ScopedEnvVar mipDrop("APPGL_TEXTURE_SHADOW_DROP_MIP_LEVELS", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint texture = 0;
+        gl.glGenTextures(1, &texture);
+        auto pixels = uniformRGBA8Pixels(4, 4, 2, 0u, 0u, 0u);
+        for (std::size_t i = 0; i < pixels.size() / 8u; ++i) {
+            const std::size_t offset = i * 4u;
+            pixels[offset + 0u] = 32u;
+            pixels[offset + 1u] = 64u;
+            pixels[offset + 2u] = 96u;
+        }
+        for (std::size_t i = pixels.size() / 8u; i < pixels.size() / 4u; ++i) {
+            const std::size_t offset = i * 4u;
+            pixels[offset + 0u] = 160u;
+            pixels[offset + 1u] = 96u;
+            pixels[offset + 2u] = 48u;
+        }
+        gl.glBindTexture(GL_TEXTURE_2D_ARRAY, texture);
+        gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER,
+                           GL_NEAREST_MIPMAP_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER,
+                           GL_NEAREST);
+        gl.glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, 4, 4, 2, 0,
+                        GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        gl.glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+        expectGLError(gl, GL_NO_ERROR, "array mip setup");
+        expectMipShadowEvicted(context, texture, 1,
+                               "array getTextureSubImage");
+
+        std::array<std::uint8_t, 2 * 2 * 4> readback = {};
+        gl.glGetTextureSubImage(texture, 1, 0, 0, 1, 2, 2, 1,
+                                GL_RGBA, GL_UNSIGNED_BYTE,
+                                static_cast<GLsizei>(readback.size()),
+                                readback.data());
+        expectGLError(gl, GL_NO_ERROR, "array mip getTextureSubImage");
+        for (std::size_t pixel = 0; pixel < readback.size() / 4u; ++pixel) {
+            const std::size_t offset = pixel * 4u;
+            expectApproxByte(readback[offset + 0u], 160u, 0u,
+                             "array mip red");
+            expectApproxByte(readback[offset + 1u], 96u, 0u,
+                             "array mip green");
+            expectApproxByte(readback[offset + 2u], 48u, 0u,
+                             "array mip blue");
+            expectApproxByte(readback[offset + 3u], 255u, 0u,
+                             "array mip alpha");
+        }
+
+        gl.glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "array mip cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "generated 2D-array mip shadow evicted and restored for layer subimage readback";
+    }
+    return result;
+}
+
+TestResult runTextureMipShadowEvictionR8Probe() {
+    auto result = runDirectSentinel("texture-mip-shadow.r8-subimage", [&] {
+        ScopedEnvVar mipDrop("APPGL_TEXTURE_SHADOW_DROP_MIP_LEVELS", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint texture = 0;
+        gl.glGenTextures(1, &texture);
+        std::array<std::uint8_t, 4 * 4> pixels;
+        pixels.fill(96u);
+        gl.glBindTexture(GL_TEXTURE_2D, texture);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                           GL_NEAREST_MIPMAP_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 4, 4, 0,
+                        GL_RED, GL_UNSIGNED_BYTE, pixels.data());
+        gl.glGenerateMipmap(GL_TEXTURE_2D);
+        expectGLError(gl, GL_NO_ERROR, "r8 mip setup");
+        expectMipShadowEvicted(context, texture, 1, "r8 mip");
+
+        std::array<std::uint8_t, 2 * 2 * 4> readback = {};
+        gl.glGetTextureSubImage(texture, 1, 0, 0, 0, 2, 2, 1,
+                                GL_RGBA, GL_UNSIGNED_BYTE,
+                                static_cast<GLsizei>(readback.size()),
+                                readback.data());
+        expectGLError(gl, GL_NO_ERROR, "r8 mip rgba subimage");
+        for (std::size_t pixel = 0; pixel < readback.size() / 4u; ++pixel) {
+            const std::size_t offset = pixel * 4u;
+            expectApproxByte(readback[offset + 0u], 96u, 0u,
+                             "r8 mip red");
+            expectApproxByte(readback[offset + 1u], 0u, 0u,
+                             "r8 mip green");
+            expectApproxByte(readback[offset + 2u], 0u, 0u,
+                             "r8 mip blue");
+            expectApproxByte(readback[offset + 3u], 255u, 0u,
+                             "r8 mip alpha");
+        }
+
+        gl.glBindTexture(GL_TEXTURE_2D, 0);
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "r8 mip cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "generated R8 mip native shadow evicted and restored for RGBA subimage readback";
+    }
+    return result;
+}
+
+TestResult runTextureMipShadowEvictionUploadedMipProbe() {
+    auto result = runDirectSentinel("texture-mip-shadow.uploaded-mip", [&] {
+        ScopedEnvVar mipDrop("APPGL_TEXTURE_SHADOW_DROP_MIP_LEVELS", "1");
+        ScopedEnvVar uploadedMipDrop(
+            "APPGL_TEXTURE_SHADOW_DROP_UPLOADED_MIP_LEVELS", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint texture = 0;
+        gl.glGenTextures(1, &texture);
+        const auto level0 = uniformRGBA8Pixels(4, 4, 1, 20u, 30u, 40u);
+        const auto level1 = uniformRGBA8Pixels(2, 2, 1, 133u, 44u, 201u);
+        gl.glBindTexture(GL_TEXTURE_2D, texture);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                           GL_NEAREST_MIPMAP_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0,
+                        GL_RGBA, GL_UNSIGNED_BYTE, level0.data());
+        gl.glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 2, 2, 0,
+                        GL_RGBA, GL_UNSIGNED_BYTE, level1.data());
+        expectGLError(gl, GL_NO_ERROR, "uploaded mip setup");
+        expectMipShadowEvicted(context, texture, 1, "uploaded mip");
+
+        std::array<std::uint8_t, 2 * 2 * 4> readback = {};
+        gl.glGetTextureImage(texture, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                             static_cast<GLsizei>(readback.size()),
+                             readback.data());
+        expectGLError(gl, GL_NO_ERROR, "uploaded mip readback");
+        for (std::size_t pixel = 0; pixel < readback.size() / 4u; ++pixel) {
+            const std::size_t offset = pixel * 4u;
+            expectApproxByte(readback[offset + 0u], 133u, 0u,
+                             "uploaded mip red");
+            expectApproxByte(readback[offset + 1u], 44u, 0u,
+                             "uploaded mip green");
+            expectApproxByte(readback[offset + 2u], 201u, 0u,
+                             "uploaded mip blue");
+            expectApproxByte(readback[offset + 3u], 255u, 0u,
+                             "uploaded mip alpha");
+        }
+
+        gl.glBindTexture(GL_TEXTURE_2D, 0);
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "uploaded mip cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "application-uploaded mip shadow evicted under the explicit widened flag and rematerialized";
+    }
+    return result;
+}
+
+TestResult runTextureMipShadowEvictionUploadRebuildProbe() {
+    auto result = runDirectSentinel("texture-mip-shadow.upload-rebuild", [&] {
+        ScopedEnvVar mipDrop("APPGL_TEXTURE_SHADOW_DROP_MIP_LEVELS", "1");
+        ScopedEnvVar uploadedMipDrop(
+            "APPGL_TEXTURE_SHADOW_DROP_UPLOADED_MIP_LEVELS", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint texture = 0;
+        gl.glGenTextures(1, &texture);
+        const auto level0 = uniformRGBA8Pixels(4, 4, 1, 9u, 18u, 27u);
+        const auto level1 = uniformRGBA8Pixels(2, 2, 1, 120u, 30u, 220u);
+        const std::array<std::uint8_t, 4> level2 = {4u, 5u, 6u, 255u};
+        gl.glBindTexture(GL_TEXTURE_2D, texture);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                           GL_NEAREST_MIPMAP_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0,
+                        GL_RGBA, GL_UNSIGNED_BYTE, level0.data());
+        gl.glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 2, 2, 0,
+                        GL_RGBA, GL_UNSIGNED_BYTE, level1.data());
+        expectGLError(gl, GL_NO_ERROR, "upload rebuild mip setup");
+        expectMipShadowEvicted(context, texture, 1, "upload rebuild source");
+
+        gl.glTexImage2D(GL_TEXTURE_2D, 2, GL_RGBA8, 1, 1, 0,
+                        GL_RGBA, GL_UNSIGNED_BYTE, level2.data());
+        expectGLError(gl, GL_NO_ERROR, "upload rebuild force level-count change");
+        const auto inventoryAfterRebuild = context.metalResourceInventory();
+        expectCondition(
+            inventoryAfterRebuild.hostCaches.textureMipShadowEviction
+                .materializeUploadRebuildCalls > 0,
+            "upload rebuild materialized evicted mip before replacing Metal texture");
+
+        std::array<std::uint8_t, 2 * 2 * 4> readback = {};
+        gl.glGetTextureImage(texture, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                             static_cast<GLsizei>(readback.size()),
+                             readback.data());
+        expectGLError(gl, GL_NO_ERROR, "upload rebuild level1 readback");
+        for (std::size_t pixel = 0; pixel < readback.size() / 4u; ++pixel) {
+            const std::size_t offset = pixel * 4u;
+            expectApproxByte(readback[offset + 0u], 120u, 0u,
+                             "upload rebuild red");
+            expectApproxByte(readback[offset + 1u], 30u, 0u,
+                             "upload rebuild green");
+            expectApproxByte(readback[offset + 2u], 220u, 0u,
+                             "upload rebuild blue");
+            expectApproxByte(readback[offset + 3u], 255u, 0u,
+                             "upload rebuild alpha");
+        }
+
+        gl.glBindTexture(GL_TEXTURE_2D, 0);
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "upload rebuild cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "full texture rebuild restored an evicted mip before releasing the old Metal texture";
+    }
+    return result;
+}
+
+TestResult runTextureMipShadowEvictionViewBlockProbe() {
+    auto result = runDirectSentinel("texture-mip-shadow.view-block", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint texture = 0;
+        GLuint view = 0;
+        const auto level0 = uniformRGBA8Pixels(4, 4, 1, 1u, 2u, 3u);
+        const auto level1 = uniformRGBA8Pixels(2, 2, 1, 10u, 20u, 30u);
+        {
+            ScopedEnvVar mipDropOff("APPGL_TEXTURE_SHADOW_DROP_MIP_LEVELS", "0");
+            gl.glGenTextures(1, &texture);
+            gl.glBindTexture(GL_TEXTURE_2D, texture);
+            gl.glTexStorage2D(GL_TEXTURE_2D, 2, GL_RGBA8, 4, 4);
+            gl.glTextureSubImage2D(texture, 0, 0, 0, 4, 4,
+                                   GL_RGBA, GL_UNSIGNED_BYTE, level0.data());
+            gl.glTextureSubImage2D(texture, 1, 0, 0, 2, 2,
+                                   GL_RGBA, GL_UNSIGNED_BYTE, level1.data());
+            gl.glGenTextures(1, &view);
+            gl.glTextureView(view, GL_TEXTURE_2D, texture, GL_RGBA8,
+                             1, 1, 0, 1);
+            expectGLError(gl, GL_NO_ERROR, "view-block setup");
+        }
+
+        ScopedEnvVar mipDrop("APPGL_TEXTURE_SHADOW_DROP_MIP_LEVELS", "1");
+        ScopedEnvVar uploadedMipDrop(
+            "APPGL_TEXTURE_SHADOW_DROP_UPLOADED_MIP_LEVELS", "1");
+        gl.glTextureSubImage2D(texture, 1, 0, 0, 2, 2,
+                               GL_RGBA, GL_UNSIGNED_BYTE, level1.data());
+        expectGLError(gl, GL_NO_ERROR, "view-block reupload");
+
+        const GLTextureObject* textureObject =
+            context.objects().textures().get(texture);
+        expectCondition(textureObject != nullptr,
+                        "view-block source texture object exists");
+        const auto& image = expectTextureLevel(context, texture, 1,
+                                               "view-block source");
+        if (image.mipShadowEvicted) {
+            throw std::runtime_error(
+                "source mip with dependent texture view was evicted: " +
+                textureStateSummary(*textureObject, image));
+        }
+        const auto inventory = context.metalResourceInventory();
+        expectCondition(
+            inventory.hostCaches.textureMipShadowEviction.blockDependentView > 0,
+            "dependent texture view block counter incremented");
+
+        gl.glDeleteTextures(1, &view);
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "view-block cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "source texture with an existing mip-level view blocked mip-shadow eviction";
+    }
+    return result;
+}
+
+TestResult runTextureMipShadowEvictionEvictBeforeViewProbe() {
+    auto result = runDirectSentinel("texture-mip-shadow.evict-before-view", [&] {
+        ScopedEnvVar mipDrop("APPGL_TEXTURE_SHADOW_DROP_MIP_LEVELS", "1");
+        ScopedEnvVar uploadedMipDrop(
+            "APPGL_TEXTURE_SHADOW_DROP_UPLOADED_MIP_LEVELS", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint texture = 0;
+        GLuint view = 0;
+        const auto level0 = uniformRGBA8Pixels(4, 4, 1, 3u, 6u, 9u);
+        const auto level1 = uniformRGBA8Pixels(2, 2, 1, 90u, 45u, 180u);
+        gl.glGenTextures(1, &texture);
+        gl.glBindTexture(GL_TEXTURE_2D, texture);
+        gl.glTexStorage2D(GL_TEXTURE_2D, 2, GL_RGBA8, 4, 4);
+        gl.glTextureSubImage2D(texture, 0, 0, 0, 4, 4,
+                               GL_RGBA, GL_UNSIGNED_BYTE, level0.data());
+        gl.glTextureSubImage2D(texture, 1, 0, 0, 2, 2,
+                               GL_RGBA, GL_UNSIGNED_BYTE, level1.data());
+        expectGLError(gl, GL_NO_ERROR, "evict-before-view setup");
+        expectMipShadowEvicted(context, texture, 1,
+                               "evict-before-view source");
+
+        gl.glGenTextures(1, &view);
+        gl.glTextureView(view, GL_TEXTURE_2D, texture, GL_RGBA8,
+                         1, 1, 0, 1);
+        expectGLError(gl, GL_NO_ERROR, "evict-before-view create view");
+
+        std::array<std::uint8_t, 2 * 2 * 4> readback = {};
+        gl.glGetTextureImage(view, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                             static_cast<GLsizei>(readback.size()),
+                             readback.data());
+        expectGLError(gl, GL_NO_ERROR, "evict-before-view readback");
+        for (std::size_t pixel = 0; pixel < readback.size() / 4u; ++pixel) {
+            const std::size_t offset = pixel * 4u;
+            expectApproxByte(readback[offset + 0u], 90u, 0u,
+                             "evict-before-view red");
+            expectApproxByte(readback[offset + 1u], 45u, 0u,
+                             "evict-before-view green");
+            expectApproxByte(readback[offset + 2u], 180u, 0u,
+                             "evict-before-view blue");
+            expectApproxByte(readback[offset + 3u], 255u, 0u,
+                             "evict-before-view alpha");
+        }
+
+        gl.glDeleteTextures(1, &view);
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "evict-before-view cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "a view created after source mip eviction still read the source Metal mip correctly";
+    }
+    return result;
+}
+
+TestResult runTextureMipShadowEvictionR8RedundantProbe() {
+    auto result = runDirectSentinel("texture-mip-shadow.r8-redundant-combined", [&] {
+        ScopedEnvVar mipDrop("APPGL_TEXTURE_SHADOW_DROP_MIP_LEVELS", "1");
+        ScopedEnvVar redundantR8("APPGL_TEXTURE_SHADOW_DROP_REDUNDANT_RGBA8", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint texture = 0;
+        gl.glGenTextures(1, &texture);
+        std::array<std::uint8_t, 4 * 4> pixels;
+        pixels.fill(77u);
+        gl.glBindTexture(GL_TEXTURE_2D, texture);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                           GL_NEAREST_MIPMAP_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 4, 4, 0,
+                        GL_RED, GL_UNSIGNED_BYTE, pixels.data());
+        gl.glGenerateMipmap(GL_TEXTURE_2D);
+        expectGLError(gl, GL_NO_ERROR, "r8 redundant setup");
+        expectMipShadowEvicted(context, texture, 1, "r8 redundant mip");
+
+        std::array<std::uint8_t, 2 * 2 * 4> readback = {};
+        gl.glGetTextureSubImage(texture, 1, 0, 0, 0, 2, 2, 1,
+                                GL_RGBA, GL_UNSIGNED_BYTE,
+                                static_cast<GLsizei>(readback.size()),
+                                readback.data());
+        expectGLError(gl, GL_NO_ERROR, "r8 redundant subimage");
+        for (std::size_t pixel = 0; pixel < readback.size() / 4u; ++pixel) {
+            const std::size_t offset = pixel * 4u;
+            expectApproxByte(readback[offset + 0u], 77u, 0u,
+                             "r8 redundant red");
+            expectApproxByte(readback[offset + 1u], 0u, 0u,
+                             "r8 redundant green");
+            expectApproxByte(readback[offset + 2u], 0u, 0u,
+                             "r8 redundant blue");
+            expectApproxByte(readback[offset + 3u], 255u, 0u,
+                             "r8 redundant alpha");
+        }
+        const auto& level = expectTextureLevel(context, texture, 1,
+                                               "r8 redundant post-readback");
+        expectCondition(!level.nativeData.empty(),
+                        "r8 redundant materialization kept native bytes");
+
+        gl.glBindTexture(GL_TEXTURE_2D, 0);
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "r8 redundant cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "R8 mip eviction remains correct with redundant-RGBA8 drop enabled";
+    }
+    return result;
+}
+
+TestResult runTextureMipShadowEvictionCopyImageProbe() {
+    auto result = runDirectSentinel("texture-mip-shadow.copyimage", [&] {
+        ScopedEnvVar mipDrop("APPGL_TEXTURE_SHADOW_DROP_MIP_LEVELS", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint textures[2] = {};
+        gl.glGenTextures(2, textures);
+        const GLuint srcTex = textures[0];
+        const GLuint dstTex = textures[1];
+        createGeneratedRGBA8MipTexture(gl, srcTex, 11u, 77u, 143u);
+        setupDCR3CRGBA8Texture(gl, dstTex, 4, 4, 2);
+        expectGLError(gl, GL_NO_ERROR, "copyimage mip setup");
+        expectMipShadowEvicted(context, srcTex, 1, "copyimage src");
+
+        gl.glCopyImageSubData(srcTex, GL_TEXTURE_2D, 1, 0, 0, 0,
+                              dstTex, GL_TEXTURE_2D, 1, 0, 0, 0,
+                              2, 2, 1);
+        expectGLError(gl, GL_NO_ERROR, "copyimage mip copy");
+
+        std::array<std::uint8_t, 2 * 2 * 4> readback = {};
+        gl.glGetTextureImage(dstTex, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                             static_cast<GLsizei>(readback.size()),
+                             readback.data());
+        expectGLError(gl, GL_NO_ERROR, "copyimage dst readback");
+        for (std::size_t pixel = 0; pixel < readback.size() / 4u; ++pixel) {
+            const std::size_t offset = pixel * 4u;
+            expectApproxByte(readback[offset + 0u], 11u, 0u,
+                             "copyimage mip red");
+            expectApproxByte(readback[offset + 1u], 77u, 0u,
+                             "copyimage mip green");
+            expectApproxByte(readback[offset + 2u], 143u, 0u,
+                             "copyimage mip blue");
+            expectApproxByte(readback[offset + 3u], 255u, 0u,
+                             "copyimage mip alpha");
+        }
+
+        gl.glBindTexture(GL_TEXTURE_2D, 0);
+        gl.glDeleteTextures(2, textures);
+        expectGLError(gl, GL_NO_ERROR, "copyimage mip cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "copyImageSubData restored an evicted generated mip source before copying";
+    }
+    return result;
+}
+
+TestResult runTextureMipShadowEvictionPartialTexSubImageProbe() {
+    auto result = runDirectSentinel("texture-mip-shadow.partial-texsubimage", [&] {
+        ScopedEnvVar mipDrop("APPGL_TEXTURE_SHADOW_DROP_MIP_LEVELS", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint texture = 0;
+        gl.glGenTextures(1, &texture);
+        createGeneratedRGBA8MipTexture(gl, texture, 50u, 60u, 70u);
+        expectGLError(gl, GL_NO_ERROR, "partial mip setup");
+        expectMipShadowEvicted(context, texture, 1,
+                               "partial texSubImage source");
+
+        const std::array<std::uint8_t, 4> patch = {200u, 10u, 20u, 255u};
+        gl.glTextureSubImage2D(texture, 1, 0, 0, 1, 1,
+                               GL_RGBA, GL_UNSIGNED_BYTE, patch.data());
+        expectGLError(gl, GL_NO_ERROR, "partial mip texSubImage");
+
+        std::array<std::uint8_t, 2 * 2 * 4> readback = {};
+        gl.glGetTextureImage(texture, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                             static_cast<GLsizei>(readback.size()),
+                             readback.data());
+        expectGLError(gl, GL_NO_ERROR, "partial mip readback");
+        std::size_t patched = 0;
+        std::size_t preserved = 0;
+        for (std::size_t pixel = 0; pixel < readback.size() / 4u; ++pixel) {
+            const std::size_t offset = pixel * 4u;
+            const bool isPatch =
+                readback[offset + 0u] == 200u &&
+                readback[offset + 1u] == 10u &&
+                readback[offset + 2u] == 20u &&
+                readback[offset + 3u] == 255u;
+            const bool isPreserved =
+                readback[offset + 0u] == 50u &&
+                readback[offset + 1u] == 60u &&
+                readback[offset + 2u] == 70u &&
+                readback[offset + 3u] == 255u;
+            if (isPatch) {
+                ++patched;
+            } else if (isPreserved) {
+                ++preserved;
+            }
+        }
+        expectCondition(patched == 1,
+                        "partial texSubImage patched one mip texel");
+        expectCondition(preserved == 3,
+                        "partial texSubImage preserved untouched mip texels");
+
+        gl.glBindTexture(GL_TEXTURE_2D, 0);
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "partial mip cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "partial texSubImage on an evicted generated mip preserved untouched texels";
+    }
+    return result;
+}
+
+TestResult runDepth32FStaleDropDepthSubImageProbe() {
+    auto result = runDirectSentinel("depth32f.stale-drop.subimage-depth-float", [&] {
+        ScopedEnvVar staleDepth("APPGL_TEXTURE_SHADOW_DROP_STALE_DEPTH32F_RGBA8", "1");
+        ScopedEnvVar redundantR8("APPGL_TEXTURE_SHADOW_DROP_REDUNDANT_RGBA8", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint texture = 0;
+        GLuint framebuffer = 0;
+        gl.glGenTextures(1, &texture);
+        setupDCR3CDepth32FTexture(gl, texture, 4, 4);
+        primeDCR3CDepth32FTexture(gl, texture, 4, 4);
+        setupDCR3CDepthTextureFbo(gl, framebuffer, texture);
+        seedDepthAttachmentWithDraw(gl, framebuffer, 4, 4, 0.375f);
+        expectGLError(gl, GL_NO_ERROR, "depth32f depth-subimage draw");
+        GLfloat seedProbe = -1.0f;
+        gl.glReadPixels(0, 0, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &seedProbe);
+        expectGLError(gl, GL_NO_ERROR, "depth32f depth-subimage seed readPixels");
+        expectApproxFloat(seedProbe, 0.375f, 0.02f,
+                          "depth32f depth-subimage seeded framebuffer depth");
+
+        const GLTextureObject* textureObject =
+            context.objects().textures().get(texture);
+        expectCondition(textureObject != nullptr,
+                        "depth32f depth-subimage texture object exists");
+        const auto& level = expectTextureLevel(
+            context, texture, 0, "depth32f depth-subimage");
+        if (!level.rgba8.empty()) {
+            throw std::runtime_error(
+                "depth32f depth-subimage stale rgba8 survived: " +
+                textureStateSummary(*textureObject, level));
+        }
+
+        std::array<GLfloat, 4> readback = {-1.0f, -1.0f, -1.0f, -1.0f};
+        gl.glGetTextureSubImage(texture, 0, 1, 1, 0, 2, 2, 1,
+                                GL_DEPTH_COMPONENT, GL_FLOAT,
+                                static_cast<GLsizei>(readback.size() * sizeof(GLfloat)),
+                                readback.data());
+        expectGLError(gl, GL_NO_ERROR, "depth32f depth-subimage readback");
+        for (std::size_t i = 0; i < readback.size(); ++i) {
+            expectApproxFloat(readback[i], 0.375f, 0.02f,
+                              "depth32f depth-subimage value");
+        }
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "depth32f depth-subimage cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "render-produced depth32f subimage depth/float readback stayed truthful after stale rgba8 drop";
+    }
+    return result;
+}
+
+TestResult runDepth32FStaleDropArrayRgbaSubImageProbe() {
+    auto result = runDirectSentinel("depth32f.stale-drop.array-rgba-subimage", [&] {
+        ScopedEnvVar staleDepth("APPGL_TEXTURE_SHADOW_DROP_STALE_DEPTH32F_RGBA8", "1");
+        ScopedEnvVar redundantR8("APPGL_TEXTURE_SHADOW_DROP_REDUNDANT_RGBA8", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint texture = 0;
+        GLuint framebuffer = 0;
+        gl.glGenTextures(1, &texture);
+        setupDCR3CDepth32FArrayTexture(gl, texture, 4, 4, 3);
+        primeDCR3CDepth32FTexture(gl, texture, 4, 4, 3);
+        setupDCR3CDepthArrayLayerFbo(gl, framebuffer, texture, 1);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        gl.glViewport(0, 0, 4, 4);
+        gl.glClearDepth(0.25);
+        gl.glClear(GL_DEPTH_BUFFER_BIT);
+        expectGLError(gl, GL_NO_ERROR, "depth32f array rgba clear");
+        GLfloat seedProbe = -1.0f;
+        gl.glReadPixels(0, 0, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &seedProbe);
+        expectGLError(gl, GL_NO_ERROR, "depth32f array rgba seed readPixels");
+        expectApproxFloat(seedProbe, 0.25f, 0.02f,
+                          "depth32f array rgba seeded framebuffer depth");
+
+        const GLTextureObject* textureObject =
+            context.objects().textures().get(texture);
+        expectCondition(textureObject != nullptr,
+                        "depth32f array rgba texture object exists");
+        const auto& level = expectTextureLevel(
+            context, texture, 0, "depth32f array rgba");
+        if (!level.rgba8.empty()) {
+            throw std::runtime_error(
+                "depth32f array rgba stale rgba8 survived: " +
+                textureStateSummary(*textureObject, level));
+        }
+
+        std::array<std::uint8_t, 4 * 4 * 4> readback;
+        readback.fill(0xAAu);
+        gl.glGetTextureSubImage(texture, 0, 0, 0, 1, 4, 4, 1,
+                                GL_RGBA, GL_UNSIGNED_BYTE,
+                                static_cast<GLsizei>(readback.size()),
+                                readback.data());
+        expectGLError(gl, GL_NO_ERROR, "depth32f array rgba subimage readback");
+
+        const std::uint8_t expectedRed = 64u;
+        for (std::size_t pixel = 0; pixel < readback.size() / 4u; ++pixel) {
+            const std::size_t offset = pixel * 4u;
+            expectApproxByte(readback[offset + 0u], expectedRed, 4u,
+                             "depth32f array rgba red");
+            expectApproxByte(readback[offset + 1u], 0u, 0u,
+                             "depth32f array rgba green");
+            expectApproxByte(readback[offset + 2u], 0u, 0u,
+                             "depth32f array rgba blue");
+            expectApproxByte(readback[offset + 3u], 255u, 0u,
+                             "depth32f array rgba alpha");
+        }
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "depth32f array rgba cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "render-produced depth32f array layer could rebuild RGBA subimage from the stale-drop path";
+    }
+    return result;
+}
+
+TestResult runDepth32FStaleDropCopyImageProbe() {
+    auto result = runDirectSentinel("depth32f.stale-drop.copyimage", [&] {
+        ScopedEnvVar staleDepth("APPGL_TEXTURE_SHADOW_DROP_STALE_DEPTH32F_RGBA8", "1");
+        ScopedEnvVar redundantR8("APPGL_TEXTURE_SHADOW_DROP_REDUNDANT_RGBA8", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint textures[2] = {};
+        GLuint framebuffer = 0;
+        gl.glGenTextures(2, textures);
+        const GLuint srcTex = textures[0];
+        const GLuint dstTex = textures[1];
+        setupDCR3CDepth32FTexture(gl, srcTex, 4, 4);
+        setupDCR3CDepth32FTexture(gl, dstTex, 4, 4);
+        primeDCR3CDepth32FTexture(gl, srcTex, 4, 4);
+        primeDCR3CDepth32FTexture(gl, dstTex, 4, 4);
+        setupDCR3CDepthTextureFbo(gl, framebuffer, srcTex);
+        seedDepthAttachmentWithDraw(gl, framebuffer, 4, 4, 0.25f);
+        expectGLError(gl, GL_NO_ERROR, "depth32f copyImage draw");
+
+        const GLTextureObject* srcObject =
+            context.objects().textures().get(srcTex);
+        expectCondition(srcObject != nullptr,
+                        "depth32f copyImage texture object exists");
+        const auto& srcLevel = expectTextureLevel(
+            context, srcTex, 0, "depth32f copyImage");
+        if (!srcLevel.rgba8.empty()) {
+            throw std::runtime_error(
+                "depth32f copyImage stale rgba8 survived: " +
+                textureStateSummary(*srcObject, srcLevel));
+        }
+
+        gl.glCopyImageSubData(srcTex, GL_TEXTURE_2D, 0, 0, 0, 0,
+                              dstTex, GL_TEXTURE_2D, 0, 0, 0, 0,
+                              4, 4, 1);
+        expectGLError(gl, GL_NO_ERROR, "depth32f copyImageSubData");
+
+        std::array<GLfloat, 16> readback = {};
+        gl.glGetTextureImage(dstTex, 0, GL_DEPTH_COMPONENT, GL_FLOAT,
+                             static_cast<GLsizei>(readback.size() * sizeof(GLfloat)),
+                             readback.data());
+        expectGLError(gl, GL_NO_ERROR, "depth32f copyImage depth readback");
+        for (GLfloat value : readback) {
+            expectApproxFloat(value, 0.25f, 0.02f,
+                              "depth32f copyImage copied depth");
+        }
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        gl.glDeleteTextures(2, textures);
+        expectGLError(gl, GL_NO_ERROR, "depth32f copyImage cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "render-produced depth32f copyImageSubData copied the authoritative Metal depth instead of stale host shadow";
+    }
+    return result;
+}
+
+TestResult runDepth32FStaleDropPartialTexSubImageProbe() {
+    auto result = runDirectSentinel("depth32f.stale-drop.partial-texsubimage", [&] {
+        ScopedEnvVar staleDepth("APPGL_TEXTURE_SHADOW_DROP_STALE_DEPTH32F_RGBA8", "1");
+        ScopedEnvVar redundantR8("APPGL_TEXTURE_SHADOW_DROP_REDUNDANT_RGBA8", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint texture = 0;
+        GLuint framebuffer = 0;
+        gl.glGenTextures(1, &texture);
+        setupDCR3CDepth32FTexture(gl, texture, 4, 4);
+        primeDCR3CDepth32FTexture(gl, texture, 4, 4);
+        setupDCR3CDepthTextureFbo(gl, framebuffer, texture);
+        seedDepthAttachmentWithDraw(gl, framebuffer, 4, 4, 0.25f);
+        expectGLError(gl, GL_NO_ERROR, "depth32f texSubImage draw");
+
+        const GLTextureObject* textureObject =
+            context.objects().textures().get(texture);
+        expectCondition(textureObject != nullptr,
+                        "depth32f texSubImage texture object exists");
+        const auto& level = expectTextureLevel(
+            context, texture, 0, "depth32f texSubImage");
+        if (!level.rgba8.empty()) {
+            throw std::runtime_error(
+                "depth32f texSubImage stale rgba8 survived: " +
+                textureStateSummary(*textureObject, level));
+        }
+
+        const GLfloat patchDepth = 0.75f;
+        gl.glTextureSubImage2D(texture, 0, 0, 0, 1, 1,
+                               GL_DEPTH_COMPONENT, GL_FLOAT, &patchDepth);
+        expectGLError(gl, GL_NO_ERROR, "depth32f texSubImage partial update");
+
+        std::array<GLfloat, 16> readback = {};
+        gl.glGetTextureImage(texture, 0, GL_DEPTH_COMPONENT, GL_FLOAT,
+                             static_cast<GLsizei>(readback.size() * sizeof(GLfloat)),
+                             readback.data());
+        expectGLError(gl, GL_NO_ERROR, "depth32f texSubImage readback");
+
+        std::size_t patchedCount = 0;
+        std::size_t preservedCount = 0;
+        for (GLfloat value : readback) {
+            if (std::fabs(value - 0.75f) <= 0.02f) {
+                ++patchedCount;
+            } else if (std::fabs(value - 0.25f) <= 0.02f) {
+                ++preservedCount;
+            }
+        }
+        expectCondition(patchedCount == 1,
+                        "depth32f texSubImage updated exactly one texel");
+        expectCondition(preservedCount == 15,
+                        "depth32f texSubImage preserved untouched rendered depth texels");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "depth32f texSubImage cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "partial texSubImage on stale-dropped depth32f kept untouched rendered texels intact";
+    }
+    return result;
+}
+
+TestResult runDepth32FStaleDropGenerateMipmapProbe() {
+    auto result = runDirectSentinel("depth32f.stale-drop.generate-mipmap", [&] {
+        ScopedEnvVar staleDepth("APPGL_TEXTURE_SHADOW_DROP_STALE_DEPTH32F_RGBA8", "1");
+        ScopedEnvVar redundantR8("APPGL_TEXTURE_SHADOW_DROP_REDUNDANT_RGBA8", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint texture = 0;
+        GLuint framebuffer = 0;
+        gl.glGenTextures(1, &texture);
+        setupDCR3CDepth32FTexture(gl, texture, 4, 4, 2);
+        primeDCR3CDepth32FTexture(gl, texture, 4, 4);
+        setupDCR3CDepthTextureFbo(gl, framebuffer, texture);
+        seedDepthAttachmentWithDraw(gl, framebuffer, 4, 4, 0.25f);
+        expectGLError(gl, GL_NO_ERROR, "depth32f generateMipmap draw");
+
+        const GLTextureObject* textureObject =
+            context.objects().textures().get(texture);
+        expectCondition(textureObject != nullptr,
+                        "depth32f generateMipmap texture object exists");
+        const auto& level0 = expectTextureLevel(
+            context, texture, 0, "depth32f generateMipmap");
+        if (!level0.rgba8.empty()) {
+            throw std::runtime_error(
+                "depth32f generateMipmap stale rgba8 survived: " +
+                textureStateSummary(*textureObject, level0));
+        }
+
+        gl.glBindTexture(GL_TEXTURE_2D, texture);
+        gl.glGenerateMipmap(GL_TEXTURE_2D);
+        expectGLError(gl, GL_NO_ERROR, "depth32f generateMipmap");
+
+        std::array<GLfloat, 4> readback = {};
+        gl.glGetTextureImage(texture, 1, GL_DEPTH_COMPONENT, GL_FLOAT,
+                             static_cast<GLsizei>(readback.size() * sizeof(GLfloat)),
+                             readback.data());
+        expectGLError(gl, GL_NO_ERROR, "depth32f mip level readback");
+        for (GLfloat value : readback) {
+            expectApproxFloat(value, 0.25f, 0.02f,
+                              "depth32f mip level depth");
+        }
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glBindTexture(GL_TEXTURE_2D, 0);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "depth32f generateMipmap cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "generateMipmap could rebuild stale-dropped depth32f state and keep depth content coherent";
+    }
+    return result;
+}
+
+TestResult runDepth32FStaleDropSwizzleProxyProbe() {
+    auto result = runDirectSentinel("depth32f.stale-drop.swizzle-proxy", [&] {
+        static constexpr const char* kSampleVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "out vec2 vUV;\n"
+            "void main() {\n"
+            "    vUV = aPos * 0.5 + 0.5;\n"
+            "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kSampleFS =
+            "#version 330 core\n"
+            "in vec2 vUV;\n"
+            "uniform sampler2D uDepthTex;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    fragColor = texture(uDepthTex, vUV);\n"
+            "}\n";
+
+        ScopedEnvVar staleDepth("APPGL_TEXTURE_SHADOW_DROP_STALE_DEPTH32F_RGBA8", "1");
+        ScopedEnvVar redundantR8("APPGL_TEXTURE_SHADOW_DROP_REDUNDANT_RGBA8", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint depthTexture = 0;
+        GLuint depthFramebuffer = 0;
+        gl.glGenTextures(1, &depthTexture);
+        setupDCR3CDepth32FTexture(gl, depthTexture, 4, 4);
+        primeDCR3CDepth32FTexture(gl, depthTexture, 4, 4);
+        setupDCR3CDepthTextureFbo(gl, depthFramebuffer, depthTexture);
+        seedDepthAttachmentWithDraw(gl, depthFramebuffer, 4, 4, 0.25f);
+        expectGLError(gl, GL_NO_ERROR, "depth32f swizzle draw");
+
+        const GLTextureObject* depthObject =
+            context.objects().textures().get(depthTexture);
+        expectCondition(depthObject != nullptr,
+                        "depth32f swizzle texture object exists");
+        const auto& depthLevel = expectTextureLevel(
+            context, depthTexture, 0, "depth32f swizzle");
+        if (!depthLevel.rgba8.empty()) {
+            throw std::runtime_error(
+                "depth32f swizzle stale rgba8 survived: " +
+                textureStateSummary(*depthObject, depthLevel));
+        }
+
+        gl.glBindTexture(GL_TEXTURE_2D, depthTexture);
+        const GLint swizzle[4] = {GL_RED, GL_RED, GL_RED, GL_ONE};
+        gl.glTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, swizzle);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+        expectGLError(gl, GL_NO_ERROR, "depth32f swizzle state");
+
+        GLuint colorTexture = 0;
+        GLuint colorFramebuffer = 0;
+        gl.glGenTextures(1, &colorTexture);
+        setupDCR3CRGBA8Texture(gl, colorTexture, 4, 4);
+        setupDCR3CTextureFbo(gl, colorFramebuffer, colorTexture);
+
+        const GLuint program = buildBenchProgram(kSampleVS, kSampleFS);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(program, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "depth32f swizzle sample program links");
+        const GLint samplerLocation =
+            gl.glGetUniformLocation(program, "uDepthTex");
+        expectCondition(samplerLocation >= 0,
+                        "depth32f swizzle sampler uniform exists");
+
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, colorFramebuffer);
+        gl.glViewport(0, 0, 4, 4);
+        gl.glUseProgram(program);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D, depthTexture);
+        gl.glUniform1i(samplerLocation, 0);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        expectGLError(gl, GL_NO_ERROR, "depth32f swizzle sample draw");
+
+        std::array<std::uint8_t, 4 * 4 * 4> pixels = {};
+        gl.glReadPixels(0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        expectGLError(gl, GL_NO_ERROR, "depth32f swizzle readback");
+        for (std::size_t pixel = 0; pixel < pixels.size() / 4u; ++pixel) {
+            const std::size_t offset = pixel * 4u;
+            expectApproxByte(pixels[offset + 0u], 64u, 4u,
+                             "depth32f swizzle red");
+            expectApproxByte(pixels[offset + 1u], 64u, 4u,
+                             "depth32f swizzle green");
+            expectApproxByte(pixels[offset + 2u], 64u, 4u,
+                             "depth32f swizzle blue");
+            expectApproxByte(pixels[offset + 3u], 255u, 0u,
+                             "depth32f swizzle alpha");
+        }
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glBindVertexArray(0);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+        gl.glBindTexture(GL_TEXTURE_2D, 0);
+        gl.glUseProgram(0);
+        gl.glDeleteProgram(program);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteFramebuffers(1, &colorFramebuffer);
+        gl.glDeleteTextures(1, &colorTexture);
+        gl.glDeleteFramebuffers(1, &depthFramebuffer);
+        gl.glDeleteTextures(1, &depthTexture);
+        expectGLError(gl, GL_NO_ERROR, "depth32f swizzle cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "post-render depth swizzle/proxy sampling still reflected live Metal depth after stale rgba8 drop";
     }
     return result;
 }
@@ -12831,6 +14260,11 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         return buildJSON(normalizedPhase, tests);
     }
 
+    if (normalizedPhase == "default-drawable-grow-only-probes") {
+        tests.push_back(runDefaultDrawableGrowOnlyReadbackProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
     if (normalizedPhase == "dcr3c-sentinels") {
         tests.push_back(runDCR3CFboPressureReadbackSentinel());
         tests.push_back(runDCR3CSoakBarBenchmarkSentinel());
@@ -12841,6 +14275,30 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runDCR3CBarBlitCopyMipmapSentinel());
         tests.push_back(runDCR3CBarCopyImageSparseLifecycleSentinel());
         tests.push_back(runDCR3CBufferRoleSentinel());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "depth32f-stale-drop-probes") {
+        tests.push_back(runDepth32FStaleDropDepthSubImageProbe());
+        tests.push_back(runDepth32FStaleDropArrayRgbaSubImageProbe());
+        tests.push_back(runDepth32FStaleDropCopyImageProbe());
+        tests.push_back(runDepth32FStaleDropPartialTexSubImageProbe());
+        tests.push_back(runDepth32FStaleDropGenerateMipmapProbe());
+        tests.push_back(runDepth32FStaleDropSwizzleProxyProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "texture-shadow-mip-eviction-probes") {
+        tests.push_back(runTextureMipShadowEvictionRGBA8ReadbackProbe());
+        tests.push_back(runTextureMipShadowEvictionArrayProbe());
+        tests.push_back(runTextureMipShadowEvictionR8Probe());
+        tests.push_back(runTextureMipShadowEvictionUploadedMipProbe());
+        tests.push_back(runTextureMipShadowEvictionUploadRebuildProbe());
+        tests.push_back(runTextureMipShadowEvictionViewBlockProbe());
+        tests.push_back(runTextureMipShadowEvictionEvictBeforeViewProbe());
+        tests.push_back(runTextureMipShadowEvictionR8RedundantProbe());
+        tests.push_back(runTextureMipShadowEvictionCopyImageProbe());
+        tests.push_back(runTextureMipShadowEvictionPartialTexSubImageProbe());
         return buildJSON(normalizedPhase, tests);
     }
 
