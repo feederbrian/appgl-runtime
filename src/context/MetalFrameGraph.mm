@@ -217,6 +217,10 @@ static bool optionalTessEvalComputeEnabled() {
     return appglEnvEnabledDefaultOff("APPGL_ENABLE_OPTIONAL_TESS_COMPUTE");
 }
 
+static bool layeredClearAsyncEnabled() {
+    return appglEnvEnabledDefaultOff("APPGL_ENABLE_LAYERED_CLEAR_ASYNC");
+}
+
 using DrawProfileClock = std::chrono::steady_clock;
 using DrawProfileTimePoint = DrawProfileClock::time_point;
 
@@ -12590,6 +12594,7 @@ fragment float4 appgl_immediate_textured_fs(
                                  bool isColor, bool isDepth, bool isStencil,
                                  const float rgba[4], float depth, std::uint32_t stencil) {
         if (texVoid == nullptr || device == nil || commandQueue == nil) return false;
+        const bool useAsyncLayeredClear = layeredClearAsyncEnabled();
         flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason::Clear);
         id<MTLTexture> tex = (__bridge id<MTLTexture>)texVoid;
         // Close any in-flight encoder. Metal disallows two render
@@ -12605,6 +12610,22 @@ fragment float4 appgl_immediate_textured_fs(
                 return true;
             }
             presentCurrentDrawable(currentCommandBuffer);
+            if (useAsyncLayeredClear) {
+                if (ringSlotAcquired) {
+                    commitWithFrameSignal(
+                        currentCommandBufferLease,
+                        AppGLCommandReason::LayeredClearDrainCurrentAsync);
+                    advanceRingBuffer();
+                } else {
+                    currentCommandBufferLease.commit(
+                        AppGLCommandReason::LayeredClearDrainCurrentAsync);
+                }
+                currentCommandBuffer = nil;
+                clearCurrentDrawable();
+                pendingPresent = false;
+                resetCachedEncoderState();
+                return true;
+            }
             const bool completed =
                 currentCommandBufferLease.commitAndWait(AppGLCommandReason::LayeredClearDrainCurrent);
             if (ringSlotAcquired) {
@@ -12630,7 +12651,10 @@ fragment float4 appgl_immediate_textured_fs(
             if (clearCommandBuffer != nil) {
                 return true;
             }
-            clearLease = makeCommandBufferDrainingAutorelease(AppGLCommandReason::LayeredClear);
+            clearLease = makeCommandBufferDrainingAutorelease(
+                useAsyncLayeredClear
+                    ? AppGLCommandReason::LayeredClearAsync
+                    : AppGLCommandReason::LayeredClear);
             clearCommandBuffer = clearLease.get();
             if (clearCommandBuffer == nil) {
                 return false;
@@ -12641,6 +12665,15 @@ fragment float4 appgl_immediate_textured_fs(
         };
         auto commitClearChunk = [&]() -> bool {
             if (clearCommandBuffer == nil) {
+                return true;
+            }
+            if (useAsyncLayeredClear) {
+                clearLease.retainObjectUntilCompleted(tex);
+                clearLease.commit(AppGLCommandReason::LayeredClearAsync);
+                clearCommandBuffer = nil;
+                clearLease = MetalCommandBufferLease{};
+                passesInCommandBuffer = 0;
+                resetCachedEncoderState();
                 return true;
             }
             const bool completed = clearLease.commitAndWait(AppGLCommandReason::LayeredClear);

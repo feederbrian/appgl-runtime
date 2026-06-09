@@ -1,6 +1,6 @@
 # AppGL Perf ARC Tracking
 
-Status: C45 is crowned as the Step 7 rung 3 memory/Mach-port stability checkpoint. Live pin `85C5B354` resolved the command-wait send-right leak in the manual gameplay gate; next roadmap lane is CPU-bound performance work for the current ~20 FPS / high-CPU / low-GPU profile.
+Status: C45 is crowned as the Step 7 rung 3 memory/Mach-port stability checkpoint. C46 is now the active CPU-bound performance lane: a default-off layered-clear async prototype has passed local synthetic/correctness gates and needs live Warzone A/B before any launcher/default change.
 Date: 2026-06-09
 Owner: AppGL-Foreman
 
@@ -3114,3 +3114,66 @@ C45 manual crown result:
 - Result: C45 is crowned as the memory/Mach-port stability checkpoint. The
   roadmap can move back to performance work, with CPU still high and FPS/GPU
   utilization as the next optimization lane.
+
+C46 layered-clear async CPU-lane prototype:
+
+- Candidate intent: reduce CPU time spent waiting on GPU-only layered-clear
+  ordering in the live Warzone path, where the crowned C45 manual artifact
+  still showed heavy `LayeredClear_delta=17,705` and
+  `LayeredClearDrainCurrent_delta=7,082` work while CPU remained high and GPU
+  underutilized.
+- Patch shape:
+  - Added `LayeredClearDrainCurrentAsync` and `LayeredClearAsync` command
+    reasons as distinct `AsyncCommit` / `GpuOnlyOrdering` counters.
+  - Added default-off feature flag `APPGL_ENABLE_LAYERED_CLEAR_ASYNC=1`.
+  - Default behavior remains the C45 synchronous layered-clear path.
+  - With the flag enabled, `clearLayeredTextureImpl` converts the current
+    command-buffer drain to async only after closing the encoder and presenting
+    the drawable. If a frame-ring slot is owned, it uses
+    `commitWithFrameSignal(...LayeredClearDrainCurrentAsync...)` and advances
+    the ring immediately without manually signaling; otherwise it uses an
+    ordinary async commit.
+  - Standalone layered-clear chunks use
+    `makeCommandBufferDrainingAutorelease(LayeredClearAsync)`, explicitly
+    retain the target `id<MTLTexture>` until command-buffer completion, and
+    submit with plain `commit(LayeredClearAsync)` so they never frame-signal.
+  - CPU-visible readback, lifetime/destruct, explicit finish/drain, and
+    `FlushForReadback` semantics remain untouched.
+- Peer source-hazard review:
+  - AppGL-Worker confirmed the opt-in async shape is plausible if ring-slot
+    balance, standalone no-frame-signal behavior, texture lifetime, producer
+    drains, queue ordering, and in-flight/backpressure counters stay covered.
+  - GLTest-Foreman accepted the default-off posture and requested local
+    default-off/opt-in correctness gates followed by live Warzone A/B before
+    any default-on or crown claim.
+- Final local artifact root:
+  `tests/reports/perf-step7-rung3-c46-layered-clear-async-local/20260609T205129Z-final`.
+- Build/static:
+  `git diff --check` passed, and
+  `cmake --build build-release-fp64on --target AppGL appgl_gauntlet_cli appgl_bar_b_benchmark -j 8`
+  passed with only the known `MTLResourceUsageSample` deprecation warnings and
+  duplicate static-library linker warning.
+- Default-off final gate passed:
+  `dcr2-sentinels`, `dcr3-sentinels`, `dcr3c-sentinels` 9/9,
+  `depth32f-stale-drop-probes` 6/6,
+  `texture-shadow-mip-eviction-probes` 10/10, and BAR-B
+  `perDrawUs=65.894488`.
+- Opt-in final gate passed with `APPGL_ENABLE_LAYERED_CLEAR_ASYNC=1`:
+  the same sentinel/probe set stayed green, and BAR-B measured
+  `perDrawUs=65.671615`. DCR3C remained bounded with `peakInFlight=2` and
+  `allocWaitTimeouts=0`.
+- Counter proof:
+  - Default-off `default-dcr3c.log` shows
+    `LayeredClear mode=commit-and-wait` with the old completion wait.
+  - Opt-in `optin-dcr3c.log` shows
+    `LayeredClearAsync mode=async-commit` and no
+    `reason=LayeredClear mode=commit-and-wait` / old completion wait in the
+    opt-in layered-clear slice.
+  - Final logs had no failed/timeout markers, no non-4 Metal completion
+    statuses, and no `allocWaitTimeouts>0`.
+- Disposition: local gate is green, but this is not crowned and not a launcher
+  change. Next gate is a short live Warzone default-off vs opt-in A/B through
+  the existing live route, collecting command-buffer reason deltas,
+  backpressure/peak in-flight, RSS/ports sanity, present attribution, and
+  FPS/CPU/GPU evidence. Only after live value and stability are shown should
+  the team consider a manual gameplay soak or default behavior change.
