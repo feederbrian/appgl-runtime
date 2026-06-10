@@ -218,7 +218,12 @@ static bool optionalTessEvalComputeEnabled() {
 }
 
 static bool layeredClearAsyncEnabled() {
-    return appglEnvEnabledDefaultOff("APPGL_ENABLE_LAYERED_CLEAR_ASYNC");
+    // S24 defaults promotion: crowned forward posture is the default.
+    // DISABLE is the operator hatch; ENABLE=0 still honored.
+    if (appglEnvEnabledDefaultOff("APPGL_DISABLE_LAYERED_CLEAR_ASYNC")) {
+        return false;
+    }
+    return appglEnvEnabledDefaultOn("APPGL_ENABLE_LAYERED_CLEAR_ASYNC");
 }
 
 // C48: defer FBO-attachment clears and fold them into the next render
@@ -226,7 +231,11 @@ static bool layeredClearAsyncEnabled() {
 // command buffers. Default-off; the default path must stay byte-identical
 // to the C46 lineage.
 static bool fboClearFoldingEnabled() {
-    return appglEnvEnabledDefaultOff("APPGL_ENABLE_FBO_CLEAR_FOLDING");
+    // S24 defaults promotion (see layeredClearAsyncEnabled).
+    if (appglEnvEnabledDefaultOff("APPGL_DISABLE_FBO_CLEAR_FOLDING")) {
+        return false;
+    }
+    return appglEnvEnabledDefaultOn("APPGL_ENABLE_FBO_CLEAR_FOLDING");
 }
 
 // C49 rider: when the requested default-drawable extent changes WITHOUT
@@ -243,7 +252,14 @@ static bool viewportRequestKeepaliveEnabled() {
 // translated draws targeting the same attachment signature instead of
 // closing it at every draw's encode tail. Default-off.
 static bool fboPassContinuationEnabled() {
-    return appglEnvEnabledDefaultOff("APPGL_ENABLE_FBO_PASS_CONTINUATION");
+    // S24 defaults promotion (see layeredClearAsyncEnabled). NOTE:
+    // VIEWPORT_REQUEST_KEEPALIVE deliberately stays default-OFF until
+    // the build-menu flicker discrimination clears it (Bundle 2 verdict
+    // carve-out) — it remains opt-in for forward sessions.
+    if (appglEnvEnabledDefaultOff("APPGL_DISABLE_FBO_PASS_CONTINUATION")) {
+        return false;
+    }
+    return appglEnvEnabledDefaultOn("APPGL_ENABLE_FBO_PASS_CONTINUATION");
 }
 
 using DrawProfileClock = std::chrono::steady_clock;

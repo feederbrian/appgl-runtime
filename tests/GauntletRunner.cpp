@@ -14214,6 +14214,8 @@ TestResult runC48FoldEngagementDepthArrayProbe() {
     auto result = runDirectSentinel("c48.fbo-clear-folding.fold-depth-array", [&] {
         ScopedEnvVar folding("APPGL_ENABLE_FBO_CLEAR_FOLDING", "1");
 
+        ScopedEnvVar foldingHatch("APPGL_DISABLE_FBO_CLEAR_FOLDING", "0");
+
         ScopedSentinelContext scoped(32, 32);
         auto& context = scoped.context();
         auto& gl = scoped.gl();
@@ -14292,6 +14294,8 @@ TestResult runC48MaterializeOnReadbackProbe() {
     auto result = runDirectSentinel("c48.fbo-clear-folding.materialize-readback", [&] {
         ScopedEnvVar folding("APPGL_ENABLE_FBO_CLEAR_FOLDING", "1");
 
+        ScopedEnvVar foldingHatch("APPGL_DISABLE_FBO_CLEAR_FOLDING", "0");
+
         ScopedSentinelContext scoped(32, 32);
         auto& context = scoped.context();
         auto& gl = scoped.gl();
@@ -14361,6 +14365,8 @@ TestResult runC48CoalesceProbe() {
     auto result = runDirectSentinel("c48.fbo-clear-folding.coalesce", [&] {
         ScopedEnvVar folding("APPGL_ENABLE_FBO_CLEAR_FOLDING", "1");
 
+        ScopedEnvVar foldingHatch("APPGL_DISABLE_FBO_CLEAR_FOLDING", "0");
+
         ScopedSentinelContext scoped(32, 32);
         auto& context = scoped.context();
         auto& gl = scoped.gl();
@@ -14423,6 +14429,7 @@ TestResult runC48CoalesceProbe() {
 TestResult runC48CascadePatternProbe() {
     auto result = runDirectSentinel("c48.fbo-clear-folding.cascade-pattern", [&] {
         ScopedEnvVar folding("APPGL_ENABLE_FBO_CLEAR_FOLDING", "1");
+        ScopedEnvVar foldingHatch("APPGL_DISABLE_FBO_CLEAR_FOLDING", "0");
         // Live-launcher posture: grow-only default drawable. Combined
         // with the viewport alternation below this reproduces the
         // per-frame ensureSizeAtLeast requestedChanged invalidate
@@ -15647,6 +15654,8 @@ TestResult runC49ContinuationEngagementProbe() {
     auto result = runDirectSentinel("c49.pass-continuation.engagement", [&] {
         ScopedEnvVar continuation("APPGL_ENABLE_FBO_PASS_CONTINUATION", "1");
 
+        ScopedEnvVar continuationHatch("APPGL_DISABLE_FBO_PASS_CONTINUATION", "0");
+
         ScopedSentinelContext scoped(32, 32);
         auto& context = scoped.context();
         auto& gl = scoped.gl();
@@ -15736,7 +15745,10 @@ TestResult runC49DefaultOffPerDrawCloseProbe() {
 TestResult runC49ClearFoldCompositionProbe() {
     auto result = runDirectSentinel("c49.pass-continuation.c48-compose", [&] {
         ScopedEnvVar continuation("APPGL_ENABLE_FBO_PASS_CONTINUATION", "1");
+        ScopedEnvVar continuationHatch("APPGL_DISABLE_FBO_PASS_CONTINUATION", "0");
         ScopedEnvVar folding("APPGL_ENABLE_FBO_CLEAR_FOLDING", "1");
+
+        ScopedEnvVar foldingHatch("APPGL_DISABLE_FBO_CLEAR_FOLDING", "0");
 
         ScopedSentinelContext scoped(32, 32);
         auto& context = scoped.context();
@@ -15834,6 +15846,8 @@ TestResult runC49ClearFoldCompositionProbe() {
 TestResult runC49MultiProgramContinuationProbe() {
     auto result = runDirectSentinel("c49.pass-continuation.multi-program", [&] {
         ScopedEnvVar continuation("APPGL_ENABLE_FBO_PASS_CONTINUATION", "1");
+
+        ScopedEnvVar continuationHatch("APPGL_DISABLE_FBO_PASS_CONTINUATION", "0");
 
         ScopedSentinelContext scoped(32, 32);
         auto& context = scoped.context();
@@ -15953,6 +15967,8 @@ TestResult runC49MultiProgramContinuationProbe() {
 TestResult runC49DefaultFbIsolationProbe() {
     auto result = runDirectSentinel("c49.pass-continuation.default-fb-isolation", [&] {
         ScopedEnvVar continuation("APPGL_ENABLE_FBO_PASS_CONTINUATION", "1");
+
+        ScopedEnvVar continuationHatch("APPGL_DISABLE_FBO_PASS_CONTINUATION", "0");
 
         ScopedSentinelContext scoped(32, 32);
         auto& gl = scoped.gl();
