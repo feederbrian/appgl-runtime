@@ -19273,12 +19273,19 @@ struct GLContext::Impl {
                 frameGraph != nullptr &&
                 texture->target != GL_TEXTURE_CUBE_MAP &&
                 texture->target != GL_TEXTURE_CUBE_MAP_ARRAY &&
-                // C50 fix (texture_barrier 8-case P->F): integer formats
-                // need the CPU pattern fill + push — the GPU clear path
-                // takes FLOAT clear values and seeds R32UI-class
-                // attachments with garbage. Restrict the reroute to
-                // non-integer formats.
-                !isIntegerInternalFormat(image.desc.internalFormat) &&
+                // C50 fix round 2 (texture_barrier 8-case P->F +
+                // dsa.renderbuffers_storage_multisample abort): the GPU
+                // clear path takes FLOAT values (integer formats got
+                // garbage) AND has a latent staging-stride bug on odd
+                // shapes (AGX bytes_per_row asserts -> heap corruption).
+                // Restrict the reroute to the probe-covered renderable
+                // UNORM whitelist — the live-WZ win set — everything
+                // else keeps the eager fill+push.
+                (image.desc.internalFormat == GL_RGBA8 ||
+                 image.desc.internalFormat == GL_RGB8 ||
+                 image.desc.internalFormat == GL_SRGB8_ALPHA8 ||
+                 image.desc.internalFormat == GL_RGBA ||
+                 image.desc.internalFormat == GL_RGB) &&
                 firstLayer == 0 && lastLayer == sourceDepth) {
                 const float rgbaF[4] = {color[0], color[1], color[2], color[3]};
                 const std::uint32_t arrayLength = sourceDepth > 1
