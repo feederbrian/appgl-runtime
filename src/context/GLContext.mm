@@ -19273,6 +19273,12 @@ struct GLContext::Impl {
                 frameGraph != nullptr &&
                 texture->target != GL_TEXTURE_CUBE_MAP &&
                 texture->target != GL_TEXTURE_CUBE_MAP_ARRAY &&
+                // C50 fix (texture_barrier 8-case P->F): integer formats
+                // need the CPU pattern fill + push — the GPU clear path
+                // takes FLOAT clear values and seeds R32UI-class
+                // attachments with garbage. Restrict the reroute to
+                // non-integer formats.
+                !isIntegerInternalFormat(image.desc.internalFormat) &&
                 firstLayer == 0 && lastLayer == sourceDepth) {
                 const float rgbaF[4] = {color[0], color[1], color[2], color[3]};
                 const std::uint32_t arrayLength = sourceDepth > 1
@@ -24912,6 +24918,22 @@ struct GLContext::Impl {
     std::uint64_t shadowClearsCoalesced = 0;
     std::uint64_t shadowClearsMaterialized = 0;
     std::uint64_t shadowClearMaterializeBytes = 0;
+
+    static bool isIntegerInternalFormat(GLenum fmt) {
+        switch (fmt) {
+            case GL_R8I: case GL_R8UI: case GL_R16I: case GL_R16UI:
+            case GL_R32I: case GL_R32UI:
+            case GL_RG8I: case GL_RG8UI: case GL_RG16I: case GL_RG16UI:
+            case GL_RG32I: case GL_RG32UI:
+            case GL_RGB8I: case GL_RGB8UI: case GL_RGB16I: case GL_RGB16UI:
+            case GL_RGB32I: case GL_RGB32UI:
+            case GL_RGBA8I: case GL_RGBA8UI: case GL_RGBA16I: case GL_RGBA16UI:
+            case GL_RGBA32I: case GL_RGBA32UI:
+                return true;
+            default:
+                return false;
+        }
+    }
 
     static bool lazyShadowClearsEnabled() {
         // Per-call read (probes toggle it per arm; cost is trivial next

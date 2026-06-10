@@ -1492,6 +1492,15 @@ bool GLContext::memoryBarrierByRegion(GLbitfield barriers) {
 bool GLContext::textureBarrier() {
     if (impl_->frameGraph != nullptr) {
         impl_->frameGraph->flushParallelEncodeBoundary();
+        // S24 C50 fix (texture_barrier 8-case P->F): glTextureBarrier
+        // requires ALL prior writes to a texture -- including clears --
+        // visible to subsequent reads in the same rendering pass
+        // sequence. The lazy-shadow texture axis routes full-surface
+        // clears through the C48 registry, which defers them into a
+        // LATER pass's load action; a barrier between the clear and the
+        // feedback read must land them now (the old eager
+        // replaceMetalTexture push made them immediately visible).
+        impl_->frameGraph->materializeAllPendingFboClears();
     }
     return true;
 }
