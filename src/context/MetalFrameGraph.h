@@ -1093,6 +1093,17 @@ public:
                            std::uint32_t arrayLength, float depth);
     bool clearTextureStencil(void* tex, std::uint32_t level, std::uint32_t slice,
                              std::uint32_t arrayLength, std::uint32_t stencil);
+    // C48: with APPGL_ENABLE_FBO_CLEAR_FOLDING the clear helpers above
+    // defer into a pending registry that the next exact-coverage render
+    // pass consumes as MTLLoadActionClear. Callers that write or read
+    // the texture outside the frame graph's encode paths (texture
+    // uploads, copy blits) must materialize pending clears on it first
+    // so the deferred clear cannot land on top of newer data.
+    void materializePendingFboClearsForTexture(void* tex);
+    // Conservative variant for multi-attachment consumers (e.g.
+    // glBlitFramebuffer): land every deferred clear. No-op when the
+    // registry is empty or folding is disabled.
+    void materializeAllPendingFboClears();
     bool writeMultisampleDepthStencilRegion(void* tex, GLint x, GLint y,
                                             GLsizei width, GLsizei height,
                                             const GLfloat* depthPixels,
@@ -1504,6 +1515,10 @@ public:
         std::uint64_t drawableAcquireFailures = 0;
         std::uint64_t drawablePresentCalls = 0;
         std::uint64_t presentCalls = 0;
+        std::uint64_t fboClearsDeferred = 0;
+        std::uint64_t fboClearsFolded = 0;
+        std::uint64_t fboClearsMaterialized = 0;
+        std::uint64_t fboClearsCoalesced = 0;
         std::uint64_t presentFromFlushCalls = 0;
         std::uint64_t presentFromSwapBuffersCalls = 0;
         std::uint64_t presentInternalCalls = 0;

@@ -221,6 +221,14 @@ static bool layeredClearAsyncEnabled() {
     return appglEnvEnabledDefaultOff("APPGL_ENABLE_LAYERED_CLEAR_ASYNC");
 }
 
+// C48: defer FBO-attachment clears and fold them into the next render
+// pass's MTLLoadActionClear instead of issuing standalone layered-clear
+// command buffers. Default-off; the default path must stay byte-identical
+// to the C46 lineage.
+static bool fboClearFoldingEnabled() {
+    return appglEnvEnabledDefaultOff("APPGL_ENABLE_FBO_CLEAR_FOLDING");
+}
+
 using DrawProfileClock = std::chrono::steady_clock;
 using DrawProfileTimePoint = DrawProfileClock::time_point;
 
@@ -3791,6 +3799,9 @@ struct MetalFrameGraph::Impl {
     }
 
     ~Impl() {
+        // C48: nothing can consume deferred clears past teardown —
+        // drop the registry retains without materializing.
+        releasePendingFboClearsForTeardown();
         if (commandSubmission != nullptr) {
             commandSubmission->setPressureFlushCallback({});
         }
@@ -4457,6 +4468,9 @@ struct MetalFrameGraph::Impl {
         if (device == nil || commandQueue == nil) {
             return false;
         }
+        // C48: solid-color fallback draws don't fold deferred FBO
+        // clears — materialize.
+        materializeAllPendingFboClears();
         flushParallelTranslatedDrawBatch(
             ParallelEncodeBoundaryReason::SolidColorDraw);
         acquireRingSlot();  // OPT-8
@@ -5924,6 +5938,107 @@ struct MetalFrameGraph::Impl {
             profileSample.encoderOpened = profileDraw;
             FG_TRACE(@"encodeTranslatedDraw: opening new render pass (prior cmdBuf=%p pendingClear=%d fbo=%d)",
                      currentCommandBuffer, hasPendingClear, isFBODraw);
+            // C48: resolve deferred FBO-attachment clears against this
+            // pass's attachment coverage. Exact-coverage entries fold
+            // into the pass's load actions below; entries on the same
+            // textures with different coverage materialize through the
+            // legacy standalone path NOW — before the pass's command
+            // buffer is ensured — so the materialize drain ordering
+            // stays valid.
+            bool foldColor0 = false;
+            MTLClearColor foldColor0Value = MTLClearColorMake(0, 0, 0, 0);
+            bool foldDepth = false;
+            double foldDepthValue = 0.0;
+            bool foldStencil = false;
+            std::uint32_t foldStencilValue = 0;
+            std::array<bool, 8> foldExtraColor{};
+            std::array<MTLClearColor, 8> foldExtraColorValue{};
+            if (std::getenv("APPGL_TRACE_FBO_CLEAR_FOLDING") != nullptr) {
+                std::fprintf(stderr,
+                    "[C48] pass-open fbo=%d entries=%zu multiview=%d colorTex=%p dsTex=%p dsLevel=%u dsSlice=%u rtal=%u maxLayer=%u\n",
+                    (int)isFBODraw, pendingFboClears.size(),
+                    (int)vertexUsesMultiviewViewMask,
+                    info.fboColorTexture, info.fboDepthStencilTexture,
+                    (unsigned)info.fboDepthStencilLevel,
+                    (unsigned)info.fboDepthStencilSlice,
+                    info.fboColorArrayLength, info.maxEmittedLayer);
+            }
+            if (isFBODraw && !pendingFboClears.empty() &&
+                !vertexUsesMultiviewViewMask) {
+                const std::uint32_t passRtal = info.fboColorArrayLength;
+                const bool rtalClampPossible = info.maxEmittedLayer > 0;
+                PendingFboClear folded;
+                if (info.fboColorTexture != nullptr && !rtalClampPossible &&
+                    consumePendingFboClearForAttachment(
+                        info.fboColorTexture, /*isColor=*/true,
+                        /*isDepth=*/false, /*isStencil=*/false,
+                        info.fboColorLevels[0], info.fboColorSlices[0],
+                        passRtal, folded)) {
+                    foldColor0 = true;
+                    foldColor0Value = MTLClearColorMake(
+                        folded.rgba[0], folded.rgba[1],
+                        folded.rgba[2], folded.rgba[3]);
+                }
+                for (std::size_t ei = 0;
+                     ei < info.fboAdditionalColorTextures.size() && ei < 7;
+                     ++ei) {
+                    void* rawTex = info.fboAdditionalColorTextures[ei];
+                    if (rawTex == nullptr || rtalClampPossible) continue;
+                    if (consumePendingFboClearForAttachment(
+                            rawTex, /*isColor=*/true,
+                            /*isDepth=*/false, /*isStencil=*/false,
+                            info.fboColorLevels[ei + 1],
+                            info.fboColorSlices[ei + 1],
+                            passRtal, folded)) {
+                        foldExtraColor[ei] = true;
+                        foldExtraColorValue[ei] = MTLClearColorMake(
+                            folded.rgba[0], folded.rgba[1],
+                            folded.rgba[2], folded.rgba[3]);
+                    }
+                }
+                // Guard the MS-mismatch recovery below: an FBO pass with
+                // mismatched color/depth sample counts drops the depth
+                // attachment, which would silently lose a consumed fold.
+                const bool depthAttachmentMayDrop =
+                    fboColorTex != nil && fboDepthStencilTex != nil &&
+                    fboColorTex.sampleCount != fboDepthStencilTex.sampleCount;
+                if (info.fboDepthStencilTexture != nullptr &&
+                    !rtalClampPossible && !depthAttachmentMayDrop) {
+                    if (consumePendingFboClearForAttachment(
+                            info.fboDepthStencilTexture, /*isColor=*/false,
+                            /*isDepth=*/true, /*isStencil=*/false,
+                            static_cast<std::uint32_t>(
+                                info.fboDepthStencilLevel),
+                            static_cast<std::uint32_t>(
+                                info.fboDepthStencilSlice),
+                            passRtal, folded)) {
+                        foldDepth = true;
+                        foldDepthValue = folded.depth;
+                    }
+                    if (consumePendingFboClearForAttachment(
+                            info.fboDepthStencilTexture, /*isColor=*/false,
+                            /*isDepth=*/false, /*isStencil=*/true,
+                            static_cast<std::uint32_t>(
+                                info.fboDepthStencilLevel),
+                            static_cast<std::uint32_t>(
+                                info.fboDepthStencilSlice),
+                            passRtal, folded)) {
+                        foldStencil = true;
+                        foldStencilValue = folded.stencil;
+                    }
+                }
+                // Whatever remains on this pass's target textures could
+                // not fold — materialize it before the pass begins.
+                std::array<void*, 8> extraTexes{};
+                for (std::size_t ei = 0;
+                     ei < info.fboAdditionalColorTextures.size() && ei < 8;
+                     ++ei) {
+                    extraTexes[ei] = info.fboAdditionalColorTextures[ei];
+                }
+                materializeNonFoldablePendingClearsForPassTargets(
+                    info.fboColorTexture, info.fboDepthStencilTexture,
+                    &extraTexes);
+            }
             // Reuse the current command buffer if one exists (e.g. from a
             // prior solid-color draw), otherwise create a new one.
             if (currentCommandBuffer == nil) {
@@ -6054,6 +6169,11 @@ struct MetalFrameGraph::Impl {
             if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
                 pass.colorAttachments[0].loadAction = MTLLoadActionClear;
                 pass.colorAttachments[0].clearColor = pendingClearColor;
+            } else if (foldColor0) {
+                // C48: consume the deferred FBO-attachment clear as this
+                // pass's load action.
+                pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+                pass.colorAttachments[0].clearColor = foldColor0Value;
             } else {
                 pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
             }
@@ -6069,7 +6189,14 @@ struct MetalFrameGraph::Impl {
                 if (rawTex == nullptr) continue;
                 id<MTLTexture> extraTex = (__bridge id<MTLTexture>)rawTex;
                 pass.colorAttachments[ei + 1].texture = extraTex;
-                pass.colorAttachments[ei + 1].loadAction = MTLLoadActionLoad;
+                if (ei < foldExtraColor.size() && foldExtraColor[ei]) {
+                    // C48: folded deferred clear for this MRT slot.
+                    pass.colorAttachments[ei + 1].loadAction = MTLLoadActionClear;
+                    pass.colorAttachments[ei + 1].clearColor =
+                        foldExtraColorValue[ei];
+                } else {
+                    pass.colorAttachments[ei + 1].loadAction = MTLLoadActionLoad;
+                }
                 pass.colorAttachments[ei + 1].storeAction = MTLStoreActionStore;
                 // Phase 6-5: per-slot slice (index ei+1 into fboColorSlices).
                 const std::size_t sliceIdx = ei + 1;
@@ -6164,6 +6291,10 @@ struct MetalFrameGraph::Impl {
                     if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_DEPTH_BUFFER_BIT)) {
                         pass.depthAttachment.loadAction = MTLLoadActionClear;
                         pass.depthAttachment.clearDepth = pendingClearDepth;
+                    } else if (foldDepth) {
+                        // C48: folded deferred FBO depth clear.
+                        pass.depthAttachment.loadAction = MTLLoadActionClear;
+                        pass.depthAttachment.clearDepth = foldDepthValue;
                     } else {
                         pass.depthAttachment.loadAction = MTLLoadActionLoad;
                     }
@@ -6180,6 +6311,11 @@ struct MetalFrameGraph::Impl {
                     if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_STENCIL_BUFFER_BIT)) {
                         pass.stencilAttachment.loadAction = MTLLoadActionClear;
                         pass.stencilAttachment.clearStencil = pendingClearStencil;
+                    } else if (foldStencil) {
+                        // C48: folded deferred FBO stencil clear.
+                        pass.stencilAttachment.loadAction = MTLLoadActionClear;
+                        pass.stencilAttachment.clearStencil =
+                            foldStencilValue & 0xFF;
                     } else {
                         pass.stencilAttachment.loadAction = MTLLoadActionLoad;
                     }
@@ -11145,6 +11281,12 @@ struct MetalFrameGraph::Impl {
     }
 
     bool encodeTranslatedDraw(TranslatedDrawInfo& info) {
+        // C48: a sampled texture with a deferred FBO clear must be
+        // materialized before any encode path (serial, parallel capture,
+        // or threaded-deferred) sees it.
+        if (!pendingFboClears.empty()) {
+            materializePendingFboClearsForSampledTextures(info);
+        }
         if (threadedDeferredRecordProfile.enabled) {
             threadedDeferredRecordProfile.recordTranslatedDraw();
             if (flushingThreadedDeferredRecordBatch) {
@@ -12577,6 +12719,244 @@ fragment float4 appgl_immediate_textured_fs(
         return immediateModeSamplerState;
     }
 
+    // C48 — pending FBO-attachment clear registry. With
+    // APPGL_ENABLE_FBO_CLEAR_FOLDING=1, clearLayeredTextureImpl defers
+    // the clear here instead of issuing drain-current + standalone
+    // clear command buffers. The next translated-draw render pass that
+    // targets the exact same attachment coverage consumes the entry as
+    // its MTLLoadActionClear (fold). Any other consumer of the texture
+    // (sampling, readback, blit, upload, non-matching pass coverage)
+    // must materialize the entry first via the legacy standalone path,
+    // tagged with the FboClearMaterialize* reasons so the census can
+    // separate folded from materialized clears.
+    struct PendingFboClear {
+        void* tex = nullptr;  // CFRetained id<MTLTexture>
+        std::uint32_t arrayLength = 0;
+        std::uint32_t level = 0;
+        std::uint32_t slice = 0;
+        bool isColor = false;
+        bool isDepth = false;
+        bool isStencil = false;
+        float rgba[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        float depth = 0.0f;
+        std::uint32_t stencil = 0;
+    };
+    std::vector<PendingFboClear> pendingFboClears;
+    static constexpr std::size_t kMaxPendingFboClears = 16;
+    std::uint64_t fboClearsDeferred = 0;
+    std::uint64_t fboClearsFolded = 0;
+    std::uint64_t fboClearsMaterialized = 0;
+    std::uint64_t fboClearsCoalesced = 0;
+
+    void deferFboClear(void* texVoid, std::uint32_t arrayLength,
+                       std::uint32_t level, std::uint32_t slice,
+                       bool isColor, bool isDepth, bool isStencil,
+                       const float rgba[4], float depth, std::uint32_t stencil) {
+        for (auto& entry : pendingFboClears) {
+            if (entry.tex == texVoid &&
+                entry.isColor == isColor &&
+                entry.isDepth == isDepth &&
+                entry.isStencil == isStencil &&
+                entry.arrayLength == arrayLength &&
+                entry.level == level &&
+                entry.slice == slice) {
+                // Same coverage cleared again before consumption —
+                // last clear wins.
+                if (rgba != nullptr) {
+                    std::memcpy(entry.rgba, rgba, sizeof(entry.rgba));
+                }
+                entry.depth = depth;
+                entry.stencil = stencil;
+                ++fboClearsCoalesced;
+                return;
+            }
+        }
+        if (pendingFboClears.size() >= kMaxPendingFboClears) {
+            PendingFboClear oldest = pendingFboClears.front();
+            pendingFboClears.erase(pendingFboClears.begin());
+            materializePendingFboClearEntry(oldest);
+        }
+        PendingFboClear entry;
+        entry.tex = texVoid;
+        CFRetain((CFTypeRef)texVoid);
+        entry.arrayLength = arrayLength;
+        entry.level = level;
+        entry.slice = slice;
+        entry.isColor = isColor;
+        entry.isDepth = isDepth;
+        entry.isStencil = isStencil;
+        if (rgba != nullptr) {
+            std::memcpy(entry.rgba, rgba, sizeof(entry.rgba));
+        }
+        entry.depth = depth;
+        entry.stencil = stencil;
+        pendingFboClears.push_back(entry);
+        ++fboClearsDeferred;
+    }
+
+    // Execute a deferred clear through the legacy standalone path with
+    // the materialize reason set, then drop the registry retain.
+    void materializePendingFboClearEntry(const PendingFboClear& entry) {
+        ++fboClearsMaterialized;
+        clearLayeredTextureImpl(entry.tex, entry.arrayLength, entry.level,
+                                entry.slice, entry.isColor, entry.isDepth,
+                                entry.isStencil,
+                                entry.isColor ? entry.rgba : nullptr,
+                                entry.depth, entry.stencil,
+                                /*materializing=*/true);
+        CFRelease((CFTypeRef)entry.tex);
+    }
+
+    void materializeAllPendingFboClears() {
+        if (pendingFboClears.empty()) {
+            return;
+        }
+        std::vector<PendingFboClear> entries;
+        entries.swap(pendingFboClears);
+        for (const auto& entry : entries) {
+            materializePendingFboClearEntry(entry);
+        }
+    }
+
+    // Materialize every pending clear on `texVoid` (and on textures it
+    // is a view of, via Metal's parentTexture relationship).
+    void materializePendingFboClearsForTexture(void* texVoid) {
+        if (pendingFboClears.empty() || texVoid == nullptr) {
+            return;
+        }
+        id<MTLTexture> tex = (__bridge id<MTLTexture>)texVoid;
+        void* parent = tex.parentTexture != nil
+            ? (__bridge void*)tex.parentTexture : nullptr;
+        std::vector<PendingFboClear> matched;
+        for (std::size_t i = 0; i < pendingFboClears.size();) {
+            if (pendingFboClears[i].tex == texVoid ||
+                (parent != nullptr && pendingFboClears[i].tex == parent)) {
+                matched.push_back(pendingFboClears[i]);
+                pendingFboClears.erase(pendingFboClears.begin() +
+                                       static_cast<std::ptrdiff_t>(i));
+            } else {
+                ++i;
+            }
+        }
+        for (const auto& entry : matched) {
+            materializePendingFboClearEntry(entry);
+        }
+    }
+
+    // A draw that SAMPLES a texture with a pending deferred clear must
+    // see the cleared contents — materialize before encoding. Matches
+    // the bound texture directly and through Metal's parentTexture
+    // (texture views). This guards the consume-before-draw case even
+    // when the C47 sampler GPU-order skip bypasses the producer drain.
+    void materializePendingFboClearsForSampledTextures(
+        const TranslatedDrawInfo& info) {
+        if (pendingFboClears.empty()) {
+            return;
+        }
+        auto scan = [&](const std::vector<TranslatedDrawInfo::TextureBinding>&
+                            bindings) {
+            for (const auto& binding : bindings) {
+                if (binding.metalTexture == nullptr) continue;
+                materializePendingFboClearsForTexture(binding.metalTexture);
+                if (pendingFboClears.empty()) return;
+            }
+        };
+        scan(info.fragmentTextures);
+        if (!pendingFboClears.empty()) {
+            scan(info.vertexTextures);
+        }
+    }
+
+    // Fold lookup at translated-draw pass-build time. Returns true and
+    // removes the entry when a pending clear exactly matches the pass's
+    // attachment coverage (texture + aspect + level + slice +
+    // layered-extent). Exact match is required: folding into a pass
+    // with different coverage would clear slices/levels the deferred
+    // glClear never targeted, or miss ones it did.
+    bool consumePendingFboClearForAttachment(void* texVoid, bool isColor,
+                                             bool isDepth, bool isStencil,
+                                             std::uint32_t level,
+                                             std::uint32_t slice,
+                                             std::uint32_t passArrayLength,
+                                             PendingFboClear& out) {
+        if (pendingFboClears.empty() || texVoid == nullptr) {
+            return false;
+        }
+        if (std::getenv("APPGL_TRACE_FBO_CLEAR_FOLDING") != nullptr) {
+            std::fprintf(stderr,
+                "[C48] consume? tex=%p aspect=%d%d%d level=%u slice=%u rtal=%u entries=%zu\n",
+                texVoid, (int)isColor, (int)isDepth, (int)isStencil,
+                level, slice, passArrayLength, pendingFboClears.size());
+            for (const auto& e : pendingFboClears) {
+                std::fprintf(stderr,
+                    "[C48]   entry tex=%p aspect=%d%d%d level=%u slice=%u arrayLen=%u\n",
+                    e.tex, (int)e.isColor, (int)e.isDepth, (int)e.isStencil,
+                    e.level, e.slice, e.arrayLength);
+            }
+        }
+        for (std::size_t i = 0; i < pendingFboClears.size(); ++i) {
+            PendingFboClear& entry = pendingFboClears[i];
+            if (entry.tex != texVoid) continue;
+            if (entry.isColor != isColor || entry.isDepth != isDepth ||
+                entry.isStencil != isStencil) {
+                continue;
+            }
+            if (entry.level != level || entry.slice != slice) continue;
+            if (entry.arrayLength != passArrayLength) continue;
+            out = entry;
+            pendingFboClears.erase(pendingFboClears.begin() +
+                                   static_cast<std::ptrdiff_t>(i));
+            ++fboClearsFolded;
+            CFRelease((CFTypeRef)out.tex);
+            return true;
+        }
+        return false;
+    }
+
+    // Materialize any remaining pending clears that live on the
+    // textures a pass is about to target with non-matching coverage
+    // (e.g. a layered entry when the pass renders a single slice).
+    // Must run before the pass's command buffer is ensured so the
+    // legacy drain ordering inside the materialize path stays valid.
+    void materializeNonFoldablePendingClearsForPassTargets(
+        void* colorTex, void* depthStencilTex,
+        const std::array<void*, 8>* additionalColor) {
+        if (pendingFboClears.empty()) {
+            return;
+        }
+        auto touchesPass = [&](void* entryTex) -> bool {
+            if (entryTex == colorTex || entryTex == depthStencilTex) {
+                return true;
+            }
+            if (additionalColor != nullptr) {
+                for (void* extra : *additionalColor) {
+                    if (extra != nullptr && entryTex == extra) return true;
+                }
+            }
+            return false;
+        };
+        std::vector<PendingFboClear> matched;
+        for (std::size_t i = 0; i < pendingFboClears.size();) {
+            if (touchesPass(pendingFboClears[i].tex)) {
+                matched.push_back(pendingFboClears[i]);
+                pendingFboClears.erase(pendingFboClears.begin() +
+                                       static_cast<std::ptrdiff_t>(i));
+            } else {
+                ++i;
+            }
+        }
+        for (const auto& entry : matched) {
+            materializePendingFboClearEntry(entry);
+        }
+    }
+
+    void releasePendingFboClearsForTeardown() {
+        for (const auto& entry : pendingFboClears) {
+            CFRelease((CFTypeRef)entry.tex);
+        }
+        pendingFboClears.clear();
+    }
+
     // Clear a (possibly layered) MTLTexture via an empty render pass
     // with MTLLoadActionClear. `arrayLength` > 0 enables layered mode
     // and clears all slices in a single pass (Metal's native path).
@@ -12592,9 +12972,36 @@ fragment float4 appgl_immediate_textured_fs(
     bool clearLayeredTextureImpl(void* texVoid, std::uint32_t arrayLength,
                                  std::uint32_t level, std::uint32_t slice,
                                  bool isColor, bool isDepth, bool isStencil,
-                                 const float rgba[4], float depth, std::uint32_t stencil) {
+                                 const float rgba[4], float depth, std::uint32_t stencil,
+                                 bool materializing = false) {
         if (texVoid == nullptr || device == nil || commandQueue == nil) return false;
+        // C48: defer the clear into the pending-fold registry instead of
+        // issuing drain + standalone clear CBs. MS attachments keep the
+        // eager path (their clears are the only legal way to seed every
+        // sample and upstream routing depends on immediate execution).
+        if (!materializing && fboClearFoldingEnabled()) {
+            id<MTLTexture> texEarly = (__bridge id<MTLTexture>)texVoid;
+            if (texEarly.sampleCount <= 1) {
+                deferFboClear(texVoid, arrayLength, level, slice,
+                              isColor, isDepth, isStencil, rgba, depth, stencil);
+                return true;
+            }
+        }
         const bool useAsyncLayeredClear = layeredClearAsyncEnabled();
+        const AppGLCommandReason drainReason = materializing
+            ? (useAsyncLayeredClear
+                   ? AppGLCommandReason::FboClearMaterializeDrainCurrentAsync
+                   : AppGLCommandReason::FboClearMaterializeDrainCurrent)
+            : (useAsyncLayeredClear
+                   ? AppGLCommandReason::LayeredClearDrainCurrentAsync
+                   : AppGLCommandReason::LayeredClearDrainCurrent);
+        const AppGLCommandReason clearReason = materializing
+            ? (useAsyncLayeredClear
+                   ? AppGLCommandReason::FboClearMaterializeAsync
+                   : AppGLCommandReason::FboClearMaterialize)
+            : (useAsyncLayeredClear
+                   ? AppGLCommandReason::LayeredClearAsync
+                   : AppGLCommandReason::LayeredClear);
         flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason::Clear);
         id<MTLTexture> tex = (__bridge id<MTLTexture>)texVoid;
         // Close any in-flight encoder. Metal disallows two render
@@ -12614,11 +13021,11 @@ fragment float4 appgl_immediate_textured_fs(
                 if (ringSlotAcquired) {
                     commitWithFrameSignal(
                         currentCommandBufferLease,
-                        AppGLCommandReason::LayeredClearDrainCurrentAsync);
+                        drainReason);
                     advanceRingBuffer();
                 } else {
                     currentCommandBufferLease.commit(
-                        AppGLCommandReason::LayeredClearDrainCurrentAsync);
+                        drainReason);
                 }
                 currentCommandBuffer = nil;
                 clearCurrentDrawable();
@@ -12627,7 +13034,7 @@ fragment float4 appgl_immediate_textured_fs(
                 return true;
             }
             const bool completed =
-                currentCommandBufferLease.commitAndWait(AppGLCommandReason::LayeredClearDrainCurrent);
+                currentCommandBufferLease.commitAndWait(drainReason);
             if (ringSlotAcquired) {
                 signalRingSlotNow();
                 advanceRingBuffer();
@@ -12651,10 +13058,7 @@ fragment float4 appgl_immediate_textured_fs(
             if (clearCommandBuffer != nil) {
                 return true;
             }
-            clearLease = makeCommandBufferDrainingAutorelease(
-                useAsyncLayeredClear
-                    ? AppGLCommandReason::LayeredClearAsync
-                    : AppGLCommandReason::LayeredClear);
+            clearLease = makeCommandBufferDrainingAutorelease(clearReason);
             clearCommandBuffer = clearLease.get();
             if (clearCommandBuffer == nil) {
                 return false;
@@ -12669,14 +13073,14 @@ fragment float4 appgl_immediate_textured_fs(
             }
             if (useAsyncLayeredClear) {
                 clearLease.retainObjectUntilCompleted(tex);
-                clearLease.commit(AppGLCommandReason::LayeredClearAsync);
+                clearLease.commit(clearReason);
                 clearCommandBuffer = nil;
                 clearLease = MetalCommandBufferLease{};
                 passesInCommandBuffer = 0;
                 resetCachedEncoderState();
                 return true;
             }
-            const bool completed = clearLease.commitAndWait(AppGLCommandReason::LayeredClear);
+            const bool completed = clearLease.commitAndWait(clearReason);
             clearCommandBuffer = nil;
             clearLease = MetalCommandBufferLease{};
             passesInCommandBuffer = 0;
@@ -13050,6 +13454,9 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         if (device == nil || commandQueue == nil) {
             return false;
         }
+        // C48: immediate-mode draws don't fold deferred FBO clears —
+        // materialize them so ordering/consumption stays correct.
+        materializeAllPendingFboClears();
         flushParallelTranslatedDrawBatch(
             ParallelEncodeBoundaryReason::ImmediateModeDraw);
         if (info.vertices == nullptr || info.vertexCount == 0 || info.vertexStride == 0) {
@@ -13375,6 +13782,9 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         FrameAttributionScope attributionScope(
             frameAttributionProfile,
             FrameAttributionAction::Finish);
+        // C48: glFinish promises every prior GL command completed —
+        // deferred FBO clears must land first.
+        materializeAllPendingFboClears();
         flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason::Finish);
         if (hasPendingClear) {
             flushPendingClear();
@@ -13402,6 +13812,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         if (device == nil || commandQueue == nil) {
             return copyHeadlessPixels(x, y, width, height, outPixels);
         }
+        // C48: deferred FBO clears must land before any readback.
+        materializeAllPendingFboClears();
         flushParallelTranslatedDrawBatch(
             ParallelEncodeBoundaryReason::CopyReadback);
         // Flush any deferred clear before readback.
@@ -13547,6 +13959,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         FrameAttributionScope attributionScope(
             frameAttributionProfile,
             FrameAttributionAction::FlushForReadback);
+        // C48: a readback consumer must observe deferred FBO clears.
+        materializeAllPendingFboClears();
         flushParallelTranslatedDrawBatch(
             ParallelEncodeBoundaryReason::CopyReadback);
         endRenderPass();
@@ -14067,6 +14481,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
     //       setTessellationFactorBuffer, and drawPatches.
     //   (6) End the render pass and commit.
     bool encodeMetalTessellationDraw(MetalTessDrawInfo& info) {
+        // C48: tess draws don't fold deferred FBO clears — materialize.
+        materializeAllPendingFboClears();
         info.didRender = false;
         if (!info.submissionGroup.declared) {
             info.submissionGroup.reset(AppGLSubmissionGroupKind::TessDraw,
@@ -16013,6 +16429,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
     //   (3b) Mesh-render PSO build (or cache hit).
     //   (3c) Render pass: bind vsOutBuf @ 22, drawMeshThreadgroups.
     bool encodeMetalMeshGSDraw(MetalFrameGraph::MetalMeshGSDrawInfo& info) {
+        // C48: mesh-GS draws don't fold deferred FBO clears — materialize.
+        materializeAllPendingFboClears();
         if (!info.submissionGroup.declared) {
             info.submissionGroup.reset(AppGLSubmissionGroupKind::MeshGsDraw,
                                        AppGLCommandReason::MeshDraw);
@@ -17025,6 +17443,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         inventory.drawableAcquireFailures = drawableAcquireFailures;
         inventory.drawablePresentCalls = drawablePresentCalls;
         inventory.presentCalls = presentCalls;
+        inventory.fboClearsDeferred = fboClearsDeferred;
+        inventory.fboClearsFolded = fboClearsFolded;
+        inventory.fboClearsMaterialized = fboClearsMaterialized;
+        inventory.fboClearsCoalesced = fboClearsCoalesced;
         inventory.presentFromFlushCalls = presentFromFlushCalls;
         inventory.presentFromSwapBuffersCalls = presentFromSwapBuffersCalls;
         inventory.presentInternalCalls = presentInternalCalls;
@@ -18961,6 +19383,14 @@ bool MetalFrameGraph::clearTextureDepth(void* tex, std::uint32_t level, std::uin
 bool MetalFrameGraph::clearTextureStencil(void* tex, std::uint32_t level, std::uint32_t slice,
                                           std::uint32_t arrayLength, std::uint32_t stencil) {
     return impl_->clearTextureStencil(tex, level, slice, arrayLength, stencil);
+}
+
+void MetalFrameGraph::materializePendingFboClearsForTexture(void* tex) {
+    impl_->materializePendingFboClearsForTexture(tex);
+}
+
+void MetalFrameGraph::materializeAllPendingFboClears() {
+    impl_->materializeAllPendingFboClears();
 }
 
 bool MetalFrameGraph::writeMultisampleDepthStencilRegion(

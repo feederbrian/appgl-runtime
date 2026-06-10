@@ -434,6 +434,12 @@ bool GLContext::copyTexImage2D(
             pushError(GL_INVALID_OPERATION);
             return false;
         }
+        // C48: the blit writes into dstTexture — land any deferred FBO
+        // clear on it first so the clear cannot overwrite the copy.
+        if (impl_->frameGraph != nullptr) {
+            impl_->frameGraph->materializePendingFboClearsForTexture(
+                dstObject->metalTexture);
+        }
         auto lease = impl_->makeCommandBuffer(AppGLCommandReason::CopyImageBlit);
         id<MTLCommandBuffer> cmd = lease.get();
         if (cmd == nil) {

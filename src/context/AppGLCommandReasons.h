@@ -80,6 +80,10 @@ enum class AppGLCommandReason : std::uint8_t {
     CpuVisibleBarrier,
     Fp64Sidecar,
     PressureFlush,
+    FboClearMaterializeDrainCurrent,
+    FboClearMaterialize,
+    FboClearMaterializeDrainCurrentAsync,
+    FboClearMaterializeAsync,
     Count,
 };
 
@@ -182,6 +186,14 @@ inline constexpr std::array<AppGLCommandReasonRecord,
          "Fp64Sidecar", "fp64-sidecar"},
         {AppGLCommandReason::PressureFlush, AppGLSubmitMode::AsyncCommit, AppGLDependencyClass::GpuOnlyOrdering,
          "PressureFlush", "pressure-flush"},
+        {AppGLCommandReason::FboClearMaterializeDrainCurrent, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::GpuOnlyOrdering,
+         "FboClearMaterializeDrainCurrent", "fbo-clear-materialize-drain-current"},
+        {AppGLCommandReason::FboClearMaterialize, AppGLSubmitMode::CommitAndWait, AppGLDependencyClass::GpuOnlyOrdering,
+         "FboClearMaterialize", "fbo-clear-materialize-sync"},
+        {AppGLCommandReason::FboClearMaterializeDrainCurrentAsync, AppGLSubmitMode::AsyncCommit, AppGLDependencyClass::GpuOnlyOrdering,
+         "FboClearMaterializeDrainCurrentAsync", "fbo-clear-materialize-drain-current-async"},
+        {AppGLCommandReason::FboClearMaterializeAsync, AppGLSubmitMode::AsyncCommit, AppGLDependencyClass::GpuOnlyOrdering,
+         "FboClearMaterializeAsync", "fbo-clear-materialize-async"},
     }};
 
 inline const AppGLCommandReasonRecord& appGLCommandReasonRecord(AppGLCommandReason reason) {

@@ -14186,6 +14186,286 @@ TestResult runScene(Scene& scene) {
     return result;
 }
 
+// C48 — FBO-attachment clear folding engagement probes. Per the C46-era
+// non-vacuity lesson these prove the mechanism ENGAGED (deferred/folded/
+// materialized counters move and the standalone LayeredClear CB census
+// stays flat), not just that nothing broke. Each probe pins the flag
+// state with ScopedEnvVar so the phase is deterministic in both gate
+// configurations.
+std::uint64_t c48ReasonSubmitted(const AppGLCommandSubmissionDebugCounters& counters,
+                                 AppGLCommandReason reason) {
+    return counters.submittedByReason[static_cast<std::size_t>(reason)];
+}
+
+TestResult runC48FoldEngagementDepthArrayProbe() {
+    auto result = runDirectSentinel("c48.fbo-clear-folding.fold-depth-array", [&] {
+        ScopedEnvVar folding("APPGL_ENABLE_FBO_CLEAR_FOLDING", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint texture = 0;
+        GLuint framebuffer = 0;
+        gl.glGenTextures(1, &texture);
+        setupDCR3CDepth32FArrayTexture(gl, texture, 4, 4, 3);
+        primeDCR3CDepth32FTexture(gl, texture, 4, 4, 3);
+        setupDCR3CDepthArrayLayerFbo(gl, framebuffer, texture, 1);
+
+        const auto invBefore = context.metalResourceInventory();
+        const auto countersBefore = context.commandSubmissionDebugCounters();
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        gl.glViewport(0, 0, 4, 4);
+        gl.glClearDepth(0.25);
+        gl.glClear(GL_DEPTH_BUFFER_BIT);
+        expectGLError(gl, GL_NO_ERROR, "c48 fold-depth-array clear");
+
+        const auto invAfterClear = context.metalResourceInventory();
+        expectCondition(
+            invAfterClear.frameGraphFboClearsDeferred ==
+                invBefore.frameGraphFboClearsDeferred + 1,
+            "c48 fold-depth-array clear was deferred");
+
+        seedDepthAttachmentWithDraw(gl, framebuffer, 4, 4, 0.625f);
+        expectGLError(gl, GL_NO_ERROR, "c48 fold-depth-array draw");
+
+        const auto invAfterDraw = context.metalResourceInventory();
+        expectCondition(
+            invAfterDraw.frameGraphFboClearsFolded ==
+                invBefore.frameGraphFboClearsFolded + 1,
+            "c48 fold-depth-array clear folded into the draw pass");
+        expectCondition(
+            invAfterDraw.frameGraphFboClearsMaterialized ==
+                invBefore.frameGraphFboClearsMaterialized,
+            "c48 fold-depth-array no materialize on the fold path");
+
+        GLfloat readback = -1.0f;
+        gl.glReadPixels(0, 0, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &readback);
+        expectGLError(gl, GL_NO_ERROR, "c48 fold-depth-array readback");
+        expectApproxFloat(readback, 0.625f, 0.02f,
+                          "c48 fold-depth-array drawn depth");
+
+        const auto countersAfter = context.commandSubmissionDebugCounters();
+        const auto clearPathSubmits =
+            [&](const AppGLCommandSubmissionDebugCounters& counters) {
+                return c48ReasonSubmitted(
+                           counters, AppGLCommandReason::LayeredClear) +
+                    c48ReasonSubmitted(
+                        counters, AppGLCommandReason::LayeredClearAsync) +
+                    c48ReasonSubmitted(
+                        counters, AppGLCommandReason::LayeredClearDrainCurrent) +
+                    c48ReasonSubmitted(
+                        counters,
+                        AppGLCommandReason::LayeredClearDrainCurrentAsync);
+            };
+        expectCondition(
+            clearPathSubmits(countersAfter) == clearPathSubmits(countersBefore),
+            "c48 fold-depth-array no standalone LayeredClear-path CB submitted");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "c48 fold-depth-array cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "deferred depth-array clear folded into the next draw pass with no standalone clear CBs";
+    }
+    return result;
+}
+
+TestResult runC48MaterializeOnReadbackProbe() {
+    auto result = runDirectSentinel("c48.fbo-clear-folding.materialize-readback", [&] {
+        ScopedEnvVar folding("APPGL_ENABLE_FBO_CLEAR_FOLDING", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint texture = 0;
+        GLuint framebuffer = 0;
+        gl.glGenTextures(1, &texture);
+        setupDCR3CDepth32FTexture(gl, texture, 4, 4);
+        primeDCR3CDepth32FTexture(gl, texture, 4, 4);
+        setupDCR3CDepthTextureFbo(gl, framebuffer, texture);
+
+        const auto invBefore = context.metalResourceInventory();
+        const auto countersBefore = context.commandSubmissionDebugCounters();
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        gl.glViewport(0, 0, 4, 4);
+        gl.glClearDepth(0.25);
+        gl.glClear(GL_DEPTH_BUFFER_BIT);
+        expectGLError(gl, GL_NO_ERROR, "c48 materialize-readback clear");
+
+        GLfloat readback = -1.0f;
+        gl.glReadPixels(0, 0, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &readback);
+        expectGLError(gl, GL_NO_ERROR, "c48 materialize-readback readPixels");
+        expectApproxFloat(readback, 0.25f, 0.02f,
+                          "c48 materialize-readback cleared depth value");
+
+        const auto invAfter = context.metalResourceInventory();
+        expectCondition(
+            invAfter.frameGraphFboClearsDeferred ==
+                invBefore.frameGraphFboClearsDeferred + 1,
+            "c48 materialize-readback clear was deferred");
+        expectCondition(
+            invAfter.frameGraphFboClearsMaterialized ==
+                invBefore.frameGraphFboClearsMaterialized + 1,
+            "c48 materialize-readback clear materialized for the readback");
+        expectCondition(
+            invAfter.frameGraphFboClearsFolded ==
+                invBefore.frameGraphFboClearsFolded,
+            "c48 materialize-readback no fold on the readback path");
+
+        const auto countersAfter = context.commandSubmissionDebugCounters();
+        const auto materializeSubmits =
+            [&](const AppGLCommandSubmissionDebugCounters& counters) {
+                return c48ReasonSubmitted(
+                           counters, AppGLCommandReason::FboClearMaterialize) +
+                    c48ReasonSubmitted(
+                        counters, AppGLCommandReason::FboClearMaterializeAsync);
+            };
+        expectCondition(
+            materializeSubmits(countersAfter) >=
+                materializeSubmits(countersBefore) + 1,
+            "c48 materialize-readback used the FboClearMaterialize reason");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "c48 materialize-readback cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "consume-before-draw readback materialized the deferred clear under the distinct census reason";
+    }
+    return result;
+}
+
+TestResult runC48CoalesceProbe() {
+    auto result = runDirectSentinel("c48.fbo-clear-folding.coalesce", [&] {
+        ScopedEnvVar folding("APPGL_ENABLE_FBO_CLEAR_FOLDING", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint texture = 0;
+        GLuint framebuffer = 0;
+        gl.glGenTextures(1, &texture);
+        setupDCR3CDepth32FTexture(gl, texture, 4, 4);
+        primeDCR3CDepth32FTexture(gl, texture, 4, 4);
+        setupDCR3CDepthTextureFbo(gl, framebuffer, texture);
+
+        const auto invBefore = context.metalResourceInventory();
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        gl.glViewport(0, 0, 4, 4);
+        gl.glClearDepth(0.25);
+        gl.glClear(GL_DEPTH_BUFFER_BIT);
+        gl.glClearDepth(0.5);
+        gl.glClear(GL_DEPTH_BUFFER_BIT);
+        expectGLError(gl, GL_NO_ERROR, "c48 coalesce clears");
+
+        GLfloat readback = -1.0f;
+        gl.glReadPixels(0, 0, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &readback);
+        expectGLError(gl, GL_NO_ERROR, "c48 coalesce readPixels");
+        expectApproxFloat(readback, 0.5f, 0.02f,
+                          "c48 coalesce last clear wins");
+
+        const auto invAfter = context.metalResourceInventory();
+        expectCondition(
+            invAfter.frameGraphFboClearsDeferred ==
+                invBefore.frameGraphFboClearsDeferred + 1,
+            "c48 coalesce one registry entry for same coverage");
+        expectCondition(
+            invAfter.frameGraphFboClearsCoalesced ==
+                invBefore.frameGraphFboClearsCoalesced + 1,
+            "c48 coalesce second clear coalesced");
+        expectCondition(
+            invAfter.frameGraphFboClearsMaterialized ==
+                invBefore.frameGraphFboClearsMaterialized + 1,
+            "c48 coalesce single materialize for the readback");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "c48 coalesce cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "same-coverage repeat clear coalesced last-wins into one deferred entry";
+    }
+    return result;
+}
+
+TestResult runC48DefaultOffZeroEngagementProbe() {
+    auto result = runDirectSentinel("c48.fbo-clear-folding.default-off-eager", [&] {
+        ScopedEnvVar folding("APPGL_ENABLE_FBO_CLEAR_FOLDING", "0");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        GLuint texture = 0;
+        GLuint framebuffer = 0;
+        gl.glGenTextures(1, &texture);
+        setupDCR3CDepth32FTexture(gl, texture, 4, 4);
+        primeDCR3CDepth32FTexture(gl, texture, 4, 4);
+        setupDCR3CDepthTextureFbo(gl, framebuffer, texture);
+
+        const auto invBefore = context.metalResourceInventory();
+        const auto countersBefore = context.commandSubmissionDebugCounters();
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        gl.glViewport(0, 0, 4, 4);
+        gl.glClearDepth(0.25);
+        gl.glClear(GL_DEPTH_BUFFER_BIT);
+        expectGLError(gl, GL_NO_ERROR, "c48 default-off clear");
+
+        GLfloat readback = -1.0f;
+        gl.glReadPixels(0, 0, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &readback);
+        expectGLError(gl, GL_NO_ERROR, "c48 default-off readPixels");
+        expectApproxFloat(readback, 0.25f, 0.02f,
+                          "c48 default-off cleared depth value");
+
+        const auto invAfter = context.metalResourceInventory();
+        expectCondition(
+            invAfter.frameGraphFboClearsDeferred ==
+                    invBefore.frameGraphFboClearsDeferred &&
+                invAfter.frameGraphFboClearsFolded ==
+                    invBefore.frameGraphFboClearsFolded &&
+                invAfter.frameGraphFboClearsMaterialized ==
+                    invBefore.frameGraphFboClearsMaterialized,
+            "c48 default-off registry never engages");
+
+        const auto countersAfter = context.commandSubmissionDebugCounters();
+        const auto layeredClearSubmits =
+            [&](const AppGLCommandSubmissionDebugCounters& counters) {
+                return c48ReasonSubmitted(
+                           counters, AppGLCommandReason::LayeredClear) +
+                    c48ReasonSubmitted(
+                        counters, AppGLCommandReason::LayeredClearAsync);
+            };
+        expectCondition(
+            layeredClearSubmits(countersAfter) >=
+                layeredClearSubmits(countersBefore) + 1,
+            "c48 default-off keeps the eager LayeredClear CB path");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &framebuffer);
+        gl.glDeleteTextures(1, &texture);
+        expectGLError(gl, GL_NO_ERROR, "c48 default-off cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "flag-off path stayed on the eager C46-lineage standalone clear CBs with zero registry traffic";
+    }
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -14299,6 +14579,14 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runTextureMipShadowEvictionR8RedundantProbe());
         tests.push_back(runTextureMipShadowEvictionCopyImageProbe());
         tests.push_back(runTextureMipShadowEvictionPartialTexSubImageProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "c48-fbo-clear-folding-probes") {
+        tests.push_back(runC48FoldEngagementDepthArrayProbe());
+        tests.push_back(runC48MaterializeOnReadbackProbe());
+        tests.push_back(runC48CoalesceProbe());
+        tests.push_back(runC48DefaultOffZeroEngagementProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

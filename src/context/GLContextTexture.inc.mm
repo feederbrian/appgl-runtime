@@ -573,6 +573,12 @@ bool GLContext::blitReadFBOToTextureSubImage(
     id<MTLDevice> mtlDevice = impl_->device;
     id<MTLCommandQueue> mtlQueue = impl_->commandQueue;
     if (mtlDevice == nil || mtlQueue == nil) return false;
+    // C48: the blit writes into dstTex — land any deferred FBO clear on
+    // it first so the clear cannot overwrite the copy.
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->materializePendingFboClearsForTexture(
+            dstObj->metalTexture);
+    }
     auto lease = impl_->makeCommandBuffer(AppGLCommandReason::CopyTextureSubImage);
     id<MTLCommandBuffer> cmd = lease.get();
     if (cmd == nil) return false;

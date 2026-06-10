@@ -823,6 +823,10 @@ public:
         std::uint64_t frameGraphDrawableAcquireFailures = 0;
         std::uint64_t frameGraphDrawablePresentCalls = 0;
         std::uint64_t frameGraphPresentCalls = 0;
+        std::uint64_t frameGraphFboClearsDeferred = 0;
+        std::uint64_t frameGraphFboClearsFolded = 0;
+        std::uint64_t frameGraphFboClearsMaterialized = 0;
+        std::uint64_t frameGraphFboClearsCoalesced = 0;
         std::uint64_t frameGraphPresentFromFlushCalls = 0;
         std::uint64_t frameGraphPresentFromSwapBuffersCalls = 0;
         std::uint64_t frameGraphPresentInternalCalls = 0;

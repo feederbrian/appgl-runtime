@@ -7855,6 +7855,29 @@ struct GLContext::Impl {
     void drainSamplerGpuProducers(const GpuResourceReadSet& reads) const {
         recordSamplerProducerDrainReadSet(reads);
         if (samplerReadSetCanUseGpuOrderSkip(reads)) {
+            // C48: the GPU-order skip bypasses flushForReadback (where
+            // deferred FBO clears normally materialize). A sampled
+            // texture with a pending deferred clear must still see the
+            // cleared contents — materialize just those entries. Cost
+            // is bounded to skip-eligible reads with producer-pending
+            // bits; the frame-graph call no-ops on an empty registry.
+            if (frameGraph != nullptr) {
+                for (const auto& read : reads) {
+                    if (read.kind != GpuResourceAccess::Kind::Texture ||
+                        read.name == 0) {
+                        continue;
+                    }
+                    forEachGpuResourceReadName(read, [&](GLuint name) {
+                        if (name == 0) return true;
+                        GLTextureObject* tex = objects->textures().get(name);
+                        if (tex != nullptr && tex->metalTexture != nullptr) {
+                            frameGraph->materializePendingFboClearsForTexture(
+                                tex->metalTexture);
+                        }
+                        return true;
+                    });
+                }
+            }
             return;
         }
         drainPendingGpuProducers(reads);
@@ -10860,6 +10883,13 @@ struct GLContext::Impl {
     // uploaded data, not the initial upload from Recoil we want to
     // fingerprint.
     bool replaceMetalTexture(GLTextureObject& object, GLuint texName = 0) {
+        // C48: an upload into the existing Metal texture must not be
+        // overwritten by a later-materialized deferred FBO clear —
+        // land the clear first (correct for both the shape-match
+        // replaceRegion/blit fast path and the full replace).
+        if (frameGraph != nullptr && object.metalTexture != nullptr) {
+            frameGraph->materializePendingFboClearsForTexture(object.metalTexture);
+        }
         object.r5PrimaryTextureEvicted = false;
         releaseTextureBufferExpansion(object);
         const auto baseIt = object.levels.find(0);
@@ -22076,6 +22106,12 @@ struct GLContext::Impl {
         if (filter != GL_NEAREST && filter != GL_LINEAR) {
             return false;
         }
+        // C48: blit sources must observe deferred FBO clears and blit
+        // destinations must not be overwritten by a later-materialized
+        // one — land them all before any blit sub-path encodes.
+        if (frameGraph != nullptr) {
+            frameGraph->materializeAllPendingFboClears();
+        }
         const GLbitfield kSupportedMask = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
         if ((mask & ~kSupportedMask) != 0 || mask == 0) {
             return false;
@@ -22527,6 +22563,13 @@ struct GLContext::Impl {
             drainFramebufferAttachmentProducer(srcAttachment,
                                                kProducerFboDepthStencilWrite |
                                                kProducerCopyWrite);
+            // C48: the blit writes into dstView.texture — land any
+            // deferred FBO clear on it first so the clear cannot
+            // overwrite the copy.
+            if (frameGraph != nullptr && dstView.texture != nil) {
+                frameGraph->materializePendingFboClearsForTexture(
+                    (__bridge void*)dstView.texture);
+            }
             auto lease = makeCommandBuffer(AppGLCommandReason::CopyImageBlit);
             id<MTLCommandBuffer> cmd = lease.get();
             if (cmd == nil) {
@@ -26510,6 +26553,14 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             frameGraphMetal.drawablePresentCalls;
         inventory.frameGraphPresentCalls =
             frameGraphMetal.presentCalls;
+        inventory.frameGraphFboClearsDeferred =
+            frameGraphMetal.fboClearsDeferred;
+        inventory.frameGraphFboClearsFolded =
+            frameGraphMetal.fboClearsFolded;
+        inventory.frameGraphFboClearsMaterialized =
+            frameGraphMetal.fboClearsMaterialized;
+        inventory.frameGraphFboClearsCoalesced =
+            frameGraphMetal.fboClearsCoalesced;
         inventory.frameGraphPresentFromFlushCalls =
             frameGraphMetal.presentFromFlushCalls;
         inventory.frameGraphPresentFromSwapBuffersCalls =
