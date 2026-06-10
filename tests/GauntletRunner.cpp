@@ -16194,6 +16194,7 @@ std::uint64_t lazyShadowCounter(GLContext& context, int which) {
 TestResult runLazyShadowFb0ReadbackProbe() {
     auto result = runDirectSentinel("lazy-shadow.fb0-readback-matrix", [&] {
         ScopedEnvVar lazy("APPGL_ENABLE_LAZY_SHADOW_CLEARS", "1");
+        ScopedEnvVar lazyHatch("APPGL_DISABLE_LAZY_SHADOW_CLEARS", "0");
         ScopedSentinelContext scoped(16, 16);
         auto& context = scoped.context();
         auto& gl = scoped.gl();
@@ -16245,6 +16246,7 @@ TestResult runLazyShadowFb0ReadbackProbe() {
 TestResult runLazyShadowBlendSeedProbe() {
     auto result = runDirectSentinel("lazy-shadow.fb0-coalesce", [&] {
         ScopedEnvVar lazy("APPGL_ENABLE_LAZY_SHADOW_CLEARS", "1");
+        ScopedEnvVar lazyHatch("APPGL_DISABLE_LAZY_SHADOW_CLEARS", "0");
         ScopedSentinelContext scoped(16, 16);
         auto& context = scoped.context();
         auto& gl = scoped.gl();
@@ -16277,6 +16279,7 @@ TestResult runLazyShadowBlendSeedProbe() {
 TestResult runLazyShadowInterleavedGpuProbe() {
     auto result = runDirectSentinel("lazy-shadow.fb0-interleaved-gpu", [&] {
         ScopedEnvVar lazy("APPGL_ENABLE_LAZY_SHADOW_CLEARS", "1");
+        ScopedEnvVar lazyHatch("APPGL_DISABLE_LAZY_SHADOW_CLEARS", "0");
         ScopedSentinelContext scoped(16, 16);
         auto& gl = scoped.gl();
         gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -16316,6 +16319,7 @@ TestResult runLazyShadowInterleavedGpuProbe() {
 TestResult runLazyShadowTextureAxisProbe() {
     auto result = runDirectSentinel("lazy-shadow.texture-axis-fold", [&] {
         ScopedEnvVar lazy("APPGL_ENABLE_LAZY_SHADOW_CLEARS", "1");
+        ScopedEnvVar lazyHatch("APPGL_DISABLE_LAZY_SHADOW_CLEARS", "0");
         ScopedEnvVar fold("APPGL_ENABLE_FBO_CLEAR_FOLDING", "1");
         ScopedEnvVar foldHatch("APPGL_DISABLE_FBO_CLEAR_FOLDING", "0");
         ScopedSentinelContext scoped(16, 16);

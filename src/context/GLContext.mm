@@ -24943,10 +24943,15 @@ struct GLContext::Impl {
     }
 
     static bool lazyShadowClearsEnabled() {
-        // Per-call read (probes toggle it per arm; cost is trivial next
-        // to the fill it replaces).
+        // C50 CROWNED 2026-06-10 (+79% live: 42→75fps): default-ON.
+        // Per-call reads so probes can toggle per arm; cost is trivial
+        // next to the fill it replaces.
+        const char* dis = std::getenv("APPGL_DISABLE_LAZY_SHADOW_CLEARS");
+        if (dis != nullptr && dis[0] != '\0' && dis[0] != '0') {
+            return false;
+        }
         const char* raw = std::getenv("APPGL_ENABLE_LAZY_SHADOW_CLEARS");
-        return raw != nullptr && raw[0] != '\0' && raw[0] != '0';
+        return raw == nullptr || raw[0] == '\0' || raw[0] != '0';
     }
 
     void materializeDefaultFbShadowClear() {
