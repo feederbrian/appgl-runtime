@@ -4387,6 +4387,9 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
     const double averageBuildMillis = pipelineCacheMisses > 0
         ? pipelineCumulativeBuildMillis / static_cast<double>(pipelineCacheMisses)
         : 0.0;
+    stream << "\"glCallCensus\":";
+    coverageStore_.appendCallCensusJson(stream, 48);
+    stream << ",";
     stream << "\"pipelineCache\":{"
            << "\"entries\":" << pipelineEntries << ","
            << "\"hits\":" << pipelineCacheHits << ","
@@ -4623,6 +4626,9 @@ std::size_t Runtime::writeLiveDiagnosticsJSON(char* out, std::size_t cap) {
     const double averageBuildMillis = pipelineCacheMisses > 0
         ? pipelineCumulativeBuildMillis / static_cast<double>(pipelineCacheMisses)
         : 0.0;
+    stream << "\"glCallCensus\":";
+    coverageStore_.appendCallCensusJson(stream, 48);
+    stream << ",";
     stream << "\"pipelineCache\":{"
            << "\"entries\":" << pipelineEntries << ","
            << "\"hits\":" << pipelineCacheHits << ","

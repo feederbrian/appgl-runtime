@@ -5888,6 +5888,38 @@ struct MetalFrameGraph::Impl {
             if (info.pipelineStateCacheMissesOut != nullptr) {
                 ++(*info.pipelineStateCacheMissesOut);
             }
+            // S24 Map-v2 lever-#2 diagnostic: the live census shows a
+            // STEADY-STATE build trickle (~0.23/frame), not warmup. Each
+            // line carries the full key-component set so a steady-state
+            // capture shows WHICH component churns (blend tuple? attr
+            // layout? sample count?) — attribution only, no behavior.
+            if (std::getenv("APPGL_TRACE_PSO_BUILDS")) {
+                const auto& ca0 = desc.colorAttachments[0];
+                std::fprintf(stderr,
+                    "[APPGL_PSO_BUILD] miss=%llu key=0x%llx program=%u "
+                    "color=0x%lX ds=0x%lX/0x%lX samples=%lu rtal=%lu "
+                    "blend=%d rgbOp=%lu aOp=%lu src=%lu/%lu dst=%lu/%lu "
+                    "writeMask=0x%lX attrs=%zu buildMs=%.2f\n",
+                    static_cast<unsigned long long>(pipelineCacheMisses),
+                    static_cast<unsigned long long>(pipelineCacheKey),
+                    static_cast<unsigned>(info.program),
+                    static_cast<unsigned long>(ca0.pixelFormat),
+                    static_cast<unsigned long>(desc.depthAttachmentPixelFormat),
+                    static_cast<unsigned long>(desc.stencilAttachmentPixelFormat),
+                    static_cast<unsigned long>(desc.rasterSampleCount),
+                    static_cast<unsigned long>(desc.maxVertexAmplificationCount),
+                    static_cast<int>(ca0.blendingEnabled),
+                    static_cast<unsigned long>(ca0.rgbBlendOperation),
+                    static_cast<unsigned long>(ca0.alphaBlendOperation),
+                    static_cast<unsigned long>(ca0.sourceRGBBlendFactor),
+                    static_cast<unsigned long>(ca0.sourceAlphaBlendFactor),
+                    static_cast<unsigned long>(ca0.destinationRGBBlendFactor),
+                    static_cast<unsigned long>(ca0.destinationAlphaBlendFactor),
+                    static_cast<unsigned long>(ca0.writeMask),
+                    info.vertexAttributeLayouts.size(),
+                    std::chrono::duration<double, std::milli>(buildEnd - buildStart).count());
+                std::fflush(stderr);
+            }
 
             // Phase 8X Group 4d follow-up¹⁴ — insert into the
             // map-based cache first. The old scalar

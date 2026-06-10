@@ -1,9 +1,13 @@
 #include "CoverageStore.h"
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <filesystem>
 #include <mutex>
 #include <sstream>
+#include <utility>
+#include <vector>
 
 #include "../shared/JsonUtil.h"
 
@@ -198,6 +202,40 @@ std::string CoverageStore::buildSnapshotJson(std::string_view renderer, const st
     stream << "]";
     stream << "}";
     return stream.str();
+}
+
+void CoverageStore::appendCallCensusJson(std::ostream& out,
+                                         std::size_t topN) const {
+    const auto exportStart = std::chrono::steady_clock::now();
+    std::uint64_t total = 0;
+    std::vector<std::pair<std::uint64_t, std::size_t>> nonZero;
+    nonZero.reserve(256);
+    for (std::size_t index = 0; index < kGLFunctionCount; ++index) {
+        const std::uint64_t count =
+            statuses_[index].callCount.load(std::memory_order_relaxed);
+        if (count > 0) {
+            total += count;
+            nonZero.emplace_back(count, index);
+        }
+    }
+    const std::size_t keep = std::min(topN, nonZero.size());
+    std::partial_sort(
+        nonZero.begin(), nonZero.begin() + static_cast<std::ptrdiff_t>(keep),
+        nonZero.end(),
+        [](const auto& a, const auto& b) { return a.first > b.first; });
+    const double exportUs =
+        std::chrono::duration<double, std::micro>(
+            std::chrono::steady_clock::now() - exportStart)
+            .count();
+    out << "{\"totalCalls\":" << total
+        << ",\"distinctFunctions\":" << nonZero.size()
+        << ",\"exportUs\":" << exportUs << ",\"top\":[";
+    for (std::size_t i = 0; i < keep; ++i) {
+        if (i != 0) out << ",";
+        out << "{\"name\":\"" << kGLFunctionMetadata[nonZero[i].second].name
+            << "\",\"count\":" << nonZero[i].first << "}";
+    }
+    out << "]}";
 }
 
 FunctionCoverage CoverageStore::status(FunctionId id) const {

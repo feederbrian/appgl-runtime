@@ -67,6 +67,13 @@ public:
     std::string fullyImplementedVersion() const;
     std::string buildSnapshotJson(std::string_view renderer, const std::vector<std::string>& traceTail) const;
 
+    // S24 Map-v2 instrument: per-entry-point call census for the bridge
+    // diagnostics. The counters pre-exist (recordCall has incremented them
+    // since day one), so the hot path gains nothing; this only exports the
+    // topN by cumulative count via a lock-free scan over the atomics and
+    // self-reports its export cost in the exportUs field.
+    void appendCallCensusJson(std::ostream& out, std::size_t topN) const;
+
     FunctionCoverage status(FunctionId id) const;
 
 private:
