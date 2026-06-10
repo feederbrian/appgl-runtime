@@ -19257,6 +19257,35 @@ struct GLContext::Impl {
             if (isMSColorTexture) {
                 return true;
             }
+            // S24 lever-#1 (texture axis): the Metal side of this clear
+            // used to be a WHOLE-texture replaceMetalTexture push per
+            // clear (16.9% of WZ's main thread in the Map-v2 sample,
+            // dominated by the push). For full-surface all-layer clears
+            // on flat 2D/array targets, route the Metal side through
+            // clearLayeredTextureColor instead — under C48 fold it
+            // defers into the next pass's load action (crowned
+            // machinery); without fold it is a GPU clear pass. The CPU
+            // rgba8/native shadows above stay eagerly correct either
+            // way, so no new CPU-consumer funnel risk.
+            if (lazyShadowClearsEnabled() &&
+                !clearScissorActive &&
+                texture->metalTexture != nullptr &&
+                frameGraph != nullptr &&
+                texture->target != GL_TEXTURE_CUBE_MAP &&
+                texture->target != GL_TEXTURE_CUBE_MAP_ARRAY &&
+                firstLayer == 0 && lastLayer == sourceDepth) {
+                const float rgbaF[4] = {color[0], color[1], color[2], color[3]};
+                const std::uint32_t arrayLength = sourceDepth > 1
+                    ? static_cast<std::uint32_t>(sourceDepth)
+                    : 0u;
+                ++shadowClearsDeferred;
+                if (frameGraph->clearLayeredTextureColor(
+                        texture->metalTexture, arrayLength, rgbaF,
+                        static_cast<std::uint32_t>(std::max<GLint>(attachment.level, 0)),
+                        0u)) {
+                    return true;
+                }
+            }
             return replaceMetalTexture(*texture);
         }
 
@@ -24871,7 +24900,41 @@ struct GLContext::Impl {
         defaultFramebufferShadowValid = false;
     }
 
-    void ensureDefaultFramebufferShadow() {
+    // S24 lever-#1 (lazy shadow clears): full-surface unmasked unscissored
+    // FB0 clears record a pending fill instead of running the per-pixel
+    // loop (40.7% of WZ's main thread in the Map-v2 sample). Every shadow
+    // consumer reaches the bytes through ensureDefaultFramebufferShadow,
+    // which materializes the pending fill first. The Metal side is
+    // untouched (FB0 clears were already loadAction-based).
+    bool defaultFbShadowClearPending = false;
+    std::array<std::uint8_t, 4> defaultFbShadowClearRGBA = {0, 0, 0, 0};
+    std::uint64_t shadowClearsDeferred = 0;
+    std::uint64_t shadowClearsCoalesced = 0;
+    std::uint64_t shadowClearsMaterialized = 0;
+    std::uint64_t shadowClearMaterializeBytes = 0;
+
+    static bool lazyShadowClearsEnabled() {
+        // Per-call read (probes toggle it per arm; cost is trivial next
+        // to the fill it replaces).
+        const char* raw = std::getenv("APPGL_ENABLE_LAZY_SHADOW_CLEARS");
+        return raw != nullptr && raw[0] != '\0' && raw[0] != '0';
+    }
+
+    void materializeDefaultFbShadowClear() {
+        if (!defaultFbShadowClearPending) {
+            return;
+        }
+        defaultFbShadowClearPending = false;
+        std::uint8_t* bytes = defaultFramebufferRGBA8.data();
+        const std::size_t pixelCount = defaultFramebufferRGBA8.size() / 4u;
+        for (std::size_t i = 0; i < pixelCount; ++i) {
+            std::memcpy(bytes + i * 4u, defaultFbShadowClearRGBA.data(), 4u);
+        }
+        ++shadowClearsMaterialized;
+        shadowClearMaterializeBytes += defaultFramebufferRGBA8.size();
+    }
+
+    void ensureDefaultFramebufferShadow(bool materializePendingClear = true) {
         const GLsizei requestedWidth =
             std::max<GLsizei>(defaultDrawableRequestWidth(), 1);
         const GLsizei requestedHeight =
@@ -24909,6 +24972,9 @@ struct GLContext::Impl {
             defaultFramebufferShadowHeight = height;
         }
         defaultFramebufferShadowValid = true;
+        if (materializePendingClear) {
+            materializeDefaultFbShadowClear();
+        }
     }
 
     void ensureDefaultDrawableForViewportExtent() {
@@ -24925,7 +24991,32 @@ struct GLContext::Impl {
     }
 
     void applyDefaultFramebufferColorClear() {
-        ensureDefaultFramebufferShadow();
+        ensureDefaultFramebufferShadow(/*materializePendingClear=*/false);
+        const GLBlendState& blendForMask = state->blendState();
+        const bool fullUnmasked =
+            !state->isEnabled(GL_SCISSOR_TEST) &&
+            blendForMask.colorMask[0] != GL_FALSE &&
+            blendForMask.colorMask[1] != GL_FALSE &&
+            blendForMask.colorMask[2] != GL_FALSE &&
+            blendForMask.colorMask[3] != GL_FALSE;
+        if (lazyShadowClearsEnabled() && fullUnmasked) {
+            if (defaultFbShadowClearPending) {
+                ++shadowClearsCoalesced;  // last full clear wins
+            }
+            defaultFbShadowClearRGBA = {
+                normalizedByte(state->clearState().color[0]),
+                normalizedByte(state->clearState().color[1]),
+                normalizedByte(state->clearState().color[2]),
+                normalizedByte(state->clearState().color[3]),
+            };
+            defaultFbShadowClearPending = true;
+            // The shadow is logically valid: pending fill + bytes.
+            defaultFramebufferShadowValid = true;
+            ++shadowClearsDeferred;
+            return;
+        }
+        // Partial/masked clears apply on top of materialized contents.
+        materializeDefaultFbShadowClear();
         const std::uint8_t rgba[4] = {
             normalizedByte(state->clearState().color[0]),
             normalizedByte(state->clearState().color[1]),
@@ -26672,6 +26763,10 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             frameGraphMetal.drawablePresentCalls;
         inventory.frameGraphPresentCalls =
             frameGraphMetal.presentCalls;
+        inventory.shadowClearsDeferred = impl_->shadowClearsDeferred;
+        inventory.shadowClearsCoalesced = impl_->shadowClearsCoalesced;
+        inventory.shadowClearsMaterialized = impl_->shadowClearsMaterialized;
+        inventory.shadowClearMaterializeBytes = impl_->shadowClearMaterializeBytes;
         inventory.bufferRenames = impl_->bufferRenames;
         inventory.bufferRenameBytes = impl_->bufferRenameBytes;
         inventory.bufferRenameSkips = impl_->bufferRenameSkips;

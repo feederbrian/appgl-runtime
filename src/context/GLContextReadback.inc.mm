@@ -740,6 +740,7 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
         impl_->frameGraph->flushForReadback();
     }
     if (format == GL_RGBA && type == GL_UNSIGNED_BYTE) {
+        impl_->materializeDefaultFbShadowClear();
         if (impl_->copyDefaultFramebufferShadowPixels(x, y, width, height, pixels)) {
             return true;
         }
@@ -756,6 +757,7 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
     }
     const std::size_t pixelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
     std::vector<std::uint8_t> rgba8(pixelCount * 4);
+    impl_->materializeDefaultFbShadowClear();
     if (!impl_->copyDefaultFramebufferShadowPixels(x, y, width, height, rgba8.data()) &&
         (impl_->frameGraph == nullptr ||
          !impl_->frameGraph->copyRGBA8Pixels(x, y, width, height, rgba8.data()))) {

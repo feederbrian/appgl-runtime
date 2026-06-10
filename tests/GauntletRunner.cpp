@@ -16180,6 +16180,195 @@ TestResult runC49DefaultFbIsolationProbe() {
     return result;
 }
 
+
+// S24 lever-#1 probes: lazy CPU-shadow clears.
+std::uint64_t lazyShadowCounter(GLContext& context, int which) {
+    const auto inv = context.metalResourceInventory();
+    switch (which) {
+        case 0: return inv.shadowClearsDeferred;
+        case 1: return inv.shadowClearsMaterialized;
+        default: return inv.frameGraphFboClearsDeferred;
+    }
+}
+
+TestResult runLazyShadowFb0ReadbackProbe() {
+    auto result = runDirectSentinel("lazy-shadow.fb0-readback-matrix", [&] {
+        ScopedEnvVar lazy("APPGL_ENABLE_LAZY_SHADOW_CLEARS", "1");
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        const auto d0 = lazyShadowCounter(context, 0);
+
+        auto readPx = [&](GLint x, GLint y) {
+            std::array<std::uint8_t, 4> px = {1, 2, 3, 4};
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            gl.glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            return px;
+        };
+        // Full deferred clear → readback materializes it.
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glClearColor(0.8f, 0.8f, 0.8f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        expectCondition(lazyShadowCounter(context, 0) > d0,
+                        "lazy-shadow fb0: full clear deferred");
+        expectApproxByte(readPx(8, 8)[0], 204u, 4u, "lazy-shadow fb0 full clear value");
+        expectCondition(lazyShadowCounter(context, 1) > 0,
+                        "lazy-shadow fb0: readback materialized");
+
+        // Full + scissored partial: partial applies over materialized full.
+        gl.glClearColor(0.2f, 0.2f, 0.2f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glEnable(GL_SCISSOR_TEST);
+        gl.glScissor(1, 1, 2, 2);
+        gl.glClearColor(0.6f, 0.6f, 0.6f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glDisable(GL_SCISSOR_TEST);
+        expectApproxByte(readPx(2, 2)[0], 153u, 4u, "lazy-shadow fb0 scissored value");
+        expectApproxByte(readPx(8, 8)[0], 51u, 4u, "lazy-shadow fb0 outside-scissor value");
+
+        // Masked clear updates only enabled channels.
+        gl.glColorMask(GL_TRUE, GL_FALSE, GL_FALSE, GL_TRUE);
+        gl.glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        const auto masked = readPx(8, 8);
+        expectApproxByte(masked[0], 255u, 4u, "lazy-shadow fb0 masked R updated");
+        expectApproxByte(masked[1], 51u, 4u, "lazy-shadow fb0 masked G preserved");
+        expectGLError(gl, GL_NO_ERROR, "lazy-shadow fb0 matrix");
+    });
+    if (result.status == "passed") {
+        result.message = "deferred FB0 clears materialize correctly for full, scissored-partial, and masked readbacks";
+    }
+    return result;
+}
+
+TestResult runLazyShadowBlendSeedProbe() {
+    auto result = runDirectSentinel("lazy-shadow.fb0-coalesce", [&] {
+        ScopedEnvVar lazy("APPGL_ENABLE_LAZY_SHADOW_CLEARS", "1");
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        const auto inv0 = context.metalResourceInventory();
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glClearColor(0.7f, 0.7f, 0.7f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);  // coalesces over the first
+        const auto inv1 = context.metalResourceInventory();
+        expectCondition(inv1.shadowClearsDeferred == inv0.shadowClearsDeferred + 2,
+                        "lazy-shadow coalesce: both clears deferred");
+        expectCondition(inv1.shadowClearsCoalesced == inv0.shadowClearsCoalesced + 1,
+                        "lazy-shadow coalesce: second clear coalesced");
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[0], 179u, 4u, "lazy-shadow coalesce: last clear wins");
+        const auto inv2 = context.metalResourceInventory();
+        expectCondition(inv2.shadowClearsMaterialized == inv1.shadowClearsMaterialized + 1,
+                        "lazy-shadow coalesce: ONE materialize served both");
+        expectGLError(gl, GL_NO_ERROR, "lazy-shadow coalesce");
+    });
+    if (result.status == "passed") {
+        result.message = "stacked deferred clears coalesce (2 deferred, 1 coalesced, 1 materialize, last-wins value)";
+    }
+    return result;
+}
+
+TestResult runLazyShadowInterleavedGpuProbe() {
+    auto result = runDirectSentinel("lazy-shadow.fb0-interleaved-gpu", [&] {
+        ScopedEnvVar lazy("APPGL_ENABLE_LAZY_SHADOW_CLEARS", "1");
+        ScopedSentinelContext scoped(16, 16);
+        auto& gl = scoped.gl();
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glClearColor(0.1f, 0.1f, 0.9f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);  // deferred in shadow, loadAction in Metal
+        static constexpr const char* kVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+        static constexpr const char* kFS =
+            "#version 330 core\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+        const GLuint program = buildBenchProgram(kVS, kFS);
+        GLuint vao = 0, vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+        gl.glViewport(0, 0, 16, 16);
+        gl.glUseProgram(program);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[1], 255u, 4u, "lazy-shadow interleaved: GPU draw wins over deferred clear");
+        expectGLError(gl, GL_NO_ERROR, "lazy-shadow interleaved");
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(program);
+    });
+    if (result.status == "passed") {
+        result.message = "deferred-clear/GPU-draw/readback ordering correct (refresh-from-Metal supersedes)";
+    }
+    return result;
+}
+
+TestResult runLazyShadowTextureAxisProbe() {
+    auto result = runDirectSentinel("lazy-shadow.texture-axis-fold", [&] {
+        ScopedEnvVar lazy("APPGL_ENABLE_LAZY_SHADOW_CLEARS", "1");
+        ScopedEnvVar fold("APPGL_ENABLE_FBO_CLEAR_FOLDING", "1");
+        ScopedEnvVar foldHatch("APPGL_DISABLE_FBO_CLEAR_FOLDING", "0");
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        const auto f0 = lazyShadowCounter(context, 2);
+
+        GLuint colorTex = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 4, 4);
+        GLuint fbo = 0;
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, 4, 4);
+        gl.glClearColor(0.0f, 0.6f, 0.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        expectCondition(lazyShadowCounter(context, 2) > f0,
+                        "lazy-shadow texture axis: Metal side deferred via C48 registry");
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(1, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[1], 153u, 4u, "lazy-shadow texture axis clear value");
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        expectGLError(gl, GL_NO_ERROR, "lazy-shadow texture axis");
+    });
+    if (result.status == "passed") {
+        result.message = "texture-FBO clear routed Metal side through the C48 registry (no whole-texture push) with correct values";
+    }
+    return result;
+}
+
+TestResult runLazyShadowDefaultOffProbe() {
+    auto result = runDirectSentinel("lazy-shadow.default-off", [&] {
+        ScopedEnvVar lazy("APPGL_ENABLE_LAZY_SHADOW_CLEARS", "0");
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glClearColor(0.4f, 0.4f, 0.4f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        expectCondition(lazyShadowCounter(context, 0) == 0,
+                        "lazy-shadow default-off: zero deferrals");
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[0], 102u, 4u, "lazy-shadow default-off value");
+    });
+    if (result.status == "passed") {
+        result.message = "flag-off path byte-identical (zero deferrals, legacy fill)";
+    }
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -16293,6 +16482,15 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runTextureMipShadowEvictionR8RedundantProbe());
         tests.push_back(runTextureMipShadowEvictionCopyImageProbe());
         tests.push_back(runTextureMipShadowEvictionPartialTexSubImageProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "lazy-shadow-clear-probes") {
+        tests.push_back(runLazyShadowFb0ReadbackProbe());
+        tests.push_back(runLazyShadowBlendSeedProbe());
+        tests.push_back(runLazyShadowInterleavedGpuProbe());
+        tests.push_back(runLazyShadowTextureAxisProbe());
+        tests.push_back(runLazyShadowDefaultOffProbe());
         return buildJSON(normalizedPhase, tests);
     }
 
