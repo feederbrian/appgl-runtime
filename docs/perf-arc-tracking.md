@@ -1,7 +1,7 @@
 # AppGL Perf ARC Tracking
 
-Status: C45 is crowned as the Step 7 rung 3 memory/Mach-port stability checkpoint. C46 is crowned as a default-off opt-in perf win: the layered-clear async prototype is committed, live-pinned for opt-in use, locally gated, and backed by autogame plus measured manual A/B throughput lift. Default-on is deferred indefinitely because the +4 FPS class win is real but not the order-of-magnitude lever; canonical launch remains default-off while the next S24 work re-aims at structural frame-shape pathologies.
-Date: 2026-06-09
+Status: C45 is crowned as the Step 7 rung 3 memory/Mach-port stability checkpoint. C46 is crowned as a default-off opt-in perf win. C47 capture evidence now proves the sampler GPU-order skip removes the live sampler-drain wait cost while residual `FlushForReadback` submits remain a structural-attribution lane. C48 visual artifact is root-caused as FBO-rendered D32F array shadow-compare y-flip exposure after the `00fde11` slice-routing fix; fix work is in progress and canonical live pin remains the pre-C48 `A8483891` runtime.
+Date: 2026-06-10
 Owner: AppGL-Foreman
 
 ## Active Baseline
@@ -3298,3 +3298,241 @@ C46 layered-clear async CPU-lane prototype:
   old GPU-only LC/LCDC waits into more delivered work and modestly better GPU
   feed. The win is crowned for opt-in use, while default-on remains deferred
   and the roadmap moves to structural attribution.
+
+## 2026-06-10 C47/C48 Continuation
+
+C47 was redefined from "flip sampler skip env" into attribution of the
+residual live `FlushForReadback` trigger. The reason is launcher posture: the
+runtime no-env default for `APPGL_ENABLE_SAMPLER_GPU_ORDER_SKIP` is still OFF,
+but the live Warzone canonical launcher defaults the sampler GPU-order skip ON
+unless `APPGL_DISABLE_SAMPLER_GPU_ORDER_SKIP=1` is set. That launcher posture
+also carried into the C46 manual A/B evidence above, so the correct question is
+not whether skip ON helps; it is why residual FFR submits remain after skip ON.
+
+Valid manual scene capture matrix, pre-C48 live pin `A8483891`:
+
+- `async+skipON`:
+  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/s24-step1-profile-of-record-manual-scene/20260610T014238Z-c46-async`.
+  Duration `210.41s`, Studio Display drawable `2560x1440`, scene markers
+  `startMultiplayerGame` and `multiplay/maps/4c-rush.gam`. Approx present
+  rate `24.65/sec`. Producer-token counters: sampler
+  `flush_candidates=124088`, `gpu_order_skips=124088`, `blocked=0`,
+  `drain_flushes=1`. `sampler_producer_drain` total `517.4 ms`,
+  average `0.425 us`. CB census: `FlushForReadback=4611`, but only `4`
+  FFR completion waits totaling `3.21 ms`.
+- `async+skipOFF`:
+  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/s24-step1-profile-of-record-manual-scene/20260610T014808Z-c46-async`.
+  Duration `210.25s`, same scene/drawable posture. Approx present rate
+  `18.50/sec`. Producer-token counters: sampler `flush_candidates=6730`,
+  `gpu_order_skips=0`, `drain_flushes=6730`.
+  `sampler_producer_drain` total `33803.8 ms`, average `40.265 us`.
+  CB census: `FlushForReadback=10099`; FFR completion waits `6734`,
+  totaling `33418.58 ms`, p95 `9325.29 us`.
+- `default+skipON`:
+  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/s24-step1-profile-of-record-manual-scene/20260610T015217Z-c46-default`.
+  Duration `210.03s`, same scene/drawable posture. Approx present rate
+  `20.69/sec`. Producer-token counters: sampler
+  `flush_candidates=97801`, `gpu_order_skips=97801`, `blocked=0`,
+  `drain_flushes=0`. `sampler_producer_drain` total `389.2 ms`,
+  average `0.405 us`. CB census: `FlushForReadback=3841`, but only `4`
+  FFR completion waits totaling `3.51 ms`.
+
+Read: sampler skip is doing the intended work in live gameplay. Turning it OFF
+reintroduces roughly `33.4s` of FFR completion wait and roughly `33.8s` of
+sampler-drain CPU time over a `210s` run. With skip ON, residual FFR remains as
+a submit-count signature, but not as the dominant completion-wait bucket. The
+C47 lane is therefore residual submit-source cleanup/avoidance, not sampler
+read-set drain viability. Capture packet was forwarded to Fable-Worker in
+bridge message `a37d2d71-5f1a-4e13-aa9f-f13d9bb87312`.
+
+Fable-Worker Step-1 residual verdict:
+
+- Residual FFR source is the per-frame viewport-request invalidate in the
+  `ensureSizeAtLeast` grow-only-skip branch.
+- The real residual cost was hiding under `drain_all` / `LifetimeDrain` stderr
+  rows, not the CB completion-wait table. Async+skipON carried about `9.2s`
+  over the `210s` capture. Standard census parsers should include
+  `LifetimeDrain` drain-all count and wait so this bucket cannot hide again.
+- The CB reason table's `commit-and-wait` submit-mode label is a nominal static
+  reason-table class, not measured behavior for this path. Residual FFR submits
+  are async; do not read the submit-mode column as actual call mode without
+  cross-checking wait rows.
+- `APPGL_FRAME_ATTRIBUTION_PROFILE` produced `0` rows despite env-on across the
+  three capture roots. Treat this as a reproducible instrumentation bug queued
+  under C49 census work.
+- The skipON matrix evidence is crown-grade for C47: it removes the live
+  sampler-drain burden. C49 should carry the residual viewport-invalidate /
+  LifetimeDrain cleanup and census instrumentation.
+
+C48 source state:
+
+- Commit `00fde11` fixes a pre-existing default-path correctness bug: hot
+  `drawArrays` / `drawElements` / `drawBaseVertex` paths did not wire the
+  FBO attachment depth-stencil slice/level into draw info. A
+  `glFramebufferTextureLayer` depth attachment with layer other than `0` could
+  draw depth to slice `0` while readbacks sampled the attached layer. Warzone's
+  far shadow cascades are the expected visible risk surface, so the visual gate
+  must watch shadow quality, not just FPS.
+- Commit `bdd2c14` adds default-off C48 FBO attachment clear folding behind
+  `APPGL_ENABLE_FBO_CLEAR_FOLDING=1`. The intended forward config is C46
+  layered-clear async ON, sampler GPU-order skip ON, and FBO clear folding ON.
+  Worker reported local gates green across default/off and forward configs,
+  including non-vacuous C48 folding probes and BAR-B identity.
+- Runtime feature commits under C48 are `00fde11` and `bdd2c14`. Formal source
+  target is now `6be0120`, which adds a C48 cascade-pattern probe only; the
+  runtime behavior under preview remains the `00fde11` slice fix plus the
+  `bdd2c14` default-off folding gate. A fresh `build-release-fp64on` AppGL
+  build completed with only the known `MTLResourceUsageSample` and
+  duplicate-library warnings.
+
+C48 live/preview posture:
+
+- Canonical live pin remains unchanged until the C48 gate chain clears:
+  `libAppGL-pinned.dylib` UUID
+  `A8483891-2FC0-3D00-BE42-94978B713DB0`, SHA256
+  `da11d5d25072d313b7d845d6b421b12557056cefdb282a13fd8a060c5cb915db`.
+- Separate unswept preview pin:
+  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-c48-preview-bdd2c14-B52F0178.dylib`.
+  UUID `B52F0178-6F29-345B-BD50-FD5E405120D1`, SHA256
+  `8606e4a8faecc95fb09925203148712fe8cc1f2246d1842ae4266772193c8528`,
+  ad-hoc/linker-signed CDHash
+  `5c3a085c7cdc42df354afcac5b3551a990c200af`, install-name
+  `@rpath/libAppGL.dylib`.
+- Preview wrapper:
+  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/launch-warzone-appgl-c48-preview.sh`.
+  It exports `APPGL_ENABLE_LAYERED_CLEAR_ASYNC=1` and
+  `APPGL_ENABLE_FBO_CLEAR_FOLDING=1`, follows canonical sampler-skip posture
+  unless explicitly disabled, and injects the preview dylib without touching
+  `libAppGL-pinned.dylib`.
+- Operator preview is explicitly unswept informal evidence. Watchpoints:
+  far-shadow cascades better/same/worse, clear/flicker/stale-frame artifacts,
+  rough FPS versus the familiar `20` default / `24` async windows, and anything
+  subjectively off.
+- Operator preview observation relayed by Fable-Clerk: no FPS delta, still
+  about `24 FPS`; visual regression: "the viewport seems to cast a shadow over
+  the scene". The operator verified this against the native control binary in
+  `/Applications`. Treat this as a parity failure on the C48 preview build
+  (`bdd2c14` plus `00fde11`, forward config async+skip+fold). C48 crown chain
+  is blocked pending root-cause.
+- Artifact triage refuted the initial FBO-fold-loss hypotheses: H1/H3/H4 were
+  not supported by the short census because the candidate logged
+  `fboClearsDeferred=375`, `fboClearsFolded=375`, `fboClearsMaterialized=0`,
+  zero lost clears, and no present failures. H5 is now confirmed precisely:
+  `00fde11` correctly unmasked previously-missed nonzero depth cascade slices,
+  and shadow-compare sampling of those FBO-rendered `Depth32Float` 2D-array
+  cascade slices binds raw y-flipped Metal content without flip compensation.
+  The existing flip machinery covers packed depth-stencil 2D textures only, not
+  plain D32F arrays. Plain sampling/readback chains still pass, explaining why
+  earlier probes and CTS did not catch the Warzone-shaped gap.
+- Root-cause proof landed as test-only commit `0b2b1e6` on top of `6be0120`:
+  `depth-layer-orientation-probes` adds a deterministic shadow-compare repro.
+  Position-derived-Z and absolute gradient orientation probes pass, while the
+  shadow-compare probe fails with the content-flip signature. C48 FBO clear
+  folding is exonerated; failure reproduces with folding OFF and fold census
+  balances. Do not revert `00fde11`; fix the compare sampling path around the
+  corrected routing.
+- Comparable unattended 4c-rush visual repro is not currently available. The
+  Step-1 `4c-rush` manual-scene captures needed operator assistance to enter
+  the scene and resize/full-monitor the window. The harness can run unattended
+  autogame, but that is a short, scenario-driven path and not a comparable
+  visual parity matrix. Because of that, Scout Sweep 1 should continue as the
+  default-path `00fde11` gate, while visual screenshot A/B waits for the
+  operator window unless a true unattended scene driver is found.
+- Short autogame C48 census A/B, informal engagement proof only:
+  - Control current pin/C46 async root:
+    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/c48-autogame-census-ab/20260610T020743Z-c46-async`.
+    Proved canonical pin `A8483891` /
+    `da11d5d25072d313b7d845d6b421b12557056cefdb282a13fd8a060c5cb915db`.
+    Highground autogame produced `113` presents, `LayeredClearAsync=350`,
+    `LayeredClearDrainCurrentAsync=140`, `FlushForReadback=75`,
+    `PressureFlush=11`, about `6.12` CB submits per present.
+  - Candidate C48 preview/fold root:
+    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/c48-autogame-census-ab/20260610T020806Z-c48-preview`.
+    Proved preview pin `B52F0178` /
+    `8606e4a8faecc95fb09925203148712fe8cc1f2246d1842ae4266772193c8528`.
+    Same autogame posture produced `116` presents, `LayeredClear*=0`,
+    `FlushForReadback=80`, `PressureFlush=12`, about `1.81` CB submits per
+    present.
+- Candidate diagnostics at last valid frame `118` showed
+    `fboClearsDeferred=375`, `fboClearsFolded=375`,
+    `fboClearsMaterialized=0`, `fboClearsCoalesced=0`, and present failures
+    `0`. This confirms C48 fold engages on the live autogame path and
+    eliminates LayeredClear command-buffer submits in the short census. It does
+    not replace Scout/default-path proof or the manual visual gate.
+- Post-Sweep-1 live triage matrix is pre-staged but cancelled as a gate because
+  the deterministic headless repro supersedes screenshots:
+  - Arm A canonical control:
+    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/launch-warzone-appgl-c48-triage-arm-a-canonical.sh`;
+    canonical pin `A8483891`, folding/trace unset.
+  - Arm B `00fde11` discriminator:
+    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/launch-warzone-appgl-c48-triage-arm-b-00fde11.sh`;
+    dylib
+    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/libAppGL-c48-armb-00fde11-7FEDBB3C.dylib`,
+    UUID `7FEDBB3C-93D8-3B0B-AC4C-16EEAE34D1F3`, SHA256
+    `70d7093c339f0a8bd8a1132ec64026676e8ff259dd10777b9e6b3dfbc4934701`,
+    valid on disk, install-name `@rpath/libAppGL.dylib`; async forced OFF and
+    `APPGL_ENABLE_FBO_CLEAR_FOLDING=0` / `APPGL_TRACE_FBO_CLEAR_FOLDING=0`
+    exported explicitly while preserving canonical skip/drop/cache posture.
+  - Arm C C48 preview forward config:
+    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/launch-warzone-appgl-c48-triage-arm-c-preview-fold.sh`;
+    preview `B52F0178`, async ON, sampler skip ON, folding ON.
+  - Arm D optional trace:
+    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/launch-warzone-appgl-c48-triage-arm-d-preview-fold-trace.sh`;
+    Arm C plus `APPGL_TRACE_FBO_CLEAR_FOLDING=1`.
+  Do not spend the post-Sweep-1 slot on this matrix unless Clerk reopens it for
+  the 00:00 operator package. Screenshot mechanics are nevertheless proven for
+  this shell: CoreGraphics window-ID enumeration works, and
+  `screencapture -x -o -l<WID>` produced a real iTerm window PNG rather than
+  wallpaper-only output. A reusable launch/capture helper is staged at
+  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/run-c48-triage-screenshot-arm.sh`;
+  it waits for the Warzone `[gameLoad]` marker, discovers the Warzone window ID,
+  and captures fixed offsets/bursts per arm.
+
+Scout retarget rationale:
+
+- The old C47 sweep on `8583284` is superseded by C48 because `00fde11` changes
+  default-path behavior and must be conformance-proven before any crown.
+- Retarget message `e551f0a6-b5fa-4d81-89b3-55cd5c35a2df` asked Scout for two
+  Release-standard full sweeps on C48 HEAD `bdd2c14`:
+  1. no-env default config, proving the `00fde11` default-path slice fix;
+  2. forward config with `APPGL_ENABLE_LAYERED_CLEAR_ASYNC=1`,
+     `APPGL_ENABLE_SAMPLER_GPU_ORDER_SKIP=1`, and
+     `APPGL_ENABLE_FBO_CLEAR_FOLDING=1`.
+- Formal target update `1a3b27dc-00ea-4373-8414-01088011affa` retargeted Scout
+  to `6be0120`; if Sweep 1 had already started on `bdd2c14`, report it as
+  preliminary/superseded and top off at `6be0120`.
+- After root cause, the sweep chain is restructured because the forthcoming fix
+  is a flag-independent default-path behavior change:
+  1. Let Sweep 1 complete on `bdd2c14`/`6be0120` default as the `00fde11`
+     default-path gate.
+  2. Sweep 2 is fix HEAD, default config. This is the priority sweep; CTS
+     uploaded-depth compare coverage is the predicate-overreach backstop.
+  3. Sweep 3 is fix HEAD, forward config: async + sampler skip + FBO folding.
+     This is the crown sweep.
+  GLTest may take a measurement window between Sweep 1 and Sweep 2 if their
+  probe is ready; otherwise between Sweep 2 and Sweep 3. Canonical live pin
+  remains `A8483891` until the full chain greens.
+
+C49 is banked as FBO pass continuation plus census hardening after C48. Do not
+open C49 before the C48 visual artifact root-cause and sweep/default-path proof
+settle, because the C48 slice fix can change shadow correctness independent of
+performance and the folding feature has explicit clear-coherence risk surfaces.
+C49 should include the viewport-invalidate / `LifetimeDrain` residual cleanup
+and repair the frame-attribution profile row path, but it is queued behind the
+C48 artifact investigation.
+
+Fable-Worker has landed two C49 draft artifacts in `specs-worker-docs/`:
+
+- `S24-C49-PASS-CONTINUATION-DRAFT-MEMO-2026-06-10.md`.
+  Draft lever: cache an active-FBO-pass signature and continue the open encoder
+  for same-target translated draws. The viewport-invalidate residual is a
+  required rider, because the per-frame invalidate would otherwise force-close
+  continued passes. C48 composition caution: `deferFboClear` must end an open
+  pass targeting the cleared attachment with `endEncoding` only and no commit,
+  so later same-pass draws cannot read pre-clear contents.
+- `S24-C49-DRAW-PATH-CENSUS-SPEC-2026-06-10.md`.
+  Instrumentation-first plan: encoder opens/closes by reason, draws-per-pass,
+  continuation hit/miss/break counters, pass descriptor build count/time,
+  `drainAllCalls`/wait time for the `LifetimeDrain` bucket, and the
+  `APPGL_FRAME_ATTRIBUTION_PROFILE` zero-row bug. No C49 implementation has
+  started; these are adjudication inputs.

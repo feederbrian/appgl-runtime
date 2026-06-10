@@ -15038,6 +15038,355 @@ TestResult runDepthLayerShadowCompareProbe() {
     return result;
 }
 
+// Negative control for the shadow-compare Y fixup predicate: UPLOADED
+// depth content (never FBO-rendered) is stored GL-oriented, so the
+// compare path must NOT flip it. Predicate overreach here is the #1
+// regression risk of the fix.
+TestResult runDepthLayerUploadedCompareNegativeControlProbe() {
+    auto result = runDirectSentinel("depth-layer.shadow-compare-uploaded-negative", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& gl = scoped.gl();
+        constexpr GLsizei kSize = 4;
+
+        GLuint depthArray = 0;
+        gl.glGenTextures(1, &depthArray);
+        setupDCR3CDepth32FArrayTexture(gl, depthArray, kSize, kSize, 3);
+        // Upload the gradient directly — GL row 0 (bottom) = 0.125.
+        std::array<GLfloat, kSize * kSize> texels = {};
+        for (GLsizei row = 0; row < kSize; ++row) {
+            for (GLsizei col = 0; col < kSize; ++col) {
+                texels[static_cast<std::size_t>(row * kSize + col)] =
+                    (static_cast<GLfloat>(row) + 0.5f) / static_cast<GLfloat>(kSize);
+            }
+        }
+        gl.glBindTexture(GL_TEXTURE_2D_ARRAY, depthArray);
+        gl.glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 1, kSize, kSize, 1,
+                           GL_DEPTH_COMPONENT, GL_FLOAT, texels.data());
+        expectGLError(gl, GL_NO_ERROR, "uploaded-negative upload");
+        gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_MODE,
+                           GL_COMPARE_REF_TO_TEXTURE);
+        gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_FUNC,
+                           GL_LEQUAL);
+
+        GLuint sceneTexture = 0;
+        gl.glGenTextures(1, &sceneTexture);
+        setupDCR3CRGBA8Texture(gl, sceneTexture, kSize, kSize);
+        GLuint sceneFbo = 0;
+        setupDCR3CTextureFbo(gl, sceneFbo, sceneTexture);
+
+        static constexpr const char* kVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "out vec2 vUV;\n"
+            "void main() {\n"
+            "    vUV = aPos * 0.5 + 0.5;\n"
+            "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kFS =
+            "#version 330 core\n"
+            "uniform sampler2DArrayShadow uShadow;\n"
+            "uniform float uLayer;\n"
+            "uniform float uRef;\n"
+            "in vec2 vUV;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    float lit = texture(uShadow, vec4(vUV, uLayer, uRef));\n"
+            "    fragColor = vec4(lit, lit, lit, 1.0);\n"
+            "}\n";
+        const GLuint program = buildBenchProgram(kVS, kFS);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(program, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "uploaded-negative program links");
+
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glUseProgram(program);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D_ARRAY, depthArray);
+        gl.glUniform1i(gl.glGetUniformLocation(program, "uShadow"), 0);
+        gl.glUniform1f(gl.glGetUniformLocation(program, "uLayer"), 1.0f);
+        gl.glUniform1f(gl.glGetUniformLocation(program, "uRef"), 0.5f);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        expectGLError(gl, GL_NO_ERROR, "uploaded-negative draw");
+
+        // Uploaded content must compare UN-flipped: {0,0,1,1}.
+        for (GLsizei row = 0; row < kSize; ++row) {
+            std::array<std::uint8_t, 4> rgba = {127, 127, 127, 127};
+            gl.glReadPixels(1, row, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                            rgba.data());
+            const GLfloat expected = row < 2 ? 0.0f : 1.0f;
+            expectApproxFloat(static_cast<GLfloat>(rgba[0]) / 255.0f, expected,
+                              0.05f,
+                              "uploaded-negative compare row (must not flip)");
+        }
+
+        gl.glBindTexture(GL_TEXTURE_2D_ARRAY, depthArray);
+        gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_MODE,
+                           GL_NONE);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(program);
+        gl.glDeleteFramebuffers(1, &sceneFbo);
+        gl.glDeleteTextures(1, &depthArray);
+        gl.glDeleteTextures(1, &sceneTexture);
+        expectGLError(gl, GL_NO_ERROR, "uploaded-negative cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "uploaded (never-rendered) depth compared UN-flipped — fixup predicate did not overreach";
+    }
+    return result;
+}
+
+// gather_compare coverage: same flip plumbing must apply to
+// textureGather on shadow samplers. The uv row chosen makes flipped
+// vs correct content maximally distinct (sum 0 vs sum 4).
+TestResult runDepthLayerGatherCompareProbe() {
+    auto result = runDirectSentinel("depth-layer.gather-compare", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& gl = scoped.gl();
+        constexpr GLsizei kSize = 4;
+
+        GLuint depthArray = 0;
+        gl.glGenTextures(1, &depthArray);
+        setupDCR3CDepth32FArrayTexture(gl, depthArray, kSize, kSize, 3);
+        primeDCR3CDepth32FTexture(gl, depthArray, kSize, kSize, 3);
+        GLuint layerFbo = 0;
+        setupDCR3CDepthArrayLayerFbo(gl, layerFbo, depthArray, 1);
+
+        GLuint sceneTexture = 0;
+        gl.glGenTextures(1, &sceneTexture);
+        setupDCR3CRGBA8Texture(gl, sceneTexture, kSize, kSize);
+        GLuint sceneFbo = 0;
+        setupDCR3CTextureFbo(gl, sceneFbo, sceneTexture);
+
+        static constexpr const char* kGradVS =
+            "#version 400 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "out vec2 vUV;\n"
+            "void main() {\n"
+            "    vUV = aPos * 0.5 + 0.5;\n"
+            "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kGradDepthFS =
+            "#version 400 core\n"
+            "in vec2 vUV;\n"
+            "void main() { gl_FragDepth = vUV.y; }\n";
+        static constexpr const char* kGatherFS =
+            "#version 400 core\n"
+            "uniform sampler2DArrayShadow uShadow;\n"
+            "uniform float uLayer;\n"
+            "uniform float uRef;\n"
+            "in vec2 vUV;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    vec4 g = textureGather(uShadow, vec3(0.5, 0.25, uLayer), uRef);\n"
+            "    float avg = dot(g, vec4(0.25));\n"
+            "    fragColor = vec4(avg, avg, avg, 1.0 + 0.0 * vUV.x);\n"
+            "}\n";
+        const GLuint gradProgram = buildBenchProgram(kGradVS, kGradDepthFS);
+        const GLuint gatherProgram = buildBenchProgram(kGradVS, kGatherFS);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(gradProgram, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "gather gradient program links");
+        gl.glGetProgramiv(gatherProgram, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "gather compare program links");
+
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, layerFbo);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        gl.glEnable(GL_DEPTH_TEST);
+        gl.glDepthMask(GL_TRUE);
+        gl.glDepthFunc(GL_ALWAYS);
+        gl.glUseProgram(gradProgram);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        expectGLError(gl, GL_NO_ERROR, "gather gradient write");
+
+        gl.glBindTexture(GL_TEXTURE_2D_ARRAY, depthArray);
+        gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_MODE,
+                           GL_COMPARE_REF_TO_TEXTURE);
+        gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_FUNC,
+                           GL_LEQUAL);
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glUseProgram(gatherProgram);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D_ARRAY, depthArray);
+        gl.glUniform1i(gl.glGetUniformLocation(gatherProgram, "uShadow"), 0);
+        gl.glUniform1f(gl.glGetUniformLocation(gatherProgram, "uLayer"), 1.0f);
+        gl.glUniform1f(gl.glGetUniformLocation(gatherProgram, "uRef"), 0.5f);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        expectGLError(gl, GL_NO_ERROR, "gather compare draw");
+
+        // Gather at uv.y=0.25 touches rows 0,1 ({0.125,0.375}); ref 0.5
+        // LEQUAL fails both → average 0.0. Flipped content would read
+        // rows 3,2 ({0.875,0.625}) → average 1.0.
+        std::array<std::uint8_t, 4> rgba = {127, 127, 127, 127};
+        gl.glReadPixels(1, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+        expectApproxFloat(static_cast<GLfloat>(rgba[0]) / 255.0f, 0.0f, 0.05f,
+                          "gather_compare rows 0,1 vs ref 0.5 (GL spec)");
+
+        gl.glBindTexture(GL_TEXTURE_2D_ARRAY, depthArray);
+        gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_MODE,
+                           GL_NONE);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(gradProgram);
+        gl.glDeleteProgram(gatherProgram);
+        gl.glDeleteFramebuffers(1, &layerFbo);
+        gl.glDeleteFramebuffers(1, &sceneFbo);
+        gl.glDeleteTextures(1, &depthArray);
+        gl.glDeleteTextures(1, &sceneTexture);
+        expectGLError(gl, GL_NO_ERROR, "gather compare cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "textureGather on the FBO-rendered shadow array matched GL spec through the flip fixup";
+    }
+    return result;
+}
+
+// textureProj shadow coverage (sampler2DShadow + projective divide) on
+// an FBO-rendered 2D depth texture — exercises the wrapped coordinate
+// through SPIRV-Cross's proj lowering.
+TestResult runDepthLayerProjCompareProbe() {
+    auto result = runDirectSentinel("depth-layer.proj-compare", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& gl = scoped.gl();
+        constexpr GLsizei kSize = 4;
+
+        GLuint depth2D = 0;
+        gl.glGenTextures(1, &depth2D);
+        setupDCR3CDepth32FTexture(gl, depth2D, kSize, kSize);
+        primeDCR3CDepth32FTexture(gl, depth2D, kSize, kSize);
+        GLuint fbo2D = 0;
+        setupDCR3CDepthTextureFbo(gl, fbo2D, depth2D);
+
+        GLuint sceneTexture = 0;
+        gl.glGenTextures(1, &sceneTexture);
+        setupDCR3CRGBA8Texture(gl, sceneTexture, kSize, kSize);
+        GLuint sceneFbo = 0;
+        setupDCR3CTextureFbo(gl, sceneFbo, sceneTexture);
+
+        static constexpr const char* kVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "out vec2 vUV;\n"
+            "void main() {\n"
+            "    vUV = aPos * 0.5 + 0.5;\n"
+            "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kGradDepthFS =
+            "#version 330 core\n"
+            "in vec2 vUV;\n"
+            "void main() { gl_FragDepth = vUV.y; }\n";
+        static constexpr const char* kProjFS =
+            "#version 330 core\n"
+            "uniform sampler2DShadow uShadow;\n"
+            "uniform float uRef;\n"
+            "in vec2 vUV;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    float q = 2.0;\n"
+            "    float lit = textureProj(uShadow,\n"
+            "        vec4(vUV.x * q, vUV.y * q, uRef * q, q));\n"
+            "    fragColor = vec4(lit, lit, lit, 1.0);\n"
+            "}\n";
+        const GLuint gradProgram = buildBenchProgram(kVS, kGradDepthFS);
+        const GLuint projProgram = buildBenchProgram(kVS, kProjFS);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(gradProgram, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "proj gradient program links");
+        gl.glGetProgramiv(projProgram, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "proj compare program links");
+
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo2D);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        gl.glEnable(GL_DEPTH_TEST);
+        gl.glDepthMask(GL_TRUE);
+        gl.glDepthFunc(GL_ALWAYS);
+        gl.glUseProgram(gradProgram);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        expectGLError(gl, GL_NO_ERROR, "proj gradient write");
+
+        gl.glBindTexture(GL_TEXTURE_2D, depth2D);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE,
+                           GL_COMPARE_REF_TO_TEXTURE);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glUseProgram(projProgram);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D, depth2D);
+        gl.glUniform1i(gl.glGetUniformLocation(projProgram, "uShadow"), 0);
+        gl.glUniform1f(gl.glGetUniformLocation(projProgram, "uRef"), 0.5f);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        expectGLError(gl, GL_NO_ERROR, "proj compare draw");
+
+        for (GLsizei row = 0; row < kSize; ++row) {
+            std::array<std::uint8_t, 4> rgba = {127, 127, 127, 127};
+            gl.glReadPixels(1, row, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                            rgba.data());
+            const GLfloat expected = row < 2 ? 0.0f : 1.0f;
+            expectApproxFloat(static_cast<GLfloat>(rgba[0]) / 255.0f, expected,
+                              0.05f, "proj compare LEQUAL row result");
+        }
+
+        gl.glBindTexture(GL_TEXTURE_2D, depth2D);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(gradProgram);
+        gl.glDeleteProgram(projProgram);
+        gl.glDeleteFramebuffers(1, &fbo2D);
+        gl.glDeleteFramebuffers(1, &sceneFbo);
+        gl.glDeleteTextures(1, &depth2D);
+        gl.glDeleteTextures(1, &sceneTexture);
+        expectGLError(gl, GL_NO_ERROR, "proj compare cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "textureProj shadow compare on FBO-rendered 2D depth matched GL spec through the flip fixup";
+    }
+    return result;
+}
+
 TestResult runC48DefaultOffZeroEngagementProbe() {
     auto result = runDirectSentinel("c48.fbo-clear-folding.default-off-eager", [&] {
         ScopedEnvVar folding("APPGL_ENABLE_FBO_CLEAR_FOLDING", "0");
@@ -15223,6 +15572,9 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runDepthLayerPositionDerivedZProbe());
         tests.push_back(runDepthLayerOrientationGradientProbe());
         tests.push_back(runDepthLayerShadowCompareProbe());
+        tests.push_back(runDepthLayerUploadedCompareNegativeControlProbe());
+        tests.push_back(runDepthLayerGatherCompareProbe());
+        tests.push_back(runDepthLayerProjCompareProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

@@ -107,6 +107,7 @@ struct TranslatedDrawPlanShaderSlots {
     std::int32_t fragmentBorderClampModesSlot = -1;
     std::int32_t fragmentBorderClampColorsSlot = -1;
     std::int32_t fragmentImplicitLodBiasCorrectionSlot = -1;
+    std::int32_t fragmentDepthCompareFlipSlot = -1;
 };
 
 struct TranslatedDrawPlan {
@@ -278,6 +279,13 @@ struct TranslatedDrawInfo {
         float lodBias = 0.0f;
         std::uint32_t borderClampMask = 0;
         std::array<std::int32_t, 4> borderColor = {0, 0, 0, 0};
+        // Shadow-compare Y fixup factor (0.0 = no flip, 1.0 = flip):
+        // 1.0 when this is a depth texture with COMPARE_REF_TO_TEXTURE
+        // whose Metal content is FBO/viewport-rendered (stored
+        // y-flipped) and not already served by the packed-format
+        // flipped sampling copy. Consumed by the _appgl_CmpFlip
+        // buffer the translator injects for compare lookups.
+        float compareFlipY = 0.0f;
     };
     std::vector<TextureBinding> fragmentTextures;
     std::vector<TextureBinding> vertexTextures;

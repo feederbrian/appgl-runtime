@@ -15155,6 +15155,40 @@ struct GLContext::Impl {
                 }
                 binding.reductionMode = static_cast<std::uint32_t>(effectiveReductionMode);
                 binding.lodBias = samplerParamsForCompleteness->lodBias;
+                // Shadow-compare Y fixup predicate. FBO/viewport-rendered
+                // depth content is stored y-flipped in the Metal texture;
+                // compare-mode sampling binds the raw texture (no proxy
+                // compensation), so the translator-injected _appgl_CmpFlip
+                // factor must flip the lookup row. Excluded: uploaded
+                // depth (raw content is GL-oriented), UPPER_LEFT clip
+                // origin, and the packed-2D shapes already served by the
+                // flipped sampling copy (depthStencilNeedsSamplingFlip —
+                // flagging those too would double-flip).
+                binding.compareFlipY = 0.0f;
+                if (samplerParamsForCompleteness->compareMode ==
+                        GL_COMPARE_REF_TO_TEXTURE &&
+                    (texObject->wasFramebufferRenderedTo ||
+                     texObject->wasViewportRenderedTo) &&
+                    state->clipOrigin() != GL_UPPER_LEFT &&
+                    binding.metalTexture != nullptr) {
+                    id<MTLTexture> boundTex =
+                        (__bridge id<MTLTexture>)binding.metalTexture;
+                    const MTLPixelFormat pf = boundTex.pixelFormat;
+                    const bool depthFamily =
+                        pf == MTLPixelFormatDepth32Float ||
+                        pf == MTLPixelFormatDepth16Unorm ||
+                        pf == MTLPixelFormatDepth32Float_Stencil8 ||
+                        pf == MTLPixelFormatDepth24Unorm_Stencil8;
+                    const bool servedByFlipCopy =
+                        (pf == MTLPixelFormatDepth32Float_Stencil8 ||
+                         pf == MTLPixelFormatDepth24Unorm_Stencil8) &&
+                        boundTex.textureType == MTLTextureType2D &&
+                        boundTex.sampleCount <= 1 &&
+                        binding.metalTexture != texObject->metalTexture;
+                    if (depthFamily && !servedByFlipCopy) {
+                        binding.compareFlipY = 1.0f;
+                    }
+                }
                 emitSamplerTrace("bound",
                                  texName,
                                  discoveredTarget,

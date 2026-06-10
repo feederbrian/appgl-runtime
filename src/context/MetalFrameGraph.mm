@@ -2159,6 +2159,32 @@ static std::size_t capturedTranslatedDrawRecordApproxBytes(
     return bytes;
 }
 
+// Shadow-compare Y-fixup slot: the translator injects
+// `constant float* _appgl_CmpFlip [[buffer(N)]]` into fragment shaders
+// that compare-sample depth2d/_array receivers (injectDepthCompareFlip);
+// N is chosen collision-free per shader, so read it back from the MSL —
+// same pattern as clipControlYSignBufferSlot below.
+static NSInteger depthCompareFlipBufferSlot(const std::string* msl) {
+    if (msl == nullptr) {
+        return -1;
+    }
+    static constexpr const char* kNeedle = "_appgl_CmpFlip [[buffer(";
+    const std::size_t pos = msl->find(kNeedle);
+    if (pos == std::string::npos) {
+        return -1;
+    }
+    std::size_t cursor = pos + std::strlen(kNeedle);
+    NSInteger slot = 0;
+    bool haveDigit = false;
+    while (cursor < msl->size() &&
+           std::isdigit(static_cast<unsigned char>((*msl)[cursor]))) {
+        haveDigit = true;
+        slot = slot * 10 + static_cast<NSInteger>((*msl)[cursor] - '0');
+        ++cursor;
+    }
+    return haveDigit ? slot : -1;
+}
+
 static NSInteger clipControlYSignBufferSlot(const std::string* msl) {
     if (msl == nullptr) {
         return -1;
@@ -2418,6 +2444,7 @@ struct TranslatedDrawMSLSlots {
     bool vertexNeedsFragmentShadingRateState = false;
     bool vertexUsesMultiviewViewMask = false;
     bool fragmentUsesMultiviewViewMask = false;
+    NSInteger fragmentDepthCompareFlipSlot = -1;
     NSInteger vertexClipControlYSignSlot = -1;
     NSInteger vertexReductionModesSlot = -1;
     NSInteger vertexLodBiasesSlot = -1;
@@ -2455,6 +2482,8 @@ static TranslatedDrawPlanShaderSlots phase2PlanShaderSlotsFromMSLSlots(
     planSlots.vertexUsesMultiviewViewMask = slots.vertexUsesMultiviewViewMask;
     planSlots.fragmentUsesMultiviewViewMask =
         slots.fragmentUsesMultiviewViewMask;
+    planSlots.fragmentDepthCompareFlipSlot =
+        phase2PlanSlotFromNSInteger(slots.fragmentDepthCompareFlipSlot);
     planSlots.vertexClipControlYSignSlot =
         phase2PlanSlotFromNSInteger(slots.vertexClipControlYSignSlot);
     planSlots.vertexReductionModesSlot =
@@ -2498,6 +2527,8 @@ static TranslatedDrawMSLSlots phase2PlanMSLSlotsFromShaderSlots(
         planSlots.vertexUsesMultiviewViewMask;
     slots.fragmentUsesMultiviewViewMask =
         planSlots.fragmentUsesMultiviewViewMask;
+    slots.fragmentDepthCompareFlipSlot =
+        phase2PlanSlotToNSInteger(planSlots.fragmentDepthCompareFlipSlot);
     slots.vertexClipControlYSignSlot =
         phase2PlanSlotToNSInteger(planSlots.vertexClipControlYSignSlot);
     slots.vertexReductionModesSlot =
@@ -2553,6 +2584,8 @@ static TranslatedDrawMSLSlots buildTranslatedDrawMSLSlots(
         mslContains(info.vertexMSL, "spvViewMask");
     slots.fragmentUsesMultiviewViewMask =
         mslContains(info.fragmentMSL, "spvViewMask");
+    slots.fragmentDepthCompareFlipSlot =
+        hasFragmentStage ? depthCompareFlipBufferSlot(info.fragmentMSL) : -1;
     slots.vertexClipControlYSignSlot =
         clipControlYSignBufferSlot(info.vertexMSL);
     slots.vertexReductionModesSlot =
@@ -4838,6 +4871,7 @@ struct MetalFrameGraph::Impl {
         bool fragmentNeedsGlNumSamplesArgBuf = false;
         bool vertexNeedsFragmentShadingRateState = false;
         NSInteger vertexClipControlYSignSlot = -1;
+        NSInteger fragmentDepthCompareFlipSlot = -1;
         bool clipControlShaderYFixup = false;
         bool clipControlInvertsWinding = false;
         bool vertexUsesMultiviewViewMask = false;
@@ -4888,6 +4922,8 @@ struct MetalFrameGraph::Impl {
                     translatedPlan->vertexNeedsFragmentShadingRateState;
                 vertexClipControlYSignSlot =
                     shaderSlots.vertexClipControlYSignSlot;
+                fragmentDepthCompareFlipSlot =
+                    shaderSlots.fragmentDepthCompareFlipSlot;
                 clipControlShaderYFixup =
                     translatedPlan->clipControlShaderYFixup;
                 clipControlInvertsWinding =
@@ -4921,6 +4957,8 @@ struct MetalFrameGraph::Impl {
                 shaderSlots.vertexNeedsFragmentShadingRateState;
             vertexClipControlYSignSlot =
                 shaderSlots.vertexClipControlYSignSlot;
+            fragmentDepthCompareFlipSlot =
+                shaderSlots.fragmentDepthCompareFlipSlot;
             clipControlShaderYFixup =
                 vertexClipControlYSignSlot >= 0 &&
                 info.clipControlYSignFixupEnabled &&
@@ -7169,6 +7207,24 @@ struct MetalFrameGraph::Impl {
                 [currentRenderEncoder setFragmentBytes:fragCoordParams
                                                 length:sizeof(fragCoordParams)
                                                atIndex:kAppGLFragCoordParamsBufferSlot];
+            }
+
+            // Shadow-compare Y fixup: per-texture-slot flip factors for
+            // the _appgl_CmpFlip buffer injected by the translator.
+            // Always set when the shader declares the buffer — bindings
+            // without the FBO-rendered predicate read 0.0 (no flip).
+            if (fragmentDepthCompareFlipSlot >= 0) {
+                float compareFlips[32] = {};
+                for (const auto& binding : info.fragmentTextures) {
+                    if (binding.metalSlot < 32u) {
+                        compareFlips[binding.metalSlot] = binding.compareFlipY;
+                    }
+                }
+                [currentRenderEncoder
+                    setFragmentBytes:compareFlips
+                              length:sizeof(compareFlips)
+                             atIndex:static_cast<NSUInteger>(
+                                 fragmentDepthCompareFlipSlot)];
             }
 
             // Bind UBO data to the Metal encoder at the reflection-specified

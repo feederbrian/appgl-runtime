@@ -1198,6 +1198,187 @@ bool findMain0ParameterEnd(const std::string& msl, std::size_t& paramEnd) {
     return depth == 0 && paramEnd < msl.size();
 }
 
+// Shadow-compare Y fixup. FBO-rendered depth content is stored
+// y-flipped in the Metal texture (LOWER_LEFT clip-origin rendering);
+// non-compare sampling compensates through the swizzle/proxy paths and
+// readbacks compensate in their own chain, but compare-mode sampling
+// (depth2d/depth2d_array sample_compare / gather_compare) binds the raw
+// texture. Wrap every compare lookup's coordinate so a per-draw, per-
+// texture-slot flip factor at buffer(29) can select GL-correct rows.
+// The factor is 0.0 (no flip — e.g. uploaded depth) or 1.0 (FBO-
+// rendered + LOWER_LEFT), supplied by the frame graph alongside the
+// texture bindings — see TranslatedDrawInfo::TextureBinding::
+// compareFlipY. Depth-cube receivers are intentionally untouched
+// (direction vectors, not 2D coords). Returns false (msl unchanged)
+// when no compare receivers or call sites are present; every anchor
+// failure falls back to the original string per house rewrite rules.
+bool injectDepthCompareFlip(std::string& msl) {
+    static constexpr const char* kFlipName = "_appgl_CmpFlip";
+    if (msl.find("sample_compare") == std::string::npos &&
+        msl.find("gather_compare") == std::string::npos) {
+        return false;
+    }
+    if (msl.find(kFlipName) != std::string::npos) {
+        return false;
+    }
+
+    std::size_t paramEnd = 0;
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return false;
+    }
+    const std::size_t mainPos = msl.find("main0(");
+    const std::size_t paramStart = mainPos + 6;
+    const std::string params = msl.substr(paramStart, paramEnd - paramStart);
+
+    // Collect depth2d / depth2d_array receiver names with their Metal
+    // texture slots from the entry-point signature, e.g.
+    //   depth2d_array<float> uShadow [[texture(0)]]
+    struct CompareReceiver {
+        std::string name;
+        unsigned slot = 0;
+    };
+    std::vector<CompareReceiver> receivers;
+    for (const char* typeNeedle : {"depth2d_array<", "depth2d<"}) {
+        std::size_t search = 0;
+        while ((search = params.find(typeNeedle, search)) != std::string::npos) {
+            // Skip depth2d_array hits when scanning for depth2d.
+            if (std::strcmp(typeNeedle, "depth2d<") == 0 && search > 0 &&
+                params.compare(search >= 6 ? search - 6 : 0, 6, "_array") == 0) {
+                search += std::strlen(typeNeedle);
+                continue;
+            }
+            const std::size_t close = params.find('>', search);
+            if (close == std::string::npos) break;
+            std::size_t nameStart = close + 1;
+            while (nameStart < params.size() &&
+                   std::isspace(static_cast<unsigned char>(params[nameStart]))) {
+                ++nameStart;
+            }
+            std::size_t nameEnd = nameStart;
+            while (nameEnd < params.size() &&
+                   (std::isalnum(static_cast<unsigned char>(params[nameEnd])) ||
+                    params[nameEnd] == '_')) {
+                ++nameEnd;
+            }
+            const std::size_t texAttr = params.find("[[texture(", nameEnd);
+            if (nameEnd > nameStart && texAttr != std::string::npos) {
+                const std::size_t slotStart = texAttr + 10;
+                const unsigned slot = static_cast<unsigned>(
+                    std::strtoul(params.c_str() + slotStart, nullptr, 10));
+                receivers.push_back(
+                    {params.substr(nameStart, nameEnd - nameStart), slot});
+            }
+            search = nameEnd;
+        }
+    }
+    if (receivers.empty()) {
+        return false;
+    }
+
+    // All mutations land on a working copy so any anchor failure can
+    // fall back to the untouched original.
+    std::string working = msl;
+
+    // Wrap the coordinate argument (first arg after the sampler) of
+    // every NAME.sample_compare( / NAME.gather_compare( call.
+    bool wrapped = false;
+    for (const auto& receiver : receivers) {
+        if (receiver.slot >= 32u) continue;
+        for (const char* call : {".sample_compare(", ".gather_compare("}) {
+            const std::string needle = receiver.name + call;
+            std::size_t pos = 0;
+            while ((pos = working.find(needle, pos)) != std::string::npos) {
+                const std::size_t argsStart = pos + needle.size();
+                // Args: sampler, coord, ... — find the coord argument's
+                // [start, end) at top paren depth.
+                std::size_t cursor = argsStart;
+                std::size_t depth = 1;
+                std::size_t commaCount = 0;
+                std::size_t coordStart = std::string::npos;
+                std::size_t coordEnd = std::string::npos;
+                while (cursor < working.size() && depth > 0) {
+                    const char c = working[cursor];
+                    if (c == '(') {
+                        ++depth;
+                    } else if (c == ')') {
+                        --depth;
+                        if (depth == 0 && commaCount == 1 &&
+                            coordEnd == std::string::npos) {
+                            coordEnd = cursor;
+                        }
+                    } else if (c == ',' && depth == 1) {
+                        ++commaCount;
+                        if (commaCount == 1) {
+                            coordStart = cursor + 1;
+                        } else if (commaCount == 2 &&
+                                   coordEnd == std::string::npos) {
+                            coordEnd = cursor;
+                        }
+                    }
+                    ++cursor;
+                }
+                if (coordStart == std::string::npos ||
+                    coordEnd == std::string::npos || coordEnd <= coordStart) {
+                    pos = argsStart;
+                    continue;
+                }
+                const std::string coordExpr =
+                    working.substr(coordStart, coordEnd - coordStart);
+                const std::string replacement =
+                    " _appgl_cmpFlipCoord(" + coordExpr + ", " +
+                    std::string(kFlipName) + "[" +
+                    std::to_string(receiver.slot) + "])";
+                working.replace(coordStart, coordEnd - coordStart, replacement);
+                wrapped = true;
+                pos = coordStart + replacement.size();
+            }
+        }
+    }
+    if (!wrapped) {
+        return false;
+    }
+
+    // Inject the flip-factor parameter into main0(...). Slot selection
+    // follows the _appgl_ClipControlYSign preferred-slot pattern: take
+    // the first fragment-stage buffer index not already present in the
+    // generated MSL; the frame graph reads the actual slot back from
+    // the "[[buffer(N)]]" needle (depthCompareFlipBufferSlot).
+    if (!findMain0ParameterEnd(working, paramEnd)) {
+        return false;
+    }
+    std::uint32_t chosenSlot = 0;
+    bool haveSlot = false;
+    for (const std::uint32_t candidate : {29u, 28u, 27u, 26u, 20u, 19u, 18u, 17u}) {
+        const std::string attr = "[[buffer(" + std::to_string(candidate) + ")]]";
+        if (working.find(attr) == std::string::npos) {
+            chosenSlot = candidate;
+            haveSlot = true;
+            break;
+        }
+    }
+    if (!haveSlot) {
+        return false;
+    }
+    const std::string param =
+        ", constant float* " + std::string(kFlipName) +
+        " [[buffer(" + std::to_string(chosenSlot) + ")]]";
+    working.insert(paramEnd, param);
+
+    // Inject the coordinate helper above the fragment entry point.
+    static constexpr const char* kHelper =
+        "\nstatic inline float2 _appgl_cmpFlipCoord(float2 c, float f)\n"
+        "{\n"
+        "    return float2(c.x, mix(c.y, 1.0f - c.y, f));\n"
+        "}\n\n";
+    const std::size_t entryPos = working.find("fragment ");
+    if (entryPos == std::string::npos) {
+        return false;
+    }
+    working.insert(entryPos, kHelper);
+    msl = std::move(working);
+    return true;
+}
+
 bool injectPrimitiveFragmentShadingRateCombiner(std::string& msl) {
     static constexpr const char* kPrimitiveRateAttr = "[[primitive_shading_rate]]";
     static constexpr const char* kStateName = "_appgl_FSRState";
@@ -6416,6 +6597,12 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 execModes.get(spv::ExecutionModePixelCenterInteger);
             if (!originUpperLeft) {
                 (void)injectFragmentCoordYFixup(msl, pixelCenterInteger);
+                // Shadow-compare Y fixup: wrap depth2d/_array
+                // sample_compare/gather_compare coordinates so the
+                // frame graph can flip rows per draw for FBO-rendered
+                // depth content (see injectDepthCompareFlip). Same
+                // LOWER_LEFT gate as the gl_FragCoord fixup.
+                (void)injectDepthCompareFlip(msl);
             }
         }
 
