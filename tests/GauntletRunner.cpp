@@ -14401,6 +14401,164 @@ TestResult runC48CoalesceProbe() {
     return result;
 }
 
+// WZ shadow-cascade pattern: per-layer clear+draw sequences against one
+// depth array, one layer with NO draws (casterless cascade), consumption
+// via SAMPLING (not readPixels), two frames with distinct clear values.
+// Models the live Warzone shape that the single-layer fold probe and the
+// legacy sentinel suites do not cover: lost/stale folded clears on layers
+// whose pass never opens, wrong-slice folds, and cross-frame staleness.
+TestResult runC48CascadePatternProbe() {
+    auto result = runDirectSentinel("c48.fbo-clear-folding.cascade-pattern", [&] {
+        ScopedEnvVar folding("APPGL_ENABLE_FBO_CLEAR_FOLDING", "1");
+        // Live-launcher posture: grow-only default drawable. Combined
+        // with the viewport alternation below this reproduces the
+        // per-frame ensureSizeAtLeast requestedChanged invalidate
+        // (async FFR commit + transient-state reset) BETWEEN clear
+        // deferral and fold consumption — the live Warzone shape.
+        ScopedEnvVar growOnly("APPGL_DEFAULT_DRAWABLE_GROW_ONLY", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& gl = scoped.gl();
+
+        constexpr GLsizei kSize = 4;
+        constexpr GLsizei kLayers = 3;
+
+        GLuint depthArray = 0;
+        gl.glGenTextures(1, &depthArray);
+        setupDCR3CDepth32FArrayTexture(gl, depthArray, kSize, kSize, kLayers);
+        primeDCR3CDepth32FTexture(gl, depthArray, kSize, kSize, kLayers);
+
+        std::array<GLuint, kLayers> layerFbo = {0, 0, 0};
+        for (GLsizei layer = 0; layer < kLayers; ++layer) {
+            setupDCR3CDepthArrayLayerFbo(gl, layerFbo[layer], depthArray, layer);
+        }
+
+        GLuint sceneTexture = 0;
+        GLuint sceneFbo = 0;
+        gl.glGenTextures(1, &sceneTexture);
+        setupDCR3CRGBA8Texture(gl, sceneTexture, kSize, kSize);
+        setupDCR3CTextureFbo(gl, sceneFbo, sceneTexture);
+
+        // Sampling program — reads one layer of the depth array and
+        // writes the depth value into the scene color target. This is
+        // the consumption shape Warzone uses (terrain samples the
+        // cascade array), exercising the sampled-texture materialize
+        // hook and the C47-skip-composed path rather than readPixels.
+        static constexpr const char* kSampleVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "out vec2 vUV;\n"
+            "void main() {\n"
+            "    vUV = aPos * 0.5 + 0.5;\n"
+            "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kSampleFS =
+            "#version 330 core\n"
+            "uniform sampler2DArray uDepthArray;\n"
+            "uniform float uLayer;\n"
+            "in vec2 vUV;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    float d = texture(uDepthArray, vec3(vUV, uLayer)).r;\n"
+            "    fragColor = vec4(d, d, d, 1.0);\n"
+            "}\n";
+        const GLuint sampleProgram = buildBenchProgram(kSampleVS, kSampleFS);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(sampleProgram, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "c48 cascade sample program links");
+        const GLint layerLocation =
+            gl.glGetUniformLocation(sampleProgram, "uLayer");
+        const GLint arrayLocation =
+            gl.glGetUniformLocation(sampleProgram, "uDepthArray");
+        expectCondition(layerLocation >= 0 && arrayLocation >= 0,
+                        "c48 cascade sample uniforms exist");
+
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+
+        auto sampleLayerToScene = [&](GLsizei layer) -> GLfloat {
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo);
+            gl.glViewport(0, 0, kSize, kSize);
+            gl.glDisable(GL_DEPTH_TEST);
+            gl.glDisable(GL_BLEND);
+            gl.glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            gl.glUseProgram(sampleProgram);
+            gl.glActiveTexture(GL_TEXTURE0);
+            gl.glBindTexture(GL_TEXTURE_2D_ARRAY, depthArray);
+            gl.glUniform1i(arrayLocation, 0);
+            gl.glUniform1f(layerLocation, static_cast<GLfloat>(layer));
+            gl.glBindVertexArray(vao);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+            gl.glBindVertexArray(0);
+            gl.glUseProgram(0);
+            std::array<std::uint8_t, 4> rgba = {0, 0, 0, 0};
+            gl.glReadPixels(1, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+            return static_cast<GLfloat>(rgba[0]) / 255.0f;
+        };
+
+        for (int frame = 0; frame < 2; ++frame) {
+            const GLfloat clearValue = frame == 0 ? 1.0f : 0.75f;
+            for (GLsizei layer = 0; layer < kLayers; ++layer) {
+                // Warzone alternates the default-FB viewport extent
+                // (shadow resolution vs window) every pass — with
+                // grow-only this triggers the requestedChanged
+                // invalidate between deferral and consumption.
+                gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                gl.glViewport(0, 0, layer % 2 == 0 ? 32 : 16,
+                              layer % 2 == 0 ? 32 : 16);
+                gl.glBindFramebuffer(GL_FRAMEBUFFER, layerFbo[layer]);
+                gl.glViewport(0, 0, kSize, kSize);
+                gl.glClearDepth(static_cast<GLdouble>(clearValue));
+                gl.glClear(GL_DEPTH_BUFFER_BIT);
+                if (layer != 1) {
+                    // Layer 1 is the casterless cascade: cleared, never
+                    // drawn. Its folded clear must still land before the
+                    // sampling pass below reads it.
+                    seedDepthAttachmentWithDraw(
+                        gl, layerFbo[layer], kSize, kSize,
+                        0.25f + 0.1f * static_cast<GLfloat>(layer) +
+                            (frame == 1 ? 0.05f : 0.0f));
+                }
+            }
+            expectGLError(gl, GL_NO_ERROR, "c48 cascade clear+draw frame");
+
+            const GLfloat tolerance = 0.02f;
+            const GLfloat layer0 = sampleLayerToScene(0);
+            const GLfloat layer1 = sampleLayerToScene(1);
+            const GLfloat layer2 = sampleLayerToScene(2);
+            expectApproxFloat(layer0,
+                              0.25f + (frame == 1 ? 0.05f : 0.0f), tolerance,
+                              frame == 0 ? "c48 cascade frame0 layer0 drawn depth"
+                                         : "c48 cascade frame1 layer0 drawn depth");
+            expectApproxFloat(layer1, clearValue, tolerance,
+                              frame == 0 ? "c48 cascade frame0 layer1 cleared (casterless)"
+                                         : "c48 cascade frame1 layer1 cleared (casterless)");
+            expectApproxFloat(layer2,
+                              0.45f + (frame == 1 ? 0.05f : 0.0f), tolerance,
+                              frame == 0 ? "c48 cascade frame0 layer2 drawn depth"
+                                         : "c48 cascade frame1 layer2 drawn depth");
+        }
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(sampleProgram);
+        for (GLsizei layer = 0; layer < kLayers; ++layer) {
+            gl.glDeleteFramebuffers(1, &layerFbo[layer]);
+        }
+        gl.glDeleteFramebuffers(1, &sceneFbo);
+        gl.glDeleteTextures(1, &sceneTexture);
+        gl.glDeleteTextures(1, &depthArray);
+        expectGLError(gl, GL_NO_ERROR, "c48 cascade cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "WZ cascade pattern (per-layer clear+draw, casterless layer, sampled consumption, two frames) stayed truthful under folding";
+    }
+    return result;
+}
+
 TestResult runC48DefaultOffZeroEngagementProbe() {
     auto result = runDirectSentinel("c48.fbo-clear-folding.default-off-eager", [&] {
         ScopedEnvVar folding("APPGL_ENABLE_FBO_CLEAR_FOLDING", "0");
@@ -14586,6 +14744,7 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runC48FoldEngagementDepthArrayProbe());
         tests.push_back(runC48MaterializeOnReadbackProbe());
         tests.push_back(runC48CoalesceProbe());
+        tests.push_back(runC48CascadePatternProbe());
         tests.push_back(runC48DefaultOffZeroEngagementProbe());
         return buildJSON(normalizedPhase, tests);
     }
