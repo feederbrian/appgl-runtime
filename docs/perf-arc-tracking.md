@@ -1,6 +1,6 @@
 # AppGL Perf ARC Tracking
 
-Status: C45 is crowned as the Step 7 rung 3 memory/Mach-port stability checkpoint. C46 is the active CPU-bound performance lane: the default-off layered-clear async prototype is committed and live-pinned for opt-in testing, local gates are green, and short autogame A/B suggests a frame-count lift but still needs manual gameplay validation before any default-on/crown claim.
+Status: C45 is crowned as the Step 7 rung 3 memory/Mach-port stability checkpoint. C46 is crowned as a default-off opt-in perf win: the layered-clear async prototype is committed, live-pinned for opt-in use, locally gated, and backed by autogame plus measured manual A/B throughput lift. Default-on is deferred indefinitely because the +4 FPS class win is real but not the order-of-magnitude lever; canonical launch remains default-off while the next S24 work re-aims at structural frame-shape pathologies.
 Date: 2026-06-09
 Owner: AppGL-Foreman
 
@@ -3225,11 +3225,76 @@ C46 layered-clear async CPU-lane prototype:
     `83.733%`). Ports/RSS stayed within the short-run stability envelope:
     opt-in average ports delta `+10.5`, default `+12.5`; opt-in peak RSS
     `969.461 MiB`, default `963.078 MiB`.
-- Current disposition: C46 is a promising opt-in candidate because it removes
-  the LC/LCDC CPU completion waits and consistently increases autogame bridge
-  frames without reopening the C45 stability blocker. It is not crowned and
-  should not be made default-on yet because CPU does not drop and peak in-flight
-  rises. Next gate is manual gameplay A/B using the C46-capable live pin:
-  run default-off and opt-in with the same map/scene, collect FPS/CPU/GPU,
-  command-buffer reason deltas, present failures, RSS/ports, and check whether
-  frame-count/FPS gains hold under normal play rather than highground autogame.
+- Fable-Clerk adjudication, 2026-06-10: C46 is crowned as an opt-in
+  throughput win because it removes the LC/LCDC CPU completion waits and
+  increases both autogame and manual-gameplay bridge frames without reopening
+  the C45 stability blocker. No additional manual pair is required for the
+  opt-in crown. Default-on is deferred indefinitely, not because the evidence
+  is weak, but because the `+4 FPS` / `~12%` class win is not the lever that
+  closes the `24 -> ~150 FPS` gap and may become the wrong policy once the
+  real bottleneck moves. Canonical launch remains default-off; use
+  `APPGL_ENABLE_LAYERED_CLEAR_ASYNC=1` or the C46 async wrapper for opt-in.
+  Step 7 micro-rung cadence is retired as the primary attack; the next S24
+  work targets structural frame-shape pathologies: roughly `4.5`
+  `LayeredClear` plus `1.8` `LayeredClearDrainCurrent` command buffers per
+  frame, and roughly `0.94` `FlushForReadback` commit-and-wait full drains per
+  frame in the live Warzone path.
+- Gate scope / thermal policy: do not make thermals a near-term C46 gate. The
+  user clarified that native/Vulkan control drives thermals when the GPU is fed
+  into the `90%` range; current AppGL is still underfeeding the GPU around
+  `40%`, and one CPU thread near `100%` is not enough on this hardware to drive
+  fan/thermal behavior. Near-term concern is hardware saturation, useful
+  utilization, and avoiding wasted cycles. Battery/thermal throttles may be a
+  later user-controlled feature, not a C46 crown blocker.
+- User manual normal-gameplay observation after the wrapper was added:
+  C46 opt-in is now reported consistently higher at roughly `24 FPS` versus
+  `20 FPS` control. Async CPU is in the high `90%` range with GPU around
+  `40%`; non-async is around `90%` CPU and `35%` GPU. Read: this is stronger
+  than the earlier within-noise framing and suggests async converts LC/LCDC
+  CPU wait into more delivered work and slightly better GPU feed, not lower
+  absolute CPU. Directional CPU-per-delivered-frame improves (`98 / 24 ~= 4.1`
+  versus `90 / 20 = 4.5` CPU%-per-FPS), while absolute CPU headroom worsens.
+  Follow-up user observations report no hitching in either default-off or async
+  mode, with the async uplift consistently around `+4 FPS`; async also feels
+  smoother, but treat that as subjective smoothness coupled to higher FPS, not
+  as proven lower frame-time variance until a harness captures lows/frame-time
+  distribution. User also reports no visual glitches in either path: no
+  observed flicker, depth/clear artifacts, or stale-layer artifacts during
+  identical-window manual gameplay. Memory and Mach behavior are stable, with
+  identical usage windows between default-off and async, materially lowering
+  the C45-regression concern for this manual path. This strengthens C46 from a
+  qualitative/within-noise result into a repeatable manual opt-in perf-win
+  candidate. The measured manual gate should still focus on repeatability,
+  frame-time distribution and `1%` lows, input latency, peak
+  in-flight/backpressure/alloc waits, present failures, and reason deltas
+  proving LC/LCDC sync waits remain removed.
+- Measured manual A/B gate result, single paired run:
+  artifact root
+  `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/live-targets/appgl-bridge/memory-runs/c46-layered-clear-async-manual-ab`.
+  Default-off run `20260609T232142Z-c46-default` and async run
+  `20260609T232531Z-c46-async` used the same C46-capable live pin
+  `A8483891` / SHA256
+  `da11d5d25072d313b7d845d6b421b12557056cefdb282a13fd8a060c5cb915db`,
+  `--window --resolution=1280x720`, `210s` duration, diagnostics interval
+  `30`, profiles disabled, Mach-port sampling enabled, and both exited `0`
+  with empty post-run process scans. Analyzer was rerun with a safe `find`
+  loop after the user's shell hit zsh `No Matches found` on a glob. Default
+  reached bridge frame `4500`; async reached `5070`, a `+570` frame /
+  approximately `+12.7%` throughput lift that matches the user's repeatable
+  `24 FPS` versus `20 FPS` observation directionally. Present failures stayed
+  `0` in both runs. Default used sync reasons:
+  `LayeredClear_delta=20165` and `LayeredClearDrainCurrent_delta=8066`, both
+  `commit-and-wait`. Async used
+  `LayeredClearAsync_delta=21040` and
+  `LayeredClearDrainCurrentAsync_delta=8416`, both `async-commit`, while
+  `FlushForReadback` remained a `commit-and-wait` readback path as intended.
+  Peak in-flight rose from `2/48` default to `6/48` async, with async final
+  current in-flight `1`, retained objects live `0`, retained objects peak `3`,
+  retained command buffers live `1`, and retained command-buffer peak `6`.
+  Post-load `180s -> end` stability stayed bounded: default RSS
+  `1036.906 -> 1048.734 MiB` and ports `373 -> 370`; async RSS
+  `1144.391 -> 1165.578 MiB` and ports `405 -> 404`. Read: C46 is a measured
+  opt-in throughput win. It still does not prove lower CPU cost; it converts
+  old GPU-only LC/LCDC waits into more delivered work and modestly better GPU
+  feed. The win is crowned for opt-in use, while default-on remains deferred
+  and the roadmap moves to structural attribution.
