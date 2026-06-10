@@ -188,6 +188,19 @@ struct GLBufferObject {
     bool r5ExpandedIndexEvicted = false;
     GLProducerPendingState producerPending;
     bool gpuAuthoredSinceCpuWrite = false;
+
+    // S24 rename-on-write hazard tracking. A buffer bound into a draw as
+    // a LIVE MTLBuffer pointer (>4KB UBO, vertex/index) is hazardous
+    // until the command buffer that encoded the reference COMPLETES; a
+    // CPU write before then must rename instead of mutating [contents]
+    // in place (the kc.inplace-ubo-race repro). Submit indices compare
+    // against the queue's completed watermark (serial queue → in-order
+    // completion). gpuWriteBindSubmitIndex tracks GPU-write-class
+    // bindings (SSBO/image/XFB) — renaming those would drop GPU writes,
+    // so they fall back to in-place.
+    std::uint64_t liveBindSubmitIndex = 0;
+    std::uint64_t gpuWriteBindSubmitIndex = 0;
+    bool textureBufferSource = false;  // renaming would orphan the view
 };
 
 struct GLTextureDesc {

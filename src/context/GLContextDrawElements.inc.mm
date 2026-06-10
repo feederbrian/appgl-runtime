@@ -626,6 +626,10 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             elementBuffer != nullptr && !elementIndexTypeNeedsExpansion(type) &&
             elementBuffer->metalBuffer != nullptr) {
             tdi.metalIndexBuffer = elementBuffer->metalBuffer;
+            if (impl_->frameGraph != nullptr) {
+                elementBuffer->liveBindSubmitIndex =
+                    impl_->frameGraph->openCommandBufferSubmitIndex();
+            }
             tdi.metalIndexBufferOffset = indexOffset;
         }
         populateTranslatedDrawFixedFunctionState(
@@ -780,6 +784,10 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     tdi.vertexStride = posStride;
                     // OPT-5: pass pre-uploaded Metal buffer for direct bind.
                     tdi.metalVertexBuffer = vbo->metalBuffer;
+                    if (impl_->frameGraph != nullptr) {
+                        vbo->liveBindSubmitIndex =
+                            impl_->frameGraph->openCommandBufferSubmitIndex();
+                    }
                     tdi.metalVertexBufferOffset = startOff;
                     tdi.glVertexBuffer = vaoLayout.primaryBufferName;
                     tdi.indices = drawElementsIndexPtr;
@@ -795,6 +803,10 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                         !elementIndexTypeNeedsExpansion(type) &&
                         elementBuffer->metalBuffer != nullptr) {
                         tdi.metalIndexBuffer = elementBuffer->metalBuffer;
+                        if (impl_->frameGraph != nullptr) {
+                            elementBuffer->liveBindSubmitIndex =
+                                impl_->frameGraph->openCommandBufferSubmitIndex();
+                        }
                         tdi.metalIndexBufferOffset = indexOffset;
                     }
                     // Phase 8X Group 4d follow-up¹⁴ — centralised fixed-

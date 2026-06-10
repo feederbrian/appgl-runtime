@@ -16263,6 +16263,13 @@ struct GLContext::Impl {
                         dataSize > 4096 && bufObj->metalBuffer != nullptr) {
                         ubo.metalBuffer = bufObj->metalBuffer;
                         ubo.metalBufferOffset = static_cast<std::size_t>(binding.offset);
+                        // S24 rename-on-write: a LIVE pointer enters the
+                        // open CB — a CPU write before that CB completes
+                        // must rename (kc.inplace-ubo-race).
+                        if (frameGraph != nullptr) {
+                            bufObj->liveBindSubmitIndex =
+                                frameGraph->openCommandBufferSubmitIndex();
+                        }
                     }
                     ubo.isVertex = isVertex;
                     ubo.isFragment = isFragment;
@@ -17433,6 +17440,50 @@ struct GLContext::Impl {
         if (length <= 0 || object.metalBuffer == nullptr || object.shadowBytes.empty()) {
             return;
         }
+        // S24 rename-on-write: if this buffer was bound into a command
+        // buffer that has NOT completed, an in-place [contents] write
+        // would be read by the already-encoded draws (GL requires each
+        // draw to see draw-time contents — kc.inplace-ubo-race repro).
+        // Rename instead: fresh MTLBuffer seeded from the full shadow,
+        // swap the object's pointer; the pending CB retains the old
+        // buffer ([commandQueue commandBuffer] = retaining variant), so
+        // its draws keep reading the old contents and the old buffer is
+        // freed on completion. Guards fall back to in-place (today's
+        // behavior) where renaming would lose state: GPU-authored
+        // contents (rename copies the CPU shadow), live map pointers,
+        // sparse backing, and buffer-texture sources (views wrap the
+        // exact MTLBuffer).
+        if (object.liveBindSubmitIndex > 0 && frameGraph != nullptr &&
+            object.liveBindSubmitIndex > frameGraph->completedCommandBufferWatermark()) {
+            const bool renameSafe =
+                !object.gpuAuthoredSinceCpuWrite &&
+                !object.producerPending.hasAny(kProducerAll) &&
+                !object.mapped &&
+                !object.sparseStorage &&
+                !object.textureBufferSource &&
+                object.fp64TransportSidecars.empty() &&
+                device != nil;
+            if (renameSafe) {
+                id<MTLBuffer> oldBuffer = metalBufferFromRaw(object.metalBuffer);
+                id<MTLBuffer> fresh =
+                    [device newBufferWithLength:[oldBuffer length]
+                                        options:metalBufferOptionsForUsage(object.usage)];
+                if (fresh != nil) {
+                    const std::size_t seedBytes = std::min(
+                        object.shadowBytes.size(),
+                        static_cast<std::size_t>([fresh length]));
+                    std::memcpy([fresh contents], object.shadowBytes.data(), seedBytes);
+                    releaseRetainedMetalObject(object.metalBuffer);
+                    object.metalBuffer = transferRetainedMetalObject(fresh);
+                    object.liveBindSubmitIndex = 0;
+                    ++bufferRenames;
+                    bufferRenameBytes += seedBytes;
+                    return;  // fresh buffer already holds the post-write shadow
+                }
+            }
+            ++bufferRenameSkips;
+            // fall through: in-place write (pre-fix behavior)
+        }
         std::uint8_t* contents = mutableBufferContents(object);
         if (contents == nullptr) {
             return;
@@ -17443,6 +17494,12 @@ struct GLContext::Impl {
             static_cast<std::size_t>(length)
         );
     }
+
+    // S24 rename-on-write engagement counters (export: metalResources
+    // inventory; renames/frame = JSONL diff, the storm watch).
+    std::uint64_t bufferRenames = 0;
+    std::uint64_t bufferRenameBytes = 0;
+    std::uint64_t bufferRenameSkips = 0;
 
     bool refreshRGB32BufferTextureView(GLTextureObject& object) {
         if (object.target != GL_TEXTURE_BUFFER ||
@@ -26615,6 +26672,9 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             frameGraphMetal.drawablePresentCalls;
         inventory.frameGraphPresentCalls =
             frameGraphMetal.presentCalls;
+        inventory.bufferRenames = impl_->bufferRenames;
+        inventory.bufferRenameBytes = impl_->bufferRenameBytes;
+        inventory.bufferRenameSkips = impl_->bufferRenameSkips;
         inventory.frameGraphFboClearsDeferred =
             frameGraphMetal.fboClearsDeferred;
         inventory.frameGraphFboClearsFolded =
@@ -38553,6 +38613,9 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
     tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
     tdi.vertexStride = posStride;
     tdi.metalVertexBuffer = vbo->metalBuffer;
+    if (frameGraph != nullptr) {
+        vbo->liveBindSubmitIndex = frameGraph->openCommandBufferSubmitIndex();
+    }
     tdi.metalVertexBufferOffset = startOff;
     tdi.glVertexBuffer = vaoLayout.primaryBufferName;
     // Filtered indices fed as UINT32 client-side index array;

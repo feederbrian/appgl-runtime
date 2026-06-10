@@ -1413,6 +1413,10 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     tdi.vertexStride = posStride;
                     // OPT-5: pass pre-uploaded Metal buffer for direct bind.
                     tdi.metalVertexBuffer = vbo->metalBuffer;
+                    if (impl_->frameGraph != nullptr) {
+                        vbo->liveBindSubmitIndex =
+                            impl_->frameGraph->openCommandBufferSubmitIndex();
+                    }
                     tdi.metalVertexBufferOffset = startOff;
                     tdi.glVertexBuffer = vaoLayout.primaryBufferName;
                     drawProfile.mark(GLDrawProfileBucket::InfoInit);
@@ -2163,6 +2167,10 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                         tdi.glVertexBuffer = 0;
                     } else {
                         tdi.metalVertexBuffer = vbo->metalBuffer;
+                    if (impl_->frameGraph != nullptr) {
+                        vbo->liveBindSubmitIndex =
+                            impl_->frameGraph->openCommandBufferSubmitIndex();
+                    }
                         tdi.metalVertexBufferOffset = startOff;
                         tdi.glVertexBuffer = vaoLayout.primaryBufferName;
                     }

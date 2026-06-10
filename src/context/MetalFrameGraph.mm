@@ -13149,6 +13149,18 @@ fragment float4 appgl_immediate_textured_fs(
         CFRelease((CFTypeRef)entry.tex);
     }
 
+    std::uint64_t openCommandBufferSubmitIndexImpl() const {
+        return commandSubmission != nullptr
+            ? commandSubmission->submittedCount() + 1
+            : 0;
+    }
+
+    std::uint64_t completedCommandBufferWatermarkImpl() const {
+        return commandSubmission != nullptr
+            ? commandSubmission->completedCount()
+            : 0;
+    }
+
     void materializeAllPendingFboClears() {
         if (pendingFboClears.empty()) {
             return;
@@ -19820,6 +19832,14 @@ void MetalFrameGraph::materializePendingFboClearsForTexture(void* tex) {
 
 void MetalFrameGraph::materializeAllPendingFboClears() {
     impl_->materializeAllPendingFboClears();
+}
+
+std::uint64_t MetalFrameGraph::openCommandBufferSubmitIndex() const {
+    return impl_->openCommandBufferSubmitIndexImpl();
+}
+
+std::uint64_t MetalFrameGraph::completedCommandBufferWatermark() const {
+    return impl_->completedCommandBufferWatermarkImpl();
 }
 
 bool MetalFrameGraph::writeMultisampleDepthStencilRegion(

@@ -200,6 +200,10 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
                     tdi.vertexStride = posStride;
                     tdi.metalVertexBuffer = vbo->metalBuffer;
+                    if (impl_->frameGraph != nullptr) {
+                        vbo->liveBindSubmitIndex =
+                            impl_->frameGraph->openCommandBufferSubmitIndex();
+                    }
                     tdi.metalVertexBufferOffset = startOff;
                     tdi.glVertexBuffer = vaoLayout.primaryBufferName;
                     tdi.indices = effectivePtr;
@@ -208,6 +212,10 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     tdi.glIndexBuffer = elementBufferName;
                     if (!elementIndexTypeNeedsExpansion(type) && elementBuffer->metalBuffer != nullptr) {
                         tdi.metalIndexBuffer = elementBuffer->metalBuffer;
+                        if (impl_->frameGraph != nullptr) {
+                            elementBuffer->liveBindSubmitIndex =
+                                impl_->frameGraph->openCommandBufferSubmitIndex();
+                        }
                         tdi.metalIndexBufferOffset = indexOffset;
                     }
                     populateTranslatedDrawFixedFunctionState(
@@ -799,6 +807,10 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
                     tdi.vertexStride = posStride;
                     tdi.metalVertexBuffer = vbo->metalBuffer;
+                    if (impl_->frameGraph != nullptr) {
+                        vbo->liveBindSubmitIndex =
+                            impl_->frameGraph->openCommandBufferSubmitIndex();
+                    }
                     tdi.metalVertexBufferOffset = startOff;
                     tdi.glVertexBuffer = vaoLayout.primaryBufferName;
                     tdi.indices = effectivePtr;
@@ -807,6 +819,10 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     tdi.glIndexBuffer = elementBufferName;
                     if (!elementIndexTypeNeedsExpansion(type) && elementBuffer->metalBuffer != nullptr) {
                         tdi.metalIndexBuffer = elementBuffer->metalBuffer;
+                        if (impl_->frameGraph != nullptr) {
+                            elementBuffer->liveBindSubmitIndex =
+                                impl_->frameGraph->openCommandBufferSubmitIndex();
+                        }
                         tdi.metalIndexBufferOffset = indexOffset;
                     }
                     populateTranslatedDrawFixedFunctionState(

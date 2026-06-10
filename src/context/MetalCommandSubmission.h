@@ -588,6 +588,17 @@ public:
         return makeCommandBufferImpl(appGLCommandReasonNSString(reason), reason, true);
     }
 
+    // S24 rename-on-write: cheap watermark accessors for buffer hazard
+    // checks (full debugCounters() copies the whole struct). The queue
+    // is serial, so completion order == submission order and a single
+    // completed watermark is a valid busy test.
+    std::uint64_t submittedCount() const {
+        return state_ ? state_->submittedCommandBuffers.load(std::memory_order_relaxed) : 0;
+    }
+    std::uint64_t completedCount() const {
+        return state_ ? state_->completedCommandBuffers.load(std::memory_order_relaxed) : 0;
+    }
+
     AppGLCommandSubmissionDebugCounters debugCounters() const {
         AppGLCommandSubmissionDebugCounters counters;
         if (!state_) {

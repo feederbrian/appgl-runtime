@@ -15964,6 +15964,148 @@ TestResult runC49MultiProgramContinuationProbe() {
     return result;
 }
 
+// K+C interaction triage (S24 flicker): in-place glBufferSubData on a
+// >4KB UBO — the size class bound as a LIVE MTLBuffer pointer (≤4KB UBOs
+// go through snapshotted setBytes) — between draws that share a command
+// buffer. GL requires each draw to see the UBO contents AS OF the draw;
+// an in-place [contents] memcpy with no hazard tracking makes every
+// earlier encoded-but-unexecuted draw read the FINAL contents instead.
+// Run via the on-demand `kc-interaction-probes` phase.
+TestResult runKCInplaceUboRaceProbe(bool continuationOn) {
+    const std::string id = std::string("kc.inplace-ubo-race.") +
+        (continuationOn ? "continued-pass" : "per-draw-pass");
+    auto result = runDirectSentinel(id.c_str(), [&] {
+        ScopedEnvVar continuation("APPGL_ENABLE_FBO_PASS_CONTINUATION",
+                                  continuationOn ? "1" : "0");
+        ScopedEnvVar continuationHatch("APPGL_DISABLE_FBO_PASS_CONTINUATION", "0");
+        ScopedEnvVar keepalive("APPGL_ENABLE_VIEWPORT_REQUEST_KEEPALIVE", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        constexpr GLsizei kSize = 8;
+        const std::uint64_t renamesBefore =
+            context.metalResourceInventory().bufferRenames;
+
+        GLuint colorTex = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, kSize, kSize);
+        GLuint fbo = 0;
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+
+        // 260 vec4s = 4160 bytes > the 4KB inline threshold → the draw
+        // path binds the live MTLBuffer instead of copying via setBytes.
+        static constexpr const char* kVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "uniform vec4 uRect;\n"
+            "void main() {\n"
+            "    vec2 base = aPos * 0.5 + 0.5;\n"
+            "    vec2 pos = uRect.xy + base * uRect.zw;\n"
+            "    gl_Position = vec4(pos * 2.0 - 1.0, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kFS =
+            "#version 330 core\n"
+            "layout(std140) uniform BigBlock { vec4 colors[260]; };\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = colors[0]; }\n";
+        const GLuint program = buildBenchProgram(kVS, kFS);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(program, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "kc race program links");
+
+        GLuint ubo = 0;
+        gl.glGenBuffers(1, &ubo);
+        gl.glBindBuffer(GL_UNIFORM_BUFFER, ubo);
+        std::vector<float> zero(260 * 4, 0.0f);
+        gl.glBufferData(GL_UNIFORM_BUFFER,
+                        static_cast<GLsizeiptr>(zero.size() * sizeof(float)),
+                        zero.data(), GL_DYNAMIC_DRAW);
+        const GLuint blockIndex = gl.glGetUniformBlockIndex(program, "BigBlock");
+        expectCondition(blockIndex != GL_INVALID_INDEX, "kc race block index");
+        gl.glUniformBlockBinding(program, blockIndex, 1);
+        gl.glBindBufferBase(GL_UNIFORM_BUFFER, 1, ubo);
+
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glUseProgram(program);
+        gl.glBindVertexArray(vao);
+        const GLint rectLoc = gl.glGetUniformLocation(program, "uRect");
+
+        // Four quadrant draws, updating colors[0] IN PLACE before each.
+        const float quadColors[4][4] = {
+            {1.0f, 0.0f, 0.0f, 1.0f},
+            {0.0f, 1.0f, 0.0f, 1.0f},
+            {0.0f, 0.0f, 1.0f, 1.0f},
+            {1.0f, 1.0f, 0.0f, 1.0f},
+        };
+        const float rects[4][4] = {
+            {0.0f, 0.0f, 0.5f, 0.5f},
+            {0.5f, 0.0f, 0.5f, 0.5f},
+            {0.0f, 0.5f, 0.5f, 0.5f},
+            {0.5f, 0.5f, 0.5f, 0.5f},
+        };
+        for (int i = 0; i < 4; ++i) {
+            gl.glBufferSubData(GL_UNIFORM_BUFFER, 0, 4 * sizeof(float),
+                               quadColors[i]);
+            gl.glUniform4fv(rectLoc, 1, rects[i]);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        expectGLError(gl, GL_NO_ERROR, "kc race draws");
+
+        // GL semantics: each quadrant holds ITS OWN color.
+        auto px = [&](GLint x, GLint y) -> std::array<std::uint8_t, 4> {
+            std::array<std::uint8_t, 4> rgba = {9, 9, 9, 9};
+            gl.glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                            rgba.data());
+            return rgba;
+        };
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        const std::array<std::array<std::uint8_t, 4>, 4> got = {
+            px(1, 1), px(6, 1), px(1, 6), px(6, 6)};
+        for (int i = 0; i < 4; ++i) {
+            const std::string tag =
+                "kc race quadrant " + std::to_string(i) + " holds draw-time color";
+            expectApproxByte(got[static_cast<std::size_t>(i)][0],
+                             static_cast<std::uint8_t>(quadColors[i][0] * 255.0f),
+                             4u, tag.c_str());
+            expectApproxByte(got[static_cast<std::size_t>(i)][1],
+                             static_cast<std::uint8_t>(quadColors[i][1] * 255.0f),
+                             4u, tag.c_str());
+            expectApproxByte(got[static_cast<std::size_t>(i)][2],
+                             static_cast<std::uint8_t>(quadColors[i][2] * 255.0f),
+                             4u, tag.c_str());
+        }
+
+        // Non-vacuity: the in-place writes into the busy UBO must have
+        // gone through the rename path, not silently in-place.
+        expectCondition(
+            context.metalResourceInventory().bufferRenames > renamesBefore,
+            "kc race: rename-on-write engaged (bufferRenames advanced)");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteBuffers(1, &ubo);
+        gl.glDeleteProgram(program);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        expectGLError(gl, GL_NO_ERROR, "kc race cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "in-place >4KB-UBO updates between same-CB draws landed per-draw (no stale-final-contents race)";
+    }
+    return result;
+}
+
 TestResult runC49DefaultFbIsolationProbe() {
     auto result = runDirectSentinel("c49.pass-continuation.default-fb-isolation", [&] {
         ScopedEnvVar continuation("APPGL_ENABLE_FBO_PASS_CONTINUATION", "1");
@@ -16151,6 +16293,12 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runTextureMipShadowEvictionR8RedundantProbe());
         tests.push_back(runTextureMipShadowEvictionCopyImageProbe());
         tests.push_back(runTextureMipShadowEvictionPartialTexSubImageProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "kc-interaction-probes") {
+        tests.push_back(runKCInplaceUboRaceProbe(true));
+        tests.push_back(runKCInplaceUboRaceProbe(false));
         return buildJSON(normalizedPhase, tests);
     }
 

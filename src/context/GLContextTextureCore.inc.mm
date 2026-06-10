@@ -1735,6 +1735,10 @@ bool GLContext::texBufferRange(
             pushError(GL_INVALID_VALUE);
             return false;
         }
+        // S24 rename-on-write: buffer-texture views wrap this exact
+        // MTLBuffer — renaming it would orphan the view, so writes to
+        // it stay in-place (and are counted as skips).
+        checkBuf->textureBufferSource = true;
     }
 
     // Record the buffer-texture binding state.

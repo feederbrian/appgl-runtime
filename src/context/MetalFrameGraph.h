@@ -1112,6 +1112,11 @@ public:
     // glBlitFramebuffer): land every deferred clear. No-op when the
     // registry is empty or folding is disabled.
     void materializeAllPendingFboClears();
+    // S24 rename-on-write hazard watermarks: a live-pointer buffer bind
+    // stamps openCommandBufferSubmitIndex(); a later CPU write while
+    // that index exceeds completedCommandBufferWatermark() must rename.
+    std::uint64_t openCommandBufferSubmitIndex() const;
+    std::uint64_t completedCommandBufferWatermark() const;
     bool writeMultisampleDepthStencilRegion(void* tex, GLint x, GLint y,
                                             GLsizei width, GLsizei height,
                                             const GLfloat* depthPixels,
