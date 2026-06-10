@@ -229,6 +229,23 @@ static bool fboClearFoldingEnabled() {
     return appglEnvEnabledDefaultOff("APPGL_ENABLE_FBO_CLEAR_FOLDING");
 }
 
+// C49 rider: when the requested default-drawable extent changes WITHOUT
+// an actual resize (grow-only skip — Warzone's per-frame shadow↔scene
+// viewport alternation), keep the transient state alive instead of
+// committing the current CB under the FlushForReadback tag and paying a
+// full-pipeline drainAllOutstanding (measured 8.9% of wall in the
+// d73c6e1 operator baseline). Real resizes keep the full invalidate.
+static bool viewportRequestKeepaliveEnabled() {
+    return appglEnvEnabledDefaultOff("APPGL_ENABLE_VIEWPORT_REQUEST_KEEPALIVE");
+}
+
+// C49 primary: keep the FBO render-pass encoder open across consecutive
+// translated draws targeting the same attachment signature instead of
+// closing it at every draw's encode tail. Default-off.
+static bool fboPassContinuationEnabled() {
+    return appglEnvEnabledDefaultOff("APPGL_ENABLE_FBO_PASS_CONTINUATION");
+}
+
 using DrawProfileClock = std::chrono::steady_clock;
 using DrawProfileTimePoint = DrawProfileClock::time_point;
 
@@ -4171,6 +4188,19 @@ struct MetalFrameGraph::Impl {
             drawableResizeLastEffectiveHeight =
                 static_cast<std::uint64_t>(drawableHeight);
             if (requestedChanged) {
+                // C49 rider: nothing resized — the drawable, textures
+                // and encoder targets are unchanged. The CB split +
+                // FlushForReadback-tagged commit + full-pipeline
+                // drainAllOutstanding here was a defensive relic costing
+                // 8.9% of wall live (d73c6e1 baseline). Keepalive keeps
+                // the headless-readback cache clear (the only state the
+                // request extent actually feeds) and leaves the current
+                // CB/encoder alone.
+                if (viewportRequestKeepaliveEnabled()) {
+                    headlessReadbackRGBA.clear();
+                    hasHeadlessReadback = false;
+                    return;
+                }
                 ++encoderClosesViewportRequestInvalidate;  // C49 census (rider target → ~0)
                 flushParallelTranslatedDrawBatch(
                     ParallelEncodeBoundaryReason::Resize);
