@@ -1275,6 +1275,21 @@ bool injectDepthCompareFlip(std::string& msl) {
         return false;
     }
 
+    // Abandonment is observable: a compare shader we could not safely
+    // rewrite stays UNFLIPPED (pre-fix behavior, fast) — loud stderr so
+    // a silently-unflipped shader cannot masquerade as fixed.
+    static std::atomic<std::uint64_t> abandonCount{0};
+    const auto abandonRewrite = [&](const char* why) -> bool {
+        const std::uint64_t n =
+            abandonCount.fetch_add(1, std::memory_order_relaxed) + 1;
+        std::fprintf(stderr,
+            "[APPGL] compare-flip rewrite ABANDONED (%s) total=%llu — "
+            "shader keeps unflipped compare sampling\n",
+            why, static_cast<unsigned long long>(n));
+        std::fflush(stderr);
+        return false;
+    };
+
     // All mutations land on a working copy so any anchor failure can
     // fall back to the untouched original.
     std::string working = msl;
@@ -1343,8 +1358,115 @@ bool injectDepthCompareFlip(std::string& msl) {
     // the first fragment-stage buffer index not already present in the
     // generated MSL; the frame graph reads the actual slot back from
     // the "[[buffer(N)]]" needle (depthCompareFlipBufferSlot).
+    // GLSL helper functions that perform the lookup are emitted by
+    // SPIRV-Cross as standalone MSL functions with the texture/sampler
+    // threaded through their parameter lists (the Warzone
+    // shadow_mapping.glsl shape). The flip-factor buffer must be
+    // threaded the same way or the wrapped call sites inside helpers
+    // reference an out-of-scope identifier — which fails compilation,
+    // and an uncached compile failure re-runs per draw (the e2a876d
+    // live regression). Mirror SPIRV-Cross: every non-main0 function
+    // whose parameter list contains a depth receiver gets
+    // `constant float* _appgl_CmpFlip` appended, and every CALL of
+    // that function gets the identifier appended (in scope at every
+    // caller: main0 has the attributed parameter; helper callers have
+    // their own appended parameter).
+    {
+        // Collect helper names: definitions are NAME(...) followed by
+        // optional whitespace and '{'; the receiver type inside the
+        // parameter list marks them.
+        std::vector<std::string> helperNames;
+        std::size_t scan = 0;
+        while ((scan = working.find("depth2d", scan)) != std::string::npos) {
+            // Find the enclosing parameter list: walk back to '(' at
+            // paren depth 0 relative to this position.
+            std::size_t open = working.rfind('(', scan);
+            const std::size_t prevClose = working.rfind(')', scan);
+            if (open == std::string::npos ||
+                (prevClose != std::string::npos && prevClose > open)) {
+                scan += 7;
+                continue;
+            }
+            // Function name directly before '('.
+            std::size_t nameEnd = open;
+            while (nameEnd > 0 &&
+                   std::isspace(static_cast<unsigned char>(working[nameEnd - 1]))) {
+                --nameEnd;
+            }
+            std::size_t nameStart = nameEnd;
+            while (nameStart > 0 &&
+                   (std::isalnum(static_cast<unsigned char>(working[nameStart - 1])) ||
+                    working[nameStart - 1] == '_')) {
+                --nameStart;
+            }
+            if (nameEnd > nameStart) {
+                const std::string name =
+                    working.substr(nameStart, nameEnd - nameStart);
+                if (name != "main0" &&
+                    std::find(helperNames.begin(), helperNames.end(), name) ==
+                        helperNames.end()) {
+                    // Confirm it is a definition: matching ')' followed
+                    // by optional whitespace then '{'.
+                    std::size_t depth = 1;
+                    std::size_t cursor = open + 1;
+                    while (cursor < working.size() && depth > 0) {
+                        if (working[cursor] == '(') ++depth;
+                        else if (working[cursor] == ')') --depth;
+                        ++cursor;
+                    }
+                    std::size_t after = cursor;
+                    while (after < working.size() &&
+                           std::isspace(static_cast<unsigned char>(working[after]))) {
+                        ++after;
+                    }
+                    if (after < working.size() && working[after] == '{') {
+                        helperNames.push_back(name);
+                    }
+                }
+            }
+            scan += 7;
+        }
+        // Thread the parameter through every definition and every call.
+        for (const auto& name : helperNames) {
+            const std::string needle = name + "(";
+            std::size_t pos = 0;
+            while ((pos = working.find(needle, pos)) != std::string::npos) {
+                // Reject partial identifier matches (e.g. xNAME().
+                if (pos > 0 &&
+                    (std::isalnum(static_cast<unsigned char>(working[pos - 1])) ||
+                     working[pos - 1] == '_')) {
+                    pos += needle.size();
+                    continue;
+                }
+                std::size_t depth = 1;
+                std::size_t cursor = pos + needle.size();
+                while (cursor < working.size() && depth > 0) {
+                    if (working[cursor] == '(') ++depth;
+                    else if (working[cursor] == ')') --depth;
+                    ++cursor;
+                }
+                if (depth != 0) {
+                    return abandonRewrite("call-paren-imbalance");
+                }
+                const std::size_t closeParen = cursor - 1;
+                std::size_t after = cursor;
+                while (after < working.size() &&
+                       std::isspace(static_cast<unsigned char>(working[after]))) {
+                    ++after;
+                }
+                const bool isDefinition =
+                    after < working.size() && working[after] == '{';
+                const std::string insertion = isDefinition
+                    ? (", constant float* " + std::string(kFlipName))
+                    : (", " + std::string(kFlipName));
+                working.insert(closeParen, insertion);
+                pos = closeParen + insertion.size() + 1;
+            }
+        }
+    }
+
     if (!findMain0ParameterEnd(working, paramEnd)) {
-        return false;
+        return abandonRewrite("main0-signature");
     }
     std::uint32_t chosenSlot = 0;
     bool haveSlot = false;
@@ -1357,24 +1479,33 @@ bool injectDepthCompareFlip(std::string& msl) {
         }
     }
     if (!haveSlot) {
-        return false;
+        return abandonRewrite("no-free-buffer-slot");
     }
     const std::string param =
         ", constant float* " + std::string(kFlipName) +
         " [[buffer(" + std::to_string(chosenSlot) + ")]]";
     working.insert(paramEnd, param);
 
-    // Inject the coordinate helper above the fragment entry point.
+    // Inject the coordinate helper ABOVE every function that may call
+    // it — immediately after `using namespace metal;` (helpers precede
+    // the fragment entry point in SPIRV-Cross emission, so anchoring on
+    // "fragment " placed it too late for helper-body call sites).
     static constexpr const char* kHelper =
         "\nstatic inline float2 _appgl_cmpFlipCoord(float2 c, float f)\n"
         "{\n"
         "    return float2(c.x, mix(c.y, 1.0f - c.y, f));\n"
-        "}\n\n";
-    const std::size_t entryPos = working.find("fragment ");
-    if (entryPos == std::string::npos) {
-        return false;
+        "}\n";
+    static constexpr const char* kUsingAnchor = "using namespace metal;\n";
+    const std::size_t usingPos = working.find(kUsingAnchor);
+    if (usingPos != std::string::npos) {
+        working.insert(usingPos + std::strlen(kUsingAnchor), kHelper);
+    } else {
+        const std::size_t entryPos = working.find("fragment ");
+        if (entryPos == std::string::npos) {
+            return abandonRewrite("no-entry-anchor");
+        }
+        working.insert(entryPos, kHelper);
     }
-    working.insert(entryPos, kHelper);
     msl = std::move(working);
     return true;
 }

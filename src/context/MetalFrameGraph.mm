@@ -18486,6 +18486,24 @@ private:
             }
         }
 
+        // Negative cache — a source that failed to compile must NOT be
+        // recompiled on every draw that references it. Without this, one
+        // broken generated shader turns into a 300-500ms Metal compile
+        // per draw per frame on the main thread (the e2a876d live
+        // regression: ~1 frame per 10 seconds + beachball). Exact-source
+        // match on hash collision; bounded; loud one-time diagnostic.
+        {
+            auto failedIt = mslLibraryCompileFailures.find(key.sourceHash);
+            if (failedIt != mslLibraryCompileFailures.end()) {
+                for (const auto& failedSource : failedIt->second) {
+                    if (failedSource == msl) {
+                        ++mslLibraryCompileFailureHits;
+                        return nil;
+                    }
+                }
+            }
+        }
+
         ++mslLibraryCacheMisses;
         id<MTLLibrary> lib = nil;
         @autoreleasepool {
@@ -18522,9 +18540,29 @@ private:
             bucket.push_back(std::move(entry));
             addMslLibraryCacheAccounting(bucket.back());
             evictMslLibraryCacheIfNeeded();
+        } else {
+            // Record the failure (bounded; loud once per source). The
+            // unconditional stderr line is half the protection — a
+            // fast-fail that is silent hides a broken shader.
+            constexpr std::size_t kMaxFailedSources = 64;
+            if (mslLibraryCompileFailureCount < kMaxFailedSources) {
+                mslLibraryCompileFailures[key.sourceHash].push_back(msl);
+                ++mslLibraryCompileFailureCount;
+            }
+            std::fprintf(stderr,
+                "[APPGL] MSL library compile FAILED (negative-cached, "
+                "failures=%llu) — draws using this shader are dropped; "
+                "set APPGL_TRACE_SHADER_BUILD=1 for the compiler error\n",
+                static_cast<unsigned long long>(
+                    mslLibraryCompileFailureCount));
+            std::fflush(stderr);
         }
         return lib;  // nil on failure; caller handles
     }
+    std::unordered_map<std::uint64_t, std::vector<std::string>>
+        mslLibraryCompileFailures;
+    std::uint64_t mslLibraryCompileFailureCount = 0;
+    std::uint64_t mslLibraryCompileFailureHits = 0;
 
     // Depth/stencil state cache — keyed by packed (depthTestEnabled, depthFunc).
     // The state space is tiny (~16 combinations); after warmup every draw is

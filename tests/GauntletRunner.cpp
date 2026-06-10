@@ -15038,6 +15038,158 @@ TestResult runDepthLayerShadowCompareProbe() {
     return result;
 }
 
+// The Warzone shadow_mapping.glsl shape: the compare lookup lives in a
+// GLSL HELPER FUNCTION, which SPIRV-Cross emits as a separate MSL
+// function taking the texture/sampler as parameters. The flip fixup
+// must reach that scope (the live e2a876d regression: a main0-only
+// injected parameter made the wrapped helper fail to compile, and the
+// uncached compile failure re-ran per draw — beachball).
+TestResult runDepthLayerHelperFunctionCompareProbe() {
+    auto result = runDirectSentinel("depth-layer.shadow-compare-helper-fn", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& gl = scoped.gl();
+        constexpr GLsizei kSize = 4;
+
+        GLuint depthArray = 0;
+        gl.glGenTextures(1, &depthArray);
+        setupDCR3CDepth32FArrayTexture(gl, depthArray, kSize, kSize, 3);
+        primeDCR3CDepth32FTexture(gl, depthArray, kSize, kSize, 3);
+        GLuint layerFbo = 0;
+        setupDCR3CDepthArrayLayerFbo(gl, layerFbo, depthArray, 1);
+
+        GLuint sceneTexture = 0;
+        gl.glGenTextures(1, &sceneTexture);
+        setupDCR3CRGBA8Texture(gl, sceneTexture, kSize, kSize);
+        GLuint sceneFbo = 0;
+        setupDCR3CTextureFbo(gl, sceneFbo, sceneTexture);
+
+        static constexpr const char* kGradVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "out vec2 vUV;\n"
+            "void main() {\n"
+            "    vUV = aPos * 0.5 + 0.5;\n"
+            "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kGradDepthFS =
+            "#version 330 core\n"
+            "in vec2 vUV;\n"
+            "void main() { gl_FragDepth = vUV.y; }\n";
+        // Mirror of WZ shadow_mapping.glsl: helper takes uv pieces and
+        // performs the compare lookup; main accumulates several taps.
+        static constexpr const char* kHelperFS =
+            "#version 330 core\n"
+            "uniform sampler2DArrayShadow uShadow;\n"
+            "uniform float uLayer;\n"
+            "uniform float uRef;\n"
+            "in vec2 vUV;\n"
+            "out vec4 fragColor;\n"
+            "float lookupShadow(vec2 base, vec2 offs, float layer, float ref) {\n"
+            "    vec2 uv = base + offs;\n"
+            "    return texture(uShadow, vec4(uv, layer, ref));\n"
+            "}\n"
+            "void main() {\n"
+            "    float sum = lookupShadow(vUV, vec2(0.0), uLayer, uRef);\n"
+            "    sum += lookupShadow(vUV, vec2(0.0, 0.0), uLayer, uRef);\n"
+            "    fragColor = vec4(sum * 0.5, sum * 0.5, sum * 0.5, 1.0);\n"
+            "}\n";
+        const GLuint gradProgram = buildBenchProgram(kGradVS, kGradDepthFS);
+        const GLuint helperProgram = buildBenchProgram(kGradVS, kHelperFS);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(gradProgram, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "helper-fn gradient program links");
+        gl.glGetProgramiv(helperProgram, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "helper-fn compare program links");
+
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, layerFbo);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        gl.glEnable(GL_DEPTH_TEST);
+        gl.glDepthMask(GL_TRUE);
+        gl.glDepthFunc(GL_ALWAYS);
+        gl.glUseProgram(gradProgram);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        expectGLError(gl, GL_NO_ERROR, "helper-fn gradient write");
+
+        gl.glBindTexture(GL_TEXTURE_2D_ARRAY, depthArray);
+        gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_MODE,
+                           GL_COMPARE_REF_TO_TEXTURE);
+        gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_FUNC,
+                           GL_LEQUAL);
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glUseProgram(helperProgram);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D_ARRAY, depthArray);
+        gl.glUniform1i(gl.glGetUniformLocation(helperProgram, "uShadow"), 0);
+        gl.glUniform1f(gl.glGetUniformLocation(helperProgram, "uLayer"), 1.0f);
+        gl.glUniform1f(gl.glGetUniformLocation(helperProgram, "uRef"), 0.5f);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        expectGLError(gl, GL_NO_ERROR, "helper-fn compare draw");
+
+        for (GLsizei row = 0; row < kSize; ++row) {
+            std::array<std::uint8_t, 4> rgba = {127, 127, 127, 127};
+            gl.glReadPixels(1, row, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                            rgba.data());
+            const GLfloat expected = row < 2 ? 0.0f : 1.0f;
+            expectApproxFloat(static_cast<GLfloat>(rgba[0]) / 255.0f, expected,
+                              0.05f,
+                              "helper-fn compare LEQUAL row result");
+        }
+
+        // Compile-storm canary (the e2a876d regression amplifier):
+        // re-drawing the same shader must not grow library-cache
+        // misses — a per-draw recompile (failed OR successful) is the
+        // beachball mechanism regardless of which shader breaks.
+        auto& context = scoped.context();
+        const auto missesBefore =
+            context.metalResourceInventory().mslLibraryCacheMisses;
+        for (int repeat = 0; repeat < 3; ++repeat) {
+            gl.glUseProgram(helperProgram);
+            gl.glBindVertexArray(vao);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+            gl.glBindVertexArray(0);
+            gl.glUseProgram(0);
+        }
+        const auto missesAfter =
+            context.metalResourceInventory().mslLibraryCacheMisses;
+        expectCondition(missesAfter == missesBefore,
+                        "helper-fn repeat draws caused zero library-cache "
+                        "misses (no per-draw compile storm)");
+
+        gl.glBindTexture(GL_TEXTURE_2D_ARRAY, depthArray);
+        gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_MODE,
+                           GL_NONE);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(gradProgram);
+        gl.glDeleteProgram(helperProgram);
+        gl.glDeleteFramebuffers(1, &layerFbo);
+        gl.glDeleteFramebuffers(1, &sceneFbo);
+        gl.glDeleteTextures(1, &depthArray);
+        gl.glDeleteTextures(1, &sceneTexture);
+        expectGLError(gl, GL_NO_ERROR, "helper-fn compare cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "helper-function compare lookup (WZ shadow_mapping shape) compiled and matched GL spec through the flip fixup";
+    }
+    return result;
+}
+
 // Negative control for the shadow-compare Y fixup predicate: UPLOADED
 // depth content (never FBO-rendered) is stored GL-oriented, so the
 // compare path must NOT flip it. Predicate overreach here is the #1
@@ -15572,6 +15724,7 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runDepthLayerPositionDerivedZProbe());
         tests.push_back(runDepthLayerOrientationGradientProbe());
         tests.push_back(runDepthLayerShadowCompareProbe());
+        tests.push_back(runDepthLayerHelperFunctionCompareProbe());
         tests.push_back(runDepthLayerUploadedCompareNegativeControlProbe());
         tests.push_back(runDepthLayerGatherCompareProbe());
         tests.push_back(runDepthLayerProjCompareProbe());
