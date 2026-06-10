@@ -13829,6 +13829,13 @@ struct GLContext::Impl {
             device == nil || commandQueue == nil) {
             return false;
         }
+        // C48: direct Metal write — land any deferred clear on this
+        // renderbuffer first (same write-before-materialize class as
+        // the advanced-blend replaceRegion push).
+        if (frameGraph != nullptr) {
+            frameGraph->materializePendingFboClearsForTexture(
+                renderbuffer.metalTexture);
+        }
         id<MTLTexture> metalTex = (__bridge id<MTLTexture>)renderbuffer.metalTexture;
         if (metalTex.sampleCount > 1) return false;
         const MTLPixelFormat pf = metalTex.pixelFormat;
@@ -13899,6 +13906,12 @@ struct GLContext::Impl {
             y + height > renderbuffer.height ||
             device == nil || commandQueue == nil) {
             return false;
+        }
+        // C48: direct Metal write — land any deferred clear first (see
+        // mirrorDepthRenderbufferRegionToMetal).
+        if (frameGraph != nullptr) {
+            frameGraph->materializePendingFboClearsForTexture(
+                renderbuffer.metalTexture);
         }
         id<MTLTexture> metalTex = (__bridge id<MTLTexture>)renderbuffer.metalTexture;
         if (metalTex.sampleCount > 1) return false;
@@ -19795,6 +19808,15 @@ struct GLContext::Impl {
             if (metalTex.sampleCount <= 1 &&
                 (metalTex.pixelFormat == MTLPixelFormatRGBA8Unorm ||
                  metalTex.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB)) {
+                // C48: this direct replaceRegion bypasses the frame
+                // graph — a still-pending deferred clear folded by a
+                // LATER GPU draw would wipe these CPU-blended texels
+                // (Sweep B KHR blend_equation_advanced.test_coherency
+                // P→F: res all-zeros). Land the deferred clear first.
+                if (frameGraph != nullptr) {
+                    frameGraph->materializePendingFboClearsForTexture(
+                        renderbufferTarget->metalTexture);
+                }
                 MTLRegion fullRegion = MTLRegionMake2D(
                     0, 0,
                     static_cast<NSUInteger>(targetWidth),
