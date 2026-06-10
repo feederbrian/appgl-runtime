@@ -15827,6 +15827,129 @@ TestResult runC49ClearFoldCompositionProbe() {
     return result;
 }
 
+// Multi-program continuation: alternate two programs with distinct
+// per-draw uniforms inside ONE continued pass (the build-menu mini-model
+// shape: model + overlay programs interleaving on the same target).
+// Catches pipeline/uniform state bleed across continued draws.
+TestResult runC49MultiProgramContinuationProbe() {
+    auto result = runDirectSentinel("c49.pass-continuation.multi-program", [&] {
+        ScopedEnvVar continuation("APPGL_ENABLE_FBO_PASS_CONTINUATION", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        constexpr GLsizei kSize = 4;
+
+        GLuint colorTex = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, kSize, kSize);
+        GLuint fbo = 0;
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+
+        static constexpr const char* kVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "uniform vec4 uRect;\n"
+            "void main() {\n"
+            "    vec2 base = aPos * 0.5 + 0.5;\n"
+            "    vec2 pos = uRect.xy + base * uRect.zw;\n"
+            "    gl_Position = vec4(pos * 2.0 - 1.0, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kFSA =
+            "#version 330 core\n"
+            "uniform vec4 uColor;\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = uColor; }\n";
+        static constexpr const char* kFSB =
+            "#version 330 core\n"
+            "uniform vec4 uColor;\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = vec4(uColor.rgb * 0.5, 1.0); }\n";
+        const GLuint programA = buildBenchProgram(kVS, kFSA);
+        const GLuint programB = buildBenchProgram(kVS, kFSB);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(programA, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "c49 multi-program A links");
+        gl.glGetProgramiv(programB, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "c49 multi-program B links");
+
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+
+        const auto before = c49Snapshot(context);
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glBindVertexArray(vao);
+        // Four quarter-rect draws alternating programs and colors —
+        // each lands in a distinct quadrant of the same target so every
+        // draw's pipeline + uniforms are independently verifiable.
+        struct DrawSpec {
+            GLuint program;
+            float rect[4];
+            float color[4];
+        };
+        const DrawSpec draws[4] = {
+            {programA, {0.0f, 0.0f, 0.5f, 0.5f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {programB, {0.5f, 0.0f, 0.5f, 0.5f}, {0.0f, 1.0f, 0.0f, 1.0f}},
+            {programA, {0.0f, 0.5f, 0.5f, 0.5f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+            {programB, {0.5f, 0.5f, 0.5f, 0.5f}, {1.0f, 1.0f, 0.0f, 1.0f}},
+        };
+        for (const auto& drawSpec : draws) {
+            gl.glUseProgram(drawSpec.program);
+            gl.glUniform4fv(gl.glGetUniformLocation(drawSpec.program, "uRect"),
+                            1, drawSpec.rect);
+            gl.glUniform4fv(gl.glGetUniformLocation(drawSpec.program, "uColor"),
+                            1, drawSpec.color);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        expectGLError(gl, GL_NO_ERROR, "c49 multi-program draws");
+
+        const auto after = c49Snapshot(context);
+        expectCondition(after.opensFbo == before.opensFbo + 1,
+                        "c49 multi-program: one pass for all four draws");
+        expectCondition(after.continuations == before.continuations + 3,
+                        "c49 multi-program: three continuations");
+
+        // Each quadrant must hold its own draw's program-specific color.
+        auto px = [&](GLint x, GLint y) -> std::array<std::uint8_t, 4> {
+            std::array<std::uint8_t, 4> rgba = {1, 2, 3, 4};
+            gl.glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                            rgba.data());
+            return rgba;
+        };
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        const auto bl = px(0, 0);
+        const auto br = px(3, 0);
+        const auto tl = px(0, 3);
+        const auto tr = px(3, 3);
+        expectApproxByte(bl[0], 255u, 4u, "c49 multi-program BL red (A)");
+        expectApproxByte(br[1], 128u, 6u, "c49 multi-program BR halved green (B)");
+        expectApproxByte(tl[2], 255u, 4u, "c49 multi-program TL blue (A)");
+        expectApproxByte(tr[0], 128u, 6u, "c49 multi-program TR halved yellow (B)");
+        expectApproxByte(tr[1], 128u, 6u, "c49 multi-program TR halved yellow g (B)");
+        expectGLError(gl, GL_NO_ERROR, "c49 multi-program readback");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(programA);
+        gl.glDeleteProgram(programB);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        expectGLError(gl, GL_NO_ERROR, "c49 multi-program cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "four draws across two programs shared one continued pass with per-draw pipelines and uniforms intact";
+    }
+    return result;
+}
+
 TestResult runC49DefaultFbIsolationProbe() {
     auto result = runDirectSentinel("c49.pass-continuation.default-fb-isolation", [&] {
         ScopedEnvVar continuation("APPGL_ENABLE_FBO_PASS_CONTINUATION", "1");
@@ -16019,6 +16142,7 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runC49ContinuationEngagementProbe());
         tests.push_back(runC49DefaultOffPerDrawCloseProbe());
         tests.push_back(runC49ClearFoldCompositionProbe());
+        tests.push_back(runC49MultiProgramContinuationProbe());
         tests.push_back(runC49DefaultFbIsolationProbe());
         return buildJSON(normalizedPhase, tests);
     }
