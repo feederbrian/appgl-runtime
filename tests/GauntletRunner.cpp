@@ -14559,6 +14559,485 @@ TestResult runC48CascadePatternProbe() {
     return result;
 }
 
+// 00fde11 follow-up — absolute content checks for depth-only layer≠0
+// passes (the Warzone cascade shape the slice fix newly routes draws
+// into). Self-consistent write-then-sample loops CANCEL a global
+// flip/range defect, so these compare ABSOLUTE values and cross-check
+// chains against each other:
+//   - position-derived depth (no gl_FragDepth — the WZ shadow-shader
+//     shape; NDC z in [-1,1] must map to depth (z+1)/2 = 0.625 for
+//     clip z=0.25) on layer-1 vs a 2D depth FBO vs a gl_FragDepth
+//     reference;
+//   - an asymmetric vertical gradient written via gl_FragDepth on
+//     layer-1 vs the SAME gradient written through the color chain
+//     (CTS-hardened orientation reference).
+GLuint c48BuildOrientationSampleProgram(GLDispatchTable& gl,
+                                        bool arraySampler,
+                                        GLint& layerLocation,
+                                        GLint& samplerLocation) {
+    static constexpr const char* kVS =
+        "#version 330 core\n"
+        "layout(location = 0) in vec2 aPos;\n"
+        "out vec2 vUV;\n"
+        "void main() {\n"
+        "    vUV = aPos * 0.5 + 0.5;\n"
+        "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+        "}\n";
+    static constexpr const char* kArrayFS =
+        "#version 330 core\n"
+        "uniform sampler2DArray uTex;\n"
+        "uniform float uLayer;\n"
+        "in vec2 vUV;\n"
+        "out vec4 fragColor;\n"
+        "void main() {\n"
+        "    float d = texture(uTex, vec3(vUV, uLayer)).r;\n"
+        "    fragColor = vec4(d, d, d, 1.0);\n"
+        "}\n";
+    static constexpr const char* k2DFS =
+        "#version 330 core\n"
+        "uniform sampler2D uTex;\n"
+        "uniform float uLayer;\n"
+        "in vec2 vUV;\n"
+        "out vec4 fragColor;\n"
+        "void main() {\n"
+        "    float d = texture(uTex, vUV).r;\n"
+        "    fragColor = vec4(d, d, d, 1.0 + 0.0 * uLayer);\n"
+        "}\n";
+    const GLuint program =
+        buildBenchProgram(kVS, arraySampler ? kArrayFS : k2DFS);
+    GLint linked = GL_FALSE;
+    gl.glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    expectCondition(linked == GL_TRUE, "orientation sample program links");
+    layerLocation = gl.glGetUniformLocation(program, "uLayer");
+    samplerLocation = gl.glGetUniformLocation(program, "uTex");
+    expectCondition(samplerLocation >= 0, "orientation sampler uniform");
+    return program;
+}
+
+TestResult runDepthLayerPositionDerivedZProbe() {
+    auto result = runDirectSentinel("depth-layer.position-derived-z", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& gl = scoped.gl();
+        constexpr GLsizei kSize = 4;
+
+        GLuint depthArray = 0;
+        gl.glGenTextures(1, &depthArray);
+        setupDCR3CDepth32FArrayTexture(gl, depthArray, kSize, kSize, 3);
+        primeDCR3CDepth32FTexture(gl, depthArray, kSize, kSize, 3);
+        GLuint layerFbo = 0;
+        setupDCR3CDepthArrayLayerFbo(gl, layerFbo, depthArray, 1);
+
+        GLuint depth2D = 0;
+        gl.glGenTextures(1, &depth2D);
+        setupDCR3CDepth32FTexture(gl, depth2D, kSize, kSize);
+        primeDCR3CDepth32FTexture(gl, depth2D, kSize, kSize);
+        GLuint fbo2D = 0;
+        setupDCR3CDepthTextureFbo(gl, fbo2D, depth2D);
+
+        // Position-derived depth writer: clip z = +0.25, w = 1 → NDC z
+        // 0.25 → GL window depth (0.25 + 1) / 2 = 0.625 (default
+        // glDepthRange). No gl_FragDepth anywhere.
+        static constexpr const char* kPosVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() {\n"
+            "    gl_Position = vec4(aPos, 0.25, 1.0);\n"
+            "}\n";
+        static constexpr const char* kPosFS =
+            "#version 330 core\n"
+            "void main() {}\n";
+        const GLuint posProgram = buildBenchProgram(kPosVS, kPosFS);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(posProgram, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "position-z program links");
+
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+
+        auto drawPositionZ = [&](GLuint framebuffer) {
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+            gl.glViewport(0, 0, kSize, kSize);
+            gl.glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+            gl.glEnable(GL_DEPTH_TEST);
+            gl.glDepthMask(GL_TRUE);
+            gl.glDepthFunc(GL_ALWAYS);
+            gl.glUseProgram(posProgram);
+            gl.glBindVertexArray(vao);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+            gl.glBindVertexArray(0);
+            gl.glUseProgram(0);
+            gl.glDisable(GL_DEPTH_TEST);
+            gl.glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        };
+        drawPositionZ(layerFbo);
+        drawPositionZ(fbo2D);
+        expectGLError(gl, GL_NO_ERROR, "position-z draws");
+
+        // Absolute value check, two readback chains per target.
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, layerFbo);
+        GLfloat direct = -1.0f;
+        gl.glReadPixels(1, 1, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &direct);
+        expectGLError(gl, GL_NO_ERROR, "position-z layer readPixels");
+        expectApproxFloat(direct, 0.625f, 0.02f,
+                          "position-derived depth on layer-1 (readback chain)");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo2D);
+        GLfloat direct2D = -1.0f;
+        gl.glReadPixels(1, 1, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &direct2D);
+        expectApproxFloat(direct2D, 0.625f, 0.02f,
+                          "position-derived depth on 2D path (readback chain)");
+        expectApproxFloat(direct, direct2D, 0.005f,
+                          "layer-1 vs 2D position-derived depth divergence");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(posProgram);
+        gl.glDeleteFramebuffers(1, &layerFbo);
+        gl.glDeleteFramebuffers(1, &fbo2D);
+        gl.glDeleteTextures(1, &depthArray);
+        gl.glDeleteTextures(1, &depth2D);
+        expectGLError(gl, GL_NO_ERROR, "position-z cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "position-derived NDC z mapped to (z+1)/2 on the depth-only layer-1 path, matching the 2D path";
+    }
+    return result;
+}
+
+TestResult runDepthLayerOrientationGradientProbe() {
+    auto result = runDirectSentinel("depth-layer.orientation-gradient", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& gl = scoped.gl();
+        constexpr GLsizei kSize = 4;
+
+        GLuint depthArray = 0;
+        gl.glGenTextures(1, &depthArray);
+        setupDCR3CDepth32FArrayTexture(gl, depthArray, kSize, kSize, 3);
+        primeDCR3CDepth32FTexture(gl, depthArray, kSize, kSize, 3);
+        GLuint layerFbo = 0;
+        setupDCR3CDepthArrayLayerFbo(gl, layerFbo, depthArray, 1);
+
+        GLuint colorRef = 0;
+        gl.glGenTextures(1, &colorRef);
+        setupDCR3CRGBA8Texture(gl, colorRef, kSize, kSize);
+        GLuint colorRefFbo = 0;
+        setupDCR3CTextureFbo(gl, colorRefFbo, colorRef);
+
+        GLuint sceneTexture = 0;
+        gl.glGenTextures(1, &sceneTexture);
+        setupDCR3CRGBA8Texture(gl, sceneTexture, kSize, kSize);
+        GLuint sceneFbo = 0;
+        setupDCR3CTextureFbo(gl, sceneFbo, sceneTexture);
+
+        // Vertical gradient writer: value = vUV.y (asymmetric in y).
+        // Depth variant writes gl_FragDepth; color variant writes the
+        // same value through the CTS-hardened color chain as the
+        // orientation reference.
+        static constexpr const char* kGradVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "out vec2 vUV;\n"
+            "void main() {\n"
+            "    vUV = aPos * 0.5 + 0.5;\n"
+            "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kGradDepthFS =
+            "#version 330 core\n"
+            "in vec2 vUV;\n"
+            "void main() { gl_FragDepth = vUV.y; }\n";
+        static constexpr const char* kGradColorFS =
+            "#version 330 core\n"
+            "in vec2 vUV;\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = vec4(vUV.y, vUV.y, vUV.y, 1.0); }\n";
+        const GLuint gradDepthProgram = buildBenchProgram(kGradVS, kGradDepthFS);
+        const GLuint gradColorProgram = buildBenchProgram(kGradVS, kGradColorFS);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(gradDepthProgram, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "gradient depth program links");
+        gl.glGetProgramiv(gradColorProgram, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "gradient color program links");
+
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+
+        // Write the gradient: depth → layer-1; color → reference.
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, layerFbo);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        gl.glEnable(GL_DEPTH_TEST);
+        gl.glDepthMask(GL_TRUE);
+        gl.glDepthFunc(GL_ALWAYS);
+        gl.glUseProgram(gradDepthProgram);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, colorRefFbo);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glUseProgram(gradColorProgram);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        expectGLError(gl, GL_NO_ERROR, "gradient writes");
+
+        // Absolute chain 1 — raw depth readback rows (GL row 0 is the
+        // BOTTOM, where vUV.y = 0.125).
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, layerFbo);
+        for (GLsizei row = 0; row < kSize; ++row) {
+            GLfloat depthValue = -1.0f;
+            gl.glReadPixels(1, row, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT,
+                            &depthValue);
+            const GLfloat expected =
+                (static_cast<GLfloat>(row) + 0.5f) / static_cast<GLfloat>(kSize);
+            expectApproxFloat(depthValue, expected, 0.03f,
+                              "depth gradient absolute row (layer-1 readback)");
+        }
+        // Absolute chain 2 — color reference rows through the same
+        // readback orientation.
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, colorRefFbo);
+        for (GLsizei row = 0; row < kSize; ++row) {
+            std::array<std::uint8_t, 4> rgba = {0, 0, 0, 0};
+            gl.glReadPixels(1, row, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                            rgba.data());
+            const GLfloat expected =
+                (static_cast<GLfloat>(row) + 0.5f) / static_cast<GLfloat>(kSize);
+            expectApproxFloat(static_cast<GLfloat>(rgba[0]) / 255.0f, expected,
+                              0.03f, "color gradient absolute row (reference)");
+        }
+        // Chain 3 — sampled consumption of the depth layer vs the color
+        // reference, row by row (the WZ shadow-lookup shape). Divergence
+        // between the two sampled chains localizes a depth-side flip
+        // even if both raw-readback chains were self-consistent.
+        GLint layerLoc = -1;
+        GLint samplerLoc = -1;
+        const GLuint sampleArrayProgram =
+            c48BuildOrientationSampleProgram(gl, true, layerLoc, samplerLoc);
+        GLint layerLoc2D = -1;
+        GLint samplerLoc2D = -1;
+        const GLuint sample2DProgram =
+            c48BuildOrientationSampleProgram(gl, false, layerLoc2D, samplerLoc2D);
+        auto sampleRows = [&](GLuint program, GLuint texture, GLenum target,
+                              GLint layerLocIn, std::array<GLfloat, 4>& rows) {
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo);
+            gl.glViewport(0, 0, kSize, kSize);
+            gl.glDisable(GL_DEPTH_TEST);
+            gl.glUseProgram(program);
+            gl.glActiveTexture(GL_TEXTURE0);
+            gl.glBindTexture(target, texture);
+            if (layerLocIn >= 0) gl.glUniform1f(layerLocIn, 1.0f);
+            gl.glBindVertexArray(vao);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+            gl.glBindVertexArray(0);
+            gl.glUseProgram(0);
+            for (GLsizei row = 0; row < kSize; ++row) {
+                std::array<std::uint8_t, 4> rgba = {0, 0, 0, 0};
+                gl.glReadPixels(1, row, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                                rgba.data());
+                rows[static_cast<std::size_t>(row)] =
+                    static_cast<GLfloat>(rgba[0]) / 255.0f;
+            }
+        };
+        std::array<GLfloat, 4> depthRows = {};
+        std::array<GLfloat, 4> colorRows = {};
+        sampleRows(sampleArrayProgram, depthArray, GL_TEXTURE_2D_ARRAY,
+                   layerLoc, depthRows);
+        sampleRows(sample2DProgram, colorRef, GL_TEXTURE_2D,
+                   -1, colorRows);
+        expectGLError(gl, GL_NO_ERROR, "gradient sampled chains");
+        for (GLsizei row = 0; row < kSize; ++row) {
+            expectApproxFloat(depthRows[static_cast<std::size_t>(row)],
+                              colorRows[static_cast<std::size_t>(row)], 0.03f,
+                              "sampled depth chain vs color reference row");
+        }
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(gradDepthProgram);
+        gl.glDeleteProgram(gradColorProgram);
+        gl.glDeleteProgram(sampleArrayProgram);
+        gl.glDeleteProgram(sample2DProgram);
+        gl.glDeleteFramebuffers(1, &layerFbo);
+        gl.glDeleteFramebuffers(1, &colorRefFbo);
+        gl.glDeleteFramebuffers(1, &sceneFbo);
+        gl.glDeleteTextures(1, &depthArray);
+        gl.glDeleteTextures(1, &colorRef);
+        gl.glDeleteTextures(1, &sceneTexture);
+        expectGLError(gl, GL_NO_ERROR, "orientation cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "depth-layer gradient matched GL-spec absolute orientation and the color-chain reference in raw and sampled chains";
+    }
+    return result;
+}
+
+// The exact Warzone shadow-lookup shape: sampler2DArrayShadow with
+// COMPARE_REF_TO_TEXTURE/LEQUAL against a known per-row depth gradient
+// on layer 1. ref=0.5 against rows {0.125,0.375,0.625,0.875} must
+// produce {0,0,1,1} — wrong compare-space, flipped content, or a
+// mis-routed layer all break the pattern.
+TestResult runDepthLayerShadowCompareProbe() {
+    auto result = runDirectSentinel("depth-layer.shadow-compare", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& gl = scoped.gl();
+        constexpr GLsizei kSize = 4;
+
+        GLuint depthArray = 0;
+        gl.glGenTextures(1, &depthArray);
+        setupDCR3CDepth32FArrayTexture(gl, depthArray, kSize, kSize, 3);
+        primeDCR3CDepth32FTexture(gl, depthArray, kSize, kSize, 3);
+        GLuint layerFbo = 0;
+        setupDCR3CDepthArrayLayerFbo(gl, layerFbo, depthArray, 1);
+
+        GLuint sceneTexture = 0;
+        gl.glGenTextures(1, &sceneTexture);
+        setupDCR3CRGBA8Texture(gl, sceneTexture, kSize, kSize);
+        GLuint sceneFbo = 0;
+        setupDCR3CTextureFbo(gl, sceneFbo, sceneTexture);
+
+        static constexpr const char* kGradVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "out vec2 vUV;\n"
+            "void main() {\n"
+            "    vUV = aPos * 0.5 + 0.5;\n"
+            "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
+            "}\n";
+        static constexpr const char* kGradDepthFS =
+            "#version 330 core\n"
+            "in vec2 vUV;\n"
+            "void main() { gl_FragDepth = vUV.y; }\n";
+        static constexpr const char* kShadowFS =
+            "#version 330 core\n"
+            "uniform sampler2DArrayShadow uShadow;\n"
+            "uniform float uLayer;\n"
+            "uniform float uRef;\n"
+            "in vec2 vUV;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    float lit = texture(uShadow, vec4(vUV, uLayer, uRef));\n"
+            "    fragColor = vec4(lit, lit, lit, 1.0);\n"
+            "}\n";
+        const GLuint gradProgram = buildBenchProgram(kGradVS, kGradDepthFS);
+        const GLuint shadowProgram = buildBenchProgram(kGradVS, kShadowFS);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(gradProgram, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "shadow gradient program links");
+        gl.glGetProgramiv(shadowProgram, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "shadow compare program links");
+        const GLint shadowLoc = gl.glGetUniformLocation(shadowProgram, "uShadow");
+        const GLint layerLoc = gl.glGetUniformLocation(shadowProgram, "uLayer");
+        const GLint refLoc = gl.glGetUniformLocation(shadowProgram, "uRef");
+        expectCondition(shadowLoc >= 0 && layerLoc >= 0 && refLoc >= 0,
+                        "shadow compare uniforms exist");
+
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, layerFbo);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        gl.glEnable(GL_DEPTH_TEST);
+        gl.glDepthMask(GL_TRUE);
+        gl.glDepthFunc(GL_ALWAYS);
+        gl.glUseProgram(gradProgram);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        expectGLError(gl, GL_NO_ERROR, "shadow gradient write");
+
+        gl.glBindTexture(GL_TEXTURE_2D_ARRAY, depthArray);
+        gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_MODE,
+                           GL_COMPARE_REF_TO_TEXTURE);
+        gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_FUNC,
+                           GL_LEQUAL);
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glUseProgram(shadowProgram);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D_ARRAY, depthArray);
+        gl.glUniform1i(shadowLoc, 0);
+        gl.glUniform1f(layerLoc, 1.0f);
+        gl.glUniform1f(refLoc, 0.5f);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        expectGLError(gl, GL_NO_ERROR, "shadow compare draw");
+
+        if (std::getenv("APPGL_C48_PROBE_DEBUG") != nullptr) {
+            // Discriminator: at ref=0.5 the symmetric gradient cannot
+            // separate operator-reversal from content-y-flip; ref=0.25
+            // can. GL-spec {0,1,1,1}; op-reversed {1,0,0,0};
+            // content-flipped {1,1,1,0}.
+            for (const GLfloat ref : {0.5f, 0.25f}) {
+                gl.glUseProgram(shadowProgram);
+                gl.glUniform1f(refLoc, ref);
+                gl.glBindVertexArray(vao);
+                gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+                gl.glBindVertexArray(0);
+                gl.glUseProgram(0);
+                std::fprintf(stderr, "[shadow-compare rows ref=%.2f layer=1]",
+                             ref);
+                for (GLsizei row = 0; row < kSize; ++row) {
+                    std::array<std::uint8_t, 4> rgba = {0, 0, 0, 0};
+                    gl.glReadPixels(1, row, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                                    rgba.data());
+                    std::fprintf(stderr, " r%d=%.3f", row, rgba[0] / 255.0f);
+                }
+                std::fprintf(stderr, "\n");
+                std::fflush(stderr);
+            }
+            // Restore the assert configuration.
+            gl.glUseProgram(shadowProgram);
+            gl.glUniform1f(refLoc, 0.5f);
+            gl.glBindVertexArray(vao);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+            gl.glBindVertexArray(0);
+            gl.glUseProgram(0);
+        }
+        // GL 4.6 §8.23: result = (ref <= D_t). Gradient rows
+        // {0.125,0.375,0.625,0.875} vs ref 0.5 → {0,0,1,1}.
+        for (GLsizei row = 0; row < kSize; ++row) {
+            std::array<std::uint8_t, 4> rgba = {127, 127, 127, 127};
+            gl.glReadPixels(1, row, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                            rgba.data());
+            const GLfloat expected = row < 2 ? 0.0f : 1.0f;
+            expectApproxFloat(static_cast<GLfloat>(rgba[0]) / 255.0f, expected,
+                              0.05f, "shadow compare LEQUAL row result");
+        }
+
+        gl.glBindTexture(GL_TEXTURE_2D_ARRAY, depthArray);
+        gl.glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_MODE,
+                           GL_NONE);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(gradProgram);
+        gl.glDeleteProgram(shadowProgram);
+        gl.glDeleteFramebuffers(1, &layerFbo);
+        gl.glDeleteFramebuffers(1, &sceneFbo);
+        gl.glDeleteTextures(1, &depthArray);
+        gl.glDeleteTextures(1, &sceneTexture);
+        expectGLError(gl, GL_NO_ERROR, "shadow compare cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "sampler2DArrayShadow LEQUAL compare against the layer-1 gradient matched GL-spec {0,0,1,1}";
+    }
+    return result;
+}
+
 TestResult runC48DefaultOffZeroEngagementProbe() {
     auto result = runDirectSentinel("c48.fbo-clear-folding.default-off-eager", [&] {
         ScopedEnvVar folding("APPGL_ENABLE_FBO_CLEAR_FOLDING", "0");
@@ -14737,6 +15216,13 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runTextureMipShadowEvictionR8RedundantProbe());
         tests.push_back(runTextureMipShadowEvictionCopyImageProbe());
         tests.push_back(runTextureMipShadowEvictionPartialTexSubImageProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "depth-layer-orientation-probes") {
+        tests.push_back(runDepthLayerPositionDerivedZProbe());
+        tests.push_back(runDepthLayerOrientationGradientProbe());
+        tests.push_back(runDepthLayerShadowCompareProbe());
         return buildJSON(normalizedPhase, tests);
     }
 
