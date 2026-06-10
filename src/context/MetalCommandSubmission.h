@@ -205,6 +205,11 @@ private:
             completedByReason;
         std::atomic<std::uint64_t> backpressureWaits{0};
         std::atomic<std::uint64_t> waitReasonLogEntries{0};
+        // S24 census: drain-all (full-pipeline) waits were invisible in
+        // the per-reason tables (Step-1 found 9.2s/210s hiding here) —
+        // count + total wall time, unconditional.
+        std::atomic<std::uint64_t> drainAllCalls{0};
+        std::atomic<std::uint64_t> drainAllWaitUsTotal{0};
         std::atomic<std::uint64_t> plainCommandBufferAllocations{0};
         std::atomic<std::uint64_t> autoreleaseDrainedCommandBufferAllocations{0};
         std::atomic<std::uint64_t> retainedObjectsAdopted{0};
@@ -599,6 +604,8 @@ public:
                 state_->completedByReason[index].load();
         }
         counters.waitReasonLogEntries = state_->waitReasonLogEntries.load();
+        counters.drainAllCalls = state_->drainAllCalls.load();
+        counters.drainAllWaitUsTotal = state_->drainAllWaitUsTotal.load();
         counters.pressureFlushCount = state_->pressureFlushCount.load();
         counters.plainCommandBufferAllocations =
             state_->plainCommandBufferAllocations.load();
@@ -678,10 +685,11 @@ public:
         }
         NSString* label = appGLCommandReasonNSString(reason);
         recordWaitReason(WaitKind::DrainAll, reason, label);
-        const bool profileEnabled = state_->profileEnabled;
-        const auto waitStart = profileEnabled
-            ? std::chrono::steady_clock::now()
-            : std::chrono::steady_clock::time_point{};
+        // S24 census: time every drain-all unconditionally (two
+        // timestamps on a ~per-frame-at-most path) so this bucket can
+        // never hide from the standard counters again.
+        state_->drainAllCalls.fetch_add(1, std::memory_order_relaxed);
+        const auto waitStart = std::chrono::steady_clock::now();
         const std::uint64_t timeoutMs = timeoutMilliseconds();
         const dispatch_time_t deadline = dispatch_time(
             DISPATCH_TIME_NOW,
@@ -697,6 +705,11 @@ public:
             dispatch_semaphore_signal(state_->inFlightSemaphore);
         }
         const bool drained = acquired == state_->inFlightBound;
+        state_->drainAllWaitUsTotal.fetch_add(
+            static_cast<std::uint64_t>(
+                std::chrono::duration<double, std::micro>(
+                    std::chrono::steady_clock::now() - waitStart).count()),
+            std::memory_order_relaxed);
         if (state_->profileEnabled) {
             const double waitUs =
                 std::chrono::duration<double, std::micro>(

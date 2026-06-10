@@ -250,6 +250,8 @@ struct AppGLCommandSubmissionDebugCounters {
     std::array<std::uint64_t, static_cast<std::size_t>(AppGLCommandReason::Count)> submittedByReason{};
     std::array<std::uint64_t, static_cast<std::size_t>(AppGLCommandReason::Count)> completedByReason{};
     std::uint64_t waitReasonLogEntries = 0;
+    std::uint64_t drainAllCalls = 0;
+    std::uint64_t drainAllWaitUsTotal = 0;
     std::uint64_t pressureFlushCount = 0;
     std::uint64_t plainCommandBufferAllocations = 0;
     std::uint64_t autoreleaseDrainedCommandBufferAllocations = 0;

@@ -3431,6 +3431,15 @@ C48 live/preview posture:
   folding is exonerated; failure reproduces with folding OFF and fold census
   balances. Do not revert `00fde11`; fix the compare sampling path around the
   corrected routing.
+- Fix commit `35df142` implements the approved option-A compare-path y-flip in
+  `ShaderTranslator`: depth compare/gather compare coordinates for
+  `depth2d`/`depth2d_array` receivers get a per-slot flip factor only when the
+  bound texture is compare-mode, FBO/viewport-rendered, lower-left, and
+  depth-family, excluding packed-2D shapes already served by the flipped
+  sampling copy. Worker local gates are green across default / fold / forward
+  configs, including promoted orientation probes, uploaded-depth negative
+  control, gather-compare, textureProj shadow, sentinel suites, BAR-B identity,
+  and GS-emulator static consistency.
 - Comparable unattended 4c-rush visual repro is not currently available. The
   Step-1 `4c-rush` manual-scene captures needed operator assistance to enter
   the scene and resize/full-monitor the window. The harness can run unattended
@@ -3512,6 +3521,34 @@ Scout retarget rationale:
   GLTest may take a measurement window between Sweep 1 and Sweep 2 if their
   probe is ready; otherwise between Sweep 2 and Sweep 3. Canonical live pin
   remains `A8483891` until the full chain greens.
+- Sweep 2 dispatch:
+  - Source `35df142`, default/no-forward-env config.
+  - Build proof:
+    `/Users/excalibur/Documents/Developer/OpenGL 4.6 Mac/appgl-runtime/build-release-fp64on/libAppGL.dylib`,
+    UUID `B30E9F60-43A2-36B5-BA7D-8981FEA98792`, SHA256
+    `0fb708248842698dea1b4fd0f9388891b5217d85058dbc7798bbd0103dc27978`,
+    codesign valid on disk, install-name `@rpath/libAppGL.dylib`. Build
+    completed with only the known `MTLResourceUsageSample` and
+    duplicate-library warnings.
+  - Scout dispatch message:
+    `7f8d9d76-307e-452a-ab31-634c6dddf305`
+    (`s24-c48-sweep2-default-35df142`). Packet explicitly requested default
+    config, Item 75 shader-preservation breadth (`shaders.*`,
+    `texture_repeat_mode`, `draw_indirect`), texture compare/shadow,
+    FBO-rendered depth compare, layered_framebuffer, and uploaded-depth
+    negative-control attention. Sweep 3 remains held behind Sweep 2.
+  - Hygiene follow-up `5211b216-9dd1-4aba-a3be-b708c0443ea3` told Scout to
+    run exact clean `35df142` or an isolated worktree pinned to it, because
+    post-dispatch uncommitted census instrumentation appeared in
+    `src/context/AppGLCommandReasons.h` and
+    `src/context/MetalCommandSubmission.h`. Those edits are not part of Sweep 2
+    unless Foreman/Clerk explicitly retarget.
+  - Fable-Clerk standing rule: Scout sweeps always run from an isolated checkout
+    pinned to the target SHA, using the `scout-worktree/` lane, never the
+    shared AppGL working tree. Follow-up
+    `3b03bf06-8bc1-4d63-9ad1-a03dbf9253cd` applied this to current Sweep 2 and
+    requested checkout path, artifact/source SHA echo, and cleanliness/pin
+    proof in the result report.
 
 C49 is banked as FBO pass continuation plus census hardening after C48. Do not
 open C49 before the C48 visual artifact root-cause and sweep/default-path proof

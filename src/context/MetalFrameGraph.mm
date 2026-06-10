@@ -4171,6 +4171,7 @@ struct MetalFrameGraph::Impl {
             drawableResizeLastEffectiveHeight =
                 static_cast<std::uint64_t>(drawableHeight);
             if (requestedChanged) {
+                ++encoderClosesViewportRequestInvalidate;  // C49 census (rider target → ~0)
                 flushParallelTranslatedDrawBatch(
                     ParallelEncodeBoundaryReason::Resize);
                 headlessReadbackRGBA.clear();
@@ -4386,6 +4387,9 @@ struct MetalFrameGraph::Impl {
     bool commitCurrentAsync(AppGLCommandReason reason) {
         const DrawProfileTimePoint attributionStart =
             frameAttributionProfile.enabled ? drawProfileNow() : DrawProfileTimePoint{};
+        if (currentRenderEncoder != nil) {
+            ++encoderClosesCommandBufferCommit;  // C49 census
+        }
         flushParallelTranslatedDrawBatch(
             ParallelEncodeBoundaryReason::CommandBufferCommit);
         endRenderPass();
@@ -5955,9 +5959,11 @@ struct MetalFrameGraph::Impl {
             profileEncoderSetupStart = stateResolveEnd;
         }
 
+        ++translatedDrawEncodeCalls;  // C49 census: draws-per-pass denominator
         // RC-A02: FBO draws need their own render pass targeting the FBO
         // texture.  If a default-framebuffer encoder is open, close it first.
         if (isFBODraw && currentRenderEncoder != nil) {
+            ++encoderClosesFboTargetChange;  // C49 census
             [currentRenderEncoder endEncoding];
             releaseCurrentRenderEncoder();
             activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
@@ -5966,6 +5972,7 @@ struct MetalFrameGraph::Impl {
         if (!isFBODraw &&
             currentRenderEncoder != nil &&
             activeRenderPassFragmentShadingRate != info.fragmentShadingRate) {
+            ++encoderClosesShadingRateChange;  // C49 census
             endRenderPass();
             resetCachedEncoderState();
         }
@@ -6182,6 +6189,7 @@ struct MetalFrameGraph::Impl {
 
             // Build the render pass, merging any pending clear into the load
             // action so clear+draws share a single render pass (OPT-4).
+            const auto passBuildStart = std::chrono::steady_clock::now();  // C49 census
             MTLRenderPassDescriptor* pass = getReusablePassDescriptor();  // ADV-4
             NSUInteger rateMapLayerCount = 1;
             pass.colorAttachments[0].texture = colorTexture;
@@ -6372,6 +6380,17 @@ struct MetalFrameGraph::Impl {
             if (!openCurrentRenderEncoder(pass)) {
                 return false;
             }
+            // C49 census: pass open by target class + build cost.
+            if (isFBODraw) {
+                ++encoderOpensFboDraw;
+            } else {
+                ++encoderOpensDefaultFb;
+            }
+            ++passDescriptorBuilds;
+            passDescriptorBuildUsTotal += static_cast<std::uint64_t>(
+                std::chrono::duration<double, std::micro>(
+                    std::chrono::steady_clock::now() - passBuildStart)
+                    .count());
             traceOpenedRenderEncoder = true;
             activeRenderPassFragmentShadingRate = info.fragmentShadingRate;
             readbackSourceTexture = colorTexture;
@@ -13063,6 +13082,7 @@ fragment float4 appgl_immediate_textured_fs(
         // Close any in-flight encoder. Metal disallows two render
         // encoders open on the same command buffer.
         if (currentRenderEncoder != nil) {
+            ++encoderClosesClear;  // C49 census
             [currentRenderEncoder endEncoding];
             releaseCurrentRenderEncoder();
             activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
@@ -13807,6 +13827,15 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 ++presentInternalCalls;
                 break;
         }
+        // S24 census: the attribution profile previously dumped ONLY in
+        // the Impl destructor, so harness-killed live runs produced 0
+        // rows (Step-1 capture matrix). Emit cumulative snapshots
+        // periodically to stderr — same channel the CB profile uses and
+        // the capture parsers already read.
+        if (frameAttributionProfile.enabled &&
+            presentCalls % 600 == 0) {
+            frameAttributionProfile.dump();
+        }
         if (pendingPresent) {
             ++presentPendingTrueCalls;
         } else {
@@ -14017,6 +14046,9 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             FrameAttributionAction::FlushForReadback);
         // C48: a readback consumer must observe deferred FBO clears.
         materializeAllPendingFboClears();
+        if (currentRenderEncoder != nil) {
+            ++encoderClosesReadback;  // C49 census
+        }
         flushParallelTranslatedDrawBatch(
             ParallelEncodeBoundaryReason::CopyReadback);
         endRenderPass();
@@ -17503,6 +17535,21 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         inventory.fboClearsFolded = fboClearsFolded;
         inventory.fboClearsMaterialized = fboClearsMaterialized;
         inventory.fboClearsCoalesced = fboClearsCoalesced;
+        inventory.encoderOpensFboDraw = encoderOpensFboDraw;
+        inventory.encoderOpensDefaultFb = encoderOpensDefaultFb;
+        inventory.encoderClosesFboTargetChange = encoderClosesFboTargetChange;
+        inventory.encoderClosesShadingRateChange = encoderClosesShadingRateChange;
+        inventory.encoderClosesViewportRequestInvalidate =
+            encoderClosesViewportRequestInvalidate;
+        inventory.encoderClosesReadback = encoderClosesReadback;
+        inventory.encoderClosesCommandBufferCommit =
+            encoderClosesCommandBufferCommit;
+        inventory.encoderClosesClear = encoderClosesClear;
+        inventory.translatedDrawEncodeCalls = translatedDrawEncodeCalls;
+        inventory.passDescriptorBuilds = passDescriptorBuilds;
+        inventory.passDescriptorBuildUsTotal = passDescriptorBuildUsTotal;
+        inventory.fboPassContinuations = fboPassContinuations;
+        inventory.fboPassSignatureMisses = fboPassSignatureMisses;
         inventory.presentFromFlushCalls = presentFromFlushCalls;
         inventory.presentFromSwapBuffersCalls = presentFromSwapBuffersCalls;
         inventory.presentInternalCalls = presentInternalCalls;
@@ -18001,6 +18048,25 @@ private:
     std::uint64_t renderEncoderReleaseCalls = 0;
     std::uint64_t renderEncoderLiveRetains = 0;
     std::uint64_t renderEncoderPeakLiveRetains = 0;
+    // S24 C49 draw-path census — encoder lifecycle decomposition for
+    // the pass-continuation lever. Opens split by target class; closes
+    // attributed at the specific close sites; continuation counters are
+    // baseline zeros until C49 lands (their A/B delta is the
+    // engagement proof). passDescriptorBuild* times the pass-build →
+    // encoder-open block (two timestamps per pass open, not per draw).
+    std::uint64_t encoderOpensFboDraw = 0;
+    std::uint64_t encoderOpensDefaultFb = 0;
+    std::uint64_t encoderClosesFboTargetChange = 0;
+    std::uint64_t encoderClosesShadingRateChange = 0;
+    std::uint64_t encoderClosesViewportRequestInvalidate = 0;
+    std::uint64_t encoderClosesReadback = 0;
+    std::uint64_t encoderClosesCommandBufferCommit = 0;
+    std::uint64_t encoderClosesClear = 0;
+    std::uint64_t translatedDrawEncodeCalls = 0;
+    std::uint64_t passDescriptorBuilds = 0;
+    std::uint64_t passDescriptorBuildUsTotal = 0;
+    std::uint64_t fboPassContinuations = 0;
+    std::uint64_t fboPassSignatureMisses = 0;
     std::uint64_t observedDrawableTextureBytes = 0;
     std::uint64_t observedDrawableTextureBytesPeak = 0;
     std::uint64_t observedDrawableTextureTruncated = 0;

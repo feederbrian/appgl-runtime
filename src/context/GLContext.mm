@@ -26595,6 +26595,32 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             frameGraphMetal.fboClearsMaterialized;
         inventory.frameGraphFboClearsCoalesced =
             frameGraphMetal.fboClearsCoalesced;
+        inventory.frameGraphEncoderOpensFboDraw =
+            frameGraphMetal.encoderOpensFboDraw;
+        inventory.frameGraphEncoderOpensDefaultFb =
+            frameGraphMetal.encoderOpensDefaultFb;
+        inventory.frameGraphEncoderClosesFboTargetChange =
+            frameGraphMetal.encoderClosesFboTargetChange;
+        inventory.frameGraphEncoderClosesShadingRateChange =
+            frameGraphMetal.encoderClosesShadingRateChange;
+        inventory.frameGraphEncoderClosesViewportRequestInvalidate =
+            frameGraphMetal.encoderClosesViewportRequestInvalidate;
+        inventory.frameGraphEncoderClosesReadback =
+            frameGraphMetal.encoderClosesReadback;
+        inventory.frameGraphEncoderClosesCommandBufferCommit =
+            frameGraphMetal.encoderClosesCommandBufferCommit;
+        inventory.frameGraphEncoderClosesClear =
+            frameGraphMetal.encoderClosesClear;
+        inventory.frameGraphTranslatedDrawEncodeCalls =
+            frameGraphMetal.translatedDrawEncodeCalls;
+        inventory.frameGraphPassDescriptorBuilds =
+            frameGraphMetal.passDescriptorBuilds;
+        inventory.frameGraphPassDescriptorBuildUsTotal =
+            frameGraphMetal.passDescriptorBuildUsTotal;
+        inventory.frameGraphFboPassContinuations =
+            frameGraphMetal.fboPassContinuations;
+        inventory.frameGraphFboPassSignatureMisses =
+            frameGraphMetal.fboPassSignatureMisses;
         inventory.frameGraphPresentFromFlushCalls =
             frameGraphMetal.presentFromFlushCalls;
         inventory.frameGraphPresentFromSwapBuffersCalls =
