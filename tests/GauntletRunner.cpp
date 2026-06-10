@@ -11909,8 +11909,21 @@ TestResult runDCR3CProducerInventorySentinel() {
         ScopedSentinelContext scoped(64, 64);
         auto& context = scoped.context();
         auto& gl = scoped.gl();
-        const bool samplerGpuOrderSkip =
-            std::getenv("APPGL_ENABLE_SAMPLER_GPU_ORDER_SKIP") != nullptr;
+        // Mirror the runtime's posture (C47: default ON with a DISABLE
+        // hatch) rather than env presence, which stopped reflecting the
+        // default when the posture flipped.
+        const bool samplerGpuOrderSkip = [] {
+            const char* disable =
+                std::getenv("APPGL_DISABLE_SAMPLER_GPU_ORDER_SKIP");
+            if (disable != nullptr && disable[0] != '\0' &&
+                disable[0] != '0') {
+                return false;
+            }
+            const char* enable =
+                std::getenv("APPGL_ENABLE_SAMPLER_GPU_ORDER_SKIP");
+            return enable == nullptr ||
+                (enable[0] != '0' && enable[0] != '\0');
+        }();
 
         const GLuint colorProgram = buildBenchProgram(kFullscreenVS, kColorFS);
         const GLuint sampleProgram = buildBenchProgram(kFullscreenVS, kSampleFS);

@@ -460,10 +460,16 @@ std::uint64_t envUInt64OrDefault(const char* primaryName,
 }
 
 bool samplerGpuOrderSkipEnabled() {
+    // C47 posture: default ON. The skip removed ~33.8s sampler-drain CPU
+    // + 33.4s FlushForReadback completion waits per 210s live window
+    // (16% of wall; presents/sec 24.65 vs 18.50) with blocked=0 across
+    // 124k flush-candidates in the Step-1 capture matrix. The DISABLE
+    // env is the operator rollback hatch; ENABLE=0 is still honored for
+    // explicit-off so existing A/B harness arms keep working.
     if (appglEnvEnabledDefaultOff("APPGL_DISABLE_SAMPLER_GPU_ORDER_SKIP")) {
         return false;
     }
-    return appglEnvEnabledDefaultOff("APPGL_ENABLE_SAMPLER_GPU_ORDER_SKIP");
+    return appglEnvEnabledDefaultOn("APPGL_ENABLE_SAMPLER_GPU_ORDER_SKIP");
 }
 
 std::uint64_t renderPsoTotalCacheLimit() {
