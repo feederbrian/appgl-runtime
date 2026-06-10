@@ -26611,6 +26611,8 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             frameGraphMetal.encoderClosesCommandBufferCommit;
         inventory.frameGraphEncoderClosesClear =
             frameGraphMetal.encoderClosesClear;
+        inventory.frameGraphEncoderClosesFboDrawTail =
+            frameGraphMetal.encoderClosesFboDrawTail;
         inventory.frameGraphTranslatedDrawEncodeCalls =
             frameGraphMetal.translatedDrawEncodeCalls;
         inventory.frameGraphPassDescriptorBuilds =

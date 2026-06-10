@@ -4392,6 +4392,7 @@ struct MetalFrameGraph::Impl {
         }
         releaseOwnedObjCObject(currentRenderEncoder);
         currentRenderEncoder = nil;
+        fboPassActive = false;  // C49: every encoder close ends the pass
     }
 
     void endCurrentRenderPassOnly() {
@@ -5990,9 +5991,36 @@ struct MetalFrameGraph::Impl {
         }
 
         ++translatedDrawEncodeCalls;  // C49 census: draws-per-pass denominator
-        // RC-A02: FBO draws need their own render pass targeting the FBO
-        // texture.  If a default-framebuffer encoder is open, close it first.
+        // RC-A02 / C49: FBO draws need a render pass targeting the FBO
+        // texture. With pass continuation, a follow-up FBO draw whose
+        // attachment signature matches the OPEN pass reuses the encoder;
+        // everything else (signature change, feedback hazard, ineligible
+        // draw, default-FB encoder) closes first.
         if (isFBODraw && currentRenderEncoder != nil) {
+            const bool canContinue =
+                fboPassContinuationEnabled() && fboPassActive &&
+                fboPassContinuationEligible(info) &&
+                fboPassSignatureMatches(info) &&
+                !fboSampledTexturesTouchActiveTargets(info);
+            if (canContinue) {
+                ++fboPassContinuations;  // C49 engagement
+            } else {
+                if (fboPassContinuationEnabled() && fboPassActive) {
+                    ++fboPassSignatureMisses;  // C49 engagement (break)
+                }
+                ++encoderClosesFboTargetChange;  // C49 census
+                [currentRenderEncoder endEncoding];
+                releaseCurrentRenderEncoder();
+                activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
+                resetCachedEncoderState();
+            }
+        }
+        // C49: a default-FB draw arriving over an OPEN FBO pass must
+        // break it — the default-FB reuse path below is target-blind
+        // and would otherwise encode into the FBO attachments. (Cannot
+        // happen pre-continuation: the FBO encoder always closed at the
+        // draw's encode tail.)
+        if (!isFBODraw && currentRenderEncoder != nil && fboPassActive) {
             ++encoderClosesFboTargetChange;  // C49 census
             [currentRenderEncoder endEncoding];
             releaseCurrentRenderEncoder();
@@ -6413,6 +6441,11 @@ struct MetalFrameGraph::Impl {
             // C49 census: pass open by target class + build cost.
             if (isFBODraw) {
                 ++encoderOpensFboDraw;
+                // C49: arm continuation for follow-up same-target draws.
+                if (fboPassContinuationEnabled() &&
+                    fboPassContinuationEligible(info)) {
+                    captureActiveFboPassSignature(info);
+                }
             } else {
                 ++encoderOpensDefaultFb;
             }
@@ -8196,10 +8229,21 @@ struct MetalFrameGraph::Impl {
         const DrawProfileTimePoint profileFinalizeStart =
             profileDraw ? drawProfileNow() : DrawProfileTimePoint{};
         if (isFBODraw) {
-            [currentRenderEncoder endEncoding];
-            releaseCurrentRenderEncoder();
-            activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
-            resetCachedEncoderState();
+            // C49: with continuation armed, leave the pass open for the
+            // next same-signature FBO draw instead of paying an
+            // endEncoding + pass rebuild + state reset per draw (122.6
+            // opens/frame at the d73c6e1 baseline, ~1.2 draws per pass).
+            // Every other close path goes through
+            // releaseCurrentRenderEncoder, which disarms fboPassActive.
+            if (fboPassContinuationEnabled() && fboPassActive) {
+                // keep open
+            } else {
+                ++encoderClosesFboDrawTail;  // C49 census
+                [currentRenderEncoder endEncoding];
+                releaseCurrentRenderEncoder();
+                activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
+                resetCachedEncoderState();
+            }
         }
 
         pendingPresent = true;
@@ -12846,6 +12890,136 @@ fragment float4 appgl_immediate_textured_fs(
         float depth = 0.0f;
         std::uint32_t stencil = 0;
     };
+    // C49 — active FBO pass signature for render-pass continuation.
+    // Captured when a continuation-eligible FBO pass opens; a follow-up
+    // FBO draw whose targets match exactly reuses the open encoder.
+    // fboPassActive is cleared in releaseCurrentRenderEncoder() so every
+    // close path (commits, readbacks, clears, breaks) resets it through
+    // the single encoder-release choke point.
+    struct ActiveFboPassSignature {
+        void* colorTex = nullptr;
+        std::array<void*, 7> extraColor{};
+        std::array<std::uint32_t, 8> colorSlices{};
+        std::array<std::uint32_t, 8> colorLevels{};
+        void* dsTex = nullptr;
+        std::uint32_t dsSlice = 0;
+        std::uint32_t dsLevel = 0;
+        std::uint32_t rtalSource = 0;
+        std::uint32_t fragmentShadingRate = 0;
+    };
+    ActiveFboPassSignature activeFboPassSignature;
+    bool fboPassActive = false;
+
+    static bool fboPassContinuationEligible(const TranslatedDrawInfo& info) {
+        // v1 conservatism: anything with side effects or pass-level
+        // routing beyond plain color/depth raster breaks the pass.
+        return info.ssboBindings.empty() &&
+            info.atomicCounterBindings.empty() &&
+            info.writtenImageTextureNames.empty() &&
+            !info.parallelEncodeQueryOrTransformFeedbackHazard &&
+            !info.parallelEncodeTessMeshOrGeometryHazard &&
+            info.maxEmittedLayer == 0 &&
+            info.viewportArrayCount <= 1;
+    }
+
+    bool fboPassSignatureMatches(const TranslatedDrawInfo& info) const {
+        if (activeFboPassSignature.colorTex != info.fboColorTexture ||
+            activeFboPassSignature.dsTex != info.fboDepthStencilTexture) {
+            return false;
+        }
+        if (activeFboPassSignature.dsSlice !=
+                static_cast<std::uint32_t>(info.fboDepthStencilSlice) ||
+            activeFboPassSignature.dsLevel !=
+                static_cast<std::uint32_t>(info.fboDepthStencilLevel)) {
+            return false;
+        }
+        if (activeFboPassSignature.rtalSource != info.fboColorArrayLength) {
+            return false;
+        }
+        if (activeFboPassSignature.fragmentShadingRate !=
+            info.fragmentShadingRate) {
+            return false;
+        }
+        for (std::size_t i = 0; i < activeFboPassSignature.extraColor.size();
+             ++i) {
+            const void* drawExtra =
+                i < info.fboAdditionalColorTextures.size()
+                    ? info.fboAdditionalColorTextures[i]
+                    : nullptr;
+            if (activeFboPassSignature.extraColor[i] != drawExtra) {
+                return false;
+            }
+        }
+        return activeFboPassSignature.colorSlices == info.fboColorSlices &&
+            activeFboPassSignature.colorLevels == info.fboColorLevels;
+    }
+
+    // Texture-feedback hazard: a continued pass must break when a draw
+    // samples one of the pass's own attachments (GL render-to-self /
+    // texture_barrier semantics; today's per-draw reopen masks this).
+    bool fboSampledTexturesTouchActiveTargets(
+        const TranslatedDrawInfo& info) const {
+        auto isTarget = [&](void* tex) -> bool {
+            if (tex == nullptr) return false;
+            if (tex == activeFboPassSignature.colorTex ||
+                tex == activeFboPassSignature.dsTex) {
+                return true;
+            }
+            for (void* extra : activeFboPassSignature.extraColor) {
+                if (extra != nullptr && tex == extra) return true;
+            }
+            return false;
+        };
+        auto scan = [&](const std::vector<TranslatedDrawInfo::TextureBinding>&
+                            bindings) -> bool {
+            for (const auto& binding : bindings) {
+                if (binding.metalTexture == nullptr) continue;
+                if (isTarget(binding.metalTexture)) return true;
+                id<MTLTexture> tex =
+                    (__bridge id<MTLTexture>)binding.metalTexture;
+                if (tex.parentTexture != nil &&
+                    isTarget((__bridge void*)tex.parentTexture)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        return scan(info.fragmentTextures) || scan(info.vertexTextures);
+    }
+
+    void captureActiveFboPassSignature(const TranslatedDrawInfo& info) {
+        activeFboPassSignature.colorTex = info.fboColorTexture;
+        for (std::size_t i = 0; i < activeFboPassSignature.extraColor.size();
+             ++i) {
+            activeFboPassSignature.extraColor[i] =
+                i < info.fboAdditionalColorTextures.size()
+                    ? info.fboAdditionalColorTextures[i]
+                    : nullptr;
+        }
+        activeFboPassSignature.colorSlices = info.fboColorSlices;
+        activeFboPassSignature.colorLevels = info.fboColorLevels;
+        activeFboPassSignature.dsTex = info.fboDepthStencilTexture;
+        activeFboPassSignature.dsSlice =
+            static_cast<std::uint32_t>(info.fboDepthStencilSlice);
+        activeFboPassSignature.dsLevel =
+            static_cast<std::uint32_t>(info.fboDepthStencilLevel);
+        activeFboPassSignature.rtalSource = info.fboColorArrayLength;
+        activeFboPassSignature.fragmentShadingRate = info.fragmentShadingRate;
+        fboPassActive = true;
+    }
+
+    bool activeFboPassTargetsTexture(void* texVoid) const {
+        if (!fboPassActive || texVoid == nullptr) return false;
+        if (texVoid == activeFboPassSignature.colorTex ||
+            texVoid == activeFboPassSignature.dsTex) {
+            return true;
+        }
+        for (void* extra : activeFboPassSignature.extraColor) {
+            if (extra != nullptr && texVoid == extra) return true;
+        }
+        return false;
+    }
+
     std::vector<PendingFboClear> pendingFboClears;
     static constexpr std::size_t kMaxPendingFboClears = 16;
     std::uint64_t fboClearsDeferred = 0;
@@ -12857,6 +13031,21 @@ fragment float4 appgl_immediate_textured_fs(
                        std::uint32_t level, std::uint32_t slice,
                        bool isColor, bool isDepth, bool isStencil,
                        const float rgba[4], float depth, std::uint32_t stencil) {
+        // C49 composition rule: a deferred clear on a texture the OPEN
+        // continued pass targets must end that pass (endEncoding only —
+        // no commit, no drain), so the NEXT draw's pass reopens with the
+        // folded MTLLoadActionClear instead of same-pass draws reading
+        // pre-clear contents. Safe today regardless of continuation
+        // because every FBO draw closes its own pass; required once
+        // passes stay open.
+        if (currentRenderEncoder != nil &&
+            activeFboPassTargetsTexture(texVoid)) {
+            ++encoderClosesClear;  // C49 census
+            [currentRenderEncoder endEncoding];
+            releaseCurrentRenderEncoder();
+            activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
+            resetCachedEncoderState();
+        }
         for (auto& entry : pendingFboClears) {
             if (entry.tex == texVoid &&
                 entry.isColor == isColor &&
@@ -17575,6 +17764,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         inventory.encoderClosesCommandBufferCommit =
             encoderClosesCommandBufferCommit;
         inventory.encoderClosesClear = encoderClosesClear;
+        inventory.encoderClosesFboDrawTail = encoderClosesFboDrawTail;
         inventory.translatedDrawEncodeCalls = translatedDrawEncodeCalls;
         inventory.passDescriptorBuilds = passDescriptorBuilds;
         inventory.passDescriptorBuildUsTotal = passDescriptorBuildUsTotal;
@@ -18092,6 +18282,7 @@ private:
     std::uint64_t encoderClosesReadback = 0;
     std::uint64_t encoderClosesCommandBufferCommit = 0;
     std::uint64_t encoderClosesClear = 0;
+    std::uint64_t encoderClosesFboDrawTail = 0;
     std::uint64_t translatedDrawEncodeCalls = 0;
     std::uint64_t passDescriptorBuilds = 0;
     std::uint64_t passDescriptorBuildUsTotal = 0;

@@ -835,6 +835,7 @@ public:
         std::uint64_t frameGraphEncoderClosesReadback = 0;
         std::uint64_t frameGraphEncoderClosesCommandBufferCommit = 0;
         std::uint64_t frameGraphEncoderClosesClear = 0;
+        std::uint64_t frameGraphEncoderClosesFboDrawTail = 0;
         std::uint64_t frameGraphTranslatedDrawEncodeCalls = 0;
         std::uint64_t frameGraphPassDescriptorBuilds = 0;
         std::uint64_t frameGraphPassDescriptorBuildUsTotal = 0;

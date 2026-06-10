@@ -1535,6 +1535,7 @@ public:
         std::uint64_t encoderClosesReadback = 0;
         std::uint64_t encoderClosesCommandBufferCommit = 0;
         std::uint64_t encoderClosesClear = 0;
+        std::uint64_t encoderClosesFboDrawTail = 0;
         std::uint64_t translatedDrawEncodeCalls = 0;
         std::uint64_t passDescriptorBuilds = 0;
         std::uint64_t passDescriptorBuildUsTotal = 0;

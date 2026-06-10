@@ -3068,6 +3068,8 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << metalInventory.frameGraphEncoderClosesCommandBufferCommit << ","
            << "\"encoderClosesClear\":"
            << metalInventory.frameGraphEncoderClosesClear << ","
+           << "\"encoderClosesFboDrawTail\":"
+           << metalInventory.frameGraphEncoderClosesFboDrawTail << ","
            << "\"translatedDrawEncodeCalls\":"
            << metalInventory.frameGraphTranslatedDrawEncodeCalls << ","
            << "\"passDescriptorBuilds\":"

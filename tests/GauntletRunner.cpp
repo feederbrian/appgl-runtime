@@ -15604,6 +15604,288 @@ TestResult runC48DefaultOffZeroEngagementProbe() {
     return result;
 }
 
+// C49 — FBO render-pass continuation probes. Engagement is proven by
+// counter deltas (opens/continuations/tail-closes), correctness by
+// readbacks, and the composition/hazard seams (C48 deferred clears
+// mid-sequence, default-FB-after-FBO isolation, render-to-self
+// feedback) each get a dedicated shape.
+struct C49CounterSnapshot {
+    std::uint64_t opensFbo = 0;
+    std::uint64_t continuations = 0;
+    std::uint64_t misses = 0;
+    std::uint64_t tailCloses = 0;
+    std::uint64_t closesClear = 0;
+    std::uint64_t folded = 0;
+};
+
+C49CounterSnapshot c49Snapshot(GLContext& context) {
+    const auto inv = context.metalResourceInventory();
+    C49CounterSnapshot snap;
+    snap.opensFbo = inv.frameGraphEncoderOpensFboDraw;
+    snap.continuations = inv.frameGraphFboPassContinuations;
+    snap.misses = inv.frameGraphFboPassSignatureMisses;
+    snap.tailCloses = inv.frameGraphEncoderClosesFboDrawTail;
+    snap.closesClear = inv.frameGraphEncoderClosesClear;
+    snap.folded = inv.frameGraphFboClearsFolded;
+    return snap;
+}
+
+TestResult runC49ContinuationEngagementProbe() {
+    auto result = runDirectSentinel("c49.pass-continuation.engagement", [&] {
+        ScopedEnvVar continuation("APPGL_ENABLE_FBO_PASS_CONTINUATION", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        constexpr GLsizei kSize = 4;
+
+        GLuint depthArray = 0;
+        gl.glGenTextures(1, &depthArray);
+        setupDCR3CDepth32FArrayTexture(gl, depthArray, kSize, kSize, 3);
+        primeDCR3CDepth32FTexture(gl, depthArray, kSize, kSize, 3);
+        GLuint layerFbo = 0;
+        setupDCR3CDepthArrayLayerFbo(gl, layerFbo, depthArray, 1);
+
+        const auto before = c49Snapshot(context);
+        // Four same-target depth draws: one pass open, three
+        // continuations, zero tail closes.
+        for (int i = 0; i < 4; ++i) {
+            seedDepthAttachmentWithDraw(gl, layerFbo, kSize, kSize,
+                                        0.2f + 0.1f * static_cast<GLfloat>(i));
+        }
+        const auto after = c49Snapshot(context);
+        expectCondition(after.opensFbo == before.opensFbo + 1,
+                        "c49 engagement: four same-target draws opened ONE pass");
+        expectCondition(after.continuations == before.continuations + 3,
+                        "c49 engagement: three continuations");
+        expectCondition(after.tailCloses == before.tailCloses,
+                        "c49 engagement: zero per-draw tail closes");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, layerFbo);
+        GLfloat readback = -1.0f;
+        gl.glReadPixels(1, 1, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &readback);
+        expectGLError(gl, GL_NO_ERROR, "c49 engagement readback");
+        expectApproxFloat(readback, 0.5f, 0.02f,
+                          "c49 engagement: last draw's depth wins");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &layerFbo);
+        gl.glDeleteTextures(1, &depthArray);
+        expectGLError(gl, GL_NO_ERROR, "c49 engagement cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "four same-target FBO draws shared one continued pass (opens=1, continuations=3, tail closes=0) with correct depth";
+    }
+    return result;
+}
+
+TestResult runC49DefaultOffPerDrawCloseProbe() {
+    auto result = runDirectSentinel("c49.pass-continuation.default-off", [&] {
+        ScopedEnvVar continuation("APPGL_ENABLE_FBO_PASS_CONTINUATION", "0");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        constexpr GLsizei kSize = 4;
+
+        GLuint depthArray = 0;
+        gl.glGenTextures(1, &depthArray);
+        setupDCR3CDepth32FArrayTexture(gl, depthArray, kSize, kSize, 3);
+        primeDCR3CDepth32FTexture(gl, depthArray, kSize, kSize, 3);
+        GLuint layerFbo = 0;
+        setupDCR3CDepthArrayLayerFbo(gl, layerFbo, depthArray, 1);
+
+        const auto before = c49Snapshot(context);
+        for (int i = 0; i < 4; ++i) {
+            seedDepthAttachmentWithDraw(gl, layerFbo, kSize, kSize, 0.5f);
+        }
+        const auto after = c49Snapshot(context);
+        expectCondition(after.opensFbo == before.opensFbo + 4,
+                        "c49 default-off: four draws open four passes");
+        expectCondition(after.continuations == before.continuations,
+                        "c49 default-off: zero continuations");
+        expectCondition(after.tailCloses == before.tailCloses + 4,
+                        "c49 default-off: per-draw tail closes preserved");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &layerFbo);
+        gl.glDeleteTextures(1, &depthArray);
+        expectGLError(gl, GL_NO_ERROR, "c49 default-off cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "flag-off path kept the per-draw close/reopen shape (byte-identical d73c6e1 behavior)";
+    }
+    return result;
+}
+
+TestResult runC49ClearFoldCompositionProbe() {
+    auto result = runDirectSentinel("c49.pass-continuation.c48-compose", [&] {
+        ScopedEnvVar continuation("APPGL_ENABLE_FBO_PASS_CONTINUATION", "1");
+        ScopedEnvVar folding("APPGL_ENABLE_FBO_CLEAR_FOLDING", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        constexpr GLsizei kSize = 4;
+
+        GLuint depthArray = 0;
+        gl.glGenTextures(1, &depthArray);
+        setupDCR3CDepth32FArrayTexture(gl, depthArray, kSize, kSize, 3);
+        primeDCR3CDepth32FTexture(gl, depthArray, kSize, kSize, 3);
+        GLuint layerFbo = 0;
+        setupDCR3CDepthArrayLayerFbo(gl, layerFbo, depthArray, 1);
+
+        const auto before = c49Snapshot(context);
+
+        // clear → draw → draw → clear → draw, all one target. The
+        // second deferred clear must END the open pass (no commit) and
+        // fold into the next draw's pass; the final GL_LESS draw at a
+        // deeper value must be discarded against the folded 0.75.
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, layerFbo);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glClearDepth(0.25);
+        gl.glClear(GL_DEPTH_BUFFER_BIT);
+        seedDepthAttachmentWithDraw(gl, layerFbo, kSize, kSize, 0.5f);
+        seedDepthAttachmentWithDraw(gl, layerFbo, kSize, kSize, 0.6f);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, layerFbo);
+        gl.glViewport(0, 0, kSize, kSize);
+        gl.glClearDepth(0.75);
+        gl.glClear(GL_DEPTH_BUFFER_BIT);
+        // GL_LESS draw at 0.9 against the folded 0.75 clear: discarded.
+        {
+            static constexpr const char* kVS =
+                "#version 330 core\n"
+                "layout(location = 0) in vec2 aPos;\n"
+                "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+            static constexpr const char* kFS =
+                "#version 330 core\n"
+                "void main() { gl_FragDepth = 0.9; }\n";
+            const GLuint program = buildBenchProgram(kVS, kFS);
+            GLuint vao = 0;
+            GLuint vbo = 0;
+            setupDCR3CFullscreenTriangle(gl, vao, vbo);
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, layerFbo);
+            gl.glViewport(0, 0, kSize, kSize);
+            gl.glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+            gl.glEnable(GL_DEPTH_TEST);
+            gl.glDepthMask(GL_TRUE);
+            gl.glDepthFunc(GL_LESS);
+            gl.glUseProgram(program);
+            gl.glBindVertexArray(vao);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+            gl.glBindVertexArray(0);
+            gl.glUseProgram(0);
+            gl.glDisable(GL_DEPTH_TEST);
+            gl.glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            gl.glDeleteVertexArrays(1, &vao);
+            gl.glDeleteBuffers(1, &vbo);
+            gl.glDeleteProgram(program);
+        }
+        expectGLError(gl, GL_NO_ERROR, "c49 compose draws");
+
+        GLfloat readback = -1.0f;
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, layerFbo);
+        gl.glReadPixels(1, 1, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &readback);
+        expectApproxFloat(readback, 0.75f, 0.02f,
+                          "c49 compose: folded mid-sequence clear visible, "
+                          "GL_LESS draw discarded");
+
+        const auto after = c49Snapshot(context);
+        expectCondition(after.folded == before.folded + 2,
+                        "c49 compose: both deferred clears folded");
+        expectCondition(after.closesClear >= before.closesClear + 1,
+                        "c49 compose: mid-sequence clear ended the open pass");
+        expectCondition(after.opensFbo == before.opensFbo + 2,
+                        "c49 compose: exactly two passes opened");
+        expectCondition(after.continuations == before.continuations + 1,
+                        "c49 compose: second draw continued the first pass");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &layerFbo);
+        gl.glDeleteTextures(1, &depthArray);
+        expectGLError(gl, GL_NO_ERROR, "c49 compose cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "deferred clear mid-continued-pass ended the pass without commit and folded into the next pass (counters + values)";
+    }
+    return result;
+}
+
+TestResult runC49DefaultFbIsolationProbe() {
+    auto result = runDirectSentinel("c49.pass-continuation.default-fb-isolation", [&] {
+        ScopedEnvVar continuation("APPGL_ENABLE_FBO_PASS_CONTINUATION", "1");
+
+        ScopedSentinelContext scoped(32, 32);
+        auto& gl = scoped.gl();
+        constexpr GLsizei kSize = 4;
+
+        GLuint depthArray = 0;
+        gl.glGenTextures(1, &depthArray);
+        setupDCR3CDepth32FArrayTexture(gl, depthArray, kSize, kSize, 3);
+        primeDCR3CDepth32FTexture(gl, depthArray, kSize, kSize, 3);
+        GLuint layerFbo = 0;
+        setupDCR3CDepthArrayLayerFbo(gl, layerFbo, depthArray, 1);
+
+        // FBO draw leaves a continued pass OPEN; the following
+        // default-FB draw must break it and render to the default
+        // framebuffer, not into the FBO attachments.
+        seedDepthAttachmentWithDraw(gl, layerFbo, kSize, kSize, 0.5f);
+        {
+            static constexpr const char* kVS =
+                "#version 330 core\n"
+                "layout(location = 0) in vec2 aPos;\n"
+                "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+            static constexpr const char* kFS =
+                "#version 330 core\n"
+                "out vec4 fragColor;\n"
+                "void main() { fragColor = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+            const GLuint program = buildBenchProgram(kVS, kFS);
+            GLuint vao = 0;
+            GLuint vbo = 0;
+            setupDCR3CFullscreenTriangle(gl, vao, vbo);
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            gl.glViewport(0, 0, 32, 32);
+            gl.glDisable(GL_DEPTH_TEST);
+            gl.glUseProgram(program);
+            gl.glBindVertexArray(vao);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+            gl.glBindVertexArray(0);
+            gl.glUseProgram(0);
+            gl.glDeleteVertexArrays(1, &vao);
+            gl.glDeleteBuffers(1, &vbo);
+            gl.glDeleteProgram(program);
+        }
+        expectGLError(gl, GL_NO_ERROR, "c49 isolation draws");
+
+        // Default FB shows the green draw…
+        std::array<std::uint8_t, 4> rgba = {0, 0, 0, 0};
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glReadPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+        expectGLError(gl, GL_NO_ERROR, "c49 isolation default readback");
+        expectApproxByte(rgba[1], 255u, 4u, "c49 isolation: default FB green");
+
+        // …and the FBO depth still holds the FBO draw's value.
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, layerFbo);
+        GLfloat depthValue = -1.0f;
+        gl.glReadPixels(1, 1, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depthValue);
+        expectApproxFloat(depthValue, 0.5f, 0.02f,
+                          "c49 isolation: FBO depth unaffected by default draw");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &layerFbo);
+        gl.glDeleteTextures(1, &depthArray);
+        expectGLError(gl, GL_NO_ERROR, "c49 isolation cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "default-FB draw broke the open FBO pass and both surfaces held the right content";
+    }
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -15717,6 +15999,14 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runTextureMipShadowEvictionR8RedundantProbe());
         tests.push_back(runTextureMipShadowEvictionCopyImageProbe());
         tests.push_back(runTextureMipShadowEvictionPartialTexSubImageProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "c49-pass-continuation-probes") {
+        tests.push_back(runC49ContinuationEngagementProbe());
+        tests.push_back(runC49DefaultOffPerDrawCloseProbe());
+        tests.push_back(runC49ClearFoldCompositionProbe());
+        tests.push_back(runC49DefaultFbIsolationProbe());
         return buildJSON(normalizedPhase, tests);
     }
 
