@@ -245,7 +245,13 @@ static bool fboClearFoldingEnabled() {
 // full-pipeline drainAllOutstanding (measured 8.9% of wall in the
 // d73c6e1 operator baseline). Real resizes keep the full invalidate.
 static bool viewportRequestKeepaliveEnabled() {
-    return appglEnvEnabledDefaultOff("APPGL_ENABLE_VIEWPORT_REQUEST_KEEPALIVE");
+    // CROWNED 2026-06-10: the K+C flicker was the in-place buffer race
+    // (fixed by rename-on-write at 7613a14), verified live — keepalive
+    // promotes to default-ON (skip-posture pattern).
+    if (appglEnvEnabledDefaultOff("APPGL_DISABLE_VIEWPORT_REQUEST_KEEPALIVE")) {
+        return false;
+    }
+    return appglEnvEnabledDefaultOn("APPGL_ENABLE_VIEWPORT_REQUEST_KEEPALIVE");
 }
 
 // C49 primary: keep the FBO render-pass encoder open across consecutive
