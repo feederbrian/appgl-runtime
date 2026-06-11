@@ -4769,7 +4769,10 @@ struct MetalFrameGraph::Impl {
             FG_TRACE(@"encodeTranslatedDraw: no vertex MSL, returning false");
             return false;
         }
-        if (std::getenv("APPGL_TRACE_VIEWPORT_LAYER_ARRAY") != nullptr &&
+        // C52 rider: latched — getenv was paid per draw (Stage-A d3e62ea class).
+        static const bool traceViewportLayerArrayEnv =
+            std::getenv("APPGL_TRACE_VIEWPORT_LAYER_ARRAY") != nullptr;
+        if (traceViewportLayerArrayEnv &&
             ((info.vertexMSL->find("[[viewport_array_index]]") != std::string::npos ||
               info.vertexMSL->find("[[render_target_array_index]]") != std::string::npos) ||
              info.viewportArrayCount > 1 ||
@@ -4915,7 +4918,8 @@ struct MetalFrameGraph::Impl {
         // MTLFunction on the GLProgramObject; subsequent draws reuse the
         // cache and skip the pipeline-rebuild cost. This undoes the pre-7-4
         // pipeline-cache-miss forcing we used to keep MTLFunctions in scope.
-        const bool forceArgBufEnv =
+        // C52 rider: latched — getenv was paid per draw (Stage-A d3e62ea class).
+        static const bool forceArgBufEnv =
             (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
         if (info.translatedPlanRejectReasonOut != nullptr) {
             info.translatedPlanRejectReasonOut->clear();
@@ -6599,13 +6603,23 @@ struct MetalFrameGraph::Impl {
             // Apply stencil reference value (descriptor doesn't carry
             // it — Metal pulls it from the encoder per draw).
             if (info.stencilTestEnabled) {
-                [currentRenderEncoder
-                    setStencilFrontReferenceValue:
-                        static_cast<uint32_t>(info.stencilFrontRef)
-                    backReferenceValue:
-                        static_cast<uint32_t>(info.stencilBackRef)];
+                const auto frontRef = static_cast<uint32_t>(info.stencilFrontRef);
+                const auto backRef = static_cast<uint32_t>(info.stencilBackRef);
+                if (!cachedStencilRefValid ||
+                    cachedStencilFrontRef != frontRef ||
+                    cachedStencilBackRef != backRef) {
+                    [currentRenderEncoder
+                        setStencilFrontReferenceValue:frontRef
+                        backReferenceValue:backRef];
+                    cachedStencilRefValid = true;
+                    cachedStencilFrontRef = frontRef;
+                    cachedStencilBackRef = backRef;
+                }
             }
-            if (std::getenv("APPGL_GS_DUMP_FBODEPTH") != nullptr) {
+            // C52 rider: latched — getenv was paid per FBO draw.
+            static const bool gsDumpFboDepthEnv =
+                std::getenv("APPGL_GS_DUMP_FBODEPTH") != nullptr;
+            if (gsDumpFboDepthEnv) {
                 std::fprintf(stderr,
                     "[GS] FBO draw depth state: test=%d writeMask=%d func=0x%x "
                     "fboDepth=%p arrayLen=%u\n",
@@ -6707,6 +6721,7 @@ struct MetalFrameGraph::Impl {
             }
             [currentRenderEncoder setViewports:vps
                                          count:info.viewportArrayCount];
+            cachedViewportValid = false;  // array set overwrites slot 0
             if (info.viewportArrayCount > 0) {
                 traceViewport = vps[0];
                 traceViewportSet = true;
@@ -6765,7 +6780,18 @@ struct MetalFrameGraph::Impl {
             vp.znear   = info.depthRangeNear;
             vp.zfar    = info.depthRangeFar;
             if (vp.width > 0 && vp.height > 0) {
-                [currentRenderEncoder setViewport:vp];
+                const bool sameViewport = cachedViewportValid &&
+                    cachedViewport.originX == vp.originX &&
+                    cachedViewport.originY == vp.originY &&
+                    cachedViewport.width == vp.width &&
+                    cachedViewport.height == vp.height &&
+                    cachedViewport.znear == vp.znear &&
+                    cachedViewport.zfar == vp.zfar;
+                if (!sameViewport) {
+                    [currentRenderEncoder setViewport:vp];
+                    cachedViewport = vp;
+                    cachedViewportValid = true;
+                }
                 traceViewport = vp;
                 traceViewportSet = true;
                 traceViewportCount = 1;
@@ -6855,6 +6881,7 @@ struct MetalFrameGraph::Impl {
                     srs[i] = makeMetalScissor(enabled, sce.x, sce.y,
                                                sce.width, sce.height);
                 }
+                cachedScissorValid = false;  // array set overwrites slot 0
                 [currentRenderEncoder setScissorRects:srs
                                                 count:info.viewportArrayCount];
                 if (info.viewportArrayCount > 0) {
@@ -6869,7 +6896,15 @@ struct MetalFrameGraph::Impl {
                                                      info.scissorX, info.scissorY,
                                                      info.scissorWidth,
                                                      info.scissorHeight);
-                [currentRenderEncoder setScissorRect:sr];
+                const bool sameScissor = cachedScissorValid &&
+                    cachedScissor.x == sr.x && cachedScissor.y == sr.y &&
+                    cachedScissor.width == sr.width &&
+                    cachedScissor.height == sr.height;
+                if (!sameScissor) {
+                    [currentRenderEncoder setScissorRect:sr];
+                    cachedScissor = sr;
+                    cachedScissorValid = true;
+                }
                 traceScissor = sr;
                 traceScissorSet = true;
                 traceScissorCount = 1;
@@ -18969,6 +19004,17 @@ private:
     MTLCullMode cachedCullMode = static_cast<MTLCullMode>(0xFFFFFFFF);
     MTLWinding cachedFrontFaceWinding = static_cast<MTLWinding>(0xFFFFFFFF);
     MTLTriangleFillMode cachedFillMode = static_cast<MTLTriangleFillMode>(0xFFFFFFFF);
+    // C52 rider: viewport/scissor/stencil-ref join OPT-6 — they were issued
+    // unconditionally per draw, and pass continuation multiplies the
+    // redundancy. Single-rect paths only; the array variants invalidate so
+    // a following single set always re-issues.
+    bool cachedViewportValid = false;
+    MTLViewport cachedViewport{};
+    bool cachedScissorValid = false;
+    MTLScissorRect cachedScissor{};
+    bool cachedStencilRefValid = false;
+    std::uint32_t cachedStencilFrontRef = 0;
+    std::uint32_t cachedStencilBackRef = 0;
 
     void resetCachedEncoderState() {
         cachedPipelineState = nil;
@@ -18976,6 +19022,9 @@ private:
         cachedCullMode = static_cast<MTLCullMode>(0xFFFFFFFF);
         cachedFrontFaceWinding = static_cast<MTLWinding>(0xFFFFFFFF);
         cachedFillMode = static_cast<MTLTriangleFillMode>(0xFFFFFFFF);
+        cachedViewportValid = false;
+        cachedScissorValid = false;
+        cachedStencilRefValid = false;
     }
 
     // ── Ring buffer for per-draw vertex/index data (OPT-1) ──

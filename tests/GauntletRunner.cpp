@@ -17045,6 +17045,71 @@ TestResult runC52AttribRecordGateProbe() {
     return result;
 }
 
+TestResult runC52EncoderStateDedupProbe() {
+    // C52 rider: viewport/scissor/stencil-ref joined the OPT-6 encoder
+    // dedup cache. Pixel-level must-hit pair: within one continued pass,
+    // a CHANGED viewport/scissor must re-issue (second region renders),
+    // and a repeated identical viewport must still render correctly
+    // (cache hold is correctness-invisible).
+    auto result = runDirectSentinel("c52.value-gate.encoder-state-dedup", [&] {
+        ScopedSentinelContext scoped(16, 16);
+        auto& gl = scoped.gl();
+        GLuint colorTex = 0, fbo = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 16, 16);
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glViewport(0, 0, 16, 16);
+        gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        C51Quad q = c51MakeQuad(gl);
+
+        // Draw 1: left half red. Draw 2 (changed viewport): right half
+        // green — the viewport set MUST fire despite the warm cache.
+        gl.glViewport(0, 0, 8, 16);
+        c51DrawQuad(gl, q, 1.0f, 0.0f, 0.0f);
+        gl.glViewport(8, 0, 8, 16);
+        c51DrawQuad(gl, q, 0.0f, 1.0f, 0.0f);
+        // Draw 3: identical viewport re-issued (cache holds) — must
+        // still land in the same region.
+        gl.glViewport(8, 0, 8, 16);
+        c51DrawQuad(gl, q, 0.0f, 0.0f, 1.0f);
+
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(4, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[0], 255u, 2u, "c52 dedup: left-half red intact");
+        gl.glReadPixels(12, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[2], 255u, 2u, "c52 dedup: changed-viewport then held-viewport draw lands (blue)");
+
+        // Scissor must-hit: full-viewport draw clipped to the left half,
+        // then a changed scissor clips to the right half.
+        gl.glViewport(0, 0, 16, 16);
+        gl.glEnable(GL_SCISSOR_TEST);
+        gl.glScissor(0, 0, 8, 16);
+        c51DrawQuad(gl, q, 1.0f, 1.0f, 0.0f);
+        gl.glScissor(8, 0, 8, 16);
+        c51DrawQuad(gl, q, 1.0f, 0.0f, 1.0f);
+        gl.glDisable(GL_SCISSOR_TEST);
+        gl.glReadPixels(4, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[0], 255u, 2u, "c52 dedup: scissored yellow left");
+        expectApproxByte(px[1], 255u, 2u, "c52 dedup: scissored yellow left (g)");
+        gl.glReadPixels(12, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[0], 255u, 2u, "c52 dedup: changed-scissor magenta right");
+        expectApproxByte(px[2], 255u, 2u, "c52 dedup: changed-scissor magenta right (b)");
+
+        c51DestroyQuad(gl, q);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        expectGLError(gl, GL_NO_ERROR, "c52 dedup cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "viewport/scissor dedup cache: changed state re-issues (pixels prove), held state renders correctly";
+    }
+    return result;
+}
+
 TestResult runC51WarmTimingDiag() {
     auto result = runDirectSentinel("c51.diag.warm-timing", [&] {
         ScopedSentinelContext scoped(64, 64);
@@ -17372,6 +17437,7 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runC52FboRenderbufferGateProbe());
         tests.push_back(runC52IndexedBufferGateProbe());
         tests.push_back(runC52AttribRecordGateProbe());
+        tests.push_back(runC52EncoderStateDedupProbe());
         return buildJSON(normalizedPhase, tests);
     }
 
