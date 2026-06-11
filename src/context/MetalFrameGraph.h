@@ -313,6 +313,11 @@ struct TranslatedDrawInfo {
     // provably matches the previous draw's, so the encode wrapper may
     // reuse it (the cache FIND still runs; eviction stays safe).
     bool prepMemoHit = false;
+    // C51 Stage A: the builder computed the SSO/subroutine hazard this
+    // draw — the encode wrapper must not recompute it (the duplicate
+    // scan ate the memo's skip savings).
+    bool hazardPrecomputed = false;
+    bool hazardPrecomputedValue = false;
     // 7C-0 parallel-encode serial batching keeps eligibility deliberately
     // narrower than the translated-draw encoder. GLContext owns these hidden
     // draw-side hazards and snapshots them before handing the draw to the

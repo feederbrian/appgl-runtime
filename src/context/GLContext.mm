@@ -17577,13 +17577,22 @@ struct GLContext::Impl {
     std::uint64_t prepMemoBustsFbo = 0;
     std::uint64_t prepMemoBustsHazard = 0;
 
-    static bool drawPrepMemoEnabled() {
-        const char* dis = std::getenv("APPGL_DISABLE_DRAW_PREP_MEMO");
-        if (dis != nullptr && dis[0] != '\0' && dis[0] != '0') {
-            return false;
+    // Per-CONTEXT latch (not static: probes toggle per fresh context;
+    // not per-call: two getenv environ scans per draw are themselves
+    // hot-path cost — the Stage-A lesson).
+    int drawPrepMemoMode = -1;
+    bool drawPrepMemoEnabled() {
+        if (drawPrepMemoMode < 0) {
+            const char* dis = std::getenv("APPGL_DISABLE_DRAW_PREP_MEMO");
+            if (dis != nullptr && dis[0] != '\0' && dis[0] != '0') {
+                drawPrepMemoMode = 0;
+            } else {
+                const char* raw = std::getenv("APPGL_ENABLE_DRAW_PREP_MEMO");
+                drawPrepMemoMode =
+                    (raw != nullptr && raw[0] != '\0' && raw[0] != '0') ? 1 : 0;
+            }
         }
-        const char* raw = std::getenv("APPGL_ENABLE_DRAW_PREP_MEMO");
-        return raw != nullptr && raw[0] != '\0' && raw[0] != '0';
+        return drawPrepMemoMode == 1;
     }
 
     // S24 rename-on-write engagement counters (export: metalResources
@@ -39364,9 +39373,13 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
             planVaoGeneration =
                 currentVao != nullptr ? currentVao->attribGeneration : 0u;
         }
-        tdi.pipelineOrSubroutinePlanCacheUnsafe =
-            currentDrawHasProgramPipelineOrSubroutinePlanCacheHazard(
-                state.get(), objects.get());
+        if (tdi.hazardPrecomputed) {
+            tdi.pipelineOrSubroutinePlanCacheUnsafe = tdi.hazardPrecomputedValue;
+        } else {
+            tdi.pipelineOrSubroutinePlanCacheUnsafe =
+                currentDrawHasProgramPipelineOrSubroutinePlanCacheHazard(
+                    state.get(), objects.get());
+        }
         tdi.parallelEncodeQueryOrTransformFeedbackHazard =
             conditionalRenderMode != 0 ||
             isTfActiveOnBoundImpl() ||

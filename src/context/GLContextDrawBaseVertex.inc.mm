@@ -801,10 +801,14 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     // SSO/subroutine hazard recomputes EVERY draw and is
                     // never memoized (S23 lesson).
                     bool memoHit = false;
+                    bool memoHazard = false;
+                    bool memoHazardComputed = false;
                     if (impl_->drawPrepMemoEnabled()) {
                         const bool hazard =
                             currentDrawHasProgramPipelineOrSubroutinePlanCacheHazard(
                                 impl_->state.get(), impl_->objects.get());
+                        memoHazard = hazard;
+                        memoHazardComputed = true;
                         auto& memo = impl_->drawPrepMemo;
                         const std::uint64_t stateGen = impl_->state->stateGeneration();
                         const GLuint drawFbo = impl_->state->boundDrawFramebuffer();
@@ -844,6 +848,8 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     }
                     TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo(/*reset=*/!memoHit);
                     tdi.prepMemoHit = memoHit;  // C51 lever 2 input
+                    tdi.hazardPrecomputed = memoHazardComputed;
+                    tdi.hazardPrecomputedValue = memoHazard;
                     tdi.mode = mode;
                     tdi.vertexCount = count;
                     tdi.baseVertex = basevertex;

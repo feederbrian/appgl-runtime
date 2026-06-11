@@ -16748,6 +16748,70 @@ TestResult runC51DrawParamVariationProbe() {
 }
 
 
+TestResult runC51WarmTimingDiag() {
+    auto result = runDirectSentinel("c51.diag.warm-timing", [&] {
+        ScopedSentinelContext scoped(64, 64);
+        auto& gl = scoped.gl();
+        GLuint colorTex = 0, fbo = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 64, 64);
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);  // FB0: the GLTest shape
+        gl.glViewport(0, 0, 64, 64);
+        gl.glDisable(GL_DEPTH_TEST);
+        C51Quad q = c51MakeQuad(gl);
+        gl.glUseProgram(q.program);
+        gl.glUniform4f(q.colorLoc, 0.5f, 0.5f, 0.5f, 1.0f);
+        gl.glBindVertexArray(q.vao);
+        auto& context = scoped.context();
+        auto run = [&](const char* flag) -> double {
+            ScopedEnvVar memoFlag("APPGL_ENABLE_DRAW_PREP_MEMO", flag);
+            ScopedEnvVar memoHatch("APPGL_DISABLE_DRAW_PREP_MEMO", "0");
+            // warmup
+            std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+            for (int i = 0; i < 2000; ++i)
+                gl.glDrawElementsInstancedBaseVertex(GL_TRIANGLES, 6,
+                    GL_UNSIGNED_SHORT, nullptr, 1, (i % 2) ? 4 : 0);
+            gl.glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            const auto t0 = std::chrono::steady_clock::now();
+            for (int f = 0; f < 4; ++f) {
+                for (int i = 0; i < 5000; ++i)
+                    gl.glDrawElementsInstancedBaseVertex(GL_TRIANGLES, 6,
+                        GL_UNSIGNED_SHORT, nullptr, 1, 0);
+                gl.glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            }
+            const auto t1 = std::chrono::steady_clock::now();
+            const auto inv = context.metalResourceInventory();
+            std::fprintf(stderr,
+                "[C51_DIAG] flag=%s opens=%llu cont=%llu sigMiss=%llu tgtChg=%llu tail=%llu hits=%llu reuses=%llu\n",
+                flag,
+                (unsigned long long)inv.frameGraphEncoderOpensFboDraw,
+                (unsigned long long)inv.frameGraphFboPassContinuations,
+                (unsigned long long)inv.frameGraphFboPassSignatureMisses,
+                (unsigned long long)inv.frameGraphEncoderClosesFboTargetChange,
+                (unsigned long long)inv.frameGraphEncoderClosesFboDrawTail,
+                (unsigned long long)inv.prepMemoHits,
+                (unsigned long long)inv.prepMemoPlanKeyReuses);
+            return std::chrono::duration<double, std::micro>(t1 - t0).count() /
+                   (4.0 * 5000.0);
+        };
+        const double offUs = run("0");
+        std::fprintf(stderr, "[C51_DIAG] off done %.3f\n", offUs);
+        const double onUs = run("1");
+        std::fprintf(stderr, "[C51_DIAG] on done %.3f\n", onUs);
+        const double off2Us = run("0");
+        std::fprintf(stderr,
+            "[C51_DIAG] warm perDraw: off=%.3fus on=%.3fus off2=%.3fus delta=%+.1f%%\n",
+            offUs, onUs, off2Us, 100.0 * (onUs - offUs) / offUs);
+        expectCondition(true, "diag");
+        c51DestroyQuad(gl, q);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+    });
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -16870,6 +16934,11 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runLazyShadowInterleavedGpuProbe());
         tests.push_back(runLazyShadowTextureAxisProbe());
         tests.push_back(runLazyShadowDefaultOffProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "c51-warm-timing-diag") {
+        tests.push_back(runC51WarmTimingDiag());
         return buildJSON(normalizedPhase, tests);
     }
 
