@@ -796,7 +796,53 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                         vbo->shadowBytes.size());
                 }
                 if (startOff <= vbo->shadowBytes.size()) {
-                    TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
+                    // C51 draw-prep memo: identical generation key =>
+                    // reuse the persistent tdi's prepared blocks. The
+                    // SSO/subroutine hazard recomputes EVERY draw and is
+                    // never memoized (S23 lesson).
+                    bool memoHit = false;
+                    if (impl_->drawPrepMemoEnabled()) {
+                        const bool hazard =
+                            currentDrawHasProgramPipelineOrSubroutinePlanCacheHazard(
+                                impl_->state.get(), impl_->objects.get());
+                        auto& memo = impl_->drawPrepMemo;
+                        const std::uint64_t stateGen = impl_->state->stateGeneration();
+                        const GLuint drawFbo = impl_->state->boundDrawFramebuffer();
+                        if (memo.valid && !hazard &&
+                            memo.stateGen == stateGen &&
+                            memo.program == programName &&
+                            memo.programExecGen == program->executableGeneration &&
+                            memo.pipelineEmuFrag == program->pipelineEmulationFragmentProgram &&
+                            memo.vao == vaoName &&
+                            memo.vaoAttribGen == vao->attribGeneration &&
+                            memo.drawFbo == drawFbo) {
+                            memoHit = true;
+                            ++impl_->prepMemoHits;
+                        } else {
+                            ++impl_->prepMemoMisses;
+                            if (memo.valid) {
+                                if (hazard) ++impl_->prepMemoBustsHazard;
+                                else if (memo.stateGen != stateGen) ++impl_->prepMemoBustsStateGen;
+                                else if (memo.program != programName ||
+                                         memo.programExecGen != program->executableGeneration ||
+                                         memo.pipelineEmuFrag != program->pipelineEmulationFragmentProgram)
+                                    ++impl_->prepMemoBustsProgram;
+                                else if (memo.vao != vaoName ||
+                                         memo.vaoAttribGen != vao->attribGeneration)
+                                    ++impl_->prepMemoBustsVao;
+                                else ++impl_->prepMemoBustsFbo;
+                            }
+                            memo.valid = !hazard;
+                            memo.stateGen = stateGen;
+                            memo.program = programName;
+                            memo.programExecGen = program->executableGeneration;
+                            memo.pipelineEmuFrag = program->pipelineEmulationFragmentProgram;
+                            memo.vao = vaoName;
+                            memo.vaoAttribGen = vao->attribGeneration;
+                            memo.drawFbo = drawFbo;
+                        }
+                    }
+                    TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo(/*reset=*/!memoHit);
                     tdi.mode = mode;
                     tdi.vertexCount = count;
                     tdi.baseVertex = basevertex;
@@ -825,6 +871,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                         }
                         tdi.metalIndexBufferOffset = indexOffset;
                     }
+                    if (!memoHit) {
                     populateTranslatedDrawFixedFunctionState(
                         tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program), this);
                     assignTranslatedDrawProgramMsl(tdi, *program);
@@ -858,17 +905,27 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     logStateResolveCostClass(
                         "drawElementsInstancedBaseVertex", programName, vaoName,
                         tdi, vao->attributes.size(), vaoLayoutCacheHit);
+                    }  // !memoHit — prepared blocks reused on hit
                     prepareTranslatedDrawUniformBuffers(
                         *program, programName, impl_->matrixState, drawID, tdi,
                         "drawElementsInstancedBaseVertex");
 
+                    if (memoHit) {
+                        // Sampler resolve always runs (producer drains /
+                        // coherence carve-out); its push vectors must not
+                        // accumulate across reuse.
+                        tdi.fragmentTextures.clear();
+                        tdi.vertexTextures.clear();
+                    }
                     impl_->resolveSamplerBindings(*program, tdi);
+                    if (!memoHit) {
                     impl_->resolveUBOBindings(*program, tdi);
                     impl_->resolveSSBOBindings(*program, tdi);
                     impl_->resolveImageBindings(*program, tdi);
+                    }
 
                     // RC-A02: resolve FBO render target.
-                    {
+                    if (!memoHit) {
                         GLsizei fboW = 0, fboH = 0;
                         void* fboDSTex = nullptr;
                         std::uint32_t fboDSSlice = 0;

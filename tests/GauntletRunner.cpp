@@ -16373,6 +16373,278 @@ TestResult runLazyShadowDefaultOffProbe() {
     return result;
 }
 
+
+// C51 draw-prep memoization probes. Draws go through
+// drawElementsInstancedBaseVertex (the wired builder) via a tiny
+// indexed quad. Uniform updates must NOT bust (the always-run carve-out
+// refreshes them); any state/binding mutation MUST.
+struct C51Quad {
+    GLuint program = 0, vao = 0, vbo = 0, ibo = 0;
+    GLint colorLoc = -1;
+};
+
+C51Quad c51MakeQuad(GLDispatchTable& gl) {
+    C51Quad q;
+    static constexpr const char* kVS =
+        "#version 330 core\n"
+        "layout(location = 0) in vec2 aPos;\n"
+        "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+    static constexpr const char* kFS =
+        "#version 330 core\n"
+        "uniform vec4 uColor;\n"
+        "out vec4 fragColor;\n"
+        "void main() { fragColor = uColor; }\n";
+    q.program = buildBenchProgram(kVS, kFS);
+    q.colorLoc = gl.glGetUniformLocation(q.program, "uColor");
+    const float verts[8] = {-1,-1, 1,-1, 1,1, -1,1};
+    const std::uint16_t idx[6] = {0,1,2, 0,2,3};
+    gl.glGenVertexArrays(1, &q.vao);
+    gl.glBindVertexArray(q.vao);
+    gl.glGenBuffers(1, &q.vbo);
+    gl.glBindBuffer(GL_ARRAY_BUFFER, q.vbo);
+    gl.glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+    gl.glEnableVertexAttribArray(0);
+    gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, nullptr);
+    gl.glGenBuffers(1, &q.ibo);
+    gl.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, q.ibo);
+    gl.glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(idx), idx, GL_STATIC_DRAW);
+    return q;
+}
+
+void c51DrawQuad(GLDispatchTable& gl, const C51Quad& q, float r, float g, float b) {
+    gl.glUseProgram(q.program);
+    gl.glUniform4f(q.colorLoc, r, g, b, 1.0f);
+    gl.glBindVertexArray(q.vao);
+    gl.glDrawElementsInstancedBaseVertex(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT,
+                                         nullptr, 1, 0);
+}
+
+void c51DestroyQuad(GLDispatchTable& gl, C51Quad& q) {
+    gl.glBindVertexArray(0);
+    gl.glUseProgram(0);
+    gl.glDeleteBuffers(1, &q.vbo);
+    gl.glDeleteBuffers(1, &q.ibo);
+    gl.glDeleteVertexArrays(1, &q.vao);
+    gl.glDeleteProgram(q.program);
+}
+
+std::uint64_t c51Counter(GLContext& context, int which) {
+    const auto inv = context.metalResourceInventory();
+    switch (which) {
+        case 0: return inv.prepMemoHits;
+        case 1: return inv.prepMemoMisses;
+        default: return inv.prepMemoBusts;
+    }
+}
+
+TestResult runC51SameStateUniformProbe() {
+    auto result = runDirectSentinel("c51.prep-memo.same-state-uniforms", [&] {
+        ScopedEnvVar memoFlag("APPGL_ENABLE_DRAW_PREP_MEMO", "1");
+        ScopedEnvVar memoHatch("APPGL_DISABLE_DRAW_PREP_MEMO", "0");
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        GLuint colorTex = 0, fbo = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, 8, 8);
+        gl.glDisable(GL_DEPTH_TEST);
+        C51Quad q = c51MakeQuad(gl);
+        const auto h0 = c51Counter(context, 0);
+        // Warm draw (miss), then 3 same-state draws with DISTINCT uniforms.
+        const float colors[4][3] = {{1,0,0},{0,1,0},{0,0,1},{1,1,0}};
+        for (int i = 0; i < 4; ++i) {
+            c51DrawQuad(gl, q, colors[i][0], colors[i][1], colors[i][2]);
+            std::array<std::uint8_t, 4> px = {0,0,0,0};
+            gl.glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            const std::string tag = "c51 same-state draw " + std::to_string(i) +
+                                    " uniform landed";
+            expectApproxByte(px[0], static_cast<std::uint8_t>(colors[i][0]*255), 4u, tag.c_str());
+            expectApproxByte(px[1], static_cast<std::uint8_t>(colors[i][1]*255), 4u, tag.c_str());
+        }
+        expectCondition(c51Counter(context, 0) >= h0 + 3,
+                        "c51 same-state: three memo hits");
+        c51DestroyQuad(gl, q);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        expectGLError(gl, GL_NO_ERROR, "c51 same-state cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "3 memo hits across same-state draws with per-draw uniforms landing (uniform carve-out proven)";
+    }
+    return result;
+}
+
+TestResult runC51DirtyMustMissProbe() {
+    auto result = runDirectSentinel("c51.prep-memo.dirty-must-miss", [&] {
+        ScopedEnvVar memoFlag("APPGL_ENABLE_DRAW_PREP_MEMO", "1");
+        ScopedEnvVar memoHatch("APPGL_DISABLE_DRAW_PREP_MEMO", "0");
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        GLuint colorTex = 0, fbo = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, 8, 8);
+        C51Quad q = c51MakeQuad(gl);
+        const auto h0 = c51Counter(context, 0);
+        const auto b0 = c51Counter(context, 2);
+        // State mutation between every draw: blend toggle + a texture
+        // rebind (the binding-bump sites) — memo must never hit.
+        GLuint dummyTex = 0;
+        gl.glGenTextures(1, &dummyTex);
+        setupDCR3CRGBA8Texture(gl, dummyTex, 2, 2);
+        for (int i = 0; i < 4; ++i) {
+            if (i % 2 == 0) gl.glEnable(GL_BLEND); else gl.glDisable(GL_BLEND);
+            gl.glBindTexture(GL_TEXTURE_2D, (i % 2) ? dummyTex : 0);
+            c51DrawQuad(gl, q, 0.5f, 0.5f, 0.5f);
+        }
+        gl.glDisable(GL_BLEND);
+        expectCondition(c51Counter(context, 0) == h0,
+                        "c51 dirty-must-miss: zero hits");
+        expectCondition(c51Counter(context, 2) > b0,
+                        "c51 dirty-must-miss: busts counted");
+        std::array<std::uint8_t, 4> px = {0,0,0,0};
+        gl.glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[0], 128u, 6u, "c51 dirty-must-miss value");
+        c51DestroyQuad(gl, q);
+        gl.glDeleteTextures(1, &dummyTex);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        expectGLError(gl, GL_NO_ERROR, "c51 dirty cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "state/binding mutations bust every draw (blend toggle + texture rebind), values correct";
+    }
+    return result;
+}
+
+TestResult runC51SsoHazardProbe() {
+    auto result = runDirectSentinel("c51.prep-memo.subroutine-hazard", [&] {
+        ScopedEnvVar memoFlag("APPGL_ENABLE_DRAW_PREP_MEMO", "1");
+        ScopedEnvVar memoHatch("APPGL_DISABLE_DRAW_PREP_MEMO", "0");
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        GLuint colorTex = 0, fbo = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, 8, 8);
+        // The S23 shape itself: a program with a SUBROUTINE uniform.
+        // Subroutine selection changes NO tracked generation — the
+        // per-draw hazard recompute is the only guard, so the memo
+        // must never hit for this program and every draw must render
+        // its freshly-selected subroutine.
+        static constexpr const char* kVS =
+            "#version 410 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+        static constexpr const char* kFS =
+            "#version 410 core\n"
+            "subroutine vec4 ColorFunc();\n"
+            "subroutine(ColorFunc) vec4 redFunc() { return vec4(1.0, 0.0, 0.0, 1.0); }\n"
+            "subroutine(ColorFunc) vec4 greenFunc() { return vec4(0.0, 1.0, 0.0, 1.0); }\n"
+            "subroutine uniform ColorFunc uFunc;\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = uFunc(); }\n";
+        const GLuint program = buildBenchProgram(kVS, kFS);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(program, GL_LINK_STATUS, &linked);
+        expectCondition(linked == GL_TRUE, "c51 subroutine program links");
+        const GLuint redIdx =
+            gl.glGetSubroutineIndex(program, GL_FRAGMENT_SHADER, "redFunc");
+        const GLuint greenIdx =
+            gl.glGetSubroutineIndex(program, GL_FRAGMENT_SHADER, "greenFunc");
+
+        const float verts[8] = {-1,-1, 1,-1, 1,1, -1,1};
+        const std::uint16_t idx[6] = {0,1,2, 0,2,3};
+        GLuint vao = 0, vbo = 0, ibo = 0;
+        gl.glGenVertexArrays(1, &vao);
+        gl.glBindVertexArray(vao);
+        gl.glGenBuffers(1, &vbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, nullptr);
+        gl.glGenBuffers(1, &ibo);
+        gl.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+        gl.glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(idx), idx, GL_STATIC_DRAW);
+
+        const auto h0 = c51Counter(context, 0);
+        gl.glUseProgram(program);
+        const GLuint seq[3] = {redIdx, greenIdx, redIdx};
+        const std::uint8_t expectR[3] = {255, 0, 255};
+        const std::uint8_t expectG[3] = {0, 255, 0};
+        for (int i = 0; i < 3; ++i) {
+            gl.glUniformSubroutinesuiv(GL_FRAGMENT_SHADER, 1, &seq[i]);
+            gl.glDrawElementsInstancedBaseVertex(GL_TRIANGLES, 6,
+                GL_UNSIGNED_SHORT, nullptr, 1, 0);
+            std::array<std::uint8_t, 4> px = {0,0,0,0};
+            gl.glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            const std::string tag =
+                "c51 subroutine draw " + std::to_string(i) + " renders selection";
+            expectApproxByte(px[0], expectR[i], 4u, tag.c_str());
+            expectApproxByte(px[1], expectG[i], 4u, tag.c_str());
+        }
+        expectCondition(c51Counter(context, 0) == h0,
+                        "c51 subroutine-hazard: memo never hits");
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteBuffers(1, &ibo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteProgram(program);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        expectGLError(gl, GL_NO_ERROR, "c51 subroutine cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "subroutine program never memo-hits and every draw renders its freshly-selected subroutine (the S23 shape)";
+    }
+    return result;
+}
+
+TestResult runC51DefaultOffProbe() {
+    auto result = runDirectSentinel("c51.prep-memo.default-off", [&] {
+        ScopedEnvVar memoFlag("APPGL_ENABLE_DRAW_PREP_MEMO", "0");
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        GLuint colorTex = 0, fbo = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, 8, 8);
+        C51Quad q = c51MakeQuad(gl);
+        for (int i = 0; i < 3; ++i) c51DrawQuad(gl, q, 1.0f, 0.0f, 1.0f);
+        expectCondition(c51Counter(context, 0) == 0 && c51Counter(context, 1) == 0,
+                        "c51 default-off: zero memo activity");
+        std::array<std::uint8_t, 4> px = {0,0,0,0};
+        gl.glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[0], 255u, 4u, "c51 default-off value");
+        c51DestroyQuad(gl, q);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        expectGLError(gl, GL_NO_ERROR, "c51 default-off cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "flag-off path has zero memo activity, byte-identical behavior";
+    }
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -16495,6 +16767,14 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runLazyShadowInterleavedGpuProbe());
         tests.push_back(runLazyShadowTextureAxisProbe());
         tests.push_back(runLazyShadowDefaultOffProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "c51-prep-memo-probes") {
+        tests.push_back(runC51SameStateUniformProbe());
+        tests.push_back(runC51DirtyMustMissProbe());
+        tests.push_back(runC51SsoHazardProbe());
+        tests.push_back(runC51DefaultOffProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

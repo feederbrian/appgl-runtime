@@ -17495,6 +17495,41 @@ struct GLContext::Impl {
         );
     }
 
+    // C51 draw-prep memoization: when no state-derived prep input has
+    // changed since the previous draw (generation key below) the builder
+    // reuses the persistent TranslatedDrawInfo's prepared blocks and
+    // skips re-deriving them. The SSO/subroutine hazard is NEVER part of
+    // the key — it is recomputed fresh every draw (S23 lesson), and
+    // resolveSamplerBindings always runs (producer-pending state has no
+    // generation; the resolve path owns the coherence drains).
+    struct DrawPrepMemo {
+        bool valid = false;
+        std::uint64_t stateGen = 0;
+        GLuint program = 0;
+        std::uint64_t programExecGen = 0;
+        GLuint pipelineEmuFrag = 0;
+        GLuint vao = 0;
+        std::uint32_t vaoAttribGen = 0;
+        GLuint drawFbo = 0;
+    };
+    DrawPrepMemo drawPrepMemo;
+    std::uint64_t prepMemoHits = 0;
+    std::uint64_t prepMemoMisses = 0;
+    std::uint64_t prepMemoBustsStateGen = 0;
+    std::uint64_t prepMemoBustsProgram = 0;
+    std::uint64_t prepMemoBustsVao = 0;
+    std::uint64_t prepMemoBustsFbo = 0;
+    std::uint64_t prepMemoBustsHazard = 0;
+
+    static bool drawPrepMemoEnabled() {
+        const char* dis = std::getenv("APPGL_DISABLE_DRAW_PREP_MEMO");
+        if (dis != nullptr && dis[0] != '\0' && dis[0] != '0') {
+            return false;
+        }
+        const char* raw = std::getenv("APPGL_ENABLE_DRAW_PREP_MEMO");
+        return raw != nullptr && raw[0] != '\0' && raw[0] != '0';
+    }
+
     // S24 rename-on-write engagement counters (export: metalResources
     // inventory; renames/frame = JSONL diff, the storm watch).
     std::uint64_t bufferRenames = 0;
@@ -26801,6 +26836,12 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         inventory.shadowClearsCoalesced = impl_->shadowClearsCoalesced;
         inventory.shadowClearsMaterialized = impl_->shadowClearsMaterialized;
         inventory.shadowClearMaterializeBytes = impl_->shadowClearMaterializeBytes;
+        inventory.prepMemoHits = impl_->prepMemoHits;
+        inventory.prepMemoMisses = impl_->prepMemoMisses;
+        inventory.prepMemoBusts =
+            impl_->prepMemoBustsStateGen + impl_->prepMemoBustsProgram +
+            impl_->prepMemoBustsVao + impl_->prepMemoBustsFbo +
+            impl_->prepMemoBustsHazard;
         inventory.bufferRenames = impl_->bufferRenames;
         inventory.bufferRenameBytes = impl_->bufferRenameBytes;
         inventory.bufferRenameSkips = impl_->bufferRenameSkips;
@@ -34967,10 +35008,12 @@ static void resetReusableTranslatedDrawInfo(TranslatedDrawInfo& tdi)
     tdi.writtenImageTextureNames = std::move(writtenImageTextureNames);
 }
 
-static TranslatedDrawInfo& reusableTranslatedDrawInfo()
+static TranslatedDrawInfo& reusableTranslatedDrawInfo(bool reset = true)
 {
     thread_local TranslatedDrawInfo tdi;
-    resetReusableTranslatedDrawInfo(tdi);
+    if (reset) {
+        resetReusableTranslatedDrawInfo(tdi);
+    }
     return tdi;
 }
 

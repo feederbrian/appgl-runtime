@@ -823,6 +823,9 @@ public:
         std::uint64_t frameGraphDrawableAcquireFailures = 0;
         std::uint64_t frameGraphDrawablePresentCalls = 0;
         std::uint64_t frameGraphPresentCalls = 0;
+        std::uint64_t prepMemoHits = 0;
+        std::uint64_t prepMemoMisses = 0;
+        std::uint64_t prepMemoBusts = 0;
         std::uint64_t shadowClearsDeferred = 0;
         std::uint64_t shadowClearsCoalesced = 0;
         std::uint64_t shadowClearsMaterialized = 0;

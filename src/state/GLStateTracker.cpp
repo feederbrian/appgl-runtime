@@ -1378,7 +1378,10 @@ bool GLStateTracker::queryDouble(GLenum pname, GLdouble* out) const {
 }
 
 void GLStateTracker::bindBuffer(GLenum target, GLuint object) {
-    ++stateGeneration_;  // C51 prep-memo bust
+    if (bufferBindings_[target] == object) {
+        return;  // C51: value-identical rebind — no state change
+    }
+    ++stateGeneration_;
     bufferBindings_[target] = object;
     markDirty(target == GL_ELEMENT_ARRAY_BUFFER ? DirtyBit::VertexInput : DirtyBit::Framebuffer);
 }
@@ -1429,7 +1432,10 @@ void GLStateTracker::deleteBufferBindings(GLuint object) {
 }
 
 void GLStateTracker::bindTexture(GLenum target, GLuint object) {
-    ++stateGeneration_;  // C51 prep-memo bust
+    if (textureUnits_[activeTextureUnit_].bindings[target] == object) {
+        return;  // C51: value-identical rebind — no state change
+    }
+    ++stateGeneration_;
     textureUnits_[activeTextureUnit_].bindings[target] = object;
     markDirty(DirtyBit::Program);
 }
@@ -1521,7 +1527,10 @@ void GLStateTracker::deleteRenderbufferBinding(GLuint object) {
 }
 
 void GLStateTracker::setActiveTextureUnit(GLuint unit) {
-    ++stateGeneration_;  // C51 prep-memo bust
+    if (unit == activeTextureUnit_) {
+        return;  // C51: value-identical — no state change
+    }
+    ++stateGeneration_;
     if (unit < textureUnits_.size()) {
         activeTextureUnit_ = unit;
     }
@@ -1532,10 +1541,13 @@ GLuint GLStateTracker::activeTextureUnit() const {
 }
 
 void GLStateTracker::bindSampler(GLuint unit, GLuint object) {
-    ++stateGeneration_;  // C51 prep-memo bust
     if (unit >= textureUnits_.size()) {
         return;
     }
+    if (textureUnits_[unit].sampler == object) {
+        return;  // C51: value-identical rebind — no state change
+    }
+    ++stateGeneration_;
     textureUnits_[unit].sampler = object;
     markDirty(DirtyBit::Program);
 }
@@ -1643,7 +1655,10 @@ const GLPixelStoreState& GLStateTracker::pixelStore() const {
 }
 
 void GLStateTracker::bindVertexArray(GLuint vao) {
-    ++stateGeneration_;  // C51 prep-memo bust
+    if (currentVertexArray_ == vao) {
+        return;  // C51: value-identical rebind — no state change
+    }
+    ++stateGeneration_;
     currentVertexArray_ = vao;
     markDirty(DirtyBit::VertexInput);
 }
@@ -1711,7 +1726,10 @@ GLenum GLStateTracker::readBuffer() const {
 }
 
 void GLStateTracker::useProgram(GLuint program) {
-    ++stateGeneration_;  // C51 prep-memo bust
+    if (currentProgram_ == program) {
+        return;  // C51: value-identical rebind — no state change
+    }
+    ++stateGeneration_;
     currentProgram_ = program;
     markDirty(DirtyBit::Program);
 }
