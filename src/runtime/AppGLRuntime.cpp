@@ -2605,6 +2605,16 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
         });
         metalInventory = currentContext->metalResourceInventory();
 
+        // C52 opt-pass instrument: the per-draw profilers' stderr dumps are
+        // teardown-gated and real apps (WZ autogame) self-exit without
+        // teardown — emit the aggregates here so every interval carries them
+        // and the analysis reads deltas like every other counter.
+        const std::string drawProfileJson =
+            currentContext->drawProfileDiagnosticsJson();
+        if (!drawProfileJson.empty()) {
+            stream << "\"drawProfile\":" << drawProfileJson << ",";
+        }
+
         stream << "\"buffers\":" << store.buffers().size() << ",";
         stream << "\"textures\":" << store.textures().size() << ",";
         stream << "\"samplers\":" << store.samplers().size() << ",";

@@ -1009,6 +1009,12 @@ public:
         std::vector<RenderPsoProgramHotspot> topRenderPsoPrograms;
     };
     MetalResourceInventory metalResourceInventory() const;
+    // C52 opt-pass instrument: JSON snapshot of the per-draw profilers
+    // ({"gl":...} for APPGL_GL_DRAW_PROFILE, {"submit":...} for
+    // APPGL_DRAW_PROFILE); "" when neither is enabled or no draws ran.
+    // Their stderr dumps are teardown-gated and real apps may never tear
+    // down — the diagnostics JSONL emits this instead.
+    std::string drawProfileDiagnosticsJson() const;
     std::uint64_t evictR5DerivedCachesForTesting(std::uint64_t budget);
 
     // Transform feedback active state tracking (for CTS api_errors_test).

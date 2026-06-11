@@ -1071,6 +1071,11 @@ public:
     // resources or issue a visibility barrier use this to close any pending
     // translated default-framebuffer batch before the mutation becomes visible.
     void flushParallelEncodeBoundary();
+    // C52 opt-pass instrument: JSON snapshot of the APPGL_DRAW_PROFILE
+    // per-draw submit aggregates ("" when the profiler is off or idle).
+    // The stderr dump is teardown-gated; this feeds the periodic
+    // diagnostics JSONL so apps that never tear down still report.
+    std::string drawSubmitProfileDiagnosticsJson() const;
     // Encodes a single draw call against the current default framebuffer using
     // the prebaked "solid color" pipeline state. Phase A Group 7 MVP. Returns
     // true on success. If the provided layout cannot be handled the caller is

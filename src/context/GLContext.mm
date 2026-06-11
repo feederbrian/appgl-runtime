@@ -1001,6 +1001,37 @@ struct GLDrawPathProfile {
         }
         std::fflush(stderr);
     }
+
+    // C52 opt-pass instrument: the stderr dump is teardown/atexit-gated and
+    // real apps (WZ autogame) self-exit without it firing — mirror the
+    // aggregates into the periodic diagnostics JSONL. Nonzero buckets only.
+    std::string diagnosticsJson() const {
+        if (!enabled || draws == 0) {
+            return std::string();
+        }
+        char head[128];
+        std::snprintf(head, sizeof(head),
+                      "{\"draws\":%llu,\"totalUs\":%.3f,\"buckets\":{",
+                      static_cast<unsigned long long>(draws), totalUs);
+        std::string out(head);
+        bool first = true;
+        for (std::size_t i = 0; i < static_cast<std::size_t>(GLDrawProfileBucket::Count); ++i) {
+            const auto& bucket = buckets[i];
+            if (bucket.count == 0) {
+                continue;
+            }
+            char entry[160];
+            std::snprintf(entry, sizeof(entry), "%s\"%s\":[%llu,%.3f]",
+                          first ? "" : ",",
+                          glDrawProfileBucketName(static_cast<GLDrawProfileBucket>(i)),
+                          static_cast<unsigned long long>(bucket.count),
+                          bucket.totalUs);
+            out += entry;
+            first = false;
+        }
+        out += "}}";
+        return out;
+    }
 };
 
 class GLDrawProfileScope {
@@ -26726,6 +26757,30 @@ std::uint64_t GLContext::metalAllocatedBytes() const {
         return impl_->frameGraph->metalAllocatedBytes();
     }
     return 0;
+}
+
+std::string GLContext::drawProfileDiagnosticsJson() const {
+    const std::string gl = impl_->drawPathProfile.diagnosticsJson();
+    const std::string submit = impl_->frameGraph != nullptr
+        ? impl_->frameGraph->drawSubmitProfileDiagnosticsJson()
+        : std::string();
+    if (gl.empty() && submit.empty()) {
+        return std::string();
+    }
+    std::string out = "{";
+    if (!gl.empty()) {
+        out += "\"gl\":";
+        out += gl;
+    }
+    if (!submit.empty()) {
+        if (!gl.empty()) {
+            out += ",";
+        }
+        out += "\"submit\":";
+        out += submit;
+    }
+    out += "}";
+    return out;
 }
 
 GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {

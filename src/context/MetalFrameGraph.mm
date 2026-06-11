@@ -381,6 +381,38 @@ struct DrawSubmitProfile {
         line("finalize", finalizeUs);
         line("unattributed", std::max(0.0, totalUs - accounted));
     }
+
+    // C52 opt-pass instrument: the stderr dump above is teardown-gated and
+    // real apps (WZ autogame) exit without tearing the frame graph down —
+    // mirror the aggregates into the periodic diagnostics JSONL instead.
+    std::string diagnosticsJson() const {
+        if (!enabled || draws == 0) {
+            return std::string();
+        }
+        char buf[1024];
+        std::snprintf(buf, sizeof(buf),
+            "{\"draws\":%llu,\"totalUs\":%.3f,\"cacheMisses\":%llu,"
+            "\"encoderOpens\":%llu,\"fboDraws\":%llu,\"argbufDraws\":%llu,"
+            "\"indexedDraws\":%llu,\"expandedDraws\":%llu,"
+            "\"metalDrawCalls\":%llu,\"components\":{"
+            "\"validation\":%.3f,\"state_resolve\":%.3f,"
+            "\"pipeline_build\":%.3f,\"encoder_setup\":%.3f,"
+            "\"render_state\":%.3f,\"binding\":%.3f,"
+            "\"primitive_prep\":%.3f,\"metal_draw_call\":%.3f,"
+            "\"finalize\":%.3f}}",
+            static_cast<unsigned long long>(draws), totalUs,
+            static_cast<unsigned long long>(cacheMisses),
+            static_cast<unsigned long long>(encoderOpens),
+            static_cast<unsigned long long>(fboDraws),
+            static_cast<unsigned long long>(argbufDraws),
+            static_cast<unsigned long long>(indexedDraws),
+            static_cast<unsigned long long>(expandedDraws),
+            static_cast<unsigned long long>(metalDrawCalls),
+            validationUs, stateResolveUs, pipelineBuildUs, encoderSetupUs,
+            renderStateUs, bindingUs, primitivePrepUs, metalDrawUs,
+            finalizeUs);
+        return std::string(buf);
+    }
 };
 
 enum class ParallelEncodeBoundaryReason : std::size_t {
@@ -11539,6 +11571,10 @@ struct MetalFrameGraph::Impl {
             ParallelEncodeBoundaryReason::ResourceMutationOrBarrier);
     }
 
+    std::string drawSubmitProfileDiagnosticsJson() const {
+        return drawSubmitProfile.diagnosticsJson();
+    }
+
     bool encodeTranslatedDraw(TranslatedDrawInfo& info) {
         // C48: a sampled texture with a deferred FBO clear must be
         // materialized before any encode path (serial, parallel capture,
@@ -19853,6 +19889,10 @@ void* MetalFrameGraph::currentRenderEncoder() const {
 
 void MetalFrameGraph::endRenderPass() {
     impl_->endRenderPass();
+}
+
+std::string MetalFrameGraph::drawSubmitProfileDiagnosticsJson() const {
+    return impl_->drawSubmitProfileDiagnosticsJson();
 }
 
 void MetalFrameGraph::flushParallelEncodeBoundary() {
