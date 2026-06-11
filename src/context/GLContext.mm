@@ -17511,8 +17511,10 @@ struct GLContext::Impl {
         GLuint vao = 0;
         std::uint32_t vaoAttribGen = 0;
         GLuint drawFbo = 0;
+        std::uint64_t domainGens[6] = {0, 0, 0, 0, 0, 0};
     };
     DrawPrepMemo drawPrepMemo;
+    std::uint64_t prepMemoBustsByDomain[6] = {0, 0, 0, 0, 0, 0};
     // C51 lever 2: last successful plan-key (reused on prep-memo HITs,
     // skipping phase2PlanCandidateKeyForDraw — the 16% bucket). The
     // prep memo's generation key deliberately excludes per-draw call
@@ -26913,6 +26915,9 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         inventory.shadowClearMaterializeBytes = impl_->shadowClearMaterializeBytes;
         inventory.prepMemoHits = impl_->prepMemoHits;
         inventory.prepMemoPlanKeyReuses = impl_->prepMemoPlanKeyReuses;
+        for (int d = 0; d < 6; ++d) {
+            inventory.prepMemoBustsByDomain[d] = impl_->prepMemoBustsByDomain[d];
+        }
         inventory.prepMemoMisses = impl_->prepMemoMisses;
         inventory.prepMemoBusts =
             impl_->prepMemoBustsStateGen + impl_->prepMemoBustsProgram +

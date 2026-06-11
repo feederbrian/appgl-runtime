@@ -826,7 +826,16 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                             ++impl_->prepMemoMisses;
                             if (memo.valid) {
                                 if (hazard) ++impl_->prepMemoBustsHazard;
-                                else if (memo.stateGen != stateGen) ++impl_->prepMemoBustsStateGen;
+                                else if (memo.stateGen != stateGen) {
+                                    ++impl_->prepMemoBustsStateGen;
+                                    // C52(a): bust topology — every domain
+                                    // that advanced since the snapshot.
+                                    for (unsigned d = 0; d < appgl::GLStateTracker::kDomainCount; ++d) {
+                                        if (impl_->state->domainGeneration(d) != memo.domainGens[d]) {
+                                            ++impl_->prepMemoBustsByDomain[d];
+                                        }
+                                    }
+                                }
                                 else if (memo.program != programName ||
                                          memo.programExecGen != program->executableGeneration ||
                                          memo.pipelineEmuFrag != program->pipelineEmulationFragmentProgram)
@@ -838,6 +847,9 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                             }
                             memo.valid = !hazard;
                             memo.stateGen = stateGen;
+                            for (unsigned d = 0; d < appgl::GLStateTracker::kDomainCount; ++d) {
+                                memo.domainGens[d] = impl_->state->domainGeneration(d);
+                            }
                             memo.program = programName;
                             memo.programExecGen = program->executableGeneration;
                             memo.pipelineEmuFrag = program->pipelineEmulationFragmentProgram;

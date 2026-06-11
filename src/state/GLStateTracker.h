@@ -338,6 +338,18 @@ public:
     // matching generation means no state-derived draw-prep input changed.
     std::uint64_t stateGeneration() const { return stateGeneration_; }
     void bumpStateGeneration() { ++stateGeneration_; }
+    // C52(a) instrument: per-domain generations for bust-topology
+    // attribution (observation-only; the memo still keys on the global
+    // generation). A mutator may advance more than one domain (e.g.
+    // bindTexture also marks Program dirty) — analysis reads the SET of
+    // advanced domains per bust; documented caveat.
+    enum StateDomain : unsigned {
+        kDomainTexture = 0, kDomainBuffer, kDomainVertexInput,
+        kDomainFixedFunction, kDomainProgram, kDomainFramebuffer,
+        kDomainCount
+    };
+    std::uint64_t domainGeneration(unsigned d) const { return domainGenerations_[d]; }
+    void bumpDomain(unsigned d) { ++stateGeneration_; ++domainGenerations_[d]; }
     bool isDirty(DirtyBit bit) const;
     void clearDirty(DirtyBit bit);
     std::uint32_t dirtyMask() const;
@@ -413,6 +425,7 @@ private:
     GLuint readFramebuffer_ = 0;
     std::uint32_t dirtyMask_ = 0xffffffffu;
     std::uint64_t stateGeneration_ = 1;
+    std::uint64_t domainGenerations_[6] = {0, 0, 0, 0, 0, 0};
     GLenum clipOrigin_ = GL_LOWER_LEFT;
     GLenum clipDepthMode_ = GL_NEGATIVE_ONE_TO_ONE;
 };

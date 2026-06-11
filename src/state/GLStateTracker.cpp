@@ -1381,7 +1381,7 @@ void GLStateTracker::bindBuffer(GLenum target, GLuint object) {
     if (bufferBindings_[target] == object) {
         return;  // C51: value-identical rebind — no state change
     }
-    ++stateGeneration_;
+    bumpDomain(kDomainBuffer);
     bufferBindings_[target] = object;
     markDirty(target == GL_ELEMENT_ARRAY_BUFFER ? DirtyBit::VertexInput : DirtyBit::Framebuffer);
 }
@@ -1392,7 +1392,7 @@ GLuint GLStateTracker::boundBuffer(GLenum target) const {
 }
 
 void GLStateTracker::bindIndexedBuffer(GLenum target, GLuint index, GLuint object, GLintptr offset, GLsizeiptr size) {
-    ++stateGeneration_;  // C51 prep-memo bust
+    bumpDomain(kDomainBuffer);  // C51 prep-memo bust
     auto& bindings = indexedBufferBindings_[target];
     if (index >= bindings.size()) {
         return;
@@ -1435,7 +1435,7 @@ void GLStateTracker::bindTexture(GLenum target, GLuint object) {
     if (textureUnits_[activeTextureUnit_].bindings[target] == object) {
         return;  // C51: value-identical rebind — no state change
     }
-    ++stateGeneration_;
+    bumpDomain(kDomainTexture);
     textureUnits_[activeTextureUnit_].bindings[target] = object;
     markDirty(DirtyBit::Program);
 }
@@ -1530,7 +1530,7 @@ void GLStateTracker::setActiveTextureUnit(GLuint unit) {
     if (unit == activeTextureUnit_) {
         return;  // C51: value-identical — no state change
     }
-    ++stateGeneration_;
+    bumpDomain(kDomainTexture);
     if (unit < textureUnits_.size()) {
         activeTextureUnit_ = unit;
     }
@@ -1547,7 +1547,7 @@ void GLStateTracker::bindSampler(GLuint unit, GLuint object) {
     if (textureUnits_[unit].sampler == object) {
         return;  // C51: value-identical rebind — no state change
     }
-    ++stateGeneration_;
+    bumpDomain(kDomainTexture);
     textureUnits_[unit].sampler = object;
     markDirty(DirtyBit::Program);
 }
@@ -1658,7 +1658,7 @@ void GLStateTracker::bindVertexArray(GLuint vao) {
     if (currentVertexArray_ == vao) {
         return;  // C51: value-identical rebind — no state change
     }
-    ++stateGeneration_;
+    bumpDomain(kDomainVertexInput);
     currentVertexArray_ = vao;
     markDirty(DirtyBit::VertexInput);
 }
@@ -1729,7 +1729,7 @@ void GLStateTracker::useProgram(GLuint program) {
     if (currentProgram_ == program) {
         return;  // C51: value-identical rebind — no state change
     }
-    ++stateGeneration_;
+    bumpDomain(kDomainProgram);
     currentProgram_ = program;
     markDirty(DirtyBit::Program);
 }
@@ -1749,7 +1749,14 @@ GLuint GLStateTracker::currentProgramPipeline() const {
 
 void GLStateTracker::markDirty(DirtyBit bit) {
     dirtyMask_ |= static_cast<std::uint32_t>(bit);
-    ++stateGeneration_;  // C51: every dirty marking is a prep-memo bust
+    // C51: every dirty marking is a prep-memo bust; C52(a): attributed
+    // to its domain for the bust-topology instrument.
+    switch (bit) {
+        case DirtyBit::VertexInput: bumpDomain(kDomainVertexInput); break;
+        case DirtyBit::Program:     bumpDomain(kDomainProgram); break;
+        case DirtyBit::Framebuffer: bumpDomain(kDomainFramebuffer); break;
+        default:                    bumpDomain(kDomainFixedFunction); break;
+    }
 }
 
 bool GLStateTracker::isDirty(DirtyBit bit) const {

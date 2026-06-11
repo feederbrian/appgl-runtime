@@ -65,7 +65,7 @@ bool GLContext::bindSampler(GLuint unit, GLuint sampler) {
 
 bool GLContext::samplerParameterInteger(GLuint sampler, GLenum pname, const GLint* params) {
     if (impl_->state) {
-        impl_->state->bumpStateGeneration();  // C51: sampler-resolve input
+        impl_->state->bumpDomain(appgl::GLStateTracker::kDomainTexture);  // C51/C52(a)
     }
     GLSamplerObject* object = impl_->objects->samplers().get(sampler);
     if (object == nullptr || !object->instantiated) {
@@ -86,7 +86,7 @@ bool GLContext::samplerParameterInteger(GLuint sampler, GLenum pname, const GLin
 
 bool GLContext::samplerParameterUnsignedInteger(GLuint sampler, GLenum pname, const GLuint* params) {
     if (impl_->state) {
-        impl_->state->bumpStateGeneration();  // C51: sampler-resolve input
+        impl_->state->bumpDomain(appgl::GLStateTracker::kDomainTexture);  // C51/C52(a)
     }
     if (params == nullptr) {
         pushError(GL_INVALID_VALUE);
@@ -108,7 +108,7 @@ bool GLContext::samplerParameterUnsignedInteger(GLuint sampler, GLenum pname, co
 
 bool GLContext::samplerParameterFloat(GLuint sampler, GLenum pname, const GLfloat* params) {
     if (impl_->state) {
-        impl_->state->bumpStateGeneration();  // C51: sampler-resolve input
+        impl_->state->bumpDomain(appgl::GLStateTracker::kDomainTexture);  // C51/C52(a)
     }
     GLSamplerObject* object = impl_->objects->samplers().get(sampler);
     if (object == nullptr || !object->instantiated) {
