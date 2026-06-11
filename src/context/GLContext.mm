@@ -17514,10 +17514,61 @@ struct GLContext::Impl {
     };
     DrawPrepMemo drawPrepMemo;
     // C51 lever 2: last successful plan-key (reused on prep-memo HITs,
-    // skipping phase2PlanCandidateKeyForDraw — the 16% bucket).
+    // skipping phase2PlanCandidateKeyForDraw — the 16% bucket). The
+    // prep memo's generation key deliberately excludes per-draw call
+    // parameters (lever 1 refreshes those scalars every draw), but the
+    // PLAN key depends on them — so reuse additionally requires the
+    // draw-parameter signature to match (the C51 sweep catch: a draw
+    // differing ONLY in baseVertex must not be served the previous
+    // plan class). Field-for-field mirror of the per-draw inputs of
+    // Phase2PlanKeyMemoSignature; per-param disposition:
+    //   mode/indexType         -> in signature (pipeline + index path)
+    //   hasIndexSource         -> in signature (arrays vs elements plan)
+    //   instanceCountNonDefault-> in signature (instancing plan class)
+    //   baseInstanceNonZero    -> in signature (base-instance shader path)
+    //   baseVertexNonZero      -> in signature (shaderBaseVertex path)
+    //   vertexData/metalVB     -> in signature (ring vs direct binding)
+    //   primitive-restart      -> NOT here: GLStateTracker enable state,
+    //                             bumps stateGeneration -> memo busts.
+    struct PlanReuseDrawSignature {
+        GLenum mode = 0;
+        bool hasIndexSource = false;
+        GLenum indexType = 0;
+        bool instanceCountNonDefault = false;
+        bool baseInstanceNonZero = false;
+        bool baseVertexNonZero = false;
+        bool vertexDataPresent = false;
+        bool metalVertexBufferPresent = false;
+        bool operator==(const PlanReuseDrawSignature& other) const {
+            return mode == other.mode &&
+                   hasIndexSource == other.hasIndexSource &&
+                   indexType == other.indexType &&
+                   instanceCountNonDefault == other.instanceCountNonDefault &&
+                   baseInstanceNonZero == other.baseInstanceNonZero &&
+                   baseVertexNonZero == other.baseVertexNonZero &&
+                   vertexDataPresent == other.vertexDataPresent &&
+                   metalVertexBufferPresent == other.metalVertexBufferPresent;
+        }
+    };
+    static PlanReuseDrawSignature planReuseDrawSignatureFor(
+        const TranslatedDrawInfo& tdi) {
+        PlanReuseDrawSignature sig;
+        sig.mode = tdi.mode;
+        sig.hasIndexSource =
+            tdi.indices != nullptr || tdi.metalIndexBuffer != nullptr;
+        sig.indexType = tdi.indexType;
+        sig.instanceCountNonDefault = tdi.instanceCount != 1;
+        sig.baseInstanceNonZero = tdi.baseInstance != 0;
+        sig.baseVertexNonZero = tdi.baseVertex != 0;
+        sig.vertexDataPresent = tdi.vertexData != nullptr;
+        sig.metalVertexBufferPresent = tdi.metalVertexBuffer != nullptr;
+        return sig;
+    }
     bool planKeyReuseValid = false;
     std::uint64_t planKeyReuse = 0;
+    PlanReuseDrawSignature planKeyReuseDrawSig;
     std::uint64_t prepMemoPlanKeyReuses = 0;
+    std::uint64_t prepMemoPlanKeyDrawSigMisses = 0;
     std::uint64_t prepMemoHits = 0;
     std::uint64_t prepMemoMisses = 0;
     std::uint64_t prepMemoBustsStateGen = 0;
@@ -39362,7 +39413,8 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
     std::uint64_t translatedPlanTraceGeneration = 0;
     bool planKeyFromMemo = false;
     if (translatedPlanCacheEnabled && tdi.prepMemoHit && planKeyReuseValid &&
-        !translatedPlanForceMiss) {
+        !translatedPlanForceMiss &&
+        planReuseDrawSignatureFor(tdi) == planKeyReuseDrawSig) {
         // C51 lever 2: prep-memo HIT — the key inputs are unchanged by
         // construction; reuse the stored key and go straight to the
         // cache find (which still handles eviction normally).
@@ -39370,6 +39422,10 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
         translatedPlanKey = planKeyReuse;
         planKeyFromMemo = true;
         ++prepMemoPlanKeyReuses;
+    }
+    if (translatedPlanCacheEnabled && !planKeyFromMemo &&
+        tdi.prepMemoHit && planKeyReuseValid) {
+        ++prepMemoPlanKeyDrawSigMisses;  // draw-param variation under a memo hit
     }
     if (translatedPlanCacheEnabled && !planKeyFromMemo) {
         translatedPlanCandidate = phase2PlanCandidateKeyForDraw(
@@ -39388,6 +39444,7 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
         }
         planKeyReuseValid = translatedPlanCandidate;
         planKeyReuse = translatedPlanKey;
+        planKeyReuseDrawSig = planReuseDrawSignatureFor(tdi);
         if (!translatedPlanCandidate) {
             GLDrawDetailScope detail(
                 drawDetailProfile, GLDrawDetailBucket::Phase2MissBuildDecision);

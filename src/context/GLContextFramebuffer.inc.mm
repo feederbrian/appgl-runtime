@@ -326,6 +326,9 @@ GLenum GLContext::checkFramebufferStatus(GLenum target) const {
 }
 
 bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint layer, bool layered) {
+    if (impl_->state) {
+        impl_->state->bumpStateGeneration();  // C51: FBO-resolve input
+    }
     if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
         pushError(GL_INVALID_ENUM);
         return false;
@@ -647,6 +650,9 @@ bool GLContext::framebufferTextureMultiviewOVR(GLenum target,
 }
 
 bool GLContext::framebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) {
+    if (impl_->state) {
+        impl_->state->bumpStateGeneration();  // C51: FBO-resolve input
+    }
     if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
         pushError(GL_INVALID_ENUM);
         return false;
@@ -996,6 +1002,9 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
 }
 
 bool GLContext::drawBuffer(GLenum buffer) {
+    if (impl_->state) {
+        impl_->state->bumpStateGeneration();  // C51: FBO-resolve input
+    }
     // glDrawBuffer (singular) has looser rules than glDrawBuffers: on
     // the default framebuffer it also accepts the combined tokens
     // (FRONT, BACK, LEFT, RIGHT, FRONT_AND_BACK). Route through the
@@ -1043,6 +1052,9 @@ bool GLContext::drawBuffer(GLenum buffer) {
 }
 
 bool GLContext::drawBuffers(GLsizei count, const GLenum* buffers) {
+    if (impl_->state) {
+        impl_->state->bumpStateGeneration();  // C51: FBO-resolve input
+    }
     if (count < 0 || count > 8 || (count > 0 && buffers == nullptr)) {
         pushError(GL_INVALID_VALUE);
         return false;

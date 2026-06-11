@@ -864,6 +864,13 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     tdi.indexCount = count;
                     tdi.indexType = effectiveType;
                     tdi.glIndexBuffer = elementBufferName;
+                    // C51: conditionally-set per-draw fields MUST reset
+                    // before their conditional on the no-reset (memo HIT)
+                    // path — a ubyte-index draw after a direct-index draw
+                    // otherwise inherits the previous draw's stale Metal
+                    // index buffer (the basevertex 5-case sweep catch).
+                    tdi.metalIndexBuffer = nullptr;
+                    tdi.metalIndexBufferOffset = 0;
                     if (!elementIndexTypeNeedsExpansion(type) && elementBuffer->metalBuffer != nullptr) {
                         tdi.metalIndexBuffer = elementBuffer->metalBuffer;
                         if (impl_->frameGraph != nullptr) {

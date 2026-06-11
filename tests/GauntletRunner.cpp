@@ -16651,6 +16651,103 @@ TestResult runC51DefaultOffProbe() {
     return result;
 }
 
+TestResult runC51DrawParamVariationProbe() {
+    auto result = runDirectSentinel("c51.prep-memo.draw-param-variation", [&] {
+        ScopedEnvVar memoFlag("APPGL_ENABLE_DRAW_PREP_MEMO", "1");
+        ScopedEnvVar memoHatch("APPGL_DISABLE_DRAW_PREP_MEMO", "0");
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        GLuint colorTex = 0, fbo = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, 8, 8);
+        gl.glDisable(GL_DEPTH_TEST);
+        // Two quads in one VBO: verts 0-3 at full screen, verts 4-7 at
+        // the LEFT HALF only. Drawing with basevertex=4 must reach the
+        // second quad even under memo hits — the C51 sweep catch was a
+        // draw differing ONLY in basevertex reusing the wrong plan.
+        static constexpr const char* kVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+        static constexpr const char* kFS =
+            "#version 330 core\n"
+            "uniform vec4 uColor;\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = uColor; }\n";
+        const GLuint program = buildBenchProgram(kVS, kFS);
+        const GLint colorLoc = gl.glGetUniformLocation(program, "uColor");
+        const float verts[16] = {-1,-1, 1,-1, 1,1, -1,1,
+                                 -1,-1, 0,-1, 0,1, -1,1};
+        const std::uint16_t idx[6] = {0,1,2, 0,2,3};
+        GLuint vao = 0, vbo = 0, ibo = 0;
+        gl.glGenVertexArrays(1, &vao);
+        gl.glBindVertexArray(vao);
+        gl.glGenBuffers(1, &vbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, nullptr);
+        gl.glGenBuffers(1, &ibo);
+        gl.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+        gl.glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(idx), idx, GL_STATIC_DRAW);
+        gl.glUseProgram(program);
+        gl.glClearColor(0, 0, 0, 1);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        // Draw 1: full quad red (basevertex 0). Draw 2: SAME everything,
+        // basevertex=4 → left-half quad green.
+        gl.glUniform4f(colorLoc, 1, 0, 0, 1);
+        gl.glDrawElementsInstancedBaseVertex(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT,
+                                             nullptr, 1, 0);
+        gl.glUniform4f(colorLoc, 0, 1, 0, 1);
+        gl.glDrawElementsInstancedBaseVertex(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT,
+                                             nullptr, 1, 4);
+        std::array<std::uint8_t, 4> left = {0,0,0,0}, right = {0,0,0,0};
+        gl.glReadPixels(1, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, left.data());
+        gl.glReadPixels(6, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, right.data());
+        expectApproxByte(left[1], 255u, 4u, "c51 draw-param: basevertex quad landed left");
+        expectApproxByte(right[0], 255u, 4u, "c51 draw-param: right stays red");
+        expectApproxByte(right[1], 0u, 4u, "c51 draw-param: right not overdrawn");
+        // Attachment-swap leg (the 5-case sweep's true root cause):
+        // re-attach a DIFFERENT texture to the SAME FBO name between
+        // draws — the memo must bust and the draw must land in the new
+        // texture, not the old one.
+        GLuint colorTex2 = 0;
+        gl.glGenTextures(1, &colorTex2);
+        setupDCR3CRGBA8Texture(gl, colorTex2, 8, 8);
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_TEXTURE_2D, colorTex2, 0);
+        gl.glUniform4f(colorLoc, 0, 0, 1, 1);
+        gl.glDrawElementsInstancedBaseVertex(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT,
+                                             nullptr, 1, 0);
+        std::array<std::uint8_t, 4> swapped = {0,0,0,0};
+        gl.glReadPixels(6, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, swapped.data());
+        expectApproxByte(swapped[2], 255u, 4u,
+                         "c51 draw-param: attachment swap lands in NEW texture");
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_TEXTURE_2D, colorTex, 0);
+        gl.glDeleteTextures(1, &colorTex2);
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteBuffers(1, &ibo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteProgram(program);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        expectGLError(gl, GL_NO_ERROR, "c51 draw-param cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "basevertex-only variation renders correctly under memo (plan reuse guarded by the draw-param signature)";
+    }
+    return result;
+}
+
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -16777,6 +16874,7 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
     }
 
     if (normalizedPhase == "c51-prep-memo-probes") {
+        tests.push_back(runC51DrawParamVariationProbe());
         tests.push_back(runC51SameStateUniformProbe());
         tests.push_back(runC51DirtyMustMissProbe());
         tests.push_back(runC51SsoHazardProbe());
