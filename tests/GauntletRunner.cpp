@@ -16965,6 +16965,86 @@ TestResult runC52IndexedBufferGateProbe() {
     return result;
 }
 
+TestResult runC52AttribRecordGateProbe() {
+    auto result = runDirectSentinel("c52.value-gate.attrib-record", [&] {
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        constexpr unsigned kVtx = appgl::GLStateTracker::kDomainVertexInput;
+        GLuint colorTex = 0, fbo = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, 8, 8);
+        gl.glDisable(GL_DEPTH_TEST);
+        C51Quad q = c51MakeQuad(gl);
+
+        // Must-miss: identical enable + attrib re-spec (WZ's dominant
+        // per-draw call shape — 5.0 attrib-pointer calls/draw).
+        const auto g0 = c52DomainGen(context, kVtx);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, nullptr);
+        expectCondition(c52DomainGen(context, kVtx) == g0,
+                        "c52 attrib gate: identical enable + re-spec quiet");
+
+        // Rendering sanity through the gated re-spec.
+        c51DrawQuad(gl, q, 0.0f, 1.0f, 0.0f);
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[1], 255u, 2u, "c52 attrib gate: draw lands after gated re-spec");
+
+        // Must-hit: stride change bumps; identical re-spec of the new
+        // record is quiet; restore bumps again.
+        const auto g1 = c52DomainGen(context, kVtx);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 16, nullptr);
+        const auto g2 = c52DomainGen(context, kVtx);
+        expectCondition(g2 > g1, "c52 attrib gate: stride change bumps");
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 16, nullptr);
+        expectCondition(c52DomainGen(context, kVtx) == g2,
+                        "c52 attrib gate: re-spec of changed record quiet");
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, nullptr);
+        expectCondition(c52DomainGen(context, kVtx) > g2,
+                        "c52 attrib gate: restore bumps");
+
+        // Enable toggle: real flips bump, repeats are quiet.
+        const auto g3 = c52DomainGen(context, kVtx);
+        gl.glDisableVertexAttribArray(0);
+        const auto g4 = c52DomainGen(context, kVtx);
+        expectCondition(g4 > g3, "c52 attrib gate: disable bumps");
+        gl.glDisableVertexAttribArray(0);
+        expectCondition(c52DomainGen(context, kVtx) == g4,
+                        "c52 attrib gate: repeated disable quiet");
+        gl.glEnableVertexAttribArray(0);
+        expectCondition(c52DomainGen(context, kVtx) > g4,
+                        "c52 attrib gate: re-enable bumps");
+
+        // Integer-pointer variant: first spec bumps, identical re-spec quiet.
+        const auto g5 = c52DomainGen(context, kVtx);
+        gl.glVertexAttribIPointer(1, 1, GL_INT, 4, nullptr);
+        const auto g6 = c52DomainGen(context, kVtx);
+        expectCondition(g6 > g5, "c52 attrib gate: IPointer first spec bumps");
+        gl.glVertexAttribIPointer(1, 1, GL_INT, 4, nullptr);
+        expectCondition(c52DomainGen(context, kVtx) == g6,
+                        "c52 attrib gate: identical IPointer re-spec quiet");
+
+        // Final draw sanity after the full gate exercise.
+        c51DrawQuad(gl, q, 1.0f, 0.0f, 0.0f);
+        gl.glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[0], 255u, 2u, "c52 attrib gate: draw lands after gate exercise");
+
+        c51DestroyQuad(gl, q);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        expectGLError(gl, GL_NO_ERROR, "c52 attrib gate cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "attrib record + binding-point compare gates descriptor invalidation and vertex-input bumps; draws land";
+    }
+    return result;
+}
+
 TestResult runC51WarmTimingDiag() {
     auto result = runDirectSentinel("c51.diag.warm-timing", [&] {
         ScopedSentinelContext scoped(64, 64);
@@ -17291,6 +17371,7 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runC52FboMutatorGateProbe());
         tests.push_back(runC52FboRenderbufferGateProbe());
         tests.push_back(runC52IndexedBufferGateProbe());
+        tests.push_back(runC52AttribRecordGateProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

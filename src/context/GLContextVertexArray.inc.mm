@@ -90,6 +90,11 @@ bool GLContext::enableVertexAttribArray(GLuint index, bool enabled) {
         pushError(index >= static_cast<GLuint>(impl_->objects->maxVertexAttribs()) ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
         return false;
     }
+    // C52 value gate: re-issuing the current enable state is a no-op —
+    // skip the vertex-descriptor invalidation and the domain bump.
+    if (vertexArray->attributes[index].enabled == enabled) {
+        return true;
+    }
     vertexArray->attributes[index].enabled = enabled;
     markVertexDescriptorDirty(*vertexArray);
     impl_->state->markDirty(DirtyBit::VertexInput);
@@ -129,6 +134,50 @@ bool GLContext::vertexAttribPointer(
     }
 
     auto& attribute = vertexArray->attributes[index];
+    // GL 4.6 §10.3.8: glVertexAttribPointer(stride=0) means "tight
+    // pack using size*sizeof(type)" — not the VAO default (16).
+    // The binding-point stride propagates to
+    // `MetalVertexDescriptor.layouts[slot].stride`; writing 16
+    // for a small (e.g. size=2 FLOAT = 8-byte) attribute makes
+    // Metal fetch every other vertex and zero-fills intermediate
+    // ones.
+    GLsizei effStride = stride;
+    if (effStride <= 0) {
+        auto byteSize = [](GLenum t) -> GLsizei {
+            switch (t) {
+                case GL_BYTE: case GL_UNSIGNED_BYTE: return 1;
+                case GL_SHORT: case GL_UNSIGNED_SHORT: case GL_HALF_FLOAT: return 2;
+                case GL_FIXED:
+                case GL_FLOAT: case GL_INT: case GL_UNSIGNED_INT: return 4;
+                case GL_DOUBLE: return 8;
+                default: return 4;
+            }
+        };
+        effStride = static_cast<GLsizei>(size) * byteSize(type);
+        if (effStride <= 0) effStride = 16;
+    }
+    // C52 value gate: re-specifying the identical attribute record
+    // (including the mirrored binding point) is a no-op — skip the
+    // vertex-descriptor invalidation and the vertex-input domain bump.
+    {
+        const bool sameAttribute = attribute.size == size &&
+            attribute.type == type && attribute.normalized == normalized &&
+            attribute.stride == stride &&
+            attribute.pointer == reinterpret_cast<std::uintptr_t>(pointer) &&
+            attribute.buffer == buffer && !attribute.integer &&
+            !attribute.longData && attribute.bindingIndex == index &&
+            attribute.relativeOffset == 0;
+        bool sameBinding = true;
+        if (index < vertexArray->bindingPoints.size()) {
+            const auto& bp = vertexArray->bindingPoints[index];
+            sameBinding = bp.buffer == buffer &&
+                bp.offset == static_cast<GLintptr>(reinterpret_cast<std::uintptr_t>(pointer)) &&
+                bp.stride == effStride;
+        }
+        if (sameAttribute && sameBinding) {
+            return true;
+        }
+    }
     attribute.size = size;
     attribute.type = type;
     attribute.normalized = normalized;
@@ -151,28 +200,6 @@ bool GLContext::vertexAttribPointer(
         auto& bp = vertexArray->bindingPoints[index];
         bp.buffer = buffer;
         bp.offset = static_cast<GLintptr>(attribute.pointer);
-        // GL 4.6 §10.3.8: glVertexAttribPointer(stride=0) means "tight
-        // pack using size*sizeof(type)" — not the VAO default (16).
-        // The binding-point stride propagates to
-        // `MetalVertexDescriptor.layouts[slot].stride`; writing 16
-        // for a small (e.g. size=2 FLOAT = 8-byte) attribute makes
-        // Metal fetch every other vertex and zero-fills intermediate
-        // ones.
-        GLsizei effStride = stride;
-        if (effStride <= 0) {
-            auto byteSize = [](GLenum t) -> GLsizei {
-                switch (t) {
-                    case GL_BYTE: case GL_UNSIGNED_BYTE: return 1;
-                    case GL_SHORT: case GL_UNSIGNED_SHORT: case GL_HALF_FLOAT: return 2;
-                    case GL_FIXED:
-                    case GL_FLOAT: case GL_INT: case GL_UNSIGNED_INT: return 4;
-                    case GL_DOUBLE: return 8;
-                    default: return 4;
-                }
-            };
-            effStride = static_cast<GLsizei>(size) * byteSize(type);
-            if (effStride <= 0) effStride = 16;
-        }
         bp.stride = effStride;
     }
     markVertexDescriptorDirty(*vertexArray);
@@ -200,6 +227,48 @@ bool GLContext::vertexAttribIPointer(GLuint index, GLint size, GLenum type, GLsi
     }
 
     auto& attribute = vertexArray->attributes[index];
+    // CKPT100 fix: glVertexAttribIPointer(stride=0) means "tight pack
+    // using size*sizeof(type)" per GL 4.6 §10.3.8 — not the
+    // VAO-default 16. The hardcoded 16 fallback caused
+    // KHR-GL46.direct_state_access.vertex_arrays_element_buffer to
+    // fail: 1-component GL_INT attribute with stride=0 should fetch
+    // every 4 bytes; with stride forced to 16, slot N reads
+    // out-of-range past the 12-byte buffer for N≥1, returning
+    // zeros. Mirror the byte-size compute already in
+    // glVertexAttribPointer for symmetry.
+    GLsizei effStride = stride;
+    if (effStride <= 0) {
+        auto byteSize = [](GLenum t) -> GLsizei {
+            switch (t) {
+                case GL_BYTE: case GL_UNSIGNED_BYTE: return 1;
+                case GL_SHORT: case GL_UNSIGNED_SHORT: return 2;
+                case GL_INT: case GL_UNSIGNED_INT: return 4;
+                default: return 4;
+            }
+        };
+        effStride = static_cast<GLsizei>(size) * byteSize(type);
+        if (effStride <= 0) effStride = 16;
+    }
+    // C52 value gate: same shape as glVertexAttribPointer above.
+    {
+        const bool sameAttribute = attribute.size == size &&
+            attribute.type == type && attribute.normalized == GL_FALSE &&
+            attribute.stride == stride &&
+            attribute.pointer == reinterpret_cast<std::uintptr_t>(pointer) &&
+            attribute.buffer == buffer && attribute.integer &&
+            !attribute.longData && attribute.bindingIndex == index &&
+            attribute.relativeOffset == 0;
+        bool sameBinding = true;
+        if (index < vertexArray->bindingPoints.size()) {
+            const auto& bp = vertexArray->bindingPoints[index];
+            sameBinding = bp.buffer == buffer &&
+                bp.offset == static_cast<GLintptr>(reinterpret_cast<std::uintptr_t>(pointer)) &&
+                bp.stride == effStride;
+        }
+        if (sameAttribute && sameBinding) {
+            return true;
+        }
+    }
     attribute.size = size;
     attribute.type = type;
     attribute.normalized = GL_FALSE;
@@ -215,28 +284,6 @@ bool GLContext::vertexAttribIPointer(GLuint index, GLint size, GLenum type, GLsi
         auto& bp = vertexArray->bindingPoints[index];
         bp.buffer = buffer;
         bp.offset = static_cast<GLintptr>(attribute.pointer);
-        // CKPT100 fix: glVertexAttribIPointer(stride=0) means "tight pack
-        // using size*sizeof(type)" per GL 4.6 §10.3.8 — not the
-        // VAO-default 16. The hardcoded 16 fallback caused
-        // KHR-GL46.direct_state_access.vertex_arrays_element_buffer to
-        // fail: 1-component GL_INT attribute with stride=0 should fetch
-        // every 4 bytes; with stride forced to 16, slot N reads
-        // out-of-range past the 12-byte buffer for N≥1, returning
-        // zeros. Mirror the byte-size compute already in
-        // glVertexAttribPointer for symmetry.
-        GLsizei effStride = stride;
-        if (effStride <= 0) {
-            auto byteSize = [](GLenum t) -> GLsizei {
-                switch (t) {
-                    case GL_BYTE: case GL_UNSIGNED_BYTE: return 1;
-                    case GL_SHORT: case GL_UNSIGNED_SHORT: return 2;
-                    case GL_INT: case GL_UNSIGNED_INT: return 4;
-                    default: return 4;
-                }
-            };
-            effStride = static_cast<GLsizei>(size) * byteSize(type);
-            if (effStride <= 0) effStride = 16;
-        }
         bp.stride = effStride;
     }
     markVertexDescriptorDirty(*vertexArray);
