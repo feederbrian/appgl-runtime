@@ -16433,6 +16433,7 @@ std::uint64_t c51Counter(GLContext& context, int which) {
     switch (which) {
         case 0: return inv.prepMemoHits;
         case 1: return inv.prepMemoMisses;
+        case 3: return inv.prepMemoPlanKeyReuses;
         default: return inv.prepMemoBusts;
     }
 }
@@ -16466,6 +16467,8 @@ TestResult runC51SameStateUniformProbe() {
         }
         expectCondition(c51Counter(context, 0) >= h0 + 3,
                         "c51 same-state: three memo hits");
+        expectCondition(c51Counter(context, 3) >= 3,
+                        "c51 same-state: plan-key reuse engaged on hits");
         c51DestroyQuad(gl, q);
         gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
         gl.glDeleteFramebuffers(1, &fbo);
@@ -16494,6 +16497,7 @@ TestResult runC51DirtyMustMissProbe() {
         C51Quad q = c51MakeQuad(gl);
         const auto h0 = c51Counter(context, 0);
         const auto b0 = c51Counter(context, 2);
+        const auto r0 = c51Counter(context, 3);
         // State mutation between every draw: blend toggle + a texture
         // rebind (the binding-bump sites) — memo must never hit.
         GLuint dummyTex = 0;
@@ -16509,6 +16513,8 @@ TestResult runC51DirtyMustMissProbe() {
                         "c51 dirty-must-miss: zero hits");
         expectCondition(c51Counter(context, 2) > b0,
                         "c51 dirty-must-miss: busts counted");
+        expectCondition(c51Counter(context, 3) == r0,
+                        "c51 dirty-must-miss: busted memo rebuilds the plan key");
         std::array<std::uint8_t, 4> px = {0,0,0,0};
         gl.glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
         expectApproxByte(px[0], 128u, 6u, "c51 dirty-must-miss value");

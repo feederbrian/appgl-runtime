@@ -309,6 +309,10 @@ struct TranslatedDrawInfo {
     // structural key, the Phase-2 plan cache routes the draw through the
     // direct encoder path.
     bool pipelineOrSubroutinePlanCacheUnsafe = false;
+    // C51: set by the draw builders on a prep-memo HIT — the plan key
+    // provably matches the previous draw's, so the encode wrapper may
+    // reuse it (the cache FIND still runs; eviction stays safe).
+    bool prepMemoHit = false;
     // 7C-0 parallel-encode serial batching keeps eligibility deliberately
     // narrower than the translated-draw encoder. GLContext owns these hidden
     // draw-side hazards and snapshots them before handing the draw to the

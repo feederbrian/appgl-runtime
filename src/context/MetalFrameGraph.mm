@@ -5905,7 +5905,8 @@ struct MetalFrameGraph::Impl {
                     "[APPGL_PSO_BUILD] miss=%llu key=0x%llx program=%u "
                     "color=0x%lX ds=0x%lX/0x%lX samples=%lu rtal=%lu "
                     "blend=%d rgbOp=%lu aOp=%lu src=%lu/%lu dst=%lu/%lu "
-                    "writeMask=0x%lX attrs=%zu buildMs=%.2f\n",
+                    "writeMask=0x%lX attrs=%zu "
+                    "attr0Stride=%zu attr0Off=%zu attr0Fmt=0x%X/%d/%d buildMs=%.2f\n",
                     static_cast<unsigned long long>(pipelineCacheMisses),
                     static_cast<unsigned long long>(pipelineCacheKey),
                     static_cast<unsigned>(info.program),
@@ -5923,6 +5924,19 @@ struct MetalFrameGraph::Impl {
                     static_cast<unsigned long>(ca0.destinationAlphaBlendFactor),
                     static_cast<unsigned long>(ca0.writeMask),
                     info.vertexAttributeLayouts.size(),
+                    info.vertexStride,
+                    info.vertexAttributeLayouts.empty()
+                        ? static_cast<std::size_t>(0)
+                        : info.vertexAttributeLayouts[0].offset,
+                    info.vertexAttributeLayouts.empty()
+                        ? 0u
+                        : static_cast<unsigned>(info.vertexAttributeLayouts[0].glType),
+                    info.vertexAttributeLayouts.empty()
+                        ? 0
+                        : static_cast<int>(info.vertexAttributeLayouts[0].glComponentCount),
+                    info.vertexAttributeLayouts.empty()
+                        ? 0
+                        : static_cast<int>(info.vertexAttributeLayouts[0].glNormalized),
                     std::chrono::duration<double, std::milli>(buildEnd - buildStart).count());
                 std::fflush(stderr);
             }

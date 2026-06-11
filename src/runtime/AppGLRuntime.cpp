@@ -3072,6 +3072,8 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << metalInventory.frameGraphEncoderClosesFboDrawTail << ","
            << "\"prepMemoHits\":"
            << metalInventory.prepMemoHits << ","
+           << "\"prepMemoPlanKeyReuses\":"
+           << metalInventory.prepMemoPlanKeyReuses << ","
            << "\"prepMemoMisses\":"
            << metalInventory.prepMemoMisses << ","
            << "\"prepMemoBusts\":"

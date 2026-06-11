@@ -17513,6 +17513,11 @@ struct GLContext::Impl {
         GLuint drawFbo = 0;
     };
     DrawPrepMemo drawPrepMemo;
+    // C51 lever 2: last successful plan-key (reused on prep-memo HITs,
+    // skipping phase2PlanCandidateKeyForDraw — the 16% bucket).
+    bool planKeyReuseValid = false;
+    std::uint64_t planKeyReuse = 0;
+    std::uint64_t prepMemoPlanKeyReuses = 0;
     std::uint64_t prepMemoHits = 0;
     std::uint64_t prepMemoMisses = 0;
     std::uint64_t prepMemoBustsStateGen = 0;
@@ -26837,6 +26842,7 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         inventory.shadowClearsMaterialized = impl_->shadowClearsMaterialized;
         inventory.shadowClearMaterializeBytes = impl_->shadowClearMaterializeBytes;
         inventory.prepMemoHits = impl_->prepMemoHits;
+        inventory.prepMemoPlanKeyReuses = impl_->prepMemoPlanKeyReuses;
         inventory.prepMemoMisses = impl_->prepMemoMisses;
         inventory.prepMemoBusts =
             impl_->prepMemoBustsStateGen + impl_->prepMemoBustsProgram +
@@ -39354,7 +39360,18 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
     const char* translatedPlanReason =
         translatedPlanCacheEnabled ? "not_candidate" : "disabled";
     std::uint64_t translatedPlanTraceGeneration = 0;
-    if (translatedPlanCacheEnabled) {
+    bool planKeyFromMemo = false;
+    if (translatedPlanCacheEnabled && tdi.prepMemoHit && planKeyReuseValid &&
+        !translatedPlanForceMiss) {
+        // C51 lever 2: prep-memo HIT — the key inputs are unchanged by
+        // construction; reuse the stored key and go straight to the
+        // cache find (which still handles eviction normally).
+        translatedPlanCandidate = true;
+        translatedPlanKey = planKeyReuse;
+        planKeyFromMemo = true;
+        ++prepMemoPlanKeyReuses;
+    }
+    if (translatedPlanCacheEnabled && !planKeyFromMemo) {
         translatedPlanCandidate = phase2PlanCandidateKeyForDraw(
             tdi,
             planVaoName,
@@ -39369,6 +39386,8 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
         if (translatedPlanCandidate) {
             coldPathProfile.recordPhase2Key(translatedPlanKey);
         }
+        planKeyReuseValid = translatedPlanCandidate;
+        planKeyReuse = translatedPlanKey;
         if (!translatedPlanCandidate) {
             GLDrawDetailScope detail(
                 drawDetailProfile, GLDrawDetailBucket::Phase2MissBuildDecision);

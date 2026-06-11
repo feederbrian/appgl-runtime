@@ -843,6 +843,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                         }
                     }
                     TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo(/*reset=*/!memoHit);
+                    tdi.prepMemoHit = memoHit;  // C51 lever 2 input
                     tdi.mode = mode;
                     tdi.vertexCount = count;
                     tdi.baseVertex = basevertex;
