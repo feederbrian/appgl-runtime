@@ -14166,6 +14166,13 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         FrameAttributionScope attributionScope(
             frameAttributionProfile,
             FrameAttributionAction::Finish);
+        // S24 correctness train: the OPEN (possibly continued) render
+        // pass must close FIRST — materializeAllPendingFboClears and
+        // flushPendingClear open their own encoders on the current CB,
+        // and Metal aborts on a second encoder while one is encoding
+        // (the glFinish-without-present seam the C51 diag exposed;
+        // legacy-GL code finishes mid-frame constantly).
+        endRenderPass();
         // C48: glFinish promises every prior GL command completed —
         // deferred FBO clears must land first.
         materializeAllPendingFboClears();
@@ -14173,7 +14180,6 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         if (hasPendingClear) {
             flushPendingClear();
         }
-        endRenderPass();
         const bool submittedFinishWork = commitCurrentAsync(AppGLCommandReason::FinishWait);
         const bool finished = commandSubmission == nullptr
             ? true

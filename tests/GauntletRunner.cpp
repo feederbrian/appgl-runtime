@@ -16890,6 +16890,50 @@ TestResult runResizeGateProbe() {
     return result;
 }
 
+TestResult runFinishOpenPassProbe() {
+    auto result = runDirectSentinel("finish.open-continued-pass", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& gl = scoped.gl();
+        GLuint colorTex = 0, fbo = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, 8, 8);
+        gl.glDisable(GL_DEPTH_TEST);
+        C51Quad q = c51MakeQuad(gl);
+        gl.glUseProgram(q.program);
+        gl.glBindVertexArray(q.vao);
+        // Draws leave a CONTINUED pass open; glFinish with NO present
+        // previously opened a second encoder on the same CB (Metal
+        // abort). Interleave clears so the pendingClear/materialize
+        // paths inside finish() are exercised too.
+        for (int round = 0; round < 3; ++round) {
+            gl.glClearColor(0.2f, 0.2f, 0.2f, 1.0f);
+            gl.glClear(GL_COLOR_BUFFER_BIT);
+            gl.glUniform4f(q.colorLoc, 0.0f, 1.0f, 0.0f, 1.0f);
+            for (int i = 0; i < 50; ++i)
+                gl.glDrawElementsInstancedBaseVertex(GL_TRIANGLES, 6,
+                    GL_UNSIGNED_SHORT, nullptr, 1, 0);
+            gl.glFinish();
+        }
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[1], 255u, 4u, "finish probe: draws landed");
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        c51DestroyQuad(gl, q);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        expectGLError(gl, GL_NO_ERROR, "finish probe cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "glFinish on an open continued pass (no present) closes the pass first; clears + draws land";
+    }
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -17022,6 +17066,7 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
 
     if (normalizedPhase == "correctness-train-probes") {
         tests.push_back(runResizeGateProbe());
+        tests.push_back(runFinishOpenPassProbe());
         return buildJSON(normalizedPhase, tests);
     }
 
