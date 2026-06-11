@@ -39425,20 +39425,23 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
         translatedPlanCacheEnabled ? "not_candidate" : "disabled";
     std::uint64_t translatedPlanTraceGeneration = 0;
     bool planKeyFromMemo = false;
-    if (translatedPlanCacheEnabled && tdi.prepMemoHit && planKeyReuseValid &&
-        !translatedPlanForceMiss &&
-        planReuseDrawSignatureFor(tdi) == planKeyReuseDrawSig) {
-        // C51 lever 2: prep-memo HIT — the key inputs are unchanged by
-        // construction; reuse the stored key and go straight to the
-        // cache find (which still handles eviction normally).
-        translatedPlanCandidate = true;
-        translatedPlanKey = planKeyReuse;
-        planKeyFromMemo = true;
-        ++prepMemoPlanKeyReuses;
-    }
-    if (translatedPlanCacheEnabled && !planKeyFromMemo &&
-        tdi.prepMemoHit && planKeyReuseValid) {
-        ++prepMemoPlanKeyDrawSigMisses;  // draw-param variation under a memo hit
+    if (translatedPlanCacheEnabled) {
+        // C51 lever 2 (Stage B corrected): on a prep-memo HIT with a
+        // matching draw-parameter signature, skip ONLY the key
+        // computation — the decision tree below (force-miss handling,
+        // cache FIND, hit/miss bookkeeping) must still run, or the
+        // resolved plan never reaches tdi.translatedPlan and the
+        // encoder takes the no-plan heavy path (the Gate-1 +286%:
+        // 'reuse' engaged while every hit lost its plan).
+        if (tdi.prepMemoHit && planKeyReuseValid && !translatedPlanForceMiss &&
+            planReuseDrawSignatureFor(tdi) == planKeyReuseDrawSig) {
+            translatedPlanCandidate = true;
+            translatedPlanKey = planKeyReuse;
+            planKeyFromMemo = true;
+            ++prepMemoPlanKeyReuses;
+        } else if (tdi.prepMemoHit && planKeyReuseValid) {
+            ++prepMemoPlanKeyDrawSigMisses;  // draw-param variation under a hit
+        }
     }
     if (translatedPlanCacheEnabled && !planKeyFromMemo) {
         translatedPlanCandidate = phase2PlanCandidateKeyForDraw(
@@ -39458,6 +39461,8 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
         planKeyReuseValid = translatedPlanCandidate;
         planKeyReuse = translatedPlanKey;
         planKeyReuseDrawSig = planReuseDrawSignatureFor(tdi);
+    }
+    if (translatedPlanCacheEnabled) {
         if (!translatedPlanCandidate) {
             GLDrawDetailScope detail(
                 drawDetailProfile, GLDrawDetailBucket::Phase2MissBuildDecision);
