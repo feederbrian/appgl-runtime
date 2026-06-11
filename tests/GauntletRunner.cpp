@@ -16912,6 +16912,59 @@ TestResult runC52FboRenderbufferGateProbe() {
     return result;
 }
 
+TestResult runC52IndexedBufferGateProbe() {
+    auto result = runDirectSentinel("c52.value-gate.indexed-buffer", [&] {
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        constexpr unsigned kBuf = appgl::GLStateTracker::kDomainBuffer;
+        GLuint ubo = 0, ubo2 = 0;
+        gl.glGenBuffers(1, &ubo);
+        gl.glBindBuffer(GL_UNIFORM_BUFFER, ubo);
+        std::array<float, 128> zeros{};
+        gl.glBufferData(GL_UNIFORM_BUFFER, sizeof(zeros), zeros.data(),
+                        GL_STATIC_DRAW);
+
+        // First indexed bind is a real change.
+        const auto g0 = c52DomainGen(context, kBuf);
+        gl.glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo);
+        const auto g1 = c52DomainGen(context, kBuf);
+        expectCondition(g1 > g0, "c52 indexed gate: first base bind bumps");
+
+        // Must-miss: identical base rebind (tuple AND generic binding match).
+        gl.glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo);
+        expectCondition(c52DomainGen(context, kBuf) == g1,
+                        "c52 indexed gate: identical base rebind quiet");
+
+        // Must-hit: same buffer, different (offset, size) tuple.
+        gl.glBindBufferRange(GL_UNIFORM_BUFFER, 0, ubo, 256, 256);
+        const auto g2 = c52DomainGen(context, kBuf);
+        expectCondition(g2 > g1, "c52 indexed gate: range change bumps");
+        gl.glBindBufferRange(GL_UNIFORM_BUFFER, 0, ubo, 256, 256);
+        expectCondition(c52DomainGen(context, kBuf) == g2,
+                        "c52 indexed gate: identical range rebind quiet");
+
+        // Must-hit: different buffer object on the same index.
+        gl.glGenBuffers(1, &ubo2);
+        gl.glBindBuffer(GL_UNIFORM_BUFFER, ubo2);
+        gl.glBufferData(GL_UNIFORM_BUFFER, sizeof(zeros), zeros.data(),
+                        GL_STATIC_DRAW);
+        const auto g3 = c52DomainGen(context, kBuf);
+        gl.glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo2);
+        expectCondition(c52DomainGen(context, kBuf) > g3,
+                        "c52 indexed gate: buffer swap on index bumps");
+
+        gl.glBindBuffer(GL_UNIFORM_BUFFER, 0);
+        gl.glDeleteBuffers(1, &ubo);
+        gl.glDeleteBuffers(1, &ubo2);
+        expectGLError(gl, GL_NO_ERROR, "c52 indexed gate cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "indexed-buffer (buffer, offset, size) tuple gated per (target, index); generic mirror self-gated";
+    }
+    return result;
+}
+
 TestResult runC51WarmTimingDiag() {
     auto result = runDirectSentinel("c51.diag.warm-timing", [&] {
         ScopedSentinelContext scoped(64, 64);
@@ -17237,6 +17290,7 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
     if (normalizedPhase == "c52-value-gate-probes") {
         tests.push_back(runC52FboMutatorGateProbe());
         tests.push_back(runC52FboRenderbufferGateProbe());
+        tests.push_back(runC52IndexedBufferGateProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

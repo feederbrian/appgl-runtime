@@ -1392,12 +1392,20 @@ GLuint GLStateTracker::boundBuffer(GLenum target) const {
 }
 
 void GLStateTracker::bindIndexedBuffer(GLenum target, GLuint index, GLuint object, GLintptr offset, GLsizeiptr size) {
-    bumpDomain(kDomainBuffer);  // C51 prep-memo bust
     auto& bindings = indexedBufferBindings_[target];
     if (index >= bindings.size()) {
         return;
     }
-    bindings[index] = {object, offset, size};
+    // C52 value gate: identical (buffer, offset, size) rebind is a no-op.
+    // This site predates the C51 early-return pass and bumped on entry
+    // unconditionally. The generic-binding mirror below is self-gated.
+    const GLIndexedBufferBinding incoming{object, offset, size};
+    if (bindings[index].buffer != incoming.buffer ||
+        bindings[index].offset != incoming.offset ||
+        bindings[index].size != incoming.size) {
+        bumpDomain(kDomainBuffer);
+        bindings[index] = incoming;
+    }
     bindBuffer(target, object);
 }
 
