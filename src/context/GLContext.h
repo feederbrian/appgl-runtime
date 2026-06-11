@@ -826,6 +826,10 @@ public:
         std::uint64_t prepMemoHits = 0;
         std::uint64_t prepMemoPlanKeyReuses = 0;
         std::array<std::uint64_t, 6> prepMemoBustsByDomain{};
+        // C52 value-gating: raw per-domain state generations (indices match
+        // GLStateTracker::StateDomain). Observation-only — lets probes assert
+        // that value-identical mutator calls do NOT advance a domain.
+        std::array<std::uint64_t, 6> stateDomainGenerations{};
         std::uint64_t prepMemoMisses = 0;
         std::uint64_t prepMemoBusts = 0;
         std::uint64_t shadowClearsDeferred = 0;

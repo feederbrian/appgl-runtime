@@ -1668,6 +1668,9 @@ GLuint GLStateTracker::boundVertexArray() const {
 }
 
 void GLStateTracker::bindDrawFramebuffer(GLuint framebuffer) {
+    if (drawFramebuffer_ == framebuffer) {
+        return;  // C52: value-identical rebind — no state change
+    }
     drawFramebuffer_ = framebuffer;
     markDirty(DirtyBit::Framebuffer);
 }
@@ -1677,6 +1680,9 @@ GLuint GLStateTracker::boundDrawFramebuffer() const {
 }
 
 void GLStateTracker::bindReadFramebuffer(GLuint framebuffer) {
+    if (readFramebuffer_ == framebuffer) {
+        return;  // C52: value-identical rebind — no state change
+    }
     readFramebuffer_ = framebuffer;
     markDirty(DirtyBit::Framebuffer);
 }
@@ -1700,10 +1706,15 @@ bool GLStateTracker::setDrawBuffers(GLsizei count, const GLenum* buffers) {
     if (count < 0 || static_cast<std::size_t>(count) > drawBuffers_.size() || (count > 0 && buffers == nullptr)) {
         return false;
     }
-    drawBuffers_.fill(GL_NONE);
+    std::array<GLenum, 8> incoming;
+    incoming.fill(GL_NONE);
     for (GLsizei index = 0; index < count; ++index) {
-        drawBuffers_[static_cast<std::size_t>(index)] = buffers[index];
+        incoming[static_cast<std::size_t>(index)] = buffers[index];
     }
+    if (incoming == drawBuffers_) {
+        return true;  // C52: value-identical set — no state change
+    }
+    drawBuffers_ = incoming;
     markDirty(DirtyBit::Framebuffer);
     return true;
 }
@@ -1716,6 +1727,9 @@ GLenum GLStateTracker::drawBuffer(GLuint index) const {
 }
 
 bool GLStateTracker::setReadBuffer(GLenum buffer) {
+    if (readBuffer_ == buffer) {
+        return true;  // C52: value-identical set — no state change
+    }
     readBuffer_ = buffer;
     markDirty(DirtyBit::Framebuffer);
     return true;

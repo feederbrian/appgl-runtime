@@ -25,6 +25,7 @@
 #include "../include/AppGL/glcorearb.h"
 #include "../src/context/GLContext.h"
 #include "../src/debug/CoverageStore.h"
+#include "../src/state/GLStateTracker.h"
 #include "../src/loader/DispatchInstall.h"
 #include "../src/objects/GLObjectStore.h"
 #include "../src/runtime/AppGLRuntime.h"
@@ -16766,6 +16767,151 @@ TestResult runC51DrawParamVariationProbe() {
 }
 
 
+// C52 value-gating probes. Each gate gets the must-miss/must-hit pair:
+// a value-identical mutator call must NOT advance its state domain
+// generation, and a changed-value call MUST still bump it. Generations
+// are read through the inventory's observation-only mirror; the gates
+// themselves are unconditional (no flag).
+std::uint64_t c52DomainGen(GLContext& context, unsigned domain) {
+    return context.metalResourceInventory().stateDomainGenerations[domain];
+}
+
+TestResult runC52FboMutatorGateProbe() {
+    auto result = runDirectSentinel("c52.value-gate.fbo-mutators", [&] {
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        constexpr unsigned kFb = appgl::GLStateTracker::kDomainFramebuffer;
+        GLuint colorTex = 0, fbo = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+        gl.glViewport(0, 0, 8, 8);
+
+        // Must-miss: value-identical re-issues of every gated mutator.
+        const auto g0 = c52DomainGen(context, kFb);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_TEXTURE_2D, colorTex, 0);
+        const GLenum ca0 = GL_COLOR_ATTACHMENT0;
+        gl.glDrawBuffers(1, &ca0);
+        gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        expectCondition(c52DomainGen(context, kFb) == g0,
+                        "c52 fbo gate: identical rebind/re-attach/re-drawbuffer quiet");
+
+        // Must-hit: attachment swap, then identical re-attach quiet again.
+        GLuint colorTex2 = 0;
+        gl.glGenTextures(1, &colorTex2);
+        setupDCR3CRGBA8Texture(gl, colorTex2, 8, 8);
+        const auto g1 = c52DomainGen(context, kFb);
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_TEXTURE_2D, colorTex2, 0);
+        const auto g2 = c52DomainGen(context, kFb);
+        expectCondition(g2 > g1, "c52 fbo gate: attachment swap bumps");
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_TEXTURE_2D, colorTex2, 0);
+        expectCondition(c52DomainGen(context, kFb) == g2,
+                        "c52 fbo gate: re-attach after swap quiet");
+
+        // Detach erase path: live detach bumps, empty detach is quiet.
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_TEXTURE_2D, 0, 0);
+        const auto g3 = c52DomainGen(context, kFb);
+        expectCondition(g3 > g2, "c52 fbo gate: live detach bumps");
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_TEXTURE_2D, 0, 0);
+        expectCondition(c52DomainGen(context, kFb) == g3,
+                        "c52 fbo gate: empty detach quiet");
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_TEXTURE_2D, colorTex, 0);
+
+        // Draw-buffer set: change bumps, identical set is quiet.
+        const auto g4 = c52DomainGen(context, kFb);
+        const GLenum none = GL_NONE;
+        gl.glDrawBuffers(1, &none);
+        const auto g5 = c52DomainGen(context, kFb);
+        expectCondition(g5 > g4, "c52 fbo gate: draw-buffer change bumps");
+        gl.glDrawBuffers(1, &none);
+        expectCondition(c52DomainGen(context, kFb) == g5,
+                        "c52 fbo gate: identical draw-buffer set quiet");
+        gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        expectCondition(c52DomainGen(context, kFb) > g5,
+                        "c52 fbo gate: draw-buffer restore bumps");
+
+        // Rendering sanity through the gated re-attach.
+        gl.glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[0], 255u, 2u, "c52 fbo gate: clear lands after gated re-attach");
+
+        // FB0 bind: real change bumps, re-bind is quiet; default-FB
+        // GL_BACK re-set routes through the gated tracker setter.
+        const auto g6 = c52DomainGen(context, kFb);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        const auto g7 = c52DomainGen(context, kFb);
+        expectCondition(g7 > g6, "c52 fbo gate: FB0 bind change bumps");
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDrawBuffer(GL_BACK);
+        expectCondition(c52DomainGen(context, kFb) == g7,
+                        "c52 fbo gate: FB0 rebind + GL_BACK re-set quiet");
+
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        gl.glDeleteTextures(1, &colorTex2);
+        expectGLError(gl, GL_NO_ERROR, "c52 fbo gate cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "fb-domain generation quiet on value-identical FBO mutators, advances on every real change, clears land";
+    }
+    return result;
+}
+
+TestResult runC52FboRenderbufferGateProbe() {
+    auto result = runDirectSentinel("c52.value-gate.fbo-renderbuffer", [&] {
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        constexpr unsigned kFb = appgl::GLStateTracker::kDomainFramebuffer;
+        GLuint colorTex = 0, fbo = 0, rb = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+        gl.glGenRenderbuffers(1, &rb);
+        gl.glBindRenderbuffer(GL_RENDERBUFFER, rb);
+        gl.glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 8, 8);
+
+        const auto g0 = c52DomainGen(context, kFb);
+        gl.glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                     GL_RENDERBUFFER, rb);
+        const auto g1 = c52DomainGen(context, kFb);
+        expectCondition(g1 > g0, "c52 rb gate: renderbuffer attach bumps");
+        gl.glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                     GL_RENDERBUFFER, rb);
+        expectCondition(c52DomainGen(context, kFb) == g1,
+                        "c52 rb gate: identical renderbuffer re-attach quiet");
+        gl.glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                     GL_RENDERBUFFER, 0);
+        const auto g2 = c52DomainGen(context, kFb);
+        expectCondition(g2 > g1, "c52 rb gate: live renderbuffer detach bumps");
+        gl.glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                     GL_RENDERBUFFER, 0);
+        expectCondition(c52DomainGen(context, kFb) == g2,
+                        "c52 rb gate: empty renderbuffer detach quiet");
+
+        gl.glBindRenderbuffer(GL_RENDERBUFFER, 0);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteRenderbuffers(1, &rb);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        expectGLError(gl, GL_NO_ERROR, "c52 rb gate cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "renderbuffer attach/detach gated on stored-record equality (must-hit/must-miss pair green)";
+    }
+    return result;
+}
+
 TestResult runC51WarmTimingDiag() {
     auto result = runDirectSentinel("c51.diag.warm-timing", [&] {
         ScopedSentinelContext scoped(64, 64);
@@ -17085,6 +17231,12 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
     if (normalizedPhase == "correctness-train-probes") {
         tests.push_back(runResizeGateProbe());
         tests.push_back(runFinishOpenPassProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "c52-value-gate-probes") {
+        tests.push_back(runC52FboMutatorGateProbe());
+        tests.push_back(runC52FboRenderbufferGateProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

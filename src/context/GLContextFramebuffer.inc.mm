@@ -325,10 +325,20 @@ GLenum GLContext::checkFramebufferStatus(GLenum target) const {
     return impl_->framebufferStatus(*object);
 }
 
+// C52 value gate: the framebuffer-domain generation must advance exactly when
+// stored attachment/drawbuffer state actually changes (99140ca's unconditional
+// top-of-function bumps made the domain bust on every call, including
+// value-identical re-attaches and error paths). Mutators below compare the
+// stored record against the incoming one and bump only on a real change.
+static bool c52AttachmentEquals(const GLFramebufferAttachment& a,
+                                const GLFramebufferAttachment& b) {
+    return a.kind == b.kind && a.object == b.object && a.level == b.level &&
+           a.layer == b.layer && a.textureTarget == b.textureTarget &&
+           a.layered == b.layered && a.multiview == b.multiview &&
+           a.baseViewIndex == b.baseViewIndex && a.numViews == b.numViews;
+}
+
 bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint layer, bool layered) {
-    if (impl_->state) {
-        impl_->state->bumpDomain(appgl::GLStateTracker::kDomainFramebuffer);  // C51/C52(a)
-    }
     if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
         pushError(GL_INVALID_ENUM);
         return false;
@@ -366,7 +376,10 @@ bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum text
         if (impl_->frameGraph != nullptr) {
             impl_->frameGraph->flushParallelEncodeBoundary();
         }
-        framebuffer->attachments.erase(attachment);
+        if (framebuffer->attachments.erase(attachment) > 0 && impl_->state) {
+            // C52: detach removed a live attachment — real change.
+            impl_->state->bumpDomain(appgl::GLStateTracker::kDomainFramebuffer);
+        }
         return true;
     }
 
@@ -576,6 +589,20 @@ bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum text
     if (impl_->frameGraph != nullptr) {
         impl_->frameGraph->flushParallelEncodeBoundary();
     }
+    // C52 value gate: re-attaching an identical record is a no-op — skip the
+    // store and the framebuffer-domain bump. The encode-boundary flush above
+    // stays unconditional (today's behavior; it is encode-side machinery, not
+    // generation noise — possible future lever, out of this gate's scope).
+    {
+        const auto found = framebuffer->attachments.find(attachment);
+        if (found != framebuffer->attachments.end() &&
+            c52AttachmentEquals(found->second, stored)) {
+            return true;
+        }
+    }
+    if (impl_->state) {
+        impl_->state->bumpDomain(appgl::GLStateTracker::kDomainFramebuffer);
+    }
     framebuffer->attachments[attachment] = stored;
     // Sprint 17 Day 1 (CKPT236) [A.2 narrow gate]: the binding-time
     // `wasRenderedTo` set originally added by Sprint 16 Day 17
@@ -650,9 +677,6 @@ bool GLContext::framebufferTextureMultiviewOVR(GLenum target,
 }
 
 bool GLContext::framebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) {
-    if (impl_->state) {
-        impl_->state->bumpDomain(appgl::GLStateTracker::kDomainFramebuffer);  // C51/C52(a)
-    }
     if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
         pushError(GL_INVALID_ENUM);
         return false;
@@ -682,7 +706,10 @@ bool GLContext::framebufferRenderbuffer(GLenum target, GLenum attachment, GLenum
     }
 
     if (renderbuffer == 0) {
-        framebuffer->attachments.erase(attachment);
+        if (framebuffer->attachments.erase(attachment) > 0 && impl_->state) {
+            // C52: detach removed a live attachment — real change.
+            impl_->state->bumpDomain(appgl::GLStateTracker::kDomainFramebuffer);
+        }
         return true;
     }
 
@@ -707,6 +734,17 @@ bool GLContext::framebufferRenderbuffer(GLenum target, GLenum attachment, GLenum
     GLFramebufferAttachment stored;
     stored.kind = GLFramebufferAttachment::Kind::Renderbuffer;
     stored.object = renderbuffer;
+    // C52 value gate: identical re-attach is a no-op — no store, no bump.
+    {
+        const auto found = framebuffer->attachments.find(attachment);
+        if (found != framebuffer->attachments.end() &&
+            c52AttachmentEquals(found->second, stored)) {
+            return true;
+        }
+    }
+    if (impl_->state) {
+        impl_->state->bumpDomain(appgl::GLStateTracker::kDomainFramebuffer);
+    }
     framebuffer->attachments[attachment] = stored;
     return true;
 }
@@ -1002,9 +1040,6 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
 }
 
 bool GLContext::drawBuffer(GLenum buffer) {
-    if (impl_->state) {
-        impl_->state->bumpDomain(appgl::GLStateTracker::kDomainFramebuffer);  // C51/C52(a)
-    }
     // glDrawBuffer (singular) has looser rules than glDrawBuffers: on
     // the default framebuffer it also accepts the combined tokens
     // (FRONT, BACK, LEFT, RIGHT, FRONT_AND_BACK). Route through the
@@ -1027,19 +1062,23 @@ bool GLContext::drawBuffer(GLenum buffer) {
     }
     // User FBO — only NONE and COLOR_ATTACHMENTi tokens accepted.
     // Combined tokens are a recognized enum shape but invalid here.
-    if (buffer == GL_NONE) {
-        framebuffer->drawBuffers.fill(GL_NONE);
-        framebuffer->drawBuffers[0] = GL_NONE;
+    if (buffer == GL_NONE || (isColorAttachmentEnum(buffer) && isColorAttachment(buffer))) {
+        std::array<GLenum, 8> incoming;
+        incoming.fill(GL_NONE);
+        incoming[0] = buffer;
+        // C52 value gate: identical draw-buffer set is a no-op — no bump.
+        if (incoming != framebuffer->drawBuffers) {
+            if (impl_->state) {
+                impl_->state->bumpDomain(appgl::GLStateTracker::kDomainFramebuffer);
+            }
+            framebuffer->drawBuffers = incoming;
+        }
         return true;
     }
     if (isColorAttachmentEnum(buffer)) {
-        if (!isColorAttachment(buffer)) {
-            pushError(GL_INVALID_OPERATION);
-            return false;
-        }
-        framebuffer->drawBuffers.fill(GL_NONE);
-        framebuffer->drawBuffers[0] = buffer;
-        return true;
+        // Color-attachment-shaped but >= MAX_COLOR_ATTACHMENTS.
+        pushError(GL_INVALID_OPERATION);
+        return false;
     }
     // `buffer` is a recognized default-FB token (FRONT, BACK, etc.) —
     // not legal on a user FBO per §17.4.1.
@@ -1052,9 +1091,6 @@ bool GLContext::drawBuffer(GLenum buffer) {
 }
 
 bool GLContext::drawBuffers(GLsizei count, const GLenum* buffers) {
-    if (impl_->state) {
-        impl_->state->bumpDomain(appgl::GLStateTracker::kDomainFramebuffer);  // C51/C52(a)
-    }
     if (count < 0 || count > 8 || (count > 0 && buffers == nullptr)) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -1157,9 +1193,17 @@ bool GLContext::drawBuffers(GLsizei count, const GLenum* buffers) {
             }
         }
     }
-    framebuffer->drawBuffers.fill(GL_NONE);
+    std::array<GLenum, 8> incoming;
+    incoming.fill(GL_NONE);
     for (GLsizei index = 0; index < count; ++index) {
-        framebuffer->drawBuffers[static_cast<std::size_t>(index)] = buffers[index];
+        incoming[static_cast<std::size_t>(index)] = buffers[index];
+    }
+    // C52 value gate: identical draw-buffer set is a no-op — no bump.
+    if (incoming != framebuffer->drawBuffers) {
+        if (impl_->state) {
+            impl_->state->bumpDomain(appgl::GLStateTracker::kDomainFramebuffer);
+        }
+        framebuffer->drawBuffers = incoming;
     }
     return true;
 }

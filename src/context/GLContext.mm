@@ -26918,6 +26918,11 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         for (int d = 0; d < 6; ++d) {
             inventory.prepMemoBustsByDomain[d] = impl_->prepMemoBustsByDomain[d];
         }
+        if (impl_->state) {
+            for (unsigned d = 0; d < appgl::GLStateTracker::kDomainCount; ++d) {
+                inventory.stateDomainGenerations[d] = impl_->state->domainGeneration(d);
+            }
+        }
         inventory.prepMemoMisses = impl_->prepMemoMisses;
         inventory.prepMemoBusts =
             impl_->prepMemoBustsStateGen + impl_->prepMemoBustsProgram +
