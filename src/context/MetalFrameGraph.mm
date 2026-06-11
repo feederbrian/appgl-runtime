@@ -2484,6 +2484,9 @@ struct TranslatedDrawMSLSlots {
     bool vertexUsesMultiviewViewMask = false;
     bool fragmentUsesMultiviewViewMask = false;
     NSInteger fragmentDepthCompareFlipSlot = -1;
+    // C52(b): sample-mask slot, plan-cached like its siblings — the
+    // per-draw whole-MSL needle-scan was 10-15% of encode.
+    NSInteger fragmentSampleMaskSlot = 21;
     NSInteger vertexClipControlYSignSlot = -1;
     NSInteger vertexReductionModesSlot = -1;
     NSInteger vertexLodBiasesSlot = -1;
@@ -2523,6 +2526,8 @@ static TranslatedDrawPlanShaderSlots phase2PlanShaderSlotsFromMSLSlots(
         slots.fragmentUsesMultiviewViewMask;
     planSlots.fragmentDepthCompareFlipSlot =
         phase2PlanSlotFromNSInteger(slots.fragmentDepthCompareFlipSlot);
+    planSlots.fragmentSampleMaskSlot =
+        phase2PlanSlotFromNSInteger(slots.fragmentSampleMaskSlot);
     planSlots.vertexClipControlYSignSlot =
         phase2PlanSlotFromNSInteger(slots.vertexClipControlYSignSlot);
     planSlots.vertexReductionModesSlot =
@@ -2568,6 +2573,8 @@ static TranslatedDrawMSLSlots phase2PlanMSLSlotsFromShaderSlots(
         planSlots.fragmentUsesMultiviewViewMask;
     slots.fragmentDepthCompareFlipSlot =
         phase2PlanSlotToNSInteger(planSlots.fragmentDepthCompareFlipSlot);
+    slots.fragmentSampleMaskSlot =
+        phase2PlanSlotToNSInteger(planSlots.fragmentSampleMaskSlot);
     slots.vertexClipControlYSignSlot =
         phase2PlanSlotToNSInteger(planSlots.vertexClipControlYSignSlot);
     slots.vertexReductionModesSlot =
@@ -2625,6 +2632,8 @@ static TranslatedDrawMSLSlots buildTranslatedDrawMSLSlots(
         mslContains(info.fragmentMSL, "spvViewMask");
     slots.fragmentDepthCompareFlipSlot =
         hasFragmentStage ? depthCompareFlipBufferSlot(info.fragmentMSL) : -1;
+    slots.fragmentSampleMaskSlot =
+        hasFragmentStage ? fixedFunctionSampleMaskBufferSlot(info.fragmentMSL) : 21;
     slots.vertexClipControlYSignSlot =
         clipControlYSignBufferSlot(info.vertexMSL);
     slots.vertexReductionModesSlot =
@@ -6630,8 +6639,7 @@ struct MetalFrameGraph::Impl {
             const std::uint32_t sampleMask = attachmentSampleCount > 1
                 ? info.sampleMask
                 : 0xFFFFFFFFu;
-            const NSInteger sampleMaskSlot =
-                fixedFunctionSampleMaskBufferSlot(info.fragmentMSL);
+            const NSInteger sampleMaskSlot = shaderSlots.fragmentSampleMaskSlot;
             [currentRenderEncoder setFragmentBytes:&sampleMask
                                            length:sizeof(sampleMask)
                                            atIndex:static_cast<NSUInteger>(sampleMaskSlot)];
@@ -10023,8 +10031,7 @@ struct MetalFrameGraph::Impl {
             const std::uint32_t sampleMask = attachmentSampleCount > 1
                 ? info.sampleMask
                 : 0xFFFFFFFFu;
-            const NSInteger sampleMaskSlot =
-                fixedFunctionSampleMaskBufferSlot(info.fragmentMSL);
+            const NSInteger sampleMaskSlot = shaderSlots.fragmentSampleMaskSlot;
             [encoder setFragmentBytes:&sampleMask
                                 length:sizeof(sampleMask)
                                atIndex:static_cast<NSUInteger>(sampleMaskSlot)];

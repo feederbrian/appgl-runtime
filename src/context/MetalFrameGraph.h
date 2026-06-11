@@ -108,6 +108,7 @@ struct TranslatedDrawPlanShaderSlots {
     std::int32_t fragmentBorderClampColorsSlot = -1;
     std::int32_t fragmentImplicitLodBiasCorrectionSlot = -1;
     std::int32_t fragmentDepthCompareFlipSlot = -1;
+    std::int32_t fragmentSampleMaskSlot = 21;
 };
 
 struct TranslatedDrawPlan {
