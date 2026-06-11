@@ -11812,22 +11812,40 @@ TestResult runDCR3CViewportRestoreAbandonmentSentinel() {
         expectGLError(gl, GL_NO_ERROR, "dcr3c abandonment viewport restore");
 
         const auto afterRestore = context.commandSubmissionDebugCounters();
-        if (afterRestore.submittedCommandBuffers <= afterDraw.submittedCommandBuffers) {
+        // S24 resize-gate posture: a viewport set while the FBO is bound
+        // no longer touches the window drawable, so NO invalidation (and
+        // no forced submission) may occur here — the pending FBO draw
+        // commits later through normal consumption. The RC-A02
+        // commit-before-invalidate guarantee is asserted below on an
+        // FB0-SCOPED resize, which still invalidates.
+        if (afterRestore.submittedCommandBuffers != afterDraw.submittedCommandBuffers) {
             recordSentinelFailure(
                 failures,
-                "viewport restore did not submit the pending FBO draw before invalidation",
+                "FBO-bound viewport restore must not invalidate/submit (resize-gate posture)",
                 "afterDraw{" + countersSummary(afterDraw) + "} afterRestore{"
                     + countersSummary(afterRestore) + "}"
             );
         }
-        if (afterRestore.currentInFlight != 0
-            || afterRestore.completedCommandBuffers != afterRestore.submittedCommandBuffers) {
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glViewport(0, 0, 48, 48);  // FB0-scoped: real drawable resize
+        expectGLError(gl, GL_NO_ERROR, "dcr3c abandonment fb0 resize");
+        const auto afterFb0Resize = context.commandSubmissionDebugCounters();
+        if (afterFb0Resize.submittedCommandBuffers <= afterRestore.submittedCommandBuffers) {
             recordSentinelFailure(
                 failures,
-                "viewport-restore invalidation did not drain submitted work",
-                countersSummary(afterRestore)
+                "FB0 resize did not submit the pending FBO draw before invalidation",
+                countersSummary(afterFb0Resize)
             );
         }
+        if (afterFb0Resize.currentInFlight != 0
+            || afterFb0Resize.completedCommandBuffers != afterFb0Resize.submittedCommandBuffers) {
+            recordSentinelFailure(
+                failures,
+                "FB0-resize invalidation did not drain submitted work",
+                countersSummary(afterFb0Resize)
+            );
+        }
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
         expectPendingHas(texturePendingBits(context, texture),
                          kProducerFboColorWrite,
                          "dcr3c abandonment restore preserves producer bits until readback");
