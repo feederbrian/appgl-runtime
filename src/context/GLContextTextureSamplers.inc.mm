@@ -64,6 +64,9 @@ bool GLContext::bindSampler(GLuint unit, GLuint sampler) {
 }
 
 bool GLContext::samplerParameterInteger(GLuint sampler, GLenum pname, const GLint* params) {
+    if (impl_->state) {
+        impl_->state->bumpStateGeneration();  // C51: sampler-resolve input
+    }
     GLSamplerObject* object = impl_->objects->samplers().get(sampler);
     if (object == nullptr || !object->instantiated) {
         pushError(GL_INVALID_OPERATION);
@@ -82,6 +85,9 @@ bool GLContext::samplerParameterInteger(GLuint sampler, GLenum pname, const GLin
 }
 
 bool GLContext::samplerParameterUnsignedInteger(GLuint sampler, GLenum pname, const GLuint* params) {
+    if (impl_->state) {
+        impl_->state->bumpStateGeneration();  // C51: sampler-resolve input
+    }
     if (params == nullptr) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -101,6 +107,9 @@ bool GLContext::samplerParameterUnsignedInteger(GLuint sampler, GLenum pname, co
 }
 
 bool GLContext::samplerParameterFloat(GLuint sampler, GLenum pname, const GLfloat* params) {
+    if (impl_->state) {
+        impl_->state->bumpStateGeneration();  // C51: sampler-resolve input
+    }
     GLSamplerObject* object = impl_->objects->samplers().get(sampler);
     if (object == nullptr || !object->instantiated) {
         pushError(GL_INVALID_OPERATION);

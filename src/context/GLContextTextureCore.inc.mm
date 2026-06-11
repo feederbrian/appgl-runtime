@@ -1843,6 +1843,9 @@ bool GLContext::texBufferRange(
 }
 
 bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* params) {
+    if (impl_->state) {
+        impl_->state->bumpStateGeneration();  // C51: sampler-resolve input
+    }
     // GL 4.6 §8.10 target-aware validation runs FIRST — before the
     // "default texture" accommodation — so spec-violating
     // combinations (MS+sampler-pname, BUFFER+sampler-pname, negative
@@ -2007,6 +2010,9 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
 }
 
 bool GLContext::texParameterUnsignedInteger(GLenum target, GLenum pname, const GLuint* params) {
+    if (impl_->state) {
+        impl_->state->bumpStateGeneration();  // C51: sampler-resolve input
+    }
     if (params == nullptr) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -2026,6 +2032,9 @@ bool GLContext::texParameterUnsignedInteger(GLenum target, GLenum pname, const G
 }
 
 bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* params) {
+    if (impl_->state) {
+        impl_->state->bumpStateGeneration();  // C51: sampler-resolve input
+    }
     // GL 4.6 §8.10 target-aware validation runs FIRST — see
     // texParameterInteger for the rationale.
     if (params != nullptr) {

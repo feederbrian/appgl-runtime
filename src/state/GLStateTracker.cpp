@@ -1378,6 +1378,7 @@ bool GLStateTracker::queryDouble(GLenum pname, GLdouble* out) const {
 }
 
 void GLStateTracker::bindBuffer(GLenum target, GLuint object) {
+    ++stateGeneration_;  // C51 prep-memo bust
     bufferBindings_[target] = object;
     markDirty(target == GL_ELEMENT_ARRAY_BUFFER ? DirtyBit::VertexInput : DirtyBit::Framebuffer);
 }
@@ -1388,6 +1389,7 @@ GLuint GLStateTracker::boundBuffer(GLenum target) const {
 }
 
 void GLStateTracker::bindIndexedBuffer(GLenum target, GLuint index, GLuint object, GLintptr offset, GLsizeiptr size) {
+    ++stateGeneration_;  // C51 prep-memo bust
     auto& bindings = indexedBufferBindings_[target];
     if (index >= bindings.size()) {
         return;
@@ -1427,6 +1429,7 @@ void GLStateTracker::deleteBufferBindings(GLuint object) {
 }
 
 void GLStateTracker::bindTexture(GLenum target, GLuint object) {
+    ++stateGeneration_;  // C51 prep-memo bust
     textureUnits_[activeTextureUnit_].bindings[target] = object;
     markDirty(DirtyBit::Program);
 }
@@ -1518,6 +1521,7 @@ void GLStateTracker::deleteRenderbufferBinding(GLuint object) {
 }
 
 void GLStateTracker::setActiveTextureUnit(GLuint unit) {
+    ++stateGeneration_;  // C51 prep-memo bust
     if (unit < textureUnits_.size()) {
         activeTextureUnit_ = unit;
     }
@@ -1528,6 +1532,7 @@ GLuint GLStateTracker::activeTextureUnit() const {
 }
 
 void GLStateTracker::bindSampler(GLuint unit, GLuint object) {
+    ++stateGeneration_;  // C51 prep-memo bust
     if (unit >= textureUnits_.size()) {
         return;
     }
@@ -1638,6 +1643,7 @@ const GLPixelStoreState& GLStateTracker::pixelStore() const {
 }
 
 void GLStateTracker::bindVertexArray(GLuint vao) {
+    ++stateGeneration_;  // C51 prep-memo bust
     currentVertexArray_ = vao;
     markDirty(DirtyBit::VertexInput);
 }
@@ -1705,6 +1711,7 @@ GLenum GLStateTracker::readBuffer() const {
 }
 
 void GLStateTracker::useProgram(GLuint program) {
+    ++stateGeneration_;  // C51 prep-memo bust
     currentProgram_ = program;
     markDirty(DirtyBit::Program);
 }
@@ -1724,6 +1731,7 @@ GLuint GLStateTracker::currentProgramPipeline() const {
 
 void GLStateTracker::markDirty(DirtyBit bit) {
     dirtyMask_ |= static_cast<std::uint32_t>(bit);
+    ++stateGeneration_;  // C51: every dirty marking is a prep-memo bust
 }
 
 bool GLStateTracker::isDirty(DirtyBit bit) const {

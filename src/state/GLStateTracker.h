@@ -331,6 +331,13 @@ public:
     GLenum clipDepthMode() const;
 
     void markDirty(DirtyBit bit);
+    // C51 draw-prep memo: monotonic generation — bumped by every dirty
+    // marking AND by binding mutators outside the DirtyBit system
+    // (texture/sampler/indexed-buffer/VAO/program binds, plus explicit
+    // context-side bumps for texture/sampler parameter edits). A
+    // matching generation means no state-derived draw-prep input changed.
+    std::uint64_t stateGeneration() const { return stateGeneration_; }
+    void bumpStateGeneration() { ++stateGeneration_; }
     bool isDirty(DirtyBit bit) const;
     void clearDirty(DirtyBit bit);
     std::uint32_t dirtyMask() const;
@@ -405,6 +412,7 @@ private:
     GLuint drawFramebuffer_ = 0;
     GLuint readFramebuffer_ = 0;
     std::uint32_t dirtyMask_ = 0xffffffffu;
+    std::uint64_t stateGeneration_ = 1;
     GLenum clipOrigin_ = GL_LOWER_LEFT;
     GLenum clipDepthMode_ = GL_NEGATIVE_ONE_TO_ONE;
 };
