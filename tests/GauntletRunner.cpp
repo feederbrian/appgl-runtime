@@ -16812,6 +16812,84 @@ TestResult runC51WarmTimingDiag() {
     return result;
 }
 
+// S24 correctness train: resize-gate probes. The window drawable must
+// be sized ONLY by FB0-scoped viewports.
+TestResult runResizeGateProbe() {
+    auto result = runDirectSentinel("resize-gate.fbo-vs-fb0", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        auto resizeCalls = [&]() {
+            return context.metalResourceInventory().frameGraphDrawableResizeCalls;
+        };
+        auto noops = [&]() {
+            return context.metalResourceInventory().frameGraphDrawableResizeNoops;
+        };
+        auto realResizes = [&]() { return resizeCalls() - noops(); };
+
+        GLuint colorTex = 0, fbo = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+
+        // 1. FBO-bound viewport change must NOT resize the drawable.
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        const auto r0 = realResizes();
+        gl.glViewport(0, 0, 2048, 2048);
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glClearColor(0.3f, 0.3f, 0.3f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glReadPixels(1, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectCondition(realResizes() == r0,
+                        "resize-gate: FBO-bound viewport did not resize drawable");
+
+        // 2. FB0-bound viewport change MUST size the drawable.
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        const auto r1 = realResizes();
+        gl.glViewport(0, 0, 48, 48);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glReadPixels(1, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectCondition(realResizes() > r1,
+                        "resize-gate: FB0-bound viewport resized drawable");
+
+        // 3. Safety: viewport set WHILE FBO-bound, then draw to FB0 —
+        // the draw-site hook must apply the then-current viewport.
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, 64, 64);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        static constexpr const char* kVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+        static constexpr const char* kFS =
+            "#version 330 core\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+        const GLuint program = buildBenchProgram(kVS, kFS);
+        GLuint vao = 0, vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+        gl.glUseProgram(program);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glReadPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[1], 255u, 4u,
+                         "resize-gate: FB0 draw after FBO-scoped viewport lands");
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(program);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        expectGLError(gl, GL_NO_ERROR, "resize-gate cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "FBO-scoped viewports no longer size the window drawable; FB0 semantics intact incl. the stale-size safety case";
+    }
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -16939,6 +17017,11 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
 
     if (normalizedPhase == "c51-warm-timing-diag") {
         tests.push_back(runC51WarmTimingDiag());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "correctness-train-probes") {
+        tests.push_back(runResizeGateProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

@@ -25115,6 +25115,16 @@ struct GLContext::Impl {
         if (frameGraph == nullptr) {
             return;
         }
+        // Resize-gate fix (S24): viewports set while a non-default
+        // framebuffer is bound belong to the FBO pass and must not size
+        // the WINDOW drawable — Warzone's shadow-pass viewport was
+        // hard-resizing the drawable twice per frame (depth-texture
+        // recreate + invalidate/drainAll each time). The draw-site
+        // ensure hooks re-evaluate with the then-current viewport when
+        // FB0 is next drawn, so no stale-size hole exists.
+        if (state->boundDrawFramebuffer() != 0) {
+            return;
+        }
         const GLsizei width = defaultDrawableRequestWidth();
         const GLsizei height = defaultDrawableRequestHeight();
         if (defaultDrawableGrowOnlyEnabled()) {
