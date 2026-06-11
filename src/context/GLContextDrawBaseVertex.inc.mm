@@ -930,6 +930,13 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                         // accumulate across reuse.
                         tdi.fragmentTextures.clear();
                         tdi.vertexTextures.clear();
+                        // Stage C: resolveSamplerBindings ALSO appends
+                        // per-draw to sampledTextureNames — without this
+                        // clear the vector grows across hits and the
+                        // wrapper's marking loops go O(n^2) per frame
+                        // (the Gate-1 residual: +4.6us/draw on textured
+                        // warm arms, invisible on untextured quads).
+                        tdi.sampledTextureNames.clear();
                     }
                     impl_->resolveSamplerBindings(*program, tdi);
                     if (!memoHit) {
