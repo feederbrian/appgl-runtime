@@ -17110,6 +17110,117 @@ TestResult runC52EncoderStateDedupProbe() {
     return result;
 }
 
+TestResult runC52PreviewFboChurnProbe() {
+    // Flicker triage (build-menu mini-model preview shape): one FBO with
+    // per-draw attachment churn — texture swaps, value-identical re-attaches,
+    // level/layer variants, detach/re-attach cycles, draw-buffer toggles,
+    // FBO↔FBO rebinds — validating EVERY draw's output by readback. A stale
+    // framebufferGen / skipped-store bug in the C52 value gates would route
+    // a draw or readback at the wrong attachment and fail a pixel here.
+    auto result = runDirectSentinel("c52.value-gate.preview-fbo-churn", [&] {
+        ScopedSentinelContext scoped(16, 16);
+        auto& gl = scoped.gl();
+        GLuint tex[3] = {0, 0, 0};
+        gl.glGenTextures(3, tex);
+        setupDCR3CRGBA8Texture(gl, tex[0], 8, 8);
+        setupDCR3CRGBA8Texture(gl, tex[1], 8, 8);
+        // tex[2] gets 2 mip levels for the level-churn variant.
+        setupDCR3CRGBA8Texture(gl, tex[2], 8, 8, 2);
+        GLuint fbo = 0;
+        setupDCR3CTextureFbo(gl, fbo, tex[0]);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glViewport(0, 0, 8, 8);
+        C51Quad q = c51MakeQuad(gl);
+
+        auto drawAndCheck = [&](float r, float g, float b, const char* tag) {
+            c51DrawQuad(gl, q, r, g, b);
+            std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+            gl.glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            expectApproxByte(px[0], static_cast<std::uint8_t>(r * 255), 3u, tag);
+            expectApproxByte(px[1], static_cast<std::uint8_t>(g * 255), 3u, tag);
+            expectApproxByte(px[2], static_cast<std::uint8_t>(b * 255), 3u, tag);
+        };
+
+        // "Frames" of per-model churn: swap attachment per model, redundant
+        // re-attach between draws (the gated path), distinct color each draw.
+        for (int frame = 0; frame < 4; ++frame) {
+            for (int model = 0; model < 2; ++model) {
+                gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                          GL_TEXTURE_2D, tex[model], 0);
+                const float shade = 0.25f + 0.5f * model;
+                drawAndCheck(shade, 1.0f - shade, 0.5f, "churn: model draw");
+                // Value-identical re-attach mid-model (preview paths re-bind
+                // their target each draw) then another draw.
+                gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                          GL_TEXTURE_2D, tex[model], 0);
+                drawAndCheck(1.0f - shade, shade, 0.25f, "churn: re-attach draw");
+            }
+        }
+
+        // Level churn on the mip'd texture: level 1 (4x4) then level 0.
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_TEXTURE_2D, tex[2], 1);
+        gl.glViewport(0, 0, 4, 4);
+        c51DrawQuad(gl, q, 1.0f, 0.0f, 1.0f);
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(2, 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[0], 255u, 3u, "churn: level-1 attach draw");
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_TEXTURE_2D, tex[2], 0);
+        gl.glViewport(0, 0, 8, 8);
+        drawAndCheck(0.0f, 1.0f, 1.0f, "churn: level-0 attach draw");
+
+        // Detach / re-attach cycle + draw-buffer toggles.
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_TEXTURE_2D, 0, 0);
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_TEXTURE_2D, tex[0], 0);
+        const GLenum none = GL_NONE;
+        const GLenum ca0 = GL_COLOR_ATTACHMENT0;
+        gl.glDrawBuffers(1, &none);
+        gl.glDrawBuffers(1, &ca0);
+        drawAndCheck(1.0f, 1.0f, 0.0f, "churn: detach/re-attach + drawbuffer toggle");
+
+        // FBO↔FBO rebind churn with value-identical rebinds interleaved.
+        GLuint fbo2 = 0;
+        setupDCR3CTextureFbo(gl, fbo2, tex[1]);
+        for (int i = 0; i < 3; ++i) {
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);  // identical rebind
+            drawAndCheck(0.75f, 0.25f, 0.0f, "churn: fbo A draw");
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo2);
+            drawAndCheck(0.0f, 0.25f, 0.75f, "churn: fbo B draw");
+        }
+
+        // Preview-consume shape: render INTO tex[1] via fbo2, then sample it
+        // while rendering into fbo — a stale-attachment bug shows here as the
+        // sampled quad carrying the wrong content.
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo2);
+        gl.glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glBindTexture(GL_TEXTURE_2D, tex[1]);
+        // (c51 quad's shader ignores textures; the clear+readback cross-check
+        // below validates the attachment routing instead.)
+        gl.glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo2);
+        gl.glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[1], 255u, 3u, "churn: cross-FBO clear routed to fbo2's attachment");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        c51DestroyQuad(gl, q);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteFramebuffers(1, &fbo2);
+        gl.glDeleteTextures(3, tex);
+        expectGLError(gl, GL_NO_ERROR, "churn cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "preview-shaped attachment churn (swap/identical/level/detach/drawbuffer/cross-FBO) renders correctly every draw";
+    }
+    return result;
+}
+
 TestResult runC51WarmTimingDiag() {
     auto result = runDirectSentinel("c51.diag.warm-timing", [&] {
         ScopedSentinelContext scoped(64, 64);
@@ -17438,6 +17549,7 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runC52IndexedBufferGateProbe());
         tests.push_back(runC52AttribRecordGateProbe());
         tests.push_back(runC52EncoderStateDedupProbe());
+        tests.push_back(runC52PreviewFboChurnProbe());
         return buildJSON(normalizedPhase, tests);
     }
 
