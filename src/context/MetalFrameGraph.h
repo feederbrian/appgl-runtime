@@ -1110,6 +1110,17 @@ public:
         std::uint64_t fboBoundaryDraws = 0;
         std::uint64_t parallelBatchCount = 0;
         std::uint64_t maxBatchSize = 0;
+        // S25 commit B: copy-headroom shadow probe (probe-facing subset;
+        // full bucket detail rides the diagnostics JSONL).
+        bool copyHeadroomEnabled = false;
+        std::uint64_t chFb0Draws = 0;
+        std::uint64_t chFb0FillSuccesses = 0;
+        double chFb0FillUsTotal = 0.0;
+        std::uint64_t chFb0Retains = 0;
+        std::uint64_t chFboDraws = 0;
+        std::uint64_t chFboUniformBytes = 0;
+        std::uint64_t chArenaDrains = 0;
+        std::uint64_t chArenaLive = 0;
     };
     FramePacingSnapshot framePacingSnapshot() const;
     // C52 flicker fix (ordered in-CB texture uploads): true when a draw

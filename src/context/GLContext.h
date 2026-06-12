@@ -1017,6 +1017,16 @@ public:
         std::uint64_t parallelFboBoundaryDraws = 0;
         std::uint64_t parallelBatchCount = 0;
         std::uint64_t parallelMaxBatchSize = 0;
+        // S25 commit B: copy-headroom shadow probe subset.
+        bool copyHeadroomEnabled = false;
+        std::uint64_t copyHeadroomFb0Draws = 0;
+        std::uint64_t copyHeadroomFb0FillSuccesses = 0;
+        double copyHeadroomFb0FillUsTotal = 0.0;
+        std::uint64_t copyHeadroomFb0Retains = 0;
+        std::uint64_t copyHeadroomFboDraws = 0;
+        std::uint64_t copyHeadroomFboUniformBytes = 0;
+        std::uint64_t copyHeadroomArenaDrains = 0;
+        std::uint64_t copyHeadroomArenaLive = 0;
         MetalResourceResidencySummary residency;
         MetalHostCacheSummary hostCaches;
         Depth32FReadbackDiagnostics depth32fReadback;

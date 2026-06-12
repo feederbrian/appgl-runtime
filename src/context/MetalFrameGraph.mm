@@ -488,6 +488,67 @@ struct FramePacingProfile {
     }
 };
 
+// S25 Rung-1 instrument commit B: copy-headroom shadow probe
+// (APPGL_COPY_HEADROOM_PROBE, default-OFF, latched per-context). Measures
+// what the ADJUDICATED Rung-2 record unit — lean-descriptor fill + a
+// batch-scoped retain arena — would cost per draw, on the live workload,
+// without changing any encode behavior. Two buckets:
+//  - fb0: census + the REAL lean fill into a scratch descriptor + a real
+//    CFRetain/CFRelease arena over the filled descriptor's Metal handles
+//    (drained at present — the frame boundary upper-bounds the per-pass
+//    arena; retain/release cost is boundary-insensitive).
+//  - fbo: CENSUS ONLY (bytes + handle counts). The shadow fill is skipped
+//    because prepareLeanDirectTranslatedDrawDescriptor calls
+//    ensureDrawableResources(), which must never run mid-FBO-pass (the
+//    f15e56d resize-gate class). The FBO lift's fill cost projects from
+//    the fb0 per-byte/per-handle numbers — same struct, same copy volume.
+struct CopyHeadroomProbe {
+    struct Bucket {
+        std::uint64_t draws = 0;
+        std::uint64_t uniformBytes = 0;
+        std::uint64_t inlineUboBytes = 0;
+        std::uint64_t textureHandles = 0;
+        std::uint64_t bufferHandles = 0;
+        std::uint64_t fillAttempts = 0;
+        std::uint64_t fillSuccesses = 0;
+        double fillUsTotal = 0.0;
+        std::uint64_t retains = 0;
+        double retainUsTotal = 0.0;
+    };
+    Bucket fb0;
+    Bucket fbo;
+    double releaseUsTotal = 0.0;
+    std::uint64_t arenaDrains = 0;
+    std::uint64_t arenaPeak = 0;
+
+    std::string diagnosticsJson(std::size_t arenaLive) const {
+        auto bucketJson = [](const Bucket& b) {
+            std::ostringstream out;
+            out << "{\"draws\":" << b.draws
+                << ",\"uniformBytes\":" << b.uniformBytes
+                << ",\"inlineUboBytes\":" << b.inlineUboBytes
+                << ",\"textureHandles\":" << b.textureHandles
+                << ",\"bufferHandles\":" << b.bufferHandles
+                << ",\"fillAttempts\":" << b.fillAttempts
+                << ",\"fillSuccesses\":" << b.fillSuccesses
+                << ",\"fillUsTotal\":" << b.fillUsTotal
+                << ",\"retains\":" << b.retains
+                << ",\"retainUsTotal\":" << b.retainUsTotal
+                << "}";
+            return out.str();
+        };
+        std::ostringstream out;
+        out << "{\"fb0\":" << bucketJson(fb0)
+            << ",\"fbo\":" << bucketJson(fbo)
+            << ",\"releaseUsTotal\":" << releaseUsTotal
+            << ",\"arenaDrains\":" << arenaDrains
+            << ",\"arenaPeak\":" << arenaPeak
+            << ",\"arenaLive\":" << arenaLive
+            << "}";
+        return out.str();
+    }
+};
+
 enum class ParallelEncodeBoundaryReason : std::size_t {
     SerialPathOnly,
     SolidColorDraw,
@@ -3988,6 +4049,8 @@ struct MetalFrameGraph::Impl {
         // C48: nothing can consume deferred clears past teardown —
         // drop the registry retains without materializing.
         releasePendingFboClearsForTeardown();
+        // S25 commit B: release any copy-headroom probe retains.
+        drainCopyHeadroomArena();
         if (commandSubmission != nullptr) {
             commandSubmission->setPressureFlushCallback({});
         }
@@ -11770,8 +11833,118 @@ struct MetalFrameGraph::Impl {
                       parallelEncodeProfile.batchFlushReasons);
         emitReasonMap("descriptorFlushReasons",
                       parallelEncodeProfile.descriptorFlushReasons);
-        out << "}}";
+        out << "}";
+        if (copyHeadroomProbeLatched) {
+            out << ",\"copyHeadroom\":"
+                << copyHeadroomProbe.diagnosticsJson(copyHeadroomArena.size());
+        }
+        out << "}";
         return out.str();
+    }
+
+    void recordCopyHeadroomShadow(const TranslatedDrawInfo& info) {
+        const bool fboBound = info.fboColorTexture != nullptr ||
+            info.fboDepthStencilTexture != nullptr ||
+            info.fboAttachmentless ||
+            hasAdditionalColorTargets(info);
+        CopyHeadroomProbe::Bucket& bucket =
+            fboBound ? copyHeadroomProbe.fbo : copyHeadroomProbe.fb0;
+        ++bucket.draws;
+        bucket.uniformBytes +=
+            static_cast<std::uint64_t>(info.vertexUniformSize) +
+            static_cast<std::uint64_t>(info.fragmentUniformSize);
+        bucket.bufferHandles +=
+            (info.metalVertexBuffer != nullptr ? 1u : 0u) +
+            (info.metalIndexBuffer != nullptr ? 1u : 0u);
+        for (const auto& evb : info.extraVertexBuffers) {
+            if (evb.metalBuffer != nullptr) {
+                ++bucket.bufferHandles;
+            }
+        }
+        for (const auto& ubo : info.uboBindings) {
+            if (ubo.metalBuffer != nullptr) {
+                ++bucket.bufferHandles;
+            } else {
+                bucket.inlineUboBytes += ubo.size;
+            }
+        }
+        for (const auto& tex : info.vertexTextures) {
+            if (tex.metalTexture != nullptr) {
+                ++bucket.textureHandles;
+            }
+        }
+        for (const auto& tex : info.fragmentTextures) {
+            if (tex.metalTexture != nullptr) {
+                ++bucket.textureHandles;
+            }
+        }
+        if (fboBound) {
+            // Census only — see CopyHeadroomProbe: the shadow fill calls
+            // ensureDrawableResources(), forbidden mid-FBO-pass.
+            return;
+        }
+        ++bucket.fillAttempts;
+        ParallelEncodeFallbackReason fallbackReason =
+            ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
+        const auto fillStart = std::chrono::steady_clock::now();
+        const bool filled = prepareLeanDirectTranslatedDrawDescriptor(
+            info, copyHeadroomScratchDescriptor, fallbackReason);
+        bucket.fillUsTotal +=
+            std::chrono::duration<double, std::micro>(
+                std::chrono::steady_clock::now() - fillStart).count();
+        if (!filled) {
+            return;
+        }
+        ++bucket.fillSuccesses;
+        const auto retainStart = std::chrono::steady_clock::now();
+        std::uint64_t retained = 0;
+        auto retainHandle = [&](const void* handle) {
+            if (handle == nullptr) {
+                return;
+            }
+            CFRetain(static_cast<CFTypeRef>(handle));
+            copyHeadroomArena.push_back(handle);
+            ++retained;
+        };
+        const LeanDirectTranslatedDrawDescriptor& d =
+            copyHeadroomScratchDescriptor;
+        retainHandle(d.metalVertexBuffer);
+        retainHandle(d.metalIndexBuffer);
+        for (std::size_t i = 0; i < d.extraVertexBufferCount; ++i) {
+            retainHandle(d.extraVertexBuffers[i].metalBuffer);
+        }
+        for (std::size_t i = 0; i < d.vertexTextureCount; ++i) {
+            retainHandle(d.vertexTextures[i].metalTexture);
+            retainHandle(d.vertexTextures[i].metalSamplerState);
+        }
+        for (std::size_t i = 0; i < d.fragmentTextureCount; ++i) {
+            retainHandle(d.fragmentTextures[i].metalTexture);
+            retainHandle(d.fragmentTextures[i].metalSamplerState);
+        }
+        for (std::size_t i = 0; i < d.uboBindingCount; ++i) {
+            retainHandle(d.uboBindings[i].metalBuffer);
+        }
+        bucket.retainUsTotal +=
+            std::chrono::duration<double, std::micro>(
+                std::chrono::steady_clock::now() - retainStart).count();
+        bucket.retains += retained;
+        copyHeadroomProbe.arenaPeak = std::max<std::uint64_t>(
+            copyHeadroomProbe.arenaPeak, copyHeadroomArena.size());
+    }
+
+    void drainCopyHeadroomArena() {
+        if (copyHeadroomArena.empty()) {
+            return;
+        }
+        const auto releaseStart = std::chrono::steady_clock::now();
+        for (const void* handle : copyHeadroomArena) {
+            CFRelease(static_cast<CFTypeRef>(handle));
+        }
+        copyHeadroomArena.clear();
+        copyHeadroomProbe.releaseUsTotal +=
+            std::chrono::duration<double, std::micro>(
+                std::chrono::steady_clock::now() - releaseStart).count();
+        ++copyHeadroomProbe.arenaDrains;
     }
 
     MetalFrameGraph::FramePacingSnapshot framePacingSnapshot() const {
@@ -11795,6 +11968,15 @@ struct MetalFrameGraph::Impl {
                 ParallelEncodeBoundaryReason::FboDraw)];
         snapshot.parallelBatchCount = parallelEncodeProfile.parallelBatchCount;
         snapshot.maxBatchSize = parallelEncodeProfile.maxBatchSize;
+        snapshot.copyHeadroomEnabled = copyHeadroomProbeLatched;
+        snapshot.chFb0Draws = copyHeadroomProbe.fb0.draws;
+        snapshot.chFb0FillSuccesses = copyHeadroomProbe.fb0.fillSuccesses;
+        snapshot.chFb0FillUsTotal = copyHeadroomProbe.fb0.fillUsTotal;
+        snapshot.chFb0Retains = copyHeadroomProbe.fb0.retains;
+        snapshot.chFboDraws = copyHeadroomProbe.fbo.draws;
+        snapshot.chFboUniformBytes = copyHeadroomProbe.fbo.uniformBytes;
+        snapshot.chArenaDrains = copyHeadroomProbe.arenaDrains;
+        snapshot.chArenaLive = copyHeadroomArena.size();
         return snapshot;
     }
 
@@ -11977,6 +12159,11 @@ struct MetalFrameGraph::Impl {
         // or threaded-deferred) sees it.
         if (!pendingFboClears.empty()) {
             materializePendingFboClearsForSampledTextures(info);
+        }
+        // S25 commit B: copy-headroom shadow — observes every translated
+        // draw before path dispatch; obs-only (see CopyHeadroomProbe).
+        if (copyHeadroomProbeLatched) {
+            recordCopyHeadroomShadow(info);
         }
         if (threadedDeferredRecordProfile.enabled) {
             threadedDeferredRecordProfile.recordTranslatedDraw();
@@ -14596,6 +14783,12 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             flushPendingClear();
         }
         ++presentCalls;
+        // S25 commit B: frame boundary drains the copy-headroom retain
+        // arena (probe retains only — the encoder/CB machinery holds its
+        // own retains, so releasing here is unconditionally safe).
+        if (copyHeadroomProbeLatched) {
+            drainCopyHeadroomArena();
+        }
         switch (reason) {
             case AppGLCommandReason::PresentFromFlush:
                 ++presentFromFlushCalls;
@@ -14651,6 +14844,11 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         FrameAttributionScope attributionScope(
             frameAttributionProfile,
             FrameAttributionAction::Finish);
+        // S25 commit B: glFinish is a frame-boundary-equivalent drain
+        // point for the copy-headroom arena (present-less harnesses).
+        if (copyHeadroomProbeLatched) {
+            drainCopyHeadroomArena();
+        }
         // S24 correctness train: the OPEN (possibly continued) render
         // pass must close FIRST — materializeAllPendingFboClears and
         // flushPendingClear open their own encoders on the current CB,
@@ -19448,6 +19646,14 @@ private:
     FramePacingProfile framePacingProfile;
     double drawableAcquireWaitUsTotal = 0.0;
     std::uint64_t drawableAcquireWaitCount = 0;
+    // S25 commit B: copy-headroom shadow probe. Latched per-context (the
+    // rider-2 pattern — the gauntlet toggles via ScopedEnvVar across
+    // probes in one process; each probe constructs a fresh context).
+    const bool copyHeadroomProbeLatched =
+        appglEnvEnabledDefaultOff("APPGL_COPY_HEADROOM_PROBE");
+    CopyHeadroomProbe copyHeadroomProbe;
+    LeanDirectTranslatedDrawDescriptor copyHeadroomScratchDescriptor;
+    std::vector<const void*> copyHeadroomArena;
     ParallelEncodeFoundationProfile parallelEncodeProfile;
     // S24 rider-2: per-context latches for per-draw flag reads (the
     // d3e62ea pattern — getenv is an environ scan, measured per-draw

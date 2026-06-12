@@ -17440,19 +17440,25 @@ TestResult runC52CrossCbUploadOrderProbe() {
         gl.glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(idx), idx, GL_STATIC_DRAW);
 
         const auto ordered0 = context.metalResourceInventory().orderedTextureUploads;
-        // Heavy draw sampling OLD (red) content, left half. The iteration
-        // count must keep the GPU busy well past the CPU's flush→upload
-        // turnaround so the committed CB is reliably still in flight —
-        // but comfortably UNDER the Metal GPU watchdog: at 8M iterations
-        // the CB completed status=5 (Error, watchdog kill) on a warm
-        // machine and the lost FBO contents read back black (S25 matrix,
-        // 2026-06-12). The under-shoot direction is self-guarding: if the
-        // CB completes before the upload, the ordered-route engagement
-        // assert below goes red.
+        // Heavy GPU work sampling OLD (red) content, left half. The CB
+        // must stay in flight well past the CPU's flush→upload turnaround
+        // — but as MANY BOUNDED draws, never one pathological draw: a
+        // single multi-hundred-ms fragment dispatch is preemption-hostile
+        // and trips macOS GPU error/recovery (the original 8M-iteration
+        // single draw produced gpuEvent diagnostic reports and came back
+        // status=5 "Discarded (victim of GPU error/recovery)"; the lost
+        // FBO contents read back black — S25 matrix 2026-06-12, sibling
+        // of the 2a9a02c probe-bug class). 64 draws × 50k iterations buys
+        // the same in-flight window draw-preemptibly. The under-shoot
+        // direction is self-guarding: if the CB completes before the
+        // upload, the ordered-route engagement assert below goes red.
         gl.glViewport(0, 0, 4, 8);
-        gl.glUniform1i(itersLoc, 2000000);
-        gl.glDrawElementsInstancedBaseVertex(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT,
-                                             nullptr, 1, 0);
+        gl.glUniform1i(itersLoc, 50000);
+        for (int i = 0; i < 64; ++i) {
+            gl.glDrawElementsInstancedBaseVertex(GL_TRIANGLES, 6,
+                                                 GL_UNSIGNED_SHORT,
+                                                 nullptr, 1, 0);
+        }
         // Commit (GPU now executing the heavy draw) and upload NEW (green)
         // content while it is still in flight.
         gl.glFlush();
@@ -18609,6 +18615,135 @@ TestResult runS25ParallelShareDefaultOffProbe() {
     return result;
 }
 
+// ── S25 commit B: copy-headroom shadow probe ──
+
+TestResult runS25CopyHeadroomShadowProbe() {
+    ScopedEnvVar probeOn("APPGL_COPY_HEADROOM_PROBE", "1");
+    auto result = runDirectSentinel("s25.copy-headroom.shadow", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        C51Quad q = c51MakeQuad(gl);
+        gl.glUseProgram(q.program);
+        gl.glBindVertexArray(q.vao);
+        gl.glViewport(0, 0, 32, 32);
+        gl.glDisable(GL_DEPTH_TEST);
+        // Default-FB draws: census + REAL lean fill + retain arena.
+        gl.glUniform4f(q.colorLoc, 0.0f, 1.0f, 0.0f, 1.0f);
+        for (int i = 0; i < 16; ++i) {
+            gl.glDrawElementsInstancedBaseVertex(
+                GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr, 1, 0);
+        }
+        // Perturbation guard: the shadow must not change what renders.
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[1], 255u, 4u, "copy-headroom: draws render correctly");
+        // FBO draws: census-only bucket (no fill, no retains).
+        GLuint colorTex = 0, fbo = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, 8, 8);
+        for (int i = 0; i < 4; ++i) {
+            gl.glDrawElementsInstancedBaseVertex(
+                GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr, 1, 0);
+        }
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        const auto mid = context.metalResourceInventory();
+        if (!mid.copyHeadroomEnabled) {
+            recordSentinelFailure(failures, "probe flag did not latch", "");
+        }
+        if (mid.copyHeadroomFb0Draws < 16 ||
+            mid.copyHeadroomFb0FillSuccesses < 1 ||
+            mid.copyHeadroomFb0FillUsTotal <= 0.0) {
+            recordSentinelFailure(
+                failures,
+                "fb0 bucket missing census/fill engagement",
+                "draws=" + std::to_string(mid.copyHeadroomFb0Draws) +
+                    " fills=" + std::to_string(mid.copyHeadroomFb0FillSuccesses) +
+                    " fillUs=" + std::to_string(mid.copyHeadroomFb0FillUsTotal));
+        }
+        if (mid.copyHeadroomFb0Retains < 1) {
+            recordSentinelFailure(
+                failures,
+                "fb0 fill did not feed the retain arena",
+                "retains=" + std::to_string(mid.copyHeadroomFb0Retains));
+        }
+        if (mid.copyHeadroomFboDraws < 4 ||
+            mid.copyHeadroomFboUniformBytes == 0) {
+            recordSentinelFailure(
+                failures,
+                "fbo census bucket missing",
+                "draws=" + std::to_string(mid.copyHeadroomFboDraws) +
+                    " uniformBytes=" +
+                    std::to_string(mid.copyHeadroomFboUniformBytes));
+        }
+        // Frame boundary drains the arena (probe retains balanced).
+        context.swapBuffers();
+        const auto after = context.metalResourceInventory();
+        if (after.copyHeadroomArenaDrains < 1 ||
+            after.copyHeadroomArenaLive != 0) {
+            recordSentinelFailure(
+                failures,
+                "present did not drain the retain arena",
+                "drains=" + std::to_string(after.copyHeadroomArenaDrains) +
+                    " live=" + std::to_string(after.copyHeadroomArenaLive));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        c51DestroyQuad(gl, q);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        expectGLError(gl, GL_NO_ERROR, "copy-headroom probe cleanup");
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "copy-headroom shadow: fb0 census+real-fill+retain arena engage, fbo bucket is census-only, present drains the arena, rendering unperturbed";
+    }
+    return result;
+}
+
+TestResult runS25CopyHeadroomDefaultOffProbe() {
+    auto result = runDirectSentinel("s25.copy-headroom.default-off", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        C51Quad q = c51MakeQuad(gl);
+        gl.glUseProgram(q.program);
+        gl.glBindVertexArray(q.vao);
+        gl.glViewport(0, 0, 32, 32);
+        gl.glUniform4f(q.colorLoc, 1.0f, 0.0f, 1.0f, 1.0f);
+        for (int i = 0; i < 8; ++i) {
+            gl.glDrawElementsInstancedBaseVertex(
+                GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr, 1, 0);
+        }
+        gl.glFinish();
+        const auto inventory = context.metalResourceInventory();
+        if (inventory.copyHeadroomEnabled ||
+            inventory.copyHeadroomFb0Draws != 0 ||
+            inventory.copyHeadroomFb0Retains != 0 ||
+            inventory.copyHeadroomArenaLive != 0) {
+            recordSentinelFailure(
+                failures,
+                "copy-headroom counters moved with the flag OFF",
+                "enabled=" + std::to_string(inventory.copyHeadroomEnabled) +
+                    " draws=" + std::to_string(inventory.copyHeadroomFb0Draws));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        c51DestroyQuad(gl, q);
+        expectGLError(gl, GL_NO_ERROR, "copy-headroom default-off cleanup");
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "default-OFF leaves every copy-headroom counter at zero (must-miss)";
+    }
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -18776,6 +18911,12 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runS25StallCountersProbe());
         tests.push_back(runS25ParallelShareProbe());
         tests.push_back(runS25ParallelShareDefaultOffProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "s25-copy-headroom-probes") {
+        tests.push_back(runS25CopyHeadroomShadowProbe());
+        tests.push_back(runS25CopyHeadroomDefaultOffProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

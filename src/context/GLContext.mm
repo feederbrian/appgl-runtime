@@ -27215,6 +27215,15 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             inventory.parallelFboBoundaryDraws = pacing.fboBoundaryDraws;
             inventory.parallelBatchCount = pacing.parallelBatchCount;
             inventory.parallelMaxBatchSize = pacing.maxBatchSize;
+            inventory.copyHeadroomEnabled = pacing.copyHeadroomEnabled;
+            inventory.copyHeadroomFb0Draws = pacing.chFb0Draws;
+            inventory.copyHeadroomFb0FillSuccesses = pacing.chFb0FillSuccesses;
+            inventory.copyHeadroomFb0FillUsTotal = pacing.chFb0FillUsTotal;
+            inventory.copyHeadroomFb0Retains = pacing.chFb0Retains;
+            inventory.copyHeadroomFboDraws = pacing.chFboDraws;
+            inventory.copyHeadroomFboUniformBytes = pacing.chFboUniformBytes;
+            inventory.copyHeadroomArenaDrains = pacing.chArenaDrains;
+            inventory.copyHeadroomArenaLive = pacing.chArenaLive;
         }
     };
     auto finalizeR8HeapSegmentation = [&]() {
