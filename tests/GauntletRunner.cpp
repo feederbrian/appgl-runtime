@@ -17413,6 +17413,12 @@ TestResult runC52CrossCbUploadOrderProbe() {
         gl.glActiveTexture(GL_TEXTURE0 + 7);
         setupDCR3CRGBA8Texture(gl, target, 8, 8);
         setupDCR3CTextureFbo(gl, fbo, target);
+        // Restore unit 0 so the mid-test glTexSubImage2D calls hit the
+        // SAMPLED texture, not the FBO target left bound on unit 7. (The
+        // original probe omitted this — its documented-red "stale-rebind"
+        // pointer evidence was tex=1-bound-by-draws vs tex=2-receiving-
+        // the-upload: two different GL textures, not a stale rebind.)
+        gl.glActiveTexture(GL_TEXTURE0);
         gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         gl.glDisable(GL_DEPTH_TEST);
         gl.glUseProgram(program);
@@ -18024,12 +18030,14 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runC52EncoderStateDedupProbe());
         tests.push_back(runC52PreviewFboChurnProbe());
         tests.push_back(runC52MidFrameUploadOrderProbe());
-        // NOTE: runC52CrossCbUploadOrderProbe is deliberately NOT in this
-        // sweep-gating phase — it is a documented-RED triage probe (phase
-        // triage-cross-cb-only) reproducing two open bugs: the cross-CB
-        // upload ordering residual and a stale-rebind-after-realloc class
-        // found during fence-leg validation. It joins this phase with the
-        // fixes.
+        // Cross-CB upload-order probe: previously a documented-RED triage
+        // probe (phase triage-cross-cb-only). Its red was a PROBE bug —
+        // glActiveTexture was left at unit 7 after FBO setup, so the
+        // mid-test uploads hit the FBO target instead of the sampled
+        // texture (the "stale-rebind-after-realloc" pointer evidence was
+        // two different GL textures). With the probe fixed, the 01179d3
+        // fence trigger fires and both ordering legs pass — it now gates.
+        tests.push_back(runC52CrossCbUploadOrderProbe());
         return buildJSON(normalizedPhase, tests);
     }
 
