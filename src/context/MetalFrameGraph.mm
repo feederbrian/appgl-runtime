@@ -25,6 +25,7 @@
 #include <deque>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -414,6 +415,76 @@ struct DrawSubmitProfile {
             renderStateUs, bindingUs, primitivePrepUs, metalDrawUs,
             finalizeUs);
         return std::string(buf);
+    }
+};
+
+// S25 Rung-1 instruments: always-on frame-pacing accumulator. The frame
+// tick is the SWAP-reason present only (presentFromSwapBuffers) — flush
+// and internal presents are not frames. Every field is cumulative so the
+// periodic diagnostics JSONL stays delta-friendly; p50/p99 come from
+// bucket deltas offline. The threading arc's gate currency is
+// p99/hitch/main-thread-stall, not avg FPS. Hitch tiers are cumulative
+// (a >=100ms frame increments all three).
+struct FramePacingProfile {
+    // 1ms buckets 0..99, index 100 = >=100ms.
+    static constexpr std::size_t kBucketCount = 101;
+    bool hasLastPresent = false;
+    std::chrono::steady_clock::time_point lastPresent{};
+    std::uint64_t frames = 0;
+    double frameTimeUsTotal = 0.0;
+    double frameTimeUsMax = 0.0;
+    std::array<std::uint64_t, kBucketCount> frameTimeMsBuckets{};
+    std::uint64_t hitch25Count = 0;
+    std::uint64_t hitch50Count = 0;
+    std::uint64_t hitch100Count = 0;
+
+    void recordSwapPresent() {
+        const auto now = std::chrono::steady_clock::now();
+        if (hasLastPresent) {
+            const double us = std::chrono::duration<double, std::micro>(
+                now - lastPresent).count();
+            ++frames;
+            frameTimeUsTotal += us;
+            frameTimeUsMax = std::max(frameTimeUsMax, us);
+            const std::size_t bucket = std::min<std::size_t>(
+                static_cast<std::size_t>(us / 1000.0), kBucketCount - 1);
+            ++frameTimeMsBuckets[bucket];
+            if (us >= 25000.0) {
+                ++hitch25Count;
+            }
+            if (us >= 50000.0) {
+                ++hitch50Count;
+            }
+            if (us >= 100000.0) {
+                ++hitch100Count;
+            }
+        }
+        hasLastPresent = true;
+        lastPresent = now;
+    }
+
+    std::string diagnosticsJson() const {
+        std::ostringstream out;
+        out << "{\"frames\":" << frames
+            << ",\"frameTimeUsTotal\":" << frameTimeUsTotal
+            << ",\"frameTimeUsMax\":" << frameTimeUsMax
+            << ",\"hitch25\":" << hitch25Count
+            << ",\"hitch50\":" << hitch50Count
+            << ",\"hitch100\":" << hitch100Count
+            << ",\"histMs\":{";
+        bool first = true;
+        for (std::size_t i = 0; i < kBucketCount; ++i) {
+            if (frameTimeMsBuckets[i] == 0) {
+                continue;
+            }
+            if (!first) {
+                out << ",";
+            }
+            first = false;
+            out << "\"" << i << "\":" << frameTimeMsBuckets[i];
+        }
+        out << "}}";
+        return out.str();
     }
 };
 
@@ -11631,6 +11702,102 @@ struct MetalFrameGraph::Impl {
         return drawSubmitProfile.diagnosticsJson();
     }
 
+    // S25 Rung-1 instruments: pacing + parallel-encode share, always
+    // emitted (the pacing counters are always-on; the parallel-encode
+    // section carries zeros until the APPGL_PARALLEL_ENCODE arm runs —
+    // its recorders are latched on the flag). Periodic-JSONL-only by
+    // design: the legacy stderr dumps of these profiles are
+    // teardown-gated and real apps never tear down.
+    std::string framePacingDiagnosticsJson() const {
+        std::ostringstream out;
+        out << "{\"pacing\":" << framePacingProfile.diagnosticsJson()
+            << ",\"drawableWaitUs\":" << drawableAcquireWaitUsTotal
+            << ",\"drawableWaitCount\":" << drawableAcquireWaitCount
+            << ",\"parallelEncode\":{"
+            << "\"enabled\":" << (parallelEncodeProfile.enabled ? 1 : 0)
+            << ",\"translatedDraws\":" << parallelEncodeProfile.translatedDraws
+            << ",\"candidateDraws\":" << parallelEncodeProfile.candidateDraws
+            << ",\"capturedDraws\":" << parallelEncodeProfile.capturedDraws
+            << ",\"parallelBatchCount\":"
+            << parallelEncodeProfile.parallelBatchCount
+            << ",\"parallelEncodedDraws\":"
+            << parallelEncodeProfile.parallelEncodedDraws
+            << ",\"serialFallbackDraws\":"
+            << parallelEncodeProfile.serialFallbackDraws
+            << ",\"descriptorPreparedDraws\":"
+            << parallelEncodeProfile.descriptorPreparedDraws
+            << ",\"descriptorEncodedDraws\":"
+            << parallelEncodeProfile.descriptorEncodedDraws
+            << ",\"descriptorFallbackDraws\":"
+            << parallelEncodeProfile.descriptorFallbackDraws
+            << ",\"batchCount\":" << parallelEncodeProfile.batchCount
+            << ",\"batchDraws\":" << parallelEncodeProfile.batchDraws
+            << ",\"maxBatchSize\":" << parallelEncodeProfile.maxBatchSize
+            << ",\"parallelEncodeWallUs\":"
+            << parallelEncodeProfile.parallelEncodeWallUs
+            << ",\"sumWorkerEncodeUs\":"
+            << parallelEncodeProfile.sumWorkerEncodeUs
+            << ",\"maxWorkerEncodeUs\":"
+            << parallelEncodeProfile.maxWorkerEncodeUs
+            << ",\"descriptorWorkerWallUs\":"
+            << parallelEncodeProfile.descriptorWorkerWallUs
+            << ",\"descriptorWorkerSumUs\":"
+            << parallelEncodeProfile.descriptorWorkerSumUs;
+        auto emitReasonMap = [&out](
+            const char* key,
+            const std::array<std::uint64_t,
+                             static_cast<std::size_t>(
+                                 ParallelEncodeBoundaryReason::Count)>& counts) {
+            out << ",\"" << key << "\":{";
+            bool first = true;
+            for (std::size_t i = 0; i < counts.size(); ++i) {
+                if (counts[i] == 0) {
+                    continue;
+                }
+                if (!first) {
+                    out << ",";
+                }
+                first = false;
+                out << "\""
+                    << parallelEncodeBoundaryReasonName(
+                           static_cast<ParallelEncodeBoundaryReason>(i))
+                    << "\":" << counts[i];
+            }
+            out << "}";
+        };
+        emitReasonMap("boundaryReasons", parallelEncodeProfile.boundaryReasons);
+        emitReasonMap("batchFlushReasons",
+                      parallelEncodeProfile.batchFlushReasons);
+        emitReasonMap("descriptorFlushReasons",
+                      parallelEncodeProfile.descriptorFlushReasons);
+        out << "}}";
+        return out.str();
+    }
+
+    MetalFrameGraph::FramePacingSnapshot framePacingSnapshot() const {
+        MetalFrameGraph::FramePacingSnapshot snapshot;
+        snapshot.frames = framePacingProfile.frames;
+        snapshot.frameTimeUsTotal = framePacingProfile.frameTimeUsTotal;
+        snapshot.frameTimeUsMax = framePacingProfile.frameTimeUsMax;
+        snapshot.hitch25Count = framePacingProfile.hitch25Count;
+        snapshot.hitch50Count = framePacingProfile.hitch50Count;
+        snapshot.hitch100Count = framePacingProfile.hitch100Count;
+        snapshot.drawableWaitUsTotal = drawableAcquireWaitUsTotal;
+        snapshot.drawableWaitCount = drawableAcquireWaitCount;
+        snapshot.parallelTranslatedDraws = parallelEncodeProfile.translatedDraws;
+        snapshot.parallelCandidateDraws = parallelEncodeProfile.candidateDraws;
+        snapshot.parallelEncodedDraws =
+            parallelEncodeProfile.parallelEncodedDraws;
+        snapshot.descriptorEncodedDraws =
+            parallelEncodeProfile.descriptorEncodedDraws;
+        snapshot.fboBoundaryDraws =
+            parallelEncodeProfile.boundaryReasons[static_cast<std::size_t>(
+                ParallelEncodeBoundaryReason::FboDraw)];
+        snapshot.parallelBatchCount = parallelEncodeProfile.parallelBatchCount;
+        snapshot.maxBatchSize = parallelEncodeProfile.maxBatchSize;
+        return snapshot;
+    }
+
     // ── C52 flicker fix (Option A): ordered in-CB texture uploads ──
     // In-place texture uploads (replaceRegion / out-of-band blit CBs) can
     // land BEFORE already-encoded draws of the still-open command buffer
@@ -14435,6 +14602,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 break;
             case AppGLCommandReason::PresentFromSwapBuffers:
                 ++presentFromSwapBuffersCalls;
+                // S25 pacing: swapBuffers IS the frame tick — record the
+                // cadence even when the present has no pending work (an
+                // empty frame is still a frame for pacing purposes).
+                framePacingProfile.recordSwapPresent();
                 break;
             default:
                 ++presentInternalCalls;
@@ -18855,9 +19026,17 @@ private:
             observeDrawableTexture(currentDrawable.texture);
             return true;
         }
+        // S25 pacing: nextDrawable blocks when the drawable pool is
+        // exhausted (frames in flight) — time it unconditionally; this
+        // stall is invisible to the command-submission wait counters.
+        const auto drawableWaitStart = std::chrono::steady_clock::now();
         @autoreleasepool {
             currentDrawable = retainOwnedObjCObject([layer nextDrawable]);
         }
+        drawableAcquireWaitUsTotal +=
+            std::chrono::duration<double, std::micro>(
+                std::chrono::steady_clock::now() - drawableWaitStart).count();
+        ++drawableAcquireWaitCount;
         currentDrawablePresented = false;
         if (currentDrawable != nil) {
             ++drawableRetainCalls;
@@ -19262,6 +19441,13 @@ private:
     };
     std::unordered_set<PipelineBuildLogKey, PipelineBuildLogKeyHash> loggedPipelineBuildPrograms;
     DrawSubmitProfile drawSubmitProfile;
+    // S25 Rung-1 instruments: always-on pacing accumulator + the
+    // GL-thread drawable-acquire wait pair (the nextDrawable stall is
+    // the one blocking site the command-submission wait kinds can't
+    // see — it blocks inside CAMetalLayer, not on our semaphores).
+    FramePacingProfile framePacingProfile;
+    double drawableAcquireWaitUsTotal = 0.0;
+    std::uint64_t drawableAcquireWaitCount = 0;
     ParallelEncodeFoundationProfile parallelEncodeProfile;
     // S24 rider-2: per-context latches for per-draw flag reads (the
     // d3e62ea pattern — getenv is an environ scan, measured per-draw
@@ -20165,6 +20351,15 @@ void MetalFrameGraph::endRenderPass() {
 
 std::string MetalFrameGraph::drawSubmitProfileDiagnosticsJson() const {
     return impl_->drawSubmitProfileDiagnosticsJson();
+}
+
+std::string MetalFrameGraph::framePacingDiagnosticsJson() const {
+    return impl_->framePacingDiagnosticsJson();
+}
+
+MetalFrameGraph::FramePacingSnapshot
+MetalFrameGraph::framePacingSnapshot() const {
+    return impl_->framePacingSnapshot();
 }
 
 bool MetalFrameGraph::currentCommandBufferMayReadTexture(const void* mtlTexture) const {

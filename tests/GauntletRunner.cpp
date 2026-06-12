@@ -18,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -17441,9 +17442,15 @@ TestResult runC52CrossCbUploadOrderProbe() {
         const auto ordered0 = context.metalResourceInventory().orderedTextureUploads;
         // Heavy draw sampling OLD (red) content, left half. The iteration
         // count must keep the GPU busy well past the CPU's flush→upload
-        // turnaround so the committed CB is reliably still in flight.
+        // turnaround so the committed CB is reliably still in flight —
+        // but comfortably UNDER the Metal GPU watchdog: at 8M iterations
+        // the CB completed status=5 (Error, watchdog kill) on a warm
+        // machine and the lost FBO contents read back black (S25 matrix,
+        // 2026-06-12). The under-shoot direction is self-guarding: if the
+        // CB completes before the upload, the ordered-route engagement
+        // assert below goes red.
         gl.glViewport(0, 0, 4, 8);
-        gl.glUniform1i(itersLoc, 8000000);
+        gl.glUniform1i(itersLoc, 2000000);
         gl.glDrawElementsInstancedBaseVertex(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT,
                                              nullptr, 1, 0);
         // Commit (GPU now executing the heavy draw) and upload NEW (green)
@@ -18339,6 +18346,269 @@ TestResult runFinishOpenPassProbe() {
     return result;
 }
 
+// ── S25 Rung-1 pacing instruments ──
+// The pacing accumulator and stall counters are always-on observation;
+// these probes prove ENGAGEMENT (counters move under forced conditions)
+// and MUST-MISS (they don't move when the condition is absent). They
+// deliberately assert nothing about absolute timing beyond the forced
+// 150ms gap — wall-clock noise on a loaded machine must not flake the
+// matrix.
+
+TestResult runS25PacingHitchProbe() {
+    auto result = runDirectSentinel("s25.pacing.hitch-tiers", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        std::vector<std::string> failures;
+        // Three back-to-back swap-presents: the first arms the
+        // accumulator, the next two record fast frame deltas.
+        context.swapBuffers();
+        context.swapBuffers();
+        context.swapBuffers();
+        const auto fast = context.metalResourceInventory();
+        if (fast.pacingFrames < 2) {
+            recordSentinelFailure(
+                failures,
+                "pacing accumulator missed fast swap-present frames",
+                "frames=" + std::to_string(fast.pacingFrames));
+        }
+        // Must-miss: back-to-back swaps are not >=100ms hitches.
+        if (fast.pacingHitch100 != 0) {
+            recordSentinelFailure(
+                failures,
+                "must-miss violated: fast swaps counted as >=100ms hitches",
+                "hitch100=" + std::to_string(fast.pacingHitch100));
+        }
+        // Must-hit: a forced 150ms inter-present gap is deterministically
+        // a >=100ms hitch (and therefore also >=25/>=50 — tiers are
+        // cumulative).
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        context.swapBuffers();
+        const auto slow = context.metalResourceInventory();
+        if (slow.pacingFrames != fast.pacingFrames + 1) {
+            recordSentinelFailure(
+                failures,
+                "forced-hitch swap did not record a frame",
+                "before=" + std::to_string(fast.pacingFrames) +
+                    " after=" + std::to_string(slow.pacingFrames));
+        }
+        if (slow.pacingHitch100 < 1 || slow.pacingHitch50 < 1 ||
+            slow.pacingHitch25 < 1) {
+            recordSentinelFailure(
+                failures,
+                "forced 150ms gap did not register in the hitch tiers",
+                "hitch25=" + std::to_string(slow.pacingHitch25) +
+                    " hitch50=" + std::to_string(slow.pacingHitch50) +
+                    " hitch100=" + std::to_string(slow.pacingHitch100));
+        }
+        if (slow.pacingFrameTimeUsMax < 100000.0) {
+            recordSentinelFailure(
+                failures,
+                "frameTimeUsMax did not capture the forced gap",
+                "maxUs=" + std::to_string(slow.pacingFrameTimeUsMax));
+        }
+        // JSONL shape sanity: histogram + parallel-share sections exist.
+        const std::string json = context.framePacingDiagnosticsJson();
+        if (json.find("\"histMs\"") == std::string::npos ||
+            json.find("\"parallelEncode\"") == std::string::npos) {
+            recordSentinelFailure(
+                failures,
+                "framePacing diagnostics JSON missing expected sections",
+                json.substr(0, 200));
+        }
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "pacing accumulator counts swap-present frames; forced 150ms gap lands in all hitch tiers + max; fast swaps stay out (must-miss)";
+    }
+    return result;
+}
+
+TestResult runS25StallCountersProbe() {
+    auto result = runDirectSentinel("s25.pacing.stall-counters", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        C51Quad q = c51MakeQuad(gl);
+        gl.glUseProgram(q.program);
+        gl.glBindVertexArray(q.vao);
+        gl.glViewport(0, 0, 32, 32);
+        gl.glUniform4f(q.colorLoc, 1.0f, 0.0f, 0.0f, 1.0f);
+        gl.glDrawElementsInstancedBaseVertex(
+            GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr, 1, 0);
+        gl.glFinish();
+        const auto before = context.commandSubmissionDebugCounters();
+        // A synchronized readback forces a commitAndWait → a Completion
+        // semaphore wait on the GL thread.
+        gl.glUniform4f(q.colorLoc, 0.0f, 1.0f, 0.0f, 1.0f);
+        gl.glDrawElementsInstancedBaseVertex(
+            GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr, 1, 0);
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        const auto after = context.commandSubmissionDebugCounters();
+        if (after.completionWaitCount < before.completionWaitCount + 1) {
+            recordSentinelFailure(
+                failures,
+                "synchronized readback did not record a completion wait",
+                "before=" + std::to_string(before.completionWaitCount) +
+                    " after=" + std::to_string(after.completionWaitCount));
+        }
+        if (after.completionWaitUsTotal < before.completionWaitUsTotal + 1) {
+            recordSentinelFailure(
+                failures,
+                "completion wait recorded zero accumulated time",
+                "beforeUs=" + std::to_string(before.completionWaitUsTotal) +
+                    " afterUs=" + std::to_string(after.completionWaitUsTotal));
+        }
+        // Monotonicity across the other kinds (engagement is workload
+        // dependent — ring-slot/in-flight waits need pipeline pressure a
+        // 2-draw probe can't force deterministically).
+        if (after.ringSlotWaitUsTotal < before.ringSlotWaitUsTotal ||
+            after.inFlightTokenWaitUsTotal < before.inFlightTokenWaitUsTotal) {
+            recordSentinelFailure(
+                failures,
+                "wait totals regressed (must be cumulative)",
+                "ringSlot " + std::to_string(before.ringSlotWaitUsTotal) +
+                    "->" + std::to_string(after.ringSlotWaitUsTotal) +
+                    " inFlight " +
+                    std::to_string(before.inFlightTokenWaitUsTotal) + "->" +
+                    std::to_string(after.inFlightTokenWaitUsTotal));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        c51DestroyQuad(gl, q);
+        expectGLError(gl, GL_NO_ERROR, "stall-counter probe cleanup");
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "synchronized readback lands in completionWait count+us; wait totals are cumulative";
+    }
+    return result;
+}
+
+TestResult runS25ParallelShareProbe() {
+    ScopedEnvVar parallelOn("APPGL_PARALLEL_ENCODE", "1");
+    ScopedEnvVar minBatch("APPGL_PARALLEL_ENCODE_MIN_BATCH", "4");
+    auto result = runDirectSentinel("s25.parallel-share.fbo-boundary", [&] {
+        // Env latched at context creation (the profile reads the flag at
+        // frame-graph construction) — ScopedSentinelContext is created
+        // AFTER the ScopedEnvVars above.
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        C51Quad q = c51MakeQuad(gl);
+        gl.glUseProgram(q.program);
+        gl.glBindVertexArray(q.vao);
+        gl.glViewport(0, 0, 64, 64);
+        gl.glDisable(GL_DEPTH_TEST);
+        // Default-FB draws: lean-path candidates.
+        gl.glUniform4f(q.colorLoc, 0.0f, 0.0f, 1.0f, 1.0f);
+        for (int i = 0; i < 64; ++i) {
+            gl.glDrawElementsInstancedBaseVertex(
+                GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr, 1, 0);
+        }
+        // FBO draws: categorically ineligible → FboDraw boundary (the
+        // share instrument item (c) — the Rung-2 scoping number).
+        GLuint colorTex = 0, fbo = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, 8, 8);
+        for (int i = 0; i < 4; ++i) {
+            gl.glDrawElementsInstancedBaseVertex(
+                GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr, 1, 0);
+        }
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glFinish();
+        const auto inventory = context.metalResourceInventory();
+        if (inventory.parallelTranslatedDraws == 0 ||
+            inventory.parallelCandidateDraws == 0) {
+            recordSentinelFailure(
+                failures,
+                "parallel-encode profile did not observe draws with the arm ON",
+                "translated=" +
+                    std::to_string(inventory.parallelTranslatedDraws) +
+                    " candidates=" +
+                    std::to_string(inventory.parallelCandidateDraws));
+        }
+        if (inventory.parallelFboBoundaryDraws < 1) {
+            recordSentinelFailure(
+                failures,
+                "FBO draws did not register FboDraw boundaries",
+                "fboBoundaryDraws=" +
+                    std::to_string(inventory.parallelFboBoundaryDraws));
+        }
+        if (inventory.parallelEncodedDraws +
+                inventory.parallelDescriptorEncodedDraws ==
+            0) {
+            recordSentinelFailure(
+                failures,
+                "no draws took a parallel/lean encode path with the arm ON",
+                "parallelEncoded=" +
+                    std::to_string(inventory.parallelEncodedDraws) +
+                    " descriptorEncoded=" +
+                    std::to_string(inventory.parallelDescriptorEncodedDraws));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        c51DestroyQuad(gl, q);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        expectGLError(gl, GL_NO_ERROR, "parallel-share probe cleanup");
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "parallel-encode arm observes draws, counts FboDraw boundaries (the share instrument), and lean/parallel-encodes default-FB draws";
+    }
+    return result;
+}
+
+TestResult runS25ParallelShareDefaultOffProbe() {
+    auto result = runDirectSentinel("s25.parallel-share.default-off", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        C51Quad q = c51MakeQuad(gl);
+        gl.glUseProgram(q.program);
+        gl.glBindVertexArray(q.vao);
+        gl.glViewport(0, 0, 32, 32);
+        gl.glUniform4f(q.colorLoc, 1.0f, 1.0f, 0.0f, 1.0f);
+        for (int i = 0; i < 8; ++i) {
+            gl.glDrawElementsInstancedBaseVertex(
+                GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr, 1, 0);
+        }
+        gl.glFinish();
+        const auto inventory = context.metalResourceInventory();
+        // Must-miss: with the flag OFF the profile recorders are latched
+        // off — the share counters must stay zero (pacing counters still
+        // run; they are always-on by design).
+        if (inventory.parallelTranslatedDraws != 0 ||
+            inventory.parallelCandidateDraws != 0 ||
+            inventory.parallelEncodedDraws != 0 ||
+            inventory.parallelDescriptorEncodedDraws != 0) {
+            recordSentinelFailure(
+                failures,
+                "parallel-encode share counters moved with the arm OFF",
+                "translated=" +
+                    std::to_string(inventory.parallelTranslatedDraws) +
+                    " candidates=" +
+                    std::to_string(inventory.parallelCandidateDraws));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        c51DestroyQuad(gl, q);
+        expectGLError(gl, GL_NO_ERROR, "parallel-share default-off cleanup");
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "default-OFF arm leaves the parallel-encode share counters at zero (must-miss)";
+    }
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -18498,6 +18768,14 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
     if (normalizedPhase == "flush-narrowing-probes") {
         tests.push_back(runFlushNarrowRenameSkipProbe());
         tests.push_back(runFlushNarrowForcedFlushProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "s25-pacing-probes") {
+        tests.push_back(runS25PacingHitchProbe());
+        tests.push_back(runS25StallCountersProbe());
+        tests.push_back(runS25ParallelShareProbe());
+        tests.push_back(runS25ParallelShareDefaultOffProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

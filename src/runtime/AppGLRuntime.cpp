@@ -2615,6 +2615,16 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
             stream << "\"drawProfile\":" << drawProfileJson << ",";
         }
 
+        // S25 Rung-1 instruments: always-on pacing histogram + hitch
+        // tiers + parallel-encode share. Cumulative like every other
+        // counter here — pacing analysis (p50/p99) takes bucket deltas
+        // between intervals.
+        const std::string pacingJson =
+            currentContext->framePacingDiagnosticsJson();
+        if (!pacingJson.empty()) {
+            stream << "\"framePacing\":" << pacingJson << ",";
+        }
+
         stream << "\"buffers\":" << store.buffers().size() << ",";
         stream << "\"textures\":" << store.textures().size() << ",";
         stream << "\"samplers\":" << store.samplers().size() << ",";
@@ -2937,6 +2947,18 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << metalInventory.commandBuffers.drainAllCalls << ","
            << "\"drainAllWaitUsTotal\":"
            << metalInventory.commandBuffers.drainAllWaitUsTotal << ","
+           << "\"inFlightTokenWaitCount\":"
+           << metalInventory.commandBuffers.inFlightTokenWaitCount << ","
+           << "\"inFlightTokenWaitUsTotal\":"
+           << metalInventory.commandBuffers.inFlightTokenWaitUsTotal << ","
+           << "\"ringSlotWaitCount\":"
+           << metalInventory.commandBuffers.ringSlotWaitCount << ","
+           << "\"ringSlotWaitUsTotal\":"
+           << metalInventory.commandBuffers.ringSlotWaitUsTotal << ","
+           << "\"completionWaitCount\":"
+           << metalInventory.commandBuffers.completionWaitCount << ","
+           << "\"completionWaitUsTotal\":"
+           << metalInventory.commandBuffers.completionWaitUsTotal << ","
            << "\"plainCommandBufferAllocations\":"
            << metalInventory.commandBuffers.plainCommandBufferAllocations << ","
            << "\"autoreleaseDrainedCommandBufferAllocations\":"

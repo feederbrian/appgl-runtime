@@ -999,6 +999,24 @@ public:
         std::uint64_t renderPsoProgramHotspotsTruncated = 0;
         MetalMemoryPressureInputs pressure;
         AppGLCommandSubmissionDebugCounters commandBuffers;
+        // S25 Rung-1 pacing instruments (probe-facing subset; the full
+        // per-ms histogram and per-reason boundary maps ride only the
+        // periodic diagnostics JSONL).
+        std::uint64_t pacingFrames = 0;
+        double pacingFrameTimeUsTotal = 0.0;
+        double pacingFrameTimeUsMax = 0.0;
+        std::uint64_t pacingHitch25 = 0;
+        std::uint64_t pacingHitch50 = 0;
+        std::uint64_t pacingHitch100 = 0;
+        double pacingDrawableWaitUs = 0.0;
+        std::uint64_t pacingDrawableWaitCount = 0;
+        std::uint64_t parallelTranslatedDraws = 0;
+        std::uint64_t parallelCandidateDraws = 0;
+        std::uint64_t parallelEncodedDraws = 0;
+        std::uint64_t parallelDescriptorEncodedDraws = 0;
+        std::uint64_t parallelFboBoundaryDraws = 0;
+        std::uint64_t parallelBatchCount = 0;
+        std::uint64_t parallelMaxBatchSize = 0;
         MetalResourceResidencySummary residency;
         MetalHostCacheSummary hostCaches;
         Depth32FReadbackDiagnostics depth32fReadback;
@@ -1027,6 +1045,11 @@ public:
     // Their stderr dumps are teardown-gated and real apps may never tear
     // down — the diagnostics JSONL emits this instead.
     std::string drawProfileDiagnosticsJson() const;
+    // S25 Rung-1 instruments: always-on frame-pacing + parallel-encode
+    // share JSON for the periodic diagnostics JSONL ("" only when no
+    // frame graph exists). Probe-facing typed subset rides
+    // MetalResourceInventory.pacing*/parallel* instead.
+    std::string framePacingDiagnosticsJson() const;
     std::uint64_t evictR5DerivedCachesForTesting(std::uint64_t budget);
 
     // Transform feedback active state tracking (for CTS api_errors_test).

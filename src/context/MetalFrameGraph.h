@@ -1088,6 +1088,30 @@ public:
     // The stderr dump is teardown-gated; this feeds the periodic
     // diagnostics JSONL so apps that never tear down still report.
     std::string drawSubmitProfileDiagnosticsJson() const;
+    // S25 Rung-1 instruments: always-on frame-pacing aggregates (the
+    // swap-present cadence histogram + hitch tiers + drawable-acquire
+    // stall) and the parallel-encode share counters. The JSON carries the
+    // full per-ms histogram and per-reason boundary maps for the periodic
+    // diagnostics JSONL; the typed snapshot is the probe-facing subset.
+    std::string framePacingDiagnosticsJson() const;
+    struct FramePacingSnapshot {
+        std::uint64_t frames = 0;
+        double frameTimeUsTotal = 0.0;
+        double frameTimeUsMax = 0.0;
+        std::uint64_t hitch25Count = 0;
+        std::uint64_t hitch50Count = 0;
+        std::uint64_t hitch100Count = 0;
+        double drawableWaitUsTotal = 0.0;
+        std::uint64_t drawableWaitCount = 0;
+        std::uint64_t parallelTranslatedDraws = 0;
+        std::uint64_t parallelCandidateDraws = 0;
+        std::uint64_t parallelEncodedDraws = 0;
+        std::uint64_t descriptorEncodedDraws = 0;
+        std::uint64_t fboBoundaryDraws = 0;
+        std::uint64_t parallelBatchCount = 0;
+        std::uint64_t maxBatchSize = 0;
+    };
+    FramePacingSnapshot framePacingSnapshot() const;
     // C52 flicker fix (ordered in-CB texture uploads): true when a draw
     // already encoded into the OPEN command buffer samples this MTLTexture
     // — an in-place upload would be visible to that draw out of order.

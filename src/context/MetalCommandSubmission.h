@@ -132,7 +132,8 @@ private:
             if (completionCopy != nil) {
                 completionCopy(completed);
             }
-            recordCompleted(state, reason, releaseLabel, completed.status);
+            recordCompleted(state, reason, releaseLabel, completed.status,
+                            completed.error);
             recordCompletionLatency(state, reason, releaseLabel, submittedAt);
             releaseToken(state, released, releaseLabel.UTF8String);
             releaseRetainedObjects(retainedObjects);
@@ -173,6 +174,12 @@ private:
             for (auto& timeoutCount : allocWaitTimeoutsByReason) {
                 timeoutCount.store(0);
             }
+            for (auto& waitCount : semaphoreWaitCountByKind) {
+                waitCount.store(0);
+            }
+            for (auto& waitUs : semaphoreWaitUsByKind) {
+                waitUs.store(0);
+            }
         }
 
         ~SharedState() {
@@ -210,6 +217,13 @@ private:
         // count + total wall time, unconditional.
         std::atomic<std::uint64_t> drainAllCalls{0};
         std::atomic<std::uint64_t> drainAllWaitUsTotal{0};
+        // S25 pacing instruments: per-kind semaphore-wait totals,
+        // unconditional (two timestamps on an already-blocking path) —
+        // same rationale as the drain-all census pair above. Indexed by
+        // WaitKind; the DrainAll slot stays zero (its dedicated counters
+        // above are authoritative — no double count).
+        std::array<std::atomic<std::uint64_t>, 4> semaphoreWaitCountByKind{};
+        std::array<std::atomic<std::uint64_t>, 4> semaphoreWaitUsByKind{};
         std::atomic<std::uint64_t> plainCommandBufferAllocations{0};
         std::atomic<std::uint64_t> autoreleaseDrainedCommandBufferAllocations{0};
         std::atomic<std::uint64_t> retainedObjectsAdopted{0};
@@ -403,7 +417,8 @@ private:
     static void recordCompleted(const std::shared_ptr<SharedState>& state,
                                 AppGLCommandReason reason,
                                 NSString* label,
-                                MTLCommandBufferStatus status) {
+                                MTLCommandBufferStatus status,
+                                NSError* error = nil) {
         if (!state) {
             return;
         }
@@ -414,7 +429,7 @@ private:
         if (state->profileEnabled) {
             const auto& record = appGLCommandReasonRecord(reason);
             std::fprintf(stderr,
-                         "[APPGL_CB_PROFILE] cb_complete reason=%s mode=%s dependency=%s label=%s submitted=%llu completed=%llu status=%ld in_flight=%u\n",
+                         "[APPGL_CB_PROFILE] cb_complete reason=%s mode=%s dependency=%s label=%s submitted=%llu completed=%llu status=%ld in_flight=%u error=%s\n",
                          record.name,
                          appGLSubmitModeName(record.submitMode),
                          appGLDependencyClassName(record.dependencyClass),
@@ -422,7 +437,8 @@ private:
                          static_cast<unsigned long long>(state->submittedCommandBuffers.load()),
                          static_cast<unsigned long long>(completed),
                          static_cast<long>(status),
-                         state->inFlightCount.load());
+                         state->inFlightCount.load(),
+                         error != nil ? error.description.UTF8String : "(none)");
             std::fflush(stderr);
         }
     }
@@ -617,6 +633,24 @@ public:
         counters.waitReasonLogEntries = state_->waitReasonLogEntries.load();
         counters.drainAllCalls = state_->drainAllCalls.load();
         counters.drainAllWaitUsTotal = state_->drainAllWaitUsTotal.load();
+        counters.inFlightTokenWaitCount =
+            state_->semaphoreWaitCountByKind[static_cast<std::size_t>(
+                MetalCommandSubmission::WaitKind::InFlightToken)].load();
+        counters.inFlightTokenWaitUsTotal =
+            state_->semaphoreWaitUsByKind[static_cast<std::size_t>(
+                MetalCommandSubmission::WaitKind::InFlightToken)].load();
+        counters.ringSlotWaitCount =
+            state_->semaphoreWaitCountByKind[static_cast<std::size_t>(
+                MetalCommandSubmission::WaitKind::RingSlot)].load();
+        counters.ringSlotWaitUsTotal =
+            state_->semaphoreWaitUsByKind[static_cast<std::size_t>(
+                MetalCommandSubmission::WaitKind::RingSlot)].load();
+        counters.completionWaitCount =
+            state_->semaphoreWaitCountByKind[static_cast<std::size_t>(
+                MetalCommandSubmission::WaitKind::Completion)].load();
+        counters.completionWaitUsTotal =
+            state_->semaphoreWaitUsByKind[static_cast<std::size_t>(
+                MetalCommandSubmission::WaitKind::Completion)].load();
         counters.pressureFlushCount = state_->pressureFlushCount.load();
         counters.plainCommandBufferAllocations =
             state_->plainCommandBufferAllocations.load();
@@ -886,12 +920,14 @@ public:
             return false;
         }
         const bool profileEnabled = state_ && state_->profileEnabled;
-        const auto waitStart = profileEnabled
-            ? std::chrono::steady_clock::now()
-            : std::chrono::steady_clock::time_point{};
+        // S25 pacing instruments: time every wait unconditionally — the
+        // per-kind totals are the main-thread-stall numerator and may
+        // never hide behind APPGL_CB_PROFILE (drain-all census rule).
+        const auto waitStart = std::chrono::steady_clock::now();
         recordWaitReason(kind, reason, label);
         if (kind == WaitKind::InFlightToken && profileEnabled) {
             if (dispatch_semaphore_wait(semaphore, DISPATCH_TIME_NOW) == 0) {
+                recordSemaphoreWaitUs(kind, waitStart);
                 recordWaitComplete(kind, reason, label, waitStart);
                 return true;
             }
@@ -910,13 +946,33 @@ public:
             DISPATCH_TIME_NOW,
             static_cast<int64_t>(timeoutMs * static_cast<std::uint64_t>(NSEC_PER_MSEC)));
         if (dispatch_semaphore_wait(semaphore, deadline) == 0) {
+            recordSemaphoreWaitUs(kind, waitStart);
             if (profileEnabled) {
                 recordWaitComplete(kind, reason, label, waitStart);
             }
             return true;
         }
+        recordSemaphoreWaitUs(kind, waitStart);
         recordTimeout(kind, reason, label, timeoutMs);
         return false;
+    }
+
+    void recordSemaphoreWaitUs(WaitKind kind,
+                               std::chrono::steady_clock::time_point waitStart) {
+        if (!state_) {
+            return;
+        }
+        const std::size_t index = static_cast<std::size_t>(kind);
+        if (index >= state_->semaphoreWaitUsByKind.size()) {
+            return;
+        }
+        state_->semaphoreWaitCountByKind[index].fetch_add(
+            1, std::memory_order_relaxed);
+        state_->semaphoreWaitUsByKind[index].fetch_add(
+            static_cast<std::uint64_t>(
+                std::chrono::duration<double, std::micro>(
+                    std::chrono::steady_clock::now() - waitStart).count()),
+            std::memory_order_relaxed);
     }
 
     void recordWaitReason(WaitKind kind, AppGLCommandReason reason, NSString* label) {

@@ -27051,6 +27051,12 @@ std::uint64_t GLContext::metalAllocatedBytes() const {
     return 0;
 }
 
+std::string GLContext::framePacingDiagnosticsJson() const {
+    return impl_->frameGraph != nullptr
+        ? impl_->frameGraph->framePacingDiagnosticsJson()
+        : std::string();
+}
+
 std::string GLContext::drawProfileDiagnosticsJson() const {
     const std::string gl = impl_->drawPathProfile.diagnosticsJson();
     const std::string submit = impl_->frameGraph != nullptr
@@ -27191,6 +27197,25 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         inventory.pressure.cbPressureFlushCount = counters.pressureFlushCount;
         inventory.pressure.cbCurrentInFlight = counters.currentInFlight;
         inventory.pressure.cbInFlightBound = counters.inFlightBound;
+        if (impl_->frameGraph) {
+            const auto pacing = impl_->frameGraph->framePacingSnapshot();
+            inventory.pacingFrames = pacing.frames;
+            inventory.pacingFrameTimeUsTotal = pacing.frameTimeUsTotal;
+            inventory.pacingFrameTimeUsMax = pacing.frameTimeUsMax;
+            inventory.pacingHitch25 = pacing.hitch25Count;
+            inventory.pacingHitch50 = pacing.hitch50Count;
+            inventory.pacingHitch100 = pacing.hitch100Count;
+            inventory.pacingDrawableWaitUs = pacing.drawableWaitUsTotal;
+            inventory.pacingDrawableWaitCount = pacing.drawableWaitCount;
+            inventory.parallelTranslatedDraws = pacing.parallelTranslatedDraws;
+            inventory.parallelCandidateDraws = pacing.parallelCandidateDraws;
+            inventory.parallelEncodedDraws = pacing.parallelEncodedDraws;
+            inventory.parallelDescriptorEncodedDraws =
+                pacing.descriptorEncodedDraws;
+            inventory.parallelFboBoundaryDraws = pacing.fboBoundaryDraws;
+            inventory.parallelBatchCount = pacing.parallelBatchCount;
+            inventory.parallelMaxBatchSize = pacing.maxBatchSize;
+        }
     };
     auto finalizeR8HeapSegmentation = [&]() {
         if (!r8Enabled) {

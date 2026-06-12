@@ -252,6 +252,15 @@ struct AppGLCommandSubmissionDebugCounters {
     std::uint64_t waitReasonLogEntries = 0;
     std::uint64_t drainAllCalls = 0;
     std::uint64_t drainAllWaitUsTotal = 0;
+    // S25 pacing instruments: GL-thread blocking time per wait kind,
+    // accumulated unconditionally (drain-all keeps its dedicated pair
+    // above). These are the main-thread-stall numerator.
+    std::uint64_t inFlightTokenWaitCount = 0;
+    std::uint64_t inFlightTokenWaitUsTotal = 0;
+    std::uint64_t ringSlotWaitCount = 0;
+    std::uint64_t ringSlotWaitUsTotal = 0;
+    std::uint64_t completionWaitCount = 0;
+    std::uint64_t completionWaitUsTotal = 0;
     std::uint64_t pressureFlushCount = 0;
     std::uint64_t plainCommandBufferAllocations = 0;
     std::uint64_t autoreleaseDrainedCommandBufferAllocations = 0;
