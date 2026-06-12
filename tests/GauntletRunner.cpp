@@ -17221,6 +17221,145 @@ TestResult runC52PreviewFboChurnProbe() {
     return result;
 }
 
+TestResult runC52MidFrameUploadOrderProbe() {
+    // Flicker triage, correctness-train suspect (resize-gate unmasking
+    // hypothesis): a mid-frame in-place texture upload must NOT be visible
+    // to draws encoded BEFORE it. Shared-storage uploads go through
+    // CPU-immediate replaceRegion (fastPathNeedsBlit keys on storage mode,
+    // not in-flight reads) and private-storage uploads ride a SEPARATE
+    // upload command buffer — both can beat an open pass-continuation CB
+    // whose earlier draws sample the old content. Pre-resize-gate, the
+    // per-frame viewport-leak invalidate/drain serialized this by accident.
+    // Shape: draw sampling content A → glTexSubImage2D to content B (no
+    // flush) → draw sampling again → validate BOTH draws at frame end.
+    auto result = runDirectSentinel("c52.triage.mid-frame-upload-order", [&] {
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        static constexpr const char* kVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "out vec2 vUV;\n"
+            "void main() { vUV = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+        static constexpr const char* kFS =
+            "#version 330 core\n"
+            "in vec2 vUV;\n"
+            "uniform sampler2D uTexture;\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = texture(uTexture, vUV); }\n";
+        const GLuint program = buildBenchProgram(kVS, kFS);
+        GLuint sampled = 0, target = 0, fbo = 0;
+        gl.glGenTextures(1, &sampled);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D, sampled);
+        gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        std::array<std::uint8_t, 4 * 4 * 4> texels{};
+        auto fill = [&](std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+            for (std::size_t i = 0; i < texels.size(); i += 4) {
+                texels[i] = r; texels[i + 1] = g; texels[i + 2] = b; texels[i + 3] = 255;
+            }
+        };
+        fill(255, 0, 0);
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA,
+                        GL_UNSIGNED_BYTE, texels.data());
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        gl.glGenTextures(1, &target);
+        setupDCR3CRGBA8Texture(gl, target, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo, target);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glUseProgram(program);
+        gl.glUniform1i(gl.glGetUniformLocation(program, "uTexture"), 0);
+        gl.glBindTexture(GL_TEXTURE_2D, sampled);
+        // Quad (reuses the c51 helpers' attribute-0 layout via a local VAO).
+        GLuint vao = 0, vbo = 0, ibo = 0;
+        const float verts[8] = {-1, -1, 1, -1, 1, 1, -1, 1};
+        const std::uint16_t idx[6] = {0, 1, 2, 0, 2, 3};
+        gl.glGenVertexArrays(1, &vao);
+        gl.glBindVertexArray(vao);
+        gl.glGenBuffers(1, &vbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, nullptr);
+        gl.glGenBuffers(1, &ibo);
+        gl.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+        gl.glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(idx), idx, GL_STATIC_DRAW);
+
+        // Several frames of the hazard shape, alternating content colors.
+        for (int round = 0; round < 4; ++round) {
+            const bool even = (round % 2) == 0;
+            const std::uint8_t oldR = even ? 255 : 0, oldG = even ? 0 : 255;
+            const std::uint8_t newR = even ? 0 : 255, newG = even ? 255 : 0;
+            // Seed the "old" content for this round (round 0 already red).
+            if (round > 0) {
+                fill(oldR, oldG, 0);
+                gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 4, 4, GL_RGBA,
+                                   GL_UNSIGNED_BYTE, texels.data());
+            }
+            // Draw 1 (left half) samples OLD content.
+            gl.glViewport(0, 0, 4, 8);
+            gl.glDrawElementsInstancedBaseVertex(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT,
+                                                 nullptr, 1, 0);
+            // Mid-frame in-place upload to NEW content — no flush/finish.
+            fill(newR, newG, 0);
+            gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 4, 4, GL_RGBA,
+                               GL_UNSIGNED_BYTE, texels.data());
+            // Draw 2 (right half) samples NEW content.
+            gl.glViewport(4, 0, 4, 8);
+            gl.glDrawElementsInstancedBaseVertex(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT,
+                                                 nullptr, 1, 0);
+            // Frame-end readback: draw 1 must show OLD, draw 2 NEW.
+            std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+            gl.glReadPixels(2, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            expectApproxByte(px[0], oldR, 3u, "upload-order: pre-upload draw sees OLD content (r)");
+            expectApproxByte(px[1], oldG, 3u, "upload-order: pre-upload draw sees OLD content (g)");
+            gl.glReadPixels(6, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            expectApproxByte(px[0], newR, 3u, "upload-order: post-upload draw sees NEW content (r)");
+            expectApproxByte(px[1], newG, 3u, "upload-order: post-upload draw sees NEW content (g)");
+        }
+
+        // Engagement: the hazard rounds must have routed through the
+        // ordered in-CB path (a green-by-accident run would mean the fix
+        // wasn't what made the pixels right).
+        const auto ordered = context.metalResourceInventory().orderedTextureUploads;
+        expectCondition(ordered > 0,
+                        "upload-order: hazard uploads took the ordered in-CB route");
+
+        // Must-miss: an upload to a texture NO draw in the open CB has
+        // sampled keeps the fast path — the routing must not tax the
+        // common (cold-upload) case.
+        GLuint freshTex = 0;
+        gl.glGenTextures(1, &freshTex);
+        gl.glBindTexture(GL_TEXTURE_2D, freshTex);
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA,
+                        GL_UNSIGNED_BYTE, texels.data());
+        gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 4, 4, GL_RGBA,
+                           GL_UNSIGNED_BYTE, texels.data());
+        expectCondition(context.metalResourceInventory().orderedTextureUploads == ordered,
+                        "upload-order: no-hazard upload stays on the fast path");
+        gl.glDeleteTextures(1, &freshTex);
+
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteBuffers(1, &ibo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &sampled);
+        gl.glDeleteTextures(1, &target);
+        expectGLError(gl, GL_NO_ERROR, "upload-order cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "mid-frame in-place texture upload stays ordered (in-CB blit route engaged; no-hazard uploads keep the fast path); pre-upload draws sample old content";
+    }
+    return result;
+}
+
 TestResult runC51WarmTimingDiag() {
     auto result = runDirectSentinel("c51.diag.warm-timing", [&] {
         ScopedSentinelContext scoped(64, 64);
@@ -17550,6 +17689,7 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runC52AttribRecordGateProbe());
         tests.push_back(runC52EncoderStateDedupProbe());
         tests.push_back(runC52PreviewFboChurnProbe());
+        tests.push_back(runC52MidFrameUploadOrderProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

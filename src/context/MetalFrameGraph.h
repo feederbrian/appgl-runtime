@@ -1076,6 +1076,26 @@ public:
     // The stderr dump is teardown-gated; this feeds the periodic
     // diagnostics JSONL so apps that never tear down still report.
     std::string drawSubmitProfileDiagnosticsJson() const;
+    // C52 flicker fix (ordered in-CB texture uploads): true when a draw
+    // already encoded into the OPEN command buffer samples this MTLTexture
+    // — an in-place upload would be visible to that draw out of order.
+    bool currentCommandBufferMayReadTexture(const void* mtlTexture) const;
+    // Encodes the upload as a staging-buffer blit INTO the open command
+    // buffer (after closing the current render pass) so already-encoded
+    // draws read the pre-upload bytes. Returns false when there is no open
+    // command buffer (caller takes its fast path — no hazard exists).
+    bool encodeOrderedTextureUpload(void* mtlTexture,
+                                    const void* bytes,
+                                    std::size_t bytesPerRow,
+                                    std::size_t bytesPerImage,
+                                    std::uint32_t x,
+                                    std::uint32_t y,
+                                    std::uint32_t width,
+                                    std::uint32_t height,
+                                    std::uint32_t mipLevel,
+                                    std::uint32_t slice);
+    // Cumulative count of ordered (hazard-routed) texture uploads.
+    std::uint64_t orderedTextureUploadCount() const;
     // Encodes a single draw call against the current default framebuffer using
     // the prebaked "solid color" pipeline state. Phase A Group 7 MVP. Returns
     // true on success. If the provided layout cannot be handled the caller is

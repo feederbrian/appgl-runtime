@@ -8018,6 +8018,9 @@ struct MetalFrameGraph::Impl {
         // resolveImageBindings populates fragmentTextures with
         // {tex, sampler=null, slot=N}, but the binding was being
         // dropped here so imageLoad in the FS read undefined.
+        // C52 flicker fix: record the sampled textures for the open CB so
+        // in-place uploads targeting them route through the ordered path.
+        noteTextureReadsForDraw(info);
         if (!fragmentUsesArgBuf) {
             for (const auto& binding : info.fragmentTextures) {
                 if (binding.metalTexture == nullptr) {
@@ -11573,6 +11576,113 @@ struct MetalFrameGraph::Impl {
 
     std::string drawSubmitProfileDiagnosticsJson() const {
         return drawSubmitProfile.diagnosticsJson();
+    }
+
+    // ── C52 flicker fix (Option A): ordered in-CB texture uploads ──
+    // In-place texture uploads (replaceRegion / out-of-band blit CBs) can
+    // land BEFORE already-encoded draws of the still-open command buffer
+    // execute, so those draws sample the NEW content (the
+    // c52.triage.mid-frame-upload-order probe shape; live symptom =
+    // build-menu mini-model flicker). Track which MTLTextures draws in the
+    // CURRENT command buffer sample; hazard uploads route through a
+    // staging-buffer blit encoded into the SAME command buffer (in-CB
+    // ordering serializes exactly what the historical per-frame
+    // invalidate/drain cycles serialized by accident — without the stall).
+    // The read-set is keyed to the CB identity so it self-heals across
+    // every commit/rotation site without touching them.
+    // Threading note: frame-graph-owned, GL-thread-only state — nothing
+    // here joins the per-draw record payload, so a future record/replay
+    // split does not deep-copy it.
+    std::unordered_set<const void*> cbTextureReadSet;
+    const void* cbTextureReadSetOwner = nullptr;
+    std::uint64_t orderedTextureUploads = 0;
+
+    void noteTextureReadsForDraw(const TranslatedDrawInfo& info) {
+        if (currentCommandBuffer == nil) {
+            return;
+        }
+        const void* owner = (__bridge const void*)currentCommandBuffer;
+        if (owner != cbTextureReadSetOwner) {
+            cbTextureReadSet.clear();
+            cbTextureReadSetOwner = owner;
+        }
+        for (const auto& binding : info.fragmentTextures) {
+            if (binding.metalTexture != nullptr) {
+                cbTextureReadSet.insert(binding.metalTexture);
+            }
+        }
+        for (const auto& binding : info.vertexTextures) {
+            if (binding.metalTexture != nullptr) {
+                cbTextureReadSet.insert(binding.metalTexture);
+            }
+        }
+    }
+
+    bool currentCommandBufferMayReadTextureImpl(const void* texture) const {
+        if (texture == nullptr || currentCommandBuffer == nil) {
+            return false;
+        }
+        if ((__bridge const void*)currentCommandBuffer != cbTextureReadSetOwner) {
+            return false;
+        }
+        return cbTextureReadSet.count(texture) != 0;
+    }
+
+    bool encodeOrderedTextureUploadImpl(void* texturePtr,
+                                        const void* bytes,
+                                        std::size_t bytesPerRow,
+                                        std::size_t bytesPerImage,
+                                        std::uint32_t x,
+                                        std::uint32_t y,
+                                        std::uint32_t width,
+                                        std::uint32_t height,
+                                        std::uint32_t mipLevel,
+                                        std::uint32_t slice) {
+        if (currentCommandBuffer == nil || device == nil ||
+            texturePtr == nullptr || bytes == nullptr) {
+            return false;
+        }
+        id<MTLTexture> texture = (__bridge id<MTLTexture>)texturePtr;
+        const std::size_t totalBytes = bytesPerImage > 0
+            ? bytesPerImage
+            : bytesPerRow * static_cast<std::size_t>(height);
+        if (totalBytes == 0) {
+            return false;
+        }
+        id<MTLBuffer> staging =
+            [device newBufferWithBytes:bytes
+                                length:totalBytes
+                               options:MTLResourceStorageModeShared];
+        if (staging == nil) {
+            return false;
+        }
+        // Close the open render pass so the blit lands AFTER the draws
+        // already encoded into this command buffer; the next draw reopens
+        // a pass through the existing on-demand machinery.
+        endCurrentRenderPassOnly();
+        id<MTLBlitCommandEncoder> blit = [currentCommandBuffer blitCommandEncoder];
+        if (blit == nil) {
+            return false;
+        }
+        MTLOrigin origin = MTLOriginMake(x, y, 0);
+        NSUInteger destSlice = slice;
+        if (texture.textureType == MTLTextureType3D) {
+            // 3D textures take the depth coordinate via origin.z, not slice.
+            origin.z = slice;
+            destSlice = 0;
+        }
+        [blit copyFromBuffer:staging
+                sourceOffset:0
+           sourceBytesPerRow:bytesPerRow
+         sourceBytesPerImage:totalBytes
+                  sourceSize:MTLSizeMake(width, height, 1)
+                   toTexture:texture
+            destinationSlice:destSlice
+            destinationLevel:mipLevel
+           destinationOrigin:origin];
+        [blit endEncoding];
+        ++orderedTextureUploads;
+        return true;
     }
 
     bool encodeTranslatedDraw(TranslatedDrawInfo& info) {
@@ -19893,6 +20003,30 @@ void MetalFrameGraph::endRenderPass() {
 
 std::string MetalFrameGraph::drawSubmitProfileDiagnosticsJson() const {
     return impl_->drawSubmitProfileDiagnosticsJson();
+}
+
+bool MetalFrameGraph::currentCommandBufferMayReadTexture(const void* mtlTexture) const {
+    return impl_->currentCommandBufferMayReadTextureImpl(mtlTexture);
+}
+
+bool MetalFrameGraph::encodeOrderedTextureUpload(void* mtlTexture,
+                                                 const void* bytes,
+                                                 std::size_t bytesPerRow,
+                                                 std::size_t bytesPerImage,
+                                                 std::uint32_t x,
+                                                 std::uint32_t y,
+                                                 std::uint32_t width,
+                                                 std::uint32_t height,
+                                                 std::uint32_t mipLevel,
+                                                 std::uint32_t slice) {
+    return impl_->encodeOrderedTextureUploadImpl(mtlTexture, bytes,
+                                                 bytesPerRow, bytesPerImage,
+                                                 x, y, width, height,
+                                                 mipLevel, slice);
+}
+
+std::uint64_t MetalFrameGraph::orderedTextureUploadCount() const {
+    return impl_->orderedTextureUploads;
 }
 
 void MetalFrameGraph::flushParallelEncodeBoundary() {

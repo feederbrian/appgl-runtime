@@ -830,6 +830,10 @@ public:
         // GLStateTracker::StateDomain). Observation-only — lets probes assert
         // that value-identical mutator calls do NOT advance a domain.
         std::array<std::uint64_t, 6> stateDomainGenerations{};
+        // C52 flicker fix: count of in-place texture uploads that were
+        // hazard-routed as ordered in-CB blits (open command buffer had
+        // draws sampling the destination texture).
+        std::uint64_t orderedTextureUploads = 0;
         std::uint64_t prepMemoMisses = 0;
         std::uint64_t prepMemoBusts = 0;
         std::uint64_t shadowClearsDeferred = 0;

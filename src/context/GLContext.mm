@@ -11270,6 +11270,33 @@ struct GLContext::Impl {
                 // path. See the full-replace block below for rationale.
                 const bool fastPathNeedsBlit =
                     (existing.storageMode == MTLStorageModePrivate);
+                // C52 flicker fix (Option A): when a draw already encoded
+                // into the OPEN command buffer samples this texture, both
+                // fast paths are unordered (replaceRegion writes CPU-side
+                // immediately; the fpBlit lease is a SEPARATE CB that
+                // commits-and-waits before the draw CB ever commits) — the
+                // pre-upload draws would sample the new bytes. Route those
+                // uploads as staging blits INTO the open CB instead.
+                const bool orderedUploadHazard = frameGraph != nullptr &&
+                    frameGraph->currentCommandBufferMayReadTexture(object.metalTexture);
+                auto orderedUpload2D = [&](const std::uint8_t* srcBytes,
+                                           NSUInteger srcRowBytes,
+                                           NSUInteger srcImageBytes,
+                                           const MTLRegion& r,
+                                           NSUInteger mip,
+                                           NSUInteger slice) -> bool {
+                    if (!orderedUploadHazard) return false;
+                    return frameGraph->encodeOrderedTextureUpload(
+                        object.metalTexture, srcBytes,
+                        static_cast<std::size_t>(srcRowBytes),
+                        static_cast<std::size_t>(srcImageBytes),
+                        static_cast<std::uint32_t>(r.origin.x),
+                        static_cast<std::uint32_t>(r.origin.y),
+                        static_cast<std::uint32_t>(r.size.width),
+                        static_cast<std::uint32_t>(r.size.height),
+                        static_cast<std::uint32_t>(mip),
+                        static_cast<std::uint32_t>(slice));
+                };
                 id<MTLCommandBuffer> fpBlitCmdBuf = nil;
                 MetalCommandBufferLease fpBlitLease;
                 id<MTLBlitCommandEncoder> fpBlitEnc = nil;
@@ -11343,7 +11370,10 @@ struct GLContext::Impl {
                                 static_cast<NSUInteger>(safeDimension(faceImage->desc.width)) * faceBpp;
                             const NSUInteger faceImageStride = faceRowStride *
                                 static_cast<NSUInteger>(safeDimension(faceImage->desc.height));
-                            if (fastPathNeedsBlit) {
+                            if (orderedUpload2D(faceBytes, faceRowStride,
+                                                faceImageStride, r, mipLevel, face)) {
+                                // hazard-routed into the open CB
+                            } else if (fastPathNeedsBlit) {
                                 fpBlitUpload2D(faceBytes,
                                                faceRowStride,
                                                faceImageStride,
@@ -11364,11 +11394,15 @@ struct GLContext::Impl {
                             const MTLRegion r = MTLRegionMake3D(0, 0, slice,
                                 static_cast<NSUInteger>(safeDimension(image.desc.width)),
                                 static_cast<NSUInteger>(safeDimension(image.desc.height)), 1);
-                            if (fastPathNeedsBlit) {
-                                const MTLRegion zr = MTLRegionMake3D(0, 0, 0,
-                                    r.size.width, r.size.height, 1);
+                            const MTLRegion zr0 = MTLRegionMake3D(0, 0, 0,
+                                r.size.width, r.size.height, 1);
+                            if (orderedUpload2D(bytes + slice * imageStride,
+                                                rowStride, imageStride, zr0,
+                                                mipLevel, slice)) {
+                                // hazard-routed (impl maps slice→origin.z for 3D)
+                            } else if (fastPathNeedsBlit) {
                                 fpBlitUpload2D(bytes + slice * imageStride,
-                                               rowStride, imageStride, zr,
+                                               rowStride, imageStride, zr0,
                                                mipLevel, slice, bpp);
                             } else {
                                 [existing replaceRegion:r mipmapLevel:mipLevel
@@ -11410,7 +11444,10 @@ struct GLContext::Impl {
                                 }
                                 layerUploadBytes = flippedLayerBytes.data();
                             }
-                            if (fastPathNeedsBlit) {
+                            if (orderedUpload2D(layerUploadBytes, rowStride,
+                                                imageStride, r, mipLevel, layer)) {
+                                // hazard-routed into the open CB
+                            } else if (fastPathNeedsBlit) {
                                 fpBlitUpload2D(layerUploadBytes,
                                                rowStride, imageStride, r,
                                                mipLevel, layer, bpp);
@@ -11431,7 +11468,11 @@ struct GLContext::Impl {
                         const MTLRegion r = MTLRegionMake2D(0, 0,
                             static_cast<NSUInteger>(safeDimension(image.desc.width)), 1);
                         for (NSUInteger layer = 0; layer < layers; ++layer) {
-                            if (fastPathNeedsBlit) {
+                            if (orderedUpload2D(bytes + layer * rowStride,
+                                                rowStride, rowStride, r,
+                                                mipLevel, layer)) {
+                                // hazard-routed into the open CB
+                            } else if (fastPathNeedsBlit) {
                                 fpBlitUpload2D(bytes + layer * rowStride,
                                                rowStride, rowStride, r,
                                                mipLevel, layer, bpp);
@@ -11451,7 +11492,10 @@ struct GLContext::Impl {
                             static_cast<NSUInteger>(safeDimension(image.desc.width)),
                             static_cast<NSUInteger>(
                                 is1D ? 1 : safeDimension(image.desc.height)));
-                        if (fastPathNeedsBlit) {
+                        if (orderedUpload2D(bytes, rowStride, imageStride, r,
+                                            mipLevel, 0)) {
+                            // hazard-routed into the open CB
+                        } else if (fastPathNeedsBlit) {
                             fpBlitUpload2D(bytes, rowStride, imageStride, r,
                                            mipLevel, 0, bpp);
                         } else {
@@ -26977,6 +27021,10 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             for (unsigned d = 0; d < appgl::GLStateTracker::kDomainCount; ++d) {
                 inventory.stateDomainGenerations[d] = impl_->state->domainGeneration(d);
             }
+        }
+        if (impl_->frameGraph != nullptr) {
+            inventory.orderedTextureUploads =
+                impl_->frameGraph->orderedTextureUploadCount();
         }
         inventory.prepMemoMisses = impl_->prepMemoMisses;
         inventory.prepMemoBusts =
