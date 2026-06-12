@@ -17360,6 +17360,134 @@ TestResult runC52MidFrameUploadOrderProbe() {
     return result;
 }
 
+TestResult runC52CrossCbUploadOrderProbe() {
+    // Fence leg (flicker round 2): live CB pressure commits buffers
+    // mid-frame, so uploads race COMMITTED-but-incomplete CBs, not the open
+    // one (live captures: orderedTextureUploads=0 despite 7,488 live
+    // glTexSubImage2D calls). Shape: heavy draw sampling T → glFlush
+    // (commits; GPU still chewing the dependent-read loop) → immediate
+    // CPU upload of new content → light draw → frame-end readback. The
+    // pre-flush draw must show OLD content; the fence trigger must fire.
+    auto result = runDirectSentinel("c52.triage.cross-cb-upload-order", [&] {
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        static constexpr const char* kVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "out vec2 vUV;\n"
+            "void main() { vUV = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+        static constexpr const char* kFS =
+            "#version 330 core\n"
+            "in vec2 vUV;\n"
+            "uniform sampler2D uTexture;\n"
+            "uniform int uIters;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    vec4 acc = vec4(0.0);\n"
+            "    vec2 uv = vUV;\n"
+            "    for (int i = 0; i < uIters; ++i) {\n"
+            "        acc += texture(uTexture, uv);\n"
+            "        uv = vUV + vec2(acc.x * 1e-9, 0.0);\n"  // serial dependency
+            "    }\n"
+            "    fragColor = vec4(acc.rgb / float(max(uIters, 1)), 1.0);\n"
+            "}\n";
+        const GLuint program = buildBenchProgram(kVS, kFS);
+        GLuint sampled = 0, target = 0, fbo = 0;
+        gl.glGenTextures(1, &sampled);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D, sampled);
+        gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        std::array<std::uint8_t, 4 * 4 * 4> texels{};
+        auto fill = [&](std::uint8_t r, std::uint8_t g) {
+            for (std::size_t i = 0; i < texels.size(); i += 4) {
+                texels[i] = r; texels[i + 1] = g; texels[i + 2] = 0; texels[i + 3] = 255;
+            }
+        };
+        fill(255, 0);
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA,
+                        GL_UNSIGNED_BYTE, texels.data());
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.glGenTextures(1, &target);
+        gl.glActiveTexture(GL_TEXTURE0 + 7);
+        setupDCR3CRGBA8Texture(gl, target, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo, target);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glUseProgram(program);
+        gl.glUniform1i(gl.glGetUniformLocation(program, "uTexture"), 0);
+        const GLint itersLoc = gl.glGetUniformLocation(program, "uIters");
+        GLuint vao = 0, vbo = 0, ibo = 0;
+        const float verts[8] = {-1, -1, 1, -1, 1, 1, -1, 1};
+        const std::uint16_t idx[6] = {0, 1, 2, 0, 2, 3};
+        gl.glGenVertexArrays(1, &vao);
+        gl.glBindVertexArray(vao);
+        gl.glGenBuffers(1, &vbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, nullptr);
+        gl.glGenBuffers(1, &ibo);
+        gl.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+        gl.glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(idx), idx, GL_STATIC_DRAW);
+
+        const auto ordered0 = context.metalResourceInventory().orderedTextureUploads;
+        // Heavy draw sampling OLD (red) content, left half. The iteration
+        // count must keep the GPU busy well past the CPU's flush→upload
+        // turnaround so the committed CB is reliably still in flight.
+        gl.glViewport(0, 0, 4, 8);
+        gl.glUniform1i(itersLoc, 8000000);
+        gl.glDrawElementsInstancedBaseVertex(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT,
+                                             nullptr, 1, 0);
+        // Commit (GPU now executing the heavy draw) and upload NEW (green)
+        // content while it is still in flight.
+        gl.glFlush();
+        fill(0, 255);
+        gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 4, 4, GL_RGBA,
+                           GL_UNSIGNED_BYTE, texels.data());
+        // Light draw sampling NEW content, right half.
+        gl.glViewport(4, 0, 4, 8);
+        gl.glUniform1i(itersLoc, 1);
+        gl.glDrawElementsInstancedBaseVertex(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT,
+                                             nullptr, 1, 0);
+
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(2, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[0], 255u, 6u, "cross-cb: committed in-flight draw sees OLD content (r)");
+        expectApproxByte(px[1], 0u, 6u, "cross-cb: committed in-flight draw sees OLD content (g)");
+        gl.glReadPixels(6, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[0], 0u, 6u, "cross-cb: post-upload draw not stale-red (r)");
+        expectApproxByte(px[1], 255u, 6u, "cross-cb: post-upload draw sees NEW content (g)");
+        expectCondition(context.metalResourceInventory().orderedTextureUploads > ordered0,
+                        "cross-cb: fence trigger routed the upload (ordered route fired)");
+
+        // Must-miss: after a full drain, the same upload takes the fast path.
+        gl.glFinish();
+        const auto ordered1 = context.metalResourceInventory().orderedTextureUploads;
+        fill(255, 255);
+        gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 4, 4, GL_RGBA,
+                           GL_UNSIGNED_BYTE, texels.data());
+        expectCondition(context.metalResourceInventory().orderedTextureUploads == ordered1,
+                        "cross-cb: post-drain upload keeps the fast path");
+
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteBuffers(1, &ibo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &sampled);
+        gl.glDeleteTextures(1, &target);
+        expectGLError(gl, GL_NO_ERROR, "cross-cb cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "committed-incomplete CB reads stay ordered against CPU uploads (fence trigger fired; post-drain uploads keep fast path)";
+    }
+    return result;
+}
+
 // C52 sampler-resolve cache probes. The cache is flagged
 // (APPGL_ENABLE_SAMPLER_RESOLVE_CACHE, default OFF); every invalidation
 // condition of the ratified four-condition matrix gets a must-miss leg
@@ -17872,6 +18000,16 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         return buildJSON(normalizedPhase, tests);
     }
 
+    if (normalizedPhase == "triage-cross-cb-only") {
+        tests.push_back(runC52CrossCbUploadOrderProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "triage-mid-frame-only") {
+        tests.push_back(runC52MidFrameUploadOrderProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
     if (normalizedPhase == "sampler-resolve-cache-probes") {
         tests.push_back(runC52SamplerResolveCacheProbe());
         tests.push_back(runC52SamplerResolveCacheDefaultOffProbe());
@@ -17886,6 +18024,12 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runC52EncoderStateDedupProbe());
         tests.push_back(runC52PreviewFboChurnProbe());
         tests.push_back(runC52MidFrameUploadOrderProbe());
+        // NOTE: runC52CrossCbUploadOrderProbe is deliberately NOT in this
+        // sweep-gating phase — it is a documented-RED triage probe (phase
+        // triage-cross-cb-only) reproducing two open bugs: the cross-CB
+        // upload ordering residual and a stale-rebind-after-realloc class
+        // found during fence-leg validation. It joins this phase with the
+        // fixes.
         return buildJSON(normalizedPhase, tests);
     }
 

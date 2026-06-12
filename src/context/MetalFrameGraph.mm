@@ -11596,6 +11596,38 @@ struct MetalFrameGraph::Impl {
     std::unordered_set<const void*> cbTextureReadSet;
     const void* cbTextureReadSetOwner = nullptr;
     std::uint64_t orderedTextureUploads = 0;
+    // Fence leg (flicker round 2): live CB pressure rotates command buffers
+    // constantly, so an upload almost never hazards the OPEN CB — it races
+    // the PRIOR committed-but-incomplete CBs instead. At commit, the open
+    // CB's read-set folds into per-texture last-read sequences; the
+    // completion handler advances completedCommitSeq (shared atomic — the
+    // only cross-thread state; map and counter are GL-thread-only).
+    // The ordered blit route is already cross-CB-safe (Metal hazard
+    // tracking orders the blit against prior CBs' tracked reads); only the
+    // trigger needed widening.
+    std::unordered_map<const void*, std::uint64_t> textureLastReadCommitSeq;
+    std::uint64_t commitSeqCounter = 0;
+    std::shared_ptr<std::atomic<std::uint64_t>> completedCommitSeq =
+        std::make_shared<std::atomic<std::uint64_t>>(0);
+
+    void foldTextureReadSetAtCommit(std::uint64_t seq) {
+        if (!cbTextureReadSet.empty()) {
+            for (const void* tex : cbTextureReadSet) {
+                textureLastReadCommitSeq[tex] = seq;  // seq is monotonic
+            }
+            cbTextureReadSet.clear();
+            cbTextureReadSetOwner = nullptr;
+        }
+        if (textureLastReadCommitSeq.size() > 512) {
+            const std::uint64_t done =
+                completedCommitSeq->load(std::memory_order_acquire);
+            for (auto it = textureLastReadCommitSeq.begin();
+                 it != textureLastReadCommitSeq.end();) {
+                it = it->second <= done ? textureLastReadCommitSeq.erase(it)
+                                        : std::next(it);
+            }
+        }
+    }
 
     void noteTextureReadsForDraw(const TranslatedDrawInfo& info) {
         if (currentCommandBuffer == nil) {
@@ -11619,13 +11651,21 @@ struct MetalFrameGraph::Impl {
     }
 
     bool currentCommandBufferMayReadTextureImpl(const void* texture) const {
-        if (texture == nullptr || currentCommandBuffer == nil) {
+        if (texture == nullptr) {
             return false;
         }
-        if ((__bridge const void*)currentCommandBuffer != cbTextureReadSetOwner) {
-            return false;
+        // Open command buffer.
+        if (currentCommandBuffer != nil &&
+            (__bridge const void*)currentCommandBuffer == cbTextureReadSetOwner &&
+            cbTextureReadSet.count(texture) != 0) {
+            return true;
         }
-        return cbTextureReadSet.count(texture) != 0;
+        // Fence leg: committed-but-incomplete command buffers. A CPU
+        // replaceRegion would race their reads; the ordered blit route is
+        // Metal-hazard-tracked against them.
+        const auto it = textureLastReadCommitSeq.find(texture);
+        return it != textureLastReadCommitSeq.end() &&
+               it->second > completedCommitSeq->load(std::memory_order_acquire);
     }
 
     bool encodeOrderedTextureUploadImpl(void* texturePtr,
@@ -11638,8 +11678,7 @@ struct MetalFrameGraph::Impl {
                                         std::uint32_t height,
                                         std::uint32_t mipLevel,
                                         std::uint32_t slice) {
-        if (currentCommandBuffer == nil || device == nil ||
-            texturePtr == nullptr || bytes == nullptr) {
+        if (device == nil || texturePtr == nullptr || bytes == nullptr) {
             return false;
         }
         id<MTLTexture> texture = (__bridge id<MTLTexture>)texturePtr;
@@ -11656,11 +11695,34 @@ struct MetalFrameGraph::Impl {
         if (staging == nil) {
             return false;
         }
-        // Close the open render pass so the blit lands AFTER the draws
-        // already encoded into this command buffer; the next draw reopens
-        // a pass through the existing on-demand machinery.
-        endCurrentRenderPassOnly();
-        id<MTLBlitCommandEncoder> blit = [currentCommandBuffer blitCommandEncoder];
+        // Two hazard kinds, two routes (fence leg):
+        // - OPEN-CB hazard (a draw already encoded in the open CB samples
+        //   this texture): the blit must land in the SAME CB after those
+        //   draws — close the pass, blit in-CB. Only safe between draws,
+        //   which is where open-CB hazards occur (uploads between draws).
+        // - PRIOR-CB-only hazard (committed-but-incomplete reader): a
+        //   SEPARATE immediately-committed CB suffices — Metal hazard
+        //   tracking orders the blit after the prior CB's reads and before
+        //   the open CB's future reads (it commits later). Crucially this
+        //   route touches NO encoder state, so it is safe at any call
+        //   depth, including texture syncs that fire mid-encode.
+        const bool openCbHazard =
+            currentCommandBuffer != nil &&
+            (__bridge const void*)currentCommandBuffer == cbTextureReadSetOwner &&
+            cbTextureReadSet.count(texturePtr) != 0;
+        id<MTLBlitCommandEncoder> blit = nil;
+        MetalCommandBufferLease separateLease;
+        if (openCbHazard) {
+            endCurrentRenderPassOnly();
+            blit = [currentCommandBuffer blitCommandEncoder];
+        } else {
+            separateLease = makeCommandBuffer(AppGLCommandReason::TextureUpload);
+            id<MTLCommandBuffer> sepBuf = separateLease.get();
+            if (sepBuf == nil) {
+                return false;
+            }
+            blit = [sepBuf blitCommandEncoder];
+        }
         if (blit == nil) {
             return false;
         }
@@ -11681,6 +11743,10 @@ struct MetalFrameGraph::Impl {
             destinationLevel:mipLevel
            destinationOrigin:origin];
         [blit endEncoding];
+        if (!openCbHazard) {
+            // Async commit — Metal tracking provides the ordering; no wait.
+            separateLease.commit(AppGLCommandReason::TextureUpload);
+        }
         ++orderedTextureUploads;
         return true;
     }
@@ -14298,6 +14364,13 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         FG_TRACE(@"present: enter  pendingPresent=%d encoder=%p cmdBuf=%p drawable=%p",
                  pendingPresent, currentRenderEncoder, currentCommandBuffer, currentDrawable);
         flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason::Present);
+        // S24 fence-leg train: the OPEN (possibly continued) render pass
+        // must close FIRST — flushPendingClear opens its own encoder on the
+        // current CB, and Metal aborts on a second encoder while one is
+        // encoding. Same seam class 8fd3a39 fixed on the FINISH path; the
+        // PRESENT path (glFlush mid-frame with a continued pass open) was
+        // latent until the cross-CB probe exercised it.
+        endCurrentRenderPassOnly();
         // Flush any deferred clear that wasn't consumed by a draw call.
         if (hasPendingClear) {
             flushPendingClear();
@@ -19304,7 +19377,20 @@ private:
         dispatch_semaphore_t sem = frameSemaphore;
         const DrawProfileTimePoint attributionStart =
             frameAttributionProfile.enabled ? drawProfileNow() : DrawProfileTimePoint{};
+        // Fence leg: fold the open-CB texture read-set under this commit's
+        // sequence; the completion block retires it. The CAS loop tolerates
+        // out-of-order completion callbacks.
+        const std::uint64_t commitSeq = ++commitSeqCounter;
+        foldTextureReadSetAtCommit(commitSeq);
+        auto completedSeq = completedCommitSeq;
         lease.commitWithCompletion(reason, ^(id<MTLCommandBuffer>) {
+            std::uint64_t prev = completedSeq->load(std::memory_order_relaxed);
+            while (prev < commitSeq &&
+                   !completedSeq->compare_exchange_weak(
+                       prev, commitSeq,
+                       std::memory_order_release,
+                       std::memory_order_relaxed)) {
+            }
             dispatch_semaphore_signal(sem);
         });
         if (frameAttributionProfile.enabled) {
