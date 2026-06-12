@@ -256,12 +256,14 @@ static bool viewportRequestKeepaliveEnabled() {
 
 // C49 primary: keep the FBO render-pass encoder open across consecutive
 // translated draws targeting the same attachment signature instead of
-// closing it at every draw's encode tail. Default-off.
+// closing it at every draw's encode tail. Default-ON (S24 promotion).
 static bool fboPassContinuationEnabled() {
-    // S24 defaults promotion (see layeredClearAsyncEnabled). NOTE:
-    // VIEWPORT_REQUEST_KEEPALIVE deliberately stays default-OFF until
-    // the build-menu flicker discrimination clears it (Bundle 2 verdict
-    // carve-out) — it remains opt-in for forward sessions.
+    // S24 defaults promotion (see layeredClearAsyncEnabled).
+    // VIEWPORT_REQUEST_KEEPALIVE is likewise default-ON — crowned
+    // 2026-06-10 after the flicker root-caused to the in-place buffer
+    // race (rename-on-write 7613a14), see viewportRequestKeepaliveEnabled
+    // above. Rider-2: read once per context via the Impl latches; the
+    // per-draw sites use the latched members.
     if (appglEnvEnabledDefaultOff("APPGL_DISABLE_FBO_PASS_CONTINUATION")) {
         return false;
     }
@@ -4259,7 +4261,7 @@ struct MetalFrameGraph::Impl {
                 // the headless-readback cache clear (the only state the
                 // request extent actually feeds) and leaves the current
                 // CB/encoder alone.
-                if (viewportRequestKeepaliveEnabled()) {
+                if (viewportRequestKeepaliveLatched) {
                     headlessReadbackRGBA.clear();
                     hasHeadlessReadback = false;
                     return;
@@ -6111,14 +6113,14 @@ struct MetalFrameGraph::Impl {
         // draw, default-FB encoder) closes first.
         if (isFBODraw && currentRenderEncoder != nil) {
             const bool canContinue =
-                fboPassContinuationEnabled() && fboPassActive &&
+                fboPassContinuationLatched && fboPassActive &&
                 fboPassContinuationEligible(info) &&
                 fboPassSignatureMatches(info) &&
                 !fboSampledTexturesTouchActiveTargets(info);
             if (canContinue) {
                 ++fboPassContinuations;  // C49 engagement
             } else {
-                if (fboPassContinuationEnabled() && fboPassActive) {
+                if (fboPassContinuationLatched && fboPassActive) {
                     ++fboPassSignatureMisses;  // C49 engagement (break)
                 }
                 ++encoderClosesFboTargetChange;  // C49 census
@@ -6555,7 +6557,7 @@ struct MetalFrameGraph::Impl {
             if (isFBODraw) {
                 ++encoderOpensFboDraw;
                 // C49: arm continuation for follow-up same-target draws.
-                if (fboPassContinuationEnabled() &&
+                if (fboPassContinuationLatched &&
                     fboPassContinuationEligible(info)) {
                     captureActiveFboPassSignature(info);
                 }
@@ -8381,7 +8383,7 @@ struct MetalFrameGraph::Impl {
             // opens/frame at the d73c6e1 baseline, ~1.2 draws per pass).
             // Every other close path goes through
             // releaseCurrentRenderEncoder, which disarms fboPassActive.
-            if (fboPassContinuationEnabled() && fboPassActive) {
+            if (fboPassContinuationLatched && fboPassActive) {
                 // keep open
             } else {
                 ++encoderClosesFboDrawTail;  // C49 census
@@ -19228,6 +19230,14 @@ private:
     std::unordered_set<PipelineBuildLogKey, PipelineBuildLogKeyHash> loggedPipelineBuildPrograms;
     DrawSubmitProfile drawSubmitProfile;
     ParallelEncodeFoundationProfile parallelEncodeProfile;
+    // S24 rider-2: per-context latches for per-draw flag reads (the
+    // d3e62ea pattern — getenv is an environ scan, measured per-draw
+    // overhead at Gate-1). Per-CONTEXT (not process-static) because the
+    // gauntlet toggles these via ScopedEnvVar across probes in one
+    // process; each probe constructs a fresh context.
+    const bool viewportRequestKeepaliveLatched =
+        viewportRequestKeepaliveEnabled();
+    const bool fboPassContinuationLatched = fboPassContinuationEnabled();
     ThreadedDeferredRecordProfile threadedDeferredRecordProfile;
     FrameAttributionProfile frameAttributionProfile;
     std::deque<CapturedTranslatedDrawRecord> pendingThreadedDeferredRecords;

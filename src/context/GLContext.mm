@@ -466,10 +466,16 @@ bool samplerGpuOrderSkipEnabled() {
     // 124k flush-candidates in the Step-1 capture matrix. The DISABLE
     // env is the operator rollback hatch; ENABLE=0 is still honored for
     // explicit-off so existing A/B harness arms keep working.
-    if (appglEnvEnabledDefaultOff("APPGL_DISABLE_SAMPLER_GPU_ORDER_SKIP")) {
-        return false;
-    }
-    return appglEnvEnabledDefaultOn("APPGL_ENABLE_SAMPLER_GPU_ORDER_SKIP");
+    // S24 rider-2: latched once per process (d3e62ea pattern) — this is
+    // read per draw via samplerReadSetCanUseGpuOrderSkip and nothing
+    // toggles it at runtime (A/B harness arms are separate processes).
+    static const bool latched = [] {
+        if (appglEnvEnabledDefaultOff("APPGL_DISABLE_SAMPLER_GPU_ORDER_SKIP")) {
+            return false;
+        }
+        return appglEnvEnabledDefaultOn("APPGL_ENABLE_SAMPLER_GPU_ORDER_SKIP");
+    }();
+    return latched;
 }
 
 std::uint64_t renderPsoTotalCacheLimit() {
@@ -2142,16 +2148,25 @@ static bool phase2PlanProfileEnabled() {
            std::getenv("APPGL_PHASE2_PLAN_KEY_PROFILE") != nullptr;
 }
 
+// S24 rider-2: latched once per process (d3e62ea pattern) — all three are
+// read per draw on the encodeTranslatedDrawAndMarkFbo path and nothing
+// toggles them at runtime.
 static bool phase2TranslatedDrawPlanCacheEnabled() {
-    return std::getenv("APPGL_PHASE2_PLAN_DISABLE") == nullptr;
+    static const bool enabled =
+        std::getenv("APPGL_PHASE2_PLAN_DISABLE") == nullptr;
+    return enabled;
 }
 
 static bool phase2TranslatedDrawPlanForceMiss() {
-    return std::getenv("APPGL_PHASE2_PLAN_FORCE_MISS") != nullptr;
+    static const bool forceMiss =
+        std::getenv("APPGL_PHASE2_PLAN_FORCE_MISS") != nullptr;
+    return forceMiss;
 }
 
 static bool phase2TranslatedDrawPlanTraceEnabled() {
-    return std::getenv("APPGL_PHASE2_PLAN_TRACE") != nullptr;
+    static const bool enabled =
+        std::getenv("APPGL_PHASE2_PLAN_TRACE") != nullptr;
+    return enabled;
 }
 
 static bool phase2FixedStateSegmentShadowEnabled() {
