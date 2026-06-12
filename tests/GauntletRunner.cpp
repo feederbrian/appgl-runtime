@@ -17494,6 +17494,267 @@ TestResult runC52CrossCbUploadOrderProbe() {
     return result;
 }
 
+// Flicker triage round 3 (scrub-loss hypothesis): a preview-shaped
+// multi-frame sequence — frame-start full clear (color+depth), background
+// quad, FBO-bound shadow-viewport excursion (the resize-gate trigger),
+// then a depth-tested "model" quad in a small preview viewport whose
+// depth varies per frame. If any frame's depth clear is lost, that
+// frame's model fails the depth test against the PREVIOUS frame's model
+// depth and the background shows through — the live build-menu flicker
+// shape. Runs the same sequence many frames and reports the first stale
+// frame. Phase is triage-only (not sweep-gating); pair a run with
+// APPGL_TRIAGE_DISABLE_RESIZE_GATE=1 to A/B the pre-f15e56d behavior in
+// the same build.
+TestResult runScrubLossPreviewShapeProbe() {
+    auto result = runDirectSentinel("triage.scrub-loss.preview-shape", [&] {
+        ScopedSentinelContext scoped(64, 64);
+        auto& gl = scoped.gl();
+        static constexpr const char* kVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "uniform float uDepth;\n"
+            "void main() { gl_Position = vec4(aPos, uDepth, 1.0); }\n";
+        static constexpr const char* kFS =
+            "#version 330 core\n"
+            "uniform vec4 uColor;\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = uColor; }\n";
+        const GLuint program = buildBenchProgram(kVS, kFS);
+        const GLint depthLoc = gl.glGetUniformLocation(program, "uDepth");
+        const GLint colorLoc = gl.glGetUniformLocation(program, "uColor");
+
+        GLuint vao = 0, vbo = 0;
+        const float quad[12] = {-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1};
+        gl.glGenVertexArrays(1, &vao);
+        gl.glBindVertexArray(vao);
+        gl.glGenBuffers(1, &vbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, nullptr);
+
+        // Shadow-pass stand-in FBO (color-only; the trigger is the
+        // FBO-bound viewport, not the FBO contents).
+        GLuint shadowTex = 0, shadowFbo = 0;
+        gl.glGenTextures(1, &shadowTex);
+        gl.glActiveTexture(GL_TEXTURE0 + 6);
+        setupDCR3CRGBA8Texture(gl, shadowTex, 16, 16);
+        setupDCR3CTextureFbo(gl, shadowFbo, shadowTex);
+        gl.glActiveTexture(GL_TEXTURE0);
+
+        gl.glUseProgram(program);
+        gl.glEnable(GL_DEPTH_TEST);
+        gl.glDepthFunc(GL_LESS);
+        gl.glClearColor(0, 0, 0, 1);
+
+        int firstStaleFrame = -1;
+        constexpr int kFrames = 24;
+        for (int frame = 0; frame < kFrames; ++frame) {
+            // Frame start: full-extent clear on FB0 (color + depth).
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            gl.glViewport(0, 0, 64, 64);
+            gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            // Background quad at far depth (red), full extent.
+            gl.glUniform1f(depthLoc, 0.9f);
+            gl.glUniform4f(colorLoc, 1, 0, 0, 1);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 6);
+            // Shadow-pass excursion: FBO-bound viewport at a different
+            // extent (the resize-gate trigger), one small draw.
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo);
+            gl.glViewport(0, 0, 128, 128);
+            gl.glUniform1f(depthLoc, 0.0f);
+            gl.glUniform4f(colorLoc, 0, 0, 1, 1);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 6);
+            // Preview viewport on FB0: the "model" at a per-frame depth.
+            // Alternates 0.3 / 0.5 — if the previous frame's depth
+            // SURVIVES the frame-start clear, the 0.5 frame's model
+            // fails GL_LESS against the stale 0.3 and the red background
+            // shows through in the preview region.
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            gl.glViewport(16, 16, 32, 32);
+            const float modelDepth = (frame % 2 == 0) ? 0.3f : 0.5f;
+            gl.glUniform1f(depthLoc, modelDepth);
+            gl.glUniform4f(colorLoc, 0, 1, 0, 1);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 6);
+            // Frame boundary.
+            scoped.context().swapBuffers();
+
+            std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+            gl.glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                            px.data());
+            const bool modelVisible = px[1] > 200 && px[0] < 50;
+            if (!modelVisible && firstStaleFrame < 0) {
+                firstStaleFrame = frame;
+            }
+        }
+        expectCondition(firstStaleFrame < 0,
+                        "scrub-loss: model visible every frame (depth clear "
+                        "landed each frame; first stale frame index in "
+                        "message if red)");
+        if (firstStaleFrame >= 0) {
+            std::fprintf(stderr,
+                         "[TRIAGE-SCRUB] first stale frame = %d\n",
+                         firstStaleFrame);
+        }
+
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteFramebuffers(1, &shadowFbo);
+        gl.glDeleteTextures(1, &shadowTex);
+        expectGLError(gl, GL_NO_ERROR, "scrub-loss cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "preview-shaped multi-frame sequence: per-frame depth clear landed every frame";
+    }
+    return result;
+}
+
+// S24 flicker root cause (round 3): a pending default-FB clear must
+// SURVIVE command-buffer rotation. invalidateTransientState (run by every
+// commitCurrentAsync, incl. mid-frame pressure flushes) used to drop
+// hasPendingClear — any pressure flush landing between glClear and its
+// consuming FB0 pass-open silently lost the frame's clear, so the next
+// pass loaded LAST frame's depth/color (the live build-menu flicker).
+// Deterministic repro: force the sampler-skip periodic pressure flush on
+// EVERY decision, render into an FBO texture (creates pending-producer
+// marks), clear FB0, then draw sampling that texture — the resolve's
+// pressure flush rotates the CB inside the clear-pending window.
+TestResult runPendingClearSurvivesPressureFlushProbe() {
+    ScopedEnvVar pressureEvery("APPGL_SAMPLER_GPU_ORDER_SKIP_PERIODIC_PRESSURE_FLUSH", "1");
+    auto result = runDirectSentinel("c52.pending-clear.pressure-flush", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& gl = scoped.gl();
+        static constexpr const char* kVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "uniform float uDepth;\n"
+            "out vec2 vUV;\n"
+            "void main() { vUV = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, uDepth, 1.0); }\n";
+        static constexpr const char* kFS =
+            "#version 330 core\n"
+            "in vec2 vUV;\n"
+            "uniform sampler2D uTexture;\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = texture(uTexture, vUV); }\n";
+        static constexpr const char* kSolidFS =
+            "#version 330 core\n"
+            "uniform vec4 uColor;\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = uColor; }\n";
+        const GLuint texProgram = buildBenchProgram(kVS, kFS);
+        const GLuint solidProgram = buildBenchProgram(kVS, kSolidFS);
+        const GLint solidColorLoc =
+            gl.glGetUniformLocation(solidProgram, "uColor");
+        const GLint solidDepthLoc =
+            gl.glGetUniformLocation(solidProgram, "uDepth");
+        const GLint texDepthLoc = gl.glGetUniformLocation(texProgram, "uDepth");
+
+        GLuint vao = 0, vbo = 0;
+        const float fullQuad[12] = {-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1};
+        gl.glGenVertexArrays(1, &vao);
+        gl.glBindVertexArray(vao);
+        gl.glGenBuffers(1, &vbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(fullQuad), fullQuad,
+                        GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, nullptr);
+
+        // Two FBO textures: T1 is what the final model draw samples; T2
+        // is sampled by the INTERVENING FBO draw whose resolve ticks the
+        // sampler-skip decision and fires the forced pressure flush while
+        // the clear is pending AND a command buffer is open (the live
+        // shape — the clear's own deferral path commits the prior CB, so
+        // the drop window needs intervening non-FB0 work).
+        GLuint t1 = 0, t2 = 0, fbo1 = 0, fbo2 = 0;
+        gl.glGenTextures(1, &t1);
+        gl.glActiveTexture(GL_TEXTURE0);
+        setupDCR3CRGBA8Texture(gl, t1, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo1, t1);
+        gl.glGenTextures(1, &t2);
+        gl.glActiveTexture(GL_TEXTURE0 + 1);
+        setupDCR3CRGBA8Texture(gl, t2, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo2, t2);
+        gl.glActiveTexture(GL_TEXTURE0);
+
+        // Stage 1: establish a NEAR depth (0.2) across FB0 — the stale
+        // content a dropped clear would leave behind. GREEN fill.
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glViewport(0, 0, 32, 32);
+        gl.glEnable(GL_DEPTH_TEST);
+        gl.glDepthFunc(GL_ALWAYS);
+        gl.glUseProgram(solidProgram);
+        gl.glUniform1f(solidDepthLoc, -0.6f);  // NDC z=-0.6 -> depth 0.2
+        gl.glUniform4f(solidColorLoc, 0, 1, 0, 1);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 6);
+        gl.glFinish();
+
+        // Stage 2: produce into T1 (RED) and prime T2.
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo1);
+        gl.glViewport(0, 0, 8, 8);
+        gl.glUniform1f(solidDepthLoc, 0.0f);
+        gl.glUniform4f(solidColorLoc, 1, 0, 0, 1);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 6);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo2);
+        gl.glUniform4f(solidColorLoc, 1, 1, 0, 1);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 6);
+        gl.glFinish();
+        // Re-produce into T2 so it is producer-pending in THIS window.
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo2);
+        gl.glUniform4f(solidColorLoc, 0, 1, 1, 1);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        // Stage 3: the frame-shaped window. Pending clear (BLUE color +
+        // depth=1.0) on FB0, then an INTERVENING FBO draw sampling the
+        // producer-pending T2 — its resolve fires the forced pressure
+        // flush with a CB open: pre-fix this destroyed the pending clear.
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glViewport(0, 0, 32, 32);
+        gl.glClearColor(0, 0, 1, 1);
+        gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo2);
+        gl.glViewport(0, 0, 8, 8);
+        gl.glUseProgram(texProgram);
+        gl.glUniform1i(gl.glGetUniformLocation(texProgram, "uTexture"), 0);
+        gl.glUniform1f(texDepthLoc, 0.0f);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 6);
+        // The model: FB0, depth-tested at 0.5 (GL_LESS). Clear landed ->
+        // depth=1.0 -> model WINS and shows T1 red. Clear dropped ->
+        // stale depth 0.2 -> model FAILS and stage-1 green survives.
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glViewport(0, 0, 32, 32);
+        gl.glDepthFunc(GL_LESS);
+        gl.glUniform1i(gl.glGetUniformLocation(texProgram, "uTexture"), 0);
+        gl.glUniform1f(texDepthLoc, 0.0f);  // NDC 0 -> depth 0.5
+        gl.glDrawArrays(GL_TRIANGLES, 0, 6);
+        gl.glFinish();
+
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[0], 255u, 6u, "pending-clear: model drew against the cleared depth (r)");
+        expectApproxByte(px[1], 0u, 6u, "pending-clear: stage-1 stale content did not survive (g)");
+
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteFramebuffers(1, &fbo1);
+        gl.glDeleteFramebuffers(1, &fbo2);
+        gl.glDeleteTextures(1, &t1);
+        gl.glDeleteTextures(1, &t2);
+        expectGLError(gl, GL_NO_ERROR, "pending-clear cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "pending default-FB clear survives mid-frame pressure-flush CB rotation";
+    }
+    return result;
+}
+
+
 // S25 Rung 1.5 flush-narrowing probes (APPGL_PARALLEL_ENCODE=1 inside the
 // probe). The buffer-mutation boundary flush is narrowed to the cases where
 // it is load-bearing: an in-place write onto a Metal buffer a pending
@@ -18221,6 +18482,16 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
 
     if (normalizedPhase == "triage-mid-frame-only") {
         tests.push_back(runC52MidFrameUploadOrderProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "triage-scrub-loss") {
+        tests.push_back(runScrubLossPreviewShapeProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "pending-clear-probes") {
+        tests.push_back(runPendingClearSurvivesPressureFlushProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

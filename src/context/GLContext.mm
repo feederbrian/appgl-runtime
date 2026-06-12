@@ -25440,7 +25440,14 @@ struct GLContext::Impl {
         // recreate + invalidate/drainAll each time). The draw-site
         // ensure hooks re-evaluate with the then-current viewport when
         // FB0 is next drawn, so no stale-size hole exists.
-        if (state->boundDrawFramebuffer() != 0) {
+        // Flicker triage round 3: APPGL_TRIAGE_DISABLE_RESIZE_GATE=1
+        // restores the pre-f15e56d behavior (FBO-bound viewports size
+        // the drawable again) so a single build can A/B the gate live
+        // and headlessly. Diagnostic only — never set in production.
+        static const bool triageDisableResizeGate =
+            std::getenv("APPGL_TRIAGE_DISABLE_RESIZE_GATE") != nullptr;
+        if (!triageDisableResizeGate &&
+            state->boundDrawFramebuffer() != 0) {
             return;
         }
         const GLsizei width = defaultDrawableRequestWidth();

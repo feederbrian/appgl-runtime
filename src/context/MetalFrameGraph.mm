@@ -4498,9 +4498,27 @@ struct MetalFrameGraph::Impl {
             }
             return false;
         }
-        presentCurrentDrawable(currentCommandBuffer);
+        // S24 flicker root cause (round 3, class audit): a PRESSURE commit
+        // is NOT a frame boundary. The old unconditional tail presented
+        // the drawable (showing a HALF-DRAWN frame — draws encoded after
+        // the mid-frame commit missed that presented frame) and then
+        // invalidateTransientState dropped the drawable + pendingPresent,
+        // splitting the rest of the frame onto a different drawable.
+        // Frame-semantic state (drawable, pendingPresent, pending clear)
+        // survives a pressure commit; only CB/encoder-coupled state
+        // resets. Frame-boundary reasons keep the historical tail.
+        const bool frameBoundaryCommit =
+            reason != AppGLCommandReason::PressureFlush;
+        if (frameBoundaryCommit) {
+            presentCurrentDrawable(currentCommandBuffer);
+        }
         commitWithFrameSignal(currentCommandBufferLease, reason);
-        invalidateTransientState();
+        if (frameBoundaryCommit) {
+            invalidateTransientState();
+        } else {
+            currentCommandBuffer = nil;
+            resetCachedEncoderState();
+        }
         advanceRingBuffer();
         if (frameAttributionProfile.enabled) {
             frameAttributionProfile.recordCommitCurrent(
@@ -18524,7 +18542,22 @@ private:
         currentCommandBuffer = nil;
         clearCurrentDrawable();
         pendingPresent = false;
-        hasPendingClear = false;
+        // S24 flicker root cause (round 3): hasPendingClear is FRAME-
+        // SEMANTIC GL state (an owed glClear), NOT transient encoder/CB
+        // state — it must SURVIVE command-buffer rotation. This method
+        // runs on every commitCurrentAsync, including mid-frame PRESSURE
+        // flushes (~900+/run live); dropping the pending clear here lost
+        // the frame's depth/color clear whenever a pressure flush landed
+        // between glClear and its consuming FB0 pass open — the next pass
+        // loaded LAST frame's depth and the build-menu preview models
+        // intermittently failed their depth test (flicker-without-break).
+        // Pre-f15e56d the per-frame resize cadence pinned the invalidates
+        // to the two viewport switches (no clear pending there in the
+        // live app's call order) and kept CBs small; the resize-gate let
+        // CBs accumulate until pressure commits drifted into the clear-
+        // pending window. The clear values (mask/color/depth/stencil) are
+        // texture-independent load-action state, so preserving them is
+        // valid across drawable/depth-texture recreation too.
         resetCachedEncoderState();
     }
 
