@@ -502,6 +502,48 @@ struct FramePacingProfile {
 //    ensureDrawableResources(), which must never run mid-FBO-pass (the
 //    f15e56d resize-gate class). The FBO lift's fill cost projects from
 //    the fb0 per-byte/per-handle numbers — same struct, same copy volume.
+// S25 readings follow-up: WHERE does the lean fill bail? The aggregate
+// pipeline_not_prepared wall (64.8% of fb0 draws, structural plateau at
+// ~60% steady-state) folds several distinct early-return sites with
+// DIFFERENT Rung-2 work items behind them (plan-prepare-at-record vs
+// PSO-cache warm vs cap growth). The shadow probe records the site per
+// failed fill; the real lean path passes nullptr and pays nothing.
+enum class LeanFillFailSite : std::uint8_t {
+    None,
+    EmitUnsafe,
+    Primitive,
+    PlanMissingOrMismatch,
+    SlotsArgBuf,
+    PsoCacheMiss,
+    VertexBufferMissing,
+    ExtraVbOverflow,
+    UniformOverflow,
+    TextureUnsupported,
+    UboOverflow,
+    Count,
+};
+
+static const char* leanFillFailSiteName(LeanFillFailSite site) {
+    switch (site) {
+        case LeanFillFailSite::None: return "none";
+        case LeanFillFailSite::EmitUnsafe: return "emit_unsafe";
+        case LeanFillFailSite::Primitive: return "primitive";
+        case LeanFillFailSite::PlanMissingOrMismatch:
+            return "plan_missing_or_mismatch";
+        case LeanFillFailSite::SlotsArgBuf: return "slots_argbuf";
+        case LeanFillFailSite::PsoCacheMiss: return "pso_cache_miss";
+        case LeanFillFailSite::VertexBufferMissing:
+            return "vertex_buffer_missing";
+        case LeanFillFailSite::ExtraVbOverflow: return "extra_vb_overflow";
+        case LeanFillFailSite::UniformOverflow: return "uniform_overflow";
+        case LeanFillFailSite::TextureUnsupported:
+            return "texture_unsupported";
+        case LeanFillFailSite::UboOverflow: return "ubo_overflow";
+        case LeanFillFailSite::Count: break;
+    }
+    return "unknown";
+}
+
 struct CopyHeadroomProbe {
     struct Bucket {
         std::uint64_t draws = 0;
@@ -520,6 +562,9 @@ struct CopyHeadroomProbe {
     double releaseUsTotal = 0.0;
     std::uint64_t arenaDrains = 0;
     std::uint64_t arenaPeak = 0;
+    std::array<std::uint64_t,
+               static_cast<std::size_t>(LeanFillFailSite::Count)>
+        fillFailBySite{};
 
     std::string diagnosticsJson(std::size_t arenaLive) const {
         auto bucketJson = [](const Bucket& b) {
@@ -544,7 +589,21 @@ struct CopyHeadroomProbe {
             << ",\"arenaDrains\":" << arenaDrains
             << ",\"arenaPeak\":" << arenaPeak
             << ",\"arenaLive\":" << arenaLive
-            << "}";
+            << ",\"fillFailBySite\":{";
+        bool first = true;
+        for (std::size_t i = 0; i < fillFailBySite.size(); ++i) {
+            if (fillFailBySite[i] == 0) {
+                continue;
+            }
+            if (!first) {
+                out << ",";
+            }
+            first = false;
+            out << "\""
+                << leanFillFailSiteName(static_cast<LeanFillFailSite>(i))
+                << "\":" << fillFailBySite[i];
+        }
+        out << "}}";
         return out.str();
     }
 };
@@ -8903,16 +8962,29 @@ struct MetalFrameGraph::Impl {
     bool prepareLeanDirectTranslatedDrawDescriptor(
         const TranslatedDrawInfo& source,
         LeanDirectTranslatedDrawDescriptor& descriptor,
-        ParallelEncodeFallbackReason& fallbackReason) {
+        ParallelEncodeFallbackReason& fallbackReason,
+        LeanFillFailSite* failSiteOut = nullptr) {
         descriptor.reset();
         fallbackReason = ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
+        // S25 readings rider: per-site failure attribution for the
+        // copy-headroom shadow (null on the real lean path — the stores
+        // below run only behind the null check, zero hot-path cost).
+        auto failAt = [&](LeanFillFailSite site) {
+            if (failSiteOut != nullptr) {
+                *failSiteOut = site;
+            }
+            return false;
+        };
+        if (failSiteOut != nullptr) {
+            *failSiteOut = LeanFillFailSite::None;
+        }
 
         if (!translatedDrawWorkerEmitSafe(source)) {
-            return false;
+            return failAt(LeanFillFailSite::EmitUnsafe);
         }
         if (!translatedDrawUsesSimpleMetalPrimitive(source.mode)) {
             fallbackReason = ParallelEncodeFallbackReason::MixedRenderState;
-            return false;
+            return failAt(LeanFillFailSite::Primitive);
         }
 
         ensureDrawableResources();
@@ -8940,7 +9012,7 @@ struct MetalFrameGraph::Impl {
             translatedPlan->forcePerSampleFS != forcePerSampleFS ||
             translatedPlan->hasFragmentStage != hasFragmentStage) {
             fallbackReason = ParallelEncodeFallbackReason::PipelineNotPrepared;
-            return false;
+            return failAt(LeanFillFailSite::PlanMissingOrMismatch);
         }
 
         const TranslatedDrawMSLSlots slots =
@@ -8952,7 +9024,7 @@ struct MetalFrameGraph::Impl {
             slots.fragmentNeedsGlNumSamplesArgBuf ||
             slots.vertexUsesMultiviewViewMask ||
             slots.fragmentUsesMultiviewViewMask) {
-            return false;
+            return failAt(LeanFillFailSite::SlotsArgBuf);
         }
 
         id<MTLRenderPipelineState> pipelineState = nil;
@@ -8975,7 +9047,7 @@ struct MetalFrameGraph::Impl {
         }
         if (pipelineState == nil) {
             fallbackReason = ParallelEncodeFallbackReason::PipelineNotPrepared;
-            return false;
+            return failAt(LeanFillFailSite::PsoCacheMiss);
         }
 
         id<MTLDepthStencilState> depthState = nil;
@@ -9016,7 +9088,7 @@ struct MetalFrameGraph::Impl {
             !hasExtraVertexAttributes;
         if (!attributelessDraw && !source.vertexAttributeLayouts.empty()) {
             if (source.metalVertexBuffer == nullptr) {
-                return false;
+                return failAt(LeanFillFailSite::VertexBufferMissing);
             }
             descriptor.bindPrimaryVertexBuffer = true;
             descriptor.metalVertexBuffer = source.metalVertexBuffer;
@@ -9031,7 +9103,7 @@ struct MetalFrameGraph::Impl {
             if (evb.metalBuffer == nullptr ||
                 descriptor.extraVertexBufferCount >=
                     descriptor.extraVertexBuffers.size()) {
-                return false;
+                return failAt(LeanFillFailSite::ExtraVbOverflow);
             }
             auto& dst =
                 descriptor.extraVertexBuffers[descriptor.extraVertexBufferCount++];
@@ -9043,7 +9115,7 @@ struct MetalFrameGraph::Impl {
         if (source.vertexUniformSize > descriptor.vertexUniformStorage.size() ||
             source.fragmentUniformSize >
                 descriptor.fragmentUniformStorage.size()) {
-            return false;
+            return failAt(LeanFillFailSite::UniformOverflow);
         }
         if (source.vertexUniformData != nullptr &&
             source.vertexUniformSize > 0) {
@@ -9092,7 +9164,7 @@ struct MetalFrameGraph::Impl {
             !copyTextures(source.fragmentTextures,
                           descriptor.fragmentTextures,
                           descriptor.fragmentTextureCount)) {
-            return false;
+            return failAt(LeanFillFailSite::TextureUnsupported);
         }
 
         for (const auto& ubo : source.uboBindings) {
@@ -9101,7 +9173,7 @@ struct MetalFrameGraph::Impl {
             }
             if (descriptor.uboBindingCount >=
                 descriptor.uboBindings.size()) {
-                return false;
+                return failAt(LeanFillFailSite::UboOverflow);
             }
             auto& copied = descriptor.uboBindings[descriptor.uboBindingCount++];
             copied.metalSlot = ubo.metalSlot;
@@ -9117,7 +9189,7 @@ struct MetalFrameGraph::Impl {
                 if (ubo.data == nullptr ||
                     descriptor.uboInlineStorageSize + ubo.size >
                         descriptor.uboInlineStorage.size()) {
-                    return false;
+                    return failAt(LeanFillFailSite::UboOverflow);
                 }
                 copied.inlineDataOffset = descriptor.uboInlineStorageSize;
                 std::memcpy(descriptor.uboInlineStorage.data() +
@@ -11886,13 +11958,16 @@ struct MetalFrameGraph::Impl {
         ++bucket.fillAttempts;
         ParallelEncodeFallbackReason fallbackReason =
             ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
+        LeanFillFailSite failSite = LeanFillFailSite::None;
         const auto fillStart = std::chrono::steady_clock::now();
         const bool filled = prepareLeanDirectTranslatedDrawDescriptor(
-            info, copyHeadroomScratchDescriptor, fallbackReason);
+            info, copyHeadroomScratchDescriptor, fallbackReason, &failSite);
         bucket.fillUsTotal +=
             std::chrono::duration<double, std::micro>(
                 std::chrono::steady_clock::now() - fillStart).count();
         if (!filled) {
+            copyHeadroomProbe.fillFailBySite[static_cast<std::size_t>(
+                failSite)] += 1;
             return;
         }
         ++bucket.fillSuccesses;

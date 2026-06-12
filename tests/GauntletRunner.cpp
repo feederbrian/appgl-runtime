@@ -18691,6 +18691,28 @@ TestResult runS25CopyHeadroomShadowProbe() {
                 "drains=" + std::to_string(after.copyHeadroomArenaDrains) +
                     " live=" + std::to_string(after.copyHeadroomArenaLive));
         }
+        // Site-split attribution: the JSONL carries fillFailBySite; when
+        // fills failed (the first draw of a fresh program fails before
+        // its PSO exists), the map must name at least one site.
+        const std::string chJson = context.framePacingDiagnosticsJson();
+        if (chJson.find("\"fillFailBySite\"") == std::string::npos) {
+            recordSentinelFailure(
+                failures,
+                "copyHeadroom JSON missing fillFailBySite section",
+                chJson.substr(0, 200));
+        }
+        const std::uint64_t failedFills =
+            after.copyHeadroomFb0Draws >= after.copyHeadroomFb0FillSuccesses
+                ? after.copyHeadroomFb0Draws -
+                      after.copyHeadroomFb0FillSuccesses
+                : 0;
+        if (failedFills > 0 &&
+            chJson.find("\"fillFailBySite\":{}") != std::string::npos) {
+            recordSentinelFailure(
+                failures,
+                "fills failed but fillFailBySite map is empty",
+                "failedFills=" + std::to_string(failedFills));
+        }
         gl.glBindVertexArray(0);
         gl.glUseProgram(0);
         c51DestroyQuad(gl, q);
