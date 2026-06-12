@@ -1675,6 +1675,13 @@ struct GLProgramObject {
     // objects, texture dirty bits, and producer drains remain live per draw.
     std::uint64_t samplerBindingRecipeGeneration = 1;
     GLSamplerBindingRecipeCache samplerBindingRecipeCache;
+    // C52 sampler-resolve cache: bumped ONLY when an integer uniform write
+    // lands on a sampler-typed location (a glUniform1i unit remap changes
+    // the resolve result but bumps neither state domain generation — the
+    // 99140ca key-gap class, caught at design time). Deliberately NOT the
+    // any-write uniformValueGeneration: per-draw scalar uniform updates
+    // must not bust the sampler-resolve cache.
+    std::uint64_t samplerUniformValueGen = 1;
 
     bool isUniformBufferDirty() const {
         return packedUniformGeneration != uniformValueGeneration;

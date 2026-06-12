@@ -17360,6 +17360,196 @@ TestResult runC52MidFrameUploadOrderProbe() {
     return result;
 }
 
+// C52 sampler-resolve cache probes. The cache is flagged
+// (APPGL_ENABLE_SAMPLER_RESOLVE_CACHE, default OFF); every invalidation
+// condition of the ratified four-condition matrix gets a must-miss leg
+// proven by PIXELS (a stale cache would render the wrong texture), and
+// the must-hit leg is proven by the hit counter plus correct pixels.
+TestResult runC52SamplerResolveCacheProbe() {
+    auto result = runDirectSentinel("c52.sampler-cache.matrix", [&] {
+        ScopedEnvVar cacheFlag("APPGL_ENABLE_SAMPLER_RESOLVE_CACHE", "1");
+        ScopedEnvVar cacheHatch("APPGL_DISABLE_SAMPLER_RESOLVE_CACHE", "0");
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        static constexpr const char* kVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "out vec2 vUV;\n"
+            "void main() { vUV = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+        static constexpr const char* kFS =
+            "#version 330 core\n"
+            "in vec2 vUV;\n"
+            "uniform sampler2D uTexture;\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = texture(uTexture, vUV); }\n";
+        const GLuint program = buildBenchProgram(kVS, kFS);
+        auto makeSolid = [&](GLuint unit, std::uint8_t r, std::uint8_t g,
+                             std::uint8_t b, GLsizei dim) -> GLuint {
+            GLuint t = 0;
+            gl.glGenTextures(1, &t);
+            gl.glActiveTexture(GL_TEXTURE0 + unit);
+            gl.glBindTexture(GL_TEXTURE_2D, t);
+            std::vector<std::uint8_t> px(static_cast<std::size_t>(dim) * dim * 4);
+            for (std::size_t i = 0; i < px.size(); i += 4) {
+                px[i] = r; px[i + 1] = g; px[i + 2] = b; px[i + 3] = 255;
+            }
+            gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, dim, dim, 0, GL_RGBA,
+                            GL_UNSIGNED_BYTE, px.data());
+            gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            return t;
+        };
+        const GLuint texA = makeSolid(0, 255, 0, 0, 4);   // unit 0: red
+        const GLuint texB = makeSolid(1, 0, 255, 0, 4);   // unit 1: green
+        GLuint target = 0, fbo = 0;
+        gl.glGenTextures(1, &target);
+        gl.glActiveTexture(GL_TEXTURE0 + 7);
+        setupDCR3CRGBA8Texture(gl, target, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo, target);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, 8, 8);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glUseProgram(program);
+        const GLint loc = gl.glGetUniformLocation(program, "uTexture");
+        gl.glUniform1i(loc, 0);
+        GLuint vao = 0, vbo = 0, ibo = 0;
+        const float verts[8] = {-1, -1, 1, -1, 1, 1, -1, 1};
+        const std::uint16_t idx[6] = {0, 1, 2, 0, 2, 3};
+        gl.glGenVertexArrays(1, &vao);
+        gl.glBindVertexArray(vao);
+        gl.glGenBuffers(1, &vbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, nullptr);
+        gl.glGenBuffers(1, &ibo);
+        gl.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+        gl.glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(idx), idx, GL_STATIC_DRAW);
+
+        auto counters = [&]() {
+            const auto inv = context.metalResourceInventory();
+            return std::array<std::uint64_t, 4>{
+                inv.samplerResolveCacheHits, inv.samplerResolveCacheMisses,
+                inv.samplerResolveCacheBusts, inv.samplerResolveCacheBypasses};
+        };
+        auto draw = [&]() {
+            gl.glDrawElementsInstancedBaseVertex(GL_TRIANGLES, 6,
+                                                 GL_UNSIGNED_SHORT, nullptr, 1, 0);
+        };
+        auto checkCenter = [&](std::uint8_t r, std::uint8_t g, std::uint8_t b,
+                               const char* tag) {
+            std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+            gl.glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            expectApproxByte(px[0], r, 3u, tag);
+            expectApproxByte(px[1], g, 3u, tag);
+            expectApproxByte(px[2], b, 3u, tag);
+        };
+
+        // MUST-HIT: same-state draws — second+ draws served from cache.
+        // (Identical glUniform1i re-issue is value-gated and must not bust.)
+        draw();
+        const auto c0 = counters();
+        gl.glUniform1i(loc, 0);  // value-identical re-issue
+        draw();
+        draw();
+        const auto c1 = counters();
+        expectCondition(c1[0] >= c0[0] + 2, "sampler-cache: same-state draws hit");
+        checkCenter(255, 0, 0, "sampler-cache: hit draws sample red (unit 0)");
+
+        // MUST-MISS 1 — sampler unit remap (the gens-blind condition):
+        // glUniform1i to unit 1 must re-resolve; a stale hit would stay red.
+        gl.glUniform1i(loc, 1);
+        draw();
+        checkCenter(0, 255, 0, "sampler-cache: unit remap re-resolves (green)");
+
+        // MUST-MISS 2 — storage redefinition: re-defining texB allocates a
+        // new MTLTexture; the cached pointer must bust, not serve the old.
+        draw();  // warm the cache on (program, unit 1)
+        gl.glActiveTexture(GL_TEXTURE0 + 1);
+        std::vector<std::uint8_t> blue(8 * 8 * 4);
+        for (std::size_t i = 0; i < blue.size(); i += 4) {
+            blue[i + 2] = 255; blue[i + 3] = 255;
+        }
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 8, 8, 0, GL_RGBA,
+                        GL_UNSIGNED_BYTE, blue.data());
+        const auto cPreRedef = counters();
+        draw();
+        checkCenter(0, 0, 255, "sampler-cache: storage redefinition busts (blue)");
+        const auto cPostRedef = counters();
+        expectCondition(cPostRedef[2] > cPreRedef[2] || cPostRedef[1] > cPreRedef[1],
+                        "sampler-cache: redefinition counted as bust/miss");
+
+        // MUST-MISS 3 — producer-pending bypass (the carve-out): render INTO
+        // texB via a second FBO, then sample it; the cached entry is gen-quiet
+        // and pointer-valid, so only the bypass keeps the drain semantics.
+        draw();  // re-warm on the blue 8x8 texB
+        GLuint fbo2 = 0;
+        setupDCR3CTextureFbo(gl, fbo2, texB);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo2);
+        gl.glViewport(0, 0, 8, 8);
+        gl.glClearColor(1.0f, 0.0f, 1.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, 8, 8);
+        const auto cPreProd = counters();
+        draw();
+        checkCenter(255, 0, 255, "sampler-cache: producer-pending draw sees rendered content (magenta)");
+        const auto cPostProd = counters();
+        expectCondition(cPostProd[3] > cPreProd[3] || cPostProd[2] > cPreProd[2],
+                        "sampler-cache: producer-pending counted as bypass/bust");
+
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteBuffers(1, &ibo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteFramebuffers(1, &fbo2);
+        gl.glDeleteTextures(1, &texA);
+        gl.glDeleteTextures(1, &texB);
+        gl.glDeleteTextures(1, &target);
+        gl.glDeleteProgram(program);
+        expectGLError(gl, GL_NO_ERROR, "sampler-cache cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "must-hit + all must-miss legs green by pixels (unit remap, storage redefinition, producer-pending bypass); counters engaged";
+    }
+    return result;
+}
+
+TestResult runC52SamplerResolveCacheDefaultOffProbe() {
+    auto result = runDirectSentinel("c52.sampler-cache.default-off", [&] {
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        GLuint colorTex = 0, fbo = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, 8, 8);
+        C51Quad q = c51MakeQuad(gl);
+        for (int i = 0; i < 3; ++i) {
+            c51DrawQuad(gl, q, 0.5f, 0.5f, 0.5f);
+        }
+        const auto inv = context.metalResourceInventory();
+        expectCondition(inv.samplerResolveCacheHits == 0 &&
+                            inv.samplerResolveCacheMisses == 0,
+                        "sampler-cache default-off: zero engagement");
+        c51DestroyQuad(gl, q);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        expectGLError(gl, GL_NO_ERROR, "sampler-cache default-off cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "flag-off path has zero cache engagement (default sweep validity preserved)";
+    }
+    return result;
+}
+
 TestResult runC51WarmTimingDiag() {
     auto result = runDirectSentinel("c51.diag.warm-timing", [&] {
         ScopedSentinelContext scoped(64, 64);
@@ -17679,6 +17869,12 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
     if (normalizedPhase == "correctness-train-probes") {
         tests.push_back(runResizeGateProbe());
         tests.push_back(runFinishOpenPassProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "sampler-resolve-cache-probes") {
+        tests.push_back(runC52SamplerResolveCacheProbe());
+        tests.push_back(runC52SamplerResolveCacheDefaultOffProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

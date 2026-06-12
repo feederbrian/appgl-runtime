@@ -8949,6 +8949,7 @@ struct GLContext::Impl {
                 objects->shaders().erase(shaderId);
             }
         }
+        samplerResolveCache.erase(program);  // C52: no stale entry on name reuse
         objects->programs().erase(program);
     }
 
@@ -14040,6 +14041,84 @@ struct GLContext::Impl {
         const bool profileSamplerBindings = drawPathProfile.enabled;
         const auto samplerBindingsStart =
             profileSamplerBindings ? glDrawProfileNow() : GLDrawProfileTimePoint{};
+        // C52 sampler-resolve cache: serve the previously resolved suffix
+        // when every input generation matches and the live texture objects
+        // still hold the cached MTLTextures (pointer identity = storage
+        // epoch). resolveStage APPENDS, so the cache stores and replays
+        // only the suffix this function adds.
+        const bool srCacheOn = samplerResolveCacheEnabled();
+        const std::size_t srFragBase = info.fragmentTextures.size();
+        const std::size_t srVertBase = info.vertexTextures.size();
+        const std::size_t srNamesBase = info.sampledTextureNames.size();
+        if (srCacheOn && info.program != 0) {
+            auto it = samplerResolveCache.find(info.program);
+            if (it != samplerResolveCache.end()) {
+                auto& entry = it->second;
+                const bool keyMatches =
+                    entry.fragmentReflection == info.fragmentReflection &&
+                    entry.vertexReflection == info.vertexReflection &&
+                    entry.textureGen == state->domainGeneration(
+                        appgl::GLStateTracker::kDomainTexture) &&
+                    entry.programGen == state->domainGeneration(
+                        appgl::GLStateTracker::kDomainProgram) &&
+                    entry.samplerUniformGen == program.samplerUniformValueGen &&
+                    entry.recipeGen == program.samplerBindingRecipeGeneration;
+                if (keyMatches) {
+                    bool stale = false;
+                    bool producerPending = false;
+                    auto validateEntries =
+                        [&](const std::vector<TranslatedDrawInfo::TextureBinding>& v) {
+                        for (const auto& b : v) {
+                            if (b.textureName == 0) {
+                                continue;
+                            }
+                            const GLTextureObject* t =
+                                objects->textures().get(b.textureName);
+                            if (t == nullptr || t->metalTexture != b.metalTexture) {
+                                stale = true;
+                                return;
+                            }
+                            if (t->producerPending.hasAny()) {
+                                producerPending = true;
+                            }
+                        }
+                    };
+                    validateEntries(entry.fragmentTextures);
+                    if (!stale) {
+                        validateEntries(entry.vertexTextures);
+                    }
+                    if (stale) {
+                        samplerResolveCache.erase(it);
+                        ++samplerResolveCacheBusts;
+                    } else if (producerPending) {
+                        // Carve-out preserved: recompute this draw so the
+                        // producer-drain machinery runs; keep the entry.
+                        ++samplerResolveCacheBypasses;
+                    } else {
+                        info.fragmentTextures.insert(info.fragmentTextures.end(),
+                                                     entry.fragmentTextures.begin(),
+                                                     entry.fragmentTextures.end());
+                        info.vertexTextures.insert(info.vertexTextures.end(),
+                                                   entry.vertexTextures.begin(),
+                                                   entry.vertexTextures.end());
+                        info.sampledTextureNames.insert(
+                            info.sampledTextureNames.end(),
+                            entry.sampledTextureNames.begin(),
+                            entry.sampledTextureNames.end());
+                        ++samplerResolveCacheHits;
+                        if (profileSamplerBindings) {
+                            drawPathProfile.record(
+                                GLDrawProfileBucket::SamplerBindingsTotal,
+                                samplerBindingsStart,
+                                glDrawProfileNow());
+                        }
+                        return;
+                    }
+                } else {
+                    ++samplerResolveCacheBusts;
+                }
+            }
+        }
         // Phase 8X Group 4d follow-up⁸ — diagnostic one-shot-per-program
         // trace so BAR can distinguish "reflection empty", "uniform
         // missing", "unit empty", "texture not instantiated", and
@@ -15404,6 +15483,28 @@ struct GLContext::Impl {
                      info.fragmentMSL);
         resolveStage("vert", info.vertexReflection, info.vertexTextures,
                      info.vertexMSL);
+        if (srCacheOn && info.program != 0) {
+            // Store the suffix this resolve appended (miss or bypass path).
+            auto& entry = samplerResolveCache[info.program];
+            entry.fragmentReflection = info.fragmentReflection;
+            entry.vertexReflection = info.vertexReflection;
+            entry.textureGen = state->domainGeneration(
+                appgl::GLStateTracker::kDomainTexture);
+            entry.programGen = state->domainGeneration(
+                appgl::GLStateTracker::kDomainProgram);
+            entry.samplerUniformGen = program.samplerUniformValueGen;
+            entry.recipeGen = program.samplerBindingRecipeGeneration;
+            entry.fragmentTextures.assign(
+                info.fragmentTextures.begin() + srFragBase,
+                info.fragmentTextures.end());
+            entry.vertexTextures.assign(
+                info.vertexTextures.begin() + srVertBase,
+                info.vertexTextures.end());
+            entry.sampledTextureNames.assign(
+                info.sampledTextureNames.begin() + srNamesBase,
+                info.sampledTextureNames.end());
+            ++samplerResolveCacheMisses;
+        }
         if (profileSamplerBindings) {
             drawPathProfile.record(GLDrawProfileBucket::SamplerBindingsTotal,
                                    samplerBindingsStart,
@@ -17653,6 +17754,52 @@ struct GLContext::Impl {
     std::uint64_t prepMemoBustsVao = 0;
     std::uint64_t prepMemoBustsFbo = 0;
     std::uint64_t prepMemoBustsHazard = 0;
+
+    // ── C52 sampler-resolve cache (flagged, default-OFF) ──
+    // resolveSamplerBindings is the always-run per-draw cost (measured
+    // 20.9% of gl-side, 2.80µs/draw). Its result depends on exactly:
+    // texture-domain state (binds/params/samplers — kDomainTexture),
+    // program binding (kDomainProgram), sampler-uniform unit values
+    // (per-program samplerUniformValueGen — glUniform1i remaps bump no
+    // domain gen), the recipe generation (relink), and the LIVE texture
+    // objects (validated at hit time by metalTexture POINTER identity,
+    // which subsumes a storage epoch exactly and per-texture — a
+    // redefinition allocates a new MTLTexture). GPU-producer-pending
+    // textures bypass (recompute the draw, keep the entry) — preserves
+    // the carve-out semantics that made resolve always-run.
+    // Threading note: per-program cache owned by the program object map,
+    // GL-thread-only; cache hits COPY into the draw info, so the record
+    // payload is unchanged — replay-split safe.
+    struct SamplerResolveCacheEntry {
+        const ShaderReflection* fragmentReflection = nullptr;
+        const ShaderReflection* vertexReflection = nullptr;
+        std::uint64_t textureGen = 0;
+        std::uint64_t programGen = 0;
+        std::uint64_t samplerUniformGen = 0;
+        std::uint64_t recipeGen = 0;
+        std::vector<TranslatedDrawInfo::TextureBinding> fragmentTextures;
+        std::vector<TranslatedDrawInfo::TextureBinding> vertexTextures;
+        std::vector<GLuint> sampledTextureNames;
+    };
+    std::unordered_map<GLuint, SamplerResolveCacheEntry> samplerResolveCache;
+    std::uint64_t samplerResolveCacheHits = 0;
+    std::uint64_t samplerResolveCacheMisses = 0;
+    std::uint64_t samplerResolveCacheBusts = 0;
+    std::uint64_t samplerResolveCacheBypasses = 0;
+    int samplerResolveCacheMode = -1;
+    bool samplerResolveCacheEnabled() {
+        if (samplerResolveCacheMode < 0) {
+            const char* dis = std::getenv("APPGL_DISABLE_SAMPLER_RESOLVE_CACHE");
+            if (dis != nullptr && dis[0] != '\0' && dis[0] != '0') {
+                samplerResolveCacheMode = 0;
+            } else {
+                const char* raw = std::getenv("APPGL_ENABLE_SAMPLER_RESOLVE_CACHE");
+                samplerResolveCacheMode =
+                    (raw != nullptr && raw[0] != '\0' && raw[0] != '0') ? 1 : 0;
+            }
+        }
+        return samplerResolveCacheMode == 1;
+    }
 
     // Per-CONTEXT latch (not static: probes toggle per fresh context;
     // not per-call: two getenv environ scans per draw are themselves
@@ -27026,6 +27173,10 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             inventory.orderedTextureUploads =
                 impl_->frameGraph->orderedTextureUploadCount();
         }
+        inventory.samplerResolveCacheHits = impl_->samplerResolveCacheHits;
+        inventory.samplerResolveCacheMisses = impl_->samplerResolveCacheMisses;
+        inventory.samplerResolveCacheBusts = impl_->samplerResolveCacheBusts;
+        inventory.samplerResolveCacheBypasses = impl_->samplerResolveCacheBypasses;
         inventory.prepMemoMisses = impl_->prepMemoMisses;
         inventory.prepMemoBusts =
             impl_->prepMemoBustsStateGen + impl_->prepMemoBustsProgram +

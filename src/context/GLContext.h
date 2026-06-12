@@ -834,6 +834,11 @@ public:
         // hazard-routed as ordered in-CB blits (open command buffer had
         // draws sampling the destination texture).
         std::uint64_t orderedTextureUploads = 0;
+        // C52 sampler-resolve cache (APPGL_ENABLE_SAMPLER_RESOLVE_CACHE).
+        std::uint64_t samplerResolveCacheHits = 0;
+        std::uint64_t samplerResolveCacheMisses = 0;
+        std::uint64_t samplerResolveCacheBusts = 0;
+        std::uint64_t samplerResolveCacheBypasses = 0;
         std::uint64_t prepMemoMisses = 0;
         std::uint64_t prepMemoBusts = 0;
         std::uint64_t shadowClearsDeferred = 0;

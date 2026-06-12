@@ -215,6 +215,41 @@ bool GLContext::detachShader(GLuint program, GLuint shader) {
 #include "GLContextShaderProgramQuery.inc.mm"
 
 #elif defined(APPGL_GLCONTEXT_SHADER_UNIFORMS)
+// C52 sampler-resolve cache: integer writes to sampler-typed locations
+// remap texture units — the one resolve input no state-domain generation
+// covers. Mirrors resolveSamplerBindings' sampler-type classification.
+static bool appglUniformTypeIsSampler(GLenum type) {
+    switch (type) {
+        case GL_SAMPLER_1D: case GL_INT_SAMPLER_1D:
+        case GL_UNSIGNED_INT_SAMPLER_1D: case GL_SAMPLER_1D_SHADOW:
+        case GL_SAMPLER_2D: case GL_INT_SAMPLER_2D:
+        case GL_UNSIGNED_INT_SAMPLER_2D: case GL_SAMPLER_2D_SHADOW:
+        case GL_SAMPLER_3D: case GL_INT_SAMPLER_3D:
+        case GL_UNSIGNED_INT_SAMPLER_3D:
+        case GL_SAMPLER_CUBE: case GL_INT_SAMPLER_CUBE:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE: case GL_SAMPLER_CUBE_SHADOW:
+        case GL_SAMPLER_1D_ARRAY: case GL_INT_SAMPLER_1D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY: case GL_SAMPLER_1D_ARRAY_SHADOW:
+        case GL_SAMPLER_2D_ARRAY: case GL_INT_SAMPLER_2D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY: case GL_SAMPLER_2D_ARRAY_SHADOW:
+        case GL_SAMPLER_CUBE_MAP_ARRAY: case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+        case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+        case GL_SAMPLER_2D_RECT: case GL_INT_SAMPLER_2D_RECT:
+        case GL_UNSIGNED_INT_SAMPLER_2D_RECT: case GL_SAMPLER_2D_RECT_SHADOW:
+        case GL_SAMPLER_BUFFER: case GL_INT_SAMPLER_BUFFER:
+        case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+        case GL_SAMPLER_2D_MULTISAMPLE: case GL_INT_SAMPLER_2D_MULTISAMPLE:
+        case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+        case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+        case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool GLContext::setUniformScalarVector(GLint location, UniformElementType element, GLint vectorSize, GLsizei count, const void* values) {
     if (location < 0) {
         return true;  // -1 silently no-ops per spec.
@@ -275,6 +310,15 @@ bool GLContext::setUniformScalarVector(GLint location, UniformElementType elemen
         otherB.clear();
     };
 
+    // Value-gated (C52 family rule): a value-identical glUniform1i re-issue
+    // must not bust the sampler-resolve cache.
+    bool samplerUnitChanged = false;
+    if (element == UniformElementType::Int && appglUniformTypeIsSampler(ref.type)) {
+        const GLint* srcInts = static_cast<const GLint*>(values);
+        samplerUnitChanged = slot->ints.size() < fullCount ||
+            std::memcmp(slot->ints.data() + writeOffset, srcInts,
+                        writeCount * sizeof(GLint)) != 0;
+    }
     switch (element) {
         case UniformElementType::Float:
             writeInto(slot->floats, slot->ints, slot->uints, static_cast<const GLfloat*>(values));
@@ -288,6 +332,9 @@ bool GLContext::setUniformScalarVector(GLint location, UniformElementType elemen
     }
     slot->doubles.clear();
     slot->df64TransportWords.clear();
+    if (samplerUnitChanged) {
+        ++object->samplerUniformValueGen;
+    }
     object->markUniformsDirty();
     return true;
 }
@@ -589,6 +636,15 @@ bool GLContext::setUniformScalarVectorForProgram(GLuint program, GLint location,
         std::memcpy(dstVec.data() + writeOffset, src, writeCount * sizeof(T));
         otherA.clear(); otherB.clear();
     };
+    // Value-gated (C52 family rule): a value-identical glUniform1i re-issue
+    // must not bust the sampler-resolve cache.
+    bool samplerUnitChanged = false;
+    if (element == UniformElementType::Int && appglUniformTypeIsSampler(ref.type)) {
+        const GLint* srcInts = static_cast<const GLint*>(values);
+        samplerUnitChanged = slot->ints.size() < fullCount ||
+            std::memcmp(slot->ints.data() + writeOffset, srcInts,
+                        writeCount * sizeof(GLint)) != 0;
+    }
     switch (element) {
         case UniformElementType::Float:
             writeInto(slot->floats, slot->ints, slot->uints, static_cast<const GLfloat*>(values)); break;
@@ -599,6 +655,9 @@ bool GLContext::setUniformScalarVectorForProgram(GLuint program, GLint location,
     }
     slot->doubles.clear();
     slot->df64TransportWords.clear();
+    if (samplerUnitChanged) {
+        ++object->samplerUniformValueGen;
+    }
     object->markUniformsDirty();
     return true;
 }
