@@ -18713,6 +18713,21 @@ TestResult runS25CopyHeadroomShadowProbe() {
                 "fills failed but fillFailBySite map is empty",
                 "failedFills=" + std::to_string(failedFills));
         }
+        // Commit-D sub-reason split: section must exist, and whenever the
+        // plan gate is the recorded site the sub-reason map must name a leg.
+        if (chJson.find("\"planFailBySubReason\"") == std::string::npos) {
+            recordSentinelFailure(
+                failures,
+                "copyHeadroom JSON missing planFailBySubReason section",
+                chJson.substr(0, 200));
+        }
+        if (chJson.find("\"plan_missing_or_mismatch\"") != std::string::npos &&
+            chJson.find("\"planFailBySubReason\":{}") != std::string::npos) {
+            recordSentinelFailure(
+                failures,
+                "plan gate failed fills but planFailBySubReason is empty",
+                "failedFills=" + std::to_string(failedFills));
+        }
         gl.glBindVertexArray(0);
         gl.glUseProgram(0);
         c51DestroyQuad(gl, q);

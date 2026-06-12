@@ -544,6 +544,40 @@ static const char* leanFillFailSiteName(LeanFillFailSite site) {
     return "unknown";
 }
 
+// S25 commit D: the plan gate is a 7-leg compound condition; the steady-state
+// stress reading put plan_missing_or_mismatch at 98.4% of fill failures
+// (100% fill-failure rate from mid-run on), so WHICH leg fails decides the
+// plan-prepare-at-record design (record-time snapshot vs a different prepare
+// site). Classification is first-match-wins in the gate's own leg order — a
+// plan can mismatch on several legs at once; the count answers "what gates
+// first", not "all that differs".
+enum class LeanPlanFailSubReason : std::uint8_t {
+    None,
+    PlanNull,
+    PlanInvalid,
+    PlanArgBuf,
+    ColorFormat,
+    SampleCount,
+    PerSampleFS,
+    FragmentStage,
+    Count,
+};
+
+static const char* leanPlanFailSubReasonName(LeanPlanFailSubReason sub) {
+    switch (sub) {
+        case LeanPlanFailSubReason::None: return "none";
+        case LeanPlanFailSubReason::PlanNull: return "plan_null";
+        case LeanPlanFailSubReason::PlanInvalid: return "plan_invalid";
+        case LeanPlanFailSubReason::PlanArgBuf: return "plan_argbuf";
+        case LeanPlanFailSubReason::ColorFormat: return "color_format";
+        case LeanPlanFailSubReason::SampleCount: return "sample_count";
+        case LeanPlanFailSubReason::PerSampleFS: return "per_sample_fs";
+        case LeanPlanFailSubReason::FragmentStage: return "fragment_stage";
+        case LeanPlanFailSubReason::Count: break;
+    }
+    return "unknown";
+}
+
 struct CopyHeadroomProbe {
     struct Bucket {
         std::uint64_t draws = 0;
@@ -565,6 +599,9 @@ struct CopyHeadroomProbe {
     std::array<std::uint64_t,
                static_cast<std::size_t>(LeanFillFailSite::Count)>
         fillFailBySite{};
+    std::array<std::uint64_t,
+               static_cast<std::size_t>(LeanPlanFailSubReason::Count)>
+        planFailBySubReason{};
 
     std::string diagnosticsJson(std::size_t arenaLive) const {
         auto bucketJson = [](const Bucket& b) {
@@ -602,6 +639,21 @@ struct CopyHeadroomProbe {
             out << "\""
                 << leanFillFailSiteName(static_cast<LeanFillFailSite>(i))
                 << "\":" << fillFailBySite[i];
+        }
+        out << "},\"planFailBySubReason\":{";
+        first = true;
+        for (std::size_t i = 0; i < planFailBySubReason.size(); ++i) {
+            if (planFailBySubReason[i] == 0) {
+                continue;
+            }
+            if (!first) {
+                out << ",";
+            }
+            first = false;
+            out << "\""
+                << leanPlanFailSubReasonName(
+                       static_cast<LeanPlanFailSubReason>(i))
+                << "\":" << planFailBySubReason[i];
         }
         out << "}}";
         return out.str();
@@ -8963,7 +9015,8 @@ struct MetalFrameGraph::Impl {
         const TranslatedDrawInfo& source,
         LeanDirectTranslatedDrawDescriptor& descriptor,
         ParallelEncodeFallbackReason& fallbackReason,
-        LeanFillFailSite* failSiteOut = nullptr) {
+        LeanFillFailSite* failSiteOut = nullptr,
+        LeanPlanFailSubReason* planSubOut = nullptr) {
         descriptor.reset();
         fallbackReason = ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
         // S25 readings rider: per-site failure attribution for the
@@ -8977,6 +9030,9 @@ struct MetalFrameGraph::Impl {
         };
         if (failSiteOut != nullptr) {
             *failSiteOut = LeanFillFailSite::None;
+        }
+        if (planSubOut != nullptr) {
+            *planSubOut = LeanPlanFailSubReason::None;
         }
 
         if (!translatedDrawWorkerEmitSafe(source)) {
@@ -9011,6 +9067,25 @@ struct MetalFrameGraph::Impl {
                 static_cast<std::uint32_t>(attachmentSampleCount) ||
             translatedPlan->forcePerSampleFS != forcePerSampleFS ||
             translatedPlan->hasFragmentStage != hasFragmentStage) {
+            if (planSubOut != nullptr) {
+                // First-match-wins, same leg order as the gate above.
+                *planSubOut =
+                    translatedPlan == nullptr
+                        ? LeanPlanFailSubReason::PlanNull
+                    : !translatedPlan->valid
+                        ? LeanPlanFailSubReason::PlanInvalid
+                    : translatedPlan->useArgumentBuffers
+                        ? LeanPlanFailSubReason::PlanArgBuf
+                    : translatedPlan->colorFormat !=
+                            static_cast<std::uint32_t>(colorFormat)
+                        ? LeanPlanFailSubReason::ColorFormat
+                    : translatedPlan->attachmentSampleCount !=
+                            static_cast<std::uint32_t>(attachmentSampleCount)
+                        ? LeanPlanFailSubReason::SampleCount
+                    : translatedPlan->forcePerSampleFS != forcePerSampleFS
+                        ? LeanPlanFailSubReason::PerSampleFS
+                        : LeanPlanFailSubReason::FragmentStage;
+            }
             fallbackReason = ParallelEncodeFallbackReason::PipelineNotPrepared;
             return failAt(LeanFillFailSite::PlanMissingOrMismatch);
         }
@@ -11959,15 +12034,21 @@ struct MetalFrameGraph::Impl {
         ParallelEncodeFallbackReason fallbackReason =
             ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
         LeanFillFailSite failSite = LeanFillFailSite::None;
+        LeanPlanFailSubReason planSub = LeanPlanFailSubReason::None;
         const auto fillStart = std::chrono::steady_clock::now();
         const bool filled = prepareLeanDirectTranslatedDrawDescriptor(
-            info, copyHeadroomScratchDescriptor, fallbackReason, &failSite);
+            info, copyHeadroomScratchDescriptor, fallbackReason, &failSite,
+            &planSub);
         bucket.fillUsTotal +=
             std::chrono::duration<double, std::micro>(
                 std::chrono::steady_clock::now() - fillStart).count();
         if (!filled) {
             copyHeadroomProbe.fillFailBySite[static_cast<std::size_t>(
                 failSite)] += 1;
+            if (failSite == LeanFillFailSite::PlanMissingOrMismatch) {
+                copyHeadroomProbe.planFailBySubReason[static_cast<std::size_t>(
+                    planSub)] += 1;
+            }
             return;
         }
         ++bucket.fillSuccesses;
