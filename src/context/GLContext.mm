@@ -17755,7 +17755,21 @@ struct GLContext::Impl {
     std::uint64_t prepMemoBustsFbo = 0;
     std::uint64_t prepMemoBustsHazard = 0;
 
-    // ── C52 sampler-resolve cache (flagged, default-OFF) ──
+    // ── C52 sampler-resolve cache (flagged, default-OFF — PARKED) ──
+    // PARK VERDICT 2026-06-12: live A/B run 1 showed engagement without
+    // benefit (35.5% hits, per-call cost flat — hit-path validation walk
+    // + store-on-every-miss copies eat the savings); run 2 under churnier
+    // content was CATASTROPHIC (hit rate collapsed to 16.4%, ~20fps,
+    // heap-side memory growth + GPU starvation; GL-object inventory flat;
+    // signature not fully explained — entry minting is impossible by
+    // construction [program-keyed map, replace-on-store, deleteProgram
+    // evicts], so the residual suspect is allocator churn on the
+    // miss/bust path plus an unidentified component). Stays opt-in for
+    // same-state-run workloads ONLY; any retry (epoch-compare +
+    // store-when-stable + cheap producer flag, spec banked) must PROVABLY
+    // BOUND the churn pathology and explain the 20fps signature first.
+    //
+    // Original design notes:
     // resolveSamplerBindings is the always-run per-draw cost (measured
     // 20.9% of gl-side, 2.80µs/draw). Its result depends on exactly:
     // texture-domain state (binds/params/samplers — kDomainTexture),
