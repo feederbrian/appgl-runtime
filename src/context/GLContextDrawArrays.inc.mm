@@ -1462,7 +1462,8 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
 
                     applyCachedVertexArrayLayout(
                         vaoLayout, *impl_->objects, tdi, first,
-                        true, true, &impl_->coldPathProfile);
+                        true, true, &impl_->coldPathProfile,
+                        impl_->frameGraph.get());
                     appendCurrentGenericVertexAttributes(
                         tdi, vao, &impl_->coldPathProfile);
                     drawProfile.mark(GLDrawProfileBucket::VertexLayout);
@@ -2224,7 +2225,8 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     applyCachedVertexArrayLayout(
                         vaoLayout, *impl_->objects, tdi, first,
                         canRebaseSingleArrayDraw, false,
-                        &impl_->coldPathProfile);
+                        &impl_->coldPathProfile,
+                        impl_->frameGraph.get());
 
                     logStateResolveCostClass(
                         "drawArraysInstanced", programName, vaoName,

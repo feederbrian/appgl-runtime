@@ -17494,6 +17494,214 @@ TestResult runC52CrossCbUploadOrderProbe() {
     return result;
 }
 
+// S25 Rung 1.5 flush-narrowing probes (APPGL_PARALLEL_ENCODE=1 inside the
+// probe). The buffer-mutation boundary flush is narrowed to the cases where
+// it is load-bearing: an in-place write onto a Metal buffer a pending
+// deferred record binds. Probe 1 proves the narrowed skip (rename-engaged
+// write keeps the batch alive AND draw-time contents stay correct — the
+// pre-write draw renders from the old allocation); probe 2 proves the
+// forced flush (a persistently-mapped buffer is un-renameable, so the
+// boundary flush must still fire and draw-time contents must still hold).
+TestResult runFlushNarrowRenameSkipProbe() {
+    ScopedEnvVar parallelFlag("APPGL_PARALLEL_ENCODE", "1");
+    auto result = runDirectSentinel("c52.flush-narrow.rename-skip", [&] {
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        static constexpr const char* kVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+        static constexpr const char* kFS =
+            "#version 330 core\n"
+            "uniform vec4 uColor;\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = uColor; }\n";
+        const GLuint program = buildBenchProgram(kVS, kFS);
+        gl.glViewport(0, 0, 16, 16);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glClearColor(0, 0, 0, 1);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glUseProgram(program);
+        const GLint colorLoc = gl.glGetUniformLocation(program, "uColor");
+
+        // Left-half quad (two triangles).
+        const float leftVerts[12] = {-1, -1, 0, -1, 0, 1,
+                                     -1, -1, 0, 1, -1, 1};
+        const float rightVerts[12] = {0, -1, 1, -1, 1, 1,
+                                      0, -1, 1, 1, 0, 1};
+        GLuint vao = 0, vbo = 0, idleVbo = 0;
+        gl.glGenVertexArrays(1, &vao);
+        gl.glBindVertexArray(vao);
+        gl.glGenBuffers(1, &vbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(leftVerts), leftVerts,
+                        GL_DYNAMIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, nullptr);
+        gl.glGenBuffers(1, &idleVbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, idleVbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(rightVerts), rightVerts,
+                        GL_DYNAMIC_DRAW);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+
+        // Warmup: the parallel capture path falls back serial until the
+        // translated plan/pipeline is prepared — heat it so the measured
+        // draws actually batch.
+        gl.glUniform4f(colorLoc, 1, 0, 0, 1);
+        for (int i = 0; i < 6; ++i) {
+            gl.glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
+        gl.glFinish();
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+
+        const auto inv0 = context.metalResourceInventory();
+        // Draw 1: OLD positions (left half), red.
+        gl.glUniform4f(colorLoc, 1, 0, 0, 1);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 6);
+        // NoLiveReaders leg: a write to a buffer no record binds must skip
+        // the boundary flush.
+        gl.glBindBuffer(GL_ARRAY_BUFFER, idleVbo);
+        gl.glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(leftVerts), leftVerts);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        // WillRename leg: the drawn VBO is live — the write renames and the
+        // batch must survive without a flush.
+        gl.glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(rightVerts), rightVerts);
+        // Draw 2: NEW positions (right half), green.
+        gl.glUniform4f(colorLoc, 0, 1, 0, 1);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 6);
+        gl.glFinish();
+
+        const auto inv1 = context.metalResourceInventory();
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(4, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[0], 255u, 6u, "flush-narrow: pre-write draw uses draw-time positions (left red r)");
+        expectApproxByte(px[1], 0u, 6u, "flush-narrow: pre-write draw uses draw-time positions (left red g)");
+        gl.glReadPixels(12, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[0], 0u, 6u, "flush-narrow: post-write draw uses new positions (right green r)");
+        expectApproxByte(px[1], 255u, 6u, "flush-narrow: post-write draw uses new positions (right green g)");
+        expectCondition(inv1.bufferBoundaryFlushesNarrowed >=
+                            inv0.bufferBoundaryFlushesNarrowed + 2,
+                        "flush-narrow: both writes skipped the boundary flush");
+        expectCondition(inv1.bufferBoundaryFlushesForced ==
+                            inv0.bufferBoundaryFlushesForced,
+                        "flush-narrow: no forced boundary flush");
+        expectCondition(inv1.bufferRenames > inv0.bufferRenames,
+                        "flush-narrow: live write renamed");
+
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteBuffers(1, &idleVbo);
+        gl.glDeleteVertexArrays(1, &vao);
+        expectGLError(gl, GL_NO_ERROR, "flush-narrow rename-skip cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "rename-engaged buffer writes skip the encode-boundary flush; draw-time contents preserved";
+    }
+    return result;
+}
+
+TestResult runFlushNarrowForcedFlushProbe() {
+    ScopedEnvVar parallelFlag("APPGL_PARALLEL_ENCODE", "1");
+    auto result = runDirectSentinel("c52.flush-narrow.live-unrenameable", [&] {
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        static constexpr const char* kVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+        static constexpr const char* kFS =
+            "#version 330 core\n"
+            "uniform vec4 uColor;\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = uColor; }\n";
+        const GLuint program = buildBenchProgram(kVS, kFS);
+        gl.glViewport(0, 0, 16, 16);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glClearColor(0, 0, 0, 1);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glUseProgram(program);
+        const GLint colorLoc = gl.glGetUniformLocation(program, "uColor");
+
+        const float leftVerts[12] = {-1, -1, 0, -1, 0, 1,
+                                     -1, -1, 0, 1, -1, 1};
+        const float rightVerts[12] = {0, -1, 1, -1, 1, 1,
+                                      0, -1, 1, 1, 0, 1};
+        GLuint vao = 0, vbo = 0, tbo = 0;
+        gl.glGenVertexArrays(1, &vao);
+        gl.glBindVertexArray(vao);
+        gl.glGenBuffers(1, &vbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(leftVerts), leftVerts,
+                        GL_DYNAMIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, nullptr);
+        // Marking the VBO as a texture-buffer source makes it permanently
+        // un-renameable (the TBO view wraps this exact MTLBuffer), so a
+        // live write must force the boundary flush.
+        gl.glGenTextures(1, &tbo);
+        gl.glActiveTexture(GL_TEXTURE0 + 5);
+        gl.glBindTexture(GL_TEXTURE_BUFFER, tbo);
+        gl.glTexBufferRange(GL_TEXTURE_BUFFER, GL_RGBA32F, vbo, 0,
+                            sizeof(leftVerts));
+        gl.glActiveTexture(GL_TEXTURE0);
+
+        // Warmup (see rename-skip probe). Blue so the measured draws are
+        // distinguishable; no glClear after — a pending deferred clear
+        // would land in the mid-sequence forced-flush pass and wipe the
+        // diagnostic.
+        gl.glUniform4f(colorLoc, 0, 0, 1, 1);
+        for (int i = 0; i < 6; ++i) {
+            gl.glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
+        gl.glFinish();
+
+        const auto inv0 = context.metalResourceInventory();
+        gl.glUniform4f(colorLoc, 1, 0, 0, 1);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 6);
+        // Live + texture-buffer-source ⇒ un-renameable ⇒ the boundary
+        // flush MUST fire so the pending record encodes before the
+        // in-place write lands.
+        gl.glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(rightVerts), rightVerts);
+        gl.glUniform4f(colorLoc, 0, 1, 0, 1);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 6);
+        gl.glFinish();
+
+        const auto inv1 = context.metalResourceInventory();
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        // ACCEPTED residual semantics, asserted deterministically: an
+        // un-renameable buffer takes the in-place write, so the encoded-
+        // but-uncommitted draw 1 samples the post-write positions and
+        // renders on the RIGHT (the kc.inplace rename-skip residual —
+        // identical pre-narrowing; the boundary flush protects the
+        // record window, not the encoded-CB window). The left half must
+        // keep the FINISHED warmup blue, and draw 2 must win the right.
+        gl.glReadPixels(4, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[0], 0u, 6u, "flush-narrow forced: finished warmup preserved on left (r)");
+        expectApproxByte(px[2], 255u, 6u, "flush-narrow forced: finished warmup preserved on left (b)");
+        gl.glReadPixels(12, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[1], 255u, 6u, "flush-narrow forced: post-write draw uses new positions (right green)");
+        expectCondition(inv1.bufferBoundaryFlushesForced >
+                            inv0.bufferBoundaryFlushesForced,
+                        "flush-narrow forced: un-renameable live write forced the boundary flush");
+        expectCondition(inv1.bufferRenames == inv0.bufferRenames,
+                        "flush-narrow forced: no rename for texture-buffer-source");
+
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteTextures(1, &tbo);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteVertexArrays(1, &vao);
+        expectGLError(gl, GL_NO_ERROR, "flush-narrow forced cleanup");
+    });
+    if (result.status == "passed") {
+        result.message = "un-renameable live buffer writes still force the encode-boundary flush; draw-time contents preserved";
+    }
+    return result;
+}
+
 // C52 sampler-resolve cache probes. The cache is flagged
 // (APPGL_ENABLE_SAMPLER_RESOLVE_CACHE, default OFF); every invalidation
 // condition of the ratified four-condition matrix gets a must-miss leg
@@ -18013,6 +18221,12 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
 
     if (normalizedPhase == "triage-mid-frame-only") {
         tests.push_back(runC52MidFrameUploadOrderProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "flush-narrowing-probes") {
+        tests.push_back(runFlushNarrowRenameSkipProbe());
+        tests.push_back(runFlushNarrowForcedFlushProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

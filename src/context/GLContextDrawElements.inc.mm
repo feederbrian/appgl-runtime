@@ -848,7 +848,8 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
 
                     applyCachedVertexArrayLayout(
                         vaoLayout, *impl_->objects, tdi, 0,
-                        false, false, &impl_->coldPathProfile);
+                        false, false, &impl_->coldPathProfile,
+                        impl_->frameGraph.get());
                     drawProfile.mark(GLDrawProfileBucket::VertexLayout);
 
                     logStateResolveCostClass(

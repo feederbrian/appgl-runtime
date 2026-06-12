@@ -1071,6 +1071,18 @@ public:
     // resources or issue a visibility barrier use this to close any pending
     // translated default-framebuffer batch before the mutation becomes visible.
     void flushParallelEncodeBoundary();
+    // S25 Rung 1.5 (flush-narrowing): true when any deferred draw batch
+    // (parallel-translated captures, threaded-deferred records, or
+    // lean-direct descriptors) is pending. Buffer-mutation sites use this
+    // plus the write's rename liveness to decide whether the boundary
+    // flush is actually required.
+    bool hasPendingDeferredDrawBatch() const;
+    // S25 Rung 1.5: the descriptor batches hold UN-retained Metal handles;
+    // when rename-on-write swaps a buffer's backing while a batch is
+    // pending, the old handle's retain is donated here instead of being
+    // released, and dropped once all pending batches have flushed (the
+    // encoder retains what it binds from then on).
+    void adoptDeferredBatchKeepalive(void* retainedHandle);
     // C52 opt-pass instrument: JSON snapshot of the APPGL_DRAW_PROFILE
     // per-draw submit aggregates ("" when the profiler is off or idle).
     // The stderr dump is teardown-gated; this feeds the periodic

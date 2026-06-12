@@ -18,6 +18,9 @@ bool GLContext::deleteBuffers(GLsizei count, const GLuint* buffers) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    // S25 Rung 1.5 note: deletion stays UNCONDITIONAL — it frees the CPU
+    // shadow and drops the runtime's Metal retain (storage-replacement
+    // class; narrowing it needs the Rung-2 record-payload retain design).
     if (impl_->frameGraph != nullptr) {
         impl_->frameGraph->flushParallelEncodeBoundary();
     }
@@ -215,6 +218,9 @@ bool GLContext::bufferData(GLenum target, GLsizeiptr size, const void* data, GLe
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // S25 Rung 1.5 note: respecification stays UNCONDITIONAL — it can
+    // reallocate the CPU shadow and replace the Metal backing outside the
+    // rename path (storage-replacement class; Rung-2 territory).
     if (impl_->frameGraph != nullptr) {
         impl_->frameGraph->flushParallelEncodeBoundary();
     }
@@ -269,9 +275,9 @@ bool GLContext::bufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
         return false;
     }
     if (size > 0) {
-        if (impl_->frameGraph != nullptr) {
-            impl_->frameGraph->flushParallelEncodeBoundary();
-        }
+        // S25 Rung 1.5: narrowed — flush only when the write lands in
+        // place on a Metal buffer a pending deferred record binds.
+        impl_->flushEncodeBoundaryForBufferWrite(*object);
         if (!impl_->writeBufferRange(*object, offset, data, size)) {
             pushError(GL_OUT_OF_MEMORY);
             return false;
@@ -325,9 +331,9 @@ bool GLContext::copyBufferSubData(
         }
     }
     if (size > 0) {
-        if (impl_->frameGraph != nullptr) {
-            impl_->frameGraph->flushParallelEncodeBoundary();
-        }
+        // S25 Rung 1.5: narrowed on the WRITE-side object (the read side
+        // consumes the CPU shadow, which deferred records never alias).
+        impl_->flushEncodeBoundaryForBufferWrite(*writeObject);
         std::vector<std::uint8_t> copyBytes(static_cast<std::size_t>(size));
         if (!impl_->readBufferRange(*readObject, readOffset, size, copyBytes.data())) {
             pushError(GL_INVALID_OPERATION);
@@ -465,9 +471,13 @@ void* GLContext::mapBufferRange(GLenum target, GLintptr offset, GLsizeiptr lengt
     }
 
     if ((access & (GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT |
-                   GL_MAP_INVALIDATE_BUFFER_BIT)) != 0 &&
-        impl_->frameGraph != nullptr) {
-        impl_->frameGraph->flushParallelEncodeBoundary();
+                   GL_MAP_INVALIDATE_BUFFER_BIT)) != 0) {
+        // S25 Rung 1.5: map-for-write — writes go through the returned
+        // pointer directly (no later sync renames them), so any live
+        // reader forces the flush; only a buffer with no live readers
+        // skips it.
+        impl_->flushEncodeBoundaryForBufferWrite(
+            *object, /*subsequentWritesBypassSync=*/true);
     }
     if (access & GL_MAP_READ_BIT) {
         impl_->drainPendingGpuProducers(*object);
@@ -645,9 +655,8 @@ bool GLContext::clearBufferData(GLenum target, GLenum internalformat, GLenum for
     if (buffer->size == 0) {
         return true; // valid no-op
     }
-    if (impl_->frameGraph != nullptr) {
-        impl_->frameGraph->flushParallelEncodeBoundary();
-    }
+    // S25 Rung 1.5: narrowed (see bufferSubData).
+    impl_->flushEncodeBoundaryForBufferWrite(*buffer);
     const std::size_t patternBytes = bufferClearPatternBytes(format, type);
     if (!impl_->fillBufferRange(*buffer, 0, buffer->size, data, patternBytes)) {
         pushError(GL_OUT_OF_MEMORY);
@@ -706,9 +715,8 @@ bool GLContext::clearBufferSubData(GLenum target, GLenum internalformat, GLintpt
     if (size == 0) {
         return true;
     }
-    if (impl_->frameGraph != nullptr) {
-        impl_->frameGraph->flushParallelEncodeBoundary();
-    }
+    // S25 Rung 1.5: narrowed (see bufferSubData).
+    impl_->flushEncodeBoundaryForBufferWrite(*buffer);
     const std::size_t patternBytes = bufferClearPatternBytes(format, type);
     if (!impl_->fillBufferRange(*buffer, offset, size, data, patternBytes)) {
         pushError(GL_OUT_OF_MEMORY);

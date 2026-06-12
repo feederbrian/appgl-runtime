@@ -17612,6 +17612,68 @@ struct GLContext::Impl {
         );
     }
 
+    // S25 Rung 1.5 (flush-narrowing): the rename decision tree, factored so
+    // the buffer-mutation flush sites and syncMetalFromShadow share ONE
+    // source of truth (predicate drift here would silently unsound the
+    // narrowing).
+    //   NoLiveReaders    — no uncompleted CB or pending deferred record
+    //                      holds this buffer's Metal handle.
+    //   WillRename       — live readers exist and the next shadow sync
+    //                      renames (old allocation keeps draw-time bytes).
+    //   LiveUnrenameable — live readers exist and the sync must write
+    //                      in place (mapped/sparse/GPU-authored/...).
+    enum class BufferWriteLiveness { NoLiveReaders, WillRename, LiveUnrenameable };
+
+    BufferWriteLiveness classifyBufferWriteLiveness(const GLBufferObject& object) const {
+        if (frameGraph == nullptr ||
+            object.metalBuffer == nullptr ||
+            object.shadowBytes.empty() ||
+            object.liveBindSubmitIndex == 0 ||
+            object.liveBindSubmitIndex <= frameGraph->completedCommandBufferWatermark()) {
+            return BufferWriteLiveness::NoLiveReaders;
+        }
+        const bool renameSafe =
+            !object.gpuAuthoredSinceCpuWrite &&
+            !object.producerPending.hasAny(kProducerAll) &&
+            !object.mapped &&
+            !object.sparseStorage &&
+            !object.textureBufferSource &&
+            object.fp64TransportSidecars.empty() &&
+            device != nil;
+        return renameSafe ? BufferWriteLiveness::WillRename
+                          : BufferWriteLiveness::LiveUnrenameable;
+    }
+
+    // S25 Rung 1.5: narrowed replacement for the unconditional
+    // flushParallelEncodeBoundary() at buffer-WRITE sites. The deferred
+    // batches deep-copy every CPU payload at record time, so the boundary
+    // flush is load-bearing ONLY when the write lands in place on a Metal
+    // buffer a pending record binds (retention is not a snapshot — the
+    // late encode would read post-write bytes). A renaming write keeps the
+    // old allocation's bytes (and the rename path donates the old handle's
+    // retain to the batch keepalive for the un-retained descriptor
+    // batches), so no flush is needed. `subsequentWritesBypassSync` is for
+    // map-for-write sites: writes through the returned pointer hit
+    // [contents] directly without another sync, so ANY live reader forces
+    // the flush, rename or not.
+    void flushEncodeBoundaryForBufferWrite(GLBufferObject& object,
+                                           bool subsequentWritesBypassSync = false) {
+        if (frameGraph == nullptr || !frameGraph->hasPendingDeferredDrawBatch()) {
+            return;
+        }
+        const BufferWriteLiveness liveness = classifyBufferWriteLiveness(object);
+        const bool mustFlush =
+            liveness == BufferWriteLiveness::LiveUnrenameable ||
+            (subsequentWritesBypassSync &&
+             liveness == BufferWriteLiveness::WillRename);
+        if (mustFlush) {
+            frameGraph->flushParallelEncodeBoundary();
+            ++bufferBoundaryFlushesForced;
+            return;
+        }
+        ++bufferBoundaryFlushesNarrowed;
+    }
+
     void syncMetalFromShadow(GLBufferObject& object, GLintptr offset, GLsizeiptr length) {
         if (length <= 0 || object.metalBuffer == nullptr || object.shadowBytes.empty()) {
             return;
@@ -17624,22 +17686,16 @@ struct GLContext::Impl {
         // swap the object's pointer; the pending CB retains the old
         // buffer ([commandQueue commandBuffer] = retaining variant), so
         // its draws keep reading the old contents and the old buffer is
-        // freed on completion. Guards fall back to in-place (today's
-        // behavior) where renaming would lose state: GPU-authored
-        // contents (rename copies the CPU shadow), live map pointers,
-        // sparse backing, and buffer-texture sources (views wrap the
-        // exact MTLBuffer).
-        if (object.liveBindSubmitIndex > 0 && frameGraph != nullptr &&
-            object.liveBindSubmitIndex > frameGraph->completedCommandBufferWatermark()) {
-            const bool renameSafe =
-                !object.gpuAuthoredSinceCpuWrite &&
-                !object.producerPending.hasAny(kProducerAll) &&
-                !object.mapped &&
-                !object.sparseStorage &&
-                !object.textureBufferSource &&
-                object.fp64TransportSidecars.empty() &&
-                device != nil;
-            if (renameSafe) {
+        // freed on completion. Pending DEFERRED batches hold the old
+        // handle un-retained (descriptor batches) — donate the retain to
+        // the batch keepalive instead of releasing (S25 Rung 1.5).
+        // Guards fall back to in-place (today's behavior) where renaming
+        // would lose state: GPU-authored contents (rename copies the CPU
+        // shadow), live map pointers, sparse backing, and buffer-texture
+        // sources (views wrap the exact MTLBuffer).
+        const BufferWriteLiveness liveness = classifyBufferWriteLiveness(object);
+        if (liveness != BufferWriteLiveness::NoLiveReaders) {
+            if (liveness == BufferWriteLiveness::WillRename) {
                 id<MTLBuffer> oldBuffer = metalBufferFromRaw(object.metalBuffer);
                 id<MTLBuffer> fresh =
                     [device newBufferWithLength:[oldBuffer length]
@@ -17649,7 +17705,13 @@ struct GLContext::Impl {
                         object.shadowBytes.size(),
                         static_cast<std::size_t>([fresh length]));
                     std::memcpy([fresh contents], object.shadowBytes.data(), seedBytes);
-                    releaseRetainedMetalObject(object.metalBuffer);
+                    if (frameGraph != nullptr &&
+                        frameGraph->hasPendingDeferredDrawBatch()) {
+                        frameGraph->adoptDeferredBatchKeepalive(object.metalBuffer);
+                        ++bufferRenameKeepalives;
+                    } else {
+                        releaseRetainedMetalObject(object.metalBuffer);
+                    }
                     object.metalBuffer = transferRetainedMetalObject(fresh);
                     object.liveBindSubmitIndex = 0;
                     ++bufferRenames;
@@ -17838,6 +17900,9 @@ struct GLContext::Impl {
     std::uint64_t bufferRenames = 0;
     std::uint64_t bufferRenameBytes = 0;
     std::uint64_t bufferRenameSkips = 0;
+    std::uint64_t bufferRenameKeepalives = 0;
+    std::uint64_t bufferBoundaryFlushesForced = 0;
+    std::uint64_t bufferBoundaryFlushesNarrowed = 0;
 
     bool refreshRGB32BufferTextureView(GLTextureObject& object) {
         if (object.target != GL_TEXTURE_BUFFER ||
@@ -27199,6 +27264,9 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         inventory.bufferRenames = impl_->bufferRenames;
         inventory.bufferRenameBytes = impl_->bufferRenameBytes;
         inventory.bufferRenameSkips = impl_->bufferRenameSkips;
+        inventory.bufferRenameKeepalives = impl_->bufferRenameKeepalives;
+        inventory.bufferBoundaryFlushesForced = impl_->bufferBoundaryFlushesForced;
+        inventory.bufferBoundaryFlushesNarrowed = impl_->bufferBoundaryFlushesNarrowed;
         inventory.frameGraphFboClearsDeferred =
             frameGraphMetal.fboClearsDeferred;
         inventory.frameGraphFboClearsFolded =
@@ -35837,7 +35905,8 @@ static void applyCachedVertexArrayLayout(
     GLint first,
     bool offsetExtraBuffersByFirst,
     bool keepEmptyExtraBufferGroups,
-    ColdPathDiagnosticProfile* coldProfile = nullptr)
+    ColdPathDiagnosticProfile* coldProfile = nullptr,
+    MetalFrameGraph* frameGraph = nullptr)
 {
     ColdPathDiagnosticScope coldScope(
         coldProfile, ColdPathDiagnosticBucket::ProgramVaoFboLayoutApply);
@@ -35873,6 +35942,15 @@ static void applyCachedVertexArrayLayout(
             evb.data = extraVbo->shadowBytes.data();
             evb.byteCount = extraVbo->shadowBytes.size();
             evb.metalBuffer = extraVbo->metalBuffer;
+            // S25 Rung 1.5: extra-attribute VBOs hand their Metal handle
+            // to the draw record exactly like the primary VBO does — mark
+            // the live bind so rename-on-write (and the narrowed boundary
+            // flush) covers them too. Pre-existing gap: only primary VBO /
+            // EBO / >4KB-UBO captures marked liveness.
+            if (frameGraph != nullptr && extraVbo->metalBuffer != nullptr) {
+                extraVbo->liveBindSubmitIndex =
+                    frameGraph->openCommandBufferSubmitIndex();
+            }
             evb.metalBufferOffset = offsetExtraBuffersByFirst
                 && group.divisor == 0
                 ? static_cast<std::size_t>(first) * group.stride

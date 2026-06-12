@@ -848,6 +848,9 @@ public:
         std::uint64_t bufferRenames = 0;
         std::uint64_t bufferRenameBytes = 0;
         std::uint64_t bufferRenameSkips = 0;
+        std::uint64_t bufferRenameKeepalives = 0;
+        std::uint64_t bufferBoundaryFlushesForced = 0;
+        std::uint64_t bufferBoundaryFlushesNarrowed = 0;
         std::uint64_t frameGraphFboClearsDeferred = 0;
         std::uint64_t frameGraphFboClearsFolded = 0;
         std::uint64_t frameGraphFboClearsMaterialized = 0;

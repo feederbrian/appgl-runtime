@@ -11553,6 +11553,7 @@ struct MetalFrameGraph::Impl {
         if (!parallelEncodeProfile.enabled ||
             pendingParallelTranslatedDraws.empty() ||
             flushingParallelTranslatedBatch) {
+            drainDeferredBatchKeepalivesIfIdle();
             return;
         }
 
@@ -11567,11 +11568,43 @@ struct MetalFrameGraph::Impl {
         }
         pendingParallelTranslatedDraws.clear();
         flushingParallelTranslatedBatch = false;
+        drainDeferredBatchKeepalivesIfIdle();
     }
 
     void flushParallelEncodeBoundary() {
         flushParallelTranslatedDrawBatch(
             ParallelEncodeBoundaryReason::ResourceMutationOrBarrier);
+    }
+
+    // S25 Rung 1.5 (flush-narrowing): rename-on-write donates the renamed
+    // buffer's old retained handle here while deferred batches are pending
+    // (lean-direct / threaded-descriptor records hold raw un-retained
+    // pointers); drained once no batch is pending — by then every encoded
+    // bind holds its own encoder retain.
+    std::vector<void*> deferredBatchKeepalives;
+
+    bool hasPendingDeferredDrawBatchImpl() const {
+        return !pendingParallelTranslatedDraws.empty() ||
+               !pendingLeanDirectDescriptors.empty() ||
+               !pendingThreadedDeferredRecords.empty();
+    }
+
+    void adoptDeferredBatchKeepaliveImpl(void* retainedHandle) {
+        if (retainedHandle == nullptr) {
+            return;
+        }
+        deferredBatchKeepalives.push_back(retainedHandle);
+    }
+
+    void drainDeferredBatchKeepalivesIfIdle() {
+        if (deferredBatchKeepalives.empty() ||
+            hasPendingDeferredDrawBatchImpl()) {
+            return;
+        }
+        for (void* handle : deferredBatchKeepalives) {
+            releaseRetainedObjCObject(handle);
+        }
+        deferredBatchKeepalives.clear();
     }
 
     std::string drawSubmitProfileDiagnosticsJson() const {
@@ -20117,6 +20150,14 @@ std::uint64_t MetalFrameGraph::orderedTextureUploadCount() const {
 
 void MetalFrameGraph::flushParallelEncodeBoundary() {
     impl_->flushParallelEncodeBoundary();
+}
+
+bool MetalFrameGraph::hasPendingDeferredDrawBatch() const {
+    return impl_->hasPendingDeferredDrawBatchImpl();
+}
+
+void MetalFrameGraph::adoptDeferredBatchKeepalive(void* retainedHandle) {
+    impl_->adoptDeferredBatchKeepaliveImpl(retainedHandle);
 }
 
 void MetalFrameGraph::flushForReadback() {

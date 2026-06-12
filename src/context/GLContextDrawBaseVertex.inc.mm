@@ -246,7 +246,8 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
 
                     applyCachedVertexArrayLayout(
                         vaoLayout, *impl_->objects, tdi, 0,
-                        false, false, &impl_->coldPathProfile);
+                        false, false, &impl_->coldPathProfile,
+                        impl_->frameGraph.get());
 
                     logStateResolveCostClass(
                         "drawElementsBaseVertex", programName, vaoName,
@@ -926,7 +927,8 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
 
                     applyCachedVertexArrayLayout(
                         vaoLayout, *impl_->objects, tdi, 0,
-                        false, false, &impl_->coldPathProfile);
+                        false, false, &impl_->coldPathProfile,
+                        impl_->frameGraph.get());
 
                     logStateResolveCostClass(
                         "drawElementsInstancedBaseVertex", programName, vaoName,
