@@ -355,6 +355,33 @@ def main():
                     print("  VERDICT: clearAfter3D NOT higher on degraded ⇒ §5's "
                           "clear-rate was a FIRST-PASS-TYPE confound, NOT a wipe — "
                           "re-examine the mechanism (do NOT fix the clear-timing).")
+                # §6 WRONG-PLAN (needs APPGL_W2_PLAN_VERIFY=1): a cache HIT served a
+                # plan whose content ≠ fresh-rebuild = MSL-identity-key collision →
+                # wrong PSO → encode-but-no-pixels = NOWHERE.
+                dvm = pl_l.get("degradedVerifyMismatches", 0)
+                pvm = pl_l.get("presentVerifyMismatches", 0)
+                vm_total = pl_l.get("degradedVerifyMismatches", None)
+                if dvm or pvm or "degradedVerifyMismatches" in pl_l:
+                    print("\n== §6 WRONG-PLAN (verify-mismatch, needs APPGL_W2_PLAN_VERIFY=1) ==")
+                    print(f"verifyMismatches/frame: degraded={rate(dvm,degf):.3f} "
+                          f"({dvm}) present={rate(pvm,presf):.3f} ({pvm})")
+                    if dvm == 0 and pvm == 0:
+                        print("  (verifyMismatches=0 — either APPGL_W2_PLAN_VERIFY not "
+                              "set, or NO wrong-plan: if the verify latch WAS on, the "
+                              "cached plans are CORRECT ⇒ pivot to the child-encoder "
+                              "state-application ALT candidate.)")
+                    elif rate(dvm, degf) > rate(pvm, presf) + 0.01 and dvm > 0:
+                        print("  VERDICT: WRONG-PLAN CONFIRMED — degraded frames are "
+                              "served a cached plan/PSO whose content ≠ the fresh "
+                              "rebuild (MSL-identity-key collision/staleness) ≫ present "
+                              "⇒ the lean cache-miss draws encode a non-null-but-WRONG "
+                              "PSO → no fragments → NOWHERE. FIX = recordPlanIdentityKey "
+                              "→ a real CONTENT hash (not pointer-approximation), stays "
+                              "parallel. Site PINNED (recordPlanIdentityKey:20584).")
+                    else:
+                        print("  VERDICT: verifyMismatches present but NOT degraded≫present "
+                              "⇒ not the degraded-specific cause — re-examine (the "
+                              "mismatches are background, not the freeze).")
 
     # Parallel-encode share (arm c).
     pe_first, pe_last = first.get("parallelEncode", {}), last.get("parallelEncode", {})

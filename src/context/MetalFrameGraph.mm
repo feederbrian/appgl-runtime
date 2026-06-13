@@ -15319,6 +15319,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             armedBatchClearAfter3D = batchClearAfter3DThisFrame;
             armedEncodeClears = encodeClearsThisFrame;
             armedMidFrameCommits = midFrameCommitsThisFrame;
+            // §6: snapshot the wrong-plan (verify-mismatch) count.
+            armedVerifyMismatches = verifyMismatchesThisFrame;
         }
         // §5: reset the per-frame batch-flush counters (snapshot armed above).
         batchFlushesThisFrame = 0;
@@ -15331,6 +15333,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         batchClearAfter3DThisFrame = 0;
         encodeClearsThisFrame = 0;
         midFrameCommitsThisFrame = 0;
+        // §6 reset.
+        verifyMismatchesThisFrame = 0;
         lastLeanColorTextureSincePresent = nullptr;
         lastLeanSubmitIndexSincePresent = 0;
         leanEncodedSincePresent = 0;
@@ -15684,6 +15688,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         std::atomic<std::uint64_t>* pClearAfter3D = &presentBatchClearAfter3D;
         std::atomic<std::uint64_t>* pEncodeClears = &presentEncodeClears;
         std::atomic<std::uint64_t>* pMidFrameCommits = &presentMidFrameCommits;
+        // §6 wrong-plan snapshot.
+        const std::uint32_t s6VerifyMismatches = armedVerifyMismatches;
+        std::atomic<std::uint64_t>* dVerifyMismatches = &degradedVerifyMismatches;
+        std::atomic<std::uint64_t>* pVerifyMismatches = &presentVerifyMismatches;
         [currentCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer>) {
             const std::uint8_t* p = static_cast<const std::uint8_t*>(rb.contents);
             int clearMatches = 0;
@@ -15713,6 +15721,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 dClearAfter3D->fetch_add(s51ClearAfter3D, std::memory_order_relaxed);
                 dEncodeClears->fetch_add(s51EncodeClears, std::memory_order_relaxed);
                 dMidFrameCommits->fetch_add(s51MidFrameCommits, std::memory_order_relaxed);
+                dVerifyMismatches->fetch_add(s6VerifyMismatches, std::memory_order_relaxed);
                 sawMissingFlag->store(true, std::memory_order_relaxed);
                 if (fullRb != nil && !spatialClaimedFlag->exchange(true)) {
                     const std::uint8_t* fp =
@@ -15766,6 +15775,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 pClearAfter3D->fetch_add(s51ClearAfter3D, std::memory_order_relaxed);
                 pEncodeClears->fetch_add(s51EncodeClears, std::memory_order_relaxed);
                 pMidFrameCommits->fetch_add(s51MidFrameCommits, std::memory_order_relaxed);
+                pVerifyMismatches->fetch_add(s6VerifyMismatches, std::memory_order_relaxed);
             }
             (void)rb;
             (void)fullRb;
@@ -15859,7 +15869,14 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             << ",\"presentEncodeClears\":"
             << presentEncodeClears.load(std::memory_order_relaxed)
             << ",\"presentMidFrameCommits\":"
-            << presentMidFrameCommits.load(std::memory_order_relaxed) << "}";
+            << presentMidFrameCommits.load(std::memory_order_relaxed)
+            // §6 WRONG-PLAN (needs APPGL_W2_PLAN_VERIFY=1): degraded ≫ present
+            // ⇒ the lean cache-miss draws are served a wrong cached plan/PSO
+            // (MSL-identity-key collision) → encode-but-no-pixels = NOWHERE.
+            << ",\"degradedVerifyMismatches\":"
+            << degradedVerifyMismatches.load(std::memory_order_relaxed)
+            << ",\"presentVerifyMismatches\":"
+            << presentVerifyMismatches.load(std::memory_order_relaxed) << "}";
         return out.str();
     }
 
@@ -20328,6 +20345,16 @@ private:
     std::atomic<std::uint64_t> presentBatchClearAfter3D{0};
     std::atomic<std::uint64_t> presentEncodeClears{0};
     std::atomic<std::uint64_t> presentMidFrameCommits{0};
+    // S25 W2 §6 WRONG-PLAN confirm (the pre-registered MSL-identity-approximation
+    // suspect): with APPGL_W2_PLAN_VERIFY=1, a cache HIT served a plan whose
+    // content ≠ the fresh rebuild = a wrong cached plan (key collision/staleness)
+    // → encodes a non-null-but-WRONG PSO → renders nothing → NOWHERE. Per-frame,
+    // bucketed degraded-vs-present via §4. degraded ≫ present ⇒ wrong-plan
+    // CONFIRMED → fix the identity key (content hash). Requires BOTH latches.
+    std::uint32_t verifyMismatchesThisFrame = 0;
+    std::uint32_t armedVerifyMismatches = 0;
+    std::atomic<std::uint64_t> degradedVerifyMismatches{0};
+    std::atomic<std::uint64_t> presentVerifyMismatches{0};
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;
@@ -20942,6 +20969,13 @@ private:
                         forcePerSampleFS, hasFragmentStage, prefix, fresh) ||
                     !translatedDrawPlanContentEquals(fresh, it->second)) {
                     ++recordPlanMemoVerifyMismatches;
+                    // S25 §6: a cache HIT served a plan whose content ≠ the fresh
+                    // rebuild for this key = a WRONG cached plan (MSL-identity-key
+                    // collision/staleness). Per-frame count, bucketed degraded-vs-
+                    // present in the §4 handler → the wrong-PSO/NOWHERE confirm.
+                    if (survivalContentProbeLatched) {
+                        ++verifyMismatchesThisFrame;
+                    }
                 }
             }
             return &it->second;
