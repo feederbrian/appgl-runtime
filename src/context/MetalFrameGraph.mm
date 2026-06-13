@@ -691,6 +691,7 @@ enum class ParallelEncodeBoundaryReason : std::size_t {
     ArgumentBuffers,
     StorageOrAtomicSideEffects,
     ImageWriteSideEffects,
+    ImageReadSideEffects,
     ProgramPipelineOrSubroutineState,
     LayeredOrViewportArrayState,
     QueryOrTransformFeedbackState,
@@ -747,6 +748,8 @@ static const char* parallelEncodeBoundaryReasonName(
             return "storage_or_atomic_side_effects";
         case ParallelEncodeBoundaryReason::ImageWriteSideEffects:
             return "image_write_side_effects";
+        case ParallelEncodeBoundaryReason::ImageReadSideEffects:
+            return "image_read_side_effects";
         case ParallelEncodeBoundaryReason::ProgramPipelineOrSubroutineState:
             return "program_pipeline_or_subroutine_state";
         case ParallelEncodeBoundaryReason::LayeredOrViewportArrayState:
@@ -2130,6 +2133,36 @@ static bool translatedDrawNeedsCpuOrRingUploadPath(
     return info.indexCount > 0 && info.metalIndexBuffer == nullptr;
 }
 
+// S25 W2.2: the ONE side-effect / image-binding rejection. The parallel
+// encode path binds neither storage buffers, atomic counters, nor image
+// units (read OR write) — a draw using any of them must take the serial
+// path, which does. The READ-image leg (readImageTextureNames) is the
+// W2.2 fix: it was MISSING from all three write-guarded authorities (gate,
+// emit-safe, the Phase-2 masker), so image-LOAD draws — incidentally kept
+// off parallel by plan-null until W2.1 resolved their plans — slipped onto
+// the parallel path and rendered without their image bindings
+// (advanced-sso-simple P→F). Single-sourced HERE so the read-check is one
+// omission-proof place, not re-papered across the call sites that caused
+// the gap. Used by translatedDrawParallelStructuralReject (gate +
+// resolve-gating) and delegated to by translatedDrawWorkerEmitSafe.
+static bool translatedDrawHasParallelUnsafeSideEffect(
+    const TranslatedDrawInfo& info,
+    ParallelEncodeBoundaryReason& reason) {
+    if (!info.ssboBindings.empty() || !info.atomicCounterBindings.empty()) {
+        reason = ParallelEncodeBoundaryReason::StorageOrAtomicSideEffects;
+        return true;
+    }
+    if (!info.writtenImageTextureNames.empty()) {
+        reason = ParallelEncodeBoundaryReason::ImageWriteSideEffects;
+        return true;
+    }
+    if (!info.readImageTextureNames.empty()) {
+        reason = ParallelEncodeBoundaryReason::ImageReadSideEffects;
+        return true;
+    }
+    return false;
+}
+
 // S25 W2.1: the plan-INDEPENDENT structural rejections — the cheap checks
 // that need no TranslatedDrawPlan. Factored out so the gate and the W2.1
 // resolve-gating agree on exactly which draws are rejected before any plan
@@ -2154,6 +2187,11 @@ static bool translatedDrawParallelStructuralReject(
         reason = ParallelEncodeBoundaryReason::ArgumentBuffers;
         return true;
     }
+    // S25 W2.2: side-effect / image-binding draws (incl. read-images) are
+    // plan-independent parallel-ineligible — reject before any plan work.
+    if (translatedDrawHasParallelUnsafeSideEffect(info, reason)) {
+        return true;
+    }
     return false;
 }
 
@@ -2176,14 +2214,9 @@ static bool translatedDrawParallelCaptureEligible(
         reason = ParallelEncodeBoundaryReason::ArgumentBuffers;
         return false;
     }
-    if (!info.ssboBindings.empty() || !info.atomicCounterBindings.empty()) {
-        reason = ParallelEncodeBoundaryReason::StorageOrAtomicSideEffects;
-        return false;
-    }
-    if (!info.writtenImageTextureNames.empty()) {
-        reason = ParallelEncodeBoundaryReason::ImageWriteSideEffects;
-        return false;
-    }
+    // S25 W2.2: ssbo/atomic/image (read+write) side-effect rejection moved
+    // into translatedDrawParallelStructuralReject (called at the top of
+    // this function), single-sourced with the resolve-gating + emit-safe.
     if (info.pipelineOrSubroutinePlanCacheUnsafe) {
         reason = ParallelEncodeBoundaryReason::ProgramPipelineOrSubroutineState;
         return false;
@@ -8754,9 +8787,12 @@ struct MetalFrameGraph::Impl {
         if (translatedDrawNeedsCpuOrRingUploadPath(info)) {
             return false;
         }
-        if (!info.ssboBindings.empty() ||
-            !info.atomicCounterBindings.empty() ||
-            !info.writtenImageTextureNames.empty()) {
+        // S25 W2.2: delegate ssbo/atomic/image (read+write) to the single
+        // side-effect predicate — same judgment the gate + resolve-gating
+        // use, so the read-image guard cannot drift between authorities.
+        ParallelEncodeBoundaryReason sideEffectReason =
+            ParallelEncodeBoundaryReason::SerialPathOnly;
+        if (translatedDrawHasParallelUnsafeSideEffect(info, sideEffectReason)) {
             return false;
         }
         if (!parallelTextureBindingsWorkerSafe(info.fragmentTextures) ||

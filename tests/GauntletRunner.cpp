@@ -19139,6 +19139,97 @@ TestResult runS25W2_1CandidateDeliveryDefaultOffProbe() {
     return result;
 }
 
+// ── S25 W2.2: read-image draws must stay off the parallel arm ──
+// The W2.1 sweep RED (advanced-sso-simple, Pass-serial/Fail-parallel) was a
+// pre-existing latent gap W2.1 unmasked: readImageTextureNames (image LOADS)
+// was guarded by NO parallel-eligibility authority (only writes were), and
+// the parallel path never binds read-images. W2.1's plan-resolve let
+// image-load draws onto the parallel path → encoded without bindings →
+// wrong. W2.2 single-sources the side-effect guard incl. readImage. This
+// probe drives a readonly-image imageLoad draw on the REAL arm under the
+// forced cache-freeze (the W2.1 resolve path) and asserts it does NOT become
+// a parallel candidate.
+//   RED on 732c763 (readImage ungated → resolves → gate passes → candidate).
+//   GREEN post-W2.2 (structural-reject → serial; candidates == 0).
+TestResult runS25W2_2ReadImageRejectProbe() {
+    ScopedEnvVar parallelOn("APPGL_PARALLEL_ENCODE", "1");
+    ScopedEnvVar minBatch("APPGL_PARALLEL_ENCODE_MIN_BATCH", "4");
+    ScopedEnvVar capClamp("APPGL_PHASE2_PLAN_CAPACITY", "0");
+    auto result = runDirectSentinel("s25.w2_2.read-image-reject", [&] {
+        static constexpr const char* kVS =
+            "#version 430 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+        // readonly image2D + imageLoad → readImageTextureNames is populated,
+        // writtenImageTextureNames stays empty (the exact failing shape).
+        static constexpr const char* kReadImageFS =
+            "#version 430 core\n"
+            "layout(rgba8, binding = 0) uniform readonly image2D inImg;\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = imageLoad(inImg, ivec2(0, 0)); }\n";
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        const GLuint program = buildBenchProgram(kVS, kReadImageFS);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(program, GL_LINK_STATUS, &linked);
+        if (linked != GL_TRUE) {
+            recordSentinelFailure(failures, "read-image program did not link", "");
+            throwIfSentinelFailed(failures);
+        }
+        GLuint vao = 0, vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+        GLuint imageTex = 0;
+        gl.glGenTextures(1, &imageTex);
+        setupDCR3CRGBA8Texture(gl, imageTex, 4, 4);
+        gl.glUseProgram(program);
+        // READ_ONLY binding → the resolve pushes to readImageTextureNames
+        // and NOT writtenImageTextureNames (GLContext resolveImageBindings).
+        gl.glBindImageTexture(0, imageTex, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA8);
+        const GLint imgLoc = gl.glGetUniformLocation(program, "inImg");
+        if (imgLoc >= 0) {
+            gl.glUniform1i(imgLoc, 0);
+        }
+        gl.glViewport(0, 0, 64, 64);
+        gl.glDisable(GL_DEPTH_TEST);
+        for (int i = 0; i < 16; ++i) {
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
+        gl.glFinish();
+        const auto inventory = context.metalResourceInventory();
+        if (inventory.parallelTranslatedDraws == 0) {
+            recordSentinelFailure(
+                failures,
+                "read-image draws were not observed by the parallel arm",
+                "translated=" +
+                    std::to_string(inventory.parallelTranslatedDraws));
+        }
+        // THE guard assertion: an image-LOAD draw must never be a parallel
+        // candidate — the parallel path cannot bind read-images.
+        if (inventory.parallelCandidateDraws != 0) {
+            recordSentinelFailure(
+                failures,
+                "read-image draw became a parallel candidate — it would "
+                "encode without its image bindings (W2.1-RED class)",
+                "candidates=" +
+                    std::to_string(inventory.parallelCandidateDraws));
+        }
+        gl.glBindImageTexture(0, 0, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA8);
+        gl.glUseProgram(0);
+        gl.glDeleteTextures(1, &imageTex);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(program);
+        expectGLError(gl, GL_NO_ERROR, "read-image-reject cleanup");
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "image-load (read-image) draw is rejected from the parallel arm and takes the serial path (W2.2 guard)";
+    }
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -19326,6 +19417,7 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
     if (normalizedPhase == "s25-w2-1-gate-probes") {
         tests.push_back(runS25W2_1CandidateDeliveryProbe());
         tests.push_back(runS25W2_1CandidateDeliveryDefaultOffProbe());
+        tests.push_back(runS25W2_2ReadImageRejectProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

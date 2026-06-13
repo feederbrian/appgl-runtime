@@ -3049,6 +3049,16 @@ static void phase2PlanHashSubmissionGroup(
     }
 }
 
+// Phase-2 plan-cacheability gate — NOT a parallel-eligibility gate. This is
+// intentionally WRITE-only on images (readImageTextureNames is absent): a
+// read-image draw CAN safely cache its translated plan (its PSO is valid;
+// the serial heavy path binds the read-images correctly), so denying it a
+// cached plan would only pessimize without benefit. The W2.2 read-image
+// PARALLEL rejection lives in translatedDrawParallelStructuralReject
+// (MetalFrameGraph.mm) — the authoritative parallel backstop — so a
+// read-image draw stays off the parallel path regardless of this gate's
+// caching decision. Keep this concern (cacheability) separate from that one
+// (parallel-eligibility); do NOT "align" the two by adding read-images here.
 static bool phase2PlanHasSideEffect(const TranslatedDrawInfo& tdi) {
     return tdi.rasterizerDiscard ||
            !tdi.writtenImageTextureNames.empty() ||
