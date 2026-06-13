@@ -4248,6 +4248,12 @@ static std::string rewriteFragmentMSLForPerSample(const std::string& fsMsl)
     return working;
 }
 
+// S25 W2 bounded Metal-capture window (forward-decls; defined after the Impl) so
+// Impl::present can start/stop the capture around the §4-degraded onset instead
+// of the whole process lifetime (which is ~3GB on a freezing run).
+static void startMetalCaptureIfRequested(id<MTLDevice> device);
+static void stopMetalCaptureIfActive();
+
 struct MetalFrameGraph::Impl {
     Impl(GLContext* ownerContext,
          void* rawLayer,
@@ -16440,6 +16446,34 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         FrameAttributionScope attributionScope(
             frameAttributionProfile,
             FrameAttributionAction::Present);
+        // S25 W2 bounded Metal-capture window: arm at the §4 sustained-degraded
+        // onset (frozen frames) or a fixed frame (serial-clean half), capture ~6
+        // present-frames, then stop. One-shot. start = a frame boundary (this
+        // present commits frame N → the window captures N+1.. while still frozen).
+        if ((metalCaptureOnDegraded || metalCaptureAtFrame > 0) &&
+            !metalCaptureDone) {
+            ++metalCaptureFrameCounter;
+            const bool armNow =
+                (metalCaptureOnDegraded &&
+                 spatialDegradedFrames.load(std::memory_order_relaxed) >= 3) ||
+                (metalCaptureAtFrame > 0 &&
+                 metalCaptureFrameCounter >=
+                     static_cast<std::uint64_t>(metalCaptureAtFrame));
+            if (metalCaptureFramesLeft == 0 && armNow) {
+                startMetalCaptureIfRequested(device);
+                metalCaptureFramesLeft = 6;
+                NSLog(@"[GL] MTLCapture: bounded window armed @present-frame %llu "
+                      @"(spatialDegraded=%llu)",
+                      (unsigned long long)metalCaptureFrameCounter,
+                      (unsigned long long)spatialDegradedFrames.load(
+                          std::memory_order_relaxed));
+            } else if (metalCaptureFramesLeft > 0) {
+                if (--metalCaptureFramesLeft == 0) {
+                    stopMetalCaptureIfActive();
+                    metalCaptureDone = true;
+                }
+            }
+        }
         FG_TRACE(@"present: enter  pendingPresent=%d encoder=%p cmdBuf=%p drawable=%p",
                  pendingPresent, currentRenderEncoder, currentCommandBuffer, currentDrawable);
         flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason::Present);
@@ -21037,6 +21071,22 @@ private:
     std::atomic<std::uint32_t> leanMaxVertexCount{0};
     std::atomic<std::uint64_t> leanIndexedDraws{0};
     std::atomic<std::uint64_t> leanHighVertDraws{0};  // vertexCount > 6
+    // S25 W2 bounded Metal-capture window (Foreman's ask — whole-lifetime ≈ 3GB
+    // on a freeze; this captures only ~6 frames around the event). Opt-in:
+    //   APPGL_METAL_CAPTURE_ON_DEGRADED=1 → start at the §4 sustained-degraded
+    //     onset (spatialDegradedFrames≥3) — targets the frozen frames.
+    //   APPGL_METAL_CAPTURE_AT_FRAME=N    → start at present frame N — for the
+    //     serial-clean half (it never freezes → a fixed steady-state trigger).
+    // Both also need APPGL_METAL_CAPTURE_PATH + MTL_CAPTURE_ENABLED=1.
+    const bool metalCaptureOnDegraded =
+        appglEnvEnabledDefaultOff("APPGL_METAL_CAPTURE_ON_DEGRADED");
+    const long metalCaptureAtFrame = [] {
+        const char* v = std::getenv("APPGL_METAL_CAPTURE_AT_FRAME");
+        return (v != nullptr && *v != '\0') ? std::atol(v) : 0L;
+    }();
+    std::uint64_t metalCaptureFrameCounter = 0;
+    int metalCaptureFramesLeft = 0;
+    bool metalCaptureDone = false;
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;
@@ -22858,7 +22908,17 @@ MetalFrameGraph::MetalFrameGraph(GLContext* context,
                                  void* commandQueue,
                                  MetalCommandSubmission* commandSubmission)
     : impl_(std::make_unique<Impl>(context, layer, device, commandQueue, commandSubmission)) {
-    startMetalCaptureIfRequested((__bridge id<MTLDevice>)device);
+    // S25 W2: in BOUNDED-window mode (on-degraded / at-frame), defer the start to
+    // Impl::present — don't open a whole-lifetime capture at launch.
+    {
+        const char* atFrame = std::getenv("APPGL_METAL_CAPTURE_AT_FRAME");
+        const bool bounded =
+            appglEnvEnabledDefaultOff("APPGL_METAL_CAPTURE_ON_DEGRADED") ||
+            (atFrame != nullptr && std::atol(atFrame) > 0);
+        if (!bounded) {
+            startMetalCaptureIfRequested((__bridge id<MTLDevice>)device);
+        }
+    }
     phase5ProbeMetalNativeTess((__bridge id<MTLDevice>)device,
                                 (__bridge id<MTLCommandQueue>)commandQueue,
                                 commandSubmission);
