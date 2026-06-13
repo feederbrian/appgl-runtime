@@ -9905,6 +9905,71 @@ struct MetalFrameGraph::Impl {
         if (survivalContentProbeLatched) {
             leanDrawsThisFrame.fetch_add(1, std::memory_order_relaxed);
         }
+        // §9 GEOMETRY/DATA-INTEGRITY: the DATA this lean-3D draw consumes (the
+        // last axis — §8-b ruled out raster-state, causally). Camera-independent
+        // gross checks straight from the descriptor at encode. Sample = the first
+        // latched lean-3D draw (the bug is steady-state — autogame reproduces
+        // WITHOUT pan — so the first draw's MVP is representative of the wrong one).
+        if (survivalContentProbeLatched) {
+            geomChecks.fetch_add(1, std::memory_order_relaxed);
+            const bool indexed = (descriptor.indexCount > 0 ||
+                                  descriptor.metalIndexBuffer != nullptr);
+            const bool degenParams =
+                (descriptor.vertexCount <= 0 && !indexed) ||
+                (indexed && descriptor.indexCount <= 0) ||
+                (descriptor.instanceCount <= 0);
+            const bool vbufNull = descriptor.bindPrimaryVertexBuffer &&
+                                  descriptor.metalVertexBuffer == nullptr;
+            bool nullTex = false;
+            for (std::size_t ti = 0; ti < descriptor.fragmentTextureCount; ++ti) {
+                if (descriptor.fragmentTextures[ti].metalTexture == nullptr) {
+                    nullTex = true;
+                    break;
+                }
+            }
+            bool degenUniform = false;
+            if (descriptor.vertexUniformSize >= sizeof(float)) {
+                const std::uint8_t* ub = descriptor.vertexUniformStorage.data();
+                const std::size_t n = descriptor.vertexUniformSize;
+                bool allZero = true;
+                for (std::size_t bi = 0; bi < n; ++bi) {
+                    if (ub[bi] != 0) { allZero = false; break; }
+                }
+                bool hasNanInf = false;
+                const std::size_t fcount = n / sizeof(float);
+                for (std::size_t fi = 0; fi < fcount; ++fi) {
+                    float f;
+                    std::memcpy(&f, ub + fi * sizeof(float), sizeof(float));
+                    if (std::isnan(f) || std::isinf(f)) { hasNanInf = true; break; }
+                }
+                degenUniform = allZero || hasNanInf;
+            }
+            if (degenParams)
+                geomDegenDrawParamsThisFrame.fetch_add(1, std::memory_order_relaxed);
+            if (vbufNull)
+                geomNullVbufThisFrame.fetch_add(1, std::memory_order_relaxed);
+            if (nullTex)
+                geomNullTextureThisFrame.fetch_add(1, std::memory_order_relaxed);
+            if (degenUniform)
+                geomDegenUniformThisFrame.fetch_add(1, std::memory_order_relaxed);
+            if (!geomSampleClaimed.exchange(true, std::memory_order_relaxed)) {
+                const std::size_t copyN = std::min<std::size_t>(
+                    descriptor.vertexUniformSize, sizeof(geomSampleMvp));
+                std::memcpy(geomSampleMvp,
+                            descriptor.vertexUniformStorage.data(), copyN);
+                geomSampleVertexCount = descriptor.vertexCount;
+                geomSampleIndexCount = descriptor.indexCount;
+                geomSampleInstanceCount = descriptor.instanceCount;
+                geomSampleMode = static_cast<std::uint32_t>(descriptor.mode);
+                geomSampleVbufPtr =
+                    reinterpret_cast<std::uintptr_t>(descriptor.metalVertexBuffer);
+                geomSampleVtxUniformSize =
+                    static_cast<std::uint32_t>(descriptor.vertexUniformSize);
+                geomSampleFragTexCount =
+                    static_cast<std::uint32_t>(descriptor.fragmentTextureCount);
+                geomSampleReady.store(true, std::memory_order_release);
+            }
+        }
         // §8-(b) passive sample (one-shot): the original mask/blend of a lean-3D
         // draw → disambiguates mask-vs-blend if arm2 restores. The map is
         // inserted only on the main thread OUTSIDE dispatch_apply (the main
@@ -15461,6 +15526,15 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 armedResizeDelta = resNow - abLastResizeEffSnap;
                 abLastResizeEffSnap = resNow;
             }
+            // §9: snapshot the geometry/data-integrity degeneracy counts.
+            armedGeomDegenUniform =
+                geomDegenUniformThisFrame.load(std::memory_order_relaxed);
+            armedGeomNullTexture =
+                geomNullTextureThisFrame.load(std::memory_order_relaxed);
+            armedGeomDegenDrawParams =
+                geomDegenDrawParamsThisFrame.load(std::memory_order_relaxed);
+            armedGeomNullVbuf =
+                geomNullVbufThisFrame.load(std::memory_order_relaxed);
         }
         // §5: reset the per-frame batch-flush counters (snapshot armed above).
         batchFlushesThisFrame = 0;
@@ -15480,6 +15554,11 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         leanScissorDegenerateThisFrame.store(0, std::memory_order_relaxed);
         leanViewportUnsetThisFrame.store(0, std::memory_order_relaxed);
         leanDepthStateNullThisFrame.store(0, std::memory_order_relaxed);
+        // §9 reset.
+        geomDegenUniformThisFrame.store(0, std::memory_order_relaxed);
+        geomNullTextureThisFrame.store(0, std::memory_order_relaxed);
+        geomDegenDrawParamsThisFrame.store(0, std::memory_order_relaxed);
+        geomNullVbufThisFrame.store(0, std::memory_order_relaxed);
         lastLeanColorTextureSincePresent = nullptr;
         lastLeanSubmitIndexSincePresent = 0;
         leanEncodedSincePresent = 0;
@@ -15861,6 +15940,11 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         std::atomic<std::uint64_t>* pArmPres =
             (s8Arm == 1) ? &spatialPresentArm1
             : (s8Arm == 2) ? &spatialPresentArm2 : &spatialPresentArm0;
+        // §9: geometry/data-integrity degeneracy counts → degraded/present.
+        const std::uint32_t s9DegenUniform = armedGeomDegenUniform;
+        const std::uint32_t s9NullTexture = armedGeomNullTexture;
+        const std::uint32_t s9DegenDrawParams = armedGeomDegenDrawParams;
+        const std::uint32_t s9NullVbuf = armedGeomNullVbuf;
         [currentCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer>) {
             const std::uint8_t* p = static_cast<const std::uint8_t*>(rb.contents);
             int clearMatches = 0;
@@ -15899,6 +15983,11 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 dArmDeg->fetch_add(1, std::memory_order_relaxed);
                 degradedRebuilds.fetch_add(s8RebuildDelta, std::memory_order_relaxed);
                 degradedResizes.fetch_add(s8ResizeDelta, std::memory_order_relaxed);
+                // §9: this DEGRADED frame's data-integrity degeneracy counts.
+                degradedGeomDegenUniform.fetch_add(s9DegenUniform, std::memory_order_relaxed);
+                degradedGeomNullTexture.fetch_add(s9NullTexture, std::memory_order_relaxed);
+                degradedGeomDegenDrawParams.fetch_add(s9DegenDrawParams, std::memory_order_relaxed);
+                degradedGeomNullVbuf.fetch_add(s9NullVbuf, std::memory_order_relaxed);
                 sawMissingFlag->store(true, std::memory_order_relaxed);
                 if (fullRb != nil && !spatialClaimedFlag->exchange(true)) {
                     const std::uint8_t* fp =
@@ -15961,6 +16050,11 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 pArmPres->fetch_add(1, std::memory_order_relaxed);
                 presentRebuilds.fetch_add(s8RebuildDelta, std::memory_order_relaxed);
                 presentResizes.fetch_add(s8ResizeDelta, std::memory_order_relaxed);
+                // §9: this PRESENT (good) frame's data-integrity counts.
+                presentGeomDegenUniform.fetch_add(s9DegenUniform, std::memory_order_relaxed);
+                presentGeomNullTexture.fetch_add(s9NullTexture, std::memory_order_relaxed);
+                presentGeomDegenDrawParams.fetch_add(s9DegenDrawParams, std::memory_order_relaxed);
+                presentGeomNullVbuf.fetch_add(s9NullVbuf, std::memory_order_relaxed);
             }
             (void)rb;
             (void)fullRb;
@@ -16134,7 +16228,49 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         } else {
             out << ",\"passiveSample\":null";
         }
-        out << "}}";
+        out << "}";  // close abBattery
+        // §9 GEOMETRY/DATA-INTEGRITY: degeneracy counts degraded-vs-present
+        // (degraded≫present on a check = the DATA the lean draw consumes is
+        // degenerate → off-frustum/no-fragments) + a one-shot value sample (the
+        // MVP/params the draw actually uses — a stale/wrong-but-finite matrix
+        // stays human-visible). Expect degenUniform CLEAN (uniforms deep-copied-
+        // safe) — a clean (A) points PAST uniforms to the vertex buffer (§9.1).
+        out << ",\"geometry\":{\"checks\":"
+            << geomChecks.load(std::memory_order_relaxed)
+            << ",\"degradedDegenUniform\":"
+            << degradedGeomDegenUniform.load(std::memory_order_relaxed)
+            << ",\"presentDegenUniform\":"
+            << presentGeomDegenUniform.load(std::memory_order_relaxed)
+            << ",\"degradedNullTexture\":"
+            << degradedGeomNullTexture.load(std::memory_order_relaxed)
+            << ",\"presentNullTexture\":"
+            << presentGeomNullTexture.load(std::memory_order_relaxed)
+            << ",\"degradedDegenDrawParams\":"
+            << degradedGeomDegenDrawParams.load(std::memory_order_relaxed)
+            << ",\"presentDegenDrawParams\":"
+            << presentGeomDegenDrawParams.load(std::memory_order_relaxed)
+            << ",\"degradedNullVbuf\":"
+            << degradedGeomNullVbuf.load(std::memory_order_relaxed)
+            << ",\"presentNullVbuf\":"
+            << presentGeomNullVbuf.load(std::memory_order_relaxed);
+        if (geomSampleReady.load(std::memory_order_acquire)) {
+            out << ",\"sample\":{\"vertexCount\":" << geomSampleVertexCount
+                << ",\"indexCount\":" << geomSampleIndexCount
+                << ",\"instanceCount\":" << geomSampleInstanceCount
+                << ",\"mode\":" << geomSampleMode
+                << ",\"vbufPtr\":" << geomSampleVbufPtr
+                << ",\"vtxUniformSize\":" << geomSampleVtxUniformSize
+                << ",\"fragTexCount\":" << geomSampleFragTexCount << ",\"mvp\":[";
+            for (int mi = 0; mi < 16; ++mi) {
+                if (mi) out << ",";
+                out << geomSampleMvp[mi];
+            }
+            out << "]}";
+        } else {
+            out << ",\"sample\":null";
+        }
+        out << "}";  // close geometry
+        out << "}";  // close outer object
         return out.str();
     }
 
@@ -20688,6 +20824,36 @@ private:
     std::atomic<bool> abPassiveSampleClaimed{false};
     std::atomic<bool> abPassiveSampleReady{false};
     std::uint32_t abPassiveSampleBlendMask = 0;
+    // S25 W2 §9 GEOMETRY/DATA-INTEGRITY probe (§8-(b) ruled out raster-state:
+    // depth + color-mask/blend OUT, causally). The lean-3D draws are STATE-
+    // perfect yet render NOWHERE ⇒ the DATA they consume is degenerate. Camera-
+    // INDEPENDENT gross checks read straight from the descriptor at encode,
+    // bucketed degraded-vs-present (§7 plumbing): (A) uniform all-zero/NaN-Inf
+    // (degenerate MVP → off-frustum), (B) null fragment-texture (stale → alpha-
+    // discard), (C) zero/degenerate draw-params + null vertex-buffer ptr. An
+    // anomaly that is degraded≫present names the prepare-capture to fix.
+    std::atomic<std::uint32_t> geomDegenUniformThisFrame{0};
+    std::atomic<std::uint32_t> geomNullTextureThisFrame{0};
+    std::atomic<std::uint32_t> geomDegenDrawParamsThisFrame{0};
+    std::atomic<std::uint32_t> geomNullVbufThisFrame{0};
+    std::uint32_t armedGeomDegenUniform = 0, armedGeomNullTexture = 0;
+    std::uint32_t armedGeomDegenDrawParams = 0, armedGeomNullVbuf = 0;
+    std::atomic<std::uint64_t> degradedGeomDegenUniform{0}, presentGeomDegenUniform{0};
+    std::atomic<std::uint64_t> degradedGeomNullTexture{0}, presentGeomNullTexture{0};
+    std::atomic<std::uint64_t> degradedGeomDegenDrawParams{0}, presentGeomDegenDrawParams{0};
+    std::atomic<std::uint64_t> degradedGeomNullVbuf{0}, presentGeomNullVbuf{0};
+    std::atomic<std::uint64_t> geomChecks{0};  // engagement (non-vacuity)
+    // §9 one-shot value sample of a lean-3D draw (the MVP the draw consumes +
+    // params + binding ptrs) → a stale/wrong-but-FINITE matrix stays human-
+    // visible even when degeneracy doesn't trip.
+    std::atomic<bool> geomSampleClaimed{false};
+    std::atomic<bool> geomSampleReady{false};
+    float geomSampleMvp[16] = {0};
+    std::int32_t geomSampleVertexCount = 0, geomSampleIndexCount = 0;
+    std::int32_t geomSampleInstanceCount = 0;
+    std::uint32_t geomSampleMode = 0;
+    std::uintptr_t geomSampleVbufPtr = 0;
+    std::uint32_t geomSampleVtxUniformSize = 0, geomSampleFragTexCount = 0;
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;

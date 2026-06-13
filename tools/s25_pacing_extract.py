@@ -485,6 +485,52 @@ def main():
                                   f"SUPPRESSED (passiveSample ⇒ likely {bd}) → fix the W2-prepare "
                                   "mask/blend capture (stale/adjacent glColorMask snapshot). "
                                   "design-before-code.")
+                # §9 GEOMETRY/DATA-INTEGRITY: a check whose degraded rate ≫ present
+                # = the DATA the lean draws consume is degenerate. Expect
+                # degenUniform CLEAN (uniforms deep-copied-safe → points to §9.1 vbuf).
+                geo = pl_l.get("geometry")
+                if geo:
+                    print("\n== §9 GEOMETRY/DATA-INTEGRITY (degraded vs present) ==")
+                    print(f"  checks(engagement)={geo.get('checks')}")
+                    checks = [
+                        ("degenUniform(MVP all-zero/NaN)", "DegenUniform",
+                         "wrong/stale MVP @W2-prepare → fix prepare uniform-capture"),
+                        ("nullTexture(unbound→discard)", "NullTexture",
+                         "stale/null texture @W2-prepare → fix prepare texture-capture"),
+                        ("degenDrawParams(zero count)", "DegenDrawParams",
+                         "degenerate draw-params @W2-prepare → fix count/mode capture"),
+                        ("nullVbuf(null vertex ptr)", "NullVbuf",
+                         "null/stale vbuf binding @W2-prepare → fix buffer-ptr capture"),
+                    ]
+                    pinned = None
+                    for label, key, fix in checks:
+                        d = geo.get("degraded" + key, 0)
+                        p = geo.get("present" + key, 0)
+                        print(f"  {label:34s}: degraded={d} present={p}")
+                        if d > 0 and d > p * 2:
+                            pinned = (label, fix)
+                    s = geo.get("sample")
+                    if s:
+                        mvp = s.get("mvp", [])
+                        print(f"  sample: vertexCount={s.get('vertexCount')} "
+                              f"indexCount={s.get('indexCount')} "
+                              f"instanceCount={s.get('instanceCount')} mode={s.get('mode')} "
+                              f"vbufPtr={s.get('vbufPtr')} vtxUniformSize={s.get('vtxUniformSize')} "
+                              f"fragTex={s.get('fragTexCount')}")
+                        if len(mvp) >= 16:
+                            print(f"    mvp diag=[{mvp[0]},{mvp[5]},{mvp[10]},{mvp[15]}] "
+                                  f"transl=[{mvp[12]},{mvp[13]},{mvp[14]}] "
+                                  "(eyeball: zero/garbage/sane?)")
+                    if geo.get("checks", 0) == 0:
+                        print("  VERDICT: engagement=0 — lean path not exercised; re-run.")
+                    elif pinned:
+                        print(f"  VERDICT: {pinned[0]} degraded≫present ⇒ PIN → {pinned[1]}")
+                    else:
+                        print("  VERDICT: §9-gross CLEAN (no degraded≫present degeneracy) — "
+                              "EXPECTED for uniforms (deep-copied-safe). The suppression is a "
+                              "SUBTLE data bug: the VERTEX-BUFFER content (raw ptr 9314, mutable "
+                              "across the deferred-encode window) → run §9.1 vbuf-content-hash "
+                              "(record-vs-encode); if that too is clean → Metal frame-capture.")
 
     # Parallel-encode share (arm c).
     pe_first, pe_last = first.get("parallelEncode", {}), last.get("parallelEncode", {})
