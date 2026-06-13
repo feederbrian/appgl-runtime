@@ -6306,6 +6306,36 @@ struct MetalFrameGraph::Impl {
                 std::fflush(stderr);
             }
             ownedPipelineState.reset(pipelineState);
+            // §8-(b) arm2: build a full-color-output VARIANT (writeMask=ALL +
+            // blend=OFF) of this PSO, keyed by the main PSO ptr, so the battery
+            // can substitute it on the lean-3D draw and watch the scene return
+            // (= color was suppressed by mask/blend). DIAGNOSTIC-ONLY, gated.
+            if (abBatteryLatched && pipelineState != nil) {
+                MTLColorWriteMask origMask = desc.colorAttachments[0].writeMask;
+                BOOL origBlend = desc.colorAttachments[0].blendingEnabled;
+                desc.colorAttachments[0].writeMask = MTLColorWriteMaskAll;
+                desc.colorAttachments[0].blendingEnabled = NO;
+                NSError* variantError = nil;
+                id<MTLRenderPipelineState> variant =
+                    [device newRenderPipelineStateWithDescriptor:desc
+                                                           error:&variantError];
+                desc.colorAttachments[0].writeMask = origMask;       // restore:
+                desc.colorAttachments[0].blendingEnabled = origBlend;  // trace reads desc
+                if (variant != nil) {
+                    if (abFullColorVariants == nil) {
+                        abFullColorVariants = [[NSMutableDictionary alloc] init];
+                    }
+                    abFullColorVariants[[NSValue valueWithPointer:
+                                            (__bridge void*)pipelineState]] = variant;
+                    std::uint32_t bm =
+                        (info.blend.enabled ? 1u : 0u) |
+                        (info.blend.colorMaskR ? 2u : 0u) |
+                        (info.blend.colorMaskG ? 4u : 0u) |
+                        (info.blend.colorMaskB ? 8u : 0u) |
+                        (info.blend.colorMaskA ? 16u : 0u);
+                    abOrigBlendMaskByPso[(__bridge void*)pipelineState] = bm;
+                }
+            }
             // addPipelineToArchive(desc);  // ADV-14: disabled pending investigation
 
             const auto buildEnd = std::chrono::steady_clock::now();
@@ -9875,6 +9905,36 @@ struct MetalFrameGraph::Impl {
         if (survivalContentProbeLatched) {
             leanDrawsThisFrame.fetch_add(1, std::memory_order_relaxed);
         }
+        // §8-(b) passive sample (one-shot): the original mask/blend of a lean-3D
+        // draw → disambiguates mask-vs-blend if arm2 restores. The map is
+        // inserted only on the main thread OUTSIDE dispatch_apply (the main
+        // thread blocks in the apply during worker encode) → read here is
+        // race-free w.r.t. inserts.
+        if (abBatteryLatched &&
+            !abPassiveSampleClaimed.load(std::memory_order_relaxed)) {
+            auto it = abOrigBlendMaskByPso.find(descriptor.pipelineState);
+            if (it != abOrigBlendMaskByPso.end() &&
+                !abPassiveSampleClaimed.exchange(
+                    true, std::memory_order_relaxed)) {
+                abPassiveSampleBlendMask = it->second;
+                abPassiveSampleReady.store(true, std::memory_order_release);
+            }
+        }
+        // §8-(b) arm2: substitute the full-color-output variant PSO (writeMask=
+        // ALL + blend=OFF). If the scene returns ⇒ color was mask/blend-
+        // suppressed. DIAGNOSTIC-ONLY (gated, never lands).
+        if (abBatteryLatched && abBatteryArmThisFrame == 2 &&
+            abFullColorVariants != nil) {
+            id variant = abFullColorVariants[[NSValue valueWithPointer:
+                                                  descriptor.pipelineState]];
+            if (variant != nil) {
+                pipelineState = (id<MTLRenderPipelineState>)variant;
+                abLeanForcedFullColor.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                abLeanForcedFullColorMissing.fetch_add(
+                    1, std::memory_order_relaxed);
+            }
+        }
         if (pipelineState != encoderState.cachedPipelineState) {
             [encoder setRenderPipelineState:pipelineState];
             encoderState.cachedPipelineState = pipelineState;
@@ -9884,6 +9944,24 @@ struct MetalFrameGraph::Impl {
             id<MTLDepthStencilState> dsState =
                 (__bridge id<MTLDepthStencilState>)
                     descriptor.depthStencilState;
+            // §8-(b) arm1: force depth-compare=ALWAYS on the lean draw. If the
+            // scene returns ⇒ the lean 3D was depth-REJECTING (the non-rebuild
+            // depth path; rebuilds=0 on the autogame). DIAGNOSTIC-ONLY.
+            if (abBatteryLatched && abBatteryArmThisFrame == 1) {
+                if (abAlwaysPassDepthState == nil) {
+                    MTLDepthStencilDescriptor* dd =
+                        [[MTLDepthStencilDescriptor alloc] init];
+                    dd.depthCompareFunction = MTLCompareFunctionAlways;
+                    dd.depthWriteEnabled = YES;
+                    abAlwaysPassDepthState =
+                        [device newDepthStencilStateWithDescriptor:dd];
+                }
+                if (abAlwaysPassDepthState != nil) {
+                    dsState = abAlwaysPassDepthState;
+                    abLeanForcedDepthAlways.fetch_add(
+                        1, std::memory_order_relaxed);
+                }
+            }
             if (dsState != nil &&
                 dsState != encoderState.cachedDepthStencilState) {
                 [encoder setDepthStencilState:dsState];
@@ -15363,6 +15441,26 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 leanViewportUnsetThisFrame.load(std::memory_order_relaxed);
             armedDepthStateNull =
                 leanDepthStateNullThisFrame.load(std::memory_order_relaxed);
+            // §8-(b): snapshot the arm THIS frame's lean draws used, then advance
+            // the round-robin (only on measured/gameplay frames → even per-arm
+            // sampling). + per-frame rebuild/effective-resize deltas (read 0 on
+            // the autogame; nonzero only under a real operator pan = FBO-thrash).
+            armedAbArm = abBatteryArmThisFrame;
+            if (abBatteryLatched) {
+                abBatteryArmThisFrame =
+                    static_cast<int>((++abBatteryFrameCounter) % 3);
+            }
+            {
+                std::uint64_t rebNow =
+                    depthStencilRebuildsFromColorSizeMismatch +
+                    depthStencilRebuildsFromSampleMismatch;
+                armedRebuildDelta = rebNow - abLastRebuildColorSnap;
+                abLastRebuildColorSnap = rebNow;
+                std::uint64_t resNow =
+                    drawableResizeCalls - drawableResizeNoops;
+                armedResizeDelta = resNow - abLastResizeEffSnap;
+                abLastResizeEffSnap = resNow;
+            }
         }
         // §5: reset the per-frame batch-flush counters (snapshot armed above).
         batchFlushesThisFrame = 0;
@@ -15752,6 +15850,17 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         std::atomic<std::uint64_t>* pScissorDegen = &presentScissorDegen;
         std::atomic<std::uint64_t>* pViewportUnset = &presentViewportUnset;
         std::atomic<std::uint64_t>* pDepthStateNull = &presentDepthStateNull;
+        // §8-(b) battery: the arm THIS frame's lean draws used + rebuild/resize
+        // deltas → bucket §4 spatialDegraded per arm (restoring arm = the pin).
+        const int s8Arm = armedAbArm;
+        const std::uint64_t s8RebuildDelta = armedRebuildDelta;
+        const std::uint64_t s8ResizeDelta = armedResizeDelta;
+        std::atomic<std::uint64_t>* dArmDeg =
+            (s8Arm == 1) ? &spatialDegradedArm1
+            : (s8Arm == 2) ? &spatialDegradedArm2 : &spatialDegradedArm0;
+        std::atomic<std::uint64_t>* pArmPres =
+            (s8Arm == 1) ? &spatialPresentArm1
+            : (s8Arm == 2) ? &spatialPresentArm2 : &spatialPresentArm0;
         [currentCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer>) {
             const std::uint8_t* p = static_cast<const std::uint8_t*>(rb.contents);
             int clearMatches = 0;
@@ -15786,6 +15895,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 dScissorDegen->fetch_add(s7ScissorDegen, std::memory_order_relaxed);
                 dViewportUnset->fetch_add(s7ViewportUnset, std::memory_order_relaxed);
                 dDepthStateNull->fetch_add(s7DepthStateNull, std::memory_order_relaxed);
+                // §8-(b): this DEGRADED frame's arm + rebuild/resize delta.
+                dArmDeg->fetch_add(1, std::memory_order_relaxed);
+                degradedRebuilds.fetch_add(s8RebuildDelta, std::memory_order_relaxed);
+                degradedResizes.fetch_add(s8ResizeDelta, std::memory_order_relaxed);
                 sawMissingFlag->store(true, std::memory_order_relaxed);
                 if (fullRb != nil && !spatialClaimedFlag->exchange(true)) {
                     const std::uint8_t* fp =
@@ -15844,6 +15957,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 pScissorDegen->fetch_add(s7ScissorDegen, std::memory_order_relaxed);
                 pViewportUnset->fetch_add(s7ViewportUnset, std::memory_order_relaxed);
                 pDepthStateNull->fetch_add(s7DepthStateNull, std::memory_order_relaxed);
+                // §8-(b): this PRESENT (good) frame's arm + rebuild/resize delta.
+                pArmPres->fetch_add(1, std::memory_order_relaxed);
+                presentRebuilds.fetch_add(s8RebuildDelta, std::memory_order_relaxed);
+                presentResizes.fetch_add(s8ResizeDelta, std::memory_order_relaxed);
             }
             (void)rb;
             (void)fullRb;
@@ -15971,10 +16088,53 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 << "],\"finalWH\":[" << sampleFinalW << "," << sampleFinalH
                 << "],\"rtWH\":[" << sampleRtW << "," << sampleRtH
                 << "],\"viewportWH\":[" << sampleViewportW << "," << sampleViewportH
-                << "]}}";
+                << "]}";
         } else {
-            out << ",\"degenSample\":null}";
+            out << ",\"degenSample\":null";
         }
+        // §8-(b) A/B force-battery: per-arm §4 spatialDegraded (the arm whose
+        // degraded rate → 0 while control stays frozen = the CAUSAL suppressor)
+        // + arm-application engagement (proves the force actually applied) +
+        // rebuild/resize fold-in (0 on autogame; nonzero only under operator
+        // pan) + the passive mask/blend sample (mask-vs-blend if arm2 restores).
+        out << ",\"abBattery\":{\"armLegend\":"
+            << "\"0=control,1=depthAlways,2=fullColor\""
+            // (a)-backstop, empirical: usesOffscreenTarget=0 confirms the
+            // present-path has no offscreen ⇒ offscreen-recreation structurally
+            // absent (source-closed (a), now data-confirmed in the same run).
+            << ",\"usesOffscreenTarget\":" << (usesOffscreenTarget ? 1 : 0)
+            << ",\"degradedByArm\":["
+            << spatialDegradedArm0.load(std::memory_order_relaxed) << ","
+            << spatialDegradedArm1.load(std::memory_order_relaxed) << ","
+            << spatialDegradedArm2.load(std::memory_order_relaxed) << "]"
+            << ",\"presentByArm\":["
+            << spatialPresentArm0.load(std::memory_order_relaxed) << ","
+            << spatialPresentArm1.load(std::memory_order_relaxed) << ","
+            << spatialPresentArm2.load(std::memory_order_relaxed) << "]"
+            << ",\"forcedDepthAlways\":"
+            << abLeanForcedDepthAlways.load(std::memory_order_relaxed)
+            << ",\"forcedFullColor\":"
+            << abLeanForcedFullColor.load(std::memory_order_relaxed)
+            << ",\"forcedFullColorMissing\":"
+            << abLeanForcedFullColorMissing.load(std::memory_order_relaxed)
+            << ",\"degradedRebuilds\":"
+            << degradedRebuilds.load(std::memory_order_relaxed)
+            << ",\"presentRebuilds\":"
+            << presentRebuilds.load(std::memory_order_relaxed)
+            << ",\"degradedResizes\":"
+            << degradedResizes.load(std::memory_order_relaxed)
+            << ",\"presentResizes\":"
+            << presentResizes.load(std::memory_order_relaxed);
+        if (abPassiveSampleReady.load(std::memory_order_acquire)) {
+            const std::uint32_t bm = abPassiveSampleBlendMask;
+            out << ",\"passiveSample\":{\"blendEnabled\":" << ((bm & 1u) ? 1 : 0)
+                << ",\"maskRGBA\":[" << ((bm & 2u) ? 1 : 0) << ","
+                << ((bm & 4u) ? 1 : 0) << "," << ((bm & 8u) ? 1 : 0) << ","
+                << ((bm & 16u) ? 1 : 0) << "]}";
+        } else {
+            out << ",\"passiveSample\":null";
+        }
+        out << "}}";
         return out.str();
     }
 
@@ -20280,6 +20440,14 @@ private:
     // counters are atomics.
     const bool survivalContentProbeLatched =
         appglEnvEnabledDefaultOff("APPGL_W2_SURVIVAL_CONTENT_PROBE");
+    // S25 W2 §8-(b) A/B FORCE-BATTERY: DIAGNOSTIC-ONLY (default-OFF, never lands).
+    // When on, the lean-3D draws are FORCED per-frame round-robin into one of 3
+    // arms — arm0 control, arm1 depth-compare=ALWAYS, arm2 full-color-output
+    // (writeMask=ALL + blend=OFF via a variant PSO). §4 spatialDegraded is
+    // bucketed per arm: the arm whose degraded→0 (scene returns) = the CAUSAL
+    // suppressor. Off ⇒ zero effect (no force, no variant PSOs) = matrix-safe.
+    const bool abBatteryLatched =
+        appglEnvEnabledDefaultOff("APPGL_W2_AB_BATTERY");
     MTLClearColor lastFrameClearColor = MTLClearColorMake(0, 0, 0, 1);
     bool survivalContentProbeArmedThisFrame = false;
     MTLClearColor survivalContentProbeClearColor = MTLClearColorMake(0, 0, 0, 1);
@@ -20487,6 +20655,39 @@ private:
     std::int32_t sampleFinalW = 0, sampleFinalH = 0;
     std::uint32_t sampleRtW = 0, sampleRtH = 0;
     std::int32_t sampleViewportW = 0, sampleViewportH = 0;
+    // (§8 present-side (a)-target-presence members removed: (a) wrong-target is
+    // source-closed [presentCurrentDrawable early-returns on usesOffscreenTarget
+    // → screen presents ⇒ usesOffscreenTarget=false ⇒ no offscreen]; the cheap
+    // usesOffscreenTarget signal in the §8-(b) JSON is the empirical (a)-backstop.)
+    // §8-(b) A/B FORCE-BATTERY state. Arm = frame round-robin (0/1/2). The
+    // always-pass DS state (arm1) + the per-PSO full-color variant (arm2) are
+    // built lazily/at-PSO-creation only when the latch is on. Per-arm §4
+    // spatialDegraded buckets → the arm with degraded→0 is the causal pin.
+    std::uint64_t abBatteryFrameCounter = 0;
+    int abBatteryArmThisFrame = 0;        // applied to this frame's lean draws
+    int armedAbArm = 0;                   // snapshot at present → completedHandler
+    id<MTLDepthStencilState> abAlwaysPassDepthState = nil;       // arm1 (lazy)
+    NSMutableDictionary* abFullColorVariants = nil;             // arm2: PSO→variant
+    std::unordered_map<void*, std::uint32_t> abOrigBlendMaskByPso;  // passive sample
+    std::atomic<std::uint64_t> spatialDegradedArm0{0}, spatialPresentArm0{0};
+    std::atomic<std::uint64_t> spatialDegradedArm1{0}, spatialPresentArm1{0};
+    std::atomic<std::uint64_t> spatialDegradedArm2{0}, spatialPresentArm2{0};
+    std::atomic<std::uint64_t> abLeanForcedDepthAlways{0};  // arm1 applications
+    std::atomic<std::uint64_t> abLeanForcedFullColor{0};    // arm2 applications
+    std::atomic<std::uint64_t> abLeanForcedFullColorMissing{0};  // arm2 no-variant
+    // rebuild-counter fold-in (degraded-vs-present per-frame delta): reads 0 on
+    // the autogame (no pan ⇒ no FBO-thrash rebuild), nonzero only under a real
+    // operator pan → tests rebuild-then-load in the operator venue.
+    std::uint64_t abLastRebuildColorSnap = 0, abLastRebuildSampleSnap = 0;
+    std::uint64_t abLastResizeEffSnap = 0;
+    std::uint64_t armedRebuildDelta = 0, armedResizeDelta = 0;
+    std::atomic<std::uint64_t> degradedRebuilds{0}, presentRebuilds{0};
+    std::atomic<std::uint64_t> degradedResizes{0}, presentResizes{0};
+    // passive mask/blend sample of a degraded lean draw (mask-vs-blend split if
+    // arm2 restores): bit0=blendEnabled, bits1-4 = colorWriteMask RGBA.
+    std::atomic<bool> abPassiveSampleClaimed{false};
+    std::atomic<bool> abPassiveSampleReady{false};
+    std::uint32_t abPassiveSampleBlendMask = 0;
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;

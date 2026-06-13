@@ -430,6 +430,61 @@ def main():
                               "the applied state is correct too — the suppression is "
                               "elsewhere (blend/color-write-mask in the PSO, or a "
                               "parallel child-encoder concurrency hazard). Re-examine.")
+                # §8-(b) A/B FORCE-BATTERY: the arm whose degraded RATE → 0 (while
+                # control stays frozen) = the causal suppressor. Engagement
+                # (forced* > 0) must hold or the arm never actually applied.
+                ab = pl_l.get("abBattery")
+                if ab:
+                    dba = ab.get("degradedByArm", [0, 0, 0])
+                    pba = ab.get("presentByArm", [0, 0, 0])
+                    names = ["control", "depthAlways", "fullColor"]
+                    print("\n== §8-(b) A/B FORCE-BATTERY (per-arm freeze rate) ==")
+                    print(f"  usesOffscreenTarget={ab.get('usesOffscreenTarget')} "
+                          "(0 ⇒ (a) wrong-target moot — data-confirmed)")
+                    print(f"  engagement: forcedDepthAlways={ab.get('forcedDepthAlways')} "
+                          f"forcedFullColor={ab.get('forcedFullColor')} "
+                          f"(variant-missing={ab.get('forcedFullColorMissing')})")
+                    print(f"  rebuilds deg/pres={ab.get('degradedRebuilds')}/"
+                          f"{ab.get('presentRebuilds')}  resizes={ab.get('degradedResizes')}/"
+                          f"{ab.get('presentResizes')}  (0/0 expected on autogame; nonzero only "
+                          "under an operator pan = rebuild-then-load live)")
+                    rates = []
+                    for i, n in enumerate(names):
+                        tot = dba[i] + pba[i]
+                        r = rate(dba[i], tot)
+                        rates.append(r)
+                        print(f"  arm{i} {n:11s}: degraded={dba[i]} present={pba[i]} "
+                              f"freeze-rate={r * 100:.1f}%")
+                    ps = ab.get("passiveSample")
+                    if ps:
+                        print(f"  passiveSample (a degraded lean-3D draw): "
+                              f"blendEnabled={ps.get('blendEnabled')} "
+                              f"maskRGBA={ps.get('maskRGBA')}")
+                    ctrl = rates[0]
+                    restorers = [i for i in (1, 2)
+                                 if ctrl - rates[i] > 0.15 and (dba[i] + pba[i]) > 0]
+                    eng_ok = (ab.get("forcedDepthAlways", 0) > 0 or
+                              ab.get("forcedFullColor", 0) > 0)
+                    if not eng_ok:
+                        print("  VERDICT: NO arm engaged (forced*=0) ⇒ the battery never "
+                              "applied — run did not exercise the lean path; re-run.")
+                    elif not restorers:
+                        print("  VERDICT: NO arm restores (all freeze-rates ≈ control) ⇒ NOT "
+                              "depth-reject, NOT color-mask/blend → the lean draws produce no "
+                              "visible output for another reason (geometry/MVP-degenerate or "
+                              "shader-output-nothing) → GPU-marker / next probe.")
+                    else:
+                        win = min(restorers, key=lambda i: rates[i])
+                        if win == 1:
+                            print("  VERDICT: arm1 depth-ALWAYS RESTORES ⇒ the lean 3D was "
+                                  "DEPTH-REJECTING (non-rebuild path; rebuilds=0 on autogame) → "
+                                  "fix the lean-pass depth compare/contents. design-before-code.")
+                        else:
+                            bd = "blend" if (ps and ps.get("blendEnabled")) else "write-mask"
+                            print("  VERDICT: arm2 full-color-output RESTORES ⇒ color "
+                                  f"SUPPRESSED (passiveSample ⇒ likely {bd}) → fix the W2-prepare "
+                                  "mask/blend capture (stale/adjacent glColorMask snapshot). "
+                                  "design-before-code.")
 
     # Parallel-encode share (arm c).
     pe_first, pe_last = first.get("parallelEncode", {}), last.get("parallelEncode", {})
