@@ -20091,6 +20091,196 @@ TestResult runS25TemporalSkyControlProbe() {
     return result;
 }
 
+// ── S25 W2 §4 SPATIAL validation — LEAN-AGNOSTIC (run SERIAL, no parallel-encode,
+// to prove §4 measures the drawable without any lean-3D landing). Each frame
+// draws to an FBO (the gameplay-gate signal, fboDrawsSincePresent≥1) + draws the
+// drawable. A present phase (center content) then a degraded phase (center clear)
+// validate the freeze counters (spatialPresent vs spatialDegraded) AND the grid
+// census (inner = central-quarter 3D-viewport non-clear). ──
+
+// FREEZE + NOWHERE: present phase (center red) → spatialPresent>0; degraded phase
+// (corner red, center clear) → spatialDegraded>0 (serial = lean-agnostic proven)
+// + frozenGridInner==0 (content only at the edge, not the viewport center).
+TestResult runS25SpatialFreezeNowhereControlProbe() {
+    ScopedEnvVar contentProbe("APPGL_W2_SURVIVAL_CONTENT_PROBE", "1");
+    ScopedEnvVar gate("APPGL_W2_SURVIVAL_GAMEPLAY_MIN_FBO", "1");
+    // deliberately NO APPGL_PARALLEL_ENCODE → SERIAL path (withLeanEncoded=0).
+    auto result = runDirectSentinel("s25.spatial.freeze-nowhere", [&] {
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        const GLuint redProg = buildBenchProgram(kSurvivalVS, kSurvivalRedFS);
+        GLuint vao = 0, vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+        const GLfloat corner[] = {-1.0f, -1.0f, -0.4f, -1.0f, -1.0f, -0.4f};
+        GLuint cVao = 0, cVbo = 0;
+        gl.glGenVertexArrays(1, &cVao);
+        gl.glBindVertexArray(cVao);
+        gl.glGenBuffers(1, &cVbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, cVbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(corner), corner, GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), nullptr);
+        GLuint fboTex = 0;
+        gl.glGenTextures(1, &fboTex);
+        setupDCR3CRGBA8Texture(gl, fboTex, 64, 64);
+        GLuint fbo = 0;
+        setupDCR3CTextureFbo(gl, fbo, fboTex);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glViewport(0, 0, 64, 64);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glUseProgram(redProg);
+        for (int i = 0; i < 6; ++i) {  // PRESENT phase: center has 3D
+            gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+            gl.glClear(GL_COLOR_BUFFER_BIT);
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);  // gameplay signal (FBO draw)
+            gl.glBindVertexArray(vao);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);        // fullscreen → center red
+            context.swapBuffers();
+        }
+        for (int i = 0; i < 10; ++i) {  // DEGRADED phase: center clear (corner only)
+            gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+            gl.glClear(GL_COLOR_BUFFER_BIT);
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            gl.glBindVertexArray(vao);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);        // FBO draw
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            gl.glBindVertexArray(cVao);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);        // corner → center stays clear
+            context.swapBuffers();
+        }
+        context.finish();
+        const std::string json = context.framePacingDiagnosticsJson();
+        const long present = extractLeanLandingCounter(json, "spatialPresentFrames");
+        const long degraded = extractLeanLandingCounter(json, "spatialDegradedFrames");
+        const long inner = extractLeanLandingCounter(json, "frozenGridInner");
+        const bool ready =
+            json.find("\"frozenSpatialReady\":true") != std::string::npos;
+        if (present <= 0) {
+            recordSentinelFailure(failures,
+                "§4 spatialPresentFrames==0 — lean-agnostic present detection failed (serial)",
+                json.substr(json.find("presentLeanLanding"), 480));
+        }
+        if (degraded <= 0) {
+            recordSentinelFailure(failures,
+                "§4 spatialDegradedFrames==0 — the freeze was NOT measured SERIALLY "
+                "(lean-agnostic trigger broken — the fault test would be circular)",
+                json.substr(json.find("presentLeanLanding"), 480));
+        }
+        if (!ready) {
+            recordSentinelFailure(failures,
+                "§4 never captured a degraded full frame (spatial census did not run)",
+                json.substr(json.find("presentLeanLanding"), 480));
+        }
+        if (ready && inner != 0) {
+            recordSentinelFailure(failures,
+                "§4 frozenGridInner!=0 on edge-only content — the inner (viewport) "
+                "region must exclude the corner/HUD edges",
+                json.substr(json.find("presentLeanLanding"), 480));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &fboTex);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteVertexArrays(1, &cVao);
+        gl.glDeleteBuffers(1, &cVbo);
+        gl.glDeleteProgram(redProg);
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "§4 (SERIAL/lean-agnostic) measures present+degraded freeze counters AND classifies edge-only content as NOWHERE (inner==0)";
+    }
+    return result;
+}
+
+// OFF-CENTER: degraded frame with content in the VIEWPORT (fullscreen red, then
+// blue over the dead-center only → center clear, the surrounding inner region
+// still red) → frozenGridInner>0 (3D present, off the dead-center).
+TestResult runS25SpatialOffCenterControlProbe() {
+    ScopedEnvVar contentProbe("APPGL_W2_SURVIVAL_CONTENT_PROBE", "1");
+    ScopedEnvVar gate("APPGL_W2_SURVIVAL_GAMEPLAY_MIN_FBO", "1");
+    auto result = runDirectSentinel("s25.spatial.off-center", [&] {
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        const GLuint redProg = buildBenchProgram(kSurvivalVS, kSurvivalRedFS);
+        const GLuint blueProg = buildBenchProgram(kSurvivalVS, kSurvivalBlueFS);
+        GLuint vao = 0, vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+        // a small centered triangle covering the dead-center 8x8 (NDC ~±0.2),
+        // leaving the surrounding inner viewport red.
+        const GLfloat centerTri[] = {-0.25f, -0.25f, 0.25f, -0.25f, 0.0f, 0.3f};
+        GLuint ctVao = 0, ctVbo = 0;
+        gl.glGenVertexArrays(1, &ctVao);
+        gl.glBindVertexArray(ctVao);
+        gl.glGenBuffers(1, &ctVbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, ctVbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(centerTri), centerTri, GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), nullptr);
+        GLuint fboTex = 0;
+        gl.glGenTextures(1, &fboTex);
+        setupDCR3CRGBA8Texture(gl, fboTex, 64, 64);
+        GLuint fbo = 0;
+        setupDCR3CTextureFbo(gl, fbo, fboTex);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glViewport(0, 0, 64, 64);
+        gl.glDisable(GL_DEPTH_TEST);
+        for (int i = 0; i < 12; ++i) {  // degraded: center clear, inner ring red
+            gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+            gl.glClear(GL_COLOR_BUFFER_BIT);
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            gl.glUseProgram(redProg);
+            gl.glBindVertexArray(vao);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);        // FBO draw (gameplay signal)
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);        // fullscreen red (fills viewport)
+            gl.glUseProgram(blueProg);
+            gl.glBindVertexArray(ctVao);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);        // blue over dead-center → center clear
+            context.swapBuffers();
+        }
+        context.finish();
+        const std::string json = context.framePacingDiagnosticsJson();
+        const long degraded = extractLeanLandingCounter(json, "spatialDegradedFrames");
+        const long inner = extractLeanLandingCounter(json, "frozenGridInner");
+        const bool ready =
+            json.find("\"frozenSpatialReady\":true") != std::string::npos;
+        if (degraded <= 0 || !ready) {
+            recordSentinelFailure(failures,
+                "§4 did not register a degraded frame / capture the full frame",
+                json.substr(json.find("presentLeanLanding"), 480));
+        }
+        if (ready && inner <= 0) {
+            recordSentinelFailure(failures,
+                "§4 frozenGridInner==0 despite 3D filling the viewport (only the "
+                "dead-center cleared) — OFF-CENTER content must read inner>0",
+                json.substr(json.find("presentLeanLanding"), 480));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &fboTex);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteVertexArrays(1, &ctVao);
+        gl.glDeleteBuffers(1, &ctVbo);
+        gl.glDeleteProgram(redProg);
+        gl.glDeleteProgram(blueProg);
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "§4 classifies 3D-fills-viewport-but-dead-center-clear as OFF-CENTER (inner>0)";
+    }
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -20317,6 +20507,12 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
     if (normalizedPhase == "s25-w2-3-temporal-validation") {
         tests.push_back(runS25TemporalWipeControlProbe());
         tests.push_back(runS25TemporalSkyControlProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "s25-w2-4-spatial-validation") {
+        tests.push_back(runS25SpatialFreezeNowhereControlProbe());
+        tests.push_back(runS25SpatialOffCenterControlProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

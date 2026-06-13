@@ -199,7 +199,8 @@ def main():
                 "contentMissingDrawOverViaDraw", "contentMissingBenignSky",
                 "contentPresentWithPost3DDraw",
                 "contentMissingWipeConfirmed", "contentMissingSkyConfirmed",
-                "contentMissingT1Unavailable")
+                "contentMissingT1Unavailable",
+                "spatialPresentFrames", "spatialDegradedFrames")
         d = {k: pl_l.get(k, 0) - pl_f.get(k, 0) for k in keys}
         for k in keys:
             print(f"{k}={d[k]}")
@@ -257,6 +258,37 @@ def main():
                   "WIPE (T1 nonclear→T2 clear) vs SKY (T1 clear→T2 clear). §2 is "
                   "confounded by the universal overlay. (Needs "
                   "APPGL_W2_SURVIVAL_CONTENT_PROBE=1; wipe is intermittent.)")
+
+        # §4 SPATIAL (LEAN-AGNOSTIC — works serial + parallel). Freeze counters =
+        # the fault test; the grid = WHERE the 3D is on a degraded frame.
+        sp = d.get("spatialPresentFrames", 0); sd = d.get("spatialDegradedFrames", 0)
+        if sp or sd:
+            tot = sp + sd
+            print(f"\n== §4 SPATIAL (lean-agnostic) ==")
+            print(f"spatialPresentFrames={sp}  spatialDegradedFrames={sd}  "
+                  f"(degraded={sd/tot*100:.1f}% of {tot} gameplay frames)")
+            print("FREEZE/FAULT: degraded-dominant + present-frozen = the persistent "
+                  "corruption. Compare PARALLEL vs SERIAL run-until-freeze: serial "
+                  "degraded≈0 (renders clean) ⇒ W2-LEAN-PATH is the cause; serial "
+                  "degraded-dominant too ⇒ pre-existing renderer bug (out-of-W2).")
+            if pl_l.get("frozenSpatialReady"):
+                gi = pl_l.get("frozenGridInner", 0); gt = pl_l.get("frozenGridTotal", 0)
+                gm = pl_l.get("frozenGridMap", "")
+                print(f"WHERE (frozen frame): frozenGridInner={gi} frozenGridTotal={gt} "
+                      f"(of 256 cells; inner=central-quarter viewport)")
+                if gi > 0:
+                    print("  VERDICT: 3D renders OFF-CENTER (present in the viewport, "
+                          "wrong place) ⇒ stale/wrong VIEWPORT or TRANSFORM cached.")
+                else:
+                    print("  VERDICT: 3D renders NOWHERE (no viewport-center content) ⇒ "
+                          "stale/wrong TARGET or null/wrong plan/descriptor.")
+                if gm:
+                    print("  grid 16x16 (1=content, 0=clear), row-major top→bottom:")
+                    for r in range(16):
+                        print("    " + gm[r*16:(r+1)*16])
+            else:
+                print("WHERE: no frozen full-frame captured (no degraded frame after "
+                      "onset, or probe off) — re-run until freeze.")
 
     # Parallel-encode share (arm c).
     pe_first, pe_last = first.get("parallelEncode", {}), last.get("parallelEncode", {})

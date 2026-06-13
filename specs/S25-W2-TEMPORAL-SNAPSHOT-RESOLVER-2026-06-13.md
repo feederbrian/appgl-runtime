@@ -91,6 +91,36 @@ autogame does NOT reproduce the operator's manual-pan wipe (it has no camera
 control) — the operator's wipe is real (reported "blue most of the time" / "stale/
 sparse 3D" during pan) and needs the operator's pan conditions under §3 + eyeball.
 
+## §4 — Spatial probe (LEAN-AGNOSTIC: fault-assignment + where-is-the-3D)
+
+The operator+autogame defect is NOT a draw-over (§3 unanimous WIPE=0) — it is a
+PERSISTENT state where the 3D stops filling the scene-center and `contentPresent`
+FREEZES (operator: frozen sp1350→8520; autogame 154459Z: present peaks 235, never
+recovers). §3 is lean-gated, so it cannot do the parallel-vs-serial fault test
+(serial has `withLeanEncoded=0` → §3 measures nothing → "no-freeze-serial" is an
+artifact). §4 fixes both gaps:
+
+- **Lean-AGNOSTIC**: armed on every GAMEPLAY frame (`fboDrawsSincePresent ≥
+  survivalGameplayMinFbo` — the FBO census counts all draws, serial or parallel),
+  NOT on a lean-3D landing. It reads the DRAWABLE center directly via its own
+  blit + completion handler (`encodeSpatialProbeIfArmed`), independent of §1/§3.
+- **FAULT** (`spatialPresentFrames` vs `spatialDegradedFrames`): the freeze =
+  present-frozen + degraded-climbing, measurable in BOTH modes. Run PARALLEL vs
+  SERIAL run-until-freeze: serial degraded≈0 (renders clean) ⇒ the W2 lean-path is
+  the cause (a W2.1 regression); serial degraded-dominant too ⇒ pre-existing
+  renderer bug (out-of-W2-scope).
+- **WHERE**: on the first degraded frame after onset (gated by `survivalSawMissing`,
+  bounded; one-shot), capture the FULL drawable → a 16×16 grid. `frozenGridInner`
+  (central-quarter = the 3D viewport, HUD-excluded) > 0 ⇒ 3D renders OFF-CENTER
+  (stale viewport/transform); inner==0 ⇒ NOWHERE (stale target/plan/descriptor).
+  Plus `frozenGridMap` (256-char map) + the opt-in full-frame PPM eyeball.
+
+Validation (`s25-w2-4-spatial-validation`, both green) — run SERIAL (no
+`APPGL_PARALLEL_ENCODE`) to prove lean-independence: freeze-nowhere control
+(present→degraded, corner content) asserts `spatialDegraded>0` SERIALLY +
+`frozenGridInner==0`; off-center control (3D fills viewport, dead-center cleared)
+asserts `frozenGridInner>0`.
+
 ## Matrix-safety
 
 43+2-phase sweep: every parallel-encode/lean/survival/present phase green + the new

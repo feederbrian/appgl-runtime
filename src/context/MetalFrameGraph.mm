@@ -4854,6 +4854,9 @@ struct MetalFrameGraph::Impl {
             // all passes, before present) — armed only on swap-present frames
             // with lean-3D landed. Obs-only, env-latched default-off.
             encodeSurvivalContentProbeIfArmed();
+            // S25 W2 §4: lean-AGNOSTIC spatial probe — armed on every gameplay
+            // frame (FBO census), measures the freeze + WHERE in serial+parallel.
+            encodeSpatialProbeIfArmed();
             presentCurrentDrawable(currentCommandBuffer);
         }
         commitWithFrameSignal(currentCommandBufferLease, reason);
@@ -15260,6 +15263,16 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             // lean path (all fell back to serial) — a distinct seam.
             ++swapPresentsCandidatesButZeroEncoded;
         }
+        // §4 SPATIAL arm (LEAN-AGNOSTIC): every GAMEPLAY frame (the FBO census is
+        // lean-independent — it counts all FBO draws, serial or parallel), arm the
+        // spatial probe REGARDLESS of whether the lean path ran this frame. This
+        // is what makes the freeze + spatial census measurable in SERIAL too (the
+        // fault test). Must run BEFORE the fboDrawsSincePresent reset below.
+        if (survivalContentProbeLatched &&
+            fboDrawsSincePresent >= survivalGameplayMinFbo) {
+            spatialProbeArmedThisFrame = true;
+            spatialProbeClearColor = lastFrameClearColor;
+        }
         lastLeanColorTextureSincePresent = nullptr;
         lastLeanSubmitIndexSincePresent = 0;
         leanEncodedSincePresent = 0;
@@ -15318,6 +15331,41 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             return;
         }
         std::fprintf(f, "P6\n%d %d\n255\n", W, H);
+        std::fwrite(rgb.data(), 1, rgb.size(), f);
+        std::fclose(f);
+    }
+
+    // §4 SPATIAL writer (opt-in via APPGL_W2_SURVIVAL_IMAGE_DIR): the FULL drawable
+    // of a frozen/degraded frame to <dir>/<filename> (P6 PPM) — the human-confirm
+    // for "where is the 3D" (terrain off-center vs all-clear-with-HUD-only). Same
+    // opt-in/one-shot/handler-safe discipline as the eyeball writer.
+    static void writeFullFramePPM(const std::uint8_t* src, NSUInteger w,
+                                  NSUInteger h, NSUInteger bpr, bool isBGRA,
+                                  const char* filename) {
+        const char* dir = std::getenv("APPGL_W2_SURVIVAL_IMAGE_DIR");
+        if (dir == nullptr || src == nullptr || w == 0 || h == 0) {
+            return;
+        }
+        std::vector<unsigned char> rgb;
+        rgb.reserve(static_cast<std::size_t>(w) * h * 3);
+        for (NSUInteger y = 0; y < h; ++y) {
+            for (NSUInteger x = 0; x < w; ++x) {
+                const std::size_t idx = y * bpr + x * 4;
+                const int b0 = src[idx + 0];
+                const int b1 = src[idx + 1];
+                const int b2 = src[idx + 2];
+                rgb.push_back(static_cast<unsigned char>(isBGRA ? b2 : b0));
+                rgb.push_back(static_cast<unsigned char>(b1));
+                rgb.push_back(static_cast<unsigned char>(isBGRA ? b0 : b2));
+            }
+        }
+        const std::string path = std::string(dir) + "/" + filename;
+        std::FILE* f = std::fopen(path.c_str(), "wb");
+        if (f == nullptr) {
+            return;
+        }
+        std::fprintf(f, "P6\n%lu %lu\n255\n",
+                     static_cast<unsigned long>(w), static_cast<unsigned long>(h));
         std::fwrite(rgb.data(), 1, rgb.size(), f);
         std::fclose(f);
     }
@@ -15470,6 +15518,156 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         }];
     }
 
+    // §4 SPATIAL probe (LEAN-AGNOSTIC): reads the DRAWABLE center directly on every
+    // armed (gameplay) frame — no dependence on a lean-3D landing — so it measures
+    // the rendered frame in SERIAL and PARALLEL alike. Counts present vs degraded
+    // (the freeze signature → the parallel-vs-serial fault test) and, on the first
+    // degraded frame after onset, captures the full drawable for the 16x16 grid
+    // census + eyeball (the WHERE). Called from commitCurrentAsync on the present CB.
+    void encodeSpatialProbeIfArmed() {
+        if (!spatialProbeArmedThisFrame) {
+            return;
+        }
+        spatialProbeArmedThisFrame = false;
+        if (currentCommandBuffer == nil || device == nil) {
+            return;
+        }
+        id<MTLTexture> tex = usesOffscreenTarget
+            ? offscreenColorTexture
+            : (currentDrawable != nil ? currentDrawable.texture : nil);
+        if (tex == nil || tex.width < 16 || tex.height < 16) {
+            return;
+        }
+        constexpr NSUInteger N = 8;  // 8x8 scene-center grid (degraded detection)
+        const NSUInteger ox = tex.width / 2 - N / 2;
+        const NSUInteger oy = tex.height / 2 - N / 2;
+        const NSUInteger bytesPerRow = N * 4;
+        id<MTLBuffer> rb = [device newBufferWithLength:bytesPerRow * N
+                                              options:MTLResourceStorageModeShared];
+        if (rb == nil) {
+            return;
+        }
+        id<MTLBlitCommandEncoder> blit = [currentCommandBuffer blitCommandEncoder];
+        [blit copyFromTexture:tex
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(ox, oy, 0)
+                   sourceSize:MTLSizeMake(N, N, 1)
+                     toBuffer:rb
+            destinationOffset:0
+       destinationBytesPerRow:bytesPerRow
+     destinationBytesPerImage:bytesPerRow * N];
+        [blit endEncoding];
+        // full-frame capture, bounded to the corruption phase (a degraded frame
+        // has been seen) and one-shot.
+        id<MTLBuffer> fullRb = nil;
+        NSUInteger fullW = 0, fullH = 0, fullBPR = 0;
+        if (survivalSawMissing.load(std::memory_order_relaxed) &&
+            !survivalSpatialClaimed.load(std::memory_order_relaxed)) {
+            fullW = tex.width;
+            fullH = tex.height;
+            fullBPR = fullW * 4;
+            fullRb = [device newBufferWithLength:fullBPR * fullH
+                                        options:MTLResourceStorageModeShared];
+            if (fullRb != nil) {
+                id<MTLBlitCommandEncoder> fblit =
+                    [currentCommandBuffer blitCommandEncoder];
+                [fblit copyFromTexture:tex
+                           sourceSlice:0
+                           sourceLevel:0
+                          sourceOrigin:MTLOriginMake(0, 0, 0)
+                            sourceSize:MTLSizeMake(fullW, fullH, 1)
+                              toBuffer:fullRb
+                     destinationOffset:0
+                destinationBytesPerRow:fullBPR
+              destinationBytesPerImage:fullBPR * fullH];
+                [fblit endEncoding];
+            }
+        }
+        const bool isBGRA = (tex.pixelFormat == MTLPixelFormatBGRA8Unorm);
+        auto toByte = [](double v) {
+            return static_cast<int>(std::clamp(v * 255.0 + 0.5, 0.0, 255.0));
+        };
+        const int cR = toByte(spatialProbeClearColor.red);
+        const int cG = toByte(spatialProbeClearColor.green);
+        const int cB = toByte(spatialProbeClearColor.blue);
+        std::atomic<std::uint64_t>* presentCtr = &spatialPresentFrames;
+        std::atomic<std::uint64_t>* degradedCtr = &spatialDegradedFrames;
+        std::atomic<bool>* sawMissingFlag = &survivalSawMissing;
+        std::atomic<bool>* spatialClaimedFlag = &survivalSpatialClaimed;
+        std::atomic<bool>* spatialReadyFlag = &survivalSpatialReady;
+        std::uint32_t* gridInnerOut = &frozenGridInner;
+        std::uint32_t* gridTotalOut = &frozenGridTotal;
+        char* gridMapOut = frozenGridMap;
+        [currentCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer>) {
+            const std::uint8_t* p = static_cast<const std::uint8_t*>(rb.contents);
+            int clearMatches = 0;
+            for (NSUInteger i = 0; i < N * N; ++i) {
+                const int b0 = p[i * 4 + 0];
+                const int b1 = p[i * 4 + 1];
+                const int b2 = p[i * 4 + 2];
+                const int sr = isBGRA ? b2 : b0;
+                const int sg = b1;
+                const int sb = isBGRA ? b0 : b2;
+                if (std::abs(sr - cR) <= 8 && std::abs(sg - cG) <= 8 &&
+                    std::abs(sb - cB) <= 8) {
+                    ++clearMatches;
+                }
+            }
+            const int threshold = 75 * static_cast<int>(N * N);
+            if (clearMatches * 100 >= threshold) {
+                // DEGRADED frame (center clear) — the freeze signature, measured
+                // lean-agnostically (serial + parallel).
+                degradedCtr->fetch_add(1, std::memory_order_relaxed);
+                sawMissingFlag->store(true, std::memory_order_relaxed);
+                if (fullRb != nil && !spatialClaimedFlag->exchange(true)) {
+                    const std::uint8_t* fp =
+                        static_cast<const std::uint8_t*>(fullRb.contents);
+                    constexpr int G = 16;
+                    int inner = 0, total = 0;
+                    for (int gy = 0; gy < G; ++gy) {
+                        for (int gx = 0; gx < G; ++gx) {
+                            const NSUInteger px =
+                                (static_cast<NSUInteger>(gx) * 2 + 1) * fullW /
+                                (2 * G);
+                            const NSUInteger py =
+                                (static_cast<NSUInteger>(gy) * 2 + 1) * fullH /
+                                (2 * G);
+                            const std::size_t idx = py * fullBPR + px * 4;
+                            const int b0 = fp[idx + 0];
+                            const int b1 = fp[idx + 1];
+                            const int b2 = fp[idx + 2];
+                            const int sr = isBGRA ? b2 : b0;
+                            const int sg = b1;
+                            const int sb = isBGRA ? b0 : b2;
+                            const bool nonClear =
+                                !(std::abs(sr - cR) <= 8 &&
+                                  std::abs(sg - cG) <= 8 &&
+                                  std::abs(sb - cB) <= 8);
+                            gridMapOut[gy * G + gx] = nonClear ? '1' : '0';
+                            if (nonClear) {
+                                ++total;
+                                if (gx >= 4 && gx < 12 && gy >= 4 && gy < 12) {
+                                    ++inner;  // central-quarter (3D viewport)
+                                }
+                            }
+                        }
+                    }
+                    gridMapOut[G * G] = '\0';
+                    *gridInnerOut = inner;
+                    *gridTotalOut = total;
+                    writeFullFramePPM(fp, fullW, fullH, fullBPR, isBGRA,
+                                      "w2-sky-fullframe.ppm");
+                    spatialReadyFlag->store(true, std::memory_order_release);
+                }
+            } else {
+                presentCtr->fetch_add(1, std::memory_order_relaxed);
+            }
+            (void)rb;
+            (void)fullRb;
+        }];
+    }
+
     std::string presentLeanLandingDiagnosticsJson() const {
         std::ostringstream out;
         out << "{\"swapPresents\":" << swapPresentsObserved
@@ -15503,7 +15701,21 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             << ",\"contentMissingSkyConfirmed\":"
             << contentMissingSkyConfirmed.load(std::memory_order_relaxed)
             << ",\"contentMissingT1Unavailable\":"
-            << contentMissingT1Unavailable.load(std::memory_order_relaxed) << "}";
+            << contentMissingT1Unavailable.load(std::memory_order_relaxed);
+        // §4 spatial (LEAN-AGNOSTIC). The present/degraded freeze counters are the
+        // fault test (serial-clean vs serial-freezes); the grid is the WHERE,
+        // emitted once a frozen frame was captured (release fence).
+        const bool spatialReady =
+            survivalSpatialReady.load(std::memory_order_acquire);
+        out << ",\"spatialPresentFrames\":"
+            << spatialPresentFrames.load(std::memory_order_relaxed)
+            << ",\"spatialDegradedFrames\":"
+            << spatialDegradedFrames.load(std::memory_order_relaxed)
+            << ",\"frozenSpatialReady\":" << (spatialReady ? "true" : "false")
+            << ",\"frozenGridInner\":" << (spatialReady ? frozenGridInner : 0u)
+            << ",\"frozenGridTotal\":" << (spatialReady ? frozenGridTotal : 0u)
+            << ",\"frozenGridMap\":\"" << (spatialReady ? frozenGridMap : "")
+            << "\"}";
         return out.str();
     }
 
@@ -19898,6 +20110,31 @@ private:
     // a PPM — an unimpeachable single-frame proof (T1 content → T2 clear) on the
     // EXACT wiped frame, with no game-over-menu confusion. Run-lifetime one-shot.
     std::atomic<bool> survivalWipeImageSaved{false};
+    // S25 W2 §4 SPATIAL (LEAN-AGNOSTIC — works in serial AND parallel): the
+    // operator+autogame defect is a PERSISTENT state where the scene-center reads
+    // clear and the 3D stops filling it. §4 reads the DRAWABLE center directly on
+    // every GAMEPLAY frame (gated only on fboDrawsSincePresent ≥ threshold — the
+    // FBO census is lean-independent), NOT on a lean-3D landing — so it measures
+    // the actual rendered frame whether the lean path ran or not. Two jobs:
+    //  (1) FAULT-ASSIGNMENT: spatialPresentFrames (center has 3D) vs
+    //      spatialDegradedFrames (center clear). The FREEZE = present-frozen +
+    //      degraded-climbing, measurable in BOTH modes → serial-CLEAN ⇒ the W2
+    //      lean-path is the cause; serial-FREEZES ⇒ pre-existing renderer bug.
+    //  (2) WHERE: on the first degraded frame AFTER onset, capture the FULL
+    //      drawable → a 16x16 grid; INNER (central-quarter, HUD-excluded) non-clear
+    //      ⇒ 3D renders OFF-CENTER; inner==0 ⇒ NOWHERE. + the full-frame eyeball.
+    // survivalSawMissing gates the full readback to the corruption phase (bounded);
+    // survivalSpatialReady is the release fence for the grid data (handler→JSON).
+    bool spatialProbeArmedThisFrame = false;
+    MTLClearColor spatialProbeClearColor = MTLClearColorMake(0, 0, 0, 1);
+    std::atomic<std::uint64_t> spatialPresentFrames{0};
+    std::atomic<std::uint64_t> spatialDegradedFrames{0};
+    std::atomic<bool> survivalSawMissing{false};
+    std::atomic<bool> survivalSpatialClaimed{false};
+    std::atomic<bool> survivalSpatialReady{false};
+    std::uint32_t frozenGridInner = 0;
+    std::uint32_t frozenGridTotal = 0;
+    char frozenGridMap[257] = {0};  // 16x16 '0'/'1' row-major + null
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;
