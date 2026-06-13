@@ -4663,6 +4663,11 @@ struct MetalFrameGraph::Impl {
         pendingClearColor = MTLClearColorMake(clearRed, clearGreen, clearBlue, clearAlpha);
         pendingClearDepth = clearDepth;
         pendingClearStencil = static_cast<std::uint32_t>(clearStencil);
+        if (mask & GL_COLOR_BUFFER_BIT) {
+            // S25 W2.1 §1: remember the frame's clear color for the survival
+            // content probe (persists after the clear is consumed).
+            lastFrameClearColor = pendingClearColor;
+        }
 
         pendingPresent = true;
     }
@@ -4845,6 +4850,10 @@ struct MetalFrameGraph::Impl {
         const bool frameBoundaryCommit =
             reason != AppGLCommandReason::PressureFlush;
         if (frameBoundaryCommit) {
+            // S25 W2.1 §1: read the scene region of the FINAL drawable (after
+            // all passes, before present) — armed only on swap-present frames
+            // with lean-3D landed. Obs-only, env-latched default-off.
+            encodeSurvivalContentProbeIfArmed();
             presentCurrentDrawable(currentCommandBuffer);
         }
         commitWithFrameSignal(currentCommandBufferLease, reason);
@@ -15109,13 +15118,24 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             } else {
                 ++swapPresentsLeanInPriorCB;
             }
-            // SURVIVAL: of the frames with lean-3D landed, did the 3D remain
-            // the drawable's last write, or did a later Clear/DontCare pass
-            // overwrite it before this present?
+            // SURVIVAL (structural): of the frames with lean-3D landed, did
+            // the 3D remain the drawable's last write, or did a later Clear/
+            // DontCare pass overwrite it? (BLIND to draw-over — see §1.)
             if (drawableLastWriteWas3D) {
                 ++swapPresentsLean3DSurvived;
             } else {
                 ++swapPresentsLean3DOverwritten;
+            }
+            // SURVIVAL (§1 content): arm the scene-region readback for this
+            // frame's commit (the drawable is held now; the blit + compare
+            // run in commitCurrentAsync + its completion handler). Captures
+            // the clear color snapshot for the compare.
+            const bool haveSurface = usesOffscreenTarget
+                ? (offscreenColorTexture != nil)
+                : (currentDrawable != nil);
+            if (survivalContentProbeLatched && haveSurface) {
+                survivalContentProbeArmedThisFrame = true;
+                survivalContentProbeClearColor = lastFrameClearColor;
             }
         } else if (leanCandidatesSincePresent > 0) {
             // Candidates were eligible this frame but none encoded onto the
@@ -15127,6 +15147,82 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         leanEncodedSincePresent = 0;
         leanCandidatesSincePresent = 0;
         drawableLastWriteWas3D = false;
+    }
+
+    // S25 W2.1 §1 content probe: blit an 8x8 scene-region from the presented
+    // drawable into a per-frame shared buffer on the present CB, and in the
+    // CB completion handler count how many samples equal the frame's clear
+    // color. High clear-fraction = the 3D scene is MISSING (overwritten by a
+    // draw-over the structural counter cannot see). Called in
+    // commitCurrentAsync AFTER the render passes, BEFORE present.
+    void encodeSurvivalContentProbeIfArmed() {
+        if (!survivalContentProbeArmedThisFrame) {
+            return;
+        }
+        survivalContentProbeArmedThisFrame = false;
+        if (currentCommandBuffer == nil || device == nil) {
+            return;
+        }
+        id<MTLTexture> tex = usesOffscreenTarget
+            ? offscreenColorTexture
+            : (currentDrawable != nil ? currentDrawable.texture : nil);
+        if (tex == nil || tex.width < 16 || tex.height < 16) {
+            return;
+        }
+        constexpr NSUInteger N = 8;  // 8x8 scene-center grid
+        const NSUInteger ox = tex.width / 2 - N / 2;
+        const NSUInteger oy = tex.height / 2 - N / 2;
+        const NSUInteger bytesPerRow = N * 4;
+        id<MTLBuffer> rb = [device newBufferWithLength:bytesPerRow * N
+                                              options:MTLResourceStorageModeShared];
+        if (rb == nil) {
+            return;
+        }
+        id<MTLBlitCommandEncoder> blit = [currentCommandBuffer blitCommandEncoder];
+        [blit copyFromTexture:tex
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(ox, oy, 0)
+                   sourceSize:MTLSizeMake(N, N, 1)
+                     toBuffer:rb
+            destinationOffset:0
+       destinationBytesPerRow:bytesPerRow
+     destinationBytesPerImage:bytesPerRow * N];
+        [blit endEncoding];
+        const bool isBGRA = (tex.pixelFormat == MTLPixelFormatBGRA8Unorm);
+        auto toByte = [](double v) {
+            return static_cast<int>(std::clamp(v * 255.0 + 0.5, 0.0, 255.0));
+        };
+        const int cR = toByte(survivalContentProbeClearColor.red);
+        const int cG = toByte(survivalContentProbeClearColor.green);
+        const int cB = toByte(survivalContentProbeClearColor.blue);
+        std::atomic<std::uint64_t>* presentCtr =
+            &swapPresentsLean3DContentPresent;
+        std::atomic<std::uint64_t>* missingCtr =
+            &swapPresentsLean3DContentMissing;
+        [currentCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer>) {
+            const std::uint8_t* p =
+                static_cast<const std::uint8_t*>(rb.contents);
+            int clearMatches = 0;
+            for (NSUInteger i = 0; i < N * N; ++i) {
+                const int b0 = p[i * 4 + 0];
+                const int b1 = p[i * 4 + 1];
+                const int b2 = p[i * 4 + 2];
+                const int sr = isBGRA ? b2 : b0;
+                const int sg = b1;
+                const int sb = isBGRA ? b0 : b2;
+                if (std::abs(sr - cR) <= 8 && std::abs(sg - cG) <= 8 &&
+                    std::abs(sb - cB) <= 8) {
+                    ++clearMatches;
+                }
+            }
+            if (clearMatches * 100 >= 75 * static_cast<int>(N * N)) {
+                missingCtr->fetch_add(1, std::memory_order_relaxed);
+            } else {
+                presentCtr->fetch_add(1, std::memory_order_relaxed);
+            }
+            (void)rb;  // retained by the block until the handler runs
+        }];
     }
 
     std::string presentLeanLandingDiagnosticsJson() const {
@@ -15141,6 +15237,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             << swapPresentsCandidatesButZeroEncoded
             << ",\"lean3DSurvived\":" << swapPresentsLean3DSurvived
             << ",\"lean3DOverwritten\":" << swapPresentsLean3DOverwritten
+            << ",\"lean3DContentPresent\":"
+            << swapPresentsLean3DContentPresent.load(std::memory_order_relaxed)
+            << ",\"lean3DContentMissing\":"
+            << swapPresentsLean3DContentMissing.load(std::memory_order_relaxed)
             << "}";
         return out.str();
     }
@@ -19436,6 +19536,22 @@ private:
     bool drawableLastWriteWas3D = false;
     std::uint64_t swapPresentsLean3DSurvived = 0;
     std::uint64_t swapPresentsLean3DOverwritten = 0;
+    // S25 W2.1 SURVIVAL §1 CONTENT probe (env-latched, default-OFF — pays a
+    // per-frame readback; only the diagnostic run pays). The structural
+    // survived/overwritten counters are BLIND to a DRAW-OVER (any lean draw
+    // — incl. a lean UI overlay — keeps drawableLastWriteWas3D=true while the
+    // pixels are painted over). This reads the actual SCENE-region pixels of
+    // the presented drawable and asks directly: is the 3D there, or the clear
+    // color? Class-agnostic (catches clear, draw-over, blit). Async: the blit
+    // rides the present CB, the compare runs in its completion handler →
+    // counters are atomics.
+    const bool survivalContentProbeLatched =
+        appglEnvEnabledDefaultOff("APPGL_W2_SURVIVAL_CONTENT_PROBE");
+    MTLClearColor lastFrameClearColor = MTLClearColorMake(0, 0, 0, 1);
+    bool survivalContentProbeArmedThisFrame = false;
+    MTLClearColor survivalContentProbeClearColor = MTLClearColorMake(0, 0, 0, 1);
+    std::atomic<std::uint64_t> swapPresentsLean3DContentPresent{0};
+    std::atomic<std::uint64_t> swapPresentsLean3DContentMissing{0};
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;

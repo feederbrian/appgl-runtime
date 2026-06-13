@@ -19539,6 +19539,93 @@ TestResult runS25LeanDeferredSurvivalInstrumentProbe() {
     return result;
 }
 
+// ── S25 W2.1 §1 content-probe validation: catches a DRAW-OVER the
+// structural counter is BLIND to ──
+// The structural lean3DSurvived/Overwritten counter only flips on a
+// Clear/DontCare pass — it scores "survived" when a later DRAW paints over
+// the 3D (incl. a lean draw that keeps drawableLastWriteWas3D=true). The §1
+// content probe reads the actual scene pixels, so it catches it. Construct:
+// clear(blue) → warm lean-3D(red) at scene center → DRAW a clear-color
+// (blue) quad OVER it (a Load-pass draw, NOT a clear) → present. The
+// structural counter must read survived (blind); §1 must read contentMissing
+// (scene == clear color).
+TestResult runS25SurvivalContentProbeValidationProbe() {
+    ScopedEnvVar parallelOn("APPGL_PARALLEL_ENCODE", "1");
+    ScopedEnvVar workers("APPGL_PARALLEL_ENCODE_WORKERS", "4");
+    ScopedEnvVar contentProbe("APPGL_W2_SURVIVAL_CONTENT_PROBE", "1");
+    auto result = runDirectSentinel("s25.survival.content-probe-validation", [&] {
+        static constexpr const char* kVS =
+            "#version 430 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+        static constexpr const char* kRedFS =
+            "#version 430 core\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = vec4(1.0, 0.0, 0.0, 1.0); }\n";
+        static constexpr const char* kBlueFS =
+            "#version 430 core\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = vec4(0.0, 0.0, 1.0, 1.0); }\n";
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        const GLuint redProg = buildBenchProgram(kVS, kRedFS);
+        const GLuint blueProg = buildBenchProgram(kVS, kBlueFS);
+        GLuint vao = 0, vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+        gl.glBindVertexArray(vao);
+        gl.glViewport(0, 0, 64, 64);
+        gl.glDisable(GL_DEPTH_TEST);
+        // Warm both programs so their draws are real lean candidates.
+        for (int i = 0; i < 8; ++i) {
+            gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+            gl.glClear(GL_COLOR_BUFFER_BIT);
+            gl.glUseProgram(redProg);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+            gl.glUseProgram(blueProg);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+            context.swapBuffers();
+        }
+        // TEST frame: clear(blue) → red 3D → blue DRAW-OVER (not a clear).
+        gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glUseProgram(redProg);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);   // 3D scene (red)
+        gl.glUseProgram(blueProg);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);   // draw-over (blue == clear)
+        context.swapBuffers();
+        context.finish();  // let the content-probe completion handler run
+        const std::string json = context.framePacingDiagnosticsJson();
+        // §1 must have caught it: lean3DContentMissing > 0.
+        const bool contentCaught =
+            json.find("\"lean3DContentMissing\":0,") == std::string::npos &&
+            json.find("\"lean3DContentMissing\":0}") == std::string::npos &&
+            json.find("\"lean3DContentMissing\":") != std::string::npos;
+        if (!contentCaught) {
+            recordSentinelFailure(
+                failures,
+                "§1 content probe did NOT catch the draw-over (scene should "
+                "read clear-color)",
+                json.substr(json.find("presentLeanLanding") != std::string::npos
+                                ? json.find("presentLeanLanding")
+                                : 0,
+                            260));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(redProg);
+        gl.glDeleteProgram(blueProg);
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "§1 content probe catches a draw-over (scene == clear color) that the structural counter is blind to";
+    }
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -19742,6 +19829,11 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
 
     if (normalizedPhase == "s25-lean-deferred-survival-instrument-probe") {
         tests.push_back(runS25LeanDeferredSurvivalInstrumentProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "s25-survival-content-probe-validation") {
+        tests.push_back(runS25SurvivalContentProbeValidationProbe());
         return buildJSON(normalizedPhase, tests);
     }
 
