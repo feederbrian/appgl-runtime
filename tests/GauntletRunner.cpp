@@ -19861,6 +19861,77 @@ TestResult runS25PassTraceBenignSkyProbe() {
     return result;
 }
 
+// §2 ViaPass positive control (closes blind-spot (b)): red 3D (lean) covers the
+// center, then a depth-only clear forces a SEPARATE drawable pass (color Load =
+// red preserved, depth Clear), into which a LEAN blue over-draw paints the clear
+// color. §1 reads contentMissing; §2 must classify it DRAW-OVER via the PASS
+// census (contentMissingDrawOverViaPass > 0) — robustly, even though the
+// over-draw is itself a lean draw (the pass open is counted before the lean
+// landing; the latch-once census does not let the lean overlay erase it). This
+// is the representative UI/overlay-compositing mechanism. Kept in its OWN phase
+// so an offscreen-context-specific miss cannot red the validated §2 phase.
+TestResult runS25PassTraceViaPassControlProbe() {
+    ScopedEnvVar parallelOn("APPGL_PARALLEL_ENCODE", "1");
+    ScopedEnvVar workers("APPGL_PARALLEL_ENCODE_WORKERS", "4");
+    ScopedEnvVar contentProbe("APPGL_W2_SURVIVAL_CONTENT_PROBE", "1");
+    ScopedEnvVar gateOff("APPGL_W2_SURVIVAL_GAMEPLAY_MIN_FBO", "0");
+    auto result = runDirectSentinel("s25.passtrace.viapass-control", [&] {
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        const GLuint redProg = buildBenchProgram(kSurvivalVS, kSurvivalRedFS);
+        const GLuint blueProg = buildBenchProgram(kSurvivalVS, kSurvivalBlueFS);
+        GLuint vao = 0, vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+        gl.glBindVertexArray(vao);
+        gl.glViewport(0, 0, 64, 64);
+        gl.glDisable(GL_DEPTH_TEST);
+        for (int i = 0; i < 12; ++i) {
+            gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+            gl.glClear(GL_COLOR_BUFFER_BIT);
+            gl.glUseProgram(redProg);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);     // 3D scene (red), lean, covers center
+            // Force a SEPARATE drawable pass without a target switch: a depth-only
+            // clear breaks the encoder; the next draw reopens with color Load
+            // (red preserved) + depth Clear → a Post3D Load drawable pass.
+            gl.glClear(GL_DEPTH_BUFFER_BIT);
+            gl.glUseProgram(blueProg);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);     // lean over-draw (blue == clear)
+            context.swapBuffers();
+        }
+        context.finish();
+        const std::string json = context.framePacingDiagnosticsJson();
+        const long missing = extractLeanLandingCounter(json, "lean3DContentMissing");
+        const long viaPass = extractLeanLandingCounter(json, "contentMissingDrawOverViaPass");
+        const long drawOver = extractLeanLandingCounter(json, "contentMissingDrawOver");
+        if (missing <= 0) {
+            recordSentinelFailure(failures,
+                "§1 did not read contentMissing (lean blue over-draw should == clear)",
+                json.substr(json.find("presentLeanLanding"), 380));
+        }
+        if (viaPass <= 0) {
+            recordSentinelFailure(failures,
+                "§2 PASS census did NOT fire — the depth-clear did not force a "
+                "separate post-3D drawable Load pass (offscreen-context specific); "
+                "ViaPass remains shares-bucket-logic-only, ViaDraw is validated",
+                json.substr(json.find("presentLeanLanding"), 380));
+        }
+        (void)drawOver;
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(redProg);
+        gl.glDeleteProgram(blueProg);
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "§2 PASS census fires on a separate-pass lean over-draw (ViaPass independently validated)";
+    }
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -20076,6 +20147,11 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
     if (normalizedPhase == "s25-w2-2-pass-trace-validation") {
         tests.push_back(runS25PassTraceDrawOverProbe());
         tests.push_back(runS25PassTraceBenignSkyProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "s25-w2-2-pass-trace-viapass-control") {
+        tests.push_back(runS25PassTraceViaPassControlProbe());
         return buildJSON(normalizedPhase, tests);
     }
 
