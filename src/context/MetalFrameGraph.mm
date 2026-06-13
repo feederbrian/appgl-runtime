@@ -10007,12 +10007,25 @@ struct MetalFrameGraph::Impl {
                 geomNullTextureThisFrame.fetch_add(1, std::memory_order_relaxed);
             if (degenUniform)
                 geomDegenUniformThisFrame.fetch_add(1, std::memory_order_relaxed);
-            // Bias the sample to a 3D-SCENE-class draw (high-vert / indexed /
-            // textured → perspective), not the first UI/HUD quad (4-vert ortho,
-            // untextured) — that's the geometry actually going missing.
-            const bool looks3DScene = (descriptor.vertexCount > 6 ||
-                                       descriptor.indexCount > 0 ||
-                                       descriptor.fragmentTextureCount > 0);
+            // Target a 3D-SCENE draw (PERSPECTIVE projection) for the sample, not
+            // a HUD ortho panel. The prior bias (`||textured`) grabbed a TEXTURED
+            // HUD quad (4-vert ortho, fragTex=1) — textured-ness ≠ 3D. Read the
+            // projection's [3][3] (uniform offset 60) + [2][3] (offset 44):
+            // perspective ⇒ [3][3]≈0 / [2][3]≈-1; ortho(HUD) ⇒ [3][3]≈1.
+            float projWW = 1.0f, projZW = 0.0f;
+            if (descriptor.vertexUniformSize >= 64) {
+                std::memcpy(&projWW,
+                            descriptor.vertexUniformStorage.data() + 60,
+                            sizeof(float));
+                std::memcpy(&projZW,
+                            descriptor.vertexUniformStorage.data() + 44,
+                            sizeof(float));
+            }
+            const bool perspective = (std::fabs(projWW) < 0.5f) ||
+                                     (std::fabs(projZW + 1.0f) < 0.5f);
+            const bool looks3DScene =
+                perspective ||
+                (descriptor.indexCount > 0 && descriptor.vertexCount > 6);
             if (looks3DScene &&
                 !geomSampleClaimed.exchange(true, std::memory_order_relaxed)) {
                 const std::size_t copyN = std::min<std::size_t>(
