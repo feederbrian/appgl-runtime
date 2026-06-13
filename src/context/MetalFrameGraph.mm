@@ -9973,6 +9973,26 @@ struct MetalFrameGraph::Impl {
         // WITHOUT pan — so the first draw's MVP is representative of the wrong one).
         if (survivalContentProbeLatched) {
             geomChecks.fetch_add(1, std::memory_order_relaxed);
+            // §10: the composition quad (lean path, textured default-FB draw)
+            // samples the 3D-FBO as its fragment texture. Capture the FIRST such
+            // source this frame → read it back in encodeSpatialProbeIfArmed.
+            if (descriptor.fragmentTextureCount > 0 &&
+                descriptor.fragmentTextures[0].metalTexture != nullptr) {
+                compositionTexturedDraws.fetch_add(1, std::memory_order_relaxed);
+                // Pick the LARGEST source (the full-screen scene-FBO), not the
+                // first — UI panels are small + first-textured mis-fired in §9.
+                id<MTLTexture> ft = (__bridge id<MTLTexture>)
+                    descriptor.fragmentTextures[0].metalTexture;
+                if (ft != nil) {
+                    const std::uint64_t area =
+                        static_cast<std::uint64_t>(ft.width) * ft.height;
+                    if (area > compositionSourceArea) {
+                        compositionSourceArea = area;
+                        compositionSourcePtr =
+                            descriptor.fragmentTextures[0].metalTexture;
+                    }
+                }
+            }
             // EDGE-1 backstop: run-wide topology census of the lean path. If the
             // 3D scene is truly NOT on the lean path, these stay low/zero.
             {
@@ -15976,6 +15996,36 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
        destinationBytesPerRow:bytesPerRow
      destinationBytesPerImage:bytesPerRow * N];
         [blit endEncoding];
+        // §10: ALSO read back the composition's SOURCE texture (the 3D-FBO) center,
+        // correlated with the drawable readback in this SAME frame.
+        id<MTLBuffer> srcRb = nil;
+        const std::uintptr_t srcPtr =
+            reinterpret_cast<std::uintptr_t>(compositionSourcePtr);
+        if (compositionSourcePtr != nullptr) {
+            id<MTLTexture> srcTex = (__bridge id<MTLTexture>)compositionSourcePtr;
+            if (srcTex != nil && srcTex.width >= 16 && srcTex.height >= 16) {
+                const NSUInteger sox = srcTex.width / 2 - N / 2;
+                const NSUInteger soy = srcTex.height / 2 - N / 2;
+                srcRb = [device newBufferWithLength:bytesPerRow * N
+                                            options:MTLResourceStorageModeShared];
+                if (srcRb != nil) {
+                    id<MTLBlitCommandEncoder> sblit =
+                        [currentCommandBuffer blitCommandEncoder];
+                    [sblit copyFromTexture:srcTex
+                               sourceSlice:0
+                               sourceLevel:0
+                              sourceOrigin:MTLOriginMake(sox, soy, 0)
+                                sourceSize:MTLSizeMake(N, N, 1)
+                                  toBuffer:srcRb
+                         destinationOffset:0
+                    destinationBytesPerRow:bytesPerRow
+                  destinationBytesPerImage:bytesPerRow * N];
+                    [sblit endEncoding];
+                }
+            }
+        }
+        compositionSourcePtr = nullptr;  // §10: reset for next frame's draws
+        compositionSourceArea = 0;
         // full-frame capture, bounded to the corruption phase (a degraded frame
         // has been seen) and one-shot.
         id<MTLBuffer> fullRb = nil;
@@ -16080,6 +16130,14 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         // §9.1: vbuf content-hash checks/mismatches → degraded/present.
         const std::uint32_t s91VbufChecks = armedVbufHashChecks;
         const std::uint32_t s91VbufMismatch = armedVbufHashMismatch;
+        // §10 FBO-source-readback: bucket pointers (srcRb + srcPtr are block locals).
+        std::atomic<std::uint64_t>* fboChecksPtr = &fboReadbackChecks;
+        std::atomic<std::uint64_t>* dSrcClear = &degradedSourceClear;
+        std::atomic<std::uint64_t>* dSrcContent = &degradedSourceContent;
+        std::atomic<std::uint64_t>* pSrcClear = &presentSourceClear;
+        std::atomic<std::uint64_t>* pSrcContent = &presentSourceContent;
+        std::atomic<std::uintptr_t>* dSrcPtrSample = &degradedSourcePtrSample;
+        std::atomic<std::uintptr_t>* pSrcPtrSample = &presentSourcePtrSample;
         [currentCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer>) {
             const std::uint8_t* p = static_cast<const std::uint8_t*>(rb.contents);
             int clearMatches = 0;
@@ -16125,6 +16183,27 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 degradedGeomNullVbuf.fetch_add(s9NullVbuf, std::memory_order_relaxed);
                 degradedVbufHashChecks.fetch_add(s91VbufChecks, std::memory_order_relaxed);
                 degradedVbufHashMismatch.fetch_add(s91VbufMismatch, std::memory_order_relaxed);
+                // §10: classify the composition SOURCE-FBO center (variance ⇒ 3D
+                // content) on this DEGRADED frame — correlated with the (clear)
+                // drawable. source CLEAR ⇒ 3D-render dropped; CONTENT ⇒ handoff.
+                if (srcRb != nil) {
+                    const std::uint8_t* sp =
+                        static_cast<const std::uint8_t*>(srcRb.contents);
+                    int smn = 255, smx = 0;
+                    for (NSUInteger i = 0; i < N * N; ++i) {
+                        for (int c = 0; c < 3; ++c) {
+                            const int v = sp[i * 4 + c];
+                            if (v < smn) smn = v;
+                            if (v > smx) smx = v;
+                        }
+                    }
+                    fboChecksPtr->fetch_add(1, std::memory_order_relaxed);
+                    if ((smx - smn) > 24)
+                        dSrcContent->fetch_add(1, std::memory_order_relaxed);
+                    else
+                        dSrcClear->fetch_add(1, std::memory_order_relaxed);
+                    dSrcPtrSample->store(srcPtr, std::memory_order_relaxed);
+                }
                 sawMissingFlag->store(true, std::memory_order_relaxed);
                 if (fullRb != nil && !spatialClaimedFlag->exchange(true)) {
                     const std::uint8_t* fp =
@@ -16194,6 +16273,26 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 presentGeomNullVbuf.fetch_add(s9NullVbuf, std::memory_order_relaxed);
                 presentVbufHashChecks.fetch_add(s91VbufChecks, std::memory_order_relaxed);
                 presentVbufHashMismatch.fetch_add(s91VbufMismatch, std::memory_order_relaxed);
+                // §10: classify the composition SOURCE-FBO center on this PRESENT
+                // (healthy) frame — the baseline the degraded source is compared to.
+                if (srcRb != nil) {
+                    const std::uint8_t* sp =
+                        static_cast<const std::uint8_t*>(srcRb.contents);
+                    int smn = 255, smx = 0;
+                    for (NSUInteger i = 0; i < N * N; ++i) {
+                        for (int c = 0; c < 3; ++c) {
+                            const int v = sp[i * 4 + c];
+                            if (v < smn) smn = v;
+                            if (v > smx) smx = v;
+                        }
+                    }
+                    fboChecksPtr->fetch_add(1, std::memory_order_relaxed);
+                    if ((smx - smn) > 24)
+                        pSrcContent->fetch_add(1, std::memory_order_relaxed);
+                    else
+                        pSrcClear->fetch_add(1, std::memory_order_relaxed);
+                    pSrcPtrSample->store(srcPtr, std::memory_order_relaxed);
+                }
             }
             (void)rb;
             (void)fullRb;
@@ -16437,6 +16536,25 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             out << ",\"sample\":null";
         }
         out << "}";  // close vbufChecks
+        // §10 FBO-source-readback (the composition's 3D-FBO source, correlated
+        // with the §4 drawable). The which-half split: degraded source CONTENT vs
+        // CLEAR (vs present baseline) = handoff/ordering vs 3D-render-dropped.
+        out << ",\"fboSource\":{\"checks\":"
+            << fboReadbackChecks.load(std::memory_order_relaxed)
+            << ",\"compositionTexturedDraws\":"
+            << compositionTexturedDraws.load(std::memory_order_relaxed)
+            << ",\"degradedSourceClear\":"
+            << degradedSourceClear.load(std::memory_order_relaxed)
+            << ",\"degradedSourceContent\":"
+            << degradedSourceContent.load(std::memory_order_relaxed)
+            << ",\"presentSourceClear\":"
+            << presentSourceClear.load(std::memory_order_relaxed)
+            << ",\"presentSourceContent\":"
+            << presentSourceContent.load(std::memory_order_relaxed)
+            << ",\"degradedSourcePtr\":"
+            << degradedSourcePtrSample.load(std::memory_order_relaxed)
+            << ",\"presentSourcePtr\":"
+            << presentSourcePtrSample.load(std::memory_order_relaxed) << "}";
         out << "}";  // close geometry
         out << "}";  // close outer object
         return out.str();
@@ -21087,6 +21205,21 @@ private:
     std::uint64_t metalCaptureFrameCounter = 0;
     int metalCaptureFramesLeft = 0;
     bool metalCaptureDone = false;
+    // S25 W2 §10 FBO-SOURCE-READBACK (EDGE-2 reframe: 3D is on the FBO path, the
+    // lean path is the composition quad sampling it). Read back the composition
+    // draw's SOURCE texture (= the 3D-FBO) center, CORRELATED with the §4 drawable
+    // readback in the SAME frame (Clerk's lock): degraded source-CLEAR ⇒ 3D-render
+    // DROPPED; degraded source-CONTENT + drawable-CLEAR ⇒ HANDOFF/ORDERING; source
+    // ptr ≠ present ⇒ wrong/stale FBO bound. Delta-based (present-content vs
+    // degraded-clear), not absolute (sky can be clear on healthy frames).
+    void* compositionSourcePtr = nullptr;       // FBO sampled this frame (LARGEST)
+    std::uint64_t compositionSourceArea = 0;    // pick the full-screen scene-FBO
+    std::atomic<std::uint64_t> compositionTexturedDraws{0};  // multi-FBO indicator
+    std::atomic<std::uint64_t> fboReadbackChecks{0};  // engagement (non-vacuity)
+    std::atomic<std::uint64_t> degradedSourceClear{0}, degradedSourceContent{0};
+    std::atomic<std::uint64_t> presentSourceClear{0}, presentSourceContent{0};
+    std::atomic<std::uintptr_t> degradedSourcePtrSample{0};
+    std::atomic<std::uintptr_t> presentSourcePtrSample{0};
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;

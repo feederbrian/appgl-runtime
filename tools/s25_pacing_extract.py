@@ -556,6 +556,43 @@ def main():
                             print("    §9.1 VERDICT: vbuf content STABLE across record→encode (no "
                                   "mismatch) → NOT the overwrite hazard → Metal frame-capture for "
                                   "a subtle finite-wrong MVP / vertex-data.")
+                # §10 FBO-source-readback (EDGE-2: the 3D-FBO the composition samples).
+                fbo = geo.get("fboSource")
+                if fbo and fbo.get("checks", 0) > 0:
+                    dsc = fbo.get("degradedSourceClear", 0)
+                    dsco = fbo.get("degradedSourceContent", 0)
+                    psc = fbo.get("presentSourceClear", 0)
+                    psco = fbo.get("presentSourceContent", 0)
+                    dtot = dsc + dsco
+                    ptot = psc + psco
+                    dcr = rate(dsco, dtot)
+                    pcr = rate(psco, ptot)
+                    print("\n== §10 FBO-SOURCE-READBACK (the 3D-FBO the composition samples) ==")
+                    print(f"  checks={fbo.get('checks')} "
+                          f"compositionTexturedDraws={fbo.get('compositionTexturedDraws')}")
+                    print(f"  degraded source: content={dsco} clear={dsc} "
+                          f"→ content-rate={dcr * 100:.1f}%")
+                    print(f"  present  source: content={psco} clear={psc} "
+                          f"→ content-rate={pcr * 100:.1f}%")
+                    dptr = fbo.get("degradedSourcePtr", 0)
+                    pptr = fbo.get("presentSourcePtr", 0)
+                    print(f"  source ptr: degraded={dptr} present={pptr}")
+                    if dptr and pptr and dptr != pptr:
+                        print("  VERDICT: source PTR DIFFERS (degraded≠present) ⇒ the composition "
+                              "binds a WRONG/STALE FBO on degraded frames → fix the FBO rebind.")
+                    elif ptot > 0 and pcr > 0.5 and pcr - dcr > 0.25:
+                        print("  VERDICT: degraded source-content ≪ present (the 3D-FBO is "
+                              "CLEAR/empty on degraded while healthy frames hold 3D) ⇒ the 3D-"
+                              "RENDER is DROPPED on the FBO-encode path → chase why the lean path "
+                              "skips/uncommits the FBO render. design-before-code.")
+                    elif dtot > 0 and dcr > 0.5:
+                        print("  VERDICT: degraded source HAS 3D content (≈present) but §4 drawable "
+                              "is CLEAR ⇒ the FBO is rendered but NOT COMPOSITED = HANDOFF/ORDERING "
+                              "(FBO-write→composition-read barrier lost) → (c) CB-ordering follow-"
+                              "up → fix = restore the dependency. design-before-code.")
+                    else:
+                        print("  VERDICT: ambiguous (low rates / no clear delta) — Foreman's Metal "
+                              "frame-capture is the ground-truth (or sample >1 readback point).")
 
     # Parallel-encode share (arm c).
     pe_first, pe_last = first.get("parallelEncode", {}), last.get("parallelEncode", {})
