@@ -593,6 +593,43 @@ def main():
                     else:
                         print("  VERDICT: ambiguous (low rates / no clear delta) — Foreman's Metal "
                               "frame-capture is the ground-truth (or sample >1 readback point).")
+                # §11 CB-epoch order: names the FBO-write→composition-read violation.
+                eo = geo.get("epochOrder")
+                if eo and eo.get("checks", 0) > 0:
+                    dra = eo.get("degradedRenderAfterRead", 0)
+                    pra = eo.get("presentRenderAfterRead", 0)
+                    dsc2 = eo.get("degradedSameCb", 0)
+                    psc2 = eo.get("presentSameCb", 0)
+                    drb = eo.get("degradedRenderBeforeRead", 0)
+                    prb = eo.get("presentRenderBeforeRead", 0)
+                    dtot = dra + dsc2 + drb
+                    ptot = pra + psc2 + prb
+                    print("\n== §11 CB-EPOCH ORDER (FBO-render vs composition-read) ==")
+                    print(f"  checks={eo.get('checks')}")
+                    print(f"  degraded: renderAfterRead={dra} sameCb={dsc2} "
+                          f"renderBeforeRead={drb}")
+                    print(f"  present : renderAfterRead={pra} sameCb={psc2} "
+                          f"renderBeforeRead={prb}")
+                    drar = rate(dra, dtot)
+                    prar = rate(pra, ptot)
+                    if dra > 0 and drar - prar > 0.15:
+                        print("  VERDICT: degraded renderAfterRead ≫ present ⇒ SMOKING GUN — "
+                              "the FBO is RENDERED on a LATER CB than the composition READS it "
+                              "(out-of-order: composition's CB read the FBO before the FBO-render "
+                              "CB's writes landed). FIX = enforce same-CB-after the FBO-render at "
+                              "the composition flush (re-apply C49 to the deferred/parallel path).")
+                    elif drb > 0 and rate(drb, dtot) - rate(prb, ptot) > 0.15:
+                        print("  VERDICT: degraded renderBeforeRead ≫ present ⇒ SPLIT — composition "
+                              "on a later CB than the (earlier) FBO-render; cross-CB sync failed → "
+                              "FIX = a targeted dependency / force same-CB at that edge.")
+                    elif dsc2 > 0 and rate(dsc2, dtot) > 0.5:
+                        print("  VERDICT: degraded SAME-CB dominant ⇒ NOT a CB-split — the FBO-"
+                              "render + composition are same-CB but still frozen = an INTRA-CB "
+                              "pass-order reorder (FBO pass encoded after the composition pass) — "
+                              "the capture's pass-order view confirms; FIX = the encode order.")
+                    else:
+                        print("  VERDICT: no clear degraded-vs-present epoch delta — re-examine / "
+                              "the operator capture is the execution-order tiebreaker.")
 
     # Parallel-encode share (arm c).
     pe_first, pe_last = first.get("parallelEncode", {}), last.get("parallelEncode", {})

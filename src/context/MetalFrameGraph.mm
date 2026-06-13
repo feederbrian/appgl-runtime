@@ -4817,6 +4817,7 @@ struct MetalFrameGraph::Impl {
             : makeCommandBuffer(reason);
         currentCommandBuffer = currentCommandBufferLease.get();
         if (currentCommandBuffer != nil) {
+            ++cbEpoch;  // §11: monotonic CB epoch (FBO-render vs composition-read order)
             attachErrorHandler(currentCommandBuffer, label);
             return true;
         }
@@ -5319,6 +5320,11 @@ struct MetalFrameGraph::Impl {
         // Lazily create the MTLRenderPipelineState from translated MSL.
         id<MTLTexture> colorTexture = isFBODraw ? fboColorTex
             : (usesOffscreenTarget ? offscreenColorTexture : nil);
+        // §11: record this FBO's render epoch (the CB it renders on) so the
+        // composition's later read can be checked for same-CB-after ordering.
+        if (survivalContentProbeLatched && isFBODraw && colorTexture != nil) {
+            fboRenderCbEpoch[(__bridge void*)colorTexture] = cbEpoch;
+        }
         if (!isFBODraw && colorTexture == nil && currentRenderEncoder != nil) {
             colorTexture = readbackSourceTexture != nil
                 ? readbackSourceTexture
@@ -9990,6 +9996,8 @@ struct MetalFrameGraph::Impl {
                         compositionSourceArea = area;
                         compositionSourcePtr =
                             descriptor.fragmentTextures[0].metalTexture;
+                        // §11: the CB epoch this composition draw reads the FBO on.
+                        compositionReadEpoch = cbEpoch;
                     }
                 }
             }
@@ -16024,8 +16032,19 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 }
             }
         }
+        // §11: snapshot the sampled FBO's render epoch vs the composition read
+        // epoch (before the §10 reset clears compositionSourcePtr).
+        armedCompositionReadEpoch = compositionReadEpoch;
+        if (compositionSourcePtr != nullptr) {
+            auto it = fboRenderCbEpoch.find(compositionSourcePtr);
+            armedFboRenderEpoch =
+                (it != fboRenderCbEpoch.end()) ? it->second : 0;
+        } else {
+            armedFboRenderEpoch = 0;
+        }
         compositionSourcePtr = nullptr;  // §10: reset for next frame's draws
         compositionSourceArea = 0;
+        compositionReadEpoch = 0;  // §11 reset
         // full-frame capture, bounded to the corruption phase (a degraded frame
         // has been seen) and one-shot.
         id<MTLBuffer> fullRb = nil;
@@ -16138,6 +16157,16 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         std::atomic<std::uint64_t>* pSrcContent = &presentSourceContent;
         std::atomic<std::uintptr_t>* dSrcPtrSample = &degradedSourcePtrSample;
         std::atomic<std::uintptr_t>* pSrcPtrSample = &presentSourcePtrSample;
+        // §11 CB-epoch: the sampled FBO's render epoch vs the composition read.
+        const std::uint64_t s11ReadEpoch = armedCompositionReadEpoch;
+        const std::uint64_t s11RenderEpoch = armedFboRenderEpoch;
+        std::atomic<std::uint64_t>* epochChecksPtr = &epochChecks;
+        std::atomic<std::uint64_t>* dRenderAfter = &degradedRenderAfterRead;
+        std::atomic<std::uint64_t>* pRenderAfter = &presentRenderAfterRead;
+        std::atomic<std::uint64_t>* dSameCbE = &degradedSameCb;
+        std::atomic<std::uint64_t>* pSameCbE = &presentSameCb;
+        std::atomic<std::uint64_t>* dRenderBefore = &degradedRenderBeforeRead;
+        std::atomic<std::uint64_t>* pRenderBefore = &presentRenderBeforeRead;
         [currentCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer>) {
             const std::uint8_t* p = static_cast<const std::uint8_t*>(rb.contents);
             int clearMatches = 0;
@@ -16203,6 +16232,16 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                     else
                         dSrcClear->fetch_add(1, std::memory_order_relaxed);
                     dSrcPtrSample->store(srcPtr, std::memory_order_relaxed);
+                }
+                // §11: FBO-render vs composition-read CB-epoch ordering (degraded).
+                if (s11ReadEpoch > 0 && s11RenderEpoch > 0) {
+                    epochChecksPtr->fetch_add(1, std::memory_order_relaxed);
+                    if (s11RenderEpoch > s11ReadEpoch)
+                        dRenderAfter->fetch_add(1, std::memory_order_relaxed);
+                    else if (s11RenderEpoch == s11ReadEpoch)
+                        dSameCbE->fetch_add(1, std::memory_order_relaxed);
+                    else
+                        dRenderBefore->fetch_add(1, std::memory_order_relaxed);
                 }
                 sawMissingFlag->store(true, std::memory_order_relaxed);
                 if (fullRb != nil && !spatialClaimedFlag->exchange(true)) {
@@ -16292,6 +16331,16 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                     else
                         pSrcClear->fetch_add(1, std::memory_order_relaxed);
                     pSrcPtrSample->store(srcPtr, std::memory_order_relaxed);
+                }
+                // §11: FBO-render vs composition-read CB-epoch ordering (present).
+                if (s11ReadEpoch > 0 && s11RenderEpoch > 0) {
+                    epochChecksPtr->fetch_add(1, std::memory_order_relaxed);
+                    if (s11RenderEpoch > s11ReadEpoch)
+                        pRenderAfter->fetch_add(1, std::memory_order_relaxed);
+                    else if (s11RenderEpoch == s11ReadEpoch)
+                        pSameCbE->fetch_add(1, std::memory_order_relaxed);
+                    else
+                        pRenderBefore->fetch_add(1, std::memory_order_relaxed);
                 }
             }
             (void)rb;
@@ -16555,6 +16604,23 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             << degradedSourcePtrSample.load(std::memory_order_relaxed)
             << ",\"presentSourcePtr\":"
             << presentSourcePtrSample.load(std::memory_order_relaxed) << "}";
+        // §11 CB-epoch order (the smoking gun for the FBO-write→composition-read
+        // violation): degraded renderAfterRead ≫ present ⇒ the FBO is rendered
+        // AFTER the composition reads it = REORDER/out-of-order = the fix site.
+        out << ",\"epochOrder\":{\"checks\":"
+            << epochChecks.load(std::memory_order_relaxed)
+            << ",\"degradedRenderAfterRead\":"
+            << degradedRenderAfterRead.load(std::memory_order_relaxed)
+            << ",\"presentRenderAfterRead\":"
+            << presentRenderAfterRead.load(std::memory_order_relaxed)
+            << ",\"degradedSameCb\":"
+            << degradedSameCb.load(std::memory_order_relaxed)
+            << ",\"presentSameCb\":"
+            << presentSameCb.load(std::memory_order_relaxed)
+            << ",\"degradedRenderBeforeRead\":"
+            << degradedRenderBeforeRead.load(std::memory_order_relaxed)
+            << ",\"presentRenderBeforeRead\":"
+            << presentRenderBeforeRead.load(std::memory_order_relaxed) << "}";
         out << "}";  // close geometry
         out << "}";  // close outer object
         return out.str();
@@ -21220,6 +21286,25 @@ private:
     std::atomic<std::uint64_t> presentSourceClear{0}, presentSourceContent{0};
     std::atomic<std::uintptr_t> degradedSourcePtrSample{0};
     std::atomic<std::uintptr_t> presentSourcePtrSample{0};
+    // S25 W2 §11 CB-EPOCH ORDER (pins the FBO-write→composition-read violation +
+    // is the unified same-CB-after fix's basis). cbEpoch ++ per new CB; record
+    // each FBO's render epoch; at the composition's FBO-read capture the read
+    // epoch; at end-of-frame compare the SAMPLED FBO's render epoch vs the read:
+    //   render>read ⇒ the FBO was rendered AFTER the composition read it =
+    //     REORDER/out-of-order (matches §10 empty-read-then-full-FBO) = smoking gun.
+    //   render==read ⇒ same CB (correct). render<read ⇒ composition on a later
+    //     CB than the render = split (cross-CB).
+    std::uint64_t cbEpoch = 0;
+    std::unordered_map<void*, std::uint64_t> fboRenderCbEpoch;  // FBO ptr→render epoch
+    std::uint64_t compositionReadEpoch = 0;       // set at the §10 source capture
+    std::uint64_t armedCompositionReadEpoch = 0;  // snapshot at end-of-frame
+    std::uint64_t armedFboRenderEpoch = 0;        // the sampled FBO's render epoch
+    std::atomic<std::uint64_t> epochChecks{0};    // engagement (non-vacuity)
+    std::atomic<std::uint64_t> degradedRenderAfterRead{0};  // REORDER smoking gun
+    std::atomic<std::uint64_t> presentRenderAfterRead{0};
+    std::atomic<std::uint64_t> degradedSameCb{0}, presentSameCb{0};
+    std::atomic<std::uint64_t> degradedRenderBeforeRead{0};  // split (cross-CB)
+    std::atomic<std::uint64_t> presentRenderBeforeRead{0};
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;
