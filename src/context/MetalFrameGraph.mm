@@ -12165,6 +12165,7 @@ struct MetalFrameGraph::Impl {
             << ",\"size\":" << recordPlanMemo.size()
             << ",\"peak\":" << recordPlanMemoPeak
             << ",\"verifyMismatches\":" << recordPlanMemoVerifyMismatches
+            << ",\"verifyChecks\":" << recordPlanMemoVerifyChecks
             << "}";
         out << ",\"presentLeanLanding\":"
             << presentLeanLandingDiagnosticsJson();
@@ -20734,6 +20735,7 @@ private:
     const bool w2PlanIdentityOmitPrefix =
         appglEnvEnabledDefaultOff("APPGL_W2_PLAN_IDENTITY_OMIT_PREFIX");
     std::uint64_t recordPlanMemoVerifyMismatches = 0;
+    std::uint64_t recordPlanMemoVerifyChecks = 0;  // §6 latch-engagement proof
 
     // Field-wise plan equality for the P1 verifier. NOT memcmp: the memo
     // entry is copy-constructed into the map and implicit copy ctors copy
@@ -20963,6 +20965,9 @@ private:
             recordPlanMemoLastUse[identity] = ++recordPlanMemoClock;
             ++recordPlanMemoHits;
             if (w2PlanVerifyLatched) {
+                ++recordPlanMemoVerifyChecks;  // §6: proves the verify latch
+                                               // ENGAGED (a 0-mismatch verdict is
+                                               // real, not a non-engaged latch)
                 TranslatedDrawPlan fresh;
                 if (!buildTranslatedDrawPlanContent(
                         source, colorFormat, attachmentSampleCount,

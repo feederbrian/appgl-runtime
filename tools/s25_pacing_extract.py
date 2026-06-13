@@ -360,28 +360,42 @@ def main():
                 # wrong PSO → encode-but-no-pixels = NOWHERE.
                 dvm = pl_l.get("degradedVerifyMismatches", 0)
                 pvm = pl_l.get("presentVerifyMismatches", 0)
-                vm_total = pl_l.get("degradedVerifyMismatches", None)
+                vchecks = find_key(last, "verifyChecks")  # latch-engagement proof
                 if dvm or pvm or "degradedVerifyMismatches" in pl_l:
                     print("\n== §6 WRONG-PLAN (verify-mismatch, needs APPGL_W2_PLAN_VERIFY=1) ==")
                     print(f"verifyMismatches/frame: degraded={rate(dvm,degf):.3f} "
-                          f"({dvm}) present={rate(pvm,presf):.3f} ({pvm})")
-                    if dvm == 0 and pvm == 0:
-                        print("  (verifyMismatches=0 — either APPGL_W2_PLAN_VERIFY not "
-                              "set, or NO wrong-plan: if the verify latch WAS on, the "
-                              "cached plans are CORRECT ⇒ pivot to the child-encoder "
-                              "state-application ALT candidate.)")
-                    elif rate(dvm, degf) > rate(pvm, presf) + 0.01 and dvm > 0:
-                        print("  VERDICT: WRONG-PLAN CONFIRMED — degraded frames are "
-                              "served a cached plan/PSO whose content ≠ the fresh "
-                              "rebuild (MSL-identity-key collision/staleness) ≫ present "
-                              "⇒ the lean cache-miss draws encode a non-null-but-WRONG "
-                              "PSO → no fragments → NOWHERE. FIX = recordPlanIdentityKey "
-                              "→ a real CONTENT hash (not pointer-approximation), stays "
-                              "parallel. Site PINNED (recordPlanIdentityKey:20584).")
+                          f"({dvm}) present={rate(pvm,presf):.3f} ({pvm})  "
+                          f"verifyChecks={vchecks} (latch {'ENGAGED' if (vchecks or 0) > 0 else 'NOT ENGAGED'})")
+                    if (vchecks or 0) == 0:
+                        print("  ⚠ verifyChecks=0 ⇒ APPGL_W2_PLAN_VERIFY did NOT engage "
+                              "— a 0-mismatch is a FALSE-NEGATIVE. Re-run with the latch "
+                              "actually set before launch.")
+                    elif dvm == 0:
+                        print("  VERDICT: latch ENGAGED + degraded verifyMismatches=0 ⇒ "
+                              "the cached plans are CORRECT (NOT a wrong-plan) ⇒ PIVOT to "
+                              "the child-encoder shared-state-application ALT (fits "
+                              "whole-scene-gone: one wrong shared state wipes all draws).")
+                    elif rate(dvm, degf) > rate(pvm, presf) + 0.01:
+                        permf = rate(dvm, degf)
+                        if permf >= 5.0:
+                            shape = ("MANY mismatches/frame ⇒ the MSL-collision hits "
+                                     "most post-pan draws ⇒ directly explains WHOLE-"
+                                     "SCENE-GONE. CLEAN wrong-plan.")
+                        else:
+                            shape = ("FEW mismatches/frame but whole-scene-gone ⇒ "
+                                     "wrong-plan is REAL but INSUFFICIENT alone ⇒ a "
+                                     "shared-state AMPLIFICATION (one wrong-PSO draw "
+                                     "corrupts shared child-encoder/pipeline state → all "
+                                     "subsequent draws fail). Fix needs BOTH.")
+                        print(f"  VERDICT: WRONG-PLAN CONFIRMED (degraded≫present, "
+                              f"{permf:.1f}/frame) — cached plan content ≠ fresh rebuild "
+                              f"= MSL-identity-key collision → non-null-but-WRONG (per "
+                              f"operator: DEGENERATE → no fragments) PSO → NOWHERE. "
+                              f"{shape} FIX = recordPlanIdentityKey → CONTENT hash "
+                              f"(:20584), stays parallel.")
                     else:
                         print("  VERDICT: verifyMismatches present but NOT degraded≫present "
-                              "⇒ not the degraded-specific cause — re-examine (the "
-                              "mismatches are background, not the freeze).")
+                              "⇒ background mismatches, not the freeze cause — re-examine.")
 
     # Parallel-encode share (arm c).
     pe_first, pe_last = first.get("parallelEncode", {}), last.get("parallelEncode", {})
