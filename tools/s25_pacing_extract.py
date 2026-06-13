@@ -289,6 +289,40 @@ def main():
             else:
                 print("WHERE: no frozen full-frame captured (no degraded frame after "
                       "onset, or probe off) — re-run until freeze.")
+            # §5 batch-pass-state: degraded-vs-present per-flush clear/depth rates.
+            dbf = pl_l.get("degradedBatchFlushes", 0)
+            pbf = pl_l.get("presentBatchFlushes", 0)
+            if dbf or pbf:
+                def rate(num, den): return (num / den) if den else 0.0
+                dcc = pl_l.get("degradedBatchColorClears", 0)
+                ddl = pl_l.get("degradedBatchDepthLoads", 0)
+                ddc = pl_l.get("degradedBatchDepthClears", 0)
+                pcc = pl_l.get("presentBatchColorClears", 0)
+                pdl = pl_l.get("presentBatchDepthLoads", 0)
+                pdc = pl_l.get("presentBatchDepthClears", 0)
+                print("\n== §5 BATCH-PASS-STATE (degraded vs present, per flush) ==")
+                print(f"flushes: degraded={dbf} present={pbf}")
+                print(f"color-CLEAR rate: degraded={rate(dcc,dbf):.2f} "
+                      f"present={rate(pcc,pbf):.2f}   "
+                      f"depth-LOAD rate: degraded={rate(ddl,dbf):.2f} "
+                      f"present={rate(pdl,pbf):.2f}   "
+                      f"depth-CLEAR rate: degraded={rate(ddc,dbf):.2f} "
+                      f"present={rate(pdc,pbf):.2f}")
+                dccr, pccr = rate(dcc,dbf), rate(pcc,pbf)
+                ddlr, pdlr = rate(ddl,dbf), rate(pdl,pbf)
+                if dccr > pccr + 0.05:
+                    print("  VERDICT: (b) CLEAR-TIMING — degraded frames read a HIGHER "
+                          "color-CLEAR rate ⇒ a late parallel batch clears the 3D away "
+                          "(S24-flicker parallel analogue; fix = port a9ccea4 "
+                          "frame-boundary-clear discipline to the parallel batch).")
+                elif ddlr > pdlr + 0.05:
+                    print("  VERDICT: (a) DEPTH-DISCARD — degraded frames LOAD (not "
+                          "clear) depth at a higher rate ⇒ stale depth discards the new "
+                          "3D fragments (fix = the batch pass depth load/clear).")
+                else:
+                    print("  VERDICT: batch clear/depth state does NOT differ "
+                          "degraded-vs-present ⇒ neither (a) nor (b) at the loadAction "
+                          "level — deeper (per-draw depth contents / race); escalate.")
 
     # Parallel-encode share (arm c).
     pe_first, pe_last = first.get("parallelEncode", {}), last.get("parallelEncode", {})

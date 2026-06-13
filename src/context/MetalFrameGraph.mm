@@ -9766,6 +9766,24 @@ struct MetalFrameGraph::Impl {
         }
         attachFragmentShadingRateMap(pass, fragmentShadingRate,
                                      colorTexture, 1);
+        // S25 §5 batch-pass-state: record the clear/depth loadActions this
+        // parallel batch reads at flush (the runtime clear/depth state). Bucketed
+        // degraded-vs-present in the §4 handler. Obs-only, latch-gated.
+        if (survivalContentProbeLatched) {
+            ++batchFlushesThisFrame;
+            if (pass.colorAttachments[0].loadAction == MTLLoadActionClear) {
+                ++batchColorClearsThisFrame;
+            } else {
+                ++batchColorLoadsThisFrame;
+            }
+            if (passDepthStencil != nil) {
+                if (pass.depthAttachment.loadAction == MTLLoadActionClear) {
+                    ++batchDepthClearsThisFrame;
+                } else {
+                    ++batchDepthLoadsThisFrame;
+                }
+            }
+        }
         passOut = pass;
         colorTextureOut = colorTexture;
         passDepthStencilOut = passDepthStencil;
@@ -15272,7 +15290,19 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             fboDrawsSincePresent >= survivalGameplayMinFbo) {
             spatialProbeArmedThisFrame = true;
             spatialProbeClearColor = lastFrameClearColor;
+            // §5: snapshot this frame's parallel-batch clear/depth loadActions.
+            armedBatchFlushes = batchFlushesThisFrame;
+            armedBatchColorClears = batchColorClearsThisFrame;
+            armedBatchColorLoads = batchColorLoadsThisFrame;
+            armedBatchDepthClears = batchDepthClearsThisFrame;
+            armedBatchDepthLoads = batchDepthLoadsThisFrame;
         }
+        // §5: reset the per-frame batch-flush counters (snapshot armed above).
+        batchFlushesThisFrame = 0;
+        batchColorClearsThisFrame = 0;
+        batchColorLoadsThisFrame = 0;
+        batchDepthClearsThisFrame = 0;
+        batchDepthLoadsThisFrame = 0;
         lastLeanColorTextureSincePresent = nullptr;
         lastLeanSubmitIndexSincePresent = 0;
         leanEncodedSincePresent = 0;
@@ -15599,6 +15629,23 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         std::uint32_t* gridInnerOut = &frozenGridInner;
         std::uint32_t* gridTotalOut = &frozenGridTotal;
         char* gridMapOut = frozenGridMap;
+        // §5: this frame's parallel-batch clear/depth loadAction snapshot +
+        // degraded/present accumulator pointers (the runtime clear/depth state).
+        const std::uint32_t s5Flushes = armedBatchFlushes;
+        const std::uint32_t s5ColorClears = armedBatchColorClears;
+        const std::uint32_t s5ColorLoads = armedBatchColorLoads;
+        const std::uint32_t s5DepthClears = armedBatchDepthClears;
+        const std::uint32_t s5DepthLoads = armedBatchDepthLoads;
+        std::atomic<std::uint64_t>* dBatchFlushes = &degradedBatchFlushes;
+        std::atomic<std::uint64_t>* dColorClears = &degradedBatchColorClears;
+        std::atomic<std::uint64_t>* dColorLoads = &degradedBatchColorLoads;
+        std::atomic<std::uint64_t>* dDepthClears = &degradedBatchDepthClears;
+        std::atomic<std::uint64_t>* dDepthLoads = &degradedBatchDepthLoads;
+        std::atomic<std::uint64_t>* pBatchFlushes = &presentBatchFlushes;
+        std::atomic<std::uint64_t>* pColorClears = &presentBatchColorClears;
+        std::atomic<std::uint64_t>* pColorLoads = &presentBatchColorLoads;
+        std::atomic<std::uint64_t>* pDepthClears = &presentBatchDepthClears;
+        std::atomic<std::uint64_t>* pDepthLoads = &presentBatchDepthLoads;
         [currentCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer>) {
             const std::uint8_t* p = static_cast<const std::uint8_t*>(rb.contents);
             int clearMatches = 0;
@@ -15619,6 +15666,12 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 // DEGRADED frame (center clear) — the freeze signature, measured
                 // lean-agnostically (serial + parallel).
                 degradedCtr->fetch_add(1, std::memory_order_relaxed);
+                // §5: the batch clear/depth state this degraded frame read.
+                dBatchFlushes->fetch_add(s5Flushes, std::memory_order_relaxed);
+                dColorClears->fetch_add(s5ColorClears, std::memory_order_relaxed);
+                dColorLoads->fetch_add(s5ColorLoads, std::memory_order_relaxed);
+                dDepthClears->fetch_add(s5DepthClears, std::memory_order_relaxed);
+                dDepthLoads->fetch_add(s5DepthLoads, std::memory_order_relaxed);
                 sawMissingFlag->store(true, std::memory_order_relaxed);
                 if (fullRb != nil && !spatialClaimedFlag->exchange(true)) {
                     const std::uint8_t* fp =
@@ -15662,6 +15715,13 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 }
             } else {
                 presentCtr->fetch_add(1, std::memory_order_relaxed);
+                // §5: the batch clear/depth state this present (good) frame read
+                // — the contrast against degraded.
+                pBatchFlushes->fetch_add(s5Flushes, std::memory_order_relaxed);
+                pColorClears->fetch_add(s5ColorClears, std::memory_order_relaxed);
+                pColorLoads->fetch_add(s5ColorLoads, std::memory_order_relaxed);
+                pDepthClears->fetch_add(s5DepthClears, std::memory_order_relaxed);
+                pDepthLoads->fetch_add(s5DepthLoads, std::memory_order_relaxed);
             }
             (void)rb;
             (void)fullRb;
@@ -15715,7 +15775,31 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             << ",\"frozenGridInner\":" << (spatialReady ? frozenGridInner : 0u)
             << ",\"frozenGridTotal\":" << (spatialReady ? frozenGridTotal : 0u)
             << ",\"frozenGridMap\":\"" << (spatialReady ? frozenGridMap : "")
-            << "\"}";
+            << "\""
+            // §5 batch-pass-state (degraded vs present per-flush clear/depth):
+            // compare the rates — degraded-higher COLOR-clear ⇒ (b) clear-timing
+            // (S24-flicker parallel analogue); degraded-higher DEPTH-load ⇒ (a)
+            // stale-depth discard.
+            << ",\"degradedBatchFlushes\":"
+            << degradedBatchFlushes.load(std::memory_order_relaxed)
+            << ",\"degradedBatchColorClears\":"
+            << degradedBatchColorClears.load(std::memory_order_relaxed)
+            << ",\"degradedBatchColorLoads\":"
+            << degradedBatchColorLoads.load(std::memory_order_relaxed)
+            << ",\"degradedBatchDepthClears\":"
+            << degradedBatchDepthClears.load(std::memory_order_relaxed)
+            << ",\"degradedBatchDepthLoads\":"
+            << degradedBatchDepthLoads.load(std::memory_order_relaxed)
+            << ",\"presentBatchFlushes\":"
+            << presentBatchFlushes.load(std::memory_order_relaxed)
+            << ",\"presentBatchColorClears\":"
+            << presentBatchColorClears.load(std::memory_order_relaxed)
+            << ",\"presentBatchColorLoads\":"
+            << presentBatchColorLoads.load(std::memory_order_relaxed)
+            << ",\"presentBatchDepthClears\":"
+            << presentBatchDepthClears.load(std::memory_order_relaxed)
+            << ",\"presentBatchDepthLoads\":"
+            << presentBatchDepthLoads.load(std::memory_order_relaxed) << "}";
         return out.str();
     }
 
@@ -20135,6 +20219,35 @@ private:
     std::uint32_t frozenGridInner = 0;
     std::uint32_t frozenGridTotal = 0;
     char frozenGridMap[257] = {0};  // 16x16 '0'/'1' row-major + null
+    // S25 W2 §5 BATCH-PASS-STATE probe: the encoded 3D draws produce no pixels
+    // despite correct per-draw state → the divergence is the RUNTIME clear/depth
+    // state the parallel batch reads at flush. Capture, per parallel batch flush,
+    // the chosen color/depth loadActions (Clear vs Load = hasPendingClear/mask),
+    // bucketed DEGRADED-vs-PRESENT (via §4). (b) clear-timing: degraded frames
+    // show a higher COLOR-clear rate (a late batch clears the 3D away — the
+    // parallel analogue of the S24 frame-semantic-clear flicker, a9ccea4); (a)
+    // depth-discard: degraded frames LOAD (not clear) depth → stale depth discards
+    // the new 3D fragments. Lean-agnostic gating reused from §4.
+    std::uint32_t batchFlushesThisFrame = 0;
+    std::uint32_t batchColorClearsThisFrame = 0;
+    std::uint32_t batchColorLoadsThisFrame = 0;
+    std::uint32_t batchDepthClearsThisFrame = 0;
+    std::uint32_t batchDepthLoadsThisFrame = 0;
+    std::uint32_t armedBatchFlushes = 0;
+    std::uint32_t armedBatchColorClears = 0;
+    std::uint32_t armedBatchColorLoads = 0;
+    std::uint32_t armedBatchDepthClears = 0;
+    std::uint32_t armedBatchDepthLoads = 0;
+    std::atomic<std::uint64_t> degradedBatchFlushes{0};
+    std::atomic<std::uint64_t> degradedBatchColorClears{0};
+    std::atomic<std::uint64_t> degradedBatchColorLoads{0};
+    std::atomic<std::uint64_t> degradedBatchDepthClears{0};
+    std::atomic<std::uint64_t> degradedBatchDepthLoads{0};
+    std::atomic<std::uint64_t> presentBatchFlushes{0};
+    std::atomic<std::uint64_t> presentBatchColorClears{0};
+    std::atomic<std::uint64_t> presentBatchColorLoads{0};
+    std::atomic<std::uint64_t> presentBatchDepthClears{0};
+    std::atomic<std::uint64_t> presentBatchDepthLoads{0};
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;
