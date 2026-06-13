@@ -18781,6 +18781,252 @@ TestResult runS25CopyHeadroomDefaultOffProbe() {
     return result;
 }
 
+// ── S25 W2: plan-prepare-at-record probes ──
+
+// P3 capacity-freeze red→green. Reproduces the measured live-WZ failure
+// mode in-gauntlet: APPGL_PHASE2_PLAN_CAPACITY=0 forces the Phase-2 plan
+// cache decision tree into permanent KeyCapacity rejection (the state the
+// stress sitting reached at decile 3 with 1,048,576 entries), so no plan
+// ever arrives with the draw. Pre-W2 the lean fill then fails plan_null on
+// every attempt (fillSuccesses == 0 → this probe is RED by construction);
+// post-W2 record-prepare builds the plan from the target snapshot and the
+// fill must succeed without the cache.
+TestResult runS25W2CapacityFreezeProbe() {
+    ScopedEnvVar probeOn("APPGL_COPY_HEADROOM_PROBE", "1");
+    ScopedEnvVar capClamp("APPGL_PHASE2_PLAN_CAPACITY", "0");
+    auto result = runDirectSentinel("s25.w2.capacity-freeze", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        C51Quad q = c51MakeQuad(gl);
+        gl.glUseProgram(q.program);
+        gl.glBindVertexArray(q.vao);
+        gl.glViewport(0, 0, 32, 32);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glUniform4f(q.colorLoc, 0.0f, 1.0f, 1.0f, 1.0f);
+        for (int i = 0; i < 16; ++i) {
+            gl.glDrawElementsInstancedBaseVertex(
+                GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr, 1, 0);
+        }
+        // Perturbation guard: rendering must be unaffected either way.
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[1], 255u, 4u,
+                         "capacity-freeze: draws render correctly");
+        gl.glFinish();
+        const auto inventory = context.metalResourceInventory();
+        if (inventory.copyHeadroomFb0Draws < 16) {
+            recordSentinelFailure(
+                failures,
+                "probe draws did not reach the shadow",
+                "draws=" + std::to_string(inventory.copyHeadroomFb0Draws));
+        }
+        if (inventory.copyHeadroomFb0FillSuccesses == 0) {
+            recordSentinelFailure(
+                failures,
+                "lean fill never succeeds with the Phase-2 plan cache "
+                "saturated — record path still depends on cache luck",
+                "fills=" +
+                    std::to_string(inventory.copyHeadroomFb0FillSuccesses) +
+                    " draws=" +
+                    std::to_string(inventory.copyHeadroomFb0Draws));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        c51DestroyQuad(gl, q);
+        expectGLError(gl, GL_NO_ERROR, "capacity-freeze probe cleanup");
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "lean fill succeeds with the Phase-2 plan cache saturated (record-prepare immune to the capacity-freeze class)";
+    }
+    return result;
+}
+
+// P1 content-equality shadow, GREEN leg: with verification latched, every
+// memo hit rebuilds the plan fresh and compares. Distinct blend states are
+// distinct plan contents (blend bits live in the cache-key prefix), so the
+// draw mix below exercises multiple memo entries with repeat hits; zero
+// mismatches required.
+TestResult runS25W2PlanVerifyProbe() {
+    ScopedEnvVar probeOn("APPGL_COPY_HEADROOM_PROBE", "1");
+    ScopedEnvVar verifyOn("APPGL_W2_PLAN_VERIFY", "1");
+    ScopedEnvVar capClamp("APPGL_PHASE2_PLAN_CAPACITY", "0");
+    auto result = runDirectSentinel("s25.w2.plan-verify", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        C51Quad q = c51MakeQuad(gl);
+        gl.glUseProgram(q.program);
+        gl.glBindVertexArray(q.vao);
+        gl.glViewport(0, 0, 32, 32);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glUniform4f(q.colorLoc, 0.0f, 1.0f, 0.0f, 1.0f);
+        for (int round = 0; round < 4; ++round) {
+            gl.glDisable(GL_BLEND);
+            for (int i = 0; i < 4; ++i) {
+                gl.glDrawElementsInstancedBaseVertex(
+                    GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr, 1, 0);
+            }
+            gl.glEnable(GL_BLEND);
+            gl.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            for (int i = 0; i < 4; ++i) {
+                gl.glDrawElementsInstancedBaseVertex(
+                    GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr, 1, 0);
+            }
+        }
+        gl.glDisable(GL_BLEND);
+        gl.glFinish();
+        const auto inventory = context.metalResourceInventory();
+        if (inventory.w2PlanMemoHits == 0 || inventory.w2PlanMemoMisses < 2) {
+            recordSentinelFailure(
+                failures,
+                "plan memo did not engage with distinct blend contents",
+                "hits=" + std::to_string(inventory.w2PlanMemoHits) +
+                    " misses=" + std::to_string(inventory.w2PlanMemoMisses));
+        }
+        if (inventory.w2PlanVerifyMismatches != 0) {
+            recordSentinelFailure(
+                failures,
+                "memo-served plan diverged from fresh build (wrong-plan class)",
+                "mismatches=" +
+                    std::to_string(inventory.w2PlanVerifyMismatches));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        c51DestroyQuad(gl, q);
+        expectGLError(gl, GL_NO_ERROR, "plan-verify probe cleanup");
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "memo-served plans are bit-identical to fresh builds across distinct blend contents (P1 green leg)";
+    }
+    return result;
+}
+
+// P1 RED leg: the omit-prefix knob weakens the identity key to MSL identity
+// only, so the blend-on and blend-off contents collide in one memo entry and
+// the verifier MUST catch the served-stale-content mismatch. Proves the
+// probe has teeth (flicker-probe red→green discipline). Rendering output is
+// deliberately not asserted here — a wrong plan is the point.
+TestResult runS25W2PlanVerifyRedLegProbe() {
+    ScopedEnvVar probeOn("APPGL_COPY_HEADROOM_PROBE", "1");
+    ScopedEnvVar verifyOn("APPGL_W2_PLAN_VERIFY", "1");
+    ScopedEnvVar omitPrefix("APPGL_W2_PLAN_IDENTITY_OMIT_PREFIX", "1");
+    ScopedEnvVar capClamp("APPGL_PHASE2_PLAN_CAPACITY", "0");
+    auto result = runDirectSentinel("s25.w2.plan-verify.red-leg", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        C51Quad q = c51MakeQuad(gl);
+        gl.glUseProgram(q.program);
+        gl.glBindVertexArray(q.vao);
+        gl.glViewport(0, 0, 32, 32);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glUniform4f(q.colorLoc, 0.0f, 0.0f, 1.0f, 1.0f);
+        gl.glDisable(GL_BLEND);
+        for (int i = 0; i < 4; ++i) {
+            gl.glDrawElementsInstancedBaseVertex(
+                GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr, 1, 0);
+        }
+        gl.glEnable(GL_BLEND);
+        gl.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        for (int i = 0; i < 4; ++i) {
+            gl.glDrawElementsInstancedBaseVertex(
+                GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr, 1, 0);
+        }
+        gl.glDisable(GL_BLEND);
+        gl.glFinish();
+        const auto inventory = context.metalResourceInventory();
+        if (inventory.w2PlanVerifyMismatches == 0) {
+            recordSentinelFailure(
+                failures,
+                "weakened identity key did not produce a caught mismatch — "
+                "the P1 verifier has no teeth",
+                "hits=" + std::to_string(inventory.w2PlanMemoHits) +
+                    " mismatches=" +
+                    std::to_string(inventory.w2PlanVerifyMismatches));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        c51DestroyQuad(gl, q);
+        expectGLError(gl, GL_NO_ERROR, "plan-verify red-leg cleanup");
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "P1 verifier catches a deliberately-collided identity key (red leg has teeth)";
+    }
+    return result;
+}
+
+// P4 snapshot staleness: an FB0-scoped resize invalidates transient state;
+// record-prepare must keep serving correct plans afterward (target formats
+// are mode-fixed, so fills resume once the target re-establishes) and the
+// P1 verifier must stay clean across the boundary — no stale target tuple.
+TestResult runS25W2SnapshotResizeProbe() {
+    ScopedEnvVar probeOn("APPGL_COPY_HEADROOM_PROBE", "1");
+    ScopedEnvVar verifyOn("APPGL_W2_PLAN_VERIFY", "1");
+    ScopedEnvVar capClamp("APPGL_PHASE2_PLAN_CAPACITY", "0");
+    auto result = runDirectSentinel("s25.w2.snapshot-resize", [&] {
+        ScopedSentinelContext scoped(32, 32);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        C51Quad q = c51MakeQuad(gl);
+        gl.glUseProgram(q.program);
+        gl.glBindVertexArray(q.vao);
+        gl.glViewport(0, 0, 32, 32);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glUniform4f(q.colorLoc, 1.0f, 0.0f, 0.0f, 1.0f);
+        for (int i = 0; i < 8; ++i) {
+            gl.glDrawElementsInstancedBaseVertex(
+                GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr, 1, 0);
+        }
+        const auto before = context.metalResourceInventory();
+        // FB0-scoped resize: real drawable resize + transient invalidation.
+        gl.glViewport(0, 0, 48, 48);
+        for (int i = 0; i < 8; ++i) {
+            gl.glDrawElementsInstancedBaseVertex(
+                GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr, 1, 0);
+        }
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(24, 24, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[0], 255u, 4u,
+                         "snapshot-resize: post-resize draws render correctly");
+        gl.glFinish();
+        const auto after = context.metalResourceInventory();
+        if (after.copyHeadroomFb0FillSuccesses <=
+            before.copyHeadroomFb0FillSuccesses) {
+            recordSentinelFailure(
+                failures,
+                "fills did not resume after the FB0 resize",
+                "before=" +
+                    std::to_string(before.copyHeadroomFb0FillSuccesses) +
+                    " after=" +
+                    std::to_string(after.copyHeadroomFb0FillSuccesses));
+        }
+        if (after.w2PlanVerifyMismatches != 0) {
+            recordSentinelFailure(
+                failures,
+                "stale plan content served across the resize boundary",
+                "mismatches=" +
+                    std::to_string(after.w2PlanVerifyMismatches));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        c51DestroyQuad(gl, q);
+        expectGLError(gl, GL_NO_ERROR, "snapshot-resize probe cleanup");
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "record-prepare stays correct across an FB0 resize (fills resume, verifier clean)";
+    }
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -18954,6 +19200,14 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
     if (normalizedPhase == "s25-copy-headroom-probes") {
         tests.push_back(runS25CopyHeadroomShadowProbe());
         tests.push_back(runS25CopyHeadroomDefaultOffProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "s25-w2-plan-prepare-probes") {
+        tests.push_back(runS25W2CapacityFreezeProbe());
+        tests.push_back(runS25W2PlanVerifyProbe());
+        tests.push_back(runS25W2PlanVerifyRedLegProbe());
+        tests.push_back(runS25W2SnapshotResizeProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

@@ -520,6 +520,13 @@ enum class LeanFillFailSite : std::uint8_t {
     UniformOverflow,
     TextureUnsupported,
     UboOverflow,
+    // S25 W2 (plan-prepare-at-record) residual sites: target state not yet
+    // established (pre-first-ensure draws) and record-time content build
+    // failure (argbuf-required plans etc.). PlanMissingOrMismatch above is
+    // retired by W2 (record-prepare resolves what the cache doesn't carry)
+    // but keeps its enum slot for cross-run name continuity.
+    SnapshotInvalid,
+    ContentBuildFail,
     Count,
 };
 
@@ -539,6 +546,8 @@ static const char* leanFillFailSiteName(LeanFillFailSite site) {
         case LeanFillFailSite::TextureUnsupported:
             return "texture_unsupported";
         case LeanFillFailSite::UboOverflow: return "ubo_overflow";
+        case LeanFillFailSite::SnapshotInvalid: return "snapshot_invalid";
+        case LeanFillFailSite::ContentBuildFail: return "content_build_fail";
         case LeanFillFailSite::Count: break;
     }
     return "unknown";
@@ -3859,7 +3868,22 @@ static MTLBlendOperation glBlendEqToMTL(GLenum eq) {
 // deterministic FNV-1a pass, so common toggles (opaque ↔ alpha-blended
 // with identical geometry layout) and SSO fragment swaps both produce
 // distinct keys.
-static std::uint64_t computePipelineCacheKey(
+// S25 W2: same env latch the encode heavy path uses (its copy is a
+// function-local static); record-time plan builds must refuse to produce
+// non-argbuf plans when the argbuf override is forced.
+static bool translatedDrawForceArgumentBuffersEnv() {
+    static const bool enabled =
+        (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
+    return enabled;
+}
+
+// S25 W2: the scalar prefix of the pipeline cache key (everything except
+// the trailing FNV over the MSL source strings). Split out so the
+// record-plan memo can use it as the cheap component of its identity key
+// without paying the per-draw full-MSL hash. Composition of the final key
+// is UNCHANGED — computePipelineCacheKey() below produces bit-identical
+// values to the pre-split function.
+static std::uint64_t computePipelineCacheKeyPrefix(
     const TranslatedDrawInfo& info, MTLPixelFormat colorFormat,
     NSUInteger sampleCount, bool forcePerSampleFS)
 {
@@ -3942,7 +3966,14 @@ static std::uint64_t computePipelineCacheKey(
         }
     }
     key |= static_cast<std::uint64_t>(hash & 0x0FFFFFFFu);  // 28 bits (bit 28 = rasterizerDiscard)
+    return key;
+}
 
+static std::uint64_t computePipelineCacheKeyFromPrefix(
+    std::uint64_t key,
+    const std::string* vertexMSL,
+    const std::string* fragmentMSL)
+{
     std::uint64_t fnv = 1469598103934665603ULL;
     auto mixByte = [&fnv](std::uint8_t byte) {
         fnv ^= static_cast<std::uint64_t>(byte);
@@ -3964,9 +3995,20 @@ static std::uint64_t computePipelineCacheKey(
         }
     };
     mixWord(key);
-    mixString(info.vertexMSL);
-    mixString(info.fragmentMSL);
+    mixString(vertexMSL);
+    mixString(fragmentMSL);
     return fnv;
+}
+
+static std::uint64_t computePipelineCacheKey(
+    const TranslatedDrawInfo& info, MTLPixelFormat colorFormat,
+    NSUInteger sampleCount, bool forcePerSampleFS)
+{
+    return computePipelineCacheKeyFromPrefix(
+        computePipelineCacheKeyPrefix(info, colorFormat, sampleCount,
+                                      forcePerSampleFS),
+        info.vertexMSL,
+        info.fragmentMSL);
 }
 
 // Phase 6-1e / 6-2: transform a SPIRV-Cross fragment MSL source so
@@ -9043,9 +9085,22 @@ struct MetalFrameGraph::Impl {
             return failAt(LeanFillFailSite::Primitive);
         }
 
-        ensureDrawableResources();
+        // S25 W2 (plan-prepare-at-record): target state comes from guarded
+        // LIVE reads of frame-graph-owned members — the same reads the
+        // captured parallel arm performs — never from
+        // ensureDrawableResources(), which is f15e56d-forbidden in record
+        // context (it is also what kept FBO draws from even shadow-filling;
+        // W1 lifts that). Both target formats are mode-fixed (offscreen =
+        // RGBA8, direct drawable = BGRA8), so live reads cannot go stale;
+        // the one hazard is reading BEFORE the offscreen target is first
+        // established, where the nil default would alias the wrong format —
+        // that case falls back instead.
         const bool hasFragmentStage =
             source.fragmentMSL != nullptr && !source.fragmentMSL->empty();
+        if (usesOffscreenTarget && offscreenColorTexture == nil) {
+            fallbackReason = ParallelEncodeFallbackReason::PipelineNotPrepared;
+            return failAt(LeanFillFailSite::SnapshotInvalid);
+        }
         id<MTLTexture> colorTexture =
             usesOffscreenTarget ? offscreenColorTexture : nil;
         const MTLPixelFormat colorFormat = colorTexture != nil
@@ -9057,37 +9112,33 @@ struct MetalFrameGraph::Impl {
             source.sampleShadingEnabled && source.minSampleShading > 0.0f &&
             attachmentSampleCount > 1;
 
+        // Three-step plan resolve: cached plan (when it arrives with the
+        // draw AND matches the live target) → record-plan memo → build.
+        // The Phase-2 cache is an optimization here, never a gate — the
+        // measured capacity-freeze class (stress 2026-06-12: cache pinned
+        // at 1,048,576 entries, fill-success frozen) must not reach the
+        // record path. The commit-D sub-reason classifier retired with the
+        // old terminal plan gate; planSubOut stays None on every path.
         const TranslatedDrawPlan* translatedPlan = source.translatedPlan;
-        if (translatedPlan == nullptr ||
-            !translatedPlan->valid ||
-            translatedPlan->useArgumentBuffers ||
-            translatedPlan->colorFormat !=
-                static_cast<std::uint32_t>(colorFormat) ||
-            translatedPlan->attachmentSampleCount !=
-                static_cast<std::uint32_t>(attachmentSampleCount) ||
-            translatedPlan->forcePerSampleFS != forcePerSampleFS ||
-            translatedPlan->hasFragmentStage != hasFragmentStage) {
-            if (planSubOut != nullptr) {
-                // First-match-wins, same leg order as the gate above.
-                *planSubOut =
-                    translatedPlan == nullptr
-                        ? LeanPlanFailSubReason::PlanNull
-                    : !translatedPlan->valid
-                        ? LeanPlanFailSubReason::PlanInvalid
-                    : translatedPlan->useArgumentBuffers
-                        ? LeanPlanFailSubReason::PlanArgBuf
-                    : translatedPlan->colorFormat !=
-                            static_cast<std::uint32_t>(colorFormat)
-                        ? LeanPlanFailSubReason::ColorFormat
-                    : translatedPlan->attachmentSampleCount !=
-                            static_cast<std::uint32_t>(attachmentSampleCount)
-                        ? LeanPlanFailSubReason::SampleCount
-                    : translatedPlan->forcePerSampleFS != forcePerSampleFS
-                        ? LeanPlanFailSubReason::PerSampleFS
-                        : LeanPlanFailSubReason::FragmentStage;
+        const bool cachedPlanUsable =
+            translatedPlan != nullptr &&
+            translatedPlan->valid &&
+            !translatedPlan->useArgumentBuffers &&
+            translatedPlan->colorFormat ==
+                static_cast<std::uint32_t>(colorFormat) &&
+            translatedPlan->attachmentSampleCount ==
+                static_cast<std::uint32_t>(attachmentSampleCount) &&
+            translatedPlan->forcePerSampleFS == forcePerSampleFS &&
+            translatedPlan->hasFragmentStage == hasFragmentStage;
+        if (!cachedPlanUsable) {
+            translatedPlan = resolveRecordPreparedPlan(
+                source, colorFormat, attachmentSampleCount, forcePerSampleFS,
+                hasFragmentStage);
+            if (translatedPlan == nullptr) {
+                fallbackReason =
+                    ParallelEncodeFallbackReason::PipelineNotPrepared;
+                return failAt(LeanFillFailSite::ContentBuildFail);
             }
-            fallbackReason = ParallelEncodeFallbackReason::PipelineNotPrepared;
-            return failAt(LeanFillFailSite::PlanMissingOrMismatch);
         }
 
         const TranslatedDrawMSLSlots slots =
@@ -11985,6 +12036,15 @@ struct MetalFrameGraph::Impl {
             out << ",\"copyHeadroom\":"
                 << copyHeadroomProbe.diagnosticsJson(copyHeadroomArena.size());
         }
+        out << ",\"recordPlanMemo\":{"
+            << "\"hits\":" << recordPlanMemoHits
+            << ",\"misses\":" << recordPlanMemoMisses
+            << ",\"buildFails\":" << recordPlanMemoBuildFails
+            << ",\"evictions\":" << recordPlanMemoEvictions
+            << ",\"size\":" << recordPlanMemo.size()
+            << ",\"peak\":" << recordPlanMemoPeak
+            << ",\"verifyMismatches\":" << recordPlanMemoVerifyMismatches
+            << "}";
         out << "}";
         return out.str();
     }
@@ -12026,8 +12086,11 @@ struct MetalFrameGraph::Impl {
             }
         }
         if (fboBound) {
-            // Census only — see CopyHeadroomProbe: the shadow fill calls
-            // ensureDrawableResources(), forbidden mid-FBO-pass.
+            // Census only pending W1: the fill no longer touches
+            // ensureDrawableResources (W2 removed it), but prepareLean still
+            // derives the plan's target tuple from the DEFAULT framebuffer —
+            // an FBO-bound draw would key a wrong-target plan. W1's lift
+            // derives FBO target state and retires this skip.
             return;
         }
         ++bucket.fillAttempts;
@@ -12133,6 +12196,13 @@ struct MetalFrameGraph::Impl {
         snapshot.chFboUniformBytes = copyHeadroomProbe.fbo.uniformBytes;
         snapshot.chArenaDrains = copyHeadroomProbe.arenaDrains;
         snapshot.chArenaLive = copyHeadroomArena.size();
+        snapshot.w2PlanMemoHits = recordPlanMemoHits;
+        snapshot.w2PlanMemoMisses = recordPlanMemoMisses;
+        snapshot.w2PlanMemoBuildFails = recordPlanMemoBuildFails;
+        snapshot.w2PlanMemoEvictions = recordPlanMemoEvictions;
+        snapshot.w2PlanMemoSize = recordPlanMemo.size();
+        snapshot.w2PlanMemoPeak = recordPlanMemoPeak;
+        snapshot.w2PlanVerifyMismatches = recordPlanMemoVerifyMismatches;
         return snapshot;
     }
 
@@ -19527,6 +19597,252 @@ private:
             ++translatedDrawMSLSlotCacheClock;
         evictTranslatedDrawMSLSlotsIfNeeded();
         return inserted.first->second;
+    }
+
+    // ── S25 W2: record-plan memo (plan-prepare-at-record) ──
+    // Frame-graph-owned, GL-thread-accessed at record time. Content-keyed:
+    // the identity key is the cheap scalar prefix of the pipeline cache key
+    // (blend / raster / layout / target tuple — every scalar dep the audit
+    // enumerated) plus MSL source IDENTITY (pointer + size + data pointer,
+    // the Phase-2 cache's shipped approximation of content; the P1
+    // content-equality probe arbitrates it). Capped WITH LRU eviction — the
+    // capacity-freeze class this memo exists to kill must not reappear here.
+    static constexpr std::size_t kRecordPlanMemoCapacity = 4096;
+    std::unordered_map<std::uint64_t, TranslatedDrawPlan> recordPlanMemo;
+    std::unordered_map<std::uint64_t, std::uint64_t> recordPlanMemoLastUse;
+    std::uint64_t recordPlanMemoClock = 0;
+    std::uint64_t recordPlanMemoHits = 0;
+    std::uint64_t recordPlanMemoMisses = 0;
+    std::uint64_t recordPlanMemoBuildFails = 0;
+    std::uint64_t recordPlanMemoEvictions = 0;
+    std::uint64_t recordPlanMemoPeak = 0;
+    // P1 content-equality shadow (probe-only): on every memo HIT, rebuild
+    // the plan fresh and compare — catches identity-key collisions (the
+    // MSL-identity approximation) and stale entries. The red-leg knob
+    // deliberately weakens the identity key so the probe can demonstrate
+    // it CATCHES a collision (omits the scalar prefix → draws differing
+    // only in blend/layout/target collide).
+    const bool w2PlanVerifyLatched =
+        appglEnvEnabledDefaultOff("APPGL_W2_PLAN_VERIFY");
+    const bool w2PlanIdentityOmitPrefix =
+        appglEnvEnabledDefaultOff("APPGL_W2_PLAN_IDENTITY_OMIT_PREFIX");
+    std::uint64_t recordPlanMemoVerifyMismatches = 0;
+
+    // Field-wise plan equality for the P1 verifier. NOT memcmp: the memo
+    // entry is copy-constructed into the map and implicit copy ctors copy
+    // members, not padding bytes — TranslatedDrawPlan's bool-then-u64
+    // layout leaves indeterminate padding that memcmp would (and did)
+    // flag as false mismatches.
+    static bool translatedDrawPlanContentEquals(const TranslatedDrawPlan& a,
+                                                const TranslatedDrawPlan& b) {
+        const auto& sa = a.shaderSlots;
+        const auto& sb = b.shaderSlots;
+        return a.valid == b.valid &&
+               a.pipelineCacheKey == b.pipelineCacheKey &&
+               a.colorFormat == b.colorFormat &&
+               a.attachmentSampleCount == b.attachmentSampleCount &&
+               a.forcePerSampleFS == b.forcePerSampleFS &&
+               a.hasFragmentStage == b.hasFragmentStage &&
+               a.vertexUsesArgumentBuffer == b.vertexUsesArgumentBuffer &&
+               a.fragmentUsesArgumentBuffer == b.fragmentUsesArgumentBuffer &&
+               a.useArgumentBuffers == b.useArgumentBuffers &&
+               a.vertexNeedsSSBOSizeBuffer == b.vertexNeedsSSBOSizeBuffer &&
+               a.fragmentNeedsSSBOSizeBuffer == b.fragmentNeedsSSBOSizeBuffer &&
+               a.fragmentNeedsFragCoordParams ==
+                   b.fragmentNeedsFragCoordParams &&
+               a.fragmentNeedsGlNumSamplesArgBuf ==
+                   b.fragmentNeedsGlNumSamplesArgBuf &&
+               a.vertexNeedsFragmentShadingRateState ==
+                   b.vertexNeedsFragmentShadingRateState &&
+               a.clipControlShaderYFixup == b.clipControlShaderYFixup &&
+               a.clipControlInvertsWinding == b.clipControlInvertsWinding &&
+               a.vertexUsesMultiviewViewMask == b.vertexUsesMultiviewViewMask &&
+               a.fragmentUsesMultiviewViewMask ==
+                   b.fragmentUsesMultiviewViewMask &&
+               sa.vertexMslUsesArgBuf == sb.vertexMslUsesArgBuf &&
+               sa.fragmentMslUsesArgBuf == sb.fragmentMslUsesArgBuf &&
+               sa.vertexHasSSBOSizeBuffer == sb.vertexHasSSBOSizeBuffer &&
+               sa.fragmentHasSSBOSizeBuffer == sb.fragmentHasSSBOSizeBuffer &&
+               sa.fragmentNeedsFragCoordParams ==
+                   sb.fragmentNeedsFragCoordParams &&
+               sa.fragmentNeedsGlNumSamplesArgBuf ==
+                   sb.fragmentNeedsGlNumSamplesArgBuf &&
+               sa.vertexNeedsFragmentShadingRateState ==
+                   sb.vertexNeedsFragmentShadingRateState &&
+               sa.vertexUsesMultiviewViewMask ==
+                   sb.vertexUsesMultiviewViewMask &&
+               sa.fragmentUsesMultiviewViewMask ==
+                   sb.fragmentUsesMultiviewViewMask &&
+               sa.vertexClipControlYSignSlot == sb.vertexClipControlYSignSlot &&
+               sa.vertexReductionModesSlot == sb.vertexReductionModesSlot &&
+               sa.vertexLodBiasesSlot == sb.vertexLodBiasesSlot &&
+               sa.vertexBorderClampModesSlot == sb.vertexBorderClampModesSlot &&
+               sa.vertexBorderClampColorsSlot ==
+                   sb.vertexBorderClampColorsSlot &&
+               sa.vertexImplicitLodBiasCorrectionSlot ==
+                   sb.vertexImplicitLodBiasCorrectionSlot &&
+               sa.fragmentReductionModesSlot == sb.fragmentReductionModesSlot &&
+               sa.fragmentLodBiasesSlot == sb.fragmentLodBiasesSlot &&
+               sa.fragmentBorderClampModesSlot ==
+                   sb.fragmentBorderClampModesSlot &&
+               sa.fragmentBorderClampColorsSlot ==
+                   sb.fragmentBorderClampColorsSlot &&
+               sa.fragmentImplicitLodBiasCorrectionSlot ==
+                   sb.fragmentImplicitLodBiasCorrectionSlot &&
+               sa.fragmentDepthCompareFlipSlot ==
+                   sb.fragmentDepthCompareFlipSlot &&
+               sa.fragmentSampleMaskSlot == sb.fragmentSampleMaskSlot;
+    }
+
+    static std::uint64_t recordPlanIdentityKey(
+        std::uint64_t prefix,
+        const std::string* vertexMSL,
+        const std::string* fragmentMSL) {
+        std::uint64_t fnv = 1469598103934665603ULL;
+        auto mixWord = [&fnv](std::uint64_t word) {
+            for (unsigned i = 0; i < 8; ++i) {
+                fnv ^= static_cast<std::uint64_t>((word >> (i * 8)) & 0xFFu);
+                fnv *= 1099511628211ULL;
+            }
+        };
+        auto mixIdentity = [&](const std::string* source) {
+            mixWord(reinterpret_cast<std::uintptr_t>(source));
+            mixWord(source != nullptr ? source->size() : 0u);
+            mixWord(reinterpret_cast<std::uintptr_t>(
+                source != nullptr && !source->empty() ? source->data()
+                                                      : nullptr));
+        };
+        mixWord(prefix);
+        mixIdentity(vertexMSL);
+        mixIdentity(fragmentMSL);
+        return fnv;
+    }
+
+    // Same derivation as the encode heavy path's no-plan block and the
+    // GL-thread staging rules (translatedPlanOut): plan is valid only for
+    // non-argbuf pipelines. Returns false → caller falls back to the
+    // serial heavy path (which renders the draw bit-identically).
+    bool buildTranslatedDrawPlanContent(
+        const TranslatedDrawInfo& source,
+        MTLPixelFormat colorFormat,
+        NSUInteger attachmentSampleCount,
+        bool forcePerSampleFS,
+        bool hasFragmentStage,
+        std::uint64_t prefix,
+        TranslatedDrawPlan& out) {
+        out = TranslatedDrawPlan{};
+        if (translatedDrawForceArgumentBuffersEnv()) {
+            return false;
+        }
+        const std::uint64_t pipelineCacheKey =
+            computePipelineCacheKeyFromPrefix(
+                prefix, source.vertexMSL, source.fragmentMSL);
+        const TranslatedDrawMSLSlots& slots =
+            translatedDrawMSLSlots(source, pipelineCacheKey, hasFragmentStage);
+        const bool vertexUsesArgBuf = slots.vertexMslUsesArgBuf;
+        const bool fragmentUsesArgBuf = slots.fragmentMslUsesArgBuf;
+        if (vertexUsesArgBuf || fragmentUsesArgBuf) {
+            return false;
+        }
+        out.valid = true;
+        out.pipelineCacheKey = pipelineCacheKey;
+        out.colorFormat = static_cast<std::uint32_t>(colorFormat);
+        out.attachmentSampleCount =
+            static_cast<std::uint32_t>(attachmentSampleCount);
+        out.forcePerSampleFS = forcePerSampleFS;
+        out.hasFragmentStage = hasFragmentStage;
+        out.vertexUsesArgumentBuffer = vertexUsesArgBuf;
+        out.fragmentUsesArgumentBuffer = fragmentUsesArgBuf;
+        out.useArgumentBuffers = false;
+        out.vertexNeedsSSBOSizeBuffer =
+            vertexUsesArgBuf && slots.vertexHasSSBOSizeBuffer;
+        out.fragmentNeedsSSBOSizeBuffer =
+            fragmentUsesArgBuf && slots.fragmentHasSSBOSizeBuffer;
+        out.fragmentNeedsFragCoordParams = slots.fragmentNeedsFragCoordParams;
+        out.fragmentNeedsGlNumSamplesArgBuf =
+            fragmentUsesArgBuf && slots.fragmentNeedsGlNumSamplesArgBuf;
+        out.vertexNeedsFragmentShadingRateState =
+            slots.vertexNeedsFragmentShadingRateState;
+        out.clipControlShaderYFixup =
+            slots.vertexClipControlYSignSlot >= 0 &&
+            source.clipControlYSignFixupEnabled &&
+            !source.stencilTestEnabled;
+        out.clipControlInvertsWinding =
+            out.clipControlShaderYFixup && source.clipOrigin != GL_UPPER_LEFT;
+        out.vertexUsesMultiviewViewMask = slots.vertexUsesMultiviewViewMask;
+        out.fragmentUsesMultiviewViewMask = slots.fragmentUsesMultiviewViewMask;
+        out.shaderSlots = phase2PlanShaderSlotsFromMSLSlots(slots);
+        return true;
+    }
+
+    void evictRecordPlanMemoIfNeeded() {
+        while (recordPlanMemo.size() > kRecordPlanMemoCapacity &&
+               !recordPlanMemo.empty()) {
+            auto evictIt = recordPlanMemo.end();
+            std::uint64_t oldestUse = std::numeric_limits<std::uint64_t>::max();
+            for (auto it = recordPlanMemo.begin(); it != recordPlanMemo.end();
+                 ++it) {
+                std::uint64_t use = 0;
+                auto useIt = recordPlanMemoLastUse.find(it->first);
+                if (useIt != recordPlanMemoLastUse.end()) {
+                    use = useIt->second;
+                }
+                if (evictIt == recordPlanMemo.end() || use < oldestUse) {
+                    oldestUse = use;
+                    evictIt = it;
+                }
+            }
+            if (evictIt == recordPlanMemo.end()) {
+                break;
+            }
+            recordPlanMemoLastUse.erase(evictIt->first);
+            recordPlanMemo.erase(evictIt);
+            ++recordPlanMemoEvictions;
+        }
+    }
+
+    const TranslatedDrawPlan* resolveRecordPreparedPlan(
+        const TranslatedDrawInfo& source,
+        MTLPixelFormat colorFormat,
+        NSUInteger attachmentSampleCount,
+        bool forcePerSampleFS,
+        bool hasFragmentStage) {
+        const std::uint64_t prefix = computePipelineCacheKeyPrefix(
+            source, colorFormat, attachmentSampleCount, forcePerSampleFS);
+        const std::uint64_t identity = recordPlanIdentityKey(
+            w2PlanIdentityOmitPrefix ? 0 : prefix,
+            source.vertexMSL, source.fragmentMSL);
+        auto it = recordPlanMemo.find(identity);
+        if (it != recordPlanMemo.end()) {
+            recordPlanMemoLastUse[identity] = ++recordPlanMemoClock;
+            ++recordPlanMemoHits;
+            if (w2PlanVerifyLatched) {
+                TranslatedDrawPlan fresh;
+                if (!buildTranslatedDrawPlanContent(
+                        source, colorFormat, attachmentSampleCount,
+                        forcePerSampleFS, hasFragmentStage, prefix, fresh) ||
+                    !translatedDrawPlanContentEquals(fresh, it->second)) {
+                    ++recordPlanMemoVerifyMismatches;
+                }
+            }
+            return &it->second;
+        }
+        ++recordPlanMemoMisses;
+        TranslatedDrawPlan built;
+        if (!buildTranslatedDrawPlanContent(source, colorFormat,
+                                            attachmentSampleCount,
+                                            forcePerSampleFS, hasFragmentStage,
+                                            prefix, built)) {
+            ++recordPlanMemoBuildFails;
+            return nullptr;
+        }
+        auto inserted = recordPlanMemo.emplace(identity, built);
+        recordPlanMemoLastUse[identity] = ++recordPlanMemoClock;
+        recordPlanMemoPeak = std::max(
+            recordPlanMemoPeak,
+            static_cast<std::uint64_t>(recordPlanMemo.size()));
+        evictRecordPlanMemoIfNeeded();
+        return &inserted.first->second;
     }
 
     static std::uint64_t mslLibraryScalarKeyBytes() {

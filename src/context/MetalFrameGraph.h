@@ -1121,6 +1121,14 @@ public:
         std::uint64_t chFboUniformBytes = 0;
         std::uint64_t chArenaDrains = 0;
         std::uint64_t chArenaLive = 0;
+        // S25 W2: record-plan memo (probe-facing subset).
+        std::uint64_t w2PlanMemoHits = 0;
+        std::uint64_t w2PlanMemoMisses = 0;
+        std::uint64_t w2PlanMemoBuildFails = 0;
+        std::uint64_t w2PlanMemoEvictions = 0;
+        std::uint64_t w2PlanMemoSize = 0;
+        std::uint64_t w2PlanMemoPeak = 0;
+        std::uint64_t w2PlanVerifyMismatches = 0;
     };
     FramePacingSnapshot framePacingSnapshot() const;
     // C52 flicker fix (ordered in-CB texture uploads): true when a draw

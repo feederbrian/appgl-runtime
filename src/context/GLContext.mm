@@ -2163,6 +2163,23 @@ static bool phase2TranslatedDrawPlanForceMiss() {
     return forceMiss;
 }
 
+// S25 W2 probe knob (P3 capacity-freeze red→green): clamp the Phase-2 plan
+// cache capacity so the gauntlet can reproduce the measured live-WZ failure
+// mode (cache at capacity → KeyCapacity reject → no plan ever reaches the
+// record path) without 1M draws. Probe-only; absent env = production limit.
+static std::size_t phase2TranslatedDrawPlanCapacity(std::size_t productionLimit) {
+    static const std::size_t capacity = [] {
+        const char* value = std::getenv("APPGL_PHASE2_PLAN_CAPACITY");
+        if (value == nullptr || *value == '\0') {
+            return std::numeric_limits<std::size_t>::max();
+        }
+        return static_cast<std::size_t>(std::strtoull(value, nullptr, 10));
+    }();
+    return capacity == std::numeric_limits<std::size_t>::max()
+        ? productionLimit
+        : capacity;
+}
+
 static bool phase2TranslatedDrawPlanTraceEnabled() {
     static const bool enabled =
         std::getenv("APPGL_PHASE2_PLAN_TRACE") != nullptr;
@@ -27224,6 +27241,13 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             inventory.copyHeadroomFboUniformBytes = pacing.chFboUniformBytes;
             inventory.copyHeadroomArenaDrains = pacing.chArenaDrains;
             inventory.copyHeadroomArenaLive = pacing.chArenaLive;
+            inventory.w2PlanMemoHits = pacing.w2PlanMemoHits;
+            inventory.w2PlanMemoMisses = pacing.w2PlanMemoMisses;
+            inventory.w2PlanMemoBuildFails = pacing.w2PlanMemoBuildFails;
+            inventory.w2PlanMemoEvictions = pacing.w2PlanMemoEvictions;
+            inventory.w2PlanMemoSize = pacing.w2PlanMemoSize;
+            inventory.w2PlanMemoPeak = pacing.w2PlanMemoPeak;
+            inventory.w2PlanVerifyMismatches = pacing.w2PlanVerifyMismatches;
         }
     };
     auto finalizeR8HeapSegmentation = [&]() {
@@ -39914,7 +39938,8 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                     drawDetailProfile,
                     GLDrawDetailBucket::Phase2MissBuildDecision);
                 if (translatedDrawPlanCache.size() >=
-                    Phase2PlanKeyProfile::kMaxTrackedKeys) {
+                    phase2TranslatedDrawPlanCapacity(
+                        Phase2PlanKeyProfile::kMaxTrackedKeys)) {
                     translatedPlanDecision = "reject";
                     translatedPlanReason =
                         phase2PlanRejectReasonName(

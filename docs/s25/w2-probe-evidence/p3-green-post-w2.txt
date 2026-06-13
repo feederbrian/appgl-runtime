@@ -1,0 +1,4 @@
+P3 capacity-freeze probe — POST-W2 GREEN
+date: 2026-06-13T00:50:52Z
+HEAD: 4ffd297 + W2 core (uncommitted)
+{"phase":"s25-w2-plan-prepare-probes","passed":true,"claimedVersion":"4.6 AppGL core","tests":[{"id":"s25.w2.capacity-freeze","status":"passed","diffRatio":0,"maxChannelDelta":0,"millis":90.5155,"goldenPath":"","actualPath":"","message":"lean fill succeeds with the Phase-2 plan cache saturated (record-prepare immune to the capacity-freeze class)","coverageDelta":[]}]}

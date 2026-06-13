@@ -1027,6 +1027,14 @@ public:
         std::uint64_t copyHeadroomFboUniformBytes = 0;
         std::uint64_t copyHeadroomArenaDrains = 0;
         std::uint64_t copyHeadroomArenaLive = 0;
+        // S25 W2: record-plan memo subset.
+        std::uint64_t w2PlanMemoHits = 0;
+        std::uint64_t w2PlanMemoMisses = 0;
+        std::uint64_t w2PlanMemoBuildFails = 0;
+        std::uint64_t w2PlanMemoEvictions = 0;
+        std::uint64_t w2PlanMemoSize = 0;
+        std::uint64_t w2PlanMemoPeak = 0;
+        std::uint64_t w2PlanVerifyMismatches = 0;
         MetalResourceResidencySummary residency;
         MetalHostCacheSummary hostCaches;
         Depth32FReadbackDiagnostics depth32fReadback;
