@@ -19549,36 +19549,41 @@ TestResult runS25LeanDeferredSurvivalInstrumentProbe() {
 // (blue) quad OVER it (a Load-pass draw, NOT a clear) → present. The
 // structural counter must read survived (blind); §1 must read contentMissing
 // (scene == clear color).
+static constexpr const char* kSurvivalVS =
+    "#version 430 core\n"
+    "layout(location = 0) in vec2 aPos;\n"
+    "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+static constexpr const char* kSurvivalRedFS =
+    "#version 430 core\n"
+    "out vec4 fragColor;\n"
+    "void main() { fragColor = vec4(1.0, 0.0, 0.0, 1.0); }\n";
+static constexpr const char* kSurvivalBlueFS =
+    "#version 430 core\n"
+    "out vec4 fragColor;\n"
+    "void main() { fragColor = vec4(0.0, 0.0, 1.0, 1.0); }\n";
+
+// §1 content-detection: with the gameplay gate OFF (MIN_FBO=0), a blue
+// DRAW-OVER (a Load-pass draw, NOT a clear) of the red 3D makes the scene
+// read the clear color (blue) → §1 must read contentMissing WHILE the
+// structural counter reads survived (the draw-over it is blind to).
 TestResult runS25SurvivalContentProbeValidationProbe() {
     ScopedEnvVar parallelOn("APPGL_PARALLEL_ENCODE", "1");
     ScopedEnvVar workers("APPGL_PARALLEL_ENCODE_WORKERS", "4");
     ScopedEnvVar contentProbe("APPGL_W2_SURVIVAL_CONTENT_PROBE", "1");
+    ScopedEnvVar gateOff("APPGL_W2_SURVIVAL_GAMEPLAY_MIN_FBO", "0");
     auto result = runDirectSentinel("s25.survival.content-probe-validation", [&] {
-        static constexpr const char* kVS =
-            "#version 430 core\n"
-            "layout(location = 0) in vec2 aPos;\n"
-            "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n";
-        static constexpr const char* kRedFS =
-            "#version 430 core\n"
-            "out vec4 fragColor;\n"
-            "void main() { fragColor = vec4(1.0, 0.0, 0.0, 1.0); }\n";
-        static constexpr const char* kBlueFS =
-            "#version 430 core\n"
-            "out vec4 fragColor;\n"
-            "void main() { fragColor = vec4(0.0, 0.0, 1.0, 1.0); }\n";
         ScopedSentinelContext scoped(64, 64);
         auto& context = scoped.context();
         auto& gl = scoped.gl();
         std::vector<std::string> failures;
-        const GLuint redProg = buildBenchProgram(kVS, kRedFS);
-        const GLuint blueProg = buildBenchProgram(kVS, kBlueFS);
+        const GLuint redProg = buildBenchProgram(kSurvivalVS, kSurvivalRedFS);
+        const GLuint blueProg = buildBenchProgram(kSurvivalVS, kSurvivalBlueFS);
         GLuint vao = 0, vbo = 0;
         setupDCR3CFullscreenTriangle(gl, vao, vbo);
         gl.glBindVertexArray(vao);
         gl.glViewport(0, 0, 64, 64);
         gl.glDisable(GL_DEPTH_TEST);
-        // Warm both programs so their draws are real lean candidates.
-        for (int i = 0; i < 8; ++i) {
+        for (int i = 0; i < 8; ++i) {  // warm both programs (lean candidates)
             gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
             gl.glClear(GL_COLOR_BUFFER_BIT);
             gl.glUseProgram(redProg);
@@ -19587,7 +19592,6 @@ TestResult runS25SurvivalContentProbeValidationProbe() {
             gl.glDrawArrays(GL_TRIANGLES, 0, 3);
             context.swapBuffers();
         }
-        // TEST frame: clear(blue) → red 3D → blue DRAW-OVER (not a clear).
         gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
         gl.glClear(GL_COLOR_BUFFER_BIT);
         gl.glUseProgram(redProg);
@@ -19597,20 +19601,15 @@ TestResult runS25SurvivalContentProbeValidationProbe() {
         context.swapBuffers();
         context.finish();  // let the content-probe completion handler run
         const std::string json = context.framePacingDiagnosticsJson();
-        // §1 must have caught it: lean3DContentMissing > 0.
-        const bool contentCaught =
+        const bool caught =
             json.find("\"lean3DContentMissing\":0,") == std::string::npos &&
             json.find("\"lean3DContentMissing\":0}") == std::string::npos &&
             json.find("\"lean3DContentMissing\":") != std::string::npos;
-        if (!contentCaught) {
+        if (!caught) {
             recordSentinelFailure(
                 failures,
-                "§1 content probe did NOT catch the draw-over (scene should "
-                "read clear-color)",
-                json.substr(json.find("presentLeanLanding") != std::string::npos
-                                ? json.find("presentLeanLanding")
-                                : 0,
-                            260));
+                "§1 did NOT catch the draw-over (scene should read clear-color)",
+                json.substr(json.find("presentLeanLanding"), 300));
         }
         gl.glBindVertexArray(0);
         gl.glUseProgram(0);
@@ -19621,7 +19620,72 @@ TestResult runS25SurvivalContentProbeValidationProbe() {
         throwIfSentinelFailed(failures);
     });
     if (result.status == "passed") {
-        result.message = "§1 content probe catches a draw-over (scene == clear color) that the structural counter is blind to";
+        result.message = "§1 content probe catches a draw-over (scene == clear color) the structural counter is blind to";
+    }
+    return result;
+}
+
+// Gameplay gate: a NO-FBO frame whose scene reads the clear color (the
+// game-over 2D false-positive class) must be EXCLUDED, not counted missing.
+// MIN_FBO=100 makes the gate strict; the test frame has zero FBO draws.
+TestResult runS25SurvivalGameplayGateProbe() {
+    ScopedEnvVar parallelOn("APPGL_PARALLEL_ENCODE", "1");
+    ScopedEnvVar workers("APPGL_PARALLEL_ENCODE_WORKERS", "4");
+    ScopedEnvVar contentProbe("APPGL_W2_SURVIVAL_CONTENT_PROBE", "1");
+    ScopedEnvVar gateStrict("APPGL_W2_SURVIVAL_GAMEPLAY_MIN_FBO", "100");
+    auto result = runDirectSentinel("s25.survival.gameplay-gate", [&] {
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        const GLuint redProg = buildBenchProgram(kSurvivalVS, kSurvivalRedFS);
+        const GLuint blueProg = buildBenchProgram(kSurvivalVS, kSurvivalBlueFS);
+        GLuint vao = 0, vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+        gl.glBindVertexArray(vao);
+        gl.glViewport(0, 0, 64, 64);
+        gl.glDisable(GL_DEPTH_TEST);
+        for (int i = 0; i < 10; ++i) {  // a no-FBO "game-over"-like sequence
+            gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+            gl.glClear(GL_COLOR_BUFFER_BIT);
+            gl.glUseProgram(redProg);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+            gl.glUseProgram(blueProg);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);  // scene → clear color
+            context.swapBuffers();
+        }
+        context.finish();
+        const std::string json = context.framePacingDiagnosticsJson();
+        // Strict gate + zero FBO → every armable frame excluded, NONE counted.
+        const bool excluded =
+            json.find("\"contentExcludedNonGameplay\":0}") == std::string::npos &&
+            json.find("\"contentExcludedNonGameplay\":") != std::string::npos;
+        const bool noneMissing =
+            json.find("\"lean3DContentMissing\":0,") != std::string::npos;
+        const bool nonePresent =
+            json.find("\"lean3DContentPresent\":0,") != std::string::npos;
+        if (!excluded) {
+            recordSentinelFailure(
+                failures, "gate did not record non-gameplay exclusions",
+                json.substr(json.find("presentLeanLanding"), 300));
+        }
+        if (!noneMissing || !nonePresent) {
+            recordSentinelFailure(
+                failures,
+                "gate did NOT exclude — content counters moved on a no-FBO "
+                "(game-over-like) frame (false-positive class not gated)",
+                json.substr(json.find("presentLeanLanding"), 300));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(redProg);
+        gl.glDeleteProgram(blueProg);
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "gameplay gate excludes no-FBO (game-over-like) frames from the content counters (the proven false-positive class)";
     }
     return result;
 }
@@ -19834,6 +19898,7 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
 
     if (normalizedPhase == "s25-survival-content-probe-validation") {
         tests.push_back(runS25SurvivalContentProbeValidationProbe());
+        tests.push_back(runS25SurvivalGameplayGateProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

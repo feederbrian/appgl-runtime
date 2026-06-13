@@ -12458,6 +12458,14 @@ struct MetalFrameGraph::Impl {
         if (copyHeadroomProbeLatched) {
             recordCopyHeadroomShadow(info);
         }
+        // S25 W2.1 §1 gameplay gate: per-frame FBO-interleave census (the
+        // 3D-world-rendering signature) — obs-only, always cheap.
+        if (survivalContentProbeLatched &&
+            (info.fboColorTexture != nullptr ||
+             info.fboDepthStencilTexture != nullptr ||
+             info.fboAttachmentless || hasAdditionalColorTargets(info))) {
+            ++fboDrawsSincePresent;
+        }
         if (threadedDeferredRecordProfile.enabled) {
             threadedDeferredRecordProfile.recordTranslatedDraw();
             if (flushingThreadedDeferredRecordBatch) {
@@ -15134,8 +15142,15 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 ? (offscreenColorTexture != nil)
                 : (currentDrawable != nil);
             if (survivalContentProbeLatched && haveSurface) {
-                survivalContentProbeArmedThisFrame = true;
-                survivalContentProbeClearColor = lastFrameClearColor;
+                // GAMEPLAY GATE: only count frames where the 3D world is
+                // rendering (FBO-interleave present). The game-over/menu 2D
+                // screen lacks it → exclude (the proven false-positive class).
+                if (fboDrawsSincePresent >= survivalGameplayMinFbo) {
+                    survivalContentProbeArmedThisFrame = true;
+                    survivalContentProbeClearColor = lastFrameClearColor;
+                } else {
+                    ++swapPresentsContentExcludedNonGameplay;
+                }
             }
         } else if (leanCandidatesSincePresent > 0) {
             // Candidates were eligible this frame but none encoded onto the
@@ -15147,6 +15162,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         leanEncodedSincePresent = 0;
         leanCandidatesSincePresent = 0;
         drawableLastWriteWas3D = false;
+        fboDrawsSincePresent = 0;
     }
 
     // S25 W2.1 §1 content probe: blit an 8x8 scene-region from the presented
@@ -15241,7 +15257,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             << swapPresentsLean3DContentPresent.load(std::memory_order_relaxed)
             << ",\"lean3DContentMissing\":"
             << swapPresentsLean3DContentMissing.load(std::memory_order_relaxed)
-            << "}";
+            << ",\"contentExcludedNonGameplay\":"
+            << swapPresentsContentExcludedNonGameplay << "}";
         return out.str();
     }
 
@@ -19552,6 +19569,18 @@ private:
     MTLClearColor survivalContentProbeClearColor = MTLClearColorMake(0, 0, 0, 1);
     std::atomic<std::uint64_t> swapPresentsLean3DContentPresent{0};
     std::atomic<std::uint64_t> swapPresentsLean3DContentMissing{0};
+    // S25 W2.1 §1 GAMEPLAY GATE: the game-over / spectator / menu screen
+    // legitimately shows NO 3D scene (scene-center reads the clear color) — a
+    // PROVEN false-positive class (Foreman's autogame content-run: gameplay
+    // 3D survived clean, contentMissing accumulated only post-displayGameOver/
+    // makePlayerSpectator). The in-code proxy for "the 3D WORLD is rendering"
+    // is the shadow/RTT FBO-interleave (gameplay ~133 FBO draws/frame; the 2D
+    // game-over screen lacks it). Arm the content probe ONLY when this frame
+    // had >= survivalGameplayMinFbo FBO draws; otherwise count it excluded.
+    std::uint64_t fboDrawsSincePresent = 0;
+    const std::uint32_t survivalGameplayMinFbo =
+        envUInt("APPGL_W2_SURVIVAL_GAMEPLAY_MIN_FBO", 16, 0, 1u << 20);
+    std::uint64_t swapPresentsContentExcludedNonGameplay = 0;
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;
