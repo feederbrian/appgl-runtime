@@ -396,6 +396,40 @@ def main():
                     else:
                         print("  VERDICT: verifyMismatches present but NOT degraded≫present "
                               "⇒ background mismatches, not the freeze cause — re-examine.")
+                # §7 CHILD-ENCODER APPLIED-STATE: the descriptor is correct (§6) but
+                # the per-draw applied state can be degenerate (scissor 1x1 clips all).
+                dsd = pl_l.get("degradedScissorDegen", 0); psd = pl_l.get("presentScissorDegen", 0)
+                ddn = pl_l.get("degradedDepthStateNull", 0); pdn = pl_l.get("presentDepthStateNull", 0)
+                dld = pl_l.get("degradedLeanDraws", 0); pld = pl_l.get("presentLeanDraws", 0)
+                samp = pl_l.get("degenSample")
+                if dld or pld or "degradedScissorDegen" in pl_l:
+                    print("\n== §7 CHILD-ENCODER APPLIED-STATE (degraded vs present) ==")
+                    print(f"lean-3D draws: degraded={dld} present={pld}")
+                    print(f"scissorDegenerate(1x1): degraded={dsd} ({rate(dsd,dld)*100:.1f}% of dg draws) "
+                          f"present={psd} ({rate(psd,pld)*100:.1f}%)")
+                    print(f"depthStateNull: degraded={ddn} ({rate(ddn,dld)*100:.1f}%) "
+                          f"present={pdn} ({rate(pdn,pld)*100:.1f}%)")
+                    if samp:
+                        print(f"  degenSample (first degenerate draw): {samp}")
+                    if rate(dsd, dld) > rate(psd, pld) + 0.02 and dsd > 0:
+                        print("  VERDICT: DEGENERATE SCISSOR CONFIRMED — degraded lean-3D "
+                              "draws compute the 1x1-corner scissor (≫present) ⇒ ALL "
+                              "fragments clipped = whole-scene NOWHERE. The degenSample "
+                              "names the exact computation (scissorXYWH vs rtWH → "
+                              "finalWH≤0). FIX targets the scissor Y-flip/finalW/H "
+                              "(metalY = rtH − scissorY − scissorH): likely a wrong/stale "
+                              "rtH (colorTexture.height) at the parallel-batch flush vs "
+                              "what the GL scissor was set for. Site: encodeLeanDirect…:9996.")
+                    elif rate(ddn, dld) > rate(pdn, pld) + 0.02 and ddn > 0:
+                        print("  VERDICT: DEPTH-STATE-NULL higher on degraded ⇒ the depth-"
+                              "stencil state isn't applied to the child encoder on bad "
+                              "frames — investigate descriptor.depthStencilState / "
+                              "passDepthStencil on the degraded batch.")
+                    elif dld > 0 and dsd == 0 and ddn == 0:
+                        print("  VERDICT: scissor + depth-state CLEAN on degraded draws ⇒ "
+                              "the applied state is correct too — the suppression is "
+                              "elsewhere (blend/color-write-mask in the PSO, or a "
+                              "parallel child-encoder concurrency hazard). Re-examine.")
 
     # Parallel-encode share (arm c).
     pe_first, pe_last = first.get("parallelEncode", {}), last.get("parallelEncode", {})

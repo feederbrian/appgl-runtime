@@ -9871,6 +9871,10 @@ struct MetalFrameGraph::Impl {
                 std::max<std::uint32_t>(
                     descriptor.attachmentSampleCount, 1u));
 
+        // §7: a lean-3D draw on the (worker) child encoder — atomic, per-frame.
+        if (survivalContentProbeLatched) {
+            leanDrawsThisFrame.fetch_add(1, std::memory_order_relaxed);
+        }
         if (pipelineState != encoderState.cachedPipelineState) {
             [encoder setRenderPipelineState:pipelineState];
             encoderState.cachedPipelineState = pipelineState;
@@ -9893,6 +9897,10 @@ struct MetalFrameGraph::Impl {
                              static_cast<uint32_t>(
                                  descriptor.stencilBackRef)];
             }
+        } else if (survivalContentProbeLatched) {
+            // §7: no depth-stencil state applied to this draw (depth test absent/
+            // wrong → could let everything pass OR, with a stale state, discard).
+            leanDepthStateNullThisFrame.fetch_add(1, std::memory_order_relaxed);
         }
 
         const MTLCullMode desiredCull = descriptor.cullFaceEnabled
@@ -10009,6 +10017,30 @@ struct MetalFrameGraph::Impl {
                           rtH > 0 ? rtH - 1 : 0,
                           1,
                           1};
+                    // §7: degenerate scissor (1x1 corner) → ALL fragments clipped
+                    // out = NOWHERE. Count it + raw-value-sample the FIRST one
+                    // (one-shot) — names the exact computation + the rtH it used.
+                    if (survivalContentProbeLatched) {
+                        leanScissorDegenerateThisFrame.fetch_add(
+                            1, std::memory_order_relaxed);
+                        if (!leanDegenSampleClaimed.exchange(
+                                true, std::memory_order_relaxed)) {
+                            sampleScissorX = descriptor.scissorX;
+                            sampleScissorY = descriptor.scissorY;
+                            sampleScissorW = descriptor.scissorWidth;
+                            sampleScissorH = descriptor.scissorHeight;
+                            sampleMetalX = metalX;
+                            sampleMetalY = metalY;
+                            sampleFinalW = finalW;
+                            sampleFinalH = finalH;
+                            sampleRtW = static_cast<std::uint32_t>(rtW);
+                            sampleRtH = static_cast<std::uint32_t>(rtH);
+                            sampleViewportW = descriptor.viewportWidth;
+                            sampleViewportH = descriptor.viewportHeight;
+                            leanDegenSampleReady.store(
+                                true, std::memory_order_release);
+                        }
+                    }
                 } else {
                     sr = {static_cast<NSUInteger>(metalX),
                           static_cast<NSUInteger>(metalY),
@@ -15322,6 +15354,15 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             armedMidFrameCommits = midFrameCommitsThisFrame;
             // §6: snapshot the wrong-plan (verify-mismatch) count.
             armedVerifyMismatches = verifyMismatchesThisFrame;
+            // §7: snapshot the child-encoder applied-state counts (workers done —
+            // the batch's dispatch_apply is synchronous, so these are stable now).
+            armedLeanDraws = leanDrawsThisFrame.load(std::memory_order_relaxed);
+            armedScissorDegen =
+                leanScissorDegenerateThisFrame.load(std::memory_order_relaxed);
+            armedViewportUnset =
+                leanViewportUnsetThisFrame.load(std::memory_order_relaxed);
+            armedDepthStateNull =
+                leanDepthStateNullThisFrame.load(std::memory_order_relaxed);
         }
         // §5: reset the per-frame batch-flush counters (snapshot armed above).
         batchFlushesThisFrame = 0;
@@ -15336,6 +15377,11 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         midFrameCommitsThisFrame = 0;
         // §6 reset.
         verifyMismatchesThisFrame = 0;
+        // §7 reset.
+        leanDrawsThisFrame.store(0, std::memory_order_relaxed);
+        leanScissorDegenerateThisFrame.store(0, std::memory_order_relaxed);
+        leanViewportUnsetThisFrame.store(0, std::memory_order_relaxed);
+        leanDepthStateNullThisFrame.store(0, std::memory_order_relaxed);
         lastLeanColorTextureSincePresent = nullptr;
         lastLeanSubmitIndexSincePresent = 0;
         leanEncodedSincePresent = 0;
@@ -15693,6 +15739,19 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         const std::uint32_t s6VerifyMismatches = armedVerifyMismatches;
         std::atomic<std::uint64_t>* dVerifyMismatches = &degradedVerifyMismatches;
         std::atomic<std::uint64_t>* pVerifyMismatches = &presentVerifyMismatches;
+        // §7 child-encoder applied-state snapshot.
+        const std::uint32_t s7LeanDraws = armedLeanDraws;
+        const std::uint32_t s7ScissorDegen = armedScissorDegen;
+        const std::uint32_t s7ViewportUnset = armedViewportUnset;
+        const std::uint32_t s7DepthStateNull = armedDepthStateNull;
+        std::atomic<std::uint64_t>* dLeanDraws = &degradedLeanDraws;
+        std::atomic<std::uint64_t>* dScissorDegen = &degradedScissorDegen;
+        std::atomic<std::uint64_t>* dViewportUnset = &degradedViewportUnset;
+        std::atomic<std::uint64_t>* dDepthStateNull = &degradedDepthStateNull;
+        std::atomic<std::uint64_t>* pLeanDraws = &presentLeanDraws;
+        std::atomic<std::uint64_t>* pScissorDegen = &presentScissorDegen;
+        std::atomic<std::uint64_t>* pViewportUnset = &presentViewportUnset;
+        std::atomic<std::uint64_t>* pDepthStateNull = &presentDepthStateNull;
         [currentCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer>) {
             const std::uint8_t* p = static_cast<const std::uint8_t*>(rb.contents);
             int clearMatches = 0;
@@ -15723,6 +15782,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 dEncodeClears->fetch_add(s51EncodeClears, std::memory_order_relaxed);
                 dMidFrameCommits->fetch_add(s51MidFrameCommits, std::memory_order_relaxed);
                 dVerifyMismatches->fetch_add(s6VerifyMismatches, std::memory_order_relaxed);
+                dLeanDraws->fetch_add(s7LeanDraws, std::memory_order_relaxed);
+                dScissorDegen->fetch_add(s7ScissorDegen, std::memory_order_relaxed);
+                dViewportUnset->fetch_add(s7ViewportUnset, std::memory_order_relaxed);
+                dDepthStateNull->fetch_add(s7DepthStateNull, std::memory_order_relaxed);
                 sawMissingFlag->store(true, std::memory_order_relaxed);
                 if (fullRb != nil && !spatialClaimedFlag->exchange(true)) {
                     const std::uint8_t* fp =
@@ -15777,6 +15840,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 pEncodeClears->fetch_add(s51EncodeClears, std::memory_order_relaxed);
                 pMidFrameCommits->fetch_add(s51MidFrameCommits, std::memory_order_relaxed);
                 pVerifyMismatches->fetch_add(s6VerifyMismatches, std::memory_order_relaxed);
+                pLeanDraws->fetch_add(s7LeanDraws, std::memory_order_relaxed);
+                pScissorDegen->fetch_add(s7ScissorDegen, std::memory_order_relaxed);
+                pViewportUnset->fetch_add(s7ViewportUnset, std::memory_order_relaxed);
+                pDepthStateNull->fetch_add(s7DepthStateNull, std::memory_order_relaxed);
             }
             (void)rb;
             (void)fullRb;
@@ -15877,7 +15944,37 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             << ",\"degradedVerifyMismatches\":"
             << degradedVerifyMismatches.load(std::memory_order_relaxed)
             << ",\"presentVerifyMismatches\":"
-            << presentVerifyMismatches.load(std::memory_order_relaxed) << "}";
+            << presentVerifyMismatches.load(std::memory_order_relaxed)
+            // §7 child-encoder APPLIED-state (degraded vs present): degraded
+            // scissorDegen ≫ present ⇒ the lean-3D draws' scissor computes to the
+            // 1x1 corner = all fragments clipped = NOWHERE. + the raw sample.
+            << ",\"degradedLeanDraws\":"
+            << degradedLeanDraws.load(std::memory_order_relaxed)
+            << ",\"degradedScissorDegen\":"
+            << degradedScissorDegen.load(std::memory_order_relaxed)
+            << ",\"degradedViewportUnset\":"
+            << degradedViewportUnset.load(std::memory_order_relaxed)
+            << ",\"degradedDepthStateNull\":"
+            << degradedDepthStateNull.load(std::memory_order_relaxed)
+            << ",\"presentLeanDraws\":"
+            << presentLeanDraws.load(std::memory_order_relaxed)
+            << ",\"presentScissorDegen\":"
+            << presentScissorDegen.load(std::memory_order_relaxed)
+            << ",\"presentViewportUnset\":"
+            << presentViewportUnset.load(std::memory_order_relaxed)
+            << ",\"presentDepthStateNull\":"
+            << presentDepthStateNull.load(std::memory_order_relaxed);
+        if (leanDegenSampleReady.load(std::memory_order_acquire)) {
+            out << ",\"degenSample\":{\"scissorXYWH\":[" << sampleScissorX << ","
+                << sampleScissorY << "," << sampleScissorW << "," << sampleScissorH
+                << "],\"metalXY\":[" << sampleMetalX << "," << sampleMetalY
+                << "],\"finalWH\":[" << sampleFinalW << "," << sampleFinalH
+                << "],\"rtWH\":[" << sampleRtW << "," << sampleRtH
+                << "],\"viewportWH\":[" << sampleViewportW << "," << sampleViewportH
+                << "]}}";
+        } else {
+            out << ",\"degenSample\":null}";
+        }
         return out.str();
     }
 
@@ -20356,6 +20453,40 @@ private:
     std::uint32_t armedVerifyMismatches = 0;
     std::atomic<std::uint64_t> degradedVerifyMismatches{0};
     std::atomic<std::uint64_t> presentVerifyMismatches{0};
+    // S25 W2 §7 CHILD-ENCODER APPLIED-STATE probe (§6 ruled out wrong-plan;
+    // pivot): the descriptor is correct but the per-draw APPLIED state on the
+    // worker child encoder may be degenerate — scissor 1x1 (a wrong Y-flip vs
+    // colorTexture.height), viewport unset, or depth-stencil-state skipped → all
+    // batch draws emit NO fragments = whole-scene NOWHERE. Counted in the worker
+    // encode (ATOMIC — concurrent dispatch_apply; stable after the synchronous
+    // batch returns), snapshot + bucketed degraded-vs-present via §4.
+    std::atomic<std::uint32_t> leanDrawsThisFrame{0};
+    std::atomic<std::uint32_t> leanScissorDegenerateThisFrame{0};
+    std::atomic<std::uint32_t> leanViewportUnsetThisFrame{0};
+    std::atomic<std::uint32_t> leanDepthStateNullThisFrame{0};
+    std::uint32_t armedLeanDraws = 0;
+    std::uint32_t armedScissorDegen = 0;
+    std::uint32_t armedViewportUnset = 0;
+    std::uint32_t armedDepthStateNull = 0;
+    std::atomic<std::uint64_t> degradedLeanDraws{0};
+    std::atomic<std::uint64_t> degradedScissorDegen{0};
+    std::atomic<std::uint64_t> degradedViewportUnset{0};
+    std::atomic<std::uint64_t> degradedDepthStateNull{0};
+    std::atomic<std::uint64_t> presentLeanDraws{0};
+    std::atomic<std::uint64_t> presentScissorDegen{0};
+    std::atomic<std::uint64_t> presentViewportUnset{0};
+    std::atomic<std::uint64_t> presentDepthStateNull{0};
+    // §7 raw-value sample of the FIRST degenerate-scissor lean-3D draw (one-shot;
+    // names the EXACT degenerate computation + the rtH used → informs the fix
+    // without a follow-up). leanDegenSampleReady is the release fence.
+    std::atomic<bool> leanDegenSampleClaimed{false};
+    std::atomic<bool> leanDegenSampleReady{false};
+    std::int32_t sampleScissorX = 0, sampleScissorY = 0;
+    std::int32_t sampleScissorW = 0, sampleScissorH = 0;
+    std::int32_t sampleMetalX = 0, sampleMetalY = 0;
+    std::int32_t sampleFinalW = 0, sampleFinalH = 0;
+    std::uint32_t sampleRtW = 0, sampleRtH = 0;
+    std::int32_t sampleViewportW = 0, sampleViewportH = 0;
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;
