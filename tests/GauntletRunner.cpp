@@ -19690,6 +19690,177 @@ TestResult runS25SurvivalGameplayGateProbe() {
     return result;
 }
 
+// ── S25 W2.2 §2 PASS-TRACE validation: the draw-over-vs-sky discriminator ──
+// §1 (content probe) proves the scene-center reads the clear color, but cannot
+// say WHY: a real DRAW-OVER (3D rendered then painted over — a localizable wipe)
+// or benign SKY (the 3D pass drew off-center, center legitimately clear). §2
+// cross-tabulates the §1 verdict against what touched the drawable AFTER the
+// first lean-3D landing. These two probes validate BOTH buckets discriminate.
+static long extractLeanLandingCounter(const std::string& json, const char* key) {
+    const std::string needle = std::string("\"") + key + "\":";
+    const auto pos = json.find(needle);
+    if (pos == std::string::npos) {
+        return -1;
+    }
+    long value = 0;
+    std::size_t i = pos + needle.size();
+    bool any = false;
+    while (i < json.size() && json[i] >= '0' && json[i] <= '9') {
+        value = value * 10 + (json[i] - '0');
+        ++i;
+        any = true;
+    }
+    return any ? value : -1;
+}
+
+// §2 DRAW-OVER: red 3D (lean) lands on the drawable + covers the scene-center,
+// then a post-3D over-draw paints the clear color over it. The over-draw is a
+// SERIAL (lean-ineligible) draw — it writes an SSBO, so the parallel-unsafe
+// reject routes it off the lean path. §1 reads contentMissing (center == clear);
+// §2 must classify it DRAW-OVER: a non-3D default-FB draw issued AFTER the 3D
+// (the draw-census retains it, because a serial draw never reaches the lean-
+// landing decrement). This is the structurally-survived + content-missing +
+// post-3D-activity signature the real wipe shows.
+static constexpr const char* kSurvivalBlueSsboFS =
+    "#version 430 core\n"
+    "layout(std430, binding = 0) buffer Sink { uint v; } sink;\n"
+    "out vec4 fragColor;\n"
+    "void main() { sink.v = 1u; fragColor = vec4(0.0, 0.0, 1.0, 1.0); }\n";
+TestResult runS25PassTraceDrawOverProbe() {
+    ScopedEnvVar parallelOn("APPGL_PARALLEL_ENCODE", "1");
+    ScopedEnvVar workers("APPGL_PARALLEL_ENCODE_WORKERS", "4");
+    ScopedEnvVar contentProbe("APPGL_W2_SURVIVAL_CONTENT_PROBE", "1");
+    ScopedEnvVar gateOff("APPGL_W2_SURVIVAL_GAMEPLAY_MIN_FBO", "0");
+    auto result = runDirectSentinel("s25.passtrace.draw-over", [&] {
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        const GLuint redProg = buildBenchProgram(kSurvivalVS, kSurvivalRedFS);
+        const GLuint blueSsboProg = buildBenchProgram(kSurvivalVS, kSurvivalBlueSsboFS);
+        GLuint vao = 0, vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+        std::uint32_t zero = 0;
+        GLuint ssbo = 0;
+        gl.glGenBuffers(1, &ssbo);
+        gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+        gl.glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(std::uint32_t),
+                        &zero, GL_DYNAMIC_DRAW);
+        gl.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo);
+        gl.glBindVertexArray(vao);
+        gl.glViewport(0, 0, 64, 64);
+        gl.glDisable(GL_DEPTH_TEST);
+        for (int i = 0; i < 12; ++i) {  // warm the lean path, then it measures
+            gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+            gl.glClear(GL_COLOR_BUFFER_BIT);
+            gl.glUseProgram(redProg);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);     // 3D scene (red), lean, covers center
+            gl.glUseProgram(blueSsboProg);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);     // serial over-draw (blue == clear)
+            context.swapBuffers();
+        }
+        context.finish();
+        const std::string json = context.framePacingDiagnosticsJson();
+        const long missing = extractLeanLandingCounter(json, "lean3DContentMissing");
+        const long drawOver = extractLeanLandingCounter(json, "contentMissingDrawOver");
+        if (missing <= 0) {
+            recordSentinelFailure(failures,
+                "§1 did not read contentMissing (scene should == clear color)",
+                json.substr(json.find("presentLeanLanding"), 360));
+        }
+        if (drawOver <= 0) {
+            recordSentinelFailure(failures,
+                "§2 did NOT classify the post-3D serial over-draw as DRAW-OVER "
+                "(a non-3D default-FB draw after the 3D)",
+                json.substr(json.find("presentLeanLanding"), 360));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteBuffers(1, &ssbo);
+        gl.glDeleteProgram(redProg);
+        gl.glDeleteProgram(blueSsboProg);
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "§2 classifies a post-3D serial over-draw as DRAW-OVER (a localizable wipe), not benign sky";
+    }
+    return result;
+}
+
+// §2 BENIGN SKY: red 3D draws OFF-CENTER (a corner triangle) so it lands on the
+// drawable (a real lean-3D draw) but never covers the 8x8 scene-CENTER — the
+// center stays the clear color — with NO over-draw after. §1 reads
+// contentMissing; §2 must classify it BENIGN SKY (nothing touched the drawable
+// after the 3D) and must NOT false-positive DRAW-OVER.
+TestResult runS25PassTraceBenignSkyProbe() {
+    ScopedEnvVar parallelOn("APPGL_PARALLEL_ENCODE", "1");
+    ScopedEnvVar workers("APPGL_PARALLEL_ENCODE_WORKERS", "4");
+    ScopedEnvVar contentProbe("APPGL_W2_SURVIVAL_CONTENT_PROBE", "1");
+    ScopedEnvVar gateOff("APPGL_W2_SURVIVAL_GAMEPLAY_MIN_FBO", "0");
+    auto result = runDirectSentinel("s25.passtrace.benign-sky", [&] {
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        const GLuint redProg = buildBenchProgram(kSurvivalVS, kSurvivalRedFS);
+        const GLfloat corner[] = {  // bottom-left corner — never covers center
+            -1.0f, -1.0f,
+            -0.4f, -1.0f,
+            -1.0f, -0.4f,
+        };
+        GLuint vao = 0, vbo = 0;
+        gl.glGenVertexArrays(1, &vao);
+        gl.glBindVertexArray(vao);
+        gl.glGenBuffers(1, &vbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(corner), corner, GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE,
+                                 2 * sizeof(GLfloat), nullptr);
+        gl.glViewport(0, 0, 64, 64);
+        gl.glDisable(GL_DEPTH_TEST);
+        for (int i = 0; i < 12; ++i) {
+            gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+            gl.glClear(GL_COLOR_BUFFER_BIT);
+            gl.glUseProgram(redProg);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);   // off-center 3D; center stays clear
+            context.swapBuffers();
+        }
+        context.finish();
+        const std::string json = context.framePacingDiagnosticsJson();
+        const long missing = extractLeanLandingCounter(json, "lean3DContentMissing");
+        const long drawOver = extractLeanLandingCounter(json, "contentMissingDrawOver");
+        const long benignSky = extractLeanLandingCounter(json, "contentMissingBenignSky");
+        if (missing <= 0) {
+            recordSentinelFailure(failures,
+                "§1 did not read contentMissing (off-center 3D should leave the center clear)",
+                json.substr(json.find("presentLeanLanding"), 360));
+        }
+        if (benignSky <= 0) {
+            recordSentinelFailure(failures,
+                "§2 did NOT classify the off-center 3D as BENIGN SKY (no post-3D activity)",
+                json.substr(json.find("presentLeanLanding"), 360));
+        }
+        if (drawOver > 0) {
+            recordSentinelFailure(failures,
+                "§2 FALSE-POSITIVE: benign off-center 3D mis-classified as DRAW-OVER",
+                json.substr(json.find("presentLeanLanding"), 360));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(redProg);
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "§2 classifies off-center 3D (center clear, no over-draw) as BENIGN SKY — no draw-over false-positive";
+    }
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -19899,6 +20070,12 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
     if (normalizedPhase == "s25-survival-content-probe-validation") {
         tests.push_back(runS25SurvivalContentProbeValidationProbe());
         tests.push_back(runS25SurvivalGameplayGateProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "s25-w2-2-pass-trace-validation") {
+        tests.push_back(runS25PassTraceDrawOverProbe());
+        tests.push_back(runS25PassTraceBenignSkyProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

@@ -10443,6 +10443,19 @@ struct MetalFrameGraph::Impl {
                    colorTexture == currentDrawable.texture);
             if (onDrawable) {
                 drawableLastWriteWas3D = true;
+                // S25 §2 pass-trace: this draw IS a lean-3D landing. The per-draw
+                // census at the top of encodeTranslatedDraw already counted it as
+                // a tentative Post3D default-FB draw (if the window was latched by
+                // a PRIOR 3D draw); undo that — a 3D draw is not an over-draw.
+                // Then LATCH the window (do NOT reset the Post3D counters: a later
+                // lean overlay draw must not erase a real over-draw signal).
+                if (survivalContentProbeLatched) {
+                    if (traceSawLean3DThisFrame &&
+                        traceDrawableDrawsPost3D > 0) {
+                        --traceDrawableDrawsPost3D;
+                    }
+                    traceSawLean3DThisFrame = true;
+                }
             }
         }
         return encoded;
@@ -12458,13 +12471,24 @@ struct MetalFrameGraph::Impl {
         if (copyHeadroomProbeLatched) {
             recordCopyHeadroomShadow(info);
         }
-        // S25 W2.1 §1 gameplay gate: per-frame FBO-interleave census (the
-        // 3D-world-rendering signature) — obs-only, always cheap.
-        if (survivalContentProbeLatched &&
-            (info.fboColorTexture != nullptr ||
-             info.fboDepthStencilTexture != nullptr ||
-             info.fboAttachmentless || hasAdditionalColorTargets(info))) {
-            ++fboDrawsSincePresent;
+        // S25 W2.1 §1 gameplay gate + §2 pass-trace: per-frame draw census
+        // (obs-only, always cheap). FBO draws are the 3D-world-rendering
+        // signature (the gameplay gate); the complement — draws onto the DEFAULT
+        // framebuffer (the drawable/presented surface) issued AFTER the last
+        // lean-3D landing — is the §2 post-3D draw-over signal. A lean-3D draw
+        // trips the default-FB branch here first, then resets the window at its
+        // landing (encodeLeanDirect…), so 3D draws never self-inflate the count;
+        // only non-3D drawable draws after the 3D persist.
+        if (survivalContentProbeLatched) {
+            const bool isFboDraw =
+                (info.fboColorTexture != nullptr ||
+                 info.fboDepthStencilTexture != nullptr ||
+                 info.fboAttachmentless || hasAdditionalColorTargets(info));
+            if (isFboDraw) {
+                ++fboDrawsSincePresent;
+            } else if (traceSawLean3DThisFrame) {
+                ++traceDrawableDrawsPost3D;  // tentative; a 3D landing decrements
+            }
         }
         if (threadedDeferredRecordProfile.enabled) {
             threadedDeferredRecordProfile.recordTranslatedDraw();
@@ -15092,8 +15116,23 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             return;  // not a drawable pass (FBO/offscreen-other) — ignore
         }
         const MTLLoadAction load = pass.colorAttachments[0].loadAction;
-        if (load == MTLLoadActionClear || load == MTLLoadActionDontCare) {
+        const bool isClearLike =
+            (load == MTLLoadActionClear || load == MTLLoadActionDontCare);
+        if (isClearLike) {
             drawableLastWriteWas3D = false;  // drawable wiped
+        }
+        // S25 §2 pass-trace: a drawable pass opened AFTER the first lean-3D draw.
+        // A Load-action open here is the structurally-invisible draw-over suspect
+        // (it does NOT reset drawableLastWriteWas3D above, so survived stays high
+        // while its draws can paint over the scene-center). Latched count — robust
+        // to later lean overlay draws in the new pass.
+        if (survivalContentProbeLatched && traceSawLean3DThisFrame) {
+            ++traceDrawablePassOpensPost3D;
+            if (isClearLike) {
+                ++traceDrawablePassClearPost3D;
+            } else {
+                ++traceDrawablePassLoadPost3D;
+            }
         }
     }
 
@@ -15148,6 +15187,12 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 if (fboDrawsSincePresent >= survivalGameplayMinFbo) {
                     survivalContentProbeArmedThisFrame = true;
                     survivalContentProbeClearColor = lastFrameClearColor;
+                    // §2 pass-trace: snapshot the Post3D trace for this frame —
+                    // the per-frame counters reset below, before the async
+                    // content handler runs the draw-over-vs-sky cross-tab.
+                    armedTracePassLoadPost3D = traceDrawablePassLoadPost3D;
+                    armedTracePassClearPost3D = traceDrawablePassClearPost3D;
+                    armedTraceDrawsPost3D = traceDrawableDrawsPost3D;
                 } else {
                     ++swapPresentsContentExcludedNonGameplay;
                 }
@@ -15163,6 +15208,12 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         leanCandidatesSincePresent = 0;
         drawableLastWriteWas3D = false;
         fboDrawsSincePresent = 0;
+        // §2 pass-trace: reset the per-frame window (snapshot already armed above).
+        traceSawLean3DThisFrame = false;
+        traceDrawablePassOpensPost3D = 0;
+        traceDrawablePassLoadPost3D = 0;
+        traceDrawablePassClearPost3D = 0;
+        traceDrawableDrawsPost3D = 0;
     }
 
     // S25 W2.1 §1 content probe: blit an 8x8 scene-region from the presented
@@ -15216,6 +15267,16 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             &swapPresentsLean3DContentPresent;
         std::atomic<std::uint64_t>* missingCtr =
             &swapPresentsLean3DContentMissing;
+        // §2 pass-trace cross-tab: post-3D activity snapshot (armed this frame)
+        // + the draw-over-vs-sky buckets, resolved at the same async verdict.
+        std::atomic<std::uint64_t>* drawOverCtr = &contentMissingDrawOver;
+        std::atomic<std::uint64_t>* benignSkyCtr = &contentMissingBenignSky;
+        std::atomic<std::uint64_t>* presentPost3DCtr = &contentPresentWithPost3DDraw;
+        std::atomic<std::uint64_t>* viaPassCtr = &contentMissingDrawOverViaPass;
+        std::atomic<std::uint64_t>* viaDrawCtr = &contentMissingDrawOverViaDraw;
+        const bool post3DViaPass = (armedTracePassLoadPost3D > 0);
+        const bool post3DViaDraw = (armedTraceDrawsPost3D > 0);
+        const bool post3DOverDraw = (post3DViaPass || post3DViaDraw);
         [currentCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer>) {
             const std::uint8_t* p =
                 static_cast<const std::uint8_t*>(rb.contents);
@@ -15234,8 +15295,27 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             }
             if (clearMatches * 100 >= 75 * static_cast<int>(N * N)) {
                 missingCtr->fetch_add(1, std::memory_order_relaxed);
+                // RESIDUAL RESOLVER: scene-center is clear AND something touched
+                // the drawable after the last 3D (a Load pass / a default-FB
+                // draw) ⇒ DRAW-OVER WIPE; nothing after the 3D ⇒ benign sky.
+                if (post3DOverDraw) {
+                    drawOverCtr->fetch_add(1, std::memory_order_relaxed);
+                    if (post3DViaPass) {
+                        viaPassCtr->fetch_add(1, std::memory_order_relaxed);
+                    }
+                    if (post3DViaDraw) {
+                        viaDrawCtr->fetch_add(1, std::memory_order_relaxed);
+                    }
+                } else {
+                    benignSkyCtr->fetch_add(1, std::memory_order_relaxed);
+                }
             } else {
                 presentCtr->fetch_add(1, std::memory_order_relaxed);
+                if (post3DOverDraw) {
+                    // present (3D visible) yet post-3D draws happened — the
+                    // over-draw didn't cover the center this frame (context).
+                    presentPost3DCtr->fetch_add(1, std::memory_order_relaxed);
+                }
             }
             (void)rb;  // retained by the block until the handler runs
         }];
@@ -15258,7 +15338,17 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             << ",\"lean3DContentMissing\":"
             << swapPresentsLean3DContentMissing.load(std::memory_order_relaxed)
             << ",\"contentExcludedNonGameplay\":"
-            << swapPresentsContentExcludedNonGameplay << "}";
+            << swapPresentsContentExcludedNonGameplay
+            << ",\"contentMissingDrawOver\":"
+            << contentMissingDrawOver.load(std::memory_order_relaxed)
+            << ",\"contentMissingDrawOverViaPass\":"
+            << contentMissingDrawOverViaPass.load(std::memory_order_relaxed)
+            << ",\"contentMissingDrawOverViaDraw\":"
+            << contentMissingDrawOverViaDraw.load(std::memory_order_relaxed)
+            << ",\"contentMissingBenignSky\":"
+            << contentMissingBenignSky.load(std::memory_order_relaxed)
+            << ",\"contentPresentWithPost3DDraw\":"
+            << contentPresentWithPost3DDraw.load(std::memory_order_relaxed) << "}";
         return out.str();
     }
 
@@ -19581,6 +19671,54 @@ private:
     const std::uint32_t survivalGameplayMinFbo =
         envUInt("APPGL_W2_SURVIVAL_GAMEPLAY_MIN_FBO", 16, 0, 1u << 20);
     std::uint64_t swapPresentsContentExcludedNonGameplay = 0;
+    // S25 W2.1 §2 DRAWABLE-PASS TRACE (gated under the content probe — only
+    // meaningful next to the content verdict; obs-only). Closes the §1 RESIDUAL
+    // the structural+content counters cannot separate: contentMissing + lean3D-
+    // SURVIVED is consistent with BOTH —
+    //   (a) DRAW-OVER WIPE: a later drawable pass painted the clear color over
+    //       the 3D. A Load-action pass open does NOT reset drawableLastWriteWas3D
+    //       (only Clear/DontCare does), so the structural counter stays
+    //       "survived" while the scene-center pixels are wiped — invisible.
+    //   (b) BENIGN SKY: the last lean-3D draw landed, but the scene-CENTER it
+    //       produced is the clear color (the 3D pass cleared, geometry drew
+    //       OFF-center — e.g. a camera framing empty terrain/sky). No over-draw.
+    // The trace records what touched the drawable AFTER the FIRST lean-3D
+    // landing this frame ("Post3D"): NEW drawable passes (by load action) + non-
+    // 3D draws onto the default framebuffer. LATCH-ONCE (NOT reset per landing):
+    // a later lean overlay draw must NOT erase the over-draw signal — that is the
+    // exact blindness the structural counter has. The per-draw census tentatively
+    // counts every default-FB draw; a lean-3D landing then DECREMENTS its own
+    // tentative count (a 3D draw is not an over-draw), so only NON-3D drawable
+    // draws persist. Cross-tabulated against the content verdict in the probe's
+    // async completion handler:
+    //   contentMissing + (Post3D Load pass || Post3D non-3D draw) → DRAW-OVER
+    //   contentMissing + neither                                  → benign sky
+    // (Post3D CLEAR passes are excluded from the draw-over test — a Clear after
+    // the 3D would flip survived→overwritten, an already-visible signal.)
+    // KNOWN BLIND SPOT (honest): a draw-over issued as a lean draw in the SAME
+    // pass as the 3D (no new pass open) is decremented like a 3D draw → reads
+    // zero. So an all-zero Post3D on a contentMissing frame is INCONCLUSIVE
+    // (benign-sky OR same-pass-lean-over-draw), not proof of benign sky. A
+    // SEPARATE-pass over-draw (the representative UI/overlay-compositing case) is
+    // caught robustly via the pass-open census, even when its draws are lean.
+    bool traceSawLean3DThisFrame = false;
+    std::uint32_t traceDrawablePassOpensPost3D = 0;
+    std::uint32_t traceDrawablePassLoadPost3D = 0;
+    std::uint32_t traceDrawablePassClearPost3D = 0;
+    std::uint32_t traceDrawableDrawsPost3D = 0;
+    // armed snapshot — recordSwapPresentLeanLanding resets the per-frame trace
+    // counters before the async content handler runs, so snapshot at arm time.
+    std::uint32_t armedTracePassLoadPost3D = 0;
+    std::uint32_t armedTracePassClearPost3D = 0;
+    std::uint32_t armedTraceDrawsPost3D = 0;
+    std::atomic<std::uint64_t> contentMissingDrawOver{0};
+    std::atomic<std::uint64_t> contentMissingBenignSky{0};
+    std::atomic<std::uint64_t> contentPresentWithPost3DDraw{0};
+    // drawOver mechanism split (localizes the fix target): a Post3D Load PASS is
+    // a separate drawable pass after the 3D (the UI/overlay-compositing case); a
+    // Post3D non-3D DRAW is a serial draw after the 3D in an existing pass.
+    std::atomic<std::uint64_t> contentMissingDrawOverViaPass{0};
+    std::atomic<std::uint64_t> contentMissingDrawOverViaDraw{0};
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;
