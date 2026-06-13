@@ -2130,7 +2130,12 @@ static bool translatedDrawNeedsCpuOrRingUploadPath(
     return info.indexCount > 0 && info.metalIndexBuffer == nullptr;
 }
 
-static bool translatedDrawParallelCaptureEligible(
+// S25 W2.1: the plan-INDEPENDENT structural rejections — the cheap checks
+// that need no TranslatedDrawPlan. Factored out so the gate and the W2.1
+// resolve-gating agree on exactly which draws are rejected before any plan
+// work, so record-prepare is NEVER paid on a draw rejected for another
+// reason (esp. the 56% FBO draws W1 has not lifted). FBO is W1's lift site.
+static bool translatedDrawParallelStructuralReject(
     const TranslatedDrawInfo& info,
     ParallelEncodeBoundaryReason& reason) {
     if (info.fboColorTexture != nullptr ||
@@ -2138,15 +2143,24 @@ static bool translatedDrawParallelCaptureEligible(
         info.fboAttachmentless ||
         hasAdditionalColorTargets(info)) {
         reason = ParallelEncodeBoundaryReason::FboDraw;
-        return false;
+        return true;
     }
     if (info.rasterizerDiscard) {
         reason = ParallelEncodeBoundaryReason::RasterizerDiscard;
-        return false;
+        return true;
     }
     if (info.submissionGroup.argumentBuffersEnabled ||
         appglEnvEnabledDefaultOff("APPGL_ENABLE_ARGUMENT_BUFFERS")) {
         reason = ParallelEncodeBoundaryReason::ArgumentBuffers;
+        return true;
+    }
+    return false;
+}
+
+static bool translatedDrawParallelCaptureEligible(
+    const TranslatedDrawInfo& info,
+    ParallelEncodeBoundaryReason& reason) {
+    if (translatedDrawParallelStructuralReject(info, reason)) {
         return false;
     }
     const TranslatedDrawPlan* translatedPlan = info.translatedPlan;
@@ -8928,18 +8942,17 @@ struct MetalFrameGraph::Impl {
         }
 
         ensureDrawableResources();
-        const bool hasFragmentStage =
-            source.fragmentMSL != nullptr && !source.fragmentMSL->empty();
-        id<MTLTexture> colorTexture =
-            usesOffscreenTarget ? offscreenColorTexture : nil;
-        const MTLPixelFormat colorFormat = colorTexture != nil
-            ? colorTexture.pixelFormat
-            : MTLPixelFormatBGRA8Unorm;
-        const NSUInteger attachmentSampleCount =
-            colorTexture != nil ? colorTexture.sampleCount : 1;
-        const bool forcePerSampleFS =
-            source.sampleShadingEnabled && source.minSampleShading > 0.0f &&
-            attachmentSampleCount > 1;
+        // S25 W2.1: share the ONE target-state derivation with the gate +
+        // prepareLean so the gate-resolved plan's tuple cannot drift from
+        // this path's match check. ensureDrawableResources() above makes the
+        // established-guard moot here (offscreenColorTexture is non-nil), so
+        // this is value-identical to the prior inline derivation.
+        const TranslatedDrawTargetState target =
+            deriveTranslatedDrawTargetState(source);
+        const bool hasFragmentStage = target.hasFragmentStage;
+        const MTLPixelFormat colorFormat = target.colorFormat;
+        const NSUInteger attachmentSampleCount = target.attachmentSampleCount;
+        const bool forcePerSampleFS = target.forcePerSampleFS;
 
         const TranslatedDrawPlan* translatedPlan = source.translatedPlan;
         if (translatedPlan == nullptr ||
@@ -9086,31 +9099,22 @@ struct MetalFrameGraph::Impl {
         }
 
         // S25 W2 (plan-prepare-at-record): target state comes from guarded
-        // LIVE reads of frame-graph-owned members — the same reads the
-        // captured parallel arm performs — never from
+        // LIVE reads of frame-graph-owned members via the ONE shared
+        // derivation (W2.1 deriveTranslatedDrawTargetState) — never from
         // ensureDrawableResources(), which is f15e56d-forbidden in record
         // context (it is also what kept FBO draws from even shadow-filling;
-        // W1 lifts that). Both target formats are mode-fixed (offscreen =
-        // RGBA8, direct drawable = BGRA8), so live reads cannot go stale;
-        // the one hazard is reading BEFORE the offscreen target is first
-        // established, where the nil default would alias the wrong format —
-        // that case falls back instead.
-        const bool hasFragmentStage =
-            source.fragmentMSL != nullptr && !source.fragmentMSL->empty();
-        if (usesOffscreenTarget && offscreenColorTexture == nil) {
+        // W1 lifts that). valid=false ⇒ offscreen target not established ⇒
+        // fall back (snapshot_invalid).
+        const TranslatedDrawTargetState target =
+            deriveTranslatedDrawTargetState(source);
+        if (!target.valid) {
             fallbackReason = ParallelEncodeFallbackReason::PipelineNotPrepared;
             return failAt(LeanFillFailSite::SnapshotInvalid);
         }
-        id<MTLTexture> colorTexture =
-            usesOffscreenTarget ? offscreenColorTexture : nil;
-        const MTLPixelFormat colorFormat = colorTexture != nil
-            ? colorTexture.pixelFormat
-            : MTLPixelFormatBGRA8Unorm;
-        const NSUInteger attachmentSampleCount =
-            colorTexture != nil ? colorTexture.sampleCount : 1;
-        const bool forcePerSampleFS =
-            source.sampleShadingEnabled && source.minSampleShading > 0.0f &&
-            attachmentSampleCount > 1;
+        const bool hasFragmentStage = target.hasFragmentStage;
+        const MTLPixelFormat colorFormat = target.colorFormat;
+        const NSUInteger attachmentSampleCount = target.attachmentSampleCount;
+        const bool forcePerSampleFS = target.forcePerSampleFS;
 
         // Three-step plan resolve: cached plan (when it arrives with the
         // draw AND matches the live target) → record-plan memo → build.
@@ -12397,6 +12401,10 @@ struct MetalFrameGraph::Impl {
                 return encodeTranslatedDrawSerial(info);
             }
 
+            // S25 W2.1: resolve a record-prepared plan for a cache-miss draw
+            // BEFORE the eligibility gate, so the gate stops rejecting
+            // plan-null at the candidate boundary.
+            ensureRecordPreparedPlanForArm(info);
             ParallelEncodeBoundaryReason reason =
                 ParallelEncodeBoundaryReason::SerialPathOnly;
             if (!translatedDrawParallelCaptureEligible(info, reason)) {
@@ -12507,6 +12515,9 @@ struct MetalFrameGraph::Impl {
             return encodeTranslatedDrawSerial(info);
         }
 
+        // S25 W2.1: resolve a record-prepared plan for a cache-miss draw
+        // BEFORE the eligibility gate (see ensureRecordPreparedPlanForArm).
+        ensureRecordPreparedPlanForArm(info);
         ParallelEncodeBoundaryReason reason =
             ParallelEncodeBoundaryReason::SerialPathOnly;
         if (!translatedDrawParallelCaptureEligible(info, reason)) {
@@ -19718,6 +19729,45 @@ private:
         return fnv;
     }
 
+    // S25 W2.1 (Clerk structural condition): the ONE derivation of the
+    // plan's target tuple from guarded live reads of mode-fixed formats +
+    // the established-guard. The candidate gate resolves a plan keyed on
+    // this, and prepareLean content-matches against it — if the two ever
+    // drifted, the gate would resolve plan-A while prepareLean matched
+    // plan-B (wasted re-resolve at best, silent wrong-plan at worst). Both
+    // call THIS, so drift is structurally impossible, not probe-dependent.
+    // valid=false ⇒ offscreen target not yet established (nil default would
+    // alias BGRA8) ⇒ caller falls back (snapshot_invalid).
+    struct TranslatedDrawTargetState {
+        bool valid = false;
+        MTLPixelFormat colorFormat = MTLPixelFormatBGRA8Unorm;
+        NSUInteger attachmentSampleCount = 1;
+        bool forcePerSampleFS = false;
+        bool hasFragmentStage = false;
+    };
+
+    TranslatedDrawTargetState deriveTranslatedDrawTargetState(
+        const TranslatedDrawInfo& source) const {
+        TranslatedDrawTargetState target;
+        target.hasFragmentStage =
+            source.fragmentMSL != nullptr && !source.fragmentMSL->empty();
+        if (usesOffscreenTarget && offscreenColorTexture == nil) {
+            target.valid = false;
+            return target;
+        }
+        id<MTLTexture> colorTexture =
+            usesOffscreenTarget ? offscreenColorTexture : nil;
+        target.colorFormat = colorTexture != nil ? colorTexture.pixelFormat
+                                                 : MTLPixelFormatBGRA8Unorm;
+        target.attachmentSampleCount =
+            colorTexture != nil ? colorTexture.sampleCount : 1;
+        target.forcePerSampleFS =
+            source.sampleShadingEnabled && source.minSampleShading > 0.0f &&
+            target.attachmentSampleCount > 1;
+        target.valid = true;
+        return target;
+    }
+
     // Same derivation as the encode heavy path's no-plan block and the
     // GL-thread staging rules (translatedPlanOut): plan is valid only for
     // non-argbuf pipelines. Returns false → caller falls back to the
@@ -19843,6 +19893,47 @@ private:
             static_cast<std::uint64_t>(recordPlanMemo.size()));
         evictRecordPlanMemoIfNeeded();
         return &inserted.first->second;
+    }
+
+    // S25 W2.1: the second leg of W2. The candidate gate
+    // (translatedDrawParallelCaptureEligible) reads info.translatedPlan
+    // directly and rejects plan-null UPSTREAM of prepareLean — so W2's
+    // record-prepare (inside prepareLean) never reached the real arm and
+    // pipeline_not_prepared did not collapse (sitting 20260613T014836Z:
+    // candidate share → 0% steady-state while the shadow held 90%). This
+    // populates info.translatedPlan at record time for a plan-null draw
+    // that has passed every plan-INDEPENDENT structural reject, so the gate
+    // sees a real plan and the draw becomes a candidate. Called before each
+    // arm dispatch's gate, on the GL thread; the returned plan points into
+    // the LRU-evictable memo but is consumed synchronously (gate → encode,
+    // or deep-copied by value into the deferred record at :9027 before any
+    // worker handoff — proven in the W2.1 design §2).
+    void ensureRecordPreparedPlanForArm(TranslatedDrawInfo& info) {
+        // Cache hit (even a target-mismatched one): the gate already passes
+        // valid plans and prepareLean re-resolves on target mismatch. Only
+        // the plan-NULL/invalid case (the cache-miss/freeze population) is
+        // what the gate rejects, so that is all we resolve here.
+        if (info.translatedPlan != nullptr && info.translatedPlan->valid) {
+            return;
+        }
+        // Requirement (2): never pay record-prepare on a draw rejected for a
+        // plan-independent reason — especially the 56% FBO draws.
+        ParallelEncodeBoundaryReason ignore =
+            ParallelEncodeBoundaryReason::SerialPathOnly;
+        if (translatedDrawParallelStructuralReject(info, ignore)) {
+            return;
+        }
+        const TranslatedDrawTargetState target =
+            deriveTranslatedDrawTargetState(info);
+        if (!target.valid) {
+            return;  // unestablished target; gate rejects downstream as before
+        }
+        const TranslatedDrawPlan* resolved = resolveRecordPreparedPlan(
+            info, target.colorFormat, target.attachmentSampleCount,
+            target.forcePerSampleFS, target.hasFragmentStage);
+        if (resolved != nullptr) {
+            info.translatedPlan = resolved;
+        }
     }
 
     static std::uint64_t mslLibraryScalarKeyBytes() {

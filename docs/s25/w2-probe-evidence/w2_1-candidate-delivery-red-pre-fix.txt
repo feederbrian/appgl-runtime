@@ -1,0 +1,6 @@
+W2.1 candidate-delivery probe — PRE-W2.1 RED CAPTURE
+date: 2026-06-13T02:43:46Z
+HEAD: 4a7a1b3 + probe scaffold (uncommitted, gate fix NOT yet applied)
+env: APPGL_PARALLEL_ENCODE=1 APPGL_PHASE2_PLAN_CAPACITY=0 APPGL_W2_PLAN_VERIFY=1
+expectation: gate hard-rejects plan-null upstream of prepareLean → 0 candidates (RED)
+{"phase":"s25-w2-1-gate-probes","passed":false,"claimedVersion":"4.6 AppGL core","tests":[{"id":"s25.w2_1.candidate-delivery","status":"failed","diffRatio":0,"maxChannelDelta":0,"millis":101.286,"goldenPath":"","actualPath":"","message":"real parallel arm formed ZERO candidates with the Phase-2 cache frozen — record-prepare did not reach the gate: translated=64 candidates=0","coverageDelta":[]},{"id":"s25.w2_1.candidate-delivery.arm-off","status":"passed","diffRatio":0,"maxChannelDelta":0,"millis":10.7611,"goldenPath":"","actualPath":"","message":"arm-OFF leaves the parallel-encode candidate counters at zero (must-miss)","coverageDelta":[]}]}

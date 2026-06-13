@@ -19027,6 +19027,118 @@ TestResult runS25W2SnapshotResizeProbe() {
     return result;
 }
 
+// ── S25 W2.1: candidate-delivery probe (measures DELIVERED, not POTENTIAL) ──
+// The W2 false-green was that the copy-headroom shadow (calls prepareLean
+// unconditionally) showed 90% would-fill while the REAL parallel arm formed
+// 0% candidates — the candidate gate translatedDrawParallelCaptureEligible
+// rejects plan-null upstream of prepareLean. This probe asserts on the REAL
+// arm's candidate counter under a forced cache-freeze (APPGL_PHASE2_PLAN_
+// CAPACITY=0 → every draw plan-null), explicitly NOT the shadow.
+//   RED on 4a7a1b3 by construction: gate rejects all → candidates = 0.
+//   GREEN post-W2.1: gate resolves at record → candidates > 0.
+TestResult runS25W2_1CandidateDeliveryProbe() {
+    ScopedEnvVar parallelOn("APPGL_PARALLEL_ENCODE", "1");
+    ScopedEnvVar minBatch("APPGL_PARALLEL_ENCODE_MIN_BATCH", "4");
+    ScopedEnvVar capClamp("APPGL_PHASE2_PLAN_CAPACITY", "0");
+    ScopedEnvVar verifyOn("APPGL_W2_PLAN_VERIFY", "1");
+    auto result = runDirectSentinel("s25.w2_1.candidate-delivery", [&] {
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        C51Quad q = c51MakeQuad(gl);
+        gl.glUseProgram(q.program);
+        gl.glBindVertexArray(q.vao);
+        gl.glViewport(0, 0, 64, 64);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glUniform4f(q.colorLoc, 0.0f, 1.0f, 0.0f, 1.0f);
+        // Default-FB draws with the Phase-2 plan cache forced to capacity 0:
+        // info.translatedPlan is null on every draw (the live freeze state).
+        for (int i = 0; i < 64; ++i) {
+            gl.glDrawElementsInstancedBaseVertex(
+                GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr, 1, 0);
+        }
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[1], 255u, 4u,
+                         "candidate-delivery: draws render correctly");
+        gl.glFinish();
+        const auto inventory = context.metalResourceInventory();
+        // THE DELIVERED assertion: the REAL arm forms candidates even with
+        // the Phase-2 cache frozen — record-prepare reached the gate.
+        if (inventory.parallelCandidateDraws == 0) {
+            recordSentinelFailure(
+                failures,
+                "real parallel arm formed ZERO candidates with the Phase-2 "
+                "cache frozen — record-prepare did not reach the gate",
+                "translated=" +
+                    std::to_string(inventory.parallelTranslatedDraws) +
+                    " candidates=" +
+                    std::to_string(inventory.parallelCandidateDraws));
+        }
+        // Wrong-plan guard on the GATE-resolved population (watch-item c):
+        // the gate's resolveRecordPreparedPlan hits run the verifier.
+        if (inventory.w2PlanVerifyMismatches != 0) {
+            recordSentinelFailure(
+                failures,
+                "gate-resolved plan diverged from fresh build (wrong-plan class)",
+                "mismatches=" +
+                    std::to_string(inventory.w2PlanVerifyMismatches));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        c51DestroyQuad(gl, q);
+        expectGLError(gl, GL_NO_ERROR, "candidate-delivery probe cleanup");
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "real parallel arm forms candidates under a frozen Phase-2 cache (record-prepare reaches the gate; verifier clean)";
+    }
+    return result;
+}
+
+TestResult runS25W2_1CandidateDeliveryDefaultOffProbe() {
+    ScopedEnvVar capClamp("APPGL_PHASE2_PLAN_CAPACITY", "0");
+    auto result = runDirectSentinel("s25.w2_1.candidate-delivery.arm-off", [&] {
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        C51Quad q = c51MakeQuad(gl);
+        gl.glUseProgram(q.program);
+        gl.glBindVertexArray(q.vao);
+        gl.glViewport(0, 0, 64, 64);
+        gl.glUniform4f(q.colorLoc, 1.0f, 0.0f, 1.0f, 1.0f);
+        for (int i = 0; i < 8; ++i) {
+            gl.glDrawElementsInstancedBaseVertex(
+                GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr, 1, 0);
+        }
+        gl.glFinish();
+        const auto inventory = context.metalResourceInventory();
+        // Must-miss: the resolve path is arm-gated; with the arm OFF the
+        // parallel-encode counters stay zero.
+        if (inventory.parallelCandidateDraws != 0 ||
+            inventory.parallelTranslatedDraws != 0) {
+            recordSentinelFailure(
+                failures,
+                "parallel-encode counters moved with the arm OFF",
+                "translated=" +
+                    std::to_string(inventory.parallelTranslatedDraws) +
+                    " candidates=" +
+                    std::to_string(inventory.parallelCandidateDraws));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        c51DestroyQuad(gl, q);
+        expectGLError(gl, GL_NO_ERROR, "candidate-delivery arm-off cleanup");
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "arm-OFF leaves the parallel-encode candidate counters at zero (must-miss)";
+    }
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -19208,6 +19320,12 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runS25W2PlanVerifyProbe());
         tests.push_back(runS25W2PlanVerifyRedLegProbe());
         tests.push_back(runS25W2SnapshotResizeProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "s25-w2-1-gate-probes") {
+        tests.push_back(runS25W2_1CandidateDeliveryProbe());
+        tests.push_back(runS25W2_1CandidateDeliveryDefaultOffProbe());
         return buildJSON(normalizedPhase, tests);
     }
 
