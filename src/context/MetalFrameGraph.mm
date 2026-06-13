@@ -4800,6 +4800,22 @@ struct MetalFrameGraph::Impl {
             : MetalCommandBufferLease{};
     }
 
+    // S25 W2 FIX: does this draw sample an FBO-color-texture as a fragment input?
+    // (frame-scoped set, populated at this frame's FBO renders.) If so, it's an
+    // FBO→composition edge → route to the immediate C49-ordered path, not deferral.
+    bool leanDrawSamplesFboColor(const TranslatedDrawInfo& info) const {
+        if (fboColorTextureSet.empty()) {
+            return false;
+        }
+        for (const auto& binding : info.fragmentTextures) {
+            if (binding.metalTexture != nullptr &&
+                fboColorTextureSet.count(binding.metalTexture) != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool ensureCurrentCommandBuffer(NSString* label) {
         return ensureCurrentCommandBuffer(label, AppGLCommandReason::Legacy);
     }
@@ -4912,6 +4928,13 @@ struct MetalFrameGraph::Impl {
         commitWithFrameSignal(currentCommandBufferLease, reason);
         if (frameBoundaryCommit) {
             invalidateTransientState();
+            // S25 W2 FIX: frame-scope the FBO-color-texture set — the next frame
+            // repopulates at its own FBO renders (no stale-ptr false-match, no
+            // destruction hook needed). Only at frame boundaries (not pressure
+            // flushes), so it persists across mid-frame commits within a frame.
+            if (!fboCarveDisabled) {
+                fboColorTextureSet.clear();
+            }
         } else {
             currentCommandBuffer = nil;
             resetCachedEncoderState();
@@ -5262,6 +5285,17 @@ struct MetalFrameGraph::Impl {
             info.fboColorTexture != nullptr ||
             info.fboDepthStencilTexture != nullptr ||
             isAttachmentlessFBODraw;
+        // S25 W2 FIX: record this frame's FBO-color-texture targets (frame-scoped)
+        // so a later composition draw sampling one routes to the immediate C49
+        // path instead of deferral (the write-before-read hazard site).
+        if (!fboCarveDisabled && info.fboColorTexture != nullptr) {
+            fboColorTextureSet.insert(info.fboColorTexture);
+            for (void* extra : info.fboAdditionalColorTextures) {
+                if (extra != nullptr) {
+                    fboColorTextureSet.insert(extra);
+                }
+            }
+        }
         id<MTLTexture> fboColorTex = (info.fboColorTexture != nullptr)
             ? (__bridge id<MTLTexture>)info.fboColorTexture : nil;
         id<MTLTexture> fboDepthStencilTex = (info.fboDepthStencilTexture != nullptr)
@@ -13002,7 +13036,23 @@ struct MetalFrameGraph::Impl {
         parallelEncodeProfile.recordCandidate();
         ++leanCandidatesSincePresent;  // S25 W2.1 localization (obs-only)
 
-        if (parallelEncodeProfile.configuredWorkerCount <= 1) {
+        // S25 W2 FIX: a composition draw that SAMPLES an FBO-color-texture takes
+        // the IMMEDIATE C49-ordered path (serial's known-correct ordering) instead
+        // of deferring — the deferred path encodes the read before the FBO-render's
+        // writes are synced (§10-§12 write-before-read hazard). Flush any pending
+        // deferred batch FIRST so this draw stays in GL order (workers<=1 never has
+        // pending, so the flush only fires on the carve-out).
+        const bool carveFboCompositionToImmediate =
+            !fboCarveDisabled &&
+            parallelEncodeProfile.configuredWorkerCount > 1 &&
+            leanDrawSamplesFboColor(info);
+        if (carveFboCompositionToImmediate) {
+            flushLeanDirectDescriptorBatch(
+                ParallelEncodeBoundaryReason::ResourceMutationOrBarrier);
+        }
+
+        if (parallelEncodeProfile.configuredWorkerCount <= 1 ||
+            carveFboCompositionToImmediate) {
             LeanDirectTranslatedDrawDescriptor descriptor;
             ParallelEncodeFallbackReason fallbackReason =
                 ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
@@ -21022,6 +21072,20 @@ private:
     // counters are atomics.
     const bool survivalContentProbeLatched =
         appglEnvEnabledDefaultOff("APPGL_W2_SURVIVAL_CONTENT_PROBE");
+    // S25 W2 FIX (the active-path change): the FBO→composition handoff. §10-§12
+    // pinned the freeze to the DEFERRED lean path encoding a composition draw that
+    // SAMPLES an FBO before the FBO-render's writes are synced (same-CB, encode-
+    // order-correct, yet reads empty = a deferred-path write-before-read hazard).
+    // FIX: route a composition draw that samples an FBO-color-texture to the
+    // IMMEDIATE C49-ordered path (serial's known-correct ordering) instead of
+    // deferring — mechanism-agnostic (those draws stop hitting the deferred
+    // hazard). fboColorTextureSet is FRAME-SCOPED (cleared at the frame boundary,
+    // repopulated at each FBO render) ⇒ no destruction hook needed + no stale-ptr
+    // false-match; covers every re-rendered (buggy) FBO; static FBOs (no clobber)
+    // are correctly not carved. Default-ON; APPGL_W2_FBO_CARVE_OFF=1 reverts (A/B).
+    const bool fboCarveDisabled =
+        appglEnvEnabledDefaultOff("APPGL_W2_FBO_CARVE_OFF");
+    std::unordered_set<void*> fboColorTextureSet;
     // S25 W2 §8-(b) A/B FORCE-BATTERY: DIAGNOSTIC-ONLY (default-OFF, never lands).
     // When on, the lean-3D draws are FORCED per-frame round-robin into one of 3
     // arms — arm0 control, arm1 depth-compare=ALWAYS, arm2 full-color-output
