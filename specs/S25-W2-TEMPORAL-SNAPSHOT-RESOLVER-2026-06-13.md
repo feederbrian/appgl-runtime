@@ -70,6 +70,27 @@ draw-over mechanism at different motion-intensity (manual pan > auto-scroll). If
 confirms WIPE, the operator's post-fix confirmation run is **RECOMMENDED** (not just
 optional) to verify the fix generalizes to the higher-rate manual-pan case.
 
+## Eyeball (opt-in, `APPGL_W2_SURVIVAL_IMAGE_DIR`)
+
+On the FIRST §3-confirmed-wipe frame, the T1 and T2 center pixels are written
+16×-upscaled side-by-side to `<dir>/w2-wipe-T1-T2.ppm` (256×128). Left = T1, right
+= T2 — an unimpeachable single-frame proof (content → clear) on the EXACT wiped
+frame, with no game-over-menu confusion (the failure mode of a coarse async
+full-frame screencapture). Default-OFF: no env ⇒ no file writes (the matrix and
+gauntlet controls leave the filesystem untouched). One-shot per run. Validated:
+the wipe-control emits T1=(255,0,0) red / T2=(0,0,255) blue — faithful.
+
+## Field result (2026-06-13): autogame = BENIGN SKY, not wipe
+
+Foreman ran the run-until-wipe loop on the §3 SHA: 8 runs, 5 verified-wipe
+(cMISS 32–88), §3 UNANIMOUS **WIPE=0 / SKY=100% / T1unavailable=0**. The
+autogame's spectator-phase center-clear is the auto-scroll camera at sky (T1
+already clear ⇒ the 3D never drew the center), NOT a draw-over wipe. §1 (real
+center-clear) + §2 (confounded drawOver) were false leads; §3 resolved them. The
+autogame does NOT reproduce the operator's manual-pan wipe (it has no camera
+control) — the operator's wipe is real (reported "blue most of the time" / "stale/
+sparse 3D" during pan) and needs the operator's pan conditions under §3 + eyeball.
+
 ## Matrix-safety
 
 43+2-phase sweep: every parallel-encode/lean/survival/present phase green + the new

@@ -15278,6 +15278,50 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         survivalT1CapturedThisFrame = false;
     }
 
+    // §3 EYEBALL writer (opt-in via APPGL_W2_SURVIVAL_IMAGE_DIR): the T1|T2 center
+    // pixels, 16x upscaled and placed side-by-side, to <dir>/w2-wipe-T1-T2.ppm.
+    // Static so it is safe to call from the CB completion handler; one-shot,
+    // guarded by survivalWipeImageSaved. No env set ⇒ no file writes (the matrix
+    // and gauntlet controls leave the filesystem untouched).
+    static void writeWipeEyeballPPM(const std::uint8_t* t1,
+                                    const std::uint8_t* t2,
+                                    NSUInteger n, bool isBGRA) {
+        const char* dir = std::getenv("APPGL_W2_SURVIVAL_IMAGE_DIR");
+        if (dir == nullptr || t1 == nullptr || t2 == nullptr) {
+            return;  // opt-in only
+        }
+        const int scale = 16;
+        const int side = static_cast<int>(n) * scale;
+        const int W = side * 2;  // T1 (left) | T2 (right)
+        const int H = side;
+        std::vector<unsigned char> rgb;
+        rgb.reserve(static_cast<std::size_t>(W) * H * 3);
+        for (int y = 0; y < H; ++y) {
+            const int sy = y / scale;
+            for (int x = 0; x < W; ++x) {
+                const bool right = (x >= side);
+                const int sx = (right ? (x - side) : x) / scale;
+                const std::uint8_t* src = right ? t2 : t1;
+                const std::size_t idx =
+                    (static_cast<std::size_t>(sy) * n + sx) * 4;
+                const int b0 = src[idx + 0];
+                const int b1 = src[idx + 1];
+                const int b2 = src[idx + 2];
+                rgb.push_back(static_cast<unsigned char>(isBGRA ? b2 : b0));
+                rgb.push_back(static_cast<unsigned char>(b1));
+                rgb.push_back(static_cast<unsigned char>(isBGRA ? b0 : b2));
+            }
+        }
+        const std::string path = std::string(dir) + "/w2-wipe-T1-T2.ppm";
+        std::FILE* f = std::fopen(path.c_str(), "wb");
+        if (f == nullptr) {
+            return;
+        }
+        std::fprintf(f, "P6\n%d %d\n255\n", W, H);
+        std::fwrite(rgb.data(), 1, rgb.size(), f);
+        std::fclose(f);
+    }
+
     // S25 W2.1 §1 content probe: blit an 8x8 scene-region from the presented
     // drawable into a per-frame shared buffer on the present CB, and in the
     // CB completion handler count how many samples equal the frame's clear
@@ -15349,6 +15393,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         std::atomic<std::uint64_t>* wipeCtr = &contentMissingWipeConfirmed;
         std::atomic<std::uint64_t>* skyCtr = &contentMissingSkyConfirmed;
         std::atomic<std::uint64_t>* t1NaCtr = &contentMissingT1Unavailable;
+        std::atomic<bool>* wipeImgSaved = &survivalWipeImageSaved;
         [currentCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer>) {
             auto clearFrac = [&](const std::uint8_t* p) {
                 int m = 0;
@@ -15398,6 +15443,14 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                         skyCtr->fetch_add(1, std::memory_order_relaxed);
                     } else {
                         wipeCtr->fetch_add(1, std::memory_order_relaxed);
+                        // §3 EYEBALL: dump the exact T1|T2 center pixels on the
+                        // FIRST confirmed-wipe frame (opt-in; one-shot).
+                        if (!wipeImgSaved->exchange(true)) {
+                            writeWipeEyeballPPM(
+                                static_cast<const std::uint8_t*>(t1.contents),
+                                static_cast<const std::uint8_t*>(rb.contents),
+                                N, isBGRA);
+                        }
                     }
                 } else {
                     // no pre-overlay snapshot this frame (no post-3D drawable
@@ -19840,6 +19893,11 @@ private:
     std::atomic<std::uint64_t> contentMissingWipeConfirmed{0};
     std::atomic<std::uint64_t> contentMissingSkyConfirmed{0};
     std::atomic<std::uint64_t> contentMissingT1Unavailable{0};
+    // §3 EYEBALL (opt-in via APPGL_W2_SURVIVAL_IMAGE_DIR): on the FIRST confirmed-
+    // wipe frame, dump the exact T1|T2 center pixels (upscaled, side by side) as
+    // a PPM — an unimpeachable single-frame proof (T1 content → T2 clear) on the
+    // EXACT wiped frame, with no game-over-menu confusion. Run-lifetime one-shot.
+    std::atomic<bool> survivalWipeImageSaved{false};
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;
