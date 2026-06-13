@@ -9967,6 +9967,25 @@ struct MetalFrameGraph::Impl {
         // WITHOUT pan — so the first draw's MVP is representative of the wrong one).
         if (survivalContentProbeLatched) {
             geomChecks.fetch_add(1, std::memory_order_relaxed);
+            // EDGE-1 backstop: run-wide topology census of the lean path. If the
+            // 3D scene is truly NOT on the lean path, these stay low/zero.
+            {
+                std::uint32_t vc =
+                    static_cast<std::uint32_t>(std::max(descriptor.vertexCount, 0));
+                std::uint32_t prevMax =
+                    leanMaxVertexCount.load(std::memory_order_relaxed);
+                while (vc > prevMax &&
+                       !leanMaxVertexCount.compare_exchange_weak(
+                           prevMax, vc, std::memory_order_relaxed)) {
+                }
+                if (descriptor.indexCount > 0 ||
+                    descriptor.metalIndexBuffer != nullptr) {
+                    leanIndexedDraws.fetch_add(1, std::memory_order_relaxed);
+                }
+                if (descriptor.vertexCount > 6) {
+                    leanHighVertDraws.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
             const bool indexed = (descriptor.indexCount > 0 ||
                                   descriptor.metalIndexBuffer != nullptr);
             const bool degenParams =
@@ -16351,6 +16370,14 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         // safe) — a clean (A) points PAST uniforms to the vertex buffer (§9.1).
         out << ",\"geometry\":{\"checks\":"
             << geomChecks.load(std::memory_order_relaxed)
+            // EDGE-1 backstop: lean-path topology census (run-wide). low max +
+            // 0 indexed + 0 high-vert ⇒ NO 3D-topology on lean = reframe locked.
+            << ",\"leanMaxVertexCount\":"
+            << leanMaxVertexCount.load(std::memory_order_relaxed)
+            << ",\"leanIndexedDraws\":"
+            << leanIndexedDraws.load(std::memory_order_relaxed)
+            << ",\"leanHighVertDraws\":"
+            << leanHighVertDraws.load(std::memory_order_relaxed)
             << ",\"degradedDegenUniform\":"
             << degradedGeomDegenUniform.load(std::memory_order_relaxed)
             << ",\"presentDegenUniform\":"
@@ -21002,6 +21029,14 @@ private:
     std::uint32_t vbufSampleRecordHash = 0, vbufSampleEncodeHash = 0;
     std::uintptr_t vbufSamplePtr = 0;
     std::uint64_t vbufSampleOffset = 0;
+    // EDGE-1 backstop (locks the reframe foundation): the 3D scene renders to an
+    // FBO (NOT the lean path); confirm NO 3D-topology draw ever reaches the lean
+    // path. Run-wide (not degraded/present): if the lean path only ever carries
+    // 4-6-vert non-indexed composition/UI quads, maxVertexCount stays low +
+    // indexedDraws=0 + highVertDraws=0 ⇒ zero 3D on lean = reframe confirmed.
+    std::atomic<std::uint32_t> leanMaxVertexCount{0};
+    std::atomic<std::uint64_t> leanIndexedDraws{0};
+    std::atomic<std::uint64_t> leanHighVertDraws{0};  // vertexCount > 6
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;
