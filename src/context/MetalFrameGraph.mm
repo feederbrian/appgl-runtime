@@ -10419,6 +10419,11 @@ struct MetalFrameGraph::Impl {
             cachedCullMode = encoderState.cachedCullMode;
             cachedFrontFaceWinding = encoderState.cachedFrontFaceWinding;
             cachedFillMode = encoderState.cachedFillMode;
+            // S25 W2.1 localization: remember the drawable + CB this lean-3D
+            // draw landed in, to compare against what swap-present commits.
+            lastLeanColorTextureSincePresent = (__bridge void*)colorTexture;
+            lastLeanSubmitIndexSincePresent = openCommandBufferSubmitIndexImpl();
+            ++leanEncodedSincePresent;
         }
         return encoded;
     }
@@ -12085,6 +12090,8 @@ struct MetalFrameGraph::Impl {
             << ",\"peak\":" << recordPlanMemoPeak
             << ",\"verifyMismatches\":" << recordPlanMemoVerifyMismatches
             << "}";
+        out << ",\"presentLeanLanding\":"
+            << presentLeanLandingDiagnosticsJson();
         out << "}";
         return out.str();
     }
@@ -12563,6 +12570,7 @@ struct MetalFrameGraph::Impl {
         }
 
         parallelEncodeProfile.recordCandidate();
+        ++leanCandidatesSincePresent;  // S25 W2.1 localization (obs-only)
 
         if (parallelEncodeProfile.configuredWorkerCount <= 1) {
             LeanDirectTranslatedDrawDescriptor descriptor;
@@ -15037,6 +15045,59 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         }
     }
 
+    // S25 W2.1 live-defect localization (obs-only). Called once per
+    // swap-present, AFTER present()'s flush has encoded any pending lean
+    // draws into the present command buffer. Compares where this frame's
+    // lean-3D draws landed (drawable texture + CB submit index) against what
+    // this swap-present commits + presents. The hypothesis under test: the
+    // lean-direct 3D pass intermittently does NOT land on the presented
+    // drawable. Designed to FALSIFY: if matched ≈ withLean every frame and
+    // mismatched/priorCB stay ~0, the hypothesis is disproven.
+    void recordSwapPresentLeanLanding() {
+        ++swapPresentsObserved;
+        void* presentedTexture = usesOffscreenTarget
+            ? (__bridge void*)offscreenColorTexture
+            : (__bridge void*)(currentDrawable != nil ? currentDrawable.texture
+                                                       : nil);
+        const std::uint64_t presentSubmitIndex =
+            openCommandBufferSubmitIndexImpl();
+        if (leanEncodedSincePresent > 0) {
+            ++swapPresentsWithLeanEncoded;
+            if (lastLeanColorTextureSincePresent != nullptr &&
+                lastLeanColorTextureSincePresent == presentedTexture) {
+                ++swapPresentsLeanDrawableMatched;
+            } else {
+                ++swapPresentsLeanDrawableMismatched;
+            }
+            if (lastLeanSubmitIndexSincePresent == presentSubmitIndex) {
+                ++swapPresentsLeanInPresentedCB;
+            } else {
+                ++swapPresentsLeanInPriorCB;
+            }
+        } else if (leanCandidatesSincePresent > 0) {
+            // Candidates were eligible this frame but none encoded onto the
+            // lean path (all fell back to serial) — a distinct seam.
+            ++swapPresentsCandidatesButZeroEncoded;
+        }
+        lastLeanColorTextureSincePresent = nullptr;
+        lastLeanSubmitIndexSincePresent = 0;
+        leanEncodedSincePresent = 0;
+        leanCandidatesSincePresent = 0;
+    }
+
+    std::string presentLeanLandingDiagnosticsJson() const {
+        std::ostringstream out;
+        out << "{\"swapPresents\":" << swapPresentsObserved
+            << ",\"withLeanEncoded\":" << swapPresentsWithLeanEncoded
+            << ",\"drawableMatched\":" << swapPresentsLeanDrawableMatched
+            << ",\"drawableMismatched\":" << swapPresentsLeanDrawableMismatched
+            << ",\"leanInPresentedCB\":" << swapPresentsLeanInPresentedCB
+            << ",\"leanInPriorCB\":" << swapPresentsLeanInPriorCB
+            << ",\"candidatesButZeroEncoded\":"
+            << swapPresentsCandidatesButZeroEncoded << "}";
+        return out.str();
+    }
+
     void present(AppGLCommandReason reason = AppGLCommandReason::PresentPendingWork) {
         FrameAttributionScope attributionScope(
             frameAttributionProfile,
@@ -15072,6 +15133,13 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 // cadence even when the present has no pending work (an
                 // empty frame is still a frame for pacing purposes).
                 framePacingProfile.recordSwapPresent();
+                // S25 W2.1 localization (obs-only): did this frame's lean-3D
+                // draws land on the drawable + CB this swap-present commits?
+                // The flush above already encoded any pending lean draws into
+                // the present CB, so leanEncodedSincePresent is the full
+                // per-frame count. FALSIFIABLE: if matched≈withLean every
+                // frame, the "pass doesn't land" hypothesis is disproven.
+                recordSwapPresentLeanLanding();
                 break;
             default:
                 ++presentInternalCalls;
@@ -19295,6 +19363,23 @@ private:
     std::uint64_t drawableAcquireSuccesses = 0;
     std::uint64_t drawableAcquireFailures = 0;
     std::uint64_t drawablePresentCalls = 0;
+    // S25 W2.1 live-defect localization (obs-only): does the lean-direct 3D
+    // pass LAND on the PRESENTED drawable each frame? Falsifiable by design —
+    // if every swap-present with lean work shows drawable+CB match, the
+    // "pass doesn't land" hypothesis is DISPROVEN. Per-frame state reset at
+    // each swap-present; the deltas localize the seam (wrong drawable vs
+    // prior-CB vs never-encoded).
+    void* lastLeanColorTextureSincePresent = nullptr;  // raw id<MTLTexture>
+    std::uint64_t lastLeanSubmitIndexSincePresent = 0;
+    std::uint64_t leanEncodedSincePresent = 0;
+    std::uint64_t leanCandidatesSincePresent = 0;
+    std::uint64_t swapPresentsObserved = 0;
+    std::uint64_t swapPresentsWithLeanEncoded = 0;
+    std::uint64_t swapPresentsLeanDrawableMatched = 0;
+    std::uint64_t swapPresentsLeanDrawableMismatched = 0;
+    std::uint64_t swapPresentsLeanInPresentedCB = 0;
+    std::uint64_t swapPresentsLeanInPriorCB = 0;
+    std::uint64_t swapPresentsCandidatesButZeroEncoded = 0;
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;

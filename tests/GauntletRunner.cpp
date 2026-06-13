@@ -19230,6 +19230,112 @@ TestResult runS25W2_2ReadImageRejectProbe() {
     return result;
 }
 
+// ── S25: lean-deferred capture-vs-encode staleness repro ──
+// The W2.1 live defect (3D scene stale during pan) root-causes to the lean
+// descriptor capturing Metal-buffer-backed bindings by raw pointer; if the
+// buffer is mutated IN PLACE between a deferred draw's capture and its
+// deferred encode, the draw reads the POST-write content (stale for that
+// draw). Deterministic repro: defer a draw with UBO=RED, mutate the UBO
+// in place to GREEN while it's pending, flush, read back.
+//   px == RED   → draw-time content preserved (protected / correct)
+//   px == GREEN → deferred draw read post-write content (THE staleness)
+//   px == BLUE  → draw was dropped entirely (a different defect)
+TestResult runS25LeanDeferredStaleBindProbe() {
+    ScopedEnvVar parallelOn("APPGL_PARALLEL_ENCODE", "1");
+    ScopedEnvVar workers("APPGL_PARALLEL_ENCODE_WORKERS", "4");
+    ScopedEnvVar leanMax("APPGL_PARALLEL_ENCODE_LEAN_MAX_BATCH", "2048");
+    ScopedEnvVar minBatch("APPGL_PARALLEL_ENCODE_MIN_BATCH", "2048");
+    ScopedEnvVar capClamp("APPGL_PHASE2_PLAN_CAPACITY", "0");
+    auto result = runDirectSentinel("s25.lean-deferred.stale-bind", [&] {
+        static constexpr const char* kVS =
+            "#version 430 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+        // >4096 bytes so the UBO takes the BY-REFERENCE Metal-buffer path
+        // (GLContext.mm:16480 — small UBOs are inline-copied/deep-copied and
+        // are not the by-reference case the defect concerns).
+        static constexpr const char* kUboFS =
+            "#version 430 core\n"
+            "layout(std140, binding = 0) uniform Col { vec4 uColor; vec4 pad[511]; };\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = uColor + 0.0 * pad[510]; }\n";
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        const GLuint program = buildBenchProgram(kVS, kUboFS);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(program, GL_LINK_STATUS, &linked);
+        if (linked != GL_TRUE) {
+            recordSentinelFailure(failures, "UBO program did not link", "");
+            throwIfSentinelFailed(failures);
+        }
+        GLuint vao = 0, vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+        // 256-byte UBO (buffer-backed, by-reference in the lean descriptor);
+        // color lives in the first 16 bytes.
+        GLuint ubo = 0;
+        gl.glGenBuffers(1, &ubo);
+        gl.glBindBuffer(GL_UNIFORM_BUFFER, ubo);
+        std::vector<std::uint8_t> uboBytes(8192, 0);  // > 4096 → by-reference
+        const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+        std::memcpy(uboBytes.data(), red, sizeof(red));
+        gl.glBufferData(GL_UNIFORM_BUFFER,
+                        static_cast<GLsizeiptr>(uboBytes.size()),
+                        uboBytes.data(), GL_DYNAMIC_DRAW);
+        gl.glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo);
+        const GLuint blockIdx = gl.glGetUniformBlockIndex(program, "Col");
+        if (blockIdx != GL_INVALID_INDEX) {
+            gl.glUniformBlockBinding(program, blockIdx, 0);
+        }
+        gl.glUseProgram(program);
+        gl.glBindVertexArray(vao);
+        gl.glViewport(0, 0, 64, 64);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);  // BLUE = "draw dropped"
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        // Deferred draw with UBO=RED (captured into the pending lean batch;
+        // workers>1 + high max-batch + no boundary → stays pending).
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        // Mutate the UBO IN PLACE to GREEN while the draw is still pending.
+        const float green[4] = {0.0f, 1.0f, 0.0f, 1.0f};
+        gl.glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(green), green);
+        // Flush + present + complete → the deferred draw encodes now.
+        gl.glFinish();
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        const bool isRed = px[0] > 200 && px[1] < 64 && px[2] < 64;
+        const bool isGreen = px[0] < 64 && px[1] > 200 && px[2] < 64;
+        const bool isBlue = px[0] < 64 && px[1] < 64 && px[2] > 200;
+        if (!isRed) {
+            const char* what = isGreen ? "GREEN (read POST-write content — "
+                                         "lean-deferred capture-vs-encode "
+                                         "STALENESS reproduced)"
+                             : isBlue ? "BLUE (draw was dropped entirely)"
+                                      : "neither red/green/blue";
+            recordSentinelFailure(
+                failures,
+                std::string("deferred draw did not preserve draw-time UBO "
+                            "content; got ") + what,
+                "rgba=" + std::to_string(px[0]) + "," +
+                    std::to_string(px[1]) + "," + std::to_string(px[2]) + "," +
+                    std::to_string(px[3]));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteBuffers(1, &ubo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(program);
+        expectGLError(gl, GL_NO_ERROR, "stale-bind probe cleanup");
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "lean-deferred draw preserves draw-time UBO content across an in-place mutation (no capture-vs-encode staleness)";
+    }
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -19418,6 +19524,11 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runS25W2_1CandidateDeliveryProbe());
         tests.push_back(runS25W2_1CandidateDeliveryDefaultOffProbe());
         tests.push_back(runS25W2_2ReadImageRejectProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "s25-lean-deferred-stale-bind-probe") {
+        tests.push_back(runS25LeanDeferredStaleBindProbe());
         return buildJSON(normalizedPhase, tests);
     }
 
