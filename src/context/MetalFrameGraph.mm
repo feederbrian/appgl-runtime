@@ -4635,6 +4635,16 @@ struct MetalFrameGraph::Impl {
 
         FG_TRACE(@"encodeClear: enter (deferred)  encoder=%p cmdBuf=%p", currentRenderEncoder, currentCommandBuffer);
 
+        // §5.1 interposer: count glClears per frame + the mid-frame commits/
+        // drawable-advances they trigger (a 2nd glClear mid-frame re-arms the
+        // clear + advances the drawable = the candidate interposer).
+        if (survivalContentProbeLatched) {
+            ++encodeClearsThisFrame;
+            if (currentCommandBuffer != nil) {
+                ++midFrameCommitsThisFrame;
+            }
+        }
+
         flushParallelTranslatedDrawBatch(ParallelEncodeBoundaryReason::Clear);
 
         // OPT-8: Acquire a ring buffer slot before any GPU work.
@@ -9773,6 +9783,13 @@ struct MetalFrameGraph::Impl {
             ++batchFlushesThisFrame;
             if (pass.colorAttachments[0].loadAction == MTLLoadActionClear) {
                 ++batchColorClearsThisFrame;
+                // §5.1 WIPE signature: a color-Clear AFTER a prior batch this
+                // frame already rendered to the drawable clears away that 3D. A
+                // first-batch clear (batchRendered3DThisFrame not yet set) is the
+                // benign frame-start clear.
+                if (batchRendered3DThisFrame) {
+                    ++batchClearAfter3DThisFrame;
+                }
             } else {
                 ++batchColorLoadsThisFrame;
             }
@@ -9783,6 +9800,8 @@ struct MetalFrameGraph::Impl {
                     ++batchDepthLoadsThisFrame;
                 }
             }
+            // this batch renders content to the drawable — latch it for §5.1.
+            batchRendered3DThisFrame = true;
         }
         passOut = pass;
         colorTextureOut = colorTexture;
@@ -15296,6 +15315,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             armedBatchColorLoads = batchColorLoadsThisFrame;
             armedBatchDepthClears = batchDepthClearsThisFrame;
             armedBatchDepthLoads = batchDepthLoadsThisFrame;
+            // §5.1: snapshot the wipe-ordering + interposer.
+            armedBatchClearAfter3D = batchClearAfter3DThisFrame;
+            armedEncodeClears = encodeClearsThisFrame;
+            armedMidFrameCommits = midFrameCommitsThisFrame;
         }
         // §5: reset the per-frame batch-flush counters (snapshot armed above).
         batchFlushesThisFrame = 0;
@@ -15303,6 +15326,11 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         batchColorLoadsThisFrame = 0;
         batchDepthClearsThisFrame = 0;
         batchDepthLoadsThisFrame = 0;
+        // §5.1 reset.
+        batchRendered3DThisFrame = false;
+        batchClearAfter3DThisFrame = 0;
+        encodeClearsThisFrame = 0;
+        midFrameCommitsThisFrame = 0;
         lastLeanColorTextureSincePresent = nullptr;
         lastLeanSubmitIndexSincePresent = 0;
         leanEncodedSincePresent = 0;
@@ -15646,6 +15674,16 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         std::atomic<std::uint64_t>* pColorLoads = &presentBatchColorLoads;
         std::atomic<std::uint64_t>* pDepthClears = &presentBatchDepthClears;
         std::atomic<std::uint64_t>* pDepthLoads = &presentBatchDepthLoads;
+        // §5.1 wipe-ordering + interposer snapshot.
+        const std::uint32_t s51ClearAfter3D = armedBatchClearAfter3D;
+        const std::uint32_t s51EncodeClears = armedEncodeClears;
+        const std::uint32_t s51MidFrameCommits = armedMidFrameCommits;
+        std::atomic<std::uint64_t>* dClearAfter3D = &degradedBatchClearAfter3D;
+        std::atomic<std::uint64_t>* dEncodeClears = &degradedEncodeClears;
+        std::atomic<std::uint64_t>* dMidFrameCommits = &degradedMidFrameCommits;
+        std::atomic<std::uint64_t>* pClearAfter3D = &presentBatchClearAfter3D;
+        std::atomic<std::uint64_t>* pEncodeClears = &presentEncodeClears;
+        std::atomic<std::uint64_t>* pMidFrameCommits = &presentMidFrameCommits;
         [currentCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer>) {
             const std::uint8_t* p = static_cast<const std::uint8_t*>(rb.contents);
             int clearMatches = 0;
@@ -15672,6 +15710,9 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 dColorLoads->fetch_add(s5ColorLoads, std::memory_order_relaxed);
                 dDepthClears->fetch_add(s5DepthClears, std::memory_order_relaxed);
                 dDepthLoads->fetch_add(s5DepthLoads, std::memory_order_relaxed);
+                dClearAfter3D->fetch_add(s51ClearAfter3D, std::memory_order_relaxed);
+                dEncodeClears->fetch_add(s51EncodeClears, std::memory_order_relaxed);
+                dMidFrameCommits->fetch_add(s51MidFrameCommits, std::memory_order_relaxed);
                 sawMissingFlag->store(true, std::memory_order_relaxed);
                 if (fullRb != nil && !spatialClaimedFlag->exchange(true)) {
                     const std::uint8_t* fp =
@@ -15722,6 +15763,9 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 pColorLoads->fetch_add(s5ColorLoads, std::memory_order_relaxed);
                 pDepthClears->fetch_add(s5DepthClears, std::memory_order_relaxed);
                 pDepthLoads->fetch_add(s5DepthLoads, std::memory_order_relaxed);
+                pClearAfter3D->fetch_add(s51ClearAfter3D, std::memory_order_relaxed);
+                pEncodeClears->fetch_add(s51EncodeClears, std::memory_order_relaxed);
+                pMidFrameCommits->fetch_add(s51MidFrameCommits, std::memory_order_relaxed);
             }
             (void)rb;
             (void)fullRb;
@@ -15799,7 +15843,23 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             << ",\"presentBatchDepthClears\":"
             << presentBatchDepthClears.load(std::memory_order_relaxed)
             << ",\"presentBatchDepthLoads\":"
-            << presentBatchDepthLoads.load(std::memory_order_relaxed) << "}";
+            << presentBatchDepthLoads.load(std::memory_order_relaxed)
+            // §5.1 WIPE-ORDERING confirm + interposer (degraded vs present):
+            // degraded clearAfter3D ≫ present ⇒ REAL WIPE (a late batch clears
+            // away 3D); the interposer = encodeClears>1 (2nd glClear) / midFrame
+            // commits (drawable-advance). present clearAfter3D≈0 = benign baseline.
+            << ",\"degradedBatchClearAfter3D\":"
+            << degradedBatchClearAfter3D.load(std::memory_order_relaxed)
+            << ",\"degradedEncodeClears\":"
+            << degradedEncodeClears.load(std::memory_order_relaxed)
+            << ",\"degradedMidFrameCommits\":"
+            << degradedMidFrameCommits.load(std::memory_order_relaxed)
+            << ",\"presentBatchClearAfter3D\":"
+            << presentBatchClearAfter3D.load(std::memory_order_relaxed)
+            << ",\"presentEncodeClears\":"
+            << presentEncodeClears.load(std::memory_order_relaxed)
+            << ",\"presentMidFrameCommits\":"
+            << presentMidFrameCommits.load(std::memory_order_relaxed) << "}";
         return out.str();
     }
 
@@ -20248,6 +20308,26 @@ private:
     std::atomic<std::uint64_t> presentBatchColorLoads{0};
     std::atomic<std::uint64_t> presentBatchDepthClears{0};
     std::atomic<std::uint64_t> presentBatchDepthLoads{0};
+    // S25 W2 §5.1 wipe-ordering confirm (the 3rd-confound gate before the fix):
+    // §5's color-clear RATE infers but doesn't DIRECTLY capture the WIPE — a batch
+    // color-Clear AFTER a prior batch this frame already rendered to the drawable
+    // (vs a benign frame-start clear by the first batch). Also captures the
+    // INTERPOSER (encodeClear count per frame + mid-frame commits/drawable-advances)
+    // = the fix site. batchRendered3DThisFrame latches on the first batch flush;
+    // a later batch's color-Clear with it set = the wipe.
+    bool batchRendered3DThisFrame = false;
+    std::uint32_t batchClearAfter3DThisFrame = 0;
+    std::uint32_t encodeClearsThisFrame = 0;
+    std::uint32_t midFrameCommitsThisFrame = 0;
+    std::uint32_t armedBatchClearAfter3D = 0;
+    std::uint32_t armedEncodeClears = 0;
+    std::uint32_t armedMidFrameCommits = 0;
+    std::atomic<std::uint64_t> degradedBatchClearAfter3D{0};
+    std::atomic<std::uint64_t> degradedEncodeClears{0};
+    std::atomic<std::uint64_t> degradedMidFrameCommits{0};
+    std::atomic<std::uint64_t> presentBatchClearAfter3D{0};
+    std::atomic<std::uint64_t> presentEncodeClears{0};
+    std::atomic<std::uint64_t> presentMidFrameCommits{0};
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;

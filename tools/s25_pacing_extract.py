@@ -323,6 +323,38 @@ def main():
                     print("  VERDICT: batch clear/depth state does NOT differ "
                           "degraded-vs-present ⇒ neither (a) nor (b) at the loadAction "
                           "level — deeper (per-draw depth contents / race); escalate.")
+                # §5.1 WIPE-ORDERING (the 3rd-confound gate): a batch color-Clear
+                # AFTER a prior batch this frame rendered 3D = the real wipe (vs a
+                # benign frame-start clear). + the interposer.
+                dca = pl_l.get("degradedBatchClearAfter3D", 0)
+                pca = pl_l.get("presentBatchClearAfter3D", 0)
+                dec = pl_l.get("degradedEncodeClears", 0)
+                pec = pl_l.get("presentEncodeClears", 0)
+                dmc = pl_l.get("degradedMidFrameCommits", 0)
+                pmc = pl_l.get("presentMidFrameCommits", 0)
+                degf = d.get("spatialDegradedFrames", 0)
+                presf = d.get("spatialPresentFrames", 0)
+                print("\n== §5.1 WIPE-ORDERING + INTERPOSER (per frame) ==")
+                print(f"clearAfter3D: degraded={dca} (/{degf}fr={rate(dca,degf):.3f}) "
+                      f"present={pca} (/{presf}fr={rate(pca,presf):.3f})")
+                print(f"interposer — encodeClears/fr: deg={rate(dec,degf):.2f} "
+                      f"pres={rate(pec,presf):.2f}   midFrameCommits/fr: "
+                      f"deg={rate(dmc,degf):.2f} pres={rate(pmc,presf):.2f}")
+                if rate(dca, degf) > rate(pca, presf) + 0.05 and dca > 0:
+                    interp = ("2nd-glClear-mid-frame (encodeClears>1)"
+                              if rate(dec, degf) > rate(pec, presf) + 0.05
+                              else "NOT a 2nd-glClear (encodeClears same) — "
+                                   "re-arm via another interposer, investigate")
+                    adv = (" + mid-frame drawable-ADVANCE (frame split across "
+                           "drawables)" if rate(dmc, degf) > rate(pmc, presf) + 0.05
+                           else "")
+                    print(f"  VERDICT: (b)-WIPE CONFIRMED — degraded frames clear "
+                          f"color AFTER a prior batch rendered 3D (≫ present). "
+                          f"Interposer = {interp}{adv}. → fix site PINNED.")
+                else:
+                    print("  VERDICT: clearAfter3D NOT higher on degraded ⇒ §5's "
+                          "clear-rate was a FIRST-PASS-TYPE confound, NOT a wipe — "
+                          "re-examine the mechanism (do NOT fix the clear-timing).")
 
     # Parallel-encode share (arm c).
     pe_first, pe_last = first.get("parallelEncode", {}), last.get("parallelEncode", {})
