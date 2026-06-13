@@ -1832,6 +1832,30 @@ static constexpr std::size_t kLeanDirectMaxUBOBindings = 8;
 static constexpr std::size_t kLeanDirectMaxInlineUniformBytes = 256;
 static constexpr std::size_t kLeanDirectMaxInlineUboBytes = 512;
 
+// S25 W2 §9.1: FNV-1a hash of a CPU-readable vertex-buffer prefix (256B from
+// offset). Returns false if the buffer isn't CPU-readable (Private storage) or
+// the offset is out of range. Used to detect record→encode content mutation of
+// the vertex DATA (the vbuf is held by raw ptr, not deep-copied).
+static inline bool appglHashVertexBufferPrefix(void* metalBuffer,
+                                               std::size_t offset,
+                                               std::uint32_t& hashOut) {
+    if (metalBuffer == nullptr) return false;
+    id<MTLBuffer> buf = (__bridge id<MTLBuffer>)metalBuffer;
+    if (buf == nil) return false;
+    const void* contents = [buf contents];  // nil for MTLStorageModePrivate
+    if (contents == nullptr) return false;
+    const std::size_t blen = static_cast<std::size_t>([buf length]);
+    if (offset >= blen) return false;
+    const std::size_t span = std::min<std::size_t>(
+        static_cast<std::size_t>(256), blen - offset);
+    const std::uint8_t* p =
+        static_cast<const std::uint8_t*>(contents) + offset;
+    std::uint32_t h = 2166136261u;
+    for (std::size_t i = 0; i < span; ++i) { h ^= p[i]; h *= 16777619u; }
+    hashOut = h;
+    return true;
+}
+
 struct LeanDirectTranslatedDrawDescriptor {
     struct ExtraVertexBuffer {
         void* metalBuffer = nullptr;
@@ -1933,6 +1957,13 @@ struct LeanDirectTranslatedDrawDescriptor {
     GLenum fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
     TranslatedDrawInfo::FragmentShadingRateShaderState
         fragmentShadingRateShaderState;
+    // S25 W2 §9.1: record-time content hash of the vertex-buffer region this
+    // draw reads. The vbuf is held as a raw ptr (NOT deep-copied like uniforms),
+    // so its content can be mutated in the deferred record→encode window; the
+    // encode re-hashes + compares = the stale/overwritten-vbuf detector. Set
+    // only when the survival latch is on + the buffer is CPU-readable.
+    std::uint32_t recordVertexHash = 0;
+    bool recordVertexHashValid = false;
 
     void reset() {
         pipelineState = nullptr;
@@ -1955,6 +1986,8 @@ struct LeanDirectTranslatedDrawDescriptor {
         bindPrimaryVertexBuffer = false;
         metalVertexBuffer = nullptr;
         metalVertexBufferOffset = 0;
+        recordVertexHash = 0;
+        recordVertexHashValid = false;
         extraVertexBufferCount = 0;
         vertexUniformData = nullptr;
         vertexUniformSize = 0;
@@ -9314,6 +9347,17 @@ struct MetalFrameGraph::Impl {
             descriptor.metalVertexBuffer = source.metalVertexBuffer;
             descriptor.metalVertexBufferOffset =
                 source.metalVertexBufferOffset;
+            // §9.1: hash the vbuf content at RECORD time → re-hashed + compared
+            // at encode (record≠encode = vbuf mutated in the deferred window).
+            if (survivalContentProbeLatched) {
+                std::uint32_t rh = 0;
+                descriptor.recordVertexHashValid =
+                    appglHashVertexBufferPrefix(
+                        descriptor.metalVertexBuffer,
+                        descriptor.metalVertexBufferOffset, rh);
+                descriptor.recordVertexHash =
+                    descriptor.recordVertexHashValid ? rh : 0;
+            }
         }
         for (std::size_t ei = 0; ei < source.extraVertexBuffers.size(); ++ei) {
             const auto& evb = source.extraVertexBuffers[ei];
@@ -9542,6 +9586,17 @@ struct MetalFrameGraph::Impl {
             descriptor.metalVertexBuffer = source.metalVertexBuffer;
             descriptor.metalVertexBufferOffset =
                 source.metalVertexBufferOffset;
+            // §9.1: hash the vbuf content at RECORD time → re-hashed + compared
+            // at encode (record≠encode = vbuf mutated in the deferred window).
+            if (survivalContentProbeLatched) {
+                std::uint32_t rh = 0;
+                descriptor.recordVertexHashValid =
+                    appglHashVertexBufferPrefix(
+                        descriptor.metalVertexBuffer,
+                        descriptor.metalVertexBufferOffset, rh);
+                descriptor.recordVertexHash =
+                    descriptor.recordVertexHashValid ? rh : 0;
+            }
         }
         for (std::size_t ei = 0; ei < source.extraVertexBuffers.size(); ++ei) {
             const auto& evb = source.extraVertexBuffers[ei];
@@ -9952,7 +10007,14 @@ struct MetalFrameGraph::Impl {
                 geomNullTextureThisFrame.fetch_add(1, std::memory_order_relaxed);
             if (degenUniform)
                 geomDegenUniformThisFrame.fetch_add(1, std::memory_order_relaxed);
-            if (!geomSampleClaimed.exchange(true, std::memory_order_relaxed)) {
+            // Bias the sample to a 3D-SCENE-class draw (high-vert / indexed /
+            // textured → perspective), not the first UI/HUD quad (4-vert ortho,
+            // untextured) — that's the geometry actually going missing.
+            const bool looks3DScene = (descriptor.vertexCount > 6 ||
+                                       descriptor.indexCount > 0 ||
+                                       descriptor.fragmentTextureCount > 0);
+            if (looks3DScene &&
+                !geomSampleClaimed.exchange(true, std::memory_order_relaxed)) {
                 const std::size_t copyN = std::min<std::size_t>(
                     descriptor.vertexUniformSize, sizeof(geomSampleMvp));
                 std::memcpy(geomSampleMvp,
@@ -9968,6 +10030,30 @@ struct MetalFrameGraph::Impl {
                 geomSampleFragTexCount =
                     static_cast<std::uint32_t>(descriptor.fragmentTextureCount);
                 geomSampleReady.store(true, std::memory_order_release);
+            }
+            // §9.1: re-hash the vbuf at ENCODE + compare to the record-time hash.
+            // record≠encode ⇒ the vertex DATA was mutated/overwritten in the
+            // deferred record→encode window = the stale-vbuf pin.
+            if (descriptor.recordVertexHashValid) {
+                vbufHashChecksThisFrame.fetch_add(1, std::memory_order_relaxed);
+                std::uint32_t eh = 0;
+                if (appglHashVertexBufferPrefix(
+                        descriptor.metalVertexBuffer,
+                        descriptor.metalVertexBufferOffset, eh) &&
+                    eh != descriptor.recordVertexHash) {
+                    vbufHashMismatchThisFrame.fetch_add(
+                        1, std::memory_order_relaxed);
+                    if (!vbufHashSampleClaimed.exchange(
+                            true, std::memory_order_relaxed)) {
+                        vbufSampleRecordHash = descriptor.recordVertexHash;
+                        vbufSampleEncodeHash = eh;
+                        vbufSamplePtr = reinterpret_cast<std::uintptr_t>(
+                            descriptor.metalVertexBuffer);
+                        vbufSampleOffset = descriptor.metalVertexBufferOffset;
+                        vbufHashSampleReady.store(
+                            true, std::memory_order_release);
+                    }
+                }
             }
         }
         // §8-(b) passive sample (one-shot): the original mask/blend of a lean-3D
@@ -15535,6 +15621,11 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 geomDegenDrawParamsThisFrame.load(std::memory_order_relaxed);
             armedGeomNullVbuf =
                 geomNullVbufThisFrame.load(std::memory_order_relaxed);
+            // §9.1: snapshot the vbuf content-hash check/mismatch counts.
+            armedVbufHashChecks =
+                vbufHashChecksThisFrame.load(std::memory_order_relaxed);
+            armedVbufHashMismatch =
+                vbufHashMismatchThisFrame.load(std::memory_order_relaxed);
         }
         // §5: reset the per-frame batch-flush counters (snapshot armed above).
         batchFlushesThisFrame = 0;
@@ -15559,6 +15650,9 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         geomNullTextureThisFrame.store(0, std::memory_order_relaxed);
         geomDegenDrawParamsThisFrame.store(0, std::memory_order_relaxed);
         geomNullVbufThisFrame.store(0, std::memory_order_relaxed);
+        // §9.1 reset.
+        vbufHashChecksThisFrame.store(0, std::memory_order_relaxed);
+        vbufHashMismatchThisFrame.store(0, std::memory_order_relaxed);
         lastLeanColorTextureSincePresent = nullptr;
         lastLeanSubmitIndexSincePresent = 0;
         leanEncodedSincePresent = 0;
@@ -15945,6 +16039,9 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         const std::uint32_t s9NullTexture = armedGeomNullTexture;
         const std::uint32_t s9DegenDrawParams = armedGeomDegenDrawParams;
         const std::uint32_t s9NullVbuf = armedGeomNullVbuf;
+        // §9.1: vbuf content-hash checks/mismatches → degraded/present.
+        const std::uint32_t s91VbufChecks = armedVbufHashChecks;
+        const std::uint32_t s91VbufMismatch = armedVbufHashMismatch;
         [currentCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer>) {
             const std::uint8_t* p = static_cast<const std::uint8_t*>(rb.contents);
             int clearMatches = 0;
@@ -15988,6 +16085,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 degradedGeomNullTexture.fetch_add(s9NullTexture, std::memory_order_relaxed);
                 degradedGeomDegenDrawParams.fetch_add(s9DegenDrawParams, std::memory_order_relaxed);
                 degradedGeomNullVbuf.fetch_add(s9NullVbuf, std::memory_order_relaxed);
+                degradedVbufHashChecks.fetch_add(s91VbufChecks, std::memory_order_relaxed);
+                degradedVbufHashMismatch.fetch_add(s91VbufMismatch, std::memory_order_relaxed);
                 sawMissingFlag->store(true, std::memory_order_relaxed);
                 if (fullRb != nil && !spatialClaimedFlag->exchange(true)) {
                     const std::uint8_t* fp =
@@ -16055,6 +16154,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 presentGeomNullTexture.fetch_add(s9NullTexture, std::memory_order_relaxed);
                 presentGeomDegenDrawParams.fetch_add(s9DegenDrawParams, std::memory_order_relaxed);
                 presentGeomNullVbuf.fetch_add(s9NullVbuf, std::memory_order_relaxed);
+                presentVbufHashChecks.fetch_add(s91VbufChecks, std::memory_order_relaxed);
+                presentVbufHashMismatch.fetch_add(s91VbufMismatch, std::memory_order_relaxed);
             }
             (void)rb;
             (void)fullRb;
@@ -16269,6 +16370,27 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         } else {
             out << ",\"sample\":null";
         }
+        // §9.1 vbuf content-integrity (record-vs-encode hash). degradedMismatch
+        // ≫ present (with checks>0) ⇒ the vertex DATA was mutated/overwritten in
+        // the deferred record→encode window = the stale-vbuf pin. checks=0 ⇒ the
+        // vbufs aren't CPU-readable (Private) → can't hash → Metal-capture.
+        out << ",\"vbufChecks\":{\"degradedChecks\":"
+            << degradedVbufHashChecks.load(std::memory_order_relaxed)
+            << ",\"presentChecks\":"
+            << presentVbufHashChecks.load(std::memory_order_relaxed)
+            << ",\"degradedMismatch\":"
+            << degradedVbufHashMismatch.load(std::memory_order_relaxed)
+            << ",\"presentMismatch\":"
+            << presentVbufHashMismatch.load(std::memory_order_relaxed);
+        if (vbufHashSampleReady.load(std::memory_order_acquire)) {
+            out << ",\"sample\":{\"recordHash\":" << vbufSampleRecordHash
+                << ",\"encodeHash\":" << vbufSampleEncodeHash
+                << ",\"vbufPtr\":" << vbufSamplePtr
+                << ",\"offset\":" << vbufSampleOffset << "}";
+        } else {
+            out << ",\"sample\":null";
+        }
+        out << "}";  // close vbufChecks
         out << "}";  // close geometry
         out << "}";  // close outer object
         return out.str();
@@ -20854,6 +20976,19 @@ private:
     std::uint32_t geomSampleMode = 0;
     std::uintptr_t geomSampleVbufPtr = 0;
     std::uint32_t geomSampleVtxUniformSize = 0, geomSampleFragTexCount = 0;
+    // §9.1 vertex-buffer content-integrity: record-vs-encode hash mismatch =
+    // the vbuf was mutated/overwritten in the deferred record→encode window
+    // (the classic parallel record/replay hazard — vbuf is raw-ptr, not copied).
+    std::atomic<std::uint32_t> vbufHashChecksThisFrame{0};      // had a record hash
+    std::atomic<std::uint32_t> vbufHashMismatchThisFrame{0};    // record != encode
+    std::uint32_t armedVbufHashChecks = 0, armedVbufHashMismatch = 0;
+    std::atomic<std::uint64_t> degradedVbufHashChecks{0}, presentVbufHashChecks{0};
+    std::atomic<std::uint64_t> degradedVbufHashMismatch{0}, presentVbufHashMismatch{0};
+    std::atomic<bool> vbufHashSampleClaimed{false};
+    std::atomic<bool> vbufHashSampleReady{false};
+    std::uint32_t vbufSampleRecordHash = 0, vbufSampleEncodeHash = 0;
+    std::uintptr_t vbufSamplePtr = 0;
+    std::uint64_t vbufSampleOffset = 0;
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;

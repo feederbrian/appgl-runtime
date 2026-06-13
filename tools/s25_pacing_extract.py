@@ -531,6 +531,31 @@ def main():
                               "SUBTLE data bug: the VERTEX-BUFFER content (raw ptr 9314, mutable "
                               "across the deferred-encode window) → run §9.1 vbuf-content-hash "
                               "(record-vs-encode); if that too is clean → Metal frame-capture.")
+                    # §9.1 vbuf content-integrity (record-vs-encode hash).
+                    vb = geo.get("vbufChecks")
+                    if vb:
+                        dc = vb.get("degradedChecks", 0); pc = vb.get("presentChecks", 0)
+                        dm = vb.get("degradedMismatch", 0); pm = vb.get("presentMismatch", 0)
+                        print(f"  §9.1 vbuf-hash: checks deg/pres={dc}/{pc}  "
+                              f"mismatch deg/pres={dm}/{pm}")
+                        vs = vb.get("sample")
+                        if vs:
+                            print(f"    mismatch sample: recordHash={vs.get('recordHash')} "
+                                  f"encodeHash={vs.get('encodeHash')} vbufPtr={vs.get('vbufPtr')} "
+                                  f"offset={vs.get('offset')}")
+                        if dc == 0 and pc == 0:
+                            print("    §9.1 VERDICT: 0 checks — vbufs not CPU-readable (Private) "
+                                  "→ can't hash → Metal frame-capture is the next step.")
+                        elif dm > 0 and dm > pm * 2:
+                            print("    §9.1 VERDICT: vbuf record≠encode degraded≫present ⇒ "
+                                  "STALE-VBUF PIN — the vertex DATA is overwritten in the deferred "
+                                  "record→encode window → fix: snapshot/deep-copy the vertex data "
+                                  "at record (like the uniforms), or hold the ring-buffer slot "
+                                  "until the deferred encode consumes it.")
+                        else:
+                            print("    §9.1 VERDICT: vbuf content STABLE across record→encode (no "
+                                  "mismatch) → NOT the overwrite hazard → Metal frame-capture for "
+                                  "a subtle finite-wrong MVP / vertex-data.")
 
     # Parallel-encode share (arm c).
     pe_first, pe_last = first.get("parallelEncode", {}), last.get("parallelEncode", {})
