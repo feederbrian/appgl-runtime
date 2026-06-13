@@ -4770,6 +4770,7 @@ struct MetalFrameGraph::Impl {
     }
 
     bool openCurrentRenderEncoder(MTLRenderPassDescriptor* pass) {
+        noteDrawablePassOpenForSurvival(pass);  // S25 W2.1 survival (obs-only)
         currentRenderEncoder =
             createRetainedRenderCommandEncoder(currentCommandBuffer, pass);
         if (currentRenderEncoder != nil) {
@@ -4931,6 +4932,7 @@ struct MetalFrameGraph::Impl {
             pass.stencilAttachment.clearStencil = pendingClearStencil;
         }
 
+        noteDrawablePassOpenForSurvival(pass);  // S25 W2.1 survival (obs-only)
         id<MTLRenderCommandEncoder> encoder =
             [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
         [encoder endEncoding];
@@ -10424,6 +10426,15 @@ struct MetalFrameGraph::Impl {
             lastLeanColorTextureSincePresent = (__bridge void*)colorTexture;
             lastLeanSubmitIndexSincePresent = openCommandBufferSubmitIndexImpl();
             ++leanEncodedSincePresent;
+            // S25 W2.1 survival: this 3D draw is now the drawable's latest
+            // write (unless a later Clear pass overwrites it before present).
+            const bool onDrawable = usesOffscreenTarget
+                ? (colorTexture == offscreenColorTexture)
+                : (currentDrawable != nil &&
+                   colorTexture == currentDrawable.texture);
+            if (onDrawable) {
+                drawableLastWriteWas3D = true;
+            }
         }
         return encoded;
     }
@@ -15045,6 +15056,30 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         }
     }
 
+    // S25 W2.1 SURVIVAL (obs-only): note a render pass opening on the
+    // PRESENTED drawable. A Clear/DontCare load on the drawable AFTER a
+    // lean-3D draw this frame overwrites the 3D — the survival wipe. The
+    // lean pass's OWN consuming-clear is harmless (it fires before the draw,
+    // which immediately re-sets the flag true), so this naturally excludes
+    // it. FBO passes target an FBO texture (not the drawable) and are
+    // ignored.
+    void noteDrawablePassOpenForSurvival(MTLRenderPassDescriptor* pass) {
+        if (pass == nil) {
+            return;
+        }
+        id<MTLTexture> drawableTex = usesOffscreenTarget
+            ? offscreenColorTexture
+            : (currentDrawable != nil ? currentDrawable.texture : nil);
+        if (drawableTex == nil ||
+            pass.colorAttachments[0].texture != drawableTex) {
+            return;  // not a drawable pass (FBO/offscreen-other) — ignore
+        }
+        const MTLLoadAction load = pass.colorAttachments[0].loadAction;
+        if (load == MTLLoadActionClear || load == MTLLoadActionDontCare) {
+            drawableLastWriteWas3D = false;  // drawable wiped
+        }
+    }
+
     // S25 W2.1 live-defect localization (obs-only). Called once per
     // swap-present, AFTER present()'s flush has encoded any pending lean
     // draws into the present command buffer. Compares where this frame's
@@ -15074,6 +15109,14 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             } else {
                 ++swapPresentsLeanInPriorCB;
             }
+            // SURVIVAL: of the frames with lean-3D landed, did the 3D remain
+            // the drawable's last write, or did a later Clear/DontCare pass
+            // overwrite it before this present?
+            if (drawableLastWriteWas3D) {
+                ++swapPresentsLean3DSurvived;
+            } else {
+                ++swapPresentsLean3DOverwritten;
+            }
         } else if (leanCandidatesSincePresent > 0) {
             // Candidates were eligible this frame but none encoded onto the
             // lean path (all fell back to serial) — a distinct seam.
@@ -15083,6 +15126,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         lastLeanSubmitIndexSincePresent = 0;
         leanEncodedSincePresent = 0;
         leanCandidatesSincePresent = 0;
+        drawableLastWriteWas3D = false;
     }
 
     std::string presentLeanLandingDiagnosticsJson() const {
@@ -15094,7 +15138,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             << ",\"leanInPresentedCB\":" << swapPresentsLeanInPresentedCB
             << ",\"leanInPriorCB\":" << swapPresentsLeanInPriorCB
             << ",\"candidatesButZeroEncoded\":"
-            << swapPresentsCandidatesButZeroEncoded << "}";
+            << swapPresentsCandidatesButZeroEncoded
+            << ",\"lean3DSurvived\":" << swapPresentsLean3DSurvived
+            << ",\"lean3DOverwritten\":" << swapPresentsLean3DOverwritten
+            << "}";
         return out.str();
     }
 
@@ -19380,6 +19427,15 @@ private:
     std::uint64_t swapPresentsLeanInPresentedCB = 0;
     std::uint64_t swapPresentsLeanInPriorCB = 0;
     std::uint64_t swapPresentsCandidatesButZeroEncoded = 0;
+    // S25 W2.1 SURVIVAL axis (obs-only): the landing counter proved the 3D
+    // lands on the presented drawable+CB every frame, yet the operator sees
+    // the clear color. So the seam is whether the 3D SURVIVES to present or a
+    // later drawable clear overwrites it. drawableLastWriteWas3D tracks the
+    // drawable's most recent write: a lean-3D draw sets it true; a Clear/
+    // DontCare drawable pass open (incl. flushPendingClear) sets it false.
+    bool drawableLastWriteWas3D = false;
+    std::uint64_t swapPresentsLean3DSurvived = 0;
+    std::uint64_t swapPresentsLean3DOverwritten = 0;
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;

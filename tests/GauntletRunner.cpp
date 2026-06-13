@@ -19336,6 +19336,209 @@ TestResult runS25LeanDeferredStaleBindProbe() {
     return result;
 }
 
+// ── S25 W2.1 survival repro: deferred-3D vs present-time clear ──
+// The localizer proved the lean-3D draws land on the presented drawable+CB
+// every gameplay frame (drawableMatched=100%), yet the operator sees the
+// CLEAR color most frames + occasional 3D. So the seam is SURVIVAL, not
+// landing: the 3D is encoded but overwritten before display. Candidate
+// mechanism: present() flushes the deferred lean-3D batch FIRST
+// (flushParallelTranslatedDrawBatch), THEN flushPendingClear() opens a
+// loadAction=Clear pass on the SAME drawable — wiping the just-rendered 3D.
+// Deterministic test: clear(blue) → deferred lean-3D draw(red) → present →
+// read back.
+//   px == RED  → the deferred 3D survived the present (correct)
+//   px == BLUE → the pending clear overwrote the deferred 3D at present
+//                (THE survival defect reproduced)
+// Doubles as the SURVIVAL-aware fix gate (the landing counter is saturated
+// at 100% and structurally blind to this).
+TestResult runS25LeanDeferredClearSurvivalProbe() {
+    // Match the LIVE localizer config (APPGL_PARALLEL_ENCODE=1, defaults
+    // elsewhere): workers default to 4 (>1 → deferred accumulation), and the
+    // draw gets a normal Phase-2 plan → lean candidate. (Forcing a capacity
+    // clamp made the draws plan-null and the lean encode never engaged.)
+    ScopedEnvVar parallelOn("APPGL_PARALLEL_ENCODE", "1");
+    ScopedEnvVar workers("APPGL_PARALLEL_ENCODE_WORKERS", "4");
+    auto result = runDirectSentinel("s25.lean-deferred.clear-survival", [&] {
+        static constexpr const char* kVS =
+            "#version 430 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+        static constexpr const char* kRedFS =
+            "#version 430 core\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = vec4(1.0, 0.0, 0.0, 1.0); }\n";
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        const GLuint program = buildBenchProgram(kVS, kRedFS);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(program, GL_LINK_STATUS, &linked);
+        if (linked != GL_TRUE) {
+            recordSentinelFailure(failures, "red program did not link", "");
+            throwIfSentinelFailed(failures);
+        }
+        GLuint vao = 0, vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+        gl.glUseProgram(program);
+        gl.glBindVertexArray(vao);
+        gl.glViewport(0, 0, 64, 64);
+        gl.glDisable(GL_DEPTH_TEST);
+        // WARM-UP: the first occurrence of a draw is cold (no PSO yet → the
+        // gate rejects it as not-a-candidate → serial). Repeat to warm the
+        // PSO + plan caches so the TEST draw is a real lean candidate (this
+        // is why the live run — which repeats every frame — engages lean).
+        for (int i = 0; i < 8; ++i) {
+            gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+            gl.glClear(GL_COLOR_BUFFER_BIT);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+            context.swapBuffers();
+        }
+        // TEST: pending clear to BLUE, then a DEFERRED lean-3D RED draw
+        // (captured, not encoded — the clear stays pending), then present.
+        gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        context.swapBuffers();  // present(): flush lean batch, then clear
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        const bool isRed = px[0] > 200 && px[1] < 64 && px[2] < 64;
+        const bool isBlue = px[0] < 64 && px[1] < 64 && px[2] > 200;
+        const auto inv = context.metalResourceInventory();
+        const std::string pathInfo =
+            " [candidates=" + std::to_string(inv.parallelCandidateDraws) +
+            " descEncoded=" + std::to_string(inv.parallelDescriptorEncodedDraws) +
+            " translated=" + std::to_string(inv.parallelTranslatedDraws) + "]";
+        if (inv.parallelDescriptorEncodedDraws == 0) {
+            recordSentinelFailure(
+                failures,
+                "draw did NOT take the lean path (serial/other) — repro tests "
+                "the wrong path" + pathInfo, "");
+        } else if (!isRed) {
+            recordSentinelFailure(
+                failures,
+                isBlue ? "deferred lean-3D was OVERWRITTEN by the present-time "
+                         "clear (survival defect reproduced)"
+                       : "deferred lean-3D neither survived (red) nor cleared "
+                         "(blue)",
+                "rgba=" + std::to_string(px[0]) + "," +
+                    std::to_string(px[1]) + "," + std::to_string(px[2]) + "," +
+                    std::to_string(px[3]) + pathInfo);
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(program);
+        expectGLError(gl, GL_NO_ERROR, "clear-survival cleanup");
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "deferred lean-3D draw survives the present-time clear (no overwrite)";
+    }
+    return result;
+}
+
+// ── S25 W2.1 survival-instrument validation (offscreen-detectability) ──
+// Confirms the obs-only survival counter (lean3DOverwritten) DETECTS a
+// post-3D drawable clear OFFSCREEN — settling whether the live-defect run
+// needs an on-screen drawable (operator) or can run via Foreman's offscreen
+// autogame. Construct the wipe deterministically: clear(blue) → deferred
+// lean-3D(red) → FBO draw (flushes the lean batch → 3D onto the drawable) →
+// clear(GREEN) → present. The present-time green clear opens a drawable
+// Clear pass AFTER the 3D → the 3D is overwritten.
+//   px == GREEN AND lean3DOverwritten > 0 → the instrument detects the wipe
+//   from the ENCODING STRUCTURE (no on-screen drawable needed) → offscreen-
+//   detectable. (px == RED would mean no wipe occurred.)
+TestResult runS25LeanDeferredSurvivalInstrumentProbe() {
+    // Match the LIVE localizer config (see clear-survival probe note).
+    ScopedEnvVar parallelOn("APPGL_PARALLEL_ENCODE", "1");
+    ScopedEnvVar workers("APPGL_PARALLEL_ENCODE_WORKERS", "4");
+    auto result = runDirectSentinel("s25.lean-deferred.survival-instrument", [&] {
+        static constexpr const char* kVS =
+            "#version 430 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+        static constexpr const char* kRedFS =
+            "#version 430 core\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = vec4(1.0, 0.0, 0.0, 1.0); }\n";
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        const GLuint program = buildBenchProgram(kVS, kRedFS);
+        GLuint vao = 0, vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+        GLuint fboColor = 0, fbo = 0;
+        gl.glGenTextures(1, &fboColor);
+        setupDCR3CRGBA8Texture(gl, fboColor, 16, 16);
+        setupDCR3CTextureFbo(gl, fbo, fboColor);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);  // warm-up on the default FB
+        gl.glUseProgram(program);
+        gl.glBindVertexArray(vao);
+        gl.glViewport(0, 0, 64, 64);
+        gl.glDisable(GL_DEPTH_TEST);
+        // WARM-UP so the test draw is a real lean candidate (see clear-
+        // survival probe note — cold draws aren't candidates).
+        for (int i = 0; i < 8; ++i) {
+            gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+            gl.glClear(GL_COLOR_BUFFER_BIT);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+            context.swapBuffers();
+        }
+        gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);  // BLUE pending clear
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);       // deferred lean-3D (red)
+        // FBO draw → FBO boundary flushes the lean batch onto the drawable.
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, 16, 16);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glViewport(0, 0, 64, 64);
+        // A second clear AFTER the 3D → present-time drawable Clear overwrite.
+        gl.glClearColor(0.0f, 1.0f, 0.0f, 1.0f);   // GREEN
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        context.swapBuffers();
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        const bool isGreen = px[0] < 64 && px[1] > 200 && px[2] < 64;
+        // The instrument must have COUNTED the overwrite from the JSONL.
+        const std::string json = context.framePacingDiagnosticsJson();
+        const bool counterFired =
+            json.find("\"lean3DOverwritten\":0}") == std::string::npos &&
+            json.find("\"lean3DOverwritten\":") != std::string::npos;
+        if (!isGreen) {
+            recordSentinelFailure(
+                failures, "expected the post-3D green clear to overwrite",
+                "rgba=" + std::to_string(px[0]) + "," +
+                    std::to_string(px[1]) + "," + std::to_string(px[2]));
+        }
+        if (!counterFired) {
+            recordSentinelFailure(
+                failures,
+                "survival instrument did NOT count the overwrite "
+                "(offscreen-detectability not confirmed)",
+                json.substr(json.find("presentLeanLanding") != std::string::npos
+                                ? json.find("presentLeanLanding")
+                                : 0,
+                            200));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &fboColor);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(program);
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "survival instrument detects a post-3D drawable-clear overwrite OFFSCREEN (encoding-structure signal — no on-screen drawable needed)";
+    }
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -19529,6 +19732,16 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
 
     if (normalizedPhase == "s25-lean-deferred-stale-bind-probe") {
         tests.push_back(runS25LeanDeferredStaleBindProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "s25-lean-deferred-clear-survival-probe") {
+        tests.push_back(runS25LeanDeferredClearSurvivalProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "s25-lean-deferred-survival-instrument-probe") {
+        tests.push_back(runS25LeanDeferredSurvivalInstrumentProbe());
         return buildJSON(normalizedPhase, tests);
     }
 
