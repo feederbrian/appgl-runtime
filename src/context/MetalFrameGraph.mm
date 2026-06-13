@@ -5324,6 +5324,8 @@ struct MetalFrameGraph::Impl {
         // composition's later read can be checked for same-CB-after ordering.
         if (survivalContentProbeLatched && isFBODraw && colorTexture != nil) {
             fboRenderCbEpoch[(__bridge void*)colorTexture] = cbEpoch;
+            // §12: per-draw encode-order seq (finer than the CB epoch).
+            fboRenderLastSeq[(__bridge void*)colorTexture] = ++drawEncodeSeq;
         }
         if (!isFBODraw && colorTexture == nil && currentRenderEncoder != nil) {
             colorTexture = readbackSourceTexture != nil
@@ -9971,6 +9973,7 @@ struct MetalFrameGraph::Impl {
         // §7: a lean-3D draw on the (worker) child encoder — atomic, per-frame.
         if (survivalContentProbeLatched) {
             leanDrawsThisFrame.fetch_add(1, std::memory_order_relaxed);
+            ++drawEncodeSeq;  // §12: per-draw encode-order seq (lean encode)
         }
         // §9 GEOMETRY/DATA-INTEGRITY: the DATA this lean-3D draw consumes (the
         // last axis — §8-b ruled out raster-state, causally). Camera-independent
@@ -9998,6 +10001,10 @@ struct MetalFrameGraph::Impl {
                             descriptor.fragmentTextures[0].metalTexture;
                         // §11: the CB epoch this composition draw reads the FBO on.
                         compositionReadEpoch = cbEpoch;
+                        // §12: the draw-encode seq + WHICH PATH (deferred-flush vs
+                        // immediate) — names the fix site (12343 vs 6577).
+                        compositionReadSeq = drawEncodeSeq;
+                        compositionViaDeferred = flushingLeanDirectDescriptorBatch;
                     }
                 }
             }
@@ -16035,16 +16042,25 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         // §11: snapshot the sampled FBO's render epoch vs the composition read
         // epoch (before the §10 reset clears compositionSourcePtr).
         armedCompositionReadEpoch = compositionReadEpoch;
+        // §12: snapshot the draw-seq order + path (alongside §11's CB epoch).
+        armedCompositionReadSeq = compositionReadSeq;
+        armedCompositionViaDeferred = compositionViaDeferred;
         if (compositionSourcePtr != nullptr) {
             auto it = fboRenderCbEpoch.find(compositionSourcePtr);
             armedFboRenderEpoch =
                 (it != fboRenderCbEpoch.end()) ? it->second : 0;
+            auto it2 = fboRenderLastSeq.find(compositionSourcePtr);
+            armedFboRenderSeq =
+                (it2 != fboRenderLastSeq.end()) ? it2->second : 0;
         } else {
             armedFboRenderEpoch = 0;
+            armedFboRenderSeq = 0;
         }
         compositionSourcePtr = nullptr;  // §10: reset for next frame's draws
         compositionSourceArea = 0;
         compositionReadEpoch = 0;  // §11 reset
+        compositionReadSeq = 0;  // §12 reset
+        compositionViaDeferred = false;
         // full-frame capture, bounded to the corruption phase (a degraded frame
         // has been seen) and one-shot.
         id<MTLBuffer> fullRb = nil;
@@ -16161,6 +16177,17 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         const std::uint64_t s11ReadEpoch = armedCompositionReadEpoch;
         const std::uint64_t s11RenderEpoch = armedFboRenderEpoch;
         std::atomic<std::uint64_t>* epochChecksPtr = &epochChecks;
+        // §12 pass/draw-order (finer than §11's CB epoch — catches intra-CB).
+        const std::uint64_t s12ReadSeq = armedCompositionReadSeq;
+        const std::uint64_t s12RenderSeq = armedFboRenderSeq;
+        const bool s12ViaDeferred = armedCompositionViaDeferred;
+        std::atomic<std::uint64_t>* passChecksPtr = &passOrderChecks;
+        std::atomic<std::uint64_t>* dRenderAfterSeq = &degradedRenderAfterSeq;
+        std::atomic<std::uint64_t>* pRenderAfterSeq = &presentRenderAfterSeq;
+        std::atomic<std::uint64_t>* dSameOrBeforeSeq = &degradedSameOrBeforeSeq;
+        std::atomic<std::uint64_t>* pSameOrBeforeSeq = &presentSameOrBeforeSeq;
+        std::atomic<std::uint64_t>* dCompImm = &degradedCompImmediate;
+        std::atomic<std::uint64_t>* dCompDef = &degradedCompDeferred;
         std::atomic<std::uint64_t>* dRenderAfter = &degradedRenderAfterRead;
         std::atomic<std::uint64_t>* pRenderAfter = &presentRenderAfterRead;
         std::atomic<std::uint64_t>* dSameCbE = &degradedSameCb;
@@ -16242,6 +16269,20 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                         dSameCbE->fetch_add(1, std::memory_order_relaxed);
                     else
                         dRenderBefore->fetch_add(1, std::memory_order_relaxed);
+                }
+                // §12: intra-CB draw-order (degraded) — render-seq > read-seq ⇒
+                // the FBO is rendered AFTER the composition reads it = the reorder
+                // §11's CB-epoch couldn't see. + which PATH (deferred vs immediate).
+                if (s12ReadSeq > 0 && s12RenderSeq > 0) {
+                    passChecksPtr->fetch_add(1, std::memory_order_relaxed);
+                    if (s12RenderSeq > s12ReadSeq)
+                        dRenderAfterSeq->fetch_add(1, std::memory_order_relaxed);
+                    else
+                        dSameOrBeforeSeq->fetch_add(1, std::memory_order_relaxed);
+                    if (s12ViaDeferred)
+                        dCompDef->fetch_add(1, std::memory_order_relaxed);
+                    else
+                        dCompImm->fetch_add(1, std::memory_order_relaxed);
                 }
                 sawMissingFlag->store(true, std::memory_order_relaxed);
                 if (fullRb != nil && !spatialClaimedFlag->exchange(true)) {
@@ -16341,6 +16382,14 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                         pSameCbE->fetch_add(1, std::memory_order_relaxed);
                     else
                         pRenderBefore->fetch_add(1, std::memory_order_relaxed);
+                }
+                // §12: intra-CB draw-order (present/healthy baseline).
+                if (s12ReadSeq > 0 && s12RenderSeq > 0) {
+                    passChecksPtr->fetch_add(1, std::memory_order_relaxed);
+                    if (s12RenderSeq > s12ReadSeq)
+                        pRenderAfterSeq->fetch_add(1, std::memory_order_relaxed);
+                    else
+                        pSameOrBeforeSeq->fetch_add(1, std::memory_order_relaxed);
                 }
             }
             (void)rb;
@@ -16621,6 +16670,23 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             << degradedRenderBeforeRead.load(std::memory_order_relaxed)
             << ",\"presentRenderBeforeRead\":"
             << presentRenderBeforeRead.load(std::memory_order_relaxed) << "}";
+        // §12 PASS-ORDER (intra-CB, finer than §11): degraded renderAfterSeq ≫
+        // present ⇒ the FBO is rendered AFTER the composition reads it within the
+        // CB = the reorder. + which PATH (deferred-flush vs immediate) = fix site.
+        out << ",\"passOrder\":{\"checks\":"
+            << passOrderChecks.load(std::memory_order_relaxed)
+            << ",\"degradedRenderAfterSeq\":"
+            << degradedRenderAfterSeq.load(std::memory_order_relaxed)
+            << ",\"presentRenderAfterSeq\":"
+            << presentRenderAfterSeq.load(std::memory_order_relaxed)
+            << ",\"degradedSameOrBeforeSeq\":"
+            << degradedSameOrBeforeSeq.load(std::memory_order_relaxed)
+            << ",\"presentSameOrBeforeSeq\":"
+            << presentSameOrBeforeSeq.load(std::memory_order_relaxed)
+            << ",\"degradedCompImmediate\":"
+            << degradedCompImmediate.load(std::memory_order_relaxed)
+            << ",\"degradedCompDeferred\":"
+            << degradedCompDeferred.load(std::memory_order_relaxed) << "}";
         out << "}";  // close geometry
         out << "}";  // close outer object
         return out.str();
@@ -21305,6 +21371,23 @@ private:
     std::atomic<std::uint64_t> degradedSameCb{0}, presentSameCb{0};
     std::atomic<std::uint64_t> degradedRenderBeforeRead{0};  // split (cross-CB)
     std::atomic<std::uint64_t> presentRenderBeforeRead{0};
+    // S25 W2 §12 PASS-ORDER (finer than §11's cbEpoch — §11 found same-CB, so the
+    // reorder is INTRA-CB): drawEncodeSeq ++ per actual draw-encode (FBO-render @
+    // 5320 + lean/composition @ encodeLeanDirect); record each FBO's last
+    // render-draw seq; capture the composition's read seq + WHICH PATH (immediate
+    // C49:6577 vs deferred-flush:12343 — names the fix site). End-of-frame compare
+    // the sampled FBO's render seq vs the composition read seq: render>read ⇒ the
+    // FBO is rendered AFTER the composition reads it = the intra-CB reorder.
+    std::uint64_t drawEncodeSeq = 0;
+    std::unordered_map<void*, std::uint64_t> fboRenderLastSeq;  // FBO→last render seq
+    std::uint64_t compositionReadSeq = 0;
+    bool compositionViaDeferred = false;
+    std::uint64_t armedCompositionReadSeq = 0, armedFboRenderSeq = 0;
+    bool armedCompositionViaDeferred = false;
+    std::atomic<std::uint64_t> passOrderChecks{0};  // engagement
+    std::atomic<std::uint64_t> degradedRenderAfterSeq{0}, presentRenderAfterSeq{0};
+    std::atomic<std::uint64_t> degradedSameOrBeforeSeq{0}, presentSameOrBeforeSeq{0};
+    std::atomic<std::uint64_t> degradedCompImmediate{0}, degradedCompDeferred{0};
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;

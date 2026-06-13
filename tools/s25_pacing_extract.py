@@ -630,6 +630,36 @@ def main():
                     else:
                         print("  VERDICT: no clear degraded-vs-present epoch delta — re-examine / "
                               "the operator capture is the execution-order tiebreaker.")
+                # §12 PASS-ORDER (intra-CB) — names the reorder + the fix-site PATH.
+                po = geo.get("passOrder")
+                if po and po.get("checks", 0) > 0:
+                    dras = po.get("degradedRenderAfterSeq", 0)
+                    pras = po.get("presentRenderAfterSeq", 0)
+                    dsbs = po.get("degradedSameOrBeforeSeq", 0)
+                    psbs = po.get("presentSameOrBeforeSeq", 0)
+                    dci = po.get("degradedCompImmediate", 0)
+                    dcd = po.get("degradedCompDeferred", 0)
+                    dtot = dras + dsbs
+                    ptot = pras + psbs
+                    print("\n== §12 PASS-ORDER (intra-CB draw-encode order) ==")
+                    print(f"  checks={po.get('checks')}")
+                    print(f"  degraded: renderAfterSeq={dras} sameOrBefore={dsbs} "
+                          f"(rate={rate(dras, dtot) * 100:.1f}%)")
+                    print(f"  present : renderAfterSeq={pras} sameOrBefore={psbs} "
+                          f"(rate={rate(pras, ptot) * 100:.1f}%)")
+                    print(f"  composition PATH on degraded: immediate={dci} deferred={dcd}")
+                    if dras > 0 and rate(dras, dtot) - rate(pras, ptot) > 0.15:
+                        path = ("DEFERRED-flush (flushLeanDirectDescriptorBatch:12343)"
+                                if dcd > dci else
+                                "IMMEDIATE (C49 guard:6577 / ensureLeanDirectDefaultRenderPass)")
+                        print(f"  VERDICT: degraded renderAfterSeq ≫ present ⇒ INTRA-CB REORDER "
+                              f"CONFIRMED — the FBO-render draw is encoded AFTER the composition "
+                              f"reads it. FIX SITE = the {path} path (degraded composition went "
+                              f"there). Encode the FBO-render before the composition there. "
+                              "design-before-code.")
+                    else:
+                        print("  VERDICT: no clear degraded renderAfterSeq delta — re-examine "
+                              "(the reorder may be finer than draw-seq, or path-mixed).")
 
     # Parallel-encode share (arm c).
     pe_first, pe_last = first.get("parallelEncode", {}), last.get("parallelEncode", {})
