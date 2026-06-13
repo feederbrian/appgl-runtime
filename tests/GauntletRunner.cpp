@@ -19932,6 +19932,165 @@ TestResult runS25PassTraceViaPassControlProbe() {
     return result;
 }
 
+// ── S25 W2 §3 TEMPORAL resolver validation — confound-MATCHING controls ──
+// The §2 benign-sky control failed by OMITTING the overlay (so it discriminated
+// trivially); real WZ runs a universal overlay every frame, which defeated §2.
+// These controls fix that: BOTH carry an identical universal center-covering
+// overlay (a depth-clear forces a separate post-3D pass; a fullscreen blue draw
+// paints the clear color over the center — the same in both). The ONLY
+// difference is whether the 3D covered the CENTER first (T1). §3 must split them
+// on T1 alone — proving discrimination WITH the confound present.
+
+// WIPE: 3D (red) covers the center → T1 non-clear; the overlay then clears the
+// center → T2 clear ⇒ contentMissingWipeConfirmed > 0, skyConfirmed == 0.
+TestResult runS25TemporalWipeControlProbe() {
+    ScopedEnvVar parallelOn("APPGL_PARALLEL_ENCODE", "1");
+    ScopedEnvVar workers("APPGL_PARALLEL_ENCODE_WORKERS", "4");
+    ScopedEnvVar contentProbe("APPGL_W2_SURVIVAL_CONTENT_PROBE", "1");
+    ScopedEnvVar gateOff("APPGL_W2_SURVIVAL_GAMEPLAY_MIN_FBO", "0");
+    auto result = runDirectSentinel("s25.temporal.wipe-control", [&] {
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        const GLuint redProg = buildBenchProgram(kSurvivalVS, kSurvivalRedFS);
+        const GLuint blueProg = buildBenchProgram(kSurvivalVS, kSurvivalBlueFS);
+        GLuint vao = 0, vbo = 0;
+        setupDCR3CFullscreenTriangle(gl, vao, vbo);
+        gl.glBindVertexArray(vao);
+        gl.glViewport(0, 0, 64, 64);
+        gl.glDisable(GL_DEPTH_TEST);
+        for (int i = 0; i < 12; ++i) {
+            gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+            gl.glClear(GL_COLOR_BUFFER_BIT);
+            gl.glUseProgram(redProg);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);   // 3D at center → T1 = red (non-clear)
+            gl.glClear(GL_DEPTH_BUFFER_BIT);        // force a separate overlay pass
+            gl.glUseProgram(blueProg);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);   // overlay clears center → T2 = blue
+            context.swapBuffers();
+        }
+        context.finish();
+        const std::string json = context.framePacingDiagnosticsJson();
+        const long missing = extractLeanLandingCounter(json, "lean3DContentMissing");
+        const long wipe = extractLeanLandingCounter(json, "contentMissingWipeConfirmed");
+        const long sky = extractLeanLandingCounter(json, "contentMissingSkyConfirmed");
+        if (missing <= 0) {
+            recordSentinelFailure(failures,
+                "§1 did not read contentMissing (overlay should clear the center)",
+                json.substr(json.find("presentLeanLanding"), 440));
+        }
+        if (wipe <= 0) {
+            recordSentinelFailure(failures,
+                "§3 did NOT confirm WIPE (T1 had 3D-at-center, T2 clear) WITH the "
+                "universal overlay present — the exact case §2 couldn't resolve",
+                json.substr(json.find("presentLeanLanding"), 440));
+        }
+        if (sky > 0) {
+            recordSentinelFailure(failures,
+                "§3 FALSE-SKY: a real center-wipe mis-classified as benign sky",
+                json.substr(json.find("presentLeanLanding"), 440));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteProgram(redProg);
+        gl.glDeleteProgram(blueProg);
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "§3 confirms REAL WIPE (3D-at-center then overlay-cleared) WITH a universal overlay present — the confound §2 couldn't survive";
+    }
+    return result;
+}
+
+// SKY: 3D (red) draws OFF-center → T1 clear (center never had 3D); the SAME
+// fullscreen overlay clears the center → T2 clear ⇒ contentMissingSkyConfirmed
+// > 0, wipeConfirmed == 0. The overlay is IDENTICAL to the WIPE control — only
+// T1 differs, and §3 must not false-positive a wipe here.
+TestResult runS25TemporalSkyControlProbe() {
+    ScopedEnvVar parallelOn("APPGL_PARALLEL_ENCODE", "1");
+    ScopedEnvVar workers("APPGL_PARALLEL_ENCODE_WORKERS", "4");
+    ScopedEnvVar contentProbe("APPGL_W2_SURVIVAL_CONTENT_PROBE", "1");
+    ScopedEnvVar gateOff("APPGL_W2_SURVIVAL_GAMEPLAY_MIN_FBO", "0");
+    auto result = runDirectSentinel("s25.temporal.sky-control", [&] {
+        ScopedSentinelContext scoped(64, 64);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        std::vector<std::string> failures;
+        const GLuint redProg = buildBenchProgram(kSurvivalVS, kSurvivalRedFS);
+        const GLuint blueProg = buildBenchProgram(kSurvivalVS, kSurvivalBlueFS);
+        // off-center 3D: a corner triangle that never covers the 8x8 center, so
+        // the center is clear at T1 (3D never drew it) — the benign-sky case.
+        const GLfloat corner[] = {
+            -1.0f, -1.0f,
+            -0.4f, -1.0f,
+            -1.0f, -0.4f,
+        };
+        GLuint redVao = 0, redVbo = 0;
+        gl.glGenVertexArrays(1, &redVao);
+        gl.glBindVertexArray(redVao);
+        gl.glGenBuffers(1, &redVbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, redVbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(corner), corner, GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE,
+                                 2 * sizeof(GLfloat), nullptr);
+        GLuint overlayVao = 0, overlayVbo = 0;
+        setupDCR3CFullscreenTriangle(gl, overlayVao, overlayVbo);  // fullscreen overlay
+        gl.glViewport(0, 0, 64, 64);
+        gl.glDisable(GL_DEPTH_TEST);
+        for (int i = 0; i < 12; ++i) {
+            gl.glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+            gl.glClear(GL_COLOR_BUFFER_BIT);
+            gl.glBindVertexArray(redVao);
+            gl.glUseProgram(redProg);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);   // 3D OFF-center → T1 = clear
+            gl.glClear(GL_DEPTH_BUFFER_BIT);        // same separate-overlay trigger
+            gl.glBindVertexArray(overlayVao);
+            gl.glUseProgram(blueProg);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);   // SAME overlay clears center → T2 = blue
+            context.swapBuffers();
+        }
+        context.finish();
+        const std::string json = context.framePacingDiagnosticsJson();
+        const long missing = extractLeanLandingCounter(json, "lean3DContentMissing");
+        const long wipe = extractLeanLandingCounter(json, "contentMissingWipeConfirmed");
+        const long sky = extractLeanLandingCounter(json, "contentMissingSkyConfirmed");
+        if (missing <= 0) {
+            recordSentinelFailure(failures,
+                "§1 did not read contentMissing (overlay should clear the center)",
+                json.substr(json.find("presentLeanLanding"), 440));
+        }
+        if (sky <= 0) {
+            recordSentinelFailure(failures,
+                "§3 did NOT confirm SKY (T1 clear: 3D off-center) WITH the same "
+                "universal overlay present",
+                json.substr(json.find("presentLeanLanding"), 440));
+        }
+        if (wipe > 0) {
+            recordSentinelFailure(failures,
+                "§3 FALSE-WIPE: benign off-center 3D mis-classified as a wipe — "
+                "the universal overlay must NOT fool §3 (the §2 failure mode)",
+                json.substr(json.find("presentLeanLanding"), 440));
+        }
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteVertexArrays(1, &redVao);
+        gl.glDeleteBuffers(1, &redVbo);
+        gl.glDeleteVertexArrays(1, &overlayVao);
+        gl.glDeleteBuffers(1, &overlayVbo);
+        gl.glDeleteProgram(redProg);
+        gl.glDeleteProgram(blueProg);
+        throwIfSentinelFailed(failures);
+    });
+    if (result.status == "passed") {
+        result.message = "§3 holds BENIGN SKY (3D off-center) WITH the identical universal overlay present — no false-wipe (the §2 failure mode closed)";
+    }
+    return result;
+}
+
 std::string buildJSON(std::string_view phase, const std::vector<TestResult>& tests) {
     const bool passed = std::all_of(tests.begin(), tests.end(), [](const TestResult& test) {
         return test.status == "passed";
@@ -20152,6 +20311,12 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
 
     if (normalizedPhase == "s25-w2-2-pass-trace-viapass-control") {
         tests.push_back(runS25PassTraceViaPassControlProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "s25-w2-3-temporal-validation") {
+        tests.push_back(runS25TemporalWipeControlProbe());
+        tests.push_back(runS25TemporalSkyControlProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

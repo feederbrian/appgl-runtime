@@ -10455,6 +10455,9 @@ struct MetalFrameGraph::Impl {
                         --traceDrawableDrawsPost3D;
                     }
                     traceSawLean3DThisFrame = true;
+                    // §3 TEMPORAL: a 3D landing in the current drawable pass —
+                    // arm a T1 snapshot for when this pass closes (next pass open).
+                    lean3DLandedSinceLastDrawablePassOpen = true;
                 }
             }
         }
@@ -15115,6 +15118,11 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             pass.colorAttachments[0].texture != drawableTex) {
             return;  // not a drawable pass (FBO/offscreen-other) — ignore
         }
+        // S25 §3 TEMPORAL: this drawable pass is opening AFTER the 3D pass closed
+        // (the previous render encoder is already ended). If a lean-3D landed in
+        // that just-closed pass, snapshot the scene-center NOW — before this pass
+        // (the overlay) can over-draw it. This is T1.
+        captureTemporalT1IfPending();
         const MTLLoadAction load = pass.colorAttachments[0].loadAction;
         const bool isClearLike =
             (load == MTLLoadActionClear || load == MTLLoadActionDontCare);
@@ -15134,6 +15142,52 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 ++traceDrawablePassLoadPost3D;
             }
         }
+    }
+
+    // S25 W2 §3 TEMPORAL: blit the scene-center 8x8 to T1 at the close of a
+    // drawable pass that contained a lean-3D landing. Called from
+    // noteDrawablePassOpenForSurvival when the NEXT drawable pass opens — the
+    // previous render encoder is already ended (the open-encoder contract), so a
+    // blit encoder is safe here. Latest-wins ⇒ T1 = the scene-center after the
+    // LAST 3D pass, captured BEFORE the overlay pass over-draws it.
+    void captureTemporalT1IfPending() {
+        if (!survivalContentProbeLatched ||
+            !lean3DLandedSinceLastDrawablePassOpen) {
+            return;
+        }
+        lean3DLandedSinceLastDrawablePassOpen = false;  // consume
+        if (currentCommandBuffer == nil || device == nil ||
+            currentRenderEncoder != nil) {
+            return;  // need a CB with no open render encoder
+        }
+        id<MTLTexture> tex = usesOffscreenTarget
+            ? offscreenColorTexture
+            : (currentDrawable != nil ? currentDrawable.texture : nil);
+        if (tex == nil || tex.width < 16 || tex.height < 16) {
+            return;
+        }
+        constexpr NSUInteger N = 8;  // same 8x8 scene-center grid as §1 (T2)
+        const NSUInteger ox = tex.width / 2 - N / 2;
+        const NSUInteger oy = tex.height / 2 - N / 2;
+        const NSUInteger bytesPerRow = N * 4;
+        id<MTLBuffer> rb = [device newBufferWithLength:bytesPerRow * N
+                                              options:MTLResourceStorageModeShared];
+        if (rb == nil) {
+            return;
+        }
+        id<MTLBlitCommandEncoder> blit = [currentCommandBuffer blitCommandEncoder];
+        [blit copyFromTexture:tex
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(ox, oy, 0)
+                   sourceSize:MTLSizeMake(N, N, 1)
+                     toBuffer:rb
+            destinationOffset:0
+       destinationBytesPerRow:bytesPerRow
+     destinationBytesPerImage:bytesPerRow * N];
+        [blit endEncoding];
+        survivalT1Buffer = rb;  // ARC retains; overwrite = latest-wins
+        survivalT1CapturedThisFrame = true;
     }
 
     // S25 W2.1 live-defect localization (obs-only). Called once per
@@ -15193,6 +15247,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                     armedTracePassLoadPost3D = traceDrawablePassLoadPost3D;
                     armedTracePassClearPost3D = traceDrawablePassClearPost3D;
                     armedTraceDrawsPost3D = traceDrawableDrawsPost3D;
+                    // §3 TEMPORAL: hand the T1 snapshot to the async handler
+                    // (the per-frame buffer resets below, before the handler runs).
+                    armedSurvivalT1Buffer = survivalT1Buffer;
+                    armedSurvivalT1Captured = survivalT1CapturedThisFrame;
                 } else {
                     ++swapPresentsContentExcludedNonGameplay;
                 }
@@ -15214,6 +15272,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         traceDrawablePassLoadPost3D = 0;
         traceDrawablePassClearPost3D = 0;
         traceDrawableDrawsPost3D = 0;
+        // §3 TEMPORAL: reset the per-frame T1 state (snapshot already armed above).
+        lean3DLandedSinceLastDrawablePassOpen = false;
+        survivalT1Buffer = nil;
+        survivalT1CapturedThisFrame = false;
     }
 
     // S25 W2.1 §1 content probe: blit an 8x8 scene-region from the presented
@@ -15277,27 +15339,42 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         const bool post3DViaPass = (armedTracePassLoadPost3D > 0);
         const bool post3DViaDraw = (armedTraceDrawsPost3D > 0);
         const bool post3DOverDraw = (post3DViaPass || post3DViaDraw);
+        // §3 TEMPORAL (CONFOUND-FREE resolver): hand T1 (the pre-overlay center
+        // snapshot) to this same handler; reset the member so next frame is fresh
+        // (the block captures the local, keeping it alive).
+        id<MTLBuffer> t1 = armedSurvivalT1Buffer;
+        const bool haveT1 = (armedSurvivalT1Captured && t1 != nil);
+        armedSurvivalT1Buffer = nil;
+        armedSurvivalT1Captured = false;
+        std::atomic<std::uint64_t>* wipeCtr = &contentMissingWipeConfirmed;
+        std::atomic<std::uint64_t>* skyCtr = &contentMissingSkyConfirmed;
+        std::atomic<std::uint64_t>* t1NaCtr = &contentMissingT1Unavailable;
         [currentCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer>) {
-            const std::uint8_t* p =
-                static_cast<const std::uint8_t*>(rb.contents);
-            int clearMatches = 0;
-            for (NSUInteger i = 0; i < N * N; ++i) {
-                const int b0 = p[i * 4 + 0];
-                const int b1 = p[i * 4 + 1];
-                const int b2 = p[i * 4 + 2];
-                const int sr = isBGRA ? b2 : b0;
-                const int sg = b1;
-                const int sb = isBGRA ? b0 : b2;
-                if (std::abs(sr - cR) <= 8 && std::abs(sg - cG) <= 8 &&
-                    std::abs(sb - cB) <= 8) {
-                    ++clearMatches;
+            auto clearFrac = [&](const std::uint8_t* p) {
+                int m = 0;
+                for (NSUInteger i = 0; i < N * N; ++i) {
+                    const int b0 = p[i * 4 + 0];
+                    const int b1 = p[i * 4 + 1];
+                    const int b2 = p[i * 4 + 2];
+                    const int sr = isBGRA ? b2 : b0;
+                    const int sg = b1;
+                    const int sb = isBGRA ? b0 : b2;
+                    if (std::abs(sr - cR) <= 8 && std::abs(sg - cG) <= 8 &&
+                        std::abs(sb - cB) <= 8) {
+                        ++m;
+                    }
                 }
-            }
-            if (clearMatches * 100 >= 75 * static_cast<int>(N * N)) {
+                return m;
+            };
+            const int clearMatches =
+                clearFrac(static_cast<const std::uint8_t*>(rb.contents));
+            const int threshold = 75 * static_cast<int>(N * N);
+            if (clearMatches * 100 >= threshold) {
                 missingCtr->fetch_add(1, std::memory_order_relaxed);
-                // RESIDUAL RESOLVER: scene-center is clear AND something touched
-                // the drawable after the last 3D (a Load pass / a default-FB
-                // draw) ⇒ DRAW-OVER WIPE; nothing after the 3D ⇒ benign sky.
+                // §2 (CONFOUNDED on real data — kept for regression/contrast):
+                // post-3D activity ⇒ drawOver; nothing after 3D ⇒ benignSky. A
+                // universal overlay makes benignSky unreachable, so this split is
+                // not authoritative — §3 below is.
                 if (post3DOverDraw) {
                     drawOverCtr->fetch_add(1, std::memory_order_relaxed);
                     if (post3DViaPass) {
@@ -15309,6 +15386,24 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 } else {
                     benignSkyCtr->fetch_add(1, std::memory_order_relaxed);
                 }
+                // §3 AUTHORITATIVE: was the scene-center already clear BEFORE the
+                // overlay (T1), or did the overlay clear it? T1 non-clear + T2
+                // clear ⇒ the center HAD 3D then lost it = REAL WIPE. T1 clear +
+                // T2 clear ⇒ the 3D never drew the center = BENIGN SKY. Immune to
+                // the universal-overlay confound — T1 is pre-overlay.
+                if (haveT1) {
+                    const int t1Clear =
+                        clearFrac(static_cast<const std::uint8_t*>(t1.contents));
+                    if (t1Clear * 100 >= threshold) {
+                        skyCtr->fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        wipeCtr->fetch_add(1, std::memory_order_relaxed);
+                    }
+                } else {
+                    // no pre-overlay snapshot this frame (no post-3D drawable
+                    // pass) — can't temporally resolve; count honestly.
+                    t1NaCtr->fetch_add(1, std::memory_order_relaxed);
+                }
             } else {
                 presentCtr->fetch_add(1, std::memory_order_relaxed);
                 if (post3DOverDraw) {
@@ -15318,6 +15413,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 }
             }
             (void)rb;  // retained by the block until the handler runs
+            (void)t1;  // retained by the block (if non-nil) until the handler runs
         }];
     }
 
@@ -15348,7 +15444,13 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             << ",\"contentMissingBenignSky\":"
             << contentMissingBenignSky.load(std::memory_order_relaxed)
             << ",\"contentPresentWithPost3DDraw\":"
-            << contentPresentWithPost3DDraw.load(std::memory_order_relaxed) << "}";
+            << contentPresentWithPost3DDraw.load(std::memory_order_relaxed)
+            << ",\"contentMissingWipeConfirmed\":"
+            << contentMissingWipeConfirmed.load(std::memory_order_relaxed)
+            << ",\"contentMissingSkyConfirmed\":"
+            << contentMissingSkyConfirmed.load(std::memory_order_relaxed)
+            << ",\"contentMissingT1Unavailable\":"
+            << contentMissingT1Unavailable.load(std::memory_order_relaxed) << "}";
         return out.str();
     }
 
@@ -19719,6 +19821,25 @@ private:
     // Post3D non-3D DRAW is a serial draw after the 3D in an existing pass.
     std::atomic<std::uint64_t> contentMissingDrawOverViaPass{0};
     std::atomic<std::uint64_t> contentMissingDrawOverViaDraw{0};
+    // S25 W2 §3 TEMPORAL resolver (CONFOUND-FREE — supersedes the §2 drawOver/
+    // benignSky split, which was confounded by the universal HUD/overlay pass:
+    // presentWithPost3DDraw≡present every frame ⇒ benignSky structurally
+    // unreachable ⇒ §2 counted activity ANYWHERE, not AT-CENTER). §3 compares the
+    // scene-center PIXEL at two times: T1 = center 8x8 at the close of the last
+    // drawable pass that contained a lean-3D landing (the moment the overlay pass
+    // opens — BEFORE it can over-draw); T2 = the §1 present blit (after the
+    // overlay). On a missing frame (T2 clear): T1 non-clear ⇒ the center HAD 3D
+    // then lost it = REAL WIPE; T1 clear ⇒ the 3D never drew the center = BENIGN
+    // SKY. Immune to the universal-overlay confound because T1 is captured before
+    // the overlay and it reads the SAME center pixel at two times.
+    bool lean3DLandedSinceLastDrawablePassOpen = false;
+    id<MTLBuffer> survivalT1Buffer = nil;        // latest center snapshot pre-overlay
+    bool survivalT1CapturedThisFrame = false;
+    id<MTLBuffer> armedSurvivalT1Buffer = nil;   // snapshot at arm (frame state resets)
+    bool armedSurvivalT1Captured = false;
+    std::atomic<std::uint64_t> contentMissingWipeConfirmed{0};
+    std::atomic<std::uint64_t> contentMissingSkyConfirmed{0};
+    std::atomic<std::uint64_t> contentMissingT1Unavailable{0};
     std::uint64_t presentCalls = 0;
     std::uint64_t presentFromFlushCalls = 0;
     std::uint64_t presentFromSwapBuffersCalls = 0;

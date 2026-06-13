@@ -197,7 +197,9 @@ def main():
                 "lean3DContentMissing", "contentExcludedNonGameplay",
                 "contentMissingDrawOver", "contentMissingDrawOverViaPass",
                 "contentMissingDrawOverViaDraw", "contentMissingBenignSky",
-                "contentPresentWithPost3DDraw")
+                "contentPresentWithPost3DDraw",
+                "contentMissingWipeConfirmed", "contentMissingSkyConfirmed",
+                "contentMissingT1Unavailable")
         d = {k: pl_l.get(k, 0) - pl_f.get(k, 0) for k in keys}
         for k in keys:
             print(f"{k}={d[k]}")
@@ -212,29 +214,49 @@ def main():
             if ct:
                 print(f"SURVIVAL §1 CONTENT: present={cp/ct*100:.2f}%  "
                       f"MISSING={cm/ct*100:.2f}%  (sampled={ct})")
-            # §2 pass-trace: split the contentMissing frames into DRAW-OVER (a
-            # real, localizable wipe) vs benign SKY (3D drew off-center).
+            # §2 pass-trace (CONFOUNDED on real data — kept for contrast only):
+            # presentWithPost3DDraw≡present ⇒ universal overlay ⇒ benignSky
+            # unreachable ⇒ drawOver≡missing. NOT authoritative; §3 is.
             do = d["contentMissingDrawOver"]; bs = d["contentMissingBenignSky"]
+            pp = d["contentPresentWithPost3DDraw"]
             if cm:
                 via_p = d["contentMissingDrawOverViaPass"]
                 via_d = d["contentMissingDrawOverViaDraw"]
-                print(f"SURVIVAL §2 RESIDUAL: of {cm} missing — DRAW-OVER={do} "
-                      f"(viaPass={via_p} separate-overlay-pass / viaDraw={via_d} "
-                      f"serial-draw)  benignSky={bs}")
-                if do > bs and do > 0:
-                    tgt = ("separate post-3D overlay PASS" if via_p >= via_d
-                           else "serial post-3D DRAW")
-                    print(f"  VERDICT: DRAW-OVER dominant ⇒ REAL WIPE the autogame "
-                          f"caught (NO operator); fix target = {tgt}.")
-                elif bs > 0 and do == 0:
-                    print("  VERDICT: benignSky only ⇒ INCONCLUSIVE — either the "
-                          "3D drew off-center (benign) OR a same-pass lean over-"
-                          "draw (the §2 blind spot). Needs the temporal snapshot "
-                          "or an operator pan-run; do NOT read as 'benign proven'.")
-            print("READ: landing matched≈withLean ⇒ 3D lands. §1 contentMissing "
-                  "⇒ scene-center reads the CLEAR color. §2 splits WHY: DRAW-OVER "
-                  "(localizable wipe) vs benign SKY. (Needs "
-                  "APPGL_W2_SURVIVAL_CONTENT_PROBE=1.)")
+                confounded = (pp == cp)  # post-3D activity on 100% of present frames
+                print(f"SURVIVAL §2 (contrast): drawOver={do} "
+                      f"(viaPass={via_p}/viaDraw={via_d}) benignSky={bs}"
+                      + ("  ⚠CONFOUNDED (presentWithPost3DDraw==present ⇒ universal "
+                         "overlay ⇒ benignSky unreachable ⇒ NOT authoritative)"
+                         if confounded else ""))
+            # §3 TEMPORAL (CONFOUND-FREE — authoritative): T1 (pre-overlay center)
+            # vs T2 (present center). wipe = center HAD 3D then lost it; sky = 3D
+            # never drew the center.
+            wipe = d["contentMissingWipeConfirmed"]
+            sky = d["contentMissingSkyConfirmed"]
+            t1na = d["contentMissingT1Unavailable"]
+            if cm:
+                print(f"SURVIVAL §3 RESIDUAL (authoritative): of {cm} missing — "
+                      f"WIPE={wipe}  SKY={sky}  T1unavailable={t1na}")
+                if wipe > sky and wipe > 0:
+                    print("  VERDICT: REAL WIPE confirmed — the scene-center had 3D "
+                          "content BEFORE the overlay (T1 non-clear) and reads clear "
+                          "at present (T2). Parallel-encode over-draw. → fix.")
+                elif sky > 0 and wipe == 0:
+                    print("  VERDICT: BENIGN SKY — the 3D never drew the center "
+                          "(T1 already clear). The autogame's center-clear is not a "
+                          "wipe → genuine reopen (operator's defect is elsewhere).")
+                elif t1na >= cm and cm > 0:
+                    print("  VERDICT: T1 UNAVAILABLE on all missing frames — no "
+                          "pre-overlay snapshot captured; cannot temporally resolve "
+                          "(investigate the T1 hook on this path).")
+            else:
+                print("  (no missing frames this run — §3 idle; the wipe is "
+                      "INTERMITTENT, re-run until lean3DContentMissing>0)")
+            print("READ: §1 contentMissing ⇒ scene-center reads CLEAR. §3 "
+                  "(authoritative) splits WHY via the center pixel at two times: "
+                  "WIPE (T1 nonclear→T2 clear) vs SKY (T1 clear→T2 clear). §2 is "
+                  "confounded by the universal overlay. (Needs "
+                  "APPGL_W2_SURVIVAL_CONTENT_PROBE=1; wipe is intermittent.)")
 
     # Parallel-encode share (arm c).
     pe_first, pe_last = first.get("parallelEncode", {}), last.get("parallelEncode", {})
