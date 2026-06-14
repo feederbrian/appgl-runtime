@@ -5043,6 +5043,9 @@ struct MetalFrameGraph::Impl {
                 compositeSkipDrawableNilThisFrame = false;
                 compositeEncodeDrawableAcqThisFrame = false;
                 compositeReachedSerialThisFrame = 0;
+                compositePrepFailSiteThisFrame = 0;
+                compositeSerialAcqFailedThisFrame = false;
+                compositeSerialAcqOkThisFrame = false;
             }
         } else {
             currentCommandBuffer = nil;
@@ -6874,8 +6877,16 @@ struct MetalFrameGraph::Impl {
                 // render target.  No drawable acquisition needed.
                 colorTexture = fboColorTex;
             } else {
+                const bool probeComposite =
+                    targetProbeLatched && isSceneCompositeDraw(info);
                 if (!acquireDrawableIfNeeded()) {  // ADV-7
+                    if (probeComposite) {
+                        compositeSerialAcqFailedThisFrame = true;  // (b) serial CAN'T acquire
+                    }
                     return false;
+                }
+                if (probeComposite) {
+                    compositeSerialAcqOkThisFrame = true;  // (b) serial DID acquire
                 }
                 colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
             }
@@ -13192,12 +13203,15 @@ struct MetalFrameGraph::Impl {
             ParallelEncodeFallbackReason fallbackReason =
                 ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
             const DrawProfileTimePoint prepareStart = drawProfileNow();
-            if (!prepareLeanDirectTranslatedDrawDescriptor(info,
-                                                           descriptor,
-                                                           fallbackReason)) {
+            LeanFillFailSite probeFailSite = LeanFillFailSite::None;
+            if (!prepareLeanDirectTranslatedDrawDescriptor(
+                    info, descriptor, fallbackReason,
+                    targetProbeLatched ? &probeFailSite : nullptr)) {
                 if (probeIsComposite) {
                     compositeSkipReasonThisFrame = 1;  // prepare-fail
                     compositeSkipDrawableNilThisFrame = (currentDrawable == nil);
+                    compositePrepFailSiteThisFrame =
+                        static_cast<std::uint8_t>(probeFailSite);
                 }
                 const ParallelEncodeBoundaryReason boundaryReason =
                     parallelEncodeBoundaryForFallback(fallbackReason);
@@ -21272,6 +21286,14 @@ private:
     bool compositeSkipDrawableNilThisFrame = false;   // drawable nil AT the skip
     bool compositeEncodeDrawableAcqThisFrame = false; // drawable acquired when ENCODED
     std::uint64_t compositeReachedSerialThisFrame = 0;
+    // S25 W2.1 DISAMBIGUATION: (a) prepare's failSite sub-reason (PSO vs drawable) +
+    // (b) the SERIAL-acquire outcome = the DECISIVE gate. serialAcqFailed on drops ⇒
+    // the FINAL drop is the drawable-nil race at serial-render (prepare-PSO-fail is
+    // an incidental upstream router) = race CONFIRMED. serialAcqOk yet still-dropped
+    // ⇒ NOT the drawable-race (PSO/plan) = re-diagnose.
+    std::uint8_t compositePrepFailSiteThisFrame = 0;   // LeanFillFailSite enum
+    bool compositeSerialAcqFailedThisFrame = false;
+    bool compositeSerialAcqOkThisFrame = false;
     // S25 W2 §8-(b) A/B FORCE-BATTERY: DIAGNOSTIC-ONLY (default-OFF, never lands).
     // When on, the lean-3D draws are FORCED per-frame round-robin into one of 3
     // arms — arm0 control, arm1 depth-compare=ALWAYS, arm2 full-color-output
@@ -21910,7 +21932,8 @@ private:
                 std::fprintf(stderr,
                     "[W2_COMPOSITE_PROBE] present=%llu issued=%llu immediate=%llu "
                     "recorded=%llu encoded=%llu DROP=%d skipReason=%u skipDrawNil=%d "
-                    "encDrawableAcq=%d reachedSerial=%llu writeDrawable=%p "
+                    "encDrawableAcq=%d reachedSerial=%llu prepFailSite=%u "
+                    "serialAcqFailed=%d serialAcqOk=%d writeDrawable=%p "
                     "presentedDrawable=%p dropFrames=%llu recordedDropFrames=%llu\n",
                     (unsigned long long)drawablePresentCalls,
                     (unsigned long long)compositeIssuedThisFrame,
@@ -21921,6 +21944,9 @@ private:
                     (int)compositeSkipDrawableNilThisFrame,
                     (int)compositeEncodeDrawableAcqThisFrame,
                     (unsigned long long)compositeReachedSerialThisFrame,
+                    (unsigned)compositePrepFailSiteThisFrame,
+                    (int)compositeSerialAcqFailedThisFrame,
+                    (int)compositeSerialAcqOkThisFrame,
                     compositeWriteDrawable,
                     (void*)(currentDrawable != nil ? currentDrawable.texture : nil),
                     (unsigned long long)compositeDropFrames,
