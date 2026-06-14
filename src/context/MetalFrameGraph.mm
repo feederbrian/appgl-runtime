@@ -4816,6 +4816,52 @@ struct MetalFrameGraph::Impl {
         return false;
     }
 
+    // S25 W2.1 COMPOSITE-PROBE: is this the fullscreen-tri SCENE COMPOSITE — a
+    // default-FB draw (writes the drawable) that SAMPLES the LARGE scene FBO
+    // (tex-53, ≈2560x1440)? Distinguishes the main composite (the one that
+    // DROPS on degraded frames) from small UI-FBO-samplers. info-based for the
+    // record/immediate sites.
+    bool isSceneCompositeDraw(const TranslatedDrawInfo& info) const {
+        if (info.fboColorTexture != nullptr || fboColorTextureSet.empty()) {
+            return false;
+        }
+        for (const auto& binding : info.fragmentTextures) {
+            if (binding.metalTexture == nullptr ||
+                fboColorTextureSet.count(binding.metalTexture) == 0) {
+                continue;
+            }
+            id<MTLTexture> t = (__bridge id<MTLTexture>)binding.metalTexture;
+            if (t != nil &&
+                static_cast<std::uint64_t>(t.width) * t.height >=
+                    2u * 1024u * 1024u) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Descriptor-based twin for the ENCODE site (lean-direct descriptors are
+    // always default-FB, so no fboColorTexture check needed).
+    bool descriptorSamplesLargeSceneFbo(
+        const LeanDirectTranslatedDrawDescriptor& descriptor) const {
+        if (fboColorTextureSet.empty()) {
+            return false;
+        }
+        for (std::size_t i = 0; i < descriptor.fragmentTextureCount; ++i) {
+            void* mt = descriptor.fragmentTextures[i].metalTexture;
+            if (mt == nullptr || fboColorTextureSet.count(mt) == 0) {
+                continue;
+            }
+            id<MTLTexture> t = (__bridge id<MTLTexture>)mt;
+            if (t != nil &&
+                static_cast<std::uint64_t>(t.width) * t.height >=
+                    2u * 1024u * 1024u) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool ensureCurrentCommandBuffer(NSString* label) {
         return ensureCurrentCommandBuffer(label, AppGLCommandReason::Legacy);
     }
@@ -4981,8 +5027,18 @@ struct MetalFrameGraph::Impl {
             // repopulates at its own FBO renders (no stale-ptr false-match, no
             // destruction hook needed). Only at frame boundaries (not pressure
             // flushes), so it persists across mid-frame commits within a frame.
-            if (!fboCarveDisabled) {
+            // (|| targetProbeLatched: the COMPOSITE-PROBE needs the set populated
+            // even with the FIX disabled, to identify scene-FBO-samplers.)
+            if (!fboCarveDisabled || targetProbeLatched) {
                 fboColorTextureSet.clear();
+            }
+            // S25 W2.1 COMPOSITE-PROBE: per-frame counters reset at the boundary.
+            if (targetProbeLatched) {
+                compositeIssuedThisFrame = 0;
+                compositeImmediateThisFrame = 0;
+                compositeRecordedThisFrame = 0;
+                compositeEncodedThisFrame.store(0, std::memory_order_relaxed);
+                compositeWriteDrawable = nullptr;
             }
         } else {
             currentCommandBuffer = nil;
@@ -5337,7 +5393,8 @@ struct MetalFrameGraph::Impl {
         // S25 W2 FIX: record this frame's FBO-color-texture targets (frame-scoped)
         // so a later composition draw sampling one routes to the immediate C49
         // path instead of deferral (the write-before-read hazard site).
-        if (!fboCarveDisabled && info.fboColorTexture != nullptr) {
+        if ((!fboCarveDisabled || targetProbeLatched) &&
+            info.fboColorTexture != nullptr) {
             fboColorTextureSet.insert(info.fboColorTexture);
             for (void* extra : info.fboAdditionalColorTextures) {
                 if (extra != nullptr) {
@@ -10046,6 +10103,14 @@ struct MetalFrameGraph::Impl {
         if (pipelineState == nil) {
             return false;
         }
+        // S25 W2.1 COMPOSITE-PROBE: this draw is about to encode. If it samples the
+        // LARGE scene FBO, it's the scene composite → count ENCODED (atomic; worker
+        // threads) + record which drawable it writes. encoded=0 on a frame = the
+        // composite is MISSING (the Inspector degraded signature).
+        if (targetProbeLatched && descriptorSamplesLargeSceneFbo(descriptor)) {
+            compositeEncodedThisFrame.fetch_add(1, std::memory_order_relaxed);
+            compositeWriteDrawable = (__bridge void*)colorTexture;
+        }
         const TranslatedDrawMSLSlots shaderSlots =
             phase2PlanMSLSlotsFromShaderSlots(descriptor.shaderSlots);
         const NSUInteger attachmentSampleCount =
@@ -13084,6 +13149,13 @@ struct MetalFrameGraph::Impl {
 
         parallelEncodeProfile.recordCandidate();
         ++leanCandidatesSincePresent;  // S25 W2.1 localization (obs-only)
+        // S25 W2.1 COMPOSITE-PROBE: track the scene composite through the lean
+        // routing to localize the MISSING drop (issued→immediate/recorded→encoded).
+        const bool probeIsComposite =
+            targetProbeLatched && isSceneCompositeDraw(info);
+        if (probeIsComposite) {
+            ++compositeIssuedThisFrame;
+        }
 
         // S25 W2 FIX: a composition draw that SAMPLES an FBO-color-texture takes
         // the IMMEDIATE C49-ordered path (serial's known-correct ordering) instead
@@ -13102,6 +13174,9 @@ struct MetalFrameGraph::Impl {
 
         if (parallelEncodeProfile.configuredWorkerCount <= 1 ||
             carveFboCompositionToImmediate) {
+            if (probeIsComposite) {
+                ++compositeImmediateThisFrame;  // composite routed IMMEDIATE
+            }
             LeanDirectTranslatedDrawDescriptor descriptor;
             ParallelEncodeFallbackReason fallbackReason =
                 ParallelEncodeFallbackReason::UnsafeResourceOrRingUpload;
@@ -13172,6 +13247,9 @@ struct MetalFrameGraph::Impl {
                 ParallelEncodeBoundaryReason::ResourceMutationOrBarrier);
         }
         pendingLeanDirectDescriptors.emplace_back();
+        if (probeIsComposite) {
+            ++compositeRecordedThisFrame;  // composite DEFERRED-recorded
+        }
         LeanDirectTranslatedDrawDescriptor& descriptor =
             pendingLeanDirectDescriptors.back();
         ParallelEncodeFallbackReason fallbackReason =
@@ -21148,6 +21226,21 @@ private:
     std::uint64_t targetProbeBoundNotDrawable = 0;
     std::uint64_t targetProbeBoundNil = 0;
     std::uint64_t targetProbeLogged = 0;
+    // S25 W2.1 COMPOSITE-PROBE (re-aim → MISSING-branch drop-detector). Per-frame:
+    // recorded = the scene composite reached the deferred record; encoded = it was
+    // actually encoded (immediate or worker-batch flush). encoded=0 on a frame ⇒
+    // the composite is MISSING (the Inspector degraded signature). recorded>0 +
+    // encoded=0 ⇒ deferred-FLUSH-DROP; recorded=0 + encoded=0 ⇒ upstream-drop.
+    // compositeWriteDrawable vs the presented drawable = the cheap wrong-drawable
+    // guard + the fix fire-check (post-fix: encoded never drops + writes presented).
+    std::uint64_t compositeIssuedThisFrame = 0;
+    std::uint64_t compositeImmediateThisFrame = 0;
+    std::uint64_t compositeRecordedThisFrame = 0;
+    // ENCODE site runs on worker threads (the batch path) → atomic.
+    std::atomic<std::uint64_t> compositeEncodedThisFrame{0};
+    void* compositeWriteDrawable = nullptr;  // benign race; read after dispatch sync
+    std::uint64_t compositeDropFrames = 0;
+    std::uint64_t compositeRecordedDropFrames = 0;
     // S25 W2 §8-(b) A/B FORCE-BATTERY: DIAGNOSTIC-ONLY (default-OFF, never lands).
     // When on, the lean-3D draws are FORCED per-frame round-robin into one of 3
     // arms — arm0 control, arm1 depth-compare=ALWAYS, arm2 full-color-output
@@ -21765,6 +21858,39 @@ private:
                 (unsigned long long)targetProbeBoundNotDrawable,
                 (unsigned long long)targetProbeBoundNil);
             std::fflush(stderr);
+        }
+        // S25 W2.1 COMPOSITE-PROBE per-frame log = the MISSING drop-detector.
+        // issued>0 + encoded=0 ⇒ the scene composite DROPPED this frame. immediate/
+        // recorded localize the drop: recorded>0+encoded=0 = deferred-FLUSH-DROP;
+        // immediate>0+encoded=0 = immediate-encode-fail; issued>0+immediate=0+
+        // recorded=0 = went serial (or eligibility race). Logs every drop + samples.
+        if (targetProbeLatched) {
+            const std::uint64_t enc =
+                compositeEncodedThisFrame.load(std::memory_order_relaxed);
+            const bool dropFrame = (compositeIssuedThisFrame > 0 && enc == 0);
+            if (dropFrame) {
+                ++compositeDropFrames;
+                if (compositeRecordedThisFrame > 0) {
+                    ++compositeRecordedDropFrames;
+                }
+            }
+            if (dropFrame || drawablePresentCalls <= 4 ||
+                drawablePresentCalls % 64 == 0) {
+                std::fprintf(stderr,
+                    "[W2_COMPOSITE_PROBE] present=%llu issued=%llu immediate=%llu "
+                    "recorded=%llu encoded=%llu DROP=%d writeDrawable=%p "
+                    "presentedDrawable=%p dropFrames=%llu recordedDropFrames=%llu\n",
+                    (unsigned long long)drawablePresentCalls,
+                    (unsigned long long)compositeIssuedThisFrame,
+                    (unsigned long long)compositeImmediateThisFrame,
+                    (unsigned long long)compositeRecordedThisFrame,
+                    (unsigned long long)enc, (int)dropFrame,
+                    compositeWriteDrawable,
+                    (void*)(currentDrawable != nil ? currentDrawable.texture : nil),
+                    (unsigned long long)compositeDropFrames,
+                    (unsigned long long)compositeRecordedDropFrames);
+                std::fflush(stderr);
+            }
         }
     }
 
