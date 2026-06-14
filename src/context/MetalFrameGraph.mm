@@ -2016,13 +2016,20 @@ struct LeanDirectTranslatedDrawDescriptor {
     // record→worker-encode window (no whack-a-mole). Called ONCE at the deferred
     // record (post-prepare); the matching release is the destructor / reset().
     void retainDeferredHandles() {
+        // S25 W2.1 LEAK-FIX (narrow-b): retain ONLY the genuinely-transient UAF
+        // object. Buffers (vertex/index/extra/UBO) are deliberately NOT retained —
+        // their lifetime is already triple-covered: GLBufferObject owns the live
+        // handle, the rename-on-write keepalive (syncMetalFromShadow @GLContext.mm
+        // DONATES the buffer's retain to deferredBatchKeepalives ASSUMING the deferred
+        // descriptor holds it UN-RETAINED), and the worker encoder retains it at bind.
+        // Retaining buffers HERE broke that Rung-1.5 un-retained invariant (descriptor-
+        // retain duplicated the keepalive's ownership + wasn't drained) → per-frame
+        // buffer accumulation on the mini-model menu = the ~160MB/s leak. The fragment
+        // SAMPLER is the one object freed-before-bind = the real UAF → KEEP it retained.
+        // PSO/DSS/textures kept too (encoder-bound + owner-held; conservative, not the
+        // leak source per the heap-diff).
         retainField(pipelineState);
         retainField(depthStencilState);
-        retainField(metalVertexBuffer);
-        for (std::size_t i = 0; i < extraVertexBufferCount; ++i) {
-            retainField(extraVertexBuffers[i].metalBuffer);
-        }
-        retainField(metalIndexBuffer);
         for (std::size_t i = 0; i < vertexTextureCount; ++i) {
             retainField(vertexTextures[i].metalTexture);
             retainField(vertexTextures[i].metalSamplerState);
@@ -2030,9 +2037,6 @@ struct LeanDirectTranslatedDrawDescriptor {
         for (std::size_t i = 0; i < fragmentTextureCount; ++i) {
             retainField(fragmentTextures[i].metalTexture);
             retainField(fragmentTextures[i].metalSamplerState);
-        }
-        for (std::size_t i = 0; i < uboBindingCount; ++i) {
-            retainField(uboBindings[i].metalBuffer);
         }
     }
 
