@@ -4891,6 +4891,9 @@ struct MetalFrameGraph::Impl {
                     ++frameCbCount;
                 }
                 cbEncoderPressure = 0;
+                frameResourcePeak = std::max<std::uint64_t>(
+                    frameResourcePeak, cbDistinctResources.size());
+                cbDistinctResources.clear();
             }
             attachErrorHandler(currentCommandBuffer, label);
             return true;
@@ -4944,6 +4947,47 @@ struct MetalFrameGraph::Impl {
                 (unsigned long long)add, kind,
                 (unsigned long long)chunk);
             std::fflush(stderr);
+        }
+    }
+
+    // RESOURCE axis: insert one MTLResource (texture/buffer) into the current-CB
+    // distinct set + FLUSHED-log each new all-time high-water (the LAST line before
+    // a SIGABRT = the resource-cap proxy). Off ⇒ no-op (matrix-safe).
+    void noteCbResource(void* resource) {
+        if (!cbPressureProbeLatched || resource == nullptr) {
+            return;
+        }
+        if (cbDistinctResources.insert(resource).second) {
+            const std::uint64_t size = cbDistinctResources.size();
+            if (size > cbResourceHighWater) {
+                cbResourceHighWater = size;
+                std::fprintf(stderr, "[W2_CB_RESOURCE] cb=%p distinct=%llu\n",
+                    (void*)currentCommandBuffer,
+                    (unsigned long long)size);
+                std::fflush(stderr);
+            }
+        }
+    }
+
+    // RESOURCE axis: account every distinct resource a lean descriptor references
+    // (textures + buffers; NOT samplers/PSO = not MTLResource) onto the current CB.
+    void noteDescriptorResources(const LeanDirectTranslatedDrawDescriptor& d) {
+        if (!cbPressureProbeLatched) {
+            return;
+        }
+        noteCbResource(d.metalVertexBuffer);
+        for (std::size_t i = 0; i < d.extraVertexBufferCount; ++i) {
+            noteCbResource(d.extraVertexBuffers[i].metalBuffer);
+        }
+        noteCbResource(d.metalIndexBuffer);
+        for (std::size_t i = 0; i < d.vertexTextureCount; ++i) {
+            noteCbResource(d.vertexTextures[i].metalTexture);
+        }
+        for (std::size_t i = 0; i < d.fragmentTextureCount; ++i) {
+            noteCbResource(d.fragmentTextures[i].metalTexture);
+        }
+        for (std::size_t i = 0; i < d.uboBindingCount; ++i) {
+            noteCbResource(d.uboBindings[i].metalBuffer);
         }
     }
 
@@ -5091,18 +5135,24 @@ struct MetalFrameGraph::Impl {
                     std::max(framePressurePeak, cbEncoderPressure);
                 const std::uint64_t cbCount =
                     frameCbCount + (cbEncoderPressure > 0 ? 1u : 0u);
+                const std::uint64_t resPeak = std::max<std::uint64_t>(
+                    frameResourcePeak, cbDistinctResources.size());
                 std::fprintf(stderr,
                     "[W2_CB_PRESSURE present] total=%llu peak=%llu cbs=%llu "
-                    "highwater=%llu\n",
+                    "highwater=%llu resPeak=%llu resHighwater=%llu\n",
                     (unsigned long long)total,
                     (unsigned long long)peak,
                     (unsigned long long)cbCount,
-                    (unsigned long long)cbEncoderPressureHighWater);
+                    (unsigned long long)cbEncoderPressureHighWater,
+                    (unsigned long long)resPeak,
+                    (unsigned long long)cbResourceHighWater);
                 std::fflush(stderr);
                 framePressureTotal = 0;
                 framePressurePeak = 0;
                 frameCbCount = 0;
                 cbEncoderPressure = 0;
+                frameResourcePeak = 0;
+                cbDistinctResources.clear();
             }
         } else {
             currentCommandBuffer = nil;
@@ -13312,6 +13362,7 @@ struct MetalFrameGraph::Impl {
             const double prepareUs =
                 drawProfileElapsedUs(prepareStart, drawProfileNow());
             parallelEncodeProfile.recordDescriptorPrepared(prepareUs);
+            noteDescriptorResources(descriptor);  // CB-PRESSURE resource axis
 
             id<MTLTexture> colorTexture = nil;
             id<MTLTexture> passDepthStencil = nil;
@@ -13394,6 +13445,7 @@ struct MetalFrameGraph::Impl {
         }
         parallelEncodeProfile.recordDescriptorPrepared(
             drawProfileElapsedUs(prepareStart, drawProfileNow()));
+        noteDescriptorResources(descriptor);  // CB-PRESSURE resource axis
         if (pendingLeanDirectDescriptors.size() >=
             parallelEncodeProfile.configuredLeanMaxBatch) {
             flushLeanDirectDescriptorBatch(
@@ -21361,6 +21413,16 @@ private:
     std::uint64_t framePressureTotal = 0;          // encoders summed over CBs/frame
     std::uint64_t framePressurePeak = 0;           // max per-CB count this frame
     std::uint64_t frameCbCount = 0;                // CBs used this frame
+    // RESOURCE axis (the DIRECT fault metric; encoder count above = secondary).
+    // The crash is IOGPU…AllocResourceAtIndex = the CB's MTLResource residency
+    // table (Metal dedupes by identity). cbDistinctResources = distinct MTLTexture/
+    // MTLBuffer referenced into the CURRENT CB (from each lean descriptor's
+    // resources at the main-thread record/immediate point), reset on fresh CB.
+    // Set-size = the metric; high-water FLUSHED [W2_CB_RESOURCE] = the resource-cap
+    // proxy (last line before the SIGABRT). Samplers/PSO excluded (not MTLResource).
+    std::unordered_set<void*> cbDistinctResources;
+    std::uint64_t cbResourceHighWater = 0;   // all-time max set-size (cap proxy)
+    std::uint64_t frameResourcePeak = 0;     // max per-CB distinct-res this frame
     // S25 W2.1 TARGET-PROBE (obs-only, default-OFF): pins Site-1 of the offscreen
     // mis-bind empirically — at each render-pass open, counts bound==drawable vs
     // bound!=drawable (the leaked main-3D target) + logs the contradiction-
