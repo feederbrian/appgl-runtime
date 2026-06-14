@@ -1965,7 +1965,66 @@ struct LeanDirectTranslatedDrawDescriptor {
     std::uint32_t recordVertexHash = 0;
     bool recordVertexHashValid = false;
 
+    // S25 W2.1 UAF-FIX: retain the descriptor's Metal handles through the deferred
+    // worker-batch flush (the record→worker-encode window). The lean descriptor was
+    // built WITHOUT this (unlike the older CapturedTranslatedDrawRecord, which DOES
+    // retain its handles) — so a handle (esp. the fragment SAMPLER) freed before the
+    // worker thread encodes it → UAF (objc_retain crash inside setFragmentSamplerState
+    // on a freed sampler). pendingLeanDirectDescriptors is a std::deque (never
+    // relocates) ⇒ this immovable RAII element needs NO move-semantics; copy is deleted
+    // to forbid a double-release. The destructor + reset()-release cover EVERY deque
+    // clear/pop/reuse/abandon path BY CONSTRUCTION (leak-proof). Deferred-path only —
+    // the immediate path is synchronous (binds before any free), so it never retains.
+    std::vector<void*> retainedObjects;
+
+    LeanDirectTranslatedDrawDescriptor() = default;
+    LeanDirectTranslatedDrawDescriptor(const LeanDirectTranslatedDrawDescriptor&) =
+        delete;
+    LeanDirectTranslatedDrawDescriptor& operator=(
+        const LeanDirectTranslatedDrawDescriptor&) = delete;
+    ~LeanDirectTranslatedDrawDescriptor() { releaseRetainedHandles(); }
+
+    void releaseRetainedHandles() {
+        for (void* object : retainedObjects) {
+            releaseRetainedObjCObject(object);
+        }
+        retainedObjects.clear();
+    }
+
+    void retainField(void*& field) {
+        void* retained = retainObjCObjectAsVoid(field);
+        field = retained;
+        if (retained != nullptr) {
+            retainedObjects.push_back(retained);
+        }
+    }
+
+    // Retain EVERY Metal handle the worker encode binds, so all survive the
+    // record→worker-encode window (no whack-a-mole). Called ONCE at the deferred
+    // record (post-prepare); the matching release is the destructor / reset().
+    void retainDeferredHandles() {
+        retainField(pipelineState);
+        retainField(depthStencilState);
+        retainField(metalVertexBuffer);
+        for (std::size_t i = 0; i < extraVertexBufferCount; ++i) {
+            retainField(extraVertexBuffers[i].metalBuffer);
+        }
+        retainField(metalIndexBuffer);
+        for (std::size_t i = 0; i < vertexTextureCount; ++i) {
+            retainField(vertexTextures[i].metalTexture);
+            retainField(vertexTextures[i].metalSamplerState);
+        }
+        for (std::size_t i = 0; i < fragmentTextureCount; ++i) {
+            retainField(fragmentTextures[i].metalTexture);
+            retainField(fragmentTextures[i].metalSamplerState);
+        }
+        for (std::size_t i = 0; i < uboBindingCount; ++i) {
+            retainField(uboBindings[i].metalBuffer);
+        }
+    }
+
     void reset() {
+        releaseRetainedHandles();  // S25 W2.1 UAF-FIX: release before reuse
         pipelineState = nullptr;
         depthStencilState = nullptr;
         shaderSlots = TranslatedDrawPlanShaderSlots{};
@@ -13445,6 +13504,8 @@ struct MetalFrameGraph::Impl {
         }
         parallelEncodeProfile.recordDescriptorPrepared(
             drawProfileElapsedUs(prepareStart, drawProfileNow()));
+        descriptor.retainDeferredHandles();  // S25 W2.1 UAF-FIX: hold handles
+                                              // alive through the worker-batch flush
         noteDescriptorResources(descriptor);  // CB-PRESSURE resource axis
         if (pendingLeanDirectDescriptors.size() >=
             parallelEncodeProfile.configuredLeanMaxBatch) {
