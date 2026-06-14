@@ -1768,6 +1768,14 @@ static void* retainObjCObjectAsVoid(void* object) {
     return (void*)CFBridgingRetain((__bridge id)object);
 }
 
+// S25 W2.1 LEAK-DIAG (obs-only, temporary): balance check for the UAF-fix retains —
+// retains must == releases per frame, the deque must drain, destructors must fire.
+// Logged at present under APPGL_W2_CB_PRESSURE_PROBE. Off ⇒ counters increment (cheap
+// atomic, behavior-neutral) but never logged = matrix-safe.
+static std::atomic<std::uint64_t> g_leanHandleRetains{0};
+static std::atomic<std::uint64_t> g_leanHandleReleases{0};
+static std::atomic<std::uint64_t> g_leanDescriptorDtors{0};
+
 struct CapturedTranslatedDrawRecord {
     TranslatedDrawInfo info;
     std::string vertexMSLStorage;
@@ -1982,11 +1990,15 @@ struct LeanDirectTranslatedDrawDescriptor {
         delete;
     LeanDirectTranslatedDrawDescriptor& operator=(
         const LeanDirectTranslatedDrawDescriptor&) = delete;
-    ~LeanDirectTranslatedDrawDescriptor() { releaseRetainedHandles(); }
+    ~LeanDirectTranslatedDrawDescriptor() {
+        g_leanDescriptorDtors.fetch_add(1, std::memory_order_relaxed);  // LEAK-DIAG
+        releaseRetainedHandles();
+    }
 
     void releaseRetainedHandles() {
         for (void* object : retainedObjects) {
             releaseRetainedObjCObject(object);
+            g_leanHandleReleases.fetch_add(1, std::memory_order_relaxed);  // LEAK-DIAG
         }
         retainedObjects.clear();
     }
@@ -1996,6 +2008,7 @@ struct LeanDirectTranslatedDrawDescriptor {
         field = retained;
         if (retained != nullptr) {
             retainedObjects.push_back(retained);
+            g_leanHandleRetains.fetch_add(1, std::memory_order_relaxed);  // LEAK-DIAG
         }
     }
 
@@ -5205,6 +5218,24 @@ struct MetalFrameGraph::Impl {
                     (unsigned long long)cbEncoderPressureHighWater,
                     (unsigned long long)resPeak,
                     (unsigned long long)cbResourceHighWater);
+                std::fflush(stderr);
+                // S25 W2.1 LEAK-DIAG: per-present retain/release balance — live
+                // (retains-releases) GROWING = leak; deque growing = not draining;
+                // dtors flat = destructors not firing.
+                std::fprintf(stderr,
+                    "[W2_LEAN_RETAIN] retains=%llu releases=%llu live=%lld "
+                    "dtors=%llu deque=%zu\n",
+                    (unsigned long long)g_leanHandleRetains.load(
+                        std::memory_order_relaxed),
+                    (unsigned long long)g_leanHandleReleases.load(
+                        std::memory_order_relaxed),
+                    (long long)((std::int64_t)g_leanHandleRetains.load(
+                                    std::memory_order_relaxed) -
+                                (std::int64_t)g_leanHandleReleases.load(
+                                    std::memory_order_relaxed)),
+                    (unsigned long long)g_leanDescriptorDtors.load(
+                        std::memory_order_relaxed),
+                    pendingLeanDirectDescriptors.size());
                 std::fflush(stderr);
                 framePressureTotal = 0;
                 framePressurePeak = 0;
