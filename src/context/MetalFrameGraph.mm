@@ -12379,45 +12379,27 @@ struct MetalFrameGraph::Impl {
             return false;
         }
 
-        id<MTLParallelRenderCommandEncoder> parallelEncoder =
-            [currentCommandBuffer parallelRenderCommandEncoderWithDescriptor:pass];
-        if (parallelEncoder == nil) {
-            fallbackReason =
-                ParallelEncodeFallbackReason::ParallelEncoderCreateFailure;
-            return false;
-        }
-
+        // S25 W2.1 CB-LEAK FIX (latent lean-path CB-retirement, pre-existing
+        // at-or-before 4ffd297, volume-uncorked by the W2 plan-prepare-at-record
+        // reroute / MIN_BATCH=1): the AGX threaded-render-pass SUB-encoders'
+        // render-contexts ([parallelEncoder renderCommandEncoder] ->
+        // subRenderCommandEncoder -> AGXRenderContext initWithCommandBuffer:,
+        // which retains the CB) are autoreleased on the MAIN thread, and this
+        // worker-batch runs in the app frame loop with NO per-frame pool drain
+        // (AppGLRuntime has none). At lean-path volume they accumulate, each
+        // pinning its command buffer -> the CB never deallocs -> its render
+        // context + ~18 pooled GPU resources leak per CB (FPInFlight /
+        // MTLResourceList / IOGPUMetalPooledResource climb 1:1; the lean CB
+        // carries +1 visible retain at commit). A PER-FLUSH @autoreleasepool
+        // around the parallel encode drains them every flush (loop-agnostic:
+        // fixes headless and the operator menu alike) while KEEPING the parallel
+        // path. Scoped to exactly the encode block -- chunkCount/chunks/wallStart
+        // /wallUs are hoisted out for the post-encode profiling, so nothing
+        // autoreleased inside the pool is read after it (no early-drain UAF).
         const std::uint64_t configuredWorkers =
             parallelEncodeProfile.configuredWorkerCount;
         const std::uint64_t chunkCount =
             std::min<std::uint64_t>(configuredWorkers, drawCount);
-        std::vector<id<MTLRenderCommandEncoder>> childEncoders;
-        childEncoders.reserve(static_cast<std::size_t>(chunkCount));
-        for (std::uint64_t chunk = 0; chunk < chunkCount; ++chunk) {
-            id<MTLRenderCommandEncoder> child =
-                [parallelEncoder renderCommandEncoder];
-            if (child == nil) {
-                for (id<MTLRenderCommandEncoder> enc : childEncoders) {
-                    [enc endEncoding];
-                }
-                [parallelEncoder endEncoding];
-                activeRenderPassFragmentShadingRate =
-                    GL_SHADING_RATE_1X1_PIXELS_EXT;
-                resetCachedEncoderState();
-                fallbackReason =
-                    ParallelEncodeFallbackReason::ChildEncoderCreateFailure;
-                return false;
-            }
-            childEncoders.push_back(child);
-            noteCbEncoderPressure(1, "lean-child", chunkCount);  // CB-PRESSURE
-        }
-
-        hasPendingClear = false;
-        readbackSourceTexture = colorTexture;
-        readbackSourceIsBGRA =
-            colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
-        activeRenderPassFragmentShadingRate = fragmentRate;
-
         struct LeanDirectChunkWork {
             std::uint64_t begin = 0;
             std::uint64_t end = 0;
@@ -12426,52 +12408,91 @@ struct MetalFrameGraph::Impl {
         };
         std::vector<LeanDirectChunkWork> chunks(
             static_cast<std::size_t>(chunkCount));
-        const std::uint64_t baseChunkSize = drawCount / chunkCount;
-        const std::uint64_t remainder = drawCount % chunkCount;
-        std::uint64_t cursor = 0;
-        for (std::uint64_t chunk = 0; chunk < chunkCount; ++chunk) {
-            const std::uint64_t count =
-                baseChunkSize + (chunk < remainder ? 1u : 0u);
-            chunks[static_cast<std::size_t>(chunk)].begin = cursor;
-            chunks[static_cast<std::size_t>(chunk)].end = cursor + count;
-            cursor += count;
-        }
-
-        const DrawProfileTimePoint wallStart = drawProfileNow();
-        LeanDirectChunkWork* chunkData = chunks.data();
-        id<MTLRenderCommandEncoder>* encoderData = childEncoders.data();
-        Impl* self = this;
-        dispatch_queue_t queue =
-            dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
-        dispatch_apply(static_cast<size_t>(chunkCount), queue, ^(size_t index) {
-            @autoreleasepool {
-                ParallelChildEncoderState childState;
-                LeanDirectChunkWork& work = chunkData[index];
-                id<MTLRenderCommandEncoder> child = encoderData[index];
-                const DrawProfileTimePoint workerStart = drawProfileNow();
-                for (std::uint64_t draw = work.begin; draw < work.end; ++draw) {
-                    const bool encoded =
-                        self->encodeLeanDirectTranslatedDrawDescriptorOnEncoder(
-                            self->pendingLeanDirectDescriptors[
-                                static_cast<std::size_t>(draw)],
-                            child,
-                            colorTexture,
-                            passDepthStencil,
-                            childState,
-                            false);
-                    if (!encoded) {
-                        ++work.failures;
-                    }
-                }
-                work.workerUs =
-                    drawProfileElapsedUs(workerStart, drawProfileNow());
-                [child endEncoding];
+        {
+            const std::uint64_t baseChunkSize = drawCount / chunkCount;
+            const std::uint64_t remainder = drawCount % chunkCount;
+            std::uint64_t cursor = 0;
+            for (std::uint64_t chunk = 0; chunk < chunkCount; ++chunk) {
+                const std::uint64_t count =
+                    baseChunkSize + (chunk < remainder ? 1u : 0u);
+                chunks[static_cast<std::size_t>(chunk)].begin = cursor;
+                chunks[static_cast<std::size_t>(chunk)].end = cursor + count;
+                cursor += count;
             }
-        });
-        [parallelEncoder endEncoding];
-        const DrawProfileTimePoint wallEnd = drawProfileNow();
-        const double wallUs =
-            drawProfileElapsedUs(wallStart, wallEnd);
+        }
+        DrawProfileTimePoint wallStart{};
+        double wallUs = 0.0;
+        @autoreleasepool {
+            id<MTLParallelRenderCommandEncoder> parallelEncoder =
+                [currentCommandBuffer
+                    parallelRenderCommandEncoderWithDescriptor:pass];
+            if (parallelEncoder == nil) {
+                fallbackReason =
+                    ParallelEncodeFallbackReason::ParallelEncoderCreateFailure;
+                return false;
+            }
+
+            std::vector<id<MTLRenderCommandEncoder>> childEncoders;
+            childEncoders.reserve(static_cast<std::size_t>(chunkCount));
+            for (std::uint64_t chunk = 0; chunk < chunkCount; ++chunk) {
+                id<MTLRenderCommandEncoder> child =
+                    [parallelEncoder renderCommandEncoder];
+                if (child == nil) {
+                    for (id<MTLRenderCommandEncoder> enc : childEncoders) {
+                        [enc endEncoding];
+                    }
+                    [parallelEncoder endEncoding];
+                    activeRenderPassFragmentShadingRate =
+                        GL_SHADING_RATE_1X1_PIXELS_EXT;
+                    resetCachedEncoderState();
+                    fallbackReason =
+                        ParallelEncodeFallbackReason::ChildEncoderCreateFailure;
+                    return false;
+                }
+                childEncoders.push_back(child);
+                noteCbEncoderPressure(1, "lean-child", chunkCount);  // CB-PRESSURE
+            }
+
+            hasPendingClear = false;
+            readbackSourceTexture = colorTexture;
+            readbackSourceIsBGRA =
+                colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
+            activeRenderPassFragmentShadingRate = fragmentRate;
+
+            wallStart = drawProfileNow();
+            LeanDirectChunkWork* chunkData = chunks.data();
+            id<MTLRenderCommandEncoder>* encoderData = childEncoders.data();
+            Impl* self = this;
+            dispatch_queue_t queue =
+                dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+            dispatch_apply(static_cast<size_t>(chunkCount), queue, ^(size_t index) {
+                @autoreleasepool {
+                    ParallelChildEncoderState childState;
+                    LeanDirectChunkWork& work = chunkData[index];
+                    id<MTLRenderCommandEncoder> child = encoderData[index];
+                    const DrawProfileTimePoint workerStart = drawProfileNow();
+                    for (std::uint64_t draw = work.begin; draw < work.end; ++draw) {
+                        const bool encoded =
+                            self->encodeLeanDirectTranslatedDrawDescriptorOnEncoder(
+                                self->pendingLeanDirectDescriptors[
+                                    static_cast<std::size_t>(draw)],
+                                child,
+                                colorTexture,
+                                passDepthStencil,
+                                childState,
+                                false);
+                        if (!encoded) {
+                            ++work.failures;
+                        }
+                    }
+                    work.workerUs =
+                        drawProfileElapsedUs(workerStart, drawProfileNow());
+                    [child endEncoding];
+                }
+            });
+            [parallelEncoder endEncoding];
+            wallUs = drawProfileElapsedUs(wallStart, drawProfileNow());
+        }
         currentRenderEncoder = nil;
         activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
         resetCachedEncoderState();
