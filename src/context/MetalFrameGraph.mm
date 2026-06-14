@@ -4842,6 +4842,7 @@ struct MetalFrameGraph::Impl {
 
     bool openCurrentRenderEncoder(MTLRenderPassDescriptor* pass) {
         noteDrawablePassOpenForSurvival(pass);  // S25 W2.1 survival (obs-only)
+        probeTargetBindAtPassOpen(pass);  // S25 W2.1 TARGET-PROBE (obs-only)
         currentRenderEncoder =
             createRetainedRenderCommandEncoder(currentCommandBuffer, pass);
         if (currentRenderEncoder != nil) {
@@ -4864,6 +4865,54 @@ struct MetalFrameGraph::Impl {
         releaseOwnedObjCObject(currentRenderEncoder);
         currentRenderEncoder = nil;
         fboPassActive = false;  // C49: every encoder close ends the pass
+    }
+
+    // S25 W2.1 TARGET-PROBE (obs-only, env APPGL_W2_TARGET_PROBE default-OFF):
+    // resolves the SOURCE-says-drawable vs GROUND-TRUTH-says-tex-53 contradiction
+    // (the main-3D pass renders to an offscreen app-FBO instead of the drawable).
+    // At EVERY render-pass open, logs the ACTUAL bound color target vs
+    // currentDrawable.texture + the acquire-state. The bound==currentDrawable
+    // .texture flag disambiguates: match=1 ⇒ CASE A (currentDrawable.texture IS
+    // the app texture — currentDrawable mis-set); match=0 ⇒ CASE B (a NON-live /
+    // prepared-descriptor bind ≠ the live drawable). size/format identify the
+    // leaked tex-53 (RGBA8 2560x1440) vs the drawable (BGRA8 1024x576) vs FBO
+    // targets. Subject-asserted in extraction by the leaked target's profile
+    // (NOT the UI pass, which logs match=1 to the drawable). Throttled to 64.
+    void probeTargetBindAtPassOpen(MTLRenderPassDescriptor* pass) {
+        if (!targetProbeLatched || pass == nil) {
+            return;
+        }
+        id<MTLTexture> bound = pass.colorAttachments[0].texture;
+        id<MTLTexture> drawableTex =
+            (currentDrawable != nil) ? currentDrawable.texture : nil;
+        ++targetProbePassOpens;
+        if (bound == nil) {
+            ++targetProbeBoundNil;
+            return;
+        }
+        if (bound == drawableTex) {
+            ++targetProbeBoundIsDrawable;
+            return;
+        }
+        // bound != the live drawable: candidate LEAK (or a legitimate FBO pass).
+        ++targetProbeBoundNotDrawable;
+        if (targetProbeLogged < 64) {
+            ++targetProbeLogged;
+            std::fprintf(stderr,
+                "[W2_TARGET_PROBE] bound=%p %lux%lu fmt=%lu | "
+                "currentDrawable=%p tex=%p %lux%lu fmt=%lu | match=%d "
+                "drawableAcquired=%d\n",
+                (void*)bound,
+                (unsigned long)bound.width, (unsigned long)bound.height,
+                (unsigned long)bound.pixelFormat,
+                (void*)currentDrawable, (void*)drawableTex,
+                (unsigned long)(drawableTex != nil ? drawableTex.width : 0),
+                (unsigned long)(drawableTex != nil ? drawableTex.height : 0),
+                (unsigned long)(drawableTex != nil ? drawableTex.pixelFormat : 0),
+                (int)(bound == drawableTex),
+                (int)(currentDrawable != nil));
+            std::fflush(stderr);
+        }
     }
 
     void endCurrentRenderPassOnly() {
@@ -21086,6 +21135,19 @@ private:
     const bool fboCarveDisabled =
         appglEnvEnabledDefaultOff("APPGL_W2_FBO_CARVE_OFF");
     std::unordered_set<void*> fboColorTextureSet;
+    // S25 W2.1 TARGET-PROBE (obs-only, default-OFF): pins Site-1 of the offscreen
+    // mis-bind empirically — at each render-pass open, counts bound==drawable vs
+    // bound!=drawable (the leaked main-3D target) + logs the contradiction-
+    // resolving detail (the actual bound color target vs currentDrawable.texture
+    // → CASE A currentDrawable-mis-set vs CASE B prepared/non-live bind). Off ⇒
+    // probeTargetBindAtPassOpen is a no-op = matrix-safe.
+    const bool targetProbeLatched =
+        appglEnvEnabledDefaultOff("APPGL_W2_TARGET_PROBE");
+    std::uint64_t targetProbePassOpens = 0;
+    std::uint64_t targetProbeBoundIsDrawable = 0;
+    std::uint64_t targetProbeBoundNotDrawable = 0;
+    std::uint64_t targetProbeBoundNil = 0;
+    std::uint64_t targetProbeLogged = 0;
     // S25 W2 §8-(b) A/B FORCE-BATTERY: DIAGNOSTIC-ONLY (default-OFF, never lands).
     // When on, the lean-3D draws are FORCED per-frame round-robin into one of 3
     // arms — arm0 control, arm1 depth-compare=ALWAYS, arm2 full-color-output
@@ -21688,6 +21750,22 @@ private:
         currentDrawablePresented = true;
         ++drawablePresentCalls;
         observeDrawableTexture(currentDrawable.texture);
+        // S25 W2.1 TARGET-PROBE summary (obs-only): periodic counter dump so a
+        // 0-leaked-binds run is distinguishable from an unarmed one (the
+        // subject-presence check). boundNotDrawable>0 with a tex-53-profile
+        // target = the mis-bind reproduces in this run.
+        if (targetProbeLatched &&
+            (drawablePresentCalls <= 4 || drawablePresentCalls % 64 == 0)) {
+            std::fprintf(stderr,
+                "[W2_TARGET_PROBE summary] present=%llu passOpens=%llu "
+                "boundDrawable=%llu boundNotDrawable=%llu boundNil=%llu\n",
+                (unsigned long long)drawablePresentCalls,
+                (unsigned long long)targetProbePassOpens,
+                (unsigned long long)targetProbeBoundIsDrawable,
+                (unsigned long long)targetProbeBoundNotDrawable,
+                (unsigned long long)targetProbeBoundNil);
+            std::fflush(stderr);
+        }
     }
 
     void clearCurrentDrawable() {
