@@ -5039,6 +5039,10 @@ struct MetalFrameGraph::Impl {
                 compositeRecordedThisFrame = 0;
                 compositeEncodedThisFrame.store(0, std::memory_order_relaxed);
                 compositeWriteDrawable = nullptr;
+                compositeSkipReasonThisFrame = 0;
+                compositeSkipDrawableNilThisFrame = false;
+                compositeEncodeDrawableAcqThisFrame = false;
+                compositeReachedSerialThisFrame = 0;
             }
         } else {
             currentCommandBuffer = nil;
@@ -5310,6 +5314,12 @@ struct MetalFrameGraph::Impl {
     bool encodeTranslatedDrawSerial(TranslatedDrawInfo& info) {
         FG_TRACE(@"encodeTranslatedDraw: enter  mode=0x%X verts=%d instances=%d encoder=%p cmdBuf=%p",
                  info.mode, info.vertexCount, info.instanceCount, currentRenderEncoder, currentCommandBuffer);
+        // S25 W2.1 ENCODE-SKIP: did the scene composite fall through to serial?
+        // (dropped-vs-serial — if it reaches here AND the screen still freezes,
+        // serial doesn't recover it = genuinely dropped, corroborating the Inspector.)
+        if (targetProbeLatched && isSceneCompositeDraw(info)) {
+            ++compositeReachedSerialThisFrame;
+        }
         if (device == nil || commandQueue == nil) {
             return false;
         }
@@ -10110,6 +10120,7 @@ struct MetalFrameGraph::Impl {
         if (targetProbeLatched && descriptorSamplesLargeSceneFbo(descriptor)) {
             compositeEncodedThisFrame.fetch_add(1, std::memory_order_relaxed);
             compositeWriteDrawable = (__bridge void*)colorTexture;
+            compositeEncodeDrawableAcqThisFrame = (currentDrawable != nil);
         }
         const TranslatedDrawMSLSlots shaderSlots =
             phase2PlanMSLSlotsFromShaderSlots(descriptor.shaderSlots);
@@ -13184,6 +13195,10 @@ struct MetalFrameGraph::Impl {
             if (!prepareLeanDirectTranslatedDrawDescriptor(info,
                                                            descriptor,
                                                            fallbackReason)) {
+                if (probeIsComposite) {
+                    compositeSkipReasonThisFrame = 1;  // prepare-fail
+                    compositeSkipDrawableNilThisFrame = (currentDrawable == nil);
+                }
                 const ParallelEncodeBoundaryReason boundaryReason =
                     parallelEncodeBoundaryForFallback(fallbackReason);
                 flushParallelTranslatedDrawBatch(boundaryReason);
@@ -13202,6 +13217,10 @@ struct MetalFrameGraph::Impl {
             if (!ensureLeanDirectDefaultRenderPass(descriptor.fragmentShadingRate,
                                                    colorTexture,
                                                    passDepthStencil)) {
+                if (probeIsComposite) {
+                    compositeSkipReasonThisFrame = 2;  // ensure/pass-build-fail
+                    compositeSkipDrawableNilThisFrame = (currentDrawable == nil);
+                }
                 fallbackReason =
                     ParallelEncodeFallbackReason::ParallelEncoderCreateFailure;
                 const ParallelEncodeBoundaryReason boundaryReason =
@@ -13218,6 +13237,10 @@ struct MetalFrameGraph::Impl {
             if (!encodeLeanDirectTranslatedDrawDescriptor(descriptor,
                                                          colorTexture,
                                                          passDepthStencil)) {
+                if (probeIsComposite) {
+                    compositeSkipReasonThisFrame = 3;  // encode-fail
+                    compositeSkipDrawableNilThisFrame = (currentDrawable == nil);
+                }
                 fallbackReason = ParallelEncodeFallbackReason::EncodeFailure;
                 const ParallelEncodeBoundaryReason boundaryReason =
                     parallelEncodeBoundaryForFallback(fallbackReason);
@@ -21241,6 +21264,14 @@ private:
     void* compositeWriteDrawable = nullptr;  // benign race; read after dispatch sync
     std::uint64_t compositeDropFrames = 0;
     std::uint64_t compositeRecordedDropFrames = 0;
+    // S25 W2.1 ENCODE-SKIP refinement: WHERE/WHY the composite lean-encode fails +
+    // the drawable-acquire-state on BOTH drop AND healthy frames (the delta =
+    // healthy-acquired vs drop-not-acquired CONFIRMS the acquire-vs-encode race) +
+    // dropped-vs-serial (reached-serial: did the skip fall back to serial-encode).
+    std::uint32_t compositeSkipReasonThisFrame = 0;   // 1=prepare 2=ensure 3=encode
+    bool compositeSkipDrawableNilThisFrame = false;   // drawable nil AT the skip
+    bool compositeEncodeDrawableAcqThisFrame = false; // drawable acquired when ENCODED
+    std::uint64_t compositeReachedSerialThisFrame = 0;
     // S25 W2 §8-(b) A/B FORCE-BATTERY: DIAGNOSTIC-ONLY (default-OFF, never lands).
     // When on, the lean-3D draws are FORCED per-frame round-robin into one of 3
     // arms — arm0 control, arm1 depth-compare=ALWAYS, arm2 full-color-output
@@ -21878,13 +21909,18 @@ private:
                 drawablePresentCalls % 64 == 0) {
                 std::fprintf(stderr,
                     "[W2_COMPOSITE_PROBE] present=%llu issued=%llu immediate=%llu "
-                    "recorded=%llu encoded=%llu DROP=%d writeDrawable=%p "
+                    "recorded=%llu encoded=%llu DROP=%d skipReason=%u skipDrawNil=%d "
+                    "encDrawableAcq=%d reachedSerial=%llu writeDrawable=%p "
                     "presentedDrawable=%p dropFrames=%llu recordedDropFrames=%llu\n",
                     (unsigned long long)drawablePresentCalls,
                     (unsigned long long)compositeIssuedThisFrame,
                     (unsigned long long)compositeImmediateThisFrame,
                     (unsigned long long)compositeRecordedThisFrame,
                     (unsigned long long)enc, (int)dropFrame,
+                    (unsigned)compositeSkipReasonThisFrame,
+                    (int)compositeSkipDrawableNilThisFrame,
+                    (int)compositeEncodeDrawableAcqThisFrame,
+                    (unsigned long long)compositeReachedSerialThisFrame,
                     compositeWriteDrawable,
                     (void*)(currentDrawable != nil ? currentDrawable.texture : nil),
                     (unsigned long long)compositeDropFrames,
