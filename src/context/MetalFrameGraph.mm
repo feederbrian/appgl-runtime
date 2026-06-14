@@ -4880,6 +4880,18 @@ struct MetalFrameGraph::Impl {
         currentCommandBuffer = currentCommandBufferLease.get();
         if (currentCommandBuffer != nil) {
             ++cbEpoch;  // §11: monotonic CB epoch (FBO-render vs composition-read order)
+            // S25 W2.1 CB-PRESSURE PROBE: a fresh CB — fold the just-finished CB
+            // (a mid-frame rotation) into the per-frame rollup, then zero the
+            // running counter. (High-water is per-run, never reset.)
+            if (cbPressureProbeLatched) {
+                if (cbEncoderPressure > 0) {
+                    framePressureTotal += cbEncoderPressure;
+                    framePressurePeak =
+                        std::max(framePressurePeak, cbEncoderPressure);
+                    ++frameCbCount;
+                }
+                cbEncoderPressure = 0;
+            }
             attachErrorHandler(currentCommandBuffer, label);
             return true;
         }
@@ -4893,6 +4905,7 @@ struct MetalFrameGraph::Impl {
             createRetainedRenderCommandEncoder(currentCommandBuffer, pass);
         if (currentRenderEncoder != nil) {
             ++renderEncoderOpenCalls;
+            noteCbEncoderPressure(1, "serial", 0);  // S25 W2.1 CB-PRESSURE PROBE
             ++renderEncoderLiveRetains;
             renderEncoderPeakLiveRetains =
                 std::max(renderEncoderPeakLiveRetains,
@@ -4911,6 +4924,27 @@ struct MetalFrameGraph::Impl {
         releaseOwnedObjCObject(currentRenderEncoder);
         currentRenderEncoder = nil;
         fboPassActive = false;  // C49: every encoder close ends the pass
+    }
+
+    // S25 W2.1 CB-PRESSURE PROBE (obs-only): count a render encoder onto the
+    // current CB + FLUSHED-log each new all-time high-water (the LAST line before
+    // a SIGABRT = the IOGPU per-CB cap proxy). Off ⇒ no-op (matrix-safe).
+    void noteCbEncoderPressure(std::uint64_t add, const char* kind,
+                               std::uint64_t chunk) {
+        if (!cbPressureProbeLatched) {
+            return;
+        }
+        cbEncoderPressure += add;
+        if (cbEncoderPressure > cbEncoderPressureHighWater) {
+            cbEncoderPressureHighWater = cbEncoderPressure;
+            std::fprintf(stderr,
+                "[W2_CB_PRESSURE] cb=%p enc=%llu add=%llu kind=%s chunk=%llu\n",
+                (void*)currentCommandBuffer,
+                (unsigned long long)cbEncoderPressure,
+                (unsigned long long)add, kind,
+                (unsigned long long)chunk);
+            std::fflush(stderr);
+        }
     }
 
     // S25 W2.1 TARGET-PROBE (obs-only, env APPGL_W2_TARGET_PROBE default-OFF):
@@ -5046,6 +5080,29 @@ struct MetalFrameGraph::Impl {
                 compositePrepFailSiteThisFrame = 0;
                 compositeSerialAcqFailedThisFrame = false;
                 compositeSerialAcqOkThisFrame = false;
+            }
+            // S25 W2.1 CB-PRESSURE PROBE: log the per-frame rollup (folding the
+            // final CB) then reset for the next frame. FLUSHED so a crash early in
+            // the next frame still leaves this frame's numbers in the log.
+            if (cbPressureProbeLatched) {
+                const std::uint64_t total =
+                    framePressureTotal + cbEncoderPressure;
+                const std::uint64_t peak =
+                    std::max(framePressurePeak, cbEncoderPressure);
+                const std::uint64_t cbCount =
+                    frameCbCount + (cbEncoderPressure > 0 ? 1u : 0u);
+                std::fprintf(stderr,
+                    "[W2_CB_PRESSURE present] total=%llu peak=%llu cbs=%llu "
+                    "highwater=%llu\n",
+                    (unsigned long long)total,
+                    (unsigned long long)peak,
+                    (unsigned long long)cbCount,
+                    (unsigned long long)cbEncoderPressureHighWater);
+                std::fflush(stderr);
+                framePressureTotal = 0;
+                framePressurePeak = 0;
+                frameCbCount = 0;
+                cbEncoderPressure = 0;
             }
         } else {
             currentCommandBuffer = nil;
@@ -12208,6 +12265,7 @@ struct MetalFrameGraph::Impl {
                 return false;
             }
             childEncoders.push_back(child);
+            noteCbEncoderPressure(1, "lean-child", chunkCount);  // CB-PRESSURE
         }
 
         hasPendingClear = false;
@@ -12430,6 +12488,7 @@ struct MetalFrameGraph::Impl {
                 return false;
             }
             childEncoders.push_back(child);
+            noteCbEncoderPressure(1, "par-child", chunkCount);  // CB-PRESSURE
         }
 
         struct ParallelChunkWork {
@@ -21285,6 +21344,23 @@ private:
     const bool leanC49FixDisabled =
         appglEnvEnabledDefaultOff("APPGL_W2_LEAN_C49_FIX_OFF");
     std::uint64_t leanC49TransitionFired = 0;
+    // S25 W2.1 CB-PRESSURE PROBE (obs-only, env APPGL_W2_CB_PRESSURE_PROBE
+    // default-OFF): calibrates the IOGPU per-COMMAND-BUFFER storage cap for the
+    // mid-frame CB-rotation crash fix. cbEncoderPressure = render encoders on the
+    // CURRENT CB (parallel +1/child, serial/FBO/immediate +1 via openCurrentRender
+    // Encoder), reset on a fresh CB. Each new all-time high-water is FLUSHED-logged
+    // → the LAST line before the IOGPUMetalCommandBufferStorageAllocResourceAtIndex
+    // SIGABRT = the abort-count (the cap proxy). Per-frame total/peak/cbCount @
+    // frame boundary = the induced-rotation baseline (rotations at threshold T =
+    // total/T → confirms T won't churn CBs). Off ⇒ noteCbEncoderPressure no-op =
+    // matrix-safe.
+    const bool cbPressureProbeLatched =
+        appglEnvEnabledDefaultOff("APPGL_W2_CB_PRESSURE_PROBE");
+    std::uint64_t cbEncoderPressure = 0;           // current-CB running encoders
+    std::uint64_t cbEncoderPressureHighWater = 0;  // all-time max (abort proxy)
+    std::uint64_t framePressureTotal = 0;          // encoders summed over CBs/frame
+    std::uint64_t framePressurePeak = 0;           // max per-CB count this frame
+    std::uint64_t frameCbCount = 0;                // CBs used this frame
     // S25 W2.1 TARGET-PROBE (obs-only, default-OFF): pins Site-1 of the offscreen
     // mis-bind empirically — at each render-pass open, counts bound==drawable vs
     // bound!=drawable (the leaked main-3D target) + logs the contradiction-
