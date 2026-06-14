@@ -13179,6 +13179,35 @@ struct MetalFrameGraph::Impl {
             ++compositeIssuedThisFrame;
         }
 
+        // S25 W2.1 FIX (THE composite-drop fix): C49 ACQUIRE-ON-TRANSITION for the
+        // LEAN path. A default-FB lean draw (writes the drawable) arriving with NO
+        // drawable acquired is the FBO→default-FB transition — but the lean path
+        // BYPASSES serial's C49 (@6625 close / @6761 acquire) because it defers /
+        // worker-batches (skipping encodeTranslatedDrawSerial). Result: the scene
+        // composite encodes (immediate OR deferred-flush) before the drawable is
+        // acquired → no target → DROP (the acquire-vs-encode race, 4.7%/31.9%;
+        // Foreman: skipDrawNil=1, encDrawableAcq healthy=1, reachedSerial-still-
+        // dropped). FIX: fire the SAME C49 transition HERE — MAIN thread, at the
+        // FBO→composite boundary: close the open FBO encoder (mirrors @6625-6630;
+        // commits its already-encoded FBO draws), then acquire the drawable — so it
+        // is live for WHICHEVER encode path follows (UPSTREAM of immediate + deferred
+        // + serial-fallback). Do NOT flush the deferred lean batch (those are default-
+        // FB composites that NEED the drawable we're acquiring). acquireDrawableIf
+        // Needed retains currentDrawable through this frame's deferred flush. Default-
+        // ON; APPGL_W2_LEAN_C49_FIX_OFF=1 = the A/B baseline (pre-fix race).
+        if (!leanC49FixDisabled && info.fboColorTexture == nullptr &&
+            currentDrawable == nil) {
+            if (currentRenderEncoder != nil && fboPassActive) {
+                [currentRenderEncoder endEncoding];
+                releaseCurrentRenderEncoder();
+                activeRenderPassFragmentShadingRate =
+                    GL_SHADING_RATE_1X1_PIXELS_EXT;
+                resetCachedEncoderState();
+            }
+            acquireDrawableIfNeeded();
+            ++leanC49TransitionFired;  // fire-check (post-fix: >0 on degraded)
+        }
+
         // S25 W2 FIX: a composition draw that SAMPLES an FBO-color-texture takes
         // the IMMEDIATE C49-ordered path (serial's known-correct ordering) instead
         // of deferring — the deferred path encodes the read before the FBO-render's
@@ -21250,6 +21279,12 @@ private:
     const bool fboCarveDisabled =
         appglEnvEnabledDefaultOff("APPGL_W2_FBO_CARVE_OFF");
     std::unordered_set<void*> fboColorTextureSet;
+    // S25 W2.1 FIX: C49 acquire-on-transition at the lean-fork (the composite-drop
+    // fix). Default-ON; APPGL_W2_LEAN_C49_FIX_OFF=1 = the pre-fix A/B baseline.
+    // leanC49TransitionFired = the fix-fired count (the §4 fire-check).
+    const bool leanC49FixDisabled =
+        appglEnvEnabledDefaultOff("APPGL_W2_LEAN_C49_FIX_OFF");
+    std::uint64_t leanC49TransitionFired = 0;
     // S25 W2.1 TARGET-PROBE (obs-only, default-OFF): pins Site-1 of the offscreen
     // mis-bind empirically — at each render-pass open, counts bound==drawable vs
     // bound!=drawable (the leaked main-3D target) + logs the contradiction-
@@ -21933,7 +21968,8 @@ private:
                     "[W2_COMPOSITE_PROBE] present=%llu issued=%llu immediate=%llu "
                     "recorded=%llu encoded=%llu DROP=%d skipReason=%u skipDrawNil=%d "
                     "encDrawableAcq=%d reachedSerial=%llu prepFailSite=%u "
-                    "serialAcqFailed=%d serialAcqOk=%d writeDrawable=%p "
+                    "serialAcqFailed=%d serialAcqOk=%d leanC49Fired=%llu "
+                    "writeDrawable=%p "
                     "presentedDrawable=%p dropFrames=%llu recordedDropFrames=%llu\n",
                     (unsigned long long)drawablePresentCalls,
                     (unsigned long long)compositeIssuedThisFrame,
@@ -21947,6 +21983,7 @@ private:
                     (unsigned)compositePrepFailSiteThisFrame,
                     (int)compositeSerialAcqFailedThisFrame,
                     (int)compositeSerialAcqOkThisFrame,
+                    (unsigned long long)leanC49TransitionFired,
                     compositeWriteDrawable,
                     (void*)(currentDrawable != nil ? currentDrawable.texture : nil),
                     (unsigned long long)compositeDropFrames,
