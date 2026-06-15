@@ -4223,6 +4223,45 @@ static std::uint64_t finalizePipelineCacheKeyFromMslFnv(std::uint64_t mslFnv,
     return fnv;
 }
 
+// S25 state_resolve lever (use-after-free guard): a cheap content SIGNATURE of
+// an MSL — FNV over (size, first-64B, last-64B). Folded into the memo identity
+// so a freed MSL's {addr,size,data} reused with DIFFERENT content yields a
+// DIFFERENT identity → no stale hit, regardless of which program freed it / how
+// many free sites exist. O(<=128B)/string, not O(KB). Near-bulletproof: the
+// residual (same size + same first/last 64B, different middle) is astronomically
+// unlikely for real shaders AND the gate-only full-content VERIFY still catches
+// it. The {ptr,size,data} components stay (discriminator); the sig is the guard.
+static std::uint64_t mslContentSignature(const std::string* source) {
+    std::uint64_t fnv = 1469598103934665603ULL;
+    auto mixByte = [&fnv](std::uint8_t byte) {
+        fnv ^= static_cast<std::uint64_t>(byte);
+        fnv *= 1099511628211ULL;
+    };
+    auto mixWord = [&](std::uint64_t word) {
+        for (unsigned i = 0; i < 8; ++i) {
+            mixByte(static_cast<std::uint8_t>((word >> (i * 8)) & 0xFFu));
+        }
+    };
+    if (source == nullptr) {
+        mixWord(0);
+        return fnv;
+    }
+    const std::size_t n = source->size();
+    mixWord(static_cast<std::uint64_t>(n));
+    constexpr std::size_t kProbe = 64;
+    const std::size_t head = std::min(n, kProbe);
+    for (std::size_t i = 0; i < head; ++i) {
+        mixByte(static_cast<std::uint8_t>((*source)[i]));
+    }
+    if (n > kProbe) {
+        const std::size_t tailStart = (n > 2 * kProbe) ? (n - kProbe) : kProbe;
+        for (std::size_t i = tailStart; i < n; ++i) {
+            mixByte(static_cast<std::uint8_t>((*source)[i]));
+        }
+    }
+    return fnv;
+}
+
 // Phase 6-1e / 6-2: transform a SPIRV-Cross fragment MSL source so
 // Metal honours GL 4.6 §14.6 / ARB_sample_shading.
 //
@@ -12969,6 +13008,10 @@ struct MetalFrameGraph::Impl {
             << ",\"bytesHashed\":" << mslHashMemoBytesHashed
             << ",\"verifyChecks\":" << mslHashMemoVerifyChecks
             << ",\"verifyMismatches\":" << mslHashMemoVerifyMismatches
+            << ",\"verifyMismatchAba\":" << mslHashMemoVerifyMismatchAba
+            << ",\"verifyMismatchCollision\":"
+            << mslHashMemoVerifyMismatchCollision
+            << ",\"ptrKeyOnly\":" << (mslHashMemoPtrKeyOnly ? 1 : 0)
             << ",\"slotCacheHits\":" << translatedDrawMSLSlotCacheHits
             << ",\"slotCacheMisses\":" << translatedDrawMSLSlotCacheMisses
             << ",\"gsReplayPathFired\":" << gsReplayPathFired
@@ -22783,6 +22826,14 @@ private:
         std::uint64_t mslFnv = 0;
         const void* vObj = nullptr;   // &vertexMSL string object (invalidation)
         const void* fObj = nullptr;   // &fragmentMSL string object
+        // Byte-tell (gate-only): the original identity components, so a verify
+        // mismatch can be CLASSIFIED — current==stored ⇒ free-reuse ABA (same
+        // {addr,size,data}, content changed = a freed/reused MSL); current!=
+        // stored ⇒ identity-hash collision.
+        std::size_t vSize = 0;
+        const void* vData = nullptr;
+        std::size_t fSize = 0;
+        const void* fData = nullptr;
     };
     std::unordered_map<std::uint64_t, MslHashMemoEntry> mslHashMemo;
     std::unordered_map<std::uint64_t, std::uint64_t> mslHashMemoLastUse;
@@ -22798,6 +22849,19 @@ private:
                                                // quantitative magnitude-sanity
     std::uint64_t mslHashMemoVerifyChecks = 0;
     std::uint64_t mslHashMemoVerifyMismatches = 0;
+    // Byte-tell classification of each verify mismatch (Clerk's rigor: prove
+    // free-reuse ABA vs hash-collision, don't assert).
+    std::uint64_t mslHashMemoVerifyMismatchAba = 0;
+    std::uint64_t mslHashMemoVerifyMismatchCollision = 0;
+    bool mslHashMemoVerifyDumped = false;
+    // Robustness fix (default-ON): fold a cheap CONTENT-SIGNATURE into the memo
+    // identity so a freed MSL's {addr,size,data} reused with DIFFERENT content
+    // yields a DIFFERENT identity → no stale (use-after-free) hit, regardless of
+    // which program freed it / how many free sites. APPGL_MSL_HASH_MEMO_PTRKEY=1
+    // reverts to the bare {ptr,size,data} key (the buggy control, to reproduce
+    // + byte-tell-classify the ABA).
+    const bool mslHashMemoPtrKeyOnly =
+        appglEnvEnabledDefaultOff("APPGL_MSL_HASH_MEMO_PTRKEY");
     // Axis-B non-vacuity guard for the GS-replay correctness control: counts
     // how many times the GS-emulation replay re-points tdi.*MSL to the
     // gsPassThrough variant (GLContext encodeEmulatedGsDraw). N>0 proves the
@@ -22835,8 +22899,17 @@ private:
     std::uint64_t mslOnlyFnvMemoized(const std::string* vertexMSL,
                                      const std::string* fragmentMSL) {
         ++mslHashMemoLookups;
-        const std::uint64_t identity =
-            recordPlanIdentityKey(0, vertexMSL, fragmentMSL);
+        // Robust identity = {ptr,size,data} pair (discriminator) + content
+        // signature (use-after-free guard). APPGL_MSL_HASH_MEMO_PTRKEY=1 reverts
+        // to the bare pair key — the buggy control for reproducing + byte-tell-
+        // classifying the free-reuse ABA.
+        std::uint64_t identity = recordPlanIdentityKey(0, vertexMSL, fragmentMSL);
+        if (!mslHashMemoPtrKeyOnly) {
+            identity ^= mslContentSignature(vertexMSL);
+            identity *= 1099511628211ULL;
+            identity ^= mslContentSignature(fragmentMSL);
+            identity *= 1099511628211ULL;
+        }
         auto it = mslHashMemo.find(identity);
         if (it != mslHashMemo.end()) {
             mslHashMemoLastUse[identity] = ++mslHashMemoClock;
@@ -22844,11 +22917,58 @@ private:
             if (mslHashMemoVerify) {
                 ++mslHashMemoVerifyChecks;
                 // P1 content-equality: recompute fresh + compare. A mismatch =
-                // the identity key served a stale/aliased mslFnv (ABA or an
-                // identity-hash collision) — must be 0.
-                if (computeMslOnlyFnv(vertexMSL, fragmentMSL) !=
-                    it->second.mslFnv) {
+                // the identity served a stale/aliased mslFnv. CLASSIFY it
+                // (Clerk's byte-tell rigor): current identity-components ==
+                // stored ⇒ free-reuse ABA (buffer reused, content changed);
+                // != ⇒ identity-hash collision.
+                const std::uint64_t fresh =
+                    computeMslOnlyFnv(vertexMSL, fragmentMSL);
+                if (fresh != it->second.mslFnv) {
                     ++mslHashMemoVerifyMismatches;
+                    const std::size_t curVSize =
+                        vertexMSL != nullptr ? vertexMSL->size() : 0;
+                    const std::size_t curFSize =
+                        fragmentMSL != nullptr ? fragmentMSL->size() : 0;
+                    const void* curVData =
+                        (vertexMSL != nullptr && !vertexMSL->empty())
+                            ? static_cast<const void*>(vertexMSL->data())
+                            : nullptr;
+                    const void* curFData =
+                        (fragmentMSL != nullptr && !fragmentMSL->empty())
+                            ? static_cast<const void*>(fragmentMSL->data())
+                            : nullptr;
+                    const bool sameComponents =
+                        it->second.vObj ==
+                            static_cast<const void*>(vertexMSL) &&
+                        it->second.fObj ==
+                            static_cast<const void*>(fragmentMSL) &&
+                        it->second.vSize == curVSize &&
+                        it->second.vData == curVData &&
+                        it->second.fSize == curFSize &&
+                        it->second.fData == curFData;
+                    if (sameComponents) {
+                        ++mslHashMemoVerifyMismatchAba;
+                    } else {
+                        ++mslHashMemoVerifyMismatchCollision;
+                    }
+                    if (!mslHashMemoVerifyDumped) {
+                        mslHashMemoVerifyDumped = true;
+                        std::fprintf(
+                            stderr,
+                            "[APPGL_MSL_HASH_MEMO_VERIFY] MISMATCH class=%s "
+                            "stored{vObj=%p vSize=%zu vData=%p fObj=%p "
+                            "fSize=%zu fData=%p fnv=%llu} current{vObj=%p "
+                            "vSize=%zu vData=%p fObj=%p fSize=%zu fData=%p "
+                            "fnv=%llu}\n",
+                            sameComponents ? "ABA" : "COLLISION",
+                            it->second.vObj, it->second.vSize, it->second.vData,
+                            it->second.fObj, it->second.fSize, it->second.fData,
+                            static_cast<unsigned long long>(it->second.mslFnv),
+                            static_cast<const void*>(vertexMSL), curVSize,
+                            curVData, static_cast<const void*>(fragmentMSL),
+                            curFSize, curFData,
+                            static_cast<unsigned long long>(fresh));
+                    }
                 }
             }
             return it->second.mslFnv;
@@ -22862,6 +22982,14 @@ private:
         entry.mslFnv = mslFnv;
         entry.vObj = static_cast<const void*>(vertexMSL);
         entry.fObj = static_cast<const void*>(fragmentMSL);
+        entry.vSize = vertexMSL != nullptr ? vertexMSL->size() : 0;
+        entry.vData = (vertexMSL != nullptr && !vertexMSL->empty())
+                          ? static_cast<const void*>(vertexMSL->data())
+                          : nullptr;
+        entry.fSize = fragmentMSL != nullptr ? fragmentMSL->size() : 0;
+        entry.fData = (fragmentMSL != nullptr && !fragmentMSL->empty())
+                          ? static_cast<const void*>(fragmentMSL->data())
+                          : nullptr;
         mslHashMemo.emplace(identity, entry);
         mslHashMemoLastUse[identity] = ++mslHashMemoClock;
         mslHashMemoPeak = std::max(
