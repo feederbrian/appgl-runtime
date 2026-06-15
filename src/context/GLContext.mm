@@ -12189,7 +12189,14 @@ struct GLContext::Impl {
                 // Use Shared storage so CPU can read back rendered data via
                 // [MTLTexture getBytes:].  On Apple Silicon the unified memory
                 // architecture makes Shared equivalent to Private in performance.
-                descriptor.storageMode = MTLStorageModeShared;
+                // EXCEPT multisample: Metal/AGX disallow CPU getBytes on an MSAA
+                // texture (MSAA readback is resolve-then-read through a separate
+                // Shared staging blit), and a Shared-storage MSAA texture has an
+                // inconsistent row layout that trips the AGX
+                // `bytes_per_row >= used_bytes_per_row` assertion when it is
+                // cleared/rendered (clearLayeredTextureImpl). MSAA must be Private.
+                descriptor.storageMode =
+                    (samples > 1) ? MTLStorageModePrivate : MTLStorageModeShared;
                 // Enable ShaderWrite for non-MSAA renderbuffers as well so the
                 // renderbuffer can back a storage image binding through a
                 // framebuffer view later (imageStore from fragment stages).
