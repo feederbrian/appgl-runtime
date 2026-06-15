@@ -8524,8 +8524,10 @@ struct MetalFrameGraph::Impl {
             // Resolve a CPU pointer to the start of the vertex
             // stream we're about to encode.
             const std::uint8_t* peekPtr = nullptr;
+            std::size_t peekAvail = 0;
             if (info.vertexData != nullptr) {
                 peekPtr = static_cast<const std::uint8_t*>(info.vertexData);
+                peekAvail = info.vertexDataByteCount;
             } else if (info.metalVertexBuffer != nullptr) {
                 id<MTLBuffer> mtlBuf = (__bridge id<MTLBuffer>)info.metalVertexBuffer;
                 // storageMode shared/managed → contents is a
@@ -8534,19 +8536,29 @@ struct MetalFrameGraph::Impl {
                     [mtlBuf storageMode] == MTLStorageModeManaged) {
                     const std::uint8_t* base =
                         static_cast<const std::uint8_t*>([mtlBuf contents]);
-                    if (base != nullptr) {
+                    const std::size_t bufLen =
+                        static_cast<std::size_t>([mtlBuf length]);
+                    if (base != nullptr &&
+                        info.metalVertexBufferOffset < bufLen) {
                         peekPtr = base + info.metalVertexBufferOffset;
+                        peekAvail = bufLen - info.metalVertexBufferOffset;
                     }
                 }
             }
 
-            if (peekPtr != nullptr) {
-                // Peek 32 bytes — enough to cover a full 32-byte
+            if (peekPtr != nullptr && peekAvail > 0) {
+                // Peek up to 32 bytes — enough to cover a full 32-byte
                 // stride (pos.xyz + uv.xy + color.rgba layouts) or
                 // two 16-byte stride quads (pos.xy + uv.xy). BAR
                 // can decode by stride; the stride is on the
-                // preceding line.
-                const std::size_t peekLen = 32;
+                // preceding line. CLAMPED to the buffer's available
+                // bytes: a VBO can be < 32 bytes (e.g. a 16-byte
+                // clip_distance quad), and the old fixed peekLen=32 read
+                // past the allocation (ASan heap-buffer-overflow READ in
+                // encodeTranslatedDrawSerial — the diagnostic reads run
+                // before the APPGL_LOG output gate, so disabling DRAW
+                // logging does NOT avoid it; the clamp is the real fix).
+                const std::size_t peekLen = std::min<std::size_t>(32, peekAvail);
                 char hexBuf[128];
                 char floatBuf[128];
                 for (std::size_t i = 0; i < peekLen; ++i) {
@@ -8554,18 +8566,22 @@ struct MetalFrameGraph::Impl {
                                   "%02X ", peekPtr[i]);
                 }
                 hexBuf[peekLen * 3 - 1] = '\0';
-                // Also interpret as 8 floats for quick visual
-                // sanity-check of position/UV ranges.
-                float asFloats[8];
-                std::memcpy(asFloats, peekPtr, sizeof(asFloats));
+                // Also interpret the available prefix as up to 8 floats for a
+                // quick visual sanity-check of position/UV ranges (tail
+                // zero-filled when the buffer holds fewer than 32 bytes).
+                float asFloats[8] = {0.0f, 0.0f, 0.0f, 0.0f,
+                                     0.0f, 0.0f, 0.0f, 0.0f};
+                std::memcpy(asFloats, peekPtr,
+                            std::min<std::size_t>(sizeof(asFloats), peekLen));
                 std::snprintf(floatBuf, sizeof(floatBuf),
                     "%.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
                     asFloats[0], asFloats[1], asFloats[2], asFloats[3],
                     asFloats[4], asFloats[5], asFloats[6], asFloats[7]);
-                APPGL_LOG(DRAW, @"[GL]     vbo peek32 hex=[%s]", hexBuf);
-                APPGL_LOG(DRAW, @"[GL]     vbo peek32 f32=[%s]", floatBuf);
+                APPGL_LOG(DRAW, @"[GL]     vbo peek hex=[%s] (len=%zu)",
+                          hexBuf, peekLen);
+                APPGL_LOG(DRAW, @"[GL]     vbo peek f32=[%s]", floatBuf);
             } else {
-                APPGL_LOG(DRAW, @"[GL]     vbo peek32 skip=private-or-null");
+                APPGL_LOG(DRAW, @"[GL]     vbo peek skip=private-or-null-or-empty");
             }
         }
         // Step 7-3: argument-buffer binding path. When argbuf is enabled
