@@ -22875,15 +22875,20 @@ private:
         ++mslHashMemoLookups;
         // Identity: APPGL_MSL_HASH_MEMO_PTRKEY=1 = the bare {ptr,size,data} key
         // (the buggy use-after-free CONTROL, to reproduce + byte-tell-classify
-        // the ABA). Default = {serial, vObj, fObj}: the monotonic program-object
-        // serial discriminates ACROSS realloc (ABSOLUTE, never reused → a freed
-        // program's MSL reused by a NEW program can't alias a stale entry);
-        // vObj/fObj (the FIELD addresses) discriminate base-vs-gsPassThrough
-        // WITHIN a program. Content changes (relink / gsPassThrough rewrite) stay
-        // invalidation-covered (@7535 / @38911-39136). FAIL-SAFE: serial==0
+        // the ABA). Default = {serial} folded with the {ptr,size,data} PAIR
+        // identity (recordPlanIdentityKey). The {ptr,size,data} (vObj/vSize/vData
+        // + fObj/fSize/fData) SELF-HEALS within-program content changes (relink /
+        // gsPassThrough rewrite → new data-ptr/size → different identity → miss →
+        // recompute), so the memo does NOT depend on invalidation completeness
+        // for content changes. The monotonic program-object serial is the
+        // ABSOLUTE realloc guard ON TOP: a freed buffer reused at the SAME
+        // {ptr,size,data} by a NEW program → different serial → different identity
+        // → no stale hit (the one case {ptr,size,data} alone can't catch).
+        // (Keying on {serial,vObj,fObj} alone DROPS the content discriminator →
+        // every new-buffer content change at a stable field address collides;
+        // that was the 513-COLLISION re-gate RED.) FAIL-SAFE: serial==0
         // (unpopulated tdi-build site) → SKIP the memo, recompute fresh — a PERF
-        // miss, NOT a stale serve (so a missed plumbing site is perf-not-
-        // correctness, the property that makes the absolute serial safe).
+        // miss, NOT a stale serve (a missed plumbing site is perf-not-correctness).
         std::uint64_t identity;
         if (mslHashMemoPtrKeyOnly) {
             identity = recordPlanIdentityKey(0, vertexMSL, fragmentMSL);
@@ -22891,16 +22896,12 @@ private:
             ++mslHashMemoFailsafeSkips;
             return computeMslOnlyFnv(vertexMSL, fragmentMSL);
         } else {
-            std::uint64_t fnv = 1469598103934665603ULL;
-            auto mixWord = [&fnv](std::uint64_t word) {
-                for (unsigned i = 0; i < 8; ++i) {
-                    fnv ^= static_cast<std::uint64_t>((word >> (i * 8)) & 0xFFu);
-                    fnv *= 1099511628211ULL;
-                }
-            };
-            mixWord(programObjectSerial);
-            mixWord(reinterpret_cast<std::uintptr_t>(vertexMSL));
-            mixWord(reinterpret_cast<std::uintptr_t>(fragmentMSL));
+            std::uint64_t fnv = recordPlanIdentityKey(0, vertexMSL, fragmentMSL);
+            for (unsigned i = 0; i < 8; ++i) {
+                fnv ^= static_cast<std::uint64_t>(
+                    (programObjectSerial >> (i * 8)) & 0xFFu);
+                fnv *= 1099511628211ULL;
+            }
             identity = fnv;
         }
         auto it = mslHashMemo.find(identity);
