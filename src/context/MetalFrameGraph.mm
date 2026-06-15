@@ -4167,6 +4167,62 @@ static std::uint64_t computePipelineCacheKey(
         info.fragmentMSL);
 }
 
+// ── S25 state_resolve lever (APPGL_MSL_HASH_MEMO, default-OFF) ──
+// The crown's computePipelineCacheKeyFromPrefix() above mixes the cheap
+// scalar prefix FIRST then FNV-hashes the FULL vertex+fragment MSL bytes
+// (O(KB)) on EVERY plan-miss draw — the dominant state_resolve sub-op
+// (per the S25 profile: state_resolve ~71% of framegraph_encode, paid every
+// draw because record-prepare skips the 56% FBO draws → info.translatedPlan
+// null → key recomputed). The MSL is program-stable; re-hashing it per draw
+// is pure waste.
+//
+// The split below REORDERS the FNV so the program-stable MSL bytes are mixed
+// FIRST (computeMslOnlyFnv) — memoizable per MSL-string identity — and the
+// cheap 8-byte prefix word is mixed LAST per draw (finalize...). This is NOT
+// bit-identical to the crown key (the crown mixes prefix-first); the OFF path
+// keeps the exact crown scheme. The ON key is internally consistent: every
+// live key-compute site routes through the single Impl entry
+// (computePipelineCacheKeyMemoized) and the keys are in-memory per-run only
+// (no disk/MTLBinaryArchive dependence on this value).
+static std::uint64_t computeMslOnlyFnv(const std::string* vertexMSL,
+                                       const std::string* fragmentMSL)
+{
+    std::uint64_t fnv = 1469598103934665603ULL;
+    auto mixByte = [&fnv](std::uint8_t byte) {
+        fnv ^= static_cast<std::uint64_t>(byte);
+        fnv *= 1099511628211ULL;
+    };
+    auto mixWord = [&](std::uint64_t word) {
+        for (unsigned i = 0; i < 8; ++i) {
+            mixByte(static_cast<std::uint8_t>((word >> (i * 8)) & 0xFFu));
+        }
+    };
+    auto mixString = [&](const std::string* source) {
+        if (source == nullptr) {
+            mixWord(0);
+            return;
+        }
+        mixWord(source->size());
+        for (unsigned char c : *source) {
+            mixByte(static_cast<std::uint8_t>(c));
+        }
+    };
+    mixString(vertexMSL);
+    mixString(fragmentMSL);
+    return fnv;
+}
+
+static std::uint64_t finalizePipelineCacheKeyFromMslFnv(std::uint64_t mslFnv,
+                                                        std::uint64_t prefix)
+{
+    std::uint64_t fnv = mslFnv;
+    for (unsigned i = 0; i < 8; ++i) {
+        fnv ^= static_cast<std::uint64_t>((prefix >> (i * 8)) & 0xFFu);
+        fnv *= 1099511628211ULL;
+    }
+    return fnv;
+}
+
 // Phase 6-1e / 6-2: transform a SPIRV-Cross fragment MSL source so
 // Metal honours GL 4.6 §14.6 / ARB_sample_shading.
 //
@@ -5817,8 +5873,11 @@ struct MetalFrameGraph::Impl {
         }
         if (!usedTranslatedPlan) {
             pipelineCacheKey =
-                computePipelineCacheKey(info, colorFormat, attachmentSampleCount,
-                                         forcePerSampleFS);
+                computePipelineCacheKeyMemoized(
+                    computePipelineCacheKeyPrefix(info, colorFormat,
+                                                  attachmentSampleCount,
+                                                  forcePerSampleFS),
+                    info.vertexMSL, info.fragmentMSL);
             shaderSlots =
                 translatedDrawMSLSlots(info, pipelineCacheKey, hasFragmentStage);
             vertexUsesArgBuf =
@@ -9321,9 +9380,11 @@ struct MetalFrameGraph::Impl {
         }
         if (!usedTranslatedPlan) {
             pipelineCacheKey =
-                computePipelineCacheKey(source, colorFormat,
-                                        attachmentSampleCount,
-                                        forcePerSampleFS);
+                computePipelineCacheKeyMemoized(
+                    computePipelineCacheKeyPrefix(source, colorFormat,
+                                                  attachmentSampleCount,
+                                                  forcePerSampleFS),
+                    source.vertexMSL, source.fragmentMSL);
             const TranslatedDrawMSLSlots& slots =
                 translatedDrawMSLSlots(source, pipelineCacheKey,
                                        hasFragmentStage);
@@ -12894,6 +12955,23 @@ struct MetalFrameGraph::Impl {
             << ",\"peak\":" << recordPlanMemoPeak
             << ",\"verifyMismatches\":" << recordPlanMemoVerifyMismatches
             << ",\"verifyChecks\":" << recordPlanMemoVerifyChecks
+            << "}";
+        out << ",\"mslHashMemo\":{"
+            << "\"enabled\":" << (mslHashMemoEnabled ? 1 : 0)
+            << ",\"lookups\":" << mslHashMemoLookups
+            << ",\"hits\":" << mslHashMemoHits
+            << ",\"misses\":" << mslHashMemoMisses
+            << ",\"reHashAvoided\":" << mslHashMemoHits
+            << ",\"evictions\":" << mslHashMemoEvictions
+            << ",\"invalidations\":" << mslHashMemoInvalidations
+            << ",\"size\":" << mslHashMemo.size()
+            << ",\"peak\":" << mslHashMemoPeak
+            << ",\"bytesHashed\":" << mslHashMemoBytesHashed
+            << ",\"verifyChecks\":" << mslHashMemoVerifyChecks
+            << ",\"verifyMismatches\":" << mslHashMemoVerifyMismatches
+            << ",\"slotCacheHits\":" << translatedDrawMSLSlotCacheHits
+            << ",\"slotCacheMisses\":" << translatedDrawMSLSlotCacheMisses
+            << ",\"gsReplayPathFired\":" << gsReplayPathFired
             << "}";
         out << ",\"presentLeanLanding\":"
             << presentLeanLandingDiagnosticsJson();
@@ -20868,6 +20946,28 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         pipelineBuildFailures = 0;
         pipelineCumulativeBuildMs = 0.0;
     }
+
+    // S25 state_resolve lever: public so the MetalFrameGraph forwards can reach
+    // them (MetalFrameGraph is NOT a friend of Impl). The internal memo methods
+    // (mslOnlyFnvMemoized / computePipelineCacheKeyMemoized / eviction) stay
+    // private. These bodies reference memo members declared later in the class
+    // — legal for in-class member function bodies. GL-thread only; no lock.
+    void invalidateMslHashMemoForStringObject(const void* stringObject) {
+        if (mslHashMemo.empty() || stringObject == nullptr) {
+            return;
+        }
+        for (auto it = mslHashMemo.begin(); it != mslHashMemo.end();) {
+            if (it->second.vObj == stringObject ||
+                it->second.fObj == stringObject) {
+                mslHashMemoLastUse.erase(it->first);
+                it = mslHashMemo.erase(it);
+                ++mslHashMemoInvalidations;
+            } else {
+                ++it;
+            }
+        }
+    }
+    void noteGsReplayPathFired() { ++gsReplayPathFired; }
     std::uint64_t getMetalAllocatedBytes() const {
         if (device != nil && [device respondsToSelector:@selector(currentAllocatedSize)]) {
             return static_cast<std::uint64_t>(device.currentAllocatedSize);
@@ -22068,6 +22168,11 @@ private:
         translatedDrawMSLSlotCacheLastUse;
     std::uint64_t translatedDrawMSLSlotCacheClock = 0;
     std::uint64_t translatedDrawMSLSlotCacheEvictions = 0;
+    // S25 state_resolve lever (Axis-B): slot-cache hit/miss for the OFF-vs-ON
+    // alias check — the key feeds this shared cache, so an ON-scheme aliasing
+    // bug would show as a changed hit/miss pattern vs OFF.
+    std::uint64_t translatedDrawMSLSlotCacheHits = 0;
+    std::uint64_t translatedDrawMSLSlotCacheMisses = 0;
     std::unordered_map<std::uint64_t, NSInteger>
         translatedDrawSampleMaskSlotCache;
     std::uint64_t renderPsoCacheClock = 0;
@@ -22348,10 +22453,12 @@ private:
         bool hasFragmentStage) {
         auto it = translatedDrawMSLSlotCache.find(pipelineCacheKey);
         if (it != translatedDrawMSLSlotCache.end()) {
+            ++translatedDrawMSLSlotCacheHits;
             translatedDrawMSLSlotCacheLastUse[pipelineCacheKey] =
                 ++translatedDrawMSLSlotCacheClock;
             return it->second;
         }
+        ++translatedDrawMSLSlotCacheMisses;
         auto inserted = translatedDrawMSLSlotCache.emplace(
             pipelineCacheKey,
             buildTranslatedDrawMSLSlots(info, hasFragmentStage));
@@ -22537,7 +22644,7 @@ private:
             return false;
         }
         const std::uint64_t pipelineCacheKey =
-            computePipelineCacheKeyFromPrefix(
+            computePipelineCacheKeyMemoized(
                 prefix, source.vertexMSL, source.fragmentMSL);
         const TranslatedDrawMSLSlots& slots =
             translatedDrawMSLSlots(source, pipelineCacheKey, hasFragmentStage);
@@ -22656,6 +22763,132 @@ private:
         evictRecordPlanMemoIfNeeded();
         return &inserted.first->second;
     }
+
+    // ── S25 state_resolve lever: MSL-FNV memo (APPGL_MSL_HASH_MEMO) ──
+    // Memoizes the O(KB) per-draw MSL re-hash (computeMslOnlyFnv) keyed by the
+    // MSL-string PAIR identity {ptr,size,data} (recordPlanIdentityKey with
+    // prefix=0 — the SAME proven discriminator the W2 record-plan memo and the
+    // Phase-2 plan key (phase2PlanHashShaderIdentity) use). The pair key
+    // distinguishes base-vs-gsPassThrough variant strings AND catches in-place
+    // rewrites (a rewritten MSL = new data-ptr/size → new identity → miss →
+    // recompute). GL-thread-confined (all live key-compute sites run on the GL
+    // thread; the dispatch_apply workers CONSUME the precomputed key) → no lock.
+    // Default-OFF: the OFF path keeps the exact crown key scheme (bit-identical).
+    const bool mslHashMemoEnabled =
+        appglEnvEnabledDefaultOff("APPGL_MSL_HASH_MEMO");
+    const bool mslHashMemoVerify =
+        appglEnvEnabledDefaultOff("APPGL_MSL_HASH_MEMO_VERIFY");
+    static constexpr std::size_t kMslHashMemoCapacity = 4096;
+    struct MslHashMemoEntry {
+        std::uint64_t mslFnv = 0;
+        const void* vObj = nullptr;   // &vertexMSL string object (invalidation)
+        const void* fObj = nullptr;   // &fragmentMSL string object
+    };
+    std::unordered_map<std::uint64_t, MslHashMemoEntry> mslHashMemo;
+    std::unordered_map<std::uint64_t, std::uint64_t> mslHashMemoLastUse;
+    std::uint64_t mslHashMemoClock = 0;
+    std::uint64_t mslHashMemoLookups = 0;
+    std::uint64_t mslHashMemoHits = 0;
+    std::uint64_t mslHashMemoMisses = 0;
+    std::uint64_t mslHashMemoEvictions = 0;
+    std::uint64_t mslHashMemoInvalidations = 0;
+    std::uint64_t mslHashMemoPeak = 0;
+    std::uint64_t mslHashMemoBytesHashed = 0;  // Σ(vMSL+fMSL) bytes over misses
+                                               // → avg MSL size for the
+                                               // quantitative magnitude-sanity
+    std::uint64_t mslHashMemoVerifyChecks = 0;
+    std::uint64_t mslHashMemoVerifyMismatches = 0;
+    // Axis-B non-vacuity guard for the GS-replay correctness control: counts
+    // how many times the GS-emulation replay re-points tdi.*MSL to the
+    // gsPassThrough variant (GLContext encodeEmulatedGsDraw). N>0 proves the
+    // workload (Scout's GS/tess CTS) actually exercised the re-point; N==0 (WZ)
+    // = the control is vacuous on that workload.
+    std::uint64_t gsReplayPathFired = 0;
+
+    void evictMslHashMemoIfNeeded() {
+        while (mslHashMemo.size() > kMslHashMemoCapacity &&
+               !mslHashMemo.empty()) {
+            auto evictIt = mslHashMemo.end();
+            std::uint64_t oldestUse = std::numeric_limits<std::uint64_t>::max();
+            for (auto it = mslHashMemo.begin(); it != mslHashMemo.end(); ++it) {
+                std::uint64_t use = 0;
+                auto useIt = mslHashMemoLastUse.find(it->first);
+                if (useIt != mslHashMemoLastUse.end()) {
+                    use = useIt->second;
+                }
+                if (evictIt == mslHashMemo.end() || use < oldestUse) {
+                    oldestUse = use;
+                    evictIt = it;
+                }
+            }
+            if (evictIt == mslHashMemo.end()) {
+                break;
+            }
+            mslHashMemoLastUse.erase(evictIt->first);
+            mslHashMemo.erase(evictIt);
+            ++mslHashMemoEvictions;
+        }
+    }
+
+    // Returns the FNV over the (program-stable) MSL bytes only, memoized by the
+    // MSL-string pair identity. GL-thread-only (no lock).
+    std::uint64_t mslOnlyFnvMemoized(const std::string* vertexMSL,
+                                     const std::string* fragmentMSL) {
+        ++mslHashMemoLookups;
+        const std::uint64_t identity =
+            recordPlanIdentityKey(0, vertexMSL, fragmentMSL);
+        auto it = mslHashMemo.find(identity);
+        if (it != mslHashMemo.end()) {
+            mslHashMemoLastUse[identity] = ++mslHashMemoClock;
+            ++mslHashMemoHits;
+            if (mslHashMemoVerify) {
+                ++mslHashMemoVerifyChecks;
+                // P1 content-equality: recompute fresh + compare. A mismatch =
+                // the identity key served a stale/aliased mslFnv (ABA or an
+                // identity-hash collision) — must be 0.
+                if (computeMslOnlyFnv(vertexMSL, fragmentMSL) !=
+                    it->second.mslFnv) {
+                    ++mslHashMemoVerifyMismatches;
+                }
+            }
+            return it->second.mslFnv;
+        }
+        ++mslHashMemoMisses;
+        mslHashMemoBytesHashed +=
+            (vertexMSL != nullptr ? vertexMSL->size() : 0u) +
+            (fragmentMSL != nullptr ? fragmentMSL->size() : 0u);
+        const std::uint64_t mslFnv = computeMslOnlyFnv(vertexMSL, fragmentMSL);
+        MslHashMemoEntry entry;
+        entry.mslFnv = mslFnv;
+        entry.vObj = static_cast<const void*>(vertexMSL);
+        entry.fObj = static_cast<const void*>(fragmentMSL);
+        mslHashMemo.emplace(identity, entry);
+        mslHashMemoLastUse[identity] = ++mslHashMemoClock;
+        mslHashMemoPeak = std::max(
+            mslHashMemoPeak,
+            static_cast<std::uint64_t>(mslHashMemo.size()));
+        evictMslHashMemoIfNeeded();
+        return mslFnv;
+    }
+
+    // Single entry point for ALL live key-compute sites (encode, record-prepare
+    // buildTranslatedDrawPlanContent, dormant captured). OFF = exact crown
+    // computePipelineCacheKeyFromPrefix (bit-identical); ON = split+memo.
+    std::uint64_t computePipelineCacheKeyMemoized(
+        std::uint64_t prefix,
+        const std::string* vertexMSL,
+        const std::string* fragmentMSL) {
+        if (!mslHashMemoEnabled) {
+            return computePipelineCacheKeyFromPrefix(prefix, vertexMSL,
+                                                     fragmentMSL);
+        }
+        return finalizePipelineCacheKeyFromMslFnv(
+            mslOnlyFnvMemoized(vertexMSL, fragmentMSL), prefix);
+    }
+
+    // (invalidateMslHashMemoForStringObject + noteGsReplayPathFired are defined
+    //  in the public Impl section above — MetalFrameGraph is not a friend — so
+    //  the forwards can reach them; the memo data + internal helpers stay here.)
 
     // S25 W2.1: the second leg of W2. The candidate gate
     // (translatedDrawParallelCaptureEligible) reads info.translatedPlan
@@ -24100,6 +24333,15 @@ MetalFrameGraph::PipelineCacheMetrics MetalFrameGraph::pipelineCacheMetrics() co
 
 void MetalFrameGraph::resetPipelineCacheMetrics() {
     impl_->resetMetrics();
+}
+
+void MetalFrameGraph::invalidateMslHashMemoForStringObject(
+    const void* stringObject) {
+    impl_->invalidateMslHashMemoForStringObject(stringObject);
+}
+
+void MetalFrameGraph::noteGsReplayPathFired() {
+    impl_->noteGsReplayPathFired();
 }
 
 std::uint64_t MetalFrameGraph::metalAllocatedBytes() const {

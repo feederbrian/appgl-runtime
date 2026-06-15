@@ -7536,5 +7536,23 @@ bool GLContext::linkProgram(GLuint program) {
     if (programObject->executableGeneration == 0) {
         programObject->executableGeneration = 1;
     }
+    // S25 state_resolve lever: this relink rebuilt the program's MSL (the
+    // executableGeneration bump is the canonical relink signal). Drop any
+    // MSL-FNV memo entry referencing the program's MSL string objects so a
+    // same-buffer relink (std::string::operator= can reuse capacity on a
+    // same/shorter reassign → {ptr,size,data} identity ABA) cannot serve a
+    // stale key. This is the single relink chokepoint → O(1), no per-draw cost,
+    // string-semantics-independent. (Production has no P1 backstop — P1 is
+    // gate-only/default-OFF — so the relink ABA must be closed structurally.)
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->invalidateMslHashMemoForStringObject(
+            &programObject->vertexMSL);
+        impl_->frameGraph->invalidateMslHashMemoForStringObject(
+            &programObject->fragmentMSL);
+        impl_->frameGraph->invalidateMslHashMemoForStringObject(
+            &programObject->gsPassThroughVertexMSL);
+        impl_->frameGraph->invalidateMslHashMemoForStringObject(
+            &programObject->gsPassThroughFragmentMSL);
+    }
     return true;
 }

@@ -38910,6 +38910,13 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     if (program.gsPassThroughVertexMSL.empty()) {
         program.gsPassThroughVertexMSL = appgl::synthesisePassThroughVertexMSL(
             replayDraw, routeLayer, routeViewportIndex);
+        // S25 state_resolve lever: VS MSL content (re)synthesised in place —
+        // drop any stale MSL-FNV memo entry referencing it (defense-in-depth
+        // beyond the {ptr,size,data} identity self-heal).
+        if (frameGraph) {
+            frameGraph->invalidateMslHashMemoForStringObject(
+                &program.gsPassThroughVertexMSL);
+        }
         program.gsPassThroughVertexMslUsesArgumentBuffer =
             mslUsesArgumentBuffer(program.gsPassThroughVertexMSL);
         program.gsPassThroughVertexMSLLayered = routeLayer;
@@ -39109,6 +39116,11 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         tdi.clipOrigin == GL_LOWER_LEFT &&
             (routeViewportIndex || cpuExpandedDomain));
     tdi.vertexMSL = &program.gsPassThroughVertexMSL;
+    // S25 state_resolve lever (Axis-B): note the GS-replay re-point fired so the
+    // diag JSONL carries N — the non-vacuity guard on the GS-replay control.
+    if (frameGraph) {
+        frameGraph->noteGsReplayPathFired();
+    }
     // Post-process the FS MSL for GS-emulation replay. PrimitiveID needs
     // a user-varying redirect; fp64 stage inputs need float transport
     // because Metal rejects nested appgl_df64 structs in [[stage_in]].
@@ -39134,6 +39146,15 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                     appgl::rewriteFragmentMSLForPrimitiveID(rewrittenFragment, replayDraw);
             }
             program.gsPassThroughFragmentMSL = std::move(rewrittenFragment);
+            // S25 state_resolve lever: the FS MSL content for this program just
+            // changed in place — drop any MSL-FNV memo entry referencing it so
+            // the next draw recomputes (defense-in-depth beyond the
+            // {ptr,size,data} identity self-heal; closes the same-ptr+size+data
+            // ABA window).
+            if (frameGraph) {
+                frameGraph->invalidateMslHashMemoForStringObject(
+                    &program.gsPassThroughFragmentMSL);
+            }
             program.gsPassThroughFragmentMslUsesArgumentBuffer =
                 mslUsesArgumentBuffer(program.gsPassThroughFragmentMSL);
             program.gsPassThroughFragmentMSLPrimIdLoc = replayDraw.primitiveIDLocation;

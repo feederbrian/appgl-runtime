@@ -1602,6 +1602,18 @@ public:
     PipelineCacheMetrics pipelineCacheMetrics() const;
     void resetPipelineCacheMetrics();
 
+    // S25 state_resolve lever: invalidate any MSL-FNV memo entry referencing a
+    // program MSL string object whose content is being rewritten/cleared
+    // (gsPassThrough rebuild, relink). GL-thread only; no-op when the memo is
+    // disabled/empty. Called from GLContext at the MSL mutation sites.
+    void invalidateMslHashMemoForStringObject(const void* stringObject);
+
+    // S25 state_resolve lever (Axis-B): GLContext notes each GS-emulation
+    // replay re-point (encodeEmulatedGsDraw) so the diag JSONL carries the
+    // GS-replay fire-count N — the non-vacuity guard on the GS-replay
+    // correctness control (valid only if N>0 on the test workload).
+    void noteGsReplayPathFired();
+
     // Metal device allocated memory (bytes).  Returns 0 if device unavailable.
     std::uint64_t metalAllocatedBytes() const;
     std::uint64_t mslLibraryCacheEntries() const;
