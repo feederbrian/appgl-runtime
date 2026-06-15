@@ -1680,6 +1680,8 @@ static void assignTranslatedDrawProgramMsl(TranslatedDrawInfo& tdi,
     // S25 state_resolve memo: the program's monotonic serial (absolute realloc
     // guard for the MSL-FNV memo identity); 0 → memo fail-safe.
     tdi.programObjectSerial = program.objectSerial;
+    // ABA residual fix: the program's executableGeneration (relink-in-place guard).
+    tdi.programObjectExecutableGeneration = program.executableGeneration;
     tdi.vertexMslUsesArgumentBuffer =
         program.vertexMslUsesArgumentBuffer;
     tdi.fragmentMslUsesArgumentBuffer =
@@ -39120,6 +39122,8 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             (routeViewportIndex || cpuExpandedDomain));
     tdi.vertexMSL = &program.gsPassThroughVertexMSL;
     tdi.programObjectSerial = program.objectSerial;  // S25 memo realloc guard
+    tdi.programObjectExecutableGeneration =
+        program.executableGeneration;  // ABA relink-in-place guard
     // S25 state_resolve lever (Axis-B): note the GS-replay re-point fired so the
     // diag JSONL carries N — the non-vacuity guard on the GS-replay control.
     if (frameGraph) {

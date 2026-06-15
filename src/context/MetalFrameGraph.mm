@@ -5882,7 +5882,8 @@ struct MetalFrameGraph::Impl {
                                                   attachmentSampleCount,
                                                   forcePerSampleFS),
                     info.vertexMSL, info.fragmentMSL,
-                    info.programObjectSerial);
+                    info.programObjectSerial,
+                    info.programObjectExecutableGeneration);
             shaderSlots =
                 translatedDrawMSLSlots(info, pipelineCacheKey, hasFragmentStage);
             vertexUsesArgBuf =
@@ -9390,7 +9391,8 @@ struct MetalFrameGraph::Impl {
                                                   attachmentSampleCount,
                                                   forcePerSampleFS),
                     source.vertexMSL, source.fragmentMSL,
-                    source.programObjectSerial);
+                    source.programObjectSerial,
+                    source.programObjectExecutableGeneration);
             const TranslatedDrawMSLSlots& slots =
                 translatedDrawMSLSlots(source, pipelineCacheKey,
                                        hasFragmentStage);
@@ -22657,7 +22659,8 @@ private:
         const std::uint64_t pipelineCacheKey =
             computePipelineCacheKeyMemoized(
                 prefix, source.vertexMSL, source.fragmentMSL,
-                source.programObjectSerial);
+                source.programObjectSerial,
+                source.programObjectExecutableGeneration);
         const TranslatedDrawMSLSlots& slots =
             translatedDrawMSLSlots(source, pipelineCacheKey, hasFragmentStage);
         const bool vertexUsesArgBuf = slots.vertexMslUsesArgBuf;
@@ -22871,7 +22874,8 @@ private:
     // MSL-string pair identity. GL-thread-only (no lock).
     std::uint64_t mslOnlyFnvMemoized(const std::string* vertexMSL,
                                      const std::string* fragmentMSL,
-                                     std::uint64_t programObjectSerial) {
+                                     std::uint64_t programObjectSerial,
+                                     std::uint64_t programObjectExecutableGeneration) {
         ++mslHashMemoLookups;
         // Identity: APPGL_MSL_HASH_MEMO_PTRKEY=1 = the bare {ptr,size,data} key
         // (the buggy use-after-free CONTROL, to reproduce + byte-tell-classify
@@ -22900,6 +22904,16 @@ private:
             for (unsigned i = 0; i < 8; ++i) {
                 fnv ^= static_cast<std::uint64_t>(
                     (programObjectSerial >> (i * 8)) & 0xFFu);
+                fnv *= 1099511628211ULL;
+            }
+            // ABA residual fix: fold the program's executableGeneration ON TOP.
+            // serial = cross-program realloc guard; gen = SAME-program
+            // relink-in-place guard (linkProgram @7535 bumps gen → new identity
+            // → no stale hit, independent of the @7547 invalidation FIRING;
+            // glCreateShaderProgramv/SSO routes through linkProgram → covered).
+            for (unsigned i = 0; i < 8; ++i) {
+                fnv ^= static_cast<std::uint64_t>(
+                    (programObjectExecutableGeneration >> (i * 8)) & 0xFFu);
                 fnv *= 1099511628211ULL;
             }
             identity = fnv;
@@ -23000,13 +23014,15 @@ private:
         std::uint64_t prefix,
         const std::string* vertexMSL,
         const std::string* fragmentMSL,
-        std::uint64_t programObjectSerial) {
+        std::uint64_t programObjectSerial,
+        std::uint64_t programObjectExecutableGeneration) {
         if (!mslHashMemoEnabled) {
             return computePipelineCacheKeyFromPrefix(prefix, vertexMSL,
                                                      fragmentMSL);
         }
         return finalizePipelineCacheKeyFromMslFnv(
-            mslOnlyFnvMemoized(vertexMSL, fragmentMSL, programObjectSerial),
+            mslOnlyFnvMemoized(vertexMSL, fragmentMSL, programObjectSerial,
+                               programObjectExecutableGeneration),
             prefix);
     }
 

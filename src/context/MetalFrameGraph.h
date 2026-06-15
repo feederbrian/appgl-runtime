@@ -593,6 +593,15 @@ struct TranslatedDrawInfo {
     // unset → the memo fail-safe (skip + recompute; perf-not-correctness). Set
     // at the tdi-build sites alongside vertexMSL/fragmentMSL.
     std::uint64_t programObjectSerial = 0;
+    // S25 ABA residual fix: the owning GLProgramObject's executableGeneration
+    // (bumped by linkProgram @GLContextShaderLink.inc.mm:7535, incl. SSO via
+    // glCreateShaderProgramv→linkProgram). Folded into the memo identity ON TOP
+    // of the serial so a SAME-program relink-in-place (same serial + same
+    // {ptr,size,data} buffer reuse, new content) yields a new identity →
+    // no stale hit, ABSOLUTELY, independent of the @7547 relink-invalidation
+    // FIRING. 0 = unset → carried with programObjectSerial==0 into the memo
+    // fail-safe. Set at the tdi-build sites alongside programObjectSerial.
+    std::uint64_t programObjectExecutableGeneration = 0;
     bool vertexMslUsesArgumentBuffer = false;
     bool fragmentMslUsesArgumentBuffer = false;
     const ShaderReflection* vertexReflection = nullptr;
