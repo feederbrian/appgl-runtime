@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <string>
@@ -907,6 +908,18 @@ struct GLSamplerBindingRecipeCache {
     GLSamplerBindingStageRecipe vertex;
 };
 
+// S25 state_resolve memo: a process-global monotonic serial, stamped on every
+// GLProgramObject construction (the SOLE assignment — move carries it via the
+// defaulted move ctor; copy is deleted → no serial conflation). The MSL-FNV memo
+// folds it into the identity so a freed program's MSL {addr,size,data} reused by
+// a NEW program (different serial) cannot alias a stale entry — the ABSOLUTE
+// use-after-free guard. Never reused (64-bit monotonic). 0 reserved = unset →
+// the memo fail-safe (skip + recompute).
+inline std::uint64_t nextGLProgramObjectSerial() {
+    static std::atomic<std::uint64_t> counter{1};
+    return counter.fetch_add(1, std::memory_order_relaxed);
+}
+
 struct GLProgramObject {
     // Phase 3f-11: explicit special members declared here + defined
     // in GLObjectStore.cpp, where appgl::interp::SpirvModule is a
@@ -947,6 +960,12 @@ struct GLProgramObject {
     // Phase-2 draw-key memoization uses this to trust cached reflection shape
     // only across draws from the same context-local program executable.
     std::uint64_t executableGeneration = 1;
+    // S25 state_resolve memo: process-global monotonic object serial (never
+    // reused). Stamped here at construction (default-member-init → runs for the
+    // defaulted default ctor); carried on move; copy deleted. The memo identity
+    // uses it as the absolute realloc/use-after-free guard across program
+    // create/delete churn (the class that defeats pointer-identity).
+    std::uint64_t objectSerial = nextGLProgramObjectSerial();
     mutable bool phase2ProgramStructuralFingerprintValid = false;
     mutable GLuint phase2ProgramStructuralFingerprintProgram = 0;
     mutable std::uint64_t phase2ProgramStructuralFingerprintGeneration = 0;

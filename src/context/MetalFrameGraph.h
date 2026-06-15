@@ -588,6 +588,11 @@ struct TranslatedDrawInfo {
     // Translated MSL + reflection (borrowed from GLProgramObject).
     const std::string* vertexMSL = nullptr;
     const std::string* fragmentMSL = nullptr;
+    // S25 state_resolve memo: the owning GLProgramObject's monotonic serial (the
+    // absolute realloc/use-after-free guard for the MSL-FNV memo identity). 0 =
+    // unset → the memo fail-safe (skip + recompute; perf-not-correctness). Set
+    // at the tdi-build sites alongside vertexMSL/fragmentMSL.
+    std::uint64_t programObjectSerial = 0;
     bool vertexMslUsesArgumentBuffer = false;
     bool fragmentMslUsesArgumentBuffer = false;
     const ShaderReflection* vertexReflection = nullptr;

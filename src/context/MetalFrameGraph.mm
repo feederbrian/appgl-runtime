@@ -4223,44 +4223,9 @@ static std::uint64_t finalizePipelineCacheKeyFromMslFnv(std::uint64_t mslFnv,
     return fnv;
 }
 
-// S25 state_resolve lever (use-after-free guard): a cheap content SIGNATURE of
-// an MSL — FNV over (size, first-64B, last-64B). Folded into the memo identity
-// so a freed MSL's {addr,size,data} reused with DIFFERENT content yields a
-// DIFFERENT identity → no stale hit, regardless of which program freed it / how
-// many free sites exist. O(<=128B)/string, not O(KB). Near-bulletproof: the
-// residual (same size + same first/last 64B, different middle) is astronomically
-// unlikely for real shaders AND the gate-only full-content VERIFY still catches
-// it. The {ptr,size,data} components stay (discriminator); the sig is the guard.
-static std::uint64_t mslContentSignature(const std::string* source) {
-    std::uint64_t fnv = 1469598103934665603ULL;
-    auto mixByte = [&fnv](std::uint8_t byte) {
-        fnv ^= static_cast<std::uint64_t>(byte);
-        fnv *= 1099511628211ULL;
-    };
-    auto mixWord = [&](std::uint64_t word) {
-        for (unsigned i = 0; i < 8; ++i) {
-            mixByte(static_cast<std::uint8_t>((word >> (i * 8)) & 0xFFu));
-        }
-    };
-    if (source == nullptr) {
-        mixWord(0);
-        return fnv;
-    }
-    const std::size_t n = source->size();
-    mixWord(static_cast<std::uint64_t>(n));
-    constexpr std::size_t kProbe = 64;
-    const std::size_t head = std::min(n, kProbe);
-    for (std::size_t i = 0; i < head; ++i) {
-        mixByte(static_cast<std::uint8_t>((*source)[i]));
-    }
-    if (n > kProbe) {
-        const std::size_t tailStart = (n > 2 * kProbe) ? (n - kProbe) : kProbe;
-        for (std::size_t i = tailStart; i < n; ++i) {
-            mixByte(static_cast<std::uint8_t>((*source)[i]));
-        }
-    }
-    return fnv;
-}
+// (mslContentSignature removed — superseded by the monotonic program-object
+//  serial in the memo identity: the content-sig was a probabilistic guard
+//  weak for SPIRV-Cross boilerplate; the serial is the absolute realloc guard.)
 
 // Phase 6-1e / 6-2: transform a SPIRV-Cross fragment MSL source so
 // Metal honours GL 4.6 §14.6 / ARB_sample_shading.
@@ -5916,7 +5881,8 @@ struct MetalFrameGraph::Impl {
                     computePipelineCacheKeyPrefix(info, colorFormat,
                                                   attachmentSampleCount,
                                                   forcePerSampleFS),
-                    info.vertexMSL, info.fragmentMSL);
+                    info.vertexMSL, info.fragmentMSL,
+                    info.programObjectSerial);
             shaderSlots =
                 translatedDrawMSLSlots(info, pipelineCacheKey, hasFragmentStage);
             vertexUsesArgBuf =
@@ -9423,7 +9389,8 @@ struct MetalFrameGraph::Impl {
                     computePipelineCacheKeyPrefix(source, colorFormat,
                                                   attachmentSampleCount,
                                                   forcePerSampleFS),
-                    source.vertexMSL, source.fragmentMSL);
+                    source.vertexMSL, source.fragmentMSL,
+                    source.programObjectSerial);
             const TranslatedDrawMSLSlots& slots =
                 translatedDrawMSLSlots(source, pipelineCacheKey,
                                        hasFragmentStage);
@@ -13012,6 +12979,7 @@ struct MetalFrameGraph::Impl {
             << ",\"verifyMismatchCollision\":"
             << mslHashMemoVerifyMismatchCollision
             << ",\"ptrKeyOnly\":" << (mslHashMemoPtrKeyOnly ? 1 : 0)
+            << ",\"failsafeSkips\":" << mslHashMemoFailsafeSkips
             << ",\"slotCacheHits\":" << translatedDrawMSLSlotCacheHits
             << ",\"slotCacheMisses\":" << translatedDrawMSLSlotCacheMisses
             << ",\"gsReplayPathFired\":" << gsReplayPathFired
@@ -22688,7 +22656,8 @@ private:
         }
         const std::uint64_t pipelineCacheKey =
             computePipelineCacheKeyMemoized(
-                prefix, source.vertexMSL, source.fragmentMSL);
+                prefix, source.vertexMSL, source.fragmentMSL,
+                source.programObjectSerial);
         const TranslatedDrawMSLSlots& slots =
             translatedDrawMSLSlots(source, pipelineCacheKey, hasFragmentStage);
         const bool vertexUsesArgBuf = slots.vertexMslUsesArgBuf;
@@ -22839,6 +22808,10 @@ private:
     std::unordered_map<std::uint64_t, std::uint64_t> mslHashMemoLastUse;
     std::uint64_t mslHashMemoClock = 0;
     std::uint64_t mslHashMemoLookups = 0;
+    // Fail-safe (serial==0 → skip memo) bypass count = the DIRECT plumbing-
+    // completeness signal: ~0 = serial populated everywhere; high = unpopulated
+    // tdi-build sites (fail-safe over-firing = perf-not-correctness).
+    std::uint64_t mslHashMemoFailsafeSkips = 0;
     std::uint64_t mslHashMemoHits = 0;
     std::uint64_t mslHashMemoMisses = 0;
     std::uint64_t mslHashMemoEvictions = 0;
@@ -22897,18 +22870,38 @@ private:
     // Returns the FNV over the (program-stable) MSL bytes only, memoized by the
     // MSL-string pair identity. GL-thread-only (no lock).
     std::uint64_t mslOnlyFnvMemoized(const std::string* vertexMSL,
-                                     const std::string* fragmentMSL) {
+                                     const std::string* fragmentMSL,
+                                     std::uint64_t programObjectSerial) {
         ++mslHashMemoLookups;
-        // Robust identity = {ptr,size,data} pair (discriminator) + content
-        // signature (use-after-free guard). APPGL_MSL_HASH_MEMO_PTRKEY=1 reverts
-        // to the bare pair key — the buggy control for reproducing + byte-tell-
-        // classifying the free-reuse ABA.
-        std::uint64_t identity = recordPlanIdentityKey(0, vertexMSL, fragmentMSL);
-        if (!mslHashMemoPtrKeyOnly) {
-            identity ^= mslContentSignature(vertexMSL);
-            identity *= 1099511628211ULL;
-            identity ^= mslContentSignature(fragmentMSL);
-            identity *= 1099511628211ULL;
+        // Identity: APPGL_MSL_HASH_MEMO_PTRKEY=1 = the bare {ptr,size,data} key
+        // (the buggy use-after-free CONTROL, to reproduce + byte-tell-classify
+        // the ABA). Default = {serial, vObj, fObj}: the monotonic program-object
+        // serial discriminates ACROSS realloc (ABSOLUTE, never reused → a freed
+        // program's MSL reused by a NEW program can't alias a stale entry);
+        // vObj/fObj (the FIELD addresses) discriminate base-vs-gsPassThrough
+        // WITHIN a program. Content changes (relink / gsPassThrough rewrite) stay
+        // invalidation-covered (@7535 / @38911-39136). FAIL-SAFE: serial==0
+        // (unpopulated tdi-build site) → SKIP the memo, recompute fresh — a PERF
+        // miss, NOT a stale serve (so a missed plumbing site is perf-not-
+        // correctness, the property that makes the absolute serial safe).
+        std::uint64_t identity;
+        if (mslHashMemoPtrKeyOnly) {
+            identity = recordPlanIdentityKey(0, vertexMSL, fragmentMSL);
+        } else if (programObjectSerial == 0) {
+            ++mslHashMemoFailsafeSkips;
+            return computeMslOnlyFnv(vertexMSL, fragmentMSL);
+        } else {
+            std::uint64_t fnv = 1469598103934665603ULL;
+            auto mixWord = [&fnv](std::uint64_t word) {
+                for (unsigned i = 0; i < 8; ++i) {
+                    fnv ^= static_cast<std::uint64_t>((word >> (i * 8)) & 0xFFu);
+                    fnv *= 1099511628211ULL;
+                }
+            };
+            mixWord(programObjectSerial);
+            mixWord(reinterpret_cast<std::uintptr_t>(vertexMSL));
+            mixWord(reinterpret_cast<std::uintptr_t>(fragmentMSL));
+            identity = fnv;
         }
         auto it = mslHashMemo.find(identity);
         if (it != mslHashMemo.end()) {
@@ -23005,13 +22998,15 @@ private:
     std::uint64_t computePipelineCacheKeyMemoized(
         std::uint64_t prefix,
         const std::string* vertexMSL,
-        const std::string* fragmentMSL) {
+        const std::string* fragmentMSL,
+        std::uint64_t programObjectSerial) {
         if (!mslHashMemoEnabled) {
             return computePipelineCacheKeyFromPrefix(prefix, vertexMSL,
                                                      fragmentMSL);
         }
         return finalizePipelineCacheKeyFromMslFnv(
-            mslOnlyFnvMemoized(vertexMSL, fragmentMSL), prefix);
+            mslOnlyFnvMemoized(vertexMSL, fragmentMSL, programObjectSerial),
+            prefix);
     }
 
     // (invalidateMslHashMemoForStringObject + noteGsReplayPathFired are defined
