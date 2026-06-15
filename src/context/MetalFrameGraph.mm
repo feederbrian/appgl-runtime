@@ -5883,7 +5883,8 @@ struct MetalFrameGraph::Impl {
                                                   forcePerSampleFS),
                     info.vertexMSL, info.fragmentMSL,
                     info.programObjectSerial,
-                    info.programObjectExecutableGeneration);
+                    info.programObjectExecutableGeneration,
+                    info.programMslVolatile);
             shaderSlots =
                 translatedDrawMSLSlots(info, pipelineCacheKey, hasFragmentStage);
             vertexUsesArgBuf =
@@ -9392,7 +9393,8 @@ struct MetalFrameGraph::Impl {
                                                   forcePerSampleFS),
                     source.vertexMSL, source.fragmentMSL,
                     source.programObjectSerial,
-                    source.programObjectExecutableGeneration);
+                    source.programObjectExecutableGeneration,
+                    source.programMslVolatile);
             const TranslatedDrawMSLSlots& slots =
                 translatedDrawMSLSlots(source, pipelineCacheKey,
                                        hasFragmentStage);
@@ -12982,6 +12984,7 @@ struct MetalFrameGraph::Impl {
             << mslHashMemoVerifyMismatchCollision
             << ",\"ptrKeyOnly\":" << (mslHashMemoPtrKeyOnly ? 1 : 0)
             << ",\"failsafeSkips\":" << mslHashMemoFailsafeSkips
+            << ",\"volatileSkips\":" << mslHashMemoVolatileSkips
             << ",\"slotCacheHits\":" << translatedDrawMSLSlotCacheHits
             << ",\"slotCacheMisses\":" << translatedDrawMSLSlotCacheMisses
             << ",\"gsReplayPathFired\":" << gsReplayPathFired
@@ -22660,7 +22663,8 @@ private:
             computePipelineCacheKeyMemoized(
                 prefix, source.vertexMSL, source.fragmentMSL,
                 source.programObjectSerial,
-                source.programObjectExecutableGeneration);
+                source.programObjectExecutableGeneration,
+                source.programMslVolatile);
         const TranslatedDrawMSLSlots& slots =
             translatedDrawMSLSlots(source, pipelineCacheKey, hasFragmentStage);
         const bool vertexUsesArgBuf = slots.vertexMslUsesArgBuf;
@@ -22815,6 +22819,11 @@ private:
     // completeness signal: ~0 = serial populated everywhere; high = unpopulated
     // tdi-build sites (fail-safe over-firing = perf-not-correctness).
     std::uint64_t mslHashMemoFailsafeSkips = 0;
+    // ABA fix (c): how many lookups skipped the memo because the program is a
+    // pipeline-splice CONTAINER (volatile MSL). Expected >0 on SSO/GS/tess CTS,
+    // 0 on WZ (no splice). Kept SEPARATE from failsafeSkips so that stays a
+    // clean serial-plumbing-completeness signal.
+    std::uint64_t mslHashMemoVolatileSkips = 0;
     std::uint64_t mslHashMemoHits = 0;
     std::uint64_t mslHashMemoMisses = 0;
     std::uint64_t mslHashMemoEvictions = 0;
@@ -22875,7 +22884,8 @@ private:
     std::uint64_t mslOnlyFnvMemoized(const std::string* vertexMSL,
                                      const std::string* fragmentMSL,
                                      std::uint64_t programObjectSerial,
-                                     std::uint64_t programObjectExecutableGeneration) {
+                                     std::uint64_t programObjectExecutableGeneration,
+                                     bool programMslVolatile) {
         ++mslHashMemoLookups;
         // Identity: APPGL_MSL_HASH_MEMO_PTRKEY=1 = the bare {ptr,size,data} key
         // (the buggy use-after-free CONTROL, to reproduce + byte-tell-classify
@@ -22896,6 +22906,17 @@ private:
         std::uint64_t identity;
         if (mslHashMemoPtrKeyOnly) {
             identity = recordPlanIdentityKey(0, vertexMSL, fragmentMSL);
+        } else if (programMslVolatile) {
+            // ABA fix (c): pipeline-splice CONTAINER — its MSL is re-derived per
+            // draw IN PLACE (same buffer, same length, no relink → serial+gen
+            // flat). NO cheap {ptr,size,serial,gen} key can distinguish a
+            // same-buffer same-length content rewrite, so SKIP the memo and
+            // recompute fresh. A perf-miss on these CTS SSO/GS/tess draws, never
+            // a stale serve. WZ has no splice containers → Axis-A unaffected.
+            // (PTRKEY control above bypasses this so it can still reproduce the
+            // bare-key ABA.)
+            ++mslHashMemoVolatileSkips;
+            return computeMslOnlyFnv(vertexMSL, fragmentMSL);
         } else if (programObjectSerial == 0) {
             ++mslHashMemoFailsafeSkips;
             return computeMslOnlyFnv(vertexMSL, fragmentMSL);
@@ -23015,14 +23036,16 @@ private:
         const std::string* vertexMSL,
         const std::string* fragmentMSL,
         std::uint64_t programObjectSerial,
-        std::uint64_t programObjectExecutableGeneration) {
+        std::uint64_t programObjectExecutableGeneration,
+        bool programMslVolatile) {
         if (!mslHashMemoEnabled) {
             return computePipelineCacheKeyFromPrefix(prefix, vertexMSL,
                                                      fragmentMSL);
         }
         return finalizePipelineCacheKeyFromMslFnv(
             mslOnlyFnvMemoized(vertexMSL, fragmentMSL, programObjectSerial,
-                               programObjectExecutableGeneration),
+                               programObjectExecutableGeneration,
+                               programMslVolatile),
             prefix);
     }
 

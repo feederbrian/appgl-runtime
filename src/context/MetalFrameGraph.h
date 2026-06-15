@@ -602,6 +602,11 @@ struct TranslatedDrawInfo {
     // FIRING. 0 = unset → carried with programObjectSerial==0 into the memo
     // fail-safe. Set at the tdi-build sites alongside programObjectSerial.
     std::uint64_t programObjectExecutableGeneration = 0;
+    // S25 ABA fix (c): the owning program is a pipeline-splice CONTAINER whose
+    // MSL is re-derived per draw in place → the MSL-FNV memo must SKIP it
+    // (recompute fresh, never a stale same-buffer hit). Set at the tdi-build
+    // sites from GLProgramObject::mslVolatile.
+    bool programMslVolatile = false;
     bool vertexMslUsesArgumentBuffer = false;
     bool fragmentMslUsesArgumentBuffer = false;
     const ShaderReflection* vertexReflection = nullptr;

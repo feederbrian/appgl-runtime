@@ -1682,6 +1682,8 @@ static void assignTranslatedDrawProgramMsl(TranslatedDrawInfo& tdi,
     tdi.programObjectSerial = program.objectSerial;
     // ABA residual fix: the program's executableGeneration (relink-in-place guard).
     tdi.programObjectExecutableGeneration = program.executableGeneration;
+    // ABA fix (c): splice-container volatile MSL → memo skip.
+    tdi.programMslVolatile = program.mslVolatile;
     tdi.vertexMslUsesArgumentBuffer =
         program.vertexMslUsesArgumentBuffer;
     tdi.fragmentMslUsesArgumentBuffer =
@@ -36727,6 +36729,9 @@ GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
     setPipelineEmulationStageUniforms(3, gsProg);
     setPipelineEmulationStageUniforms(4, fsProg);
     gsProg->uniformLayoutComputed = false;
+    // (c) ABA fix: GS-pipeline emulation container — FS MSL spliced in place per
+    // draw (no relink) → volatile, memo must skip (same rationale as resolveDrawProgram).
+    gsProg->mslVolatile = true;
     outProgramName = ppo->geometryProgram;
     return gsProg;
 }
@@ -36902,6 +36907,11 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
         vsProg->fragmentReflection = ShaderReflection{};
         vsProg->uniformLayoutComputed = false;
     }
+    // (c) ABA fix: the spliced container FS MSL is re-derived per draw IN PLACE
+    // (same buffer, no relink → flat serial/gen) → mark VOLATILE so the MSL-FNV
+    // memo skips it (recompute, never a stale same-buffer hit). Only the
+    // pipeline-splice path reaches here (the bound-program fast path early-returns).
+    vsProg->mslVolatile = true;
     programName = ppo->vertexProgram;
     return vsProg;
 }
@@ -37141,6 +37151,9 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
             vsProg->vertexMslUsesArgumentBuffer;
         synth->vertexReflection = vsProg->vertexReflection;
     }
+    // (c) ABA fix: tess synth container — VS/FS MSL spliced in place per draw
+    // (no relink) → volatile, memo must skip (same rationale as resolveDrawProgram).
+    synth->mslVolatile = true;
 
     // Carry SPIR-V onto the synth program so any downstream emulator
     // path that wants it (TessellationEmulator parsed-module cache,
@@ -39124,6 +39137,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     tdi.programObjectSerial = program.objectSerial;  // S25 memo realloc guard
     tdi.programObjectExecutableGeneration =
         program.executableGeneration;  // ABA relink-in-place guard
+    tdi.programMslVolatile = program.mslVolatile;  // ABA fix (c): splice-container skip
     // S25 state_resolve lever (Axis-B): note the GS-replay re-point fired so the
     // diag JSONL carries N — the non-vacuity guard on the GS-replay control.
     if (frameGraph) {

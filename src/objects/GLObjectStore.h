@@ -966,6 +966,14 @@ struct GLProgramObject {
     // uses it as the absolute realloc/use-after-free guard across program
     // create/delete churn (the class that defeats pointer-identity).
     std::uint64_t objectSerial = nextGLProgramObjectSerial();
+    // S25 ABA fix (c): true when this program is used as a pipeline-splice
+    // CONTAINER (resolveDrawProgram / resolvePipelineEmulationProgram /
+    // ensurePipelineTessSynthesizedProgram) whose vertex/fragment MSL is
+    // re-derived per draw IN PLACE (same buffer, no relink → flat serial+gen).
+    // Such MSL is inherently volatile, so the MSL-FNV memo MUST skip it
+    // (recompute fresh) — folding any cheap {ptr,size,serial,gen} key can't
+    // catch a same-buffer same-length content rewrite. One-way latch.
+    bool mslVolatile = false;
     mutable bool phase2ProgramStructuralFingerprintValid = false;
     mutable GLuint phase2ProgramStructuralFingerprintProgram = 0;
     mutable std::uint64_t phase2ProgramStructuralFingerprintGeneration = 0;
