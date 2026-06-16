@@ -6008,7 +6008,30 @@ struct MetalFrameGraph::Impl {
         ScopedOwnedObjCObject ownedPipelineState;
 
         id<MTLRenderPipelineState> pipelineState = nil;
-        if (info.pipelineStateCacheOut != nullptr) {
+        // sub-lever (b): last-resolved PSO fast-path. If this draw's FULL identity
+        // matches the previous resolved draw, reuse the last PSO and skip the
+        // per-draw unordered_map find. Safe because (under the default unlimited
+        // cache, where this is enabled) the cached PSO is freed only by relink
+        // (CFRelease+clear @GLContextShaderLink:3376) or program delete — both
+        // caught here: serial (≠0, monotonic) catches delete+realloc, generation
+        // catches relink-in-place (bumped @linkProgram:7535), and the content-key
+        // catches SSO in-place MSL rewrites (the memo + (c) volatile-skip already
+        // make the key correct on this base). Disabled under a configured limit
+        // (eviction could free the cached PSO) — falls through to the find.
+        if (lastResolvedPso != nullptr &&
+            !renderPsoCacheLimited() &&
+            info.programObjectSerial != 0 &&
+            pipelineCacheKey == lastResolvedPsoKey &&
+            info.programObjectSerial == lastResolvedPsoSerial &&
+            info.programObjectExecutableGeneration == lastResolvedPsoGen) {
+            pipelineState = (__bridge id<MTLRenderPipelineState>)(lastResolvedPso);
+            if (info.pipelineStateCacheHitsOut != nullptr) {
+                ++(*info.pipelineStateCacheHitsOut);
+            }
+            ++pipelineCacheHits;
+            ++renderPsoLastKeyFastPathHits;
+        }
+        if (pipelineState == nil && info.pipelineStateCacheOut != nullptr) {
             auto it = info.pipelineStateCacheOut->find(pipelineCacheKey);
             if (it != info.pipelineStateCacheOut->end() && it->second != nullptr) {
                 pipelineState = (__bridge id<MTLRenderPipelineState>)(it->second);
@@ -6023,6 +6046,14 @@ struct MetalFrameGraph::Impl {
                     ++(*info.pipelineStateCacheHitsOut);
                 }
                 ++pipelineCacheHits;
+                // sub-lever (b): remember this resolved {key,PSO} + its program
+                // identity (serial+gen) for the next-draw fast-path above. The
+                // pointer is cache-owned (stable until relink/delete/eviction,
+                // all guarded), so caching it across draws is safe.
+                lastResolvedPso = it->second;
+                lastResolvedPsoKey = pipelineCacheKey;
+                lastResolvedPsoSerial = info.programObjectSerial;
+                lastResolvedPsoGen = info.programObjectExecutableGeneration;
             }
         }
         // Legacy scalar cache kept as a fallback for the first-draw
@@ -13026,6 +13057,7 @@ struct MetalFrameGraph::Impl {
             << ",\"slotCacheHits\":" << translatedDrawMSLSlotCacheHits
             << ",\"slotCacheMisses\":" << translatedDrawMSLSlotCacheMisses
             << ",\"gsReplayPathFired\":" << gsReplayPathFired
+            << ",\"psoLastKeyFastPathHits\":" << renderPsoLastKeyFastPathHits
             << "}";
         out << ",\"presentLeanLanding\":"
             << presentLeanLandingDiagnosticsJson();
@@ -22231,6 +22263,17 @@ private:
         translatedDrawSampleMaskSlotCache;
     std::uint64_t renderPsoCacheClock = 0;
     std::uint64_t renderPsoCacheEvictions = 0;
+    // S25 pipeline_build sub-lever (b): last-resolved PSO fast-path. Remember the
+    // previous draw's resolved {key, PSO} plus its program identity (serial+gen)
+    // so a consecutive same-program/same-state draw can reuse the PSO and skip
+    // the per-draw unordered_map find. Consulted only under the default unlimited
+    // cache (no eviction); the serial/gen guard covers program delete+realloc and
+    // relink-in-place.
+    std::uint64_t lastResolvedPsoKey = 0;
+    std::uint64_t lastResolvedPsoSerial = 0;
+    std::uint64_t lastResolvedPsoGen = 0;
+    void* lastResolvedPso = nullptr;
+    std::uint64_t renderPsoLastKeyFastPathHits = 0;
 
     // ADV-4: reusable render pass descriptor. Avoids allocating a fresh
     // autoreleased ObjC object at each render-pass setup site.
