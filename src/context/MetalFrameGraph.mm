@@ -22808,9 +22808,12 @@ private:
     // rewrites (a rewritten MSL = new data-ptr/size → new identity → miss →
     // recompute). GL-thread-confined (all live key-compute sites run on the GL
     // thread; the dispatch_apply workers CONSUME the precomputed key) → no lock.
-    // Default-OFF: the OFF path keeps the exact crown key scheme (bit-identical).
+    // Default-ON (operator-authorized 21% activation): no-env → memo ON, the
+    // SAME code path as the MEMO=1-via-env build (so its full-CTS transfers);
+    // APPGL_MSL_HASH_MEMO=0 is the OFF switch, keeping the exact crown key
+    // scheme (bit-identical). Pure default-polarity flip — no logic change.
     const bool mslHashMemoEnabled =
-        appglEnvEnabledDefaultOff("APPGL_MSL_HASH_MEMO");
+        appglEnvEnabledDefaultOn("APPGL_MSL_HASH_MEMO");
     const bool mslHashMemoVerify =
         appglEnvEnabledDefaultOff("APPGL_MSL_HASH_MEMO_VERIFY");
     static constexpr std::size_t kMslHashMemoCapacity = 4096;
