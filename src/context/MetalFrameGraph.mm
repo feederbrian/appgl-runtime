@@ -156,7 +156,21 @@ static std::size_t renderPsoCacheLimitPerProgram() {
 // hash-map ops on every PSO-cache access; under a configured limit the LRU is
 // maintained exactly as before, so eviction stays correct.
 static bool renderPsoCacheLimited() {
-    static const bool limited = (renderPsoCacheLimitPerProgram() != 0);
+    // "Any PSO-cache limit active" — gates BOTH (a)'s lazy-LRU lastUse write and
+    // (b)'s last-key PSO fast-path. Covers the per-program evictor
+    // (APPGL_RENDER_PSO_CACHE_LIMIT_PER_PROGRAM) AND the SEPARATE global total-
+    // cache evictor (evictRenderPsoTotalCacheIfNeeded @GLContext.mm:39607,
+    // APPGL_RENDER_PSO_CACHE_LIMIT_TOTAL) which CFRelease's a global-LRU PSO and
+    // does NOT clear (b)'s lastResolvedPso. Under a total-limit-only config (b)
+    // MUST disable (else UAF on a globally-evicted PSO) and (a) MUST keep the
+    // lastUse write (the global evictor's LRU). Both limits default 0 (evictors
+    // off) ⇒ false by default ⇒ perf-inert for the canonical config (A/Bs
+    // unaffected). (renderPsoTotalCacheLimit() is GLContext-local / not cross-TU-
+    // callable, so read the same env here via envSizeLimit — identical
+    // active/inactive boundary.)
+    static const bool limited =
+        (renderPsoCacheLimitPerProgram() != 0) ||
+        (envSizeLimit("APPGL_RENDER_PSO_CACHE_LIMIT_TOTAL", 0) != 0);
     return limited;
 }
 
