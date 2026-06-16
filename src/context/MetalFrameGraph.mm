@@ -144,6 +144,22 @@ static std::size_t renderPsoCacheLimitPerProgram() {
     return envSizeLimit("APPGL_RENDER_PSO_CACHE_LIMIT_PER_PROGRAM", 0);
 }
 
+// S25 pipeline_build sub-lever (a) — "lazy LRU": the per-program PSO cache's
+// lastUse map exists ONLY to drive evictRenderPsoCacheIfNeeded's LRU choice,
+// and that evictor early-returns when the per-program limit is 0 (the default
+// for APPGL_RENDER_PSO_CACHE_LIMIT_PER_PROGRAM = unlimited). So under the
+// default the per-draw lastUse write is dead weight — it feeds nothing but the
+// renderPsoLastUseRange profiling diagnostic, which is correctly-empty when
+// nothing is ever evicted. Latch "is the cache limited?" once (the limit is a
+// startup env constant; the PSO-cache hit path must not call getenv per draw)
+// and gate both lastUse writes on it: under unlimited we drop one of the two
+// hash-map ops on every PSO-cache access; under a configured limit the LRU is
+// maintained exactly as before, so eviction stays correct.
+static bool renderPsoCacheLimited() {
+    static const bool limited = (renderPsoCacheLimitPerProgram() != 0);
+    return limited;
+}
+
 static std::size_t translatedDrawMSLSlotCacheLimit() {
     return envSizeLimit("APPGL_TRANSLATED_DRAW_MSL_SLOT_CACHE_LIMIT", 0);
 }
@@ -5996,7 +6012,10 @@ struct MetalFrameGraph::Impl {
             auto it = info.pipelineStateCacheOut->find(pipelineCacheKey);
             if (it != info.pipelineStateCacheOut->end() && it->second != nullptr) {
                 pipelineState = (__bridge id<MTLRenderPipelineState>)(it->second);
-                if (info.pipelineStateCacheLastUseOut != nullptr) {
+                // sub-lever (a): skip the dead-weight lastUse write when the
+                // PSO cache is unlimited (see renderPsoCacheLimited).
+                if (info.pipelineStateCacheLastUseOut != nullptr &&
+                    renderPsoCacheLimited()) {
                     (*info.pipelineStateCacheLastUseOut)[pipelineCacheKey] =
                         ++renderPsoCacheClock;
                 }
@@ -6871,7 +6890,10 @@ struct MetalFrameGraph::Impl {
             if (info.pipelineStateCacheOut != nullptr) {
                 void* retained = (void*)CFBridgingRetain(pipelineState);
                 auto inserted = info.pipelineStateCacheOut->emplace(pipelineCacheKey, retained);
-                if (info.pipelineStateCacheLastUseOut != nullptr) {
+                // sub-lever (a): skip the dead-weight lastUse write when the
+                // PSO cache is unlimited (see renderPsoCacheLimited).
+                if (info.pipelineStateCacheLastUseOut != nullptr &&
+                    renderPsoCacheLimited()) {
                     (*info.pipelineStateCacheLastUseOut)[pipelineCacheKey] =
                         ++renderPsoCacheClock;
                 }
