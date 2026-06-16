@@ -23,6 +23,183 @@ attribution stays positive. The implementation gate remains closed until
 GLTest reports the now-correct viewport profile and Foreman explicitly releases
 the lever.
 
+> **SUPERSEDED (2026-06-15) for the post-W2-crown surface — see "S25 Post-W2-Crown
+> Localization" immediately below.** The S23 gate above (viewport re-baseline,
+> `d17e298`-era) is retained for lineage. The W2 CB-leak crown (`5a79c25c` =
+> `2566e14`) re-baselined the performance surface and a fresh 6-bucket profile
+> moved the target; the load-bearing attribution question is answered there.
+
+## S25 Post-W2-Crown Localization — state_resolve MSL-Hash Memo (2026-06-15)
+
+Status: **design-of-record for the state_resolve lever.** Operator-greenlit
+(design phase, read-only). Implementation gated on operator examination + explicit
+go. Default-OFF; crown-rotation only on a green gate + operator express in-session
+permission + operator live-run.
+
+### S23 → S25 supersede: why the target moved
+
+The S23 gate gated Lever A on whether encode-under-churn still dominates. It does —
+but the W2 plan-prepare-at-record (`recordPlanMemo`) already collapsed the S23 #1
+cost (`phase2_plan_lookup`, 7.748 ms), which had been **masking** the durable
+bottleneck. A 6-bucket per-draw CPU re-profile on the W2 crown (read-only,
+DYLD-explicit on `5a79c25c`/`09431D80`, steady-state, relative shares; full table
+in `live-targets/appgl-bridge/FOREMAN-S25-PERF-PROFILE-RESULT.md`) exposed it:
+
+- **`state_resolve` ≈ 54% of the per-draw GL-wrapper** (71.3% of
+  `framegraph_encode` × 76.5% wrapper-share), #1 by ~4×.
+- `phase2_plan_lookup` demoted to 5.0% (W2 worked, as predicted).
+- `submission_group` / `preflight` negligible (1.0% / 0.1%).
+- Threading is **out** on three independent grounds (draw-encode = 2.8%;
+  `PARALLEL_ENCODE` forms zero batches on the crown; `state_resolve` is per-draw
+  work *inside* the encode, not the draw-encode). Efficiency-vs-threading framing
+  is in the Next-Ceiling cadence below.
+
+### The localized root (a surgical instance of Lever A)
+
+`state_resolve`'s dominant cost is **not** VAO/uniform/texture resolution — it is the
+per-draw **re-hash of the full vertex + fragment MSL source** in
+`computePipelineCacheKey` (`MetalFrameGraph.mm:4234-4246`, O(KB)/draw). The key's
+downstream consumers (slot-cache `translatedDrawMSLSlots`@22727, PSO cache@6021) are
+already memoized by the resulting key; **the key-compute is the lone un-memoized
+step.** It runs every draw because the W2 plan-prepare that would skip it
+(`recordPlanMemo` via `ensureRecordPreparedPlanForArm`) bypasses the dominant ~56%
+FBO draws (Requirement-2 prepare-skip @23085-91 → `translatedPlan` null).
+
+Empirically confirmed (read-only, existing Run B): **PSO-cache hit-rate 96.36%**
+(35078/1326) → the cost is the pre-cache key-compute, not PSO builds;
+`recordPlanMemo` disaggregates 20615 lean-memoized vs ~36K FBO-bypass draws (the
+re-hash population). This is the surgical isolation of Lever A's "pipeline cache key"
+payload term — the single most expensive un-memoized contribution.
+
+### Lever: memoize the MSL-hash term, keep the prefix per-draw
+
+Split `computePipelineCacheKeyFromPrefix` (`MetalFrameGraph.mm:4219`):
+
+- (a) the **MSL-FNV contribution** — `mixString(vertexMSL)` + `mixString(fragmentMSL)`,
+  the O(KB) cost — becomes a **memoized lookup**;
+- (b) the **per-draw finalize** mixes the cheap O(1) prefix word into the memoized
+  MSL-FNV.
+
+**Implementation boundary (load-bearing):** memoize ONLY the MSL-hash term; KEEP the
+prefix mixed per-draw — the prefix is what discriminates the per-sample-FS /
+clip-control / multiview variants. A memo that swallows the prefix (whole-key per
+program) re-introduces variant collisions.
+
+### Keying — MSL-STRING IDENTITY (the correctness core)
+
+Key the MSL-FNV memo on **MSL-string identity**, not program-id: reuse the existing
+in-production `phase2PlanHashShaderIdentity` (`GLContext.mm:2243-2251` =
+`{string-obj-ptr, size, data-ptr}`, already applied @2345-46 for the phase2 plan
+key), as the **PAIR** `{vertexMSL-identity, fragmentMSL-identity}` (the GS-replay
+path can mix a gsPassThrough-vertex with a base-fragment, so the pair is required).
+
+**Why string-identity, not per-program (stabilizing rationale).** String-identity is
+correctness-complete **by construction**: a content/identity key cannot alias two
+distinct hashed MSL strings no matter how many code paths re-point
+`tdi.{vertex,fragment}MSL`. Per-program keying is complete *only under exhaustive
+enumeration* of every re-point site — an open-ended obligation that already failed
+once: a first inspection cleared per-sample-FS / clip-control / multiview (all
+genuinely prefix-encoded) and concluded per-program safe, but an **exhaustive sweep**
+found the **GS-emulation / tessellation replay** path (`GLContext.mm:39108-39185`)
+re-points the hashed pointers to rewritten variants —
+`tdi.vertexMSL ← &program.gsPassThroughVertexMSL` (@39119);
+`tdi.fragmentMSL ← &program.gsPassThroughFragmentMSL` (@39171, rewritten in place via
+`std::move` @39144 on `primIdLoc` change, through `rewriteFragmentMSLForPrimitiveID` /
+`rewriteFragmentMSLForFp64StageIn`) — under the **same link-generation** and **not
+prefix-encoded**. A per-program key would alias base vs GS-replay in the shared
+slot-cache@22727 = a real correctness bug for GS/tessellation draws. (Verified
+independently by Worker's sweep, Foreman, and Clerk reading the source.)
+String-identity makes correctness independent of that enumeration ever being complete.
+
+**ABA / invalidation.** MSL strings are KB-sized → always heap, non-SSO → the
+data-ptr is a reliable realloc signal. All content-mutation sites assign/`std::move`
+from a fresh string (new data-ptr): GS draw-time rewrites
+(`synthesisePassThroughVertexMSL` @38919, `gsPassThroughFragmentMSL` @39144) and
+link-time base reassembly. Fold memo-entry invalidation into those existing mutation
+sites (the gsPassThrough cache-clear @39150-61 + the link clears), with the **P1
+content-equality probe** as defense-in-depth against the residual theoretical ABA.
+
+**Not bit-identical.** The new key value differs from the crown's (FNV mixes prefix
+first, then MSL; reordering to memoize the MSL term changes the value). The safety
+invariant is therefore *not* bit-identicality but: (1) **consistency** — every live
+key-compute site adopts the scheme atomically (live site = `5911` only; `9441` is
+dormant — zero callers / zero enqueue sites — updated for hygiene); (2) **no persisted
+keys** — the key feeds only in-memory per-run caches (rebuilt each launch), so a
+scheme change strands no on-disk cache; (3) **collision-resistance unchanged** — same
+FNV inputs, reordered → same discrimination (re-validated by the P1/P2 probes).
+
+**Thread-safety.** The live key-compute (`5911`) is GL-thread-confined; the
+`dispatch_apply` workers consume the precomputed key and do not recompute. The memo
+is lock-free by construction; compute the MSL-FNV on the GL thread (first use / at
+link) so it is read-only when workers run.
+
+### Validation gate (pre-registered, 3-axis)
+
+Verbatim source: `live-targets/appgl-bridge/FOREMAN-STATE-RESOLVE-GATE-INPUT.md`.
+ALL three axes must pass before any crown-rotation.
+
+- **Axis A — MAGNITUDE (the A/B re-profile, headline exit).** Re-run the *identical*
+  6-bucket profile, candidate vs crown `5a79c25c`, same harness/posture. Subject
+  discipline: DYLD-insert each dylib explicitly (not build-release — it drifts),
+  UUID-confirm, and **shape-equivalence** (Release-shape ≈ crown; HALT on
+  debug/-O0/ASAN — it inflates buckets unevenly and the relative-share read lies).
+  Engagement (non-vacuity): the memo provably fires on FBO draws (hit-rate > 0, MSL
+  re-hash count → ~0 there); a zero-fire candidate auto-fails. PASS BAR
+  (pre-registered, RELATIVE share — not an absolute-µs claim): `state_resolve` share
+  drops to its non-re-hash residual (pre-register the residual target from Worker's
+  sub-op sizing before the run). Magnitude sanity: the drop must account for the
+  predicted re-hash share, else wrong root → do not crown.
+- **Axis B — CORRECTNESS NO-REGRESS.** SCOUT-W full P→F=0 KHR-GL46/CTS, candidate vs
+  crown. Variant-discrimination positive-controls (the cache-coherence axis), led by
+  the **decisive GS-replay control** — same program's normal draw vs its GS-replay
+  draw (primitiveID, and fp64-stage-in; the @39119/@39171 re-point) must get DISTINCT
+  keys + correct PSO + NO slot-cache@22727 alias — then per-sample-FS / clip-control /
+  multiview, plus re-link re-computes, plus no-persisted-keys confirm.
+- **Axis C — BUILD POSTURE.** Default-OFF env-gated for clean A/B isolation;
+  crown-applicable (rotate `5a79c25c` → candidate) only on Axis-A ∧ Axis-B green with
+  operator express in-session permission (crown-flow: archive-first rollback,
+  verify-the-irreversible-step, atomic sidecar regen, no teammate-relay auth) and the
+  operator's own live-run.
+
+### Next-ceiling cadence + M2-M6+ scaling
+
+Verbatim source: same Foreman doc, Section 2.
+
+- **The ladder:** profile → lever → re-profile → next-ceiling → repeat, run until
+  GPU-bound (hand-off to the Metal-Opt Stage S27, whose §5 entry-gate *is* the
+  GPU-bound check). Each lever's Axis-A re-profile names the next #1.
+- **Standing prediction:** if `state_resolve` collapses, `pipeline_build` (12.7%) is
+  the likely next #1. Pre-register each rung; the re-profile falsifies/confirms.
+- **Machine-class honesty:** relative shares are machine-class-dependent — per-hardware
+  re-profile (M2/M3/M4/M5/M6) before claiming a lever "scales cleanly"; a lever
+  crowned on M1 Max stays gated on a per-class re-profile.
+- **Single-core-ceiling → threading go/no-go:** each re-profile also estimates the
+  residual single-thread per-draw cost → single-core submission ceiling (draws/sec),
+  compared per machine-class vs GPU draw-consumption. One core feeds the GPU →
+  efficiency sufficed; one core can't (likely high-end M5/M6) → that is the *measured*
+  trigger for the record/replay threading arc (`s25-threading-arc-seed`, Mesa-TC),
+  held in reserve — which pays off by then because the efficiency ladder shrank the
+  serial fraction (raised the Amdahl ceiling; you don't thread a 97%-serial path —
+  why W1 walled). The ladder terminus is the threading decision point, on data.
+
+### Implementation slices
+
+1. **Scaffold (default-OFF):** add the MSL-identity PAIR memo + counters
+   (lookup/hit/miss/invalidate) at the `computePipelineCacheKeyFromPrefix` split;
+   env-gated; OFF path = the unchanged crown key scheme.
+2. **Engage:** ON path uses the split scheme (memoized MSL-FNV by identity + per-draw
+   prefix mix); wire invalidation into the existing mutation/clear sites.
+3. **A/B + correctness:** run the 3-axis gate (Axis A re-profile, Axis B SCOUT-W +
+   positive-controls, shape-equivalence).
+4. **Rotation (operator-gated):** only on a green gate, with operator express + live-run.
+
+### Decision posture
+
+This section is the design for the operator to examine. The next step —
+implementation — is the first move beyond the read-only research mandate and is the
+operator's go/no-go. Nothing here has touched code or the canonical pin; all upstream
+work was read-only.
+
 ## Objective
 
 The S23 viewport correctness arc is closed. Phase 2 targets the remaining
