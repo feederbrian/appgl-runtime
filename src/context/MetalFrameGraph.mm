@@ -16081,22 +16081,23 @@ fragment float4 appgl_immediate_textured_fs(
             : 0;
     }
 
-    void materializeAllPendingFboClears() {
+    bool materializeAllPendingFboClears() {
         if (pendingFboClears.empty()) {
-            return;
+            return false;
         }
         std::vector<PendingFboClear> entries;
         entries.swap(pendingFboClears);
         for (const auto& entry : entries) {
             materializePendingFboClearEntry(entry);
         }
+        return true;
     }
 
     // Materialize every pending clear on `texVoid` (and on textures it
     // is a view of, via Metal's parentTexture relationship).
-    void materializePendingFboClearsForTexture(void* texVoid) {
+    bool materializePendingFboClearsForTexture(void* texVoid) {
         if (pendingFboClears.empty() || texVoid == nullptr) {
-            return;
+            return false;
         }
         id<MTLTexture> tex = (__bridge id<MTLTexture>)texVoid;
         void* parent = tex.parentTexture != nil
@@ -16115,6 +16116,7 @@ fragment float4 appgl_immediate_textured_fs(
         for (const auto& entry : matched) {
             materializePendingFboClearEntry(entry);
         }
+        return !matched.empty();
     }
 
     // A draw that SAMPLES a texture with a pending deferred clear must
@@ -25758,12 +25760,12 @@ bool MetalFrameGraph::clearTextureStencil(void* tex, std::uint32_t level, std::u
     return impl_->clearTextureStencil(tex, level, slice, arrayLength, stencil);
 }
 
-void MetalFrameGraph::materializePendingFboClearsForTexture(void* tex) {
-    impl_->materializePendingFboClearsForTexture(tex);
+bool MetalFrameGraph::materializePendingFboClearsForTexture(void* tex) {
+    return impl_->materializePendingFboClearsForTexture(tex);
 }
 
-void MetalFrameGraph::materializeAllPendingFboClears() {
-    impl_->materializeAllPendingFboClears();
+bool MetalFrameGraph::materializeAllPendingFboClears() {
+    return impl_->materializeAllPendingFboClears();
 }
 
 std::uint64_t MetalFrameGraph::openCommandBufferSubmitIndex() const {

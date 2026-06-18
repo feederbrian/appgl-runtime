@@ -1219,12 +1219,13 @@ public:
     // pass consumes as MTLLoadActionClear. Callers that write or read
     // the texture outside the frame graph's encode paths (texture
     // uploads, copy blits) must materialize pending clears on it first
-    // so the deferred clear cannot land on top of newer data.
-    void materializePendingFboClearsForTexture(void* tex);
+    // so the deferred clear cannot land on top of newer data. Returns
+    // true when a clear was materialized.
+    bool materializePendingFboClearsForTexture(void* tex);
     // Conservative variant for multi-attachment consumers (e.g.
     // glBlitFramebuffer): land every deferred clear. No-op when the
     // registry is empty or folding is disabled.
-    void materializeAllPendingFboClears();
+    bool materializeAllPendingFboClears();
     // S24 rename-on-write hazard watermarks: a live-pointer buffer bind
     // stamps openCommandBufferSubmitIndex(); a later CPU write while
     // that index exceeds completedCommandBufferWatermark() must rename.

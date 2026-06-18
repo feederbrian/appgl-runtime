@@ -20,7 +20,45 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
     }
     if (impl_->frameGraph != nullptr) {
         impl_->frameGraph->flushParallelEncodeBoundary();
+        const bool materialized =
+            impl_->frameGraph->materializePendingFboClearsForTexture(
+                tex->metalTexture);
+        if (materialized) {
+            impl_->frameGraph->flushForReadback();
+        }
     }
+    auto ensureColorShadowBacking = [&](GLTextureImageLevel& img,
+                                        GLint shadowLevel) -> bool {
+        if (!isColorFormat(img.desc.internalFormat)) {
+            return true;
+        }
+        const std::size_t rgba8Bytes =
+            rgba8ByteCount(img.desc.width, img.desc.height, img.desc.depth);
+        if (img.rgba8.size() >= rgba8Bytes ||
+            (img.nativeBpp > 0 && !img.nativeData.empty())) {
+            return true;
+        }
+        if (tex->metalTexture != nullptr) {
+            impl_->markTextureMipShadowNeedsMetalMaterialize(*tex, img);
+            if (!impl_->materializeTextureMipShadowFromMetal(
+                    *tex,
+                    shadowLevel,
+                    Impl::TextureMipShadowMaterializeConsumer::ClearTex)) {
+                return false;
+            }
+            if (img.rgba8.size() >= rgba8Bytes ||
+                (img.nativeBpp > 0 && !img.nativeData.empty())) {
+                return true;
+            }
+        }
+        img.rgba8.assign(rgba8Bytes, 0);
+        img.nativeData.clear();
+        img.nativeBpp = 0;
+        img.mipShadowEvicted = false;
+        img.mipShadowEvictedRgba8Bytes = 0;
+        img.mipShadowEvictedNativeBytes = 0;
+        return true;
+    };
     // If level is -1, clear all defined levels to zero.
     if (level < 0) {
         for (auto& [lvl, img] : tex->levels) {
@@ -32,6 +70,10 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
                     pushError(GL_INVALID_OPERATION);
                     return false;
                 }
+                if (!ensureColorShadowBacking(img, lvl)) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
                 img.generatedMipLevel = false;
                 fillLevelWithClearValue_T(impl_.get(), *tex, img,
                                           0, 0, 0,
@@ -39,8 +81,9 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
                                           format, type, data);
             }
         }
+        tex->colorShadowAuthoritative = true;
         if (tex->metalTexture != nullptr) {
-            impl_->replaceMetalTexture(*tex);
+            impl_->replaceMetalTexture(*tex, texture);
         }
         impl_->markGpuResourceWrites({
             {Impl::GpuResourceAccess::Kind::Texture,
@@ -70,6 +113,10 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (!ensureColorShadowBacking(it->second, level)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     it->second.generatedMipLevel = false;
     fillLevelWithClearValue_T(impl_.get(), *tex, it->second,
                             0, 0, 0,
@@ -77,8 +124,9 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
                             it->second.desc.height,
                             it->second.desc.depth,
                             format, type, data);
+    tex->colorShadowAuthoritative = true;
     if (tex->metalTexture != nullptr) {
-        impl_->replaceMetalTexture(*tex);
+        impl_->replaceMetalTexture(*tex, texture);
     }
     impl_->markGpuResourceWrites({
         {Impl::GpuResourceAccess::Kind::Texture,
@@ -114,10 +162,55 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushParallelEncodeBoundary();
+        const bool materialized =
+            impl_->frameGraph->materializePendingFboClearsForTexture(
+                tex->metalTexture);
+        if (materialized) {
+            impl_->frameGraph->flushForReadback();
+        }
+    }
+    auto ensureColorShadowBacking = [&](GLTextureImageLevel& img,
+                                        GLint shadowLevel) -> bool {
+        if (!isColorFormat(img.desc.internalFormat)) {
+            return true;
+        }
+        const std::size_t rgba8Bytes =
+            rgba8ByteCount(img.desc.width, img.desc.height, img.desc.depth);
+        if (img.rgba8.size() >= rgba8Bytes ||
+            (img.nativeBpp > 0 && !img.nativeData.empty())) {
+            return true;
+        }
+        if (tex->metalTexture != nullptr) {
+            impl_->markTextureMipShadowNeedsMetalMaterialize(*tex, img);
+            if (!impl_->materializeTextureMipShadowFromMetal(
+                    *tex,
+                    shadowLevel,
+                    Impl::TextureMipShadowMaterializeConsumer::ClearTex)) {
+                return false;
+            }
+            if (img.rgba8.size() >= rgba8Bytes ||
+                (img.nativeBpp > 0 && !img.nativeData.empty())) {
+                return true;
+            }
+        }
+        img.rgba8.assign(rgba8Bytes, 0);
+        img.nativeData.clear();
+        img.nativeBpp = 0;
+        img.mipShadowEvicted = false;
+        img.mipShadowEvictedRgba8Bytes = 0;
+        img.mipShadowEvictedNativeBytes = 0;
+        return true;
+    };
     if (!impl_->materializeTextureMipShadowFromMetal(
             *tex,
             level,
             Impl::TextureMipShadowMaterializeConsumer::ClearTex)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!ensureColorShadowBacking(it->second, level)) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -126,8 +219,9 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
                             xoffset, yoffset, zoffset,
                             width, height, depth,
                             format, type, data);
+    tex->colorShadowAuthoritative = true;
     if (tex->metalTexture != nullptr) {
-        impl_->replaceMetalTexture(*tex);
+        impl_->replaceMetalTexture(*tex, texture);
     }
     impl_->markGpuResourceWrites({
         {Impl::GpuResourceAccess::Kind::Texture,

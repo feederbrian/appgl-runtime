@@ -11763,7 +11763,12 @@ struct GLContext::Impl {
         // land the clear first (correct for both the shape-match
         // replaceRegion/blit fast path and the full replace).
         if (frameGraph != nullptr && object.metalTexture != nullptr) {
-            frameGraph->materializePendingFboClearsForTexture(object.metalTexture);
+            const bool materialized =
+                frameGraph->materializePendingFboClearsForTexture(
+                    object.metalTexture);
+            if (materialized) {
+                frameGraph->flushForReadback();
+            }
         }
         object.r5PrimaryTextureEvicted = false;
         releaseTextureBufferExpansion(object);
@@ -23935,7 +23940,11 @@ struct GLContext::Impl {
         // destinations must not be overwritten by a later-materialized
         // one — land them all before any blit sub-path encodes.
         if (frameGraph != nullptr) {
-            frameGraph->materializeAllPendingFboClears();
+            const bool materialized =
+                frameGraph->materializeAllPendingFboClears();
+            if (materialized) {
+                frameGraph->flushForReadback();
+            }
         }
         const GLbitfield kSupportedMask = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
         if ((mask & ~kSupportedMask) != 0 || mask == 0) {

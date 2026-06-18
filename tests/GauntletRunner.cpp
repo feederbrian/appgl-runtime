@@ -16211,6 +16211,87 @@ std::uint64_t lazyShadowCounter(GLContext& context, int which) {
     }
 }
 
+using LazyShadowRGBA = std::array<std::uint8_t, 4>;
+using LazyShadowReadback4x4 = std::array<std::uint8_t, 4u * 4u * 4u>;
+
+struct LazyShadowF1Samples {
+    std::array<LazyShadowRGBA, 4> pixels = {};
+};
+
+constexpr LazyShadowRGBA kLazyShadowF1ClearRGBA = {51u, 102u, 204u, 255u};
+constexpr LazyShadowRGBA kLazyShadowPatchRGBA = {255u, 0u, 0u, 255u};
+
+LazyShadowRGBA lazyShadowPixel(const std::uint8_t* bytes,
+                               std::size_t width,
+                               std::size_t x,
+                               std::size_t y) {
+    const std::size_t offset = (y * width + x) * 4u;
+    return {bytes[offset + 0u],
+            bytes[offset + 1u],
+            bytes[offset + 2u],
+            bytes[offset + 3u]};
+}
+
+void expectLazyShadowRGBA(const LazyShadowRGBA& actual,
+                          const LazyShadowRGBA& expected,
+                          std::string_view label,
+                          std::uint8_t tolerance = 4u) {
+    const char* channels[4] = {" R", " G", " B", " A"};
+    for (std::size_t channel = 0; channel < actual.size(); ++channel) {
+        expectApproxByte(actual[channel], expected[channel], tolerance,
+                         std::string(label) + channels[channel]);
+    }
+}
+
+void expectLazyShadowF1SamplesMatch(const LazyShadowF1Samples& disabled,
+                                    const LazyShadowF1Samples& enabled,
+                                    std::size_t count,
+                                    std::string_view label) {
+    for (std::size_t index = 0; index < count; ++index) {
+        expectCondition(disabled.pixels[index] == enabled.pixels[index],
+                        std::string(label) + " sample " +
+                            std::to_string(index) +
+                            " byte-identical with F1 default-off");
+    }
+}
+
+template <typename Reader>
+LazyShadowF1Samples runLazyShadowF1ReaderArm(std::string_view label,
+                                             bool f1Enabled,
+                                             Reader&& reader,
+                                             GLsizei levels = 1) {
+    ScopedEnvVar lazy("APPGL_ENABLE_LAZY_SHADOW_CLEARS", "1");
+    ScopedEnvVar lazyHatch("APPGL_DISABLE_LAZY_SHADOW_CLEARS", "0");
+    ScopedEnvVar fold("APPGL_ENABLE_FBO_CLEAR_FOLDING", "1");
+    ScopedEnvVar foldHatch("APPGL_DISABLE_FBO_CLEAR_FOLDING", "0");
+    ScopedEnvVar f1("APPGL_ENABLE_FBO_CLEAR_GPU_ONLY_COLOR",
+                    f1Enabled ? "1" : "0");
+    ScopedSentinelContext scoped(16, 16);
+    auto& context = scoped.context();
+    auto& gl = scoped.gl();
+    const auto f0 = lazyShadowCounter(context, 2);
+
+    GLuint colorTex = 0;
+    gl.glGenTextures(1, &colorTex);
+    setupDCR3CRGBA8Texture(gl, colorTex, 4, 4, levels);
+    GLuint fbo = 0;
+    setupDCR3CTextureFbo(gl, fbo, colorTex);
+    gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    gl.glViewport(0, 0, 4, 4);
+    gl.glClearColor(0.2f, 0.4f, 0.8f, 1.0f);
+    gl.glClear(GL_COLOR_BUFFER_BIT);
+    expectCondition(lazyShadowCounter(context, 2) > f0,
+                    std::string(label) + ": texture-FBO clear deferred");
+
+    LazyShadowF1Samples samples = reader(gl, colorTex, fbo);
+    gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    gl.glBindTexture(GL_TEXTURE_2D, 0);
+    gl.glDeleteFramebuffers(1, &fbo);
+    gl.glDeleteTextures(1, &colorTex);
+    expectGLError(gl, GL_NO_ERROR, std::string(label) + " cleanup");
+    return samples;
+}
+
 TestResult runLazyShadowFb0ReadbackProbe() {
     auto result = runDirectSentinel("lazy-shadow.fb0-readback-matrix", [&] {
         ScopedEnvVar lazy("APPGL_ENABLE_LAZY_SHADOW_CLEARS", "1");
@@ -16436,6 +16517,355 @@ TestResult runLazyShadowF1TexSubImageProbe() {
     if (result.status == "passed") {
         result.message =
             "F1 GPU-only texture clear materialized before texSubImage RMW and preserved surrounding clear bytes";
+    }
+    return result;
+}
+
+TestResult runLazyShadowF1GetTextureSubImageProbe() {
+    auto result = runDirectSentinel("lazy-shadow.f1-get-texture-subimage", [&] {
+        const auto runArm = [](bool f1Enabled) {
+            return runLazyShadowF1ReaderArm(
+                "lazy-shadow F1 getTextureSubImage", f1Enabled,
+                [](GLDispatchTable& gl, GLuint colorTex, GLuint fbo) {
+                    (void)fbo;
+                    LazyShadowReadback4x4 readback = {};
+                    gl.glGetTextureSubImage(colorTex, 0, 0, 0, 0, 4, 4, 1,
+                                            GL_RGBA, GL_UNSIGNED_BYTE,
+                                            static_cast<GLsizei>(readback.size()),
+                                            readback.data());
+                    expectGLError(gl, GL_NO_ERROR,
+                                  "lazy-shadow F1 getTextureSubImage readback");
+                    LazyShadowF1Samples samples;
+                    samples.pixels[0] = lazyShadowPixel(readback.data(), 4, 0, 0);
+                    samples.pixels[1] = lazyShadowPixel(readback.data(), 4, 3, 3);
+                    expectLazyShadowRGBA(samples.pixels[0], kLazyShadowF1ClearRGBA,
+                                         "lazy-shadow F1 getTextureSubImage pixel 0,0");
+                    expectLazyShadowRGBA(samples.pixels[1], kLazyShadowF1ClearRGBA,
+                                         "lazy-shadow F1 getTextureSubImage pixel 3,3");
+                    return samples;
+                });
+        };
+
+        const auto disabled = runArm(false);
+        const auto enabled = runArm(true);
+        expectLazyShadowF1SamplesMatch(disabled, enabled, 2,
+                                       "lazy-shadow F1 getTextureSubImage");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "F1 GPU-only texture clear produced byte-identical glGetTextureSubImage reads versus default-off";
+    }
+    return result;
+}
+
+TestResult runLazyShadowF1CopyTextureSubImageProbe() {
+    auto result = runDirectSentinel("lazy-shadow.f1-copy-texture-subimage", [&] {
+        const auto runArm = [](bool f1Enabled) {
+            return runLazyShadowF1ReaderArm(
+                "lazy-shadow F1 copy texture subimage", f1Enabled,
+                [](GLDispatchTable& gl, GLuint colorTex, GLuint fbo) {
+                    (void)colorTex;
+                    GLuint copyTexImageTex = 0;
+                    GLuint copyTextureSubImageTex = 0;
+                    gl.glGenTextures(1, &copyTexImageTex);
+                    gl.glGenTextures(1, &copyTextureSubImageTex);
+
+                    gl.glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+                    gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+                    gl.glBindTexture(GL_TEXTURE_2D, copyTexImageTex);
+                    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                    gl.glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 0, 0, 4, 4, 0);
+                    expectGLError(gl, GL_NO_ERROR,
+                                  "lazy-shadow F1 glCopyTexImage2D");
+
+                    LazyShadowReadback4x4 copyTexImagePixels = {};
+                    gl.glGetTextureImage(copyTexImageTex, 0, GL_RGBA,
+                                         GL_UNSIGNED_BYTE,
+                                         static_cast<GLsizei>(copyTexImagePixels.size()),
+                                         copyTexImagePixels.data());
+                    expectGLError(gl, GL_NO_ERROR,
+                                  "lazy-shadow F1 glCopyTexImage2D readback");
+
+                    setupDCR3CRGBA8Texture(gl, copyTextureSubImageTex, 4, 4);
+                    gl.glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+                    gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+                    gl.glCopyTextureSubImage2D(copyTextureSubImageTex, 0, 0, 0,
+                                               0, 0, 4, 4);
+                    expectGLError(gl, GL_NO_ERROR,
+                                  "lazy-shadow F1 glCopyTextureSubImage2D");
+
+                    LazyShadowReadback4x4 copyTextureSubImagePixels = {};
+                    gl.glGetTextureImage(copyTextureSubImageTex, 0, GL_RGBA,
+                                         GL_UNSIGNED_BYTE,
+                                         static_cast<GLsizei>(
+                                             copyTextureSubImagePixels.size()),
+                                         copyTextureSubImagePixels.data());
+                    expectGLError(gl, GL_NO_ERROR,
+                                  "lazy-shadow F1 glCopyTextureSubImage2D readback");
+
+                    LazyShadowF1Samples samples;
+                    samples.pixels[0] =
+                        lazyShadowPixel(copyTexImagePixels.data(), 4, 0, 0);
+                    samples.pixels[1] =
+                        lazyShadowPixel(copyTextureSubImagePixels.data(), 4, 3, 3);
+                    expectLazyShadowRGBA(samples.pixels[0], kLazyShadowF1ClearRGBA,
+                                         "lazy-shadow F1 glCopyTexImage2D pixel");
+                    expectLazyShadowRGBA(samples.pixels[1], kLazyShadowF1ClearRGBA,
+                                         "lazy-shadow F1 glCopyTextureSubImage2D pixel");
+
+                    gl.glBindTexture(GL_TEXTURE_2D, 0);
+                    gl.glDeleteTextures(1, &copyTextureSubImageTex);
+                    gl.glDeleteTextures(1, &copyTexImageTex);
+                    return samples;
+                });
+        };
+
+        const auto disabled = runArm(false);
+        const auto enabled = runArm(true);
+        expectLazyShadowF1SamplesMatch(disabled, enabled, 2,
+                                       "lazy-shadow F1 copy texture subimage");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "F1 GPU-only texture clear fed glCopyTexImage2D and glCopyTextureSubImage2D with default-off byte parity";
+    }
+    return result;
+}
+
+TestResult runLazyShadowF1CopyImageSubDataProbe() {
+    auto result = runDirectSentinel("lazy-shadow.f1-copy-image-subdata", [&] {
+        const auto runArm = [](bool f1Enabled) {
+            return runLazyShadowF1ReaderArm(
+                "lazy-shadow F1 copyImageSubData", f1Enabled,
+                [](GLDispatchTable& gl, GLuint colorTex, GLuint fbo) {
+                    (void)fbo;
+                    GLuint dstTex = 0;
+                    gl.glGenTextures(1, &dstTex);
+                    setupDCR3CRGBA8Texture(gl, dstTex, 4, 4);
+                    gl.glCopyImageSubData(colorTex, GL_TEXTURE_2D, 0, 0, 0, 0,
+                                          dstTex, GL_TEXTURE_2D, 0, 0, 0, 0,
+                                          4, 4, 1);
+                    expectGLError(gl, GL_NO_ERROR,
+                                  "lazy-shadow F1 glCopyImageSubData");
+
+                    LazyShadowReadback4x4 readback = {};
+                    gl.glGetTextureImage(dstTex, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                                         static_cast<GLsizei>(readback.size()),
+                                         readback.data());
+                    expectGLError(gl, GL_NO_ERROR,
+                                  "lazy-shadow F1 glCopyImageSubData readback");
+
+                    LazyShadowF1Samples samples;
+                    samples.pixels[0] = lazyShadowPixel(readback.data(), 4, 0, 0);
+                    samples.pixels[1] = lazyShadowPixel(readback.data(), 4, 3, 3);
+                    expectLazyShadowRGBA(samples.pixels[0], kLazyShadowF1ClearRGBA,
+                                         "lazy-shadow F1 glCopyImageSubData pixel 0,0");
+                    expectLazyShadowRGBA(samples.pixels[1], kLazyShadowF1ClearRGBA,
+                                         "lazy-shadow F1 glCopyImageSubData pixel 3,3");
+
+                    gl.glDeleteTextures(1, &dstTex);
+                    return samples;
+                });
+        };
+
+        const auto disabled = runArm(false);
+        const auto enabled = runArm(true);
+        expectLazyShadowF1SamplesMatch(disabled, enabled, 2,
+                                       "lazy-shadow F1 copyImageSubData");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "F1 GPU-only texture clear fed glCopyImageSubData with default-off byte parity";
+    }
+    return result;
+}
+
+TestResult runLazyShadowF1GenerateMipmapProbe() {
+    auto result = runDirectSentinel("lazy-shadow.f1-generate-mipmap", [&] {
+        const auto runArm = [](bool f1Enabled) {
+            return runLazyShadowF1ReaderArm(
+                "lazy-shadow F1 generateMipmap", f1Enabled,
+                [](GLDispatchTable& gl, GLuint colorTex, GLuint fbo) {
+                    (void)fbo;
+                    gl.glBindTexture(GL_TEXTURE_2D, colorTex);
+                    gl.glGenerateMipmap(GL_TEXTURE_2D);
+                    expectGLError(gl, GL_NO_ERROR,
+                                  "lazy-shadow F1 glGenerateMipmap");
+
+                    std::array<std::uint8_t, 2u * 2u * 4u> readback = {};
+                    gl.glGetTextureImage(colorTex, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                                         static_cast<GLsizei>(readback.size()),
+                                         readback.data());
+                    expectGLError(gl, GL_NO_ERROR,
+                                  "lazy-shadow F1 glGenerateMipmap level 1 readback");
+
+                    LazyShadowF1Samples samples;
+                    samples.pixels[0] = lazyShadowPixel(readback.data(), 2, 0, 0);
+                    samples.pixels[1] = lazyShadowPixel(readback.data(), 2, 1, 1);
+                    expectLazyShadowRGBA(samples.pixels[0], kLazyShadowF1ClearRGBA,
+                                         "lazy-shadow F1 mipmap pixel 0,0");
+                    expectLazyShadowRGBA(samples.pixels[1], kLazyShadowF1ClearRGBA,
+                                         "lazy-shadow F1 mipmap pixel 1,1");
+                    return samples;
+                },
+                3);
+        };
+
+        const auto disabled = runArm(false);
+        const auto enabled = runArm(true);
+        expectLazyShadowF1SamplesMatch(disabled, enabled, 2,
+                                       "lazy-shadow F1 generateMipmap");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "F1 GPU-only texture clear materialized through glGenerateMipmap with default-off byte parity";
+    }
+    return result;
+}
+
+TestResult runLazyShadowF1ClearTexImageSubImageProbe() {
+    auto result = runDirectSentinel("lazy-shadow.f1-clear-tex-image-subimage", [&] {
+        const auto runArm = [](bool f1Enabled) {
+            return runLazyShadowF1ReaderArm(
+                "lazy-shadow F1 clearTexImageSubImage", f1Enabled,
+                [](GLDispatchTable& gl, GLuint colorTex, GLuint fbo) {
+                    LazyShadowF1Samples samples;
+
+                    GLuint fullTex = 0;
+                    GLuint fullFbo = 0;
+                    gl.glGenTextures(1, &fullTex);
+                    setupDCR3CRGBA8Texture(gl, fullTex, 4, 4);
+                    setupDCR3CTextureFbo(gl, fullFbo, fullTex);
+                    gl.glBindFramebuffer(GL_FRAMEBUFFER, fullFbo);
+                    gl.glViewport(0, 0, 4, 4);
+                    gl.glClearColor(0.2f, 0.4f, 0.8f, 1.0f);
+                    gl.glClear(GL_COLOR_BUFFER_BIT);
+
+                    gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                    gl.glClearTexImage(fullTex, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                                       kLazyShadowPatchRGBA.data());
+                    expectGLError(gl, GL_NO_ERROR,
+                                  "lazy-shadow F1 glClearTexImage");
+                    LazyShadowReadback4x4 fullReadback = {};
+                    gl.glGetTextureImage(fullTex, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                                         static_cast<GLsizei>(fullReadback.size()),
+                                         fullReadback.data());
+                    expectGLError(gl, GL_NO_ERROR,
+                                  "lazy-shadow F1 glClearTexImage readback");
+                    samples.pixels[0] =
+                        lazyShadowPixel(fullReadback.data(), 4, 0, 0);
+                    expectLazyShadowRGBA(samples.pixels[0], kLazyShadowPatchRGBA,
+                                         "lazy-shadow F1 glClearTexImage pixel",
+                                         0u);
+
+                    gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                    gl.glClearTexSubImage(colorTex, 0, 1, 1, 0, 1, 1, 1,
+                                          GL_RGBA, GL_UNSIGNED_BYTE,
+                                          kLazyShadowPatchRGBA.data());
+                    expectGLError(gl, GL_NO_ERROR,
+                                  "lazy-shadow F1 glClearTexSubImage");
+                    LazyShadowReadback4x4 subReadback = {};
+                    gl.glGetTextureImage(colorTex, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                                         static_cast<GLsizei>(subReadback.size()),
+                                         subReadback.data());
+                    expectGLError(gl, GL_NO_ERROR,
+                                  "lazy-shadow F1 glClearTexSubImage readback");
+                    samples.pixels[1] =
+                        lazyShadowPixel(subReadback.data(), 4, 0, 0);
+                    samples.pixels[2] =
+                        lazyShadowPixel(subReadback.data(), 4, 1, 1);
+                    expectLazyShadowRGBA(samples.pixels[1], kLazyShadowF1ClearRGBA,
+                                         "lazy-shadow F1 glClearTexSubImage outside");
+                    expectLazyShadowRGBA(samples.pixels[2], kLazyShadowPatchRGBA,
+                                         "lazy-shadow F1 glClearTexSubImage patch",
+                                         0u);
+
+                    gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                    gl.glDeleteFramebuffers(1, &fullFbo);
+                    gl.glDeleteTextures(1, &fullTex);
+                    return samples;
+                });
+        };
+
+        const auto disabled = runArm(false);
+        const auto enabled = runArm(true);
+        expectLazyShadowF1SamplesMatch(disabled, enabled, 3,
+                                       "lazy-shadow F1 clearTexImageSubImage");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "F1 GPU-only texture clear stayed coherent through glClearTexImage and partial glClearTexSubImage RMW";
+    }
+    return result;
+}
+
+TestResult runLazyShadowF1BlitFramebufferDestRmwProbe() {
+    auto result = runDirectSentinel("lazy-shadow.f1-blit-dest-rmw", [&] {
+        const auto runArm = [](bool f1Enabled) {
+            return runLazyShadowF1ReaderArm(
+                "lazy-shadow F1 blit destination RMW", f1Enabled,
+                [](GLDispatchTable& gl, GLuint colorTex, GLuint fbo) {
+                    (void)colorTex;
+                    GLuint srcTex = 0;
+                    GLuint srcFbo = 0;
+                    gl.glGenTextures(1, &srcTex);
+                    setupDCR3CRGBA8Texture(gl, srcTex, 4, 4);
+                    LazyShadowReadback4x4 redPixels = {};
+                    for (std::size_t i = 0; i < 16u; ++i) {
+                        redPixels[i * 4u + 0u] = kLazyShadowPatchRGBA[0];
+                        redPixels[i * 4u + 1u] = kLazyShadowPatchRGBA[1];
+                        redPixels[i * 4u + 2u] = kLazyShadowPatchRGBA[2];
+                        redPixels[i * 4u + 3u] = kLazyShadowPatchRGBA[3];
+                    }
+                    gl.glBindTexture(GL_TEXTURE_2D, srcTex);
+                    gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 4, 4,
+                                       GL_RGBA, GL_UNSIGNED_BYTE,
+                                       redPixels.data());
+                    expectGLError(gl, GL_NO_ERROR,
+                                  "lazy-shadow F1 blit source upload");
+                    setupDCR3CTextureFbo(gl, srcFbo, srcTex);
+                    gl.glBindFramebuffer(GL_READ_FRAMEBUFFER, srcFbo);
+                    gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+                    gl.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+                    gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+                    gl.glBlitFramebuffer(0, 0, 1, 1,
+                                         1, 1, 2, 2,
+                                         GL_COLOR_BUFFER_BIT, GL_NEAREST);
+                    expectGLError(gl, GL_NO_ERROR,
+                                  "lazy-shadow F1 glBlitFramebuffer dest RMW");
+
+                    LazyShadowReadback4x4 readback = {};
+                    gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+                    gl.glReadPixels(0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE,
+                                    readback.data());
+                    expectGLError(gl, GL_NO_ERROR,
+                                  "lazy-shadow F1 glBlitFramebuffer dest readback");
+
+                    LazyShadowF1Samples samples;
+                    samples.pixels[0] = lazyShadowPixel(readback.data(), 4, 0, 0);
+                    samples.pixels[1] = lazyShadowPixel(readback.data(), 4, 1, 1);
+                    expectLazyShadowRGBA(samples.pixels[0], kLazyShadowF1ClearRGBA,
+                                         "lazy-shadow F1 blit outside");
+                    expectLazyShadowRGBA(samples.pixels[1], kLazyShadowPatchRGBA,
+                                         "lazy-shadow F1 blit patch",
+                                         0u);
+
+                    gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                    gl.glDeleteFramebuffers(1, &srcFbo);
+                    gl.glDeleteTextures(1, &srcTex);
+                    return samples;
+                });
+        };
+
+        const auto disabled = runArm(false);
+        const auto enabled = runArm(true);
+        expectLazyShadowF1SamplesMatch(disabled, enabled, 2,
+                                       "lazy-shadow F1 blit destination RMW");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "F1 GPU-only texture clear materialized before partial glBlitFramebuffer destination RMW with default-off byte parity";
     }
     return result;
 }
@@ -20471,6 +20901,12 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runLazyShadowInterleavedGpuProbe());
         tests.push_back(runLazyShadowTextureAxisProbe());
         tests.push_back(runLazyShadowF1TexSubImageProbe());
+        tests.push_back(runLazyShadowF1GetTextureSubImageProbe());
+        tests.push_back(runLazyShadowF1CopyTextureSubImageProbe());
+        tests.push_back(runLazyShadowF1CopyImageSubDataProbe());
+        tests.push_back(runLazyShadowF1GenerateMipmapProbe());
+        tests.push_back(runLazyShadowF1ClearTexImageSubImageProbe());
+        tests.push_back(runLazyShadowF1BlitFramebufferDestRmwProbe());
         tests.push_back(runLazyShadowDefaultOffProbe());
         return buildJSON(normalizedPhase, tests);
     }
