@@ -301,6 +301,16 @@ static bool fboPassContinuationEnabled() {
     return appglEnvEnabledDefaultOn("APPGL_ENABLE_FBO_PASS_CONTINUATION");
 }
 
+static bool serialBindCacheEnabled() {
+    return appglEnvEnabledDefaultOff("APPGL_SERIAL_BIND_CACHE");
+}
+
+static bool encodeSubtimeProfileEnabled() {
+    return appglEnvEnabledDefaultOff("APPGL_ENCODE_SUBTIME_PROFILE") ||
+           appglEnvEnabledDefaultOff("APPGL_DRAW_PROFILE") ||
+           appglEnvEnabledDefaultOff("APPGL_GL_DRAW_DETAIL_PROFILE");
+}
+
 using DrawProfileClock = std::chrono::steady_clock;
 using DrawProfileTimePoint = DrawProfileClock::time_point;
 
@@ -448,6 +458,144 @@ struct DrawSubmitProfile {
     }
 };
 
+struct EncodeSubtimeProfileSample {
+    double argConstructUs = 0.0;
+    double pipelineStateSetUs = 0.0;
+    double resourceBindUs = 0.0;
+    double drawEmitUs = 0.0;
+    std::uint64_t bindIdentityChecks = 0;
+    std::uint64_t bindChanged = 0;
+    std::uint64_t bindRedundant = 0;
+    std::uint64_t bindSkipped = 0;
+    std::uint64_t producerDrainDespiteBindSkip = 0;
+    std::uint64_t drawCalls = 0;
+    std::uint64_t firstDrawAfterEncoderOpen = 0;
+    std::uint64_t firstDrawAfterOpenBindIdentityChecks = 0;
+    std::uint64_t firstDrawAfterOpenBindChanged = 0;
+    std::uint64_t firstDrawAfterOpenBindRedundant = 0;
+    std::uint64_t firstDrawAfterOpenBindSkipped = 0;
+};
+
+struct EncodeSubtimeProfile {
+    bool enabled = encodeSubtimeProfileEnabled();
+    std::uint64_t draws = 0;
+    double argConstructUs = 0.0;
+    double pipelineStateSetUs = 0.0;
+    double resourceBindUs = 0.0;
+    double drawEmitUs = 0.0;
+    std::uint64_t bindIdentityChecks = 0;
+    std::uint64_t bindChanged = 0;
+    std::uint64_t bindRedundant = 0;
+    std::uint64_t bindSkipped = 0;
+    std::uint64_t producerDrainDespiteBindSkip = 0;
+    std::uint64_t drawCalls = 0;
+    std::uint64_t firstDrawAfterEncoderOpen = 0;
+    std::uint64_t firstDrawAfterOpenBindIdentityChecks = 0;
+    std::uint64_t firstDrawAfterOpenBindChanged = 0;
+    std::uint64_t firstDrawAfterOpenBindRedundant = 0;
+    std::uint64_t firstDrawAfterOpenBindSkipped = 0;
+
+    void record(const EncodeSubtimeProfileSample& s) {
+        if (!enabled) {
+            return;
+        }
+        ++draws;
+        argConstructUs += s.argConstructUs;
+        pipelineStateSetUs += s.pipelineStateSetUs;
+        resourceBindUs += s.resourceBindUs;
+        drawEmitUs += s.drawEmitUs;
+        bindIdentityChecks += s.bindIdentityChecks;
+        bindChanged += s.bindChanged;
+        bindRedundant += s.bindRedundant;
+        bindSkipped += s.bindSkipped;
+        producerDrainDespiteBindSkip += s.producerDrainDespiteBindSkip;
+        drawCalls += s.drawCalls;
+        firstDrawAfterEncoderOpen += s.firstDrawAfterEncoderOpen;
+        firstDrawAfterOpenBindIdentityChecks +=
+            s.firstDrawAfterOpenBindIdentityChecks;
+        firstDrawAfterOpenBindChanged += s.firstDrawAfterOpenBindChanged;
+        firstDrawAfterOpenBindRedundant += s.firstDrawAfterOpenBindRedundant;
+        firstDrawAfterOpenBindSkipped += s.firstDrawAfterOpenBindSkipped;
+    }
+
+    void dump() const {
+        if (!enabled || draws == 0) {
+            return;
+        }
+        const double totalSubtimeUs =
+            argConstructUs + pipelineStateSetUs + resourceBindUs + drawEmitUs;
+        std::fprintf(stderr,
+            "[APPGL_ENCODE_SUBTIME_PROFILE] summary draws=%llu "
+            "arg_construct_us=%.3f avg_arg_construct_us=%.3f "
+            "pipeline_state_set_us=%.3f avg_pipeline_state_set_us=%.3f "
+            "resource_bind_us=%.3f avg_resource_bind_us=%.3f "
+            "draw_emit_us=%.3f avg_draw_emit_us=%.3f "
+            "total_subtime_us=%.3f avg_total_subtime_us=%.3f "
+            "identity_checks=%llu changed=%llu redundant=%llu skipped=%llu "
+            "producer_drain_despite_bind_skip=%llu draw_calls=%llu "
+            "first_draw_after_open=%llu first_open_identity_checks=%llu "
+            "first_open_changed=%llu first_open_redundant=%llu "
+            "first_open_skipped=%llu\n",
+            static_cast<unsigned long long>(draws),
+            argConstructUs,
+            argConstructUs / static_cast<double>(draws),
+            pipelineStateSetUs,
+            pipelineStateSetUs / static_cast<double>(draws),
+            resourceBindUs,
+            resourceBindUs / static_cast<double>(draws),
+            drawEmitUs,
+            drawEmitUs / static_cast<double>(draws),
+            totalSubtimeUs,
+            totalSubtimeUs / static_cast<double>(draws),
+            static_cast<unsigned long long>(bindIdentityChecks),
+            static_cast<unsigned long long>(bindChanged),
+            static_cast<unsigned long long>(bindRedundant),
+            static_cast<unsigned long long>(bindSkipped),
+            static_cast<unsigned long long>(producerDrainDespiteBindSkip),
+            static_cast<unsigned long long>(drawCalls),
+            static_cast<unsigned long long>(firstDrawAfterEncoderOpen),
+            static_cast<unsigned long long>(
+                firstDrawAfterOpenBindIdentityChecks),
+            static_cast<unsigned long long>(firstDrawAfterOpenBindChanged),
+            static_cast<unsigned long long>(firstDrawAfterOpenBindRedundant),
+            static_cast<unsigned long long>(firstDrawAfterOpenBindSkipped));
+    }
+
+    std::string diagnosticsJson() const {
+        if (!enabled || draws == 0) {
+            return std::string();
+        }
+        const double totalSubtimeUs =
+            argConstructUs + pipelineStateSetUs + resourceBindUs + drawEmitUs;
+        std::ostringstream out;
+        out << "{\"draws\":" << draws
+            << ",\"argConstructUs\":" << argConstructUs
+            << ",\"pipelineStateSetUs\":" << pipelineStateSetUs
+            << ",\"resourceBindUs\":" << resourceBindUs
+            << ",\"drawEmitUs\":" << drawEmitUs
+            << ",\"totalSubtimeUs\":" << totalSubtimeUs
+            << ",\"bindIdentityChecks\":" << bindIdentityChecks
+            << ",\"bindChanged\":" << bindChanged
+            << ",\"bindRedundant\":" << bindRedundant
+            << ",\"bindSkipped\":" << bindSkipped
+            << ",\"producerDrainDespiteBindSkip\":"
+            << producerDrainDespiteBindSkip
+            << ",\"drawCalls\":" << drawCalls
+            << ",\"firstDrawAfterEncoderOpen\":"
+            << firstDrawAfterEncoderOpen
+            << ",\"firstDrawAfterOpenBindIdentityChecks\":"
+            << firstDrawAfterOpenBindIdentityChecks
+            << ",\"firstDrawAfterOpenBindChanged\":"
+            << firstDrawAfterOpenBindChanged
+            << ",\"firstDrawAfterOpenBindRedundant\":"
+            << firstDrawAfterOpenBindRedundant
+            << ",\"firstDrawAfterOpenBindSkipped\":"
+            << firstDrawAfterOpenBindSkipped
+            << "}";
+        return out.str();
+    }
+};
+
 // S25 Rung-1 instruments: always-on frame-pacing accumulator. The frame
 // tick is the SWAP-reason present only (presentFromSwapBuffers) — flush
 // and internal presents are not frames. Every field is cumulative so the
@@ -462,6 +610,7 @@ struct FramePacingProfile {
     std::chrono::steady_clock::time_point lastPresent{};
     std::uint64_t frames = 0;
     double frameTimeUsTotal = 0.0;
+    double frameTimeUsSquaredTotal = 0.0;
     double frameTimeUsMax = 0.0;
     std::array<std::uint64_t, kBucketCount> frameTimeMsBuckets{};
     std::uint64_t hitch25Count = 0;
@@ -475,6 +624,7 @@ struct FramePacingProfile {
                 now - lastPresent).count();
             ++frames;
             frameTimeUsTotal += us;
+            frameTimeUsSquaredTotal += us * us;
             frameTimeUsMax = std::max(frameTimeUsMax, us);
             const std::size_t bucket = std::min<std::size_t>(
                 static_cast<std::size_t>(us / 1000.0), kBucketCount - 1);
@@ -494,15 +644,42 @@ struct FramePacingProfile {
     }
 
     std::string diagnosticsJson() const {
+        const double meanUs = frames > 0
+            ? frameTimeUsTotal / static_cast<double>(frames)
+            : 0.0;
+        const double varianceUs = frames > 0
+            ? std::max(
+                  0.0,
+                  frameTimeUsSquaredTotal / static_cast<double>(frames) -
+                      meanUs * meanUs)
+            : 0.0;
+        const double stddevUs = std::sqrt(varianceUs);
+        const double cov = meanUs > 0.0 ? stddevUs / meanUs : 0.0;
         std::ostringstream out;
         out << "{\"frames\":" << frames
             << ",\"frameTimeUsTotal\":" << frameTimeUsTotal
+            << ",\"frameTimeUsSquaredTotal\":" << frameTimeUsSquaredTotal
             << ",\"frameTimeUsMax\":" << frameTimeUsMax
+            << ",\"interPresentGapUsMean\":" << meanUs
+            << ",\"interPresentGapUsStdDev\":" << stddevUs
+            << ",\"interPresentGapUsCoV\":" << cov
             << ",\"hitch25\":" << hitch25Count
             << ",\"hitch50\":" << hitch50Count
             << ",\"hitch100\":" << hitch100Count
             << ",\"histMs\":{";
         bool first = true;
+        for (std::size_t i = 0; i < kBucketCount; ++i) {
+            if (frameTimeMsBuckets[i] == 0) {
+                continue;
+            }
+            if (!first) {
+                out << ",";
+            }
+            first = false;
+            out << "\"" << i << "\":" << frameTimeMsBuckets[i];
+        }
+        out << "},\"interPresentGapHistMs\":{";
+        first = true;
         for (std::size_t i = 0; i < kBucketCount; ++i) {
             if (frameTimeMsBuckets[i] == 0) {
                 continue;
@@ -4484,6 +4661,7 @@ struct MetalFrameGraph::Impl {
             ringSlotAcquired = false;
         }
         drawSubmitProfile.dump();
+        encodeSubtimeProfile.dump();
         parallelEncodeProfile.dump();
         threadedDeferredRecordProfile.dump();
         frameAttributionProfile.dump();
@@ -5079,6 +5257,8 @@ struct MetalFrameGraph::Impl {
             renderEncoderPeakLiveRetains =
                 std::max(renderEncoderPeakLiveRetains,
                          renderEncoderLiveRetains);
+            resetCachedEncoderState();
+            currentEncoderFirstDrawPending = true;
         }
         return currentRenderEncoder != nil;
     }
@@ -5093,6 +5273,8 @@ struct MetalFrameGraph::Impl {
         releaseOwnedObjCObject(currentRenderEncoder);
         currentRenderEncoder = nil;
         fboPassActive = false;  // C49: every encoder close ends the pass
+        resetCachedEncoderState();
+        currentEncoderFirstDrawPending = false;
     }
 
     // S25 W2.1 CB-PRESSURE PROBE (obs-only): count a render encoder onto the
@@ -5619,10 +5801,23 @@ struct MetalFrameGraph::Impl {
         }
         DrawSubmitProfileSample profileSample;
         const bool profileDraw = drawSubmitProfile.enabled;
+        EncodeSubtimeProfileSample encodeSubtimeSample;
+        const bool profileEncodeSubtime = encodeSubtimeProfile.enabled;
+        EncodeSubtimeProfileSample* encodeSubtimeSamplePtr =
+            profileEncodeSubtime ? &encodeSubtimeSample : nullptr;
+        const bool profileAny = profileDraw || profileEncodeSubtime;
         const DrawProfileTimePoint profileTotalStart =
-            profileDraw ? drawProfileNow() : DrawProfileTimePoint{};
+            profileAny ? drawProfileNow() : DrawProfileTimePoint{};
         DrawProfileTimePoint profileValidationEnd = profileTotalStart;
+        double profileValidationUs = 0.0;
         double profilePipelineBuildUs = 0.0;
+        double profileStateResolveUs = 0.0;
+        double profileEncoderSetupUs = 0.0;
+        double profileRenderStateUs = 0.0;
+        double profileBindingUs = 0.0;
+        double profilePrimitivePrepUs = 0.0;
+        double profileMetalDrawUs = 0.0;
+        std::uint64_t profileMetalDrawCalls = 0;
         acquireRingSlot();  // OPT-8
         if (info.vertexCount <= 0) {
             FG_TRACE(@"encodeTranslatedDraw: vertexCount <= 0, returning false");
@@ -5755,10 +5950,13 @@ struct MetalFrameGraph::Impl {
             }
             fboColorTex = dsOnlyColorTex;
         }
-        if (profileDraw) {
+        if (profileAny) {
             profileValidationEnd = drawProfileNow();
-            profileSample.validationUs =
+            profileValidationUs =
                 drawProfileElapsedUs(profileTotalStart, profileValidationEnd);
+            if (profileDraw) {
+                profileSample.validationUs = profileValidationUs;
+            }
         }
 
         // Lazily create the MTLRenderPipelineState from translated MSL.
@@ -6871,7 +7069,7 @@ struct MetalFrameGraph::Impl {
 
             const auto buildEnd = std::chrono::steady_clock::now();
             pipelineCumulativeBuildMs += std::chrono::duration<double, std::milli>(buildEnd - buildStart).count();
-            if (profileDraw) {
+            if (profileAny) {
                 profilePipelineBuildUs += drawProfileElapsedUs(buildStart, buildEnd);
             }
             ++pipelineCacheMisses;
@@ -7035,13 +7233,16 @@ struct MetalFrameGraph::Impl {
         }
 
         DrawProfileTimePoint profileEncoderSetupStart = profileValidationEnd;
-        if (profileDraw) {
+        if (profileAny) {
             const DrawProfileTimePoint stateResolveEnd = drawProfileNow();
-            profileSample.pipelineBuildUs = profilePipelineBuildUs;
-            profileSample.stateResolveUs = std::max(
+            profileStateResolveUs = std::max(
                 0.0,
                 drawProfileElapsedUs(profileValidationEnd, stateResolveEnd) -
                     profilePipelineBuildUs);
+            if (profileDraw) {
+                profileSample.pipelineBuildUs = profilePipelineBuildUs;
+                profileSample.stateResolveUs = profileStateResolveUs;
+            }
             profileEncoderSetupStart = stateResolveEnd;
         }
 
@@ -7052,16 +7253,37 @@ struct MetalFrameGraph::Impl {
         // everything else (signature change, feedback hazard, ineligible
         // draw, default-FB encoder) closes first.
         if (isFBODraw && currentRenderEncoder != nil) {
+            const std::uint32_t rejectMask =
+                fboPassContinuationRejectMask(info);
+            const bool eligibleForContinuation = rejectMask == 0;
+            const bool activeSignatureMatches =
+                fboPassActive && fboPassSignatureMatches(info);
+            const bool feedbackHit =
+                eligibleForContinuation && activeSignatureMatches &&
+                fboSampledTexturesTouchActiveTargets(info);
             const bool canContinue =
                 fboPassContinuationLatched && fboPassActive &&
-                fboPassContinuationEligible(info) &&
-                fboPassSignatureMatches(info) &&
-                !fboSampledTexturesTouchActiveTargets(info);
+                eligibleForContinuation &&
+                activeSignatureMatches &&
+                !feedbackHit;
             if (canContinue) {
                 ++fboPassContinuations;  // C49 engagement
             } else {
-                if (fboPassContinuationLatched && fboPassActive) {
-                    ++fboPassSignatureMisses;  // C49 engagement (break)
+                if (fboPassActive) {
+                    if (!eligibleForContinuation) {
+                        recordFboContinuationRejectMask(rejectMask);
+                        if (activeSignatureMatches &&
+                            fboContinuationRejectMaskIsBufferOnly(rejectMask)) {
+                            ++fboContinuationV2BufferOnlyCandidates;
+                        }
+                    } else if (!activeSignatureMatches) {
+                        ++fboPassSignatureMisses;  // C49 engagement (break)
+                        recordFboPassSignatureMissComponents(info);
+                    } else if (feedbackHit) {
+                        ++fboFeedbackHits;
+                    }
+                } else {
+                    ++defaultToFboFlips;
                 }
                 ++encoderClosesFboTargetChange;  // C49 census
                 [currentRenderEncoder endEncoding];
@@ -7076,6 +7298,7 @@ struct MetalFrameGraph::Impl {
         // happen pre-continuation: the FBO encoder always closed at the
         // draw's encode tail.)
         if (!isFBODraw && currentRenderEncoder != nil && fboPassActive) {
+            ++fboToDefaultFlips;
             ++encoderClosesFboTargetChange;  // C49 census
             [currentRenderEncoder endEncoding];
             releaseCurrentRenderEncoder();
@@ -7525,10 +7748,13 @@ struct MetalFrameGraph::Impl {
         }
 
         DrawProfileTimePoint profileRenderStateStart = profileEncoderSetupStart;
-        if (profileDraw) {
+        if (profileAny) {
             profileRenderStateStart = drawProfileNow();
-            profileSample.encoderSetupUs =
+            profileEncoderSetupUs =
                 drawProfileElapsedUs(profileEncoderSetupStart, profileRenderStateStart);
+            if (profileDraw) {
+                profileSample.encoderSetupUs = profileEncoderSetupUs;
+            }
         }
 
         // Encode the draw into the shared render encoder.
@@ -7636,9 +7862,11 @@ struct MetalFrameGraph::Impl {
                 ? info.sampleMask
                 : 0xFFFFFFFFu;
             const NSInteger sampleMaskSlot = shaderSlots.fragmentSampleMaskSlot;
-            [currentRenderEncoder setFragmentBytes:&sampleMask
-                                           length:sizeof(sampleMask)
-                                           atIndex:static_cast<NSUInteger>(sampleMaskSlot)];
+            bindFragmentBytesIfNeeded(
+                encodeSubtimeSamplePtr,
+                &sampleMask,
+                sizeof(sampleMask),
+                static_cast<NSUInteger>(sampleMaskSlot));
         }
 
         // GL 4.6 §14.6.5 / GL_ARB_polygon_offset_clamp — apply depth
@@ -8088,10 +8316,13 @@ struct MetalFrameGraph::Impl {
         }
 
         DrawProfileTimePoint profileBindingStart = profileRenderStateStart;
-        if (profileDraw) {
+        if (profileAny) {
             profileBindingStart = drawProfileNow();
-            profileSample.renderStateUs =
+            profileRenderStateUs =
                 drawProfileElapsedUs(profileRenderStateStart, profileBindingStart);
+            if (profileDraw) {
+                profileSample.renderStateUs = profileRenderStateUs;
+            }
         }
 
         // Bind vertex data at buffer index 0.
@@ -8105,15 +8336,18 @@ struct MetalFrameGraph::Impl {
             // come from current generic attributes in extra constant buffers.
         } else if (info.metalVertexBuffer != nullptr) {
             id<MTLBuffer> mtlBuf = (__bridge id<MTLBuffer>)info.metalVertexBuffer;
-            [currentRenderEncoder setVertexBuffer:mtlBuf
-                                           offset:static_cast<NSUInteger>(info.metalVertexBufferOffset)
-                                          atIndex:0];
+            bindVertexBufferIfNeeded(
+                encodeSubtimeSamplePtr,
+                mtlBuf,
+                static_cast<NSUInteger>(info.metalVertexBufferOffset),
+                0);
         } else {
             auto alloc = ringSuballocate(info.vertexData, info.vertexDataByteCount);
             if (alloc.buffer == nil) {
                 return false;
             }
-            [currentRenderEncoder setVertexBuffer:alloc.buffer offset:alloc.offset atIndex:0];
+            bindVertexBufferIfNeeded(
+                encodeSubtimeSamplePtr, alloc.buffer, alloc.offset, 0);
         }
 
         // Bind extra vertex buffers (buffer index 1+) — e.g. per-instance
@@ -8122,9 +8356,11 @@ struct MetalFrameGraph::Impl {
             const auto& evb = info.extraVertexBuffers[ei];
             if (evb.metalBuffer != nullptr) {
                 id<MTLBuffer> mtlBuf = (__bridge id<MTLBuffer>)evb.metalBuffer;
-                [currentRenderEncoder setVertexBuffer:mtlBuf
-                                               offset:static_cast<NSUInteger>(evb.metalBufferOffset)
-                                              atIndex:static_cast<NSUInteger>(ei + 1)];
+                bindVertexBufferIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    mtlBuf,
+                    static_cast<NSUInteger>(evb.metalBufferOffset),
+                    static_cast<NSUInteger>(ei + 1));
             } else {
                 const void* bytes = evb.data != nullptr
                     ? evb.data
@@ -8133,9 +8369,11 @@ struct MetalFrameGraph::Impl {
                 if (alloc.buffer == nil) {
                     return false;
                 }
-                [currentRenderEncoder setVertexBuffer:alloc.buffer
-                                               offset:alloc.offset
-                                              atIndex:static_cast<NSUInteger>(ei + 1)];
+                bindVertexBufferIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    alloc.buffer,
+                    alloc.offset,
+                    static_cast<NSUInteger>(ei + 1));
             }
         }
 
@@ -8150,15 +8388,19 @@ struct MetalFrameGraph::Impl {
         {
             if (!vertexUsesArgBuf &&
                 info.vertexUniformData != nullptr && info.vertexUniformSize > 0) {
-                [currentRenderEncoder setVertexBytes:info.vertexUniformData
-                                              length:info.vertexUniformSize
-                                             atIndex:16];
+                bindVertexBytesIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    info.vertexUniformData,
+                    info.vertexUniformSize,
+                    16);
             }
             if (!fragmentUsesArgBuf &&
                 info.fragmentUniformData != nullptr && info.fragmentUniformSize > 0) {
-                [currentRenderEncoder setFragmentBytes:info.fragmentUniformData
-                                                length:info.fragmentUniformSize
-                                               atIndex:16];
+                bindFragmentBytesIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    info.fragmentUniformData,
+                    info.fragmentUniformSize,
+                    16);
             }
             // CKPT121 (Sprint 11 Phase 2 Day 6): SPIRV-Cross emits
             // gl_NumSamples as a `constant int& [[buffer(0)]]` FS
@@ -8170,22 +8412,28 @@ struct MetalFrameGraph::Impl {
             // do not get the UINT_MAX neutralization.
             if (!fragmentNeedsGlNumSamplesArgBuf) {
                 const int32_t glNumSamples = static_cast<int32_t>(attachmentSampleCount);
-                [currentRenderEncoder setFragmentBytes:&glNumSamples
-                                                length:sizeof(glNumSamples)
-                                               atIndex:0];
+                bindFragmentBytesIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    &glNumSamples,
+                    sizeof(glNumSamples),
+                    0);
             }
             if (vertexNeedsFragmentShadingRateState) {
-                [currentRenderEncoder setVertexBytes:&info.fragmentShadingRateShaderState
-                                              length:sizeof(info.fragmentShadingRateShaderState)
-                                             atIndex:kAppGLFragmentShadingRateParamsBufferSlot];
+                bindVertexBytesIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    &info.fragmentShadingRateShaderState,
+                    sizeof(info.fragmentShadingRateShaderState),
+                    kAppGLFragmentShadingRateParamsBufferSlot);
             }
             if (vertexClipControlYSignSlot >= 0) {
                 const float clipControlYSign =
                     (clipControlShaderYFixup &&
                      info.clipOrigin != GL_UPPER_LEFT) ? -1.0f : 1.0f;
-                [currentRenderEncoder setVertexBytes:&clipControlYSign
-                                              length:sizeof(clipControlYSign)
-                                             atIndex:static_cast<NSUInteger>(vertexClipControlYSignSlot)];
+                bindVertexBytesIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    &clipControlYSign,
+                    sizeof(clipControlYSign),
+                    static_cast<NSUInteger>(vertexClipControlYSignSlot));
             }
             const bool logLodBias = std::getenv("APPGL_LOG_LB") != nullptr;
             const NSInteger vertexReductionModesSlot =
@@ -8193,9 +8441,11 @@ struct MetalFrameGraph::Impl {
             if (vertexReductionModesSlot >= 0) {
                 std::vector<std::uint32_t>& modes = textureUIntScratch();
                 buildTextureReductionModes(info.vertexTextures, modes);
-                [currentRenderEncoder setVertexBytes:modes.data()
-                                              length:modes.size() * sizeof(std::uint32_t)
-                                             atIndex:static_cast<NSUInteger>(vertexReductionModesSlot)];
+                bindVertexBytesIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    modes.data(),
+                    static_cast<NSUInteger>(modes.size() * sizeof(std::uint32_t)),
+                    static_cast<NSUInteger>(vertexReductionModesSlot));
             }
             const NSInteger vertexLodBiasesSlot =
                 shaderSlots.vertexLodBiasesSlot;
@@ -8210,9 +8460,11 @@ struct MetalFrameGraph::Impl {
                         biases.empty() ? 0.0 : static_cast<double>(biases[0]),
                         info.vertexTextures.size());
                 }
-                [currentRenderEncoder setVertexBytes:biases.data()
-                                              length:biases.size() * sizeof(float)
-                                             atIndex:static_cast<NSUInteger>(vertexLodBiasesSlot)];
+                bindVertexBytesIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    biases.data(),
+                    static_cast<NSUInteger>(biases.size() * sizeof(float)),
+                    static_cast<NSUInteger>(vertexLodBiasesSlot));
             }
             const NSInteger vertexBorderClampModesSlot =
                 shaderSlots.vertexBorderClampModesSlot;
@@ -8221,34 +8473,43 @@ struct MetalFrameGraph::Impl {
             if (vertexBorderClampModesSlot >= 0) {
                 std::vector<std::uint32_t>& modes = textureUIntScratch();
                 buildTextureBorderClampModes(info.vertexTextures, modes);
-                [currentRenderEncoder setVertexBytes:modes.data()
-                                              length:modes.size() * sizeof(std::uint32_t)
-                                             atIndex:static_cast<NSUInteger>(vertexBorderClampModesSlot)];
+                bindVertexBytesIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    modes.data(),
+                    static_cast<NSUInteger>(modes.size() * sizeof(std::uint32_t)),
+                    static_cast<NSUInteger>(vertexBorderClampModesSlot));
             }
             if (vertexBorderClampColorsSlot >= 0) {
                 std::vector<std::array<std::int32_t, 4>>& colors =
                     textureBorderColorScratch();
                 buildTextureBorderClampColors(info.vertexTextures, colors);
-                [currentRenderEncoder setVertexBytes:colors.data()
-                                              length:colors.size() * sizeof(std::array<std::int32_t, 4>)
-                                             atIndex:static_cast<NSUInteger>(vertexBorderClampColorsSlot)];
+                bindVertexBytesIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    colors.data(),
+                    static_cast<NSUInteger>(
+                        colors.size() * sizeof(std::array<std::int32_t, 4>)),
+                    static_cast<NSUInteger>(vertexBorderClampColorsSlot));
             }
             const NSInteger vertexImplicitLodBiasCorrectionSlot =
                 shaderSlots.vertexImplicitLodBiasCorrectionSlot;
             if (vertexImplicitLodBiasCorrectionSlot >= 0) {
                 const float correction = 0.0f;
-                [currentRenderEncoder setVertexBytes:&correction
-                                              length:sizeof(correction)
-                                             atIndex:static_cast<NSUInteger>(vertexImplicitLodBiasCorrectionSlot)];
+                bindVertexBytesIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    &correction,
+                    sizeof(correction),
+                    static_cast<NSUInteger>(vertexImplicitLodBiasCorrectionSlot));
             }
             const NSInteger fragmentReductionModesSlot =
                 shaderSlots.fragmentReductionModesSlot;
             if (fragmentReductionModesSlot >= 0) {
                 std::vector<std::uint32_t>& modes = textureUIntScratch();
                 buildTextureReductionModes(info.fragmentTextures, modes);
-                [currentRenderEncoder setFragmentBytes:modes.data()
-                                                length:modes.size() * sizeof(std::uint32_t)
-                                               atIndex:static_cast<NSUInteger>(fragmentReductionModesSlot)];
+                bindFragmentBytesIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    modes.data(),
+                    static_cast<NSUInteger>(modes.size() * sizeof(std::uint32_t)),
+                    static_cast<NSUInteger>(fragmentReductionModesSlot));
             }
             const NSInteger fragmentLodBiasesSlot =
                 shaderSlots.fragmentLodBiasesSlot;
@@ -8263,9 +8524,11 @@ struct MetalFrameGraph::Impl {
                         biases.empty() ? 0.0 : static_cast<double>(biases[0]),
                         info.fragmentTextures.size());
                 }
-                [currentRenderEncoder setFragmentBytes:biases.data()
-                                                length:biases.size() * sizeof(float)
-                                               atIndex:static_cast<NSUInteger>(fragmentLodBiasesSlot)];
+                bindFragmentBytesIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    biases.data(),
+                    static_cast<NSUInteger>(biases.size() * sizeof(float)),
+                    static_cast<NSUInteger>(fragmentLodBiasesSlot));
             }
             const NSInteger fragmentBorderClampModesSlot =
                 shaderSlots.fragmentBorderClampModesSlot;
@@ -8274,17 +8537,22 @@ struct MetalFrameGraph::Impl {
             if (fragmentBorderClampModesSlot >= 0) {
                 std::vector<std::uint32_t>& modes = textureUIntScratch();
                 buildTextureBorderClampModes(info.fragmentTextures, modes);
-                [currentRenderEncoder setFragmentBytes:modes.data()
-                                                length:modes.size() * sizeof(std::uint32_t)
-                                               atIndex:static_cast<NSUInteger>(fragmentBorderClampModesSlot)];
+                bindFragmentBytesIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    modes.data(),
+                    static_cast<NSUInteger>(modes.size() * sizeof(std::uint32_t)),
+                    static_cast<NSUInteger>(fragmentBorderClampModesSlot));
             }
             if (fragmentBorderClampColorsSlot >= 0) {
                 std::vector<std::array<std::int32_t, 4>>& colors =
                     textureBorderColorScratch();
                 buildTextureBorderClampColors(info.fragmentTextures, colors);
-                [currentRenderEncoder setFragmentBytes:colors.data()
-                                                length:colors.size() * sizeof(std::array<std::int32_t, 4>)
-                                               atIndex:static_cast<NSUInteger>(fragmentBorderClampColorsSlot)];
+                bindFragmentBytesIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    colors.data(),
+                    static_cast<NSUInteger>(
+                        colors.size() * sizeof(std::array<std::int32_t, 4>)),
+                    static_cast<NSUInteger>(fragmentBorderClampColorsSlot));
             }
             const NSInteger fragmentImplicitLodBiasCorrectionSlot =
                 shaderSlots.fragmentImplicitLodBiasCorrectionSlot;
@@ -8301,9 +8569,11 @@ struct MetalFrameGraph::Impl {
                         info.fboWidth,
                         info.fboHeight);
                 }
-                [currentRenderEncoder setFragmentBytes:&correction
-                                                length:sizeof(correction)
-                                               atIndex:static_cast<NSUInteger>(fragmentImplicitLodBiasCorrectionSlot)];
+                bindFragmentBytesIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    &correction,
+                    sizeof(correction),
+                    static_cast<NSUInteger>(fragmentImplicitLodBiasCorrectionSlot));
             }
             if (fragmentNeedsFragCoordParams) {
                 const float renderTargetHeight = colorTexture != nil
@@ -8379,9 +8649,11 @@ struct MetalFrameGraph::Impl {
                 // render-target texture coordinate space; texture_barrier
                 // self-feedback relies on that aliasing path and is not the
                 // D-3 sampled-input case.
-                [currentRenderEncoder setFragmentBytes:fragCoordParams
-                                                length:sizeof(fragCoordParams)
-                                               atIndex:kAppGLFragCoordParamsBufferSlot];
+                bindFragmentBytesIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    fragCoordParams,
+                    sizeof(fragCoordParams),
+                    kAppGLFragCoordParamsBufferSlot);
             }
 
             // Shadow-compare Y fixup: per-texture-slot flip factors for
@@ -8395,11 +8667,11 @@ struct MetalFrameGraph::Impl {
                         compareFlips[binding.metalSlot] = binding.compareFlipY;
                     }
                 }
-                [currentRenderEncoder
-                    setFragmentBytes:compareFlips
-                              length:sizeof(compareFlips)
-                             atIndex:static_cast<NSUInteger>(
-                                 fragmentDepthCompareFlipSlot)];
+                bindFragmentBytesIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    compareFlips,
+                    sizeof(compareFlips),
+                    static_cast<NSUInteger>(fragmentDepthCompareFlipSlot));
             }
 
             // Bind UBO data to the Metal encoder at the reflection-specified
@@ -8413,22 +8685,28 @@ struct MetalFrameGraph::Impl {
                     id<MTLBuffer> buf = (__bridge id<MTLBuffer>)(ubo.metalBuffer);
                     const NSUInteger off = static_cast<NSUInteger>(ubo.metalBufferOffset);
                     if (ubo.isVertex && !vertexUsesArgBuf) {
-                        [currentRenderEncoder setVertexBuffer:buf offset:off atIndex:slot];
+                        bindVertexBufferIfNeeded(
+                            encodeSubtimeSamplePtr, buf, off, slot);
                     }
                     if (ubo.isFragment && !fragmentUsesArgBuf) {
-                        [currentRenderEncoder setFragmentBuffer:buf offset:off atIndex:slot];
+                        bindFragmentBufferIfNeeded(
+                            encodeSubtimeSamplePtr, buf, off, slot);
                     }
                 } else if (ubo.data != nullptr) {
                     // Small UBO (≤4KB): inline bytes.
                     if (ubo.isVertex && !vertexUsesArgBuf) {
-                        [currentRenderEncoder setVertexBytes:ubo.data
-                                                      length:static_cast<NSUInteger>(ubo.size)
-                                                     atIndex:slot];
+                        bindVertexBytesIfNeeded(
+                            encodeSubtimeSamplePtr,
+                            ubo.data,
+                            static_cast<NSUInteger>(ubo.size),
+                            slot);
                     }
                     if (ubo.isFragment && !fragmentUsesArgBuf) {
-                        [currentRenderEncoder setFragmentBytes:ubo.data
-                                                        length:static_cast<NSUInteger>(ubo.size)
-                                                       atIndex:slot];
+                        bindFragmentBytesIfNeeded(
+                            encodeSubtimeSamplePtr,
+                            ubo.data,
+                            static_cast<NSUInteger>(ubo.size),
+                            slot);
                     }
                 }
             }
@@ -8451,10 +8729,12 @@ struct MetalFrameGraph::Impl {
             const NSUInteger slot = static_cast<NSUInteger>(ssbo.metalSlot);
             const NSUInteger off = static_cast<NSUInteger>(ssbo.offset);
             if (ssbo.isVertex && !vertexUsesArgBuf) {
-                [currentRenderEncoder setVertexBuffer:buf offset:off atIndex:slot];
+                bindVertexBufferIfNeeded(
+                    encodeSubtimeSamplePtr, buf, off, slot);
             }
             if (ssbo.isFragment && !fragmentUsesArgBuf) {
-                [currentRenderEncoder setFragmentBuffer:buf offset:off atIndex:slot];
+                bindFragmentBufferIfNeeded(
+                    encodeSubtimeSamplePtr, buf, off, slot);
             }
         }
         for (const auto& atomic : info.atomicCounterBindings) {
@@ -8463,22 +8743,28 @@ struct MetalFrameGraph::Impl {
             const NSUInteger slot = static_cast<NSUInteger>(atomic.metalSlot);
             const NSUInteger off = static_cast<NSUInteger>(atomic.offset);
             if (atomic.isVertex && !vertexUsesArgBuf) {
-                [currentRenderEncoder setVertexBuffer:buf offset:off atIndex:slot];
+                bindVertexBufferIfNeeded(
+                    encodeSubtimeSamplePtr, buf, off, slot);
             }
             if (atomic.isFragment && !fragmentUsesArgBuf) {
-                [currentRenderEncoder setFragmentBuffer:buf offset:off atIndex:slot];
+                bindFragmentBufferIfNeeded(
+                    encodeSubtimeSamplePtr, buf, off, slot);
             }
         }
 
         if (vertexUsesMultiviewViewMask && !vertexUsesArgBuf) {
-            [currentRenderEncoder setVertexBytes:ovrViewMask
-                                          length:sizeof(ovrViewMask)
-                                         atIndex:24];
+            bindVertexBytesIfNeeded(
+                encodeSubtimeSamplePtr,
+                ovrViewMask,
+                sizeof(ovrViewMask),
+                24);
         }
         if (fragmentUsesMultiviewViewMask && !fragmentUsesArgBuf) {
-            [currentRenderEncoder setFragmentBytes:ovrViewMask
-                                            length:sizeof(ovrViewMask)
-                                           atIndex:24];
+            bindFragmentBytesIfNeeded(
+                encodeSubtimeSamplePtr,
+                ovrViewMask,
+                sizeof(ovrViewMask),
+                24);
         }
 
         // Phase 8X Group 4d follow-up⁷ — bind textures and samplers for
@@ -8760,13 +9046,17 @@ struct MetalFrameGraph::Impl {
                                         offset:sizeAlloc.offset
                                        atIndex:0];
                             if (isFragment) {
-                                [currentRenderEncoder setFragmentBuffer:sizeAlloc.buffer
-                                                                  offset:sizeAlloc.offset
-                                                                 atIndex:30];
+                                bindFragmentBufferIfNeeded(
+                                    encodeSubtimeSamplePtr,
+                                    sizeAlloc.buffer,
+                                    sizeAlloc.offset,
+                                    30);
                             } else {
-                                [currentRenderEncoder setVertexBuffer:sizeAlloc.buffer
-                                                                offset:sizeAlloc.offset
-                                                               atIndex:30];
+                                bindVertexBufferIfNeeded(
+                                    encodeSubtimeSamplePtr,
+                                    sizeAlloc.buffer,
+                                    sizeAlloc.offset,
+                                    30);
                             }
                             [currentRenderEncoder useResource:sizeAlloc.buffer
                                                         usage:MTLResourceUsageRead
@@ -8856,9 +9146,11 @@ struct MetalFrameGraph::Impl {
                                                stages:stage];
                 }
                 if (isFragment) {
-                    [currentRenderEncoder setFragmentBuffer:argBuf offset:argBufOffset atIndex:24];
+                    bindFragmentBufferIfNeeded(
+                        encodeSubtimeSamplePtr, argBuf, argBufOffset, 24);
                 } else {
-                    [currentRenderEncoder setVertexBuffer:argBuf offset:argBufOffset atIndex:24];
+                    bindVertexBufferIfNeeded(
+                        encodeSubtimeSamplePtr, argBuf, argBufOffset, 24);
                 }
             };
             encodeTexturesIntoArgBuf(fragArgEncoderSet0, info.fragmentTextures,
@@ -8960,9 +9252,11 @@ struct MetalFrameGraph::Impl {
                 }
 
                 if (isVertex) {
-                    [currentRenderEncoder setVertexBuffer:argBuf offset:argBufOffset atIndex:25];
+                    bindVertexBufferIfNeeded(
+                        encodeSubtimeSamplePtr, argBuf, argBufOffset, 25);
                 } else {
-                    [currentRenderEncoder setFragmentBuffer:argBuf offset:argBufOffset atIndex:25];
+                    bindFragmentBufferIfNeeded(
+                        encodeSubtimeSamplePtr, argBuf, argBufOffset, 25);
                 }
             };
             encodeUBOsIntoArgBuf(fragArgEncoderSet1,
@@ -8993,23 +9287,29 @@ struct MetalFrameGraph::Impl {
                     continue;
                 }
                 id<MTLTexture> tex = (__bridge id<MTLTexture>)binding.metalTexture;
-                [currentRenderEncoder setFragmentTexture:tex
-                                                 atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+                bindFragmentTextureIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    tex,
+                    static_cast<NSUInteger>(binding.metalSlot));
                 if (binding.imageAtomicMetalBuffer != nullptr &&
                     binding.imageAtomicBufferSlot != 0xFFFFFFFFu) {
                     id<MTLBuffer> buf =
                         (__bridge id<MTLBuffer>)binding.imageAtomicMetalBuffer;
                     if (buf != nil) {
-                        [currentRenderEncoder setFragmentBuffer:buf
-                                                         offset:binding.imageAtomicBufferOffset
-                                                        atIndex:static_cast<NSUInteger>(
-                                                            binding.imageAtomicBufferSlot)];
+                        bindFragmentBufferIfNeeded(
+                            encodeSubtimeSamplePtr,
+                            buf,
+                            binding.imageAtomicBufferOffset,
+                            static_cast<NSUInteger>(
+                                binding.imageAtomicBufferSlot));
                     }
                 }
                 if (binding.metalSamplerState != nullptr) {
                     id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)binding.metalSamplerState;
-                    [currentRenderEncoder setFragmentSamplerState:smp
-                                                          atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+                    bindFragmentSamplerStateIfNeeded(
+                        encodeSubtimeSamplePtr,
+                        smp,
+                        static_cast<NSUInteger>(binding.metalSlot));
                 }
             }
         }
@@ -9019,32 +9319,45 @@ struct MetalFrameGraph::Impl {
                     continue;
                 }
                 id<MTLTexture> tex = (__bridge id<MTLTexture>)binding.metalTexture;
-                [currentRenderEncoder setVertexTexture:tex
-                                               atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+                bindVertexTextureIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    tex,
+                    static_cast<NSUInteger>(binding.metalSlot));
                 if (binding.imageAtomicMetalBuffer != nullptr &&
                     binding.imageAtomicBufferSlot != 0xFFFFFFFFu) {
                     id<MTLBuffer> buf =
                         (__bridge id<MTLBuffer>)binding.imageAtomicMetalBuffer;
                     if (buf != nil) {
-                        [currentRenderEncoder setVertexBuffer:buf
-                                                       offset:binding.imageAtomicBufferOffset
-                                                      atIndex:static_cast<NSUInteger>(
-                                                          binding.imageAtomicBufferSlot)];
+                        bindVertexBufferIfNeeded(
+                            encodeSubtimeSamplePtr,
+                            buf,
+                            binding.imageAtomicBufferOffset,
+                            static_cast<NSUInteger>(
+                                binding.imageAtomicBufferSlot));
                     }
                 }
                 if (binding.metalSamplerState != nullptr) {
                     id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)binding.metalSamplerState;
-                    [currentRenderEncoder setVertexSamplerState:smp
-                                                        atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+                    bindVertexSamplerStateIfNeeded(
+                        encodeSubtimeSamplePtr,
+                        smp,
+                        static_cast<NSUInteger>(binding.metalSlot));
                 }
             }
         }
+        recordProducerDrainDespiteBindSkip(encodeSubtimeSamplePtr, info);
 
         DrawProfileTimePoint profilePrimitivePrepStart = profileBindingStart;
-        if (profileDraw) {
+        if (profileAny) {
             profilePrimitivePrepStart = drawProfileNow();
-            profileSample.bindingUs =
+            profileBindingUs =
                 drawProfileElapsedUs(profileBindingStart, profilePrimitivePrepStart);
+            if (profileDraw) {
+                profileSample.bindingUs = profileBindingUs;
+            }
+            if (profileEncodeSubtime) {
+                encodeSubtimeSample.resourceBindUs = profileBindingUs;
+            }
         }
 
         MTLPrimitiveType primitive;
@@ -9227,20 +9540,29 @@ struct MetalFrameGraph::Impl {
         profileSample.expanded = useExpandedIndices && !expandedIndices.empty();
         DrawProfileTimePoint profilePreDrawStart = profilePrimitivePrepStart;
         auto profileBeginMetalDraw = [&]() -> DrawProfileTimePoint {
-            if (!profileDraw) {
+            if (!profileAny) {
                 return DrawProfileTimePoint{};
             }
             const DrawProfileTimePoint metalDrawStart = drawProfileNow();
-            profileSample.primitivePrepUs +=
+            const double primitivePrepUs =
                 drawProfileElapsedUs(profilePreDrawStart, metalDrawStart);
-            ++profileSample.metalDrawCalls;
+            profilePrimitivePrepUs += primitivePrepUs;
+            ++profileMetalDrawCalls;
+            if (profileDraw) {
+                profileSample.primitivePrepUs += primitivePrepUs;
+                ++profileSample.metalDrawCalls;
+            }
             return metalDrawStart;
         };
         auto profileEndMetalDraw = [&](DrawProfileTimePoint metalDrawStart) {
-            if (!profileDraw) return;
+            if (!profileAny) return;
             const DrawProfileTimePoint metalDrawEnd = drawProfileNow();
-            profileSample.metalDrawUs +=
+            const double metalDrawUs =
                 drawProfileElapsedUs(metalDrawStart, metalDrawEnd);
+            profileMetalDrawUs += metalDrawUs;
+            if (profileDraw) {
+                profileSample.metalDrawUs += metalDrawUs;
+            }
             profilePreDrawStart = metalDrawEnd;
         };
 
@@ -9339,7 +9661,10 @@ struct MetalFrameGraph::Impl {
         }
 
         const DrawProfileTimePoint profileFinalizeStart =
-            profileDraw ? drawProfileNow() : DrawProfileTimePoint{};
+            profileAny ? drawProfileNow() : DrawProfileTimePoint{};
+        const bool wasFirstDrawAfterEncoderOpen =
+            currentEncoderFirstDrawPending;
+        currentEncoderFirstDrawPending = false;
         if (isFBODraw) {
             // C49: with continuation armed, leave the pass open for the
             // next same-signature FBO draw instead of paying an
@@ -9350,6 +9675,23 @@ struct MetalFrameGraph::Impl {
             if (fboPassContinuationLatched && fboPassActive) {
                 // keep open
             } else {
+                if (!fboPassContinuationLatched) {
+                    ++fboTailCloseContinuationDisabled;
+                } else {
+                    const std::uint32_t rejectMask =
+                        fboPassContinuationRejectMask(info);
+                    if (rejectMask != 0) {
+                        ++fboTailCloseIneligible;
+                        recordFboContinuationRejectMask(rejectMask);
+                        if (fboContinuationRejectMaskIsBufferOnly(rejectMask)) {
+                            ++fboContinuationV2BufferOnlyCandidates;
+                        }
+                    } else if (!fboPassActive) {
+                        ++fboTailCloseNoActivePass;
+                    } else {
+                        ++fboTailCloseOther;
+                    }
+                }
                 ++encoderClosesFboDrawTail;  // C49 census
                 [currentRenderEncoder endEncoding];
                 releaseCurrentRenderEncoder();
@@ -9359,13 +9701,39 @@ struct MetalFrameGraph::Impl {
         }
 
         pendingPresent = true;
-        if (profileDraw) {
+        if (profileAny) {
             const DrawProfileTimePoint profileTotalEnd = drawProfileNow();
-            profileSample.finalizeUs =
-                drawProfileElapsedUs(profileFinalizeStart, profileTotalEnd);
-            profileSample.totalUs =
-                drawProfileElapsedUs(profileTotalStart, profileTotalEnd);
-            drawSubmitProfile.record(profileSample);
+            if (profileDraw) {
+                profileSample.finalizeUs =
+                    drawProfileElapsedUs(profileFinalizeStart, profileTotalEnd);
+                profileSample.totalUs =
+                    drawProfileElapsedUs(profileTotalStart, profileTotalEnd);
+                drawSubmitProfile.record(profileSample);
+            }
+            if (profileEncodeSubtime) {
+                encodeSubtimeSample.argConstructUs =
+                    profileValidationUs +
+                    profileStateResolveUs +
+                    profilePipelineBuildUs +
+                    profileEncoderSetupUs +
+                    profilePrimitivePrepUs;
+                encodeSubtimeSample.pipelineStateSetUs = profileRenderStateUs;
+                encodeSubtimeSample.resourceBindUs = profileBindingUs;
+                encodeSubtimeSample.drawEmitUs = profileMetalDrawUs;
+                encodeSubtimeSample.drawCalls = profileMetalDrawCalls;
+                if (wasFirstDrawAfterEncoderOpen) {
+                    encodeSubtimeSample.firstDrawAfterEncoderOpen = 1;
+                    encodeSubtimeSample.firstDrawAfterOpenBindIdentityChecks =
+                        encodeSubtimeSample.bindIdentityChecks;
+                    encodeSubtimeSample.firstDrawAfterOpenBindChanged =
+                        encodeSubtimeSample.bindChanged;
+                    encodeSubtimeSample.firstDrawAfterOpenBindRedundant =
+                        encodeSubtimeSample.bindRedundant;
+                    encodeSubtimeSample.firstDrawAfterOpenBindSkipped =
+                        encodeSubtimeSample.bindSkipped;
+                }
+                encodeSubtimeProfile.record(encodeSubtimeSample);
+            }
         }
         return true;
     }
@@ -12963,7 +13331,26 @@ struct MetalFrameGraph::Impl {
     }
 
     std::string drawSubmitProfileDiagnosticsJson() const {
-        return drawSubmitProfile.diagnosticsJson();
+        const std::string submit = drawSubmitProfile.diagnosticsJson();
+        const std::string encodeSubtime =
+            encodeSubtimeProfile.diagnosticsJson();
+        if (submit.empty()) {
+            return encodeSubtime.empty()
+                ? std::string()
+                : std::string("{\"encodeSubtime\":") + encodeSubtime + "}";
+        }
+        if (encodeSubtime.empty()) {
+            return submit;
+        }
+        std::string out = submit;
+        if (!out.empty() && out.back() == '}') {
+            out.pop_back();
+            out += ",\"encodeSubtime\":";
+            out += encodeSubtime;
+            out += "}";
+            return out;
+        }
+        return submit;
     }
 
     // S25 Rung-1 instruments: pacing + parallel-encode share, always
@@ -12977,6 +13364,45 @@ struct MetalFrameGraph::Impl {
         out << "{\"pacing\":" << framePacingProfile.diagnosticsJson()
             << ",\"drawableWaitUs\":" << drawableAcquireWaitUsTotal
             << ",\"drawableWaitCount\":" << drawableAcquireWaitCount
+            << ",\"commandBuffersCommitted\":" << commandBuffersCommitted
+            << ",\"encoderBoundary\":{"
+            << "\"fboTailCloseContinuationDisabled\":"
+            << fboTailCloseContinuationDisabled
+            << ",\"fboTailCloseIneligible\":" << fboTailCloseIneligible
+            << ",\"fboTailCloseNoActivePass\":" << fboTailCloseNoActivePass
+            << ",\"fboTailCloseOther\":" << fboTailCloseOther
+            << ",\"fboContinuationRejectSsbo\":"
+            << fboContinuationRejectSsbo
+            << ",\"fboContinuationRejectAtomic\":"
+            << fboContinuationRejectAtomic
+            << ",\"fboContinuationRejectImageWrite\":"
+            << fboContinuationRejectImageWrite
+            << ",\"fboContinuationRejectQueryTf\":"
+            << fboContinuationRejectQueryTf
+            << ",\"fboContinuationRejectTessMeshGs\":"
+            << fboContinuationRejectTessMeshGs
+            << ",\"fboContinuationRejectLayered\":"
+            << fboContinuationRejectLayered
+            << ",\"fboContinuationRejectViewportArray\":"
+            << fboContinuationRejectViewportArray
+            << ",\"fboContinuationV2BufferOnlyCandidates\":"
+            << fboContinuationV2BufferOnlyCandidates
+            << ",\"fboSignatureMissColorTex\":"
+            << fboSignatureMissColorTex
+            << ",\"fboSignatureMissDsTex\":" << fboSignatureMissDsTex
+            << ",\"fboSignatureMissDsSliceLevel\":"
+            << fboSignatureMissDsSliceLevel
+            << ",\"fboSignatureMissRtal\":" << fboSignatureMissRtal
+            << ",\"fboSignatureMissFragmentShadingRate\":"
+            << fboSignatureMissFragmentShadingRate
+            << ",\"fboSignatureMissExtraColor\":"
+            << fboSignatureMissExtraColor
+            << ",\"fboSignatureMissColorSlicesLevels\":"
+            << fboSignatureMissColorSlicesLevels
+            << ",\"fboFeedbackHits\":" << fboFeedbackHits
+            << ",\"defaultToFboFlips\":" << defaultToFboFlips
+            << ",\"fboToDefaultFlips\":" << fboToDefaultFlips
+            << "}"
             << ",\"parallelEncode\":{"
             << "\"enabled\":" << (parallelEncodeProfile.enabled ? 1 : 0)
             << ",\"translatedDraws\":" << parallelEncodeProfile.translatedDraws
@@ -13200,7 +13626,22 @@ struct MetalFrameGraph::Impl {
         MetalFrameGraph::FramePacingSnapshot snapshot;
         snapshot.frames = framePacingProfile.frames;
         snapshot.frameTimeUsTotal = framePacingProfile.frameTimeUsTotal;
+        snapshot.frameTimeUsSquaredTotal =
+            framePacingProfile.frameTimeUsSquaredTotal;
         snapshot.frameTimeUsMax = framePacingProfile.frameTimeUsMax;
+        if (framePacingProfile.frames > 0) {
+            const double meanUs = framePacingProfile.frameTimeUsTotal /
+                static_cast<double>(framePacingProfile.frames);
+            const double varianceUs = std::max(
+                0.0,
+                framePacingProfile.frameTimeUsSquaredTotal /
+                    static_cast<double>(framePacingProfile.frames) -
+                    meanUs * meanUs);
+            snapshot.interPresentGapUsStdDev = std::sqrt(varianceUs);
+            snapshot.interPresentGapUsCoV = meanUs > 0.0
+                ? snapshot.interPresentGapUsStdDev / meanUs
+                : 0.0;
+        }
         snapshot.hitch25Count = framePacingProfile.hitch25Count;
         snapshot.hitch50Count = framePacingProfile.hitch50Count;
         snapshot.hitch100Count = framePacingProfile.hitch100Count;
@@ -14999,16 +15440,75 @@ fragment float4 appgl_immediate_textured_fs(
     ActiveFboPassSignature activeFboPassSignature;
     bool fboPassActive = false;
 
+    static constexpr std::uint32_t kFboContinuationRejectSsbo = 1u << 0;
+    static constexpr std::uint32_t kFboContinuationRejectAtomic = 1u << 1;
+    static constexpr std::uint32_t kFboContinuationRejectImageWrite = 1u << 2;
+    static constexpr std::uint32_t kFboContinuationRejectQueryTf = 1u << 3;
+    static constexpr std::uint32_t kFboContinuationRejectTessMeshGs = 1u << 4;
+    static constexpr std::uint32_t kFboContinuationRejectLayered = 1u << 5;
+    static constexpr std::uint32_t kFboContinuationRejectViewportArray = 1u << 6;
+    static constexpr std::uint32_t kFboContinuationRejectBufferOnly =
+        kFboContinuationRejectSsbo | kFboContinuationRejectAtomic;
+
+    static std::uint32_t fboPassContinuationRejectMask(
+        const TranslatedDrawInfo& info) {
+        std::uint32_t mask = 0;
+        if (!info.ssboBindings.empty()) {
+            mask |= kFboContinuationRejectSsbo;
+        }
+        if (!info.atomicCounterBindings.empty()) {
+            mask |= kFboContinuationRejectAtomic;
+        }
+        if (!info.writtenImageTextureNames.empty()) {
+            mask |= kFboContinuationRejectImageWrite;
+        }
+        if (info.parallelEncodeQueryOrTransformFeedbackHazard) {
+            mask |= kFboContinuationRejectQueryTf;
+        }
+        if (info.parallelEncodeTessMeshOrGeometryHazard) {
+            mask |= kFboContinuationRejectTessMeshGs;
+        }
+        if (info.maxEmittedLayer != 0) {
+            mask |= kFboContinuationRejectLayered;
+        }
+        if (info.viewportArrayCount > 1) {
+            mask |= kFboContinuationRejectViewportArray;
+        }
+        return mask;
+    }
+
     static bool fboPassContinuationEligible(const TranslatedDrawInfo& info) {
         // v1 conservatism: anything with side effects or pass-level
         // routing beyond plain color/depth raster breaks the pass.
-        return info.ssboBindings.empty() &&
-            info.atomicCounterBindings.empty() &&
-            info.writtenImageTextureNames.empty() &&
-            !info.parallelEncodeQueryOrTransformFeedbackHazard &&
-            !info.parallelEncodeTessMeshOrGeometryHazard &&
-            info.maxEmittedLayer == 0 &&
-            info.viewportArrayCount <= 1;
+        return fboPassContinuationRejectMask(info) == 0;
+    }
+
+    static bool fboContinuationRejectMaskIsBufferOnly(std::uint32_t mask) {
+        return mask != 0 && (mask & ~kFboContinuationRejectBufferOnly) == 0;
+    }
+
+    void recordFboContinuationRejectMask(std::uint32_t mask) {
+        if (mask & kFboContinuationRejectSsbo) {
+            ++fboContinuationRejectSsbo;
+        }
+        if (mask & kFboContinuationRejectAtomic) {
+            ++fboContinuationRejectAtomic;
+        }
+        if (mask & kFboContinuationRejectImageWrite) {
+            ++fboContinuationRejectImageWrite;
+        }
+        if (mask & kFboContinuationRejectQueryTf) {
+            ++fboContinuationRejectQueryTf;
+        }
+        if (mask & kFboContinuationRejectTessMeshGs) {
+            ++fboContinuationRejectTessMeshGs;
+        }
+        if (mask & kFboContinuationRejectLayered) {
+            ++fboContinuationRejectLayered;
+        }
+        if (mask & kFboContinuationRejectViewportArray) {
+            ++fboContinuationRejectViewportArray;
+        }
     }
 
     bool fboPassSignatureMatches(const TranslatedDrawInfo& info) const {
@@ -15041,6 +15541,44 @@ fragment float4 appgl_immediate_textured_fs(
         }
         return activeFboPassSignature.colorSlices == info.fboColorSlices &&
             activeFboPassSignature.colorLevels == info.fboColorLevels;
+    }
+
+    void recordFboPassSignatureMissComponents(
+        const TranslatedDrawInfo& info) {
+        if (activeFboPassSignature.colorTex != info.fboColorTexture) {
+            ++fboSignatureMissColorTex;
+        }
+        if (activeFboPassSignature.dsTex != info.fboDepthStencilTexture) {
+            ++fboSignatureMissDsTex;
+        }
+        if (activeFboPassSignature.dsSlice !=
+                static_cast<std::uint32_t>(info.fboDepthStencilSlice) ||
+            activeFboPassSignature.dsLevel !=
+                static_cast<std::uint32_t>(info.fboDepthStencilLevel)) {
+            ++fboSignatureMissDsSliceLevel;
+        }
+        if (activeFboPassSignature.rtalSource != info.fboColorArrayLength) {
+            ++fboSignatureMissRtal;
+        }
+        if (activeFboPassSignature.fragmentShadingRate !=
+                info.fragmentShadingRate) {
+            ++fboSignatureMissFragmentShadingRate;
+        }
+        for (std::size_t i = 0; i < activeFboPassSignature.extraColor.size();
+             ++i) {
+            const void* drawExtra =
+                i < info.fboAdditionalColorTextures.size()
+                    ? info.fboAdditionalColorTextures[i]
+                    : nullptr;
+            if (activeFboPassSignature.extraColor[i] != drawExtra) {
+                ++fboSignatureMissExtraColor;
+                break;
+            }
+        }
+        if (activeFboPassSignature.colorSlices != info.fboColorSlices ||
+            activeFboPassSignature.colorLevels != info.fboColorLevels) {
+            ++fboSignatureMissColorSlicesLevels;
+        }
     }
 
     // Texture-feedback hazard: a continued pass must break when a draw
@@ -21182,6 +21720,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             presentCommandBufferPresentCalls;
         inventory.presentCommandBufferNilCalls =
             presentCommandBufferNilCalls;
+        inventory.commandBuffersCommitted = commandBuffersCommitted;
         inventory.presentNoWorkReturns = presentNoWorkReturns;
         inventory.presentCommitAttempts = presentCommitAttempts;
         inventory.presentCommitSuccesses = presentCommitSuccesses;
@@ -22158,6 +22697,7 @@ private:
     std::uint64_t presentPendingFalseCalls = 0;
     std::uint64_t presentCommandBufferPresentCalls = 0;
     std::uint64_t presentCommandBufferNilCalls = 0;
+    std::uint64_t commandBuffersCommitted = 0;
     std::uint64_t presentNoWorkReturns = 0;
     std::uint64_t presentCommitAttempts = 0;
     std::uint64_t presentCommitSuccesses = 0;
@@ -22200,6 +22740,29 @@ private:
     std::uint64_t passDescriptorBuildUsTotal = 0;
     std::uint64_t fboPassContinuations = 0;
     std::uint64_t fboPassSignatureMisses = 0;
+    std::uint64_t fboTailCloseContinuationDisabled = 0;
+    std::uint64_t fboTailCloseIneligible = 0;
+    std::uint64_t fboTailCloseNoActivePass = 0;
+    std::uint64_t fboTailCloseOther = 0;
+    std::uint64_t fboContinuationRejectSsbo = 0;
+    std::uint64_t fboContinuationRejectAtomic = 0;
+    std::uint64_t fboContinuationRejectImageWrite = 0;
+    std::uint64_t fboContinuationRejectQueryTf = 0;
+    std::uint64_t fboContinuationRejectTessMeshGs = 0;
+    std::uint64_t fboContinuationRejectLayered = 0;
+    std::uint64_t fboContinuationRejectViewportArray = 0;
+    std::uint64_t fboContinuationV2BufferOnlyCandidates = 0;
+    std::uint64_t fboSignatureMissColorTex = 0;
+    std::uint64_t fboSignatureMissDsTex = 0;
+    std::uint64_t fboSignatureMissDsSliceLevel = 0;
+    std::uint64_t fboSignatureMissRtal = 0;
+    std::uint64_t fboSignatureMissFragmentShadingRate = 0;
+    std::uint64_t fboSignatureMissExtraColor = 0;
+    std::uint64_t fboSignatureMissColorSlicesLevels = 0;
+    std::uint64_t fboFeedbackHits = 0;
+    std::uint64_t defaultToFboFlips = 0;
+    std::uint64_t fboToDefaultFlips = 0;
+    bool currentEncoderFirstDrawPending = false;
     std::uint64_t observedDrawableTextureBytes = 0;
     std::uint64_t observedDrawableTextureBytesPeak = 0;
     std::uint64_t observedDrawableTextureTruncated = 0;
@@ -23458,6 +24021,7 @@ private:
     };
     std::unordered_set<PipelineBuildLogKey, PipelineBuildLogKeyHash> loggedPipelineBuildPrograms;
     DrawSubmitProfile drawSubmitProfile;
+    EncodeSubtimeProfile encodeSubtimeProfile;
     // S25 Rung-1 instruments: always-on pacing accumulator + the
     // GL-thread drawable-acquire wait pair (the nextDrawable stall is
     // the one blocking site the command-submission wait kinds can't
@@ -23482,6 +24046,7 @@ private:
     const bool viewportRequestKeepaliveLatched =
         viewportRequestKeepaliveEnabled();
     const bool fboPassContinuationLatched = fboPassContinuationEnabled();
+    const bool serialBindCacheLatched = serialBindCacheEnabled();
     ThreadedDeferredRecordProfile threadedDeferredRecordProfile;
     FrameAttributionProfile frameAttributionProfile;
     std::deque<CapturedTranslatedDrawRecord> pendingThreadedDeferredRecords;
@@ -23522,6 +24087,259 @@ private:
     std::uint32_t cachedStencilFrontRef = 0;
     std::uint32_t cachedStencilBackRef = 0;
 
+    static constexpr std::size_t kEncodeSubtimeTrackedSlots = 256;
+    struct SerialBindCacheBufferBinding {
+        id<MTLBuffer> buffer = nil;
+        NSUInteger offset = 0;
+        bool valid = false;
+    };
+    struct SerialBindCacheBytesBinding {
+        std::uint64_t hash = 0;
+        NSUInteger length = 0;
+        bool valid = false;
+    };
+    struct SerialBindCacheTextureBinding {
+        id<MTLTexture> texture = nil;
+        bool valid = false;
+    };
+    struct SerialBindCacheSamplerBinding {
+        id<MTLSamplerState> sampler = nil;
+        bool valid = false;
+    };
+
+    std::array<SerialBindCacheBufferBinding, kEncodeSubtimeTrackedSlots>
+        serialBindVertexBuffers{};
+    std::array<SerialBindCacheBufferBinding, kEncodeSubtimeTrackedSlots>
+        serialBindFragmentBuffers{};
+    std::array<SerialBindCacheBytesBinding, kEncodeSubtimeTrackedSlots>
+        serialBindVertexBytes{};
+    std::array<SerialBindCacheBytesBinding, kEncodeSubtimeTrackedSlots>
+        serialBindFragmentBytes{};
+    std::array<SerialBindCacheTextureBinding, kEncodeSubtimeTrackedSlots>
+        serialBindVertexTextures{};
+    std::array<SerialBindCacheTextureBinding, kEncodeSubtimeTrackedSlots>
+        serialBindFragmentTextures{};
+    std::array<SerialBindCacheSamplerBinding, kEncodeSubtimeTrackedSlots>
+        serialBindVertexSamplers{};
+    std::array<SerialBindCacheSamplerBinding, kEncodeSubtimeTrackedSlots>
+        serialBindFragmentSamplers{};
+
+    static std::uint64_t serialBindCacheBytesHash(const void* data,
+                                                  NSUInteger length) {
+        std::uint64_t hash = 1469598103934665603ull;
+        const unsigned char* bytes =
+            static_cast<const unsigned char*>(data);
+        for (NSUInteger i = 0; i < length; ++i) {
+            hash ^= static_cast<std::uint64_t>(bytes[i]);
+            hash *= 1099511628211ull;
+        }
+        return hash;
+    }
+
+    static void recordSerialBindCacheDecision(
+        EncodeSubtimeProfileSample* sample,
+        bool changed,
+        bool skipped) {
+        if (sample == nullptr) {
+            return;
+        }
+        ++sample->bindIdentityChecks;
+        if (changed) {
+            ++sample->bindChanged;
+        } else {
+            ++sample->bindRedundant;
+        }
+        if (skipped) {
+            ++sample->bindSkipped;
+        }
+    }
+
+    bool shouldBindBuffer(EncodeSubtimeProfileSample* sample,
+                          std::array<SerialBindCacheBufferBinding,
+                                     kEncodeSubtimeTrackedSlots>& buffers,
+                          std::array<SerialBindCacheBytesBinding,
+                                     kEncodeSubtimeTrackedSlots>& bytes,
+                          NSUInteger slot,
+                          id<MTLBuffer> buffer,
+                          NSUInteger offset) {
+        if (slot >= buffers.size()) {
+            return true;
+        }
+        auto& cached = buffers[slot];
+        const bool changed =
+            !cached.valid || cached.buffer != buffer || cached.offset != offset;
+        if (changed) {
+            cached.buffer = buffer;
+            cached.offset = offset;
+            cached.valid = true;
+            bytes[slot].valid = false;
+        }
+        const bool skipped = serialBindCacheLatched && !changed;
+        recordSerialBindCacheDecision(sample, changed, skipped);
+        return !skipped;
+    }
+
+    bool shouldBindBytes(EncodeSubtimeProfileSample* sample,
+                         std::array<SerialBindCacheBytesBinding,
+                                    kEncodeSubtimeTrackedSlots>& bytes,
+                         std::array<SerialBindCacheBufferBinding,
+                                    kEncodeSubtimeTrackedSlots>& buffers,
+                         NSUInteger slot,
+                         const void* data,
+                         NSUInteger length) {
+        if (slot >= bytes.size()) {
+            return true;
+        }
+        if (data == nullptr && length > 0) {
+            bytes[slot].valid = false;
+            buffers[slot].valid = false;
+            recordSerialBindCacheDecision(sample, true, false);
+            return true;
+        }
+        const std::uint64_t hash = serialBindCacheBytesHash(data, length);
+        auto& cached = bytes[slot];
+        const bool changed =
+            !cached.valid || cached.hash != hash || cached.length != length;
+        if (changed) {
+            cached.hash = hash;
+            cached.length = length;
+            cached.valid = true;
+            buffers[slot].valid = false;
+        }
+        const bool skipped = serialBindCacheLatched && !changed;
+        recordSerialBindCacheDecision(sample, changed, skipped);
+        return !skipped;
+    }
+
+    bool shouldBindTexture(EncodeSubtimeProfileSample* sample,
+                           std::array<SerialBindCacheTextureBinding,
+                                      kEncodeSubtimeTrackedSlots>& textures,
+                           NSUInteger slot,
+                           id<MTLTexture> texture) {
+        if (slot >= textures.size()) {
+            return true;
+        }
+        auto& cached = textures[slot];
+        const bool changed = !cached.valid || cached.texture != texture;
+        if (changed) {
+            cached.texture = texture;
+            cached.valid = true;
+        }
+        const bool skipped = serialBindCacheLatched && !changed;
+        recordSerialBindCacheDecision(sample, changed, skipped);
+        return !skipped;
+    }
+
+    bool shouldBindSampler(EncodeSubtimeProfileSample* sample,
+                           std::array<SerialBindCacheSamplerBinding,
+                                      kEncodeSubtimeTrackedSlots>& samplers,
+                           NSUInteger slot,
+                           id<MTLSamplerState> sampler) {
+        if (slot >= samplers.size()) {
+            return true;
+        }
+        auto& cached = samplers[slot];
+        const bool changed = !cached.valid || cached.sampler != sampler;
+        if (changed) {
+            cached.sampler = sampler;
+            cached.valid = true;
+        }
+        const bool skipped = serialBindCacheLatched && !changed;
+        recordSerialBindCacheDecision(sample, changed, skipped);
+        return !skipped;
+    }
+
+    void bindVertexBufferIfNeeded(EncodeSubtimeProfileSample* sample,
+                                  id<MTLBuffer> buffer,
+                                  NSUInteger offset,
+                                  NSUInteger slot) {
+        if (shouldBindBuffer(sample, serialBindVertexBuffers,
+                             serialBindVertexBytes, slot, buffer, offset)) {
+            [currentRenderEncoder setVertexBuffer:buffer offset:offset atIndex:slot];
+        }
+    }
+
+    void bindFragmentBufferIfNeeded(EncodeSubtimeProfileSample* sample,
+                                    id<MTLBuffer> buffer,
+                                    NSUInteger offset,
+                                    NSUInteger slot) {
+        if (shouldBindBuffer(sample, serialBindFragmentBuffers,
+                             serialBindFragmentBytes, slot, buffer, offset)) {
+            [currentRenderEncoder setFragmentBuffer:buffer offset:offset atIndex:slot];
+        }
+    }
+
+    void bindVertexBytesIfNeeded(EncodeSubtimeProfileSample* sample,
+                                 const void* data,
+                                 NSUInteger length,
+                                 NSUInteger slot) {
+        if (shouldBindBytes(sample, serialBindVertexBytes,
+                            serialBindVertexBuffers, slot, data, length)) {
+            [currentRenderEncoder setVertexBytes:data length:length atIndex:slot];
+        }
+    }
+
+    void bindFragmentBytesIfNeeded(EncodeSubtimeProfileSample* sample,
+                                   const void* data,
+                                   NSUInteger length,
+                                   NSUInteger slot) {
+        if (shouldBindBytes(sample, serialBindFragmentBytes,
+                            serialBindFragmentBuffers, slot, data, length)) {
+            [currentRenderEncoder setFragmentBytes:data length:length atIndex:slot];
+        }
+    }
+
+    void bindVertexTextureIfNeeded(EncodeSubtimeProfileSample* sample,
+                                   id<MTLTexture> texture,
+                                   NSUInteger slot) {
+        if (shouldBindTexture(sample, serialBindVertexTextures,
+                              slot, texture)) {
+            [currentRenderEncoder setVertexTexture:texture atIndex:slot];
+        }
+    }
+
+    void bindFragmentTextureIfNeeded(EncodeSubtimeProfileSample* sample,
+                                     id<MTLTexture> texture,
+                                     NSUInteger slot) {
+        if (shouldBindTexture(sample, serialBindFragmentTextures,
+                              slot, texture)) {
+            [currentRenderEncoder setFragmentTexture:texture atIndex:slot];
+        }
+    }
+
+    void bindVertexSamplerStateIfNeeded(EncodeSubtimeProfileSample* sample,
+                                        id<MTLSamplerState> sampler,
+                                        NSUInteger slot) {
+        if (shouldBindSampler(sample, serialBindVertexSamplers,
+                              slot, sampler)) {
+            [currentRenderEncoder setVertexSamplerState:sampler atIndex:slot];
+        }
+    }
+
+    void bindFragmentSamplerStateIfNeeded(EncodeSubtimeProfileSample* sample,
+                                          id<MTLSamplerState> sampler,
+                                          NSUInteger slot) {
+        if (shouldBindSampler(sample, serialBindFragmentSamplers,
+                              slot, sampler)) {
+            [currentRenderEncoder setFragmentSamplerState:sampler atIndex:slot];
+        }
+    }
+
+    static void recordProducerDrainDespiteBindSkip(
+        EncodeSubtimeProfileSample* sample,
+        const TranslatedDrawInfo& info) {
+        if (sample == nullptr || sample->bindSkipped == 0) {
+            return;
+        }
+        if (!info.sampledTextureNames.empty() ||
+            !info.readImageTextureNames.empty() ||
+            !info.writtenImageTextureNames.empty() ||
+            !info.fragmentTextures.empty() ||
+            !info.vertexTextures.empty()) {
+            ++sample->producerDrainDespiteBindSkip;
+        }
+    }
+
     void resetCachedEncoderState() {
         cachedPipelineState = nil;
         cachedDepthStencilState = nil;
@@ -23531,6 +24349,14 @@ private:
         cachedViewportValid = false;
         cachedScissorValid = false;
         cachedStencilRefValid = false;
+        serialBindVertexBuffers = {};
+        serialBindFragmentBuffers = {};
+        serialBindVertexBytes = {};
+        serialBindFragmentBytes = {};
+        serialBindVertexTextures = {};
+        serialBindFragmentTextures = {};
+        serialBindVertexSamplers = {};
+        serialBindFragmentSamplers = {};
     }
 
     // ── Ring buffer for per-draw vertex/index data (OPT-1) ──
@@ -23670,6 +24496,9 @@ private:
         const std::uint64_t commitSeq = ++commitSeqCounter;
         foldTextureReadSetAtCommit(commitSeq);
         auto completedSeq = completedCommitSeq;
+        if (lease.get() != nil) {
+            ++commandBuffersCommitted;
+        }
         lease.commitWithCompletion(reason, ^(id<MTLCommandBuffer>) {
             std::uint64_t prev = completedSeq->load(std::memory_order_relaxed);
             while (prev < commitSeq &&

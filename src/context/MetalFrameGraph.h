@@ -1116,7 +1116,10 @@ public:
     struct FramePacingSnapshot {
         std::uint64_t frames = 0;
         double frameTimeUsTotal = 0.0;
+        double frameTimeUsSquaredTotal = 0.0;
         double frameTimeUsMax = 0.0;
+        double interPresentGapUsStdDev = 0.0;
+        double interPresentGapUsCoV = 0.0;
         std::uint64_t hitch25Count = 0;
         std::uint64_t hitch50Count = 0;
         std::uint64_t hitch100Count = 0;
@@ -1674,6 +1677,7 @@ public:
         std::uint64_t presentPendingFalseCalls = 0;
         std::uint64_t presentCommandBufferPresentCalls = 0;
         std::uint64_t presentCommandBufferNilCalls = 0;
+        std::uint64_t commandBuffersCommitted = 0;
         std::uint64_t presentNoWorkReturns = 0;
         std::uint64_t presentCommitAttempts = 0;
         std::uint64_t presentCommitSuccesses = 0;

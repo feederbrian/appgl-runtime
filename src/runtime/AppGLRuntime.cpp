@@ -2891,6 +2891,33 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
                << "}";
     }
     stream << "]},";
+    const double pacingInterPresentGapUsMean =
+        metalInventory.pacingFrames > 0
+            ? metalInventory.pacingFrameTimeUsTotal /
+                  static_cast<double>(metalInventory.pacingFrames)
+            : 0.0;
+    stream << "\"pacing\":{"
+           << "\"frames\":" << metalInventory.pacingFrames << ","
+           << "\"frameTimeUsTotal\":"
+           << metalInventory.pacingFrameTimeUsTotal << ","
+           << "\"frameTimeUsSquaredTotal\":"
+           << metalInventory.pacingFrameTimeUsSquaredTotal << ","
+           << "\"frameTimeUsMax\":"
+           << metalInventory.pacingFrameTimeUsMax << ","
+           << "\"interPresentGapUsMean\":"
+           << pacingInterPresentGapUsMean << ","
+           << "\"interPresentGapUsStdDev\":"
+           << metalInventory.pacingInterPresentGapUsStdDev << ","
+           << "\"interPresentGapUsCoV\":"
+           << metalInventory.pacingInterPresentGapUsCoV << ","
+           << "\"hitch25\":" << metalInventory.pacingHitch25 << ","
+           << "\"hitch50\":" << metalInventory.pacingHitch50 << ","
+           << "\"hitch100\":" << metalInventory.pacingHitch100 << ","
+           << "\"drawableWaitUs\":"
+           << metalInventory.pacingDrawableWaitUs << ","
+           << "\"drawableWaitCount\":"
+           << metalInventory.pacingDrawableWaitCount
+           << "},";
     auto emitCommandReasonCounts = [&](const char* name,
                                        const auto& counts) {
         stream << "\"" << name << "\":[";
@@ -2922,6 +2949,8 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
 
     stream << "\"commandBuffers\":{"
            << "\"submittedCommandBuffers\":"
+           << metalInventory.commandBuffers.submittedCommandBuffers << ","
+           << "\"commandBuffersCommitted\":"
            << metalInventory.commandBuffers.submittedCommandBuffers << ","
            << "\"completedCommandBuffers\":"
            << metalInventory.commandBuffers.completedCommandBuffers << ",";
@@ -3162,6 +3191,8 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << metalInventory.frameGraphPresentCommandBufferPresentCalls << ","
            << "\"presentCommandBufferNilCalls\":"
            << metalInventory.frameGraphPresentCommandBufferNilCalls << ","
+           << "\"commandBuffersCommitted\":"
+           << metalInventory.frameGraphCommandBuffersCommitted << ","
            << "\"presentNoWorkReturns\":"
            << metalInventory.frameGraphPresentNoWorkReturns << ","
            << "\"presentCommitAttempts\":"

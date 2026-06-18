@@ -876,6 +876,7 @@ public:
         std::uint64_t frameGraphPresentPendingFalseCalls = 0;
         std::uint64_t frameGraphPresentCommandBufferPresentCalls = 0;
         std::uint64_t frameGraphPresentCommandBufferNilCalls = 0;
+        std::uint64_t frameGraphCommandBuffersCommitted = 0;
         std::uint64_t frameGraphPresentNoWorkReturns = 0;
         std::uint64_t frameGraphPresentCommitAttempts = 0;
         std::uint64_t frameGraphPresentCommitSuccesses = 0;
@@ -1004,7 +1005,10 @@ public:
         // periodic diagnostics JSONL).
         std::uint64_t pacingFrames = 0;
         double pacingFrameTimeUsTotal = 0.0;
+        double pacingFrameTimeUsSquaredTotal = 0.0;
         double pacingFrameTimeUsMax = 0.0;
+        double pacingInterPresentGapUsStdDev = 0.0;
+        double pacingInterPresentGapUsCoV = 0.0;
         std::uint64_t pacingHitch25 = 0;
         std::uint64_t pacingHitch50 = 0;
         std::uint64_t pacingHitch100 = 0;

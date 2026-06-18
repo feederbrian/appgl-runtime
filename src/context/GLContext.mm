@@ -27242,7 +27242,13 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             const auto pacing = impl_->frameGraph->framePacingSnapshot();
             inventory.pacingFrames = pacing.frames;
             inventory.pacingFrameTimeUsTotal = pacing.frameTimeUsTotal;
+            inventory.pacingFrameTimeUsSquaredTotal =
+                pacing.frameTimeUsSquaredTotal;
             inventory.pacingFrameTimeUsMax = pacing.frameTimeUsMax;
+            inventory.pacingInterPresentGapUsStdDev =
+                pacing.interPresentGapUsStdDev;
+            inventory.pacingInterPresentGapUsCoV =
+                pacing.interPresentGapUsCoV;
             inventory.pacingHitch25 = pacing.hitch25Count;
             inventory.pacingHitch50 = pacing.hitch50Count;
             inventory.pacingHitch100 = pacing.hitch100Count;
@@ -27421,6 +27427,8 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             frameGraphMetal.presentCommandBufferPresentCalls;
         inventory.frameGraphPresentCommandBufferNilCalls =
             frameGraphMetal.presentCommandBufferNilCalls;
+        inventory.frameGraphCommandBuffersCommitted =
+            frameGraphMetal.commandBuffersCommitted;
         inventory.frameGraphPresentNoWorkReturns =
             frameGraphMetal.presentNoWorkReturns;
         inventory.frameGraphPresentCommitAttempts =
