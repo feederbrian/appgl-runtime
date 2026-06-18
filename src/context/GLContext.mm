@@ -1493,6 +1493,28 @@ struct BindingConstructionSizingProfile {
 };
 
 struct ClearColorAttachmentSizingProfile {
+    enum class EncoderClass : std::uint8_t {
+        NoFrameGraph,
+        NoMetalTexture,
+        NoOpenEncoder,
+        SameTargetEncoder,
+        OtherTargetEncoder,
+    };
+
+    enum class F1FallbackReason : std::uint8_t {
+        None,
+        Scissor,
+        ColorMask,
+        PartialCoverage,
+        NoFrameGraph,
+        NoMetalTexture,
+        Multisample,
+        TextureTarget,
+        Format,
+        RenderbufferNativeBpp,
+        ZeroArea,
+    };
+
     bool enabled = bindingConstructionSizingEnabled();
     std::uint64_t clearCalls = 0;
     std::uint64_t clearBytesCleared = 0;
@@ -1510,6 +1532,32 @@ struct ClearColorAttachmentSizingProfile {
     std::uint64_t clearMemsetBytes = 0;
     std::uint64_t clearDescriptorRebuildCalls = 0;
     std::uint64_t clearViaDrawCalls = 0;
+    std::uint64_t f1ClassifierCalls = 0;
+    std::uint64_t f1TextureAttachments = 0;
+    std::uint64_t f1RenderbufferAttachments = 0;
+    std::uint64_t f1FullUnmasked = 0;
+    std::uint64_t f1Scissor = 0;
+    std::uint64_t f1ColorMask = 0;
+    std::uint64_t f1PartialCoverage = 0;
+    std::uint64_t f1FramebufferColorClearCalls = 0;
+    std::uint64_t f1FramebufferColorClearSlots = 0;
+    std::uint64_t f1FramebufferMrtClearCalls = 0;
+    std::uint64_t f1EncoderNoFrameGraph = 0;
+    std::uint64_t f1EncoderNoMetalTexture = 0;
+    std::uint64_t f1EncoderNoOpen = 0;
+    std::uint64_t f1EncoderSameTarget = 0;
+    std::uint64_t f1EncoderOtherTarget = 0;
+    std::uint64_t f1Eligible = 0;
+    std::uint64_t f1FallbackScissor = 0;
+    std::uint64_t f1FallbackColorMask = 0;
+    std::uint64_t f1FallbackPartialCoverage = 0;
+    std::uint64_t f1FallbackNoFrameGraph = 0;
+    std::uint64_t f1FallbackNoMetalTexture = 0;
+    std::uint64_t f1FallbackMultisample = 0;
+    std::uint64_t f1FallbackTextureTarget = 0;
+    std::uint64_t f1FallbackFormat = 0;
+    std::uint64_t f1FallbackRenderbufferNativeBpp = 0;
+    std::uint64_t f1FallbackZeroArea = 0;
     double clearMemsetUs = 0.0;
     double clearDescriptorRebuildUs = 0.0;
     double clearViaDrawUs = 0.0;
@@ -1563,6 +1611,104 @@ struct ClearColorAttachmentSizingProfile {
         }
     }
 
+    void recordFramebufferColorClear(std::uint64_t activeSlots) {
+        if (!enabled) {
+            return;
+        }
+        ++f1FramebufferColorClearCalls;
+        f1FramebufferColorClearSlots += activeSlots;
+        if (activeSlots > 1) {
+            ++f1FramebufferMrtClearCalls;
+        }
+    }
+
+    void recordF1Classifier(bool textureAttachment,
+                            bool renderbufferAttachment,
+                            bool scissorActive,
+                            bool fullColorMask,
+                            bool fullCoverage,
+                            EncoderClass encoderClass,
+                            bool eligible,
+                            F1FallbackReason fallbackReason) {
+        if (!enabled) {
+            return;
+        }
+        ++f1ClassifierCalls;
+        if (textureAttachment) {
+            ++f1TextureAttachments;
+        }
+        if (renderbufferAttachment) {
+            ++f1RenderbufferAttachments;
+        }
+        if (!scissorActive && fullColorMask && fullCoverage) {
+            ++f1FullUnmasked;
+        }
+        if (scissorActive) {
+            ++f1Scissor;
+        }
+        if (!fullColorMask) {
+            ++f1ColorMask;
+        }
+        if (!fullCoverage) {
+            ++f1PartialCoverage;
+        }
+        switch (encoderClass) {
+            case EncoderClass::NoFrameGraph:
+                ++f1EncoderNoFrameGraph;
+                break;
+            case EncoderClass::NoMetalTexture:
+                ++f1EncoderNoMetalTexture;
+                break;
+            case EncoderClass::NoOpenEncoder:
+                ++f1EncoderNoOpen;
+                break;
+            case EncoderClass::SameTargetEncoder:
+                ++f1EncoderSameTarget;
+                break;
+            case EncoderClass::OtherTargetEncoder:
+                ++f1EncoderOtherTarget;
+                break;
+        }
+        if (eligible) {
+            ++f1Eligible;
+            return;
+        }
+        switch (fallbackReason) {
+            case F1FallbackReason::None:
+                break;
+            case F1FallbackReason::Scissor:
+                ++f1FallbackScissor;
+                break;
+            case F1FallbackReason::ColorMask:
+                ++f1FallbackColorMask;
+                break;
+            case F1FallbackReason::PartialCoverage:
+                ++f1FallbackPartialCoverage;
+                break;
+            case F1FallbackReason::NoFrameGraph:
+                ++f1FallbackNoFrameGraph;
+                break;
+            case F1FallbackReason::NoMetalTexture:
+                ++f1FallbackNoMetalTexture;
+                break;
+            case F1FallbackReason::Multisample:
+                ++f1FallbackMultisample;
+                break;
+            case F1FallbackReason::TextureTarget:
+                ++f1FallbackTextureTarget;
+                break;
+            case F1FallbackReason::Format:
+                ++f1FallbackFormat;
+                break;
+            case F1FallbackReason::RenderbufferNativeBpp:
+                ++f1FallbackRenderbufferNativeBpp;
+                break;
+            case F1FallbackReason::ZeroArea:
+                ++f1FallbackZeroArea;
+                break;
+        }
+    }
+
     void dump() const {
         if (!enabled || clearCalls == 0) {
             return;
@@ -1602,6 +1748,44 @@ struct ClearColorAttachmentSizingProfile {
             clearViaDrawCalls > 0
                 ? clearViaDrawUs / static_cast<double>(clearViaDrawCalls)
                 : 0.0);
+        std::fprintf(stderr,
+            "[APPGL_CLEAR_F1_CLASSIFIER] summary calls=%llu texture=%llu "
+            "renderbuffer=%llu full_unmasked=%llu scissor=%llu color_mask=%llu "
+            "partial_coverage=%llu fbo_color_clears=%llu fbo_color_slots=%llu "
+            "mrt_clears=%llu encoder_no_frame_graph=%llu "
+            "encoder_no_metal_texture=%llu encoder_no_open=%llu "
+            "encoder_same_target=%llu encoder_other_target=%llu "
+            "eligible=%llu fallback_scissor=%llu fallback_color_mask=%llu "
+            "fallback_partial_coverage=%llu fallback_no_frame_graph=%llu "
+            "fallback_no_metal_texture=%llu fallback_multisample=%llu "
+            "fallback_texture_target=%llu fallback_format=%llu "
+            "fallback_renderbuffer_native_bpp=%llu fallback_zero_area=%llu\n",
+            static_cast<unsigned long long>(f1ClassifierCalls),
+            static_cast<unsigned long long>(f1TextureAttachments),
+            static_cast<unsigned long long>(f1RenderbufferAttachments),
+            static_cast<unsigned long long>(f1FullUnmasked),
+            static_cast<unsigned long long>(f1Scissor),
+            static_cast<unsigned long long>(f1ColorMask),
+            static_cast<unsigned long long>(f1PartialCoverage),
+            static_cast<unsigned long long>(f1FramebufferColorClearCalls),
+            static_cast<unsigned long long>(f1FramebufferColorClearSlots),
+            static_cast<unsigned long long>(f1FramebufferMrtClearCalls),
+            static_cast<unsigned long long>(f1EncoderNoFrameGraph),
+            static_cast<unsigned long long>(f1EncoderNoMetalTexture),
+            static_cast<unsigned long long>(f1EncoderNoOpen),
+            static_cast<unsigned long long>(f1EncoderSameTarget),
+            static_cast<unsigned long long>(f1EncoderOtherTarget),
+            static_cast<unsigned long long>(f1Eligible),
+            static_cast<unsigned long long>(f1FallbackScissor),
+            static_cast<unsigned long long>(f1FallbackColorMask),
+            static_cast<unsigned long long>(f1FallbackPartialCoverage),
+            static_cast<unsigned long long>(f1FallbackNoFrameGraph),
+            static_cast<unsigned long long>(f1FallbackNoMetalTexture),
+            static_cast<unsigned long long>(f1FallbackMultisample),
+            static_cast<unsigned long long>(f1FallbackTextureTarget),
+            static_cast<unsigned long long>(f1FallbackFormat),
+            static_cast<unsigned long long>(f1FallbackRenderbufferNativeBpp),
+            static_cast<unsigned long long>(f1FallbackZeroArea));
         std::fflush(stderr);
     }
 
@@ -1631,6 +1815,49 @@ struct ClearColorAttachmentSizingProfile {
             << clearDescriptorRebuildCalls
             << ",\"clearViaDrawUs\":" << clearViaDrawUs
             << ",\"clearViaDrawCalls\":" << clearViaDrawCalls
+            << ",\"f1ClassifierCalls\":" << f1ClassifierCalls
+            << ",\"f1TextureAttachments\":" << f1TextureAttachments
+            << ",\"f1RenderbufferAttachments\":"
+            << f1RenderbufferAttachments
+            << ",\"f1FullUnmasked\":" << f1FullUnmasked
+            << ",\"f1Scissor\":" << f1Scissor
+            << ",\"f1ColorMask\":" << f1ColorMask
+            << ",\"f1PartialCoverage\":" << f1PartialCoverage
+            << ",\"f1FramebufferColorClearCalls\":"
+            << f1FramebufferColorClearCalls
+            << ",\"f1FramebufferColorClearSlots\":"
+            << f1FramebufferColorClearSlots
+            << ",\"f1FramebufferMrtClearCalls\":"
+            << f1FramebufferMrtClearCalls
+            << ",\"f1EncoderNoFrameGraph\":"
+            << f1EncoderNoFrameGraph
+            << ",\"f1EncoderNoMetalTexture\":"
+            << f1EncoderNoMetalTexture
+            << ",\"f1EncoderNoOpen\":" << f1EncoderNoOpen
+            << ",\"f1EncoderSameTarget\":"
+            << f1EncoderSameTarget
+            << ",\"f1EncoderOtherTarget\":"
+            << f1EncoderOtherTarget
+            << ",\"f1Eligible\":" << f1Eligible
+            << ",\"f1FallbackScissor\":"
+            << f1FallbackScissor
+            << ",\"f1FallbackColorMask\":"
+            << f1FallbackColorMask
+            << ",\"f1FallbackPartialCoverage\":"
+            << f1FallbackPartialCoverage
+            << ",\"f1FallbackNoFrameGraph\":"
+            << f1FallbackNoFrameGraph
+            << ",\"f1FallbackNoMetalTexture\":"
+            << f1FallbackNoMetalTexture
+            << ",\"f1FallbackMultisample\":"
+            << f1FallbackMultisample
+            << ",\"f1FallbackTextureTarget\":"
+            << f1FallbackTextureTarget
+            << ",\"f1FallbackFormat\":" << f1FallbackFormat
+            << ",\"f1FallbackRenderbufferNativeBpp\":"
+            << f1FallbackRenderbufferNativeBpp
+            << ",\"f1FallbackZeroArea\":"
+            << f1FallbackZeroArea
             << "}";
         return out.str();
     }
@@ -19926,6 +20153,109 @@ struct GLContext::Impl {
                 }
                 return ok;
             };
+        using F1EncoderClass = ClearColorAttachmentSizingProfile::EncoderClass;
+        using F1FallbackReason =
+            ClearColorAttachmentSizingProfile::F1FallbackReason;
+        auto classifyEncoder = [&](void* metalTexture) {
+            if (frameGraph == nullptr) {
+                return F1EncoderClass::NoFrameGraph;
+            }
+            if (metalTexture == nullptr) {
+                return F1EncoderClass::NoMetalTexture;
+            }
+            if (frameGraph->currentRenderEncoder() == nullptr) {
+                return F1EncoderClass::NoOpenEncoder;
+            }
+            return frameGraph->currentRenderEncoderTargetsTexture(metalTexture)
+                ? F1EncoderClass::SameTargetEncoder
+                : F1EncoderClass::OtherTargetEncoder;
+        };
+        auto firstFallbackReason = [](bool scissorActive,
+                                      bool fullColorMask,
+                                      bool fullCoverage,
+                                      bool hasFrameGraph,
+                                      bool hasMetalTexture,
+                                      bool multisample,
+                                      bool textureTargetSupported,
+                                      bool formatSupported,
+                                      bool renderbufferNativeBpp,
+                                      bool zeroArea) {
+            if (zeroArea) {
+                return F1FallbackReason::ZeroArea;
+            }
+            if (scissorActive) {
+                return F1FallbackReason::Scissor;
+            }
+            if (!fullColorMask) {
+                return F1FallbackReason::ColorMask;
+            }
+            if (!fullCoverage) {
+                return F1FallbackReason::PartialCoverage;
+            }
+            if (!hasFrameGraph) {
+                return F1FallbackReason::NoFrameGraph;
+            }
+            if (!hasMetalTexture) {
+                return F1FallbackReason::NoMetalTexture;
+            }
+            if (multisample) {
+                return F1FallbackReason::Multisample;
+            }
+            if (!textureTargetSupported) {
+                return F1FallbackReason::TextureTarget;
+            }
+            if (!formatSupported) {
+                return F1FallbackReason::Format;
+            }
+            if (renderbufferNativeBpp) {
+                return F1FallbackReason::RenderbufferNativeBpp;
+            }
+            return F1FallbackReason::None;
+        };
+        auto recordF1Classifier = [&](bool textureAttachment,
+                                      bool renderbufferAttachment,
+                                      bool scissorActive,
+                                      bool fullColorMask,
+                                      bool fullCoverage,
+                                      void* metalTexture,
+                                      bool multisample,
+                                      bool textureTargetSupported,
+                                      bool formatSupported,
+                                      bool renderbufferNativeBpp,
+                                      bool zeroArea) {
+            const bool hasFrameGraph = frameGraph != nullptr;
+            const bool hasMetalTexture = metalTexture != nullptr;
+            const bool eligible =
+                !zeroArea &&
+                !scissorActive &&
+                fullColorMask &&
+                fullCoverage &&
+                hasFrameGraph &&
+                hasMetalTexture &&
+                !multisample &&
+                textureTargetSupported &&
+                formatSupported &&
+                !renderbufferNativeBpp;
+            clearColorAttachmentSizingProfile.recordF1Classifier(
+                textureAttachment,
+                renderbufferAttachment,
+                scissorActive,
+                fullColorMask,
+                fullCoverage,
+                classifyEncoder(metalTexture),
+                eligible,
+                eligible ? F1FallbackReason::None
+                         : firstFallbackReason(scissorActive,
+                                               fullColorMask,
+                                               fullCoverage,
+                                               hasFrameGraph,
+                                               hasMetalTexture,
+                                               multisample,
+                                               textureTargetSupported,
+                                               formatSupported,
+                                               renderbufferNativeBpp,
+                                               zeroArea));
+        };
         const std::uint8_t rgba[4] = {
             normalizedByte(color[0]),
             normalizedByte(color[1]),
@@ -19957,6 +20287,12 @@ struct GLContext::Impl {
             const bool clearScissorActive =
                 scgot > 0 &&
                 (scarr[0].enabled || state->isEnabled(GL_SCISSOR_TEST));
+            const GLBlendState& blendForMask = state->blendState();
+            const bool fullColorMask =
+                blendForMask.colorMask[0] != GL_FALSE &&
+                blendForMask.colorMask[1] != GL_FALSE &&
+                blendForMask.colorMask[2] != GL_FALSE &&
+                blendForMask.colorMask[3] != GL_FALSE;
             const bool isMSColorTexture =
                 texture->target == GL_TEXTURE_2D_MULTISAMPLE ||
                 texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
@@ -19993,6 +20329,18 @@ struct GLContext::Impl {
                     static_cast<std::uint64_t>(metalTex.height) *
                     metalLayers *
                     static_cast<std::uint64_t>(metalTex.sampleCount) * 4u;
+                recordF1Classifier(
+                    /*textureAttachment=*/true,
+                    /*renderbufferAttachment=*/false,
+                    clearScissorActive,
+                    fullColorMask,
+                    /*fullCoverage=*/true,
+                    texture->metalTexture,
+                    /*multisample=*/true,
+                    /*textureTargetSupported=*/false,
+                    /*formatSupported=*/true,
+                    /*renderbufferNativeBpp=*/false,
+                    /*zeroArea=*/false);
                 if (texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
                     if (attachment.layered) {
                         const GLTextureImageLevel& image = level->second;
@@ -20077,6 +20425,18 @@ struct GLContext::Impl {
                 const auto& s0 = scarr[0];
                 if (s0.width <= 0 || s0.height <= 0) {
                     // Zero-dim scissor masks every pixel; nothing to write.
+                    recordF1Classifier(
+                        /*textureAttachment=*/true,
+                        /*renderbufferAttachment=*/false,
+                        clearScissorActive,
+                        fullColorMask,
+                        /*fullCoverage=*/false,
+                        texture->metalTexture,
+                        /*multisample=*/isMSColorTexture,
+                        /*textureTargetSupported=*/true,
+                        /*formatSupported=*/true,
+                        /*renderbufferNativeBpp=*/false,
+                        /*zeroArea=*/true);
                     return true;
                 }
                 scissorMinX = std::max<GLsizei>(0, s0.x);
@@ -20090,9 +20450,51 @@ struct GLContext::Impl {
                 scissorMinY = metalMinY;
                 scissorMaxY = metalMaxY;
                 if (scissorMinX >= scissorMaxX || scissorMinY >= scissorMaxY) {
+                    recordF1Classifier(
+                        /*textureAttachment=*/true,
+                        /*renderbufferAttachment=*/false,
+                        clearScissorActive,
+                        fullColorMask,
+                        /*fullCoverage=*/false,
+                        texture->metalTexture,
+                        /*multisample=*/isMSColorTexture,
+                        /*textureTargetSupported=*/true,
+                        /*formatSupported=*/true,
+                        /*renderbufferNativeBpp=*/false,
+                        /*zeroArea=*/true);
                     return true;
                 }
             }
+            const bool textureFullCoverage =
+                firstLayer == 0 &&
+                lastLayer == sourceDepth &&
+                scissorMinX == 0 &&
+                scissorMaxX == sourceWidth &&
+                scissorMinY == 0 &&
+                scissorMaxY == sourceHeight;
+            const bool f1TextureTargetSupported =
+                texture->target != GL_TEXTURE_CUBE_MAP &&
+                texture->target != GL_TEXTURE_CUBE_MAP_ARRAY &&
+                texture->target != GL_TEXTURE_2D_MULTISAMPLE &&
+                texture->target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+            const bool f1TextureFormatSupported =
+                image.desc.internalFormat == GL_RGBA8 ||
+                image.desc.internalFormat == GL_RGB8 ||
+                image.desc.internalFormat == GL_SRGB8_ALPHA8 ||
+                image.desc.internalFormat == GL_RGBA ||
+                image.desc.internalFormat == GL_RGB;
+            recordF1Classifier(
+                /*textureAttachment=*/true,
+                /*renderbufferAttachment=*/false,
+                clearScissorActive,
+                fullColorMask,
+                textureFullCoverage,
+                texture->metalTexture,
+                /*multisample=*/isMSColorTexture,
+                f1TextureTargetSupported,
+                f1TextureFormatSupported,
+                /*renderbufferNativeBpp=*/false,
+                /*zeroArea=*/false);
             const std::uint64_t clearRegionPixels =
                 static_cast<std::uint64_t>(lastLayer - firstLayer) *
                 static_cast<std::uint64_t>(scissorMaxY - scissorMinY) *
@@ -20427,7 +20829,33 @@ struct GLContext::Impl {
                 minY = std::max<GLint>(0, s.y);
                 maxY = std::min<GLint>(renderbuffer->height, s.y + s.height);
             }
+            const GLBlendState& blend = state->blendState();
+            const bool fullColorMask =
+                blend.colorMask[0] != GL_FALSE &&
+                blend.colorMask[1] != GL_FALSE &&
+                blend.colorMask[2] != GL_FALSE &&
+                blend.colorMask[3] != GL_FALSE;
+            bool renderbufferMultisample = false;
+            if (renderbuffer->metalTexture != nullptr) {
+                id<MTLTexture> classifierMetalTex =
+                    (__bridge id<MTLTexture>)renderbuffer->metalTexture;
+                renderbufferMultisample = classifierMetalTex.sampleCount > 1;
+            }
+            const bool renderbufferFormatSupported =
+                !isIntegerInternalFormat(renderbuffer->internalFormat);
             if (minX >= maxX || minY >= maxY) {
+                recordF1Classifier(
+                    /*textureAttachment=*/false,
+                    /*renderbufferAttachment=*/true,
+                    clearScissorActive,
+                    fullColorMask,
+                    /*fullCoverage=*/false,
+                    renderbuffer->metalTexture,
+                    renderbufferMultisample,
+                    /*textureTargetSupported=*/true,
+                    renderbufferFormatSupported,
+                    renderbuffer->nativeBpp != 0,
+                    /*zeroArea=*/true);
                 return true;
             }
             const std::uint64_t renderbufferRegionPixels =
@@ -20435,12 +20863,6 @@ struct GLContext::Impl {
                 static_cast<std::uint64_t>(maxY - minY);
             const std::uint64_t renderbufferClearBytes =
                 renderbufferRegionPixels * 4u;
-            const GLBlendState& blend = state->blendState();
-            const bool fullColorMask =
-                blend.colorMask[0] != GL_FALSE &&
-                blend.colorMask[1] != GL_FALSE &&
-                blend.colorMask[2] != GL_FALSE &&
-                blend.colorMask[3] != GL_FALSE;
             const std::size_t renderbufferPixels =
                 static_cast<std::size_t>(renderbuffer->width) *
                 static_cast<std::size_t>(renderbuffer->height);
@@ -20449,6 +20871,23 @@ struct GLContext::Impl {
                 state->clipDepthMode() == GL_NEGATIVE_ONE_TO_ONE;
             const bool blackColorClear =
                 rgba[0] == 0 && rgba[1] == 0 && rgba[2] == 0;
+            const bool renderbufferFullCoverage =
+                minX == 0 &&
+                maxX == renderbuffer->width &&
+                minY == 0 &&
+                maxY == renderbuffer->height;
+            recordF1Classifier(
+                /*textureAttachment=*/false,
+                /*renderbufferAttachment=*/true,
+                clearScissorActive,
+                fullColorMask,
+                renderbufferFullCoverage,
+                renderbuffer->metalTexture,
+                renderbufferMultisample,
+                /*textureTargetSupported=*/true,
+                renderbufferFormatSupported,
+                renderbuffer->nativeBpp != 0,
+                /*zeroArea=*/false);
             // Multisample renderbuffers cannot be updated with replaceRegion;
             // clear through Metal so later MS resolves see the clear value.
             if (!clearScissorActive &&
@@ -21671,6 +22110,19 @@ struct GLContext::Impl {
 
         GpuResourceWriteSet clearWrites;
         if ((mask & GL_COLOR_BUFFER_BIT) != 0) {
+            if (clearColorAttachmentSizingProfile.enabled) {
+                std::uint64_t activeColorSlots = 0;
+                for (GLenum buffer : framebuffer->drawBuffers) {
+                    if (buffer == GL_NONE) {
+                        continue;
+                    }
+                    if (framebufferAttachment(*framebuffer, buffer) != nullptr) {
+                        ++activeColorSlots;
+                    }
+                }
+                clearColorAttachmentSizingProfile.recordFramebufferColorClear(
+                    activeColorSlots);
+            }
             for (GLenum buffer : framebuffer->drawBuffers) {
                 if (buffer == GL_NONE) {
                     continue;

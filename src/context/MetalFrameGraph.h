@@ -1085,6 +1085,7 @@ public:
     );
     void beginRenderPassForCurrentFramebuffer(GLStateTracker& state, GLObjectStore& objects);
     void* currentRenderEncoder() const;
+    bool currentRenderEncoderTargetsTexture(void* tex) const;
     void endRenderPass();
     // 7C-0 serial batch protocol: callers that are about to mutate GL-visible
     // resources or issue a visibility barrier use this to close any pending

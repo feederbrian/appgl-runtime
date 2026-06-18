@@ -5321,6 +5321,10 @@ struct MetalFrameGraph::Impl {
         return (__bridge void*)currentRenderEncoder;
     }
 
+    bool renderEncoderTargetsTexture(void* tex) const {
+        return currentRenderEncoder != nil && activeFboPassTargetsTexture(tex);
+    }
+
     void attachErrorHandler(id<MTLCommandBuffer> buf, NSString* label) {
 #if APPGL_TRACE_FRAMEGRAPH
         buf.label = label;
@@ -25646,6 +25650,10 @@ void MetalFrameGraph::beginRenderPassForCurrentFramebuffer(GLStateTracker& state
 
 void* MetalFrameGraph::currentRenderEncoder() const {
     return impl_->renderEncoder();
+}
+
+bool MetalFrameGraph::currentRenderEncoderTargetsTexture(void* tex) const {
+    return impl_ != nullptr && impl_->renderEncoderTargetsTexture(tex);
 }
 
 void MetalFrameGraph::endRenderPass() {
