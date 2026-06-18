@@ -466,10 +466,23 @@ struct EncodeSubtimeProfileSample {
     double drawEmitUs = 0.0;
     double argbufTextureFillUs = 0.0;
     double argbufUboFillUs = 0.0;
+    double marshalVertexBufferUs = 0.0;
+    double marshalUboUs = 0.0;
+    double marshalSetBytesUs = 0.0;
+    double marshalTextureUs = 0.0;
+    double marshalSamplerUs = 0.0;
     std::uint64_t argbufTextureFillCalls = 0;
     std::uint64_t argbufUboFillCalls = 0;
     std::uint64_t argbufTextureFillBytes = 0;
     std::uint64_t argbufUboFillBytes = 0;
+    std::uint64_t marshalVertexBufferCalls = 0;
+    std::uint64_t marshalUboCalls = 0;
+    std::uint64_t marshalSetBytesCalls = 0;
+    std::uint64_t marshalTextureCalls = 0;
+    std::uint64_t marshalSamplerCalls = 0;
+    std::uint64_t marshalVertexBufferBytes = 0;
+    std::uint64_t marshalUboBytes = 0;
+    std::uint64_t marshalSetBytesBytes = 0;
     std::uint64_t bindIdentityChecks = 0;
     std::uint64_t bindChanged = 0;
     std::uint64_t bindRedundant = 0;
@@ -492,10 +505,23 @@ struct EncodeSubtimeProfile {
     double drawEmitUs = 0.0;
     double argbufTextureFillUs = 0.0;
     double argbufUboFillUs = 0.0;
+    double marshalVertexBufferUs = 0.0;
+    double marshalUboUs = 0.0;
+    double marshalSetBytesUs = 0.0;
+    double marshalTextureUs = 0.0;
+    double marshalSamplerUs = 0.0;
     std::uint64_t argbufTextureFillCalls = 0;
     std::uint64_t argbufUboFillCalls = 0;
     std::uint64_t argbufTextureFillBytes = 0;
     std::uint64_t argbufUboFillBytes = 0;
+    std::uint64_t marshalVertexBufferCalls = 0;
+    std::uint64_t marshalUboCalls = 0;
+    std::uint64_t marshalSetBytesCalls = 0;
+    std::uint64_t marshalTextureCalls = 0;
+    std::uint64_t marshalSamplerCalls = 0;
+    std::uint64_t marshalVertexBufferBytes = 0;
+    std::uint64_t marshalUboBytes = 0;
+    std::uint64_t marshalSetBytesBytes = 0;
     std::uint64_t bindIdentityChecks = 0;
     std::uint64_t bindChanged = 0;
     std::uint64_t bindRedundant = 0;
@@ -519,10 +545,23 @@ struct EncodeSubtimeProfile {
         drawEmitUs += s.drawEmitUs;
         argbufTextureFillUs += s.argbufTextureFillUs;
         argbufUboFillUs += s.argbufUboFillUs;
+        marshalVertexBufferUs += s.marshalVertexBufferUs;
+        marshalUboUs += s.marshalUboUs;
+        marshalSetBytesUs += s.marshalSetBytesUs;
+        marshalTextureUs += s.marshalTextureUs;
+        marshalSamplerUs += s.marshalSamplerUs;
         argbufTextureFillCalls += s.argbufTextureFillCalls;
         argbufUboFillCalls += s.argbufUboFillCalls;
         argbufTextureFillBytes += s.argbufTextureFillBytes;
         argbufUboFillBytes += s.argbufUboFillBytes;
+        marshalVertexBufferCalls += s.marshalVertexBufferCalls;
+        marshalUboCalls += s.marshalUboCalls;
+        marshalSetBytesCalls += s.marshalSetBytesCalls;
+        marshalTextureCalls += s.marshalTextureCalls;
+        marshalSamplerCalls += s.marshalSamplerCalls;
+        marshalVertexBufferBytes += s.marshalVertexBufferBytes;
+        marshalUboBytes += s.marshalUboBytes;
+        marshalSetBytesBytes += s.marshalSetBytesBytes;
         bindIdentityChecks += s.bindIdentityChecks;
         bindChanged += s.bindChanged;
         bindRedundant += s.bindRedundant;
@@ -553,6 +592,16 @@ struct EncodeSubtimeProfile {
             "argbuf_ubo_fill_us=%.3f avg_argbuf_ubo_fill_us=%.3f "
             "argbuf_texture_fill_calls=%llu argbuf_ubo_fill_calls=%llu "
             "argbuf_texture_fill_bytes=%llu argbuf_ubo_fill_bytes=%llu "
+            "marshal_vertex_buffer_us=%.3f marshal_vertex_buffer_calls=%llu "
+            "marshal_vertex_buffer_bytes=%llu avg_marshal_vertex_buffer_call_us=%.3f "
+            "marshal_ubo_us=%.3f marshal_ubo_calls=%llu marshal_ubo_bytes=%llu "
+            "avg_marshal_ubo_call_us=%.3f "
+            "marshal_setbytes_us=%.3f marshal_setbytes_calls=%llu "
+            "marshal_setbytes_bytes=%llu avg_marshal_setbytes_call_us=%.3f "
+            "marshal_texture_us=%.3f marshal_texture_calls=%llu "
+            "avg_marshal_texture_call_us=%.3f "
+            "marshal_sampler_us=%.3f marshal_sampler_calls=%llu "
+            "avg_marshal_sampler_call_us=%.3f "
             "total_subtime_us=%.3f avg_total_subtime_us=%.3f "
             "identity_checks=%llu changed=%llu redundant=%llu skipped=%llu "
             "producer_drain_despite_bind_skip=%llu draw_calls=%llu "
@@ -576,6 +625,34 @@ struct EncodeSubtimeProfile {
             static_cast<unsigned long long>(argbufUboFillCalls),
             static_cast<unsigned long long>(argbufTextureFillBytes),
             static_cast<unsigned long long>(argbufUboFillBytes),
+            marshalVertexBufferUs,
+            static_cast<unsigned long long>(marshalVertexBufferCalls),
+            static_cast<unsigned long long>(marshalVertexBufferBytes),
+            marshalVertexBufferCalls > 0
+                ? marshalVertexBufferUs / static_cast<double>(marshalVertexBufferCalls)
+                : 0.0,
+            marshalUboUs,
+            static_cast<unsigned long long>(marshalUboCalls),
+            static_cast<unsigned long long>(marshalUboBytes),
+            marshalUboCalls > 0
+                ? marshalUboUs / static_cast<double>(marshalUboCalls)
+                : 0.0,
+            marshalSetBytesUs,
+            static_cast<unsigned long long>(marshalSetBytesCalls),
+            static_cast<unsigned long long>(marshalSetBytesBytes),
+            marshalSetBytesCalls > 0
+                ? marshalSetBytesUs / static_cast<double>(marshalSetBytesCalls)
+                : 0.0,
+            marshalTextureUs,
+            static_cast<unsigned long long>(marshalTextureCalls),
+            marshalTextureCalls > 0
+                ? marshalTextureUs / static_cast<double>(marshalTextureCalls)
+                : 0.0,
+            marshalSamplerUs,
+            static_cast<unsigned long long>(marshalSamplerCalls),
+            marshalSamplerCalls > 0
+                ? marshalSamplerUs / static_cast<double>(marshalSamplerCalls)
+                : 0.0,
             totalSubtimeUs,
             totalSubtimeUs / static_cast<double>(draws),
             static_cast<unsigned long long>(bindIdentityChecks),
@@ -610,6 +687,19 @@ struct EncodeSubtimeProfile {
             << ",\"argbufUboFillCalls\":" << argbufUboFillCalls
             << ",\"argbufTextureFillBytes\":" << argbufTextureFillBytes
             << ",\"argbufUboFillBytes\":" << argbufUboFillBytes
+            << ",\"marshalVertexBufferUs\":" << marshalVertexBufferUs
+            << ",\"marshalVertexBufferCalls\":" << marshalVertexBufferCalls
+            << ",\"marshalVertexBufferBytes\":" << marshalVertexBufferBytes
+            << ",\"marshalUboUs\":" << marshalUboUs
+            << ",\"marshalUboCalls\":" << marshalUboCalls
+            << ",\"marshalUboBytes\":" << marshalUboBytes
+            << ",\"marshalSetBytesUs\":" << marshalSetBytesUs
+            << ",\"marshalSetBytesCalls\":" << marshalSetBytesCalls
+            << ",\"marshalSetBytesBytes\":" << marshalSetBytesBytes
+            << ",\"marshalTextureUs\":" << marshalTextureUs
+            << ",\"marshalTextureCalls\":" << marshalTextureCalls
+            << ",\"marshalSamplerUs\":" << marshalSamplerUs
+            << ",\"marshalSamplerCalls\":" << marshalSamplerCalls
             << ",\"totalSubtimeUs\":" << totalSubtimeUs
             << ",\"bindIdentityChecks\":" << bindIdentityChecks
             << ",\"bindChanged\":" << bindChanged
@@ -632,6 +722,51 @@ struct EncodeSubtimeProfile {
         return out.str();
     }
 };
+
+enum class EncodeMarshalClass {
+    None,
+    VertexBuffer,
+    UboBuffer,
+    SetBytes,
+    Texture,
+    Sampler,
+};
+
+static void recordEncodeMarshalClass(EncodeSubtimeProfileSample* sample,
+                                     EncodeMarshalClass klass,
+                                     double us,
+                                     std::uint64_t bytes = 0) {
+    if (sample == nullptr || klass == EncodeMarshalClass::None) {
+        return;
+    }
+    switch (klass) {
+    case EncodeMarshalClass::VertexBuffer:
+        sample->marshalVertexBufferUs += us;
+        ++sample->marshalVertexBufferCalls;
+        sample->marshalVertexBufferBytes += bytes;
+        break;
+    case EncodeMarshalClass::UboBuffer:
+        sample->marshalUboUs += us;
+        ++sample->marshalUboCalls;
+        sample->marshalUboBytes += bytes;
+        break;
+    case EncodeMarshalClass::SetBytes:
+        sample->marshalSetBytesUs += us;
+        ++sample->marshalSetBytesCalls;
+        sample->marshalSetBytesBytes += bytes;
+        break;
+    case EncodeMarshalClass::Texture:
+        sample->marshalTextureUs += us;
+        ++sample->marshalTextureCalls;
+        break;
+    case EncodeMarshalClass::Sampler:
+        sample->marshalSamplerUs += us;
+        ++sample->marshalSamplerCalls;
+        break;
+    case EncodeMarshalClass::None:
+        break;
+    }
+}
 
 // S25 Rung-1 instruments: always-on frame-pacing accumulator. The frame
 // tick is the SWAP-reason present only (presentFromSwapBuffers) — flush
@@ -8377,14 +8512,21 @@ struct MetalFrameGraph::Impl {
                 encodeSubtimeSamplePtr,
                 mtlBuf,
                 static_cast<NSUInteger>(info.metalVertexBufferOffset),
-                0);
+                0,
+                EncodeMarshalClass::VertexBuffer,
+                static_cast<std::uint64_t>(info.vertexDataByteCount));
         } else {
             auto alloc = ringSuballocate(info.vertexData, info.vertexDataByteCount);
             if (alloc.buffer == nil) {
                 return false;
             }
             bindVertexBufferIfNeeded(
-                encodeSubtimeSamplePtr, alloc.buffer, alloc.offset, 0);
+                encodeSubtimeSamplePtr,
+                alloc.buffer,
+                alloc.offset,
+                0,
+                EncodeMarshalClass::VertexBuffer,
+                static_cast<std::uint64_t>(info.vertexDataByteCount));
         }
 
         // Bind extra vertex buffers (buffer index 1+) — e.g. per-instance
@@ -8397,7 +8539,9 @@ struct MetalFrameGraph::Impl {
                     encodeSubtimeSamplePtr,
                     mtlBuf,
                     static_cast<NSUInteger>(evb.metalBufferOffset),
-                    static_cast<NSUInteger>(ei + 1));
+                    static_cast<NSUInteger>(ei + 1),
+                    EncodeMarshalClass::VertexBuffer,
+                    static_cast<std::uint64_t>(evb.byteCount));
             } else {
                 const void* bytes = evb.data != nullptr
                     ? evb.data
@@ -8410,7 +8554,9 @@ struct MetalFrameGraph::Impl {
                     encodeSubtimeSamplePtr,
                     alloc.buffer,
                     alloc.offset,
-                    static_cast<NSUInteger>(ei + 1));
+                    static_cast<NSUInteger>(ei + 1),
+                    EncodeMarshalClass::VertexBuffer,
+                    static_cast<std::uint64_t>(evb.byteCount));
             }
         }
 
@@ -8429,7 +8575,8 @@ struct MetalFrameGraph::Impl {
                     encodeSubtimeSamplePtr,
                     info.vertexUniformData,
                     info.vertexUniformSize,
-                    16);
+                    16,
+                    EncodeMarshalClass::SetBytes);
             }
             if (!fragmentUsesArgBuf &&
                 info.fragmentUniformData != nullptr && info.fragmentUniformSize > 0) {
@@ -8437,7 +8584,8 @@ struct MetalFrameGraph::Impl {
                     encodeSubtimeSamplePtr,
                     info.fragmentUniformData,
                     info.fragmentUniformSize,
-                    16);
+                    16,
+                    EncodeMarshalClass::SetBytes);
             }
             // CKPT121 (Sprint 11 Phase 2 Day 6): SPIRV-Cross emits
             // gl_NumSamples as a `constant int& [[buffer(0)]]` FS
@@ -8453,14 +8601,16 @@ struct MetalFrameGraph::Impl {
                     encodeSubtimeSamplePtr,
                     &glNumSamples,
                     sizeof(glNumSamples),
-                    0);
+                    0,
+                    EncodeMarshalClass::SetBytes);
             }
             if (vertexNeedsFragmentShadingRateState) {
                 bindVertexBytesIfNeeded(
                     encodeSubtimeSamplePtr,
                     &info.fragmentShadingRateShaderState,
                     sizeof(info.fragmentShadingRateShaderState),
-                    kAppGLFragmentShadingRateParamsBufferSlot);
+                    kAppGLFragmentShadingRateParamsBufferSlot,
+                    EncodeMarshalClass::SetBytes);
             }
             if (vertexClipControlYSignSlot >= 0) {
                 const float clipControlYSign =
@@ -8470,7 +8620,8 @@ struct MetalFrameGraph::Impl {
                     encodeSubtimeSamplePtr,
                     &clipControlYSign,
                     sizeof(clipControlYSign),
-                    static_cast<NSUInteger>(vertexClipControlYSignSlot));
+                    static_cast<NSUInteger>(vertexClipControlYSignSlot),
+                    EncodeMarshalClass::SetBytes);
             }
             const bool logLodBias = std::getenv("APPGL_LOG_LB") != nullptr;
             const NSInteger vertexReductionModesSlot =
@@ -8482,7 +8633,8 @@ struct MetalFrameGraph::Impl {
                     encodeSubtimeSamplePtr,
                     modes.data(),
                     static_cast<NSUInteger>(modes.size() * sizeof(std::uint32_t)),
-                    static_cast<NSUInteger>(vertexReductionModesSlot));
+                    static_cast<NSUInteger>(vertexReductionModesSlot),
+                    EncodeMarshalClass::SetBytes);
             }
             const NSInteger vertexLodBiasesSlot =
                 shaderSlots.vertexLodBiasesSlot;
@@ -8501,7 +8653,8 @@ struct MetalFrameGraph::Impl {
                     encodeSubtimeSamplePtr,
                     biases.data(),
                     static_cast<NSUInteger>(biases.size() * sizeof(float)),
-                    static_cast<NSUInteger>(vertexLodBiasesSlot));
+                    static_cast<NSUInteger>(vertexLodBiasesSlot),
+                    EncodeMarshalClass::SetBytes);
             }
             const NSInteger vertexBorderClampModesSlot =
                 shaderSlots.vertexBorderClampModesSlot;
@@ -8514,7 +8667,8 @@ struct MetalFrameGraph::Impl {
                     encodeSubtimeSamplePtr,
                     modes.data(),
                     static_cast<NSUInteger>(modes.size() * sizeof(std::uint32_t)),
-                    static_cast<NSUInteger>(vertexBorderClampModesSlot));
+                    static_cast<NSUInteger>(vertexBorderClampModesSlot),
+                    EncodeMarshalClass::SetBytes);
             }
             if (vertexBorderClampColorsSlot >= 0) {
                 std::vector<std::array<std::int32_t, 4>>& colors =
@@ -8525,7 +8679,8 @@ struct MetalFrameGraph::Impl {
                     colors.data(),
                     static_cast<NSUInteger>(
                         colors.size() * sizeof(std::array<std::int32_t, 4>)),
-                    static_cast<NSUInteger>(vertexBorderClampColorsSlot));
+                    static_cast<NSUInteger>(vertexBorderClampColorsSlot),
+                    EncodeMarshalClass::SetBytes);
             }
             const NSInteger vertexImplicitLodBiasCorrectionSlot =
                 shaderSlots.vertexImplicitLodBiasCorrectionSlot;
@@ -8535,7 +8690,8 @@ struct MetalFrameGraph::Impl {
                     encodeSubtimeSamplePtr,
                     &correction,
                     sizeof(correction),
-                    static_cast<NSUInteger>(vertexImplicitLodBiasCorrectionSlot));
+                    static_cast<NSUInteger>(vertexImplicitLodBiasCorrectionSlot),
+                    EncodeMarshalClass::SetBytes);
             }
             const NSInteger fragmentReductionModesSlot =
                 shaderSlots.fragmentReductionModesSlot;
@@ -8546,7 +8702,8 @@ struct MetalFrameGraph::Impl {
                     encodeSubtimeSamplePtr,
                     modes.data(),
                     static_cast<NSUInteger>(modes.size() * sizeof(std::uint32_t)),
-                    static_cast<NSUInteger>(fragmentReductionModesSlot));
+                    static_cast<NSUInteger>(fragmentReductionModesSlot),
+                    EncodeMarshalClass::SetBytes);
             }
             const NSInteger fragmentLodBiasesSlot =
                 shaderSlots.fragmentLodBiasesSlot;
@@ -8565,7 +8722,8 @@ struct MetalFrameGraph::Impl {
                     encodeSubtimeSamplePtr,
                     biases.data(),
                     static_cast<NSUInteger>(biases.size() * sizeof(float)),
-                    static_cast<NSUInteger>(fragmentLodBiasesSlot));
+                    static_cast<NSUInteger>(fragmentLodBiasesSlot),
+                    EncodeMarshalClass::SetBytes);
             }
             const NSInteger fragmentBorderClampModesSlot =
                 shaderSlots.fragmentBorderClampModesSlot;
@@ -8578,7 +8736,8 @@ struct MetalFrameGraph::Impl {
                     encodeSubtimeSamplePtr,
                     modes.data(),
                     static_cast<NSUInteger>(modes.size() * sizeof(std::uint32_t)),
-                    static_cast<NSUInteger>(fragmentBorderClampModesSlot));
+                    static_cast<NSUInteger>(fragmentBorderClampModesSlot),
+                    EncodeMarshalClass::SetBytes);
             }
             if (fragmentBorderClampColorsSlot >= 0) {
                 std::vector<std::array<std::int32_t, 4>>& colors =
@@ -8589,7 +8748,8 @@ struct MetalFrameGraph::Impl {
                     colors.data(),
                     static_cast<NSUInteger>(
                         colors.size() * sizeof(std::array<std::int32_t, 4>)),
-                    static_cast<NSUInteger>(fragmentBorderClampColorsSlot));
+                    static_cast<NSUInteger>(fragmentBorderClampColorsSlot),
+                    EncodeMarshalClass::SetBytes);
             }
             const NSInteger fragmentImplicitLodBiasCorrectionSlot =
                 shaderSlots.fragmentImplicitLodBiasCorrectionSlot;
@@ -8610,7 +8770,8 @@ struct MetalFrameGraph::Impl {
                     encodeSubtimeSamplePtr,
                     &correction,
                     sizeof(correction),
-                    static_cast<NSUInteger>(fragmentImplicitLodBiasCorrectionSlot));
+                    static_cast<NSUInteger>(fragmentImplicitLodBiasCorrectionSlot),
+                    EncodeMarshalClass::SetBytes);
             }
             if (fragmentNeedsFragCoordParams) {
                 const float renderTargetHeight = colorTexture != nil
@@ -8690,7 +8851,8 @@ struct MetalFrameGraph::Impl {
                     encodeSubtimeSamplePtr,
                     fragCoordParams,
                     sizeof(fragCoordParams),
-                    kAppGLFragCoordParamsBufferSlot);
+                    kAppGLFragCoordParamsBufferSlot,
+                    EncodeMarshalClass::SetBytes);
             }
 
             // Shadow-compare Y fixup: per-texture-slot flip factors for
@@ -8708,7 +8870,8 @@ struct MetalFrameGraph::Impl {
                     encodeSubtimeSamplePtr,
                     compareFlips,
                     sizeof(compareFlips),
-                    static_cast<NSUInteger>(fragmentDepthCompareFlipSlot));
+                    static_cast<NSUInteger>(fragmentDepthCompareFlipSlot),
+                    EncodeMarshalClass::SetBytes);
             }
 
             // Bind UBO data to the Metal encoder at the reflection-specified
@@ -8723,11 +8886,21 @@ struct MetalFrameGraph::Impl {
                     const NSUInteger off = static_cast<NSUInteger>(ubo.metalBufferOffset);
                     if (ubo.isVertex && !vertexUsesArgBuf) {
                         bindVertexBufferIfNeeded(
-                            encodeSubtimeSamplePtr, buf, off, slot);
+                            encodeSubtimeSamplePtr,
+                            buf,
+                            off,
+                            slot,
+                            EncodeMarshalClass::UboBuffer,
+                            static_cast<std::uint64_t>(ubo.size));
                     }
                     if (ubo.isFragment && !fragmentUsesArgBuf) {
                         bindFragmentBufferIfNeeded(
-                            encodeSubtimeSamplePtr, buf, off, slot);
+                            encodeSubtimeSamplePtr,
+                            buf,
+                            off,
+                            slot,
+                            EncodeMarshalClass::UboBuffer,
+                            static_cast<std::uint64_t>(ubo.size));
                     }
                 } else if (ubo.data != nullptr) {
                     // Small UBO (≤4KB): inline bytes.
@@ -8736,14 +8909,16 @@ struct MetalFrameGraph::Impl {
                             encodeSubtimeSamplePtr,
                             ubo.data,
                             static_cast<NSUInteger>(ubo.size),
-                            slot);
+                            slot,
+                            EncodeMarshalClass::SetBytes);
                     }
                     if (ubo.isFragment && !fragmentUsesArgBuf) {
                         bindFragmentBytesIfNeeded(
                             encodeSubtimeSamplePtr,
                             ubo.data,
                             static_cast<NSUInteger>(ubo.size),
-                            slot);
+                            slot,
+                            EncodeMarshalClass::SetBytes);
                     }
                 }
             }
@@ -8767,11 +8942,21 @@ struct MetalFrameGraph::Impl {
             const NSUInteger off = static_cast<NSUInteger>(ssbo.offset);
             if (ssbo.isVertex && !vertexUsesArgBuf) {
                 bindVertexBufferIfNeeded(
-                    encodeSubtimeSamplePtr, buf, off, slot);
+                    encodeSubtimeSamplePtr,
+                    buf,
+                    off,
+                    slot,
+                    EncodeMarshalClass::UboBuffer,
+                    static_cast<std::uint64_t>(ssbo.size));
             }
             if (ssbo.isFragment && !fragmentUsesArgBuf) {
                 bindFragmentBufferIfNeeded(
-                    encodeSubtimeSamplePtr, buf, off, slot);
+                    encodeSubtimeSamplePtr,
+                    buf,
+                    off,
+                    slot,
+                    EncodeMarshalClass::UboBuffer,
+                    static_cast<std::uint64_t>(ssbo.size));
             }
         }
         for (const auto& atomic : info.atomicCounterBindings) {
@@ -8781,11 +8966,19 @@ struct MetalFrameGraph::Impl {
             const NSUInteger off = static_cast<NSUInteger>(atomic.offset);
             if (atomic.isVertex && !vertexUsesArgBuf) {
                 bindVertexBufferIfNeeded(
-                    encodeSubtimeSamplePtr, buf, off, slot);
+                    encodeSubtimeSamplePtr,
+                    buf,
+                    off,
+                    slot,
+                    EncodeMarshalClass::UboBuffer);
             }
             if (atomic.isFragment && !fragmentUsesArgBuf) {
                 bindFragmentBufferIfNeeded(
-                    encodeSubtimeSamplePtr, buf, off, slot);
+                    encodeSubtimeSamplePtr,
+                    buf,
+                    off,
+                    slot,
+                    EncodeMarshalClass::UboBuffer);
             }
         }
 
@@ -8794,14 +8987,16 @@ struct MetalFrameGraph::Impl {
                 encodeSubtimeSamplePtr,
                 ovrViewMask,
                 sizeof(ovrViewMask),
-                24);
+                24,
+                EncodeMarshalClass::SetBytes);
         }
         if (fragmentUsesMultiviewViewMask && !fragmentUsesArgBuf) {
             bindFragmentBytesIfNeeded(
                 encodeSubtimeSamplePtr,
                 ovrViewMask,
                 sizeof(ovrViewMask),
-                24);
+                24,
+                EncodeMarshalClass::SetBytes);
         }
 
         // Phase 8X Group 4d follow-up⁷ — bind textures and samplers for
@@ -9369,7 +9564,8 @@ struct MetalFrameGraph::Impl {
                 bindFragmentTextureIfNeeded(
                     encodeSubtimeSamplePtr,
                     tex,
-                    static_cast<NSUInteger>(binding.metalSlot));
+                    static_cast<NSUInteger>(binding.metalSlot),
+                    EncodeMarshalClass::Texture);
                 if (binding.imageAtomicMetalBuffer != nullptr &&
                     binding.imageAtomicBufferSlot != 0xFFFFFFFFu) {
                     id<MTLBuffer> buf =
@@ -9380,7 +9576,8 @@ struct MetalFrameGraph::Impl {
                             buf,
                             binding.imageAtomicBufferOffset,
                             static_cast<NSUInteger>(
-                                binding.imageAtomicBufferSlot));
+                                binding.imageAtomicBufferSlot),
+                            EncodeMarshalClass::UboBuffer);
                     }
                 }
                 if (binding.metalSamplerState != nullptr) {
@@ -9388,7 +9585,8 @@ struct MetalFrameGraph::Impl {
                     bindFragmentSamplerStateIfNeeded(
                         encodeSubtimeSamplePtr,
                         smp,
-                        static_cast<NSUInteger>(binding.metalSlot));
+                        static_cast<NSUInteger>(binding.metalSlot),
+                        EncodeMarshalClass::Sampler);
                 }
             }
         }
@@ -9401,7 +9599,8 @@ struct MetalFrameGraph::Impl {
                 bindVertexTextureIfNeeded(
                     encodeSubtimeSamplePtr,
                     tex,
-                    static_cast<NSUInteger>(binding.metalSlot));
+                    static_cast<NSUInteger>(binding.metalSlot),
+                    EncodeMarshalClass::Texture);
                 if (binding.imageAtomicMetalBuffer != nullptr &&
                     binding.imageAtomicBufferSlot != 0xFFFFFFFFu) {
                     id<MTLBuffer> buf =
@@ -9412,7 +9611,8 @@ struct MetalFrameGraph::Impl {
                             buf,
                             binding.imageAtomicBufferOffset,
                             static_cast<NSUInteger>(
-                                binding.imageAtomicBufferSlot));
+                                binding.imageAtomicBufferSlot),
+                            EncodeMarshalClass::UboBuffer);
                     }
                 }
                 if (binding.metalSamplerState != nullptr) {
@@ -9420,7 +9620,8 @@ struct MetalFrameGraph::Impl {
                     bindVertexSamplerStateIfNeeded(
                         encodeSubtimeSamplePtr,
                         smp,
-                        static_cast<NSUInteger>(binding.metalSlot));
+                        static_cast<NSUInteger>(binding.metalSlot),
+                        EncodeMarshalClass::Sampler);
                 }
             }
         }
@@ -24331,76 +24532,178 @@ private:
     void bindVertexBufferIfNeeded(EncodeSubtimeProfileSample* sample,
                                   id<MTLBuffer> buffer,
                                   NSUInteger offset,
-                                  NSUInteger slot) {
+                                  NSUInteger slot,
+                                  EncodeMarshalClass marshalClass =
+                                      EncodeMarshalClass::None,
+                                  std::uint64_t marshalBytes = 0) {
         if (shouldBindBuffer(sample, serialBindVertexBuffers,
                              serialBindVertexBytes, slot, buffer, offset)) {
+            const bool profileMarshal =
+                sample != nullptr && marshalClass != EncodeMarshalClass::None;
+            const auto start =
+                profileMarshal ? drawProfileNow() : DrawProfileTimePoint{};
             [currentRenderEncoder setVertexBuffer:buffer offset:offset atIndex:slot];
+            if (profileMarshal) {
+                recordEncodeMarshalClass(
+                    sample,
+                    marshalClass,
+                    drawProfileElapsedUs(start, drawProfileNow()),
+                    marshalBytes);
+            }
         }
     }
 
     void bindFragmentBufferIfNeeded(EncodeSubtimeProfileSample* sample,
                                     id<MTLBuffer> buffer,
                                     NSUInteger offset,
-                                    NSUInteger slot) {
+                                    NSUInteger slot,
+                                    EncodeMarshalClass marshalClass =
+                                        EncodeMarshalClass::None,
+                                    std::uint64_t marshalBytes = 0) {
         if (shouldBindBuffer(sample, serialBindFragmentBuffers,
                              serialBindFragmentBytes, slot, buffer, offset)) {
+            const bool profileMarshal =
+                sample != nullptr && marshalClass != EncodeMarshalClass::None;
+            const auto start =
+                profileMarshal ? drawProfileNow() : DrawProfileTimePoint{};
             [currentRenderEncoder setFragmentBuffer:buffer offset:offset atIndex:slot];
+            if (profileMarshal) {
+                recordEncodeMarshalClass(
+                    sample,
+                    marshalClass,
+                    drawProfileElapsedUs(start, drawProfileNow()),
+                    marshalBytes);
+            }
         }
     }
 
     void bindVertexBytesIfNeeded(EncodeSubtimeProfileSample* sample,
                                  const void* data,
                                  NSUInteger length,
-                                 NSUInteger slot) {
+                                 NSUInteger slot,
+                                 EncodeMarshalClass marshalClass =
+                                     EncodeMarshalClass::None) {
         if (shouldBindBytes(sample, serialBindVertexBytes,
                             serialBindVertexBuffers, slot, data, length)) {
+            const bool profileMarshal =
+                sample != nullptr && marshalClass != EncodeMarshalClass::None;
+            const auto start =
+                profileMarshal ? drawProfileNow() : DrawProfileTimePoint{};
             [currentRenderEncoder setVertexBytes:data length:length atIndex:slot];
+            if (profileMarshal) {
+                recordEncodeMarshalClass(
+                    sample,
+                    marshalClass,
+                    drawProfileElapsedUs(start, drawProfileNow()),
+                    static_cast<std::uint64_t>(length));
+            }
         }
     }
 
     void bindFragmentBytesIfNeeded(EncodeSubtimeProfileSample* sample,
                                    const void* data,
                                    NSUInteger length,
-                                   NSUInteger slot) {
+                                   NSUInteger slot,
+                                   EncodeMarshalClass marshalClass =
+                                       EncodeMarshalClass::None) {
         if (shouldBindBytes(sample, serialBindFragmentBytes,
                             serialBindFragmentBuffers, slot, data, length)) {
+            const bool profileMarshal =
+                sample != nullptr && marshalClass != EncodeMarshalClass::None;
+            const auto start =
+                profileMarshal ? drawProfileNow() : DrawProfileTimePoint{};
             [currentRenderEncoder setFragmentBytes:data length:length atIndex:slot];
+            if (profileMarshal) {
+                recordEncodeMarshalClass(
+                    sample,
+                    marshalClass,
+                    drawProfileElapsedUs(start, drawProfileNow()),
+                    static_cast<std::uint64_t>(length));
+            }
         }
     }
 
     void bindVertexTextureIfNeeded(EncodeSubtimeProfileSample* sample,
                                    id<MTLTexture> texture,
-                                   NSUInteger slot) {
+                                   NSUInteger slot,
+                                   EncodeMarshalClass marshalClass =
+                                       EncodeMarshalClass::None) {
         if (shouldBindTexture(sample, serialBindVertexTextures,
                               slot, texture)) {
+            const bool profileMarshal =
+                sample != nullptr && marshalClass != EncodeMarshalClass::None;
+            const auto start =
+                profileMarshal ? drawProfileNow() : DrawProfileTimePoint{};
             [currentRenderEncoder setVertexTexture:texture atIndex:slot];
+            if (profileMarshal) {
+                recordEncodeMarshalClass(
+                    sample,
+                    marshalClass,
+                    drawProfileElapsedUs(start, drawProfileNow()));
+            }
         }
     }
 
     void bindFragmentTextureIfNeeded(EncodeSubtimeProfileSample* sample,
                                      id<MTLTexture> texture,
-                                     NSUInteger slot) {
+                                     NSUInteger slot,
+                                     EncodeMarshalClass marshalClass =
+                                         EncodeMarshalClass::None) {
         if (shouldBindTexture(sample, serialBindFragmentTextures,
                               slot, texture)) {
+            const bool profileMarshal =
+                sample != nullptr && marshalClass != EncodeMarshalClass::None;
+            const auto start =
+                profileMarshal ? drawProfileNow() : DrawProfileTimePoint{};
             [currentRenderEncoder setFragmentTexture:texture atIndex:slot];
+            if (profileMarshal) {
+                recordEncodeMarshalClass(
+                    sample,
+                    marshalClass,
+                    drawProfileElapsedUs(start, drawProfileNow()));
+            }
         }
     }
 
     void bindVertexSamplerStateIfNeeded(EncodeSubtimeProfileSample* sample,
                                         id<MTLSamplerState> sampler,
-                                        NSUInteger slot) {
+                                        NSUInteger slot,
+                                        EncodeMarshalClass marshalClass =
+                                            EncodeMarshalClass::None) {
         if (shouldBindSampler(sample, serialBindVertexSamplers,
                               slot, sampler)) {
+            const bool profileMarshal =
+                sample != nullptr && marshalClass != EncodeMarshalClass::None;
+            const auto start =
+                profileMarshal ? drawProfileNow() : DrawProfileTimePoint{};
             [currentRenderEncoder setVertexSamplerState:sampler atIndex:slot];
+            if (profileMarshal) {
+                recordEncodeMarshalClass(
+                    sample,
+                    marshalClass,
+                    drawProfileElapsedUs(start, drawProfileNow()));
+            }
         }
     }
 
     void bindFragmentSamplerStateIfNeeded(EncodeSubtimeProfileSample* sample,
                                           id<MTLSamplerState> sampler,
-                                          NSUInteger slot) {
+                                          NSUInteger slot,
+                                          EncodeMarshalClass marshalClass =
+                                              EncodeMarshalClass::None) {
         if (shouldBindSampler(sample, serialBindFragmentSamplers,
                               slot, sampler)) {
+            const bool profileMarshal =
+                sample != nullptr && marshalClass != EncodeMarshalClass::None;
+            const auto start =
+                profileMarshal ? drawProfileNow() : DrawProfileTimePoint{};
             [currentRenderEncoder setFragmentSamplerState:sampler atIndex:slot];
+            if (profileMarshal) {
+                recordEncodeMarshalClass(
+                    sample,
+                    marshalClass,
+                    drawProfileElapsedUs(start, drawProfileNow()));
+            }
         }
     }
 

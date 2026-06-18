@@ -1328,6 +1328,7 @@ struct BindingConstructionSizingProfile {
     std::uint64_t referencedAtomicBindings = 0;
     std::uint64_t replayCopyBytes = 0;
     std::uint64_t validateHash = 0;
+    std::uint64_t planKeyCalls = 0;
     double keyReadCompareUs = 0.0;
     double uniformPackUs = 0.0;
     double samplerResolveUs = 0.0;
@@ -1336,6 +1337,7 @@ struct BindingConstructionSizingProfile {
     double imageResolveUs = 0.0;
     double validateWalkUs = 0.0;
     double replayCopyUs = 0.0;
+    double planKeyUs = 0.0;
     bool hasLastKey = false;
     BindingConstructionSizingKey lastKey{};
 
@@ -1382,6 +1384,14 @@ struct BindingConstructionSizingProfile {
         }
     }
 
+    void recordPlanKey(double us) {
+        if (!enabled) {
+            return;
+        }
+        ++planKeyCalls;
+        planKeyUs += us;
+    }
+
     void dump() const {
         if (!enabled || draws == 0) {
             return;
@@ -1404,6 +1414,7 @@ struct BindingConstructionSizingProfile {
             "validate_walk_us=%.3f avg_validate_walk_us=%.3f "
             "replay_copies=%llu replay_copy_us=%.3f "
             "avg_replay_copy_us=%.3f replay_copy_bytes=%llu "
+            "plan_key_calls=%llu plan_key_us=%.3f avg_plan_key_us=%.3f "
             "referenced_textures=%llu referenced_ubos=%llu "
             "referenced_ssbos=%llu referenced_atomics=%llu "
             "validate_hash=0x%016llx\n",
@@ -1431,6 +1442,11 @@ struct BindingConstructionSizingProfile {
             replayCopyUs,
             replayCopyUs / denom,
             static_cast<unsigned long long>(replayCopyBytes),
+            static_cast<unsigned long long>(planKeyCalls),
+            planKeyUs,
+            planKeyCalls > 0
+                ? planKeyUs / static_cast<double>(planKeyCalls)
+                : 0.0,
             static_cast<unsigned long long>(referencedTextures),
             static_cast<unsigned long long>(referencedUboBindings),
             static_cast<unsigned long long>(referencedSsboBindings),
@@ -1464,11 +1480,114 @@ struct BindingConstructionSizingProfile {
             << ",\"replayCopies\":" << replayCopies
             << ",\"replayCopyUs\":" << replayCopyUs
             << ",\"replayCopyBytes\":" << replayCopyBytes
+            << ",\"planKeyCalls\":" << planKeyCalls
+            << ",\"planKeyUs\":" << planKeyUs
             << ",\"referencedTextures\":" << referencedTextures
             << ",\"referencedUboBindings\":" << referencedUboBindings
             << ",\"referencedSsboBindings\":" << referencedSsboBindings
             << ",\"referencedAtomicBindings\":" << referencedAtomicBindings
             << ",\"validateHash\":" << validateHash
+            << "}";
+        return out.str();
+    }
+};
+
+struct ClearColorAttachmentSizingProfile {
+    bool enabled = bindingConstructionSizingEnabled();
+    std::uint64_t clearCalls = 0;
+    std::uint64_t clearBytesCleared = 0;
+    std::uint64_t clearsViaLoadAction = 0;
+    std::uint64_t clearsCpuSide = 0;
+    std::uint64_t clearsMidPass = 0;
+    std::uint64_t clearMemsetBytes = 0;
+    std::uint64_t clearDescriptorRebuildCalls = 0;
+    std::uint64_t clearViaDrawCalls = 0;
+    double clearMemsetUs = 0.0;
+    double clearDescriptorRebuildUs = 0.0;
+    double clearViaDrawUs = 0.0;
+
+    void recordCall(std::uint64_t bytes, bool midPass) {
+        if (!enabled) {
+            return;
+        }
+        ++clearCalls;
+        clearBytesCleared += bytes;
+        if (midPass) {
+            ++clearsMidPass;
+        }
+    }
+
+    void recordCpuSide(double us, std::uint64_t bytes) {
+        if (!enabled) {
+            return;
+        }
+        ++clearsCpuSide;
+        clearMemsetUs += us;
+        clearMemsetBytes += bytes;
+    }
+
+    void recordLoadAction(double us) {
+        if (!enabled) {
+            return;
+        }
+        ++clearsViaLoadAction;
+        ++clearDescriptorRebuildCalls;
+        clearDescriptorRebuildUs += us;
+    }
+
+    void dump() const {
+        if (!enabled || clearCalls == 0) {
+            return;
+        }
+        const double denom = static_cast<double>(clearCalls);
+        std::fprintf(stderr,
+            "[APPGL_CLEAR_COLOR_ATTACHMENT_SIZING] summary clear_calls=%llu "
+            "clear_bytes=%llu clears_via_load_action=%llu clears_cpu_side=%llu "
+            "clears_mid_pass=%llu clear_memset_us=%.3f "
+            "avg_clear_memset_us=%.3f clear_memset_bytes=%llu "
+            "clear_descriptor_rebuild_us=%.3f clear_descriptor_rebuild_calls=%llu "
+            "avg_clear_descriptor_rebuild_us=%.3f clear_via_draw_us=%.3f "
+            "clear_via_draw_calls=%llu avg_clear_via_draw_us=%.3f\n",
+            static_cast<unsigned long long>(clearCalls),
+            static_cast<unsigned long long>(clearBytesCleared),
+            static_cast<unsigned long long>(clearsViaLoadAction),
+            static_cast<unsigned long long>(clearsCpuSide),
+            static_cast<unsigned long long>(clearsMidPass),
+            clearMemsetUs,
+            clearMemsetUs / denom,
+            static_cast<unsigned long long>(clearMemsetBytes),
+            clearDescriptorRebuildUs,
+            static_cast<unsigned long long>(clearDescriptorRebuildCalls),
+            clearDescriptorRebuildCalls > 0
+                ? clearDescriptorRebuildUs /
+                    static_cast<double>(clearDescriptorRebuildCalls)
+                : 0.0,
+            clearViaDrawUs,
+            static_cast<unsigned long long>(clearViaDrawCalls),
+            clearViaDrawCalls > 0
+                ? clearViaDrawUs / static_cast<double>(clearViaDrawCalls)
+                : 0.0);
+        std::fflush(stderr);
+    }
+
+    std::string diagnosticsJson() const {
+        if (!enabled || clearCalls == 0) {
+            return std::string();
+        }
+        std::ostringstream out;
+        out << "{\"clearCalls\":" << clearCalls
+            << ",\"clearBytesCleared\":" << clearBytesCleared
+            << ",\"clearsViaLoadAction\":" << clearsViaLoadAction
+            << ",\"clearsCpuSide\":" << clearsCpuSide
+            << ",\"clearsMidPass\":" << clearsMidPass
+            << ",\"clearMemsetUs\":" << clearMemsetUs
+            << ",\"clearMemsetBytes\":" << clearMemsetBytes
+            << ",\"clearDescriptorRebuildUs\":"
+            << clearDescriptorRebuildUs
+            << ",\"clearDescriptorRebuildCalls\":"
+            << clearDescriptorRebuildCalls
+            << ",\"clearViaDrawUs\":" << clearViaDrawUs
+            << ",\"clearViaDrawCalls\":" << clearViaDrawCalls
             << "}";
         return out.str();
     }
@@ -7786,6 +7905,7 @@ struct GLContext::Impl {
         phase2PlanKeyProfile.dump();
         drawPathProfile.dump();
         bindingConstructionSizingProfile.dump();
+        clearColorAttachmentSizingProfile.dump();
         producerTokenProfile.dump(producerTokenEpoch,
                                   producerTokenKnownCompletedEpoch);
         serialDeferredRecordProfile.dump();
@@ -19697,6 +19817,54 @@ struct GLContext::Impl {
     bool clearColorAttachment(const GLFramebufferAttachment& attachment,
                               const GLfloat color[4],
                               bool allowNativeRenderbufferClear) {
+        const bool clearSizing = clearColorAttachmentSizingProfile.enabled;
+        bool clearSizingRecordedCall = false;
+        auto clearMidPass = [&]() -> bool {
+            return frameGraph != nullptr &&
+                frameGraph->currentRenderEncoder() != nullptr;
+        };
+        auto recordClearCallOnce = [&](std::uint64_t bytes) {
+            if (!clearSizing || clearSizingRecordedCall) {
+                return;
+            }
+            clearColorAttachmentSizingProfile.recordCall(bytes, clearMidPass());
+            clearSizingRecordedCall = true;
+        };
+        auto recordCpuSideClear = [&](GLDrawProfileTimePoint start,
+                                      std::uint64_t bytes) {
+            if (!clearSizing) {
+                return;
+            }
+            clearColorAttachmentSizingProfile.recordCpuSide(
+                glDrawProfileElapsedUs(start, glDrawProfileNow()),
+                bytes);
+        };
+        auto recordLoadActionClear = [&](GLDrawProfileTimePoint start) {
+            if (!clearSizing) {
+                return;
+            }
+            clearColorAttachmentSizingProfile.recordLoadAction(
+                glDrawProfileElapsedUs(start, glDrawProfileNow()));
+        };
+        auto callProfiledLayeredColorClear =
+            [&](std::uint64_t bytes,
+                void* tex,
+                std::uint32_t arrayLength,
+                const float rgbaF[4],
+                std::uint32_t level,
+                std::uint32_t slice) -> bool {
+                const auto start = clearSizing
+                    ? glDrawProfileNow()
+                    : GLDrawProfileTimePoint{};
+                const bool ok = frameGraph != nullptr &&
+                    frameGraph->clearLayeredTextureColor(
+                        tex, arrayLength, rgbaF, level, slice);
+                if (ok) {
+                    recordClearCallOnce(bytes);
+                    recordLoadActionClear(start);
+                }
+                return ok;
+            };
         const std::uint8_t rgba[4] = {
             normalizedByte(color[0]),
             normalizedByte(color[1]),
@@ -19755,6 +19923,15 @@ struct GLContext::Impl {
                 const float rgbaF[4] = { color[0], color[1], color[2], color[3] };
                 std::uint32_t arrayLength = 0;
                 std::uint32_t clearSlice = 0;
+                id<MTLTexture> metalTex =
+                    (__bridge id<MTLTexture>)texture->metalTexture;
+                const std::uint64_t metalLayers =
+                    metalTex.arrayLength > 0 ? metalTex.arrayLength : 1u;
+                const std::uint64_t msClearBytes =
+                    static_cast<std::uint64_t>(metalTex.width) *
+                    static_cast<std::uint64_t>(metalTex.height) *
+                    metalLayers *
+                    static_cast<std::uint64_t>(metalTex.sampleCount) * 4u;
                 if (texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
                     if (attachment.layered) {
                         const GLTextureImageLevel& image = level->second;
@@ -19764,8 +19941,11 @@ struct GLContext::Impl {
                     }
                 }
                 texture->colorShadowAuthoritative = false;
-                return frameGraph->clearLayeredTextureColor(
-                    texture->metalTexture, arrayLength, rgbaF,
+                return callProfiledLayeredColorClear(
+                    msClearBytes,
+                    texture->metalTexture,
+                    arrayLength,
+                    rgbaF,
                     static_cast<std::uint32_t>(std::max<GLint>(attachment.level, 0)),
                     clearSlice);
             }
@@ -19852,6 +20032,26 @@ struct GLContext::Impl {
                     return true;
                 }
             }
+            const std::uint64_t clearRegionPixels =
+                static_cast<std::uint64_t>(lastLayer - firstLayer) *
+                static_cast<std::uint64_t>(scissorMaxY - scissorMinY) *
+                static_cast<std::uint64_t>(scissorMaxX - scissorMinX);
+            const std::uint64_t clearPixelBytes =
+                image.nativeBpp > 0
+                    ? static_cast<std::uint64_t>(image.nativeBpp)
+                    : 4u;
+            const std::uint64_t textureClearBytes =
+                clearRegionPixels * clearPixelBytes;
+            const std::uint64_t textureCpuClearBytes =
+                clearRegionPixels * 4u +
+                (image.nativeBpp > 0
+                    ? clearRegionPixels *
+                          static_cast<std::uint64_t>(image.nativeBpp)
+                    : 0u);
+            recordClearCallOnce(textureClearBytes);
+            const auto textureCpuClearStart = clearSizing
+                ? glDrawProfileNow()
+                : GLDrawProfileTimePoint{};
             for (GLsizei z = firstLayer; z < lastLayer; ++z) {
                 for (GLsizei y = scissorMinY; y < scissorMaxY; ++y) {
                     for (GLsizei x = scissorMinX; x < scissorMaxX; ++x) {
@@ -20094,6 +20294,7 @@ struct GLContext::Impl {
                     }
                 }
             }
+            recordCpuSideClear(textureCpuClearStart, textureCpuClearBytes);
             if (isMSColorTexture) {
                 return true;
             }
@@ -20132,8 +20333,11 @@ struct GLContext::Impl {
                     ? static_cast<std::uint32_t>(sourceDepth)
                     : 0u;
                 ++shadowClearsDeferred;
-                if (frameGraph->clearLayeredTextureColor(
-                        texture->metalTexture, arrayLength, rgbaF,
+                if (callProfiledLayeredColorClear(
+                        textureClearBytes,
+                        texture->metalTexture,
+                        arrayLength,
+                        rgbaF,
                         static_cast<std::uint32_t>(std::max<GLint>(attachment.level, 0)),
                         0u)) {
                     return true;
@@ -20162,6 +20366,11 @@ struct GLContext::Impl {
             if (minX >= maxX || minY >= maxY) {
                 return true;
             }
+            const std::uint64_t renderbufferRegionPixels =
+                static_cast<std::uint64_t>(maxX - minX) *
+                static_cast<std::uint64_t>(maxY - minY);
+            const std::uint64_t renderbufferClearBytes =
+                renderbufferRegionPixels * 4u;
             const GLBlendState& blend = state->blendState();
             const bool fullColorMask =
                 blend.colorMask[0] != GL_FALSE &&
@@ -20188,8 +20397,13 @@ struct GLContext::Impl {
                     const float rgbaF[4] = {
                         color[0], color[1], color[2], color[3]
                     };
-                    if (frameGraph->clearLayeredTextureColor(
-                            renderbuffer->metalTexture, 0, rgbaF)) {
+                    if (callProfiledLayeredColorClear(
+                            renderbufferClearBytes,
+                            renderbuffer->metalTexture,
+                            0,
+                            rgbaF,
+                            0,
+                            0)) {
                         renderbuffer->rgba8ShadowClearPending = false;
                         renderbuffer->colorShadowAuthoritative = false;
                         return true;
@@ -20224,8 +20438,13 @@ struct GLContext::Impl {
                     const float rgbaF[4] = {
                         color[0], color[1], color[2], color[3]
                     };
-                    if (frameGraph->clearLayeredTextureColor(
-                            renderbuffer->metalTexture, 0, rgbaF)) {
+                    if (callProfiledLayeredColorClear(
+                            renderbufferClearBytes,
+                            renderbuffer->metalTexture,
+                            0,
+                            rgbaF,
+                            0,
+                            0)) {
                         renderbuffer->rgba8ShadowClearPending = true;
                         renderbuffer->rgba8ShadowClearValue = {
                             rgba[0], rgba[1], rgba[2], rgba[3]
@@ -20249,6 +20468,10 @@ struct GLContext::Impl {
                 if (nativeRGBA8Clear) {
                     const GLsizei regionWidth = maxX - minX;
                     const GLsizei regionHeight = maxY - minY;
+                    recordClearCallOnce(renderbufferClearBytes);
+                    const auto scissorNativeClearStart = clearSizing
+                        ? glDrawProfileNow()
+                        : GLDrawProfileTimePoint{};
                     std::vector<std::uint8_t> region(
                         static_cast<std::size_t>(regionWidth) *
                         static_cast<std::size_t>(regionHeight) * 4u);
@@ -20268,6 +20491,9 @@ struct GLContext::Impl {
                                 bytesPerRow:static_cast<NSUInteger>(regionWidth) * 4u];
                     renderbuffer->rgba8ShadowClearPending = false;
                     renderbuffer->colorShadowAuthoritative = false;
+                    recordCpuSideClear(
+                        scissorNativeClearStart,
+                        renderbufferClearBytes);
                     return true;
                 }
             }
@@ -20283,6 +20509,10 @@ struct GLContext::Impl {
             if (renderbuffer->rgba8.size() < rbBytes) {
                 renderbuffer->rgba8.assign(rbBytes, 0);
             }
+            recordClearCallOnce(renderbufferClearBytes);
+            const auto renderbufferCpuClearStart = clearSizing
+                ? glDrawProfileNow()
+                : GLDrawProfileTimePoint{};
             const bool lowerLeft = state->clipOrigin() != GL_UPPER_LEFT;
             for (GLint glY = minY; glY < maxY; ++glY) {
                 const GLint storageY = lowerLeft ? (renderbuffer->height - 1 - glY) : glY;
@@ -20310,6 +20540,9 @@ struct GLContext::Impl {
                 // pass to clear properly; single-sample float is the
                 // common case and all draw_buffers tests target it).
                 if (metalTex.sampleCount > 1) {
+                    recordCpuSideClear(
+                        renderbufferCpuClearStart,
+                        renderbufferClearBytes);
                     return true;
                 }
                 MTLPixelFormat pf = metalTex.pixelFormat;
@@ -20323,6 +20556,9 @@ struct GLContext::Impl {
                                 mipmapLevel:0
                                   withBytes:renderbuffer->rgba8.data()
                                 bytesPerRow:width * 4u];
+                    recordCpuSideClear(
+                        renderbufferCpuClearStart,
+                        renderbufferClearBytes);
                     return true;
                 }
                 // Encode the clear color for the Metal pixel format. The
@@ -20543,9 +20779,17 @@ struct GLContext::Impl {
                         // through the rgba8 fallback path still works
                         // for this renderbuffer when Metal-tex readback
                         // doesn't match any format above.
+                        recordCpuSideClear(
+                            renderbufferCpuClearStart,
+                            renderbufferClearBytes);
                         return true;
                 }
-                if (bpp == 0) return true;
+                if (bpp == 0) {
+                    recordCpuSideClear(
+                        renderbufferCpuClearStart,
+                        renderbufferClearBytes);
+                    return true;
+                }
                 // Build a full-texture buffer by replicating the encoded
                 // pixel across every texel, then a single replaceRegion
                 // uploads the whole thing.
@@ -20562,6 +20806,9 @@ struct GLContext::Impl {
                               withBytes:buf.data()
                             bytesPerRow:bytesPerRow];
             }
+            recordCpuSideClear(
+                renderbufferCpuClearStart,
+                renderbufferClearBytes);
             return true;
         }
 
@@ -25613,6 +25860,7 @@ struct GLContext::Impl {
     std::unique_ptr<GLStateTracker> state;
     GLDrawPathProfile drawPathProfile;
     BindingConstructionSizingProfile bindingConstructionSizingProfile;
+    ClearColorAttachmentSizingProfile clearColorAttachmentSizingProfile;
     mutable GLProducerTokenProfile producerTokenProfile;
     mutable std::uint64_t samplerGpuOrderSkipDecisionCount = 0;
     SerialDeferredRecordProfile serialDeferredRecordProfile;
@@ -27492,10 +27740,13 @@ std::string GLContext::drawProfileDiagnosticsJson() const {
     const std::string gl = impl_->drawPathProfile.diagnosticsJson();
     const std::string bindingConstructionSizing =
         impl_->bindingConstructionSizingProfile.diagnosticsJson();
+    const std::string clearColorAttachmentSizing =
+        impl_->clearColorAttachmentSizingProfile.diagnosticsJson();
     const std::string submit = impl_->frameGraph != nullptr
         ? impl_->frameGraph->drawSubmitProfileDiagnosticsJson()
         : std::string();
-    if (gl.empty() && bindingConstructionSizing.empty() && submit.empty()) {
+    if (gl.empty() && bindingConstructionSizing.empty() &&
+        clearColorAttachmentSizing.empty() && submit.empty()) {
         return std::string();
     }
     std::string out = "{";
@@ -27510,8 +27761,16 @@ std::string GLContext::drawProfileDiagnosticsJson() const {
         out += "\"bindingConstructionSizing\":";
         out += bindingConstructionSizing;
     }
-    if (!submit.empty()) {
+    if (!clearColorAttachmentSizing.empty()) {
         if (!gl.empty() || !bindingConstructionSizing.empty()) {
+            out += ",";
+        }
+        out += "\"clearColorAttachmentSizing\":";
+        out += clearColorAttachmentSizing;
+    }
+    if (!submit.empty()) {
+        if (!gl.empty() || !bindingConstructionSizing.empty() ||
+            !clearColorAttachmentSizing.empty()) {
             out += ",";
         }
         out += "\"submit\":";
@@ -40366,8 +40625,10 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                                submissionGroupStart,
                                glDrawProfileNow());
     }
+    const bool profilePhase2PlanLookup =
+        drawPathProfile.enabled || bindingConstructionSizingProfile.enabled;
     const auto phase2PlanLookupStart =
-        drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
+        profilePhase2PlanLookup ? glDrawProfileNow() : GLDrawProfileTimePoint{};
     {
         GLDrawDetailScope detail(
             drawDetailProfile, GLDrawDetailBucket::Phase2StateCompatibilityChecks);
@@ -40509,10 +40770,17 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
             }
         }
     }
+    const auto phase2PlanLookupEnd =
+        profilePhase2PlanLookup ? glDrawProfileNow() : GLDrawProfileTimePoint{};
     if (drawPathProfile.enabled) {
         drawPathProfile.record(GLDrawProfileBucket::Phase2PlanLookup,
                                phase2PlanLookupStart,
-                               glDrawProfileNow());
+                               phase2PlanLookupEnd);
+    }
+    if (bindingConstructionSizingProfile.enabled) {
+        bindingConstructionSizingProfile.recordPlanKey(
+            glDrawProfileElapsedUs(phase2PlanLookupStart,
+                                   phase2PlanLookupEnd));
     }
     {
         GLDrawDetailScope detail(
