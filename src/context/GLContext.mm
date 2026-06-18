@@ -11595,6 +11595,23 @@ struct GLContext::Impl {
         return true;
     }
 
+    void markTextureMipShadowNeedsMetalMaterialize(
+        GLTextureObject& object,
+        GLTextureImageLevel& image) {
+        object.colorShadowAuthoritative = false;
+        if (object.metalTexture == nullptr) {
+            return;
+        }
+        // Reuse the mip-shadow materialization funnel for F1 clears: CPU
+        // shadow readers/RMW writers must refresh from Metal before use.
+        image.mipShadowEvicted = true;
+        image.mipShadowEvictedRgba8Bytes = image.rgba8.size();
+        image.mipShadowEvictedNativeBytes = image.nativeData.size();
+        std::vector<std::uint8_t>().swap(image.rgba8);
+        std::vector<std::uint8_t>().swap(image.nativeData);
+        image.nativeBpp = 0;
+    }
+
     bool materializeAllTextureMipShadowsFromMetal(
         GLTextureObject& object,
         TextureMipShadowMaterializeConsumer consumer) {
@@ -20511,6 +20528,37 @@ struct GLContext::Impl {
                     ? clearRegionPixels *
                           static_cast<std::uint64_t>(image.nativeBpp)
                     : 0u);
+            if (fboClearGpuOnlyColorEnabled() &&
+                textureFullCoverage &&
+                fullColorMask &&
+                !clearScissorActive &&
+                frameGraph != nullptr &&
+                texture->metalTexture != nullptr &&
+                classifyEncoder(texture->metalTexture) !=
+                    F1EncoderClass::SameTargetEncoder &&
+                !isMSColorTexture &&
+                f1TextureTargetSupported &&
+                f1TextureFormatSupported &&
+                mipShadowEvictionTargetSupported(texture->target) &&
+                image.nativeBpp == 0 &&
+                image.nativeData.empty()) {
+                const float rgbaF[4] = {color[0], color[1], color[2], color[3]};
+                const std::uint32_t arrayLength = sourceDepth > 1
+                    ? static_cast<std::uint32_t>(sourceDepth)
+                    : 0u;
+                if (callProfiledLayeredColorClear(
+                        textureClearBytes,
+                        texture->metalTexture,
+                        arrayLength,
+                        rgbaF,
+                        static_cast<std::uint32_t>(
+                            std::max<GLint>(attachment.level, 0)),
+                        0u)) {
+                    markTextureMipShadowNeedsMetalMaterialize(*texture, image);
+                    ++shadowClearsDeferred;
+                    return true;
+                }
+            }
             recordClearCallOnce(textureClearBytes);
             const auto textureCpuClearStart = clearSizing
                 ? glDrawProfileNow()
@@ -23468,7 +23516,14 @@ struct GLContext::Impl {
                     : (writableTexture->target == GL_TEXTURE_1D_ARRAY
                         ? std::max<GLsizei>(level->second.desc.height, 1)
                         : (writableTexture->target == GL_TEXTURE_CUBE_MAP ? 6 : 1));
-            if (level->second.rgba8.size() < rgba8ByteCount(sourceWidth, sourceHeight, sourceDepth)) {
+            if (!materializeTextureMipShadowFromMetal(
+                    *writableTexture,
+                    resolved.level,
+                    TextureMipShadowMaterializeConsumer::TexSubImage)) {
+                return false;
+            }
+            if (level->second.rgba8.size() <
+                rgba8ByteCount(sourceWidth, sourceHeight, sourceDepth)) {
                 level->second.rgba8.assign(rgba8ByteCount(sourceWidth, sourceHeight, sourceDepth), 0);
             }
             writableImage = &level->second;
@@ -26571,6 +26626,11 @@ struct GLContext::Impl {
         }
         const char* raw = std::getenv("APPGL_ENABLE_LAZY_SHADOW_CLEARS");
         return raw == nullptr || raw[0] == '\0' || raw[0] != '0';
+    }
+
+    static bool fboClearGpuOnlyColorEnabled() {
+        const char* raw = std::getenv("APPGL_ENABLE_FBO_CLEAR_GPU_ONLY_COLOR");
+        return raw != nullptr && raw[0] != '\0' && raw[0] != '0';
     }
 
     void materializeDefaultFbShadowClear() {

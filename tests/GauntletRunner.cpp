@@ -16372,6 +16372,74 @@ TestResult runLazyShadowTextureAxisProbe() {
     return result;
 }
 
+TestResult runLazyShadowF1TexSubImageProbe() {
+    auto result = runDirectSentinel("lazy-shadow.f1-texsubimage-rmw", [&] {
+        ScopedEnvVar lazy("APPGL_ENABLE_LAZY_SHADOW_CLEARS", "1");
+        ScopedEnvVar lazyHatch("APPGL_DISABLE_LAZY_SHADOW_CLEARS", "0");
+        ScopedEnvVar fold("APPGL_ENABLE_FBO_CLEAR_FOLDING", "1");
+        ScopedEnvVar foldHatch("APPGL_DISABLE_FBO_CLEAR_FOLDING", "0");
+        ScopedEnvVar f1("APPGL_ENABLE_FBO_CLEAR_GPU_ONLY_COLOR", "1");
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        const auto f0 = lazyShadowCounter(context, 2);
+
+        GLuint colorTex = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 4, 4);
+        GLuint fbo = 0;
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, 4, 4);
+        gl.glClearColor(0.2f, 0.4f, 0.8f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        expectCondition(lazyShadowCounter(context, 2) > f0,
+                        "lazy-shadow F1 texSubImage: FBO clear deferred");
+
+        const std::uint8_t patch[4] = {255u, 0u, 0u, 255u};
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glBindTexture(GL_TEXTURE_2D, colorTex);
+        gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 1, 1, 1, 1,
+                           GL_RGBA, GL_UNSIGNED_BYTE, patch);
+        expectGLError(gl, GL_NO_ERROR,
+                      "lazy-shadow F1 texSubImage partial update");
+
+        std::array<std::uint8_t, 4u * 4u * 4u> readback = {};
+        gl.glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                         readback.data());
+        expectGLError(gl, GL_NO_ERROR,
+                      "lazy-shadow F1 texSubImage getTexImage");
+        const auto pixel = [&](std::size_t x, std::size_t y) {
+            return readback.data() + (y * 4u + x) * 4u;
+        };
+        const std::uint8_t* clearPx = pixel(0, 0);
+        const std::uint8_t* patchPx = pixel(1, 1);
+        expectApproxByte(clearPx[0], 51u, 4u,
+                         "lazy-shadow F1 texSubImage: clear R preserved");
+        expectApproxByte(clearPx[1], 102u, 4u,
+                         "lazy-shadow F1 texSubImage: clear G preserved");
+        expectApproxByte(clearPx[2], 204u, 4u,
+                         "lazy-shadow F1 texSubImage: clear B preserved");
+        expectApproxByte(patchPx[0], 255u, 0u,
+                         "lazy-shadow F1 texSubImage: patch R landed");
+        expectApproxByte(patchPx[1], 0u, 0u,
+                         "lazy-shadow F1 texSubImage: patch G landed");
+        expectApproxByte(patchPx[2], 0u, 0u,
+                         "lazy-shadow F1 texSubImage: patch B landed");
+
+        gl.glBindTexture(GL_TEXTURE_2D, 0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        expectGLError(gl, GL_NO_ERROR,
+                      "lazy-shadow F1 texSubImage cleanup");
+    });
+    if (result.status == "passed") {
+        result.message =
+            "F1 GPU-only texture clear materialized before texSubImage RMW and preserved surrounding clear bytes";
+    }
+    return result;
+}
+
 TestResult runLazyShadowDefaultOffProbe() {
     auto result = runDirectSentinel("lazy-shadow.default-off", [&] {
         ScopedEnvVar lazy("APPGL_ENABLE_LAZY_SHADOW_CLEARS", "0");
@@ -20402,6 +20470,7 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runLazyShadowBlendSeedProbe());
         tests.push_back(runLazyShadowInterleavedGpuProbe());
         tests.push_back(runLazyShadowTextureAxisProbe());
+        tests.push_back(runLazyShadowF1TexSubImageProbe());
         tests.push_back(runLazyShadowDefaultOffProbe());
         return buildJSON(normalizedPhase, tests);
     }
