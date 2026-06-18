@@ -461,6 +461,12 @@ struct DrawSubmitProfile {
 
 struct EncodeSubtimeProfileSample {
     double argConstructUs = 0.0;
+    double argValidationUs = 0.0;
+    double argStateResolveUs = 0.0;
+    double argPipelineBuildUs = 0.0;
+    double argEncoderSetupUs = 0.0;
+    double argPrimitivePrepUs = 0.0;
+    double argConstructOtherUs = 0.0;
     double pipelineStateSetUs = 0.0;
     double resourceBindUs = 0.0;
     double drawEmitUs = 0.0;
@@ -500,6 +506,12 @@ struct EncodeSubtimeProfile {
     bool enabled = encodeSubtimeProfileEnabled();
     std::uint64_t draws = 0;
     double argConstructUs = 0.0;
+    double argValidationUs = 0.0;
+    double argStateResolveUs = 0.0;
+    double argPipelineBuildUs = 0.0;
+    double argEncoderSetupUs = 0.0;
+    double argPrimitivePrepUs = 0.0;
+    double argConstructOtherUs = 0.0;
     double pipelineStateSetUs = 0.0;
     double resourceBindUs = 0.0;
     double drawEmitUs = 0.0;
@@ -540,6 +552,12 @@ struct EncodeSubtimeProfile {
         }
         ++draws;
         argConstructUs += s.argConstructUs;
+        argValidationUs += s.argValidationUs;
+        argStateResolveUs += s.argStateResolveUs;
+        argPipelineBuildUs += s.argPipelineBuildUs;
+        argEncoderSetupUs += s.argEncoderSetupUs;
+        argPrimitivePrepUs += s.argPrimitivePrepUs;
+        argConstructOtherUs += s.argConstructOtherUs;
         pipelineStateSetUs += s.pipelineStateSetUs;
         resourceBindUs += s.resourceBindUs;
         drawEmitUs += s.drawEmitUs;
@@ -585,6 +603,12 @@ struct EncodeSubtimeProfile {
         std::fprintf(stderr,
             "[APPGL_ENCODE_SUBTIME_PROFILE] summary draws=%llu "
             "arg_construct_us=%.3f avg_arg_construct_us=%.3f "
+            "arg_validation_us=%.3f avg_arg_validation_us=%.3f "
+            "arg_state_resolve_us=%.3f avg_arg_state_resolve_us=%.3f "
+            "arg_pipeline_build_us=%.3f avg_arg_pipeline_build_us=%.3f "
+            "arg_encoder_setup_us=%.3f avg_arg_encoder_setup_us=%.3f "
+            "arg_primitive_prep_us=%.3f avg_arg_primitive_prep_us=%.3f "
+            "arg_construct_other_us=%.3f avg_arg_construct_other_us=%.3f "
             "pipeline_state_set_us=%.3f avg_pipeline_state_set_us=%.3f "
             "resource_bind_us=%.3f avg_resource_bind_us=%.3f "
             "draw_emit_us=%.3f avg_draw_emit_us=%.3f "
@@ -611,6 +635,18 @@ struct EncodeSubtimeProfile {
             static_cast<unsigned long long>(draws),
             argConstructUs,
             argConstructUs / static_cast<double>(draws),
+            argValidationUs,
+            argValidationUs / static_cast<double>(draws),
+            argStateResolveUs,
+            argStateResolveUs / static_cast<double>(draws),
+            argPipelineBuildUs,
+            argPipelineBuildUs / static_cast<double>(draws),
+            argEncoderSetupUs,
+            argEncoderSetupUs / static_cast<double>(draws),
+            argPrimitivePrepUs,
+            argPrimitivePrepUs / static_cast<double>(draws),
+            argConstructOtherUs,
+            argConstructOtherUs / static_cast<double>(draws),
             pipelineStateSetUs,
             pipelineStateSetUs / static_cast<double>(draws),
             resourceBindUs,
@@ -678,6 +714,12 @@ struct EncodeSubtimeProfile {
         std::ostringstream out;
         out << "{\"draws\":" << draws
             << ",\"argConstructUs\":" << argConstructUs
+            << ",\"argValidationUs\":" << argValidationUs
+            << ",\"argStateResolveUs\":" << argStateResolveUs
+            << ",\"argPipelineBuildUs\":" << argPipelineBuildUs
+            << ",\"argEncoderSetupUs\":" << argEncoderSetupUs
+            << ",\"argPrimitivePrepUs\":" << argPrimitivePrepUs
+            << ",\"argConstructOtherUs\":" << argConstructOtherUs
             << ",\"pipelineStateSetUs\":" << pipelineStateSetUs
             << ",\"resourceBindUs\":" << resourceBindUs
             << ",\"drawEmitUs\":" << drawEmitUs
@@ -9991,12 +10033,27 @@ struct MetalFrameGraph::Impl {
                 drawSubmitProfile.record(profileSample);
             }
             if (profileEncodeSubtime) {
+                encodeSubtimeSample.argValidationUs = profileValidationUs;
+                encodeSubtimeSample.argStateResolveUs = profileStateResolveUs;
+                encodeSubtimeSample.argPipelineBuildUs = profilePipelineBuildUs;
+                encodeSubtimeSample.argEncoderSetupUs = profileEncoderSetupUs;
+                encodeSubtimeSample.argPrimitivePrepUs = profilePrimitivePrepUs;
                 encodeSubtimeSample.argConstructUs =
                     profileValidationUs +
                     profileStateResolveUs +
                     profilePipelineBuildUs +
                     profileEncoderSetupUs +
                     profilePrimitivePrepUs;
+                const double coveredArgConstructUs =
+                    encodeSubtimeSample.argValidationUs +
+                    encodeSubtimeSample.argStateResolveUs +
+                    encodeSubtimeSample.argPipelineBuildUs +
+                    encodeSubtimeSample.argEncoderSetupUs +
+                    encodeSubtimeSample.argPrimitivePrepUs;
+                encodeSubtimeSample.argConstructOtherUs =
+                    encodeSubtimeSample.argConstructUs > coveredArgConstructUs
+                        ? encodeSubtimeSample.argConstructUs - coveredArgConstructUs
+                        : 0.0;
                 encodeSubtimeSample.pipelineStateSetUs = profileRenderStateUs;
                 encodeSubtimeSample.resourceBindUs = profileBindingUs;
                 encodeSubtimeSample.drawEmitUs = profileMetalDrawUs;

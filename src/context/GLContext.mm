@@ -1496,9 +1496,17 @@ struct ClearColorAttachmentSizingProfile {
     bool enabled = bindingConstructionSizingEnabled();
     std::uint64_t clearCalls = 0;
     std::uint64_t clearBytesCleared = 0;
+    // Mutually-exclusive outcome partition. Exactly one of these increments
+    // per recorded clear.
     std::uint64_t clearsViaLoadAction = 0;
     std::uint64_t clearsCpuSide = 0;
     std::uint64_t clearsMidPass = 0;
+    // Independent facts for clears that legitimately do more than one thing
+    // today, such as CPU shadow fill plus deferred GPU loadAction clear.
+    std::uint64_t clearsLoadActionRouted = 0;
+    std::uint64_t clearsCpuSideObserved = 0;
+    std::uint64_t clearsMidPassObserved = 0;
+    std::uint64_t clearsLoadActionEligibleAtPassStart = 0;
     std::uint64_t clearMemsetBytes = 0;
     std::uint64_t clearDescriptorRebuildCalls = 0;
     std::uint64_t clearViaDrawCalls = 0;
@@ -1513,7 +1521,7 @@ struct ClearColorAttachmentSizingProfile {
         ++clearCalls;
         clearBytesCleared += bytes;
         if (midPass) {
-            ++clearsMidPass;
+            ++clearsMidPassObserved;
         }
     }
 
@@ -1521,7 +1529,7 @@ struct ClearColorAttachmentSizingProfile {
         if (!enabled) {
             return;
         }
-        ++clearsCpuSide;
+        ++clearsCpuSideObserved;
         clearMemsetUs += us;
         clearMemsetBytes += bytes;
     }
@@ -1530,9 +1538,29 @@ struct ClearColorAttachmentSizingProfile {
         if (!enabled) {
             return;
         }
-        ++clearsViaLoadAction;
+        ++clearsLoadActionRouted;
         ++clearDescriptorRebuildCalls;
         clearDescriptorRebuildUs += us;
+    }
+
+    void recordPartition(bool midPassAtClearStart,
+                         bool cpuSideObserved,
+                         bool loadActionRouted) {
+        if (!enabled) {
+            return;
+        }
+        if (loadActionRouted && !midPassAtClearStart) {
+            ++clearsLoadActionEligibleAtPassStart;
+        }
+        if (midPassAtClearStart) {
+            ++clearsMidPass;
+        } else if (loadActionRouted) {
+            ++clearsViaLoadAction;
+        } else if (cpuSideObserved) {
+            ++clearsCpuSide;
+        } else {
+            ++clearsCpuSide;
+        }
     }
 
     void dump() const {
@@ -1543,7 +1571,9 @@ struct ClearColorAttachmentSizingProfile {
         std::fprintf(stderr,
             "[APPGL_CLEAR_COLOR_ATTACHMENT_SIZING] summary clear_calls=%llu "
             "clear_bytes=%llu clears_via_load_action=%llu clears_cpu_side=%llu "
-            "clears_mid_pass=%llu clear_memset_us=%.3f "
+            "clears_mid_pass=%llu clears_load_action_routed=%llu "
+            "clears_cpu_side_observed=%llu clears_mid_pass_observed=%llu "
+            "clears_load_action_eligible_at_pass_start=%llu clear_memset_us=%.3f "
             "avg_clear_memset_us=%.3f clear_memset_bytes=%llu "
             "clear_descriptor_rebuild_us=%.3f clear_descriptor_rebuild_calls=%llu "
             "avg_clear_descriptor_rebuild_us=%.3f clear_via_draw_us=%.3f "
@@ -1553,6 +1583,11 @@ struct ClearColorAttachmentSizingProfile {
             static_cast<unsigned long long>(clearsViaLoadAction),
             static_cast<unsigned long long>(clearsCpuSide),
             static_cast<unsigned long long>(clearsMidPass),
+            static_cast<unsigned long long>(clearsLoadActionRouted),
+            static_cast<unsigned long long>(clearsCpuSideObserved),
+            static_cast<unsigned long long>(clearsMidPassObserved),
+            static_cast<unsigned long long>(
+                clearsLoadActionEligibleAtPassStart),
             clearMemsetUs,
             clearMemsetUs / denom,
             static_cast<unsigned long long>(clearMemsetBytes),
@@ -1580,6 +1615,14 @@ struct ClearColorAttachmentSizingProfile {
             << ",\"clearsViaLoadAction\":" << clearsViaLoadAction
             << ",\"clearsCpuSide\":" << clearsCpuSide
             << ",\"clearsMidPass\":" << clearsMidPass
+            << ",\"clearsLoadActionRouted\":"
+            << clearsLoadActionRouted
+            << ",\"clearsCpuSideObserved\":"
+            << clearsCpuSideObserved
+            << ",\"clearsMidPassObserved\":"
+            << clearsMidPassObserved
+            << ",\"clearsLoadActionEligibleAtPassStart\":"
+            << clearsLoadActionEligibleAtPassStart
             << ",\"clearMemsetUs\":" << clearMemsetUs
             << ",\"clearMemsetBytes\":" << clearMemsetBytes
             << ",\"clearDescriptorRebuildUs\":"
@@ -19819,22 +19862,38 @@ struct GLContext::Impl {
                               bool allowNativeRenderbufferClear) {
         const bool clearSizing = clearColorAttachmentSizingProfile.enabled;
         bool clearSizingRecordedCall = false;
-        auto clearMidPass = [&]() -> bool {
-            return frameGraph != nullptr &&
-                frameGraph->currentRenderEncoder() != nullptr;
-        };
+        bool clearSizingCpuSideObserved = false;
+        bool clearSizingLoadActionRouted = false;
+        bool clearSizingPartitionRecorded = false;
+        const bool clearSizingMidPassAtStart =
+            frameGraph != nullptr &&
+            frameGraph->currentRenderEncoder() != nullptr;
         auto recordClearCallOnce = [&](std::uint64_t bytes) {
             if (!clearSizing || clearSizingRecordedCall) {
                 return;
             }
-            clearColorAttachmentSizingProfile.recordCall(bytes, clearMidPass());
+            clearColorAttachmentSizingProfile.recordCall(
+                bytes, clearSizingMidPassAtStart);
             clearSizingRecordedCall = true;
+        };
+        auto finalizeClearSizingPartition = [&]() {
+            if (!clearSizing ||
+                !clearSizingRecordedCall ||
+                clearSizingPartitionRecorded) {
+                return;
+            }
+            clearColorAttachmentSizingProfile.recordPartition(
+                clearSizingMidPassAtStart,
+                clearSizingCpuSideObserved,
+                clearSizingLoadActionRouted);
+            clearSizingPartitionRecorded = true;
         };
         auto recordCpuSideClear = [&](GLDrawProfileTimePoint start,
                                       std::uint64_t bytes) {
             if (!clearSizing) {
                 return;
             }
+            clearSizingCpuSideObserved = true;
             clearColorAttachmentSizingProfile.recordCpuSide(
                 glDrawProfileElapsedUs(start, glDrawProfileNow()),
                 bytes);
@@ -19843,6 +19902,7 @@ struct GLContext::Impl {
             if (!clearSizing) {
                 return;
             }
+            clearSizingLoadActionRouted = true;
             clearColorAttachmentSizingProfile.recordLoadAction(
                 glDrawProfileElapsedUs(start, glDrawProfileNow()));
         };
@@ -19862,6 +19922,7 @@ struct GLContext::Impl {
                 if (ok) {
                     recordClearCallOnce(bytes);
                     recordLoadActionClear(start);
+                    finalizeClearSizingPartition();
                 }
                 return ok;
             };
@@ -20296,6 +20357,7 @@ struct GLContext::Impl {
             }
             recordCpuSideClear(textureCpuClearStart, textureCpuClearBytes);
             if (isMSColorTexture) {
+                finalizeClearSizingPartition();
                 return true;
             }
             // S24 lever-#1 (texture axis): the Metal side of this clear
@@ -20343,7 +20405,9 @@ struct GLContext::Impl {
                     return true;
                 }
             }
-            return replaceMetalTexture(*texture);
+            const bool replaced = replaceMetalTexture(*texture);
+            finalizeClearSizingPartition();
+            return replaced;
         }
 
         if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
@@ -20494,6 +20558,7 @@ struct GLContext::Impl {
                     recordCpuSideClear(
                         scissorNativeClearStart,
                         renderbufferClearBytes);
+                    finalizeClearSizingPartition();
                     return true;
                 }
             }
@@ -20543,6 +20608,7 @@ struct GLContext::Impl {
                     recordCpuSideClear(
                         renderbufferCpuClearStart,
                         renderbufferClearBytes);
+                    finalizeClearSizingPartition();
                     return true;
                 }
                 MTLPixelFormat pf = metalTex.pixelFormat;
@@ -20559,6 +20625,7 @@ struct GLContext::Impl {
                     recordCpuSideClear(
                         renderbufferCpuClearStart,
                         renderbufferClearBytes);
+                    finalizeClearSizingPartition();
                     return true;
                 }
                 // Encode the clear color for the Metal pixel format. The
@@ -20782,12 +20849,14 @@ struct GLContext::Impl {
                         recordCpuSideClear(
                             renderbufferCpuClearStart,
                             renderbufferClearBytes);
+                        finalizeClearSizingPartition();
                         return true;
                 }
                 if (bpp == 0) {
                     recordCpuSideClear(
                         renderbufferCpuClearStart,
                         renderbufferClearBytes);
+                    finalizeClearSizingPartition();
                     return true;
                 }
                 // Build a full-texture buffer by replicating the encoded
@@ -20809,6 +20878,7 @@ struct GLContext::Impl {
             recordCpuSideClear(
                 renderbufferCpuClearStart,
                 renderbufferClearBytes);
+            finalizeClearSizingPartition();
             return true;
         }
 
