@@ -252,14 +252,13 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     logStateResolveCostClass(
                         "drawElementsBaseVertex", programName, vaoName,
                         tdi, vao->attributes.size(), vaoLayoutCacheHit);
-                    prepareTranslatedDrawUniformBuffers(
-                        *program, programName, impl_->matrixState, drawID, tdi,
-                        "drawElementsBaseVertex");
+                    const double bindingConstructionUniformPackUs =
+                        impl_->prepareBindingConstructionUniformBuffers(
+                            *program, programName, drawID, tdi,
+                            "drawElementsBaseVertex");
 
-                    impl_->resolveSamplerBindings(*program, tdi);
-                    impl_->resolveUBOBindings(*program, tdi);
-                    impl_->resolveSSBOBindings(*program, tdi);
-                    impl_->resolveImageBindings(*program, tdi);
+                    impl_->resolveBindingConstructionForTranslatedDraw(
+                        *program, tdi, bindingConstructionUniformPackUs);
 
                     // RC-A02: resolve FBO render target.
                     {
@@ -934,9 +933,10 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                         "drawElementsInstancedBaseVertex", programName, vaoName,
                         tdi, vao->attributes.size(), vaoLayoutCacheHit);
                     }  // !memoHit — prepared blocks reused on hit
-                    prepareTranslatedDrawUniformBuffers(
-                        *program, programName, impl_->matrixState, drawID, tdi,
-                        "drawElementsInstancedBaseVertex");
+                    const double bindingConstructionUniformPackUs =
+                        impl_->prepareBindingConstructionUniformBuffers(
+                            *program, programName, drawID, tdi,
+                            "drawElementsInstancedBaseVertex");
 
                     if (memoHit) {
                         // Sampler resolve always runs (producer drains /
@@ -951,12 +951,10 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                         // (the Gate-1 residual: +4.6us/draw on textured
                         // warm arms, invisible on untextured quads).
                         tdi.sampledTextureNames.clear();
-                    }
-                    impl_->resolveSamplerBindings(*program, tdi);
-                    if (!memoHit) {
-                    impl_->resolveUBOBindings(*program, tdi);
-                    impl_->resolveSSBOBindings(*program, tdi);
-                    impl_->resolveImageBindings(*program, tdi);
+                        impl_->resolveSamplerBindings(*program, tdi);
+                    } else {
+                        impl_->resolveBindingConstructionForTranslatedDraw(
+                            *program, tdi, bindingConstructionUniformPackUs);
                     }
 
                     // RC-A02: resolve FBO render target.

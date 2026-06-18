@@ -308,7 +308,8 @@ static bool serialBindCacheEnabled() {
 static bool encodeSubtimeProfileEnabled() {
     return appglEnvEnabledDefaultOff("APPGL_ENCODE_SUBTIME_PROFILE") ||
            appglEnvEnabledDefaultOff("APPGL_DRAW_PROFILE") ||
-           appglEnvEnabledDefaultOff("APPGL_GL_DRAW_DETAIL_PROFILE");
+           appglEnvEnabledDefaultOff("APPGL_GL_DRAW_DETAIL_PROFILE") ||
+           appglEnvEnabledDefaultOff("APPGL_BINDING_CONSTRUCTION_SIZING");
 }
 
 using DrawProfileClock = std::chrono::steady_clock;
@@ -463,6 +464,12 @@ struct EncodeSubtimeProfileSample {
     double pipelineStateSetUs = 0.0;
     double resourceBindUs = 0.0;
     double drawEmitUs = 0.0;
+    double argbufTextureFillUs = 0.0;
+    double argbufUboFillUs = 0.0;
+    std::uint64_t argbufTextureFillCalls = 0;
+    std::uint64_t argbufUboFillCalls = 0;
+    std::uint64_t argbufTextureFillBytes = 0;
+    std::uint64_t argbufUboFillBytes = 0;
     std::uint64_t bindIdentityChecks = 0;
     std::uint64_t bindChanged = 0;
     std::uint64_t bindRedundant = 0;
@@ -483,6 +490,12 @@ struct EncodeSubtimeProfile {
     double pipelineStateSetUs = 0.0;
     double resourceBindUs = 0.0;
     double drawEmitUs = 0.0;
+    double argbufTextureFillUs = 0.0;
+    double argbufUboFillUs = 0.0;
+    std::uint64_t argbufTextureFillCalls = 0;
+    std::uint64_t argbufUboFillCalls = 0;
+    std::uint64_t argbufTextureFillBytes = 0;
+    std::uint64_t argbufUboFillBytes = 0;
     std::uint64_t bindIdentityChecks = 0;
     std::uint64_t bindChanged = 0;
     std::uint64_t bindRedundant = 0;
@@ -504,6 +517,12 @@ struct EncodeSubtimeProfile {
         pipelineStateSetUs += s.pipelineStateSetUs;
         resourceBindUs += s.resourceBindUs;
         drawEmitUs += s.drawEmitUs;
+        argbufTextureFillUs += s.argbufTextureFillUs;
+        argbufUboFillUs += s.argbufUboFillUs;
+        argbufTextureFillCalls += s.argbufTextureFillCalls;
+        argbufUboFillCalls += s.argbufUboFillCalls;
+        argbufTextureFillBytes += s.argbufTextureFillBytes;
+        argbufUboFillBytes += s.argbufUboFillBytes;
         bindIdentityChecks += s.bindIdentityChecks;
         bindChanged += s.bindChanged;
         bindRedundant += s.bindRedundant;
@@ -530,6 +549,10 @@ struct EncodeSubtimeProfile {
             "pipeline_state_set_us=%.3f avg_pipeline_state_set_us=%.3f "
             "resource_bind_us=%.3f avg_resource_bind_us=%.3f "
             "draw_emit_us=%.3f avg_draw_emit_us=%.3f "
+            "argbuf_texture_fill_us=%.3f avg_argbuf_texture_fill_us=%.3f "
+            "argbuf_ubo_fill_us=%.3f avg_argbuf_ubo_fill_us=%.3f "
+            "argbuf_texture_fill_calls=%llu argbuf_ubo_fill_calls=%llu "
+            "argbuf_texture_fill_bytes=%llu argbuf_ubo_fill_bytes=%llu "
             "total_subtime_us=%.3f avg_total_subtime_us=%.3f "
             "identity_checks=%llu changed=%llu redundant=%llu skipped=%llu "
             "producer_drain_despite_bind_skip=%llu draw_calls=%llu "
@@ -545,6 +568,14 @@ struct EncodeSubtimeProfile {
             resourceBindUs / static_cast<double>(draws),
             drawEmitUs,
             drawEmitUs / static_cast<double>(draws),
+            argbufTextureFillUs,
+            argbufTextureFillUs / static_cast<double>(draws),
+            argbufUboFillUs,
+            argbufUboFillUs / static_cast<double>(draws),
+            static_cast<unsigned long long>(argbufTextureFillCalls),
+            static_cast<unsigned long long>(argbufUboFillCalls),
+            static_cast<unsigned long long>(argbufTextureFillBytes),
+            static_cast<unsigned long long>(argbufUboFillBytes),
             totalSubtimeUs,
             totalSubtimeUs / static_cast<double>(draws),
             static_cast<unsigned long long>(bindIdentityChecks),
@@ -573,6 +604,12 @@ struct EncodeSubtimeProfile {
             << ",\"pipelineStateSetUs\":" << pipelineStateSetUs
             << ",\"resourceBindUs\":" << resourceBindUs
             << ",\"drawEmitUs\":" << drawEmitUs
+            << ",\"argbufTextureFillUs\":" << argbufTextureFillUs
+            << ",\"argbufUboFillUs\":" << argbufUboFillUs
+            << ",\"argbufTextureFillCalls\":" << argbufTextureFillCalls
+            << ",\"argbufUboFillCalls\":" << argbufUboFillCalls
+            << ",\"argbufTextureFillBytes\":" << argbufTextureFillBytes
+            << ",\"argbufUboFillBytes\":" << argbufUboFillBytes
             << ",\"totalSubtimeUs\":" << totalSubtimeUs
             << ",\"bindIdentityChecks\":" << bindIdentityChecks
             << ",\"bindChanged\":" << bindChanged
@@ -8963,6 +9000,11 @@ struct MetalFrameGraph::Impl {
                 if (encoder == nil) return;
                 const NSUInteger len = [encoder encodedLength];
                 if (len == 0) return;
+                if (encodeSubtimeSamplePtr != nullptr) {
+                    ++encodeSubtimeSamplePtr->argbufTextureFillCalls;
+                    encodeSubtimeSamplePtr->argbufTextureFillBytes +=
+                        static_cast<std::uint64_t>(len);
+                }
                 // Step 7-4: ring-buffer sub-allocation for the
                 // argument buffer. Avoids per-draw
                 // newBufferWithLength churn — a single 16-MB ring slot
@@ -9153,14 +9195,28 @@ struct MetalFrameGraph::Impl {
                         encodeSubtimeSamplePtr, argBuf, argBufOffset, 24);
                 }
             };
-            encodeTexturesIntoArgBuf(fragArgEncoderSet0, info.fragmentTextures,
-                                      MTLRenderStageFragment, true,
-                                      fragmentNeedsGlNumSamplesArgBuf,
-                                      fragmentNeedsSSBOSizeBuffer);
-            encodeTexturesIntoArgBuf(vertArgEncoderSet0, info.vertexTextures,
-                                      MTLRenderStageVertex, false,
-                                      false,
-                                      vertexNeedsSSBOSizeBuffer);
+            auto profileArgbufTextureFill = [&](auto&& call) {
+                if (!profileEncodeSubtime) {
+                    call();
+                    return;
+                }
+                const auto start = drawProfileNow();
+                call();
+                encodeSubtimeSample.argbufTextureFillUs +=
+                    drawProfileElapsedUs(start, drawProfileNow());
+            };
+            profileArgbufTextureFill([&]() {
+                encodeTexturesIntoArgBuf(fragArgEncoderSet0, info.fragmentTextures,
+                                          MTLRenderStageFragment, true,
+                                          fragmentNeedsGlNumSamplesArgBuf,
+                                          fragmentNeedsSSBOSizeBuffer);
+            });
+            profileArgbufTextureFill([&]() {
+                encodeTexturesIntoArgBuf(vertArgEncoderSet0, info.vertexTextures,
+                                          MTLRenderStageVertex, false,
+                                          false,
+                                          vertexNeedsSSBOSizeBuffer);
+            });
 
             // Step 7-3 UBO follow-up: populate desc_set 1 argbuf with
             // the default uniform block + explicit `uniform Block`
@@ -9186,6 +9242,11 @@ struct MetalFrameGraph::Impl {
                 if (encoder == nil) return;
                 const NSUInteger len = [encoder encodedLength];
                 if (len == 0) return;
+                if (encodeSubtimeSamplePtr != nullptr) {
+                    ++encodeSubtimeSamplePtr->argbufUboFillCalls;
+                    encodeSubtimeSamplePtr->argbufUboFillBytes +=
+                        static_cast<std::uint64_t>(len);
+                }
                 // Step 7-4: ring-buffer sub-allocation for the UBO
                 // argument buffer (matches the set-0 texture argbuf
                 // allocation above).
@@ -9259,12 +9320,30 @@ struct MetalFrameGraph::Impl {
                         encodeSubtimeSamplePtr, argBuf, argBufOffset, 25);
                 }
             };
-            encodeUBOsIntoArgBuf(fragArgEncoderSet1,
-                                  info.fragmentUniformData, info.fragmentUniformSize,
-                                  /*isVertex=*/false, MTLRenderStageFragment);
-            encodeUBOsIntoArgBuf(vertArgEncoderSet1,
-                                  info.vertexUniformData, info.vertexUniformSize,
-                                  /*isVertex=*/true, MTLRenderStageVertex);
+            auto profileArgbufUboFill = [&](auto&& call) {
+                if (!profileEncodeSubtime) {
+                    call();
+                    return;
+                }
+                const auto start = drawProfileNow();
+                call();
+                encodeSubtimeSample.argbufUboFillUs +=
+                    drawProfileElapsedUs(start, drawProfileNow());
+            };
+            profileArgbufUboFill([&]() {
+                encodeUBOsIntoArgBuf(fragArgEncoderSet1,
+                                      info.fragmentUniformData,
+                                      info.fragmentUniformSize,
+                                      /*isVertex=*/false,
+                                      MTLRenderStageFragment);
+            });
+            profileArgbufUboFill([&]() {
+                encodeUBOsIntoArgBuf(vertArgEncoderSet1,
+                                      info.vertexUniformData,
+                                      info.vertexUniformSize,
+                                      /*isVertex=*/true,
+                                      MTLRenderStageVertex);
+            });
         }
         // Sprint 8 B Cluster F F1 Day 9 (CKPT81): the per-binding
         // skip used to require BOTH metalTexture AND metalSamplerState

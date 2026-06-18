@@ -660,14 +660,13 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         logStateResolveCostClass(
             "drawElements-attributeless", programName, vaoName,
             tdi, vao->attributes.size());
-        prepareTranslatedDrawUniformBuffers(
-            *program, programName, impl_->matrixState, drawID, tdi,
-            "drawElements-attributeless");
+        const double bindingConstructionUniformPackUs =
+            impl_->prepareBindingConstructionUniformBuffers(
+                *program, programName, drawID, tdi,
+                "drawElements-attributeless");
 
-        impl_->resolveSamplerBindings(*program, tdi);
-        impl_->resolveUBOBindings(*program, tdi);
-        impl_->resolveSSBOBindings(*program, tdi);
-        impl_->resolveImageBindings(*program, tdi);
+        impl_->resolveBindingConstructionForTranslatedDraw(
+            *program, tdi, bindingConstructionUniformPackUs);
 
         // FBO render target.
         {
@@ -856,19 +855,15 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                         "drawElements", programName, vaoName,
                         tdi, vao->attributes.size(), vaoLayoutCacheHit);
                     drawProfile.mark(GLDrawProfileBucket::Diagnostics);
-                    prepareTranslatedDrawUniformBuffers(
-                        *program, programName, impl_->matrixState, drawID, tdi,
-                        "drawElements");
+                    const double bindingConstructionUniformPackUs =
+                        impl_->prepareBindingConstructionUniformBuffers(
+                            *program, programName, drawID, tdi,
+                            "drawElements");
                     drawProfile.mark(GLDrawProfileBucket::UniformBuffers);
 
-                    impl_->resolveSamplerBindings(*program, tdi);
+                    impl_->resolveBindingConstructionForTranslatedDraw(
+                        *program, tdi, bindingConstructionUniformPackUs);
                     drawProfile.resetCursor();
-                    impl_->resolveUBOBindings(*program, tdi);
-                    drawProfile.mark(GLDrawProfileBucket::UboBindings);
-                    impl_->resolveSSBOBindings(*program, tdi);
-                    drawProfile.mark(GLDrawProfileBucket::SsboBindings);
-                    impl_->resolveImageBindings(*program, tdi);
-                    drawProfile.mark(GLDrawProfileBucket::ImageBindings);
 
                     // RC-A02: resolve FBO render target.
                     {

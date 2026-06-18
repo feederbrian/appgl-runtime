@@ -56,6 +56,7 @@
 #include <limits>
 #include <mutex>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -859,6 +860,10 @@ static double glDrawProfileElapsedUs(GLDrawProfileTimePoint start,
     return std::chrono::duration<double, std::micro>(end - start).count();
 }
 
+static bool bindingConstructionSizingEnabled() {
+    return appglEnvEnabledDefaultOff("APPGL_BINDING_CONSTRUCTION_SIZING");
+}
+
 enum class GLDrawProfileBucket : std::size_t {
     Validation,
     DrawablePrep,
@@ -1247,6 +1252,380 @@ private:
     GLDrawDetailBucket bucket_ = GLDrawDetailBucket::Count;
     GLDrawProfileTimePoint start_{};
 };
+
+struct BindingConstructionSizingKey {
+    GLuint program = 0;
+    GLuint programPipeline = 0;
+    std::uint64_t programObjectSerial = 0;
+    std::uint64_t executableGeneration = 0;
+    std::uint64_t samplerUniformGeneration = 0;
+    std::uint64_t samplerRecipeGeneration = 0;
+    std::uint64_t globalStateGeneration = 0;
+    std::uint64_t textureDomainGeneration = 0;
+    std::uint64_t bufferDomainGeneration = 0;
+    std::uint64_t programDomainGeneration = 0;
+    std::uintptr_t vertexReflection = 0;
+    std::uintptr_t fragmentReflection = 0;
+    std::uintptr_t vertexMsl = 0;
+    std::uintptr_t fragmentMsl = 0;
+    std::uint32_t resourceUniformBlockCount = 0;
+    std::uint32_t resourceStorageBlockCount = 0;
+    std::uint32_t resourceAtomicBlockCount = 0;
+    bool vertexUsesArgumentBuffer = false;
+    bool fragmentUsesArgumentBuffer = false;
+
+    bool operator==(const BindingConstructionSizingKey& rhs) const {
+        return program == rhs.program &&
+            programPipeline == rhs.programPipeline &&
+            programObjectSerial == rhs.programObjectSerial &&
+            executableGeneration == rhs.executableGeneration &&
+            samplerUniformGeneration == rhs.samplerUniformGeneration &&
+            samplerRecipeGeneration == rhs.samplerRecipeGeneration &&
+            globalStateGeneration == rhs.globalStateGeneration &&
+            textureDomainGeneration == rhs.textureDomainGeneration &&
+            bufferDomainGeneration == rhs.bufferDomainGeneration &&
+            programDomainGeneration == rhs.programDomainGeneration &&
+            vertexReflection == rhs.vertexReflection &&
+            fragmentReflection == rhs.fragmentReflection &&
+            vertexMsl == rhs.vertexMsl &&
+            fragmentMsl == rhs.fragmentMsl &&
+            resourceUniformBlockCount == rhs.resourceUniformBlockCount &&
+            resourceStorageBlockCount == rhs.resourceStorageBlockCount &&
+            resourceAtomicBlockCount == rhs.resourceAtomicBlockCount &&
+            vertexUsesArgumentBuffer == rhs.vertexUsesArgumentBuffer &&
+            fragmentUsesArgumentBuffer == rhs.fragmentUsesArgumentBuffer;
+    }
+};
+
+struct BindingConstructionSizingSample {
+    double keyReadCompareUs = 0.0;
+    double uniformPackUs = 0.0;
+    double samplerResolveUs = 0.0;
+    double uboResolveUs = 0.0;
+    double ssboAtomicResolveUs = 0.0;
+    double imageResolveUs = 0.0;
+    double validateWalkUs = 0.0;
+    double replayCopyUs = 0.0;
+    std::uint64_t referencedTextures = 0;
+    std::uint64_t referencedUboBindings = 0;
+    std::uint64_t referencedSsboBindings = 0;
+    std::uint64_t referencedAtomicBindings = 0;
+    std::uint64_t replayCopyBytes = 0;
+    std::uint64_t validateHash = 0;
+};
+
+struct BindingConstructionSizingProfile {
+    bool enabled = bindingConstructionSizingEnabled();
+    std::uint64_t draws = 0;
+    std::uint64_t coarseCandidates = 0;
+    std::uint64_t coarseHits = 0;
+    std::uint64_t coarseMisses = 0;
+    std::uint64_t validateWalks = 0;
+    std::uint64_t replayCopies = 0;
+    std::uint64_t referencedTextures = 0;
+    std::uint64_t referencedUboBindings = 0;
+    std::uint64_t referencedSsboBindings = 0;
+    std::uint64_t referencedAtomicBindings = 0;
+    std::uint64_t replayCopyBytes = 0;
+    std::uint64_t validateHash = 0;
+    double keyReadCompareUs = 0.0;
+    double uniformPackUs = 0.0;
+    double samplerResolveUs = 0.0;
+    double uboResolveUs = 0.0;
+    double ssboAtomicResolveUs = 0.0;
+    double imageResolveUs = 0.0;
+    double validateWalkUs = 0.0;
+    double replayCopyUs = 0.0;
+    bool hasLastKey = false;
+    BindingConstructionSizingKey lastKey{};
+
+    bool observeCoarseKey(const BindingConstructionSizingKey& key) {
+        if (!enabled) {
+            return false;
+        }
+        ++coarseCandidates;
+        const bool hit = hasLastKey && key == lastKey;
+        if (hit) {
+            ++coarseHits;
+        } else {
+            ++coarseMisses;
+        }
+        lastKey = key;
+        hasLastKey = true;
+        return hit;
+    }
+
+    void record(const BindingConstructionSizingSample& sample) {
+        if (!enabled) {
+            return;
+        }
+        ++draws;
+        keyReadCompareUs += sample.keyReadCompareUs;
+        uniformPackUs += sample.uniformPackUs;
+        samplerResolveUs += sample.samplerResolveUs;
+        uboResolveUs += sample.uboResolveUs;
+        ssboAtomicResolveUs += sample.ssboAtomicResolveUs;
+        imageResolveUs += sample.imageResolveUs;
+        validateWalkUs += sample.validateWalkUs;
+        replayCopyUs += sample.replayCopyUs;
+        referencedTextures += sample.referencedTextures;
+        referencedUboBindings += sample.referencedUboBindings;
+        referencedSsboBindings += sample.referencedSsboBindings;
+        referencedAtomicBindings += sample.referencedAtomicBindings;
+        replayCopyBytes += sample.replayCopyBytes;
+        validateHash ^= sample.validateHash;
+        if (sample.validateWalkUs > 0.0) {
+            ++validateWalks;
+        }
+        if (sample.replayCopyUs > 0.0) {
+            ++replayCopies;
+        }
+    }
+
+    void dump() const {
+        if (!enabled || draws == 0) {
+            return;
+        }
+        const double denom = static_cast<double>(draws);
+        const double hitRate = coarseCandidates > 0
+            ? static_cast<double>(coarseHits) /
+                  static_cast<double>(coarseCandidates)
+            : 0.0;
+        std::fprintf(stderr,
+            "[APPGL_BINDING_CONSTRUCTION_SIZING] summary draws=%llu "
+            "coarse_candidates=%llu coarse_hits=%llu coarse_misses=%llu "
+            "coarse_hit_rate=%.6f key_read_compare_us=%.3f "
+            "avg_key_read_compare_us=%.3f uniform_pack_us=%.3f "
+            "avg_uniform_pack_us=%.3f sampler_resolve_us=%.3f "
+            "avg_sampler_resolve_us=%.3f ubo_resolve_us=%.3f "
+            "avg_ubo_resolve_us=%.3f ssbo_atomic_resolve_us=%.3f "
+            "avg_ssbo_atomic_resolve_us=%.3f image_resolve_us=%.3f "
+            "avg_image_resolve_us=%.3f validate_walks=%llu "
+            "validate_walk_us=%.3f avg_validate_walk_us=%.3f "
+            "replay_copies=%llu replay_copy_us=%.3f "
+            "avg_replay_copy_us=%.3f replay_copy_bytes=%llu "
+            "referenced_textures=%llu referenced_ubos=%llu "
+            "referenced_ssbos=%llu referenced_atomics=%llu "
+            "validate_hash=0x%016llx\n",
+            static_cast<unsigned long long>(draws),
+            static_cast<unsigned long long>(coarseCandidates),
+            static_cast<unsigned long long>(coarseHits),
+            static_cast<unsigned long long>(coarseMisses),
+            hitRate,
+            keyReadCompareUs,
+            keyReadCompareUs / denom,
+            uniformPackUs,
+            uniformPackUs / denom,
+            samplerResolveUs,
+            samplerResolveUs / denom,
+            uboResolveUs,
+            uboResolveUs / denom,
+            ssboAtomicResolveUs,
+            ssboAtomicResolveUs / denom,
+            imageResolveUs,
+            imageResolveUs / denom,
+            static_cast<unsigned long long>(validateWalks),
+            validateWalkUs,
+            validateWalkUs / denom,
+            static_cast<unsigned long long>(replayCopies),
+            replayCopyUs,
+            replayCopyUs / denom,
+            static_cast<unsigned long long>(replayCopyBytes),
+            static_cast<unsigned long long>(referencedTextures),
+            static_cast<unsigned long long>(referencedUboBindings),
+            static_cast<unsigned long long>(referencedSsboBindings),
+            static_cast<unsigned long long>(referencedAtomicBindings),
+            static_cast<unsigned long long>(validateHash));
+        std::fflush(stderr);
+    }
+
+    std::string diagnosticsJson() const {
+        if (!enabled || draws == 0) {
+            return std::string();
+        }
+        const double hitRate = coarseCandidates > 0
+            ? static_cast<double>(coarseHits) /
+                  static_cast<double>(coarseCandidates)
+            : 0.0;
+        std::ostringstream out;
+        out << "{\"draws\":" << draws
+            << ",\"coarseCandidates\":" << coarseCandidates
+            << ",\"coarseHits\":" << coarseHits
+            << ",\"coarseMisses\":" << coarseMisses
+            << ",\"coarseHitRate\":" << hitRate
+            << ",\"keyReadCompareUs\":" << keyReadCompareUs
+            << ",\"uniformPackUs\":" << uniformPackUs
+            << ",\"samplerResolveUs\":" << samplerResolveUs
+            << ",\"uboResolveUs\":" << uboResolveUs
+            << ",\"ssboAtomicResolveUs\":" << ssboAtomicResolveUs
+            << ",\"imageResolveUs\":" << imageResolveUs
+            << ",\"validateWalks\":" << validateWalks
+            << ",\"validateWalkUs\":" << validateWalkUs
+            << ",\"replayCopies\":" << replayCopies
+            << ",\"replayCopyUs\":" << replayCopyUs
+            << ",\"replayCopyBytes\":" << replayCopyBytes
+            << ",\"referencedTextures\":" << referencedTextures
+            << ",\"referencedUboBindings\":" << referencedUboBindings
+            << ",\"referencedSsboBindings\":" << referencedSsboBindings
+            << ",\"referencedAtomicBindings\":" << referencedAtomicBindings
+            << ",\"validateHash\":" << validateHash
+            << "}";
+        return out.str();
+    }
+};
+
+static void bindingConstructionHashMix(std::uint64_t& hash,
+                                       std::uint64_t value) {
+    hash ^= value + 0x9e3779b97f4a7c15ull + (hash << 6u) + (hash >> 2u);
+}
+
+static BindingConstructionSizingKey bindingConstructionSizingKeyFor(
+    const GLStateTracker& state,
+    const GLProgramObject& program,
+    const TranslatedDrawInfo& info)
+{
+    BindingConstructionSizingKey key;
+    key.program = info.program;
+    key.programPipeline = state.currentProgramPipeline();
+    key.programObjectSerial = program.objectSerial;
+    key.executableGeneration = program.executableGeneration;
+    key.samplerUniformGeneration = program.samplerUniformValueGen;
+    key.samplerRecipeGeneration = program.samplerBindingRecipeGeneration;
+    key.globalStateGeneration = state.stateGeneration();
+    key.textureDomainGeneration =
+        state.domainGeneration(GLStateTracker::kDomainTexture);
+    key.bufferDomainGeneration =
+        state.domainGeneration(GLStateTracker::kDomainBuffer);
+    key.programDomainGeneration =
+        state.domainGeneration(GLStateTracker::kDomainProgram);
+    key.vertexReflection =
+        reinterpret_cast<std::uintptr_t>(info.vertexReflection);
+    key.fragmentReflection =
+        reinterpret_cast<std::uintptr_t>(info.fragmentReflection);
+    key.vertexMsl = reinterpret_cast<std::uintptr_t>(info.vertexMSL);
+    key.fragmentMsl = reinterpret_cast<std::uintptr_t>(info.fragmentMSL);
+    key.resourceUniformBlockCount =
+        static_cast<std::uint32_t>(program.resourceUniformBlocks.size());
+    key.resourceStorageBlockCount =
+        static_cast<std::uint32_t>(program.resourceStorageBlocks.size());
+    key.resourceAtomicBlockCount =
+        static_cast<std::uint32_t>(program.resourceAtomicCounterBuffers.size());
+    key.vertexUsesArgumentBuffer = info.vertexMslUsesArgumentBuffer;
+    key.fragmentUsesArgumentBuffer = info.fragmentMslUsesArgumentBuffer;
+    return key;
+}
+
+static void bindingConstructionSizingValidateWalk(
+    const TranslatedDrawInfo& info,
+    BindingConstructionSizingSample& sample)
+{
+    std::uint64_t hash = 1469598103934665603ull;
+    auto walkTextures =
+        [&](const std::vector<TranslatedDrawInfo::TextureBinding>& textures) {
+            sample.referencedTextures +=
+                static_cast<std::uint64_t>(textures.size());
+            for (const auto& binding : textures) {
+                bindingConstructionHashMix(hash, binding.textureName);
+                bindingConstructionHashMix(
+                    hash,
+                    reinterpret_cast<std::uintptr_t>(binding.metalTexture));
+                bindingConstructionHashMix(
+                    hash,
+                    reinterpret_cast<std::uintptr_t>(
+                        binding.metalSamplerState));
+                bindingConstructionHashMix(
+                    hash,
+                    reinterpret_cast<std::uintptr_t>(
+                        binding.textureBufferBackingMetalBuffer));
+                bindingConstructionHashMix(
+                    hash,
+                    reinterpret_cast<std::uintptr_t>(
+                        binding.imageAtomicMetalBuffer));
+                bindingConstructionHashMix(hash, binding.metalSlot);
+            }
+        };
+    walkTextures(info.fragmentTextures);
+    walkTextures(info.vertexTextures);
+    sample.referencedUboBindings =
+        static_cast<std::uint64_t>(info.uboBindings.size());
+    for (const auto& ubo : info.uboBindings) {
+        bindingConstructionHashMix(hash, ubo.glBufferName);
+        bindingConstructionHashMix(
+            hash, reinterpret_cast<std::uintptr_t>(ubo.metalBuffer));
+        bindingConstructionHashMix(hash, ubo.metalBufferOffset);
+        bindingConstructionHashMix(hash, ubo.size);
+        bindingConstructionHashMix(hash, ubo.metalSlot);
+    }
+    sample.referencedSsboBindings =
+        static_cast<std::uint64_t>(info.ssboBindings.size());
+    for (const auto& ssbo : info.ssboBindings) {
+        bindingConstructionHashMix(hash, ssbo.glBufferName);
+        bindingConstructionHashMix(
+            hash, reinterpret_cast<std::uintptr_t>(ssbo.metalBuffer));
+        bindingConstructionHashMix(hash, ssbo.offset);
+        bindingConstructionHashMix(hash, ssbo.size);
+        bindingConstructionHashMix(hash, ssbo.metalSlot);
+    }
+    sample.referencedAtomicBindings =
+        static_cast<std::uint64_t>(info.atomicCounterBindings.size());
+    for (const auto& atomic : info.atomicCounterBindings) {
+        bindingConstructionHashMix(hash, atomic.glBufferName);
+        bindingConstructionHashMix(
+            hash, reinterpret_cast<std::uintptr_t>(atomic.metalBuffer));
+        bindingConstructionHashMix(hash, atomic.offset);
+        bindingConstructionHashMix(hash, atomic.metalSlot);
+    }
+    sample.validateHash = hash;
+}
+
+static std::uint64_t bindingConstructionSizingReplayCopyBytes(
+    const TranslatedDrawInfo& info)
+{
+    std::uint64_t bytes = 0;
+    bytes += static_cast<std::uint64_t>(
+        info.fragmentTextures.size() *
+        sizeof(TranslatedDrawInfo::TextureBinding));
+    bytes += static_cast<std::uint64_t>(
+        info.vertexTextures.size() *
+        sizeof(TranslatedDrawInfo::TextureBinding));
+    bytes += static_cast<std::uint64_t>(
+        info.uboBindings.size() * sizeof(TranslatedDrawInfo::UBOBinding));
+    bytes += static_cast<std::uint64_t>(
+        info.ssboBindings.size() * sizeof(TranslatedDrawInfo::SSBOBinding));
+    bytes += static_cast<std::uint64_t>(
+        info.atomicCounterBindings.size() *
+        sizeof(TranslatedDrawInfo::AtomicCounterBinding));
+    bytes += static_cast<std::uint64_t>(
+        info.sampledTextureNames.size() * sizeof(GLuint));
+    bytes += static_cast<std::uint64_t>(
+        info.readImageTextureNames.size() * sizeof(GLuint));
+    bytes += static_cast<std::uint64_t>(
+        info.writtenImageTextureNames.size() * sizeof(GLuint));
+    return bytes;
+}
+
+static void bindingConstructionSizingReplayCopyWalk(
+    const TranslatedDrawInfo& info,
+    BindingConstructionSizingSample& sample)
+{
+    thread_local std::vector<TranslatedDrawInfo::TextureBinding> fragTextures;
+    thread_local std::vector<TranslatedDrawInfo::TextureBinding> vertTextures;
+    thread_local std::vector<TranslatedDrawInfo::UBOBinding> ubos;
+    thread_local std::vector<TranslatedDrawInfo::SSBOBinding> ssbos;
+    thread_local std::vector<TranslatedDrawInfo::AtomicCounterBinding> atomics;
+    thread_local std::vector<GLuint> sampledNames;
+    thread_local std::vector<GLuint> readImageNames;
+    thread_local std::vector<GLuint> writtenImageNames;
+    fragTextures = info.fragmentTextures;
+    vertTextures = info.vertexTextures;
+    ubos = info.uboBindings;
+    ssbos = info.ssboBindings;
+    atomics = info.atomicCounterBindings;
+    sampledNames = info.sampledTextureNames;
+    readImageNames = info.readImageTextureNames;
+    writtenImageNames = info.writtenImageTextureNames;
+    sample.replayCopyBytes = bindingConstructionSizingReplayCopyBytes(info);
+}
 
 static std::size_t glProducerTokenKindIndex(
     GLProducerTokenResourceKind kind) {
@@ -7406,6 +7785,7 @@ struct GLContext::Impl {
         coldPathProfile.dump();
         phase2PlanKeyProfile.dump();
         drawPathProfile.dump();
+        bindingConstructionSizingProfile.dump();
         producerTokenProfile.dump(producerTokenEpoch,
                                   producerTokenKnownCompletedEpoch);
         serialDeferredRecordProfile.dump();
@@ -7418,7 +7798,8 @@ struct GLContext::Impl {
             std::getenv("APPGL_GL_PRODUCER_TOKEN_PROFILE") != nullptr ||
             std::getenv("APPGL_SERIAL_DEFERRED_RECORD_PROFILE") != nullptr ||
             std::getenv("APPGL_7G_COLD_PATH_PROFILE") != nullptr ||
-            std::getenv("APPGL_PHASE2_PLAN_KEY_PROFILE") != nullptr;
+            std::getenv("APPGL_PHASE2_PLAN_KEY_PROFILE") != nullptr ||
+            bindingConstructionSizingEnabled();
     }
 
     static std::vector<Impl*>& activeProfileContexts() {
@@ -24276,6 +24657,14 @@ struct GLContext::Impl {
                                   GLuint programName,
                                   GLenum mode,
                                   const std::vector<std::uint32_t>& filteredIndices);
+    double prepareBindingConstructionUniformBuffers(GLProgramObject& program,
+                                                    GLuint programName,
+                                                    GLuint drawID,
+                                                    TranslatedDrawInfo& info,
+                                                    const char* label);
+    void resolveBindingConstructionForTranslatedDraw(GLProgramObject& program,
+                                                     TranslatedDrawInfo& info,
+                                                     double uniformPackUs = 0.0);
 
     // Sprint 17 Day 7+ Bank-Group-H Path B Phase 3 day 4 — wrapper around
     // `frameGraph->encodeTranslatedDraw` that marks the bound draw FBO's
@@ -25223,6 +25612,7 @@ struct GLContext::Impl {
     std::unique_ptr<GLObjectStore> objects;
     std::unique_ptr<GLStateTracker> state;
     GLDrawPathProfile drawPathProfile;
+    BindingConstructionSizingProfile bindingConstructionSizingProfile;
     mutable GLProducerTokenProfile producerTokenProfile;
     mutable std::uint64_t samplerGpuOrderSkipDecisionCount = 0;
     SerialDeferredRecordProfile serialDeferredRecordProfile;
@@ -27100,10 +27490,12 @@ std::string GLContext::framePacingDiagnosticsJson() const {
 
 std::string GLContext::drawProfileDiagnosticsJson() const {
     const std::string gl = impl_->drawPathProfile.diagnosticsJson();
+    const std::string bindingConstructionSizing =
+        impl_->bindingConstructionSizingProfile.diagnosticsJson();
     const std::string submit = impl_->frameGraph != nullptr
         ? impl_->frameGraph->drawSubmitProfileDiagnosticsJson()
         : std::string();
-    if (gl.empty() && submit.empty()) {
+    if (gl.empty() && bindingConstructionSizing.empty() && submit.empty()) {
         return std::string();
     }
     std::string out = "{";
@@ -27111,8 +27503,15 @@ std::string GLContext::drawProfileDiagnosticsJson() const {
         out += "\"gl\":";
         out += gl;
     }
-    if (!submit.empty()) {
+    if (!bindingConstructionSizing.empty()) {
         if (!gl.empty()) {
+            out += ",";
+        }
+        out += "\"bindingConstructionSizing\":";
+        out += bindingConstructionSizing;
+    }
+    if (!submit.empty()) {
+        if (!gl.empty() || !bindingConstructionSizing.empty()) {
             out += ",";
         }
         out += "\"submit\":";
@@ -38567,6 +38966,88 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     return ok;
 }
 
+double GLContext::Impl::prepareBindingConstructionUniformBuffers(
+    GLProgramObject& program,
+    GLuint programName,
+    GLuint drawID,
+    TranslatedDrawInfo& info,
+    const char* label)
+{
+    const auto start = bindingConstructionSizingProfile.enabled
+        ? glDrawProfileNow()
+        : GLDrawProfileTimePoint{};
+    prepareTranslatedDrawUniformBuffers(
+        program, programName, matrixState, drawID, info, label);
+    return bindingConstructionSizingProfile.enabled
+        ? glDrawProfileElapsedUs(start, glDrawProfileNow())
+        : 0.0;
+}
+
+void GLContext::Impl::resolveBindingConstructionForTranslatedDraw(
+    GLProgramObject& program,
+    TranslatedDrawInfo& info,
+    double uniformPackUs)
+{
+    BindingConstructionSizingSample sizingSample;
+    sizingSample.uniformPackUs = uniformPackUs;
+    const bool sizing = bindingConstructionSizingProfile.enabled;
+    if (sizing) {
+        const auto keyStart = glDrawProfileNow();
+        const BindingConstructionSizingKey key =
+            bindingConstructionSizingKeyFor(*state, program, info);
+        sizingSample.keyReadCompareUs =
+            glDrawProfileElapsedUs(keyStart, glDrawProfileNow());
+        (void)bindingConstructionSizingProfile.observeCoarseKey(key);
+    }
+
+    auto timeResolver = [&](auto&& resolver,
+                            double& outUs,
+                            GLDrawProfileBucket drawBucket) {
+        const bool profileDrawBucket =
+            drawPathProfile.enabled && drawBucket != GLDrawProfileBucket::Count;
+        if (!sizing && !profileDrawBucket) {
+            resolver();
+            return;
+        }
+        const auto start = glDrawProfileNow();
+        resolver();
+        const double elapsedUs =
+            glDrawProfileElapsedUs(start, glDrawProfileNow());
+        if (sizing) {
+            outUs = elapsedUs;
+        }
+        if (profileDrawBucket) {
+            drawPathProfile.record(drawBucket, elapsedUs);
+        }
+    };
+
+    timeResolver([&]() { resolveSamplerBindings(program, info); },
+                 sizingSample.samplerResolveUs,
+                 GLDrawProfileBucket::Count);
+    timeResolver([&]() { resolveUBOBindings(program, info); },
+                 sizingSample.uboResolveUs,
+                 GLDrawProfileBucket::UboBindings);
+    timeResolver([&]() { resolveSSBOBindings(program, info); },
+                 sizingSample.ssboAtomicResolveUs,
+                 GLDrawProfileBucket::SsboBindings);
+    timeResolver([&]() { resolveImageBindings(program, info); },
+                 sizingSample.imageResolveUs,
+                 GLDrawProfileBucket::ImageBindings);
+
+    if (sizing) {
+        const auto validateStart = glDrawProfileNow();
+        bindingConstructionSizingValidateWalk(info, sizingSample);
+        sizingSample.validateWalkUs =
+            glDrawProfileElapsedUs(validateStart, glDrawProfileNow());
+
+        const auto replayStart = glDrawProfileNow();
+        bindingConstructionSizingReplayCopyWalk(info, sizingSample);
+        sizingSample.replayCopyUs =
+            glDrawProfileElapsedUs(replayStart, glDrawProfileNow());
+        bindingConstructionSizingProfile.record(sizingSample);
+    }
+}
+
 bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                                            GLuint programName,
                                            const appgl::EmulatedDraw& ed,
@@ -39259,18 +39740,27 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         program.uniformLayoutComputed = true;
     }
     thread_local std::vector<std::uint8_t> gsFragUniformScratch;
+    double bindingConstructionUniformPackUs = 0.0;
+    const auto bindingConstructionUniformPackStart =
+        bindingConstructionSizingProfile.enabled
+            ? glDrawProfileNow()
+            : GLDrawProfileTimePoint{};
     buildStageUniformBuffer(gsFragUniformScratch,
         program.fragmentReflection, uniformValuesForEmulationStage(program, 4),
         program.fragmentUniformLayout);
+    if (bindingConstructionSizingProfile.enabled) {
+        bindingConstructionUniformPackUs =
+            glDrawProfileElapsedUs(
+                bindingConstructionUniformPackStart,
+                glDrawProfileNow());
+    }
     tdi.vertexUniformData = nullptr;
     tdi.vertexUniformSize = 0;
     tdi.fragmentUniformData = gsFragUniformScratch.data();
     tdi.fragmentUniformSize = gsFragUniformScratch.size();
 
-    resolveSamplerBindings(program, tdi);
-    resolveUBOBindings(program, tdi);
-    resolveSSBOBindings(program, tdi);
-    resolveImageBindings(program, tdi);
+    resolveBindingConstructionForTranslatedDraw(
+        program, tdi, bindingConstructionUniformPackUs);
 
     if (preFboColTex != nullptr || preFboDSTex != nullptr || preAttachmentlessFbo) {
         tdi.fboColorTexture = preFboColTex;
@@ -39410,13 +39900,12 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
     logStateResolveCostClass(
         "cull-filtered-draw", programName, 0, tdi, vao.attributes.size(),
         vaoLayoutCacheHit);
-    prepareTranslatedDrawUniformBuffers(
-        program, programName, matrixState, 0, tdi, "cull-filtered-draw");
+    const double bindingConstructionUniformPackUs =
+        prepareBindingConstructionUniformBuffers(
+        program, programName, 0, tdi, "cull-filtered-draw");
 
-    resolveSamplerBindings(program, tdi);
-    resolveUBOBindings(program, tdi);
-    resolveSSBOBindings(program, tdi);
-    resolveImageBindings(program, tdi);
+    resolveBindingConstructionForTranslatedDraw(
+        program, tdi, bindingConstructionUniformPackUs);
 
     {
         GLsizei fboW = 0, fboH = 0;

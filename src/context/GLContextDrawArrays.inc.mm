@@ -1213,14 +1213,13 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             logStateResolveCostClass(
                 "drawArrays-attributeless", programName, vaoName,
                 tdi, vao->attributes.size());
-            prepareTranslatedDrawUniformBuffers(
-                *program, programName, impl_->matrixState, drawID, tdi,
-                "drawArrays-attributeless");
+            const double bindingConstructionUniformPackUs =
+                impl_->prepareBindingConstructionUniformBuffers(
+                    *program, programName, drawID, tdi,
+                    "drawArrays-attributeless");
 
-            impl_->resolveSamplerBindings(*program, tdi);
-            impl_->resolveUBOBindings(*program, tdi);
-            impl_->resolveSSBOBindings(*program, tdi);
-            impl_->resolveImageBindings(*program, tdi);
+            impl_->resolveBindingConstructionForTranslatedDraw(
+                *program, tdi, bindingConstructionUniformPackUs);
 
             // RC-A02: resolve FBO render target.
             {
@@ -1325,14 +1324,13 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 logStateResolveCostClass(
                     "drawArrays-generic-attrs", programName, vaoName,
                     tdi, vao->attributes.size());
-                prepareTranslatedDrawUniformBuffers(
-                    *program, programName, impl_->matrixState, drawID, tdi,
-                    "drawArrays-generic-attrs");
+                const double bindingConstructionUniformPackUs =
+                    impl_->prepareBindingConstructionUniformBuffers(
+                        *program, programName, drawID, tdi,
+                        "drawArrays-generic-attrs");
 
-                impl_->resolveSamplerBindings(*program, tdi);
-                impl_->resolveUBOBindings(*program, tdi);
-                impl_->resolveSSBOBindings(*program, tdi);
-                impl_->resolveImageBindings(*program, tdi);
+                impl_->resolveBindingConstructionForTranslatedDraw(
+                    *program, tdi, bindingConstructionUniformPackUs);
 
                 {
                     GLsizei fboW = 0, fboH = 0;
@@ -1472,9 +1470,10 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                         "drawArrays", programName, vaoName,
                         tdi, vao->attributes.size(), vaoLayoutCacheHit);
                     drawProfile.mark(GLDrawProfileBucket::Diagnostics);
-                    prepareTranslatedDrawUniformBuffers(
-                        *program, programName, impl_->matrixState, drawID, tdi,
-                        "drawArrays");
+                    const double bindingConstructionUniformPackUs =
+                        impl_->prepareBindingConstructionUniformBuffers(
+                            *program, programName, drawID, tdi,
+                            "drawArrays");
                     drawProfile.mark(GLDrawProfileBucket::UniformBuffers);
 
                     // Phase 8X Group 4d follow-up⁷ — resolve each sampler
@@ -1488,14 +1487,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     // encodeTranslatedDraw bound zero textures/samplers
                     // and the fragment shader sampled from an unbound
                     // slot.
-                    impl_->resolveSamplerBindings(*program, tdi);
+                    impl_->resolveBindingConstructionForTranslatedDraw(
+                        *program, tdi, bindingConstructionUniformPackUs);
                     drawProfile.resetCursor();
-                    impl_->resolveUBOBindings(*program, tdi);
-                    drawProfile.mark(GLDrawProfileBucket::UboBindings);
-                    impl_->resolveSSBOBindings(*program, tdi);
-                    drawProfile.mark(GLDrawProfileBucket::SsboBindings);
-                    impl_->resolveImageBindings(*program, tdi);
-                    drawProfile.mark(GLDrawProfileBucket::ImageBindings);
 
                     // RC-A02: resolve FBO render target when a user FBO is bound.
                     {
@@ -2054,13 +2048,12 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             logStateResolveCostClass(
                 "drawArraysInstanced-attributeless", programName, vaoName,
                 tdi, vao->attributes.size());
-            prepareTranslatedDrawUniformBuffers(
-                *program, programName, impl_->matrixState, drawID, tdi,
-                "drawArraysInstanced-attributeless");
-            impl_->resolveSamplerBindings(*program, tdi);
-            impl_->resolveUBOBindings(*program, tdi);
-            impl_->resolveSSBOBindings(*program, tdi);
-            impl_->resolveImageBindings(*program, tdi);
+            const double bindingConstructionUniformPackUs =
+                impl_->prepareBindingConstructionUniformBuffers(
+                    *program, programName, drawID, tdi,
+                    "drawArraysInstanced-attributeless");
+            impl_->resolveBindingConstructionForTranslatedDraw(
+                *program, tdi, bindingConstructionUniformPackUs);
             {
                 GLsizei fboW = 0, fboH = 0;
                 void* fboDSTex = nullptr;
@@ -2231,17 +2224,16 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     logStateResolveCostClass(
                         "drawArraysInstanced", programName, vaoName,
                         tdi, vao->attributes.size(), vaoLayoutCacheHit);
-                    prepareTranslatedDrawUniformBuffers(
-                        *program, programName, impl_->matrixState, drawID, tdi,
-                        "drawArraysInstanced");
+                    const double bindingConstructionUniformPackUs =
+                        impl_->prepareBindingConstructionUniformBuffers(
+                            *program, programName, drawID, tdi,
+                            "drawArraysInstanced");
 
                     // Phase 8X Group 4d follow-up⁷ — see matching comment in
                     // drawArrays for rationale; the instanced draw path
                     // needs identical sampler resolution.
-                    impl_->resolveSamplerBindings(*program, tdi);
-                    impl_->resolveUBOBindings(*program, tdi);
-                    impl_->resolveSSBOBindings(*program, tdi);
-                    impl_->resolveImageBindings(*program, tdi);
+                    impl_->resolveBindingConstructionForTranslatedDraw(
+                        *program, tdi, bindingConstructionUniformPackUs);
 
                     // RC-A02: resolve FBO render target.
                     {
