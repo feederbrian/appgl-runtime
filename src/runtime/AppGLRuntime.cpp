@@ -3149,6 +3149,50 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << metalInventory.samplerResolveCacheMisses << ","
            << metalInventory.samplerResolveCacheBusts << ","
            << metalInventory.samplerResolveCacheBypasses << "],"
+           << "\"defaultUniformGenerationBindCache\":{"
+           << "\"capacityPerStage\":"
+           << metalInventory.defaultUniformGenerationBindCacheCapacity
+           << ",\"lookups\":"
+           << metalInventory.defaultUniformGenerationBindCacheLookups
+           << ",\"hits\":"
+           << metalInventory.defaultUniformGenerationBindCacheHits
+           << ",\"activeHits\":"
+           << metalInventory.defaultUniformGenerationBindCacheActiveHits
+           << ",\"rebinds\":"
+           << metalInventory.defaultUniformGenerationBindCacheRebinds
+           << ",\"misses\":"
+           << metalInventory.defaultUniformGenerationBindCacheMisses
+           << ",\"stores\":"
+           << metalInventory.defaultUniformGenerationBindCacheStores
+           << ",\"evictions\":"
+           << metalInventory.defaultUniformGenerationBindCacheEvictions
+           << ",\"liveEntries\":"
+           << metalInventory.defaultUniformGenerationBindCacheLiveEntries
+           << ",\"peakEntries\":"
+           << metalInventory.defaultUniformGenerationBindCachePeakEntries
+           << ",\"activeInvalidations\":"
+           << metalInventory.defaultUniformGenerationBindCacheActiveInvalidations
+           << ",\"resetInvalidations\":"
+           << metalInventory.defaultUniformGenerationBindCacheResetInvalidations
+           << ",\"resetInvalidatedEntries\":"
+           << metalInventory.defaultUniformGenerationBindCacheResetInvalidatedEntries
+           << ",\"obs\":{"
+           << "\"draws\":"
+           << metalInventory.defaultUniformGenerationBindCacheObsDraws
+           << ",\"bind_skip_hits\":"
+           << metalInventory.defaultUniformGenerationBindCacheObsBindSkipHits
+           << ",\"generation_hits\":"
+           << metalInventory.defaultUniformGenerationBindCacheObsGenerationHits
+           << ",\"hash_free_rebind_hits\":"
+           << metalInventory.defaultUniformGenerationBindCacheObsHashFreeRebindHits
+           << ",\"misses\":"
+           << metalInventory.defaultUniformGenerationBindCacheObsMisses
+           << ",\"hashes_skipped_on_miss\":"
+           << metalInventory.defaultUniformGenerationBindCacheObsHashesSkippedOnMiss
+           << ",\"hashes_run\":"
+           << metalInventory.defaultUniformGenerationBindCacheObsHashesRun
+           << "}"
+           << "},"
            << "\"orderedTextureUploads\":"
            << metalInventory.orderedTextureUploads << ","
            << "\"prepMemoBusts\":"

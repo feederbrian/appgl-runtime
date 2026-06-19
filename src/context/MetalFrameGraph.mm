@@ -315,6 +315,28 @@ static bool defaultUniformGenerationBindCacheValidateEnabled() {
         "APPGL_DEFAULT_UNIFORM_GENERATION_BIND_CACHE_VALIDATE");
 }
 
+static bool defaultUniformGenerationBindCacheObsEnabled() {
+    return appglEnvEnabledDefaultOff(
+        "APPGL_DEFAULT_UNIFORM_GENERATION_BIND_CACHE_OBS");
+}
+
+static std::uint64_t defaultUniformGenerationBindCacheObsDumpIntervalMs() {
+    return static_cast<std::uint64_t>(
+        envSizeLimit(
+            "APPGL_DEFAULT_UNIFORM_GENERATION_BIND_CACHE_OBS_DUMP_INTERVAL_MS",
+            0));
+}
+
+static constexpr std::size_t kDefaultUniformGenerationBindCacheDefaultEntries = 64;
+static constexpr std::size_t kDefaultUniformGenerationBindCacheMaxEntries = 256;
+
+static std::size_t defaultUniformGenerationBindCacheEntries() {
+    return std::min<std::size_t>(
+        envSizeLimit("APPGL_DEFAULT_UNIFORM_GENERATION_BIND_CACHE_ENTRIES",
+                     kDefaultUniformGenerationBindCacheDefaultEntries),
+        kDefaultUniformGenerationBindCacheMaxEntries);
+}
+
 static bool encodeSubtimeProfileEnabled() {
     return appglEnvEnabledDefaultOff("APPGL_ENCODE_SUBTIME_PROFILE") ||
            appglEnvEnabledDefaultOff("APPGL_DRAW_PROFILE") ||
@@ -1179,6 +1201,123 @@ struct ArgEncoderSetupFloorProfile {
             }
         }
         std::fflush(stderr);
+    }
+};
+
+struct DefaultUniformGenerationBindCacheObserver {
+    bool enabled = defaultUniformGenerationBindCacheObsEnabled();
+    std::uint64_t dumpIntervalMs =
+        defaultUniformGenerationBindCacheObsDumpIntervalMs();
+    bool intervalDumpArmed = false;
+    DrawProfileTimePoint nextIntervalDump{};
+    std::uint64_t draws = 0;
+    std::uint64_t bindSkipHits = 0;
+    std::uint64_t generationHits = 0;
+    std::uint64_t hashFreeRebindHits = 0;
+    std::uint64_t misses = 0;
+    std::uint64_t hashesSkippedOnMiss = 0;
+    std::uint64_t hashesRun = 0;
+
+    void recordDraw() {
+        if (!enabled) {
+            return;
+        }
+        ++draws;
+        maybeDumpInterval();
+    }
+
+    void recordBindSkipHit() {
+        if (!enabled) {
+            return;
+        }
+        ++bindSkipHits;
+        ++generationHits;
+        maybeDumpInterval();
+    }
+
+    void recordHashFreeRebindHit() {
+        if (!enabled) {
+            return;
+        }
+        ++generationHits;
+        ++hashFreeRebindHits;
+        maybeDumpInterval();
+    }
+
+    void recordMissHashSkipped() {
+        if (!enabled) {
+            return;
+        }
+        ++misses;
+        ++hashesSkippedOnMiss;
+        maybeDumpInterval();
+    }
+
+    void recordHashRun() {
+        if (!enabled) {
+            return;
+        }
+        ++hashesRun;
+        maybeDumpInterval();
+    }
+
+    void maybeDumpInterval() {
+        if (!enabled || dumpIntervalMs == 0 || draws == 0) {
+            return;
+        }
+        const DrawProfileTimePoint now = drawProfileNow();
+        if (!intervalDumpArmed) {
+            intervalDumpArmed = true;
+            nextIntervalDump =
+                now + std::chrono::milliseconds(
+                    static_cast<long long>(dumpIntervalMs));
+            return;
+        }
+        if (now < nextIntervalDump) {
+            return;
+        }
+        dump("interval");
+        nextIntervalDump =
+            now + std::chrono::milliseconds(
+                static_cast<long long>(dumpIntervalMs));
+    }
+
+    void dump(const char* reason = "teardown") const {
+        if (!enabled || draws == 0) {
+            return;
+        }
+        const double drawDenom = static_cast<double>(draws);
+        std::fprintf(stderr,
+            "[APPGL_DEFAULT_UNIFORM_GENERATION_BIND_CACHE_OBS] summary "
+            "reason=%s draws=%llu bind_skip_hits=%llu generation_hits=%llu "
+            "hash_free_rebind_hits=%llu misses=%llu "
+            "hashes_skipped_on_miss=%llu hashes_run=%llu "
+            "bind_skip_hit_rate=%.6f generation_hit_rate=%.6f\n",
+            reason != nullptr ? reason : "unknown",
+            static_cast<unsigned long long>(draws),
+            static_cast<unsigned long long>(bindSkipHits),
+            static_cast<unsigned long long>(generationHits),
+            static_cast<unsigned long long>(hashFreeRebindHits),
+            static_cast<unsigned long long>(misses),
+            static_cast<unsigned long long>(hashesSkippedOnMiss),
+            static_cast<unsigned long long>(hashesRun),
+            static_cast<double>(bindSkipHits) / drawDenom,
+            static_cast<double>(generationHits) / drawDenom);
+        std::fflush(stderr);
+    }
+
+    std::string diagnosticsJson() const {
+        std::ostringstream out;
+        out << "{\"enabled\":" << (enabled ? 1 : 0)
+            << ",\"draws\":" << draws
+            << ",\"bind_skip_hits\":" << bindSkipHits
+            << ",\"generation_hits\":" << generationHits
+            << ",\"hash_free_rebind_hits\":" << hashFreeRebindHits
+            << ",\"misses\":" << misses
+            << ",\"hashes_skipped_on_miss\":" << hashesSkippedOnMiss
+            << ",\"hashes_run\":" << hashesRun
+            << "}";
+        return out.str();
     }
 };
 
@@ -5294,6 +5433,7 @@ struct MetalFrameGraph::Impl {
         drawSubmitProfile.dump();
         encodeSubtimeProfile.dump();
         argEncoderSetupFloorProfile.dump();
+        defaultUniformGenerationBindCacheObserver.dump();
         parallelEncodeProfile.dump();
         threadedDeferredRecordProfile.dump();
         frameAttributionProfile.dump();
@@ -14350,6 +14490,35 @@ struct MetalFrameGraph::Impl {
             << ",\"verifyMismatches\":" << recordPlanMemoVerifyMismatches
             << ",\"verifyChecks\":" << recordPlanMemoVerifyChecks
             << "}";
+        out << ",\"defaultUniformGenerationBindCache\":{"
+            << "\"enabled\":"
+            << (defaultUniformGenerationBindCacheLatched ? 1 : 0)
+            << ",\"capacityPerStage\":"
+            << defaultUniformGenerationBindCacheEntriesLatched
+            << ",\"lookups\":"
+            << defaultUniformGenerationBindCacheLookups
+            << ",\"hits\":" << defaultUniformGenerationBindCacheHits
+            << ",\"activeHits\":"
+            << defaultUniformGenerationBindCacheActiveHits
+            << ",\"rebinds\":"
+            << defaultUniformGenerationBindCacheRebinds
+            << ",\"misses\":" << defaultUniformGenerationBindCacheMisses
+            << ",\"stores\":" << defaultUniformGenerationBindCacheStores
+            << ",\"evictions\":"
+            << defaultUniformGenerationBindCacheEvictions
+            << ",\"liveEntries\":"
+            << defaultUniformGenerationBindCacheLiveEntries()
+            << ",\"peakEntries\":"
+            << defaultUniformGenerationBindCachePeakEntries
+            << ",\"activeInvalidations\":"
+            << defaultUniformGenerationBindCacheActiveInvalidations
+            << ",\"resetInvalidations\":"
+            << defaultUniformGenerationBindCacheResetInvalidations
+            << ",\"resetInvalidatedEntries\":"
+            << defaultUniformGenerationBindCacheResetInvalidatedEntries
+            << "}";
+        out << ",\"defaultUniformGenerationBindCacheObs\":"
+            << defaultUniformGenerationBindCacheObserver.diagnosticsJson();
         out << ",\"mslHashMemo\":{"
             << "\"enabled\":" << (mslHashMemoEnabled ? 1 : 0)
             << ",\"lookups\":" << mslHashMemoLookups
@@ -14549,6 +14718,46 @@ struct MetalFrameGraph::Impl {
         snapshot.w2PlanMemoSize = recordPlanMemo.size();
         snapshot.w2PlanMemoPeak = recordPlanMemoPeak;
         snapshot.w2PlanVerifyMismatches = recordPlanMemoVerifyMismatches;
+        snapshot.defaultUniformGenerationBindCacheLookups =
+            defaultUniformGenerationBindCacheLookups;
+        snapshot.defaultUniformGenerationBindCacheHits =
+            defaultUniformGenerationBindCacheHits;
+        snapshot.defaultUniformGenerationBindCacheActiveHits =
+            defaultUniformGenerationBindCacheActiveHits;
+        snapshot.defaultUniformGenerationBindCacheRebinds =
+            defaultUniformGenerationBindCacheRebinds;
+        snapshot.defaultUniformGenerationBindCacheMisses =
+            defaultUniformGenerationBindCacheMisses;
+        snapshot.defaultUniformGenerationBindCacheStores =
+            defaultUniformGenerationBindCacheStores;
+        snapshot.defaultUniformGenerationBindCacheEvictions =
+            defaultUniformGenerationBindCacheEvictions;
+        snapshot.defaultUniformGenerationBindCacheLiveEntries =
+            defaultUniformGenerationBindCacheLiveEntries();
+        snapshot.defaultUniformGenerationBindCachePeakEntries =
+            defaultUniformGenerationBindCachePeakEntries;
+        snapshot.defaultUniformGenerationBindCacheCapacity =
+            defaultUniformGenerationBindCacheEntriesLatched;
+        snapshot.defaultUniformGenerationBindCacheActiveInvalidations =
+            defaultUniformGenerationBindCacheActiveInvalidations;
+        snapshot.defaultUniformGenerationBindCacheResetInvalidations =
+            defaultUniformGenerationBindCacheResetInvalidations;
+        snapshot.defaultUniformGenerationBindCacheResetInvalidatedEntries =
+            defaultUniformGenerationBindCacheResetInvalidatedEntries;
+        snapshot.defaultUniformGenerationBindCacheObsDraws =
+            defaultUniformGenerationBindCacheObserver.draws;
+        snapshot.defaultUniformGenerationBindCacheObsBindSkipHits =
+            defaultUniformGenerationBindCacheObserver.bindSkipHits;
+        snapshot.defaultUniformGenerationBindCacheObsGenerationHits =
+            defaultUniformGenerationBindCacheObserver.generationHits;
+        snapshot.defaultUniformGenerationBindCacheObsHashFreeRebindHits =
+            defaultUniformGenerationBindCacheObserver.hashFreeRebindHits;
+        snapshot.defaultUniformGenerationBindCacheObsMisses =
+            defaultUniformGenerationBindCacheObserver.misses;
+        snapshot.defaultUniformGenerationBindCacheObsHashesSkippedOnMiss =
+            defaultUniformGenerationBindCacheObserver.hashesSkippedOnMiss;
+        snapshot.defaultUniformGenerationBindCacheObsHashesRun =
+            defaultUniformGenerationBindCacheObserver.hashesRun;
         return snapshot;
     }
 
@@ -24900,6 +25109,8 @@ private:
     DrawSubmitProfile drawSubmitProfile;
     EncodeSubtimeProfile encodeSubtimeProfile;
     ArgEncoderSetupFloorProfile argEncoderSetupFloorProfile;
+    DefaultUniformGenerationBindCacheObserver
+        defaultUniformGenerationBindCacheObserver;
     // S25 Rung-1 instruments: always-on pacing accumulator + the
     // GL-thread drawable-acquire wait pair (the nextDrawable stall is
     // the one blocking site the command-submission wait kinds can't
@@ -24929,6 +25140,8 @@ private:
         defaultUniformGenerationBindCacheEnabled();
     const bool defaultUniformGenerationBindCacheValidateLatched =
         defaultUniformGenerationBindCacheValidateEnabled();
+    const std::size_t defaultUniformGenerationBindCacheEntriesLatched =
+        defaultUniformGenerationBindCacheEntries();
     ThreadedDeferredRecordProfile threadedDeferredRecordProfile;
     FrameAttributionProfile frameAttributionProfile;
     std::deque<CapturedTranslatedDrawRecord> pendingThreadedDeferredRecords;
@@ -24995,6 +25208,7 @@ private:
         std::uint64_t generation = 0;
         const void* data = nullptr;
         NSUInteger length = 0;
+        std::uint64_t lastUseSerial = 0;
         std::vector<std::uint8_t> validationBoundBytes;
         bool valid = false;
     };
@@ -25015,10 +25229,27 @@ private:
         serialBindVertexSamplers{};
     std::array<SerialBindCacheSamplerBinding, kEncodeSubtimeTrackedSlots>
         serialBindFragmentSamplers{};
+    using DefaultUniformGenerationBindCache =
+        std::array<DefaultUniformGenerationBindCacheBinding,
+                   kDefaultUniformGenerationBindCacheMaxEntries>;
+    DefaultUniformGenerationBindCache defaultUniformGenerationVertexBindCache{};
+    DefaultUniformGenerationBindCache defaultUniformGenerationFragmentBindCache{};
+    std::uint64_t defaultUniformGenerationBindCacheLookups = 0;
+    std::uint64_t defaultUniformGenerationBindCacheHits = 0;
+    std::uint64_t defaultUniformGenerationBindCacheActiveHits = 0;
+    std::uint64_t defaultUniformGenerationBindCacheRebinds = 0;
+    std::uint64_t defaultUniformGenerationBindCacheMisses = 0;
+    std::uint64_t defaultUniformGenerationBindCacheStores = 0;
+    std::uint64_t defaultUniformGenerationBindCacheEvictions = 0;
+    std::uint64_t defaultUniformGenerationBindCacheActiveInvalidations = 0;
+    std::uint64_t defaultUniformGenerationBindCacheResetInvalidations = 0;
+    std::uint64_t defaultUniformGenerationBindCacheResetInvalidatedEntries = 0;
+    std::uint64_t defaultUniformGenerationBindCachePeakEntries = 0;
+    std::uint64_t defaultUniformGenerationBindCacheUseSerial = 0;
     DefaultUniformGenerationBindCacheBinding
-        defaultUniformGenerationVertexBindCache{};
+        defaultUniformGenerationVertexActiveBinding{};
     DefaultUniformGenerationBindCacheBinding
-        defaultUniformGenerationFragmentBindCache{};
+        defaultUniformGenerationFragmentActiveBinding{};
     using FloorUniformBytesClass =
         ArgEncoderSetupFloorProfileSample::UniformBytesClass;
     ArgEncoderSetupFloorProfileSample* activeFloorProfileSample = nullptr;
@@ -25090,6 +25321,7 @@ private:
     bool defaultUniformGenerationKeyUsable(
         const TranslatedDrawInfo& info) const {
         return defaultUniformGenerationBindCacheLatched &&
+               defaultUniformGenerationBindCacheEntriesLatched > 0 &&
                info.program != 0 &&
                info.programObjectSerial != 0 &&
                info.defaultUniformGeneration != 0;
@@ -25138,58 +25370,194 @@ private:
         std::abort();
     }
 
-    bool defaultUniformGenerationCacheHit(
-        const DefaultUniformGenerationBindCacheBinding& cached,
+    bool defaultUniformGenerationCacheEntryMatches(
+        const DefaultUniformGenerationBindCacheBinding& entry,
         const TranslatedDrawInfo& info,
         const void* data,
         NSUInteger length) const {
-        return defaultUniformGenerationKeyUsable(info) &&
-               cached.valid &&
-               cached.program == info.program &&
-               cached.programObjectSerial == info.programObjectSerial &&
-               cached.programObjectExecutableGeneration ==
+        return entry.valid &&
+               entry.program == info.program &&
+               entry.programObjectSerial == info.programObjectSerial &&
+               entry.programObjectExecutableGeneration ==
                    info.programObjectExecutableGeneration &&
-               cached.generation == info.defaultUniformGeneration &&
-               cached.data == data &&
-               cached.length == length;
+               entry.generation == info.defaultUniformGeneration &&
+               entry.data == data &&
+               entry.length == length;
     }
 
-    void updateDefaultUniformGenerationCache(
-        DefaultUniformGenerationBindCacheBinding& cached,
+    DefaultUniformGenerationBindCacheBinding*
+    findDefaultUniformGenerationCacheEntry(
+        DefaultUniformGenerationBindCache& cache,
         const TranslatedDrawInfo& info,
         const void* data,
         NSUInteger length) {
         if (!defaultUniformGenerationKeyUsable(info)) {
-            cached = {};
+            return nullptr;
+        }
+        const std::size_t entryCount =
+            std::min(defaultUniformGenerationBindCacheEntriesLatched,
+                     cache.size());
+        for (std::size_t i = 0; i < entryCount; ++i) {
+            if (defaultUniformGenerationCacheEntryMatches(
+                    cache[i], info, data, length)) {
+                return &cache[i];
+            }
+        }
+        return nullptr;
+    }
+
+    std::size_t defaultUniformGenerationCacheEntryCount(
+        const DefaultUniformGenerationBindCache& cache) const {
+        const std::size_t entryCount =
+            std::min(defaultUniformGenerationBindCacheEntriesLatched,
+                     cache.size());
+        std::size_t count = 0;
+        for (std::size_t i = 0; i < entryCount; ++i) {
+            if (cache[i].valid) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    std::size_t defaultUniformGenerationBindCacheLiveEntries() const {
+        return defaultUniformGenerationCacheEntryCount(
+                   defaultUniformGenerationVertexBindCache) +
+               defaultUniformGenerationCacheEntryCount(
+                   defaultUniformGenerationFragmentBindCache);
+    }
+
+    void recordDefaultUniformGenerationBindCachePeak() {
+        defaultUniformGenerationBindCachePeakEntries =
+            std::max<std::uint64_t>(
+                defaultUniformGenerationBindCachePeakEntries,
+                defaultUniformGenerationBindCacheLiveEntries());
+    }
+
+    std::uint64_t nextDefaultUniformGenerationBindCacheUseSerial() {
+        ++defaultUniformGenerationBindCacheUseSerial;
+        if (defaultUniformGenerationBindCacheUseSerial == 0) {
+            defaultUniformGenerationBindCacheUseSerial = 1;
+        }
+        return defaultUniformGenerationBindCacheUseSerial;
+    }
+
+    void updateDefaultUniformGenerationCache(
+        DefaultUniformGenerationBindCache& cache,
+        const TranslatedDrawInfo& info,
+        const void* data,
+        NSUInteger length) {
+        if (!defaultUniformGenerationKeyUsable(info)) {
             return;
         }
-        cached.program = info.program;
-        cached.programObjectSerial = info.programObjectSerial;
-        cached.programObjectExecutableGeneration =
+        const std::size_t entryCount =
+            std::min(defaultUniformGenerationBindCacheEntriesLatched,
+                     cache.size());
+        if (entryCount == 0) {
+            return;
+        }
+        DefaultUniformGenerationBindCacheBinding* victim = nullptr;
+        for (std::size_t i = 0; i < entryCount; ++i) {
+            if (!cache[i].valid) {
+                victim = &cache[i];
+                break;
+            }
+            if (victim == nullptr ||
+                cache[i].lastUseSerial < victim->lastUseSerial) {
+                victim = &cache[i];
+            }
+        }
+        if (victim == nullptr) {
+            return;
+        }
+        if (victim->valid) {
+            ++defaultUniformGenerationBindCacheEvictions;
+        }
+        victim->program = info.program;
+        victim->programObjectSerial = info.programObjectSerial;
+        victim->programObjectExecutableGeneration =
             info.programObjectExecutableGeneration;
-        cached.generation = info.defaultUniformGeneration;
-        cached.data = data;
-        cached.length = length;
+        victim->generation = info.defaultUniformGeneration;
+        victim->data = data;
+        victim->length = length;
+        victim->lastUseSerial = nextDefaultUniformGenerationBindCacheUseSerial();
         if (defaultUniformGenerationBindCacheValidateLatched &&
             data != nullptr && length > 0) {
             const auto* bytes = static_cast<const std::uint8_t*>(data);
-            cached.validationBoundBytes.assign(
+            victim->validationBoundBytes.assign(
                 bytes, bytes + static_cast<std::size_t>(length));
         } else {
-            cached.validationBoundBytes.clear();
+            victim->validationBoundBytes.clear();
         }
-        cached.valid = true;
+        victim->valid = true;
+        ++defaultUniformGenerationBindCacheStores;
+        recordDefaultUniformGenerationBindCachePeak();
+    }
+
+    void updateDefaultUniformGenerationActiveBinding(
+        DefaultUniformGenerationBindCacheBinding& active,
+        const TranslatedDrawInfo& info,
+        const void* data,
+        NSUInteger length,
+        const std::vector<std::uint8_t>* validationBoundBytes = nullptr) {
+        if (!defaultUniformGenerationKeyUsable(info)) {
+            active = {};
+            return;
+        }
+        active.program = info.program;
+        active.programObjectSerial = info.programObjectSerial;
+        active.programObjectExecutableGeneration =
+            info.programObjectExecutableGeneration;
+        active.generation = info.defaultUniformGeneration;
+        active.data = data;
+        active.length = length;
+        active.lastUseSerial = nextDefaultUniformGenerationBindCacheUseSerial();
+        if (defaultUniformGenerationBindCacheValidateLatched) {
+            if (validationBoundBytes != nullptr) {
+                active.validationBoundBytes = *validationBoundBytes;
+            } else if (data != nullptr && length > 0) {
+                const auto* bytes = static_cast<const std::uint8_t*>(data);
+                active.validationBoundBytes.assign(
+                    bytes, bytes + static_cast<std::size_t>(length));
+            } else {
+                active.validationBoundBytes.clear();
+            }
+        } else {
+            active.validationBoundBytes.clear();
+        }
+        active.valid = true;
+    }
+
+    void clearDefaultUniformGenerationCache(
+        DefaultUniformGenerationBindCache& cache) {
+        std::size_t removed = 0;
+        for (auto& entry : cache) {
+            if (entry.valid) {
+                ++removed;
+            }
+            entry = {};
+        }
+        if (removed > 0) {
+            ++defaultUniformGenerationBindCacheResetInvalidations;
+            defaultUniformGenerationBindCacheResetInvalidatedEntries += removed;
+        }
     }
 
     void invalidateDefaultUniformGenerationVertexCacheForSlot(NSUInteger slot) {
         if (slot == 16) {
-            defaultUniformGenerationVertexBindCache = {};
+            if (defaultUniformGenerationVertexActiveBinding.valid) {
+                ++defaultUniformGenerationBindCacheActiveInvalidations;
+            }
+            defaultUniformGenerationVertexActiveBinding = {};
         }
     }
 
     void invalidateDefaultUniformGenerationFragmentCacheForSlot(NSUInteger slot) {
         if (slot == 16) {
-            defaultUniformGenerationFragmentBindCache = {};
+            if (defaultUniformGenerationFragmentActiveBinding.valid) {
+                ++defaultUniformGenerationBindCacheActiveInvalidations;
+            }
+            defaultUniformGenerationFragmentActiveBinding = {};
         }
     }
 
@@ -25417,6 +25785,68 @@ private:
         }
     }
 
+    void setVertexBytesSkippingSerialHash(
+        EncodeSubtimeProfileSample* sample,
+        const void* data,
+        NSUInteger length,
+        NSUInteger slot,
+        EncodeMarshalClass marshalClass = EncodeMarshalClass::None) {
+        if (slot < serialBindVertexBytes.size()) {
+            serialBindVertexBytes[slot].valid = false;
+            serialBindVertexBuffers[slot].valid = false;
+        }
+        recordSerialBindCacheDecision(sample, true, false);
+        recordActiveFloorUniformBytes(length, true);
+        const bool profileMarshal =
+            sample != nullptr && marshalClass != EncodeMarshalClass::None;
+        const bool profileFloorUpload = activeFloorProfileSample != nullptr;
+        const bool profileSetBytes = profileMarshal || profileFloorUpload;
+        const auto start =
+            profileSetBytes ? drawProfileNow() : DrawProfileTimePoint{};
+        [currentRenderEncoder setVertexBytes:data length:length atIndex:slot];
+        const double elapsedUs =
+            profileSetBytes ? drawProfileElapsedUs(start, drawProfileNow()) : 0.0;
+        if (profileMarshal) {
+            recordEncodeMarshalClass(
+                sample, marshalClass, elapsedUs,
+                static_cast<std::uint64_t>(length));
+        }
+        if (profileFloorUpload) {
+            recordActiveFloorUniformBytesSetBytesUploadUs(elapsedUs);
+        }
+    }
+
+    void setFragmentBytesSkippingSerialHash(
+        EncodeSubtimeProfileSample* sample,
+        const void* data,
+        NSUInteger length,
+        NSUInteger slot,
+        EncodeMarshalClass marshalClass = EncodeMarshalClass::None) {
+        if (slot < serialBindFragmentBytes.size()) {
+            serialBindFragmentBytes[slot].valid = false;
+            serialBindFragmentBuffers[slot].valid = false;
+        }
+        recordSerialBindCacheDecision(sample, true, false);
+        recordActiveFloorUniformBytes(length, true);
+        const bool profileMarshal =
+            sample != nullptr && marshalClass != EncodeMarshalClass::None;
+        const bool profileFloorUpload = activeFloorProfileSample != nullptr;
+        const bool profileSetBytes = profileMarshal || profileFloorUpload;
+        const auto start =
+            profileSetBytes ? drawProfileNow() : DrawProfileTimePoint{};
+        [currentRenderEncoder setFragmentBytes:data length:length atIndex:slot];
+        const double elapsedUs =
+            profileSetBytes ? drawProfileElapsedUs(start, drawProfileNow()) : 0.0;
+        if (profileMarshal) {
+            recordEncodeMarshalClass(
+                sample, marshalClass, elapsedUs,
+                static_cast<std::uint64_t>(length));
+        }
+        if (profileFloorUpload) {
+            recordActiveFloorUniformBytesSetBytesUploadUs(elapsedUs);
+        }
+    }
+
     void bindDefaultUniformVertexBytesIfNeeded(
         EncodeSubtimeProfileSample* sample,
         const TranslatedDrawInfo& info,
@@ -25424,10 +25854,21 @@ private:
         NSUInteger length,
         NSUInteger slot,
         EncodeMarshalClass marshalClass = EncodeMarshalClass::None) {
-        if (defaultUniformGenerationCacheHit(
-                defaultUniformGenerationVertexBindCache, info, data, length)) {
+        const bool keyUsable = defaultUniformGenerationKeyUsable(info);
+        if (keyUsable) {
+            ++defaultUniformGenerationBindCacheLookups;
+            defaultUniformGenerationBindCacheObserver.recordDraw();
+        }
+        if (defaultUniformGenerationCacheEntryMatches(
+                defaultUniformGenerationVertexActiveBinding,
+                info, data, length)) {
+            ++defaultUniformGenerationBindCacheHits;
+            ++defaultUniformGenerationBindCacheActiveHits;
+            defaultUniformGenerationBindCacheObserver.recordBindSkipHit();
+            defaultUniformGenerationVertexActiveBinding.lastUseSerial =
+                nextDefaultUniformGenerationBindCacheUseSerial();
             const auto& boundBytes =
-                defaultUniformGenerationVertexBindCache.validationBoundBytes;
+                defaultUniformGenerationVertexActiveBinding.validationBoundBytes;
             validateDefaultUniformGenerationBytes(
                 "vertex", info, info.defaultUniformValidationVertexBytes,
                 boundBytes.empty() ? nullptr : boundBytes.data(),
@@ -25435,12 +25876,45 @@ private:
             recordSerialBindCacheDecision(sample, false, true);
             return;
         }
+        if (DefaultUniformGenerationBindCacheBinding* entry =
+                findDefaultUniformGenerationCacheEntry(
+                    defaultUniformGenerationVertexBindCache, info, data, length)) {
+            ++defaultUniformGenerationBindCacheHits;
+            ++defaultUniformGenerationBindCacheRebinds;
+            defaultUniformGenerationBindCacheObserver.recordHashFreeRebindHit();
+            entry->lastUseSerial =
+                nextDefaultUniformGenerationBindCacheUseSerial();
+            const auto& boundBytes =
+                entry->validationBoundBytes;
+            validateDefaultUniformGenerationBytes(
+                "vertex", info, info.defaultUniformValidationVertexBytes,
+                boundBytes.empty() ? nullptr : boundBytes.data(),
+                static_cast<NSUInteger>(boundBytes.size()));
+            setVertexBytesSkippingSerialHash(
+                sample, data, length, slot, marshalClass);
+            updateDefaultUniformGenerationActiveBinding(
+                defaultUniformGenerationVertexActiveBinding,
+                info, data, length, &entry->validationBoundBytes);
+            return;
+        }
+        if (!keyUsable) {
+            defaultUniformGenerationBindCacheObserver.recordHashRun();
+            bindVertexBytesIfNeeded(sample, data, length, slot, marshalClass);
+            return;
+        }
+        if (keyUsable) {
+            ++defaultUniformGenerationBindCacheMisses;
+            defaultUniformGenerationBindCacheObserver.recordMissHashSkipped();
+        }
         validateDefaultUniformGenerationBytes(
             "vertex", info, info.defaultUniformValidationVertexBytes,
             data, length);
-        bindVertexBytesIfNeeded(sample, data, length, slot, marshalClass);
+        setVertexBytesSkippingSerialHash(
+            sample, data, length, slot, marshalClass);
         updateDefaultUniformGenerationCache(
             defaultUniformGenerationVertexBindCache, info, data, length);
+        updateDefaultUniformGenerationActiveBinding(
+            defaultUniformGenerationVertexActiveBinding, info, data, length);
     }
 
     void bindDefaultUniformFragmentBytesIfNeeded(
@@ -25450,10 +25924,21 @@ private:
         NSUInteger length,
         NSUInteger slot,
         EncodeMarshalClass marshalClass = EncodeMarshalClass::None) {
-        if (defaultUniformGenerationCacheHit(
-                defaultUniformGenerationFragmentBindCache, info, data, length)) {
+        const bool keyUsable = defaultUniformGenerationKeyUsable(info);
+        if (keyUsable) {
+            ++defaultUniformGenerationBindCacheLookups;
+            defaultUniformGenerationBindCacheObserver.recordDraw();
+        }
+        if (defaultUniformGenerationCacheEntryMatches(
+                defaultUniformGenerationFragmentActiveBinding,
+                info, data, length)) {
+            ++defaultUniformGenerationBindCacheHits;
+            ++defaultUniformGenerationBindCacheActiveHits;
+            defaultUniformGenerationBindCacheObserver.recordBindSkipHit();
+            defaultUniformGenerationFragmentActiveBinding.lastUseSerial =
+                nextDefaultUniformGenerationBindCacheUseSerial();
             const auto& boundBytes =
-                defaultUniformGenerationFragmentBindCache.validationBoundBytes;
+                defaultUniformGenerationFragmentActiveBinding.validationBoundBytes;
             validateDefaultUniformGenerationBytes(
                 "fragment", info, info.defaultUniformValidationFragmentBytes,
                 boundBytes.empty() ? nullptr : boundBytes.data(),
@@ -25461,12 +25946,46 @@ private:
             recordSerialBindCacheDecision(sample, false, true);
             return;
         }
+        if (DefaultUniformGenerationBindCacheBinding* entry =
+                findDefaultUniformGenerationCacheEntry(
+                    defaultUniformGenerationFragmentBindCache,
+                    info, data, length)) {
+            ++defaultUniformGenerationBindCacheHits;
+            ++defaultUniformGenerationBindCacheRebinds;
+            defaultUniformGenerationBindCacheObserver.recordHashFreeRebindHit();
+            entry->lastUseSerial =
+                nextDefaultUniformGenerationBindCacheUseSerial();
+            const auto& boundBytes =
+                entry->validationBoundBytes;
+            validateDefaultUniformGenerationBytes(
+                "fragment", info, info.defaultUniformValidationFragmentBytes,
+                boundBytes.empty() ? nullptr : boundBytes.data(),
+                static_cast<NSUInteger>(boundBytes.size()));
+            setFragmentBytesSkippingSerialHash(
+                sample, data, length, slot, marshalClass);
+            updateDefaultUniformGenerationActiveBinding(
+                defaultUniformGenerationFragmentActiveBinding,
+                info, data, length, &entry->validationBoundBytes);
+            return;
+        }
+        if (!keyUsable) {
+            defaultUniformGenerationBindCacheObserver.recordHashRun();
+            bindFragmentBytesIfNeeded(sample, data, length, slot, marshalClass);
+            return;
+        }
+        if (keyUsable) {
+            ++defaultUniformGenerationBindCacheMisses;
+            defaultUniformGenerationBindCacheObserver.recordMissHashSkipped();
+        }
         validateDefaultUniformGenerationBytes(
             "fragment", info, info.defaultUniformValidationFragmentBytes,
             data, length);
-        bindFragmentBytesIfNeeded(sample, data, length, slot, marshalClass);
+        setFragmentBytesSkippingSerialHash(
+            sample, data, length, slot, marshalClass);
         updateDefaultUniformGenerationCache(
             defaultUniformGenerationFragmentBindCache, info, data, length);
+        updateDefaultUniformGenerationActiveBinding(
+            defaultUniformGenerationFragmentActiveBinding, info, data, length);
     }
 
     void bindVertexTextureIfNeeded(EncodeSubtimeProfileSample* sample,
@@ -25585,8 +26104,10 @@ private:
         serialBindFragmentTextures = {};
         serialBindVertexSamplers = {};
         serialBindFragmentSamplers = {};
-        defaultUniformGenerationVertexBindCache = {};
-        defaultUniformGenerationFragmentBindCache = {};
+        clearDefaultUniformGenerationCache(defaultUniformGenerationVertexBindCache);
+        clearDefaultUniformGenerationCache(defaultUniformGenerationFragmentBindCache);
+        defaultUniformGenerationVertexActiveBinding = {};
+        defaultUniformGenerationFragmentActiveBinding = {};
     }
 
     // ── Ring buffer for per-draw vertex/index data (OPT-1) ──

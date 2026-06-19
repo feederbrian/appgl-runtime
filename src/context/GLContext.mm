@@ -28532,6 +28532,46 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             inventory.w2PlanMemoSize = pacing.w2PlanMemoSize;
             inventory.w2PlanMemoPeak = pacing.w2PlanMemoPeak;
             inventory.w2PlanVerifyMismatches = pacing.w2PlanVerifyMismatches;
+            inventory.defaultUniformGenerationBindCacheLookups =
+                pacing.defaultUniformGenerationBindCacheLookups;
+            inventory.defaultUniformGenerationBindCacheHits =
+                pacing.defaultUniformGenerationBindCacheHits;
+            inventory.defaultUniformGenerationBindCacheActiveHits =
+                pacing.defaultUniformGenerationBindCacheActiveHits;
+            inventory.defaultUniformGenerationBindCacheRebinds =
+                pacing.defaultUniformGenerationBindCacheRebinds;
+            inventory.defaultUniformGenerationBindCacheMisses =
+                pacing.defaultUniformGenerationBindCacheMisses;
+            inventory.defaultUniformGenerationBindCacheStores =
+                pacing.defaultUniformGenerationBindCacheStores;
+            inventory.defaultUniformGenerationBindCacheEvictions =
+                pacing.defaultUniformGenerationBindCacheEvictions;
+            inventory.defaultUniformGenerationBindCacheLiveEntries =
+                pacing.defaultUniformGenerationBindCacheLiveEntries;
+            inventory.defaultUniformGenerationBindCachePeakEntries =
+                pacing.defaultUniformGenerationBindCachePeakEntries;
+            inventory.defaultUniformGenerationBindCacheCapacity =
+                pacing.defaultUniformGenerationBindCacheCapacity;
+            inventory.defaultUniformGenerationBindCacheActiveInvalidations =
+                pacing.defaultUniformGenerationBindCacheActiveInvalidations;
+            inventory.defaultUniformGenerationBindCacheResetInvalidations =
+                pacing.defaultUniformGenerationBindCacheResetInvalidations;
+            inventory.defaultUniformGenerationBindCacheResetInvalidatedEntries =
+                pacing.defaultUniformGenerationBindCacheResetInvalidatedEntries;
+            inventory.defaultUniformGenerationBindCacheObsDraws =
+                pacing.defaultUniformGenerationBindCacheObsDraws;
+            inventory.defaultUniformGenerationBindCacheObsBindSkipHits =
+                pacing.defaultUniformGenerationBindCacheObsBindSkipHits;
+            inventory.defaultUniformGenerationBindCacheObsGenerationHits =
+                pacing.defaultUniformGenerationBindCacheObsGenerationHits;
+            inventory.defaultUniformGenerationBindCacheObsHashFreeRebindHits =
+                pacing.defaultUniformGenerationBindCacheObsHashFreeRebindHits;
+            inventory.defaultUniformGenerationBindCacheObsMisses =
+                pacing.defaultUniformGenerationBindCacheObsMisses;
+            inventory.defaultUniformGenerationBindCacheObsHashesSkippedOnMiss =
+                pacing.defaultUniformGenerationBindCacheObsHashesSkippedOnMiss;
+            inventory.defaultUniformGenerationBindCacheObsHashesRun =
+                pacing.defaultUniformGenerationBindCacheObsHashesRun;
         }
     };
     auto finalizeR8HeapSegmentation = [&]() {

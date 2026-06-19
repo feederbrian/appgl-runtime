@@ -17169,6 +17169,153 @@ TestResult runC51DefaultOffProbe() {
     return result;
 }
 
+TestResult runDefaultUniformGenerationBindCacheNWayProbe() {
+    std::string summary;
+    auto result = runDirectSentinel(
+        "s25.default-uniform-generation-bind-cache.nway", [&] {
+        ScopedEnvVar cacheFlag(
+            "APPGL_DEFAULT_UNIFORM_GENERATION_BIND_CACHE", "1");
+        ScopedEnvVar cacheObs(
+            "APPGL_DEFAULT_UNIFORM_GENERATION_BIND_CACHE_OBS", "1");
+        ScopedEnvVar cacheEntries(
+            "APPGL_DEFAULT_UNIFORM_GENERATION_BIND_CACHE_ENTRIES", "8");
+        ScopedSentinelContext scoped(16, 16);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+        GLuint colorTex = 0, fbo = 0;
+        gl.glGenTextures(1, &colorTex);
+        setupDCR3CRGBA8Texture(gl, colorTex, 8, 8);
+        setupDCR3CTextureFbo(gl, fbo, colorTex);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.glViewport(0, 0, 8, 8);
+        gl.glDisable(GL_DEPTH_TEST);
+        C51Quad a = c51MakeQuad(gl);
+        C51Quad b = c51MakeQuad(gl);
+
+        gl.glUseProgram(a.program);
+        gl.glUniform4f(a.colorLoc, 1.0f, 0.0f, 0.0f, 1.0f);
+        gl.glUseProgram(b.program);
+        gl.glUniform4f(b.colorLoc, 0.0f, 1.0f, 0.0f, 1.0f);
+
+        const auto before = context.metalResourceInventory();
+        auto drawOnly = [&](const C51Quad& q) {
+            gl.glUseProgram(q.program);
+            gl.glBindVertexArray(q.vao);
+            gl.glDrawElementsInstancedBaseVertex(
+                GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr, 1, 0);
+        };
+
+        drawOnly(a); // miss, bind red
+        drawOnly(b); // miss, bind green
+        drawOnly(a); // bounded-cache rebind hit, red must return
+        drawOnly(b); // bounded-cache rebind hit, green must return
+        drawOnly(a); // bounded-cache rebind hit, red must return
+        drawOnly(a); // active hit, no setBytes needed
+        gl.glFinish();
+
+        const auto after = context.metalResourceInventory();
+        const auto lookups =
+            after.defaultUniformGenerationBindCacheLookups -
+            before.defaultUniformGenerationBindCacheLookups;
+        const auto hits =
+            after.defaultUniformGenerationBindCacheHits -
+            before.defaultUniformGenerationBindCacheHits;
+        const auto activeHits =
+            after.defaultUniformGenerationBindCacheActiveHits -
+            before.defaultUniformGenerationBindCacheActiveHits;
+        const auto rebinds =
+            after.defaultUniformGenerationBindCacheRebinds -
+            before.defaultUniformGenerationBindCacheRebinds;
+        const auto misses =
+            after.defaultUniformGenerationBindCacheMisses -
+            before.defaultUniformGenerationBindCacheMisses;
+        const auto obsDraws =
+            after.defaultUniformGenerationBindCacheObsDraws -
+            before.defaultUniformGenerationBindCacheObsDraws;
+        const auto obsBindSkipHits =
+            after.defaultUniformGenerationBindCacheObsBindSkipHits -
+            before.defaultUniformGenerationBindCacheObsBindSkipHits;
+        const auto obsGenerationHits =
+            after.defaultUniformGenerationBindCacheObsGenerationHits -
+            before.defaultUniformGenerationBindCacheObsGenerationHits;
+        const auto obsHashFreeRebindHits =
+            after.defaultUniformGenerationBindCacheObsHashFreeRebindHits -
+            before.defaultUniformGenerationBindCacheObsHashFreeRebindHits;
+        const auto obsMisses =
+            after.defaultUniformGenerationBindCacheObsMisses -
+            before.defaultUniformGenerationBindCacheObsMisses;
+        const auto obsHashesSkippedOnMiss =
+            after.defaultUniformGenerationBindCacheObsHashesSkippedOnMiss -
+            before.defaultUniformGenerationBindCacheObsHashesSkippedOnMiss;
+        const auto obsHashesRun =
+            after.defaultUniformGenerationBindCacheObsHashesRun -
+            before.defaultUniformGenerationBindCacheObsHashesRun;
+        expectCondition(lookups >= 6,
+                        "default-uniform gen cache: lookups counted");
+        expectCondition(misses >= 2,
+                        "default-uniform gen cache: first A/B draws miss");
+        expectCondition(rebinds >= 3,
+                        "default-uniform gen cache: interleaved A/B returns "
+                        "skip hash and rebind");
+        expectCondition(activeHits >= 1,
+                        "default-uniform gen cache: consecutive A draw active-hit skips bind");
+        expectCondition(hits >= rebinds + activeHits,
+                        "default-uniform gen cache: total hits include "
+                        "rebinds and active hits");
+        expectCondition(after.defaultUniformGenerationBindCachePeakEntries >= 2,
+                        "default-uniform gen cache: bounded cache retained "
+                        "two program entries");
+        expectCondition(after.defaultUniformGenerationBindCacheCapacity == 8,
+                        "default-uniform gen cache: capacity env latched");
+        expectCondition(obsDraws == lookups,
+                        "default-uniform gen cache obs: draws mirror lookups");
+        expectCondition(obsGenerationHits == hits,
+                        "default-uniform gen cache obs: generation hits direct");
+        expectCondition(obsBindSkipHits == activeHits,
+                        "default-uniform gen cache obs: bind skip hits direct");
+        expectCondition(obsHashFreeRebindHits == rebinds,
+                        "default-uniform gen cache obs: rebind hits skip hash");
+        expectCondition(obsMisses == misses,
+                        "default-uniform gen cache obs: misses direct");
+        expectCondition(obsHashesSkippedOnMiss == misses,
+                        "default-uniform gen cache obs: miss path skipped hash");
+        expectCondition(obsHashesRun == 0,
+                        "default-uniform gen cache obs: no serial hashes ran");
+
+        std::array<std::uint8_t, 4> px = {0, 0, 0, 0};
+        gl.glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        expectApproxByte(px[0], 255u, 4u,
+                         "default-uniform gen cache: final red rebind/active value");
+        expectApproxByte(px[1], 0u, 4u,
+                         "default-uniform gen cache: stale green did not persist");
+
+        c51DestroyQuad(gl, a);
+        c51DestroyQuad(gl, b);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteTextures(1, &colorTex);
+        expectGLError(gl, GL_NO_ERROR,
+                      "default-uniform gen cache n-way cleanup");
+        std::ostringstream out;
+        out << "lookups=" << lookups
+            << " hits=" << hits
+            << " activeHits=" << activeHits
+            << " rebinds=" << rebinds
+            << " misses=" << misses
+            << " obs_draws=" << obsDraws
+            << " bind_skip_hits=" << obsBindSkipHits
+            << " generation_hits=" << obsGenerationHits
+            << " hash_free_rebind_hits=" << obsHashFreeRebindHits
+            << " hashes_skipped_on_miss=" << obsHashesSkippedOnMiss
+            << " hashes_run=" << obsHashesRun;
+        summary = out.str();
+    });
+    if (result.status == "passed") {
+        result.message = summary;
+    }
+    return result;
+}
+
 TestResult runC51DrawParamVariationProbe() {
     auto result = runDirectSentinel("c51.prep-memo.draw-param-variation", [&] {
         ScopedEnvVar memoFlag("APPGL_ENABLE_DRAW_PREP_MEMO", "1");
@@ -21052,6 +21199,11 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runC51DirtyMustMissProbe());
         tests.push_back(runC51SsoHazardProbe());
         tests.push_back(runC51DefaultOffProbe());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "default-uniform-generation-bind-cache-probes") {
+        tests.push_back(runDefaultUniformGenerationBindCacheNWayProbe());
         return buildJSON(normalizedPhase, tests);
     }
 

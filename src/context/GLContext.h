@@ -1039,6 +1039,27 @@ public:
         std::uint64_t w2PlanMemoSize = 0;
         std::uint64_t w2PlanMemoPeak = 0;
         std::uint64_t w2PlanVerifyMismatches = 0;
+        // S25 Lever-G: bounded default-uniform generation bind cache.
+        std::uint64_t defaultUniformGenerationBindCacheLookups = 0;
+        std::uint64_t defaultUniformGenerationBindCacheHits = 0;
+        std::uint64_t defaultUniformGenerationBindCacheActiveHits = 0;
+        std::uint64_t defaultUniformGenerationBindCacheRebinds = 0;
+        std::uint64_t defaultUniformGenerationBindCacheMisses = 0;
+        std::uint64_t defaultUniformGenerationBindCacheStores = 0;
+        std::uint64_t defaultUniformGenerationBindCacheEvictions = 0;
+        std::uint64_t defaultUniformGenerationBindCacheLiveEntries = 0;
+        std::uint64_t defaultUniformGenerationBindCachePeakEntries = 0;
+        std::uint64_t defaultUniformGenerationBindCacheCapacity = 0;
+        std::uint64_t defaultUniformGenerationBindCacheActiveInvalidations = 0;
+        std::uint64_t defaultUniformGenerationBindCacheResetInvalidations = 0;
+        std::uint64_t defaultUniformGenerationBindCacheResetInvalidatedEntries = 0;
+        std::uint64_t defaultUniformGenerationBindCacheObsDraws = 0;
+        std::uint64_t defaultUniformGenerationBindCacheObsBindSkipHits = 0;
+        std::uint64_t defaultUniformGenerationBindCacheObsGenerationHits = 0;
+        std::uint64_t defaultUniformGenerationBindCacheObsHashFreeRebindHits = 0;
+        std::uint64_t defaultUniformGenerationBindCacheObsMisses = 0;
+        std::uint64_t defaultUniformGenerationBindCacheObsHashesSkippedOnMiss = 0;
+        std::uint64_t defaultUniformGenerationBindCacheObsHashesRun = 0;
         MetalResourceResidencySummary residency;
         MetalHostCacheSummary hostCaches;
         Depth32FReadbackDiagnostics depth32fReadback;
