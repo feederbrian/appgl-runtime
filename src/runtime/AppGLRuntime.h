@@ -821,6 +821,7 @@ private:
     GLDispatchTable dispatch_;
     CoverageStore coverageStore_;
     TraceLog traceLog_;
+    bool recordCallsEnabled_ = true;
     std::string rendererString_ = "AppGL on Metal";
     mutable std::mutex contextMutex_;
     std::unordered_set<GLContext*> liveContexts_;

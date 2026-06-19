@@ -1,5 +1,6 @@
 #include "AppGLRuntime.h"
 
+#include "AppGLEnv.h"
 #include "AppGLFeatureFlags.h"
 #include "AppGLMemoryPressure.h"
 
@@ -1803,7 +1804,8 @@ Runtime& Runtime::shared() {
     return runtime;
 }
 
-Runtime::Runtime() {
+Runtime::Runtime()
+    : recordCallsEnabled_(appglEnvEnabledDefaultOn("APPGL_RECORD_CALLS")) {
     initializeDispatch();
     memoryPressureObserver_ = std::make_unique<MemoryPressureObserver>();
     // Install crash handlers that print a backtrace on SIGBUS/SIGSEGV so we
@@ -1841,6 +1843,9 @@ const GLDispatchTable& Runtime::dispatch() const {
 }
 
 void Runtime::recordFunctionInvocation(FunctionId id, std::string_view functionName) {
+    if (!recordCallsEnabled_) {
+        return;
+    }
     coverageStore_.recordCall(id);
     traceLog_.append(std::string(functionName));
 }
