@@ -81,7 +81,7 @@ static bool envVarPresent(const char* name) {
 }
 
 static bool appglHotpathInvariantHoistSubflagEnabled(const char* name) {
-    return appgl::appglEnvEnabledDefaultOff("APPGL_HOTPATH_INVARIANT_HOIST") &&
+    return appgl::appglEnvEnabledDefaultOn("APPGL_HOTPATH_INVARIANT_HOIST") &&
            appgl::appglEnvEnabledDefaultOn(name);
 }
 

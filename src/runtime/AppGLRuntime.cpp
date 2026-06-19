@@ -1805,7 +1805,7 @@ Runtime& Runtime::shared() {
 }
 
 static bool appglHotpathInvariantHoistSubflagEnabled(const char* name) {
-    return appglEnvEnabledDefaultOff("APPGL_HOTPATH_INVARIANT_HOIST") &&
+    return appglEnvEnabledDefaultOn("APPGL_HOTPATH_INVARIANT_HOIST") &&
            appglEnvEnabledDefaultOn(name);
 }
 
