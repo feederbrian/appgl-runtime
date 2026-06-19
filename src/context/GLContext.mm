@@ -26639,7 +26639,7 @@ struct GLContext::Impl {
 
     static bool fboClearGpuOnlyColorEnabled() {
         const char* raw = std::getenv("APPGL_ENABLE_FBO_CLEAR_GPU_ONLY_COLOR");
-        return raw != nullptr && raw[0] != '\0' && raw[0] != '0';
+        return raw == nullptr || raw[0] == '\0' || raw[0] != '0';
     }
 
     void materializeDefaultFbShadowClear() {
