@@ -236,6 +236,11 @@ struct TranslatedDrawInfo {
     std::size_t vertexUniformSize = 0;
     const std::uint8_t* fragmentUniformData = nullptr;
     std::size_t fragmentUniformSize = 0;
+    std::uint64_t defaultUniformGeneration = 0;
+    // Validation-only fresh packs used by the default-uniform generation
+    // bind cache. Empty unless the validation env flag is enabled.
+    std::vector<std::uint8_t> defaultUniformValidationVertexBytes;
+    std::vector<std::uint8_t> defaultUniformValidationFragmentBytes;
 
     // Phase 8X Group 4d follow-up⁷ — per-draw texture/sampler binding
     // plumbing. Prior to this round, `encodeTranslatedDraw` bound zero

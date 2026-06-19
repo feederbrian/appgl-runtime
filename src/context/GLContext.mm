@@ -864,6 +864,11 @@ static bool bindingConstructionSizingEnabled() {
     return appglEnvEnabledDefaultOff("APPGL_BINDING_CONSTRUCTION_SIZING");
 }
 
+static bool defaultUniformGenerationBindCacheValidateEnabled() {
+    return appglEnvEnabledDefaultOff(
+        "APPGL_DEFAULT_UNIFORM_GENERATION_BIND_CACHE_VALIDATE");
+}
+
 enum class GLDrawProfileBucket : std::size_t {
     Validation,
     DrawablePrep,
@@ -36702,6 +36707,19 @@ static void prepareTranslatedDrawUniformBuffers(
     tdi.vertexUniformSize = program.cachedVertexUniformBuffer.size();
     tdi.fragmentUniformData = program.cachedFragmentUniformBuffer.data();
     tdi.fragmentUniformSize = program.cachedFragmentUniformBuffer.size();
+    tdi.defaultUniformGeneration = program.packedUniformGeneration;
+
+    if (defaultUniformGenerationBindCacheValidateEnabled()) {
+        buildStageUniformBuffer(tdi.defaultUniformValidationVertexBytes,
+            program.vertexReflection, program.uniformValues,
+            program.vertexUniformLayout);
+        buildStageUniformBuffer(tdi.defaultUniformValidationFragmentBytes,
+            program.fragmentReflection, program.uniformValues,
+            program.fragmentUniformLayout);
+    } else {
+        tdi.defaultUniformValidationVertexBytes.clear();
+        tdi.defaultUniformValidationFragmentBytes.clear();
+    }
 
     APPGL_LOG(DRAW, @"[GL:uniform-rebuild] path=%s program=%u rebuilt=%d gen=%llu"
                     @" vertexBytes=%zu fragmentBytes=%zu",

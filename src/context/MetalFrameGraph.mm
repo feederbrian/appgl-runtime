@@ -305,6 +305,16 @@ static bool serialBindCacheEnabled() {
     return appglEnvEnabledDefaultOff("APPGL_SERIAL_BIND_CACHE");
 }
 
+static bool defaultUniformGenerationBindCacheEnabled() {
+    return appglEnvEnabledDefaultOff(
+        "APPGL_DEFAULT_UNIFORM_GENERATION_BIND_CACHE");
+}
+
+static bool defaultUniformGenerationBindCacheValidateEnabled() {
+    return appglEnvEnabledDefaultOff(
+        "APPGL_DEFAULT_UNIFORM_GENERATION_BIND_CACHE_VALIDATE");
+}
+
 static bool encodeSubtimeProfileEnabled() {
     return appglEnvEnabledDefaultOff("APPGL_ENCODE_SUBTIME_PROFILE") ||
            appglEnvEnabledDefaultOff("APPGL_DRAW_PROFILE") ||
@@ -9070,8 +9080,9 @@ struct MetalFrameGraph::Impl {
                     DefaultUniform);
             if (!vertexUsesArgBuf &&
                 info.vertexUniformData != nullptr && info.vertexUniformSize > 0) {
-                bindVertexBytesIfNeeded(
+                bindDefaultUniformVertexBytesIfNeeded(
                     encodeSubtimeSamplePtr,
+                    info,
                     info.vertexUniformData,
                     info.vertexUniformSize,
                     16,
@@ -9079,8 +9090,9 @@ struct MetalFrameGraph::Impl {
             }
             if (!fragmentUsesArgBuf &&
                 info.fragmentUniformData != nullptr && info.fragmentUniformSize > 0) {
-                bindFragmentBytesIfNeeded(
+                bindDefaultUniformFragmentBytesIfNeeded(
                     encodeSubtimeSamplePtr,
+                    info,
                     info.fragmentUniformData,
                     info.fragmentUniformSize,
                     16,
@@ -24913,6 +24925,10 @@ private:
         viewportRequestKeepaliveEnabled();
     const bool fboPassContinuationLatched = fboPassContinuationEnabled();
     const bool serialBindCacheLatched = serialBindCacheEnabled();
+    const bool defaultUniformGenerationBindCacheLatched =
+        defaultUniformGenerationBindCacheEnabled();
+    const bool defaultUniformGenerationBindCacheValidateLatched =
+        defaultUniformGenerationBindCacheValidateEnabled();
     ThreadedDeferredRecordProfile threadedDeferredRecordProfile;
     FrameAttributionProfile frameAttributionProfile;
     std::deque<CapturedTranslatedDrawRecord> pendingThreadedDeferredRecords;
@@ -24972,6 +24988,16 @@ private:
         id<MTLSamplerState> sampler = nil;
         bool valid = false;
     };
+    struct DefaultUniformGenerationBindCacheBinding {
+        GLuint program = 0;
+        std::uint64_t programObjectSerial = 0;
+        std::uint64_t programObjectExecutableGeneration = 0;
+        std::uint64_t generation = 0;
+        const void* data = nullptr;
+        NSUInteger length = 0;
+        std::vector<std::uint8_t> validationBoundBytes;
+        bool valid = false;
+    };
 
     std::array<SerialBindCacheBufferBinding, kEncodeSubtimeTrackedSlots>
         serialBindVertexBuffers{};
@@ -24989,6 +25015,10 @@ private:
         serialBindVertexSamplers{};
     std::array<SerialBindCacheSamplerBinding, kEncodeSubtimeTrackedSlots>
         serialBindFragmentSamplers{};
+    DefaultUniformGenerationBindCacheBinding
+        defaultUniformGenerationVertexBindCache{};
+    DefaultUniformGenerationBindCacheBinding
+        defaultUniformGenerationFragmentBindCache{};
     using FloorUniformBytesClass =
         ArgEncoderSetupFloorProfileSample::UniformBytesClass;
     ArgEncoderSetupFloorProfileSample* activeFloorProfileSample = nullptr;
@@ -25054,6 +25084,112 @@ private:
         }
         if (skipped) {
             ++sample->bindSkipped;
+        }
+    }
+
+    bool defaultUniformGenerationKeyUsable(
+        const TranslatedDrawInfo& info) const {
+        return defaultUniformGenerationBindCacheLatched &&
+               info.program != 0 &&
+               info.programObjectSerial != 0 &&
+               info.defaultUniformGeneration != 0;
+    }
+
+    static bool defaultUniformValidationBytesMatch(
+        const std::vector<std::uint8_t>& expected,
+        const void* data,
+        NSUInteger length) {
+        if (expected.size() != static_cast<std::size_t>(length)) {
+            return false;
+        }
+        if (length == 0) {
+            return true;
+        }
+        if (data == nullptr) {
+            return false;
+        }
+        return std::memcmp(expected.data(), data,
+                           static_cast<std::size_t>(length)) == 0;
+    }
+
+    void validateDefaultUniformGenerationBytes(
+        const char* stage,
+        const TranslatedDrawInfo& info,
+        const std::vector<std::uint8_t>& expected,
+        const void* data,
+        NSUInteger length) const {
+        if (!defaultUniformGenerationBindCacheValidateLatched) {
+            return;
+        }
+        if (defaultUniformValidationBytesMatch(expected, data, length)) {
+            return;
+        }
+        std::fprintf(stderr,
+                     "[APPGL_DEFAULT_UNIFORM_GENERATION_BIND_CACHE_VALIDATE] "
+                     "mismatch stage=%s program=%u generation=%llu "
+                     "cachedLength=%llu freshLength=%zu\n",
+                     stage,
+                     info.program,
+                     static_cast<unsigned long long>(
+                         info.defaultUniformGeneration),
+                     static_cast<unsigned long long>(length),
+                     expected.size());
+        std::fflush(stderr);
+        std::abort();
+    }
+
+    bool defaultUniformGenerationCacheHit(
+        const DefaultUniformGenerationBindCacheBinding& cached,
+        const TranslatedDrawInfo& info,
+        const void* data,
+        NSUInteger length) const {
+        return defaultUniformGenerationKeyUsable(info) &&
+               cached.valid &&
+               cached.program == info.program &&
+               cached.programObjectSerial == info.programObjectSerial &&
+               cached.programObjectExecutableGeneration ==
+                   info.programObjectExecutableGeneration &&
+               cached.generation == info.defaultUniformGeneration &&
+               cached.data == data &&
+               cached.length == length;
+    }
+
+    void updateDefaultUniformGenerationCache(
+        DefaultUniformGenerationBindCacheBinding& cached,
+        const TranslatedDrawInfo& info,
+        const void* data,
+        NSUInteger length) {
+        if (!defaultUniformGenerationKeyUsable(info)) {
+            cached = {};
+            return;
+        }
+        cached.program = info.program;
+        cached.programObjectSerial = info.programObjectSerial;
+        cached.programObjectExecutableGeneration =
+            info.programObjectExecutableGeneration;
+        cached.generation = info.defaultUniformGeneration;
+        cached.data = data;
+        cached.length = length;
+        if (defaultUniformGenerationBindCacheValidateLatched &&
+            data != nullptr && length > 0) {
+            const auto* bytes = static_cast<const std::uint8_t*>(data);
+            cached.validationBoundBytes.assign(
+                bytes, bytes + static_cast<std::size_t>(length));
+        } else {
+            cached.validationBoundBytes.clear();
+        }
+        cached.valid = true;
+    }
+
+    void invalidateDefaultUniformGenerationVertexCacheForSlot(NSUInteger slot) {
+        if (slot == 16) {
+            defaultUniformGenerationVertexBindCache = {};
+        }
+    }
+
+    void invalidateDefaultUniformGenerationFragmentCacheForSlot(NSUInteger slot) {
+        if (slot == 16) {
+            defaultUniformGenerationFragmentBindCache = {};
         }
     }
 
@@ -25172,6 +25308,7 @@ private:
                                   EncodeMarshalClass marshalClass =
                                       EncodeMarshalClass::None,
                                   std::uint64_t marshalBytes = 0) {
+        invalidateDefaultUniformGenerationVertexCacheForSlot(slot);
         if (shouldBindBuffer(sample, serialBindVertexBuffers,
                              serialBindVertexBytes, slot, buffer, offset)) {
             const bool profileMarshal =
@@ -25196,6 +25333,7 @@ private:
                                     EncodeMarshalClass marshalClass =
                                         EncodeMarshalClass::None,
                                     std::uint64_t marshalBytes = 0) {
+        invalidateDefaultUniformGenerationFragmentCacheForSlot(slot);
         if (shouldBindBuffer(sample, serialBindFragmentBuffers,
                              serialBindFragmentBytes, slot, buffer, offset)) {
             const bool profileMarshal =
@@ -25219,6 +25357,7 @@ private:
                                  NSUInteger slot,
                                  EncodeMarshalClass marshalClass =
                                      EncodeMarshalClass::None) {
+        invalidateDefaultUniformGenerationVertexCacheForSlot(slot);
         if (shouldBindBytes(sample, serialBindVertexBytes,
                             serialBindVertexBuffers, slot, data, length)) {
             const bool profileMarshal =
@@ -25251,6 +25390,7 @@ private:
                                    NSUInteger slot,
                                    EncodeMarshalClass marshalClass =
                                        EncodeMarshalClass::None) {
+        invalidateDefaultUniformGenerationFragmentCacheForSlot(slot);
         if (shouldBindBytes(sample, serialBindFragmentBytes,
                             serialBindFragmentBuffers, slot, data, length)) {
             const bool profileMarshal =
@@ -25275,6 +25415,58 @@ private:
                 recordActiveFloorUniformBytesSetBytesUploadUs(elapsedUs);
             }
         }
+    }
+
+    void bindDefaultUniformVertexBytesIfNeeded(
+        EncodeSubtimeProfileSample* sample,
+        const TranslatedDrawInfo& info,
+        const void* data,
+        NSUInteger length,
+        NSUInteger slot,
+        EncodeMarshalClass marshalClass = EncodeMarshalClass::None) {
+        if (defaultUniformGenerationCacheHit(
+                defaultUniformGenerationVertexBindCache, info, data, length)) {
+            const auto& boundBytes =
+                defaultUniformGenerationVertexBindCache.validationBoundBytes;
+            validateDefaultUniformGenerationBytes(
+                "vertex", info, info.defaultUniformValidationVertexBytes,
+                boundBytes.empty() ? nullptr : boundBytes.data(),
+                static_cast<NSUInteger>(boundBytes.size()));
+            recordSerialBindCacheDecision(sample, false, true);
+            return;
+        }
+        validateDefaultUniformGenerationBytes(
+            "vertex", info, info.defaultUniformValidationVertexBytes,
+            data, length);
+        bindVertexBytesIfNeeded(sample, data, length, slot, marshalClass);
+        updateDefaultUniformGenerationCache(
+            defaultUniformGenerationVertexBindCache, info, data, length);
+    }
+
+    void bindDefaultUniformFragmentBytesIfNeeded(
+        EncodeSubtimeProfileSample* sample,
+        const TranslatedDrawInfo& info,
+        const void* data,
+        NSUInteger length,
+        NSUInteger slot,
+        EncodeMarshalClass marshalClass = EncodeMarshalClass::None) {
+        if (defaultUniformGenerationCacheHit(
+                defaultUniformGenerationFragmentBindCache, info, data, length)) {
+            const auto& boundBytes =
+                defaultUniformGenerationFragmentBindCache.validationBoundBytes;
+            validateDefaultUniformGenerationBytes(
+                "fragment", info, info.defaultUniformValidationFragmentBytes,
+                boundBytes.empty() ? nullptr : boundBytes.data(),
+                static_cast<NSUInteger>(boundBytes.size()));
+            recordSerialBindCacheDecision(sample, false, true);
+            return;
+        }
+        validateDefaultUniformGenerationBytes(
+            "fragment", info, info.defaultUniformValidationFragmentBytes,
+            data, length);
+        bindFragmentBytesIfNeeded(sample, data, length, slot, marshalClass);
+        updateDefaultUniformGenerationCache(
+            defaultUniformGenerationFragmentBindCache, info, data, length);
     }
 
     void bindVertexTextureIfNeeded(EncodeSubtimeProfileSample* sample,
@@ -25393,6 +25585,8 @@ private:
         serialBindFragmentTextures = {};
         serialBindVertexSamplers = {};
         serialBindFragmentSamplers = {};
+        defaultUniformGenerationVertexBindCache = {};
+        defaultUniformGenerationFragmentBindCache = {};
     }
 
     // ── Ring buffer for per-draw vertex/index data (OPT-1) ──
