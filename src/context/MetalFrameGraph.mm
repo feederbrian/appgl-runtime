@@ -317,6 +317,11 @@ static bool argEncoderSetupFloorProfileEnabled() {
     return appglEnvEnabledDefaultOff("APPGL_ARG_ENCODER_SETUP_FLOOR_PROFILE");
 }
 
+static std::uint64_t argEncoderSetupFloorDumpIntervalMs() {
+    return static_cast<std::uint64_t>(
+        envSizeLimit("APPGL_ARG_ENCODER_SETUP_FLOOR_DUMP_INTERVAL_MS", 0));
+}
+
 using DrawProfileClock = std::chrono::steady_clock;
 using DrawProfileTimePoint = DrawProfileClock::time_point;
 
@@ -799,6 +804,9 @@ struct ArgEncoderSetupFloorProfileSample {
 
 struct ArgEncoderSetupFloorProfile {
     bool enabled = argEncoderSetupFloorProfileEnabled();
+    std::uint64_t dumpIntervalMs = argEncoderSetupFloorDumpIntervalMs();
+    bool intervalDumpArmed = false;
+    DrawProfileTimePoint nextIntervalDump{};
     std::uint64_t draws = 0;
     std::uint64_t fboDraws = 0;
     std::uint64_t argbufDraws = 0;
@@ -865,9 +873,31 @@ struct ArgEncoderSetupFloorProfile {
             s.resourceBindHazardValidateUs;
         resourceBindOtherUs +=
             s.resourceBindUs > accounted ? s.resourceBindUs - accounted : 0.0;
+        maybeDumpInterval();
     }
 
-    void dump() const {
+    void maybeDumpInterval() {
+        if (!enabled || dumpIntervalMs == 0 || draws == 0) {
+            return;
+        }
+        const DrawProfileTimePoint now = drawProfileNow();
+        if (!intervalDumpArmed) {
+            intervalDumpArmed = true;
+            nextIntervalDump =
+                now + std::chrono::milliseconds(
+                    static_cast<long long>(dumpIntervalMs));
+            return;
+        }
+        if (now < nextIntervalDump) {
+            return;
+        }
+        dump("interval");
+        nextIntervalDump =
+            now + std::chrono::milliseconds(
+                static_cast<long long>(dumpIntervalMs));
+    }
+
+    void dump(const char* reason = "teardown") const {
         if (!enabled || draws == 0) {
             return;
         }
@@ -882,6 +912,7 @@ struct ArgEncoderSetupFloorProfile {
             resourceBindHazardValidateUs;
         std::fprintf(stderr,
             "[APPGL_ARG_ENCODER_SETUP_FLOOR_PROFILE] summary draws=%llu "
+            "reason=%s "
             "total_us=%.3f avg_total_us=%.3f "
             "arg_construct_us=%.3f avg_arg_construct_us=%.3f "
             "arg_validation_us=%.3f avg_arg_validation_us=%.3f "
@@ -914,6 +945,7 @@ struct ArgEncoderSetupFloorProfile {
             "expanded_draws=%llu first_draw_after_open=%llu "
             "metal_draw_calls=%llu avg_metal_draw_calls=%.3f\n",
             static_cast<unsigned long long>(draws),
+            reason != nullptr ? reason : "unknown",
             totalUs,
             totalUs / drawDenom,
             argConstructUs,
@@ -961,6 +993,7 @@ struct ArgEncoderSetupFloorProfile {
             static_cast<unsigned long long>(firstDrawAfterEncoderOpen),
             static_cast<unsigned long long>(metalDrawCalls),
             static_cast<double>(metalDrawCalls) / drawDenom);
+        std::fflush(stderr);
     }
 };
 
