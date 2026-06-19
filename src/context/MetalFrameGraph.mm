@@ -795,6 +795,9 @@ struct ArgEncoderSetupFloorProfileSample {
         std::uint64_t bytes = 0;
         std::uint64_t changedBytes = 0;
         std::uint64_t redundantBytes = 0;
+        double classTotalUs = 0.0;
+        double hashClassifyUs = 0.0;
+        double setBytesUploadUs = 0.0;
     };
 
     double totalUs = 0.0;
@@ -865,6 +868,30 @@ struct ArgEncoderSetupFloorProfileSample {
             ++stats.redundantCalls;
             stats.redundantBytes += static_cast<std::uint64_t>(length);
         }
+    }
+
+    void recordUniformClassUs(UniformBytesClass klass, double us) {
+        if (klass == UniformBytesClass::None ||
+            klass == UniformBytesClass::Count) {
+            return;
+        }
+        uniformBytes[static_cast<std::size_t>(klass)].classTotalUs += us;
+    }
+
+    void recordUniformHashClassifyUs(UniformBytesClass klass, double us) {
+        if (klass == UniformBytesClass::None ||
+            klass == UniformBytesClass::Count) {
+            return;
+        }
+        uniformBytes[static_cast<std::size_t>(klass)].hashClassifyUs += us;
+    }
+
+    void recordUniformSetBytesUploadUs(UniformBytesClass klass, double us) {
+        if (klass == UniformBytesClass::None ||
+            klass == UniformBytesClass::Count) {
+            return;
+        }
+        uniformBytes[static_cast<std::size_t>(klass)].setBytesUploadUs += us;
     }
 };
 
@@ -950,6 +977,11 @@ struct ArgEncoderSetupFloorProfile {
             uniformBytes[i].bytes += s.uniformBytes[i].bytes;
             uniformBytes[i].changedBytes += s.uniformBytes[i].changedBytes;
             uniformBytes[i].redundantBytes += s.uniformBytes[i].redundantBytes;
+            uniformBytes[i].classTotalUs += s.uniformBytes[i].classTotalUs;
+            uniformBytes[i].hashClassifyUs +=
+                s.uniformBytes[i].hashClassifyUs;
+            uniformBytes[i].setBytesUploadUs +=
+                s.uniformBytes[i].setBytesUploadUs;
         }
         maybeDumpInterval();
     }
@@ -1076,31 +1108,65 @@ struct ArgEncoderSetupFloorProfile {
                 static_cast<ArgEncoderSetupFloorProfileSample::UniformBytesClass>(
                     i);
             const auto& stats = uniformBytes[i];
-            if (stats.calls == 0) {
+            if (stats.calls == 0 && stats.classTotalUs == 0.0 &&
+                stats.hashClassifyUs == 0.0 && stats.setBytesUploadUs == 0.0) {
                 continue;
             }
-            std::fprintf(stderr,
-                "[APPGL_ARG_ENCODER_SETUP_FLOOR_PROFILE] uniform_bytes "
-                "reason=%s class=%s calls=%llu changed_calls=%llu "
-                "redundant_calls=%llu bytes=%llu changed_bytes=%llu "
-                "redundant_bytes=%llu redundant_call_pct=%.3f "
-                "redundant_byte_pct=%.3f\n",
-                reason != nullptr ? reason : "unknown",
-                ArgEncoderSetupFloorProfileSample::uniformBytesClassName(klass),
-                static_cast<unsigned long long>(stats.calls),
-                static_cast<unsigned long long>(stats.changedCalls),
-                static_cast<unsigned long long>(stats.redundantCalls),
-                static_cast<unsigned long long>(stats.bytes),
-                static_cast<unsigned long long>(stats.changedBytes),
-                static_cast<unsigned long long>(stats.redundantBytes),
-                stats.calls > 0
-                    ? (static_cast<double>(stats.redundantCalls) * 100.0) /
-                        static_cast<double>(stats.calls)
-                    : 0.0,
-                stats.bytes > 0
-                    ? (static_cast<double>(stats.redundantBytes) * 100.0) /
-                        static_cast<double>(stats.bytes)
-                    : 0.0);
+            if (stats.calls > 0) {
+                std::fprintf(stderr,
+                    "[APPGL_ARG_ENCODER_SETUP_FLOOR_PROFILE] uniform_bytes "
+                    "reason=%s class=%s calls=%llu changed_calls=%llu "
+                    "redundant_calls=%llu bytes=%llu changed_bytes=%llu "
+                    "redundant_bytes=%llu redundant_call_pct=%.3f "
+                    "redundant_byte_pct=%.3f\n",
+                    reason != nullptr ? reason : "unknown",
+                    ArgEncoderSetupFloorProfileSample::uniformBytesClassName(
+                        klass),
+                    static_cast<unsigned long long>(stats.calls),
+                    static_cast<unsigned long long>(stats.changedCalls),
+                    static_cast<unsigned long long>(stats.redundantCalls),
+                    static_cast<unsigned long long>(stats.bytes),
+                    static_cast<unsigned long long>(stats.changedBytes),
+                    static_cast<unsigned long long>(stats.redundantBytes),
+                    stats.calls > 0
+                        ? (static_cast<double>(stats.redundantCalls) * 100.0) /
+                            static_cast<double>(stats.calls)
+                        : 0.0,
+                    stats.bytes > 0
+                        ? (static_cast<double>(stats.redundantBytes) * 100.0) /
+                            static_cast<double>(stats.bytes)
+                        : 0.0);
+            }
+            const double marshalUploadUs =
+                stats.classTotalUs > stats.hashClassifyUs
+                    ? stats.classTotalUs - stats.hashClassifyUs
+                    : 0.0;
+            if (stats.classTotalUs > 0.0 || stats.hashClassifyUs > 0.0 ||
+                stats.setBytesUploadUs > 0.0) {
+                std::fprintf(stderr,
+                    "[APPGL_ARG_ENCODER_SETUP_FLOOR_PROFILE] uniform_timing "
+                    "reason=%s class=%s class_total_us=%.3f "
+                    "avg_draw_class_total_us=%.3f hash_classify_us=%.3f "
+                    "avg_draw_hash_classify_us=%.3f marshal_upload_us=%.3f "
+                    "avg_draw_marshal_upload_us=%.3f "
+                    "setbytes_upload_us=%.3f "
+                    "avg_draw_setbytes_upload_us=%.3f "
+                    "hash_classify_pct=%.3f\n",
+                    reason != nullptr ? reason : "unknown",
+                    ArgEncoderSetupFloorProfileSample::uniformBytesClassName(
+                        klass),
+                    stats.classTotalUs,
+                    stats.classTotalUs / drawDenom,
+                    stats.hashClassifyUs,
+                    stats.hashClassifyUs / drawDenom,
+                    marshalUploadUs,
+                    marshalUploadUs / drawDenom,
+                    stats.setBytesUploadUs,
+                    stats.setBytesUploadUs / drawDenom,
+                    stats.classTotalUs > 0.0
+                        ? (stats.hashClassifyUs * 100.0) / stats.classTotalUs
+                        : 0.0);
+            }
         }
         std::fflush(stderr);
     }
@@ -8895,18 +8961,31 @@ struct MetalFrameGraph::Impl {
             bucket += drawProfileElapsedUs(floorResourceBindCursor, now);
             floorResourceBindCursor = now;
         };
+        DrawProfileTimePoint floorUniformBytesClassStart{};
+        auto closeFloorUniformBytesClass = [&]() {
+            if (!profileFloor || activeFloorProfileSample == nullptr) {
+                return;
+            }
+            recordActiveFloorUniformBytesClassUs(
+                drawProfileElapsedUs(
+                    floorUniformBytesClassStart,
+                    drawProfileNow()));
+        };
         auto setFloorUniformBytesClass =
             [&](ArgEncoderSetupFloorProfileSample::UniformBytesClass klass) {
                 if (!profileFloor) {
                     return;
                 }
+                closeFloorUniformBytesClass();
                 activeFloorProfileSample = &floorProfileSample;
                 activeFloorUniformBytesClass = klass;
+                floorUniformBytesClassStart = drawProfileNow();
             };
         auto clearFloorUniformBytesClass = [&]() {
             if (!profileFloor) {
                 return;
             }
+            closeFloorUniformBytesClass();
             activeFloorProfileSample = nullptr;
             activeFloorUniformBytesClass =
                 ArgEncoderSetupFloorProfileSample::UniformBytesClass::None;
@@ -24924,6 +25003,30 @@ private:
             activeFloorUniformBytesClass, length, changed);
     }
 
+    void recordActiveFloorUniformBytesClassUs(double us) {
+        if (activeFloorProfileSample == nullptr) {
+            return;
+        }
+        activeFloorProfileSample->recordUniformClassUs(
+            activeFloorUniformBytesClass, us);
+    }
+
+    void recordActiveFloorUniformBytesHashClassifyUs(double us) {
+        if (activeFloorProfileSample == nullptr) {
+            return;
+        }
+        activeFloorProfileSample->recordUniformHashClassifyUs(
+            activeFloorUniformBytesClass, us);
+    }
+
+    void recordActiveFloorUniformBytesSetBytesUploadUs(double us) {
+        if (activeFloorProfileSample == nullptr) {
+            return;
+        }
+        activeFloorProfileSample->recordUniformSetBytesUploadUs(
+            activeFloorUniformBytesClass, us);
+    }
+
     static std::uint64_t serialBindCacheBytesHash(const void* data,
                                                   NSUInteger length) {
         std::uint64_t hash = 1469598103934665603ull;
@@ -24987,16 +25090,27 @@ private:
                          NSUInteger slot,
                          const void* data,
                          NSUInteger length) {
+        const bool profileFloorDecision = activeFloorProfileSample != nullptr;
+        const DrawProfileTimePoint decisionStart =
+            profileFloorDecision ? drawProfileNow() : DrawProfileTimePoint{};
+        auto finishBytesDecision = [&](NSUInteger byteLength,
+                                       bool changed,
+                                       bool shouldBind) {
+            if (profileFloorDecision) {
+                recordActiveFloorUniformBytesHashClassifyUs(
+                    drawProfileElapsedUs(decisionStart, drawProfileNow()));
+            }
+            recordActiveFloorUniformBytes(byteLength, changed);
+            return shouldBind;
+        };
         if (slot >= bytes.size()) {
-            recordActiveFloorUniformBytes(length, true);
-            return true;
+            return finishBytesDecision(length, true, true);
         }
         if (data == nullptr && length > 0) {
             bytes[slot].valid = false;
             buffers[slot].valid = false;
             recordSerialBindCacheDecision(sample, true, false);
-            recordActiveFloorUniformBytes(length, true);
-            return true;
+            return finishBytesDecision(length, true, true);
         }
         const std::uint64_t hash = serialBindCacheBytesHash(data, length);
         auto& cached = bytes[slot];
@@ -25010,8 +25124,7 @@ private:
         }
         const bool skipped = serialBindCacheLatched && !changed;
         recordSerialBindCacheDecision(sample, changed, skipped);
-        recordActiveFloorUniformBytes(length, changed);
-        return !skipped;
+        return finishBytesDecision(length, changed, !skipped);
     }
 
     bool shouldBindTexture(EncodeSubtimeProfileSample* sample,
@@ -25110,15 +25223,24 @@ private:
                             serialBindVertexBuffers, slot, data, length)) {
             const bool profileMarshal =
                 sample != nullptr && marshalClass != EncodeMarshalClass::None;
+            const bool profileFloorUpload = activeFloorProfileSample != nullptr;
+            const bool profileSetBytes = profileMarshal || profileFloorUpload;
             const auto start =
-                profileMarshal ? drawProfileNow() : DrawProfileTimePoint{};
+                profileSetBytes ? drawProfileNow() : DrawProfileTimePoint{};
             [currentRenderEncoder setVertexBytes:data length:length atIndex:slot];
+            const double elapsedUs =
+                profileSetBytes
+                    ? drawProfileElapsedUs(start, drawProfileNow())
+                    : 0.0;
             if (profileMarshal) {
                 recordEncodeMarshalClass(
                     sample,
                     marshalClass,
-                    drawProfileElapsedUs(start, drawProfileNow()),
+                    elapsedUs,
                     static_cast<std::uint64_t>(length));
+            }
+            if (profileFloorUpload) {
+                recordActiveFloorUniformBytesSetBytesUploadUs(elapsedUs);
             }
         }
     }
@@ -25133,15 +25255,24 @@ private:
                             serialBindFragmentBuffers, slot, data, length)) {
             const bool profileMarshal =
                 sample != nullptr && marshalClass != EncodeMarshalClass::None;
+            const bool profileFloorUpload = activeFloorProfileSample != nullptr;
+            const bool profileSetBytes = profileMarshal || profileFloorUpload;
             const auto start =
-                profileMarshal ? drawProfileNow() : DrawProfileTimePoint{};
+                profileSetBytes ? drawProfileNow() : DrawProfileTimePoint{};
             [currentRenderEncoder setFragmentBytes:data length:length atIndex:slot];
+            const double elapsedUs =
+                profileSetBytes
+                    ? drawProfileElapsedUs(start, drawProfileNow())
+                    : 0.0;
             if (profileMarshal) {
                 recordEncodeMarshalClass(
                     sample,
                     marshalClass,
-                    drawProfileElapsedUs(start, drawProfileNow()),
+                    elapsedUs,
                     static_cast<std::uint64_t>(length));
+            }
+            if (profileFloorUpload) {
+                recordActiveFloorUniformBytesSetBytesUploadUs(elapsedUs);
             }
         }
     }
