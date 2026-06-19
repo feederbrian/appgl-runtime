@@ -776,6 +776,27 @@ struct EncodeSubtimeProfile {
 };
 
 struct ArgEncoderSetupFloorProfileSample {
+    enum class UniformBytesClass : std::uint8_t {
+        None = 0,
+        DefaultUniform,
+        DerivedState,
+        TextureState,
+        FragCoord,
+        ShadowCompare,
+        ExplicitUbo,
+        Multiview,
+        Count,
+    };
+
+    struct UniformBytesStats {
+        std::uint64_t calls = 0;
+        std::uint64_t changedCalls = 0;
+        std::uint64_t redundantCalls = 0;
+        std::uint64_t bytes = 0;
+        std::uint64_t changedBytes = 0;
+        std::uint64_t redundantBytes = 0;
+    };
+
     double totalUs = 0.0;
     double argConstructUs = 0.0;
     double argValidationUs = 0.0;
@@ -800,6 +821,51 @@ struct ArgEncoderSetupFloorProfileSample {
     bool expanded = false;
     bool firstDrawAfterEncoderOpen = false;
     std::uint64_t metalDrawCalls = 0;
+    std::array<UniformBytesStats,
+               static_cast<std::size_t>(UniformBytesClass::Count)>
+        uniformBytes = {};
+
+    static const char* uniformBytesClassName(UniformBytesClass klass) {
+        switch (klass) {
+        case UniformBytesClass::DefaultUniform:
+            return "default_uniform";
+        case UniformBytesClass::DerivedState:
+            return "derived_state";
+        case UniformBytesClass::TextureState:
+            return "texture_state";
+        case UniformBytesClass::FragCoord:
+            return "fragcoord";
+        case UniformBytesClass::ShadowCompare:
+            return "shadow_compare";
+        case UniformBytesClass::ExplicitUbo:
+            return "explicit_ubo";
+        case UniformBytesClass::Multiview:
+            return "multiview";
+        case UniformBytesClass::None:
+        case UniformBytesClass::Count:
+            break;
+        }
+        return "none";
+    }
+
+    void recordUniformBytes(UniformBytesClass klass,
+                            NSUInteger length,
+                            bool changed) {
+        if (klass == UniformBytesClass::None ||
+            klass == UniformBytesClass::Count) {
+            return;
+        }
+        auto& stats = uniformBytes[static_cast<std::size_t>(klass)];
+        ++stats.calls;
+        stats.bytes += static_cast<std::uint64_t>(length);
+        if (changed) {
+            ++stats.changedCalls;
+            stats.changedBytes += static_cast<std::uint64_t>(length);
+        } else {
+            ++stats.redundantCalls;
+            stats.redundantBytes += static_cast<std::uint64_t>(length);
+        }
+    }
 };
 
 struct ArgEncoderSetupFloorProfile {
@@ -833,6 +899,10 @@ struct ArgEncoderSetupFloorProfile {
     double resourceBindDirectTextureSamplerUs = 0.0;
     double resourceBindHazardValidateUs = 0.0;
     double resourceBindOtherUs = 0.0;
+    std::array<ArgEncoderSetupFloorProfileSample::UniformBytesStats,
+               static_cast<std::size_t>(
+                   ArgEncoderSetupFloorProfileSample::UniformBytesClass::Count)>
+        uniformBytes = {};
 
     void record(const ArgEncoderSetupFloorProfileSample& s) {
         if (!enabled) {
@@ -873,6 +943,14 @@ struct ArgEncoderSetupFloorProfile {
             s.resourceBindHazardValidateUs;
         resourceBindOtherUs +=
             s.resourceBindUs > accounted ? s.resourceBindUs - accounted : 0.0;
+        for (std::size_t i = 0; i < uniformBytes.size(); ++i) {
+            uniformBytes[i].calls += s.uniformBytes[i].calls;
+            uniformBytes[i].changedCalls += s.uniformBytes[i].changedCalls;
+            uniformBytes[i].redundantCalls += s.uniformBytes[i].redundantCalls;
+            uniformBytes[i].bytes += s.uniformBytes[i].bytes;
+            uniformBytes[i].changedBytes += s.uniformBytes[i].changedBytes;
+            uniformBytes[i].redundantBytes += s.uniformBytes[i].redundantBytes;
+        }
         maybeDumpInterval();
     }
 
@@ -993,6 +1071,37 @@ struct ArgEncoderSetupFloorProfile {
             static_cast<unsigned long long>(firstDrawAfterEncoderOpen),
             static_cast<unsigned long long>(metalDrawCalls),
             static_cast<double>(metalDrawCalls) / drawDenom);
+        for (std::size_t i = 1; i < uniformBytes.size(); ++i) {
+            const auto klass =
+                static_cast<ArgEncoderSetupFloorProfileSample::UniformBytesClass>(
+                    i);
+            const auto& stats = uniformBytes[i];
+            if (stats.calls == 0) {
+                continue;
+            }
+            std::fprintf(stderr,
+                "[APPGL_ARG_ENCODER_SETUP_FLOOR_PROFILE] uniform_bytes "
+                "reason=%s class=%s calls=%llu changed_calls=%llu "
+                "redundant_calls=%llu bytes=%llu changed_bytes=%llu "
+                "redundant_bytes=%llu redundant_call_pct=%.3f "
+                "redundant_byte_pct=%.3f\n",
+                reason != nullptr ? reason : "unknown",
+                ArgEncoderSetupFloorProfileSample::uniformBytesClassName(klass),
+                static_cast<unsigned long long>(stats.calls),
+                static_cast<unsigned long long>(stats.changedCalls),
+                static_cast<unsigned long long>(stats.redundantCalls),
+                static_cast<unsigned long long>(stats.bytes),
+                static_cast<unsigned long long>(stats.changedBytes),
+                static_cast<unsigned long long>(stats.redundantBytes),
+                stats.calls > 0
+                    ? (static_cast<double>(stats.redundantCalls) * 100.0) /
+                        static_cast<double>(stats.calls)
+                    : 0.0,
+                stats.bytes > 0
+                    ? (static_cast<double>(stats.redundantBytes) * 100.0) /
+                        static_cast<double>(stats.bytes)
+                    : 0.0);
+        }
         std::fflush(stderr);
     }
 };
@@ -8786,6 +8895,22 @@ struct MetalFrameGraph::Impl {
             bucket += drawProfileElapsedUs(floorResourceBindCursor, now);
             floorResourceBindCursor = now;
         };
+        auto setFloorUniformBytesClass =
+            [&](ArgEncoderSetupFloorProfileSample::UniformBytesClass klass) {
+                if (!profileFloor) {
+                    return;
+                }
+                activeFloorProfileSample = &floorProfileSample;
+                activeFloorUniformBytesClass = klass;
+            };
+        auto clearFloorUniformBytesClass = [&]() {
+            if (!profileFloor) {
+                return;
+            }
+            activeFloorProfileSample = nullptr;
+            activeFloorUniformBytesClass =
+                ArgEncoderSetupFloorProfileSample::UniformBytesClass::None;
+        };
 
         // Bind vertex data at buffer index 0.
         // Attributeless draws (gl_VertexID-driven) skip vertex buffer binding.
@@ -8861,6 +8986,9 @@ struct MetalFrameGraph::Impl {
         // so the setBytes calls are no-ops. Under argbuf mode with
         // UBOs present, skip the direct-binding calls entirely.
         {
+            setFloorUniformBytesClass(
+                ArgEncoderSetupFloorProfileSample::UniformBytesClass::
+                    DefaultUniform);
             if (!vertexUsesArgBuf &&
                 info.vertexUniformData != nullptr && info.vertexUniformSize > 0) {
                 bindVertexBytesIfNeeded(
@@ -8879,6 +9007,9 @@ struct MetalFrameGraph::Impl {
                     16,
                     EncodeMarshalClass::SetBytes);
             }
+            setFloorUniformBytesClass(
+                ArgEncoderSetupFloorProfileSample::UniformBytesClass::
+                    DerivedState);
             // CKPT121 (Sprint 11 Phase 2 Day 6): SPIRV-Cross emits
             // gl_NumSamples as a `constant int& [[buffer(0)]]` FS
             // parameter. The MSL ShaderTranslator post-process gates the
@@ -8916,6 +9047,9 @@ struct MetalFrameGraph::Impl {
                     EncodeMarshalClass::SetBytes);
             }
             const bool logLodBias = std::getenv("APPGL_LOG_LB") != nullptr;
+            setFloorUniformBytesClass(
+                ArgEncoderSetupFloorProfileSample::UniformBytesClass::
+                    TextureState);
             const NSInteger vertexReductionModesSlot =
                 shaderSlots.vertexReductionModesSlot;
             if (vertexReductionModesSlot >= 0) {
@@ -9065,6 +9199,9 @@ struct MetalFrameGraph::Impl {
                     static_cast<NSUInteger>(fragmentImplicitLodBiasCorrectionSlot),
                     EncodeMarshalClass::SetBytes);
             }
+            setFloorUniformBytesClass(
+                ArgEncoderSetupFloorProfileSample::UniformBytesClass::
+                    FragCoord);
             if (fragmentNeedsFragCoordParams) {
                 const float renderTargetHeight = colorTexture != nil
                     ? static_cast<float>(colorTexture.height)
@@ -9147,6 +9284,9 @@ struct MetalFrameGraph::Impl {
                     EncodeMarshalClass::SetBytes);
             }
 
+            setFloorUniformBytesClass(
+                ArgEncoderSetupFloorProfileSample::UniformBytesClass::
+                    ShadowCompare);
             // Shadow-compare Y fixup: per-texture-slot flip factors for
             // the _appgl_CmpFlip buffer injected by the translator.
             // Always set when the shader declares the buffer — bindings
@@ -9166,6 +9306,9 @@ struct MetalFrameGraph::Impl {
                     EncodeMarshalClass::SetBytes);
             }
 
+            setFloorUniformBytesClass(
+                ArgEncoderSetupFloorProfileSample::UniformBytesClass::
+                    ExplicitUbo);
             // Bind UBO data to the Metal encoder at the reflection-specified
             // [[buffer(N)]] slots.  Each entry was resolved by GLContext from
             // the GL uniform buffer binding state.
@@ -9214,6 +9357,7 @@ struct MetalFrameGraph::Impl {
                     }
                 }
             }
+            clearFloorUniformBytesClass();
         }
         recordFloorResourceBindSlice(
             floorProfileSample.resourceBindDirectUniformStateUs);
@@ -9279,6 +9423,9 @@ struct MetalFrameGraph::Impl {
             floorProfileSample.resourceBindDirectStorageBufferUs);
 
         if (vertexUsesMultiviewViewMask && !vertexUsesArgBuf) {
+            setFloorUniformBytesClass(
+                ArgEncoderSetupFloorProfileSample::UniformBytesClass::
+                    Multiview);
             bindVertexBytesIfNeeded(
                 encodeSubtimeSamplePtr,
                 ovrViewMask,
@@ -9287,6 +9434,9 @@ struct MetalFrameGraph::Impl {
                 EncodeMarshalClass::SetBytes);
         }
         if (fragmentUsesMultiviewViewMask && !fragmentUsesArgBuf) {
+            setFloorUniformBytesClass(
+                ArgEncoderSetupFloorProfileSample::UniformBytesClass::
+                    Multiview);
             bindFragmentBytesIfNeeded(
                 encodeSubtimeSamplePtr,
                 ovrViewMask,
@@ -9294,6 +9444,7 @@ struct MetalFrameGraph::Impl {
                 24,
                 EncodeMarshalClass::SetBytes);
         }
+        clearFloorUniformBytesClass();
         recordFloorResourceBindSlice(
             floorProfileSample.resourceBindDirectUniformStateUs);
 
@@ -24759,6 +24910,19 @@ private:
         serialBindVertexSamplers{};
     std::array<SerialBindCacheSamplerBinding, kEncodeSubtimeTrackedSlots>
         serialBindFragmentSamplers{};
+    using FloorUniformBytesClass =
+        ArgEncoderSetupFloorProfileSample::UniformBytesClass;
+    ArgEncoderSetupFloorProfileSample* activeFloorProfileSample = nullptr;
+    FloorUniformBytesClass activeFloorUniformBytesClass =
+        FloorUniformBytesClass::None;
+
+    void recordActiveFloorUniformBytes(NSUInteger length, bool changed) {
+        if (activeFloorProfileSample == nullptr) {
+            return;
+        }
+        activeFloorProfileSample->recordUniformBytes(
+            activeFloorUniformBytesClass, length, changed);
+    }
 
     static std::uint64_t serialBindCacheBytesHash(const void* data,
                                                   NSUInteger length) {
@@ -24824,12 +24988,14 @@ private:
                          const void* data,
                          NSUInteger length) {
         if (slot >= bytes.size()) {
+            recordActiveFloorUniformBytes(length, true);
             return true;
         }
         if (data == nullptr && length > 0) {
             bytes[slot].valid = false;
             buffers[slot].valid = false;
             recordSerialBindCacheDecision(sample, true, false);
+            recordActiveFloorUniformBytes(length, true);
             return true;
         }
         const std::uint64_t hash = serialBindCacheBytesHash(data, length);
@@ -24844,6 +25010,7 @@ private:
         }
         const bool skipped = serialBindCacheLatched && !changed;
         recordSerialBindCacheDecision(sample, changed, skipped);
+        recordActiveFloorUniformBytes(length, changed);
         return !skipped;
     }
 
