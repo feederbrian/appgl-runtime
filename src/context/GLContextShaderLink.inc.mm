@@ -3301,6 +3301,10 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->fragmentMSL.clear();
     programObject->vertexMslUsesArgumentBuffer = false;
     programObject->fragmentMslUsesArgumentBuffer = false;
+    programObject->vertexMslWritesRenderTargetArrayIndex = false;
+    programObject->vertexMslWritesViewportArrayIndex = false;
+    programObject->vertexMslHasClipControlYSignParameter = false;
+    programObject->fragmentMslUsesFragCoordParams = false;
     programObject->tessControlMSL.clear();
     programObject->tessEvalMSL.clear();
     programObject->tessVertexAsComputeMSL.clear();

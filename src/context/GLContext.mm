@@ -80,6 +80,11 @@ static bool envVarPresent(const char* name) {
     return std::getenv(name) != nullptr;
 }
 
+static bool appglHotpathInvariantHoistSubflagEnabled(const char* name) {
+    return appgl::appglEnvEnabledDefaultOff("APPGL_HOTPATH_INVARIANT_HOIST") &&
+           appgl::appglEnvEnabledDefaultOn(name);
+}
+
 // Compat-profile upload-format enums removed from the core glcorearb.h
 // surface in GL 3.2. AppGL still accepts them as upload aliases via
 // componentCountForFormat + buildRGBA8Upload; defining them here with
@@ -2439,11 +2444,23 @@ static bool mslUsesArgumentBuffer(const std::string* msl) {
     return msl != nullptr && mslUsesArgumentBuffer(*msl);
 }
 
+static bool mslContains(const std::string& msl, const char* needle) {
+    return msl.find(needle) != std::string::npos;
+}
+
 static void refreshProgramMslArgumentBufferMetadata(GLProgramObject& program) {
     program.vertexMslUsesArgumentBuffer =
         mslUsesArgumentBuffer(program.vertexMSL);
     program.fragmentMslUsesArgumentBuffer =
         mslUsesArgumentBuffer(program.fragmentMSL);
+    program.vertexMslWritesRenderTargetArrayIndex =
+        mslContains(program.vertexMSL, "[[render_target_array_index]]");
+    program.vertexMslWritesViewportArrayIndex =
+        mslContains(program.vertexMSL, "[[viewport_array_index]]");
+    program.vertexMslHasClipControlYSignParameter =
+        mslContains(program.vertexMSL, "_appgl_ClipControlYSign [[buffer(");
+    program.fragmentMslUsesFragCoordParams =
+        mslContains(program.fragmentMSL, "_appgl_FragCoordParams");
     program.gsPassThroughVertexMslUsesArgumentBuffer =
         mslUsesArgumentBuffer(program.gsPassThroughVertexMSL);
     program.gsPassThroughFragmentMslUsesArgumentBuffer =
@@ -2465,6 +2482,15 @@ static void assignTranslatedDrawProgramMsl(TranslatedDrawInfo& tdi,
         program.vertexMslUsesArgumentBuffer;
     tdi.fragmentMslUsesArgumentBuffer =
         program.fragmentMslUsesArgumentBuffer;
+    tdi.mslPredicateCacheValid = !program.mslVolatile;
+    tdi.vertexMslWritesRenderTargetArrayIndex =
+        program.vertexMslWritesRenderTargetArrayIndex;
+    tdi.vertexMslWritesViewportArrayIndex =
+        program.vertexMslWritesViewportArrayIndex;
+    tdi.vertexMslHasClipControlYSignParameter =
+        program.vertexMslHasClipControlYSignParameter;
+    tdi.fragmentMslUsesFragCoordParams =
+        program.fragmentMslUsesFragCoordParams;
 }
 
 struct ColdPathDiagnosticProfile {
@@ -8142,14 +8168,22 @@ static constexpr std::uint64_t kSubmittedPipelineStatsQueryMask =
 }  // namespace
 
 struct GLContext::Impl {
-    bool hotpathConstantHoistEnabled =
-        appglEnvEnabledDefaultOff("APPGL_HOTPATH_CONSTANT_HOIST");
+    bool hotpathInvariantEnvCacheEnabled =
+        appglHotpathInvariantHoistSubflagEnabled(
+            "APPGL_HOTPATH_INVARIANT_HOIST_ENV_CACHE");
+    bool hotpathInvariantMslPredicatesEnabled =
+        appglHotpathInvariantHoistSubflagEnabled(
+            "APPGL_HOTPATH_INVARIANT_HOIST_MSL_PREDICATES");
+    bool hotpathInvariantMslPredicatesValidateEnabled =
+        hotpathInvariantMslPredicatesEnabled &&
+        appglEnvEnabledDefaultOff(
+            "APPGL_HOTPATH_INVARIANT_HOIST_MSL_PREDICATES_VALIDATE");
     bool forceArgumentBuffersLatched =
-        hotpathConstantHoistEnabled &&
+        hotpathInvariantEnvCacheEnabled &&
         envVarPresent("APPGL_ENABLE_ARGUMENT_BUFFERS");
 
     bool forceArgumentBuffersEnabled() const {
-        return hotpathConstantHoistEnabled
+        return hotpathInvariantEnvCacheEnabled
             ? forceArgumentBuffersLatched
             : envVarPresent("APPGL_ENABLE_ARGUMENT_BUFFERS");
     }
@@ -35988,6 +36022,10 @@ static GLenum detectBoolMemberType(const std::string& source,
 
 static bool mslWritesRenderTargetArrayIndex(const std::string* msl);
 static bool mslWritesViewportArrayIndex(const std::string* msl);
+static bool programFragmentMslUsesFragCoordParams(
+    const GLProgramObject& program,
+    bool cacheEnabled,
+    bool validateEnabled);
 static void rewriteMslOutputLocationsForFragmentInputs(
     std::string& vertexMSL,
     const std::string& fragmentMSL);
@@ -38000,6 +38038,8 @@ GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
             gsProg->fragmentMSL = fsProg->fragmentMSL;
             gsProg->fragmentMslUsesArgumentBuffer =
                 fsProg->fragmentMslUsesArgumentBuffer;
+            gsProg->fragmentMslUsesFragCoordParams =
+                fsProg->fragmentMslUsesFragCoordParams;
             gsProg->fragmentReflection = fsProg->fragmentReflection;
             gsProg->pipelineEmulationFragmentProgram = ppo->fragmentProgram;
             if (fragmentStageChanged) {
@@ -38009,6 +38049,7 @@ GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
     } else if (gsProg->pipelineEmulationFragmentProgram != 0 || !gsProg->fragmentMSL.empty()) {
         gsProg->fragmentMSL.clear();
         gsProg->fragmentMslUsesArgumentBuffer = false;
+        gsProg->fragmentMslUsesFragCoordParams = false;
         gsProg->fragmentReflection = ShaderReflection{};
         gsProg->pipelineEmulationFragmentProgram = 0;
         invalidateGsPassThroughFragmentCache(gsProg);
@@ -38197,6 +38238,8 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
             vsProg->fragmentMSL = fsProg->fragmentMSL;
             vsProg->fragmentMslUsesArgumentBuffer =
                 fsProg->fragmentMslUsesArgumentBuffer;
+            vsProg->fragmentMslUsesFragCoordParams =
+                fsProg->fragmentMslUsesFragCoordParams;
             rewriteMslOutputLocationsForFragmentInputs(
                 vsProg->vertexMSL, vsProg->fragmentMSL);
             vsProg->fragmentReflection = fsProg->fragmentReflection;
@@ -38247,6 +38290,7 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
         // over from a previous pipeline that did have one.
         vsProg->fragmentMSL.clear();
         vsProg->fragmentMslUsesArgumentBuffer = false;
+        vsProg->fragmentMslUsesFragCoordParams = false;
         vsProg->fragmentReflection = ShaderReflection{};
         vsProg->uniformLayoutComputed = false;
     }
@@ -38486,12 +38530,20 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
         synth->fragmentMSL = fsProg->fragmentMSL;
         synth->fragmentMslUsesArgumentBuffer =
             fsProg->fragmentMslUsesArgumentBuffer;
+        synth->fragmentMslUsesFragCoordParams =
+            fsProg->fragmentMslUsesFragCoordParams;
         synth->fragmentReflection = fsProg->fragmentReflection;
     }
     if (vsProg != nullptr) {
         synth->vertexMSL = vsProg->vertexMSL;
         synth->vertexMslUsesArgumentBuffer =
             vsProg->vertexMslUsesArgumentBuffer;
+        synth->vertexMslWritesRenderTargetArrayIndex =
+            vsProg->vertexMslWritesRenderTargetArrayIndex;
+        synth->vertexMslWritesViewportArrayIndex =
+            vsProg->vertexMslWritesViewportArrayIndex;
+        synth->vertexMslHasClipControlYSignParameter =
+            vsProg->vertexMslHasClipControlYSignParameter;
         synth->vertexReflection = vsProg->vertexReflection;
     }
     // (c) ABA fix: tess synth container — VS/FS MSL spliced in place per draw
@@ -39796,7 +39848,10 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     info.meshTextures = std::move(textureInfo.vertexTextures);
     info.fragmentTextures = std::move(textureInfo.fragmentTextures);
     info.fragmentNeedsFragCoordParams =
-        (program.fragmentMSL.find("_appgl_FragCoordParams") != std::string::npos);
+        programFragmentMslUsesFragCoordParams(
+            program,
+            hotpathInvariantMslPredicatesEnabled,
+            hotpathInvariantMslPredicatesValidateEnabled);
     declareMeshGsSubmissionGroup(info, meshVsBufferNames, textureInfo);
 
     // GL render state — mirror encodeTranslatedDraw's tdi setup
@@ -40563,6 +40618,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     tdi.programObjectExecutableGeneration =
         program.executableGeneration;  // ABA relink-in-place guard
     tdi.programMslVolatile = program.mslVolatile;  // ABA fix (c): splice-container skip
+    tdi.mslPredicateCacheValid = false;
     // S25 state_resolve lever (Axis-B): note the GS-replay re-point fired so the
     // diag JSONL carries N — the non-vacuity guard on the GS-replay control.
     if (frameGraph) {
@@ -40872,22 +40928,95 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
     return encodeTranslatedDrawAndMarkFbo(tdi, &preflight);
 }
 
-static bool translatedDrawUsesClipControlYSign(const TranslatedDrawInfo& tdi) {
-    return tdi.clipControlYSignFixupEnabled &&
+static bool selectTranslatedDrawMslPredicate(
+    bool cacheEnabled,
+    bool validateEnabled,
+    bool cacheValid,
+    bool cachedValue,
+    bool liveValue) {
+    if (validateEnabled && cacheValid) {
+        assert(cachedValue == liveValue);
+    }
+    return cacheEnabled && cacheValid ? cachedValue : liveValue;
+}
+
+static bool programFragmentMslUsesFragCoordParams(
+    const GLProgramObject& program,
+    bool cacheEnabled,
+    bool validateEnabled) {
+    const bool liveValue =
+        program.fragmentMSL.find("_appgl_FragCoordParams") !=
+        std::string::npos;
+    return selectTranslatedDrawMslPredicate(
+        cacheEnabled,
+        validateEnabled,
+        true,
+        program.fragmentMslUsesFragCoordParams,
+        liveValue);
+}
+
+static bool translatedDrawHasClipControlYSignParameter(
+    const TranslatedDrawInfo& tdi,
+    bool cacheEnabled,
+    bool validateEnabled) {
+    const bool liveValue =
         tdi.vertexMSL != nullptr &&
         tdi.vertexMSL->find("_appgl_ClipControlYSign [[buffer(") !=
             std::string::npos;
+    return selectTranslatedDrawMslPredicate(
+        cacheEnabled,
+        validateEnabled,
+        tdi.mslPredicateCacheValid,
+        tdi.vertexMslHasClipControlYSignParameter,
+        liveValue);
 }
 
-static bool translatedDrawHasClipControlYSignParameter(const TranslatedDrawInfo& tdi) {
-    return tdi.vertexMSL != nullptr &&
-        tdi.vertexMSL->find("_appgl_ClipControlYSign [[buffer(") !=
-            std::string::npos;
+static bool translatedDrawUsesClipControlYSign(
+    const TranslatedDrawInfo& tdi,
+    bool cacheEnabled,
+    bool validateEnabled) {
+    return tdi.clipControlYSignFixupEnabled &&
+        translatedDrawHasClipControlYSignParameter(
+            tdi, cacheEnabled, validateEnabled);
 }
 
-static bool translatedDrawUsesFragCoordParams(const TranslatedDrawInfo& tdi) {
-    return tdi.fragmentMSL != nullptr &&
+static bool translatedDrawMslWritesRenderTargetArrayIndex(
+    const TranslatedDrawInfo& tdi,
+    bool cacheEnabled,
+    bool validateEnabled) {
+    return selectTranslatedDrawMslPredicate(
+        cacheEnabled,
+        validateEnabled,
+        tdi.mslPredicateCacheValid,
+        tdi.vertexMslWritesRenderTargetArrayIndex,
+        mslWritesRenderTargetArrayIndex(tdi.vertexMSL));
+}
+
+static bool translatedDrawMslWritesViewportArrayIndex(
+    const TranslatedDrawInfo& tdi,
+    bool cacheEnabled,
+    bool validateEnabled) {
+    return selectTranslatedDrawMslPredicate(
+        cacheEnabled,
+        validateEnabled,
+        tdi.mslPredicateCacheValid,
+        tdi.vertexMslWritesViewportArrayIndex,
+        mslWritesViewportArrayIndex(tdi.vertexMSL));
+}
+
+static bool translatedDrawUsesFragCoordParams(
+    const TranslatedDrawInfo& tdi,
+    bool cacheEnabled,
+    bool validateEnabled) {
+    const bool liveValue =
+        tdi.fragmentMSL != nullptr &&
         tdi.fragmentMSL->find("_appgl_FragCoordParams") != std::string::npos;
+    return selectTranslatedDrawMslPredicate(
+        cacheEnabled,
+        validateEnabled,
+        tdi.mslPredicateCacheValid,
+        tdi.fragmentMslUsesFragCoordParams,
+        liveValue);
 }
 
 static bool textureTargetUsesNormalized2DSampling(const GLTextureObject& texture) {
@@ -41199,7 +41328,10 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
             drawDetailProfile,
             GLDrawDetailBucket::TranslatedFixedFunctionTransientHazards);
         if (drawFboName != 0 &&
-            translatedDrawHasClipControlYSignParameter(tdi)) {
+            translatedDrawHasClipControlYSignParameter(
+                tdi,
+                hotpathInvariantMslPredicatesEnabled,
+                hotpathInvariantMslPredicatesValidateEnabled)) {
             if (const GLFramebufferObject* fbo =
                     objects->framebuffers().get(drawFboName)) {
                 phase2PlanSetFixedStateBool(
@@ -41238,7 +41370,10 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                 }
             }
         }
-        if (mslWritesRenderTargetArrayIndex(tdi.vertexMSL) &&
+        if (translatedDrawMslWritesRenderTargetArrayIndex(
+                tdi,
+                hotpathInvariantMslPredicatesEnabled,
+                hotpathInvariantMslPredicatesValidateEnabled) &&
             tdi.fboColorArrayLength == 0) {
             if (drawFboName == 0) {
                 tdi.fboColorArrayLength = 1;
@@ -41274,7 +41409,10 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
         }
         if (!tdi.markColorAttachmentReadbackFlip &&
             tdi.viewportArrayCount > 1 &&
-            mslWritesViewportArrayIndex(tdi.vertexMSL) &&
+            translatedDrawMslWritesViewportArrayIndex(
+                tdi,
+                hotpathInvariantMslPredicatesEnabled,
+                hotpathInvariantMslPredicatesValidateEnabled) &&
             tdi.clipOrigin == GL_LOWER_LEFT) {
             phase2PlanSetFixedStateBool(
                 tdi, tdi.markColorAttachmentReadbackFlip, true);
@@ -41620,7 +41758,10 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                 // only, while viewport-routed GS/cull paths also mark the
                 // narrower glGetTexImage Y-unflip flag.
                 const bool clipControlShaderYFixup =
-                    translatedDrawUsesClipControlYSign(tdi) &&
+                    translatedDrawUsesClipControlYSign(
+                        tdi,
+                        hotpathInvariantMslPredicatesEnabled,
+                        hotpathInvariantMslPredicatesValidateEnabled) &&
                     !tdi.stencilTestEnabled;
                 const bool lowerLeftFramebufferReadbackFlip =
                     tdi.clipOrigin == GL_LOWER_LEFT &&
@@ -41628,7 +41769,10 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                 const bool fragCoordClipControlReadbackFlip =
                     tdi.clipOrigin == GL_LOWER_LEFT &&
                     clipControlShaderYFixup &&
-                    translatedDrawUsesFragCoordParams(tdi);
+                    translatedDrawUsesFragCoordParams(
+                        tdi,
+                        hotpathInvariantMslPredicatesEnabled,
+                        hotpathInvariantMslPredicatesValidateEnabled);
                 if (lowerLeftFramebufferReadbackFlip ||
                     fragCoordClipControlReadbackFlip ||
                     clipControlShaderYFixup ||

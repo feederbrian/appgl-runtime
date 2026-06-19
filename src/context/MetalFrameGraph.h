@@ -614,6 +614,11 @@ struct TranslatedDrawInfo {
     bool programMslVolatile = false;
     bool vertexMslUsesArgumentBuffer = false;
     bool fragmentMslUsesArgumentBuffer = false;
+    bool mslPredicateCacheValid = false;
+    bool vertexMslWritesRenderTargetArrayIndex = false;
+    bool vertexMslWritesViewportArrayIndex = false;
+    bool vertexMslHasClipControlYSignParameter = false;
+    bool fragmentMslUsesFragCoordParams = false;
     const ShaderReflection* vertexReflection = nullptr;
     const ShaderReflection* fragmentReflection = nullptr;
 

@@ -1027,6 +1027,10 @@ struct GLProgramObject {
     std::string fragmentMSL;
     bool vertexMslUsesArgumentBuffer = false;
     bool fragmentMslUsesArgumentBuffer = false;
+    bool vertexMslWritesRenderTargetArrayIndex = false;
+    bool vertexMslWritesViewportArrayIndex = false;
+    bool vertexMslHasClipControlYSignParameter = false;
+    bool fragmentMslUsesFragCoordParams = false;
     // Metal-native tessellation pipeline MSL (Phase 1 of the metal-tess
     // project). Populated at link time for tess programs with SPIRV-Cross's
     // tess options forced on, so TCS is emittable as a compute kernel and

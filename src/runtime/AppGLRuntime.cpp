@@ -1804,10 +1804,16 @@ Runtime& Runtime::shared() {
     return runtime;
 }
 
+static bool appglHotpathInvariantHoistSubflagEnabled(const char* name) {
+    return appglEnvEnabledDefaultOff("APPGL_HOTPATH_INVARIANT_HOIST") &&
+           appglEnvEnabledDefaultOn(name);
+}
+
 Runtime::Runtime()
     : recordCallsEnabled_(appglEnvEnabledDefaultOff("APPGL_RECORD_CALLS")),
-      hotpathConstantHoistEnabled_(
-          appglEnvEnabledDefaultOff("APPGL_HOTPATH_CONSTANT_HOIST")) {
+      hotpathInvariantVersionStringEnabled_(
+          appglHotpathInvariantHoistSubflagEnabled(
+              "APPGL_HOTPATH_INVARIANT_HOIST_VERSION_STRING")) {
     initializeDispatch();
     memoryPressureObserver_ = std::make_unique<MemoryPressureObserver>();
     // Install crash handlers that print a backtrace on SIGBUS/SIGSEGV so we
@@ -2323,7 +2329,7 @@ std::string Runtime::claimedVersionString() const {
 
 void Runtime::refreshCurrentContextClaimedVersion() {
     if (gCurrentContext != nullptr) {
-        if (hotpathConstantHoistEnabled_ &&
+        if (hotpathInvariantVersionStringEnabled_ &&
             gCurrentContext->claimedVersionStringSeeded()) {
             return;
         }

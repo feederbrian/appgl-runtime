@@ -140,6 +140,11 @@ static bool envVarPresent(const char* name) {
     return std::getenv(name) != nullptr;
 }
 
+static bool appglHotpathInvariantHoistSubflagEnabled(const char* name) {
+    return appglEnvEnabledDefaultOff("APPGL_HOTPATH_INVARIANT_HOIST") &&
+           appglEnvEnabledDefaultOn(name);
+}
+
 static std::string envStringOrEmpty(const char* name) {
     const char* raw = std::getenv(name);
     return raw != nullptr ? std::string(raw) : std::string{};
@@ -5380,38 +5385,39 @@ static void startMetalCaptureIfRequested(id<MTLDevice> device);
 static void stopMetalCaptureIfActive();
 
 struct MetalFrameGraph::Impl {
-    bool hotpathConstantHoistEnabled =
-        appglEnvEnabledDefaultOff("APPGL_HOTPATH_CONSTANT_HOIST");
+    bool hotpathInvariantEnvCacheEnabled =
+        appglHotpathInvariantHoistSubflagEnabled(
+            "APPGL_HOTPATH_INVARIANT_HOIST_ENV_CACHE");
     std::string traceDrawTargetsEnv =
-        hotpathConstantHoistEnabled
+        hotpathInvariantEnvCacheEnabled
             ? envStringOrEmpty("APPGL_TRACE_DRAW_TARGETS")
             : std::string{};
     std::uint32_t traceDrawTargetsLimitLatched =
-        hotpathConstantHoistEnabled ? traceDrawTargetsLimit() : 512u;
+        hotpathInvariantEnvCacheEnabled ? traceDrawTargetsLimit() : 512u;
     bool traceVertexBindingsLatched =
-        hotpathConstantHoistEnabled &&
+        hotpathInvariantEnvCacheEnabled &&
         envVarPresent("APPGL_TRACE_VERTEX_BINDINGS");
     bool logLodBiasLatched =
-        hotpathConstantHoistEnabled && envVarPresent("APPGL_LOG_LB");
+        hotpathInvariantEnvCacheEnabled && envVarPresent("APPGL_LOG_LB");
     bool traceFboClearFoldingLatched =
-        hotpathConstantHoistEnabled &&
+        hotpathInvariantEnvCacheEnabled &&
         envVarPresent("APPGL_TRACE_FBO_CLEAR_FOLDING");
     bool traceShaderBuildLatched =
-        hotpathConstantHoistEnabled &&
+        hotpathInvariantEnvCacheEnabled &&
         envVarPresent("APPGL_TRACE_SHADER_BUILD");
     bool tracePsoBuildsLatched =
-        hotpathConstantHoistEnabled &&
+        hotpathInvariantEnvCacheEnabled &&
         envVarPresent("APPGL_TRACE_PSO_BUILDS");
     bool forceArgumentBuffersLatched =
-        hotpathConstantHoistEnabled &&
+        hotpathInvariantEnvCacheEnabled &&
         envVarPresent("APPGL_ENABLE_ARGUMENT_BUFFERS");
 
     bool traceEnvPresent(const char* name, bool latched) const {
-        return hotpathConstantHoistEnabled ? latched : envVarPresent(name);
+        return hotpathInvariantEnvCacheEnabled ? latched : envVarPresent(name);
     }
 
     bool shouldEmitDrawTargetTrace(GLuint program) const {
-        if (!hotpathConstantHoistEnabled) {
+        if (!hotpathInvariantEnvCacheEnabled) {
             return shouldEmitDrawTargetTraceUncached(program);
         }
         if (!traceDrawTargetsProgramMatches(traceDrawTargetsEnv.c_str(), program)) {
@@ -5445,7 +5451,7 @@ struct MetalFrameGraph::Impl {
     }
 
     bool forceArgumentBuffersEnabled() const {
-        return hotpathConstantHoistEnabled
+        return hotpathInvariantEnvCacheEnabled
             ? forceArgumentBuffersLatched
             : translatedDrawForceArgumentBuffersEnv();
     }

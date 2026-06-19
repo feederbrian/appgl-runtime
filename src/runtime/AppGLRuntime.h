@@ -822,7 +822,7 @@ private:
     CoverageStore coverageStore_;
     TraceLog traceLog_;
     bool recordCallsEnabled_ = true;
-    bool hotpathConstantHoistEnabled_ = false;
+    bool hotpathInvariantVersionStringEnabled_ = false;
     std::string rendererString_ = "AppGL on Metal";
     mutable std::mutex contextMutex_;
     std::unordered_set<GLContext*> liveContexts_;
