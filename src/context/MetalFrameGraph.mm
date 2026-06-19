@@ -312,6 +312,11 @@ static bool encodeSubtimeProfileEnabled() {
            appglEnvEnabledDefaultOff("APPGL_BINDING_CONSTRUCTION_SIZING");
 }
 
+static bool argEncoderSetupFloorProfileEnabled() {
+    // Post-F1 floor rider: one aggregate stderr row, no diagnostics JSON.
+    return appglEnvEnabledDefaultOff("APPGL_ARG_ENCODER_SETUP_FLOOR_PROFILE");
+}
+
 using DrawProfileClock = std::chrono::steady_clock;
 using DrawProfileTimePoint = DrawProfileClock::time_point;
 
@@ -762,6 +767,200 @@ struct EncodeSubtimeProfile {
             << firstDrawAfterOpenBindSkipped
             << "}";
         return out.str();
+    }
+};
+
+struct ArgEncoderSetupFloorProfileSample {
+    double totalUs = 0.0;
+    double argConstructUs = 0.0;
+    double argValidationUs = 0.0;
+    double argStateResolveUs = 0.0;
+    double argPipelineBuildUs = 0.0;
+    double argEncoderSetupUs = 0.0;
+    double argPrimitivePrepUs = 0.0;
+    double pipelineStateSetUs = 0.0;
+    double resourceBindUs = 0.0;
+    double drawEmitUs = 0.0;
+    double finalizeUs = 0.0;
+    double resourceBindVertexBufferUs = 0.0;
+    double resourceBindDirectUniformStateUs = 0.0;
+    double resourceBindDirectStorageBufferUs = 0.0;
+    double resourceBindArgbufTextureUs = 0.0;
+    double resourceBindArgbufUboUs = 0.0;
+    double resourceBindDirectTextureSamplerUs = 0.0;
+    double resourceBindHazardValidateUs = 0.0;
+    bool fboDraw = false;
+    bool argumentBuffers = false;
+    bool indexed = false;
+    bool expanded = false;
+    bool firstDrawAfterEncoderOpen = false;
+    std::uint64_t metalDrawCalls = 0;
+};
+
+struct ArgEncoderSetupFloorProfile {
+    bool enabled = argEncoderSetupFloorProfileEnabled();
+    std::uint64_t draws = 0;
+    std::uint64_t fboDraws = 0;
+    std::uint64_t argbufDraws = 0;
+    std::uint64_t indexedDraws = 0;
+    std::uint64_t expandedDraws = 0;
+    std::uint64_t firstDrawAfterEncoderOpen = 0;
+    std::uint64_t metalDrawCalls = 0;
+    double totalUs = 0.0;
+    double argConstructUs = 0.0;
+    double argValidationUs = 0.0;
+    double argStateResolveUs = 0.0;
+    double argPipelineBuildUs = 0.0;
+    double argEncoderSetupUs = 0.0;
+    double argPrimitivePrepUs = 0.0;
+    double pipelineStateSetUs = 0.0;
+    double resourceBindUs = 0.0;
+    double drawEmitUs = 0.0;
+    double finalizeUs = 0.0;
+    double resourceBindVertexBufferUs = 0.0;
+    double resourceBindDirectUniformStateUs = 0.0;
+    double resourceBindDirectStorageBufferUs = 0.0;
+    double resourceBindArgbufTextureUs = 0.0;
+    double resourceBindArgbufUboUs = 0.0;
+    double resourceBindDirectTextureSamplerUs = 0.0;
+    double resourceBindHazardValidateUs = 0.0;
+    double resourceBindOtherUs = 0.0;
+
+    void record(const ArgEncoderSetupFloorProfileSample& s) {
+        if (!enabled) {
+            return;
+        }
+        ++draws;
+        fboDraws += s.fboDraw ? 1 : 0;
+        argbufDraws += s.argumentBuffers ? 1 : 0;
+        indexedDraws += s.indexed ? 1 : 0;
+        expandedDraws += s.expanded ? 1 : 0;
+        firstDrawAfterEncoderOpen += s.firstDrawAfterEncoderOpen ? 1 : 0;
+        metalDrawCalls += s.metalDrawCalls;
+        totalUs += s.totalUs;
+        argConstructUs += s.argConstructUs;
+        argValidationUs += s.argValidationUs;
+        argStateResolveUs += s.argStateResolveUs;
+        argPipelineBuildUs += s.argPipelineBuildUs;
+        argEncoderSetupUs += s.argEncoderSetupUs;
+        argPrimitivePrepUs += s.argPrimitivePrepUs;
+        pipelineStateSetUs += s.pipelineStateSetUs;
+        resourceBindUs += s.resourceBindUs;
+        drawEmitUs += s.drawEmitUs;
+        finalizeUs += s.finalizeUs;
+        resourceBindVertexBufferUs += s.resourceBindVertexBufferUs;
+        resourceBindDirectUniformStateUs += s.resourceBindDirectUniformStateUs;
+        resourceBindDirectStorageBufferUs += s.resourceBindDirectStorageBufferUs;
+        resourceBindArgbufTextureUs += s.resourceBindArgbufTextureUs;
+        resourceBindArgbufUboUs += s.resourceBindArgbufUboUs;
+        resourceBindDirectTextureSamplerUs += s.resourceBindDirectTextureSamplerUs;
+        resourceBindHazardValidateUs += s.resourceBindHazardValidateUs;
+        const double accounted =
+            s.resourceBindVertexBufferUs +
+            s.resourceBindDirectUniformStateUs +
+            s.resourceBindDirectStorageBufferUs +
+            s.resourceBindArgbufTextureUs +
+            s.resourceBindArgbufUboUs +
+            s.resourceBindDirectTextureSamplerUs +
+            s.resourceBindHazardValidateUs;
+        resourceBindOtherUs +=
+            s.resourceBindUs > accounted ? s.resourceBindUs - accounted : 0.0;
+    }
+
+    void dump() const {
+        if (!enabled || draws == 0) {
+            return;
+        }
+        const double drawDenom = static_cast<double>(draws);
+        const double resourceBindAccountedUs =
+            resourceBindVertexBufferUs +
+            resourceBindDirectUniformStateUs +
+            resourceBindDirectStorageBufferUs +
+            resourceBindArgbufTextureUs +
+            resourceBindArgbufUboUs +
+            resourceBindDirectTextureSamplerUs +
+            resourceBindHazardValidateUs;
+        std::fprintf(stderr,
+            "[APPGL_ARG_ENCODER_SETUP_FLOOR_PROFILE] summary draws=%llu "
+            "total_us=%.3f avg_total_us=%.3f "
+            "arg_construct_us=%.3f avg_arg_construct_us=%.3f "
+            "arg_validation_us=%.3f avg_arg_validation_us=%.3f "
+            "arg_state_resolve_us=%.3f avg_arg_state_resolve_us=%.3f "
+            "arg_pipeline_build_us=%.3f avg_arg_pipeline_build_us=%.3f "
+            "arg_encoder_setup_us=%.3f avg_arg_encoder_setup_us=%.3f "
+            "arg_primitive_prep_us=%.3f avg_arg_primitive_prep_us=%.3f "
+            "pipeline_state_set_us=%.3f avg_pipeline_state_set_us=%.3f "
+            "resource_bind_us=%.3f avg_resource_bind_us=%.3f "
+            "draw_emit_us=%.3f avg_draw_emit_us=%.3f "
+            "finalize_us=%.3f avg_finalize_us=%.3f "
+            "resource_bind_vertex_buffer_us=%.3f "
+            "avg_resource_bind_vertex_buffer_us=%.3f "
+            "resource_bind_direct_uniform_state_us=%.3f "
+            "avg_resource_bind_direct_uniform_state_us=%.3f "
+            "resource_bind_direct_storage_buffer_us=%.3f "
+            "avg_resource_bind_direct_storage_buffer_us=%.3f "
+            "resource_bind_argbuf_texture_us=%.3f "
+            "avg_resource_bind_argbuf_texture_us=%.3f "
+            "resource_bind_argbuf_ubo_us=%.3f "
+            "avg_resource_bind_argbuf_ubo_us=%.3f "
+            "resource_bind_direct_texture_sampler_us=%.3f "
+            "avg_resource_bind_direct_texture_sampler_us=%.3f "
+            "resource_bind_hazard_validate_us=%.3f "
+            "avg_resource_bind_hazard_validate_us=%.3f "
+            "resource_bind_accounted_us=%.3f "
+            "avg_resource_bind_accounted_us=%.3f "
+            "resource_bind_other_us=%.3f avg_resource_bind_other_us=%.3f "
+            "fbo_draws=%llu argbuf_draws=%llu indexed_draws=%llu "
+            "expanded_draws=%llu first_draw_after_open=%llu "
+            "metal_draw_calls=%llu avg_metal_draw_calls=%.3f\n",
+            static_cast<unsigned long long>(draws),
+            totalUs,
+            totalUs / drawDenom,
+            argConstructUs,
+            argConstructUs / drawDenom,
+            argValidationUs,
+            argValidationUs / drawDenom,
+            argStateResolveUs,
+            argStateResolveUs / drawDenom,
+            argPipelineBuildUs,
+            argPipelineBuildUs / drawDenom,
+            argEncoderSetupUs,
+            argEncoderSetupUs / drawDenom,
+            argPrimitivePrepUs,
+            argPrimitivePrepUs / drawDenom,
+            pipelineStateSetUs,
+            pipelineStateSetUs / drawDenom,
+            resourceBindUs,
+            resourceBindUs / drawDenom,
+            drawEmitUs,
+            drawEmitUs / drawDenom,
+            finalizeUs,
+            finalizeUs / drawDenom,
+            resourceBindVertexBufferUs,
+            resourceBindVertexBufferUs / drawDenom,
+            resourceBindDirectUniformStateUs,
+            resourceBindDirectUniformStateUs / drawDenom,
+            resourceBindDirectStorageBufferUs,
+            resourceBindDirectStorageBufferUs / drawDenom,
+            resourceBindArgbufTextureUs,
+            resourceBindArgbufTextureUs / drawDenom,
+            resourceBindArgbufUboUs,
+            resourceBindArgbufUboUs / drawDenom,
+            resourceBindDirectTextureSamplerUs,
+            resourceBindDirectTextureSamplerUs / drawDenom,
+            resourceBindHazardValidateUs,
+            resourceBindHazardValidateUs / drawDenom,
+            resourceBindAccountedUs,
+            resourceBindAccountedUs / drawDenom,
+            resourceBindOtherUs,
+            resourceBindOtherUs / drawDenom,
+            static_cast<unsigned long long>(fboDraws),
+            static_cast<unsigned long long>(argbufDraws),
+            static_cast<unsigned long long>(indexedDraws),
+            static_cast<unsigned long long>(expandedDraws),
+            static_cast<unsigned long long>(firstDrawAfterEncoderOpen),
+            static_cast<unsigned long long>(metalDrawCalls),
+            static_cast<double>(metalDrawCalls) / drawDenom);
     }
 };
 
@@ -4876,6 +5075,7 @@ struct MetalFrameGraph::Impl {
         }
         drawSubmitProfile.dump();
         encodeSubtimeProfile.dump();
+        argEncoderSetupFloorProfile.dump();
         parallelEncodeProfile.dump();
         threadedDeferredRecordProfile.dump();
         frameAttributionProfile.dump();
@@ -6023,7 +6223,9 @@ struct MetalFrameGraph::Impl {
         const bool profileEncodeSubtime = encodeSubtimeProfile.enabled;
         EncodeSubtimeProfileSample* encodeSubtimeSamplePtr =
             profileEncodeSubtime ? &encodeSubtimeSample : nullptr;
-        const bool profileAny = profileDraw || profileEncodeSubtime;
+        ArgEncoderSetupFloorProfileSample floorProfileSample;
+        const bool profileFloor = argEncoderSetupFloorProfile.enabled;
+        const bool profileAny = profileDraw || profileEncodeSubtime || profileFloor;
         const DrawProfileTimePoint profileTotalStart =
             profileAny ? drawProfileNow() : DrawProfileTimePoint{};
         DrawProfileTimePoint profileValidationEnd = profileTotalStart;
@@ -8542,6 +8744,15 @@ struct MetalFrameGraph::Impl {
                 profileSample.renderStateUs = profileRenderStateUs;
             }
         }
+        DrawProfileTimePoint floorResourceBindCursor = profileBindingStart;
+        auto recordFloorResourceBindSlice = [&](double& bucket) {
+            if (!profileFloor) {
+                return;
+            }
+            const DrawProfileTimePoint now = drawProfileNow();
+            bucket += drawProfileElapsedUs(floorResourceBindCursor, now);
+            floorResourceBindCursor = now;
+        };
 
         // Bind vertex data at buffer index 0.
         // Attributeless draws (gl_VertexID-driven) skip vertex buffer binding.
@@ -8605,6 +8816,8 @@ struct MetalFrameGraph::Impl {
                     static_cast<std::uint64_t>(evb.byteCount));
             }
         }
+        recordFloorResourceBindSlice(
+            floorProfileSample.resourceBindVertexBufferUs);
 
         // Bind per-stage uniform buffers. Under argbuf mode, these are
         // populated into the desc_set 1 argument buffer via the
@@ -8969,6 +9182,8 @@ struct MetalFrameGraph::Impl {
                 }
             }
         }
+        recordFloorResourceBindSlice(
+            floorProfileSample.resourceBindDirectUniformStateUs);
 
         // Bind SSBOs to the render encoder. GL 4.3+ permits vertex and
         // fragment stages to declare `layout(binding=N) buffer X` for
@@ -9027,6 +9242,8 @@ struct MetalFrameGraph::Impl {
                     EncodeMarshalClass::UboBuffer);
             }
         }
+        recordFloorResourceBindSlice(
+            floorProfileSample.resourceBindDirectStorageBufferUs);
 
         if (vertexUsesMultiviewViewMask && !vertexUsesArgBuf) {
             bindVertexBytesIfNeeded(
@@ -9044,6 +9261,8 @@ struct MetalFrameGraph::Impl {
                 24,
                 EncodeMarshalClass::SetBytes);
         }
+        recordFloorResourceBindSlice(
+            floorProfileSample.resourceBindDirectUniformStateUs);
 
         // Phase 8X Group 4d follow-up⁷ — bind textures and samplers for
         // this draw. GLContext::drawArrays / drawArraysInstanced /
@@ -9458,6 +9677,8 @@ struct MetalFrameGraph::Impl {
                                           false,
                                           vertexNeedsSSBOSizeBuffer);
             });
+            recordFloorResourceBindSlice(
+                floorProfileSample.resourceBindArgbufTextureUs);
 
             // Step 7-3 UBO follow-up: populate desc_set 1 argbuf with
             // the default uniform block + explicit `uniform Block`
@@ -9585,6 +9806,8 @@ struct MetalFrameGraph::Impl {
                                       /*isVertex=*/true,
                                       MTLRenderStageVertex);
             });
+            recordFloorResourceBindSlice(
+                floorProfileSample.resourceBindArgbufUboUs);
         }
         // Sprint 8 B Cluster F F1 Day 9 (CKPT81): the per-binding
         // skip used to require BOTH metalTexture AND metalSamplerState
@@ -9601,6 +9824,8 @@ struct MetalFrameGraph::Impl {
         // C52 flicker fix: record the sampled textures for the open CB so
         // in-place uploads targeting them route through the ordered path.
         noteTextureReadsForDraw(info);
+        recordFloorResourceBindSlice(
+            floorProfileSample.resourceBindHazardValidateUs);
         if (!fragmentUsesArgBuf) {
             for (const auto& binding : info.fragmentTextures) {
                 if (binding.metalTexture == nullptr) {
@@ -9671,7 +9896,11 @@ struct MetalFrameGraph::Impl {
                 }
             }
         }
+        recordFloorResourceBindSlice(
+            floorProfileSample.resourceBindDirectTextureSamplerUs);
         recordProducerDrainDespiteBindSkip(encodeSubtimeSamplePtr, info);
+        recordFloorResourceBindSlice(
+            floorProfileSample.resourceBindHazardValidateUs);
 
         DrawProfileTimePoint profilePrimitivePrepStart = profileBindingStart;
         if (profileAny) {
@@ -9864,6 +10093,12 @@ struct MetalFrameGraph::Impl {
             (useExpandedIndices && !expandedIndices.empty()) ||
             (info.indices != nullptr && info.indexCount > 0);
         profileSample.expanded = useExpandedIndices && !expandedIndices.empty();
+        if (profileFloor) {
+            floorProfileSample.fboDraw = isFBODraw;
+            floorProfileSample.argumentBuffers = useArgBuf;
+            floorProfileSample.indexed = profileSample.indexed;
+            floorProfileSample.expanded = profileSample.expanded;
+        }
         DrawProfileTimePoint profilePreDrawStart = profilePrimitivePrepStart;
         auto profileBeginMetalDraw = [&]() -> DrawProfileTimePoint {
             if (!profileAny) {
@@ -10029,12 +10264,36 @@ struct MetalFrameGraph::Impl {
         pendingPresent = true;
         if (profileAny) {
             const DrawProfileTimePoint profileTotalEnd = drawProfileNow();
+            const double profileFinalizeUs =
+                drawProfileElapsedUs(profileFinalizeStart, profileTotalEnd);
+            const double profileTotalUs =
+                drawProfileElapsedUs(profileTotalStart, profileTotalEnd);
             if (profileDraw) {
-                profileSample.finalizeUs =
-                    drawProfileElapsedUs(profileFinalizeStart, profileTotalEnd);
-                profileSample.totalUs =
-                    drawProfileElapsedUs(profileTotalStart, profileTotalEnd);
+                profileSample.finalizeUs = profileFinalizeUs;
+                profileSample.totalUs = profileTotalUs;
                 drawSubmitProfile.record(profileSample);
+            }
+            if (profileFloor) {
+                floorProfileSample.argValidationUs = profileValidationUs;
+                floorProfileSample.argStateResolveUs = profileStateResolveUs;
+                floorProfileSample.argPipelineBuildUs = profilePipelineBuildUs;
+                floorProfileSample.argEncoderSetupUs = profileEncoderSetupUs;
+                floorProfileSample.argPrimitivePrepUs = profilePrimitivePrepUs;
+                floorProfileSample.argConstructUs =
+                    profileValidationUs +
+                    profileStateResolveUs +
+                    profilePipelineBuildUs +
+                    profileEncoderSetupUs +
+                    profilePrimitivePrepUs;
+                floorProfileSample.pipelineStateSetUs = profileRenderStateUs;
+                floorProfileSample.resourceBindUs = profileBindingUs;
+                floorProfileSample.drawEmitUs = profileMetalDrawUs;
+                floorProfileSample.finalizeUs = profileFinalizeUs;
+                floorProfileSample.totalUs = profileTotalUs;
+                floorProfileSample.metalDrawCalls = profileMetalDrawCalls;
+                floorProfileSample.firstDrawAfterEncoderOpen =
+                    wasFirstDrawAfterEncoderOpen;
+                argEncoderSetupFloorProfile.record(floorProfileSample);
             }
             if (profileEncodeSubtime) {
                 encodeSubtimeSample.argValidationUs = profileValidationUs;
@@ -24365,6 +24624,7 @@ private:
     std::unordered_set<PipelineBuildLogKey, PipelineBuildLogKeyHash> loggedPipelineBuildPrograms;
     DrawSubmitProfile drawSubmitProfile;
     EncodeSubtimeProfile encodeSubtimeProfile;
+    ArgEncoderSetupFloorProfile argEncoderSetupFloorProfile;
     // S25 Rung-1 instruments: always-on pacing accumulator + the
     // GL-thread drawable-acquire wait pair (the nextDrawable stall is
     // the one blocking site the command-submission wait kinds can't
