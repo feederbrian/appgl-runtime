@@ -306,7 +306,7 @@ static bool serialBindCacheEnabled() {
 }
 
 static bool defaultUniformGenerationBindCacheEnabled() {
-    return appglEnvEnabledDefaultOff(
+    return appglEnvEnabledDefaultOn(
         "APPGL_DEFAULT_UNIFORM_GENERATION_BIND_CACHE");
 }
 
