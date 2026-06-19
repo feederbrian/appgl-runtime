@@ -1805,7 +1805,9 @@ Runtime& Runtime::shared() {
 }
 
 Runtime::Runtime()
-    : recordCallsEnabled_(appglEnvEnabledDefaultOff("APPGL_RECORD_CALLS")) {
+    : recordCallsEnabled_(appglEnvEnabledDefaultOff("APPGL_RECORD_CALLS")),
+      hotpathConstantHoistEnabled_(
+          appglEnvEnabledDefaultOff("APPGL_HOTPATH_CONSTANT_HOIST")) {
     initializeDispatch();
     memoryPressureObserver_ = std::make_unique<MemoryPressureObserver>();
     // Install crash handlers that print a backtrace on SIGBUS/SIGSEGV so we
@@ -2321,6 +2323,10 @@ std::string Runtime::claimedVersionString() const {
 
 void Runtime::refreshCurrentContextClaimedVersion() {
     if (gCurrentContext != nullptr) {
+        if (hotpathConstantHoistEnabled_ &&
+            gCurrentContext->claimedVersionStringSeeded()) {
+            return;
+        }
         gCurrentContext->setClaimedVersionString(claimedVersionString());
     }
 }

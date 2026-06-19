@@ -76,6 +76,10 @@
 #define APPGL_DCR_SENTINEL_HOOK(name) false
 #endif
 
+static bool envVarPresent(const char* name) {
+    return std::getenv(name) != nullptr;
+}
+
 // Compat-profile upload-format enums removed from the core glcorearb.h
 // surface in GL 3.2. AppGL still accepts them as upload aliases via
 // componentCountForFormat + buildRGBA8Upload; defining them here with
@@ -8138,6 +8142,18 @@ static constexpr std::uint64_t kSubmittedPipelineStatsQueryMask =
 }  // namespace
 
 struct GLContext::Impl {
+    bool hotpathConstantHoistEnabled =
+        appglEnvEnabledDefaultOff("APPGL_HOTPATH_CONSTANT_HOIST");
+    bool forceArgumentBuffersLatched =
+        hotpathConstantHoistEnabled &&
+        envVarPresent("APPGL_ENABLE_ARGUMENT_BUFFERS");
+
+    bool forceArgumentBuffersEnabled() const {
+        return hotpathConstantHoistEnabled
+            ? forceArgumentBuffersLatched
+            : envVarPresent("APPGL_ENABLE_ARGUMENT_BUFFERS");
+    }
+
     ~Impl() {
         dumpProfilesOnce();
         unregisterProfileContext(this);
@@ -9225,8 +9241,7 @@ struct GLContext::Impl {
                     coldBookkeepingStart,
                     coldHazardStart);
             }
-            const bool forceArgBuf =
-                std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr;
+            const bool forceArgBuf = forceArgumentBuffersEnabled();
             group.argumentBuffersEnabled =
                 forceArgBuf ||
                 tdi.vertexMslUsesArgumentBuffer ||
@@ -9324,7 +9339,7 @@ struct GLContext::Impl {
         group.addSubgroup(AppGLSubmissionGroupKind::ComputeDispatch,
                           AppGLCommandReason::ComputeDispatch);
         group.argumentBuffersEnabled =
-            std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr &&
+            forceArgumentBuffersEnabled() &&
             info.metalComputeFunction != nullptr;
         if (group.argumentBuffersEnabled) {
             group.addSubgroup(AppGLSubmissionGroupKind::ArgumentBinding,
@@ -9398,7 +9413,7 @@ struct GLContext::Impl {
                     AppGLCommandReason::TessRender);
         group.approximateFallbackDisallowed = true;
         group.argumentBuffersEnabled =
-            std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr ||
+            forceArgumentBuffersEnabled() ||
             submissionMslUsesArgumentBuffer(info.tessEvalMSL) ||
             submissionMslUsesArgumentBuffer(info.fragmentMSL);
         if (group.argumentBuffersEnabled) {
@@ -27442,6 +27457,7 @@ struct GLContext::Impl {
     // string and the shading-language-version string must reflect what the
     // translator is actually capable of accepting.
     std::string versionString = "4.6 AppGL core";
+    bool claimedVersionStringSeeded = false;
     std::string shadingLanguageVersion = "4.60";
 };
 
@@ -28232,6 +28248,11 @@ void GLContext::setClaimedVersionString(std::string value) {
     // so the GL_VERSION string never regresses to a "bootstrap" suffix
     // engines parse as a GL3 context.
     impl_->versionString = value.empty() ? "4.6 AppGL core" : std::move(value);
+    impl_->claimedVersionStringSeeded = true;
+}
+
+bool GLContext::claimedVersionStringSeeded() const {
+    return impl_->claimedVersionStringSeeded;
 }
 
 GLCapabilities& GLContext::capabilities() {

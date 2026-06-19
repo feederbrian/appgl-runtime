@@ -136,6 +136,15 @@ static std::size_t envSizeLimit(const char* name, std::size_t fallback) {
     return static_cast<std::size_t>(parsed);
 }
 
+static bool envVarPresent(const char* name) {
+    return std::getenv(name) != nullptr;
+}
+
+static std::string envStringOrEmpty(const char* name) {
+    const char* raw = std::getenv(name);
+    return raw != nullptr ? std::string(raw) : std::string{};
+}
+
 static std::size_t mslLibraryCacheLimit() {
     return envSizeLimit("APPGL_MSL_LIBRARY_CACHE_LIMIT", 512);
 }
@@ -230,14 +239,17 @@ static std::uint32_t traceDrawTargetsLimit() {
     return static_cast<std::uint32_t>(parsed);
 }
 
-static bool shouldEmitDrawTargetTrace(GLuint program) {
+static bool consumeTraceDrawTargetLimit(std::uint32_t limit) {
+    static std::atomic<std::uint32_t> emitted{0u};
+    return emitted.fetch_add(1u, std::memory_order_relaxed) < limit;
+}
+
+static bool shouldEmitDrawTargetTraceUncached(GLuint program) {
     const char* raw = std::getenv("APPGL_TRACE_DRAW_TARGETS");
     if (!traceDrawTargetsProgramMatches(raw, program)) {
         return false;
     }
-    static std::atomic<std::uint32_t> emitted{0u};
-    return emitted.fetch_add(1u, std::memory_order_relaxed) <
-        traceDrawTargetsLimit();
+    return consumeTraceDrawTargetLimit(traceDrawTargetsLimit());
 }
 
 static bool metalTessTFEnabled() {
@@ -5368,6 +5380,76 @@ static void startMetalCaptureIfRequested(id<MTLDevice> device);
 static void stopMetalCaptureIfActive();
 
 struct MetalFrameGraph::Impl {
+    bool hotpathConstantHoistEnabled =
+        appglEnvEnabledDefaultOff("APPGL_HOTPATH_CONSTANT_HOIST");
+    std::string traceDrawTargetsEnv =
+        hotpathConstantHoistEnabled
+            ? envStringOrEmpty("APPGL_TRACE_DRAW_TARGETS")
+            : std::string{};
+    std::uint32_t traceDrawTargetsLimitLatched =
+        hotpathConstantHoistEnabled ? traceDrawTargetsLimit() : 512u;
+    bool traceVertexBindingsLatched =
+        hotpathConstantHoistEnabled &&
+        envVarPresent("APPGL_TRACE_VERTEX_BINDINGS");
+    bool logLodBiasLatched =
+        hotpathConstantHoistEnabled && envVarPresent("APPGL_LOG_LB");
+    bool traceFboClearFoldingLatched =
+        hotpathConstantHoistEnabled &&
+        envVarPresent("APPGL_TRACE_FBO_CLEAR_FOLDING");
+    bool traceShaderBuildLatched =
+        hotpathConstantHoistEnabled &&
+        envVarPresent("APPGL_TRACE_SHADER_BUILD");
+    bool tracePsoBuildsLatched =
+        hotpathConstantHoistEnabled &&
+        envVarPresent("APPGL_TRACE_PSO_BUILDS");
+    bool forceArgumentBuffersLatched =
+        hotpathConstantHoistEnabled &&
+        envVarPresent("APPGL_ENABLE_ARGUMENT_BUFFERS");
+
+    bool traceEnvPresent(const char* name, bool latched) const {
+        return hotpathConstantHoistEnabled ? latched : envVarPresent(name);
+    }
+
+    bool shouldEmitDrawTargetTrace(GLuint program) const {
+        if (!hotpathConstantHoistEnabled) {
+            return shouldEmitDrawTargetTraceUncached(program);
+        }
+        if (!traceDrawTargetsProgramMatches(traceDrawTargetsEnv.c_str(), program)) {
+            return false;
+        }
+        return consumeTraceDrawTargetLimit(traceDrawTargetsLimitLatched);
+    }
+
+    bool traceVertexBindingsEnabled() const {
+        return traceEnvPresent("APPGL_TRACE_VERTEX_BINDINGS",
+                               traceVertexBindingsLatched);
+    }
+
+    bool logLodBiasEnabled() const {
+        return traceEnvPresent("APPGL_LOG_LB", logLodBiasLatched);
+    }
+
+    bool traceFboClearFoldingEnabled() const {
+        return traceEnvPresent("APPGL_TRACE_FBO_CLEAR_FOLDING",
+                               traceFboClearFoldingLatched);
+    }
+
+    bool traceShaderBuildEnabled() const {
+        return traceEnvPresent("APPGL_TRACE_SHADER_BUILD",
+                               traceShaderBuildLatched);
+    }
+
+    bool tracePsoBuildsEnabled() const {
+        return traceEnvPresent("APPGL_TRACE_PSO_BUILDS",
+                               tracePsoBuildsLatched);
+    }
+
+    bool forceArgumentBuffersEnabled() const {
+        return hotpathConstantHoistEnabled
+            ? forceArgumentBuffersLatched
+            : translatedDrawForceArgumentBuffersEnv();
+    }
+
     Impl(GLContext* ownerContext,
          void* rawLayer,
          void* rawDevice,
@@ -6796,8 +6878,7 @@ struct MetalFrameGraph::Impl {
         // cache and skip the pipeline-rebuild cost. This undoes the pre-7-4
         // pipeline-cache-miss forcing we used to keep MTLFunctions in scope.
         // C52 rider: latched — getenv was paid per draw (Stage-A d3e62ea class).
-        static const bool forceArgBufEnv =
-            (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
+        const bool forceArgBufEnv = forceArgumentBuffersEnabled();
         if (info.translatedPlanRejectReasonOut != nullptr) {
             info.translatedPlanRejectReasonOut->clear();
         }
@@ -7094,7 +7175,7 @@ struct MetalFrameGraph::Impl {
                         errText = "(nil description)";
                     }
                 }
-                if (std::getenv("APPGL_TRACE_SHADER_BUILD")) {
+                if (traceShaderBuildEnabled()) {
                     std::fprintf(stderr,
                         "[APPGL_PIPELINE] program=%u key=0x%llx build=fail "
                         "stage=%s mode=0x%X verts=%d indices=%d instances=%d "
@@ -7148,7 +7229,7 @@ struct MetalFrameGraph::Impl {
                                                    constantValues:emptyConstants
                                                             error:&vertFnError];
             if (vertFn == nil) {
-                if (std::getenv("APPGL_TRACE_SHADER_BUILD")) {
+                if (traceShaderBuildEnabled()) {
                     std::fprintf(stderr, "[APPGL] vertex-function build failed: %s\n",
                         vertFnError ? vertFnError.localizedDescription.UTF8String : "(no err)");
                 }
@@ -7796,7 +7877,7 @@ struct MetalFrameGraph::Impl {
                 recordBuildFailure("pipeline-state", error);
                 return false;
             }
-            if (std::getenv("APPGL_TRACE_SHADER_BUILD")) {
+            if (traceShaderBuildEnabled()) {
                 std::fprintf(stderr,
                     "[APPGL_PIPELINE] program=%u key=0x%llx build=success "
                     "mode=0x%X verts=%d indices=%d instances=%d attrs=%zu "
@@ -7859,7 +7940,7 @@ struct MetalFrameGraph::Impl {
             // line carries the full key-component set so a steady-state
             // capture shows WHICH component churns (blend tuple? attr
             // layout? sample count?) — attribution only, no behavior.
-            if (std::getenv("APPGL_TRACE_PSO_BUILDS")) {
+            if (tracePsoBuildsEnabled()) {
                 const auto& ca0 = desc.colorAttachments[0];
                 std::fprintf(stderr,
                     "[APPGL_PSO_BUILD] miss=%llu key=0x%llx program=%u "
@@ -8112,7 +8193,7 @@ struct MetalFrameGraph::Impl {
             std::uint32_t foldStencilValue = 0;
             std::array<bool, 8> foldExtraColor{};
             std::array<MTLClearColor, 8> foldExtraColorValue{};
-            if (std::getenv("APPGL_TRACE_FBO_CLEAR_FOLDING") != nullptr) {
+            if (traceFboClearFoldingEnabled()) {
                 std::fprintf(stderr,
                     "[C48] pass-open fbo=%d entries=%zu multiview=%d colorTex=%p dsTex=%p dsLevel=%u dsSlice=%u rtal=%u maxLayer=%u\n",
                     (int)isFBODraw, pendingFboClears.size(),
@@ -8980,7 +9061,7 @@ struct MetalFrameGraph::Impl {
                 info.blend.colorMaskB ? 1 : 0,
                 info.blend.colorMaskA ? 1 : 0,
                 info.rasterizerDiscard ? 1 : 0);
-            if (std::getenv("APPGL_TRACE_VERTEX_BINDINGS") != nullptr) {
+            if (traceVertexBindingsEnabled()) {
                 const std::size_t reflectedInputCount =
                     info.vertexReflection != nullptr
                         ? info.vertexReflection->vertexInputs.size()
@@ -9277,7 +9358,7 @@ struct MetalFrameGraph::Impl {
                     static_cast<NSUInteger>(vertexClipControlYSignSlot),
                     EncodeMarshalClass::SetBytes);
             }
-            const bool logLodBias = std::getenv("APPGL_LOG_LB") != nullptr;
+            const bool logLodBias = logLodBiasEnabled();
             setFloorUniformBytesClass(
                 ArgEncoderSetupFloorProfileSample::UniformBytesClass::
                     TextureState);
@@ -16901,7 +16982,7 @@ fragment float4 appgl_immediate_textured_fs(
         if (pendingFboClears.empty() || texVoid == nullptr) {
             return false;
         }
-        if (std::getenv("APPGL_TRACE_FBO_CLEAR_FOLDING") != nullptr) {
+        if (traceFboClearFoldingEnabled()) {
             std::fprintf(stderr,
                 "[C48] consume? tex=%p aspect=%d%d%d level=%u slice=%u rtal=%u entries=%zu\n",
                 texVoid, (int)isColor, (int)isDepth, (int)isStencil,
@@ -19944,7 +20025,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                                                 constantValues:emptyConstants
                                                          error:&fnErr];
                 if (fn == nil) {
-                    if (std::getenv("APPGL_TRACE_SHADER_BUILD")) {
+                    if (traceShaderBuildEnabled()) {
                         std::fprintf(stderr,
                             "[APPGL] tess compute function build failed: %s\n",
                             fnErr ? fnErr.localizedDescription.UTF8String : "(no err)");
@@ -22354,7 +22435,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         // `resources.storage_images` kept them, producing argbuf
         // entries whose slot was outside the encoder's valid range).
         const bool useArgBuf =
-            (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
+            forceArgumentBuffersEnabled();
         info.submissionGroup.argumentBuffersEnabled = useArgBuf;
         id<MTLFunction> computeFn = (__bridge id<MTLFunction>)info.metalComputeFunction;
         auto populateSSBOSizeConstants = [&](std::vector<std::uint32_t>& sizes) -> bool {
@@ -24400,7 +24481,7 @@ private:
         std::uint64_t prefix,
         TranslatedDrawPlan& out) {
         out = TranslatedDrawPlan{};
-        if (translatedDrawForceArgumentBuffersEnv()) {
+        if (forceArgumentBuffersEnabled()) {
             return false;
         }
         const std::uint64_t pipelineCacheKey =
@@ -24997,7 +25078,7 @@ private:
                                        encoding:NSUTF8StringEncoding];
             ScopedOwnedObjCObject srcRelease(src);
             if (src == nil) {
-                if (std::getenv("APPGL_TRACE_SHADER_BUILD")) {
+                if (traceShaderBuildEnabled()) {
                     std::fprintf(stderr,
                         "[APPGL] MSL library build failed: invalid UTF-8 source\n");
                 }
@@ -25006,7 +25087,7 @@ private:
             ++mslLibrarySourceNSStringCreations;
             NSError* err = nil;
             lib = [device newLibraryWithSource:src options:nil error:&err];
-            if (lib == nil && std::getenv("APPGL_TRACE_SHADER_BUILD")) {
+            if (lib == nil && traceShaderBuildEnabled()) {
                 std::fprintf(stderr, "[APPGL] MSL library build failed: %s\n",
                     err ? err.localizedDescription.UTF8String : "(no err)");
             }

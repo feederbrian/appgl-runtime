@@ -581,6 +581,7 @@ public:
     const GLubyte* getString(GLenum name);
     const std::string& rendererString() const;
     void setClaimedVersionString(std::string value);
+    bool claimedVersionStringSeeded() const;
     GLCapabilities& capabilities();
     const GLCapabilities& capabilities() const;
     GLObjectStore& objects();
