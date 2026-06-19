@@ -1805,7 +1805,7 @@ Runtime& Runtime::shared() {
 }
 
 Runtime::Runtime()
-    : recordCallsEnabled_(appglEnvEnabledDefaultOn("APPGL_RECORD_CALLS")) {
+    : recordCallsEnabled_(appglEnvEnabledDefaultOff("APPGL_RECORD_CALLS")) {
     initializeDispatch();
     memoryPressureObserver_ = std::make_unique<MemoryPressureObserver>();
     // Install crash handlers that print a backtrace on SIGBUS/SIGSEGV so we
