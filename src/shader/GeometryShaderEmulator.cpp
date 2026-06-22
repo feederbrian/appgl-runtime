@@ -13113,10 +13113,7 @@ std::string rewriteFragmentMSLForPrimitiveID(const std::string& fsMsl,
     // For (A) we replace the whole primitive_id param with our
     // stage_in struct. For (B)/(C) we remove the primitive_id
     // param + its surrounding comma, and inject the new
-    // struct-field into the existing main0_in. Only case (A)
-    // applies to CTS `primitive_id_from_fragment` — cases (B)/(C)
-    // need the deeper struct-injection path which we implement
-    // when we first hit a test that triggers them.
+    // struct-field into the existing main0_in.
 
     // Locate the `fragment <return-type> main0(` line. We find
     // `main0(` first, then walk backwards to the start of that
@@ -13141,20 +13138,10 @@ std::string rewriteFragmentMSLForPrimitiveID(const std::string& fsMsl,
     }
     if (depth != 0) return fsMsl;
 
-    // Inspect param list to classify A (single primitive_id) vs
-    // B/C (multiple params). Case A is what CTS
-    // primitive_id_from_fragment uses; B/C need struct-injection
-    // into an existing main0_in — not yet implemented.
     const std::size_t paramListStart = mainPos + 6;
     const std::string paramList = fsMsl.substr(paramListStart, parenEnd - paramListStart);
     const bool isCaseA = (paramList.find(',') == std::string::npos);
-    if (!isCaseA) return fsMsl;
 
-    // Everything between `main0(` and `)`, i.e. `paramList`, is
-    // the original parameter (just the primitive_id). We build
-    // the rewritten MSL by replacing that whole signature line
-    // with our own, with the struct definition preceding it.
-    //
     // Find the opening brace that starts the function body.
     std::size_t braceStart = parenEnd + 1;
     while (braceStart < fsMsl.size() && fsMsl[braceStart] != '{') {
@@ -13168,35 +13155,195 @@ std::string rewriteFragmentMSLForPrimitiveID(const std::string& fsMsl,
     // and any fragment-qualifier attributes SPIRV-Cross emitted.
     const std::string sigPrefix = fsMsl.substr(sigLineStart, mainPos - sigLineStart);
 
-    std::string out;
-    out.reserve(fsMsl.size() + 256);
+    if (isCaseA) {
+        std::string out;
+        out.reserve(fsMsl.size() + 256);
 
-    // Prologue: everything before the function signature line.
-    out.append(fsMsl, 0, sigLineStart);
+        // Prologue: everything before the function signature line.
+        out.append(fsMsl, 0, sigLineStart);
 
-    // Inject a GS-prim-id stage_in struct immediately above the
-    // function signature, on its own line block.
-    out.append("struct _gs_fs_in {\n");
-    out.append("    int _gs_prim_id [[user(locn");
-    out.append(std::to_string(draw.primitiveIDLocation));
-    out.append("), flat]];\n");
-    out.append("};\n\n");
+        // Inject a GS-prim-id stage_in struct immediately above the
+        // function signature, on its own line block.
+        out.append("struct _gs_fs_in {\n");
+        out.append("    int _gs_prim_id [[user(locn");
+        out.append(std::to_string(draw.primitiveIDLocation));
+        out.append("), flat]];\n");
+        out.append("};\n\n");
 
-    // Rebuilt function signature: original prefix + main0 with
-    // our stage_in parameter replacing the old [[primitive_id]]
-    // one. Keep any whitespace between `)` and `{` that was in
-    // the original for formatting parity.
-    out.append(sigPrefix);
-    out.append("main0(_gs_fs_in _gs_in [[stage_in]])");
-    out.append(fsMsl, parenEnd + 1, braceStart - (parenEnd + 1));
+        // Rebuilt function signature: original prefix + main0 with
+        // our stage_in parameter replacing the old [[primitive_id]]
+        // one. Keep any whitespace between `)` and `{` that was in
+        // the original for formatting parity.
+        out.append(sigPrefix);
+        out.append("main0(_gs_fs_in _gs_in [[stage_in]])");
+        out.append(fsMsl, parenEnd + 1, braceStart - (parenEnd + 1));
 
-    // Opening brace + GS-prim-id shadow local, then the rest of
-    // the body unchanged. The local shadows the dropped
-    // parameter so existing `gl_PrimitiveID` references bind to
-    // our injected value without further edits.
-    out.append("{\n");
-    out.append("    uint gl_PrimitiveID = uint(_gs_in._gs_prim_id);\n");
-    out.append(fsMsl, braceStart + 1, std::string::npos);
+        // Opening brace + GS-prim-id shadow local, then the rest of
+        // the body unchanged. The local shadows the dropped
+        // parameter so existing `gl_PrimitiveID` references bind to
+        // our injected value without further edits.
+        out.append("{\n");
+        out.append("    uint gl_PrimitiveID = uint(_gs_in._gs_prim_id);\n");
+        out.append(fsMsl, braceStart + 1, std::string::npos);
+        return out;
+    }
+
+    auto isIdent = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+    };
+    auto trim = [](std::string s) {
+        std::size_t first = 0;
+        while (first < s.size() &&
+               std::isspace(static_cast<unsigned char>(s[first]))) {
+            ++first;
+        }
+        std::size_t last = s.size();
+        while (last > first &&
+               std::isspace(static_cast<unsigned char>(s[last - 1]))) {
+            --last;
+        }
+        return s.substr(first, last - first);
+    };
+    auto parseTrailingIdent = [&](const std::string& s,
+                                  std::size_t end,
+                                  std::string& ident,
+                                  std::size_t& identStart) -> bool {
+        while (end > 0 &&
+               !isIdent(s[end - 1])) {
+            --end;
+        }
+        if (end == 0) return false;
+        identStart = end;
+        while (identStart > 0 && isIdent(s[identStart - 1])) {
+            --identStart;
+        }
+        ident = s.substr(identStart, end - identStart);
+        return !ident.empty();
+    };
+
+    std::string newParamList = paramList;
+    const std::size_t relPrimPos = paramPos - paramListStart;
+    if (relPrimPos >= newParamList.size()) return fsMsl;
+
+    std::size_t removeStart = relPrimPos;
+    std::size_t removeEnd = relPrimPos + primIdParam.size();
+    std::size_t afterPrim = removeEnd;
+    while (afterPrim < newParamList.size() &&
+           std::isspace(static_cast<unsigned char>(newParamList[afterPrim]))) {
+        ++afterPrim;
+    }
+
+    if (afterPrim < newParamList.size() && newParamList[afterPrim] == ',') {
+        // Case B: primitive_id is first. Drop it, the following comma,
+        // and any separator whitespace before the next parameter.
+        removeEnd = afterPrim + 1;
+        while (removeEnd < newParamList.size() &&
+               std::isspace(static_cast<unsigned char>(newParamList[removeEnd]))) {
+            ++removeEnd;
+        }
+    } else {
+        // Case C: primitive_id is not first. Drop the separator comma
+        // immediately before it plus any whitespace around the removed
+        // parameter.
+        std::size_t beforePrim = removeStart;
+        while (beforePrim > 0 &&
+               std::isspace(static_cast<unsigned char>(newParamList[beforePrim - 1]))) {
+            --beforePrim;
+        }
+        if (beforePrim == 0 || newParamList[beforePrim - 1] != ',') {
+            return fsMsl;
+        }
+        removeStart = beforePrim - 1;
+        while (removeEnd < newParamList.size() &&
+               std::isspace(static_cast<unsigned char>(newParamList[removeEnd]))) {
+            ++removeEnd;
+        }
+    }
+    newParamList.erase(removeStart, removeEnd - removeStart);
+    newParamList = trim(newParamList);
+
+    const std::string stageInAttr = "[[stage_in]]";
+    const std::size_t stageAttrPos = newParamList.find(stageInAttr);
+    if (stageAttrPos == std::string::npos) {
+        std::string out;
+        out.reserve(fsMsl.size() + 256);
+
+        out.append(fsMsl, 0, sigLineStart);
+        out.append("struct _gs_fs_in {\n");
+        out.append("    int _gs_prim_id [[user(locn");
+        out.append(std::to_string(draw.primitiveIDLocation));
+        out.append("), flat]];\n");
+        out.append("};\n\n");
+
+        out.append(sigPrefix);
+        out.append("main0(_gs_fs_in _gs_in [[stage_in]]");
+        if (!newParamList.empty()) {
+            out.append(", ");
+            out.append(newParamList);
+        }
+        out.append(")");
+        out.append(fsMsl, parenEnd + 1, braceStart - (parenEnd + 1));
+        out.append("{\n");
+        out.append("    uint gl_PrimitiveID = uint(_gs_in._gs_prim_id);\n");
+        out.append(fsMsl, braceStart + 1, std::string::npos);
+        return out;
+    }
+
+    std::size_t stageParamStart = stageAttrPos;
+    while (stageParamStart > 0 && newParamList[stageParamStart - 1] != ',') {
+        --stageParamStart;
+    }
+    if (stageParamStart < newParamList.size() &&
+        newParamList[stageParamStart] == ',') {
+        ++stageParamStart;
+    }
+
+    const std::string stageParamPrefix =
+        trim(newParamList.substr(stageParamStart, stageAttrPos - stageParamStart));
+    std::string stageInName;
+    std::size_t nameStart = 0;
+    if (!parseTrailingIdent(stageParamPrefix, stageParamPrefix.size(),
+                            stageInName, nameStart)) {
+        return fsMsl;
+    }
+
+    std::string stageInType;
+    std::size_t typeEnd = nameStart;
+    while (typeEnd > 0 &&
+           (std::isspace(static_cast<unsigned char>(stageParamPrefix[typeEnd - 1])) ||
+            stageParamPrefix[typeEnd - 1] == '&' ||
+            stageParamPrefix[typeEnd - 1] == '*')) {
+        --typeEnd;
+    }
+    std::size_t typeStart = 0;
+    if (!parseTrailingIdent(stageParamPrefix, typeEnd, stageInType, typeStart)) {
+        return fsMsl;
+    }
+
+    const std::string structNeedle = "struct " + stageInType;
+    const std::size_t structPos = fsMsl.find(structNeedle);
+    if (structPos == std::string::npos) return fsMsl;
+    const std::size_t structBraceOpen = fsMsl.find('{', structPos);
+    if (structBraceOpen == std::string::npos) return fsMsl;
+    const std::size_t structBraceClose = fsMsl.find("};", structBraceOpen);
+    if (structBraceClose == std::string::npos) return fsMsl;
+
+    const bool hasInjectedField =
+        fsMsl.find("_gs_prim_id", structBraceOpen) < structBraceClose;
+    std::string out = fsMsl;
+    out.reserve(fsMsl.size() + 192);
+
+    std::string shadowLocal = "\n    uint gl_PrimitiveID = uint(";
+    shadowLocal += stageInName;
+    shadowLocal += "._gs_prim_id);\n";
+    out.insert(braceStart + 1, shadowLocal);
+    out.replace(paramListStart, parenEnd - paramListStart, newParamList);
+    if (!hasInjectedField) {
+        std::string field = "    int _gs_prim_id [[user(locn";
+        field += std::to_string(draw.primitiveIDLocation);
+        field += "), flat]];\n";
+        out.insert(structBraceClose, field);
+    }
     return out;
 }
 
