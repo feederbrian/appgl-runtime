@@ -192,7 +192,9 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         GLuint rejectedGsProgramName = 0;
         if (impl_->state->currentProgram() != 0) {
             if (program != nullptr && program->gsPresent &&
-                !program->geometryEmulated) {
+                !program->geometryEmulated &&
+                program->metalGSTier !=
+                    GLProgramObject::MetalGSTier::MeshShader) {
                 rejectedGsProgram = program;
                 rejectedGsProgramName = programName;
             }
@@ -206,7 +208,9 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 ? impl_->objects->programs().get(gsProgramName)
                 : nullptr;
             if (gsProgram != nullptr && gsProgram->gsPresent &&
-                !gsProgram->geometryEmulated) {
+                !gsProgram->geometryEmulated &&
+                gsProgram->metalGSTier !=
+                    GLProgramObject::MetalGSTier::MeshShader) {
                 rejectedGsProgram = gsProgram;
                 rejectedGsProgramName = gsProgramName;
             }

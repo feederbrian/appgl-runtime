@@ -668,7 +668,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
         if (glUseProgramName != 0) {
             if (emulProgram != nullptr &&
                 emulProgram->gsPresent &&
-                !emulProgram->geometryEmulated) {
+                !emulProgram->geometryEmulated &&
+                emulProgram->metalGSTier !=
+                    GLProgramObject::MetalGSTier::MeshShader) {
                 rejectedGsProgram = emulProgram;
                 rejectedGsProgramName = emulProgramName;
             }
@@ -683,7 +685,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 : nullptr;
             if (gsProgram != nullptr &&
                 gsProgram->gsPresent &&
-                !gsProgram->geometryEmulated) {
+                !gsProgram->geometryEmulated &&
+                gsProgram->metalGSTier !=
+                    GLProgramObject::MetalGSTier::MeshShader) {
                 rejectedGsProgram = gsProgram;
                 rejectedGsProgramName = gsProgramName;
             }
