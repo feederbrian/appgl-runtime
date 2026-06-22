@@ -9168,6 +9168,7 @@ GLenum outputModeToGL(std::uint32_t mode) {
 
 bool detectGeometryEmulatable(GLProgramObject& program) {
     program.geometryEmulated = false;
+    program.geometryEmulationDiagnostic.clear();
     program.gsPresent = false;
     program.gsInputTopology = 0;
     program.gsOutputTopology = 0;
@@ -9175,11 +9176,26 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     program.gsInvocations = 1;
 
     const bool trace = std::getenv("APPGL_TRACE_GS_EMUL") != nullptr;
-    if (program.geometrySpirv.empty()) return false;
+    auto reject = [&](std::string reason) {
+        program.geometryEmulationDiagnostic = std::move(reason);
+        if (trace) {
+            std::fprintf(stderr, "[GS-emul] reject: %s\n",
+                         program.geometryEmulationDiagnostic.c_str());
+        }
+        return false;
+    };
+
+    if (program.geometrySpirv.empty()) {
+        return reject("empty geometry SPIR-V");
+    }
 
     SpirvModule mod;
-    if (!mod.parse(program.geometrySpirv.data(), program.geometrySpirv.size())) return false;
-    if (!mod.haveFuncBody) return false;
+    if (!mod.parse(program.geometrySpirv.data(), program.geometrySpirv.size())) {
+        return reject("SPIR-V parse failed: " + mod.parseError);
+    }
+    if (!mod.haveFuncBody) {
+        return reject("SPIR-V module has no function body");
+    }
 
     // Topology + max_vertices. GL_POINTS is literally 0x0, so we use
     // explicit haveInput/haveOutput flags rather than comparing the
@@ -9219,14 +9235,19 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     program.gsMaxVertices = maxVertices;
     program.gsInvocations = invocations;
 
-    if (!haveInputTopo || !haveOutputTopo || maxVertices == 0) return false;
+    if (!haveInputTopo || !haveOutputTopo || maxVertices == 0) {
+        return reject("missing GS input/output topology or max_vertices");
+    }
     // Multi-invocation GS supported via per-invocation re-run in
     // `emulateGeometryDraw` (gl_InvocationID fed into the
     // interpreter via setGsInvocationId). Guard against runaway
     // invocations counts that would blow up draw time: reject
     // anything above a sensible advertised upper bound.
     constexpr std::uint32_t kMaxGsInvocationsEmulated = 32;
-    if (invocations == 0 || invocations > kMaxGsInvocationsEmulated) return false;
+    if (invocations == 0 || invocations > kMaxGsInvocationsEmulated) {
+        return reject("unsupported GS invocation count " +
+                      std::to_string(invocations));
+    }
     (void)trace;   // still used in the body walker below
 
     // Reject emulation when the VS writes gl_ClipDistance /
@@ -9346,11 +9367,8 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     // synth VS when the cull count is ambiguous, or
     // reflecting the FS input layout).
     if (programStoresClipOrCull() && !geometryStoresLayerOrViewport()) {
-        if (std::getenv("APPGL_TRACE_GS_EMUL") != nullptr) {
-            std::fprintf(stderr, "[GS-emul] reject: VS stores gl_Clip/CullDistance — "
-                         "emulator path still has pixel-coverage gaps for CTS cull_distance.*\n");
-        }
-        return false;
+        return reject("VS stores gl_Clip/CullDistance; GS emulator path still "
+                      "has pixel-coverage gaps for CTS cull_distance.*");
     }
 
     // Walk the function body and reject on any unsupported opcode.
@@ -9358,18 +9376,21 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     // diagnostics can grep for "[GS-emul] reject" and enumerate which
     // opcodes are still missing. Gated behind APPGL_TRACE_GS_EMUL so
     // production runs stay quiet.
+    std::string scanDiagnostic;
     auto scanFunctionBody = [&](std::size_t start, std::size_t end) -> bool {
         std::size_t pc = start;
         while (pc < end) {
             const std::uint32_t inst = mod.words[pc];
             const std::uint16_t opcode = static_cast<std::uint16_t>(inst & 0xFFFF);
             const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
-            if (wc == 0) return false;   // malformed
+            if (wc == 0) {
+                scanDiagnostic = "malformed GS SPIR-V instruction at pc=" +
+                    std::to_string(pc);
+                return false;
+            }
             if (!isSupportedGsOpcode(opcode)) {
-                if (std::getenv("APPGL_TRACE_GS_EMUL") != nullptr) {
-                    std::fprintf(stderr, "[GS-emul] reject: unsupported opcode %u at pc=%zu\n",
-                                 opcode, pc);
-                }
+                scanDiagnostic = "unsupported GS opcode " +
+                    std::to_string(opcode) + " at pc=" + std::to_string(pc);
                 return false;
             }
             pc += wc;
@@ -9379,14 +9400,19 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     if (!mod.functions.empty()) {
         for (const auto& kv : mod.functions) {
             if (!scanFunctionBody(kv.second.bodyStart, kv.second.bodyEnd)) {
-                return false;
+                return reject(scanDiagnostic.empty()
+                    ? "unsupported GS function body"
+                    : scanDiagnostic);
             }
         }
     } else if (!scanFunctionBody(mod.funcBodyStart, mod.funcBodyEnd)) {
-        return false;
+        return reject(scanDiagnostic.empty()
+            ? "unsupported GS function body"
+            : scanDiagnostic);
     }
 
     program.geometryEmulated = true;
+    program.geometryEmulationDiagnostic.clear();
     return true;
 }
 

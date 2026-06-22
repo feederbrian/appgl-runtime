@@ -28173,6 +28173,44 @@ void recordPipelineBuildFailureOnce(GLProgramObject* program,
     Runtime::shared().recordShaderTranslation(std::move(record));
 }
 
+void recordGeometryShaderEmulationFailure(GLProgramObject* program,
+                                          GLuint programName,
+                                          const char* siteName,
+                                          const std::string& diagnostic,
+                                          bool detectRejected) {
+    if (program == nullptr || siteName == nullptr) {
+        return;
+    }
+    std::string reason = diagnostic;
+    if (reason.empty()) {
+        reason = program->geometryEmulationDiagnostic.empty()
+            ? "geometry shader emulation failed without diagnostic"
+            : program->geometryEmulationDiagnostic;
+    }
+    APPGL_LOG(SHADER,
+              @"[GL] %s GS-emul FAIL-LOUD program=%u detectRejected=%d diagnostic=%s",
+              siteName, programName, detectRejected ? 1 : 0, reason.c_str());
+    std::fprintf(stderr,
+        "[APPGL][GS-EMUL-FAIL] site=%s program=%u gsPresent=%d "
+        "geometryEmulated=%d detectRejected=%d diagnostic=%s\n",
+        siteName,
+        static_cast<unsigned>(programName),
+        program->gsPresent ? 1 : 0,
+        program->geometryEmulated ? 1 : 0,
+        detectRejected ? 1 : 0,
+        reason.c_str());
+
+    Runtime::ShaderTranslationRecord record;
+    record.id = "program-" + std::to_string(programName) + "-geometry-emulation";
+    record.stage = detectRejected ? "geometry-link-reject" : "geometry-runtime-bail";
+    record.sourceHash = program->vertexSourceHash;
+    record.vertexSourceHash = program->vertexSourceHash;
+    record.fragmentSourceHash = program->fragmentSourceHash;
+    record.glslangLog = std::string(siteName) + ": " + reason;
+    record.success = false;
+    Runtime::shared().recordShaderTranslation(std::move(record));
+}
+
 }  // namespace
 
 void GLContext::pushError(GLenum error,

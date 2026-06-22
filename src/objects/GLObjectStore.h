@@ -1107,6 +1107,7 @@ struct GLProgramObject {
     // branches on `geometryEmulated` before the normal translated-
     // pipeline path. See docs/geometry-shader-emulation.md.
     bool geometryEmulated = false;
+    std::string geometryEmulationDiagnostic;
     std::vector<std::uint32_t> geometrySpirv;
     // Tessellation-emulation flag. Set by
     // `appgl::detectTessellationEmulatable` at link time when the

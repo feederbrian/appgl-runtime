@@ -660,6 +660,42 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     GLuint emulProgramName = (glUseProgramName != 0) ? programName : 0;
     GLProgramObject* emulProgram = impl_->resolvePipelineEmulationProgram(
         glUseProgramName, emulProgramName);
+    const bool gsRasterExpected =
+        !impl_->state->isEnabled(GL_RASTERIZER_DISCARD);
+    if (gsRasterExpected) {
+        GLProgramObject* rejectedGsProgram = nullptr;
+        GLuint rejectedGsProgramName = 0;
+        if (glUseProgramName != 0) {
+            if (emulProgram != nullptr &&
+                emulProgram->gsPresent &&
+                !emulProgram->geometryEmulated) {
+                rejectedGsProgram = emulProgram;
+                rejectedGsProgramName = emulProgramName;
+            }
+        } else {
+            const GLuint pipelineName = impl_->state->currentProgramPipeline();
+            GLProgramPipelineObject* ppo = (pipelineName != 0)
+                ? impl_->objects->programPipelines().get(pipelineName)
+                : nullptr;
+            const GLuint gsProgramName = ppo ? ppo->geometryProgram : 0;
+            GLProgramObject* gsProgram = (gsProgramName != 0)
+                ? impl_->objects->programs().get(gsProgramName)
+                : nullptr;
+            if (gsProgram != nullptr &&
+                gsProgram->gsPresent &&
+                !gsProgram->geometryEmulated) {
+                rejectedGsProgram = gsProgram;
+                rejectedGsProgramName = gsProgramName;
+            }
+        }
+        if (rejectedGsProgram != nullptr) {
+            recordGeometryShaderEmulationFailure(
+                rejectedGsProgram, rejectedGsProgramName,
+                "drawArrays", rejectedGsProgram->geometryEmulationDiagnostic,
+                /*detectRejected=*/true);
+            return true;
+        }
+    }
     // Sprint 3 Step 2 Phase 2 [metal-mesh-GS]: try the mesh-shader path
     // first when the program's tier classifies as MeshShader. Default-on
     // post Path G+H verification (CKPT17 closed Phase 2 with +1 net gain
@@ -809,8 +845,17 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 }
                 // Fall through to the legacy path if encode fails
                 // for non-B4 draws.
-            } else if (!ed.diagnostic.empty()) {
-                APPGL_LOG(SHADER, @"drawArrays GS-emul: %s", ed.diagnostic.c_str());
+            } else {
+                const std::string gsDiag = ed.diagnostic.empty()
+                    ? "GS emulator returned ok=false without diagnostic"
+                    : ed.diagnostic;
+                APPGL_LOG(SHADER, @"drawArrays GS-emul: %s", gsDiag.c_str());
+                if (gsRasterExpected) {
+                    recordGeometryShaderEmulationFailure(
+                        emulProgram, emulProgramName,
+                        "drawArrays", gsDiag, /*detectRejected=*/false);
+                    return true;
+                }
                 if (dcr4eExactNoLegacy) {
                     appgl::AppGLSubmissionGroup fallbackGroup;
                     impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
@@ -818,12 +863,6 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                               @"drawArrays GS-emul exact interpreter failed — consuming as unsupported");
                     return true;
                 }
-            } else if (dcr4eExactNoLegacy) {
-                appgl::AppGLSubmissionGroup fallbackGroup;
-                impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
-                APPGL_LOG(SHADER,
-                          @"drawArrays GS-emul exact interpreter failed — consuming as unsupported");
-                return true;
             }
         }
     }

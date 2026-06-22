@@ -5030,13 +5030,20 @@ bool GLContext::linkProgram(GLuint program) {
                     "", true
                 });
             } else {
+                const std::string gsEmulDiagnostic =
+                    programObject->geometryEmulationDiagnostic.empty()
+                        ? "unsupported opcode, topology, or execution mode"
+                        : programObject->geometryEmulationDiagnostic;
+                programObject->linkLog +=
+                    "\n[geometry-emul] rejected: " + gsEmulDiagnostic;
                 Runtime::shared().recordShaderTranslation({
                     programTag + "-geometry-emulation", "geometry",
                     quickHash(geometryShader->source),
                     linkVertexHash, linkFragmentHash,
                     "geometry shader outside the CPU-emulator's supported "
-                    "SPIR-V subset (unsupported opcode or topology); program "
-                    "falls back to VS+FS-only raster without GS",
+                    "SPIR-V subset; raster draws will be fail-loud instead "
+                    "of falling back to VS+FS-only. Reason: " +
+                        gsEmulDiagnostic,
                     "", false
                 });
             }

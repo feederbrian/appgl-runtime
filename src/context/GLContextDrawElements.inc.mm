@@ -185,6 +185,40 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     // glUseProgramStages without ever calling glUseProgram.
     GLuint programName = impl_->state->currentProgram();
     GLProgramObject* program = impl_->resolveDrawProgram(programName);
+    const bool gsRasterExpected =
+        !impl_->state->isEnabled(GL_RASTERIZER_DISCARD);
+    if (gsRasterExpected) {
+        GLProgramObject* rejectedGsProgram = nullptr;
+        GLuint rejectedGsProgramName = 0;
+        if (impl_->state->currentProgram() != 0) {
+            if (program != nullptr && program->gsPresent &&
+                !program->geometryEmulated) {
+                rejectedGsProgram = program;
+                rejectedGsProgramName = programName;
+            }
+        } else {
+            const GLuint pipelineName = impl_->state->currentProgramPipeline();
+            GLProgramPipelineObject* ppo = (pipelineName != 0)
+                ? impl_->objects->programPipelines().get(pipelineName)
+                : nullptr;
+            const GLuint gsProgramName = ppo ? ppo->geometryProgram : 0;
+            GLProgramObject* gsProgram = (gsProgramName != 0)
+                ? impl_->objects->programs().get(gsProgramName)
+                : nullptr;
+            if (gsProgram != nullptr && gsProgram->gsPresent &&
+                !gsProgram->geometryEmulated) {
+                rejectedGsProgram = gsProgram;
+                rejectedGsProgramName = gsProgramName;
+            }
+        }
+        if (rejectedGsProgram != nullptr) {
+            recordGeometryShaderEmulationFailure(
+                rejectedGsProgram, rejectedGsProgramName,
+                "drawElements", rejectedGsProgram->geometryEmulationDiagnostic,
+                /*detectRejected=*/true);
+            return true;
+        }
+    }
     {
         bool advancedBlendHandled = false;
         const bool advancedBlendOk =
@@ -362,10 +396,22 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
                     return true;
                 }
-            } else if (dcr4eExactNoLegacy) {
-                appgl::AppGLSubmissionGroup fallbackGroup;
-                impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
-                return true;
+            } else {
+                const std::string gsDiag = ed.diagnostic.empty()
+                    ? "GS emulator returned ok=false without diagnostic"
+                    : ed.diagnostic;
+                APPGL_LOG(SHADER, @"drawElements GS-emul: %s", gsDiag.c_str());
+                if (gsRasterExpected) {
+                    recordGeometryShaderEmulationFailure(
+                        program, programName,
+                        "drawElements", gsDiag, /*detectRejected=*/false);
+                    return true;
+                }
+                if (dcr4eExactNoLegacy) {
+                    appgl::AppGLSubmissionGroup fallbackGroup;
+                    impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
+                    return true;
+                }
             }
         }
     }
