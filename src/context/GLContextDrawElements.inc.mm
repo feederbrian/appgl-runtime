@@ -187,42 +187,6 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     GLProgramObject* program = impl_->resolveDrawProgram(programName);
     const bool gsRasterExpected =
         !impl_->state->isEnabled(GL_RASTERIZER_DISCARD);
-    if (gsRasterExpected) {
-        GLProgramObject* rejectedGsProgram = nullptr;
-        GLuint rejectedGsProgramName = 0;
-        if (impl_->state->currentProgram() != 0) {
-            if (program != nullptr && program->gsPresent &&
-                !program->geometryEmulated &&
-                program->metalGSTier !=
-                    GLProgramObject::MetalGSTier::MeshShader) {
-                rejectedGsProgram = program;
-                rejectedGsProgramName = programName;
-            }
-        } else {
-            const GLuint pipelineName = impl_->state->currentProgramPipeline();
-            GLProgramPipelineObject* ppo = (pipelineName != 0)
-                ? impl_->objects->programPipelines().get(pipelineName)
-                : nullptr;
-            const GLuint gsProgramName = ppo ? ppo->geometryProgram : 0;
-            GLProgramObject* gsProgram = (gsProgramName != 0)
-                ? impl_->objects->programs().get(gsProgramName)
-                : nullptr;
-            if (gsProgram != nullptr && gsProgram->gsPresent &&
-                !gsProgram->geometryEmulated &&
-                gsProgram->metalGSTier !=
-                    GLProgramObject::MetalGSTier::MeshShader) {
-                rejectedGsProgram = gsProgram;
-                rejectedGsProgramName = gsProgramName;
-            }
-        }
-        if (rejectedGsProgram != nullptr) {
-            recordGeometryShaderEmulationFailure(
-                rejectedGsProgram, rejectedGsProgramName,
-                "drawElements", rejectedGsProgram->geometryEmulationDiagnostic,
-                /*detectRejected=*/true);
-            return true;
-        }
-    }
     {
         bool advancedBlendHandled = false;
         const bool advancedBlendOk =

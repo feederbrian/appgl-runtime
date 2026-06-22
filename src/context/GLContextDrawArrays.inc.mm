@@ -662,44 +662,6 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
         glUseProgramName, emulProgramName);
     const bool gsRasterExpected =
         !impl_->state->isEnabled(GL_RASTERIZER_DISCARD);
-    if (gsRasterExpected) {
-        GLProgramObject* rejectedGsProgram = nullptr;
-        GLuint rejectedGsProgramName = 0;
-        if (glUseProgramName != 0) {
-            if (emulProgram != nullptr &&
-                emulProgram->gsPresent &&
-                !emulProgram->geometryEmulated &&
-                emulProgram->metalGSTier !=
-                    GLProgramObject::MetalGSTier::MeshShader) {
-                rejectedGsProgram = emulProgram;
-                rejectedGsProgramName = emulProgramName;
-            }
-        } else {
-            const GLuint pipelineName = impl_->state->currentProgramPipeline();
-            GLProgramPipelineObject* ppo = (pipelineName != 0)
-                ? impl_->objects->programPipelines().get(pipelineName)
-                : nullptr;
-            const GLuint gsProgramName = ppo ? ppo->geometryProgram : 0;
-            GLProgramObject* gsProgram = (gsProgramName != 0)
-                ? impl_->objects->programs().get(gsProgramName)
-                : nullptr;
-            if (gsProgram != nullptr &&
-                gsProgram->gsPresent &&
-                !gsProgram->geometryEmulated &&
-                gsProgram->metalGSTier !=
-                    GLProgramObject::MetalGSTier::MeshShader) {
-                rejectedGsProgram = gsProgram;
-                rejectedGsProgramName = gsProgramName;
-            }
-        }
-        if (rejectedGsProgram != nullptr) {
-            recordGeometryShaderEmulationFailure(
-                rejectedGsProgram, rejectedGsProgramName,
-                "drawArrays", rejectedGsProgram->geometryEmulationDiagnostic,
-                /*detectRejected=*/true);
-            return true;
-        }
-    }
     // Sprint 3 Step 2 Phase 2 [metal-mesh-GS]: try the mesh-shader path
     // only when explicitly enabled. APPGL_ENABLE_MESH_GS is default-off
     // while the mesh path is embryonic; the CPU GS interpreter remains
