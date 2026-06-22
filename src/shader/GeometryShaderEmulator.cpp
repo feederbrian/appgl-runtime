@@ -154,7 +154,7 @@ enum GLSLstd450 : std::uint32_t {
     GLSLstd450Modf = 35, GLSLstd450ModfStruct = 36,
     GLSLstd450FMin = 37, GLSLstd450UMin = 38, GLSLstd450SMin = 39,
     GLSLstd450FMax = 40, GLSLstd450UMax = 41, GLSLstd450SMax = 42,
-    GLSLstd450FClamp = 43,
+    GLSLstd450FClamp = 43, GLSLstd450UClamp = 44, GLSLstd450SClamp = 45,
     GLSLstd450FMix = 46, GLSLstd450Step = 48, GLSLstd450SmoothStep = 49,
     GLSLstd450Fma = 50, GLSLstd450Frexp = 51,
     GLSLstd450FrexpStruct = 52, GLSLstd450Ldexp = 53,
@@ -4550,6 +4550,23 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
         case ::GLSLstd450FClamp:  return ternaryMap([](float x, float lo, float hi) {
             return std::fmin(std::fmax(x, lo), hi);
         });
+        case ::GLSLstd450UClamp: {
+            Value r = a;
+            for (int k = 0; k < a.componentCount(); ++k) {
+                r.i[k] = static_cast<std::int32_t>(
+                    std::min(std::max(uintLane(a, k), uintLane(b, k)),
+                             uintLane(c, k)));
+            }
+            return r;
+        }
+        case ::GLSLstd450SClamp: {
+            Value r = a;
+            for (int k = 0; k < a.componentCount(); ++k) {
+                r.i[k] = std::min(std::max(intLane(a, k), intLane(b, k)),
+                                  intLane(c, k));
+            }
+            return r;
+        }
         case ::GLSLstd450FMix:    return ternaryMap([](float x, float y, float t) {
             return x * (1.0f - t) + y * t;
         });
