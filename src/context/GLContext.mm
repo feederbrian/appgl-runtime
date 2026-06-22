@@ -15462,12 +15462,23 @@ struct GLContext::Impl {
                 }
                 return false;
             };
-            if (!matchUniform(sampledTex.name)) {
-                constexpr const char* kAppglPrefix = "_appgl_";
-                constexpr std::size_t kAppglPrefixLen = 7;
-                if (sampledTex.name.compare(0, kAppglPrefixLen, kAppglPrefix) == 0) {
-                    matchUniform(sampledTex.name.substr(kAppglPrefixLen));
+            constexpr const char* kAppglPrefix = "_appgl_";
+            constexpr std::size_t kAppglPrefixLen = 7;
+            const bool internalCompatName =
+                sampledTex.name.compare(0, kAppglPrefixLen, kAppglPrefix) == 0;
+            if (internalCompatName) {
+                // CompatShaderRewrite can rename a source uniform such as
+                // `sampler` to `_appgl_sampler` for translation. Prefer the
+                // source-visible uniform slot because glUniform updates land
+                // there; fall back to the reflected name for genuinely
+                // synthesized uniforms.
+                const std::string sourceName =
+                    sampledTex.name.substr(kAppglPrefixLen);
+                if (!matchUniform(sourceName)) {
+                    matchUniform(sampledTex.name);
                 }
+            } else {
+                matchUniform(sampledTex.name);
             }
             entry.preferredTarget = preferredTargetForSamplerType(entry.samplerGLType);
             static constexpr std::uint32_t kMaxDirectMetalSamplerSlots = 16u;
