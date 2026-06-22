@@ -4564,10 +4564,16 @@ bool GLContext::linkProgram(GLuint program) {
                     (void)appgl::detectTessellationEmulatable(*programObject);
                 }
             }
+            const bool meshGsEnabled =
+                appgl::appglEnvEnabledDefaultOff("APPGL_ENABLE_MESH_GS");
             // Sprint 3 [metal-mesh-GS]: try the Metal mesh shader path
             // for GS programs whose shape fits the SPIRV-Cross
-            // GS-as-mesh patch's MVP coverage. Gate is a 3-way
+            // GS-as-mesh patch's MVP coverage. Default-off
+            // APPGL_ENABLE_MESH_GS keeps this embryonic path inert until
+            // it is promoted; with the flag off, the CPU GS path owns
+            // correctness. Gate is a 4-way
             // conjunction:
+            //   (0) APPGL_ENABLE_MESH_GS is explicitly enabled
             //   (a) device supports mesh shaders
             //       (`MTLGPUFamilyMetal3` + `MTLGPUFamilyApple7`)
             //   (b) GS shape is mesh-MVP-supported (triangle/line/point
@@ -4575,7 +4581,7 @@ bool GLContext::linkProgram(GLuint program) {
             //       no streams)
             //   (c) GS SPIR-V successfully translates with
             //       `forceGeometryShaderAsMesh = true`
-            // When all three hold, set metalGSTier = MeshShader and
+            // When all four hold, set metalGSTier = MeshShader and
             // stash the emitted MSL for later PSO build. Otherwise
             // fall back to the existing CPU GS interpreter
             // classification (`geometryEmulated`).
@@ -4770,7 +4776,8 @@ bool GLContext::linkProgram(GLuint program) {
                         }
                     }
                 };
-            if (geometryShader != nullptr && !geometryShader->spirv.empty() &&
+            if (meshGsEnabled &&
+                geometryShader != nullptr && !geometryShader->spirv.empty() &&
                 !programObject->geometryEmulated &&
                 impl_->capabilities != nullptr &&
                 impl_->capabilities->meshShaderSupported()) {

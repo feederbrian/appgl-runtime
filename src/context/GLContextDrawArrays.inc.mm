@@ -701,13 +701,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
         }
     }
     // Sprint 3 Step 2 Phase 2 [metal-mesh-GS]: try the mesh-shader path
-    // first when the program's tier classifies as MeshShader. Default-on
-    // post Path G+H verification (CKPT17 closed Phase 2 with +1 net gain
-    // `gl_pointsize_value`, zero regressions, default-off invariant
-    // 120/136 held, tess invariant 117/140 held). The previous
-    // APPGL_ENABLE_MESH_GS env-gate is removed — encoder failure still
-    // returns false → existing CPU GS interpreter path runs (natural
-    // fallback) for any program that can't be mesh-tier-handled.
+    // only when explicitly enabled. APPGL_ENABLE_MESH_GS is default-off
+    // while the mesh path is embryonic; the CPU GS interpreter remains
+    // the correctness path unless the flag is set.
     // Sprint 7 prep (CKPT52 fix-path A): condition mesh-GS on
     // !transformFeedbackActive. The mesh-GS encoder writes to render
     // targets, not TF buffers; routing TF-active draws through it
@@ -715,7 +711,10 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     // support via writeGsXfbAndCheckDiscard. With TF active, fall
     // through to CPU emul.
     bool meshGsNativeAttempted = false;
-    if (emulProgram != nullptr &&
+    const bool meshGsEnabled =
+        appgl::appglEnvEnabledDefaultOff("APPGL_ENABLE_MESH_GS");
+    if (meshGsEnabled &&
+        emulProgram != nullptr &&
         emulProgram->metalGSTier == GLProgramObject::MetalGSTier::MeshShader &&
         !impl_->transformFeedbackActive) {
         meshGsNativeAttempted = true;

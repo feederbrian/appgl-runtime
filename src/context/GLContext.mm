@@ -25598,12 +25598,11 @@ struct GLContext::Impl {
                                    GLuint baseInstance = 0);
 
     // Sprint 3 Step 2 Phase 2 [metal-mesh-GS]: try the mesh-shader
-    // path for tier=MeshShader programs. Returns true on successful
+    // path for tier=MeshShader programs when APPGL_ENABLE_MESH_GS is set.
+    // Returns true on successful
     // encode + commit, false on any precondition / encode failure
-    // (caller falls through to CPU GS interpreter). Default-on post
-    // Phase 2 close (CKPT17) — Path G + Path H verification cleared
-    // the regression and locked in `gl_pointsize_value` +1 conversion
-    // gain. The prior APPGL_ENABLE_MESH_GS env-gate is removed.
+    // (caller falls through to CPU GS interpreter). Default-off keeps the
+    // embryonic mesh path inert until it is promoted.
     bool tryMetalMeshGSDraw(GLProgramObject& program,
                             GLuint programName,
                             GLenum mode,
@@ -39736,6 +39735,9 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
                                           GLint first)
 {
     (void)first;
+    if (!appglEnvEnabledDefaultOff("APPGL_ENABLE_MESH_GS")) {
+        return false;
+    }
     // MVP envelope guard. Phase 2 currently handles GL_POINTS draws
     // only — covers all 6 conversion-target failing tests
     // (gl_pointsize_value + 5 limits/api point-output cases). Lines
