@@ -1042,6 +1042,7 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_RECTANGLE_TEXTURE_SIZE] = maxTextureSize;
     integerLimits_[GL_MIN_PROGRAM_TEXTURE_GATHER_OFFSET] = -8;
     integerLimits_[GL_MAX_PROGRAM_TEXTURE_GATHER_OFFSET] = 7;
+    integerLimits_[GL_MAX_PROGRAM_TEXTURE_GATHER_COMPONENTS_ARB] = 4;
 
     // Multisampling.
     integerLimits_[GL_MAX_SAMPLE_MASK_WORDS] = 1;
