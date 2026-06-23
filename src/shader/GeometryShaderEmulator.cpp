@@ -229,6 +229,7 @@ using namespace appgl::interp;
 constexpr std::uint32_t kSpvStorageClassAtomicCounter = 10;
 constexpr std::uint32_t kAtomicCounterStorageBindingBase = 0x10000000u;
 constexpr std::uint32_t kGLTexture1DArray = 0x8C18u;
+constexpr std::uint32_t kGLTextureCubeMapArray = 0x9009u;
 
 bool spirvTypeNameLooksAtomicCounterBlock(const SpirvModule& mod,
                                           std::uint32_t typeId) {
@@ -7471,10 +7472,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                         }
                     }
                     const std::uint32_t mipCount =
-                        slot.mipWidths.empty()
-                            ? 1u
-                            : static_cast<std::uint32_t>(
-                                  slot.mipWidths.size());
+                        static_cast<std::uint32_t>(slot.mipWidths.size());
                     if (mipCount > 0 && lodLevel >= mipCount) {
                         lodLevel = mipCount - 1u;
                     }
@@ -7494,10 +7492,24 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                           lodLevel < slot.mipHeights.size())
                         ? slot.mipHeights[lodLevel]
                         : fallbackMipDim(slot.height);
-                    qd = (!slot.mipLayerFaces.empty() &&
-                          lodLevel < slot.mipLayerFaces.size())
-                        ? slot.mipLayerFaces[lodLevel]
-                        : slot.depth;
+                    const std::uint32_t queryLayers =
+                        (!slot.mipLayerFaces.empty() &&
+                         lodLevel < slot.mipLayerFaces.size())
+                            ? slot.mipLayerFaces[lodLevel]
+                            : slot.depth;
+                    const bool queryCubeArray =
+                        (!h.isStorage &&
+                         (slot.samplerType == GL_SAMPLER_CUBE_MAP_ARRAY ||
+                          slot.samplerType == GL_INT_SAMPLER_CUBE_MAP_ARRAY ||
+                          slot.samplerType == GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY ||
+                          slot.samplerType == GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW)) ||
+                        (h.isStorage &&
+                         slot.textureTarget == kGLTextureCubeMapArray);
+                    qd = queryCubeArray
+                        ? (slot.depth != 0
+                               ? slot.depth
+                               : std::max<std::uint32_t>(queryLayers / 6u, 1u))
+                        : queryLayers;
                     if (h.isStorage &&
                         slot.textureTarget == kGLTexture1DArray) {
                         qh = qd;

@@ -979,6 +979,14 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     legacy.rewroteTexture2D = containsIdentifier(source, "texture2D");
     legacy.rewroteTextureCube = containsIdentifier(source, "textureCube");
     legacy.rewroteShadow2DProj = containsIdentifier(source, "shadow2DProj");
+    const bool needsExplicitLocationPreamble =
+        (isVertex &&
+         (legacy.attrVertex || legacy.attrNormal || legacy.attrColor ||
+          legacy.attrMultiTexCoord[0] || legacy.attrMultiTexCoord[1] ||
+          legacy.attrMultiTexCoord[2] || legacy.attrMultiTexCoord[3] ||
+          legacy.attrMultiTexCoord[4] || legacy.attrMultiTexCoord[5] ||
+          legacy.attrMultiTexCoord[6] || legacy.attrMultiTexCoord[7])) ||
+        (isFragment && (legacy.fragColor || legacy.fragDataMax >= 0));
 
     // ---- 2. Version line — compat/pre-140 → core 330 rewrite -------------
     std::size_t versionStart = std::string::npos;
@@ -989,21 +997,20 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         const int versionNumber = parseVersionNumber(versionLine);
         const bool isCompat = containsIdentifier(versionLine, "compatibility");
         // fw¹⁹ version-floor upgrade: glslang's Vulkan client front-end
-        // rejects any desktop shader below `#version 140`, so any
-        // `#version 100/110/120/130` needs to be rewritten. The chosen
-        // upgrade target is `#version 330 core` because 330 is the
-        // lowest version that unlocks explicit `layout(location=...)`
-        // qualifiers and the unified `texture()`/`textureProj()` sampler
-        // overloads — both of which the rewriter relies on when
-        // emitting preamble declarations for the legacy attribute and
-        // texture-sampler names.
+        // rejects any desktop shader below `#version 140`. Separately,
+        // the synthesized legacy attribute / fragment-output preamble
+        // uses explicit `layout(location=...)` qualifiers, which desktop
+        // GLSL accepts as core at 330. Upgrade only when the emitted
+        // preamble actually needs those qualifiers so unrelated #version
+        // 140/150 shaders keep their original frontend surface.
         const bool needsFloorUpgrade =
-            (versionNumber > 0 && versionNumber < 140 && !isCompat);
+            versionNumber > 0 &&
+            ((versionNumber < 140 && !isCompat) ||
+             (needsExplicitLocationPreamble && versionNumber < 330));
         if (needsFloorUpgrade) {
             legacy.upgradedVersion = true;
             // Replace the entire version line with `#version 330 core`
-            // regardless of the original profile token — pre-140
-            // desktop sources have no profile qualifier of their own.
+            // regardless of the original profile token.
             static constexpr const char kReplacement[] = "#version 330 core";
             constexpr std::size_t kReplacementLen = sizeof(kReplacement) - 1;
             const std::size_t lineLen = versionEol - versionStart;
@@ -1687,19 +1694,47 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
 
     // ---- 6. Inject preamble ----------------------------------------------
     // The preamble must come AFTER `#version` (GLSL forbids any non-
-    // whitespace before `#version`). After the preamble we emit `#line 2`
-    // so glslang's error reporting maps the user's line 2 to its original
-    // line number despite the inserted preamble lines.
+    // whitespace before `#version`) and after the contiguous initial
+    // `#extension` block (GLSL requires extension directives to precede
+    // declarations). After the preamble we emit `#line N` so glslang's
+    // error reporting maps the next user line to its original line number
+    // despite the inserted preamble lines.
     if (versionEol != std::string::npos) {
         std::size_t insertAt = versionEol;
         if (insertAt < result.source.size() &&
             result.source[insertAt] == '\n') {
             insertAt += 1;
         }
+        while (insertAt < result.source.size()) {
+            std::size_t lineStart = insertAt;
+            while (lineStart < result.source.size() &&
+                   (result.source[lineStart] == ' ' ||
+                    result.source[lineStart] == '\t')) {
+                ++lineStart;
+            }
+            if (result.source.compare(lineStart, 10, "#extension") != 0) {
+                break;
+            }
+            std::size_t lineEnd = result.source.find('\n', lineStart);
+            if (lineEnd == std::string::npos) {
+                insertAt = result.source.size();
+                break;
+            }
+            insertAt = lineEnd + 1;
+        }
+        unsigned int originalLine = 1;
+        for (std::size_t i = 0; i < insertAt; ++i) {
+            if (result.source[i] == '\n') {
+                ++originalLine;
+            }
+        }
         std::string injected;
-        injected.reserve(preamble.size() + 16);
+        char lineDirective[32];
+        std::snprintf(lineDirective, sizeof(lineDirective),
+                      "#line %u\n", originalLine);
+        injected.reserve(preamble.size() + std::strlen(lineDirective));
         injected.append(preamble);
-        injected.append("#line 2\n");
+        injected.append(lineDirective);
         result.source.insert(insertAt, injected);
     } else {
         // No `#version` line in the original. The fallback version
