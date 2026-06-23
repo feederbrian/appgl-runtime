@@ -2,6 +2,8 @@
 
 #include "ExtensionContext.h"
 
+#include "../runtime/AppGLProfile.h"
+
 #include <algorithm>
 #include <array>
 #include <mutex>
@@ -168,6 +170,9 @@ void rebuildExtensionBlob(RegistryState& state) {
 
 void seedBaseExtensions(RegistryState& state) {
     state.activeExtensions.assign(kBaseExtensions.begin(), kBaseExtensions.end());
+    if (appglCompatProfileEnabled()) {
+        state.activeExtensions.push_back("GL_ARB_compatibility");
+    }
     state.sparseTextureHooks = {};
     state.fragmentShadingRateHooks = {};
 }

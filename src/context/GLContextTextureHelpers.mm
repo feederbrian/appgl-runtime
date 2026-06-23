@@ -1,4 +1,5 @@
 #include "GLContextTextureHelpers.h"
+#include "../runtime/AppGLProfile.h"
 
 namespace appgl {
 
@@ -235,6 +236,8 @@ std::size_t componentCountForFormat(GLenum format) {
         case GL_BGRA:
         case GL_BGRA_INTEGER:
             return 4;
+        case GL_ABGR_EXT:
+            return appglCompatProfileEnabled() ? 4 : 0;
         // Compat-profile upload formats.
         case GL_ALPHA:
         case GL_LUMINANCE:

@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "../runtime/AppGLProfile.h"
 #include "../shared/JsonUtil.h"
 
 namespace appgl {
@@ -112,7 +113,7 @@ const char* CoverageStore::claimedVersion() {
     // the split: see fullyImplementedVersion(), consulted by
     // buildSnapshotJson() to keep the diagnostic coverage JSON honest
     // about what's been exercised.
-    return "4.6 AppGL core";
+    return appglClaimedVersionString();
 }
 
 std::string CoverageStore::fullyImplementedVersion() const {

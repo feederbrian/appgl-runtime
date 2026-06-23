@@ -947,12 +947,11 @@ bool GLContext::linkProgram(GLuint program) {
     // compat-shader rewriter (CompatShaderRewrite.h) prepends `appgl_*`
     // uniform declarations into the rewritten source for every legacy
     // matrix identifier referenced by the original compat-profile
-    // shader. Those synthesized uniforms flowed through the scanner
-    // above and now have real GL locations in `programObject->uniforms`.
-    // Caching them once here means the per-draw matrix push is an O(1)
-    // index lookup into `uniformValues` instead of a string scan over
-    // the uniform table on every frame.
-    {
+    // shader. Most synthesized uniforms flow through the scanner above;
+    // FragmentOnly compatibility synthesis below can also introduce a
+    // vertex-stage matrix uniform that only appears after SPIRV-Cross
+    // reflection supplementing, so keep this refreshable.
+    auto refreshSynthesizedUniformLocations = [&]() {
         namespace SUN = appgl::SynthesizedUniformNames;
         auto findLocByName = [&](const char* name) -> GLint {
             for (const auto& u : programObject->uniforms) {
@@ -988,7 +987,8 @@ bool GLContext::linkProgram(GLuint program) {
             findLocByName("_appgl_BaseVertex");
         programObject->shaderBaseInstanceUniformLocation =
             findLocByName("_appgl_BaseInstance");
-    }
+    };
+    refreshSynthesizedUniformLocations();
 
     // ─── Transform feedback link-time validation ───────────────────────
     // GL 4.6 §11.1.2.1: the linker must reject programs whose transform
@@ -3851,6 +3851,7 @@ bool GLContext::linkProgram(GLuint program) {
         return linked;
     };
 
+    std::string fragmentOnlySyntheticVertexSourceForReflection;
     bool rasterTranslationOk = false;
     switch (kind) {
         case ProgramKind::VertexFragment: {
@@ -4206,6 +4207,105 @@ bool GLContext::linkProgram(GLuint program) {
             break;
         }
         case ProgramKind::FragmentOnly: {
+            bool synthesizedCompatPipeline = false;
+            if (appglCompatProfileEnabled() &&
+                fragmentShader != nullptr &&
+                !fragmentShader->isSpirvBinary) {
+                CompatShaderRewriteResult fsRewrite =
+                    rewriteCompatShader(fragmentShader->source, GL_FRAGMENT_SHADER);
+                if (fsRewrite.legacy.texCoordMax >= 0) {
+                    // Piglit's fixed-function teximage helper feeds generic
+                    // attrib 0 for position and attrib 1 for texture coords.
+                    static constexpr const char* kCompatFragmentOnlyVertexSource =
+                        "#version 330 core\n"
+                        "layout(location = 0) in vec4 piglit_vertex;\n"
+                        "layout(location = 1) in vec2 piglit_texcoord;\n"
+                        "uniform mat4 appgl_ModelViewProjectionMatrix;\n"
+                        "out vec4 appgl_TexCoord[8];\n"
+                        "void main() {\n"
+                        "    gl_Position = appgl_ModelViewProjectionMatrix * piglit_vertex;\n"
+                        "    for (int i = 0; i < 8; ++i) {\n"
+                        "        appgl_TexCoord[i] = vec4(0.0, 0.0, 0.0, 1.0);\n"
+                        "    }\n"
+                        "    appgl_TexCoord[0] = vec4(piglit_texcoord, 0.0, 1.0);\n"
+                        "}\n";
+                    std::string vsLinkSource =
+                        rewriteShaderDrawParametersForSpirv(
+                            kCompatFragmentOnlyVertexSource, GL_VERTEX_SHADER);
+                    std::string fsLinkSource =
+                        fsRewrite.didRewrite ? fsRewrite.source : fragmentShader->source;
+                    fsLinkSource =
+                        rewriteShaderDrawParametersForSpirv(
+                            fsLinkSource, GL_FRAGMENT_SHADER);
+                    vsLinkSource =
+                        rewriteUnsizedUniformArrayInitializersForSpirv(vsLinkSource);
+                    fsLinkSource =
+                        rewriteUnsizedUniformArrayInitializersForSpirv(fsLinkSource);
+                    vsLinkSource =
+                        rewriteSsboConsecutiveRuntimeArraysForSpirv(vsLinkSource);
+                    fsLinkSource =
+                        rewriteSsboConsecutiveRuntimeArraysForSpirv(fsLinkSource);
+                    vsLinkSource =
+                        rewrite420packImplicitConversionsForSpirv(vsLinkSource);
+                    fsLinkSource =
+                        rewrite420packImplicitConversionsForSpirv(fsLinkSource);
+                    vsLinkSource =
+                        rewrite420packQualifierOrderInvariantInputsForSpirv(vsLinkSource);
+                    fsLinkSource =
+                        rewrite420packQualifierOrderInvariantInputsForSpirv(fsLinkSource);
+
+                    std::string linkErrorLog;
+                    LinkedProgramSpirv linked = translator.compileGLSLProgram(
+                        vsLinkSource, fsLinkSource, 330, &linkErrorLog);
+                    if (!linked.linkSucceeded) {
+                        Runtime::shared().recordShaderTranslation({
+                            programTag + "-fragmentonly-compat-link-spirv",
+                            "link", "", "", linkFragmentHash,
+                            linkErrorLog.empty()
+                                ? "compileGLSLProgram failed (no log)"
+                                : linkErrorLog,
+                            "", false
+                        });
+                    } else {
+                        const bool forceRasterArgBuf =
+                            spirvUsesStorageBuffers(linked.vertexSpirv.data(),
+                                                    linked.vertexSpirv.size()) ||
+                            spirvUsesStorageBuffers(linked.fragmentSpirv.data(),
+                                                    linked.fragmentSpirv.size());
+                        appgl::TranslatorOptions vsOptions;
+                        vsOptions.forceArgumentBuffers = forceRasterArgBuf;
+                        vsOptions.enableClipControlYSignFixup = true;
+                        appgl::TranslatorOptions fsOptions;
+                        fsOptions.forceArgumentBuffers = forceRasterArgBuf;
+                        ShaderReflection vsRefl, fsRefl;
+                        const bool vsOk = translateStage(
+                            "vertex", linked.vertexSpirv.data(),
+                            linked.vertexSpirv.size(), vsLinkSource,
+                            programObject->vertexMSL, vsRefl, vsOptions);
+                        const bool fsOk = translateStage(
+                            "fragment", linked.fragmentSpirv.data(),
+                            linked.fragmentSpirv.size(), fragmentShader->source,
+                            programObject->fragmentMSL, fsRefl, fsOptions);
+                        if (vsOk && fsOk) {
+                            rewriteMslOutputLocationsForFragmentInputs(
+                                programObject->vertexMSL, programObject->fragmentMSL);
+                            programObject->vertexReflection = std::move(vsRefl);
+                            programObject->fragmentReflection = std::move(fsRefl);
+                            programObject->vertexSpirv = std::move(linked.vertexSpirv);
+                            programObject->vertexSpirvEntryPoint.clear();
+                            programObject->vertexSpirvSpecializationConstants.clear();
+                            fragmentOnlySyntheticVertexSourceForReflection =
+                                vsLinkSource;
+                            programObject->hasTranslatedPipeline = true;
+                            rasterTranslationOk = true;
+                            synthesizedCompatPipeline = true;
+                        }
+                    }
+                }
+            }
+            if (synthesizedCompatPipeline) {
+                break;
+            }
             ShaderReflection fsRefl;
             appgl::TranslatorOptions fsOptions;
             if (fragmentShader != nullptr) {
@@ -6607,7 +6707,11 @@ bool GLContext::linkProgram(GLuint program) {
         };
 
         static const std::string kEmptySrc;
-        const std::string& vsSrc2 = vertexShader ? vertexShader->source : kEmptySrc;
+        const std::string& vsSrc2 = vertexShader
+            ? vertexShader->source
+            : (!fragmentOnlySyntheticVertexSourceForReflection.empty()
+                ? fragmentOnlySyntheticVertexSourceForReflection
+                : kEmptySrc);
         const std::string& fsSrc2 = fragmentShader ? fragmentShader->source : kEmptySrc;
         const std::string& gsSrc2 = geometryShader ? geometryShader->source : kEmptySrc;
         const std::string& csSrc2 = computeShader ? computeShader->source : kEmptySrc;
@@ -6870,6 +6974,11 @@ bool GLContext::linkProgram(GLuint program) {
         processSubroutineDispatchUniforms(programObject->tessEvalAsComputeReflection);
         processSubroutineDispatchUniforms(programObject->computeReflection);
     }
+
+    // Reflection supplementing can add synthesized default-block uniforms
+    // that source scanning did not see, notably the FragmentOnly synthetic
+    // fixed-function VS matrix uniform.
+    refreshSynthesizedUniformLocations();
 
     // ── Merge SPIRV-Cross uniform block reflection into the program's
     //    resource introspection tables ──

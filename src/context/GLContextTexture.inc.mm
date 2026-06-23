@@ -54,6 +54,8 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
         img.rgba8.assign(rgba8Bytes, 0);
         img.nativeData.clear();
         img.nativeBpp = 0;
+        img.exactReadbackData.clear();
+        img.exactReadbackBpp = 0;
         img.mipShadowEvicted = false;
         img.mipShadowEvictedRgba8Bytes = 0;
         img.mipShadowEvictedNativeBytes = 0;
@@ -198,6 +200,8 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
         img.rgba8.assign(rgba8Bytes, 0);
         img.nativeData.clear();
         img.nativeBpp = 0;
+        img.exactReadbackData.clear();
+        img.exactReadbackBpp = 0;
         img.mipShadowEvicted = false;
         img.mipShadowEvictedRgba8Bytes = 0;
         img.mipShadowEvictedNativeBytes = 0;
@@ -914,8 +918,14 @@ bool GLContext::getTextureParameterIuiv(GLuint texture, GLenum pname, GLuint* pa
     })
 }
 
-bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum pname, GLint* params) {
-    auto* obj = impl_->objects->textures().get(texture);
+bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum pname, GLint* params,
+                                           GLenum requestTarget) {
+    GLTextureObject* obj = nullptr;
+    if (texture == 0 && requestTarget != 0 && appglCompatProfileEnabled()) {
+        obj = impl_->compatDefaultTexture(requestTarget);
+    } else {
+        obj = impl_->objects->textures().get(texture);
+    }
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
     // GL 4.6 §8.11: level < 0 or level > log2(MAX_TEXTURE_SIZE) is
     // INVALID_VALUE. CTS
@@ -1260,7 +1270,12 @@ bool GLContext::getTextureLevelParameterfv(GLuint texture, GLint level, GLenum p
 bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
                                 GLenum type, GLsizei bufSize, void* pixels,
                                 GLenum requestTarget) {
-    auto* obj = impl_->objects->textures().get(texture);
+    GLTextureObject* obj = nullptr;
+    if (texture == 0 && requestTarget != 0 && appglCompatProfileEnabled()) {
+        obj = impl_->compatDefaultTexture(requestTarget);
+    } else {
+        obj = impl_->objects->textures().get(texture);
+    }
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
     // GL 4.6 §8.11.4: multisample textures can't be read via GetTextureImage.
     if (obj->target == GL_TEXTURE_2D_MULTISAMPLE ||
@@ -1379,6 +1394,31 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
     // Null-pixel early-out only when no PBO is bound — otherwise null
     // (== offset 0) is a valid PBO destination.
     if (pixels == nullptr && !packPBOBound) return true;
+
+    if (appglCompatProfileEnabled() && !packPBOBound) {
+        const auto levelIt = obj->levels.find(level);
+        if (levelIt != obj->levels.end() && levelIt->second.defined &&
+            isLegacyCompatTextureFormatCombo(
+                levelIt->second.desc.internalFormat,
+                levelIt->second.desc.sourceFormat) &&
+            copySimpleTextureLevelShadow(*obj,
+                                         levelIt->second,
+                                         format,
+                                         type,
+                                         bufSize,
+                                         impl_->state->pixelStore(),
+                                         pixels,
+                                         (obj->wasFramebufferRenderedTo ||
+                                          obj->wasViewportRenderedTo) &&
+                                             impl_->state->clipOrigin() != GL_UPPER_LEFT)) {
+            impl_->drainPendingGpuProducers({
+                {Impl::GpuResourceAccess::Kind::Texture,
+                 texture,
+                 kProducerAll},
+            });
+            return true;
+        }
+    }
 
     if (obj->viewSourceTexture != 0) {
         (void)impl_->materializeTextureView(*obj);

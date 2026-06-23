@@ -27,6 +27,7 @@
 #include "../objects/GLObjectStore.h"
 #include "../shared/JsonUtil.h"
 #include "../state/GLStateTracker.h"
+#include "AppGLProfile.h"
 
 // Phase 8X Group 4d follow-up⁶ — compat-profile upload aliases. These
 // enums were removed from the core profile in GL 3.2, so glcorearb.h does
@@ -39,23 +40,74 @@
 #ifndef GL_ALPHA8
 #define GL_ALPHA8 0x803C
 #endif
+#ifndef GL_ALPHA4
+#define GL_ALPHA4 0x803B
+#endif
+#ifndef GL_ALPHA12
+#define GL_ALPHA12 0x803D
+#endif
+#ifndef GL_ALPHA16
+#define GL_ALPHA16 0x803E
+#endif
 #ifndef GL_LUMINANCE
 #define GL_LUMINANCE 0x1909
 #endif
 #ifndef GL_LUMINANCE_ALPHA
 #define GL_LUMINANCE_ALPHA 0x190A
 #endif
+#ifndef GL_LUMINANCE4
+#define GL_LUMINANCE4 0x803F
+#endif
 #ifndef GL_LUMINANCE8
 #define GL_LUMINANCE8 0x8040
+#endif
+#ifndef GL_LUMINANCE12
+#define GL_LUMINANCE12 0x8041
+#endif
+#ifndef GL_LUMINANCE16
+#define GL_LUMINANCE16 0x8042
+#endif
+#ifndef GL_LUMINANCE4_ALPHA4
+#define GL_LUMINANCE4_ALPHA4 0x8043
+#endif
+#ifndef GL_LUMINANCE6_ALPHA2
+#define GL_LUMINANCE6_ALPHA2 0x8044
 #endif
 #ifndef GL_LUMINANCE8_ALPHA8
 #define GL_LUMINANCE8_ALPHA8 0x8045
 #endif
+#ifndef GL_LUMINANCE12_ALPHA4
+#define GL_LUMINANCE12_ALPHA4 0x8046
+#endif
+#ifndef GL_LUMINANCE12_ALPHA12
+#define GL_LUMINANCE12_ALPHA12 0x8047
+#endif
+#ifndef GL_LUMINANCE16_ALPHA16
+#define GL_LUMINANCE16_ALPHA16 0x8048
+#endif
 #ifndef GL_INTENSITY
 #define GL_INTENSITY 0x8049
 #endif
+#ifndef GL_INTENSITY4
+#define GL_INTENSITY4 0x804A
+#endif
 #ifndef GL_INTENSITY8
 #define GL_INTENSITY8 0x804B
+#endif
+#ifndef GL_INTENSITY12
+#define GL_INTENSITY12 0x804C
+#endif
+#ifndef GL_INTENSITY16
+#define GL_INTENSITY16 0x804D
+#endif
+#ifndef GL_ABGR_EXT
+#define GL_ABGR_EXT 0x8000
+#endif
+#ifndef GL_SLUMINANCE8
+#define GL_SLUMINANCE8 0x8C47
+#endif
+#ifndef GL_SLUMINANCE8_ALPHA8
+#define GL_SLUMINANCE8_ALPHA8 0x8C45
 #endif
 
 namespace appgl {
@@ -881,6 +933,24 @@ bool isValidLegacyUploadInternalFormat(GLenum internalFormat) {
         case GL_LUMINANCE8_ALPHA8:
         case GL_INTENSITY:
         case GL_INTENSITY8:
+            return true;
+        case GL_ALPHA4:
+        case GL_ALPHA12:
+        case GL_ALPHA16:
+        case GL_LUMINANCE4:
+        case GL_LUMINANCE12:
+        case GL_LUMINANCE16:
+        case GL_LUMINANCE4_ALPHA4:
+        case GL_LUMINANCE6_ALPHA2:
+        case GL_LUMINANCE12_ALPHA4:
+        case GL_LUMINANCE12_ALPHA12:
+        case GL_LUMINANCE16_ALPHA16:
+        case GL_INTENSITY4:
+        case GL_INTENSITY12:
+        case GL_INTENSITY16:
+        case GL_SLUMINANCE8:
+        case GL_SLUMINANCE8_ALPHA8:
+            return appglCompatProfileEnabled();
         // Generic "compressed" internal formats — GL 4.6 §8.5.3 allows
         // the driver to keep uncompressed, so treat them as aliases to
         // the uncompressed base format. `metalRenderbufferFormat` maps
@@ -997,6 +1067,8 @@ bool isValidTextureUploadFormat(GLenum format) {
         case GL_LUMINANCE_ALPHA:
         case GL_INTENSITY:
             return true;
+        case GL_ABGR_EXT:
+            return appglCompatProfileEnabled();
         default:
             return false;
     }
@@ -1108,7 +1180,8 @@ bool isFormatTypeCompatible(GLenum format, GLenum type) {
     const bool isRGB = (format == GL_RGB || format == GL_RGB_INTEGER);
     const bool isBGR = (format == GL_BGR || format == GL_BGR_INTEGER);
     const bool isRGBA_family = (format == GL_RGBA || format == GL_RGBA_INTEGER
-        || format == GL_BGRA || format == GL_BGRA_INTEGER);
+        || format == GL_BGRA || format == GL_BGRA_INTEGER
+        || (format == GL_ABGR_EXT && appglCompatProfileEnabled()));
 
     switch (type) {
         // Plain integer/float types accept any base color format, plus

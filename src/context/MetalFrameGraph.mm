@@ -6,6 +6,7 @@
 #include "../objects/GLObjectStore.h"
 #include "../runtime/AppGLEnv.h"
 #include "../runtime/AppGLLog.h"
+#include "../runtime/AppGLProfile.h"
 #include "../shader/TessellationEmulator.h"
 #include "../state/GLStateTracker.h"
 
@@ -8835,8 +8836,14 @@ struct MetalFrameGraph::Impl {
             const GLint glY = std::max<GLint>(0, info.viewportY);
             const GLsizei availW = static_cast<GLsizei>(std::max<GLint>(0, rtW - glX));
             const GLsizei availH = static_cast<GLsizei>(std::max<GLint>(0, rtH - glY));
-            const GLsizei glW = std::min<GLsizei>(info.viewportWidth, availW);
-            const GLsizei glH = std::min<GLsizei>(info.viewportHeight, availH);
+            const bool preserveViewportExtent =
+                appglCompatProfileEnabled() && clipControlShaderYFixup;
+            const GLsizei glW = preserveViewportExtent
+                ? info.viewportWidth
+                : std::min<GLsizei>(info.viewportWidth, availW);
+            const GLsizei glH = preserveViewportExtent
+                ? info.viewportHeight
+                : std::min<GLsizei>(info.viewportHeight, availH);
             // Sprint 21 A-2 [clip_control.viewport_bounds]: translated
             // vertex shaders now carry a draw-time clip-control Y sign.
             // When present, keep the viewport rectangle fixed and let
@@ -12256,10 +12263,15 @@ struct MetalFrameGraph::Impl {
                 static_cast<GLsizei>(std::max<GLint>(0, rtW - glX));
             const GLsizei availH =
                 static_cast<GLsizei>(std::max<GLint>(0, rtH - glY));
-            const GLsizei glW =
-                std::min<GLsizei>(descriptor.viewportWidth, availW);
-            const GLsizei glH =
-                std::min<GLsizei>(descriptor.viewportHeight, availH);
+            const bool preserveViewportExtent =
+                appglCompatProfileEnabled() &&
+                descriptor.clipControlShaderYFixup;
+            const GLsizei glW = preserveViewportExtent
+                ? descriptor.viewportWidth
+                : std::min<GLsizei>(descriptor.viewportWidth, availW);
+            const GLsizei glH = preserveViewportExtent
+                ? descriptor.viewportHeight
+                : std::min<GLsizei>(descriptor.viewportHeight, availH);
             const bool flipY = (descriptor.clipOrigin != GL_UPPER_LEFT);
             MTLViewport vp;
             vp.originX = static_cast<double>(glX);
@@ -12928,8 +12940,14 @@ struct MetalFrameGraph::Impl {
                 static_cast<GLsizei>(std::max<GLint>(0, rtW - glX));
             const GLsizei availH =
                 static_cast<GLsizei>(std::max<GLint>(0, rtH - glY));
-            const GLsizei glW = std::min<GLsizei>(info.viewportWidth, availW);
-            const GLsizei glH = std::min<GLsizei>(info.viewportHeight, availH);
+            const bool preserveViewportExtent =
+                appglCompatProfileEnabled() && clipControlShaderYFixup;
+            const GLsizei glW = preserveViewportExtent
+                ? info.viewportWidth
+                : std::min<GLsizei>(info.viewportWidth, availW);
+            const GLsizei glH = preserveViewportExtent
+                ? info.viewportHeight
+                : std::min<GLsizei>(info.viewportHeight, availH);
             const bool flipY = (info.clipOrigin != GL_UPPER_LEFT);
             MTLViewport vp;
             vp.originX = static_cast<double>(glX);

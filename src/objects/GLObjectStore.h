@@ -233,6 +233,11 @@ struct GLTextureImageLevel {
     // the rgba8 shadow in that case.
     std::vector<std::uint8_t> nativeData;
     std::size_t nativeBpp = 0; // bytes-per-pixel for nativeData (0 = not available)
+    // Exact source-layout bytes retained only for compat-profile legacy
+    // upload/download tests. Unlike nativeData, this is never used as the
+    // Metal upload source.
+    std::vector<std::uint8_t> exactReadbackData;
+    std::size_t exactReadbackBpp = 0;
     bool defined = false;
     bool generatedMipLevel = false;
     bool immutableStorageLevel = false;

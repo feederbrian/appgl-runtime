@@ -1,6 +1,7 @@
 #include "GLContext.h"
 #include "../runtime/AppGLDiagnostics.h"
 #include "../runtime/AppGLEnv.h"
+#include "../runtime/AppGLProfile.h"
 #include "../runtime/AppGLLog.h"
 #include "MetalFrameGraph.h"
 #include "MetalCommandSubmission.h"
@@ -5841,6 +5842,36 @@ MTLPixelFormat metalRenderbufferFormat(GLenum internalFormat) {
         case GL_RGB8:
         case GL_RGBA8:
             return MTLPixelFormatRGBA8Unorm;
+        case GL_ALPHA:
+        case GL_ALPHA4:
+        case GL_ALPHA8:
+        case GL_ALPHA12:
+        case GL_ALPHA16:
+        case GL_LUMINANCE:
+        case GL_LUMINANCE4:
+        case GL_LUMINANCE8:
+        case GL_LUMINANCE12:
+        case GL_LUMINANCE16:
+        case GL_LUMINANCE_ALPHA:
+        case GL_LUMINANCE4_ALPHA4:
+        case GL_LUMINANCE6_ALPHA2:
+        case GL_LUMINANCE8_ALPHA8:
+        case GL_LUMINANCE12_ALPHA4:
+        case GL_LUMINANCE12_ALPHA12:
+        case GL_LUMINANCE16_ALPHA16:
+        case GL_INTENSITY:
+        case GL_INTENSITY4:
+        case GL_INTENSITY8:
+        case GL_INTENSITY12:
+        case GL_INTENSITY16:
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatRGBA8Unorm
+                : MTLPixelFormatInvalid;
+        case GL_SLUMINANCE8:
+        case GL_SLUMINANCE8_ALPHA8:
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatRGBA8Unorm_sRGB
+                : MTLPixelFormatInvalid;
         // Generic "compressed" internal formats — resolve to the
         // uncompressed base type on Metal. GL 4.6 §8.5.3 allows the
         // driver to choose compression or keep the texture uncompressed.
@@ -6075,6 +6106,134 @@ bool isCompressedInternalFormat(GLenum internalFormat) {
 
 bool isColorFormat(GLenum internalFormat) {
     return !isDepthFormat(internalFormat) && !isStencilFormat(internalFormat);
+}
+
+bool isLegacyCompatTextureExternalFormat(GLenum format) {
+    switch (format) {
+        case GL_GREEN:
+        case GL_BLUE:
+        case GL_ALPHA:
+        case GL_LUMINANCE:
+        case GL_LUMINANCE_ALPHA:
+        case GL_INTENSITY:
+        case GL_ABGR_EXT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isLegacyCompatTextureInternalFormat(GLenum internalFormat) {
+    switch (internalFormat) {
+        case GL_ALPHA:
+        case GL_ALPHA4:
+        case GL_ALPHA8:
+        case GL_ALPHA12:
+        case GL_ALPHA16:
+        case GL_LUMINANCE:
+        case GL_LUMINANCE4:
+        case GL_LUMINANCE8:
+        case GL_LUMINANCE12:
+        case GL_LUMINANCE16:
+        case GL_LUMINANCE_ALPHA:
+        case GL_LUMINANCE4_ALPHA4:
+        case GL_LUMINANCE6_ALPHA2:
+        case GL_LUMINANCE8_ALPHA8:
+        case GL_LUMINANCE12_ALPHA4:
+        case GL_LUMINANCE12_ALPHA12:
+        case GL_LUMINANCE16_ALPHA16:
+        case GL_INTENSITY:
+        case GL_INTENSITY4:
+        case GL_INTENSITY8:
+        case GL_INTENSITY12:
+        case GL_INTENSITY16:
+        case GL_SLUMINANCE8:
+        case GL_SLUMINANCE8_ALPHA8:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isLegacyCompatTextureFormatCombo(GLenum internalFormat, GLenum format) {
+    return isLegacyCompatTextureExternalFormat(format) ||
+           isLegacyCompatTextureInternalFormat(internalFormat);
+}
+
+std::size_t compatTextureInternalBaseComponentCount(GLenum internalFormat) {
+    switch (internalFormat) {
+        case GL_RED:
+        case GL_RED_INTEGER:
+        case GL_R8:
+        case GL_R8_SNORM:
+        case GL_R16:
+        case GL_R16_SNORM:
+        case GL_R16F:
+        case GL_R32F:
+        case GL_R8I:
+        case GL_R8UI:
+        case GL_R16I:
+        case GL_R16UI:
+        case GL_R32I:
+        case GL_R32UI:
+            return 1;
+        case GL_RG:
+        case GL_RG_INTEGER:
+        case GL_RG8:
+        case GL_RG8_SNORM:
+        case GL_RG16:
+        case GL_RG16_SNORM:
+        case GL_RG16F:
+        case GL_RG32F:
+        case GL_RG8I:
+        case GL_RG8UI:
+        case GL_RG16I:
+        case GL_RG16UI:
+        case GL_RG32I:
+        case GL_RG32UI:
+            return 2;
+        case GL_RGB:
+        case GL_RGB_INTEGER:
+        case GL_R3_G3_B2:
+        case GL_RGB4:
+        case GL_RGB5:
+        case GL_RGB8:
+        case GL_RGB8_SNORM:
+        case GL_SRGB8:
+        case GL_RGB10:
+        case GL_R11F_G11F_B10F:
+        case GL_RGB12:
+        case GL_RGB9_E5:
+        case GL_RGB16:
+        case GL_RGB16F:
+        case GL_RGB16_SNORM:
+        case GL_RGB32F:
+        case GL_RGB8I:
+        case GL_RGB8UI:
+        case GL_RGB16I:
+        case GL_RGB16UI:
+        case GL_RGB32I:
+        case GL_RGB32UI:
+        case GL_RGB565:
+            return 3;
+        default:
+            return 4;
+    }
+}
+
+bool needsCompatTextureBaseNormalization(GLenum internalFormat, GLenum format) {
+    const std::size_t internalComponents =
+        compatTextureInternalBaseComponentCount(internalFormat);
+    const std::size_t externalComponents = componentCountForFormat(format);
+    return externalComponents > internalComponents;
+}
+
+bool shouldNormalizeLegacyCompatTextureUpload(GLenum internalFormat, GLenum format) {
+    return appglCompatProfileEnabled() &&
+           !isDepthFormat(internalFormat) &&
+           !isStencilFormat(internalFormat) &&
+           (isLegacyCompatTextureFormatCombo(internalFormat, format) ||
+            needsCompatTextureBaseNormalization(internalFormat, format));
 }
 
 bool isRGBFamilyWithoutAlpha(GLenum internalFormat) {
@@ -9869,9 +10028,23 @@ struct GLContext::Impl {
     GLTextureObject* currentTexture(GLenum target) {
         const GLuint name = state->boundTexture(normalizeTextureBindingTarget(target));
         if (name == 0) {
+            if (appglCompatProfileEnabled()) {
+                return compatDefaultTexture(target);
+            }
             return nullptr;
         }
         return objects->textures().get(name);
+    }
+
+    GLTextureObject* compatDefaultTexture(GLenum target) {
+        const GLenum bindingTarget = normalizeTextureBindingTarget(target);
+        GLTextureObject& object = compatDefaultTextures[bindingTarget];
+        if (object.target == 0) {
+            object.target = bindingTarget;
+            object.desc.target = bindingTarget;
+            object.instantiated = true;
+        }
+        return &object;
     }
 
     static std::uint16_t byteSwap16(std::uint16_t v) {
@@ -10088,7 +10261,12 @@ struct GLContext::Impl {
     // as normalized [0,1]/[-1,1] values (false). GL_FLOAT / GL_HALF_FLOAT
     // always return the float value regardless of the flag.
     static double readSourceComponentDouble(
-        const std::uint8_t* src, GLenum type, std::size_t idx, bool asInteger, bool swapBytes = false
+        const std::uint8_t* src,
+        GLenum type,
+        std::size_t idx,
+        bool asInteger,
+        bool swapBytes = false,
+        bool decodeCompatPackedFloat = false
     ) {
         switch (type) {
             case GL_UNSIGNED_BYTE: {
@@ -10306,9 +10484,316 @@ struct GLContext::Impl {
                 return asInteger ? static_cast<double>(bits)
                                  : static_cast<double>(bits) / static_cast<double>(maxBits);
             }
+            case GL_UNSIGNED_INT_10F_11F_11F_REV: {
+                if (!decodeCompatPackedFloat) {
+                    return 0.0;
+                }
+                std::uint32_t v = readU32Value(src, swapBytes);
+                auto decodeFloat11 = [](std::uint32_t bits11) -> double {
+                    const std::uint32_t exp5 = (bits11 >> 6) & 0x1Fu;
+                    const std::uint32_t mant6 = bits11 & 0x3Fu;
+                    if (exp5 == 0) {
+                        return std::ldexp(static_cast<double>(mant6) / 64.0, -14);
+                    }
+                    if (exp5 == 31) {
+                        return std::numeric_limits<double>::infinity();
+                    }
+                    return std::ldexp(1.0 + static_cast<double>(mant6) / 64.0,
+                                      static_cast<int>(exp5) - 15);
+                };
+                auto decodeFloat10 = [](std::uint32_t bits10) -> double {
+                    const std::uint32_t exp5 = (bits10 >> 5) & 0x1Fu;
+                    const std::uint32_t mant5 = bits10 & 0x1Fu;
+                    if (exp5 == 0) {
+                        return std::ldexp(static_cast<double>(mant5) / 32.0, -14);
+                    }
+                    if (exp5 == 31) {
+                        return std::numeric_limits<double>::infinity();
+                    }
+                    return std::ldexp(1.0 + static_cast<double>(mant5) / 32.0,
+                                      static_cast<int>(exp5) - 15);
+                };
+                switch (idx) {
+                    case 0: return decodeFloat11(v & 0x7FFu);
+                    case 1: return decodeFloat11((v >> 11) & 0x7FFu);
+                    case 2: return decodeFloat10((v >> 22) & 0x3FFu);
+                    case 3: return 1.0;
+                    default: return 0.0;
+                }
+            }
+            case GL_UNSIGNED_INT_5_9_9_9_REV: {
+                if (!decodeCompatPackedFloat) {
+                    return 0.0;
+                }
+                std::uint32_t v = readU32Value(src, swapBytes);
+                const std::uint32_t rm = v & 0x1FFu;
+                const std::uint32_t gm = (v >> 9) & 0x1FFu;
+                const std::uint32_t bm = (v >> 18) & 0x1FFu;
+                const std::uint32_t e = (v >> 27) & 0x1Fu;
+                const double scale = std::ldexp(1.0 / 512.0, static_cast<int>(e) - 15);
+                switch (idx) {
+                    case 0: return static_cast<double>(rm) * scale;
+                    case 1: return static_cast<double>(gm) * scale;
+                    case 2: return static_cast<double>(bm) * scale;
+                    case 3: return 1.0;
+                    default: return 0.0;
+                }
+            }
             default:
                 return 0.0;
         }
+    }
+
+    enum class CompatUploadBase {
+        Red,
+        Rg,
+        Rgb,
+        Rgba,
+        Alpha,
+        Luminance,
+        LuminanceAlpha,
+        Intensity
+    };
+
+    static CompatUploadBase compatUploadBaseForInternalFormat(GLenum internalFormat) {
+        switch (internalFormat) {
+            case GL_RED:
+            case GL_RED_INTEGER:
+            case GL_R8:
+            case GL_R8_SNORM:
+            case GL_R16:
+            case GL_R16_SNORM:
+            case GL_R16F:
+            case GL_R32F:
+            case GL_R8I:
+            case GL_R8UI:
+            case GL_R16I:
+            case GL_R16UI:
+            case GL_R32I:
+            case GL_R32UI:
+                return CompatUploadBase::Red;
+            case GL_RG:
+            case GL_RG_INTEGER:
+            case GL_RG8:
+            case GL_RG8_SNORM:
+            case GL_RG16:
+            case GL_RG16_SNORM:
+            case GL_RG16F:
+            case GL_RG32F:
+            case GL_RG8I:
+            case GL_RG8UI:
+            case GL_RG16I:
+            case GL_RG16UI:
+            case GL_RG32I:
+            case GL_RG32UI:
+                return CompatUploadBase::Rg;
+            case GL_RGB:
+            case GL_RGB_INTEGER:
+            case GL_R3_G3_B2:
+            case GL_RGB4:
+            case GL_RGB5:
+            case GL_RGB8:
+            case GL_RGB8_SNORM:
+            case GL_SRGB8:
+            case GL_RGB10:
+            case GL_R11F_G11F_B10F:
+            case GL_RGB12:
+            case GL_RGB9_E5:
+            case GL_RGB16:
+            case GL_RGB16F:
+            case GL_RGB16_SNORM:
+            case GL_RGB32F:
+            case GL_RGB8I:
+            case GL_RGB8UI:
+            case GL_RGB16I:
+            case GL_RGB16UI:
+            case GL_RGB32I:
+            case GL_RGB32UI:
+            case GL_RGB565:
+                return CompatUploadBase::Rgb;
+            case GL_ALPHA:
+            case GL_ALPHA4:
+            case GL_ALPHA8:
+            case GL_ALPHA12:
+            case GL_ALPHA16:
+                return CompatUploadBase::Alpha;
+            case GL_LUMINANCE:
+            case GL_LUMINANCE4:
+            case GL_LUMINANCE8:
+            case GL_LUMINANCE12:
+            case GL_LUMINANCE16:
+            case GL_SLUMINANCE8:
+                return CompatUploadBase::Luminance;
+            case GL_LUMINANCE_ALPHA:
+            case GL_LUMINANCE4_ALPHA4:
+            case GL_LUMINANCE6_ALPHA2:
+            case GL_LUMINANCE8_ALPHA8:
+            case GL_LUMINANCE12_ALPHA4:
+            case GL_LUMINANCE12_ALPHA12:
+            case GL_LUMINANCE16_ALPHA16:
+            case GL_SLUMINANCE8_ALPHA8:
+                return CompatUploadBase::LuminanceAlpha;
+            case GL_INTENSITY:
+            case GL_INTENSITY4:
+            case GL_INTENSITY8:
+            case GL_INTENSITY12:
+            case GL_INTENSITY16:
+                return CompatUploadBase::Intensity;
+            case GL_RGBA:
+            case GL_RGBA_INTEGER:
+            default:
+                return CompatUploadBase::Rgba;
+        }
+    }
+
+    static void readCompatUploadSourceRGBA(
+        const std::uint8_t* pixel,
+        GLenum format,
+        GLenum type,
+        bool asInteger,
+        bool swapBytes,
+        double rgba[4]
+    ) {
+        double raw[4] = {0.0, 0.0, 0.0, 1.0};
+        const std::size_t components = componentCountForFormat(format);
+        for (std::size_t c = 0; c < components && c < 4; ++c) {
+            raw[c] = readSourceComponentDouble(
+                pixel,
+                type,
+                c,
+                asInteger,
+                swapBytes,
+                true);
+        }
+
+        rgba[0] = 0.0;
+        rgba[1] = 0.0;
+        rgba[2] = 0.0;
+        rgba[3] = 1.0;
+        switch (format) {
+            case GL_RED:
+            case GL_RED_INTEGER:
+                rgba[0] = raw[0];
+                break;
+            case GL_GREEN:
+            case GL_GREEN_INTEGER:
+                rgba[1] = raw[0];
+                break;
+            case GL_BLUE:
+            case GL_BLUE_INTEGER:
+                rgba[2] = raw[0];
+                break;
+            case GL_ALPHA:
+                rgba[3] = raw[0];
+                break;
+            case GL_RG:
+            case GL_RG_INTEGER:
+                rgba[0] = raw[0];
+                rgba[1] = raw[1];
+                break;
+            case GL_RGB:
+            case GL_RGB_INTEGER:
+                rgba[0] = raw[0];
+                rgba[1] = raw[1];
+                rgba[2] = raw[2];
+                break;
+            case GL_RGBA:
+            case GL_RGBA_INTEGER:
+                rgba[0] = raw[0];
+                rgba[1] = raw[1];
+                rgba[2] = raw[2];
+                rgba[3] = raw[3];
+                break;
+            case GL_BGR:
+            case GL_BGR_INTEGER:
+                rgba[0] = raw[2];
+                rgba[1] = raw[1];
+                rgba[2] = raw[0];
+                break;
+            case GL_BGRA:
+            case GL_BGRA_INTEGER:
+                rgba[0] = raw[2];
+                rgba[1] = raw[1];
+                rgba[2] = raw[0];
+                rgba[3] = raw[3];
+                break;
+            case GL_ABGR_EXT:
+                rgba[0] = raw[3];
+                rgba[1] = raw[2];
+                rgba[2] = raw[1];
+                rgba[3] = raw[0];
+                break;
+            case GL_INTENSITY:
+                rgba[0] = raw[0];
+                rgba[1] = raw[0];
+                rgba[2] = raw[0];
+                rgba[3] = raw[0];
+                break;
+            case GL_LUMINANCE_ALPHA:
+                rgba[3] = raw[1];
+                rgba[0] = raw[0];
+                rgba[1] = raw[0];
+                rgba[2] = raw[0];
+                break;
+            case GL_LUMINANCE:
+                rgba[0] = raw[0];
+                rgba[1] = raw[0];
+                rgba[2] = raw[0];
+                break;
+            default:
+                for (std::size_t c = 0; c < components && c < 4; ++c) {
+                    rgba[c] = raw[c];
+                }
+                break;
+        }
+    }
+
+    static void applyCompatUploadInternalBase(GLenum internalFormat, double rgba[4]) {
+        switch (compatUploadBaseForInternalFormat(internalFormat)) {
+            case CompatUploadBase::Red:
+                rgba[1] = 0.0;
+                rgba[2] = 0.0;
+                rgba[3] = 1.0;
+                break;
+            case CompatUploadBase::Rg:
+                rgba[2] = 0.0;
+                rgba[3] = 1.0;
+                break;
+            case CompatUploadBase::Rgb:
+                rgba[3] = 1.0;
+                break;
+            case CompatUploadBase::Rgba:
+                break;
+            case CompatUploadBase::Alpha:
+                rgba[0] = 0.0;
+                rgba[1] = 0.0;
+                rgba[2] = 0.0;
+                break;
+            case CompatUploadBase::Luminance:
+                rgba[3] = 1.0;
+                rgba[1] = rgba[0];
+                rgba[2] = rgba[0];
+                break;
+            case CompatUploadBase::LuminanceAlpha:
+                rgba[1] = rgba[0];
+                rgba[2] = rgba[0];
+                break;
+            case CompatUploadBase::Intensity:
+                rgba[1] = rgba[0];
+                rgba[2] = rgba[0];
+                rgba[3] = rgba[0];
+                break;
+        }
+    }
+
+    static std::uint8_t compatUploadComponentToU8(double value) {
+        if (!(value > 0.0)) {
+            return 0u;
+        }
+        if (value >= 1.0) {
+            return 255u;
+        }
+        return static_cast<std::uint8_t>(value * 255.0 + 0.5);
     }
 
     static std::uint16_t floatToHalf(float f) {
@@ -10415,7 +10900,8 @@ struct GLContext::Impl {
         GLenum format, GLenum type,
         const void* pixels,
         std::vector<std::uint8_t>& nativeData,
-        std::size_t& outBpp
+        std::size_t& outBpp,
+        bool normalizeCompatUpload = false
     ) {
         MTLPixelFormat mtlFmt = metalRenderbufferFormat(internalFormat);
         if (mtlFmt == MTLPixelFormatInvalid) return false;
@@ -10585,7 +11071,7 @@ struct GLContext::Impl {
         // uint-sampler-requires-uint-format contract. RGB10_A2 (unorm)
         // similarly benefits: an exact round-trip at 10-bit precision
         // is more faithful than the RGBA8 shadow's 8-bit truncation.
-        if (isPackedPixelType(type)) {
+        if (isPackedPixelType(type) && !normalizeCompatUpload) {
             const bool isRGB10A2Metal =
                 mtlFmt == MTLPixelFormatRGB10A2Unorm ||
                 mtlFmt == MTLPixelFormatRGB10A2Uint;
@@ -10723,7 +11209,11 @@ struct GLContext::Impl {
                     for (GLsizei x = 0; x < width; ++x) {
                         const std::uint8_t* pixel = srcRow + static_cast<std::size_t>(x) * srcPixelBytes;
                         double comps[4] = {0.0, 0.0, 0.0, 1.0};
-                        if (isBGR && srcComponents >= 3) {
+                        if (normalizeCompatUpload) {
+                            readCompatUploadSourceRGBA(pixel, format, type,
+                                                       asInteger, unpackSwapBytes, comps);
+                            applyCompatUploadInternalBase(internalFormat, comps);
+                        } else if (isBGR && srcComponents >= 3) {
                             comps[0] = readSourceComponentDouble(pixel, type, 2, asInteger, unpackSwapBytes);
                             comps[1] = readSourceComponentDouble(pixel, type, 1, asInteger, unpackSwapBytes);
                             comps[2] = readSourceComponentDouble(pixel, type, 0, asInteger, unpackSwapBytes);
@@ -10801,8 +11291,12 @@ struct GLContext::Impl {
                     for (GLsizei x = 0; x < width; ++x) {
                         const std::uint8_t* pixel =
                             srcRow + static_cast<std::size_t>(x) * srcPixelBytes;
-                        double comps[3] = {0.0, 0.0, 0.0};
-                        if (format == GL_BGR || format == GL_BGRA) {
+                        double comps[4] = {0.0, 0.0, 0.0, 1.0};
+                        if (normalizeCompatUpload) {
+                            readCompatUploadSourceRGBA(pixel, format, type,
+                                                       false, unpackSwapBytes, comps);
+                            applyCompatUploadInternalBase(internalFormat, comps);
+                        } else if (format == GL_BGR || format == GL_BGRA) {
                             if (srcComponents >= 3) {
                                 comps[0] = readSourceComponentDouble(pixel, type, 2, false, unpackSwapBytes);
                                 comps[1] = readSourceComponentDouble(pixel, type, 1, false, unpackSwapBytes);
@@ -10882,7 +11376,11 @@ struct GLContext::Impl {
                     // Read source components into RGBA doubles.
                     double comps[4] = {0.0, 0.0, 0.0, 1.0};
 
-                    if (isBGR && srcComponents >= 3) {
+                    if (normalizeCompatUpload) {
+                        readCompatUploadSourceRGBA(pixel, format, type,
+                                                   asInteger, unpackSwapBytes, comps);
+                        applyCompatUploadInternalBase(internalFormat, comps);
+                    } else if (isBGR && srcComponents >= 3) {
                         comps[0] = readSourceComponentDouble(pixel, type, 2, asInteger, unpackSwapBytes);
                         comps[1] = readSourceComponentDouble(pixel, type, 1, asInteger, unpackSwapBytes);
                         comps[2] = readSourceComponentDouble(pixel, type, 0, asInteger, unpackSwapBytes);
@@ -10912,13 +11410,15 @@ struct GLContext::Impl {
     }
 
     bool buildRGBA8Upload(
+        GLenum internalFormat,
         GLsizei width,
         GLsizei height,
         GLsizei depth,
         GLenum format,
         GLenum type,
         const void* pixels,
-        std::vector<std::uint8_t>& rgba8
+        std::vector<std::uint8_t>& rgba8,
+        bool normalizeCompatUpload = false
     ) {
         if (width < 0 || height < 0 || depth < 0) {
             return false;
@@ -10948,6 +11448,35 @@ struct GLContext::Impl {
             + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
             + static_cast<std::size_t>(store.unpackSkipPixels) * pixelBytes;
         const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
+
+        if (normalizeCompatUpload) {
+            for (GLsizei z = 0; z < depth; ++z) {
+                for (GLsizei y = 0; y < height; ++y) {
+                    for (GLsizei x = 0; x < width; ++x) {
+                        const std::size_t sourceByteIndex =
+                            static_cast<std::size_t>(z) * imageBytes
+                            + static_cast<std::size_t>(y) * rowBytes
+                            + static_cast<std::size_t>(x) * pixelBytes;
+                        const std::size_t destIndex =
+                            ((static_cast<std::size_t>(z) * static_cast<std::size_t>(height)
+                                + static_cast<std::size_t>(y))
+                                * static_cast<std::size_t>(width)
+                                + static_cast<std::size_t>(x))
+                            * 4u;
+                        double comps[4] = {0.0, 0.0, 0.0, 1.0};
+                        const std::uint8_t* pixel = source + sourceByteIndex;
+                        readCompatUploadSourceRGBA(pixel, format, type,
+                                                   false, unpackSwapBytes, comps);
+                        applyCompatUploadInternalBase(internalFormat, comps);
+                        rgba8[destIndex + 0] = compatUploadComponentToU8(comps[0]);
+                        rgba8[destIndex + 1] = compatUploadComponentToU8(comps[1]);
+                        rgba8[destIndex + 2] = compatUploadComponentToU8(comps[2]);
+                        rgba8[destIndex + 3] = compatUploadComponentToU8(comps[3]);
+                    }
+                }
+            }
+            return true;
+        }
 
         // Compat-profile aliases
         const bool isAlphaOnly = (format == GL_ALPHA);
@@ -26507,6 +27036,7 @@ struct GLContext::Impl {
     std::unique_ptr<MetalFrameGraph> frameGraph;
     std::unique_ptr<GLCapabilities> capabilities;
     std::unique_ptr<GLObjectStore> objects;
+    std::unordered_map<GLenum, GLTextureObject> compatDefaultTextures;
     std::unique_ptr<GLStateTracker> state;
     GLDrawPathProfile drawPathProfile;
     BindingConstructionSizingProfile bindingConstructionSizingProfile;
@@ -27500,13 +28030,18 @@ struct GLContext::Impl {
     // back to a GL3 codepath if they see a 3.x string, so both the version
     // string and the shading-language-version string must reflect what the
     // translator is actually capable of accepting.
-    std::string versionString = "4.6 AppGL core";
+    std::string versionString = appglClaimedVersionString();
     bool claimedVersionStringSeeded = false;
     std::string shadingLanguageVersion = "4.60";
 };
 
 GLContext::GLContext(void* layer)
-    : impl_(std::make_unique<Impl>(this, layer, 1280, 720, false)) {
+    : impl_(std::make_unique<Impl>(
+          this,
+          layer,
+          appglCompatProfileEnabled() ? 0 : 1280,
+          appglCompatProfileEnabled() ? 0 : 720,
+          false)) {
     Runtime::shared().registerContext(this);
     ExtensionContext extensionContext(*this);
     extensions::ExtensionRegistry::initializeAll(extensionContext);
@@ -28323,13 +28858,14 @@ const std::string& GLContext::rendererString() const {
 
 void GLContext::setClaimedVersionString(std::string value) {
     // In Phase 8X Landing C the runtime switched to a declarative
-    // claimed-version constant ("4.6 AppGL core" — see
+    // claimed-version constant (core by default, compatibility when
+    // APPGL_COMPAT_PROFILE is enabled — see
     // CoverageStore::claimedVersion). The only empty-string path that
     // can still reach us is someone calling this method directly with
     // an empty argument; fall through to the same declarative constant
     // so the GL_VERSION string never regresses to a "bootstrap" suffix
     // engines parse as a GL3 context.
-    impl_->versionString = value.empty() ? "4.6 AppGL core" : std::move(value);
+    impl_->versionString = value.empty() ? appglClaimedVersionString() : std::move(value);
     impl_->claimedVersionStringSeeded = true;
 }
 
@@ -41705,14 +42241,32 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
     }
     coldPathProfile.recordPhase2Decision(translatedPlanDecision);
     if (translatedPlanTrace) {
+        const bool traceClipParam =
+            translatedDrawHasClipControlYSignParameter(
+                tdi,
+                hotpathInvariantMslPredicatesEnabled,
+                hotpathInvariantMslPredicatesValidateEnabled);
+        const bool traceClipUsed =
+            translatedDrawUsesClipControlYSign(
+                tdi,
+                hotpathInvariantMslPredicatesEnabled,
+                hotpathInvariantMslPredicatesValidateEnabled);
         std::fprintf(stderr,
             "[APPGL_PHASE2_PLAN] key=0x%016llx vao=%u vao_gen=%u "
-            "draw_fbo=%u decision=%s reason=%s plan_gen=%llu "
+            "draw_fbo=%u clip_param=%d clip_enabled=%d clip_used=%d "
+            "viewport=%dx%d fbo=%dx%d decision=%s reason=%s plan_gen=%llu "
             "cache_entries=%zu\n",
             static_cast<unsigned long long>(translatedPlanKey),
             static_cast<unsigned>(planVaoName),
             static_cast<unsigned>(planVaoGeneration),
             static_cast<unsigned>(drawFboName),
+            traceClipParam ? 1 : 0,
+            tdi.clipControlYSignFixupEnabled ? 1 : 0,
+            traceClipUsed ? 1 : 0,
+            static_cast<int>(tdi.viewportWidth),
+            static_cast<int>(tdi.viewportHeight),
+            static_cast<int>(tdi.fboWidth),
+            static_cast<int>(tdi.fboHeight),
             translatedPlanDecision,
             translatedPlanReason,
             static_cast<unsigned long long>(translatedPlanTraceGeneration),
@@ -43107,10 +43661,31 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
     const std::uint8_t* sourceBytes = nullptr;
     std::size_t sourceBpp = 0;
     std::size_t sourceByteCount = 0;
+    const bool legacyCompatSourceLevel =
+        appglCompatProfileEnabled() &&
+        isLegacyCompatTextureFormatCombo(
+            image.desc.internalFormat,
+            image.desc.sourceFormat);
     if (format == GL_RGBA && type == GL_UNSIGNED_BYTE && !image.rgba8.empty()) {
         sourceBytes = image.rgba8.data();
         sourceBpp = 4;
         sourceByteCount = image.rgba8.size();
+    } else if (legacyCompatSourceLevel &&
+               format == image.desc.sourceFormat &&
+               type == image.desc.sourceType &&
+               image.exactReadbackBpp == dstPixelBytes &&
+               !image.exactReadbackData.empty()) {
+        sourceBytes = image.exactReadbackData.data();
+        sourceBpp = image.exactReadbackBpp;
+        sourceByteCount = image.exactReadbackData.size();
+    } else if (legacyCompatSourceLevel &&
+               format == image.desc.sourceFormat &&
+               type == image.desc.sourceType &&
+               image.nativeBpp == dstPixelBytes &&
+               !image.nativeData.empty()) {
+        sourceBytes = image.nativeData.data();
+        sourceBpp = image.nativeBpp;
+        sourceByteCount = image.nativeData.size();
     } else if (useNativeDepth32FAsRgba8) {
         sourceBytes = image.nativeData.data();
         sourceBpp = image.nativeBpp;

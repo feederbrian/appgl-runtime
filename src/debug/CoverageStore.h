@@ -49,7 +49,9 @@ public:
     //                                glGetString(GL_VERSION) and
     //                                Runtime::claimedVersionString consult,
     //                                independent of coverage-store state.
-    //                                Returns "4.6 AppGL core".
+    //                                Returns "4.6 AppGL core", or
+    //                                "4.6 AppGL compatibility" when
+    //                                APPGL_COMPAT_PROFILE is enabled.
     //
     //   fullyImplementedVersion()  — dynamic walk over the coverage table.
     //                                Reports the highest core version for

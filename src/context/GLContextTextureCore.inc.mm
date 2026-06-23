@@ -239,7 +239,13 @@ bool GLContext::texImage(
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    if (!impl_->buildRGBA8Upload(image.desc.width, image.desc.height, image.desc.depth, format, type, resolvedPixels, image.rgba8)) {
+    const bool normalizeCompatUpload =
+        shouldNormalizeLegacyCompatTextureUpload(internalFormatEnum, format);
+    if (!impl_->buildRGBA8Upload(
+            internalFormatEnum,
+            image.desc.width, image.desc.height, image.desc.depth,
+            format, type, resolvedPixels, image.rgba8,
+            normalizeCompatUpload)) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -247,7 +253,93 @@ bool GLContext::texImage(
     impl_->buildNativeUpload(
         static_cast<GLenum>(internalformat),
         image.desc.width, image.desc.height, image.desc.depth,
-        format, type, resolvedPixels, image.nativeData, image.nativeBpp);
+        format, type, resolvedPixels, image.nativeData, image.nativeBpp,
+        normalizeCompatUpload);
+    if (normalizeCompatUpload && !isPackedPixelType(type)) {
+        GLenum exactFormat = 0;
+        switch (Impl::compatUploadBaseForInternalFormat(internalFormatEnum)) {
+            case Impl::CompatUploadBase::Alpha:
+                exactFormat = GL_ALPHA;
+                break;
+            case Impl::CompatUploadBase::Luminance:
+                exactFormat = GL_LUMINANCE;
+                break;
+            case Impl::CompatUploadBase::LuminanceAlpha:
+                exactFormat = GL_LUMINANCE_ALPHA;
+                break;
+            case Impl::CompatUploadBase::Intensity:
+                exactFormat = GL_INTENSITY;
+                break;
+            default:
+                break;
+        }
+        if (exactFormat != 0 && format == exactFormat && pxBytes > 0) {
+            const bool mirrorExactIntoNative = image.nativeData.empty();
+            image.exactReadbackBpp = pxBytes;
+            const std::size_t totalBytes =
+                static_cast<std::size_t>(image.desc.width) *
+                static_cast<std::size_t>(image.desc.height) *
+                static_cast<std::size_t>(image.desc.depth) *
+                image.exactReadbackBpp;
+            image.exactReadbackData.assign(totalBytes, 0);
+            if (resolvedPixels != nullptr && totalBytes > 0) {
+                const auto& store = impl_->state->pixelStore();
+                const std::size_t sourceWidth =
+                    static_cast<std::size_t>(store.unpackRowLength > 0
+                        ? store.unpackRowLength
+                        : image.desc.width);
+                const std::size_t sourceHeight =
+                    static_cast<std::size_t>(store.unpackImageHeight > 0
+                        ? store.unpackImageHeight
+                        : image.desc.height);
+                const std::size_t rowBytes =
+                    alignByteCount(sourceWidth * image.exactReadbackBpp,
+                                   store.unpackAlignment);
+                const std::size_t imageBytes = rowBytes * sourceHeight;
+                const std::size_t sourceOffset =
+                    static_cast<std::size_t>(store.unpackSkipImages) * imageBytes +
+                    static_cast<std::size_t>(store.unpackSkipRows) * rowBytes +
+                    static_cast<std::size_t>(store.unpackSkipPixels) * image.exactReadbackBpp;
+                const auto* source =
+                    static_cast<const std::uint8_t*>(resolvedPixels) + sourceOffset;
+                const bool swapBytes = (store.unpackSwapBytes == GL_TRUE);
+                for (GLsizei z = 0; z < image.desc.depth; ++z) {
+                    for (GLsizei y = 0; y < image.desc.height; ++y) {
+                        const std::uint8_t* srcRow =
+                            source + static_cast<std::size_t>(z) * imageBytes +
+                            static_cast<std::size_t>(y) * rowBytes;
+                        std::uint8_t* dstRow =
+                            image.exactReadbackData.data() +
+                            (static_cast<std::size_t>(z) *
+                             static_cast<std::size_t>(image.desc.height) +
+                             static_cast<std::size_t>(y)) *
+                            static_cast<std::size_t>(image.desc.width) *
+                            image.exactReadbackBpp;
+                        std::memcpy(dstRow, srcRow,
+                                    static_cast<std::size_t>(image.desc.width) *
+                                    image.exactReadbackBpp);
+                        if (swapBytes && typeBytes > 1) {
+                            const std::size_t components =
+                                componentCountForFormat(format);
+                            for (GLsizei x = 0; x < image.desc.width; ++x) {
+                                std::uint8_t* pixel =
+                                    dstRow + static_cast<std::size_t>(x) *
+                                    image.exactReadbackBpp;
+                                for (std::size_t c = 0; c < components; ++c) {
+                                    std::reverse(pixel + c * typeBytes,
+                                                 pixel + (c + 1u) * typeBytes);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (mirrorExactIntoNative) {
+                image.nativeBpp = image.exactReadbackBpp;
+                image.nativeData = image.exactReadbackData;
+            }
+        }
+    }
 
     if (level == 0 || !object->levels.contains(0)) {
         object->desc = image.desc;
@@ -687,6 +779,8 @@ bool GLContext::texSubImage(
         return false;
     }
     image.generatedMipLevel = false;
+    image.exactReadbackData.clear();
+    image.exactReadbackBpp = 0;
     GLint effectiveZoffset = zoffset;
     if (sparseCubeFace >= 0) {
         effectiveZoffset = sparseCubeFace;
@@ -730,7 +824,12 @@ bool GLContext::texSubImage(
         return false;
     }
     std::vector<std::uint8_t> upload;
-    if (!impl_->buildRGBA8Upload(width, height, depth, format, type, resolvedPixels, upload)) {
+    const bool normalizeCompatUpload =
+        shouldNormalizeLegacyCompatTextureUpload(image.desc.internalFormat, format);
+    if (!impl_->buildRGBA8Upload(
+            image.desc.internalFormat,
+            width, height, depth, format, type, resolvedPixels, upload,
+            normalizeCompatUpload)) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -772,7 +871,8 @@ bool GLContext::texSubImage(
         std::size_t nativeBpp = 0;
         if (impl_->buildNativeUpload(image.desc.internalFormat,
                 width, height, depth, format, type, resolvedPixels,
-                nativeUpload, nativeBpp) && nativeBpp == image.nativeBpp) {
+                nativeUpload, nativeBpp,
+                normalizeCompatUpload) && nativeBpp == image.nativeBpp) {
             for (GLsizei z = 0; z < depth; ++z) {
                 for (GLsizei y = 0; y < height; ++y) {
                     const std::size_t srcOff =

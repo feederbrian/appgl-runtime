@@ -2,6 +2,7 @@
 
 #include "MetalVertexDescriptorBuilder.h"
 #include "../objects/GLObjectStore.h"
+#include "../runtime/AppGLProfile.h"
 
 #include <algorithm>
 #include <type_traits>
@@ -1801,6 +1802,10 @@ GLenum GLStateTracker::clipDepthMode() const { return clipDepthMode_; }
 bool GLStateTracker::validateForDraw() const {
     // GL 3.2+ core profile: drawing with VAO 0 is GL_INVALID_OPERATION. This guard
     // is what the future glDraw* entrypoints must consult before pushing work.
+    // Compatibility profile keeps VAO 0 legal as the default vertex array.
+    if (appglCompatProfileEnabled()) {
+        return true;
+    }
     return currentVertexArray_ != 0;
 }
 

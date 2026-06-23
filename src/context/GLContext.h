@@ -446,7 +446,8 @@ public:
     bool getTextureParameterIiv(GLuint texture, GLenum pname, GLint* params);
     bool getTextureParameterIuiv(GLuint texture, GLenum pname, GLuint* params);
     bool getTextureLevelParameterfv(GLuint texture, GLint level, GLenum pname, GLfloat* params);
-    bool getTextureLevelParameteriv(GLuint texture, GLint level, GLenum pname, GLint* params);
+    bool getTextureLevelParameteriv(GLuint texture, GLint level, GLenum pname, GLint* params,
+                                    GLenum requestTarget = 0);
     bool getTextureImage(GLuint texture, GLint level, GLenum format,
                          GLenum type, GLsizei bufSize, void* pixels,
                          GLenum requestTarget = 0);

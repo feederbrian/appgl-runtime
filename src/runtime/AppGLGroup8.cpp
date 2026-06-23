@@ -9,6 +9,7 @@
 
 #include "../context/GLContext.h"
 #include "../extensions/ExtensionRegistry.h"
+#include "../runtime/AppGLProfile.h"
 #include "../state/GLStateTracker.h"
 #include "../debug/CoverageStore.h"
 #include "../generated/gl_dispatch.gen.h"
@@ -166,8 +167,10 @@ static void APIENTRY glGetTexImage(GLenum target, GLint level, GLenum format, GL
     }
     GLuint texName = context->state().boundTexture(bindTarget);
     if (texName == 0) {
-        context->pushError(GL_INVALID_OPERATION);
-        return;
+        if (!appglCompatProfileEnabled()) {
+            context->pushError(GL_INVALID_OPERATION);
+            return;
+        }
     }
 
     // Delegate to the DSA getTextureImage with bufSize=0 (no size bound for
@@ -202,6 +205,10 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
 
     // Find the bound texture for this target
     GLuint texName = context->state().boundTexture(target);
+    if (texName == 0 && appglCompatProfileEnabled()) {
+        (void)context->getTextureLevelParameteriv(texName, level, pname, params, target);
+        return;
+    }
     GLTextureObject* tex = context->objects().textures().get(texName);
     // OpenGL 4.6 §8.11: querying a default texture (no user texture bound
     // to `target`) is valid — all parameters return their default values
