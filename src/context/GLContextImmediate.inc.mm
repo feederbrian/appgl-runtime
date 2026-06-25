@@ -12,6 +12,23 @@
 // per-vertex registers updated by glColor*/glTexCoord* without
 // emitting a vertex; only glVertex* pushes into the capture vector.
 
+namespace {
+
+std::uint32_t appglImmediateTextureBaseClass(GLenum internalFormat) {
+    switch (internalFormat) {
+        case GL_ALPHA:
+        case GL_ALPHA4:
+        case GL_ALPHA8:
+        case GL_ALPHA12:
+        case GL_ALPHA16:
+            return 1u;
+        default:
+            return 0u;
+    }
+}
+
+}  // namespace
+
 #ifndef GL_LINE_STIPPLE
 #define GL_LINE_STIPPLE 0x0B24
 #endif
@@ -2896,6 +2913,7 @@ void GLContext::endImmediate() {
     const bool lineStippleShadowPainted = paintStippledLinesToShadow();
 
     void* fixedFunctionSamplerState = nullptr;
+    GLenum fixedFunctionTextureInternalFormat = 0;
     auto resolveFixedFunctionTexture = [&]() -> void* {
         GLenum target = 0;
         if (impl_->state->isEnabled(GL_TEXTURE_2D)) {
@@ -2917,6 +2935,7 @@ void GLContext::endImmediate() {
         if (impl_->rebuildTextureSamplerState(texName, *tex)) {
             fixedFunctionSamplerState = tex->metalSampler;
         }
+        fixedFunctionTextureInternalFormat = tex->desc.internalFormat;
         return impl_->resolveSwizzledTexture(*tex);
     };
 
@@ -2928,6 +2947,14 @@ void GLContext::endImmediate() {
     info.mvp = drawMvp;
     info.metalTexture = resolveFixedFunctionTexture();
     info.metalSamplerState = fixedFunctionSamplerState;
+    if (appglCompatProfileEnabled()) {
+        const std::uint32_t textureBaseClass =
+            appglImmediateTextureBaseClass(fixedFunctionTextureInternalFormat);
+        if (textureBaseClass != 0u) {
+            info.textureEnvMode = impl_->texEnv.mode;
+            info.textureBaseClass = textureBaseClass;
+        }
+    }
     info.fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
     {
         GLsizei fboW = 0;
@@ -3305,6 +3332,7 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
     }
 
     void* fixedFunctionSamplerState = nullptr;
+    GLenum fixedFunctionTextureInternalFormat = 0;
     auto resolveFixedFunctionTexture = [&]() -> void* {
         GLenum target = 0;
         if (impl_->state->isEnabled(GL_TEXTURE_2D)) {
@@ -3326,6 +3354,7 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         if (impl_->rebuildTextureSamplerState(texName, *tex)) {
             fixedFunctionSamplerState = tex->metalSampler;
         }
+        fixedFunctionTextureInternalFormat = tex->desc.internalFormat;
         return impl_->resolveSwizzledTexture(*tex);
     };
 
@@ -4108,6 +4137,14 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         info.mvp = encodeMvp;
         info.metalTexture = resolveFixedFunctionTexture();
         info.metalSamplerState = fixedFunctionSamplerState;
+        if (appglCompatProfileEnabled()) {
+            const std::uint32_t textureBaseClass =
+                appglImmediateTextureBaseClass(fixedFunctionTextureInternalFormat);
+            if (textureBaseClass != 0u) {
+                info.textureEnvMode = impl_->texEnv.mode;
+                info.textureBaseClass = textureBaseClass;
+            }
+        }
         info.fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
         GLsizei fboW = 0;
         GLsizei fboH = 0;

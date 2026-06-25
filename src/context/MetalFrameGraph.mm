@@ -16485,6 +16485,11 @@ struct AppGLImmediateOut {
     float2 texcoord;
 };
 
+struct AppGLImmediateTextureState {
+    uint envMode;
+    uint baseClass;
+};
+
 vertex AppGLImmediateOut appgl_immediate_vs(
     AppGLImmediateIn in [[stage_in]],
     constant float4x4& mvp [[buffer(1)]]
@@ -16504,9 +16509,19 @@ fragment float4 appgl_immediate_color_fs(AppGLImmediateOut in [[stage_in]]) {
 fragment float4 appgl_immediate_textured_fs(
     AppGLImmediateOut in [[stage_in]],
     texture2d<float> tex [[texture(0)]],
-    sampler samp [[sampler(0)]]
+    sampler samp [[sampler(0)]],
+    constant AppGLImmediateTextureState& textureState [[buffer(0)]]
 ) {
-    return in.color * tex.sample(samp, in.texcoord);
+    constexpr uint kEnvReplace = 0x1E01u;
+    constexpr uint kBaseAlpha = 1u;
+    float4 sample = tex.sample(samp, in.texcoord);
+    if (textureState.envMode == kEnvReplace) {
+        if (textureState.baseClass == kBaseAlpha) {
+            return float4(in.color.rgb, sample.a);
+        }
+        return sample;
+    }
+    return in.color * sample;
 }
 )MSL";
         NSError* error = nil;
@@ -17902,6 +17917,21 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             if (samp != nil) {
                 [encoder setFragmentSamplerState:samp atIndex:0];
             }
+            struct ImmediateTextureState {
+                std::uint32_t envMode;
+                std::uint32_t baseClass;
+            };
+            const bool compatLegacyTextureState =
+                appglCompatProfileEnabled() && info.textureBaseClass != 0u;
+            const ImmediateTextureState textureState = {
+                compatLegacyTextureState
+                    ? static_cast<std::uint32_t>(info.textureEnvMode)
+                    : 0u,
+                compatLegacyTextureState ? info.textureBaseClass : 0u
+            };
+            [encoder setFragmentBytes:&textureState
+                                length:sizeof(textureState)
+                               atIndex:0];
         }
 
         [encoder drawPrimitives:primitive

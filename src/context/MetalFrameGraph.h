@@ -786,6 +786,8 @@ struct ImmediateDrawInfo {
     Matrix4 mvp = Matrix4::identity();
     void* metalTexture = nullptr;  // id<MTLTexture> or nullptr
     void* metalSamplerState = nullptr; // id<MTLSamplerState> or nullptr
+    GLenum textureEnvMode = 0;
+    std::uint32_t textureBaseClass = 0; // 1 = legacy GL_ALPHA-family texture.
     GLenum fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
     void* fboColorTexture = nullptr;        // id<MTLTexture> or nullptr
     void* fboDepthStencilTexture = nullptr; // id<MTLTexture> or nullptr

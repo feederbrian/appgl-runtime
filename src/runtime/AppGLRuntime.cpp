@@ -895,6 +895,13 @@ bool isValidLegacyUploadInternalFormat(GLenum internalFormat) {
     // The legacy validator previously restricted this to 8-bit unorm only;
     // widened now so CTS format/type coverage tests can reach the upload path.
     switch (internalFormat) {
+        // Legacy component-count internal formats accepted by
+        // compatibility-profile TexImage entry points.
+        case 1:
+        case 2:
+        case 3:
+        case 4:
+            return appglCompatProfileEnabled();
         // Unsized (base) formats
         case GL_RED:
         case GL_RG:

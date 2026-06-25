@@ -6352,8 +6352,34 @@ bool isLegacyCompatTextureExternalFormat(GLenum format) {
     }
 }
 
+bool isLegacyCompatComponentCountInternalFormat(GLenum internalFormat) {
+    return internalFormat >= 1 && internalFormat <= 4;
+}
+
 bool isLegacyCompatTextureInternalFormat(GLenum internalFormat) {
     switch (internalFormat) {
+        case 1:
+        case 2:
+        case 3:
+        case 4:
+        case GL_RED:
+        case GL_RG:
+        case GL_RGB:
+        case GL_RGBA:
+        case GL_R3_G3_B2:
+        case GL_RGB4:
+        case GL_RGB5:
+        case GL_RGB8:
+        case GL_RGB10:
+        case GL_RGB12:
+        case GL_RGB16:
+        case GL_RGBA2:
+        case GL_RGBA4:
+        case GL_RGB5_A1:
+        case GL_RGBA8:
+        case GL_RGB10_A2:
+        case GL_RGBA12:
+        case GL_RGBA16:
         case GL_ALPHA:
         case GL_ALPHA4:
         case GL_ALPHA8:
@@ -6391,6 +6417,7 @@ bool isLegacyCompatTextureFormatCombo(GLenum internalFormat, GLenum format) {
 
 std::size_t compatTextureInternalBaseComponentCount(GLenum internalFormat) {
     switch (internalFormat) {
+        case 1:
         case GL_RED:
         case GL_RED_INTEGER:
         case GL_R8:
@@ -6406,6 +6433,7 @@ std::size_t compatTextureInternalBaseComponentCount(GLenum internalFormat) {
         case GL_R32I:
         case GL_R32UI:
             return 1;
+        case 2:
         case GL_RG:
         case GL_RG_INTEGER:
         case GL_RG8:
@@ -6421,6 +6449,7 @@ std::size_t compatTextureInternalBaseComponentCount(GLenum internalFormat) {
         case GL_RG32I:
         case GL_RG32UI:
             return 2;
+        case 3:
         case GL_RGB:
         case GL_RGB_INTEGER:
         case GL_R3_G3_B2:
@@ -6448,8 +6477,9 @@ std::size_t compatTextureInternalBaseComponentCount(GLenum internalFormat) {
             case GL_COMPRESSED_SRGB:
             case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
                 return 3;
-            default:
-                return 4;
+        case 4:
+        default:
+            return 4;
     }
 }
 
@@ -10392,6 +10422,10 @@ struct GLContext::Impl {
     static std::uint8_t readComponentAsU8(
         const std::uint8_t* src, GLenum type, std::size_t componentIndex, bool swapBytes = false
     ) {
+        auto signedNormalizedToU8 = [](double v, double maxValue) -> std::uint8_t {
+            const double normalized = std::max(0.0, std::min(1.0, v / maxValue));
+            return static_cast<std::uint8_t>(normalized * 255.0 + 0.5);
+        };
         switch (type) {
             case GL_UNSIGNED_BYTE:
                 return src[componentIndex];
@@ -10407,7 +10441,7 @@ struct GLContext::Impl {
                 std::uint16_t bits = readU16Component(src, componentIndex, swapBytes);
                 std::int16_t v;
                 std::memcpy(&v, &bits, sizeof(v));
-                return static_cast<std::uint8_t>(std::max(0, static_cast<int>(v) * 255 / 32767));
+                return signedNormalizedToU8(static_cast<double>(v), 32767.0);
             }
             case GL_UNSIGNED_INT: {
                 auto v = readU32Component(src, componentIndex, swapBytes);
@@ -10417,7 +10451,7 @@ struct GLContext::Impl {
                 std::uint32_t bits = readU32Component(src, componentIndex, swapBytes);
                 std::int32_t v;
                 std::memcpy(&v, &bits, sizeof(v));
-                return static_cast<std::uint8_t>(std::max(0, static_cast<int>(static_cast<double>(v) * 255.0 / 2147483647.0)));
+                return signedNormalizedToU8(static_cast<double>(v), 2147483647.0);
             }
             case GL_FLOAT: {
                 std::uint32_t bits = readU32Component(src, componentIndex, swapBytes);
@@ -10841,6 +10875,14 @@ struct GLContext::Impl {
 
     static CompatUploadBase compatUploadBaseForInternalFormat(GLenum internalFormat) {
         switch (internalFormat) {
+            case 1:
+                return CompatUploadBase::Luminance;
+            case 2:
+                return CompatUploadBase::LuminanceAlpha;
+            case 3:
+                return CompatUploadBase::Rgb;
+            case 4:
+                return CompatUploadBase::Rgba;
             case GL_RED:
             case GL_RED_INTEGER:
             case GL_R8:
@@ -11229,8 +11271,13 @@ struct GLContext::Impl {
         const void* pixels,
         std::vector<std::uint8_t>& nativeData,
         std::size_t& outBpp,
-        bool normalizeCompatUpload = false
+        bool normalizeCompatUpload = false,
+        bool ignoreUnpackSkipImages = false
     ) {
+        auto unpackSkipImages = [&](const auto& store) -> std::size_t {
+            return ignoreUnpackSkipImages ? 0u
+                : static_cast<std::size_t>(store.unpackSkipImages);
+        };
         MTLPixelFormat mtlFmt = metalRenderbufferFormat(internalFormat);
         if (mtlFmt == MTLPixelFormatInvalid) return false;
 
@@ -11259,7 +11306,7 @@ struct GLContext::Impl {
                                store.unpackAlignment);
             const std::size_t imageBytes = rowBytes * sourceHeight;
             const std::size_t sourceOffset =
-                static_cast<std::size_t>(store.unpackSkipImages) * imageBytes
+                unpackSkipImages(store) * imageBytes
                 + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
                 + static_cast<std::size_t>(store.unpackSkipPixels) * srcPixelBytes;
             const auto* source =
@@ -11308,7 +11355,7 @@ struct GLContext::Impl {
             const std::size_t rowBytes     = alignByteCount(sourceWidth * srcPixelBytes, store.unpackAlignment);
             const std::size_t imageBytes   = rowBytes * sourceHeight;
             const std::size_t sourceOffset =
-                static_cast<std::size_t>(store.unpackSkipImages) * imageBytes
+                unpackSkipImages(store) * imageBytes
                 + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
                 + static_cast<std::size_t>(store.unpackSkipPixels) * srcPixelBytes;
             const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
@@ -11361,7 +11408,7 @@ struct GLContext::Impl {
             const std::size_t rowBytes     = alignByteCount(sourceWidth * srcPixelBytes, store.unpackAlignment);
             const std::size_t imageBytes   = rowBytes * sourceHeight;
             const std::size_t sourceOffset =
-                static_cast<std::size_t>(store.unpackSkipImages) * imageBytes
+                unpackSkipImages(store) * imageBytes
                 + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
                 + static_cast<std::size_t>(store.unpackSkipPixels) * srcPixelBytes;
             const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
@@ -11435,7 +11482,7 @@ struct GLContext::Impl {
                 const std::size_t rowBytes     = alignByteCount(sourceWidth * srcPixelBytes, store.unpackAlignment);
                 const std::size_t imageBytes   = rowBytes * sourceHeight;
                 const std::size_t sourceOffset =
-                    static_cast<std::size_t>(store.unpackSkipImages) * imageBytes
+                    unpackSkipImages(store) * imageBytes
                     + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
                     + static_cast<std::size_t>(store.unpackSkipPixels) * srcPixelBytes;
                 const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
@@ -11513,7 +11560,7 @@ struct GLContext::Impl {
             const std::size_t rowBytes     = alignByteCount(sourceWidth * srcPixelBytes, store.unpackAlignment);
             const std::size_t imageBytes   = rowBytes * sourceHeight;
             const std::size_t sourceOffset =
-                static_cast<std::size_t>(store.unpackSkipImages) * imageBytes
+                unpackSkipImages(store) * imageBytes
                 + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
                 + static_cast<std::size_t>(store.unpackSkipPixels) * srcPixelBytes;
             const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
@@ -11602,7 +11649,7 @@ struct GLContext::Impl {
                 alignByteCount(sourceWidth * srcPixelBytes, store.unpackAlignment);
             const std::size_t imageBytes = rowBytes * sourceHeight;
             const std::size_t sourceOffset =
-                static_cast<std::size_t>(store.unpackSkipImages) * imageBytes
+                unpackSkipImages(store) * imageBytes
                 + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
                 + static_cast<std::size_t>(store.unpackSkipPixels) * srcPixelBytes;
             const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
@@ -11678,7 +11725,7 @@ struct GLContext::Impl {
         const std::size_t rowBytes     = alignByteCount(sourceWidth * srcPixelBytes, store.unpackAlignment);
         const std::size_t imageBytes   = rowBytes * sourceHeight;
         const std::size_t sourceOffset =
-            static_cast<std::size_t>(store.unpackSkipImages) * imageBytes
+            unpackSkipImages(store) * imageBytes
             + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
             + static_cast<std::size_t>(store.unpackSkipPixels) * srcPixelBytes;
         const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
@@ -11746,7 +11793,8 @@ struct GLContext::Impl {
         GLenum type,
         const void* pixels,
         std::vector<std::uint8_t>& rgba8,
-        bool normalizeCompatUpload = false
+        bool normalizeCompatUpload = false,
+        bool ignoreUnpackSkipImages = false
     ) {
         if (width < 0 || height < 0 || depth < 0) {
             return false;
@@ -11771,8 +11819,10 @@ struct GLContext::Impl {
         const std::size_t sourceHeight = static_cast<std::size_t>(store.unpackImageHeight > 0 ? store.unpackImageHeight : height);
         const std::size_t rowBytes = alignByteCount(sourceWidth * pixelBytes, store.unpackAlignment);
         const std::size_t imageBytes = rowBytes * sourceHeight;
+        const std::size_t unpackSkipImages = ignoreUnpackSkipImages ? 0u
+            : static_cast<std::size_t>(store.unpackSkipImages);
         const std::size_t sourceOffset =
-            static_cast<std::size_t>(store.unpackSkipImages) * imageBytes
+            unpackSkipImages * imageBytes
             + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
             + static_cast<std::size_t>(store.unpackSkipPixels) * pixelBytes;
         const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;

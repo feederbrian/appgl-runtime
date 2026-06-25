@@ -125,7 +125,13 @@ bool GLContext::texImage(
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    if (!isSupportedInternalTextureFormat(*impl_->capabilities, static_cast<GLenum>(internalformat)) || componentCountForFormat(format) == 0) {
+    const GLenum internalFormatEnum = static_cast<GLenum>(internalformat);
+    const bool compatComponentCountInternalFormat =
+        appglCompatProfileEnabled() &&
+        isLegacyCompatComponentCountInternalFormat(internalFormatEnum);
+    if ((!compatComponentCountInternalFormat &&
+         !isSupportedInternalTextureFormat(*impl_->capabilities, internalFormatEnum)) ||
+        componentCountForFormat(format) == 0) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
@@ -138,7 +144,6 @@ bool GLContext::texImage(
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    const GLenum internalFormatEnum = static_cast<GLenum>(internalformat);
     if (target == GL_TEXTURE_3D &&
         (isDepthFormat(internalFormatEnum) ||
          isStencilFormat(internalFormatEnum) ||
@@ -295,6 +300,12 @@ bool GLContext::texImage(
         ? depth : 1;
     image.desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
     image.defined = true;
+    const bool ignoreUnpackSkipImages =
+        appglCompatProfileEnabled() &&
+        isLegacyCompatTextureFormatCombo(internalFormatEnum, format) &&
+        target != GL_TEXTURE_3D &&
+        target != GL_TEXTURE_2D_ARRAY &&
+        target != GL_TEXTURE_CUBE_MAP_ARRAY;
     // Resolve pixels against GL_PIXEL_UNPACK_BUFFER if one is bound.
     // Without this, passing an offset (as CTS does after binding a PBO)
     // would SIGSEGV when we treat the offset as a raw pointer. See
@@ -320,7 +331,8 @@ bool GLContext::texImage(
             internalFormatEnum,
             image.desc.width, image.desc.height, image.desc.depth,
             format, type, resolvedPixels, image.rgba8,
-            normalizeCompatUpload)) {
+            normalizeCompatUpload,
+            ignoreUnpackSkipImages)) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -329,7 +341,8 @@ bool GLContext::texImage(
         static_cast<GLenum>(internalformat),
         image.desc.width, image.desc.height, image.desc.depth,
         format, type, resolvedPixels, image.nativeData, image.nativeBpp,
-        normalizeCompatUpload);
+        normalizeCompatUpload,
+        ignoreUnpackSkipImages);
     if (normalizeCompatUpload && !isPackedPixelType(type)) {
         GLenum exactFormat = 0;
         switch (Impl::compatUploadBaseForInternalFormat(internalFormatEnum)) {
@@ -371,8 +384,11 @@ bool GLContext::texImage(
                     alignByteCount(sourceWidth * image.exactReadbackBpp,
                                    store.unpackAlignment);
                 const std::size_t imageBytes = rowBytes * sourceHeight;
+                const std::size_t unpackSkipImages =
+                    ignoreUnpackSkipImages ? 0u
+                                           : static_cast<std::size_t>(store.unpackSkipImages);
                 const std::size_t sourceOffset =
-                    static_cast<std::size_t>(store.unpackSkipImages) * imageBytes +
+                    unpackSkipImages * imageBytes +
                     static_cast<std::size_t>(store.unpackSkipRows) * rowBytes +
                     static_cast<std::size_t>(store.unpackSkipPixels) * image.exactReadbackBpp;
                 const auto* source =
@@ -995,6 +1011,12 @@ bool GLContext::texSubImage(
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    const bool ignoreUnpackSkipImages =
+        appglCompatProfileEnabled() &&
+        isLegacyCompatTextureFormatCombo(image.desc.internalFormat, format) &&
+        target != GL_TEXTURE_3D &&
+        target != GL_TEXTURE_2D_ARRAY &&
+        target != GL_TEXTURE_CUBE_MAP_ARRAY;
 
     // Resolve pixels against GL_PIXEL_UNPACK_BUFFER if bound (see
     // texImage for rationale). CTS DSA textures_subimage_errors SIGSEGV
@@ -1032,7 +1054,8 @@ bool GLContext::texSubImage(
     if (!impl_->buildRGBA8Upload(
             image.desc.internalFormat,
             width, height, depth, format, type, resolvedPixels, upload,
-            normalizeCompatUpload)) {
+            normalizeCompatUpload,
+            ignoreUnpackSkipImages)) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -1075,7 +1098,8 @@ bool GLContext::texSubImage(
         if (impl_->buildNativeUpload(image.desc.internalFormat,
                 width, height, depth, format, type, resolvedPixels,
                 nativeUpload, nativeBpp,
-                normalizeCompatUpload) && nativeBpp == image.nativeBpp) {
+                normalizeCompatUpload,
+                ignoreUnpackSkipImages) && nativeBpp == image.nativeBpp) {
             for (GLsizei z = 0; z < depth; ++z) {
                 for (GLsizei y = 0; y < height; ++y) {
                     const std::size_t srcOff =
