@@ -632,6 +632,10 @@ bool GLContext::copyTexImage2D(
     GLsizei height,
     GLint border
 ) {
+    if (isLegacyCompatComponentCountInternalFormat(internalformat)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
     if (width < 0 || height < 0) {
         pushError(GL_INVALID_VALUE);
         return false;

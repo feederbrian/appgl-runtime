@@ -1044,6 +1044,8 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                     }
                 }
                 switch (fmt) {
+                    case 1:
+                    case 2:
                     case GL_LUMINANCE:
                     case GL_LUMINANCE8:
                     case GL_LUMINANCE_ALPHA:
@@ -1102,6 +1104,7 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                 if (luminanceBits > 0) {
                     if (channel == 3) {
                         switch (fmt) {
+                            case 2:
                             case GL_LUMINANCE_ALPHA:
                             case GL_LUMINANCE8_ALPHA8:
                                 return 8;
@@ -1124,6 +1127,12 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                 }
                 if (legacyIntensitySize() > 0) {
                     return 0;
+                }
+                if (fmt == 3) {
+                    return (channel < 3) ? 8 : 0;
+                }
+                if (fmt == 4) {
+                    return 8;
                 }
                 // Red-only formats: R8/R16/R8I/R8UI/R16I/R16UI/R16F/R32F/R32I/R32UI/R8_SNORM/R16_SNORM.
                 if (match({GL_R8, GL_R8_SNORM, GL_R8I, GL_R8UI})) {

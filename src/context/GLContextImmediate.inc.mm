@@ -3228,6 +3228,16 @@ void GLContext::endImmediate() {
         if (!appglCompatProfileEnabled()) {
             return false;
         }
+        const bool filledPrimitiveMode =
+            mode == GL_TRIANGLES ||
+            mode == GL_TRIANGLE_STRIP ||
+            mode == GL_TRIANGLE_FAN ||
+            mode == GL_QUADS ||
+            mode == GL_QUAD_STRIP ||
+            mode == GL_POLYGON;
+        if (!filledPrimitiveMode) {
+            return false;
+        }
         if (drawMode != GL_TRIANGLES ||
             drawVerts == nullptr ||
             drawCount < 3 ||

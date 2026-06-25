@@ -368,6 +368,8 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                     }
                 }
                 switch (fmt) {
+                    case 1:
+                    case 2:
                     case GL_LUMINANCE:
                     case GL_LUMINANCE8:
                     case GL_LUMINANCE_ALPHA:
@@ -421,6 +423,7 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                 if (luminanceBits > 0) {
                     if (channel == 3) {
                         switch (fmt) {
+                            case 2:
                             case GL_LUMINANCE_ALPHA:
                             case GL_LUMINANCE8_ALPHA8:
                                 return 8;
@@ -443,6 +446,12 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                 }
                 if (legacyIntensitySize() > 0) {
                     return 0;
+                }
+                if (fmt == 3) {
+                    return (channel < 3) ? 8 : 0;
+                }
+                if (fmt == 4) {
+                    return 8;
                 }
                 if (match({GL_R8, GL_R8_SNORM, GL_R8I, GL_R8UI})) {
                     return channel == 0 ? 8 : 0;
