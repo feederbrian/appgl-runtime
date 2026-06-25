@@ -12688,7 +12688,13 @@ struct GLContext::Impl {
         }
         object.r5PrimaryTextureEvicted = false;
         releaseTextureBufferExpansion(object);
-        const auto baseIt = object.levels.find(0);
+        const auto levelZeroIt = object.levels.find(0);
+        GLint descriptorBaseLevel = 0;
+        auto baseIt = levelZeroIt;
+        if (baseIt == object.levels.end() || !baseIt->second.defined) {
+            descriptorBaseLevel = std::max<GLint>(object.params.baseLevel, 0);
+            baseIt = object.levels.find(descriptorBaseLevel);
+        }
         if (baseIt == object.levels.end()) {
             releaseRetainedMetalObject(object.metalTexture);
             object.metalTexture = nullptr;
@@ -12707,6 +12713,29 @@ struct GLContext::Impl {
         if (device == nil || !baseLevel.defined || baseLevel.desc.width <= 0 || baseLevel.desc.height <= 0 || baseLevel.desc.depth <= 0) {
             return true;
         }
+        auto inferVirtualLevelZeroDimension = [](GLsizei dimension, GLint level) -> GLsizei {
+            if (level <= 0 || dimension <= 1) {
+                return dimension;
+            }
+            GLsizei inferred = dimension;
+            for (GLint i = 0; i < level; ++i) {
+                if (inferred > std::numeric_limits<GLsizei>::max() / 2) {
+                    return std::numeric_limits<GLsizei>::max();
+                }
+                inferred *= 2;
+            }
+            return inferred;
+        };
+        const GLsizei descriptorBaseWidth =
+            inferVirtualLevelZeroDimension(baseLevel.desc.width, descriptorBaseLevel);
+        const GLsizei descriptorBaseHeight =
+            (object.target == GL_TEXTURE_1D || object.target == GL_TEXTURE_1D_ARRAY)
+                ? baseLevel.desc.height
+                : inferVirtualLevelZeroDimension(baseLevel.desc.height, descriptorBaseLevel);
+        const GLsizei descriptorBaseDepth =
+            (object.target == GL_TEXTURE_3D)
+                ? inferVirtualLevelZeroDimension(baseLevel.desc.depth, descriptorBaseLevel)
+                : baseLevel.desc.depth;
         auto maybeDropRedundantRgba8Shadows = [&](bool useNativePathForUpload) {
             if (!useNativePathForUpload ||
                 !textureShadowDropRedundantRgba8Enabled()) {
@@ -12916,12 +12945,12 @@ struct GLContext::Impl {
         // change, size change).
         id<MTLTexture> existing = (__bridge id<MTLTexture>)object.metalTexture;
         if (existing != nil) {
-            const NSUInteger wantWidth = static_cast<NSUInteger>(baseLevel.desc.width);
+            const NSUInteger wantWidth = static_cast<NSUInteger>(descriptorBaseWidth);
             const NSUInteger wantHeight = static_cast<NSUInteger>(
                 (object.target == GL_TEXTURE_1D || object.target == GL_TEXTURE_1D_ARRAY)
-                ? 1 : baseLevel.desc.height);
+                ? 1 : descriptorBaseHeight);
             const NSUInteger wantDepth = static_cast<NSUInteger>(
-                object.target == GL_TEXTURE_3D ? baseLevel.desc.depth : 1);
+                object.target == GL_TEXTURE_3D ? descriptorBaseDepth : 1);
             const NSUInteger wantArray = (object.target == GL_TEXTURE_1D_ARRAY)
                 ? static_cast<NSUInteger>(baseLevel.desc.height)
                 : (object.target == GL_TEXTURE_2D_ARRAY
@@ -13372,15 +13401,15 @@ struct GLContext::Impl {
         ScopedOwnedMetalObject descriptorRelease(descriptor);
         descriptor.textureType = metalTextureTypeForTarget(object.target);
         descriptor.pixelFormat = chosenFormat;
-        descriptor.width = static_cast<NSUInteger>(baseLevel.desc.width);
+        descriptor.width = static_cast<NSUInteger>(descriptorBaseWidth);
         // GL_TEXTURE_1D_ARRAY stores its layer count in `height` (2-arg GL API).
         // Metal requires height=1 for 1D array textures; layers come from arrayLength.
         const bool is1DArray = (object.target == GL_TEXTURE_1D_ARRAY);
         const bool is2DArray = (object.target == GL_TEXTURE_2D_ARRAY);
         const bool isCubeArray = (object.target == GL_TEXTURE_CUBE_MAP_ARRAY);
         descriptor.height = static_cast<NSUInteger>(
-            (object.target == GL_TEXTURE_1D || is1DArray) ? 1 : baseLevel.desc.height);
-        descriptor.depth = static_cast<NSUInteger>(object.target == GL_TEXTURE_3D ? baseLevel.desc.depth : 1);
+            (object.target == GL_TEXTURE_1D || is1DArray) ? 1 : descriptorBaseHeight);
+        descriptor.depth = static_cast<NSUInteger>(object.target == GL_TEXTURE_3D ? descriptorBaseDepth : 1);
         // Arrayed textures: Metal uses arrayLength. GL puts layer count in
         // `height` for 1D_ARRAY and `depth` for 2D_ARRAY. For
         // GL_TEXTURE_CUBE_MAP_ARRAY, `depth` is the total layer-face
@@ -13446,9 +13475,9 @@ struct GLContext::Impl {
         id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
         if (texture == nil) {
             const std::size_t baseTexels =
-                static_cast<std::size_t>(std::max<GLsizei>(baseLevel.desc.width, 1)) *
-                static_cast<std::size_t>(std::max<GLsizei>(baseLevel.desc.height, 1)) *
-                static_cast<std::size_t>(std::max<GLsizei>(baseLevel.desc.depth, 1));
+                static_cast<std::size_t>(std::max<GLsizei>(descriptorBaseWidth, 1)) *
+                static_cast<std::size_t>(std::max<GLsizei>(descriptorBaseHeight, 1)) *
+                static_cast<std::size_t>(std::max<GLsizei>(descriptorBaseDepth, 1));
             const bool allowCpuOnlyHugeTexture =
                 !isMSTarget && baseTexels >= 64u * 1024u * 1024u;
             if (allowCpuOnlyHugeTexture) {

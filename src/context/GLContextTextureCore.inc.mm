@@ -2309,6 +2309,16 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
         pname == GL_TEXTURE_MAX_LEVEL) {
         object->swizzleDirty = true;
     }
+    if (pname == GL_TEXTURE_BASE_LEVEL ||
+        pname == GL_TEXTURE_MAX_LEVEL) {
+        const GLuint textureName = impl_->state != nullptr
+            ? impl_->state->boundTexture(target)
+            : 0u;
+        if (!impl_->replaceMetalTexture(*object, textureName)) {
+            pushError(GL_OUT_OF_MEMORY);
+            return false;
+        }
+    }
     return true;
 }
 
@@ -2472,6 +2482,13 @@ bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* pa
     if (pname == GL_TEXTURE_BASE_LEVEL ||
         pname == GL_TEXTURE_MAX_LEVEL) {
         object->swizzleDirty = true;
+        const GLuint textureName = impl_->state != nullptr
+            ? impl_->state->boundTexture(target)
+            : 0u;
+        if (!impl_->replaceMetalTexture(*object, textureName)) {
+            pushError(GL_OUT_OF_MEMORY);
+            return false;
+        }
     }
     return true;
 }
