@@ -37,12 +37,118 @@ bool GLContext::deleteTextures(GLsizei count, const GLuint* textures) {
     if (impl_->frameGraph != nullptr) {
         impl_->frameGraph->flushParallelEncodeBoundary();
     }
+    auto detachSimpleTextureViewsFromDeletedSource =
+        [&](GLuint sourceName, GLTextureObject& sourceObject) {
+            struct RebasedView {
+                GLuint name = 0;
+                GLint minLevel = 0;
+                GLint minLayer = 0;
+            };
+            std::vector<RebasedView> rebased;
+            impl_->objects->textures().forEach(
+                [&](GLuint viewName, GLTextureObject& viewObject) {
+                    if (viewObject.viewSourceTexture != sourceName) {
+                        return;
+                    }
+                    const GLint oldMinLevel = viewObject.viewMinLevel;
+                    const GLint oldMinLayer = viewObject.viewMinLayer;
+                    if (viewObject.metalTexture == nullptr ||
+                        !viewObject.instantiated) {
+                        (void)impl_->materializeTextureView(viewObject);
+                    }
+
+                    // A surviving view already owns a retained Metal view.
+                    // For the CPU shadow paths added by legacy pixel transfer,
+                    // keep a local level snapshot when the view maps layers
+                    // directly; otherwise leave the Metal view alive and avoid
+                    // chasing the deleted source from CPU-side shadow writers.
+                    if (oldMinLayer == 0) {
+                        const GLint viewLevels = std::max<GLint>(
+                            viewObject.viewNumLevels > 0
+                                ? viewObject.viewNumLevels
+                                : viewObject.desc.levels,
+                            1);
+                        viewObject.levels.clear();
+                        for (const auto& [srcLevel, srcImage] :
+                             sourceObject.levels) {
+                            if (srcLevel < oldMinLevel ||
+                                srcLevel >= oldMinLevel + viewLevels) {
+                                continue;
+                            }
+                            GLTextureImageLevel copied = srcImage;
+                            copied.desc.target = viewObject.desc.target;
+                            copied.desc.internalFormat =
+                                viewObject.desc.internalFormat;
+                            copied.desc.levels = viewObject.desc.levels;
+                            copied.desc.layers = viewObject.desc.layers;
+                            viewObject.levels.emplace(srcLevel - oldMinLevel,
+                                                      std::move(copied));
+                        }
+                        for (std::size_t face = 0;
+                             face < viewObject.cubeFaceLevels.size();
+                             ++face) {
+                            viewObject.cubeFaceLevels[face].clear();
+                            for (const auto& [srcLevel, srcImage] :
+                                 sourceObject.cubeFaceLevels[face]) {
+                                if (srcLevel < oldMinLevel ||
+                                    srcLevel >= oldMinLevel + viewLevels) {
+                                    continue;
+                                }
+                                GLTextureImageLevel copied = srcImage;
+                                copied.desc.target = viewObject.desc.target;
+                                copied.desc.internalFormat =
+                                    viewObject.desc.internalFormat;
+                                copied.desc.levels = viewObject.desc.levels;
+                                copied.desc.layers = viewObject.desc.layers;
+                                viewObject.cubeFaceLevels[face].emplace(
+                                    srcLevel - oldMinLevel, std::move(copied));
+                            }
+                        }
+                        viewObject.colorShadowAuthoritative =
+                            sourceObject.colorShadowAuthoritative;
+                        viewObject.depthStencilShadowAuthoritative =
+                            sourceObject.depthStencilShadowAuthoritative;
+                        viewObject.wasFramebufferRenderedTo =
+                            sourceObject.wasFramebufferRenderedTo;
+                        viewObject.wasViewportRenderedTo =
+                            sourceObject.wasViewportRenderedTo;
+                        viewObject.viewSourceTexture = 0;
+                        viewObject.viewMinLevel = 0;
+                        viewObject.viewMinLayer = 0;
+                        rebased.push_back({viewName, oldMinLevel, oldMinLayer});
+                    }
+                });
+
+            for (const RebasedView& view : rebased) {
+                std::vector<GLuint> stack{view.name};
+                while (!stack.empty()) {
+                    const GLuint parentName = stack.back();
+                    stack.pop_back();
+                    impl_->objects->textures().forEach(
+                        [&](GLuint childName, GLTextureObject& child) {
+                            if (child.viewSourceTexture != parentName) {
+                                return;
+                            }
+                            child.viewMinLevel =
+                                std::max<GLint>(0,
+                                                child.viewMinLevel -
+                                                    view.minLevel);
+                            child.viewMinLayer =
+                                std::max<GLint>(0,
+                                                child.viewMinLayer -
+                                                    view.minLayer);
+                            stack.push_back(childName);
+                        });
+                }
+            }
+        };
     for (GLsizei index = 0; index < count; ++index) {
         const GLuint name = textures[index];
         if (name == 0) {
             continue;
         }
         if (GLTextureObject* object = impl_->objects->textures().get(name); object != nullptr) {
+            detachSimpleTextureViewsFromDeletedSource(name, *object);
             for (auto& ib : impl_->imageBindings) {
                 if (ib.texture == name) {
                     ib.invalidateMetalView();
@@ -129,9 +235,14 @@ bool GLContext::texImage(
     const bool compatComponentCountInternalFormat =
         appglCompatProfileEnabled() &&
         isLegacyCompatComponentCountInternalFormat(internalFormatEnum);
+    const bool compatColorIndexBitmapFormat =
+        appglCompatProfileEnabled() &&
+        format == GL_COLOR_INDEX &&
+        type == GL_BITMAP;
     if ((!compatComponentCountInternalFormat &&
          !isSupportedInternalTextureFormat(*impl_->capabilities, internalFormatEnum)) ||
-        componentCountForFormat(format) == 0) {
+        (componentCountForFormat(format) == 0 &&
+         !compatColorIndexBitmapFormat)) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
@@ -306,6 +417,45 @@ bool GLContext::texImage(
         target != GL_TEXTURE_3D &&
         target != GL_TEXTURE_2D_ARRAY &&
         target != GL_TEXTURE_CUBE_MAP_ARRAY;
+    const bool compatColorIndexBitmapUpload =
+        appglCompatProfileEnabled() &&
+        format == GL_COLOR_INDEX &&
+        type == GL_BITMAP &&
+        image.desc.depth == 1;
+    if (compatColorIndexBitmapUpload) {
+        const auto& store = impl_->state->pixelStore();
+        const std::size_t sourceWidth =
+            static_cast<std::size_t>(store.unpackRowLength > 0
+                ? store.unpackRowLength
+                : image.desc.width);
+        const std::size_t rowBytes =
+            alignByteCount((sourceWidth + 7u) / 8u, store.unpackAlignment);
+        const std::size_t requiredBytes =
+            (static_cast<std::size_t>(std::max<GLint>(store.unpackSkipRows, 0)) +
+             static_cast<std::size_t>(std::max<GLsizei>(image.desc.height, 0))) *
+            rowBytes;
+        auto [resolvedPixels, pboOk] = impl_->resolveUnpackPBO(
+            pixels, requiredBytes, 1);
+        if (!pboOk) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        if (!impl_->buildColorIndexBitmapUpload(
+                image.desc.width, image.desc.height,
+                resolvedPixels, image.rgba8)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        object->levels[level] = std::move(image);
+        object->desc = object->levels[level].desc;
+        object->desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
+        if (!impl_->replaceMetalTexture(*object, impl_->state->boundTexture(target))) {
+            pushError(GL_OUT_OF_MEMORY);
+            return false;
+        }
+        return true;
+    }
+
     // Resolve pixels against GL_PIXEL_UNPACK_BUFFER if one is bound.
     // Without this, passing an offset (as CTS does after binding a PBO)
     // would SIGSEGV when we treat the offset as a raw pointer. See

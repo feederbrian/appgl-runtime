@@ -121,6 +121,12 @@
 #ifndef GL_DEPTH_TEXTURE_MODE
 #define GL_DEPTH_TEXTURE_MODE 0x884B
 #endif
+#ifndef GL_COLOR_INDEX
+#define GL_COLOR_INDEX 0x1900
+#endif
+#ifndef GL_BITMAP
+#define GL_BITMAP 0x1A00
+#endif
 
 namespace appgl {
 
@@ -1142,6 +1148,8 @@ bool isValidTextureUploadFormat(GLenum format) {
         case GL_LUMINANCE_ALPHA:
         case GL_INTENSITY:
             return true;
+        case GL_COLOR_INDEX:
+            return appglCompatProfileEnabled();
         case GL_ABGR_EXT:
             return appglCompatProfileEnabled();
         default:
@@ -1179,6 +1187,8 @@ bool isValidTextureUploadType(GLenum type) {
         case GL_UNSIGNED_INT_10F_11F_11F_REV:
         case GL_UNSIGNED_INT_5_9_9_9_REV:
             return true;
+        case GL_BITMAP:
+            return appglCompatProfileEnabled();
         default:
             return false;
     }
@@ -1247,6 +1257,7 @@ bool isFormatTypeCompatible(GLenum format, GLenum type) {
     const bool isDepthFormat = (format == GL_DEPTH_COMPONENT);
     const bool isDepthStencilFormat = (format == GL_DEPTH_STENCIL);
     const bool isStencilFormat = (format == GL_STENCIL_INDEX);
+    const bool isColorIndexFormat = (format == GL_COLOR_INDEX);
     const bool isIntegerFormat = (format == GL_RED_INTEGER
         || format == GL_GREEN_INTEGER || format == GL_BLUE_INTEGER
         || format == GL_RG_INTEGER
@@ -1301,6 +1312,8 @@ bool isFormatTypeCompatible(GLenum format, GLenum type) {
         case GL_UNSIGNED_INT_24_8:
         case GL_FLOAT_32_UNSIGNED_INT_24_8_REV:
             return isDepthStencilFormat;
+        case GL_BITMAP:
+            return appglCompatProfileEnabled() && isColorIndexFormat;
         // Float-packed RGB types (§8.4.4.2): RGB only, non-integer.
         case GL_UNSIGNED_INT_10F_11F_11F_REV:
         case GL_UNSIGNED_INT_5_9_9_9_REV:

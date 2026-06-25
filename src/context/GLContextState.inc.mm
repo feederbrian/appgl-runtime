@@ -286,6 +286,16 @@ void GLContext::setHint(GLenum target, GLenum mode) {
 
 #elif defined(APPGL_GLCONTEXT_STATE_ENABLE)
 void GLContext::setEnabled(GLenum cap, bool enabled) {
+    if (impl_->displayLists.compiling && !impl_->displayLists.replaying) {
+        Impl::DisplayListCommand command;
+        command.kind = Impl::DisplayListCommand::Kind::Enable;
+        command.enumValue = cap;
+        command.values[0] = enabled ? 1.0f : 0.0f;
+        impl_->displayLists.compileCommands.push_back(command);
+        if (!impl_->displayLists.compileAndExecute) {
+            return;
+        }
+    }
     if (enabled) {
         impl_->state->enable(cap);
     } else {

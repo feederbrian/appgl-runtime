@@ -42,6 +42,7 @@
 #include "AppGLRuntime.h"
 
 #include <cmath>
+#include <vector>
 
 #ifndef GL_SHADE_MODEL
 #define GL_SHADE_MODEL 0x0B54
@@ -703,6 +704,44 @@ extern "C" void APIENTRY glDrawPixels(GLsizei width,
         return;
     }
     (void)ctx->drawPixelsCompat(width, height, format, type, pixels);
+}
+
+extern "C" void APIENTRY glPixelMapfv(GLenum map,
+                                      GLsizei mapsize,
+                                      const GLfloat* values) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    (void)ctx->pixelMapCompat(map, mapsize, values);
+}
+
+extern "C" void APIENTRY glPixelMapuiv(GLenum map,
+                                       GLsizei mapsize,
+                                       const GLuint* values) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr || mapsize < 0 || values == nullptr) {
+        return;
+    }
+    std::vector<GLfloat> converted(static_cast<std::size_t>(mapsize));
+    for (GLsizei i = 0; i < mapsize; ++i) {
+        converted[static_cast<std::size_t>(i)] = static_cast<GLfloat>(values[i]);
+    }
+    (void)ctx->pixelMapCompat(map, mapsize, converted.data());
+}
+
+extern "C" void APIENTRY glPixelMapusv(GLenum map,
+                                       GLsizei mapsize,
+                                       const GLushort* values) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr || mapsize < 0 || values == nullptr) {
+        return;
+    }
+    std::vector<GLfloat> converted(static_cast<std::size_t>(mapsize));
+    for (GLsizei i = 0; i < mapsize; ++i) {
+        converted[static_cast<std::size_t>(i)] = static_cast<GLfloat>(values[i]);
+    }
+    (void)ctx->pixelMapCompat(map, mapsize, converted.data());
 }
 
 extern "C" void APIENTRY glPixelTransferf(GLenum pname, GLfloat param) {

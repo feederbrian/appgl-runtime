@@ -1096,30 +1096,6 @@ extern "C" void APIENTRY glPassThrough(GLfloat token) {
     return;
 }
 
-extern "C" void APIENTRY glPixelMapfv(GLenum map, GLsizei mapsize, const GLfloat *values) {
-    (void)map;
-    (void)mapsize;
-    (void)values;
-    appgl::Runtime::shared().recordFixedFunctionStub("glPixelMapfv");
-    return;
-}
-
-extern "C" void APIENTRY glPixelMapuiv(GLenum map, GLsizei mapsize, const GLuint *values) {
-    (void)map;
-    (void)mapsize;
-    (void)values;
-    appgl::Runtime::shared().recordFixedFunctionStub("glPixelMapuiv");
-    return;
-}
-
-extern "C" void APIENTRY glPixelMapusv(GLenum map, GLsizei mapsize, const GLushort *values) {
-    (void)map;
-    (void)mapsize;
-    (void)values;
-    appgl::Runtime::shared().recordFixedFunctionStub("glPixelMapusv");
-    return;
-}
-
 extern "C" void APIENTRY glPixelZoom(GLfloat xfactor, GLfloat yfactor) {
     (void)xfactor;
     (void)yfactor;

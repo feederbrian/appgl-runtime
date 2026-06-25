@@ -127,6 +127,18 @@
 #ifndef GL_MAP_COLOR
 #define GL_MAP_COLOR 0x0D10
 #endif
+#ifndef GL_PIXEL_MAP_I_TO_R
+#define GL_PIXEL_MAP_I_TO_R 0x0C72
+#endif
+#ifndef GL_PIXEL_MAP_I_TO_G
+#define GL_PIXEL_MAP_I_TO_G 0x0C73
+#endif
+#ifndef GL_PIXEL_MAP_I_TO_B
+#define GL_PIXEL_MAP_I_TO_B 0x0C74
+#endif
+#ifndef GL_PIXEL_MAP_I_TO_A
+#define GL_PIXEL_MAP_I_TO_A 0x0C75
+#endif
 #ifndef GL_MAP_STENCIL
 #define GL_MAP_STENCIL 0x0D11
 #endif
@@ -252,6 +264,12 @@
 #endif
 #ifndef GL_REPLACE
 #define GL_REPLACE 0x1E01
+#endif
+#ifndef GL_COLOR_INDEX
+#define GL_COLOR_INDEX 0x1900
+#endif
+#ifndef GL_BITMAP
+#define GL_BITMAP 0x1A00
 #endif
 #ifndef GL_TEXTURE_GEN_S
 #define GL_TEXTURE_GEN_S 0x0C60
@@ -11164,6 +11182,91 @@ struct GLContext::Impl {
             rgba[c] = rgba[c] * static_cast<double>(pixelTransferColorScale[c])
                     + static_cast<double>(pixelTransferColorBias[c]);
         }
+    }
+
+    bool setCompatPixelMap(GLenum map, GLsizei mapsize, const GLfloat* values) {
+        if (mapsize < 0 || values == nullptr) {
+            return false;
+        }
+        std::size_t channel = 4;
+        switch (map) {
+            case GL_PIXEL_MAP_I_TO_R:
+                channel = 0;
+                break;
+            case GL_PIXEL_MAP_I_TO_G:
+                channel = 1;
+                break;
+            case GL_PIXEL_MAP_I_TO_B:
+                channel = 2;
+                break;
+            case GL_PIXEL_MAP_I_TO_A:
+                channel = 3;
+                break;
+            default:
+                return false;
+        }
+        pixelMapIndexToRGBA[channel].assign(values, values + mapsize);
+        return true;
+    }
+
+    GLfloat compatPixelMapValue(std::size_t channel, std::size_t index) const {
+        const auto& map = pixelMapIndexToRGBA[channel];
+        if (!map.empty()) {
+            return map[std::min(index, map.size() - 1u)];
+        }
+        if (channel == 3) {
+            return 1.0f;
+        }
+        return index == 0u ? 0.0f : 1.0f;
+    }
+
+    bool buildColorIndexBitmapUpload(GLsizei width,
+                                     GLsizei height,
+                                     const void* pixels,
+                                     std::vector<std::uint8_t>& rgba8) const {
+        if (width < 0 || height < 0) {
+            return false;
+        }
+        rgba8.assign(rgba8ByteCount(width, height, 1), 0);
+        if (pixels == nullptr || width == 0 || height == 0) {
+            return true;
+        }
+        const auto& store = state->pixelStore();
+        const std::size_t sourceWidth =
+            static_cast<std::size_t>(store.unpackRowLength > 0
+                ? store.unpackRowLength
+                : width);
+        const std::size_t rowBytes =
+            alignByteCount((sourceWidth + 7u) / 8u, store.unpackAlignment);
+        const std::size_t skipRows =
+            static_cast<std::size_t>(std::max<GLint>(store.unpackSkipRows, 0));
+        const std::size_t skipPixels =
+            static_cast<std::size_t>(std::max<GLint>(store.unpackSkipPixels, 0));
+        const auto* source =
+            static_cast<const std::uint8_t*>(pixels) + skipRows * rowBytes;
+        const bool lsbFirst = store.unpackLsbFirst == GL_TRUE;
+        for (GLsizei y = 0; y < height; ++y) {
+            const auto* row =
+                source + static_cast<std::size_t>(y) * rowBytes;
+            for (GLsizei x = 0; x < width; ++x) {
+                const std::size_t bitIndex =
+                    skipPixels + static_cast<std::size_t>(x);
+                const std::uint8_t byte = row[bitIndex / 8u];
+                const std::uint8_t bit =
+                    lsbFirst
+                        ? static_cast<std::uint8_t>((byte >> (bitIndex & 7u)) & 1u)
+                        : static_cast<std::uint8_t>((byte >> (7u - (bitIndex & 7u))) & 1u);
+                const std::size_t dst =
+                    (static_cast<std::size_t>(y) *
+                     static_cast<std::size_t>(width) +
+                     static_cast<std::size_t>(x)) * 4u;
+                rgba8[dst + 0] = normalizedByte(compatPixelMapValue(0, bit));
+                rgba8[dst + 1] = normalizedByte(compatPixelMapValue(1, bit));
+                rgba8[dst + 2] = normalizedByte(compatPixelMapValue(2, bit));
+                rgba8[dst + 3] = normalizedByte(compatPixelMapValue(3, bit));
+            }
+        }
+        return true;
     }
 
     static std::uint16_t floatToHalf(float f) {
@@ -28302,6 +28405,7 @@ struct GLContext::Impl {
             Vertex,
             Color,
             TexCoord,
+            Enable,
             CallList,
         };
         Kind kind = Kind::Clear;
@@ -28870,6 +28974,12 @@ struct GLContext::Impl {
     std::array<ImageBinding, kMaxImageUnits> imageBindings{};
     std::array<GLfloat, 4> pixelTransferColorScale{{1.0f, 1.0f, 1.0f, 1.0f}};
     std::array<GLfloat, 4> pixelTransferColorBias{{0.0f, 0.0f, 0.0f, 0.0f}};
+    std::array<std::vector<GLfloat>, 4> pixelMapIndexToRGBA{{
+        std::vector<GLfloat>{0.0f, 1.0f},
+        std::vector<GLfloat>{0.0f, 1.0f},
+        std::vector<GLfloat>{0.0f, 1.0f},
+        std::vector<GLfloat>{1.0f, 1.0f},
+    }};
 
     GLContext* owner = nullptr;
     std::string vendorString = "AppGL";
@@ -29362,6 +29472,15 @@ bool GLContext::pixelTransferCompat(GLenum pname, GLfloat param) {
                       "pname is not a legacy pixel-transfer parameter");
             return false;
     }
+}
+
+bool GLContext::pixelMapCompat(GLenum map, GLsizei mapsize, const GLfloat* values) {
+    if (!impl_->setCompatPixelMap(map, mapsize, values)) {
+        pushError(GL_INVALID_ENUM, "glPixelMap",
+                  "map is not a supported legacy index-to-color pixel map");
+        return false;
+    }
+    return true;
 }
 
 #define APPGL_GLCONTEXT_FRAMEBUFFER_CORE

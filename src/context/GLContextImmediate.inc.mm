@@ -871,6 +871,59 @@ bool GLContext::drawPixelsCompat(GLsizei width,
         }
         return static_cast<std::uint8_t>(value & 0xffu);
     };
+    auto sampleCurrentTexture2D = [&](std::uint8_t rgba[4]) {
+        if (!impl_->state->isEnabled(GL_TEXTURE_2D)) {
+            return;
+        }
+        GLTextureObject* texture = impl_->currentTexture(GL_TEXTURE_2D);
+        if (texture == nullptr) {
+            return;
+        }
+        const GLint level = std::max<GLint>(texture->params.baseLevel, 0);
+        const auto levelIt = texture->levels.find(level);
+        if (levelIt == texture->levels.end() || !levelIt->second.defined) {
+            return;
+        }
+        const GLTextureImageLevel& image = levelIt->second;
+        const GLsizei texWidth = std::max<GLsizei>(image.desc.width, 1);
+        const GLsizei texHeight = std::max<GLsizei>(image.desc.height, 1);
+        const std::size_t required =
+            static_cast<std::size_t>(texWidth) *
+            static_cast<std::size_t>(texHeight) * 4u;
+        if (image.rgba8.size() < required) {
+            return;
+        }
+        auto clampTexel = [](float coord, GLsizei extent) -> GLsizei {
+            const float scaled = coord * static_cast<float>(extent);
+            const auto texel = static_cast<GLsizei>(std::floor(scaled));
+            return std::clamp<GLsizei>(texel, 0, extent - 1);
+        };
+        const GLsizei tx = clampTexel(impl_->immediate.currentTexcoord[0], texWidth);
+        const GLsizei ty = clampTexel(impl_->immediate.currentTexcoord[1], texHeight);
+        const std::size_t texOffset =
+            (static_cast<std::size_t>(ty) *
+             static_cast<std::size_t>(texWidth) +
+             static_cast<std::size_t>(tx)) * 4u;
+        const std::uint8_t texel[4] = {
+            image.rgba8[texOffset + 0],
+            image.rgba8[texOffset + 1],
+            image.rgba8[texOffset + 2],
+            image.rgba8[texOffset + 3],
+        };
+        switch (impl_->texEnv.mode) {
+            case GL_REPLACE:
+                std::memcpy(rgba, texel, 4u);
+                break;
+            case GL_MODULATE:
+            default:
+                for (int c = 0; c < 4; ++c) {
+                    rgba[c] = static_cast<std::uint8_t>(
+                        (static_cast<unsigned>(rgba[c]) *
+                         static_cast<unsigned>(texel[c]) + 127u) / 255u);
+                }
+                break;
+        }
+    };
 
 	    if (format == GL_DEPTH_COMPONENT || format == GL_STENCIL_INDEX) {
 	        impl_->ensureDefaultFramebufferDepthStencilShadow();
@@ -1035,6 +1088,7 @@ bool GLContext::drawPixelsCompat(GLsizei width,
             }
             std::uint8_t rgba[4];
             readColor(pixel, rgba);
+            sampleCurrentTexture2D(rgba);
             const std::size_t offset =
                 (static_cast<std::size_t>(dstY) *
                  static_cast<std::size_t>(impl_->defaultFramebufferShadowWidth) +
@@ -3081,6 +3135,345 @@ void GLContext::endImmediate() {
         return true;
     };
     const bool lineStippleShadowPainted = paintStippledLinesToShadow();
+    auto paintImmediateFilledRectToShadow = [&]() -> bool {
+        if (!appglCompatProfileEnabled()) {
+            return false;
+        }
+        if (drawMode != GL_TRIANGLES ||
+            drawVerts == nullptr ||
+            drawCount < 3 ||
+            impl_->state->isEnabled(GL_DEPTH_TEST) ||
+            impl_->state->isEnabled(GL_STENCIL_TEST) ||
+            impl_->state->isEnabled(GL_BLEND) ||
+            impl_->state->isEnabled(GL_COLOR_LOGIC_OP) ||
+            impl_->state->isEnabled(GL_FOG) ||
+            impl_->state->isEnabled(GL_LIGHTING)) {
+            return false;
+        }
+        const auto& vp = impl_->state->viewport();
+        if (vp.width <= 0 || vp.height <= 0) {
+            return false;
+        }
+        struct WindowVertex {
+            float x = 0.0f;
+            float y = 0.0f;
+            bool ok = false;
+        };
+        auto toWindow = [&](const Impl::ImmediateModeVertex& src) {
+            WindowVertex out;
+            float clip[4] = {};
+            for (int row = 0; row < 4; ++row) {
+                clip[row] =
+                    drawMvp.m[0 * 4 + row] * src.position[0] +
+                    drawMvp.m[1 * 4 + row] * src.position[1] +
+                    drawMvp.m[2 * 4 + row] * src.position[2] +
+                    drawMvp.m[3 * 4 + row] * src.position[3];
+            }
+            if (clip[3] == 0.0f ||
+                !std::isfinite(clip[0]) ||
+                !std::isfinite(clip[1]) ||
+                !std::isfinite(clip[2]) ||
+                !std::isfinite(clip[3])) {
+                return out;
+            }
+            const float invW = 1.0f / clip[3];
+            out.x = static_cast<float>(vp.x) +
+                (clip[0] * invW + 1.0f) * 0.5f *
+                static_cast<float>(vp.width);
+            out.y = static_cast<float>(vp.y) +
+                (clip[1] * invW + 1.0f) * 0.5f *
+                static_cast<float>(vp.height);
+            out.ok = true;
+            return out;
+        };
+
+        float minXf = std::numeric_limits<float>::infinity();
+        float minYf = std::numeric_limits<float>::infinity();
+        float maxXf = -std::numeric_limits<float>::infinity();
+        float maxYf = -std::numeric_limits<float>::infinity();
+        for (std::size_t i = 0; i < drawCount; ++i) {
+            const WindowVertex w = toWindow(drawVerts[i]);
+            if (!w.ok) {
+                return false;
+            }
+            minXf = std::min(minXf, w.x);
+            minYf = std::min(minYf, w.y);
+            maxXf = std::max(maxXf, w.x);
+            maxYf = std::max(maxYf, w.y);
+        }
+        const GLint x0 = static_cast<GLint>(std::ceil(minXf - 0.5f));
+        const GLint y0 = static_cast<GLint>(std::ceil(minYf - 0.5f));
+        const GLint x1 = static_cast<GLint>(std::ceil(maxXf - 0.5f));
+        const GLint y1 = static_cast<GLint>(std::ceil(maxYf - 0.5f));
+        if (x0 >= x1 || y0 >= y1) {
+            return false;
+        }
+        const bool texture2D = impl_->state->isEnabled(GL_TEXTURE_2D);
+        if (texture2D) {
+            const std::uint64_t area =
+                static_cast<std::uint64_t>(std::max<GLint>(0, x1 - x0)) *
+                static_cast<std::uint64_t>(std::max<GLint>(0, y1 - y0));
+            if (area > 65536u) {
+                return false;
+            }
+        }
+
+        const std::uint8_t baseRGBA[4] = {
+            normalizedByte(drawVerts[0].color[0]),
+            normalizedByte(drawVerts[0].color[1]),
+            normalizedByte(drawVerts[0].color[2]),
+            normalizedByte(drawVerts[0].color[3]),
+        };
+        const GLTextureImageLevel* sampledImage = nullptr;
+        GLsizei sampledWidth = 1;
+        GLsizei sampledHeight = 1;
+        float minS = std::numeric_limits<float>::infinity();
+        float minT = std::numeric_limits<float>::infinity();
+        float maxS = -std::numeric_limits<float>::infinity();
+        float maxT = -std::numeric_limits<float>::infinity();
+        if (texture2D) {
+            GLTextureObject* texture = impl_->currentTexture(GL_TEXTURE_2D);
+            if (texture == nullptr) {
+                return false;
+            }
+            const GLint level = std::max<GLint>(texture->params.baseLevel, 0);
+            const auto levelIt = texture->levels.find(level);
+            if (levelIt == texture->levels.end() || !levelIt->second.defined) {
+                return false;
+            }
+            const GLTextureImageLevel& image = levelIt->second;
+            const GLsizei tw = std::max<GLsizei>(image.desc.width, 1);
+            const GLsizei th = std::max<GLsizei>(image.desc.height, 1);
+            const std::size_t required =
+                static_cast<std::size_t>(tw) *
+                static_cast<std::size_t>(th) * 4u;
+            if (image.rgba8.size() < required) {
+                return false;
+            }
+            sampledImage = &image;
+            sampledWidth = tw;
+            sampledHeight = th;
+            for (std::size_t i = 0; i < drawCount; ++i) {
+                minS = std::min(minS, drawVerts[i].texcoord[0]);
+                minT = std::min(minT, drawVerts[i].texcoord[1]);
+                maxS = std::max(maxS, drawVerts[i].texcoord[0]);
+                maxT = std::max(maxT, drawVerts[i].texcoord[1]);
+            }
+        }
+
+        const auto& blend = impl_->state->blendState();
+        auto shadePixel = [&](GLint x, GLint y, std::uint8_t out[4]) {
+            std::memcpy(out, baseRGBA, 4u);
+            if (!texture2D || sampledImage == nullptr) {
+                return;
+            }
+            const float u = (x1 == x0)
+                ? 0.0f
+                : (static_cast<float>(x) + 0.5f - static_cast<float>(x0)) /
+                    static_cast<float>(x1 - x0);
+            const float v = (y1 == y0)
+                ? 0.0f
+                : (static_cast<float>(y) + 0.5f - static_cast<float>(y0)) /
+                    static_cast<float>(y1 - y0);
+            const float s = minS + std::clamp(u, 0.0f, 1.0f) * (maxS - minS);
+            const float t = minT + std::clamp(v, 0.0f, 1.0f) * (maxT - minT);
+            const auto texelCoord = [](float coord, GLsizei extent) {
+                return std::clamp<GLsizei>(
+                    static_cast<GLsizei>(
+                        std::floor(coord * static_cast<float>(extent))),
+                    0,
+                    extent - 1);
+            };
+            const GLsizei tx = texelCoord(s, sampledWidth);
+            const GLsizei ty = texelCoord(t, sampledHeight);
+            const std::size_t texOffset =
+                (static_cast<std::size_t>(ty) *
+                 static_cast<std::size_t>(sampledWidth) +
+                 static_cast<std::size_t>(tx)) * 4u;
+            const std::uint8_t texel[4] = {
+                sampledImage->rgba8[texOffset + 0],
+                sampledImage->rgba8[texOffset + 1],
+                sampledImage->rgba8[texOffset + 2],
+                sampledImage->rgba8[texOffset + 3],
+            };
+            if (impl_->texEnv.mode == GL_REPLACE) {
+                std::memcpy(out, texel, 4u);
+                return;
+            }
+            for (int c = 0; c < 4; ++c) {
+                out[c] = static_cast<std::uint8_t>(
+                    (static_cast<unsigned>(out[c]) *
+                     static_cast<unsigned>(texel[c]) + 127u) / 255u);
+            }
+        };
+        auto insideScissor = [&](GLint x, GLint y) {
+            if (!impl_->state->isEnabled(GL_SCISSOR_TEST)) {
+                return true;
+            }
+            const auto& sc = impl_->state->scissor();
+            return x >= sc.x && y >= sc.y &&
+                   x < sc.x + sc.width &&
+                   y < sc.y + sc.height;
+        };
+        auto writeDefaultPixel = [&](GLint x, GLint y) {
+            if (x < 0 || y < 0 ||
+                x >= impl_->defaultFramebufferShadowWidth ||
+                y >= impl_->defaultFramebufferShadowHeight ||
+                !insideScissor(x, y)) {
+                return;
+            }
+            const std::size_t offset =
+                (static_cast<std::size_t>(y) *
+                 static_cast<std::size_t>(impl_->defaultFramebufferShadowWidth) +
+                 static_cast<std::size_t>(x)) * 4u;
+            std::uint8_t rgba[4];
+            shadePixel(x, y, rgba);
+            for (int c = 0; c < 4; ++c) {
+                if (blend.colorMask[c] != GL_FALSE) {
+                    impl_->defaultFramebufferRGBA8[offset + static_cast<std::size_t>(c)] =
+                        rgba[c];
+                }
+            }
+        };
+
+        if (impl_->state->boundDrawFramebuffer() == 0) {
+            const bool hadValidShadow =
+                impl_->defaultFramebufferShadowValid &&
+                !impl_->defaultFramebufferRGBA8.empty();
+            impl_->ensureDefaultFramebufferShadow(
+                /*materializePendingClear=*/hadValidShadow);
+            if (!hadValidShadow) {
+                impl_->materializeDefaultFbShadowClear();
+            }
+            for (GLint y = y0; y < y1; ++y) {
+                for (GLint x = x0; x < x1; ++x) {
+                    writeDefaultPixel(x, y);
+                }
+            }
+            impl_->defaultFramebufferShadowValid = true;
+            return true;
+        }
+
+        GLFramebufferObject* fbo =
+            impl_->objects->framebuffers().get(impl_->state->boundDrawFramebuffer());
+        if (fbo == nullptr) {
+            return false;
+        }
+        const bool lowerLeft = impl_->state->clipOrigin() != GL_UPPER_LEFT;
+        bool painted = false;
+        for (GLenum drawBuffer : fbo->drawBuffers) {
+            if (drawBuffer == GL_NONE) {
+                continue;
+            }
+            const GLFramebufferAttachment* attachment =
+                impl_->framebufferAttachment(*fbo, drawBuffer);
+            if (attachment == nullptr) {
+                continue;
+            }
+            if (attachment->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+                GLRenderbufferObject* rb =
+                    impl_->objects->renderbuffers().get(attachment->object);
+                if (rb == nullptr || !rb->storageDefined ||
+                    rb->width <= 0 || rb->height <= 0) {
+                    continue;
+                }
+                const GLint px0 = std::max<GLint>(0, x0);
+                const GLint py0 = std::max<GLint>(0, y0);
+                const GLint px1 = std::min<GLint>(rb->width, x1);
+                const GLint py1 = std::min<GLint>(rb->height, y1);
+                const std::size_t bytes =
+                    static_cast<std::size_t>(rb->width) *
+                    static_cast<std::size_t>(rb->height) * 4u;
+                if (rb->rgba8.size() < bytes) {
+                    rb->rgba8.assign(bytes, 0);
+                }
+                for (GLint y = py0; y < py1; ++y) {
+                    const GLint sy = lowerLeft ? (rb->height - 1 - y) : y;
+                    for (GLint x = px0; x < px1; ++x) {
+                        if (!insideScissor(x, y)) {
+                            continue;
+                        }
+                        const std::size_t offset =
+                            (static_cast<std::size_t>(sy) *
+                             static_cast<std::size_t>(rb->width) +
+                             static_cast<std::size_t>(x)) * 4u;
+                        std::uint8_t rgba[4];
+                        shadePixel(x, y, rgba);
+                        for (int c = 0; c < 4; ++c) {
+                            if (blend.colorMask[c] != GL_FALSE) {
+                                rb->rgba8[offset + static_cast<std::size_t>(c)] =
+                                    rgba[c];
+                            }
+                        }
+                    }
+                }
+                rb->rgba8ShadowClearPending = false;
+                rb->colorShadowAuthoritative = true;
+                rb->framebufferReadbackYFlip = lowerLeft;
+                painted = true;
+            } else if (attachment->kind == GLFramebufferAttachment::Kind::Texture) {
+                const auto resolved =
+                    impl_->resolveTextureAttachmentStorage(*attachment);
+                GLTextureObject* texture = resolved.storageTexture;
+                if (!resolved.valid || texture == nullptr) {
+                    continue;
+                }
+                auto level = texture->levels.find(resolved.level);
+                if (level == texture->levels.end() || !level->second.defined) {
+                    continue;
+                }
+                GLTextureImageLevel& image = level->second;
+                const GLsizei tw = std::max<GLsizei>(image.desc.width, 1);
+                const GLsizei th = texture->target == GL_TEXTURE_1D
+                    ? 1
+                    : std::max<GLsizei>(image.desc.height, 1);
+                const GLint px0 = std::max<GLint>(0, x0);
+                const GLint py0 = std::max<GLint>(0, y0);
+                const GLint px1 = std::min<GLint>(tw, x1);
+                const GLint py1 = std::min<GLint>(th, y1);
+                const GLint layer = std::max<GLint>(resolved.layer, 0);
+                const GLsizei depth = std::max<GLsizei>(image.desc.depth, 1);
+                if (layer >= depth) {
+                    continue;
+                }
+                const std::size_t layerBytes =
+                    static_cast<std::size_t>(tw) *
+                    static_cast<std::size_t>(th) * 4u;
+                const std::size_t bytes =
+                    layerBytes * static_cast<std::size_t>(depth);
+                if (image.rgba8.size() < bytes) {
+                    image.rgba8.assign(bytes, 0);
+                }
+                for (GLint y = py0; y < py1; ++y) {
+                    const GLint sy = lowerLeft ? (th - 1 - y) : y;
+                    for (GLint x = px0; x < px1; ++x) {
+                        if (!insideScissor(x, y)) {
+                            continue;
+                        }
+                        const std::size_t offset =
+                            static_cast<std::size_t>(layer) * layerBytes +
+                            (static_cast<std::size_t>(sy) *
+                             static_cast<std::size_t>(tw) +
+                             static_cast<std::size_t>(x)) * 4u;
+                        std::uint8_t rgba[4];
+                        shadePixel(x, y, rgba);
+                        for (int c = 0; c < 4; ++c) {
+                            if (blend.colorMask[c] != GL_FALSE) {
+                                image.rgba8[offset + static_cast<std::size_t>(c)] =
+                                    rgba[c];
+                            }
+                        }
+                    }
+                }
+                texture->colorShadowAuthoritative = true;
+                if (lowerLeft) {
+                    texture->wasFramebufferRenderedTo = true;
+                }
+                painted = true;
+            }
+        }
+        return painted;
+    };
 
     void* fixedFunctionSamplerState = nullptr;
     GLenum fixedFunctionTextureInternalFormat = 0;
@@ -3189,12 +3582,15 @@ void GLContext::endImmediate() {
     }
 
     const bool ok = impl_->frameGraph->encodeImmediateModeDraw(info);
+    bool filledRectShadowPainted = false;
     if (ok) {
         impl_->markBoundDrawFramebufferWrites();
+        filledRectShadowPainted = paintImmediateFilledRectToShadow();
     }
     if (ok && impl_->state->boundDrawFramebuffer() == 0 &&
         !logicOpLineShadowPainted &&
-        !lineStippleShadowPainted) {
+        !lineStippleShadowPainted &&
+        !filledRectShadowPainted) {
         impl_->invalidateDefaultFramebufferShadow();
     }
     if (!ok) {
@@ -3298,6 +3694,9 @@ void GLContext::callListCompat(GLuint list) {
                                   command.values[1],
                                   0.0f,
                                   1.0f);
+                break;
+            case Impl::DisplayListCommand::Kind::Enable:
+                setEnabled(command.enumValue, command.values[0] != 0.0f);
                 break;
             case Impl::DisplayListCommand::Kind::CallList:
                 callListCompat(command.list);

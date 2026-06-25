@@ -436,9 +436,50 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
                 return true;
             }
         }
+        auto fboColorAttachmentPrefersRGBA8Shadow = [&]() -> bool {
+            if (!appglCompatProfileEnabled()) {
+                return false;
+            }
+            const GLuint fbName = impl_->state->boundReadFramebuffer();
+            const GLFramebufferObject* fb =
+                impl_->objects->framebuffers().get(fbName);
+            if (fbName == 0 || fb == nullptr || fb->readBuffer == GL_NONE) {
+                return false;
+            }
+            const GLFramebufferAttachment* att =
+                impl_->framebufferAttachment(*fb, fb->readBuffer);
+            if (att == nullptr) {
+                return false;
+            }
+            if (att->kind == GLFramebufferAttachment::Kind::Texture) {
+                const auto resolved =
+                    impl_->resolveTextureAttachmentStorage(*att);
+                const GLTextureObject* texture = resolved.storageTexture;
+                if (!resolved.valid || texture == nullptr ||
+                    !texture->colorShadowAuthoritative) {
+                    return false;
+                }
+                const auto level = texture->levels.find(resolved.level);
+                return level != texture->levels.end() &&
+                       level->second.defined &&
+                       !level->second.rgba8.empty();
+            }
+            if (att->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+                const GLRenderbufferObject* rb =
+                    impl_->objects->renderbuffers().get(att->object);
+                return rb != nullptr && rb->storageDefined &&
+                       rb->colorShadowAuthoritative &&
+                       !rb->rgba8.empty();
+            }
+            return false;
+        };
+        const bool preferFboRGBA8Shadow =
+            fboColorAttachmentPrefersRGBA8Shadow();
         // Try native-format readback first (preserves full precision for
-        // R32F, RGBA32F, integer formats, etc.).
-        if (impl_->readFBOColorNative(x, y, width, height, format, type, pixels)) {
+        // R32F, RGBA32F, integer formats, etc.) unless an FBO compatibility
+        // path has explicitly authored the RGBA8 shadow.
+        if (!preferFboRGBA8Shadow &&
+            impl_->readFBOColorNative(x, y, width, height, format, type, pixels)) {
             return true;
         }
         // Color readback: read RGBA8 internally, then convert to requested format/type

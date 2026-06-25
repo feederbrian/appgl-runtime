@@ -671,6 +671,7 @@ public:
     bool accumCompat(GLenum op, GLfloat value);
     bool drawPixelsCompat(GLsizei width, GLsizei height, GLenum format, GLenum type, const void* pixels);
     bool pixelTransferCompat(GLenum pname, GLfloat param);
+    bool pixelMapCompat(GLenum map, GLsizei mapsize, const GLfloat* values);
     void pushAttribCompat(GLbitfield mask);
     void popAttribCompat();
     void setColorMaterialCompat(GLenum face, GLenum mode);
