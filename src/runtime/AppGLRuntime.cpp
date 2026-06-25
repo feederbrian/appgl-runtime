@@ -867,6 +867,34 @@ bool isValidTextureTarget(GLenum target) {
     }
 }
 
+bool isCompatProxyTexImage1DTarget(GLenum target) {
+    return appglCompatProfileEnabled() && target == GL_PROXY_TEXTURE_1D;
+}
+
+bool isCompatProxyTexImage2DTarget(GLenum target) {
+    switch (target) {
+        case GL_PROXY_TEXTURE_2D:
+            return true;
+        case GL_PROXY_TEXTURE_1D_ARRAY:
+        case GL_PROXY_TEXTURE_RECTANGLE:
+        case GL_PROXY_TEXTURE_CUBE_MAP:
+            return appglCompatProfileEnabled();
+        default:
+            return false;
+    }
+}
+
+bool isCompatProxyTexImage3DTarget(GLenum target) {
+    switch (target) {
+        case GL_PROXY_TEXTURE_3D:
+        case GL_PROXY_TEXTURE_2D_ARRAY:
+        case GL_PROXY_TEXTURE_CUBE_MAP_ARRAY:
+            return appglCompatProfileEnabled();
+        default:
+            return false;
+    }
+}
+
 // GL 4.6 §8.10 / §8.11.2 — glTexParameter* and glGetTexParameter* are
 // valid for the 10 sampler-capable targets: TEXTURE_1D / 2D / 3D /
 // 1D_ARRAY / 2D_ARRAY / RECTANGLE / CUBE_MAP / CUBE_MAP_ARRAY /
@@ -5974,7 +6002,7 @@ void APIENTRY glTexImage1D(GLenum target, GLint level, GLint internalformat, GLs
     if (context == nullptr) {
         return;
     }
-    if (target != GL_TEXTURE_1D) {
+    if (target != GL_TEXTURE_1D && !isCompatProxyTexImage1DTarget(target)) {
         recordValidationError(context, "glTexImage1D", GL_INVALID_ENUM, "target must be GL_TEXTURE_1D");
         return;
     }
@@ -6003,7 +6031,6 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat, GLs
         return;
     }
     if (target != GL_TEXTURE_2D
-        && target != GL_PROXY_TEXTURE_2D
         && target != GL_TEXTURE_1D_ARRAY
         && target != GL_TEXTURE_RECTANGLE
         && target != GL_TEXTURE_CUBE_MAP_POSITIVE_X
@@ -6011,7 +6038,8 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat, GLs
         && target != GL_TEXTURE_CUBE_MAP_POSITIVE_Y
         && target != GL_TEXTURE_CUBE_MAP_NEGATIVE_Y
         && target != GL_TEXTURE_CUBE_MAP_POSITIVE_Z
-        && target != GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) {
+        && target != GL_TEXTURE_CUBE_MAP_NEGATIVE_Z
+        && !isCompatProxyTexImage2DTarget(target)) {
         recordValidationError(context, "glTexImage2D", GL_INVALID_ENUM, "target must be GL_TEXTURE_2D");
         return;
     }
@@ -6052,7 +6080,8 @@ void APIENTRY glTexImage3D(
     }
     if (target != GL_TEXTURE_3D
         && target != GL_TEXTURE_2D_ARRAY
-        && target != GL_TEXTURE_CUBE_MAP_ARRAY) {
+        && target != GL_TEXTURE_CUBE_MAP_ARRAY
+        && !isCompatProxyTexImage3DTarget(target)) {
         recordValidationError(context, "glTexImage3D", GL_INVALID_ENUM, "target must be GL_TEXTURE_3D");
         return;
     }

@@ -210,6 +210,34 @@ bool GLContext::bindTexture(GLenum target, GLuint texture) {
     return true;
 }
 
+static bool appglIsCompatProxyTextureTarget(GLenum target) {
+    switch (target) {
+        case GL_PROXY_TEXTURE_1D:
+        case GL_PROXY_TEXTURE_2D:
+        case GL_PROXY_TEXTURE_3D:
+        case GL_PROXY_TEXTURE_1D_ARRAY:
+        case GL_PROXY_TEXTURE_2D_ARRAY:
+        case GL_PROXY_TEXTURE_RECTANGLE:
+        case GL_PROXY_TEXTURE_CUBE_MAP:
+        case GL_PROXY_TEXTURE_CUBE_MAP_ARRAY:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static GLsizei appglLog2TextureLimit(GLint limit) {
+    GLsizei logMax = 0;
+    for (GLint v = limit; v > 1; v >>= 1) {
+        ++logMax;
+    }
+    return logMax;
+}
+
+static bool appglProxyLevelIsMipped(GLenum target) {
+    return target != GL_PROXY_TEXTURE_RECTANGLE;
+}
+
 bool GLContext::texImage(
     GLenum target,
     GLint level,
@@ -222,8 +250,10 @@ bool GLContext::texImage(
     GLenum type,
     const void* pixels
 ) {
-    const bool proxyTexture2D = target == GL_PROXY_TEXTURE_2D;
-    if (!proxyTexture2D && !isTextureTarget(target)) {
+    const bool proxyTextureTarget =
+        target == GL_PROXY_TEXTURE_2D ||
+        (appglCompatProfileEnabled() && appglIsCompatProxyTextureTarget(target));
+    if (!proxyTextureTarget && !isTextureTarget(target)) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
@@ -251,41 +281,51 @@ bool GLContext::texImage(
         return false;
     }
     if ((target == GL_TEXTURE_1D && (height != 1 || depth != 1))
-        || ((target == GL_TEXTURE_2D || proxyTexture2D) && depth != 1)) {
+        || (target == GL_PROXY_TEXTURE_1D && (height != 1 || depth != 1))
+        || ((target == GL_TEXTURE_2D || target == GL_PROXY_TEXTURE_2D ||
+             target == GL_PROXY_TEXTURE_RECTANGLE ||
+             target == GL_PROXY_TEXTURE_CUBE_MAP ||
+             target == GL_PROXY_TEXTURE_1D_ARRAY) && depth != 1)) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    if (target == GL_TEXTURE_3D &&
+    if ((target == GL_TEXTURE_3D || target == GL_PROXY_TEXTURE_3D) &&
         (isDepthFormat(internalFormatEnum) ||
          isStencilFormat(internalFormatEnum) ||
          isTexture3DRGTCFormat(internalFormatEnum))) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
+        if (target == GL_TEXTURE_3D) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
     }
     // GL 4.6 §8.5 — GL_TEXTURE_CUBE_MAP_ARRAY storage must be
     // square (width == height) with depth a multiple of 6.
-    if (target == GL_TEXTURE_CUBE_MAP_ARRAY) {
+    if (target == GL_TEXTURE_CUBE_MAP_ARRAY || target == GL_PROXY_TEXTURE_CUBE_MAP_ARRAY) {
         if (width != height) {
-            pushError(GL_INVALID_VALUE);
-            return false;
+            if (target == GL_TEXTURE_CUBE_MAP_ARRAY) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
         }
         if ((depth % 6) != 0) {
-            pushError(GL_INVALID_VALUE);
-            return false;
+            if (target == GL_TEXTURE_CUBE_MAP_ARRAY) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
         }
     }
     // Proxy textures only update queryable image state. They do not bind
     // storage or create Metal resources; over-limit dimensions are valid and
     // zero the proxy level so callers can test allocation feasibility.
-    if (proxyTexture2D) {
+    if (proxyTextureTarget) {
         if (impl_->capabilities != nullptr) {
             GLint maxTex = 0;
             impl_->capabilities->queryInteger(GL_MAX_TEXTURE_SIZE, &maxTex);
-            GLsizei logMax = 0;
-            for (GLint v = maxTex; v > 1; v >>= 1) {
-                ++logMax;
+            if (appglProxyLevelIsMipped(target) && level > appglLog2TextureLimit(maxTex)) {
+                pushError(GL_INVALID_VALUE);
+                return false;
             }
-            if (level > logMax) {
+            if (!appglProxyLevelIsMipped(target) && level != 0) {
                 pushError(GL_INVALID_VALUE);
                 return false;
             }
@@ -294,8 +334,51 @@ bool GLContext::texImage(
         bool fitsLimits = true;
         if (impl_->capabilities != nullptr) {
             GLint maxTex = 0;
+            GLint max3D = 0;
+            GLint maxLayers = 0;
+            GLint maxRect = 0;
+            GLint maxCube = 0;
             impl_->capabilities->queryInteger(GL_MAX_TEXTURE_SIZE, &maxTex);
-            fitsLimits = maxTex <= 0 || (width <= maxTex && height <= maxTex);
+            impl_->capabilities->queryInteger(GL_MAX_3D_TEXTURE_SIZE, &max3D);
+            impl_->capabilities->queryInteger(GL_MAX_ARRAY_TEXTURE_LAYERS, &maxLayers);
+            impl_->capabilities->queryInteger(GL_MAX_RECTANGLE_TEXTURE_SIZE, &maxRect);
+            impl_->capabilities->queryInteger(GL_MAX_CUBE_MAP_TEXTURE_SIZE, &maxCube);
+            if (maxRect <= 0) maxRect = maxTex;
+            if (maxCube <= 0) maxCube = maxTex;
+            switch (target) {
+                case GL_PROXY_TEXTURE_1D:
+                    fitsLimits = maxTex <= 0 || width <= maxTex;
+                    break;
+                case GL_PROXY_TEXTURE_2D:
+                    fitsLimits = maxTex <= 0 || (width <= maxTex && height <= maxTex);
+                    break;
+                case GL_PROXY_TEXTURE_RECTANGLE:
+                    fitsLimits = maxRect <= 0 || (width <= maxRect && height <= maxRect);
+                    break;
+                case GL_PROXY_TEXTURE_CUBE_MAP:
+                    fitsLimits = (maxCube <= 0 || (width <= maxCube && height <= maxCube)) &&
+                                  width == height;
+                    break;
+                case GL_PROXY_TEXTURE_3D:
+                    fitsLimits = max3D <= 0 || (width <= max3D && height <= max3D && depth <= max3D);
+                    break;
+                case GL_PROXY_TEXTURE_1D_ARRAY:
+                    fitsLimits = (maxTex <= 0 || width <= maxTex) &&
+                                  (maxLayers <= 0 || height <= maxLayers);
+                    break;
+                case GL_PROXY_TEXTURE_2D_ARRAY:
+                    fitsLimits = (maxTex <= 0 || (width <= maxTex && height <= maxTex)) &&
+                                  (maxLayers <= 0 || depth <= maxLayers);
+                    break;
+                case GL_PROXY_TEXTURE_CUBE_MAP_ARRAY:
+                    fitsLimits = (maxCube <= 0 || (width <= maxCube && height <= maxCube)) &&
+                                  (maxLayers <= 0 || depth <= maxLayers) &&
+                                  width == height &&
+                                  (depth % 6) == 0;
+                    break;
+                default:
+                    break;
+            }
         }
 
         GLTextureImageLevel image;
@@ -304,9 +387,15 @@ bool GLContext::texImage(
         image.desc.sourceFormat = format;
         image.desc.sourceType = type;
         image.desc.width = fitsLimits ? width : 0;
-        image.desc.height = fitsLimits ? height : 0;
-        image.desc.depth = 1;
-        image.desc.layers = 1;
+        image.desc.height = fitsLimits ? (target == GL_PROXY_TEXTURE_1D ? 1 : height) : 0;
+        image.desc.depth = fitsLimits ?
+            ((target == GL_PROXY_TEXTURE_3D ||
+              target == GL_PROXY_TEXTURE_2D_ARRAY ||
+              target == GL_PROXY_TEXTURE_CUBE_MAP_ARRAY) ? depth : 1) : 0;
+        image.desc.layers = fitsLimits ?
+            (target == GL_PROXY_TEXTURE_1D_ARRAY ? height :
+             ((target == GL_PROXY_TEXTURE_2D_ARRAY ||
+               target == GL_PROXY_TEXTURE_CUBE_MAP_ARRAY) ? depth : 1)) : 0;
         image.desc.levels = level + 1;
         image.defined = true;
 
