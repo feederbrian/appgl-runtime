@@ -4908,12 +4908,14 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         if (x0 >= x1 || y0 >= y1) {
             return false;
         }
-	        const std::uint8_t rgba[4] = {
-	            normalizedByte(source[0].color[0]),
-	            normalizedByte(source[0].color[1]),
-	            normalizedByte(source[0].color[2]),
-	            normalizedByte(source[0].color[3]),
-	        };
+        const Impl::ImmediateModeVertex& colorVertex =
+            !fillVertices.empty() ? fillVertices[0] : source[0];
+        const std::uint8_t rgba[4] = {
+            normalizedByte(colorVertex.color[0]),
+            normalizedByte(colorVertex.color[1]),
+            normalizedByte(colorVertex.color[2]),
+            normalizedByte(colorVertex.color[3]),
+        };
 	        float depthA = 0.0f;
 	        float depthB = 0.0f;
 	        float depthC = wv[0].z;
