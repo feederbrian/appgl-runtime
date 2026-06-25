@@ -3165,7 +3165,15 @@ void GLContext::endImmediate() {
                     (pattern == 0x5555u)
                         ? -0.5f * static_cast<float>(factor)
                         : 0.5f * static_cast<float>(factor);
-                for (GLint x = startX; x < endX; ++x) {
+                GLint loopStartX = std::max<GLint>(startX, 0);
+                GLint loopEndX =
+                    std::min<GLint>(endX, impl_->defaultFramebufferShadowWidth);
+                if (impl_->state->isEnabled(GL_SCISSOR_TEST)) {
+                    const auto& sc = impl_->state->scissor();
+                    loopStartX = std::max<GLint>(loopStartX, sc.x);
+                    loopEndX = std::min<GLint>(loopEndX, sc.x + sc.width);
+                }
+                for (GLint x = loopStartX; x < loopEndX; ++x) {
                     const float distance =
                         (static_cast<float>(x) - wa.x) * direction;
                     const float coverage =
@@ -3317,7 +3325,63 @@ void GLContext::endImmediate() {
             if (texture == nullptr) {
                 return false;
             }
-            const GLint level = std::max<GLint>(texture->params.baseLevel, 0);
+            const GLint baseLevel = std::max<GLint>(texture->params.baseLevel, 0);
+            const auto baseIt = texture->levels.find(baseLevel);
+            if (baseIt == texture->levels.end() || !baseIt->second.defined) {
+                return false;
+            }
+            const GLTextureImageLevel& baseImage = baseIt->second;
+            for (std::size_t i = 0; i < drawCount; ++i) {
+                minS = std::min(minS, drawVerts[i].texcoord[0]);
+                minT = std::min(minT, drawVerts[i].texcoord[1]);
+                maxS = std::max(maxS, drawVerts[i].texcoord[0]);
+                maxT = std::max(maxT, drawVerts[i].texcoord[1]);
+            }
+            auto mipmappedMinFilter = [](GLint filter) {
+                switch (filter) {
+                    case GL_NEAREST_MIPMAP_NEAREST:
+                    case GL_LINEAR_MIPMAP_NEAREST:
+                    case GL_NEAREST_MIPMAP_LINEAR:
+                    case GL_LINEAR_MIPMAP_LINEAR:
+                        return true;
+                    default:
+                        return false;
+                }
+            };
+            auto selectedTextureLevel = [&]() -> GLint {
+                if (!mipmappedMinFilter(texture->params.minFilter)) {
+                    return baseLevel;
+                }
+                const float rectWidth = static_cast<float>(std::max<GLint>(x1 - x0, 1));
+                const float rectHeight = static_cast<float>(std::max<GLint>(y1 - y0, 1));
+                const float dsdx =
+                    std::fabs(maxS - minS) *
+                    static_cast<float>(std::max<GLsizei>(baseImage.desc.width, 1)) /
+                    rectWidth;
+                const float dtdy =
+                    std::fabs(maxT - minT) *
+                    static_cast<float>(std::max<GLsizei>(baseImage.desc.height, 1)) /
+                    rectHeight;
+                float lambda = std::log2(std::max(dsdx, dtdy));
+                if (!std::isfinite(lambda)) {
+                    lambda = 0.0f;
+                }
+                lambda += texture->params.lodBias;
+                lambda = std::clamp(lambda, texture->params.minLod, texture->params.maxLod);
+                const GLint levelOffset = std::max<GLint>(
+                    0,
+                    static_cast<GLint>(std::floor(lambda + 0.5f)));
+                GLint maxDefinedLevel = baseLevel;
+                for (const auto& [definedLevel, definedImage] : texture->levels) {
+                    if (definedImage.defined) {
+                        maxDefinedLevel = std::max(maxDefinedLevel, definedLevel);
+                    }
+                }
+                const GLint effectiveMaxLevel =
+                    std::max(baseLevel, std::min(texture->params.maxLevel, maxDefinedLevel));
+                return std::clamp(baseLevel + levelOffset, baseLevel, effectiveMaxLevel);
+            };
+            const GLint level = selectedTextureLevel();
             const auto levelIt = texture->levels.find(level);
             if (levelIt == texture->levels.end() || !levelIt->second.defined) {
                 return false;
@@ -3334,12 +3398,6 @@ void GLContext::endImmediate() {
             sampledImage = &image;
             sampledWidth = tw;
             sampledHeight = th;
-            for (std::size_t i = 0; i < drawCount; ++i) {
-                minS = std::min(minS, drawVerts[i].texcoord[0]);
-                minT = std::min(minT, drawVerts[i].texcoord[1]);
-                maxS = std::max(maxS, drawVerts[i].texcoord[0]);
-                maxT = std::max(maxT, drawVerts[i].texcoord[1]);
-            }
         }
 
         const auto& blend = impl_->state->blendState();
