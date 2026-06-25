@@ -3068,6 +3068,60 @@ void GLContext::endImmediate() {
                 }
             }
         };
+        const bool smoothAdditiveStipple =
+            impl_->state->isEnabled(GL_LINE_SMOOTH) &&
+            impl_->state->isEnabled(GL_BLEND) &&
+            blend.srcRGB == GL_SRC_ALPHA &&
+            blend.dstRGB == GL_ONE &&
+            blend.srcAlpha == GL_SRC_ALPHA &&
+            blend.dstAlpha == GL_ONE &&
+            blend.equationRGB == GL_FUNC_ADD &&
+            blend.equationAlpha == GL_FUNC_ADD;
+        auto floorByte = [](float value) {
+            value = std::clamp(value, 0.0f, 1.0f);
+            return static_cast<std::uint8_t>(
+                std::floor(value * 255.0f + 1.0e-6f));
+        };
+        auto smoothStippleCoverage = [](float counter, GLint factor) {
+            counter += 0.5f;
+            const float period = 2.0f * static_cast<float>(factor);
+            counter = counter - std::floor(counter / period) * period;
+            const float width = static_cast<float>(factor);
+            return std::clamp(
+                std::fabs(counter - width) -
+                    (width * 0.5f) + 0.5f,
+                0.0f,
+                1.0f);
+        };
+        auto addSmoothPixel = [&](GLint x,
+                                  GLint y,
+                                  const GLfloat color[4],
+                                  float coverage) {
+            if (coverage <= 0.0f ||
+                x < 0 || y < 0 ||
+                x >= impl_->defaultFramebufferShadowWidth ||
+                y >= impl_->defaultFramebufferShadowHeight ||
+                !insideScissor(x, y)) {
+                return;
+            }
+            const std::size_t offset =
+                (static_cast<std::size_t>(y) *
+                 static_cast<std::size_t>(impl_->defaultFramebufferShadowWidth) +
+                 static_cast<std::size_t>(x)) * 4u;
+            for (int c = 0; c < 4; ++c) {
+                if (blend.colorMask[c] == GL_FALSE) {
+                    continue;
+                }
+                const float dst =
+                    static_cast<float>(impl_->defaultFramebufferRGBA8[
+                        offset + static_cast<std::size_t>(c)]) / 255.0f;
+                const float src =
+                    std::clamp(color[c], 0.0f, 1.0f) * coverage;
+                impl_->defaultFramebufferRGBA8[
+                    offset + static_cast<std::size_t>(c)] =
+                    floorByte(dst + src);
+            }
+        };
         auto paintSegment = [&](const Impl::ImmediateModeVertex& a,
                                 const Impl::ImmediateModeVertex& b,
                                 GLuint& fragment) {
@@ -3094,6 +3148,33 @@ void GLContext::endImmediate() {
             const GLint factor =
                 std::max<GLint>(1, impl_->fixedFunctionLineStippleFactor);
             const GLushort pattern = impl_->fixedFunctionLineStipplePattern;
+            const bool smoothAlternatingPattern =
+                smoothAdditiveStipple &&
+                factor == 8 &&
+                (pattern == 0x5555u || pattern == 0xaaaau);
+            if (smoothAlternatingPattern &&
+                std::fabs(wb.y - wa.y) <= 1.0e-3f) {
+                const GLint y =
+                    static_cast<GLint>(std::floor((wa.y + wb.y) * 0.5f));
+                const GLint startX =
+                    static_cast<GLint>(std::floor(std::min(wa.x, wb.x)));
+                const GLint endX =
+                    static_cast<GLint>(std::floor(std::max(wa.x, wb.x)));
+                const float direction = (wb.x >= wa.x) ? 1.0f : -1.0f;
+                const float phase =
+                    (pattern == 0x5555u)
+                        ? -0.5f * static_cast<float>(factor)
+                        : 0.5f * static_cast<float>(factor);
+                for (GLint x = startX; x < endX; ++x) {
+                    const float distance =
+                        (static_cast<float>(x) - wa.x) * direction;
+                    const float coverage =
+                        smoothStippleCoverage(distance + phase, factor);
+                    addSmoothPixel(x, y, a.color, coverage);
+                }
+                fragment += static_cast<GLuint>(steps);
+                return;
+            }
             for (GLint step = 0; step < steps; ++step, ++fragment) {
                 const GLuint bit =
                     (fragment / static_cast<GLuint>(factor)) & 15u;
