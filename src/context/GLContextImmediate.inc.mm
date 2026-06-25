@@ -1458,19 +1458,189 @@ bool GLContext::copyPixelsCompat(GLint x,
                   "width and height must be non-negative");
         return false;
     }
-    if (type != GL_COLOR && type != GL_DEPTH && type != GL_STENCIL) {
+    if (type != GL_COLOR && type != GL_DEPTH &&
+        type != GL_STENCIL && type != GL_DEPTH_STENCIL) {
         pushError(GL_INVALID_ENUM, "glCopyPixels",
-                  "type is not GL_COLOR, GL_DEPTH, or GL_STENCIL");
+                  "type is not GL_COLOR, GL_DEPTH, GL_STENCIL, or GL_DEPTH_STENCIL");
         return false;
     }
     if (width == 0 || height == 0 || !impl_->fixedFunctionRasterPositionValid) {
         return true;
     }
 
-    // Narrow Piglit/GL 1.1 bridge: color copies inside the default
-    // framebuffer can stay CPU-shadow authoritative. Depth/stencil copies
-    // retain the old no-op stub behavior until their separate residual
-    // cluster is implemented.
+    if (type != GL_COLOR && impl_->state->boundReadFramebuffer() == 0 &&
+        impl_->state->boundDrawFramebuffer() == 0) {
+        const bool copyDepth =
+            type == GL_DEPTH || type == GL_DEPTH_STENCIL;
+        const bool copyStencil =
+            type == GL_STENCIL || type == GL_DEPTH_STENCIL;
+        impl_->ensureDefaultFramebufferDepthStencilShadow();
+        if ((copyDepth && !impl_->defaultFramebufferDepthShadowValid) ||
+            (copyStencil && !impl_->defaultFramebufferStencilShadowValid)) {
+            return true;
+        }
+
+        const std::size_t pixelCount =
+            static_cast<std::size_t>(width) *
+            static_cast<std::size_t>(height);
+        std::vector<GLfloat> sourceDepth;
+        std::vector<std::uint8_t> sourceStencil;
+        if (copyDepth) {
+            sourceDepth.resize(pixelCount);
+            if (!impl_->copyDefaultFramebufferDepthPixels(
+                    x, y, width, height, sourceDepth.data())) {
+                return true;
+            }
+        }
+        if (copyStencil) {
+            sourceStencil.resize(pixelCount);
+            if (!impl_->copyDefaultFramebufferStencilPixels(
+                    x, y, width, height, sourceStencil.data())) {
+                return true;
+            }
+        }
+
+        GLint minX = impl_->fixedFunctionRasterX;
+        GLint minY = impl_->fixedFunctionRasterY;
+        GLint maxX = minX + width;
+        GLint maxY = minY + height;
+        if (impl_->state->isEnabled(GL_SCISSOR_TEST)) {
+            const auto& sc = impl_->state->scissor();
+            minX = std::max<GLint>(minX, sc.x);
+            minY = std::max<GLint>(minY, sc.y);
+            maxX = std::min<GLint>(maxX, sc.x + sc.width);
+            maxY = std::min<GLint>(maxY, sc.y + sc.height);
+        }
+        minX = std::max<GLint>(minX, 0);
+        minY = std::max<GLint>(minY, 0);
+        maxX = std::min<GLint>(
+            maxX, impl_->defaultFramebufferDepthStencilShadowWidth);
+        maxY = std::min<GLint>(
+            maxY, impl_->defaultFramebufferDepthStencilShadowHeight);
+        if (minX >= maxX || minY >= maxY) {
+            return true;
+        }
+
+        auto depthPasses = [&](GLfloat incoming, GLfloat current) {
+            if (!impl_->state->isEnabled(GL_DEPTH_TEST)) {
+                return true;
+            }
+            switch (impl_->state->depthState().func) {
+                case GL_NEVER:    return false;
+                case GL_LESS:     return incoming < current;
+                case GL_LEQUAL:   return incoming <= current;
+                case GL_GREATER:  return incoming > current;
+                case GL_GEQUAL:   return incoming >= current;
+                case GL_EQUAL:    return incoming == current;
+                case GL_NOTEQUAL: return incoming != current;
+                case GL_ALWAYS:
+                default:          return true;
+            }
+        };
+
+        const auto& stencilFace = impl_->state->stencilState().front;
+        const std::uint8_t stencilWriteMask =
+            static_cast<std::uint8_t>(stencilFace.writeMask & 0xffu);
+        const bool depthWrite =
+            copyDepth && impl_->state->depthState().writeMask != GL_FALSE;
+        for (GLint dstY = minY; dstY < maxY; ++dstY) {
+            for (GLint dstX = minX; dstX < maxX; ++dstX) {
+                const GLsizei srcX = dstX - impl_->fixedFunctionRasterX;
+                const GLsizei srcY = dstY - impl_->fixedFunctionRasterY;
+                const std::size_t srcOffset =
+                    static_cast<std::size_t>(srcY) *
+                    static_cast<std::size_t>(width) +
+                    static_cast<std::size_t>(srcX);
+                const std::size_t dstOffset =
+                    static_cast<std::size_t>(dstY) *
+                    static_cast<std::size_t>(
+                        impl_->defaultFramebufferDepthStencilShadowWidth) +
+                    static_cast<std::size_t>(dstX);
+
+                bool depthPassed = true;
+                if (copyDepth) {
+                    depthPassed = depthPasses(
+                        sourceDepth[srcOffset],
+                        impl_->defaultFramebufferDepth32[dstOffset]);
+                    if (depthPassed && depthWrite) {
+                        impl_->defaultFramebufferDepth32[dstOffset] =
+                            sourceDepth[srcOffset];
+                    }
+                }
+                if (copyStencil && depthPassed) {
+                    impl_->defaultFramebufferStencil8[dstOffset] =
+                        static_cast<std::uint8_t>(
+                            (impl_->defaultFramebufferStencil8[dstOffset] &
+                             ~stencilWriteMask) |
+                            (sourceStencil[srcOffset] & stencilWriteMask));
+                }
+            }
+        }
+
+        if (copyDepth) {
+            impl_->defaultFramebufferDepthShadowValid = true;
+        }
+        if (copyStencil) {
+            impl_->defaultFramebufferStencilShadowValid = true;
+        }
+        if (impl_->frameGraph != nullptr) {
+            const GLsizei uploadWidth = maxX - minX;
+            const GLsizei uploadHeight = maxY - minY;
+            std::vector<GLfloat> depthUpload;
+            if (copyDepth) {
+                depthUpload.resize(
+                    static_cast<std::size_t>(uploadWidth) *
+                    static_cast<std::size_t>(uploadHeight));
+                for (GLsizei row = 0; row < uploadHeight; ++row) {
+                    const std::size_t srcOffset =
+                        static_cast<std::size_t>(minY + row) *
+                        static_cast<std::size_t>(
+                            impl_->defaultFramebufferDepthStencilShadowWidth) +
+                        static_cast<std::size_t>(minX);
+                    const std::size_t dstOffset =
+                        static_cast<std::size_t>(row) *
+                        static_cast<std::size_t>(uploadWidth);
+                    std::memcpy(depthUpload.data() + dstOffset,
+                                impl_->defaultFramebufferDepth32.data() +
+                                    srcOffset,
+                                static_cast<std::size_t>(uploadWidth) *
+                                    sizeof(GLfloat));
+                }
+            }
+            bool uniformStencil = copyStencil;
+            std::uint8_t stencilValue = 0;
+            if (copyStencil) {
+                const std::size_t firstOffset =
+                    static_cast<std::size_t>(minY) *
+                    static_cast<std::size_t>(
+                        impl_->defaultFramebufferDepthStencilShadowWidth) +
+                    static_cast<std::size_t>(minX);
+                stencilValue = impl_->defaultFramebufferStencil8[firstOffset];
+                for (GLsizei row = 0; row < uploadHeight && uniformStencil; ++row) {
+                    for (GLsizei col = 0; col < uploadWidth; ++col) {
+                        const std::size_t offset =
+                            static_cast<std::size_t>(minY + row) *
+                            static_cast<std::size_t>(
+                                impl_->defaultFramebufferDepthStencilShadowWidth) +
+                            static_cast<std::size_t>(minX + col);
+                        if (impl_->defaultFramebufferStencil8[offset] !=
+                            stencilValue) {
+                            uniformStencil = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!copyStencil || uniformStencil) {
+                (void)impl_->frameGraph->writeDefaultDepthStencilRegion(
+                    minX, minY, uploadWidth, uploadHeight,
+                    copyDepth ? depthUpload.data() : nullptr,
+                    copyDepth, stencilValue, copyStencil);
+            }
+        }
+        return true;
+    }
+
     if (type != GL_COLOR ||
         impl_->state->boundReadFramebuffer() != 0 ||
         impl_->state->boundDrawFramebuffer() != 0) {
@@ -4396,10 +4566,10 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
 	                default:          return true;
 	            }
 	        };
-	        auto stencilPasses = [&](GLint gx, GLint gy) {
-	            if (!stencilTestEnabled) {
-	                return true;
-	            }
+		        auto stencilPasses = [&](GLint gx, GLint gy) {
+		            if (!stencilTestEnabled) {
+		                return true;
+		            }
 	            if (gx < 0 || gy < 0 ||
 	                gx >= impl_->defaultFramebufferDepthStencilShadowWidth ||
 	                gy >= impl_->defaultFramebufferDepthStencilShadowHeight) {
@@ -4425,9 +4595,38 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
 	                case GL_EQUAL:    return maskedRef == maskedValue;
 	                case GL_NOTEQUAL: return maskedRef != maskedValue;
 	                case GL_ALWAYS:
-	                default:          return true;
-	            }
-	        };
+		                default:          return true;
+		            }
+		        };
+		        auto applyStencilOp = [&](std::uint8_t current, GLenum op) {
+		            const auto& face = impl_->state->stencilState().front;
+		            const std::uint8_t ref =
+		                static_cast<std::uint8_t>(face.ref & 0xff);
+		            switch (op) {
+		                case GL_KEEP:
+		                    return current;
+		                case GL_ZERO:
+		                    return static_cast<std::uint8_t>(0);
+		                case GL_REPLACE:
+		                    return ref;
+		                case GL_INCR:
+		                    return current == 0xffu
+		                        ? current
+		                        : static_cast<std::uint8_t>(current + 1u);
+		                case GL_DECR:
+		                    return current == 0u
+		                        ? current
+		                        : static_cast<std::uint8_t>(current - 1u);
+		                case GL_INCR_WRAP:
+		                    return static_cast<std::uint8_t>(current + 1u);
+		                case GL_DECR_WRAP:
+		                    return static_cast<std::uint8_t>(current - 1u);
+		                case GL_INVERT:
+		                    return static_cast<std::uint8_t>(~current);
+		                default:
+		                    return current;
+		            }
+		        };
 
 	        if (impl_->state->boundDrawFramebuffer() == 0) {
             if (!impl_->defaultFramebufferShadowValid ||
@@ -4445,41 +4644,93 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
             if (px0 >= px1 || py0 >= py1) {
                 return false;
 	            }
-	            for (GLint gy = py0; gy < py1; ++gy) {
-	                for (GLint gx = px0; gx < px1; ++gx) {
-	                    if (depthTestEnabled) {
-	                        if (gx >= impl_->defaultFramebufferDepthStencilShadowWidth ||
-	                            gy >= impl_->defaultFramebufferDepthStencilShadowHeight) {
-	                            continue;
-	                        }
-	                        const std::size_t depthOffset =
-	                            static_cast<std::size_t>(gy) *
-	                            static_cast<std::size_t>(impl_->defaultFramebufferDepthStencilShadowWidth) +
-	                            static_cast<std::size_t>(gx);
-	                        const GLfloat incomingDepth = incomingDepthAt(gx, gy);
-	                        if (!depthPasses(incomingDepth,
-	                                         impl_->defaultFramebufferDepth32[depthOffset])) {
-	                            continue;
-	                        }
-	                        if (impl_->state->depthState().writeMask != GL_FALSE) {
-	                            impl_->defaultFramebufferDepth32[depthOffset] = incomingDepth;
-	                        }
-	                    }
-	                    if (!stencilPasses(gx, gy)) {
-	                        continue;
-	                    }
-	                    const std::size_t offset =
-	                        (static_cast<std::size_t>(gy) *
-	                         static_cast<std::size_t>(impl_->defaultFramebufferShadowWidth) +
+		            for (GLint gy = py0; gy < py1; ++gy) {
+		                for (GLint gx = px0; gx < px1; ++gx) {
+		                    const bool needsDepthStencil =
+		                        depthTestEnabled || stencilTestEnabled;
+		                    if (needsDepthStencil &&
+		                        (gx >= impl_->defaultFramebufferDepthStencilShadowWidth ||
+		                         gy >= impl_->defaultFramebufferDepthStencilShadowHeight)) {
+		                        continue;
+		                    }
+		                    const std::size_t dsOffset =
+		                        needsDepthStencil
+		                            ? static_cast<std::size_t>(gy) *
+		                                  static_cast<std::size_t>(
+		                                      impl_->defaultFramebufferDepthStencilShadowWidth) +
+		                                  static_cast<std::size_t>(gx)
+		                            : 0u;
+		                    bool stencilPassed = true;
+		                    if (stencilTestEnabled) {
+		                        stencilPassed = stencilPasses(gx, gy);
+		                        if (!stencilPassed) {
+		                            const auto& face =
+		                                impl_->state->stencilState().front;
+		                            const std::uint8_t writeMask =
+		                                static_cast<std::uint8_t>(
+		                                    face.writeMask & 0xffu);
+		                            const std::uint8_t updated =
+		                                applyStencilOp(
+		                                    impl_->defaultFramebufferStencil8[dsOffset],
+		                                    face.fail);
+		                            impl_->defaultFramebufferStencil8[dsOffset] =
+		                                static_cast<std::uint8_t>(
+		                                    (impl_->defaultFramebufferStencil8[dsOffset] &
+		                                     ~writeMask) |
+		                                    (updated & writeMask));
+		                            continue;
+		                        }
+		                    }
+		                    bool depthPassed = true;
+		                    const GLfloat incomingDepth = incomingDepthAt(gx, gy);
+		                    if (depthTestEnabled) {
+		                        depthPassed = depthPasses(
+		                            incomingDepth,
+		                            impl_->defaultFramebufferDepth32[dsOffset]);
+		                    }
+		                    if (stencilTestEnabled) {
+		                        const auto& face =
+		                            impl_->state->stencilState().front;
+		                        const std::uint8_t writeMask =
+		                            static_cast<std::uint8_t>(
+		                                face.writeMask & 0xffu);
+		                        const std::uint8_t updated =
+		                            applyStencilOp(
+		                                impl_->defaultFramebufferStencil8[dsOffset],
+		                                depthPassed ? face.depthPass
+		                                            : face.depthFail);
+		                        impl_->defaultFramebufferStencil8[dsOffset] =
+		                            static_cast<std::uint8_t>(
+		                                (impl_->defaultFramebufferStencil8[dsOffset] &
+		                                 ~writeMask) |
+		                                (updated & writeMask));
+		                    }
+		                    if (!depthPassed) {
+		                        continue;
+		                    }
+		                    if (depthTestEnabled &&
+		                        impl_->state->depthState().writeMask != GL_FALSE) {
+		                        impl_->defaultFramebufferDepth32[dsOffset] =
+		                            incomingDepth;
+		                    }
+		                    const std::size_t offset =
+		                        (static_cast<std::size_t>(gy) *
+		                         static_cast<std::size_t>(impl_->defaultFramebufferShadowWidth) +
                          static_cast<std::size_t>(gx)) * 4u;
                     std::memcpy(impl_->defaultFramebufferRGBA8.data() + offset,
                                 rgba,
                                 4u);
                 }
-            }
-            impl_->defaultFramebufferShadowValid = true;
-            return true;
-        }
+	            }
+	            impl_->defaultFramebufferShadowValid = true;
+	            if (depthTestEnabled) {
+	                impl_->defaultFramebufferDepthShadowValid = true;
+	            }
+	            if (stencilTestEnabled) {
+	                impl_->defaultFramebufferStencilShadowValid = true;
+	            }
+	            return true;
+	        }
 
         GLFramebufferObject* fbo =
             impl_->objects->framebuffers().get(impl_->state->boundDrawFramebuffer());
