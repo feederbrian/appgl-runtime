@@ -4888,16 +4888,16 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
 
         GLint x0 = std::max<GLint>(
             vp.x,
-            static_cast<GLint>(std::floor(minX + 0.0001f)));
+            static_cast<GLint>(std::ceil(minX - 0.5f)));
         GLint y0 = std::max<GLint>(
             vp.y,
-            static_cast<GLint>(std::floor(minY + 0.0001f)));
+            static_cast<GLint>(std::ceil(minY - 0.5f)));
         GLint x1 = std::min<GLint>(
             vp.x + vp.width,
-            static_cast<GLint>(std::ceil(maxX - 0.0001f)));
+            static_cast<GLint>(std::ceil(maxX - 0.5f)));
         GLint y1 = std::min<GLint>(
             vp.y + vp.height,
-            static_cast<GLint>(std::ceil(maxY - 0.0001f)));
+            static_cast<GLint>(std::ceil(maxY - 0.5f)));
         if (impl_->state->isEnabled(GL_SCISSOR_TEST)) {
             const auto& sc = impl_->state->scissor();
             x0 = std::max<GLint>(x0, sc.x);
