@@ -1120,20 +1120,6 @@ extern "C" void APIENTRY glPixelMapusv(GLenum map, GLsizei mapsize, const GLusho
     return;
 }
 
-extern "C" void APIENTRY glPixelTransferf(GLenum pname, GLfloat param) {
-    (void)pname;
-    (void)param;
-    appgl::Runtime::shared().recordFixedFunctionStub("glPixelTransferf");
-    return;
-}
-
-extern "C" void APIENTRY glPixelTransferi(GLenum pname, GLint param) {
-    (void)pname;
-    (void)param;
-    appgl::Runtime::shared().recordFixedFunctionStub("glPixelTransferi");
-    return;
-}
-
 extern "C" void APIENTRY glPixelZoom(GLfloat xfactor, GLfloat yfactor) {
     (void)xfactor;
     (void)yfactor;

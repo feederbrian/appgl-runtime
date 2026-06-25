@@ -38,6 +38,7 @@
 #include "../../include/AppGL/glcorearb.h"
 
 #include "../context/GLContext.h"
+#include "../runtime/AppGLProfile.h"
 #include "AppGLRuntime.h"
 
 #include <cmath>
@@ -131,6 +132,30 @@
 #endif
 #ifndef GL_ACCUM_BUFFER_BIT
 #define GL_ACCUM_BUFFER_BIT 0x00000200
+#endif
+#ifndef GL_RED_SCALE
+#define GL_RED_SCALE 0x0D14
+#endif
+#ifndef GL_RED_BIAS
+#define GL_RED_BIAS 0x0D15
+#endif
+#ifndef GL_GREEN_SCALE
+#define GL_GREEN_SCALE 0x0D18
+#endif
+#ifndef GL_GREEN_BIAS
+#define GL_GREEN_BIAS 0x0D19
+#endif
+#ifndef GL_BLUE_SCALE
+#define GL_BLUE_SCALE 0x0D1A
+#endif
+#ifndef GL_BLUE_BIAS
+#define GL_BLUE_BIAS 0x0D1B
+#endif
+#ifndef GL_ALPHA_SCALE
+#define GL_ALPHA_SCALE 0x0D1C
+#endif
+#ifndef GL_ALPHA_BIAS
+#define GL_ALPHA_BIAS 0x0D1D
 #endif
 
 namespace {
@@ -678,6 +703,30 @@ extern "C" void APIENTRY glDrawPixels(GLsizei width,
         return;
     }
     (void)ctx->drawPixelsCompat(width, height, format, type, pixels);
+}
+
+extern "C" void APIENTRY glPixelTransferf(GLenum pname, GLfloat param) {
+    if (!appgl::appglCompatProfileEnabled()) {
+        appgl::Runtime::shared().recordFixedFunctionStub("glPixelTransferf");
+        return;
+    }
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    (void)ctx->pixelTransferCompat(pname, param);
+}
+
+extern "C" void APIENTRY glPixelTransferi(GLenum pname, GLint param) {
+    if (!appgl::appglCompatProfileEnabled()) {
+        appgl::Runtime::shared().recordFixedFunctionStub("glPixelTransferi");
+        return;
+    }
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    (void)ctx->pixelTransferCompat(pname, static_cast<GLfloat>(param));
 }
 
 extern "C" void APIENTRY glClipPlane(GLenum plane, const GLdouble* equation) {

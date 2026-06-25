@@ -388,6 +388,8 @@ MANUAL_FIXED_FUNCTION_OVERRIDES = {
     "glClearAccum",
     "glAccum",
     "glDrawPixels",
+    "glPixelTransferf",
+    "glPixelTransferi",
     "glClipPlane",
     "glLineStipple",
     "glColorMaterial",

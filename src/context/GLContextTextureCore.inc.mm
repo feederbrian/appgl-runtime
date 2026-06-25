@@ -314,7 +314,8 @@ bool GLContext::texImage(
         return false;
     }
     const bool normalizeCompatUpload =
-        shouldNormalizeLegacyCompatTextureUpload(internalFormatEnum, format);
+        shouldNormalizeLegacyCompatTextureUpload(internalFormatEnum, format) ||
+        impl_->shouldApplyCompatPixelTransfer(internalFormatEnum, format, type);
     if (!impl_->buildRGBA8Upload(
             internalFormatEnum,
             image.desc.width, image.desc.height, image.desc.depth,
@@ -1026,7 +1027,8 @@ bool GLContext::texSubImage(
     }
     std::vector<std::uint8_t> upload;
     const bool normalizeCompatUpload =
-        shouldNormalizeLegacyCompatTextureUpload(image.desc.internalFormat, format);
+        shouldNormalizeLegacyCompatTextureUpload(image.desc.internalFormat, format) ||
+        impl_->shouldApplyCompatPixelTransfer(image.desc.internalFormat, format, type);
     if (!impl_->buildRGBA8Upload(
             image.desc.internalFormat,
             width, height, depth, format, type, resolvedPixels, upload,

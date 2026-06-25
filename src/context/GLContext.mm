@@ -124,6 +124,48 @@
 #ifndef GL_ACCUM_BUFFER_BIT
 #define GL_ACCUM_BUFFER_BIT 0x00000200
 #endif
+#ifndef GL_MAP_COLOR
+#define GL_MAP_COLOR 0x0D10
+#endif
+#ifndef GL_MAP_STENCIL
+#define GL_MAP_STENCIL 0x0D11
+#endif
+#ifndef GL_INDEX_SHIFT
+#define GL_INDEX_SHIFT 0x0D12
+#endif
+#ifndef GL_INDEX_OFFSET
+#define GL_INDEX_OFFSET 0x0D13
+#endif
+#ifndef GL_RED_SCALE
+#define GL_RED_SCALE 0x0D14
+#endif
+#ifndef GL_RED_BIAS
+#define GL_RED_BIAS 0x0D15
+#endif
+#ifndef GL_GREEN_SCALE
+#define GL_GREEN_SCALE 0x0D18
+#endif
+#ifndef GL_GREEN_BIAS
+#define GL_GREEN_BIAS 0x0D19
+#endif
+#ifndef GL_BLUE_SCALE
+#define GL_BLUE_SCALE 0x0D1A
+#endif
+#ifndef GL_BLUE_BIAS
+#define GL_BLUE_BIAS 0x0D1B
+#endif
+#ifndef GL_ALPHA_SCALE
+#define GL_ALPHA_SCALE 0x0D1C
+#endif
+#ifndef GL_ALPHA_BIAS
+#define GL_ALPHA_BIAS 0x0D1D
+#endif
+#ifndef GL_DEPTH_SCALE
+#define GL_DEPTH_SCALE 0x0D1E
+#endif
+#ifndef GL_DEPTH_BIAS
+#define GL_DEPTH_BIAS 0x0D1F
+#endif
 #ifndef GL_RETURN
 #define GL_RETURN 0x0102
 #endif
@@ -11041,6 +11083,47 @@ struct GLContext::Impl {
         return static_cast<std::uint8_t>(value * 255.0 + 0.5);
     }
 
+    bool compatPixelTransferColorScaleBiasActive() const {
+        for (std::size_t c = 0; c < 4; ++c) {
+            if (pixelTransferColorScale[c] != 1.0f ||
+                pixelTransferColorBias[c] != 0.0f) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool shouldApplyCompatPixelTransfer(GLenum internalFormat,
+                                        GLenum format,
+                                        GLenum type) const {
+        if (!appglCompatProfileEnabled() ||
+            !compatPixelTransferColorScaleBiasActive() ||
+            format != GL_RGBA ||
+            type != GL_FLOAT) {
+            return false;
+        }
+        switch (internalFormat) {
+            case GL_RGBA:
+            case GL_RGBA2:
+            case GL_RGBA4:
+            case GL_RGBA8:
+            case GL_RGBA12:
+            case GL_RGBA16:
+            case GL_RGBA16F:
+            case GL_RGBA32F:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    void applyCompatPixelTransferColorScaleBias(double rgba[4]) const {
+        for (std::size_t c = 0; c < 4; ++c) {
+            rgba[c] = rgba[c] * static_cast<double>(pixelTransferColorScale[c])
+                    + static_cast<double>(pixelTransferColorBias[c]);
+        }
+    }
+
     static std::uint16_t floatToHalf(float f) {
         std::uint32_t bits;
         std::memcpy(&bits, &f, sizeof(bits));
@@ -11695,6 +11778,8 @@ struct GLContext::Impl {
         const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
 
         if (normalizeCompatUpload) {
+            const bool applyPixelTransfer =
+                shouldApplyCompatPixelTransfer(internalFormat, format, type);
             for (GLsizei z = 0; z < depth; ++z) {
                 for (GLsizei y = 0; y < height; ++y) {
                     for (GLsizei x = 0; x < width; ++x) {
@@ -11713,6 +11798,9 @@ struct GLContext::Impl {
                         readCompatUploadSourceRGBA(pixel, format, type,
                                                    false, unpackSwapBytes, comps);
                         applyCompatUploadInternalBase(internalFormat, comps);
+                        if (applyPixelTransfer) {
+                            applyCompatPixelTransferColorScaleBias(comps);
+                        }
                         rgba8[destIndex + 0] = compatUploadComponentToU8(comps[0]);
                         rgba8[destIndex + 1] = compatUploadComponentToU8(comps[1]);
                         rgba8[destIndex + 2] = compatUploadComponentToU8(comps[2]);
@@ -28660,6 +28748,8 @@ struct GLContext::Impl {
     }
     static constexpr std::size_t kMaxImageUnits = 16;
     std::array<ImageBinding, kMaxImageUnits> imageBindings{};
+    std::array<GLfloat, 4> pixelTransferColorScale{{1.0f, 1.0f, 1.0f, 1.0f}};
+    std::array<GLfloat, 4> pixelTransferColorBias{{0.0f, 0.0f, 0.0f, 0.0f}};
 
     GLContext* owner = nullptr;
     std::string vendorString = "AppGL";
@@ -29112,6 +29202,46 @@ inline void logTFReadback(GLenum target,
 bool GLContext::pixelStore(GLenum pname, GLint value) {
     impl_->state->setPixelStore(pname, value);
     return true;
+}
+
+bool GLContext::pixelTransferCompat(GLenum pname, GLfloat param) {
+    switch (pname) {
+        case GL_RED_SCALE:
+            impl_->pixelTransferColorScale[0] = param;
+            return true;
+        case GL_RED_BIAS:
+            impl_->pixelTransferColorBias[0] = param;
+            return true;
+        case GL_GREEN_SCALE:
+            impl_->pixelTransferColorScale[1] = param;
+            return true;
+        case GL_GREEN_BIAS:
+            impl_->pixelTransferColorBias[1] = param;
+            return true;
+        case GL_BLUE_SCALE:
+            impl_->pixelTransferColorScale[2] = param;
+            return true;
+        case GL_BLUE_BIAS:
+            impl_->pixelTransferColorBias[2] = param;
+            return true;
+        case GL_ALPHA_SCALE:
+            impl_->pixelTransferColorScale[3] = param;
+            return true;
+        case GL_ALPHA_BIAS:
+            impl_->pixelTransferColorBias[3] = param;
+            return true;
+        case GL_MAP_COLOR:
+        case GL_MAP_STENCIL:
+        case GL_INDEX_SHIFT:
+        case GL_INDEX_OFFSET:
+        case GL_DEPTH_SCALE:
+        case GL_DEPTH_BIAS:
+            return true;
+        default:
+            pushError(GL_INVALID_ENUM, "glPixelTransfer",
+                      "pname is not a legacy pixel-transfer parameter");
+            return false;
+    }
 }
 
 #define APPGL_GLCONTEXT_FRAMEBUFFER_CORE
