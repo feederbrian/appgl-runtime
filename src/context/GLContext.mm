@@ -12793,6 +12793,41 @@ struct GLContext::Impl {
             }
             return nullptr;
         };
+        auto imageFitsMetalMip = [&](id<MTLTexture> metalTex,
+                                     GLint levelIndex,
+                                     const GLTextureImageLevel& image) -> bool {
+            if (metalTex == nil || levelIndex < 0) {
+                return false;
+            }
+            const NSUInteger mipLevel = static_cast<NSUInteger>(levelIndex);
+            if (mipLevel >= nonZeroMipLevelCount(metalTex.mipmapLevelCount)) {
+                return false;
+            }
+            const NSUInteger mipWidth = mipDimensionAtLevel(metalTex.width, mipLevel);
+            const NSUInteger mipHeight = mipDimensionAtLevel(metalTex.height, mipLevel);
+            const NSUInteger mipDepth = mipDimensionAtLevel(metalTex.depth, mipLevel);
+            if (static_cast<NSUInteger>(safeDimension(image.desc.width)) > mipWidth) {
+                return false;
+            }
+            if (object.target != GL_TEXTURE_1D &&
+                object.target != GL_TEXTURE_1D_ARRAY &&
+                static_cast<NSUInteger>(safeDimension(image.desc.height)) > mipHeight) {
+                return false;
+            }
+            if (object.target == GL_TEXTURE_3D &&
+                static_cast<NSUInteger>(safeDimension(image.desc.depth)) > mipDepth) {
+                return false;
+            }
+            if (object.target == GL_TEXTURE_2D_ARRAY &&
+                static_cast<NSUInteger>(safeDimension(image.desc.depth)) > metalTex.arrayLength) {
+                return false;
+            }
+            if (object.target == GL_TEXTURE_1D_ARRAY &&
+                static_cast<NSUInteger>(safeDimension(image.desc.height)) > metalTex.arrayLength) {
+                return false;
+            }
+            return true;
+        };
 
         ExtensionContext extensionContext(*owner);
         bool sparseUploadHandled = false;
@@ -13126,6 +13161,9 @@ struct GLContext::Impl {
                     }
                     const NSUInteger mipLevel = static_cast<NSUInteger>(levelIndex);
                     if (mipLevel >= nonZeroMipLevelCount(existing.mipmapLevelCount)) {
+                        continue;
+                    }
+                    if (!imageFitsMetalMip(existing, levelIndex, image)) {
                         continue;
                     }
                     const NSUInteger rowStride = static_cast<NSUInteger>(safeDimension(image.desc.width)) * bpp;
@@ -13571,6 +13609,9 @@ struct GLContext::Impl {
             }
             const NSUInteger mipLevel = static_cast<NSUInteger>(levelIndex);
             if (mipLevel >= descriptor.mipmapLevelCount) {
+                continue;
+            }
+            if (!imageFitsMetalMip(texture, levelIndex, image)) {
                 continue;
             }
             // Sprint 8 B Cluster F F1 Day 10 (CKPT82): Metal requires

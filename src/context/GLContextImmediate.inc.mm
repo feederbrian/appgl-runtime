@@ -2895,28 +2895,27 @@ void GLContext::endImmediate() {
     };
     const bool lineStippleShadowPainted = paintStippledLinesToShadow();
 
+    void* fixedFunctionSamplerState = nullptr;
     auto resolveFixedFunctionTexture = [&]() -> void* {
         GLenum target = 0;
-        if (impl_->state->isEnabled(GL_TEXTURE_2D) &&
-            impl_->state->boundTextureOnUnit(0, GL_TEXTURE_2D) != 0) {
+        if (impl_->state->isEnabled(GL_TEXTURE_2D)) {
             target = GL_TEXTURE_2D;
-        } else if (impl_->state->isEnabled(GL_TEXTURE_1D) &&
-                   impl_->state->boundTextureOnUnit(0, GL_TEXTURE_1D) != 0) {
+        } else if (impl_->state->isEnabled(GL_TEXTURE_1D)) {
             target = GL_TEXTURE_1D;
         }
         if (target == 0) {
             return nullptr;
         }
         const GLuint texName = impl_->state->boundTextureOnUnit(0, target);
-        if (texName == 0) {
-            return nullptr;
-        }
-        GLTextureObject* tex = impl_->objects->textures().get(texName);
+        GLTextureObject* tex = impl_->currentTexture(target);
         if (tex == nullptr || tex->metalTexture == nullptr) {
             return nullptr;
         }
         if (!impl_->sampledTextureCompleteForSampler(*tex, tex->params)) {
             return nullptr;
+        }
+        if (impl_->rebuildTextureSamplerState(texName, *tex)) {
+            fixedFunctionSamplerState = tex->metalSampler;
         }
         return impl_->resolveSwizzledTexture(*tex);
     };
@@ -2928,6 +2927,7 @@ void GLContext::endImmediate() {
     info.vertexStride = sizeof(Impl::ImmediateModeVertex);
     info.mvp = drawMvp;
     info.metalTexture = resolveFixedFunctionTexture();
+    info.metalSamplerState = fixedFunctionSamplerState;
     info.fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
     {
         GLsizei fboW = 0;
@@ -3304,28 +3304,27 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         return false;
     }
 
+    void* fixedFunctionSamplerState = nullptr;
     auto resolveFixedFunctionTexture = [&]() -> void* {
         GLenum target = 0;
-        if (impl_->state->isEnabled(GL_TEXTURE_2D) &&
-            impl_->state->boundTextureOnUnit(0, GL_TEXTURE_2D) != 0) {
+        if (impl_->state->isEnabled(GL_TEXTURE_2D)) {
             target = GL_TEXTURE_2D;
-        } else if (impl_->state->isEnabled(GL_TEXTURE_1D) &&
-                   impl_->state->boundTextureOnUnit(0, GL_TEXTURE_1D) != 0) {
+        } else if (impl_->state->isEnabled(GL_TEXTURE_1D)) {
             target = GL_TEXTURE_1D;
         }
         if (target == 0) {
             return nullptr;
         }
         const GLuint texName = impl_->state->boundTextureOnUnit(0, target);
-        if (texName == 0) {
-            return nullptr;
-        }
-        GLTextureObject* tex = impl_->objects->textures().get(texName);
+        GLTextureObject* tex = impl_->currentTexture(target);
         if (tex == nullptr || tex->metalTexture == nullptr) {
             return nullptr;
         }
         if (!impl_->sampledTextureCompleteForSampler(*tex, tex->params)) {
             return nullptr;
+        }
+        if (impl_->rebuildTextureSamplerState(texName, *tex)) {
+            fixedFunctionSamplerState = tex->metalSampler;
         }
         return impl_->resolveSwizzledTexture(*tex);
     };
@@ -4108,6 +4107,7 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         info.vertexStride = sizeof(Impl::ImmediateModeVertex);
         info.mvp = encodeMvp;
         info.metalTexture = resolveFixedFunctionTexture();
+        info.metalSamplerState = fixedFunctionSamplerState;
         info.fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
         GLsizei fboW = 0;
         GLsizei fboH = 0;

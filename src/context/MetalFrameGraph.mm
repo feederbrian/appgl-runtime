@@ -17896,7 +17896,9 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         if (info.metalTexture != nullptr) {
             id<MTLTexture> tex = (__bridge id<MTLTexture>)(info.metalTexture);
             [encoder setFragmentTexture:tex atIndex:0];
-            id<MTLSamplerState> samp = immediateModeDefaultSampler();
+            id<MTLSamplerState> samp = info.metalSamplerState != nullptr
+                ? (__bridge id<MTLSamplerState>)(info.metalSamplerState)
+                : immediateModeDefaultSampler();
             if (samp != nil) {
                 [encoder setFragmentSamplerState:samp atIndex:0];
             }

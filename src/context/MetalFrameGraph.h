@@ -775,8 +775,9 @@ struct TranslatedDrawInfo {
 // it's pushed as a vertex-stage constant because no shader program is
 // active on this path. `metalTexture` is the id<MTLTexture> bound to
 // GL_TEXTURE_2D on unit 0 (resolved by the caller), or nullptr if no
-// texture is bound; the frame graph picks the untextured pipeline in
-// that case.
+// texture is bound; `metalSamplerState` carries the matching fixed-
+// function texture parameters when available. The frame graph picks
+// the untextured pipeline when `metalTexture` is null.
 struct ImmediateDrawInfo {
     GLenum mode = 0;
     const void* vertices = nullptr;
@@ -784,6 +785,7 @@ struct ImmediateDrawInfo {
     std::size_t vertexStride = 0;
     Matrix4 mvp = Matrix4::identity();
     void* metalTexture = nullptr;  // id<MTLTexture> or nullptr
+    void* metalSamplerState = nullptr; // id<MTLSamplerState> or nullptr
     GLenum fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
     void* fboColorTexture = nullptr;        // id<MTLTexture> or nullptr
     void* fboDepthStencilTexture = nullptr; // id<MTLTexture> or nullptr
