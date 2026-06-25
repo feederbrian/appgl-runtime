@@ -1034,6 +1034,15 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
             // red=8 green=8 blue=8 alpha=8 (wrong).
             const GLenum fmt = desc.internalFormat;
             auto legacyLuminanceSize = [fmt]() -> GLint {
+                if (appglCompatProfileEnabled()) {
+                    switch (fmt) {
+                        case GL_SLUMINANCE8:
+                        case GL_SLUMINANCE8_ALPHA8:
+                            return 8;
+                        default:
+                            break;
+                    }
+                }
                 switch (fmt) {
                     case GL_LUMINANCE:
                     case GL_LUMINANCE8:
@@ -1096,6 +1105,8 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                             case GL_LUMINANCE_ALPHA:
                             case GL_LUMINANCE8_ALPHA8:
                                 return 8;
+                            case GL_SLUMINANCE8_ALPHA8:
+                                return appglCompatProfileEnabled() ? 8 : 0;
                             case GL_LUMINANCE4_ALPHA4:
                             case GL_LUMINANCE12_ALPHA4:
                                 return 4;
@@ -1133,6 +1144,16 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                 }
                 if (match({GL_RG32F, GL_RG32I, GL_RG32UI})) {
                     return (channel < 2) ? 32 : 0;
+                }
+                if (appglCompatProfileEnabled()) {
+                    if (match({GL_COMPRESSED_RED_RGTC1,
+                               GL_COMPRESSED_SIGNED_RED_RGTC1})) {
+                        return channel == 0 ? -1 : 0;
+                    }
+                    if (match({GL_COMPRESSED_RG_RGTC2,
+                               GL_COMPRESSED_SIGNED_RG_RGTC2})) {
+                        return channel < 2 ? -1 : 0;
+                    }
                 }
                 // R+G+B formats.
                 if (match({GL_RGB8, GL_RGB8_SNORM, GL_RGB8I, GL_RGB8UI, GL_SRGB, GL_SRGB8, GL_RGB,

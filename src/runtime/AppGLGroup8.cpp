@@ -92,6 +92,12 @@
 #ifndef GL_TEXTURE_INTENSITY_SIZE
 #define GL_TEXTURE_INTENSITY_SIZE 0x8061
 #endif
+#ifndef GL_SLUMINANCE8
+#define GL_SLUMINANCE8 0x8C47
+#endif
+#ifndef GL_SLUMINANCE8_ALPHA8
+#define GL_SLUMINANCE8_ALPHA8 0x8C45
+#endif
 
 namespace appgl {
 
@@ -352,6 +358,15 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                 return false;
             };
             auto legacyLuminanceSize = [&]() -> GLint {
+                if (appglCompatProfileEnabled()) {
+                    switch (fmt) {
+                        case GL_SLUMINANCE8:
+                        case GL_SLUMINANCE8_ALPHA8:
+                            return 8;
+                        default:
+                            break;
+                    }
+                }
                 switch (fmt) {
                     case GL_LUMINANCE:
                     case GL_LUMINANCE8:
@@ -409,6 +424,8 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                             case GL_LUMINANCE_ALPHA:
                             case GL_LUMINANCE8_ALPHA8:
                                 return 8;
+                            case GL_SLUMINANCE8_ALPHA8:
+                                return appglCompatProfileEnabled() ? 8 : 0;
                             case GL_LUMINANCE4_ALPHA4:
                             case GL_LUMINANCE12_ALPHA4:
                                 return 4;
@@ -444,6 +461,16 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                 }
                 if (match({GL_RG32F, GL_RG32I, GL_RG32UI})) {
                     return (channel < 2) ? 32 : 0;
+                }
+                if (appglCompatProfileEnabled()) {
+                    if (match({GL_COMPRESSED_RED_RGTC1,
+                               GL_COMPRESSED_SIGNED_RED_RGTC1})) {
+                        return channel == 0 ? -1 : 0;
+                    }
+                    if (match({GL_COMPRESSED_RG_RGTC2,
+                               GL_COMPRESSED_SIGNED_RG_RGTC2})) {
+                        return channel < 2 ? -1 : 0;
+                    }
                 }
                 if (match({GL_RGB8, GL_RGB8_SNORM, GL_RGB8I, GL_RGB8UI, GL_SRGB, GL_SRGB8, GL_RGB,
                            GL_COMPRESSED_RGB, GL_COMPRESSED_RGB_S3TC_DXT1_EXT})) {
