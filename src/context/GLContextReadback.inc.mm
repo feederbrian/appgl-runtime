@@ -61,6 +61,8 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
         // glReadPixels failed" on combos the spec explicitly permits.
         const bool isColorReadback =
             (format == GL_RED || format == GL_GREEN || format == GL_BLUE
+             || format == GL_ALPHA || format == GL_LUMINANCE
+             || format == GL_LUMINANCE_ALPHA
              || format == GL_RG || format == GL_RGB || format == GL_RGBA
              || format == GL_BGR || format == GL_BGRA
              || format == GL_RED_INTEGER || format == GL_GREEN_INTEGER
@@ -499,23 +501,36 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
 
             const bool formatIsBGR = (format == GL_BGR || format == GL_BGR_INTEGER);
             const bool formatIsBGRA = (format == GL_BGRA || format == GL_BGRA_INTEGER);
-            const bool formatIsGreen = (format == GL_GREEN || format == GL_GREEN_INTEGER);
-            const bool formatIsBlue = (format == GL_BLUE || format == GL_BLUE_INTEGER);
-            const bool formatIsAlpha = (format == GL_ALPHA);
-            auto getComponent = [&](const double* vals4, int glCompIndex) -> double {
-                if (formatIsBGR) {
-                    static const int map[3] = {2, 1, 0};
+                const bool formatIsGreen = (format == GL_GREEN || format == GL_GREEN_INTEGER);
+                const bool formatIsBlue = (format == GL_BLUE || format == GL_BLUE_INTEGER);
+                const bool formatIsAlpha = (format == GL_ALPHA);
+                const bool formatIsLuminance = (format == GL_LUMINANCE);
+                const bool formatIsLuminanceAlpha = (format == GL_LUMINANCE_ALPHA);
+                auto getComponent = [&](const double* vals4, int glCompIndex) -> double {
+                    if (formatIsBGR) {
+                        static const int map[3] = {2, 1, 0};
                     return glCompIndex < 3 ? vals4[map[glCompIndex]] : 1.0;
                 }
                 if (formatIsBGRA) {
                     static const int map[4] = {2, 1, 0, 3};
                     return glCompIndex < 4 ? vals4[map[glCompIndex]] : 1.0;
                 }
-                if (formatIsGreen) return glCompIndex == 0 ? vals4[1] : 0.0;
-                if (formatIsBlue) return glCompIndex == 0 ? vals4[2] : 0.0;
-                if (formatIsAlpha) return glCompIndex == 0 ? vals4[3] : 0.0;
-                return vals4[glCompIndex];
-            };
+                    if (formatIsGreen) return glCompIndex == 0 ? vals4[1] : 0.0;
+                    if (formatIsBlue) return glCompIndex == 0 ? vals4[2] : 0.0;
+                    if (formatIsAlpha) return glCompIndex == 0 ? vals4[3] : 0.0;
+                    if (formatIsLuminance) {
+                        return glCompIndex == 0
+                            ? vals4[0] + vals4[1] + vals4[2]
+                            : 0.0;
+                    }
+                    if (formatIsLuminanceAlpha) {
+                        if (glCompIndex == 0) {
+                            return vals4[0] + vals4[1] + vals4[2];
+                        }
+                        return glCompIndex == 1 ? vals4[3] : 0.0;
+                    }
+                    return vals4[glCompIndex];
+                };
             auto packUN = [](double v, unsigned bits) -> std::uint32_t {
                 if (v < 0.0) v = 0.0;
                 if (v > 1.0) v = 1.0;
@@ -667,6 +682,21 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
                     src[0] = b; src[1] = g; src[2] = r;
                 } else if (format == GL_BGRA || format == GL_BGRA_INTEGER) {
                     src[0] = b; src[1] = g; src[2] = r; src[3] = a;
+                } else if (format == GL_LUMINANCE) {
+                    const unsigned lum =
+                        static_cast<unsigned>(r) +
+                        static_cast<unsigned>(g) +
+                        static_cast<unsigned>(b);
+                    src[0] = static_cast<std::uint8_t>(
+                        std::min<unsigned>(lum, 255u));
+                } else if (format == GL_LUMINANCE_ALPHA) {
+                    const unsigned lum =
+                        static_cast<unsigned>(r) +
+                        static_cast<unsigned>(g) +
+                        static_cast<unsigned>(b);
+                    src[0] = static_cast<std::uint8_t>(
+                        std::min<unsigned>(lum, 255u));
+                    src[1] = a;
                 }
                 std::uint8_t* dstPixelBase = dest
                     + static_cast<std::size_t>(row) * dstRowBytes
@@ -734,7 +764,122 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
         return true;
     }
 
-    // Default framebuffer readback — widen format/type acceptance
+    // Default framebuffer depth/stencil readback. MetalFrameGraph does not
+    // expose a default depth/stencil copy path, so answer clear-only legacy
+    // probes from the CPU shadow we maintain for FB0 depth/stencil clears.
+    if (format == GL_DEPTH_COMPONENT && type == GL_FLOAT) {
+        std::vector<GLfloat> depthStage(
+            static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+        if (!impl_->copyDefaultFramebufferDepthPixels(
+                x, y, width, height, depthStage.data())) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        const auto& packStore = impl_->state->pixelStore();
+        const std::size_t dstPixelBytes = sizeof(GLfloat);
+        const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+            ? static_cast<std::size_t>(packStore.packRowLength)
+            : static_cast<std::size_t>(width);
+        const std::size_t dstRowBytes = alignByteCount(
+            dstRowStridePixels * dstPixelBytes, packStore.packAlignment);
+        auto* dest = static_cast<std::uint8_t*>(pixels)
+            + static_cast<std::size_t>(packStore.packSkipRows) * dstRowBytes
+            + static_cast<std::size_t>(packStore.packSkipPixels) * dstPixelBytes;
+        for (GLsizei row = 0; row < height; ++row) {
+            std::memcpy(dest + static_cast<std::size_t>(row) * dstRowBytes,
+                        depthStage.data() +
+                            static_cast<std::size_t>(row) *
+                            static_cast<std::size_t>(width),
+                        static_cast<std::size_t>(width) * dstPixelBytes);
+        }
+        return true;
+    }
+    if (format == GL_STENCIL_INDEX &&
+        (type == GL_UNSIGNED_BYTE || type == GL_UNSIGNED_SHORT ||
+         type == GL_UNSIGNED_INT || type == GL_BYTE ||
+         type == GL_SHORT || type == GL_INT)) {
+        const std::size_t pixelCount =
+            static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+        std::vector<std::uint8_t> stencilStage(pixelCount);
+        if (!impl_->copyDefaultFramebufferStencilPixels(
+                x, y, width, height, stencilStage.data())) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        const auto& packStore = impl_->state->pixelStore();
+        const std::size_t dstPixelBytes =
+            std::max<std::size_t>(bytesPerComponent(type), 1);
+        const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+            ? static_cast<std::size_t>(packStore.packRowLength)
+            : static_cast<std::size_t>(width);
+        const std::size_t dstRowBytes = alignByteCount(
+            dstRowStridePixels * dstPixelBytes, packStore.packAlignment);
+        auto* dest = static_cast<std::uint8_t*>(pixels)
+            + static_cast<std::size_t>(packStore.packSkipRows) * dstRowBytes
+            + static_cast<std::size_t>(packStore.packSkipPixels) * dstPixelBytes;
+        for (GLsizei row = 0; row < height; ++row) {
+            for (GLsizei col = 0; col < width; ++col) {
+                const std::size_t i =
+                    static_cast<std::size_t>(row) *
+                    static_cast<std::size_t>(width) +
+                    static_cast<std::size_t>(col);
+                std::uint8_t* slot = dest +
+                    static_cast<std::size_t>(row) * dstRowBytes +
+                    static_cast<std::size_t>(col) * dstPixelBytes;
+                std::memset(slot, 0, dstPixelBytes);
+                slot[0] = stencilStage[i];
+                if (packStore.packSwapBytes == GL_TRUE) {
+                    Impl::swapPixelStoreBytes(slot, dstPixelBytes);
+                }
+            }
+        }
+        return true;
+    }
+
+    // Default framebuffer readback — widen format/type acceptance.
+    // If the CPU shadow is authoritative, answer before forcing a Metal
+    // readback flush; tiny legacy probes such as draw-sync depend on this
+    // path not serializing every pixel-sized draw.
+    if (format == GL_RGBA && type == GL_UNSIGNED_BYTE) {
+        impl_->materializeDefaultFbShadowClear();
+        if (impl_->copyDefaultFramebufferShadowPixels(x, y, width, height, pixels)) {
+            return true;
+        }
+    }
+    if ((format == GL_RGB || format == GL_RGBA) && type == GL_FLOAT) {
+        const std::size_t components = format == GL_RGB ? 3u : 4u;
+        const std::size_t pixelCount =
+            static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+        std::vector<std::uint8_t> rgba8(pixelCount * 4u);
+        impl_->materializeDefaultFbShadowClear();
+        if (impl_->copyDefaultFramebufferShadowPixels(
+                x, y, width, height, rgba8.data())) {
+            const auto& packStore = impl_->state->pixelStore();
+            const std::size_t dstPixelBytes = components * sizeof(GLfloat);
+            const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+                ? static_cast<std::size_t>(packStore.packRowLength)
+                : static_cast<std::size_t>(width);
+            const std::size_t dstRowBytes = alignByteCount(
+                dstRowStridePixels * dstPixelBytes,
+                packStore.packAlignment);
+            auto* dest = static_cast<std::uint8_t*>(pixels)
+                + static_cast<std::size_t>(packStore.packSkipRows) * dstRowBytes
+                + static_cast<std::size_t>(packStore.packSkipPixels) * dstPixelBytes;
+            for (GLsizei row = 0; row < height; ++row) {
+                for (GLsizei col = 0; col < width; ++col) {
+                    const std::size_t srcOffset =
+                        static_cast<std::size_t>(row * width + col) * 4u;
+                    auto* dst = reinterpret_cast<GLfloat*>(
+                        dest + static_cast<std::size_t>(row) * dstRowBytes +
+                        static_cast<std::size_t>(col) * dstPixelBytes);
+                    for (std::size_t c = 0; c < components; ++c) {
+                        dst[c] = static_cast<GLfloat>(rgba8[srcOffset + c]) / 255.0f;
+                    }
+                }
+            }
+            return true;
+        }
+    }
     impl_->encodePendingWork();
     if (impl_->frameGraph != nullptr) {
         impl_->frameGraph->flushForReadback();
@@ -779,25 +924,40 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
         } else if (format == GL_BGRA || format == GL_BGRA_INTEGER) {
             std::swap(src[0], src[2]);
         }
+        auto componentByte = [&](std::size_t c) -> std::uint8_t {
+            if (format == GL_LUMINANCE || format == GL_LUMINANCE_ALPHA) {
+                const unsigned l = std::min<unsigned>(
+                    255u,
+                    static_cast<unsigned>(src[0]) +
+                    static_cast<unsigned>(src[1]) +
+                    static_cast<unsigned>(src[2]));
+                if (c == 0) {
+                    return static_cast<std::uint8_t>(l);
+                }
+                return format == GL_LUMINANCE_ALPHA && c == 1 ? src[3] : 0;
+            }
+            return src[c];
+        };
         for (std::size_t c = 0; c < components; ++c) {
-            const float normalized = static_cast<float>(src[c]) / 255.0f;
+            const std::uint8_t value = componentByte(c);
+            const float normalized = static_cast<float>(value) / 255.0f;
             switch (type) {
                 case GL_UNSIGNED_BYTE:
-                    dest[i * components + c] = src[c];
+                    dest[i * components + c] = value;
                     break;
                 case GL_FLOAT:
                     reinterpret_cast<float*>(dest)[i * components + c] = normalized;
                     break;
                 case GL_UNSIGNED_SHORT:
                     reinterpret_cast<std::uint16_t*>(dest)[i * components + c] =
-                        static_cast<std::uint16_t>(src[c] * 257);
+                        static_cast<std::uint16_t>(value * 257);
                     break;
                 case GL_UNSIGNED_INT:
                     reinterpret_cast<std::uint32_t*>(dest)[i * components + c] =
-                        static_cast<std::uint32_t>(src[c]) * 16843009u;
+                        static_cast<std::uint32_t>(value) * 16843009u;
                     break;
                 default:
-                    dest[i * components + c] = src[c];
+                    dest[i * components + c] = value;
                     break;
             }
         }

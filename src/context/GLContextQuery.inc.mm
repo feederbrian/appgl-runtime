@@ -132,6 +132,10 @@ bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
         *data = integerValue != 0 ? GL_TRUE : GL_FALSE;
         return true;
     }
+    if (pname == GL_SHADE_MODEL) {
+        *data = impl_->fixedFunctionShadeModel != 0 ? GL_TRUE : GL_FALSE;
+        return true;
+    }
     // Transform feedback state — gluStateReset queries these via getBooleanv;
     // returning GL_INVALID_ENUM here aborts the reset and bleeds state across
     // CTS tests (active/paused/binding all default to GL_FALSE/0 since we
@@ -207,6 +211,26 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
             : static_cast<GLint>(impl_->debugMessages.front().message.size() + 1);
         return true;
     }
+    if (pname == GL_SHADE_MODEL) {
+        *data = static_cast<GLint>(impl_->fixedFunctionShadeModel);
+        return true;
+    }
+    if (pname == GL_RENDER_MODE) {
+        *data = static_cast<GLint>(impl_->selection.renderMode);
+        return true;
+    }
+    if (pname == GL_NAME_STACK_DEPTH) {
+        *data = static_cast<GLint>(impl_->selection.nameStack.size());
+        return true;
+    }
+    if (pname == GL_MAX_NAME_STACK_DEPTH) {
+        *data = GLContext::Impl::kMaxSelectNameStackDepth;
+        return true;
+    }
+    if (pname == GL_SELECTION_BUFFER_SIZE) {
+        *data = impl_->selection.bufferSize;
+        return true;
+    }
     if (pname == GL_READ_BUFFER) {
         const GLuint framebufferName = impl_->state->boundReadFramebuffer();
         const GLFramebufferObject* framebuffer = impl_->objects->framebuffers().get(framebufferName);
@@ -247,6 +271,39 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
     }
     if (pname == GL_SAMPLES) {
         *data = 0;
+        return true;
+    }
+    if (pname == GL_DEPTH_BITS || pname == GL_STENCIL_BITS) {
+        const GLuint fbName = impl_->state->boundReadFramebuffer();
+        if (fbName == 0) {
+            *data = pname == GL_DEPTH_BITS ? 24 : 8;
+            return true;
+        }
+        GLint bits = 0;
+        if (const GLFramebufferObject* fb = impl_->objects->framebuffers().get(fbName)) {
+            const GLFramebufferAttachment* att = impl_->framebufferAttachment(
+                *fb,
+                pname == GL_DEPTH_BITS ? GL_DEPTH_ATTACHMENT : GL_STENCIL_ATTACHMENT);
+            const auto info = att != nullptr
+                ? impl_->framebufferAttachmentInfo(*att)
+                : GLContext::Impl::AttachmentInfo{};
+            if (info.complete) {
+                if (pname == GL_DEPTH_BITS) {
+                    if (info.internalFormat == GL_DEPTH_COMPONENT16) {
+                        bits = 16;
+                    } else if (info.internalFormat == GL_DEPTH_COMPONENT32 ||
+                               info.internalFormat == GL_DEPTH_COMPONENT32F ||
+                               info.internalFormat == GL_DEPTH32F_STENCIL8) {
+                        bits = 32;
+                    } else if (isDepthFormat(info.internalFormat)) {
+                        bits = 24;
+                    }
+                } else if (isStencilFormat(info.internalFormat)) {
+                    bits = 8;
+                }
+            }
+        }
+        *data = bits;
         return true;
     }
     // GL 4.6 §18.3: GL_IMPLEMENTATION_COLOR_READ_{TYPE,FORMAT} report
@@ -354,6 +411,19 @@ bool GLContext::queryInteger64(GLenum pname, GLint64* data) {
         return false;
     }
     if (pname == GL_DEBUG_GROUP_STACK_DEPTH || pname == GL_DEBUG_NEXT_LOGGED_MESSAGE_LENGTH) {
+        GLint integerValue = 0;
+        if (!queryInteger(pname, &integerValue)) {
+            return false;
+        }
+        *data = static_cast<GLint64>(integerValue);
+        return true;
+    }
+    if (pname == GL_SHADE_MODEL) {
+        *data = static_cast<GLint64>(impl_->fixedFunctionShadeModel);
+        return true;
+    }
+    if (pname == GL_RENDER_MODE || pname == GL_NAME_STACK_DEPTH ||
+        pname == GL_MAX_NAME_STACK_DEPTH || pname == GL_SELECTION_BUFFER_SIZE) {
         GLint integerValue = 0;
         if (!queryInteger(pname, &integerValue)) {
             return false;
@@ -597,6 +667,10 @@ bool GLContext::queryFloat(GLenum pname, GLfloat* data) {
         *data = static_cast<GLfloat>(integerValue);
         return true;
     }
+    if (pname == GL_SHADE_MODEL) {
+        *data = static_cast<GLfloat>(impl_->fixedFunctionShadeModel);
+        return true;
+    }
     bool fragmentShadingRateHandled = false;
     if (!queryFragmentShadingRateFloat(*this, pname, data, fragmentShadingRateHandled)) {
         return false;
@@ -642,6 +716,10 @@ bool GLContext::queryDouble(GLenum pname, GLdouble* data) {
             return false;
         }
         *data = static_cast<GLdouble>(integerValue);
+        return true;
+    }
+    if (pname == GL_SHADE_MODEL) {
+        *data = static_cast<GLdouble>(impl_->fixedFunctionShadeModel);
         return true;
     }
     bool fragmentShadingRateHandled = false;

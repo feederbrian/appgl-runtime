@@ -1022,7 +1022,9 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
         case GL_TEXTURE_RED_SIZE:
         case GL_TEXTURE_GREEN_SIZE:
         case GL_TEXTURE_BLUE_SIZE:
-        case GL_TEXTURE_ALPHA_SIZE: {
+        case GL_TEXTURE_ALPHA_SIZE:
+        case GL_TEXTURE_LUMINANCE_SIZE:
+        case GL_TEXTURE_INTENSITY_SIZE: {
             // GL 4.6 Table 8.12 / §8.11.2. Reports per-channel bit
             // counts of the promoted internal format — NOT the
             // Metal backing format. CTS `texture_size_promotion`
@@ -1031,12 +1033,87 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
             // all four channels, which reported R8 as having
             // red=8 green=8 blue=8 alpha=8 (wrong).
             const GLenum fmt = desc.internalFormat;
-            auto channelSize = [fmt](int channel) -> GLint {
+            auto legacyLuminanceSize = [fmt]() -> GLint {
+                switch (fmt) {
+                    case GL_LUMINANCE:
+                    case GL_LUMINANCE8:
+                    case GL_LUMINANCE_ALPHA:
+                    case GL_LUMINANCE8_ALPHA8:
+                        return 8;
+                    case GL_LUMINANCE4:
+                    case GL_LUMINANCE4_ALPHA4:
+                        return 4;
+                    case GL_LUMINANCE6_ALPHA2:
+                        return 6;
+                    case GL_LUMINANCE12:
+                    case GL_LUMINANCE12_ALPHA4:
+                    case GL_LUMINANCE12_ALPHA12:
+                        return 12;
+                    case GL_LUMINANCE16:
+                    case GL_LUMINANCE16_ALPHA16:
+                        return 16;
+                    default:
+                        return 0;
+                }
+            };
+            auto legacyIntensitySize = [fmt]() -> GLint {
+                switch (fmt) {
+                    case GL_INTENSITY:
+                    case GL_INTENSITY8:
+                        return 8;
+                    case GL_INTENSITY4:
+                        return 4;
+                    case GL_INTENSITY12:
+                        return 12;
+                    case GL_INTENSITY16:
+                        return 16;
+                    default:
+                        return 0;
+                }
+            };
+            auto channelSize = [&](int channel) -> GLint {
                 // channel: 0=R, 1=G, 2=B, 3=A
                 auto match = [fmt](std::initializer_list<GLenum> lst) {
                     for (GLenum f : lst) if (f == fmt) return true;
                     return false;
                 };
+                if (fmt == GL_ALPHA || fmt == GL_ALPHA8) {
+                    return channel == 3 ? 8 : 0;
+                }
+                if (fmt == GL_ALPHA4) {
+                    return channel == 3 ? 4 : 0;
+                }
+                if (fmt == GL_ALPHA12) {
+                    return channel == 3 ? 12 : 0;
+                }
+                if (fmt == GL_ALPHA16) {
+                    return channel == 3 ? 16 : 0;
+                }
+                const GLint luminanceBits = legacyLuminanceSize();
+                if (luminanceBits > 0) {
+                    if (channel == 3) {
+                        switch (fmt) {
+                            case GL_LUMINANCE_ALPHA:
+                            case GL_LUMINANCE8_ALPHA8:
+                                return 8;
+                            case GL_LUMINANCE4_ALPHA4:
+                            case GL_LUMINANCE12_ALPHA4:
+                                return 4;
+                            case GL_LUMINANCE6_ALPHA2:
+                                return 2;
+                            case GL_LUMINANCE12_ALPHA12:
+                                return 12;
+                            case GL_LUMINANCE16_ALPHA16:
+                                return 16;
+                            default:
+                                return 0;
+                        }
+                    }
+                    return 0;
+                }
+                if (legacyIntensitySize() > 0) {
+                    return 0;
+                }
                 // Red-only formats: R8/R16/R8I/R8UI/R16I/R16UI/R16F/R32F/R32I/R32UI/R8_SNORM/R16_SNORM.
                 if (match({GL_R8, GL_R8_SNORM, GL_R8I, GL_R8UI})) {
                     return channel == 0 ? 8 : 0;
@@ -1058,7 +1135,8 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                     return (channel < 2) ? 32 : 0;
                 }
                 // R+G+B formats.
-                if (match({GL_RGB8, GL_RGB8_SNORM, GL_RGB8I, GL_RGB8UI, GL_SRGB, GL_SRGB8, GL_RGB})) {
+                if (match({GL_RGB8, GL_RGB8_SNORM, GL_RGB8I, GL_RGB8UI, GL_SRGB, GL_SRGB8, GL_RGB,
+                           GL_COMPRESSED_RGB, GL_COMPRESSED_RGB_S3TC_DXT1_EXT})) {
                     return (channel < 3) ? 8 : 0;
                 }
                 if (match({GL_RGB16, GL_RGB16_SNORM, GL_RGB16I, GL_RGB16UI, GL_RGB16F})) {
@@ -1069,7 +1147,10 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                 }
                 // R+G+B+A formats.
                 if (match({GL_RGBA8, GL_RGBA8_SNORM, GL_RGBA8I, GL_RGBA8UI,
-                           GL_SRGB8_ALPHA8, GL_SRGB_ALPHA, GL_RGBA})) {
+                           GL_SRGB8_ALPHA8, GL_SRGB_ALPHA, GL_RGBA,
+                           GL_COMPRESSED_RGBA, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+                           GL_COMPRESSED_RGBA_S3TC_DXT3_EXT,
+                           GL_COMPRESSED_RGBA_S3TC_DXT5_EXT})) {
                     return 8;
                 }
                 if (match({GL_RGBA16, GL_RGBA16_SNORM, GL_RGBA16I, GL_RGBA16UI, GL_RGBA16F})) {
@@ -1139,6 +1220,8 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                 case GL_TEXTURE_GREEN_SIZE: *params = channelSize(1); break;
                 case GL_TEXTURE_BLUE_SIZE:  *params = channelSize(2); break;
                 case GL_TEXTURE_ALPHA_SIZE: *params = channelSize(3); break;
+                case GL_TEXTURE_LUMINANCE_SIZE: *params = legacyLuminanceSize(); break;
+                case GL_TEXTURE_INTENSITY_SIZE: *params = legacyIntensitySize(); break;
                 default: *params = 0; break;
             }
             return true;
@@ -2462,6 +2545,66 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
     // that the over-broad CKPT226 binding-time set was wrongly
     // flipping (CKPT236 bisect).
     const bool yFlipReadback = obj->wasViewportRenderedTo;
+    const GLenum readbackInternalFormat = [&]() -> GLenum {
+        const auto levelIt = obj->levels.find(level);
+        if (levelIt != obj->levels.end() && levelIt->second.defined) {
+            return levelIt->second.desc.internalFormat;
+        }
+        return obj->desc.internalFormat;
+    }();
+    auto remapLegacyCompatReadback = [&](double vals[4]) {
+        switch (readbackInternalFormat) {
+            case GL_LUMINANCE:
+            case GL_LUMINANCE4:
+            case GL_LUMINANCE8:
+            case GL_LUMINANCE12:
+            case GL_LUMINANCE16:
+            case GL_SLUMINANCE8: {
+                const double l = vals[0];
+                vals[0] = l;
+                vals[1] = 0.0;
+                vals[2] = 0.0;
+                vals[3] = 1.0;
+                break;
+            }
+            case GL_LUMINANCE_ALPHA:
+            case GL_LUMINANCE4_ALPHA4:
+            case GL_LUMINANCE6_ALPHA2:
+            case GL_LUMINANCE8_ALPHA8:
+            case GL_LUMINANCE12_ALPHA4:
+            case GL_LUMINANCE12_ALPHA12:
+            case GL_LUMINANCE16_ALPHA16:
+            case GL_SLUMINANCE8_ALPHA8: {
+                const double l = vals[0];
+                const double a = vals[3];
+                vals[0] = l;
+                vals[1] = 0.0;
+                vals[2] = 0.0;
+                vals[3] = a;
+                break;
+            }
+            case GL_INTENSITY:
+            case GL_INTENSITY4:
+            case GL_INTENSITY8:
+            case GL_INTENSITY12:
+            case GL_INTENSITY16: {
+                const double i = vals[0];
+                vals[0] = i;
+                vals[1] = 0.0;
+                vals[2] = 0.0;
+                vals[3] = i;
+                break;
+            }
+            case GL_RGB5_A1:
+                vals[0] = std::round(std::clamp(vals[0], 0.0, 1.0) * 31.0) / 31.0;
+                vals[1] = std::round(std::clamp(vals[1], 0.0, 1.0) * 31.0) / 31.0;
+                vals[2] = std::round(std::clamp(vals[2], 0.0, 1.0) * 31.0) / 31.0;
+                vals[3] = std::clamp(vals[3], 0.0, 1.0) >= 0.5 ? 1.0 : 0.0;
+                break;
+            default:
+                break;
+        }
+    };
     for (NSUInteger slice = 0; slice < numSlices; ++slice) {
       const std::uint8_t* sliceRaw = raw.data() + slice * bytesPerImage;
       std::uint8_t* dest = destBase + slice * dstSliceBytesAligned;
@@ -2482,6 +2625,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
                 }
                 vals[c] = readSrcComponent(srcPixel, readComp);
             }
+            remapLegacyCompatReadback(vals);
 
             // Write to destination using PACK-aligned row stride.
             const std::size_t dstByteOffset =

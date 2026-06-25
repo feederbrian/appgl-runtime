@@ -15,6 +15,9 @@ void GLContext::setClearStencil(GLint stencil) {
 }
 
 void GLContext::clear(GLbitfield mask) {
+    if (!recordDisplayListClear(mask)) {
+        return;
+    }
     if (impl_->state->boundDrawFramebuffer() != 0) {
         if (!impl_->clearBoundFramebuffer(mask)) {
             pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
@@ -28,14 +31,57 @@ void GLContext::clear(GLbitfield mask) {
     if ((mask & GL_COLOR_BUFFER_BIT) != 0) {
         impl_->applyDefaultFramebufferColorClear();
     }
+    GLbitfield pendingBits = mask & ~GL_ACCUM_BUFFER_BIT;
     if ((mask & GL_DEPTH_BUFFER_BIT) != 0) {
-        impl_->occlusionApproxDepthKnown = true;
-        impl_->occlusionApproxDepth = static_cast<float>(
-            std::clamp(impl_->state->clearState().depth, 0.0, 1.0));
+        if (impl_->state->depthState().writeMask != GL_FALSE) {
+            impl_->occlusionApproxDepthKnown = true;
+            impl_->occlusionApproxDepth = static_cast<float>(
+                std::clamp(impl_->state->clearState().depth, 0.0, 1.0));
+        } else {
+            pendingBits &= ~GL_DEPTH_BUFFER_BIT;
+        }
+    }
+    const auto& clearState = impl_->state->clearState();
+    if ((mask & GL_COLOR_BUFFER_BIT) != 0) {
+        impl_->pendingClearColor = {
+            clearState.color[0],
+            clearState.color[1],
+            clearState.color[2],
+            clearState.color[3],
+        };
+    }
+    if ((pendingBits & GL_DEPTH_BUFFER_BIT) != 0) {
+        impl_->ensureDefaultFramebufferDepthStencilShadow();
+        std::fill(impl_->defaultFramebufferDepth32.begin(),
+                  impl_->defaultFramebufferDepth32.end(),
+                  static_cast<GLfloat>(std::clamp(clearState.depth, 0.0, 1.0)));
+        impl_->defaultFramebufferDepthShadowValid = true;
+        impl_->pendingClearDepth = clearState.depth;
+    }
+    if ((mask & GL_STENCIL_BUFFER_BIT) != 0) {
+        impl_->ensureDefaultFramebufferDepthStencilShadow();
+        const std::uint8_t writeMask =
+            static_cast<std::uint8_t>(impl_->state->stencilState().front.writeMask & 0xFFu);
+        if (writeMask != 0) {
+            const std::uint8_t clearStencil =
+                static_cast<std::uint8_t>(clearState.stencil & 0xFF);
+            for (std::uint8_t& stencil : impl_->defaultFramebufferStencil8) {
+                stencil = static_cast<std::uint8_t>(
+                    (stencil & ~writeMask) | (clearStencil & writeMask));
+            }
+            impl_->defaultFramebufferStencilShadowValid = true;
+        }
+        if (writeMask == 0xFFu) {
+            impl_->pendingClearStencil = clearState.stencil;
+        } else {
+            pendingBits &= ~GL_STENCIL_BUFFER_BIT;
+        }
     }
     // Accumulate mask bits so consecutive glClear calls (e.g. color then
     // depth) don't overwrite each other before the pending clear is flushed.
-    impl_->pendingMask |= mask;
+    // Values are captured per bit at glClear time so a later stencil-only
+    // clear cannot change an older pending depth clear value.
+    impl_->pendingMask |= pendingBits;
     impl_->pendingClear = (impl_->pendingMask & (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0;
 }
 
@@ -219,8 +265,7 @@ void GLContext::setFrontFace(GLenum mode) {
 }
 
 void GLContext::setPolygonMode(GLenum face, GLenum mode) {
-    (void)face;  // Metal doesn't distinguish front/back fill modes
-    impl_->state->setPolygonFillMode(mode);
+    impl_->state->setPolygonMode(face, mode);
 }
 
 void GLContext::setPolygonOffset(GLfloat factor, GLfloat units) {

@@ -785,6 +785,44 @@ struct ImmediateDrawInfo {
     Matrix4 mvp = Matrix4::identity();
     void* metalTexture = nullptr;  // id<MTLTexture> or nullptr
     GLenum fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
+    void* fboColorTexture = nullptr;        // id<MTLTexture> or nullptr
+    void* fboDepthStencilTexture = nullptr; // id<MTLTexture> or nullptr
+    GLsizei fboWidth = 0;
+    GLsizei fboHeight = 0;
+    GLint viewportX = 0;
+    GLint viewportY = 0;
+    GLsizei viewportWidth = 0;
+    GLsizei viewportHeight = 0;
+    GLdouble depthRangeNear = 0.0;
+    GLdouble depthRangeFar = 1.0;
+    bool depthTestEnabled = false;
+    GLenum depthFunc = GL_LESS;
+    bool depthWriteMask = true;
+    bool stencilTestEnabled = false;
+    GLenum stencilFrontFunc = GL_ALWAYS;
+    GLint stencilFrontRef = 0;
+    GLuint stencilFrontValueMask = 0xFFFFFFFFu;
+    GLenum stencilFrontFail = GL_KEEP;
+    GLenum stencilFrontDepthFail = GL_KEEP;
+    GLenum stencilFrontDepthPass = GL_KEEP;
+    GLuint stencilFrontWriteMask = 0xFFFFFFFFu;
+    GLenum stencilBackFunc = GL_ALWAYS;
+    GLint stencilBackRef = 0;
+    GLuint stencilBackValueMask = 0xFFFFFFFFu;
+    GLenum stencilBackFail = GL_KEEP;
+    GLenum stencilBackDepthFail = GL_KEEP;
+    GLenum stencilBackDepthPass = GL_KEEP;
+    GLuint stencilBackWriteMask = 0xFFFFFFFFu;
+    bool polygonOffsetEnabled = false;
+    GLfloat polygonOffsetFactor = 0.0f;
+    GLfloat polygonOffsetUnits = 0.0f;
+    GLfloat polygonOffsetClamp = 0.0f;
+    TranslatedDrawInfo::BlendState blend;
+    bool scissorTestEnabled = false;
+    GLint scissorX = 0;
+    GLint scissorY = 0;
+    GLsizei scissorWidth = 0;
+    GLsizei scissorHeight = 0;
 };
 
 // Compute dispatch descriptor. Populated by GLContext::dispatchCompute
@@ -1268,6 +1306,12 @@ public:
                                             bool writeDepth,
                                             std::uint8_t stencilValue,
                                             bool writeStencil);
+    bool writeDefaultDepthStencilRegion(GLint x, GLint y,
+                                        GLsizei width, GLsizei height,
+                                        const GLfloat* depthPixels,
+                                        bool writeDepth,
+                                        std::uint8_t stencilValue,
+                                        bool writeStencil);
 
     // Compile a compute shader's MSL source into a retained
     // MTLComputePipelineState and return it as a type-erased void*

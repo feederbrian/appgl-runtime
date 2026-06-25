@@ -27,6 +27,9 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     if (impl_->shouldSkipDrawForConditionalRender()) {
         return true;
     }
+    if (encodeLegacyClientArrayDraw(mode, 0, count, indices, type, "glDrawElements")) {
+        return true;
+    }
     if (!impl_->validateCurrentProgramPipelineForDraw()) {
         return false;
     }

@@ -116,7 +116,8 @@ bool GLContext::texImage(
     GLenum type,
     const void* pixels
 ) {
-    if (!isTextureTarget(target)) {
+    const bool proxyTexture2D = target == GL_PROXY_TEXTURE_2D;
+    if (!proxyTexture2D && !isTextureTarget(target)) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
@@ -128,8 +129,12 @@ bool GLContext::texImage(
         pushError(GL_INVALID_ENUM);
         return false;
     }
+    if (!isFormatTypeCompatible_extern(format, type)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     if ((target == GL_TEXTURE_1D && (height != 1 || depth != 1))
-        || (target == GL_TEXTURE_2D && depth != 1)) {
+        || ((target == GL_TEXTURE_2D || proxyTexture2D) && depth != 1)) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
@@ -153,6 +158,55 @@ bool GLContext::texImage(
             return false;
         }
     }
+    // Proxy textures only update queryable image state. They do not bind
+    // storage or create Metal resources; over-limit dimensions are valid and
+    // zero the proxy level so callers can test allocation feasibility.
+    if (proxyTexture2D) {
+        if (impl_->capabilities != nullptr) {
+            GLint maxTex = 0;
+            impl_->capabilities->queryInteger(GL_MAX_TEXTURE_SIZE, &maxTex);
+            GLsizei logMax = 0;
+            for (GLint v = maxTex; v > 1; v >>= 1) {
+                ++logMax;
+            }
+            if (level > logMax) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+        }
+
+        bool fitsLimits = true;
+        if (impl_->capabilities != nullptr) {
+            GLint maxTex = 0;
+            impl_->capabilities->queryInteger(GL_MAX_TEXTURE_SIZE, &maxTex);
+            fitsLimits = maxTex <= 0 || (width <= maxTex && height <= maxTex);
+        }
+
+        GLTextureImageLevel image;
+        image.desc.target = target;
+        image.desc.internalFormat = static_cast<GLenum>(internalformat);
+        image.desc.sourceFormat = format;
+        image.desc.sourceType = type;
+        image.desc.width = fitsLimits ? width : 0;
+        image.desc.height = fitsLimits ? height : 0;
+        image.desc.depth = 1;
+        image.desc.layers = 1;
+        image.desc.levels = level + 1;
+        image.defined = true;
+
+        GLTextureObject* object = impl_->compatDefaultTexture(target);
+        if (object == nullptr) {
+            return true;
+        }
+        if (level == 0 || !object->levels.contains(0)) {
+            object->desc = image.desc;
+        }
+        object->desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
+        image.desc.levels = object->desc.levels;
+        object->levels[level] = std::move(image);
+        return true;
+    }
+
     // Enforce GL_MAX_TEXTURE_SIZE/GL_MAX_3D_TEXTURE_SIZE before reaching
     // Metal (which asserts on oversize dims).
     if (impl_->capabilities != nullptr) {
@@ -160,6 +214,26 @@ bool GLContext::texImage(
         impl_->capabilities->queryInteger(GL_MAX_TEXTURE_SIZE, &maxTex);
         impl_->capabilities->queryInteger(GL_MAX_3D_TEXTURE_SIZE, &max3D);
         impl_->capabilities->queryInteger(GL_MAX_ARRAY_TEXTURE_LAYERS, &maxLayers);
+        if ((target == GL_TEXTURE_1D || target == GL_TEXTURE_2D ||
+             target == GL_TEXTURE_1D_ARRAY || target == GL_TEXTURE_2D_ARRAY ||
+             target == GL_TEXTURE_CUBE_MAP_ARRAY) && maxTex > 0) {
+            GLsizei maxLevel = 0;
+            for (GLint v = maxTex; v > 1; v >>= 1) {
+                ++maxLevel;
+            }
+            if (level > maxLevel) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            GLsizei levelMaxTex = maxTex;
+            for (GLint i = 0; i < level && levelMaxTex > 1; ++i) {
+                levelMaxTex >>= 1;
+            }
+            if (width > levelMaxTex || height > levelMaxTex) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+        }
         if (maxTex > 0 && (width > maxTex || height > maxTex)) {
             pushError(GL_INVALID_VALUE);
             return false;
@@ -359,9 +433,24 @@ bool GLContext::texImage(
             object->cubeFacesDefined |= static_cast<std::uint8_t>(1u << faceIdx);
         }
     }
-    if (!impl_->replaceMetalTexture(*object, impl_->state->boundTexture(target))) {
+    const GLuint textureName = impl_->state->boundTexture(target);
+    if (!impl_->replaceMetalTexture(*object, textureName)) {
         pushError(GL_OUT_OF_MEMORY);
         return false;
+    }
+    if (level == object->params.baseLevel &&
+        object->params.generateMipmap == GL_TRUE) {
+        const GLenum normalizedTarget = Impl::normalizeTextureBindingTarget(target);
+        const bool cubeReady =
+            normalizedTarget != GL_TEXTURE_CUBE_MAP ||
+            object->cubeFacesDefined == 0x3F;
+        if (cubeReady && impl_->generateMipmaps(*object)) {
+            impl_->markGpuResourceWrites({
+                {Impl::GpuResourceAccess::Kind::Texture,
+                 textureName,
+                 kProducerMipmapWrite}
+            });
+        }
     }
     return true;
 }
@@ -570,6 +659,23 @@ bool GLContext::copyTexImage2D(
         return true;
     }
 
+    const bool trimCopyBorder =
+        border == 1 &&
+        target == GL_TEXTURE_2D &&
+        !isDepthCopy &&
+        !isStencilCopy;
+    if (trimCopyBorder) {
+        if (width < 2 || height < 2) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        x += 1;
+        y += 1;
+        width -= 2;
+        height -= 2;
+        border = 0;
+    }
+
     const std::size_t pixelCount =
         static_cast<std::size_t>(width) *
         static_cast<std::size_t>(height);
@@ -594,8 +700,14 @@ bool GLContext::copyTexImage2D(
         !impl_->readFramebufferPixels(readFormat, x, y,
                                       width, height,
                                       uploadBytes.data())) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
+        const bool defaultReadFramebuffer =
+            impl_->state->boundReadFramebuffer() == 0;
+        if (!defaultReadFramebuffer ||
+            !readPixels(x, y, width, height, readFormat, uploadType,
+                        uploadBytes.data())) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
     }
 
     const bool copied = texImage(target, level,
@@ -607,6 +719,95 @@ bool GLContext::copyTexImage2D(
         impl_->markGpuResourceWrites({
             {Impl::GpuResourceAccess::Kind::Texture,
              impl_->state->boundTexture(target),
+             kProducerCopyWrite}
+        });
+    }
+    return copied;
+}
+
+bool GLContext::copyTexImage1D(
+    GLenum target,
+    GLint level,
+    GLenum internalformat,
+    GLint x,
+    GLint y,
+    GLsizei width,
+    GLint border
+) {
+    return copyTexImage2D(target, level, internalformat, x, y, width, 1, border);
+}
+
+bool GLContext::copyTexSubImage1D(
+    GLenum target,
+    GLint level,
+    GLint xoffset,
+    GLint x,
+    GLint y,
+    GLsizei width
+) {
+    const GLuint texture = impl_->state->boundTexture(target);
+    if (!validateCopyTextureSubImage(texture, 1, level,
+                                     xoffset, 0, 0, width, 1)) {
+        return false;
+    }
+    if (width == 0) {
+        return true;
+    }
+
+    std::vector<std::uint8_t> uploadBytes(
+        static_cast<std::size_t>(width) * 4u, 0);
+    if (!readPixels(x, y, width, 1,
+                    GL_RGBA, GL_UNSIGNED_BYTE, uploadBytes.data())) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const bool copied = texSubImage(target, level, xoffset, 0, 0,
+                                    width, 1, 1,
+                                    GL_RGBA, GL_UNSIGNED_BYTE,
+                                    uploadBytes.data());
+    if (copied) {
+        impl_->markGpuResourceWrites({
+            {Impl::GpuResourceAccess::Kind::Texture, texture,
+             kProducerCopyWrite}
+        });
+    }
+    return copied;
+}
+
+bool GLContext::copyTexSubImage2D(
+    GLenum target,
+    GLint level,
+    GLint xoffset,
+    GLint yoffset,
+    GLint x,
+    GLint y,
+    GLsizei width,
+    GLsizei height
+) {
+    const GLuint texture = impl_->state->boundTexture(target);
+    if (!validateCopyTextureSubImage(texture, 2, level,
+                                     xoffset, yoffset, 0, width, height)) {
+        return false;
+    }
+    if (width == 0 || height == 0) {
+        return true;
+    }
+
+    std::vector<std::uint8_t> uploadBytes(
+        static_cast<std::size_t>(width) *
+        static_cast<std::size_t>(height) * 4u, 0);
+    if (!readPixels(x, y, width, height,
+                    GL_RGBA, GL_UNSIGNED_BYTE, uploadBytes.data())) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const bool copied = texSubImage(target, level, xoffset, yoffset, 0,
+                                    width, height, 1,
+                                    GL_RGBA, GL_UNSIGNED_BYTE,
+                                    uploadBytes.data());
+    if (copied) {
+        impl_->markGpuResourceWrites({
+            {Impl::GpuResourceAccess::Kind::Texture, texture,
              kProducerCopyWrite}
         });
     }

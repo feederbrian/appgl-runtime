@@ -34,7 +34,7 @@ struct GLDepthRangeState {
 };
 
 struct GLClearState {
-    GLfloat color[4] = {0.08f, 0.10f, 0.16f, 1.0f};
+    GLfloat color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     GLdouble depth = 1.0;
     GLint stencil = 0;
 };
@@ -93,11 +93,17 @@ struct GLRasterState {
     GLenum cullFaceMode = GL_BACK;
     GLenum frontFace = GL_CCW;
     GLenum polygonFillMode = GL_FILL;   // GL_FILL, GL_LINE, or GL_POINT
+    GLenum polygonModeFront = GL_FILL;
+    GLenum polygonModeBack = GL_FILL;
     GLfloat polygonOffsetFactor = 0.0f;
     GLfloat polygonOffsetUnits = 0.0f;
     GLfloat polygonOffsetClamp = 0.0f;
     GLfloat lineWidth = 1.0f;
     GLfloat pointSize = 1.0f;
+};
+
+struct GLFixedFunctionFogState {
+    GLfloat start = 0.0f;
 };
 
 struct GLTextureUnitState {
@@ -253,6 +259,7 @@ public:
 
     void setCullFace(GLenum mode);
     void setFrontFace(GLenum mode);
+    void setPolygonMode(GLenum face, GLenum mode);
     void setPolygonFillMode(GLenum mode);
     void setPolygonOffset(GLfloat factor, GLfloat units);
     void setPolygonOffsetClamp(GLfloat factor, GLfloat units, GLfloat clamp);
@@ -260,6 +267,8 @@ public:
     void setPointSize(GLfloat size);
     void setHint(GLenum target, GLenum mode);
     const GLRasterState& rasterState() const;
+    void setFogFloat(GLenum pname, GLfloat value);
+    const GLFixedFunctionFogState& fogState() const;
 
     void enable(GLenum cap);
     void disable(GLenum cap);
@@ -409,6 +418,7 @@ private:
     GLDepthState depth_;
     GLStencilState stencil_;
     GLRasterState raster_;
+    GLFixedFunctionFogState fog_;
     std::unordered_map<GLenum, GLenum> hints_;
     std::unordered_set<GLenum> enabledCaps_;
     std::unordered_map<GLenum, GLuint> bufferBindings_;

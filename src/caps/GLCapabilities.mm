@@ -65,6 +65,9 @@
 #ifndef GL_LUMINANCE16_ALPHA16
 #define GL_LUMINANCE16_ALPHA16 0x8048
 #endif
+#ifndef GL_ALIASED_POINT_SIZE_RANGE
+#define GL_ALIASED_POINT_SIZE_RANGE 0x846D
+#endif
 #ifndef GL_INTENSITY
 #define GL_INTENSITY 0x8049
 #endif
@@ -149,6 +152,7 @@ bool GLCapabilities::queryInteger(GLenum pname, GLint* out) const {
     // directly and aborts on INVALID_ENUM if the int path doesn't
     // know the pname.
     if (pname == GL_POINT_SIZE_RANGE ||           // == GL_SMOOTH_POINT_SIZE_RANGE
+        pname == GL_ALIASED_POINT_SIZE_RANGE ||
         pname == GL_LINE_WIDTH_RANGE ||           // == GL_SMOOTH_LINE_WIDTH_RANGE
         pname == GL_ALIASED_LINE_WIDTH_RANGE ||
         pname == GL_VIEWPORT_BOUNDS_RANGE) {
@@ -213,6 +217,7 @@ bool GLCapabilities::queryInteger64(GLenum pname, GLint64* out) const {
     // Pair-valued float pnames are reachable through glGetInteger64v
     // too; see queryInteger comment above for spec rationale.
     if (pname == GL_POINT_SIZE_RANGE ||           // == GL_SMOOTH_POINT_SIZE_RANGE
+        pname == GL_ALIASED_POINT_SIZE_RANGE ||
         pname == GL_LINE_WIDTH_RANGE ||           // == GL_SMOOTH_LINE_WIDTH_RANGE
         pname == GL_ALIASED_LINE_WIDTH_RANGE ||
         pname == GL_VIEWPORT_BOUNDS_RANGE) {
@@ -312,11 +317,14 @@ bool GLCapabilities::queryFloat(GLenum pname, GLfloat* out) const {
         // once in the switch.
         switch (pname) {
             case GL_POINT_SIZE_RANGE:          // == GL_SMOOTH_POINT_SIZE_RANGE (0x0B12)
+            case GL_ALIASED_POINT_SIZE_RANGE:
                 out[1] = 256.0f;
                 break;
             case GL_LINE_WIDTH_RANGE:          // == GL_SMOOTH_LINE_WIDTH_RANGE (0x0B22)
+                out[1] = 1.0f;   // Metal rasterizer only supports native line-width 1
+                break;
             case GL_ALIASED_LINE_WIDTH_RANGE:
-                out[1] = 1.0f;   // Metal rasterizer only supports line-width 1
+                out[1] = 12.0f;  // Compat fixed-function paths expand wide aliased lines
                 break;
             case GL_VIEWPORT_BOUNDS_RANGE:
                 // Min stored as -32768; max is the symmetric +32768.
@@ -1058,6 +1066,7 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // Point size range — Metal Apple Silicon supports up to 511.
     floatLimits_[GL_POINT_SIZE_RANGE] = 1.0f;       // min (queried as float pair, index 0 = min)
     floatLimits_[GL_SMOOTH_POINT_SIZE_RANGE] = 1.0f;
+    floatLimits_[GL_ALIASED_POINT_SIZE_RANGE] = 1.0f;
     floatLimits_[GL_POINT_SIZE_GRANULARITY] = 1.0f;
     floatLimits_[GL_SMOOTH_POINT_SIZE_GRANULARITY] = 1.0f;
     // Line width range.

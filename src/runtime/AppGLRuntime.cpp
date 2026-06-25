@@ -109,6 +109,18 @@
 #ifndef GL_SLUMINANCE8_ALPHA8
 #define GL_SLUMINANCE8_ALPHA8 0x8C45
 #endif
+#ifndef GL_QUAD_STRIP
+#define GL_QUAD_STRIP 0x0008
+#endif
+#ifndef GL_POLYGON
+#define GL_POLYGON 0x0009
+#endif
+#ifndef GL_GENERATE_MIPMAP
+#define GL_GENERATE_MIPMAP 0x8191
+#endif
+#ifndef GL_DEPTH_TEXTURE_MODE
+#define GL_DEPTH_TEXTURE_MODE 0x884B
+#endif
 
 namespace appgl {
 
@@ -228,6 +240,10 @@ void markStateFunction(FunctionId id, std::string_view note) {
     Runtime::shared().refreshCurrentContextClaimedVersion();
 }
 
+#ifndef GL_LINE_STIPPLE
+#define GL_LINE_STIPPLE 0x0B24
+#endif
+
 // Phase A state mirror allowlist — every cap that glEnable/glDisable/glIsEnabled
 // accepts without raising GL_INVALID_ENUM. Keeping this list explicit means BAR's
 // audit can cross-reference which caps are supported against their InitGLState
@@ -235,10 +251,12 @@ void markStateFunction(FunctionId id, std::string_view note) {
 //
 // Supported groups:
 //   Raster/blending   : GL_BLEND, GL_CULL_FACE, GL_DEPTH_TEST, GL_STENCIL_TEST,
-//                       GL_SCISSOR_TEST, GL_DITHER, GL_FRAMEBUFFER_SRGB
+//                       GL_SCISSOR_TEST, GL_DITHER, GL_FRAMEBUFFER_SRGB,
+//                       GL_COLOR_LOGIC_OP
 //   Polygon offsets   : GL_POLYGON_OFFSET_{FILL,LINE,POINT}
 //   Primitive restart : GL_PRIMITIVE_RESTART, GL_PRIMITIVE_RESTART_FIXED_INDEX
-//   Point/line/smooth : GL_PROGRAM_POINT_SIZE, GL_LINE_SMOOTH, GL_POLYGON_SMOOTH
+//   Point/line/smooth : GL_PROGRAM_POINT_SIZE, GL_LINE_SMOOTH,
+//                       GL_LINE_STIPPLE, GL_POLYGON_SMOOTH
 //   MSAA              : GL_MULTISAMPLE, GL_SAMPLE_{ALPHA_TO_COVERAGE,
 //                       ALPHA_TO_ONE,COVERAGE,MASK}
 //   Transform fb      : GL_RASTERIZER_DISCARD
@@ -249,18 +267,75 @@ void markStateFunction(FunctionId id, std::string_view note) {
 // Anything outside this list pushes GL_INVALID_ENUM. That is the spec-correct
 // behaviour for unknown caps — but the message also reports the raw enum in hex
 // so the caller (or their diagnostic log) knows exactly which cap failed.
+#ifndef GL_COLOR_MATERIAL
+#define GL_COLOR_MATERIAL 0x0B57
+#endif
+#ifndef GL_COLOR_ARRAY
+#define GL_COLOR_ARRAY 0x8076
+#endif
+#ifndef GL_FOG
+#define GL_FOG 0x0B60
+#endif
+#ifndef GL_LIGHTING
+#define GL_LIGHTING 0x0B50
+#endif
+#ifndef GL_LIGHT0
+#define GL_LIGHT0 0x4000
+#endif
+#ifndef GL_LIGHT7
+#define GL_LIGHT7 0x4007
+#endif
+#ifndef GL_TEXTURE_GEN_S
+#define GL_TEXTURE_GEN_S 0x0C60
+#endif
+#ifndef GL_TEXTURE_GEN_T
+#define GL_TEXTURE_GEN_T 0x0C61
+#endif
+#ifndef GL_TEXTURE_GEN_R
+#define GL_TEXTURE_GEN_R 0x0C62
+#endif
+#ifndef GL_TEXTURE_GEN_Q
+#define GL_TEXTURE_GEN_Q 0x0C63
+#endif
+#ifndef GL_TEXTURE_2D
+#define GL_TEXTURE_2D 0x0DE1
+#endif
+#ifndef GL_TEXTURE_1D
+#define GL_TEXTURE_1D 0x0DE0
+#endif
+bool isLegacyClientArrayCap(GLenum cap) {
+    return cap == GL_VERTEX_ARRAY || cap == GL_COLOR_ARRAY;
+}
+
 bool isValidEnableCap(GLenum cap) {
+    if (isLegacyClientArrayCap(cap)) {
+        return true;
+    }
+    if (cap >= GL_LIGHT0 && cap <= GL_LIGHT7) {
+        return true;
+    }
     if (cap >= GL_CLIP_DISTANCE0 && cap <= GL_CLIP_DISTANCE7) {
         return true;
     }
     switch (cap) {
         case GL_BLEND:
+        case GL_COLOR_LOGIC_OP:
         case GL_CULL_FACE:
         case GL_DEBUG_OUTPUT:
         case GL_DEBUG_OUTPUT_SYNCHRONOUS:
         case GL_DEPTH_TEST:
         case GL_DITHER:
         case GL_LINE_SMOOTH:
+        case GL_LINE_STIPPLE:
+        case GL_COLOR_MATERIAL:
+        case GL_FOG:
+        case GL_LIGHTING:
+        case GL_TEXTURE_1D:
+        case GL_TEXTURE_2D:
+        case GL_TEXTURE_GEN_S:
+        case GL_TEXTURE_GEN_T:
+        case GL_TEXTURE_GEN_R:
+        case GL_TEXTURE_GEN_Q:
         case GL_MULTISAMPLE:
         case GL_POLYGON_OFFSET_FILL:
         case GL_POLYGON_OFFSET_LINE:
@@ -313,10 +388,6 @@ bool isValidEnableCap(GLenum cap) {
 // Currently:
 //   GL_ALPHA_TEST     (0x0BC0) — alpha-test stage from compat fragment pipeline.
 //   GL_LIGHTING       (0x0B50) — fixed-function lighting (compat-only since 3.1).
-//   GL_TEXTURE_2D     (0x0DE1) — fixed-function texture-target enable; in core
-//                                profile texture binding alone is sufficient,
-//                                but compat engines still toggle it during
-//                                init (e.g. BAR's CompoundDraw / TextureUtils).
 //   GL_NORMALIZE      (0x0BA1) — fixed-function per-vertex normal rescaling.
 //                                AppGL has no fixed-function lighting pipeline,
 //                                so the normal-rescale state has no semantic.
@@ -333,19 +404,6 @@ bool isValidEnableCap(GLenum cap) {
 //                                an earlier draft). AppGL has no fixed-
 //                                function lighting pipeline, so silently
 //                                accepting both lights is the right answer.
-//   GL_LINE_STIPPLE   (0x0B24) — compat-profile line stippling. BAR's
-//                                `LuaOpenGL::ResetGLState` disables it during
-//                                state reset (`LuaOpenGL.cpp:517`). Metal
-//                                has no line-stipple equivalent and AppGL
-//                                never enables it, so disable is a no-op.
-//   GL_COLOR_LOGIC_OP (0x0BF2) — compat-profile fragment logical-op stage.
-//                                BAR's `LuaOpenGL::ResetGLState` disables it
-//                                at `LuaOpenGL.cpp:533`. Metal supports a
-//                                pipeline-level logic op but AppGL doesn't
-//                                wire the compat toggle through to the
-//                                Metal render-pipeline descriptor; silently
-//                                accepting the disable is the correct
-//                                semantic (the default is "off" anyway).
 //   GL_TEXTURE_GEN_S  (0x0C60) — fixed-function per-coordinate automatic
 //   GL_TEXTURE_GEN_T  (0x0C61)   texture-coordinate generation. Phase 8X
 //   GL_TEXTURE_GEN_R  (0x0C62)   Group 4d follow-up¹⁹ — the legacy GLSL
@@ -370,14 +428,18 @@ bool isValidEnableCap(GLenum cap) {
 //                                (there's no toggle — `gl_PointCoord` is
 //                                always available in the fragment stage),
 //                                so silent accept is correct.
+//   GL_MAP1_VERTEX_3  (0x0D97) — evaluator map enables used by Piglit's
+//   GL_MAP1_VERTEX_4  (0x0D98)   display-list fdo31590 smoke. AppGL does
+//   GL_MAP2_VERTEX_3  (0x0DB7)   not implement evaluator-generated
+//   GL_MAP2_VERTEX_4  (0x0DB8)   geometry, but accepting the setup caps as
+//                                no-ops preserves the test's validity focus:
+//                                display-list compilation/replay must not
+//                                leak INVALID_ENUM.
 #ifndef GL_ALPHA_TEST
 #define GL_ALPHA_TEST 0x0BC0
 #endif
 #ifndef GL_LIGHTING
 #define GL_LIGHTING 0x0B50
-#endif
-#ifndef GL_TEXTURE_2D
-#define GL_TEXTURE_2D 0x0DE1
 #endif
 #ifndef GL_NORMALIZE
 #define GL_NORMALIZE 0x0BA1
@@ -409,21 +471,27 @@ bool isValidEnableCap(GLenum cap) {
 #ifndef GL_POINT_SPRITE
 #define GL_POINT_SPRITE 0x8861
 #endif
+#ifndef GL_MAP1_VERTEX_3
+#define GL_MAP1_VERTEX_3 0x0D97
+#endif
+#ifndef GL_MAP1_VERTEX_4
+#define GL_MAP1_VERTEX_4 0x0D98
+#endif
+#ifndef GL_MAP2_VERTEX_3
+#define GL_MAP2_VERTEX_3 0x0DB7
+#endif
+#ifndef GL_MAP2_VERTEX_4
+#define GL_MAP2_VERTEX_4 0x0DB8
+#endif
 bool isCompatNoOpEnableCap(GLenum cap) {
     switch (cap) {
         case GL_ALPHA_TEST:
-        case GL_LIGHTING:
-        case GL_TEXTURE_2D:
         case GL_NORMALIZE:
-        case GL_LIGHT0:
-        case GL_LIGHT1:
-        case GL_LINE_STIPPLE:
-        case GL_COLOR_LOGIC_OP:
-        case GL_TEXTURE_GEN_S:
-        case GL_TEXTURE_GEN_T:
-        case GL_TEXTURE_GEN_R:
-        case GL_TEXTURE_GEN_Q:
         case GL_POINT_SPRITE:
+        case GL_MAP1_VERTEX_3:
+        case GL_MAP1_VERTEX_4:
+        case GL_MAP2_VERTEX_3:
+        case GL_MAP2_VERTEX_4:
             return true;
         default:
             return false;
@@ -1296,6 +1364,8 @@ bool isValidTextureParameterPname(GLenum pname) {
         case GL_TEXTURE_MAX_ANISOTROPY:
         case GL_TEXTURE_REDUCTION_MODE_ARB:
         case GL_DEPTH_STENCIL_TEXTURE_MODE:
+        case GL_DEPTH_TEXTURE_MODE:
+        case GL_GENERATE_MIPMAP:
         // ARB_sparse_texture scaffold. These are per-texture state, not
         // sampler-object state, and remain queryable even while runtime
         // extension advertising is held.
@@ -1395,6 +1465,11 @@ bool validateTextureParameterValues(GLenum pname, const GLint* params) {
                    params[0] == GL_MAX;
         case GL_DEPTH_STENCIL_TEXTURE_MODE:
             return params[0] == GL_DEPTH_COMPONENT || params[0] == GL_STENCIL_INDEX;
+        case GL_DEPTH_TEXTURE_MODE:
+            return params[0] == GL_LUMINANCE || params[0] == GL_INTENSITY ||
+                   params[0] == GL_ALPHA || params[0] == GL_RED;
+        case GL_GENERATE_MIPMAP:
+            return params[0] == GL_FALSE || params[0] == GL_TRUE;
         case GL_TEXTURE_SPARSE_ARB:
             return params[0] == GL_FALSE || params[0] == GL_TRUE;
         case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB:
@@ -1992,23 +2067,18 @@ static bool isSilentlyAcceptedFixedFunctionStub(std::string_view functionName) {
     // never reads it back through GL — it ends up driving an immediate-mode
     // vertex stream that the translated pipeline doesn't sample.
     if (functionName == "glColor3f") return true;
-    // Phase 8X Group 4d follow-up⁴ §6d — three more legacy compat entry
+    // Phase 8X Group 4d follow-up⁴ §6d — legacy compat entry
     // points BAR's verification round flagged as steady-state noise:
     //
     //   glColor4f    — same rationale as glColor3f, just the alpha-bearing
     //                  variant. The fixed-function colour register has no
     //                  Metal analogue and translated draws never sample it.
-    //   glShadeModel — flat vs smooth shading is a vertex-output decoration
-    //                  the translator handles via vertex-stage attribute
-    //                  qualifiers, not a runtime toggle. The compat call is
-    //                  a true no-op for translated programs.
     //   glRectf      — emits an immediate-mode quad. The translated path
     //                  never reaches the immediate-mode vertex stream the
     //                  compat profile would push, so there's no draw to
     //                  drop on the floor — the call is silently absorbed
     //                  the same way glBegin/glEnd are.
     if (functionName == "glColor4f") return true;
-    if (functionName == "glShadeModel") return true;
     if (functionName == "glRectf") return true;
     // Phase 8X Group 4d follow-up¹⁸ — four more compat-profile fixed-function
     // entry points BAR's verification round pinned as steady-state noise, all
@@ -5913,6 +5983,7 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat, GLs
         return;
     }
     if (target != GL_TEXTURE_2D
+        && target != GL_PROXY_TEXTURE_2D
         && target != GL_TEXTURE_1D_ARRAY
         && target != GL_TEXTURE_RECTANGLE
         && target != GL_TEXTURE_CUBE_MAP_POSITIVE_X
@@ -6408,12 +6479,33 @@ void APIENTRY glPixelStorei(GLenum pname, GLint param) {
 }
 
 void APIENTRY glPixelStoref(GLenum pname, GLfloat param) {
+    auto* context = requireCurrentContext("glPixelStoref");
+    if (context == nullptr) {
+        return;
+    }
     if (!std::isfinite(param)) {
-        auto* context = requireCurrentContext("glPixelStoref");
         recordValidationError(context, "glPixelStoref", GL_INVALID_VALUE, "pixel-store value must be finite");
         return;
     }
-    glPixelStorei(pname, static_cast<GLint>(param));
+    if (!isValidPixelStorePname(pname)) {
+        recordValidationError(context, "glPixelStoref", GL_INVALID_ENUM, "pname is not a supported pixel-store field");
+        return;
+    }
+    const GLdouble rounded = std::floor(static_cast<GLdouble>(param) + 0.5);
+    if (rounded < static_cast<GLdouble>(std::numeric_limits<GLint>::min()) ||
+        rounded > static_cast<GLdouble>(std::numeric_limits<GLint>::max())) {
+        recordValidationError(context, "glPixelStoref", GL_INVALID_VALUE, "pixel-store value is outside GLint range");
+        return;
+    }
+    const GLint value = static_cast<GLint>(rounded);
+    if (!isValidPixelStoreValue(pname, value)) {
+        recordValidationError(context, "glPixelStoref", GL_INVALID_VALUE, "pixel-store value is invalid");
+        return;
+    }
+    if (context->pixelStore(pname, value)) {
+        markTextureFunction(FunctionId::glPixelStoref, "Float pixel-store values are rounded and tracked.");
+        Runtime::shared().recordBootstrapTrace("glPixelStoref(" + std::to_string(pname) + ")");
+    }
     Runtime::shared().coverageStore().markSmokeTested(FunctionId::glPixelStoref, kPhaseATextureTestId, "Float pixel-store values route through the integer pixel-store state.");
 }
 
@@ -6958,6 +7050,11 @@ void APIENTRY glEnable(GLenum cap) {
     if (context == nullptr) {
         return;
     }
+    if (isLegacyClientArrayCap(cap)) {
+        (void)context->setLegacyClientArrayEnabled(cap, true);
+        Runtime::shared().recordBootstrapTrace("glEnable(" + std::to_string(cap) + ") -> legacy client array");
+        return;
+    }
     if (isCompatNoOpEnableCap(cap)) {
         // Compat-profile no-op: trace the call so diagnostics can show
         // the legacy probe but don't push an error or update state.
@@ -6988,6 +7085,11 @@ void APIENTRY glDisable(GLenum cap) {
     if (context == nullptr) {
         return;
     }
+    if (isLegacyClientArrayCap(cap)) {
+        (void)context->setLegacyClientArrayEnabled(cap, false);
+        Runtime::shared().recordBootstrapTrace("glDisable(" + std::to_string(cap) + ") -> legacy client array");
+        return;
+    }
     if (isCompatNoOpEnableCap(cap)) {
         Runtime::shared().recordBootstrapTrace(
             "glDisable(0x" + [](GLenum c) {
@@ -7015,6 +7117,10 @@ GLboolean APIENTRY glIsEnabled(GLenum cap) {
     auto* context = requireCurrentContext("glIsEnabled");
     if (context == nullptr) {
         return GL_FALSE;
+    }
+    if (isLegacyClientArrayCap(cap)) {
+        Runtime::shared().recordBootstrapTrace("glIsEnabled(" + std::to_string(cap) + ") -> legacy client array");
+        return context->isLegacyClientArrayEnabled(cap) ? GL_TRUE : GL_FALSE;
     }
     if (isCompatNoOpEnableCap(cap)) {
         // Compat no-op caps always read as disabled — they have no
@@ -7442,7 +7548,7 @@ GLenum APIENTRY glGetError(void) {
     if (context == nullptr) {
         return GL_NO_ERROR;
     }
-    return context->popError();
+    return context->popErrorForGetError();
 }
 
 void APIENTRY glDebugMessageControl(
@@ -8336,6 +8442,10 @@ bool isValidDrawMode(GLenum mode) {
         case GL_TRIANGLE_STRIP_ADJACENCY:
         case GL_PATCHES:
             return true;
+        case GL_QUADS:
+        case GL_QUAD_STRIP:
+        case GL_POLYGON:
+            return appglCompatProfileEnabled();
         default:
             return false;
     }

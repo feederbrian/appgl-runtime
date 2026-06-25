@@ -77,6 +77,8 @@ public:
     void setLineWidth(GLfloat width);
     void setPointSize(GLfloat size);
     void setHint(GLenum target, GLenum mode);
+    void setShadeModel(GLenum mode);
+    GLenum shadeModel() const;
     void flush();
     void finish();
     void swapBuffers();
@@ -171,8 +173,11 @@ public:
     bool isTexture(GLuint texture) const;
     bool bindTexture(GLenum target, GLuint texture);
     bool texImage(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type, const void* pixels);
+    bool copyTexImage1D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLint border);
     bool copyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border);
     bool texSubImage(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* pixels);
+    bool copyTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width);
+    bool copyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height);
     // Sprint 17 Day 7+ Bank-Group-E: compressed texture upload.
     // Allocates a Metal texture with the matching MTLPixelFormat (per
     // GLCapabilities format table) and uploads the user payload via
@@ -578,6 +583,7 @@ public:
                    std::string_view message = std::string_view{},
                    std::source_location loc = std::source_location::current());
     GLenum popError();
+    GLenum popErrorForGetError();
 
     const GLubyte* getString(GLenum name);
     const std::string& rendererString() const;
@@ -636,6 +642,47 @@ public:
     void immediateColor(float r, float g, float b, float a);
     void immediateTexCoord(unsigned int unit, float s, float t, float r, float q);
     void endImmediate();
+    void newListCompat(GLuint list, GLenum mode);
+    void endListCompat();
+    void callListCompat(GLuint list);
+    void callListsCompat(GLsizei n, GLenum type, const void* lists);
+    void deleteListsCompat(GLuint list, GLsizei range);
+    GLuint genListsCompat(GLsizei range);
+    GLboolean isListCompat(GLuint list) const;
+    void listBaseCompat(GLuint base);
+    bool recordDisplayListClear(GLbitfield mask);
+    bool setLegacyClientArrayPointer(GLenum array, GLint size, GLenum type, GLsizei stride, const void* pointer);
+    bool setLegacyClientArrayEnabled(GLenum array, bool enabled);
+    bool isLegacyClientArrayEnabled(GLenum array) const;
+    bool encodeLegacyClientArrayDraw(GLenum mode, GLint first, GLsizei count, const void* indices, GLenum indexType, const char* debugLabel);
+    void setRasterPosition(float x, float y, float z, float w);
+    void setWindowRasterPosition(GLint x, GLint y, GLfloat z = 0.0f);
+    void setLogicOp(GLenum opcode);
+    void setLineStipple(GLint factor, GLushort pattern);
+    void setFogFloat(GLenum pname, GLfloat value);
+    void setFogFloatVector(GLenum pname, const GLfloat* params);
+    void setLightFloatCompat(GLenum light, GLenum pname, const GLfloat* params);
+    void setLightModelFloatCompat(GLenum pname, const GLfloat* params);
+    void setNormalCompat(GLfloat x, GLfloat y, GLfloat z);
+    void setClipPlaneCompat(GLenum plane, const GLdouble* equation);
+    void setTexEnvFloatCompat(GLenum target, GLenum pname, const GLfloat* params);
+    void setTexGenFloatCompat(GLenum coord, GLenum pname, const GLfloat* params);
+    void setAccumClearCompat(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
+    bool accumCompat(GLenum op, GLfloat value);
+    bool drawPixelsCompat(GLsizei width, GLsizei height, GLenum format, GLenum type, const void* pixels);
+    void pushAttribCompat(GLbitfield mask);
+    void popAttribCompat();
+    void setColorMaterialCompat(GLenum face, GLenum mode);
+    void setMaterialFloatCompat(GLenum face, GLenum pname, const GLfloat* params);
+    void getMaterialFloatCompat(GLenum face, GLenum pname, GLfloat* params) const;
+    void getMaterialIntegerCompat(GLenum face, GLenum pname, GLint* params) const;
+    void selectBufferCompat(GLsizei size, GLuint* buffer);
+    GLint renderModeCompat(GLenum mode);
+    void initNamesCompat();
+    void pushNameCompat(GLuint name);
+    void popNameCompat();
+    void loadNameCompat(GLuint name);
+    bool copyPixelsCompat(GLint x, GLint y, GLsizei width, GLsizei height, GLenum type);
 
     // Benchmark instrumentation — pipeline cache metrics.
     //
@@ -1115,6 +1162,8 @@ public:
 
 private:
     GLProgramObject* validateProgramUniformTarget(GLuint program);
+    void flushSelectHitCompat();
+    void recordSelectHitCompat(GLuint minDepth, GLuint maxDepth);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

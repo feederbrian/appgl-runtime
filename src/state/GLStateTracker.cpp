@@ -5,8 +5,13 @@
 #include "../runtime/AppGLProfile.h"
 
 #include <algorithm>
+#include <cmath>
 #include <type_traits>
 #include <utility>
+
+#ifndef GL_FOG_START
+#define GL_FOG_START 0x0B63
+#endif
 
 namespace appgl {
 namespace {
@@ -24,6 +29,13 @@ void writeScalar(GLboolean* out, Source value) {
 template <typename Destination, typename Source>
 void writeBooleanScalar(Destination* out, Source value) {
     *out = value ? GL_TRUE : GL_FALSE;
+}
+
+template <typename Destination>
+Destination roundFloatStateToInteger(GLfloat value) {
+    // GL Get integer conversion rounds floating-point state to nearest
+    // independent of the process floating-point rounding mode.
+    return static_cast<Destination>(std::floor(static_cast<GLdouble>(value) + 0.5));
 }
 
 template <typename Destination>
@@ -943,7 +955,31 @@ void GLStateTracker::setFrontFace(GLenum mode) {
     markDirty(DirtyBit::RasterState);
 }
 
+void GLStateTracker::setPolygonMode(GLenum face, GLenum mode) {
+    switch (face) {
+        case GL_FRONT:
+            raster_.polygonModeFront = mode;
+            break;
+        case GL_BACK:
+            raster_.polygonModeBack = mode;
+            break;
+        case GL_FRONT_AND_BACK:
+            raster_.polygonModeFront = mode;
+            raster_.polygonModeBack = mode;
+            break;
+        default:
+            return;
+    }
+    raster_.polygonFillMode =
+        (raster_.polygonModeFront == raster_.polygonModeBack)
+            ? raster_.polygonModeFront
+            : GL_FILL;
+    markDirty(DirtyBit::RasterState);
+}
+
 void GLStateTracker::setPolygonFillMode(GLenum mode) {
+    raster_.polygonModeFront = mode;
+    raster_.polygonModeBack = mode;
     raster_.polygonFillMode = mode;
     markDirty(DirtyBit::RasterState);
 }
@@ -977,6 +1013,17 @@ void GLStateTracker::setHint(GLenum target, GLenum mode) {
 
 const GLRasterState& GLStateTracker::rasterState() const {
     return raster_;
+}
+
+void GLStateTracker::setFogFloat(GLenum pname, GLfloat value) {
+    if (pname == GL_FOG_START) {
+        fog_.start = value;
+        bumpDomain(kDomainFixedFunction);
+    }
+}
+
+const GLFixedFunctionFogState& GLStateTracker::fogState() const {
+    return fog_;
 }
 
 namespace {
@@ -1101,6 +1148,9 @@ bool GLStateTracker::queryBoolean(GLenum pname, GLboolean* out) const {
                 for (int i = 0; i < 2; ++i)
                     out[i] = static_cast<GLboolean>(tessellation_.defaultInnerLevel[i] != 0.0f);
                 return true;
+            case GL_FOG_START:
+                *out = fog_.start != 0.0f ? GL_TRUE : GL_FALSE;
+                return true;
             case 0x91B0:   // GL_MAX_SHADER_COMPILER_THREADS_KHR / _ARB
                 *out = maxShaderCompilerThreads_ != 0 ? GL_TRUE : GL_FALSE;
                 return true;
@@ -1163,6 +1213,9 @@ bool GLStateTracker::queryInteger(GLenum pname, GLint* out) const {
                 for (int i = 0; i < 2; ++i)
                     out[i] = static_cast<GLint>(tessellation_.defaultInnerLevel[i]);
                 return true;
+            case GL_FOG_START:
+                *out = roundFloatStateToInteger<GLint>(fog_.start);
+                return true;
             case 0x91B0:   // GL_MAX_SHADER_COMPILER_THREADS_KHR / _ARB
                 *out = static_cast<std::remove_reference_t<decltype(*out)>>(maxShaderCompilerThreads_);
                 return true;
@@ -1220,6 +1273,9 @@ bool GLStateTracker::queryInteger64(GLenum pname, GLint64* out) const {
             case GL_PATCH_DEFAULT_INNER_LEVEL:
                 for (int i = 0; i < 2; ++i)
                     out[i] = static_cast<GLint64>(tessellation_.defaultInnerLevel[i]);
+                return true;
+            case GL_FOG_START:
+                *out = roundFloatStateToInteger<GLint64>(fog_.start);
                 return true;
             case 0x91B0:   // GL_MAX_SHADER_COMPILER_THREADS_KHR / _ARB
                 *out = static_cast<std::remove_reference_t<decltype(*out)>>(maxShaderCompilerThreads_);
@@ -1288,6 +1344,9 @@ bool GLStateTracker::queryFloat(GLenum pname, GLfloat* out) const {
                 // verify` probes the value after glMinSampleShading.
                 *out = blend_.minSampleShading;
                 return true;
+            case GL_FOG_START:
+                *out = fog_.start;
+                return true;
             default:
                 break;
         }
@@ -1345,6 +1404,9 @@ bool GLStateTracker::queryDouble(GLenum pname, GLdouble* out) const {
                 return true;
             case GL_MIN_SAMPLE_SHADING_VALUE:
                 *out = static_cast<GLdouble>(blend_.minSampleShading);
+                return true;
+            case GL_FOG_START:
+                *out = static_cast<GLdouble>(fog_.start);
                 return true;
             default:
                 break;

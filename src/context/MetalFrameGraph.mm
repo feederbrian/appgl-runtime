@@ -10473,6 +10473,26 @@ struct MetalFrameGraph::Impl {
             case GL_LINES:          primitive = MTLPrimitiveTypeLine; break;
             case GL_LINE_STRIP:     primitive = MTLPrimitiveTypeLineStrip; break;
             case GL_TRIANGLE_STRIP: primitive = MTLPrimitiveTypeTriangleStrip; break;
+            case GL_QUADS: {
+                primitive = MTLPrimitiveTypeTriangle;
+                const GLsizei n = (info.indices != nullptr && info.indexCount > 0)
+                    ? info.indexCount : info.vertexCount;
+                const GLsizei quads = n / 4;
+                if (quads > 0) {
+                    expandedIndices.reserve(static_cast<std::size_t>(quads) * 6);
+                    for (GLsizei q = 0; q < quads; ++q) {
+                        const GLsizei base = q * 4;
+                        expandedIndices.push_back(readPositional(base + 0));
+                        expandedIndices.push_back(readPositional(base + 1));
+                        expandedIndices.push_back(readPositional(base + 2));
+                        expandedIndices.push_back(readPositional(base + 0));
+                        expandedIndices.push_back(readPositional(base + 2));
+                        expandedIndices.push_back(readPositional(base + 3));
+                    }
+                    useExpandedIndices = true;
+                }
+                break;
+            }
             case GL_TRIANGLE_FAN: {
                 // Expand: fan(v0,v1,v2,...,vN) → tri(v0,v1,v2), tri(v0,v2,v3), ...
                 primitive = MTLPrimitiveTypeTriangle;
@@ -16471,6 +16491,7 @@ vertex AppGLImmediateOut appgl_immediate_vs(
 ) {
     AppGLImmediateOut out;
     out.position = mvp * in.position;
+    out.position.z = out.position.z * 0.5 + out.position.w * 0.5;
     out.color    = in.color;
     out.texcoord = in.texcoord;
     return out;
@@ -16502,10 +16523,33 @@ fragment float4 appgl_immediate_textured_fs(
             && immediateModeTexturedFragmentFn != nil;
     }
 
-    bool ensureImmediateModePipelines(MTLPixelFormat colorFormat) {
+    static std::uint64_t computeImmediateModePipelineKey(
+        MTLPixelFormat colorFormat,
+        const TranslatedDrawInfo::BlendState& blend)
+    {
+        std::uint64_t key = 0;
+        key |= static_cast<std::uint64_t>(colorFormat & 0xFF) << 56;
+        key |= (blend.enabled    ? 1ULL : 0ULL) << 55;
+        key |= (blend.colorMaskA ? 1ULL : 0ULL) << 54;
+        key |= (blend.colorMaskB ? 1ULL : 0ULL) << 53;
+        key |= (blend.colorMaskG ? 1ULL : 0ULL) << 52;
+        key |= (blend.colorMaskR ? 1ULL : 0ULL) << 51;
+        key |= (static_cast<std::uint64_t>(glBlendEqToMTL(blend.equationRGB)) & 0x7ULL) << 48;
+        key |= (static_cast<std::uint64_t>(glBlendEqToMTL(blend.equationAlpha)) & 0x7ULL) << 45;
+        key |= (static_cast<std::uint64_t>(glBlendFactorToMTL(blend.srcRGB)) & 0xFULL) << 41;
+        key |= (static_cast<std::uint64_t>(glBlendFactorToMTL(blend.dstRGB)) & 0xFULL) << 37;
+        key |= (static_cast<std::uint64_t>(glBlendFactorToMTL(blend.srcAlpha)) & 0xFULL) << 33;
+        key |= (static_cast<std::uint64_t>(glBlendFactorToMTL(blend.dstAlpha)) & 0xFULL) << 29;
+        return key;
+    }
+
+    bool ensureImmediateModePipelines(MTLPixelFormat colorFormat,
+                                      const TranslatedDrawInfo::BlendState& blend) {
+        const std::uint64_t pipelineKey =
+            computeImmediateModePipelineKey(colorFormat, blend);
         if (immediateModeColorPipelineState != nil
             && immediateModeTexturedPipelineState != nil
-            && immediateModePipelineColorFormat == colorFormat) {
+            && immediateModePipelineKey == pipelineKey) {
             return true;
         }
 
@@ -16526,9 +16570,6 @@ fragment float4 appgl_immediate_textured_fs(
         vertexDescriptor.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
         vertexDescriptor.layouts[0].stepRate = 1;
 
-        // Alpha blending is always enabled for immediate-mode — it's
-        // what Chobby's Chili UI renders on top of the scene and every
-        // glColor*/glTexCoord* path assumes straight-alpha blending.
         auto makePipeline = [&](id<MTLFunction> fragmentFn) -> id<MTLRenderPipelineState> {
             MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
             ScopedOwnedObjCObject descRelease(desc);
@@ -16536,13 +16577,20 @@ fragment float4 appgl_immediate_textured_fs(
             desc.fragmentFunction = fragmentFn;
             desc.vertexDescriptor = vertexDescriptor;
             desc.colorAttachments[0].pixelFormat = colorFormat;
-            desc.colorAttachments[0].blendingEnabled = YES;
-            desc.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
-            desc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-            desc.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorSourceAlpha;
-            desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-            desc.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
-            desc.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+            MTLRenderPipelineColorAttachmentDescriptor* colorDesc = desc.colorAttachments[0];
+            colorDesc.blendingEnabled = blend.enabled ? YES : NO;
+            colorDesc.sourceRGBBlendFactor = glBlendFactorToMTL(blend.srcRGB);
+            colorDesc.destinationRGBBlendFactor = glBlendFactorToMTL(blend.dstRGB);
+            colorDesc.sourceAlphaBlendFactor = glBlendFactorToMTL(blend.srcAlpha);
+            colorDesc.destinationAlphaBlendFactor = glBlendFactorToMTL(blend.dstAlpha);
+            colorDesc.rgbBlendOperation = glBlendEqToMTL(blend.equationRGB);
+            colorDesc.alphaBlendOperation = glBlendEqToMTL(blend.equationAlpha);
+            MTLColorWriteMask writeMask = 0;
+            if (blend.colorMaskR) writeMask |= MTLColorWriteMaskRed;
+            if (blend.colorMaskG) writeMask |= MTLColorWriteMaskGreen;
+            if (blend.colorMaskB) writeMask |= MTLColorWriteMaskBlue;
+            if (blend.colorMaskA) writeMask |= MTLColorWriteMaskAlpha;
+            colorDesc.writeMask = writeMask;
             desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
             desc.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
             NSError* error = nil;
@@ -16564,7 +16612,7 @@ fragment float4 appgl_immediate_textured_fs(
         releaseOwnedObjCObject(immediateModeTexturedPipelineState);
         immediateModeColorPipelineState = colorState;
         immediateModeTexturedPipelineState = texturedState;
-        immediateModePipelineColorFormat = colorFormat;
+        immediateModePipelineKey = pipelineKey;
         return true;
     }
 
@@ -17429,12 +17477,12 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         return [device newDepthStencilStateWithDescriptor:desc];
     }
 
-    bool writeMultisampleDepthStencilRegion(void* texVoid, GLint x, GLint y,
-                                            GLsizei width, GLsizei height,
-                                            const GLfloat* depthPixels,
-                                            bool writeDepth,
-                                            std::uint8_t stencilValue,
-                                            bool writeStencil) {
+    bool writeDepthStencilRegion(void* texVoid, GLint x, GLint y,
+                                 GLsizei width, GLsizei height,
+                                 const GLfloat* depthPixels,
+                                 bool writeDepth,
+                                 std::uint8_t stencilValue,
+                                 bool writeStencil) {
         if (texVoid == nullptr || device == nil || commandQueue == nil ||
             width <= 0 || height <= 0 || x < 0 || y < 0 ||
             (!writeDepth && !writeStencil) ||
@@ -17442,7 +17490,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             return false;
         }
         id<MTLTexture> tex = (__bridge id<MTLTexture>)texVoid;
-        if (tex == nil || tex.sampleCount <= 1 ||
+        if (tex == nil ||
             x + width > static_cast<GLint>(tex.width) ||
             y + height > static_cast<GLint>(tex.height)) {
             return false;
@@ -17506,8 +17554,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                                                                    width:tex.width
                                                                   height:tex.height
                                                                mipmapped:NO];
-            dummyDesc.textureType = MTLTextureType2DMultisample;
             dummyDesc.sampleCount = tex.sampleCount;
+            dummyDesc.textureType = tex.sampleCount > 1
+                ? MTLTextureType2DMultisample
+                : MTLTextureType2D;
             dummyDesc.storageMode = MTLStorageModePrivate;
             dummyDesc.usage = MTLTextureUsageRenderTarget;
             dummyColor = reusableDummyColorTexture(dummyDesc);
@@ -17573,6 +17623,37 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         return completed;
     }
 
+    bool writeMultisampleDepthStencilRegion(void* texVoid, GLint x, GLint y,
+                                            GLsizei width, GLsizei height,
+                                            const GLfloat* depthPixels,
+                                            bool writeDepth,
+                                            std::uint8_t stencilValue,
+                                            bool writeStencil) {
+        id<MTLTexture> tex = (__bridge id<MTLTexture>)texVoid;
+        if (tex == nil || tex.sampleCount <= 1) {
+            return false;
+        }
+        return writeDepthStencilRegion(texVoid, x, y, width, height,
+                                       depthPixels, writeDepth,
+                                       stencilValue, writeStencil);
+    }
+
+    bool writeDefaultDepthStencilRegion(GLint x, GLint y,
+                                        GLsizei width, GLsizei height,
+                                        const GLfloat* depthPixels,
+                                        bool writeDepth,
+                                        std::uint8_t stencilValue,
+                                        bool writeStencil) {
+        ensureDrawableResources();
+        if (hasPendingClear) {
+            flushPendingClear();
+        }
+        return writeDepthStencilRegion((__bridge void*)depthStencilTexture,
+                                       x, y, width, height,
+                                       depthPixels, writeDepth,
+                                       stencilValue, writeStencil);
+    }
+
     bool encodeImmediateModeDraw(const ImmediateDrawInfo& info) {
         FG_TRACE(@"encodeImmediateModeDraw: enter mode=0x%X verts=%zu tex=%p",
                  info.mode, info.vertexCount, info.metalTexture);
@@ -17606,7 +17687,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         }
 
         acquireRingSlot();
-        ensureDrawableResources();
+        const bool isFBODraw = info.fboColorTexture != nullptr;
+        if (!isFBODraw) {
+            ensureDrawableResources();
+        }
         if (!ensureImmediateModeLibrary()) {
             return false;
         }
@@ -17620,48 +17704,62 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             }
         }
 
-        if (!acquireDrawableIfNeeded()) {  // ADV-7
-            return false;
+        id<MTLTexture> colorTexture = nil;
+        if (isFBODraw) {
+            colorTexture = (__bridge id<MTLTexture>)(info.fboColorTexture);
+        } else {
+            if (!acquireDrawableIfNeeded()) {  // ADV-7
+                return false;
+            }
+            colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
         }
-
-        id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
         if (colorTexture == nil) {
             return false;
         }
+        id<MTLTexture> passDepthStencil = isFBODraw
+            ? (__bridge id<MTLTexture>)(info.fboDepthStencilTexture)
+            : depthStencilTexture;
 
         const MTLPixelFormat colorFormat = colorTexture.pixelFormat;
-        if (!ensureImmediateModePipelines(colorFormat)) {
+        if (!ensureImmediateModePipelines(colorFormat, info.blend)) {
             return false;
         }
 
         MTLRenderPassDescriptor* pass = getReusablePassDescriptor();  // ADV-4
         pass.colorAttachments[0].texture = colorTexture;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-        if (hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
+        if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
             pass.colorAttachments[0].loadAction = MTLLoadActionClear;
             pass.colorAttachments[0].clearColor = pendingClearColor;
         } else {
             pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
         }
-        if (depthStencilTexture != nil) {
-            pass.depthAttachment.texture = depthStencilTexture;
+        pass.depthAttachment.texture = passDepthStencil;
+        pass.stencilAttachment.texture = passDepthStencil;
+        if (passDepthStencil != nil) {
             pass.depthAttachment.storeAction = MTLStoreActionStore;
-            pass.stencilAttachment.texture = depthStencilTexture;
             pass.stencilAttachment.storeAction = MTLStoreActionStore;
-            if (hasPendingClear && (pendingClearMask & GL_DEPTH_BUFFER_BIT)) {
+            if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_DEPTH_BUFFER_BIT)) {
                 pass.depthAttachment.loadAction = MTLLoadActionClear;
                 pass.depthAttachment.clearDepth = pendingClearDepth;
             } else {
                 pass.depthAttachment.loadAction = MTLLoadActionLoad;
             }
-            if (hasPendingClear && (pendingClearMask & GL_STENCIL_BUFFER_BIT)) {
+            if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_STENCIL_BUFFER_BIT)) {
                 pass.stencilAttachment.loadAction = MTLLoadActionClear;
                 pass.stencilAttachment.clearStencil = pendingClearStencil;
             } else {
                 pass.stencilAttachment.loadAction = MTLLoadActionLoad;
             }
+        } else {
+            pass.depthAttachment.loadAction = MTLLoadActionDontCare;
+            pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+            pass.stencilAttachment.loadAction = MTLLoadActionDontCare;
+            pass.stencilAttachment.storeAction = MTLStoreActionDontCare;
         }
-        hasPendingClear = false;
+        if (!isFBODraw) {
+            hasPendingClear = false;
+        }
 
         attachFragmentShadingRateMap(pass, info.fragmentShadingRate, colorTexture, 1);
         id<MTLRenderCommandEncoder> encoder =
@@ -17677,6 +17775,105 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         [encoder setCullMode:MTLCullModeNone];
         [encoder setFrontFacingWinding:MTLWindingCounterClockwise];
         [encoder setTriangleFillMode:MTLTriangleFillModeFill];
+        if (passDepthStencil != nil) {
+            MetalDrawInfo depthInfo;
+            depthInfo.depthTestEnabled = info.depthTestEnabled;
+            depthInfo.depthFunc = info.depthFunc;
+            depthInfo.depthWriteMask = info.depthWriteMask;
+            depthInfo.stencilTestEnabled = info.stencilTestEnabled;
+            depthInfo.stencilFrontFunc = info.stencilFrontFunc;
+            depthInfo.stencilFrontRef = info.stencilFrontRef;
+            depthInfo.stencilFrontValueMask = info.stencilFrontValueMask;
+            depthInfo.stencilFrontFail = info.stencilFrontFail;
+            depthInfo.stencilFrontDepthFail = info.stencilFrontDepthFail;
+            depthInfo.stencilFrontDepthPass = info.stencilFrontDepthPass;
+            depthInfo.stencilFrontWriteMask = info.stencilFrontWriteMask;
+            depthInfo.stencilBackFunc = info.stencilBackFunc;
+            depthInfo.stencilBackRef = info.stencilBackRef;
+            depthInfo.stencilBackValueMask = info.stencilBackValueMask;
+            depthInfo.stencilBackFail = info.stencilBackFail;
+            depthInfo.stencilBackDepthFail = info.stencilBackDepthFail;
+            depthInfo.stencilBackDepthPass = info.stencilBackDepthPass;
+            depthInfo.stencilBackWriteMask = info.stencilBackWriteMask;
+            id<MTLDepthStencilState> dsState = depthStencilStateForDraw(depthInfo);
+            if (dsState != nil) {
+                [encoder setDepthStencilState:dsState];
+            }
+            if (info.stencilTestEnabled) {
+                [encoder setStencilFrontReferenceValue:
+                             static_cast<uint32_t>(info.stencilFrontRef)
+                            backReferenceValue:
+                             static_cast<uint32_t>(info.stencilBackRef)];
+            }
+        }
+        {
+            const float bias = info.polygonOffsetEnabled ? info.polygonOffsetUnits : 0.0f;
+            const float slope = info.polygonOffsetEnabled ? info.polygonOffsetFactor : 0.0f;
+            const float clampV = info.polygonOffsetEnabled ? info.polygonOffsetClamp : 0.0f;
+            [encoder setDepthBias:bias slopeScale:slope clamp:clampV];
+        }
+        const NSUInteger rtWidth = static_cast<NSUInteger>(
+            isFBODraw && info.fboWidth > 0
+                ? info.fboWidth
+                : static_cast<GLsizei>(colorTexture.width));
+        const NSUInteger rtHeight = static_cast<NSUInteger>(
+            isFBODraw && info.fboHeight > 0
+                ? info.fboHeight
+                : static_cast<GLsizei>(colorTexture.height));
+        if (info.viewportWidth > 0 && info.viewportHeight > 0 && rtWidth > 0 && rtHeight > 0) {
+            const GLint glX = std::max<GLint>(0, info.viewportX);
+            const GLint glY = std::max<GLint>(0, info.viewportY);
+            const GLsizei availW = static_cast<GLsizei>(std::max<GLint>(0, static_cast<GLint>(rtWidth) - glX));
+            const GLsizei availH = static_cast<GLsizei>(std::max<GLint>(0, static_cast<GLint>(rtHeight) - glY));
+            const GLsizei glW = std::min<GLsizei>(info.viewportWidth, availW);
+            const GLsizei glH = std::min<GLsizei>(info.viewportHeight, availH);
+            if (glW > 0 && glH > 0) {
+                MTLViewport vp;
+                vp.originX = static_cast<double>(glX);
+                vp.originY = static_cast<double>(rtHeight) - static_cast<double>(glY) - static_cast<double>(glH);
+                vp.width = static_cast<double>(glW);
+                vp.height = static_cast<double>(glH);
+                vp.znear = info.depthRangeNear;
+                vp.zfar = info.depthRangeFar;
+                [encoder setViewport:vp];
+            }
+        }
+        auto makeImmediateScissor = [&](bool enabled, GLint glX, GLint glY,
+                                        GLsizei glW, GLsizei glH) -> MTLScissorRect {
+            MTLScissorRect sr;
+            if (!enabled) {
+                sr.x = 0; sr.y = 0; sr.width = rtWidth; sr.height = rtHeight;
+                return sr;
+            }
+            if (glW <= 0 || glH <= 0 || rtWidth == 0 || rtHeight == 0) {
+                sr.x = 0; sr.y = 0; sr.width = 0; sr.height = 0;
+                return sr;
+            }
+            GLint metalX = std::max<GLint>(0, glX);
+            GLint metalYBottomLeft = std::max<GLint>(0, glY);
+            GLint metalY = static_cast<GLint>(rtHeight) - metalYBottomLeft - glH;
+            if (metalY < 0) { glH += metalY; metalY = 0; }
+            const GLsizei availW = static_cast<GLsizei>(rtWidth) - metalX;
+            const GLsizei availH = static_cast<GLsizei>(rtHeight) - metalY;
+            const GLsizei finalW = std::min<GLsizei>(glW, std::max<GLsizei>(0, availW));
+            const GLsizei finalH = std::min<GLsizei>(glH, std::max<GLsizei>(0, availH));
+            if (finalW <= 0 || finalH <= 0) {
+                sr.x = rtWidth > 0 ? rtWidth - 1 : 0;
+                sr.y = rtHeight > 0 ? rtHeight - 1 : 0;
+                sr.width = 1; sr.height = 1;
+                return sr;
+            }
+            sr.x = static_cast<NSUInteger>(metalX);
+            sr.y = static_cast<NSUInteger>(metalY);
+            sr.width = static_cast<NSUInteger>(finalW);
+            sr.height = static_cast<NSUInteger>(finalH);
+            return sr;
+        };
+        [encoder setScissorRect:makeImmediateScissor(info.scissorTestEnabled,
+                                                     info.scissorX,
+                                                     info.scissorY,
+                                                     info.scissorWidth,
+                                                     info.scissorHeight)];
 
         const std::size_t vertexBytes = info.vertexCount * info.vertexStride;
         if (vertexBytes <= 4096) {
@@ -19335,7 +19532,6 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             }
             sourceBytes = static_cast<const std::uint8_t*>([readbackBuffer contents]);
         }
-
         // RC-A02: OpenGL framebuffer row 0 is at the bottom; Metal
         // texture row 0 is at the top.  Flip Y during readback:
         // metalRow = textureHeight - 1 - glRow.
@@ -23365,7 +23561,7 @@ private:
     id<MTLFunction> immediateModeTexturedFragmentFn = nil;
     id<MTLRenderPipelineState> immediateModeColorPipelineState = nil;
     id<MTLRenderPipelineState> immediateModeTexturedPipelineState = nil;
-    MTLPixelFormat immediateModePipelineColorFormat = MTLPixelFormatInvalid;
+    std::uint64_t immediateModePipelineKey = 0;
     id<MTLSamplerState> immediateModeSamplerState = nil;
     id<MTLLibrary> depthStencilUploadLibrary = nil;
     id<MTLFunction> depthStencilUploadVertexFn = nil;
@@ -27199,6 +27395,20 @@ bool MetalFrameGraph::writeMultisampleDepthStencilRegion(
     bool writeStencil) {
     return impl_->writeMultisampleDepthStencilRegion(
         tex, x, y, width, height, depthPixels, writeDepth,
+        stencilValue, writeStencil);
+}
+
+bool MetalFrameGraph::writeDefaultDepthStencilRegion(
+    GLint x,
+    GLint y,
+    GLsizei width,
+    GLsizei height,
+    const GLfloat* depthPixels,
+    bool writeDepth,
+    std::uint8_t stencilValue,
+    bool writeStencil) {
+    return impl_->writeDefaultDepthStencilRegion(
+        x, y, width, height, depthPixels, writeDepth,
         stencilValue, writeStencil);
 }
 

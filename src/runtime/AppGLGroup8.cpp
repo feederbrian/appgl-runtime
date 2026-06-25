@@ -23,6 +23,76 @@
 #include <string>
 #include <unordered_set>
 
+#ifndef GL_ALPHA4
+#define GL_ALPHA4 0x803B
+#endif
+#ifndef GL_ALPHA8
+#define GL_ALPHA8 0x803C
+#endif
+#ifndef GL_ALPHA12
+#define GL_ALPHA12 0x803D
+#endif
+#ifndef GL_ALPHA16
+#define GL_ALPHA16 0x803E
+#endif
+#ifndef GL_LUMINANCE
+#define GL_LUMINANCE 0x1909
+#endif
+#ifndef GL_LUMINANCE_ALPHA
+#define GL_LUMINANCE_ALPHA 0x190A
+#endif
+#ifndef GL_LUMINANCE4
+#define GL_LUMINANCE4 0x803F
+#endif
+#ifndef GL_LUMINANCE8
+#define GL_LUMINANCE8 0x8040
+#endif
+#ifndef GL_LUMINANCE12
+#define GL_LUMINANCE12 0x8041
+#endif
+#ifndef GL_LUMINANCE16
+#define GL_LUMINANCE16 0x8042
+#endif
+#ifndef GL_LUMINANCE4_ALPHA4
+#define GL_LUMINANCE4_ALPHA4 0x8043
+#endif
+#ifndef GL_LUMINANCE6_ALPHA2
+#define GL_LUMINANCE6_ALPHA2 0x8044
+#endif
+#ifndef GL_LUMINANCE8_ALPHA8
+#define GL_LUMINANCE8_ALPHA8 0x8045
+#endif
+#ifndef GL_LUMINANCE12_ALPHA4
+#define GL_LUMINANCE12_ALPHA4 0x8046
+#endif
+#ifndef GL_LUMINANCE12_ALPHA12
+#define GL_LUMINANCE12_ALPHA12 0x8047
+#endif
+#ifndef GL_LUMINANCE16_ALPHA16
+#define GL_LUMINANCE16_ALPHA16 0x8048
+#endif
+#ifndef GL_INTENSITY
+#define GL_INTENSITY 0x8049
+#endif
+#ifndef GL_INTENSITY4
+#define GL_INTENSITY4 0x804A
+#endif
+#ifndef GL_INTENSITY8
+#define GL_INTENSITY8 0x804B
+#endif
+#ifndef GL_INTENSITY12
+#define GL_INTENSITY12 0x804C
+#endif
+#ifndef GL_INTENSITY16
+#define GL_INTENSITY16 0x804D
+#endif
+#ifndef GL_TEXTURE_LUMINANCE_SIZE
+#define GL_TEXTURE_LUMINANCE_SIZE 0x8060
+#endif
+#ifndef GL_TEXTURE_INTENSITY_SIZE
+#define GL_TEXTURE_INTENSITY_SIZE 0x8061
+#endif
+
 namespace appgl {
 
 namespace {
@@ -124,7 +194,9 @@ static void APIENTRY glFinish(void) {
 }
 
 static void APIENTRY glLogicOp(GLenum opcode) {
-    (void)opcode;
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    context->setLogicOp(opcode);
 }
 
 static void APIENTRY glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type, void *pixels) {
@@ -267,7 +339,9 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
         case GL_TEXTURE_RED_SIZE:
         case GL_TEXTURE_GREEN_SIZE:
         case GL_TEXTURE_BLUE_SIZE:
-        case GL_TEXTURE_ALPHA_SIZE: {
+        case GL_TEXTURE_ALPHA_SIZE:
+        case GL_TEXTURE_LUMINANCE_SIZE:
+        case GL_TEXTURE_INTENSITY_SIZE: {
             // GL 4.6 Table 8.12 / §8.11.2 — per-channel bit counts
             // of the promoted internal format. CTS
             // `texture_size_promotion.functional` iterates every
@@ -277,7 +351,82 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                 for (GLenum f : lst) if (f == fmt) return true;
                 return false;
             };
+            auto legacyLuminanceSize = [&]() -> GLint {
+                switch (fmt) {
+                    case GL_LUMINANCE:
+                    case GL_LUMINANCE8:
+                    case GL_LUMINANCE_ALPHA:
+                    case GL_LUMINANCE8_ALPHA8:
+                        return 8;
+                    case GL_LUMINANCE4:
+                    case GL_LUMINANCE4_ALPHA4:
+                        return 4;
+                    case GL_LUMINANCE6_ALPHA2:
+                        return 6;
+                    case GL_LUMINANCE12:
+                    case GL_LUMINANCE12_ALPHA4:
+                    case GL_LUMINANCE12_ALPHA12:
+                        return 12;
+                    case GL_LUMINANCE16:
+                    case GL_LUMINANCE16_ALPHA16:
+                        return 16;
+                    default:
+                        return 0;
+                }
+            };
+            auto legacyIntensitySize = [&]() -> GLint {
+                switch (fmt) {
+                    case GL_INTENSITY:
+                    case GL_INTENSITY8:
+                        return 8;
+                    case GL_INTENSITY4:
+                        return 4;
+                    case GL_INTENSITY12:
+                        return 12;
+                    case GL_INTENSITY16:
+                        return 16;
+                    default:
+                        return 0;
+                }
+            };
             auto channelSize = [&](int channel) -> GLint {
+                if (fmt == GL_ALPHA || fmt == GL_ALPHA8) {
+                    return channel == 3 ? 8 : 0;
+                }
+                if (fmt == GL_ALPHA4) {
+                    return channel == 3 ? 4 : 0;
+                }
+                if (fmt == GL_ALPHA12) {
+                    return channel == 3 ? 12 : 0;
+                }
+                if (fmt == GL_ALPHA16) {
+                    return channel == 3 ? 16 : 0;
+                }
+                const GLint luminanceBits = legacyLuminanceSize();
+                if (luminanceBits > 0) {
+                    if (channel == 3) {
+                        switch (fmt) {
+                            case GL_LUMINANCE_ALPHA:
+                            case GL_LUMINANCE8_ALPHA8:
+                                return 8;
+                            case GL_LUMINANCE4_ALPHA4:
+                            case GL_LUMINANCE12_ALPHA4:
+                                return 4;
+                            case GL_LUMINANCE6_ALPHA2:
+                                return 2;
+                            case GL_LUMINANCE12_ALPHA12:
+                                return 12;
+                            case GL_LUMINANCE16_ALPHA16:
+                                return 16;
+                            default:
+                                return 0;
+                        }
+                    }
+                    return 0;
+                }
+                if (legacyIntensitySize() > 0) {
+                    return 0;
+                }
                 if (match({GL_R8, GL_R8_SNORM, GL_R8I, GL_R8UI})) {
                     return channel == 0 ? 8 : 0;
                 }
@@ -296,7 +445,8 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                 if (match({GL_RG32F, GL_RG32I, GL_RG32UI})) {
                     return (channel < 2) ? 32 : 0;
                 }
-                if (match({GL_RGB8, GL_RGB8_SNORM, GL_RGB8I, GL_RGB8UI, GL_SRGB, GL_SRGB8, GL_RGB})) {
+                if (match({GL_RGB8, GL_RGB8_SNORM, GL_RGB8I, GL_RGB8UI, GL_SRGB, GL_SRGB8, GL_RGB,
+                           GL_COMPRESSED_RGB, GL_COMPRESSED_RGB_S3TC_DXT1_EXT})) {
                     return (channel < 3) ? 8 : 0;
                 }
                 if (match({GL_RGB16, GL_RGB16_SNORM, GL_RGB16I, GL_RGB16UI, GL_RGB16F})) {
@@ -306,7 +456,10 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                     return (channel < 3) ? 32 : 0;
                 }
                 if (match({GL_RGBA8, GL_RGBA8_SNORM, GL_RGBA8I, GL_RGBA8UI,
-                           GL_SRGB8_ALPHA8, GL_SRGB_ALPHA, GL_RGBA})) {
+                           GL_SRGB8_ALPHA8, GL_SRGB_ALPHA, GL_RGBA,
+                           GL_COMPRESSED_RGBA, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+                           GL_COMPRESSED_RGBA_S3TC_DXT3_EXT,
+                           GL_COMPRESSED_RGBA_S3TC_DXT5_EXT})) {
                     return 8;
                 }
                 if (match({GL_RGBA16, GL_RGBA16_SNORM, GL_RGBA16I, GL_RGBA16UI, GL_RGBA16F})) {
@@ -359,6 +512,8 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                 case GL_TEXTURE_GREEN_SIZE: *params = channelSize(1); break;
                 case GL_TEXTURE_BLUE_SIZE:  *params = channelSize(2); break;
                 case GL_TEXTURE_ALPHA_SIZE: *params = channelSize(3); break;
+                case GL_TEXTURE_LUMINANCE_SIZE: *params = legacyLuminanceSize(); break;
+                case GL_TEXTURE_INTENSITY_SIZE: *params = legacyIntensitySize(); break;
                 default: *params = 0; break;
             }
             break;
@@ -514,14 +669,10 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
 }
 
 static void APIENTRY glCopyTexImage1D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLint border) {
-    (void)target;
-    (void)level;
-    (void)internalformat;
-    (void)x;
-    (void)y;
-    (void)width;
-    (void)border;
-    warnDataDroppedOnce("glCopyTexImage1D");
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    (void)context->copyTexImage1D(target, level, internalformat,
+                                  x, y, width, border);
 }
 
 static void APIENTRY glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border) {
@@ -534,25 +685,16 @@ static void APIENTRY glCopyTexImage2D(GLenum target, GLint level, GLenum interna
 }
 
 static void APIENTRY glCopyTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width) {
-    (void)target;
-    (void)level;
-    (void)xoffset;
-    (void)x;
-    (void)y;
-    (void)width;
-    warnDataDroppedOnce("glCopyTexSubImage1D");
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    (void)context->copyTexSubImage1D(target, level, xoffset, x, y, width);
 }
 
 static void APIENTRY glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
-    (void)target;
-    (void)level;
-    (void)xoffset;
-    (void)yoffset;
-    (void)x;
-    (void)y;
-    (void)width;
-    (void)height;
-    warnDataDroppedOnce("glCopyTexSubImage2D");
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    (void)context->copyTexSubImage2D(target, level, xoffset, yoffset,
+                                     x, y, width, height);
 }
 
 static void APIENTRY glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices) {

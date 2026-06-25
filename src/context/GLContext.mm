@@ -67,6 +67,190 @@
 
 #include <unistd.h>
 
+#ifndef GL_SHADE_MODEL
+#define GL_SHADE_MODEL 0x0B54
+#endif
+#ifndef GL_FLAT
+#define GL_FLAT 0x1D00
+#endif
+#ifndef GL_SMOOTH
+#define GL_SMOOTH 0x1D01
+#endif
+#ifndef GL_COLOR_ARRAY
+#define GL_COLOR_ARRAY 0x8076
+#endif
+#ifndef GL_QUAD_STRIP
+#define GL_QUAD_STRIP 0x0008
+#endif
+#ifndef GL_POLYGON
+#define GL_POLYGON 0x0009
+#endif
+#ifndef GL_RENDER_MODE
+#define GL_RENDER_MODE 0x0C40
+#endif
+#ifndef GL_MAX_NAME_STACK_DEPTH
+#define GL_MAX_NAME_STACK_DEPTH 0x0D37
+#endif
+#ifndef GL_DEPTH_BITS
+#define GL_DEPTH_BITS 0x0D56
+#endif
+#ifndef GL_STENCIL_BITS
+#define GL_STENCIL_BITS 0x0D57
+#endif
+#ifndef GL_NAME_STACK_DEPTH
+#define GL_NAME_STACK_DEPTH 0x0D70
+#endif
+#ifndef GL_SELECTION_BUFFER_SIZE
+#define GL_SELECTION_BUFFER_SIZE 0x0DF4
+#endif
+#ifndef GL_RENDER
+#define GL_RENDER 0x1C00
+#endif
+#ifndef GL_FEEDBACK
+#define GL_FEEDBACK 0x1C01
+#endif
+#ifndef GL_SELECT
+#define GL_SELECT 0x1C02
+#endif
+#ifndef GL_FRONT_AND_BACK
+#define GL_FRONT_AND_BACK 0x0408
+#endif
+#ifndef GL_AMBIENT_AND_DIFFUSE
+#define GL_AMBIENT_AND_DIFFUSE 0x1602
+#endif
+#ifndef GL_CURRENT_BIT
+#define GL_CURRENT_BIT 0x00000001
+#endif
+#ifndef GL_ACCUM_BUFFER_BIT
+#define GL_ACCUM_BUFFER_BIT 0x00000200
+#endif
+#ifndef GL_RETURN
+#define GL_RETURN 0x0102
+#endif
+#ifndef GL_FOG
+#define GL_FOG 0x0B60
+#endif
+#ifndef GL_FOG_MODE
+#define GL_FOG_MODE 0x0B65
+#endif
+#ifndef GL_FOG_DENSITY
+#define GL_FOG_DENSITY 0x0B62
+#endif
+#ifndef GL_FOG_START
+#define GL_FOG_START 0x0B63
+#endif
+#ifndef GL_FOG_END
+#define GL_FOG_END 0x0B64
+#endif
+#ifndef GL_FOG_COLOR
+#define GL_FOG_COLOR 0x0B66
+#endif
+#ifndef GL_EXP
+#define GL_EXP 0x0800
+#endif
+#ifndef GL_EXP2
+#define GL_EXP2 0x0801
+#endif
+#ifndef GL_LIGHTING
+#define GL_LIGHTING 0x0B50
+#endif
+#ifndef GL_LIGHT0
+#define GL_LIGHT0 0x4000
+#endif
+#ifndef GL_LIGHT7
+#define GL_LIGHT7 0x4007
+#endif
+#ifndef GL_LIGHT_MODEL_AMBIENT
+#define GL_LIGHT_MODEL_AMBIENT 0x0B53
+#endif
+#ifndef GL_LIGHT_MODEL_TWO_SIDE
+#define GL_LIGHT_MODEL_TWO_SIDE 0x0B52
+#endif
+#ifndef GL_POSITION
+#define GL_POSITION 0x1203
+#endif
+#ifndef GL_SPOT_DIRECTION
+#define GL_SPOT_DIRECTION 0x1204
+#endif
+#ifndef GL_SPOT_EXPONENT
+#define GL_SPOT_EXPONENT 0x1205
+#endif
+#ifndef GL_SPOT_CUTOFF
+#define GL_SPOT_CUTOFF 0x1206
+#endif
+#ifndef GL_CONSTANT_ATTENUATION
+#define GL_CONSTANT_ATTENUATION 0x1207
+#endif
+#ifndef GL_LINEAR_ATTENUATION
+#define GL_LINEAR_ATTENUATION 0x1208
+#endif
+#ifndef GL_QUADRATIC_ATTENUATION
+#define GL_QUADRATIC_ATTENUATION 0x1209
+#endif
+#ifndef GL_CLIP_PLANE0
+#define GL_CLIP_PLANE0 0x3000
+#endif
+#ifndef GL_CLIP_PLANE7
+#define GL_CLIP_PLANE7 0x3007
+#endif
+#ifndef GL_TEXTURE_ENV
+#define GL_TEXTURE_ENV 0x2300
+#endif
+#ifndef GL_TEXTURE_ENV_MODE
+#define GL_TEXTURE_ENV_MODE 0x2200
+#endif
+#ifndef GL_TEXTURE_ENV_COLOR
+#define GL_TEXTURE_ENV_COLOR 0x2201
+#endif
+#ifndef GL_MODULATE
+#define GL_MODULATE 0x2100
+#endif
+#ifndef GL_DECAL
+#define GL_DECAL 0x2101
+#endif
+#ifndef GL_REPLACE
+#define GL_REPLACE 0x1E01
+#endif
+#ifndef GL_TEXTURE_GEN_S
+#define GL_TEXTURE_GEN_S 0x0C60
+#endif
+#ifndef GL_TEXTURE_GEN_T
+#define GL_TEXTURE_GEN_T 0x0C61
+#endif
+#ifndef GL_TEXTURE_GEN_R
+#define GL_TEXTURE_GEN_R 0x0C62
+#endif
+#ifndef GL_TEXTURE_GEN_Q
+#define GL_TEXTURE_GEN_Q 0x0C63
+#endif
+#ifndef GL_S
+#define GL_S 0x2000
+#endif
+#ifndef GL_T
+#define GL_T 0x2001
+#endif
+#ifndef GL_R
+#define GL_R 0x2002
+#endif
+#ifndef GL_Q
+#define GL_Q 0x2003
+#endif
+#ifndef GL_TEXTURE_GEN_MODE
+#define GL_TEXTURE_GEN_MODE 0x2500
+#endif
+#ifndef GL_OBJECT_LINEAR
+#define GL_OBJECT_LINEAR 0x2401
+#endif
+#ifndef GL_EYE_LINEAR
+#define GL_EYE_LINEAR 0x2400
+#endif
+#ifndef GL_OBJECT_PLANE
+#define GL_OBJECT_PLANE 0x2501
+#endif
+#ifndef GL_EYE_PLANE
+#define GL_EYE_PLANE 0x2502
+#endif
+
 #ifndef APPGL_ENABLE_DCR_SENTINEL_HOOKS
 #define APPGL_ENABLE_DCR_SENTINEL_HOOKS 0
 #endif
@@ -126,6 +310,9 @@ static bool appglHotpathInvariantHoistSubflagEnabled(const char* name) {
 // initialization doesn't trip on GL_INVALID_ENUM during boot.
 #ifndef GL_DEPTH_TEXTURE_MODE
 #define GL_DEPTH_TEXTURE_MODE 0x884B
+#endif
+#ifndef GL_GENERATE_MIPMAP
+#define GL_GENERATE_MIPMAP 0x8191
 #endif
 
 namespace appgl {
@@ -6212,12 +6399,15 @@ std::size_t compatTextureInternalBaseComponentCount(GLenum internalFormat) {
         case GL_RGB8UI:
         case GL_RGB16I:
         case GL_RGB16UI:
-        case GL_RGB32I:
-        case GL_RGB32UI:
-        case GL_RGB565:
-            return 3;
-        default:
-            return 4;
+            case GL_RGB32I:
+            case GL_RGB32UI:
+            case GL_RGB565:
+            case GL_COMPRESSED_RGB:
+            case GL_COMPRESSED_SRGB:
+            case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+                return 3;
+            default:
+                return 4;
     }
 }
 
@@ -7254,6 +7444,44 @@ std::vector<std::uint8_t> downsampleRGBA8(
     return dest;
 }
 
+std::vector<std::uint8_t> downsampleRGBA8NearestHigh(
+    const std::vector<std::uint8_t>& source,
+    GLsizei sourceWidth,
+    GLsizei sourceHeight,
+    GLsizei sourceDepth,
+    GLsizei destWidth,
+    GLsizei destHeight,
+    GLsizei destDepth
+) {
+    std::vector<std::uint8_t> dest(rgba8ByteCount(destWidth, destHeight, destDepth), 0);
+    if (source.empty()) {
+        return dest;
+    }
+    for (GLsizei z = 0; z < destDepth; ++z) {
+        const GLsizei sourceZ = std::min<GLsizei>(z * 2 + 1, sourceDepth - 1);
+        for (GLsizei y = 0; y < destHeight; ++y) {
+            const GLsizei sourceY = std::min<GLsizei>(y * 2 + 1, sourceHeight - 1);
+            for (GLsizei x = 0; x < destWidth; ++x) {
+                const GLsizei sourceX = std::min<GLsizei>(x * 2 + 1, sourceWidth - 1);
+                const std::size_t sourceOffset =
+                    ((static_cast<std::size_t>(sourceZ) * static_cast<std::size_t>(sourceHeight)
+                        + static_cast<std::size_t>(sourceY))
+                        * static_cast<std::size_t>(sourceWidth)
+                        + static_cast<std::size_t>(sourceX)) * 4u;
+                const std::size_t destOffset =
+                    ((static_cast<std::size_t>(z) * static_cast<std::size_t>(destHeight)
+                        + static_cast<std::size_t>(y))
+                        * static_cast<std::size_t>(destWidth)
+                        + static_cast<std::size_t>(x)) * 4u;
+                std::memcpy(dest.data() + destOffset,
+                            source.data() + sourceOffset,
+                            4u);
+            }
+        }
+    }
+    return dest;
+}
+
 MTLSamplerAddressMode metalAddressMode(GLint mode) {
     switch (mode) {
         case GL_CLAMP_TO_EDGE:
@@ -7465,6 +7693,11 @@ static bool isValidTexParameterEnumValue(GLenum pname, GLint v) {
             return v == GL_MIN || v == GL_WEIGHTED_AVERAGE_ARB || v == GL_MAX;
         case GL_DEPTH_STENCIL_TEXTURE_MODE:
             return v == GL_DEPTH_COMPONENT || v == GL_STENCIL_INDEX;
+        case GL_DEPTH_TEXTURE_MODE:
+            return v == GL_LUMINANCE || v == GL_INTENSITY ||
+                   v == GL_ALPHA || v == GL_RED;
+        case GL_GENERATE_MIPMAP:
+            return v == GL_FALSE || v == GL_TRUE;
         case GL_TEXTURE_SWIZZLE_R:
         case GL_TEXTURE_SWIZZLE_G:
         case GL_TEXTURE_SWIZZLE_B:
@@ -7552,6 +7785,9 @@ bool setTextureParameterInteger(GLTextureParameters& params, GLenum pname, const
             // and discard so legacy initializers don't trip GL_INVALID_ENUM.
             (void)params;
             (void)values;
+            return true;
+        case GL_GENERATE_MIPMAP:
+            params.generateMipmap = values[0] ? GL_TRUE : GL_FALSE;
             return true;
         // Float-typed pnames accepted via the int path per GL 4.6 §8.10:
         // glTexParameteri{v} must accept any pname glTexParameterf{v}
@@ -7684,6 +7920,12 @@ bool getTextureParameterInteger(const GLTextureParameters& params, GLenum pname,
             return true;
         case GL_DEPTH_STENCIL_TEXTURE_MODE:
             values[0] = params.depthStencilTextureMode;
+            return true;
+        case GL_DEPTH_TEXTURE_MODE:
+            values[0] = GL_LUMINANCE;
+            return true;
+        case GL_GENERATE_MIPMAP:
+            values[0] = params.generateMipmap;
             return true;
         // GL 4.6 §8.10 — glGetTexParameteriv must accept any pname
         // accepted by glGetTexParameterfv (incl. float-typed params
@@ -10610,6 +10852,9 @@ struct GLContext::Impl {
             case GL_RGB32I:
             case GL_RGB32UI:
             case GL_RGB565:
+            case GL_COMPRESSED_RGB:
+            case GL_COMPRESSED_SRGB:
+            case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
                 return CompatUploadBase::Rgb;
             case GL_ALPHA:
             case GL_ALPHA4:
@@ -13740,15 +13985,26 @@ struct GLContext::Impl {
             generated.defined = true;
             generated.generatedMipLevel = true;
             generated.immutableStorageLevel = baseLevel.immutableStorageLevel;
-            generated.rgba8 = downsampleRGBA8(
-                previousLevel.rgba8,
-                previousLevel.desc.width,
-                previousLevel.desc.height,
-                previousLevel.desc.depth,
-                generated.desc.width,
-                generated.desc.height,
-                generated.desc.depth
-            );
+            const bool legacyIntensityHighPrecision =
+                baseLevel.desc.internalFormat == GL_INTENSITY12 ||
+                baseLevel.desc.internalFormat == GL_INTENSITY16;
+            generated.rgba8 = legacyIntensityHighPrecision
+                ? downsampleRGBA8NearestHigh(
+                    previousLevel.rgba8,
+                    previousLevel.desc.width,
+                    previousLevel.desc.height,
+                    previousLevel.desc.depth,
+                    generated.desc.width,
+                    generated.desc.height,
+                    generated.desc.depth)
+                : downsampleRGBA8(
+                    previousLevel.rgba8,
+                    previousLevel.desc.width,
+                    previousLevel.desc.height,
+                    previousLevel.desc.depth,
+                    generated.desc.width,
+                    generated.desc.height,
+                    generated.desc.depth);
             // Also downsample nativeData when the texture has a non-
             // RGBA8 Metal pixel format. This matches what replaceMetal-
             // Texture's upload loop expects and avoids the AGX
@@ -13767,6 +14023,28 @@ struct GLContext::Impl {
                     nativeFmt
                 );
                 generated.nativeBpp = baseLevel.nativeBpp;
+            } else if (hasNativeBase &&
+                       baseLevel.nativeBpp == 4 &&
+                       baseLevel.desc.internalFormat == GL_RGB10_A2) {
+                const std::size_t pixelCount =
+                    static_cast<std::size_t>(generated.desc.width) *
+                    static_cast<std::size_t>(generated.desc.height) *
+                    static_cast<std::size_t>(generated.desc.depth);
+                generated.nativeData.resize(pixelCount * 4u, 0);
+                for (std::size_t pixel = 0; pixel < pixelCount; ++pixel) {
+                    const std::uint8_t* rgba = generated.rgba8.data() + pixel * 4u;
+                    const std::uint32_t r = static_cast<std::uint32_t>(
+                        std::min<unsigned>(1023u, (static_cast<unsigned>(rgba[0]) * 1023u + 127u) / 255u));
+                    const std::uint32_t g = static_cast<std::uint32_t>(
+                        std::min<unsigned>(1023u, (static_cast<unsigned>(rgba[1]) * 1023u + 127u) / 255u));
+                    const std::uint32_t b = static_cast<std::uint32_t>(
+                        std::min<unsigned>(1023u, (static_cast<unsigned>(rgba[2]) * 1023u + 127u) / 255u));
+                    const std::uint32_t a = static_cast<std::uint32_t>(
+                        std::min<unsigned>(3u, (static_cast<unsigned>(rgba[3]) * 3u + 127u) / 255u));
+                    const std::uint32_t word = r | (g << 10) | (b << 20) | (a << 30);
+                    std::memcpy(generated.nativeData.data() + pixel * 4u, &word, sizeof(word));
+                }
+                generated.nativeBpp = 4;
             }
             object.levels[levelIndex] = std::move(generated);
             previousLevel = object.levels.at(levelIndex);
@@ -22915,7 +23193,6 @@ struct GLContext::Impl {
             }
             sourceNeedsFboYFlip = rb->framebufferReadbackYFlip;
             const bool preferRenderbufferShadow =
-                metalTex != nil && metalTex.sampleCount > 1 &&
                 rb->colorShadowAuthoritative;
             if (metalTex == nil || preferRenderbufferShadow) {
                 if (rb->rgba8.empty()) return false;
@@ -23074,6 +23351,58 @@ struct GLContext::Impl {
                     out[dstOffset + 1] = 0;
                     out[dstOffset + 2] = 0;
                     out[dstOffset + 3] = 255;
+                }
+            }
+            return true;
+        }
+
+        const bool canReadRegionalRGBA8 =
+            (readTex.pixelFormat == MTLPixelFormatRGBA8Unorm ||
+             readTex.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB ||
+             readTex.pixelFormat == MTLPixelFormatBGRA8Unorm) &&
+            x >= 0 && y >= 0 &&
+            width <= sourceWidth && height <= sourceHeight &&
+            x <= sourceWidth - width &&
+            y <= sourceHeight - height;
+        if (canReadRegionalRGBA8) {
+            const NSUInteger regionWidth = static_cast<NSUInteger>(width);
+            const NSUInteger regionHeight = static_cast<NSUInteger>(height);
+            const NSUInteger regionBytesPerRow = regionWidth * 4u;
+            std::vector<std::uint8_t> region(
+                static_cast<std::size_t>(regionBytesPerRow * regionHeight));
+            const NSUInteger metalY = yFlipReadback
+                ? static_cast<NSUInteger>(sourceHeight - y - height)
+                : static_cast<NSUInteger>(y);
+            [readTex getBytes:region.data()
+                   bytesPerRow:regionBytesPerRow
+                bytesPerImage:0
+                   fromRegion:MTLRegionMake2D(static_cast<NSUInteger>(x),
+                                               metalY,
+                                               regionWidth,
+                                               regionHeight)
+                  mipmapLevel:metalMipLevel
+                        slice:metalSlice];
+
+            auto* out = static_cast<std::uint8_t*>(pixels);
+            for (GLsizei row = 0; row < height; ++row) {
+                const GLsizei srcRow = yFlipReadback ? (height - 1 - row) : row;
+                for (GLsizei col = 0; col < width; ++col) {
+                    const std::size_t dstOffset =
+                        static_cast<std::size_t>(row * width + col) * 4u;
+                    const std::size_t srcOffset =
+                        (static_cast<std::size_t>(srcRow) *
+                         static_cast<std::size_t>(regionBytesPerRow)) +
+                        static_cast<std::size_t>(col) * 4u;
+                    if (isBGRA) {
+                        out[dstOffset + 0] = region[srcOffset + 2];
+                        out[dstOffset + 1] = region[srcOffset + 1];
+                        out[dstOffset + 2] = region[srcOffset + 0];
+                        out[dstOffset + 3] = region[srcOffset + 3];
+                    } else {
+                        std::memcpy(out + dstOffset,
+                                    region.data() + srcOffset,
+                                    4u);
+                    }
                 }
             }
             return true;
@@ -25400,17 +25729,20 @@ struct GLContext::Impl {
         // wasViewportRenderedTo marker still honored for routed GS/cull
         // producers.
         bool sourceNeedsFboYFlip = true;  // renderbuffers default to FBO-produced
+        GLenum sourceInternalFormat = 0;
         if (att->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
             const GLRenderbufferObject* rb = objects->renderbuffers().get(att->object);
             if (!rb || !rb->storageDefined || rb->metalTexture == nullptr) return false;
             metalTex = (__bridge id<MTLTexture>)rb->metalTexture;
             sourceWidth = rb->width;
             sourceHeight = rb->height;
+            sourceInternalFormat = rb->internalFormat;
             sourceNeedsFboYFlip = rb->framebufferReadbackYFlip;
         } else if (att->kind == GLFramebufferAttachment::Kind::Texture) {
             const GLTextureObject* tex = objects->textures().get(att->object);
             if (!tex || tex->metalTexture == nullptr) return false;
             metalTex = (__bridge id<MTLTexture>)tex->metalTexture;
+            sourceInternalFormat = tex->desc.internalFormat;
             metalMipLevel = static_cast<NSUInteger>(att->level);
             if (tex->target == GL_TEXTURE_3D) {
                 is3DTextureSrc = true;
@@ -25655,6 +25987,8 @@ struct GLContext::Impl {
         const bool formatIsGreen = (format == GL_GREEN || format == GL_GREEN_INTEGER);
         const bool formatIsBlue  = (format == GL_BLUE  || format == GL_BLUE_INTEGER);
         const bool formatIsAlpha = (format == GL_ALPHA);
+        const bool formatIsLuminance = (format == GL_LUMINANCE);
+        const bool formatIsLuminanceAlpha = (format == GL_LUMINANCE_ALPHA);
         // Helper: return the `i`-th GL component (per format's component
         // order) drawn from `vals[]` (which is in RGBA order). Used by
         // the packed-type encoders below.
@@ -25672,8 +26006,64 @@ struct GLContext::Impl {
                 return glCompIndex == 0 ? vals4[2] : 0.0;
             } else if (formatIsAlpha) {
                 return glCompIndex == 0 ? vals4[3] : 0.0;
+            } else if (formatIsLuminance) {
+                return glCompIndex == 0
+                    ? vals4[0] + vals4[1] + vals4[2]
+                    : 0.0;
+            } else if (formatIsLuminanceAlpha) {
+                if (glCompIndex == 0) {
+                    return vals4[0] + vals4[1] + vals4[2];
+                }
+                return glCompIndex == 1 ? vals4[3] : 0.0;
             }
             return vals4[glCompIndex];
+        };
+        auto remapLegacyAttachmentReadback = [&](double vals[4]) {
+            switch (sourceInternalFormat) {
+                case GL_LUMINANCE:
+                case GL_LUMINANCE4:
+                case GL_LUMINANCE8:
+                case GL_LUMINANCE12:
+                case GL_LUMINANCE16:
+                case GL_SLUMINANCE8: {
+                    const double l = vals[0];
+                    vals[0] = l;
+                    vals[1] = 0.0;
+                    vals[2] = 0.0;
+                    vals[3] = 1.0;
+                    break;
+                }
+                case GL_LUMINANCE_ALPHA:
+                case GL_LUMINANCE4_ALPHA4:
+                case GL_LUMINANCE6_ALPHA2:
+                case GL_LUMINANCE8_ALPHA8:
+                case GL_LUMINANCE12_ALPHA4:
+                case GL_LUMINANCE12_ALPHA12:
+                case GL_LUMINANCE16_ALPHA16:
+                case GL_SLUMINANCE8_ALPHA8: {
+                    const double l = vals[0];
+                    const double a = vals[3];
+                    vals[0] = l;
+                    vals[1] = 0.0;
+                    vals[2] = 0.0;
+                    vals[3] = a;
+                    break;
+                }
+                case GL_INTENSITY:
+                case GL_INTENSITY4:
+                case GL_INTENSITY8:
+                case GL_INTENSITY12:
+                case GL_INTENSITY16: {
+                    const double i = vals[0];
+                    vals[0] = i;
+                    vals[1] = 0.0;
+                    vals[2] = 0.0;
+                    vals[3] = i;
+                    break;
+                }
+                default:
+                    break;
+            }
         };
 
         const bool srcIsIntegerForPacked =
@@ -25728,6 +26118,7 @@ struct GLContext::Impl {
                     }
                     vals[c] = readSrcComponent(srcPixel, readComp);
                 }
+                remapLegacyAttachmentReadback(vals);
 
                 // Packed-type encoding: one packed word per pixel rather
                 // than per-component. GL 4.6 §8.4.4.4 + Table 8.8 define
@@ -26226,12 +26617,12 @@ struct GLContext::Impl {
         ensureDefaultDrawableForViewportExtent();
         frameGraph->encodeDefaultFramebufferClear(
             pendingMask,
-            state->clearState().color[0],
-            state->clearState().color[1],
-            state->clearState().color[2],
-            state->clearState().color[3],
-            state->clearState().depth,
-            state->clearState().stencil
+            pendingClearColor[0],
+            pendingClearColor[1],
+            pendingClearColor[2],
+            pendingClearColor[3],
+            pendingClearDepth,
+            pendingClearStencil
         );
         pendingMask = 0;
         pendingClear = false;
@@ -27158,6 +27549,9 @@ struct GLContext::Impl {
     MatrixStateMirror matrixState;
     GLbitfield pendingMask = GL_COLOR_BUFFER_BIT;
     bool pendingClear = true;
+    std::array<GLfloat, 4> pendingClearColor = {0.0f, 0.0f, 0.0f, 0.0f};
+    GLdouble pendingClearDepth = 1.0;
+    GLint pendingClearStencil = 0;
     std::vector<std::uint8_t> defaultFramebufferRGBA8;
     GLsizei defaultFramebufferShadowWidth = 0;
     GLsizei defaultFramebufferShadowHeight = 0;
@@ -27188,6 +27582,8 @@ struct GLContext::Impl {
 
     void invalidateDefaultFramebufferShadow() {
         defaultFramebufferShadowValid = false;
+        defaultFramebufferDepthShadowValid = false;
+        defaultFramebufferStencilShadowValid = false;
     }
 
     // S24 lever-#1 (lazy shadow clears): full-surface unmasked unscissored
@@ -27201,6 +27597,12 @@ struct GLContext::Impl {
     std::uint64_t shadowClearsDeferred = 0;
     std::uint64_t shadowClearsCoalesced = 0;
     std::uint64_t shadowClearsMaterialized = 0;
+    std::vector<GLfloat> defaultFramebufferDepth32;
+    std::vector<std::uint8_t> defaultFramebufferStencil8;
+    GLsizei defaultFramebufferDepthStencilShadowWidth = 0;
+    GLsizei defaultFramebufferDepthStencilShadowHeight = 0;
+    bool defaultFramebufferDepthShadowValid = false;
+    bool defaultFramebufferStencilShadowValid = false;
     std::uint64_t shadowClearMaterializeBytes = 0;
 
     static bool isIntegerInternalFormat(GLenum fmt) {
@@ -27291,6 +27693,109 @@ struct GLContext::Impl {
         if (materializePendingClear) {
             materializeDefaultFbShadowClear();
         }
+    }
+
+    void ensureDefaultFramebufferDepthStencilShadow() {
+        const GLsizei requestedWidth =
+            std::max<GLsizei>(defaultDrawableRequestWidth(), 1);
+        const GLsizei requestedHeight =
+            std::max<GLsizei>(defaultDrawableRequestHeight(), 1);
+        const GLsizei width = defaultDrawableGrowOnlyEnabled()
+            ? std::max<GLsizei>(requestedWidth, defaultFramebufferDepthStencilShadowWidth)
+            : requestedWidth;
+        const GLsizei height = defaultDrawableGrowOnlyEnabled()
+            ? std::max<GLsizei>(requestedHeight, defaultFramebufferDepthStencilShadowHeight)
+            : requestedHeight;
+        const std::size_t pixelCount =
+            static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+        if (defaultFramebufferDepthStencilShadowWidth == width &&
+            defaultFramebufferDepthStencilShadowHeight == height &&
+            defaultFramebufferDepth32.size() == pixelCount &&
+            defaultFramebufferStencil8.size() == pixelCount) {
+            return;
+        }
+
+        std::vector<GLfloat> resizedDepth(pixelCount, 1.0f);
+        std::vector<std::uint8_t> resizedStencil(pixelCount, 0);
+        const GLsizei copyWidth =
+            std::min(defaultFramebufferDepthStencilShadowWidth, width);
+        const GLsizei copyHeight =
+            std::min(defaultFramebufferDepthStencilShadowHeight, height);
+        for (GLsizei row = 0; row < copyHeight; ++row) {
+            const std::size_t srcOffset =
+                static_cast<std::size_t>(row) *
+                static_cast<std::size_t>(defaultFramebufferDepthStencilShadowWidth);
+            const std::size_t dstOffset =
+                static_cast<std::size_t>(row) * static_cast<std::size_t>(width);
+            std::memcpy(resizedDepth.data() + dstOffset,
+                        defaultFramebufferDepth32.data() + srcOffset,
+                        static_cast<std::size_t>(copyWidth) * sizeof(GLfloat));
+            std::memcpy(resizedStencil.data() + dstOffset,
+                        defaultFramebufferStencil8.data() + srcOffset,
+                        static_cast<std::size_t>(copyWidth));
+        }
+        defaultFramebufferDepth32.swap(resizedDepth);
+        defaultFramebufferStencil8.swap(resizedStencil);
+        defaultFramebufferDepthStencilShadowWidth = width;
+        defaultFramebufferDepthStencilShadowHeight = height;
+    }
+
+    bool copyDefaultFramebufferDepthPixels(GLint x, GLint y, GLsizei width,
+                                           GLsizei height, void* outPixels) const {
+        if (!defaultFramebufferDepthShadowValid || outPixels == nullptr ||
+            width < 0 || height < 0) {
+            return false;
+        }
+        auto* out = static_cast<GLfloat*>(outPixels);
+        for (GLsizei row = 0; row < height; ++row) {
+            for (GLsizei col = 0; col < width; ++col) {
+                const GLint srcX = x + col;
+                const GLint srcY = y + row;
+                const std::size_t dstOffset =
+                    static_cast<std::size_t>(row * width + col);
+                if (srcX < 0 || srcY < 0 ||
+                    srcX >= defaultFramebufferDepthStencilShadowWidth ||
+                    srcY >= defaultFramebufferDepthStencilShadowHeight) {
+                    out[dstOffset] = 0.0f;
+                    continue;
+                }
+                out[dstOffset] =
+                    defaultFramebufferDepth32[
+                        static_cast<std::size_t>(srcY) *
+                        static_cast<std::size_t>(defaultFramebufferDepthStencilShadowWidth) +
+                        static_cast<std::size_t>(srcX)];
+            }
+        }
+        return true;
+    }
+
+    bool copyDefaultFramebufferStencilPixels(GLint x, GLint y, GLsizei width,
+                                             GLsizei height, void* outPixels) const {
+        if (!defaultFramebufferStencilShadowValid || outPixels == nullptr ||
+            width < 0 || height < 0) {
+            return false;
+        }
+        auto* out = static_cast<std::uint8_t*>(outPixels);
+        for (GLsizei row = 0; row < height; ++row) {
+            for (GLsizei col = 0; col < width; ++col) {
+                const GLint srcX = x + col;
+                const GLint srcY = y + row;
+                const std::size_t dstOffset =
+                    static_cast<std::size_t>(row * width + col);
+                if (srcX < 0 || srcY < 0 ||
+                    srcX >= defaultFramebufferDepthStencilShadowWidth ||
+                    srcY >= defaultFramebufferDepthStencilShadowHeight) {
+                    out[dstOffset] = 0;
+                    continue;
+                }
+                out[dstOffset] =
+                    defaultFramebufferStencil8[
+                        static_cast<std::size_t>(srcY) *
+                        static_cast<std::size_t>(defaultFramebufferDepthStencilShadowWidth) +
+                        static_cast<std::size_t>(srcX)];
+            }
+        }
+        return true;
     }
 
     void ensureDefaultDrawableForViewportExtent() {
@@ -27505,6 +28010,42 @@ struct GLContext::Impl {
     std::array<std::array<GLuint, 4>, kMaxImmediateDoubleAttribs> immediateUIntAttribs{};
     std::array<GLVertexAttributeState::ImmediateKind, kMaxImmediateDoubleAttribs> immediateAttribKinds{};
 
+    GLenum fixedFunctionShadeModel = GL_SMOOTH;
+    bool fixedFunctionRasterPositionValid = true;
+    GLint fixedFunctionRasterX = 0;
+    GLint fixedFunctionRasterY = 0;
+    GLfloat fixedFunctionRasterZ = 0.0f;
+    GLenum fixedFunctionLogicOp = GL_COPY;
+    GLint fixedFunctionLineStippleFactor = 1;
+    GLushort fixedFunctionLineStipplePattern = 0xffffu;
+    static constexpr GLsizei kMaxSelectNameStackDepth = 64;
+    struct SelectionState {
+        GLenum renderMode = GL_RENDER;
+        GLuint* buffer = nullptr;
+        GLsizei bufferSize = 0;
+        GLsizei writeOffset = 0;
+        GLint hitCount = 0;
+        bool overflow = false;
+        std::vector<GLuint> nameStack;
+        bool pendingHit = false;
+        std::vector<GLuint> pendingNames;
+        GLuint pendingMinZ = 0xffffffffu;
+        GLuint pendingMaxZ = 0u;
+    };
+    SelectionState selection;
+
+    struct LegacyClientArray {
+        bool enabled = false;
+        GLint size = 0;
+        GLenum type = 0;
+        GLsizei stride = 0;
+        const void* pointer = nullptr;
+        GLuint bufferName = 0;
+    };
+    LegacyClientArray legacyVertexArray;
+    LegacyClientArray legacyColorArray;
+    LegacyClientArray legacyTexCoordArray;
+
     // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
     // capture state.
     //
@@ -27538,6 +28079,109 @@ struct GLContext::Impl {
         std::vector<ImmediateModeVertex> vertices;
     };
     ImmediateModeCapture immediate;
+    std::vector<ImmediateModeVertex> legacyClientArrayVertices;
+    struct CompatAttribSnapshot {
+        bool hasCurrentColor = false;
+        float currentColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    };
+    std::vector<CompatAttribSnapshot> compatAttribStack;
+
+    struct DisplayListCommand {
+        enum class Kind {
+            Clear,
+            Begin,
+            End,
+            Vertex,
+            Color,
+            TexCoord,
+            CallList,
+        };
+        Kind kind = Kind::Clear;
+        GLenum enumValue = 0;
+        GLuint list = 0;
+        float values[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    };
+    struct DisplayListObject {
+        std::vector<DisplayListCommand> commands;
+    };
+    struct DisplayListState {
+        bool compiling = false;
+        bool compileAndExecute = false;
+        bool replaying = false;
+        GLuint currentList = 0;
+        GLuint listBase = 0;
+        GLuint nextGeneratedList = 1;
+        unsigned int replayDepth = 0;
+        std::vector<DisplayListCommand> compileCommands;
+        std::unordered_map<GLuint, DisplayListObject> lists;
+    };
+    DisplayListState displayLists;
+
+    struct FixedFunctionMaterial {
+        float ambient[4] = {0.2f, 0.2f, 0.2f, 1.0f};
+        float diffuse[4] = {0.8f, 0.8f, 0.8f, 1.0f};
+        float specular[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        float emission[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        float shininess = 0.0f;
+    };
+    struct FixedFunctionMaterialState {
+        FixedFunctionMaterial front;
+        FixedFunctionMaterial back;
+        GLenum colorMaterialFace = GL_FRONT_AND_BACK;
+        GLenum colorMaterialMode = GL_AMBIENT_AND_DIFFUSE;
+    };
+    FixedFunctionMaterialState material;
+    struct FixedFunctionFogState {
+        GLenum mode = GL_EXP;
+        float density = 1.0f;
+        float start = 0.0f;
+        float end = 1.0f;
+        float color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    };
+    FixedFunctionFogState fog;
+    struct FixedFunctionLight {
+        float ambient[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        float diffuse[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        float specular[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        float position[4] = {0.0f, 0.0f, 1.0f, 0.0f};
+        float spotDirection[3] = {0.0f, 0.0f, -1.0f};
+        float spotExponent = 0.0f;
+        float spotCutoff = 180.0f;
+        float constantAttenuation = 1.0f;
+        float linearAttenuation = 0.0f;
+        float quadraticAttenuation = 0.0f;
+    };
+    struct FixedFunctionLightingState {
+        std::array<FixedFunctionLight, 8> lights{};
+        float modelAmbient[4] = {0.2f, 0.2f, 0.2f, 1.0f};
+        bool twoSide = false;
+        float currentNormal[3] = {0.0f, 0.0f, 1.0f};
+
+        FixedFunctionLightingState() {
+            lights[0].diffuse[0] = 1.0f;
+            lights[0].diffuse[1] = 1.0f;
+            lights[0].diffuse[2] = 1.0f;
+            lights[0].diffuse[3] = 1.0f;
+            lights[0].specular[0] = 1.0f;
+            lights[0].specular[1] = 1.0f;
+            lights[0].specular[2] = 1.0f;
+            lights[0].specular[3] = 1.0f;
+        }
+    };
+    FixedFunctionLightingState lighting;
+    struct FixedFunctionTexGenCoord {
+        GLenum mode = GL_EYE_LINEAR;
+        float objectPlane[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        float eyePlane[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    };
+    struct FixedFunctionTexEnvState {
+        GLenum mode = GL_MODULATE;
+        float color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    };
+    std::array<FixedFunctionTexGenCoord, 4> texGen{};
+    FixedFunctionTexEnvState texEnv;
+    std::array<std::array<double, 4>, 8> clipPlanes{};
+    float accumClearColor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     // GL 4.2 — image load/store unit bindings.
     struct ImageBinding {
         GLuint texture = 0;
@@ -28832,6 +29476,15 @@ GLenum GLContext::popError() {
     const GLenum error = impl_->errors.front();
     impl_->errors.pop_front();
     return error;
+}
+
+GLenum GLContext::popErrorForGetError() {
+    if (impl_->immediate.active) {
+        pushError(GL_INVALID_OPERATION, "glGetError",
+                  "glGetError called inside glBegin/glEnd");
+        return GL_NO_ERROR;
+    }
+    return popError();
 }
 
 const GLubyte* GLContext::getString(GLenum name) {
@@ -42493,6 +43146,10 @@ static bool isValidDrawMode(GLenum mode) {
         case GL_TRIANGLE_STRIP_ADJACENCY:
         case GL_PATCHES:
             return true;
+        case GL_QUADS:
+        case GL_QUAD_STRIP:
+        case GL_POLYGON:
+            return appglCompatProfileEnabled();
         default:
             return false;
     }
