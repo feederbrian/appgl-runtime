@@ -176,6 +176,7 @@ void seedBaseExtensions(RegistryState& state) {
         state.activeExtensions.push_back("GL_EXT_packed_depth_stencil");
         state.activeExtensions.push_back("GL_ARB_depth_buffer_float");
         state.activeExtensions.push_back("GL_ARB_window_pos");
+        state.activeExtensions.push_back("GL_EXT_gpu_shader4");
     }
     state.sparseTextureHooks = {};
     state.fragmentShadingRateHooks = {};

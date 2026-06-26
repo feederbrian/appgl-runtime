@@ -404,6 +404,74 @@ static const GpuShader4ShadowWrapper kGpuShader4ShadowWrappers[] = {
         "}\n",
     },
     {
+        "shadow1DArray",
+        "appgl_gpu_shader4_shadow1DArray",
+        "vec4 appgl_gpu_shader4_shadow1DArray(sampler1DArrayShadow s, vec3 p) {\n"
+        "    return vec4(texture(s, p));\n"
+        "}\n",
+        "vec4 appgl_gpu_shader4_shadow1DArray(sampler1DArrayShadow s, vec3 p, float bias) {\n"
+        "    return vec4(texture(s, p, bias));\n"
+        "}\n",
+    },
+    {
+        "shadow2DArray",
+        "appgl_gpu_shader4_shadow2DArray",
+        "vec4 appgl_gpu_shader4_shadow2DArray(sampler2DArrayShadow s, vec4 p) {\n"
+        "    return vec4(texture(s, p));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow2DRect",
+        "appgl_gpu_shader4_shadow2DRect",
+        "vec4 appgl_gpu_shader4_shadow2DRect(sampler2DRectShadow s, vec3 p) {\n"
+        "    return vec4(texture(s, p));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow2DRectProj",
+        "appgl_gpu_shader4_shadow2DRectProj",
+        "vec4 appgl_gpu_shader4_shadow2DRectProj(sampler2DRectShadow s, vec4 p) {\n"
+        "    return vec4(textureProj(s, p));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow1DArrayOffset",
+        "appgl_gpu_shader4_shadow1DArrayOffset",
+        "vec4 appgl_gpu_shader4_shadow1DArrayOffset(sampler1DArrayShadow s, vec3 p, int offset) {\n"
+        "    return vec4(texture(s, p));\n"
+        "}\n",
+        "vec4 appgl_gpu_shader4_shadow1DArrayOffset(sampler1DArrayShadow s, vec3 p, int offset, float bias) {\n"
+        "    return vec4(texture(s, p, bias));\n"
+        "}\n",
+    },
+    {
+        "shadow2DArrayOffset",
+        "appgl_gpu_shader4_shadow2DArrayOffset",
+        "vec4 appgl_gpu_shader4_shadow2DArrayOffset(sampler2DArrayShadow s, vec4 p, ivec2 offset) {\n"
+        "    return vec4(texture(s, p));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow2DRectOffset",
+        "appgl_gpu_shader4_shadow2DRectOffset",
+        "vec4 appgl_gpu_shader4_shadow2DRectOffset(sampler2DRectShadow s, vec3 p, ivec2 offset) {\n"
+        "    return vec4(texture(s, p));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow2DRectProjOffset",
+        "appgl_gpu_shader4_shadow2DRectProjOffset",
+        "vec4 appgl_gpu_shader4_shadow2DRectProjOffset(sampler2DRectShadow s, vec4 p, ivec2 offset) {\n"
+        "    return vec4(textureProj(s, p));\n"
+        "}\n",
+        nullptr,
+    },
+    {
         "shadow1DLod",
         "appgl_gpu_shader4_shadow1DLod",
         "vec4 appgl_gpu_shader4_shadow1DLod(sampler1DShadow s, vec3 p, float lod) {\n"
@@ -464,6 +532,22 @@ static const GpuShader4ShadowWrapper kGpuShader4ShadowWrappers[] = {
         "appgl_gpu_shader4_shadow2DProjLodOffset",
         "vec4 appgl_gpu_shader4_shadow2DProjLodOffset(sampler2DShadow s, vec4 p, float lod, ivec2 offset) {\n"
         "    return vec4(textureProjLod(s, p, lod));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow1DArrayLod",
+        "appgl_gpu_shader4_shadow1DArrayLod",
+        "vec4 appgl_gpu_shader4_shadow1DArrayLod(sampler1DArrayShadow s, vec3 p, float lod) {\n"
+        "    return vec4(textureLod(s, p, lod));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow1DArrayLodOffset",
+        "appgl_gpu_shader4_shadow1DArrayLodOffset",
+        "vec4 appgl_gpu_shader4_shadow1DArrayLodOffset(sampler1DArrayShadow s, vec3 p, float lod, int offset) {\n"
+        "    return vec4(textureLod(s, p, lod));\n"
         "}\n",
         nullptr,
     },
@@ -539,6 +623,70 @@ static const GpuShader4ShadowWrapper kGpuShader4ShadowWrappers[] = {
         "}\n",
         nullptr,
     },
+    {
+        "shadow1DArrayGrad",
+        "appgl_gpu_shader4_shadow1DArrayGrad",
+        "vec4 appgl_gpu_shader4_shadow1DArrayGrad(sampler1DArrayShadow s, vec3 p, float dPdx, float dPdy) {\n"
+        "    return vec4(textureGrad(s, p, dPdx, dPdy));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow2DArrayGrad",
+        "appgl_gpu_shader4_shadow2DArrayGrad",
+        "vec4 appgl_gpu_shader4_shadow2DArrayGrad(sampler2DArrayShadow s, vec4 p, vec2 dPdx, vec2 dPdy) {\n"
+        "    return vec4(textureGrad(s, p, dPdx, dPdy));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow2DRectGrad",
+        "appgl_gpu_shader4_shadow2DRectGrad",
+        "vec4 appgl_gpu_shader4_shadow2DRectGrad(sampler2DRectShadow s, vec3 p, vec2 dPdx, vec2 dPdy) {\n"
+        "    return vec4(textureGrad(s, p, dPdx, dPdy));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow2DRectProjGrad",
+        "appgl_gpu_shader4_shadow2DRectProjGrad",
+        "vec4 appgl_gpu_shader4_shadow2DRectProjGrad(sampler2DRectShadow s, vec4 p, vec2 dPdx, vec2 dPdy) {\n"
+        "    return vec4(textureProjGrad(s, p, dPdx, dPdy));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow1DArrayGradOffset",
+        "appgl_gpu_shader4_shadow1DArrayGradOffset",
+        "vec4 appgl_gpu_shader4_shadow1DArrayGradOffset(sampler1DArrayShadow s, vec3 p, float dPdx, float dPdy, int offset) {\n"
+        "    return vec4(textureGrad(s, p, dPdx, dPdy));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow2DArrayGradOffset",
+        "appgl_gpu_shader4_shadow2DArrayGradOffset",
+        "vec4 appgl_gpu_shader4_shadow2DArrayGradOffset(sampler2DArrayShadow s, vec4 p, vec2 dPdx, vec2 dPdy, ivec2 offset) {\n"
+        "    return vec4(textureGrad(s, p, dPdx, dPdy));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow2DRectGradOffset",
+        "appgl_gpu_shader4_shadow2DRectGradOffset",
+        "vec4 appgl_gpu_shader4_shadow2DRectGradOffset(sampler2DRectShadow s, vec3 p, vec2 dPdx, vec2 dPdy, ivec2 offset) {\n"
+        "    return vec4(textureGrad(s, p, dPdx, dPdy));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow2DRectProjGradOffset",
+        "appgl_gpu_shader4_shadow2DRectProjGradOffset",
+        "vec4 appgl_gpu_shader4_shadow2DRectProjGradOffset(sampler2DRectShadow s, vec4 p, vec2 dPdx, vec2 dPdy, ivec2 offset) {\n"
+        "    return vec4(textureProjGrad(s, p, dPdx, dPdy));\n"
+        "}\n",
+        nullptr,
+    },
 };
 
 struct GpuShader4TextureAlias {
@@ -551,50 +699,81 @@ static const GpuShader4TextureAlias kGpuShader4TextureAliases[] = {
     {"textureSize2D", "textureSize"},
     {"textureSize3D", "textureSize"},
     {"textureSizeCube", "textureSize"},
+    {"textureSize1DArray", "textureSize"},
+    {"textureSize2DArray", "textureSize"},
+    {"textureSize2DRect", "textureSize"},
+    {"textureSizeBuffer", "textureSize"},
 
+    {"texelFetch1DArrayOffset", "texelFetchOffset"},
+    {"texelFetch2DArrayOffset", "texelFetchOffset"},
+    {"texelFetch2DRectOffset", "texelFetchOffset"},
     {"texelFetch1DOffset", "texelFetchOffset"},
     {"texelFetch2DOffset", "texelFetchOffset"},
     {"texelFetch3DOffset", "texelFetchOffset"},
+    {"texelFetch1DArray", "texelFetch"},
+    {"texelFetch2DArray", "texelFetch"},
+    {"texelFetch2DRect", "texelFetch"},
+    {"texelFetchBuffer", "texelFetch"},
     {"texelFetch1D", "texelFetch"},
     {"texelFetch2D", "texelFetch"},
     {"texelFetch3D", "texelFetch"},
 
+    {"texture2DRectProjGradOffset", "textureProjGradOffset"},
     {"texture1DProjGradOffset", "textureProjGradOffset"},
     {"texture2DProjGradOffset", "textureProjGradOffset"},
     {"texture3DProjGradOffset", "textureProjGradOffset"},
     {"texture1DProjLodOffset", "textureProjLodOffset"},
     {"texture2DProjLodOffset", "textureProjLodOffset"},
     {"texture3DProjLodOffset", "textureProjLodOffset"},
+    {"texture2DRectProjOffset", "textureProjOffset"},
     {"texture1DProjOffset", "textureProjOffset"},
     {"texture2DProjOffset", "textureProjOffset"},
     {"texture3DProjOffset", "textureProjOffset"},
+    {"texture2DRectProjGrad", "textureProjGrad"},
     {"texture1DProjGrad", "textureProjGrad"},
     {"texture2DProjGrad", "textureProjGrad"},
     {"texture3DProjGrad", "textureProjGrad"},
     {"texture1DProjLod", "textureProjLod"},
     {"texture2DProjLod", "textureProjLod"},
     {"texture3DProjLod", "textureProjLod"},
+    {"texture2DRectProj", "textureProj"},
     {"texture1DProj", "textureProj"},
     {"texture2DProj", "textureProj"},
     {"texture3DProj", "textureProj"},
 
+    {"texture1DArrayGradOffset", "textureGradOffset"},
+    {"texture2DArrayGradOffset", "textureGradOffset"},
+    {"texture2DRectGradOffset", "textureGradOffset"},
     {"texture1DGradOffset", "textureGradOffset"},
     {"texture2DGradOffset", "textureGradOffset"},
     {"texture3DGradOffset", "textureGradOffset"},
+    {"texture1DArrayLodOffset", "textureLodOffset"},
+    {"texture2DArrayLodOffset", "textureLodOffset"},
     {"texture1DLodOffset", "textureLodOffset"},
     {"texture2DLodOffset", "textureLodOffset"},
     {"texture3DLodOffset", "textureLodOffset"},
+    {"texture1DArrayOffset", "textureOffset"},
+    {"texture2DArrayOffset", "textureOffset"},
+    {"texture2DRectOffset", "textureOffset"},
     {"texture1DOffset", "textureOffset"},
     {"texture2DOffset", "textureOffset"},
     {"texture3DOffset", "textureOffset"},
+    {"texture1DArrayGrad", "textureGrad"},
+    {"texture2DArrayGrad", "textureGrad"},
+    {"texture2DRectGrad", "textureGrad"},
     {"texture1DGrad", "textureGrad"},
     {"texture2DGrad", "textureGrad"},
     {"texture3DGrad", "textureGrad"},
     {"textureCubeGrad", "textureGrad"},
+    {"texture1DArrayLod", "textureLod"},
+    {"texture2DArrayLod", "textureLod"},
     {"texture1DLod", "textureLod"},
     {"texture2DLod", "textureLod"},
     {"texture3DLod", "textureLod"},
     {"textureCubeLod", "textureLod"},
+    {"texture1DArray", "texture"},
+    {"texture2DArray", "texture"},
+    {"texture2DRect", "texture"},
     {"texture1D", "texture"},
     {"texture2D", "texture"},
     {"texture3D", "texture"},
