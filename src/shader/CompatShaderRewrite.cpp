@@ -68,6 +68,38 @@ void replaceIdentifier(std::string& src,
     }
 }
 
+bool replaceFunctionIdentifier(std::string& src,
+                               std::string_view from,
+                               std::string_view to) {
+    bool didReplace = false;
+    std::size_t pos = 0;
+    while (true) {
+        const std::size_t found = src.find(from, pos);
+        if (found == std::string::npos) {
+            return didReplace;
+        }
+        const bool leftOk = (found == 0) || !isIdentChar(src[found - 1]);
+        const std::size_t end = found + from.size();
+        const bool rightOk = (end >= src.size()) || !isIdentChar(src[end]);
+        if (!leftOk || !rightOk) {
+            pos = found + 1;
+            continue;
+        }
+        std::size_t call = end;
+        while (call < src.size() &&
+               std::isspace(static_cast<unsigned char>(src[call]))) {
+            ++call;
+        }
+        if (call < src.size() && src[call] == '(') {
+            src.replace(found, from.size(), to);
+            didReplace = true;
+            pos = found + to.size();
+        } else {
+            pos = found + 1;
+        }
+    }
+}
+
 // Replace every literal occurrence of `from` with `to`. Used for
 // dotted field-access rewrites (`gl_Fog.color` → `appgl_FogColor`)
 // where the leading and trailing boundaries are already partly
@@ -1266,7 +1298,13 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         }
     }
 
-    if (!didAnyRewrite && !didSamplerFixup) {
+    bool didGpuShader4TruncateFixup = false;
+    if (hasGpuShader4Directive && containsIdentifier(result.source, "truncate")) {
+        didGpuShader4TruncateFixup =
+            replaceFunctionIdentifier(result.source, "truncate", "trunc");
+    }
+
+    if (!didAnyRewrite && !didSamplerFixup && !didGpuShader4TruncateFixup) {
         return result;
     }
     result.didRewrite = true;
