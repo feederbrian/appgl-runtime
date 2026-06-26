@@ -28690,29 +28690,30 @@ struct GLContext::Impl {
     // primitive mode, and start accumulating vertices into `vertices`.
     // `glColor*` and `glTexCoord*` update the per-vertex registers
     // without emitting; `glVertex*` pushes one interleaved
-    // `{pos[4], color[4], texcoord[2]}` tuple into the buffer using the
+    // `{pos[4], color[4], texcoord[4]}` tuple into the buffer using the
     // current registers. `glEnd` expands `GL_QUADS` to triangles
     // CPU-side (Metal core has no quads primitive), resolves the
-    // currently-bound unit-0 GL_TEXTURE_2D for the textured-vs-untextured
+    // currently-bound unit-0 GL_TEXTURE_2D/GL_TEXTURE_1D for the
+    // textured-vs-untextured
     // pipeline choice, and hands the buffer off to
     // `MetalFrameGraph::encodeImmediateModeDraw`.
     //
     // The capture buffer reuses this struct across calls (we only
     // `clear()` the vector on `beginImmediate`) so per-batch allocations
-    // stay amortized. The 40-byte vertex matches the vertex descriptor
+    // stay amortized. The 48-byte vertex matches the vertex descriptor
     // set up in `MetalFrameGraph::ensureImmediateModePipeline`.
     struct ImmediateModeVertex {
         float position[4];
         float color[4];
-        float texcoord[2];
+        float texcoord[4];
     };
-    static_assert(sizeof(ImmediateModeVertex) == 40,
-                  "ImmediateModeVertex must be 40 bytes to match the vertex descriptor in MetalFrameGraph::ensureImmediateModePipeline");
+    static_assert(sizeof(ImmediateModeVertex) == 48,
+                  "ImmediateModeVertex must be 48 bytes to match the vertex descriptor in MetalFrameGraph::ensureImmediateModePipeline");
     struct ImmediateModeCapture {
         bool active = false;
         GLenum mode = 0;
         float currentColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-        float currentTexcoord[2] = {0.0f, 0.0f};
+        float currentTexcoord[4] = {0.0f, 0.0f, 0.0f, 1.0f};
         std::vector<ImmediateModeVertex> vertices;
     };
     ImmediateModeCapture immediate;

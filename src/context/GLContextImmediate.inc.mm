@@ -2095,6 +2095,8 @@ void GLContext::immediateVertex(float x, float y, float z, float w) {
     v.color[3] = impl_->immediate.currentColor[3];
     v.texcoord[0] = impl_->immediate.currentTexcoord[0];
     v.texcoord[1] = impl_->immediate.currentTexcoord[1];
+    v.texcoord[2] = impl_->immediate.currentTexcoord[2];
+    v.texcoord[3] = impl_->immediate.currentTexcoord[3];
     impl_->immediate.vertices.push_back(v);
 }
 
@@ -2158,7 +2160,7 @@ void GLContext::immediateColor(float r, float g, float b, float a) {
     }
 }
 
-void GLContext::immediateTexCoord(unsigned int unit, float s, float t, float /*r*/, float /*q*/) {
+void GLContext::immediateTexCoord(unsigned int unit, float s, float t, float r, float q) {
     // Only texture unit 0 is captured for the built-in immediate-mode
     // pipeline (Chobby/Chili UI only uses unit 0). Multi-texturing on
     // other units is silently ignored — this matches the single-
@@ -2171,6 +2173,8 @@ void GLContext::immediateTexCoord(unsigned int unit, float s, float t, float /*r
         command.kind = Impl::DisplayListCommand::Kind::TexCoord;
         command.values[0] = s;
         command.values[1] = t;
+        command.values[2] = r;
+        command.values[3] = q;
         impl_->displayLists.compileCommands.push_back(command);
         if (!impl_->displayLists.compileAndExecute) {
             return;
@@ -2178,6 +2182,8 @@ void GLContext::immediateTexCoord(unsigned int unit, float s, float t, float /*r
     }
     impl_->immediate.currentTexcoord[0] = s;
     impl_->immediate.currentTexcoord[1] = t;
+    impl_->immediate.currentTexcoord[2] = r;
+    impl_->immediate.currentTexcoord[3] = q;
 }
 
 void GLContext::endImmediate() {
@@ -3367,6 +3373,10 @@ void GLContext::endImmediate() {
         if (!filledPrimitiveMode) {
             return false;
         }
+        if (impl_->state->isEnabled(GL_TEXTURE_1D) ||
+            impl_->state->isEnabled(GL_TEXTURE_2D)) {
+            return false;
+        }
         if (drawMode != GL_TRIANGLES ||
             drawVerts == nullptr ||
             drawCount < 3 ||
@@ -3459,6 +3469,15 @@ void GLContext::endImmediate() {
         float minT = std::numeric_limits<float>::infinity();
         float maxS = -std::numeric_limits<float>::infinity();
         float maxT = -std::numeric_limits<float>::infinity();
+        const auto projectedST = [](const Impl::ImmediateModeVertex& v) {
+            const float invQ = v.texcoord[3] != 0.0f
+                ? 1.0f / v.texcoord[3]
+                : 1.0f;
+            return std::array<float, 2>{
+                v.texcoord[0] * invQ,
+                v.texcoord[1] * invQ
+            };
+        };
         if (texture2D) {
             GLTextureObject* texture = impl_->currentTexture(GL_TEXTURE_2D);
             if (texture == nullptr) {
@@ -3471,10 +3490,11 @@ void GLContext::endImmediate() {
             }
             const GLTextureImageLevel& baseImage = baseIt->second;
             for (std::size_t i = 0; i < drawCount; ++i) {
-                minS = std::min(minS, drawVerts[i].texcoord[0]);
-                minT = std::min(minT, drawVerts[i].texcoord[1]);
-                maxS = std::max(maxS, drawVerts[i].texcoord[0]);
-                maxT = std::max(maxT, drawVerts[i].texcoord[1]);
+                const auto st = projectedST(drawVerts[i]);
+                minS = std::min(minS, st[0]);
+                minT = std::min(minT, st[1]);
+                maxS = std::max(maxS, st[0]);
+                maxT = std::max(maxT, st[1]);
             }
             auto mipmappedMinFilter = [](GLint filter) {
                 switch (filter) {
@@ -3755,29 +3775,29 @@ void GLContext::endImmediate() {
 
     void* fixedFunctionSamplerState = nullptr;
     GLenum fixedFunctionTextureInternalFormat = 0;
+    GLenum fixedFunctionTextureTarget = 0;
     auto resolveFixedFunctionTexture = [&]() -> void* {
-        GLenum target = 0;
-        if (impl_->state->isEnabled(GL_TEXTURE_2D)) {
-            target = GL_TEXTURE_2D;
-        } else if (impl_->state->isEnabled(GL_TEXTURE_1D)) {
-            target = GL_TEXTURE_1D;
+        for (GLenum target : {GL_TEXTURE_2D, GL_TEXTURE_1D}) {
+            if (!impl_->state->isEnabled(target)) {
+                continue;
+            }
+            const GLuint texName = impl_->state->boundTextureOnUnit(0, target);
+            GLTextureObject* tex = impl_->currentTexture(target);
+            if (tex == nullptr || tex->metalTexture == nullptr) {
+                continue;
+            }
+            if (!impl_->sampledTextureCompleteForSampler(*tex, tex->params)) {
+                continue;
+            }
+            if (impl_->rebuildTextureSamplerState(texName, *tex)) {
+                fixedFunctionSamplerState = tex->metalSampler;
+            }
+            fixedFunctionTextureInternalFormat = tex->desc.internalFormat;
+            fixedFunctionTextureTarget = target;
+            return impl_->resolveSwizzledTexture(*tex);
         }
-        if (target == 0) {
-            return nullptr;
-        }
-        const GLuint texName = impl_->state->boundTextureOnUnit(0, target);
-        GLTextureObject* tex = impl_->currentTexture(target);
-        if (tex == nullptr || tex->metalTexture == nullptr) {
-            return nullptr;
-        }
-        if (!impl_->sampledTextureCompleteForSampler(*tex, tex->params)) {
-            return nullptr;
-        }
-        if (impl_->rebuildTextureSamplerState(texName, *tex)) {
-            fixedFunctionSamplerState = tex->metalSampler;
-        }
-        fixedFunctionTextureInternalFormat = tex->desc.internalFormat;
-        return impl_->resolveSwizzledTexture(*tex);
+        fixedFunctionTextureTarget = 0;
+        return nullptr;
     };
 
     if (impl_->encodeImmediateTranslatedProgramDraw(
@@ -3797,6 +3817,7 @@ void GLContext::endImmediate() {
     info.mvp = drawMvp;
     info.metalTexture = resolveFixedFunctionTexture();
     info.metalSamplerState = fixedFunctionSamplerState;
+    info.textureTarget = fixedFunctionTextureTarget;
     if (appglCompatProfileEnabled()) {
         const std::uint32_t textureBaseClass =
             appglImmediateTextureBaseClass(fixedFunctionTextureInternalFormat);
@@ -3979,8 +4000,8 @@ void GLContext::callListCompat(GLuint list) {
                 immediateTexCoord(0,
                                   command.values[0],
                                   command.values[1],
-                                  0.0f,
-                                  1.0f);
+                                  command.values[2],
+                                  command.values[3]);
                 break;
             case Impl::DisplayListCommand::Kind::Enable:
                 setEnabled(command.enumValue, command.values[0] != 0.0f);
@@ -4189,29 +4210,29 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
 
     void* fixedFunctionSamplerState = nullptr;
     GLenum fixedFunctionTextureInternalFormat = 0;
+    GLenum fixedFunctionTextureTarget = 0;
     auto resolveFixedFunctionTexture = [&]() -> void* {
-        GLenum target = 0;
-        if (impl_->state->isEnabled(GL_TEXTURE_2D)) {
-            target = GL_TEXTURE_2D;
-        } else if (impl_->state->isEnabled(GL_TEXTURE_1D)) {
-            target = GL_TEXTURE_1D;
+        for (GLenum target : {GL_TEXTURE_2D, GL_TEXTURE_1D}) {
+            if (!impl_->state->isEnabled(target)) {
+                continue;
+            }
+            const GLuint texName = impl_->state->boundTextureOnUnit(0, target);
+            GLTextureObject* tex = impl_->currentTexture(target);
+            if (tex == nullptr || tex->metalTexture == nullptr) {
+                continue;
+            }
+            if (!impl_->sampledTextureCompleteForSampler(*tex, tex->params)) {
+                continue;
+            }
+            if (impl_->rebuildTextureSamplerState(texName, *tex)) {
+                fixedFunctionSamplerState = tex->metalSampler;
+            }
+            fixedFunctionTextureInternalFormat = tex->desc.internalFormat;
+            fixedFunctionTextureTarget = target;
+            return impl_->resolveSwizzledTexture(*tex);
         }
-        if (target == 0) {
-            return nullptr;
-        }
-        const GLuint texName = impl_->state->boundTextureOnUnit(0, target);
-        GLTextureObject* tex = impl_->currentTexture(target);
-        if (tex == nullptr || tex->metalTexture == nullptr) {
-            return nullptr;
-        }
-        if (!impl_->sampledTextureCompleteForSampler(*tex, tex->params)) {
-            return nullptr;
-        }
-        if (impl_->rebuildTextureSamplerState(texName, *tex)) {
-            fixedFunctionSamplerState = tex->metalSampler;
-        }
-        fixedFunctionTextureInternalFormat = tex->desc.internalFormat;
-        return impl_->resolveSwizzledTexture(*tex);
+        fixedFunctionTextureTarget = 0;
+        return nullptr;
     };
 
     const std::size_t vertexStride = vertexArray.stride > 0
@@ -4347,6 +4368,12 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         v.texcoord[1] = (tp != nullptr && texCoordArray.size >= 2)
             ? tp[1]
             : impl_->immediate.currentTexcoord[1];
+        v.texcoord[2] = (tp != nullptr && texCoordArray.size >= 3)
+            ? tp[2]
+            : impl_->immediate.currentTexcoord[2];
+        v.texcoord[3] = (tp != nullptr && texCoordArray.size >= 4)
+            ? tp[3]
+            : impl_->immediate.currentTexcoord[3];
         source.push_back(v);
     }
 
@@ -4993,6 +5020,7 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         info.mvp = encodeMvp;
         info.metalTexture = resolveFixedFunctionTexture();
         info.metalSamplerState = fixedFunctionSamplerState;
+        info.textureTarget = fixedFunctionTextureTarget;
         if (appglCompatProfileEnabled()) {
             const std::uint32_t textureBaseClass =
                 appglImmediateTextureBaseClass(fixedFunctionTextureInternalFormat);

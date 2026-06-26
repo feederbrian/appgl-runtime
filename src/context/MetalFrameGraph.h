@@ -764,18 +764,19 @@ struct TranslatedDrawInfo {
 // draw captured between `glBegin` and `glEnd`.
 //
 // The vertex layout is fixed: `{float position[4], float color[4],
-// float texcoord[2]}` = 40 bytes. `vertices` points at a contiguous
+// float texcoord[4]}` = 48 bytes. `vertices` points at a contiguous
 // array of that tuple type (owned by the caller — `GLContext::endImmediate`
 // passes its capture vector directly, and the frame graph copies the
 // bytes into the triple-buffered ring before returning). `vertexStride`
-// is always `sizeof(float) * 10` but is carried explicitly so the Metal
+// is always `sizeof(float) * 12` but is carried explicitly so the Metal
 // vertex descriptor can be built from the struct without magic numbers.
 //
 // `mvp` is the projection * modelview matrix snapshot at glEnd time;
 // it's pushed as a vertex-stage constant because no shader program is
-// active on this path. `metalTexture` is the id<MTLTexture> bound to
-// GL_TEXTURE_2D on unit 0 (resolved by the caller), or nullptr if no
-// texture is bound; `metalSamplerState` carries the matching fixed-
+// active on this path. `metalTexture` is the id<MTLTexture> bound to the
+// fixed-function unit-0 target (GL_TEXTURE_1D or GL_TEXTURE_2D, resolved
+// by the caller), or nullptr if no texture is bound; `metalSamplerState`
+// carries the matching fixed-
 // function texture parameters when available. The frame graph picks
 // the untextured pipeline when `metalTexture` is null.
 struct ImmediateDrawInfo {
@@ -786,6 +787,7 @@ struct ImmediateDrawInfo {
     Matrix4 mvp = Matrix4::identity();
     void* metalTexture = nullptr;  // id<MTLTexture> or nullptr
     void* metalSamplerState = nullptr; // id<MTLSamplerState> or nullptr
+    GLenum textureTarget = 0;
     GLenum textureEnvMode = 0;
     std::uint32_t textureBaseClass = 0; // 1 = legacy GL_ALPHA-family texture.
     GLenum fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;

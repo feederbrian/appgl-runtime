@@ -5567,9 +5567,11 @@ struct MetalFrameGraph::Impl {
         releaseOwnedObjCObject(immediateModeLibrary);
         releaseOwnedObjCObject(immediateModeVertexFn);
         releaseOwnedObjCObject(immediateModeColorFragmentFn);
-        releaseOwnedObjCObject(immediateModeTexturedFragmentFn);
+        releaseOwnedObjCObject(immediateModeTextured2DFragmentFn);
+        releaseOwnedObjCObject(immediateModeTextured1DFragmentFn);
         releaseOwnedObjCObject(immediateModeColorPipelineState);
-        releaseOwnedObjCObject(immediateModeTexturedPipelineState);
+        releaseOwnedObjCObject(immediateModeTextured2DPipelineState);
+        releaseOwnedObjCObject(immediateModeTextured1DPipelineState);
         releaseOwnedObjCObject(immediateModeSamplerState);
         releaseOwnedObjCObject(depthStencilUploadLibrary);
         releaseOwnedObjCObject(depthStencilUploadVertexFn);
@@ -16452,8 +16454,9 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
     }
 
     // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
-    // shader library and two pipeline states (vertex-color-only and
-    // vertex-color × texture2D). Built lazily on first glEnd that
+    // shader library and three pipeline states (vertex-color-only,
+    // vertex-color × texture2D, and vertex-color × native texture1D).
+    // Built lazily on first glEnd that
     // actually drains vertices, mirroring the solid-color pattern.
     //
     // The MSL vertex shader reads the captured `{pos, color, texcoord}`
@@ -16462,7 +16465,7 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
     // index 1 (buffer 0 is the vertex data). The fragment shader picks
     // the path based on which pipeline is bound — untextured just
     // returns the interpolated color, textured multiplies it by a
-    // sample from a single-unit texture2D bound at fragment slot 0.
+    // sample from a single-unit texture bound at fragment slot 0.
     // Both pipelines share the same vertex descriptor / vertex function
     // / color format, so the only divergence is the fragment function.
     bool ensureImmediateModeLibrary() {
@@ -16476,19 +16479,39 @@ using namespace metal;
 struct AppGLImmediateIn {
     float4 position [[attribute(0)]];
     float4 color    [[attribute(1)]];
-    float2 texcoord [[attribute(2)]];
+    float4 texcoord [[attribute(2)]];
 };
 
 struct AppGLImmediateOut {
     float4 position [[position]];
     float4 color;
-    float2 texcoord;
+    float4 texcoord;
 };
 
 struct AppGLImmediateTextureState {
     uint envMode;
     uint baseClass;
+    uint target;
 };
+
+static float4 appgl_immediate_finish_sample(float4 color,
+                                            float4 sample,
+                                            constant AppGLImmediateTextureState& textureState) {
+    constexpr uint kEnvReplace = 0x1E01u;
+    constexpr uint kBaseAlpha = 1u;
+    if (textureState.envMode == kEnvReplace) {
+        if (textureState.baseClass == kBaseAlpha) {
+            return float4(color.rgb, sample.a);
+        }
+        return sample;
+    }
+    return color * sample;
+}
+
+static float2 appgl_immediate_projected_st(float4 texcoord) {
+    const float invQ = texcoord.w != 0.0f ? 1.0f / texcoord.w : 1.0f;
+    return texcoord.xy * invQ;
+}
 
 vertex AppGLImmediateOut appgl_immediate_vs(
     AppGLImmediateIn in [[stage_in]],
@@ -16512,16 +16535,24 @@ fragment float4 appgl_immediate_textured_fs(
     sampler samp [[sampler(0)]],
     constant AppGLImmediateTextureState& textureState [[buffer(0)]]
 ) {
-    constexpr uint kEnvReplace = 0x1E01u;
-    constexpr uint kBaseAlpha = 1u;
-    float4 sample = tex.sample(samp, in.texcoord);
-    if (textureState.envMode == kEnvReplace) {
-        if (textureState.baseClass == kBaseAlpha) {
-            return float4(in.color.rgb, sample.a);
-        }
-        return sample;
-    }
-    return in.color * sample;
+    constexpr uint kTargetTexture1D = 0x0DE0u;
+    const float2 st = appgl_immediate_projected_st(in.texcoord);
+    const float2 coord = textureState.target == kTargetTexture1D
+        ? float2(st.x, 0.5f)
+        : st;
+    return appgl_immediate_finish_sample(
+        in.color, tex.sample(samp, coord), textureState);
+}
+
+fragment float4 appgl_immediate_textured_1d_fs(
+    AppGLImmediateOut in [[stage_in]],
+    texture1d<float> tex [[texture(0)]],
+    sampler samp [[sampler(0)]],
+    constant AppGLImmediateTextureState& textureState [[buffer(0)]]
+) {
+    const float2 st = appgl_immediate_projected_st(in.texcoord);
+    return appgl_immediate_finish_sample(
+        in.color, tex.sample(samp, st.x), textureState);
 }
 )MSL";
         NSError* error = nil;
@@ -16532,10 +16563,12 @@ fragment float4 appgl_immediate_textured_fs(
         }
         immediateModeVertexFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_vs"];
         immediateModeColorFragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_color_fs"];
-        immediateModeTexturedFragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_textured_fs"];
+        immediateModeTextured2DFragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_textured_fs"];
+        immediateModeTextured1DFragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_textured_1d_fs"];
         return immediateModeVertexFn != nil
             && immediateModeColorFragmentFn != nil
-            && immediateModeTexturedFragmentFn != nil;
+            && immediateModeTextured2DFragmentFn != nil
+            && immediateModeTextured1DFragmentFn != nil;
     }
 
     static std::uint64_t computeImmediateModePipelineKey(
@@ -16563,7 +16596,8 @@ fragment float4 appgl_immediate_textured_fs(
         const std::uint64_t pipelineKey =
             computeImmediateModePipelineKey(colorFormat, blend);
         if (immediateModeColorPipelineState != nil
-            && immediateModeTexturedPipelineState != nil
+            && immediateModeTextured2DPipelineState != nil
+            && immediateModeTextured1DPipelineState != nil
             && immediateModePipelineKey == pipelineKey) {
             return true;
         }
@@ -16577,11 +16611,11 @@ fragment float4 appgl_immediate_textured_fs(
         vertexDescriptor.attributes[1].format = MTLVertexFormatFloat4;
         vertexDescriptor.attributes[1].offset = sizeof(float) * 4;
         vertexDescriptor.attributes[1].bufferIndex = 0;
-        // attribute 2: texcoord (float2) at offset 32
-        vertexDescriptor.attributes[2].format = MTLVertexFormatFloat2;
+        // attribute 2: texcoord (float4) at offset 32
+        vertexDescriptor.attributes[2].format = MTLVertexFormatFloat4;
         vertexDescriptor.attributes[2].offset = sizeof(float) * 8;
         vertexDescriptor.attributes[2].bufferIndex = 0;
-        vertexDescriptor.layouts[0].stride = sizeof(float) * 10; // 40 bytes
+        vertexDescriptor.layouts[0].stride = sizeof(float) * 12; // 48 bytes
         vertexDescriptor.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
         vertexDescriptor.layouts[0].stepRate = 1;
 
@@ -16617,16 +16651,20 @@ fragment float4 appgl_immediate_textured_fs(
         };
 
         id<MTLRenderPipelineState> colorState = makePipeline(immediateModeColorFragmentFn);
-        id<MTLRenderPipelineState> texturedState = makePipeline(immediateModeTexturedFragmentFn);
-        if (colorState == nil || texturedState == nil) {
+        id<MTLRenderPipelineState> textured2DState = makePipeline(immediateModeTextured2DFragmentFn);
+        id<MTLRenderPipelineState> textured1DState = makePipeline(immediateModeTextured1DFragmentFn);
+        if (colorState == nil || textured2DState == nil || textured1DState == nil) {
             releaseOwnedObjCObject(colorState);
-            releaseOwnedObjCObject(texturedState);
+            releaseOwnedObjCObject(textured2DState);
+            releaseOwnedObjCObject(textured1DState);
             return false;
         }
         releaseOwnedObjCObject(immediateModeColorPipelineState);
-        releaseOwnedObjCObject(immediateModeTexturedPipelineState);
+        releaseOwnedObjCObject(immediateModeTextured2DPipelineState);
+        releaseOwnedObjCObject(immediateModeTextured1DPipelineState);
         immediateModeColorPipelineState = colorState;
-        immediateModeTexturedPipelineState = texturedState;
+        immediateModeTextured2DPipelineState = textured2DState;
+        immediateModeTextured1DPipelineState = textured1DState;
         immediateModePipelineKey = pipelineKey;
         return true;
     }
@@ -17783,9 +17821,19 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             return false;
         }
 
-        id<MTLRenderPipelineState> pipelineState = (info.metalTexture != nullptr)
-            ? immediateModeTexturedPipelineState
+        id<MTLTexture> immediateTexture = info.metalTexture != nullptr
+            ? (__bridge id<MTLTexture>)(info.metalTexture)
+            : nil;
+        const bool immediateTextureIsNative1D =
+            immediateTexture != nil && immediateTexture.textureType == MTLTextureType1D;
+        id<MTLRenderPipelineState> pipelineState = immediateTexture != nil
+            ? (immediateTextureIsNative1D
+                ? immediateModeTextured1DPipelineState
+                : immediateModeTextured2DPipelineState)
             : immediateModeColorPipelineState;
+        if (pipelineState == nil) {
+            return false;
+        }
         [encoder setRenderPipelineState:pipelineState];
         [encoder setCullMode:MTLCullModeNone];
         [encoder setFrontFacingWinding:MTLWindingCounterClockwise];
@@ -17908,9 +17956,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         const Matrix4 mvp = info.mvp;
         [encoder setVertexBytes:mvp.m.data() length:sizeof(float) * 16 atIndex:1];
 
-        if (info.metalTexture != nullptr) {
-            id<MTLTexture> tex = (__bridge id<MTLTexture>)(info.metalTexture);
-            [encoder setFragmentTexture:tex atIndex:0];
+        if (immediateTexture != nil) {
+            [encoder setFragmentTexture:immediateTexture atIndex:0];
             id<MTLSamplerState> samp = info.metalSamplerState != nullptr
                 ? (__bridge id<MTLSamplerState>)(info.metalSamplerState)
                 : immediateModeDefaultSampler();
@@ -17920,6 +17967,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             struct ImmediateTextureState {
                 std::uint32_t envMode;
                 std::uint32_t baseClass;
+                std::uint32_t target;
             };
             const bool compatLegacyTextureState =
                 appglCompatProfileEnabled() && info.textureBaseClass != 0u;
@@ -17927,7 +17975,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 compatLegacyTextureState
                     ? static_cast<std::uint32_t>(info.textureEnvMode)
                     : 0u,
-                compatLegacyTextureState ? info.textureBaseClass : 0u
+                compatLegacyTextureState ? info.textureBaseClass : 0u,
+                info.textureTarget == GL_TEXTURE_1D
+                    ? static_cast<std::uint32_t>(GL_TEXTURE_1D)
+                    : 0u
             };
             [encoder setFragmentBytes:&textureState
                                 length:sizeof(textureState)
@@ -23277,9 +23328,11 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         addLibrary(immediateModeLibrary);
         addFunction(immediateModeVertexFn);
         addFunction(immediateModeColorFragmentFn);
-        addFunction(immediateModeTexturedFragmentFn);
+        addFunction(immediateModeTextured2DFragmentFn);
+        addFunction(immediateModeTextured1DFragmentFn);
         addRenderPipeline(immediateModeColorPipelineState);
-        addRenderPipeline(immediateModeTexturedPipelineState);
+        addRenderPipeline(immediateModeTextured2DPipelineState);
+        addRenderPipeline(immediateModeTextured1DPipelineState);
         addSampler(immediateModeSamplerState);
         addLibrary(depthStencilUploadLibrary);
         addFunction(depthStencilUploadVertexFn);
@@ -23582,7 +23635,7 @@ private:
     id<MTLComputePipelineState> tessDomainPortQuadsPSO = nil;
 
     // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
-    // shader library, two pipeline states, and a default sampler.
+    // shader library, three pipeline states, and a default sampler.
     // See `ensureImmediateModeLibrary` and `ensureImmediateModePipelines`
     // for the shader source and descriptor layout. These are only
     // touched from `encodeImmediateModeDraw` so no cross-encoder
@@ -23590,9 +23643,11 @@ private:
     id<MTLLibrary> immediateModeLibrary = nil;
     id<MTLFunction> immediateModeVertexFn = nil;
     id<MTLFunction> immediateModeColorFragmentFn = nil;
-    id<MTLFunction> immediateModeTexturedFragmentFn = nil;
+    id<MTLFunction> immediateModeTextured2DFragmentFn = nil;
+    id<MTLFunction> immediateModeTextured1DFragmentFn = nil;
     id<MTLRenderPipelineState> immediateModeColorPipelineState = nil;
-    id<MTLRenderPipelineState> immediateModeTexturedPipelineState = nil;
+    id<MTLRenderPipelineState> immediateModeTextured2DPipelineState = nil;
+    id<MTLRenderPipelineState> immediateModeTextured1DPipelineState = nil;
     std::uint64_t immediateModePipelineKey = 0;
     id<MTLSamplerState> immediateModeSamplerState = nil;
     id<MTLLibrary> depthStencilUploadLibrary = nil;
