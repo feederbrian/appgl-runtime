@@ -198,6 +198,56 @@ bool replaceCodeIdentifier(std::string& src,
     return didReplace;
 }
 
+bool replaceCodeFunctionIdentifier(std::string& src,
+                                   std::string_view from,
+                                   std::string_view to) {
+    bool didReplace = false;
+    std::size_t pos = 0;
+    while (pos < src.size()) {
+        if (isPreprocessorDirectiveLine(src, pos)) {
+            pos = skipPreprocessorDirective(src, pos);
+            continue;
+        }
+        if (src.compare(pos, 2, "//") == 0) {
+            pos = skipLineComment(src, pos);
+            continue;
+        }
+        if (src.compare(pos, 2, "/*") == 0) {
+            pos = skipBlockComment(src, pos);
+            continue;
+        }
+        if (src[pos] == '"' || src[pos] == '\'') {
+            pos = skipStringLiteral(src, pos);
+            continue;
+        }
+        if (src.compare(pos, from.size(), from) != 0) {
+            ++pos;
+            continue;
+        }
+        const bool leftOk = (pos == 0) || !isIdentChar(src[pos - 1]);
+        const std::size_t end = pos + from.size();
+        const bool rightOk =
+            (end >= src.size()) || !isIdentChar(src[end]);
+        if (!leftOk || !rightOk) {
+            ++pos;
+            continue;
+        }
+        std::size_t call = end;
+        while (call < src.size() &&
+               std::isspace(static_cast<unsigned char>(src[call]))) {
+            ++call;
+        }
+        if (call < src.size() && src[call] == '(') {
+            src.replace(pos, from.size(), to);
+            didReplace = true;
+            pos += to.size();
+        } else {
+            ++pos;
+        }
+    }
+    return didReplace;
+}
+
 bool replaceCodeUnsignedInt(std::string& src) {
     static constexpr std::string_view kUnsigned = "unsigned";
     static constexpr std::string_view kInt = "int";
@@ -256,6 +306,240 @@ bool replaceCodeUnsignedInt(std::string& src) {
     }
     return didReplace;
 }
+
+struct GpuShader4ShadowWrapper {
+    const char* legacyName;
+    const char* helperName;
+    const char* commonSource;
+    const char* fragmentSource;
+};
+
+static const GpuShader4ShadowWrapper kGpuShader4ShadowWrappers[] = {
+    {
+        "shadow1D",
+        "appgl_gpu_shader4_shadow1D",
+        "vec4 appgl_gpu_shader4_shadow1D(sampler1DShadow s, vec3 p) {\n"
+        "    return vec4(textureLod(s, p, 0.0));\n"
+        "}\n",
+        "vec4 appgl_gpu_shader4_shadow1D(sampler1DShadow s, vec3 p, float bias) {\n"
+        "    return vec4(texture(s, p, bias));\n"
+        "}\n",
+    },
+    {
+        "shadow2D",
+        "appgl_gpu_shader4_shadow2D",
+        "vec4 appgl_gpu_shader4_shadow2D(sampler2DShadow s, vec3 p) {\n"
+        "    return vec4(textureLod(s, p, 0.0));\n"
+        "}\n",
+        "vec4 appgl_gpu_shader4_shadow2D(sampler2DShadow s, vec3 p, float bias) {\n"
+        "    return vec4(texture(s, p, bias));\n"
+        "}\n",
+    },
+    {
+        "shadowCube",
+        "appgl_gpu_shader4_shadowCube",
+        "vec4 appgl_gpu_shader4_shadowCube(samplerCubeShadow s, vec4 p) {\n"
+        "    return vec4(texture(s, p));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow1DProj",
+        "appgl_gpu_shader4_shadow1DProj",
+        "vec4 appgl_gpu_shader4_shadow1DProj(sampler1DShadow s, vec4 p) {\n"
+        "    return vec4(textureProjLod(s, p, 0.0));\n"
+        "}\n",
+        "vec4 appgl_gpu_shader4_shadow1DProj(sampler1DShadow s, vec4 p, float bias) {\n"
+        "    return vec4(textureProj(s, p, bias));\n"
+        "}\n",
+    },
+    {
+        "shadow2DProj",
+        "appgl_gpu_shader4_shadow2DProj",
+        "vec4 appgl_gpu_shader4_shadow2DProj(sampler2DShadow s, vec4 p) {\n"
+        "    return vec4(textureProjLod(s, p, 0.0));\n"
+        "}\n",
+        "vec4 appgl_gpu_shader4_shadow2DProj(sampler2DShadow s, vec4 p, float bias) {\n"
+        "    return vec4(textureProj(s, p, bias));\n"
+        "}\n",
+    },
+    {
+        "shadow1DOffset",
+        "appgl_gpu_shader4_shadow1DOffset",
+        "vec4 appgl_gpu_shader4_shadow1DOffset(sampler1DShadow s, vec3 p, int offset) {\n"
+        "    return vec4(textureLod(s, p, 0.0));\n"
+        "}\n",
+        "vec4 appgl_gpu_shader4_shadow1DOffset(sampler1DShadow s, vec3 p, int offset, float bias) {\n"
+        "    return vec4(texture(s, p, bias));\n"
+        "}\n",
+    },
+    {
+        "shadow2DOffset",
+        "appgl_gpu_shader4_shadow2DOffset",
+        "vec4 appgl_gpu_shader4_shadow2DOffset(sampler2DShadow s, vec3 p, ivec2 offset) {\n"
+        "    return vec4(textureLod(s, p, 0.0));\n"
+        "}\n",
+        "vec4 appgl_gpu_shader4_shadow2DOffset(sampler2DShadow s, vec3 p, ivec2 offset, float bias) {\n"
+        "    return vec4(texture(s, p, bias));\n"
+        "}\n",
+    },
+    {
+        "shadow1DProjOffset",
+        "appgl_gpu_shader4_shadow1DProjOffset",
+        "vec4 appgl_gpu_shader4_shadow1DProjOffset(sampler1DShadow s, vec4 p, int offset) {\n"
+        "    return vec4(textureProjLod(s, p, 0.0));\n"
+        "}\n",
+        "vec4 appgl_gpu_shader4_shadow1DProjOffset(sampler1DShadow s, vec4 p, int offset, float bias) {\n"
+        "    return vec4(textureProj(s, p, bias));\n"
+        "}\n",
+    },
+    {
+        "shadow2DProjOffset",
+        "appgl_gpu_shader4_shadow2DProjOffset",
+        "vec4 appgl_gpu_shader4_shadow2DProjOffset(sampler2DShadow s, vec4 p, ivec2 offset) {\n"
+        "    return vec4(textureProjLod(s, p, 0.0));\n"
+        "}\n",
+        "vec4 appgl_gpu_shader4_shadow2DProjOffset(sampler2DShadow s, vec4 p, ivec2 offset, float bias) {\n"
+        "    return vec4(textureProj(s, p, bias));\n"
+        "}\n",
+    },
+    {
+        "shadow1DLod",
+        "appgl_gpu_shader4_shadow1DLod",
+        "vec4 appgl_gpu_shader4_shadow1DLod(sampler1DShadow s, vec3 p, float lod) {\n"
+        "    return vec4(textureLod(s, p, lod));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow2DLod",
+        "appgl_gpu_shader4_shadow2DLod",
+        "vec4 appgl_gpu_shader4_shadow2DLod(sampler2DShadow s, vec3 p, float lod) {\n"
+        "    return vec4(textureLod(s, p, lod));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow1DProjLod",
+        "appgl_gpu_shader4_shadow1DProjLod",
+        "vec4 appgl_gpu_shader4_shadow1DProjLod(sampler1DShadow s, vec4 p, float lod) {\n"
+        "    return vec4(textureProjLod(s, p, lod));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow2DProjLod",
+        "appgl_gpu_shader4_shadow2DProjLod",
+        "vec4 appgl_gpu_shader4_shadow2DProjLod(sampler2DShadow s, vec4 p, float lod) {\n"
+        "    return vec4(textureProjLod(s, p, lod));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow1DLodOffset",
+        "appgl_gpu_shader4_shadow1DLodOffset",
+        "vec4 appgl_gpu_shader4_shadow1DLodOffset(sampler1DShadow s, vec3 p, float lod, int offset) {\n"
+        "    return vec4(textureLod(s, p, lod));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow2DLodOffset",
+        "appgl_gpu_shader4_shadow2DLodOffset",
+        "vec4 appgl_gpu_shader4_shadow2DLodOffset(sampler2DShadow s, vec3 p, float lod, ivec2 offset) {\n"
+        "    return vec4(textureLod(s, p, lod));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow1DProjLodOffset",
+        "appgl_gpu_shader4_shadow1DProjLodOffset",
+        "vec4 appgl_gpu_shader4_shadow1DProjLodOffset(sampler1DShadow s, vec4 p, float lod, int offset) {\n"
+        "    return vec4(textureProjLod(s, p, lod));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow2DProjLodOffset",
+        "appgl_gpu_shader4_shadow2DProjLodOffset",
+        "vec4 appgl_gpu_shader4_shadow2DProjLodOffset(sampler2DShadow s, vec4 p, float lod, ivec2 offset) {\n"
+        "    return vec4(textureProjLod(s, p, lod));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow1DGrad",
+        "appgl_gpu_shader4_shadow1DGrad",
+        "vec4 appgl_gpu_shader4_shadow1DGrad(sampler1DShadow s, vec3 p, float dPdx, float dPdy) {\n"
+        "    return vec4(textureGrad(s, p, dPdx, dPdy));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow1DProjGrad",
+        "appgl_gpu_shader4_shadow1DProjGrad",
+        "vec4 appgl_gpu_shader4_shadow1DProjGrad(sampler1DShadow s, vec4 p, float dPdx, float dPdy) {\n"
+        "    return vec4(textureProjGrad(s, p, dPdx, dPdy));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow2DGrad",
+        "appgl_gpu_shader4_shadow2DGrad",
+        "vec4 appgl_gpu_shader4_shadow2DGrad(sampler2DShadow s, vec3 p, vec2 dPdx, vec2 dPdy) {\n"
+        "    return vec4(textureGrad(s, p, dPdx, dPdy));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow2DProjGrad",
+        "appgl_gpu_shader4_shadow2DProjGrad",
+        "vec4 appgl_gpu_shader4_shadow2DProjGrad(sampler2DShadow s, vec4 p, vec2 dPdx, vec2 dPdy) {\n"
+        "    return vec4(textureProjGrad(s, p, dPdx, dPdy));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadowCubeGrad",
+        "appgl_gpu_shader4_shadowCubeGrad",
+        "vec4 appgl_gpu_shader4_shadowCubeGrad(samplerCubeShadow s, vec4 p, vec3 dPdx, vec3 dPdy) {\n"
+        "    return vec4(textureGrad(s, p, dPdx, dPdy));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow1DGradOffset",
+        "appgl_gpu_shader4_shadow1DGradOffset",
+        "vec4 appgl_gpu_shader4_shadow1DGradOffset(sampler1DShadow s, vec3 p, float dPdx, float dPdy, int offset) {\n"
+        "    return vec4(textureGrad(s, p, dPdx, dPdy));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow1DProjGradOffset",
+        "appgl_gpu_shader4_shadow1DProjGradOffset",
+        "vec4 appgl_gpu_shader4_shadow1DProjGradOffset(sampler1DShadow s, vec4 p, float dPdx, float dPdy, int offset) {\n"
+        "    return vec4(textureProjGrad(s, p, dPdx, dPdy));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow2DGradOffset",
+        "appgl_gpu_shader4_shadow2DGradOffset",
+        "vec4 appgl_gpu_shader4_shadow2DGradOffset(sampler2DShadow s, vec3 p, vec2 dPdx, vec2 dPdy, ivec2 offset) {\n"
+        "    return vec4(textureGrad(s, p, dPdx, dPdy));\n"
+        "}\n",
+        nullptr,
+    },
+    {
+        "shadow2DProjGradOffset",
+        "appgl_gpu_shader4_shadow2DProjGradOffset",
+        "vec4 appgl_gpu_shader4_shadow2DProjGradOffset(sampler2DShadow s, vec4 p, vec2 dPdx, vec2 dPdy, ivec2 offset) {\n"
+        "    return vec4(textureProjGrad(s, p, dPdx, dPdy));\n"
+        "}\n",
+        nullptr,
+    },
+};
 
 // Replace every literal occurrence of `from` with `to`. Used for
 // dotted field-access rewrites (`gl_Fog.color` → `appgl_FogColor`)
@@ -1471,9 +1755,28 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
                 replaceCodeUnsignedInt(result.source) || didGpuShader4LexicalFixup;
         }
     }
+    bool didGpuShader4ShadowFixup = false;
+    std::string gpuShader4ShadowPreamble;
+    if (hasGpuShader4Directive &&
+        result.source.find("shadow") != std::string::npos) {
+        for (const auto& wrapper : kGpuShader4ShadowWrappers) {
+            if (!containsIdentifier(result.source, wrapper.legacyName)) {
+                continue;
+            }
+            if (replaceCodeFunctionIdentifier(result.source,
+                                              wrapper.legacyName,
+                                              wrapper.helperName)) {
+                gpuShader4ShadowPreamble.append(wrapper.commonSource);
+                if (isFragment && wrapper.fragmentSource) {
+                    gpuShader4ShadowPreamble.append(wrapper.fragmentSource);
+                }
+                didGpuShader4ShadowFixup = true;
+            }
+        }
+    }
 
     if (!didAnyRewrite && !didSamplerFixup && !didGpuShader4TruncateFixup &&
-        !didGpuShader4LexicalFixup) {
+        !didGpuShader4LexicalFixup && !didGpuShader4ShadowFixup) {
         return result;
     }
     result.didRewrite = true;
@@ -1654,6 +1957,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     // ---- 5. Build preamble -----------------------------------------------
     std::string preamble;
     preamble.reserve(2048);
+    preamble.append(gpuShader4ShadowPreamble);
 
     auto addUniform = [&preamble](const char* glName,
                                   const char* applName,
