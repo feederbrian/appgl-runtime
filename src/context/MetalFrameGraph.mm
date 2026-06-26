@@ -16492,6 +16492,12 @@ struct AppGLImmediateTextureState {
     uint envMode;
     uint baseClass;
     uint target;
+    uint wrapS;
+    uint wrapT;
+    uint minFilter;
+    uint magFilter;
+    uint _pad;
+    float4 borderColor;
 };
 
 static float4 appgl_immediate_finish_sample(float4 color,
@@ -16511,6 +16517,43 @@ static float4 appgl_immediate_finish_sample(float4 color,
 static float2 appgl_immediate_projected_st(float4 texcoord) {
     const float invQ = texcoord.w != 0.0f ? 1.0f / texcoord.w : 1.0f;
     return texcoord.xy * invQ;
+}
+
+static bool appgl_immediate_coord_oob(float coord) {
+    return coord < 0.0f || coord > 1.0f;
+}
+
+static float4 appgl_immediate_apply_border(float4 sample,
+                                           float2 coord,
+                                           bool useT,
+                                           constant AppGLImmediateTextureState& textureState) {
+    constexpr uint kWrapClamp = 0x2900u;
+    constexpr uint kWrapClampToBorder = 0x812Du;
+    constexpr uint kFilterLinear = 0x2601u;
+    const bool outS = appgl_immediate_coord_oob(coord.x);
+    const bool outT = useT && appgl_immediate_coord_oob(coord.y);
+    if ((textureState.wrapS == kWrapClampToBorder && outS) ||
+        (textureState.wrapT == kWrapClampToBorder && outT)) {
+        return textureState.borderColor;
+    }
+    const bool linear =
+        textureState.minFilter == kFilterLinear ||
+        textureState.magFilter == kFilterLinear;
+    if (!linear) {
+        return sample;
+    }
+    uint clampAxes = 0u;
+    if (textureState.wrapS == kWrapClamp && outS) {
+        clampAxes += 1u;
+    }
+    if (textureState.wrapT == kWrapClamp && outT) {
+        clampAxes += 1u;
+    }
+    if (clampAxes == 0u) {
+        return sample;
+    }
+    const float borderFactor = 1.0f - (clampAxes == 1u ? 0.5f : 0.25f);
+    return mix(sample, textureState.borderColor, borderFactor);
 }
 
 vertex AppGLImmediateOut appgl_immediate_vs(
@@ -16540,8 +16583,13 @@ fragment float4 appgl_immediate_textured_fs(
     const float2 coord = textureState.target == kTargetTexture1D
         ? float2(st.x, 0.5f)
         : st;
+    const float4 sample = appgl_immediate_apply_border(
+        tex.sample(samp, coord),
+        coord,
+        textureState.target != kTargetTexture1D,
+        textureState);
     return appgl_immediate_finish_sample(
-        in.color, tex.sample(samp, coord), textureState);
+        in.color, sample, textureState);
 }
 
 fragment float4 appgl_immediate_textured_1d_fs(
@@ -16551,8 +16599,13 @@ fragment float4 appgl_immediate_textured_1d_fs(
     constant AppGLImmediateTextureState& textureState [[buffer(0)]]
 ) {
     const float2 st = appgl_immediate_projected_st(in.texcoord);
+    const float4 sample = appgl_immediate_apply_border(
+        tex.sample(samp, st.x),
+        float2(st.x, 0.5f),
+        false,
+        textureState);
     return appgl_immediate_finish_sample(
-        in.color, tex.sample(samp, st.x), textureState);
+        in.color, sample, textureState);
 }
 )MSL";
         NSError* error = nil;
@@ -17968,6 +18021,12 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 std::uint32_t envMode;
                 std::uint32_t baseClass;
                 std::uint32_t target;
+                std::uint32_t wrapS;
+                std::uint32_t wrapT;
+                std::uint32_t minFilter;
+                std::uint32_t magFilter;
+                std::uint32_t pad;
+                float borderColor[4];
             };
             const bool compatLegacyTextureState =
                 appglCompatProfileEnabled() && info.textureBaseClass != 0u;
@@ -17978,7 +18037,18 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 compatLegacyTextureState ? info.textureBaseClass : 0u,
                 info.textureTarget == GL_TEXTURE_1D
                     ? static_cast<std::uint32_t>(GL_TEXTURE_1D)
-                    : 0u
+                    : 0u,
+                static_cast<std::uint32_t>(info.textureWrapS),
+                static_cast<std::uint32_t>(info.textureWrapT),
+                static_cast<std::uint32_t>(info.textureMinFilter),
+                static_cast<std::uint32_t>(info.textureMagFilter),
+                0u,
+                {
+                    info.textureBorderColor[0],
+                    info.textureBorderColor[1],
+                    info.textureBorderColor[2],
+                    info.textureBorderColor[3],
+                }
             };
             [encoder setFragmentBytes:&textureState
                                 length:sizeof(textureState)

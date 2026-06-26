@@ -27,6 +27,94 @@ std::uint32_t appglImmediateTextureBaseClass(GLenum internalFormat) {
     }
 }
 
+GLfloat appglImmediateTextureComponent(
+    const std::array<GLfloat, 4>& color,
+    GLint component
+) {
+    switch (component) {
+        case GL_RED: return color[0];
+        case GL_GREEN: return color[1];
+        case GL_BLUE: return color[2];
+        case GL_ALPHA: return color[3];
+        case GL_ZERO: return 0.0f;
+        case GL_ONE: return 1.0f;
+        default: return color[0];
+    }
+}
+
+std::array<GLfloat, 4> appglImmediateBaseBorderColor(
+    GLenum internalFormat,
+    const std::array<GLfloat, 4>& border
+) {
+    switch (internalFormat) {
+        case GL_ALPHA:
+        case GL_ALPHA4:
+        case GL_ALPHA8:
+        case GL_ALPHA12:
+        case GL_ALPHA16:
+            return {0.0f, 0.0f, 0.0f, border[3]};
+        case GL_LUMINANCE:
+        case GL_LUMINANCE4:
+        case GL_LUMINANCE8:
+        case GL_LUMINANCE12:
+        case GL_LUMINANCE16:
+            return {border[0], border[0], border[0], 1.0f};
+        case GL_LUMINANCE_ALPHA:
+        case GL_LUMINANCE4_ALPHA4:
+        case GL_LUMINANCE6_ALPHA2:
+        case GL_LUMINANCE8_ALPHA8:
+        case GL_LUMINANCE12_ALPHA4:
+        case GL_LUMINANCE12_ALPHA12:
+        case GL_LUMINANCE16_ALPHA16:
+            return {border[0], border[0], border[0], border[3]};
+        case GL_INTENSITY:
+        case GL_INTENSITY4:
+        case GL_INTENSITY8:
+        case GL_INTENSITY12:
+        case GL_INTENSITY16:
+            return {border[0], border[0], border[0], border[0]};
+        case GL_RED:
+        case GL_R8:
+        case GL_R16:
+        case GL_R16F:
+        case GL_R32F:
+        case GL_R8_SNORM:
+        case GL_R16_SNORM:
+            return {border[0], 0.0f, 0.0f, 1.0f};
+        case GL_RG:
+        case GL_RG8:
+        case GL_RG16:
+        case GL_RG16F:
+        case GL_RG32F:
+        case GL_RG8_SNORM:
+        case GL_RG16_SNORM:
+            return {border[0], border[1], 0.0f, 1.0f};
+        default:
+            break;
+    }
+    if (isDepthFormat(internalFormat)) {
+        return {border[0], border[0], border[0], 1.0f};
+    }
+    if (isRGBFamilyWithoutAlpha(internalFormat)) {
+        return {border[0], border[1], border[2], 1.0f};
+    }
+    return border;
+}
+
+std::array<GLfloat, 4> appglImmediateResolvedBorderColor(
+    GLenum internalFormat,
+    const GLTextureParameters& params
+) {
+    const std::array<GLfloat, 4> base =
+        appglImmediateBaseBorderColor(internalFormat, params.borderColor);
+    return {
+        appglImmediateTextureComponent(base, params.swizzle[0]),
+        appglImmediateTextureComponent(base, params.swizzle[1]),
+        appglImmediateTextureComponent(base, params.swizzle[2]),
+        appglImmediateTextureComponent(base, params.swizzle[3]),
+    };
+}
+
 }  // namespace
 
 #ifndef GL_LINE_STIPPLE
@@ -3808,6 +3896,8 @@ void GLContext::endImmediate() {
     void* fixedFunctionSamplerState = nullptr;
     GLenum fixedFunctionTextureInternalFormat = 0;
     GLenum fixedFunctionTextureTarget = 0;
+    GLTextureParameters fixedFunctionTextureParams;
+    bool fixedFunctionTextureParamsValid = false;
     auto resolveFixedFunctionTexture = [&]() -> void* {
         for (GLenum target : {GL_TEXTURE_2D, GL_TEXTURE_1D}) {
             if (!impl_->state->isEnabled(target)) {
@@ -3826,9 +3916,12 @@ void GLContext::endImmediate() {
             }
             fixedFunctionTextureInternalFormat = tex->desc.internalFormat;
             fixedFunctionTextureTarget = target;
+            fixedFunctionTextureParams = tex->params;
+            fixedFunctionTextureParamsValid = true;
             return impl_->resolveSwizzledTexture(*tex);
         }
         fixedFunctionTextureTarget = 0;
+        fixedFunctionTextureParamsValid = false;
         return nullptr;
     };
 
@@ -3850,6 +3943,15 @@ void GLContext::endImmediate() {
     info.metalTexture = resolveFixedFunctionTexture();
     info.metalSamplerState = fixedFunctionSamplerState;
     info.textureTarget = fixedFunctionTextureTarget;
+    if (fixedFunctionTextureParamsValid) {
+        info.textureWrapS = fixedFunctionTextureParams.wrapS;
+        info.textureWrapT = fixedFunctionTextureParams.wrapT;
+        info.textureMinFilter = fixedFunctionTextureParams.minFilter;
+        info.textureMagFilter = fixedFunctionTextureParams.magFilter;
+        info.textureBorderColor = appglImmediateResolvedBorderColor(
+            fixedFunctionTextureInternalFormat,
+            fixedFunctionTextureParams);
+    }
     if (appglCompatProfileEnabled()) {
         const std::uint32_t textureBaseClass =
             appglImmediateTextureBaseClass(fixedFunctionTextureInternalFormat);
@@ -4243,6 +4345,8 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
     void* fixedFunctionSamplerState = nullptr;
     GLenum fixedFunctionTextureInternalFormat = 0;
     GLenum fixedFunctionTextureTarget = 0;
+    GLTextureParameters fixedFunctionTextureParams;
+    bool fixedFunctionTextureParamsValid = false;
     auto resolveFixedFunctionTexture = [&]() -> void* {
         for (GLenum target : {GL_TEXTURE_2D, GL_TEXTURE_1D}) {
             if (!impl_->state->isEnabled(target)) {
@@ -4261,9 +4365,12 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
             }
             fixedFunctionTextureInternalFormat = tex->desc.internalFormat;
             fixedFunctionTextureTarget = target;
+            fixedFunctionTextureParams = tex->params;
+            fixedFunctionTextureParamsValid = true;
             return impl_->resolveSwizzledTexture(*tex);
         }
         fixedFunctionTextureTarget = 0;
+        fixedFunctionTextureParamsValid = false;
         return nullptr;
     };
 
@@ -5053,6 +5160,15 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         info.metalTexture = resolveFixedFunctionTexture();
         info.metalSamplerState = fixedFunctionSamplerState;
         info.textureTarget = fixedFunctionTextureTarget;
+        if (fixedFunctionTextureParamsValid) {
+            info.textureWrapS = fixedFunctionTextureParams.wrapS;
+            info.textureWrapT = fixedFunctionTextureParams.wrapT;
+            info.textureMinFilter = fixedFunctionTextureParams.minFilter;
+            info.textureMagFilter = fixedFunctionTextureParams.magFilter;
+            info.textureBorderColor = appglImmediateResolvedBorderColor(
+                fixedFunctionTextureInternalFormat,
+                fixedFunctionTextureParams);
+        }
         if (appglCompatProfileEnabled()) {
             const std::uint32_t textureBaseClass =
                 appglImmediateTextureBaseClass(fixedFunctionTextureInternalFormat);

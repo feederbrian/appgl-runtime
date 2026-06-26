@@ -790,6 +790,11 @@ struct ImmediateDrawInfo {
     GLenum textureTarget = 0;
     GLenum textureEnvMode = 0;
     std::uint32_t textureBaseClass = 0; // 1 = legacy GL_ALPHA-family texture.
+    GLint textureWrapS = GL_REPEAT;
+    GLint textureWrapT = GL_REPEAT;
+    GLint textureMinFilter = GL_NEAREST_MIPMAP_LINEAR;
+    GLint textureMagFilter = GL_LINEAR;
+    std::array<GLfloat, 4> textureBorderColor = {0.0f, 0.0f, 0.0f, 0.0f};
     GLenum fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
     void* fboColorTexture = nullptr;        // id<MTLTexture> or nullptr
     void* fboDepthStencilTexture = nullptr; // id<MTLTexture> or nullptr
