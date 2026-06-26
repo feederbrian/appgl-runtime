@@ -574,10 +574,19 @@ bool GLContext::drawPixelsCompat(GLsizei width,
         type == GL_UNSIGNED_INT_8_8_8_8_REV ||
         type == GL_UNSIGNED_INT_10_10_10_2 ||
         type == GL_UNSIGNED_INT_2_10_10_10_REV;
+    const bool packedDepthStencil =
+        type == GL_UNSIGNED_INT_24_8 ||
+        type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV;
     if ((packedRGB && format != GL_RGB) ||
         (packedRGBA && format != GL_RGBA && format != GL_BGRA)) {
         pushError(GL_INVALID_OPERATION, "glDrawPixels",
                   "packed pixel type is incompatible with format");
+        return false;
+    }
+    if ((packedDepthStencil && format != GL_DEPTH_STENCIL) ||
+        (format == GL_DEPTH_STENCIL && !packedDepthStencil)) {
+        pushError(GL_INVALID_OPERATION, "glDrawPixels",
+                  "depth-stencil format requires a packed depth-stencil type");
         return false;
     }
     const auto componentCount = [&]() -> std::size_t {
@@ -592,6 +601,7 @@ bool GLContext::drawPixelsCompat(GLsizei width,
                 return 1u;
             case GL_RG:
             case GL_LUMINANCE_ALPHA:
+            case GL_DEPTH_STENCIL:
                 return 2u;
             case GL_RGB:
             case GL_BGR:
@@ -623,7 +633,10 @@ bool GLContext::drawPixelsCompat(GLsizei width,
             case GL_UNSIGNED_INT_8_8_8_8_REV:
             case GL_UNSIGNED_INT_10_10_10_2:
             case GL_UNSIGNED_INT_2_10_10_10_REV:
+            case GL_UNSIGNED_INT_24_8:
                 return 4u;
+            case GL_FLOAT_32_UNSIGNED_INT_24_8_REV:
+                return 8u;
             default:
                 return 0u;
         }
@@ -871,6 +884,33 @@ bool GLContext::drawPixelsCompat(GLsizei width,
         }
         return static_cast<std::uint8_t>(value & 0xffu);
     };
+    auto readDepthStencilDepth = [&](const std::uint8_t* pixel) -> GLfloat {
+        if (type == GL_UNSIGNED_INT_24_8) {
+            const std::uint32_t packed = Impl::readU32Value(pixel, swapBytes);
+            const std::uint32_t depth24 = (packed >> 8) & 0x00ffffffu;
+            return static_cast<GLfloat>(
+                static_cast<double>(depth24) / static_cast<double>(0x00ffffffu));
+        }
+        if (type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV) {
+            const std::uint32_t bits = Impl::readU32Value(pixel, swapBytes);
+            GLfloat depth = 0.0f;
+            std::memcpy(&depth, &bits, sizeof(depth));
+            return depth;
+        }
+        return 0.0f;
+    };
+    auto readDepthStencilStencil = [&](const std::uint8_t* pixel) -> std::uint8_t {
+        if (type == GL_UNSIGNED_INT_24_8) {
+            const std::uint32_t packed = Impl::readU32Value(pixel, swapBytes);
+            return static_cast<std::uint8_t>(packed & 0xffu);
+        }
+        if (type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV) {
+            const std::uint32_t stencilSlot =
+                Impl::readU32Value(pixel + sizeof(GLfloat), swapBytes);
+            return static_cast<std::uint8_t>(stencilSlot & 0xffu);
+        }
+        return 0;
+    };
     auto sampleCurrentTexture2D = [&](std::uint8_t rgba[4]) {
         if (!impl_->state->isEnabled(GL_TEXTURE_2D)) {
             return;
@@ -925,7 +965,9 @@ bool GLContext::drawPixelsCompat(GLsizei width,
         }
     };
 
-	    if (format == GL_DEPTH_COMPONENT || format == GL_STENCIL_INDEX) {
+	    if (format == GL_DEPTH_COMPONENT ||
+            format == GL_STENCIL_INDEX ||
+            format == GL_DEPTH_STENCIL) {
 	        impl_->ensureDefaultFramebufferDepthStencilShadow();
 	        if (format == GL_DEPTH_COMPONENT) {
 	            impl_->ensureDefaultFramebufferShadow();
@@ -1004,7 +1046,7 @@ bool GLContext::drawPixelsCompat(GLsizei width,
 	            rgba[c] = normalizedByte(std::clamp(out[c], 0.0f, 1.0f));
 	        }
 	    };
-	    auto depthPasses = [&](GLfloat incoming, GLfloat current) {
+		        auto depthPasses = [&](GLfloat incoming, GLfloat current) {
 	        if (!impl_->state->isEnabled(GL_DEPTH_TEST)) {
 	            return true;
 	        }
@@ -1019,8 +1061,11 @@ bool GLContext::drawPixelsCompat(GLsizei width,
 	            case GL_ALWAYS:
 	            default:          return true;
 	        }
-	    };
-	    for (GLsizei row = 0; row < height; ++row) {
+		        };
+        const auto& stencilFace = impl_->state->stencilState().front;
+        const std::uint8_t stencilWriteMask =
+            static_cast<std::uint8_t>(stencilFace.writeMask & 0xffu);
+		    for (GLsizei row = 0; row < height; ++row) {
 	        const auto* srcRow = source + static_cast<std::size_t>(row) * rowBytes;
 	        const GLint dstY = impl_->fixedFunctionRasterY + row;
         if (dstY < 0) {
@@ -1031,8 +1076,35 @@ bool GLContext::drawPixelsCompat(GLsizei width,
             if (dstX < 0) {
                 continue;
             }
-            const auto* pixel = srcRow + static_cast<std::size_t>(col) * pixelBytes;
-            if (format == GL_DEPTH_COMPONENT) {
+	            const auto* pixel = srcRow + static_cast<std::size_t>(col) * pixelBytes;
+            if (format == GL_DEPTH_STENCIL) {
+                if (dstX >= impl_->defaultFramebufferDepthStencilShadowWidth ||
+                    dstY >= impl_->defaultFramebufferDepthStencilShadowHeight) {
+                    continue;
+                }
+                const std::size_t offset =
+                    static_cast<std::size_t>(dstY) *
+                    static_cast<std::size_t>(impl_->defaultFramebufferDepthStencilShadowWidth) +
+                    static_cast<std::size_t>(dstX);
+                const GLfloat incomingDepth =
+                    std::clamp(readDepthStencilDepth(pixel), 0.0f, 1.0f);
+                if (!depthPasses(incomingDepth,
+                                 impl_->defaultFramebufferDepth32[offset])) {
+                    continue;
+                }
+                if (impl_->state->depthState().writeMask != GL_FALSE) {
+                    impl_->defaultFramebufferDepth32[offset] = incomingDepth;
+                }
+                const std::uint8_t incomingStencil =
+                    readDepthStencilStencil(pixel);
+                impl_->defaultFramebufferStencil8[offset] =
+                    static_cast<std::uint8_t>(
+                        (impl_->defaultFramebufferStencil8[offset] &
+                         ~stencilWriteMask) |
+                        (incomingStencil & stencilWriteMask));
+                continue;
+            }
+	            if (format == GL_DEPTH_COMPONENT) {
                 if (dstX >= impl_->defaultFramebufferDepthStencilShadowWidth ||
                     dstY >= impl_->defaultFramebufferDepthStencilShadowHeight) {
                     continue;
@@ -1100,7 +1172,64 @@ bool GLContext::drawPixelsCompat(GLsizei width,
             if (blend.colorMask[3] != GL_FALSE) impl_->defaultFramebufferRGBA8[offset + 3] = rgba[3];
         }
     }
-	    if (format == GL_DEPTH_COMPONENT) {
+	    if (format == GL_DEPTH_STENCIL) {
+	        impl_->defaultFramebufferDepthShadowValid = true;
+	        impl_->defaultFramebufferStencilShadowValid = true;
+	        if (impl_->state->boundDrawFramebuffer() == 0 &&
+	            impl_->frameGraph != nullptr) {
+	            const GLint minX = std::max<GLint>(impl_->fixedFunctionRasterX, 0);
+	            const GLint minY = std::max<GLint>(impl_->fixedFunctionRasterY, 0);
+	            const GLint maxX = std::min<GLint>(
+	                impl_->fixedFunctionRasterX + width,
+	                impl_->defaultFramebufferDepthStencilShadowWidth);
+	            const GLint maxY = std::min<GLint>(
+	                impl_->fixedFunctionRasterY + height,
+	                impl_->defaultFramebufferDepthStencilShadowHeight);
+	            if (minX < maxX && minY < maxY) {
+	                const GLsizei uploadWidth = maxX - minX;
+	                const GLsizei uploadHeight = maxY - minY;
+	                std::vector<GLfloat> depthUpload(
+	                    static_cast<std::size_t>(uploadWidth) *
+	                    static_cast<std::size_t>(uploadHeight));
+	                for (GLsizei row = 0; row < uploadHeight; ++row) {
+	                    const std::size_t srcOffset =
+	                        static_cast<std::size_t>(minY + row) *
+	                        static_cast<std::size_t>(impl_->defaultFramebufferDepthStencilShadowWidth) +
+	                        static_cast<std::size_t>(minX);
+	                    const std::size_t dstOffset =
+	                        static_cast<std::size_t>(row) *
+	                        static_cast<std::size_t>(uploadWidth);
+	                    std::memcpy(depthUpload.data() + dstOffset,
+	                                impl_->defaultFramebufferDepth32.data() + srcOffset,
+	                                static_cast<std::size_t>(uploadWidth) * sizeof(GLfloat));
+	                }
+	                const std::size_t firstOffset =
+	                    static_cast<std::size_t>(minY) *
+	                    static_cast<std::size_t>(impl_->defaultFramebufferDepthStencilShadowWidth) +
+	                    static_cast<std::size_t>(minX);
+	                const std::uint8_t stencilValue =
+	                    impl_->defaultFramebufferStencil8[firstOffset];
+	                bool uniformStencil = true;
+	                for (GLsizei row = 0; row < uploadHeight && uniformStencil; ++row) {
+	                    for (GLsizei col = 0; col < uploadWidth; ++col) {
+	                        const std::size_t offset =
+	                            static_cast<std::size_t>(minY + row) *
+	                            static_cast<std::size_t>(impl_->defaultFramebufferDepthStencilShadowWidth) +
+	                            static_cast<std::size_t>(minX + col);
+	                        if (impl_->defaultFramebufferStencil8[offset] != stencilValue) {
+	                            uniformStencil = false;
+	                            break;
+	                        }
+	                    }
+	                }
+	                if (uniformStencil) {
+	                    (void)impl_->frameGraph->writeDefaultDepthStencilRegion(
+	                        minX, minY, uploadWidth, uploadHeight,
+	                        depthUpload.data(), true, stencilValue, true);
+	                }
+	            }
+	        }
+	    } else if (format == GL_DEPTH_COMPONENT) {
 	        impl_->defaultFramebufferDepthShadowValid = true;
 	        impl_->defaultFramebufferShadowValid = true;
 	        if (impl_->state->boundDrawFramebuffer() == 0 &&

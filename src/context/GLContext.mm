@@ -25187,19 +25187,28 @@ struct GLContext::Impl {
 
         const GLuint readName = state->boundReadFramebuffer();
         const GLuint drawName = state->boundDrawFramebuffer();
-        const GLFramebufferObject* readFb = objects->framebuffers().get(readName);
+        const bool readDefaultFramebuffer = (readName == 0);
+        const GLFramebufferObject* readFb =
+            readDefaultFramebuffer ? nullptr : objects->framebuffers().get(readName);
         GLFramebufferObject* drawFb =
             drawName == 0 ? nullptr : objects->framebuffers().get(drawName);
         const bool drawDefaultFramebuffer = (drawName == 0);
-        if (readName == 0 || readFb == nullptr ||
+        const bool defaultDepthStencilBlit =
+            appglCompatProfileEnabled() &&
+            readDefaultFramebuffer && drawDefaultFramebuffer &&
+            (mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0;
+        if ((!readDefaultFramebuffer && readFb == nullptr) ||
+            (readDefaultFramebuffer && !defaultDepthStencilBlit) ||
             (!drawDefaultFramebuffer && drawFb == nullptr)) {
             return false;
         }
         if (drawDefaultFramebuffer &&
-            (mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0) {
+            (mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0 &&
+            !appglCompatProfileEnabled()) {
             return false;
         }
-        if (framebufferStatus(*readFb) != GL_FRAMEBUFFER_COMPLETE ||
+        if ((!readDefaultFramebuffer &&
+             framebufferStatus(*readFb) != GL_FRAMEBUFFER_COMPLETE) ||
             (!drawDefaultFramebuffer &&
              framebufferStatus(*drawFb) != GL_FRAMEBUFFER_COMPLETE)) {
             return false;
@@ -25359,11 +25368,235 @@ struct GLContext::Impl {
             return clipped.data();
         };
         if (drawDefaultFramebuffer) {
+            bool wroteDefaultDepthStencil = false;
+            if ((mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0) {
+                if (writeWindow.empty) {
+                    wroteDefaultDepthStencil = true;
+                } else {
+                    const bool copyDepth =
+                        (mask & GL_DEPTH_BUFFER_BIT) != 0;
+                    const bool copyStencil =
+                        (mask & GL_STENCIL_BUFFER_BIT) != 0;
+                    std::vector<GLfloat> srcDepthStage;
+                    std::vector<std::uint8_t> srcStencilStage;
+                    if (copyDepth) {
+                        srcDepthStage.resize(
+                            static_cast<std::size_t>(copyWidth) *
+                            static_cast<std::size_t>(copyHeight));
+                    }
+                    if (copyStencil) {
+                        srcStencilStage.resize(
+                            static_cast<std::size_t>(copyWidth) *
+                            static_cast<std::size_t>(copyHeight));
+                    }
+
+                    if (readDefaultFramebuffer) {
+                        if ((copyDepth &&
+                             !copyDefaultFramebufferDepthPixels(
+                                 srcX, srcY, copyWidth, copyHeight,
+                                 srcDepthStage.data())) ||
+                            (copyStencil &&
+                             !copyDefaultFramebufferStencilPixels(
+                                 srcX, srcY, copyWidth, copyHeight,
+                                 srcStencilStage.data()))) {
+                            return false;
+                        }
+                    } else {
+                        const GLFramebufferAttachment* srcDepth =
+                            copyDepth ? framebufferAttachment(
+                                *readFb, GL_DEPTH_ATTACHMENT) : nullptr;
+                        const GLFramebufferAttachment* srcStencil =
+                            copyStencil ? framebufferAttachment(
+                                *readFb, GL_STENCIL_ATTACHMENT) : nullptr;
+                        if ((copyDepth &&
+                             (srcDepth == nullptr ||
+                              !readDepthAttachmentPixels(
+                                  *srcDepth, srcX, srcY, copyWidth,
+                                  copyHeight, srcDepthStage.data()))) ||
+                            (copyStencil &&
+                             (srcStencil == nullptr ||
+                              !readStencilAttachmentPixels(
+                                  *srcStencil, srcX, srcY, copyWidth,
+                                  copyHeight, srcStencilStage.data())))) {
+                            return false;
+                        }
+                    }
+
+                    const GLfloat* depthStagePtr = srcDepthStage.data();
+                    const std::uint8_t* stencilStagePtr =
+                        srcStencilStage.data();
+                    std::vector<GLfloat> scaledDepth;
+                    std::vector<std::uint8_t> scaledStencil;
+                    if (needsScale) {
+                        if (copyDepth) {
+                            scaledDepth.resize(
+                                static_cast<std::size_t>(dstWidth) *
+                                static_cast<std::size_t>(dstHeight));
+                        }
+                        if (copyStencil) {
+                            scaledStencil.resize(
+                                static_cast<std::size_t>(dstWidth) *
+                                static_cast<std::size_t>(dstHeight));
+                        }
+                        for (GLsizei dy = 0; dy < dstHeight; ++dy) {
+                            for (GLsizei dx = 0; dx < dstWidth; ++dx) {
+                                GLsizei sx = 0, sy = 0;
+                                sampleSrcIndex(dx, dy, sx, sy);
+                                const std::size_t srcIdx =
+                                    static_cast<std::size_t>(sy) *
+                                    static_cast<std::size_t>(copyWidth) +
+                                    static_cast<std::size_t>(sx);
+                                const std::size_t dstIdx =
+                                    static_cast<std::size_t>(dy) *
+                                    static_cast<std::size_t>(dstWidth) +
+                                    static_cast<std::size_t>(dx);
+                                if (copyDepth) {
+                                    scaledDepth[dstIdx] =
+                                        srcDepthStage[srcIdx];
+                                }
+                                if (copyStencil) {
+                                    scaledStencil[dstIdx] =
+                                        srcStencilStage[srcIdx];
+                                }
+                            }
+                        }
+                        if (copyDepth) {
+                            depthStagePtr = scaledDepth.data();
+                        }
+                        if (copyStencil) {
+                            stencilStagePtr = scaledStencil.data();
+                        }
+                    }
+
+                    std::vector<GLfloat> clippedDepth;
+                    std::vector<std::uint8_t> clippedStencil;
+                    const GLfloat* writeDepth = copyDepth
+                        ? copyDepthWindow(depthStagePtr, clippedDepth)
+                        : nullptr;
+                    const std::uint8_t* writeStencil = copyStencil
+                        ? copyStencilWindow(stencilStagePtr, clippedStencil)
+                        : nullptr;
+
+                    ensureDefaultFramebufferDepthStencilShadow();
+                    for (GLsizei row = 0; row < writeWindow.height; ++row) {
+                        const GLint dstRow = writeWindow.y + row;
+                        if (dstRow < 0 ||
+                            dstRow >= defaultFramebufferDepthStencilShadowHeight) {
+                            continue;
+                        }
+                        for (GLsizei col = 0; col < writeWindow.width; ++col) {
+                            const GLint dstCol = writeWindow.x + col;
+                            if (dstCol < 0 ||
+                                dstCol >= defaultFramebufferDepthStencilShadowWidth) {
+                                continue;
+                            }
+                            const std::size_t srcOffset =
+                                static_cast<std::size_t>(row) *
+                                static_cast<std::size_t>(writeWindow.width) +
+                                static_cast<std::size_t>(col);
+                            const std::size_t dstOffset =
+                                static_cast<std::size_t>(dstRow) *
+                                static_cast<std::size_t>(
+                                    defaultFramebufferDepthStencilShadowWidth) +
+                                static_cast<std::size_t>(dstCol);
+                            if (copyDepth) {
+                                defaultFramebufferDepth32[dstOffset] =
+                                    writeDepth[srcOffset];
+                            }
+                            if (copyStencil) {
+                                defaultFramebufferStencil8[dstOffset] =
+                                    writeStencil[srcOffset];
+                            }
+                        }
+                    }
+                    if (copyDepth) {
+                        defaultFramebufferDepthShadowValid = true;
+                    }
+                    if (copyStencil) {
+                        defaultFramebufferStencilShadowValid = true;
+                    }
+                    if (frameGraph != nullptr) {
+                        const GLint minX =
+                            std::max<GLint>(writeWindow.x, 0);
+                        const GLint minY =
+                            std::max<GLint>(writeWindow.y, 0);
+                        const GLint maxX = std::min<GLint>(
+                            writeWindow.x + writeWindow.width,
+                            defaultFramebufferDepthStencilShadowWidth);
+                        const GLint maxY = std::min<GLint>(
+                            writeWindow.y + writeWindow.height,
+                            defaultFramebufferDepthStencilShadowHeight);
+                        if (minX < maxX && minY < maxY) {
+                            const GLsizei uploadWidth = maxX - minX;
+                            const GLsizei uploadHeight = maxY - minY;
+                            std::vector<GLfloat> depthUpload;
+                            if (copyDepth) {
+                                depthUpload.resize(
+                                    static_cast<std::size_t>(uploadWidth) *
+                                    static_cast<std::size_t>(uploadHeight));
+                                for (GLsizei row = 0; row < uploadHeight; ++row) {
+                                    const std::size_t srcOffset =
+                                        static_cast<std::size_t>(minY + row) *
+                                        static_cast<std::size_t>(
+                                            defaultFramebufferDepthStencilShadowWidth) +
+                                        static_cast<std::size_t>(minX);
+                                    const std::size_t dstOffset =
+                                        static_cast<std::size_t>(row) *
+                                        static_cast<std::size_t>(uploadWidth);
+                                    std::memcpy(
+                                        depthUpload.data() + dstOffset,
+                                        defaultFramebufferDepth32.data() +
+                                            srcOffset,
+                                        static_cast<std::size_t>(uploadWidth) *
+                                            sizeof(GLfloat));
+                                }
+                            }
+                            bool uniformStencil = copyStencil;
+                            std::uint8_t stencilValue = 0;
+                            if (copyStencil) {
+                                const std::size_t firstOffset =
+                                    static_cast<std::size_t>(minY) *
+                                    static_cast<std::size_t>(
+                                        defaultFramebufferDepthStencilShadowWidth) +
+                                    static_cast<std::size_t>(minX);
+                                stencilValue =
+                                    defaultFramebufferStencil8[firstOffset];
+                                for (GLsizei row = 0;
+                                     row < uploadHeight && uniformStencil;
+                                     ++row) {
+                                    for (GLsizei col = 0; col < uploadWidth;
+                                         ++col) {
+                                        const std::size_t offset =
+                                            static_cast<std::size_t>(minY + row) *
+                                            static_cast<std::size_t>(
+                                                defaultFramebufferDepthStencilShadowWidth) +
+                                            static_cast<std::size_t>(minX + col);
+                                        if (defaultFramebufferStencil8[offset] !=
+                                            stencilValue) {
+                                            uniformStencil = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if (!copyStencil || uniformStencil) {
+                                (void)frameGraph->writeDefaultDepthStencilRegion(
+                                    minX, minY, uploadWidth, uploadHeight,
+                                    copyDepth ? depthUpload.data() : nullptr,
+                                    copyDepth, stencilValue, copyStencil);
+                            }
+                        }
+                    }
+                    wroteDefaultDepthStencil = true;
+                }
+            }
             if ((mask & GL_COLOR_BUFFER_BIT) == 0) {
-                return true;
+                return wroteDefaultDepthStencil ||
+                       (mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) == 0;
             }
             const GLFramebufferAttachment* srcAttachment =
-                framebufferAttachment(*readFb, readFb->readBuffer);
+                readDefaultFramebuffer ? nullptr
+                    : framebufferAttachment(*readFb, readFb->readBuffer);
             if (srcAttachment == nullptr || writeWindow.empty) {
                 return true;
             }

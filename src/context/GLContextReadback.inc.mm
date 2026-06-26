@@ -808,6 +808,83 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
     // Default framebuffer depth/stencil readback. MetalFrameGraph does not
     // expose a default depth/stencil copy path, so answer clear-only legacy
     // probes from the CPU shadow we maintain for FB0 depth/stencil clears.
+    if (appglCompatProfileEnabled() &&
+        format == GL_DEPTH_STENCIL &&
+        (type == GL_UNSIGNED_INT_24_8 ||
+         type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV)) {
+        const std::size_t pixelCount =
+            static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+        std::vector<GLfloat> depthStage(pixelCount);
+        std::vector<std::uint8_t> stencilStage(pixelCount);
+        if (!impl_->copyDefaultFramebufferDepthPixels(
+                x, y, width, height, depthStage.data()) ||
+            !impl_->copyDefaultFramebufferStencilPixels(
+                x, y, width, height, stencilStage.data())) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+
+        const auto& packStore = impl_->state->pixelStore();
+        const bool packSwapBytes = (packStore.packSwapBytes == GL_TRUE);
+        const std::size_t dstPixelBytes = bytesPerPixel(format, type);
+        const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+            ? static_cast<std::size_t>(packStore.packRowLength)
+            : static_cast<std::size_t>(width);
+        const std::size_t dstRowBytes = alignByteCount(
+            dstRowStridePixels * dstPixelBytes, packStore.packAlignment);
+        auto* dest = static_cast<std::uint8_t*>(pixels)
+            + static_cast<std::size_t>(packStore.packSkipRows) * dstRowBytes
+            + static_cast<std::size_t>(packStore.packSkipPixels) * dstPixelBytes;
+
+        if (type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV) {
+            for (GLsizei row = 0; row < height; ++row) {
+                for (GLsizei col = 0; col < width; ++col) {
+                    const std::size_t i =
+                        static_cast<std::size_t>(row) *
+                        static_cast<std::size_t>(width) +
+                        static_cast<std::size_t>(col);
+                    std::uint8_t* dst = dest +
+                        static_cast<std::size_t>(row) * dstRowBytes +
+                        static_cast<std::size_t>(col) * dstPixelBytes;
+                    const GLfloat depth = depthStage[i];
+                    const std::uint32_t stencilSlot =
+                        static_cast<std::uint32_t>(stencilStage[i]);
+                    std::memcpy(dst, &depth, sizeof(depth));
+                    std::memcpy(dst + sizeof(depth), &stencilSlot,
+                                sizeof(stencilSlot));
+                    if (packSwapBytes) {
+                        Impl::swapPixelStoreBytes(dst, dstPixelBytes);
+                    }
+                }
+            }
+        } else {
+            for (GLsizei row = 0; row < height; ++row) {
+                for (GLsizei col = 0; col < width; ++col) {
+                    const std::size_t i =
+                        static_cast<std::size_t>(row) *
+                        static_cast<std::size_t>(width) +
+                        static_cast<std::size_t>(col);
+                    std::uint8_t* dst = dest +
+                        static_cast<std::size_t>(row) * dstRowBytes +
+                        static_cast<std::size_t>(col) * dstPixelBytes;
+                    const GLfloat clampedDepth =
+                        std::clamp(depthStage[i], 0.0f, 1.0f);
+                    const std::uint32_t depth24 =
+                        Impl::packReadbackBits(
+                            static_cast<double>(clampedDepth),
+                            0x00ffffffu, false);
+                    const std::uint32_t packed =
+                        (depth24 << 8) |
+                        static_cast<std::uint32_t>(stencilStage[i]);
+                    std::memcpy(dst, &packed, sizeof(packed));
+                    if (packSwapBytes) {
+                        Impl::swapPixelStoreBytes(dst, dstPixelBytes);
+                    }
+                }
+            }
+        }
+        return true;
+    }
     if (format == GL_DEPTH_COMPONENT && type == GL_FLOAT) {
         std::vector<GLfloat> depthStage(
             static_cast<std::size_t>(width) * static_cast<std::size_t>(height));

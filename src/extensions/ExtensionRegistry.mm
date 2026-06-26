@@ -172,6 +172,9 @@ void seedBaseExtensions(RegistryState& state) {
     state.activeExtensions.assign(kBaseExtensions.begin(), kBaseExtensions.end());
     if (appglCompatProfileEnabled()) {
         state.activeExtensions.push_back("GL_ARB_compatibility");
+        state.activeExtensions.push_back("GL_EXT_framebuffer_blit");
+        state.activeExtensions.push_back("GL_EXT_packed_depth_stencil");
+        state.activeExtensions.push_back("GL_ARB_depth_buffer_float");
     }
     state.sparseTextureHooks = {};
     state.fragmentShadingRateHooks = {};
