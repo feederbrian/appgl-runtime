@@ -814,18 +814,20 @@ bool runS25LiveMSAAResolveToDefaultSentinel(std::string& message) {
 
         const std::array<float, 15> vertices = {
             -1.0f, -1.0f, 0.0f, 1.0f, 0.0f,
-             3.0f, -1.0f, 0.0f, 1.0f, 0.0f,
-            -1.0f,  3.0f, 0.0f, 1.0f, 0.0f,
+             1.0f, -1.0f, 0.0f, 1.0f, 0.0f,
+            -1.0f,  1.0f, 0.0f, 1.0f, 0.0f,
         };
 
         GLuint vao = 0;
         GLuint vbo = 0;
         GLuint msaaFramebuffer = 0;
         GLuint msaaColor = 0;
+        GLuint msaaDepth = 0;
         gl.glGenVertexArrays(1, &vao);
         gl.glGenBuffers(1, &vbo);
         gl.glGenFramebuffers(1, &msaaFramebuffer);
         gl.glGenRenderbuffers(1, &msaaColor);
+        gl.glGenRenderbuffers(1, &msaaDepth);
 
         gl.glBindVertexArray(vao);
         gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
@@ -855,6 +857,24 @@ bool runS25LiveMSAAResolveToDefaultSentinel(std::string& message) {
                                      GL_COLOR_ATTACHMENT0,
                                      GL_RENDERBUFFER,
                                      msaaColor);
+        GLint colorSamples = 0;
+        gl.glGetRenderbufferParameteriv(GL_RENDERBUFFER,
+                                        GL_RENDERBUFFER_SAMPLES,
+                                        &colorSamples);
+        gl.glBindRenderbuffer(GL_RENDERBUFFER, msaaDepth);
+        gl.glRenderbufferStorageMultisample(GL_RENDERBUFFER,
+                                            4,
+                                            GL_DEPTH_COMPONENT24,
+                                            kCanvasWidth,
+                                            kCanvasHeight);
+        gl.glFramebufferRenderbuffer(GL_FRAMEBUFFER,
+                                     GL_DEPTH_ATTACHMENT,
+                                     GL_RENDERBUFFER,
+                                     msaaDepth);
+        GLint depthSamples = 0;
+        gl.glGetRenderbufferParameteriv(GL_RENDERBUFFER,
+                                        GL_RENDERBUFFER_SAMPLES,
+                                        &depthSamples);
         const GLenum drawBuffer = GL_COLOR_ATTACHMENT0;
         gl.glDrawBuffers(1, &drawBuffer);
         gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
@@ -894,27 +914,56 @@ bool runS25LiveMSAAResolveToDefaultSentinel(std::string& message) {
                 gl, program, vao, msaaFramebuffer, message);
         }
 
-        std::array<std::uint8_t, 4> pixel = {};
+        std::array<std::uint8_t, kCanvasWidth * kCanvasHeight * 4> pixels = {};
         if (ok) {
             gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
             gl.glReadBuffer(GL_BACK);
-            gl.glReadPixels(kCanvasWidth / 2,
-                            kCanvasHeight / 2,
-                            1,
-                            1,
+            gl.glReadPixels(0,
+                            0,
+                            kCanvasWidth,
+                            kCanvasHeight,
                             GL_RGBA,
                             GL_UNSIGNED_BYTE,
-                            pixel.data());
+                            pixels.data());
             ok = expectNoError(
                 gl, "live-present MSAA default readback", message);
         }
-        if (ok && (pixel[1] < 180 || pixel[0] > 48 || pixel[2] > 48)) {
+        std::size_t fullGreen = 0;
+        std::size_t black = 0;
+        std::size_t partialGreen = 0;
+        if (ok) {
+            for (GLsizei y = 0; y < kCanvasHeight; ++y) {
+                for (GLsizei x = 0; x < kCanvasWidth; ++x) {
+                    const std::size_t offset =
+                        (static_cast<std::size_t>(y) *
+                             static_cast<std::size_t>(kCanvasWidth) +
+                         static_cast<std::size_t>(x)) * 4u;
+                    const std::uint8_t r = pixels[offset + 0u];
+                    const std::uint8_t g = pixels[offset + 1u];
+                    const std::uint8_t b = pixels[offset + 2u];
+                    const std::uint8_t a = pixels[offset + 3u];
+                    if (a < 200 || r > 32 || b > 32) {
+                        continue;
+                    }
+                    if (g > 224) {
+                        ++fullGreen;
+                    } else if (g < 16) {
+                        ++black;
+                    } else if (g >= 32 && g <= 224) {
+                        ++partialGreen;
+                    }
+                }
+            }
+        }
+        if (ok && (colorSamples != 4 || depthSamples != 4 ||
+                   partialGreen == 0)) {
             std::ostringstream stream;
-            stream << "live-present MSAA default center pixel rgba=("
-                   << static_cast<int>(pixel[0]) << ","
-                   << static_cast<int>(pixel[1]) << ","
-                   << static_cast<int>(pixel[2]) << ","
-                   << static_cast<int>(pixel[3]) << ")";
+            stream << "live-present MSAA effect check failed"
+                   << " partialEdgePixels=" << partialGreen
+                   << " fullGreen=" << fullGreen
+                   << " black=" << black
+                   << " colorSamples=" << colorSamples
+                   << " depthSamples=" << depthSamples;
             message = stream.str();
             ok = false;
         }
@@ -949,8 +998,16 @@ bool runS25LiveMSAAResolveToDefaultSentinel(std::string& message) {
         if (ok) {
             context->swapBuffers();
             pumpRunLoopOnce();
-            message =
-                "layer-backed BGRA default framebuffer accepted 4x RGBA8 MSAA resolve blit";
+            std::ostringstream stream;
+            stream
+                << "layer-backed BGRA default framebuffer accepted 4x RGBA8"
+                << " MSAA resolve blit with partialEdgePixels="
+                << partialGreen
+                << " fullGreen=" << fullGreen
+                << " black=" << black
+                << " colorSamples=" << colorSamples
+                << " depthSamples=" << depthSamples;
+            message = stream.str();
         }
 
         gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -958,6 +1015,7 @@ bool runS25LiveMSAAResolveToDefaultSentinel(std::string& message) {
         gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
         gl.glBindVertexArray(0);
         gl.glUseProgram(0);
+        gl.glDeleteRenderbuffers(1, &msaaDepth);
         gl.glDeleteRenderbuffers(1, &msaaColor);
         gl.glDeleteFramebuffers(1, &msaaFramebuffer);
         gl.glDeleteBuffers(1, &vbo);

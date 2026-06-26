@@ -13896,6 +13896,7 @@ TestResult runS22LivePresentTessFurPathSentinel() {
 }
 
 TestResult runS25LiveMSAAResolveToDefaultPathSentinel() {
+    std::string detail;
     auto result = runDirectSentinel("s25.live-msaa-resolve-to-default-bgra", [&] {
         std::string message;
         if (!runS25LiveMSAAResolveToDefaultSentinel(message)) {
@@ -13903,10 +13904,10 @@ TestResult runS25LiveMSAAResolveToDefaultPathSentinel() {
                 ? "live-present MSAA default resolve sentinel failed"
                 : message);
         }
+        detail = message;
     });
-    if (result.status == "passed") {
-        result.message =
-            "layer-backed BGRA default framebuffer resolved 4x RGBA8 MSAA color";
+    if (result.status == "passed" && !detail.empty()) {
+        result.message = detail;
     }
     return result;
 }
