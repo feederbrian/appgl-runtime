@@ -5557,6 +5557,13 @@ struct MetalFrameGraph::Impl {
         releaseOwnedObjCObject(solidColorVertexFn);
         releaseOwnedObjCObject(solidColorFragmentFn);
         releaseOwnedObjCObject(solidColorPipelineState);
+        releaseOwnedObjCObject(msaaColorResolveCopyLibrary);
+        releaseOwnedObjCObject(msaaColorResolveCopyVertexFn);
+        releaseOwnedObjCObject(msaaColorResolveCopyFragmentFn);
+        for (auto& entry : msaaColorResolveCopyPSOCache) {
+            releaseOwnedObjCObject(entry.second);
+        }
+        msaaColorResolveCopyPSOCache.clear();
         releaseOwnedObjCObject(tessDomainGenLibrary);
         releaseOwnedObjCObject(tessDomainGenPipelineState);
         releaseOwnedObjCObject(tessDomainCaptureLibrary);
@@ -16453,6 +16460,281 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
         return true;
     }
 
+    static bool msaaColorResolveCopyFormatSupported(MTLPixelFormat format) {
+        switch (format) {
+            case MTLPixelFormatRGBA8Unorm:
+            case MTLPixelFormatRGBA8Unorm_sRGB:
+            case MTLPixelFormatBGRA8Unorm:
+            case MTLPixelFormatBGRA8Unorm_sRGB:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    bool ensureMsaaColorResolveCopyLibrary() {
+        if (msaaColorResolveCopyLibrary != nil) {
+            return true;
+        }
+        NSString* source = @R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct AppGLResolveCopyVSOut {
+    float4 position [[position]];
+};
+
+struct AppGLResolveCopyParams {
+    uint width;
+    uint height;
+};
+
+vertex AppGLResolveCopyVSOut appgl_msaa_color_resolve_copy_vs(
+    uint vertexID [[vertex_id]])
+{
+    constexpr float2 positions[3] = {
+        float2(-1.0, -1.0),
+        float2( 3.0, -1.0),
+        float2(-1.0,  3.0)
+    };
+    AppGLResolveCopyVSOut out;
+    out.position = float4(positions[vertexID], 0.0, 1.0);
+    return out;
+}
+
+fragment float4 appgl_msaa_color_resolve_copy_fs(
+    AppGLResolveCopyVSOut in [[stage_in]],
+    texture2d<float, access::read> src [[texture(0)]],
+    constant AppGLResolveCopyParams& params [[buffer(0)]])
+{
+    const uint x = min(uint(in.position.x), params.width - 1u);
+    const uint y = min(uint(in.position.y), params.height - 1u);
+    return src.read(uint2(x, y));
+}
+)MSL";
+        NSError* error = nil;
+        msaaColorResolveCopyLibrary =
+            [device newLibraryWithSource:source options:nil error:&error];
+        if (msaaColorResolveCopyLibrary == nil) {
+            NSLog(@"[AppGL] MSAA color resolve-copy library build failed: %@",
+                  error);
+            return false;
+        }
+        msaaColorResolveCopyVertexFn =
+            [msaaColorResolveCopyLibrary
+                newFunctionWithName:@"appgl_msaa_color_resolve_copy_vs"];
+        msaaColorResolveCopyFragmentFn =
+            [msaaColorResolveCopyLibrary
+                newFunctionWithName:@"appgl_msaa_color_resolve_copy_fs"];
+        return msaaColorResolveCopyVertexFn != nil &&
+               msaaColorResolveCopyFragmentFn != nil;
+    }
+
+    id<MTLRenderPipelineState> msaaColorResolveCopyPipelineState(
+        MTLPixelFormat dstFormat) {
+        if (!msaaColorResolveCopyFormatSupported(dstFormat) ||
+            !ensureMsaaColorResolveCopyLibrary()) {
+            return nil;
+        }
+        const std::uint64_t key = static_cast<std::uint64_t>(dstFormat);
+        auto it = msaaColorResolveCopyPSOCache.find(key);
+        if (it != msaaColorResolveCopyPSOCache.end()) {
+            return it->second;
+        }
+
+        MTLRenderPipelineDescriptor* desc =
+            [[MTLRenderPipelineDescriptor alloc] init];
+        ScopedOwnedObjCObject descRelease(desc);
+        desc.vertexFunction = msaaColorResolveCopyVertexFn;
+        desc.fragmentFunction = msaaColorResolveCopyFragmentFn;
+        desc.colorAttachments[0].pixelFormat = dstFormat;
+
+        NSError* error = nil;
+        id<MTLRenderPipelineState> state =
+            [device newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (state == nil) {
+            NSLog(@"[AppGL] MSAA color resolve-copy PSO build failed: %@",
+                  error);
+            return nil;
+        }
+        msaaColorResolveCopyPSOCache[key] = state;
+        return state;
+    }
+
+    bool encodeMultisampleColorResolve(id<MTLCommandBuffer> cmd,
+                                       id<MTLTexture> src,
+                                       NSUInteger srcSlice,
+                                       id<MTLTexture> dst) {
+        if (cmd == nil || src == nil || dst == nil ||
+            src.sampleCount <= 1 || dst.sampleCount != 1 ||
+            src.width != dst.width || src.height != dst.height ||
+            src.pixelFormat != dst.pixelFormat) {
+            return false;
+        }
+        const bool sourceIsArray =
+            src.textureType == MTLTextureType2DMultisampleArray;
+        if (!sourceIsArray && srcSlice != 0) {
+            return false;
+        }
+        if (sourceIsArray && srcSlice >= src.arrayLength) {
+            return false;
+        }
+
+        MTLRenderPassDescriptor* pass = getReusablePassDescriptor();
+        pass.colorAttachments[0].texture = src;
+        pass.colorAttachments[0].slice = sourceIsArray ? srcSlice : 0;
+        pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        pass.colorAttachments[0].storeAction =
+            MTLStoreActionMultisampleResolve;
+        pass.colorAttachments[0].resolveTexture = dst;
+        pass.colorAttachments[0].resolveLevel = 0;
+        pass.colorAttachments[0].resolveSlice = 0;
+        id<MTLRenderCommandEncoder> enc =
+            [cmd renderCommandEncoderWithDescriptor:pass];
+        if (enc == nil) {
+            return false;
+        }
+        [enc endEncoding];
+        return true;
+    }
+
+    bool resolveMultisampleColorToDefaultFramebuffer(void* srcTexVoid,
+                                                     std::uint32_t srcSlice,
+                                                     GLsizei width,
+                                                     GLsizei height) {
+        ++msaaDefaultColorResolveCalls;
+        auto fail = [&]() {
+            ++msaaDefaultColorResolveFailures;
+            return false;
+        };
+        if (srcTexVoid == nullptr || device == nil || commandQueue == nil ||
+            width <= 0 || height <= 0) {
+            return fail();
+        }
+        id<MTLTexture> src = (__bridge id<MTLTexture>)srcTexVoid;
+        if (src == nil || src.sampleCount <= 1 ||
+            !msaaColorResolveCopyFormatSupported(src.pixelFormat) ||
+            static_cast<NSUInteger>(width) != src.width ||
+            static_cast<NSUInteger>(height) != src.height) {
+            return fail();
+        }
+
+        materializeAllPendingFboClears();
+        flushParallelTranslatedDrawBatch(
+            ParallelEncodeBoundaryReason::ResourceMutationOrBarrier);
+        endRenderPass();
+        if (hasPendingClear) {
+            flushPendingClear();
+        }
+        ensureDrawableResources();
+        acquireRingSlot();
+        if (!ensureCurrentCommandBuffer(AppGLCommandReason::CopyImageBlit)) {
+            return fail();
+        }
+        if (!acquireDrawableIfNeeded()) {
+            return fail();
+        }
+
+        id<MTLTexture> dst =
+            usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
+        if (dst == nil || dst.sampleCount != 1 ||
+            static_cast<NSUInteger>(width) != dst.width ||
+            static_cast<NSUInteger>(height) != dst.height ||
+            !msaaColorResolveCopyFormatSupported(dst.pixelFormat)) {
+            return fail();
+        }
+
+        const bool canDirectResolve = dst.pixelFormat == src.pixelFormat;
+        id<MTLRenderPipelineState> copyPso = nil;
+        if (!canDirectResolve) {
+            copyPso = msaaColorResolveCopyPipelineState(dst.pixelFormat);
+            if (copyPso == nil) {
+                return fail();
+            }
+        }
+
+        id<MTLTexture> resolvedTex = dst;
+        ScopedOwnedObjCObject resolvedTexRelease;
+        if (!canDirectResolve) {
+            MTLTextureDescriptor* tempDesc =
+                [MTLTextureDescriptor
+                    texture2DDescriptorWithPixelFormat:src.pixelFormat
+                                                width:src.width
+                                               height:src.height
+                                            mipmapped:NO];
+            tempDesc.storageMode = MTLStorageModePrivate;
+            tempDesc.usage =
+                MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            resolvedTex = [device newTextureWithDescriptor:tempDesc];
+            if (resolvedTex == nil) {
+                return fail();
+            }
+            currentCommandBufferLease.adoptRetainedObject(resolvedTex);
+            resolvedTexRelease.reset(resolvedTex);
+            resolvedTexRelease.release();
+        }
+
+        if (!encodeMultisampleColorResolve(currentCommandBuffer,
+                                           src,
+                                           static_cast<NSUInteger>(srcSlice),
+                                           resolvedTex)) {
+            return fail();
+        }
+
+        if (!canDirectResolve) {
+            MTLRenderPassDescriptor* pass = getReusablePassDescriptor();
+            pass.colorAttachments[0].texture = dst;
+            pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+            pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            id<MTLRenderCommandEncoder> enc =
+                [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
+            if (enc == nil) {
+                return fail();
+            }
+            struct CopyParams {
+                std::uint32_t width;
+                std::uint32_t height;
+            };
+            const CopyParams params = {
+                static_cast<std::uint32_t>(width),
+                static_cast<std::uint32_t>(height)
+            };
+            [enc setRenderPipelineState:copyPso];
+            [enc setViewport:(MTLViewport){
+                0.0, 0.0,
+                static_cast<double>(width),
+                static_cast<double>(height),
+                0.0, 1.0
+            }];
+            [enc setScissorRect:(MTLScissorRect){
+                0, 0,
+                static_cast<NSUInteger>(width),
+                static_cast<NSUInteger>(height)
+            }];
+            [enc setFragmentTexture:resolvedTex atIndex:0];
+            [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
+            [enc setCullMode:MTLCullModeNone];
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle
+                    vertexStart:0
+                    vertexCount:3];
+            [enc endEncoding];
+        }
+
+        readbackSourceTexture = dst;
+        readbackSourceIsBGRA = dst.pixelFormat == MTLPixelFormatBGRA8Unorm ||
+                               dst.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB;
+        hasHeadlessReadback = false;
+        pendingPresent = true;
+        resetCachedEncoderState();
+        ++msaaDefaultColorResolveSuccesses;
+        if (canDirectResolve) {
+            ++msaaDefaultColorResolveDirectResolves;
+        } else {
+            ++msaaDefaultColorResolveCopyResolves;
+        }
+        return true;
+    }
+
     // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
     // shader library and three pipeline states (vertex-color-only,
     // vertex-color × texture2D, and vertex-color × native texture1D).
@@ -23282,6 +23564,16 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         inventory.presentCommandBufferNilCalls =
             presentCommandBufferNilCalls;
         inventory.commandBuffersCommitted = commandBuffersCommitted;
+        inventory.msaaDefaultColorResolveCalls =
+            msaaDefaultColorResolveCalls;
+        inventory.msaaDefaultColorResolveSuccesses =
+            msaaDefaultColorResolveSuccesses;
+        inventory.msaaDefaultColorResolveFailures =
+            msaaDefaultColorResolveFailures;
+        inventory.msaaDefaultColorResolveDirectResolves =
+            msaaDefaultColorResolveDirectResolves;
+        inventory.msaaDefaultColorResolveCopyResolves =
+            msaaDefaultColorResolveCopyResolves;
         inventory.presentNoWorkReturns = presentNoWorkReturns;
         inventory.presentCommitAttempts = presentCommitAttempts;
         inventory.presentCommitSuccesses = presentCommitSuccesses;
@@ -23685,6 +23977,16 @@ private:
     id<MTLFunction> solidColorFragmentFn = nil;
     id<MTLRenderPipelineState> solidColorPipelineState = nil;
     MTLPixelFormat solidColorPipelineColorFormat = MTLPixelFormatInvalid;
+    id<MTLLibrary> msaaColorResolveCopyLibrary = nil;
+    id<MTLFunction> msaaColorResolveCopyVertexFn = nil;
+    id<MTLFunction> msaaColorResolveCopyFragmentFn = nil;
+    std::unordered_map<std::uint64_t, id<MTLRenderPipelineState>>
+        msaaColorResolveCopyPSOCache;
+    std::uint64_t msaaDefaultColorResolveCalls = 0;
+    std::uint64_t msaaDefaultColorResolveSuccesses = 0;
+    std::uint64_t msaaDefaultColorResolveFailures = 0;
+    std::uint64_t msaaDefaultColorResolveDirectResolves = 0;
+    std::uint64_t msaaDefaultColorResolveCopyResolves = 0;
 
     // Phase 3B.3 [metal-tess-TF] — tess domain-point generator compute
     // kernel. Built lazily the first time a TES-as-compute path needs
@@ -27588,6 +27890,15 @@ bool MetalFrameGraph::writeDefaultDepthStencilRegion(
     return impl_->writeDefaultDepthStencilRegion(
         x, y, width, height, depthPixels, writeDepth,
         stencilValue, writeStencil);
+}
+
+bool MetalFrameGraph::resolveMultisampleColorToDefaultFramebuffer(
+    void* srcTex,
+    std::uint32_t srcSlice,
+    GLsizei width,
+    GLsizei height) {
+    return impl_->resolveMultisampleColorToDefaultFramebuffer(
+        srcTex, srcSlice, width, height);
 }
 
 void* MetalFrameGraph::buildComputePipelineState(const std::string& msl, std::string* outError,

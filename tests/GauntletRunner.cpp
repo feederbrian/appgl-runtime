@@ -13895,6 +13895,22 @@ TestResult runS22LivePresentTessFurPathSentinel() {
     return result;
 }
 
+TestResult runS25LiveMSAAResolveToDefaultPathSentinel() {
+    auto result = runDirectSentinel("s25.live-msaa-resolve-to-default-bgra", [&] {
+        std::string message;
+        if (!runS25LiveMSAAResolveToDefaultSentinel(message)) {
+            throw std::runtime_error(message.empty()
+                ? "live-present MSAA default resolve sentinel failed"
+                : message);
+        }
+    });
+    if (result.status == "passed") {
+        result.message =
+            "layer-backed BGRA default framebuffer resolved 4x RGBA8 MSAA color";
+    }
+    return result;
+}
+
 TestResult runMipOversizedLevelProbe() {
     auto result = runDirectSentinel("mip.oversized-level-subimage", [&] {
         ScopedSentinelContext scoped(32, 32);
@@ -21250,6 +21266,11 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
     if (normalizedPhase == "s22-live-present-sentinel") {
         tests.push_back(runS22LivePresentPathSentinel());
         tests.push_back(runS22LivePresentTessFurPathSentinel());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "s25-msaa-default-resolve-sentinel") {
+        tests.push_back(runS25LiveMSAAResolveToDefaultPathSentinel());
         return buildJSON(normalizedPhase, tests);
     }
 

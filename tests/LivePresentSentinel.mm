@@ -410,6 +410,40 @@ bool renderTessFurFrame(GLDispatchTable& gl,
     return expectNoError(gl, "live-present tess fur draw", message);
 }
 
+bool renderMSAAResolveToDefaultFrame(GLDispatchTable& gl,
+                                     GLuint program,
+                                     GLuint vao,
+                                     GLuint msaaFramebuffer,
+                                     std::string& message) {
+    gl.glBindFramebuffer(GL_FRAMEBUFFER, msaaFramebuffer);
+    gl.glViewport(0, 0, kCanvasWidth, kCanvasHeight);
+    gl.glDisable(GL_BLEND);
+    gl.glDisable(GL_CULL_FACE);
+    gl.glDisable(GL_DEPTH_TEST);
+    gl.glDisable(GL_SCISSOR_TEST);
+    gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    gl.glClear(GL_COLOR_BUFFER_BIT);
+    gl.glUseProgram(program);
+    gl.glBindVertexArray(vao);
+    gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+    gl.glBindVertexArray(0);
+    gl.glUseProgram(0);
+    if (!expectNoError(gl, "live-present MSAA source draw", message)) {
+        return false;
+    }
+
+    gl.glBindFramebuffer(GL_READ_FRAMEBUFFER, msaaFramebuffer);
+    gl.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+    gl.glDrawBuffer(GL_BACK);
+    gl.glBlitFramebuffer(0, 0, kCanvasWidth, kCanvasHeight,
+                          0, 0, kCanvasWidth, kCanvasHeight,
+                          GL_COLOR_BUFFER_BIT,
+                          GL_NEAREST);
+    gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return expectNoError(gl, "live-present MSAA default resolve blit", message);
+}
+
 }  // namespace
 
 bool runS22LivePresentMDISentinel(std::string& message) {
@@ -719,6 +753,216 @@ bool runS22LivePresentTessFurSentinel(std::string& message) {
         gl.glDeleteVertexArrays(1, &warmupVao);
         gl.glDeleteProgram(tessProgram);
         gl.glDeleteProgram(warmupProgram);
+        Runtime::shared().makeCurrent(nullptr);
+        context.reset();
+        [window close];
+#if !__has_feature(objc_arc)
+        [view release];
+        [window release];
+#endif
+        return ok;
+    }
+}
+
+bool runS25LiveMSAAResolveToDefaultSentinel(std::string& message) {
+    if (![NSThread isMainThread]) {
+        message =
+            "live-present MSAA default resolve sentinel requires the main thread";
+        return false;
+    }
+
+    @autoreleasepool {
+        [NSApplication sharedApplication];
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
+
+        const NSRect rect = NSMakeRect(0, 0, kCanvasWidth, kCanvasHeight);
+        NSWindow* window =
+            [[NSWindow alloc] initWithContentRect:rect
+                                        styleMask:NSWindowStyleMaskBorderless
+                                          backing:NSBackingStoreBuffered
+                                            defer:NO];
+        [window setReleasedWhenClosed:NO];
+        NSView* view = [[NSView alloc] initWithFrame:rect];
+        CAMetalLayer* layer = [CAMetalLayer layer];
+        layer.frame = rect;
+        layer.bounds = rect;
+        layer.drawableSize = CGSizeMake(kCanvasWidth, kCanvasHeight);
+        layer.framebufferOnly = NO;
+        layer.displaySyncEnabled = NO;
+        view.wantsLayer = YES;
+        view.layer = layer;
+        window.contentView = view;
+        [window orderFrontRegardless];
+        pumpRunLoopOnce();
+
+        auto context = std::make_unique<GLContext>((__bridge void*)layer);
+        Runtime::shared().makeCurrent(context.get());
+        Runtime::shared().noteRenderer(context->rendererString());
+        auto& gl = Runtime::shared().dispatch();
+
+        const GLuint program = buildProgram(gl, message);
+        if (program == 0) {
+            Runtime::shared().makeCurrent(nullptr);
+            context.reset();
+            [window close];
+#if !__has_feature(objc_arc)
+            [view release];
+            [window release];
+#endif
+            return false;
+        }
+
+        const std::array<float, 15> vertices = {
+            -1.0f, -1.0f, 0.0f, 1.0f, 0.0f,
+             3.0f, -1.0f, 0.0f, 1.0f, 0.0f,
+            -1.0f,  3.0f, 0.0f, 1.0f, 0.0f,
+        };
+
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        GLuint msaaFramebuffer = 0;
+        GLuint msaaColor = 0;
+        gl.glGenVertexArrays(1, &vao);
+        gl.glGenBuffers(1, &vbo);
+        gl.glGenFramebuffers(1, &msaaFramebuffer);
+        gl.glGenRenderbuffers(1, &msaaColor);
+
+        gl.glBindVertexArray(vao);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        gl.glBufferData(GL_ARRAY_BUFFER,
+                        static_cast<GLsizeiptr>(vertices.size() * sizeof(float)),
+                        vertices.data(),
+                        GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE,
+                                 kStrideBytes,
+                                 reinterpret_cast<void*>(0));
+        gl.glEnableVertexAttribArray(1);
+        gl.glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE,
+                                 kStrideBytes,
+                                 reinterpret_cast<void*>(2 * sizeof(float)));
+        gl.glBindVertexArray(0);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, msaaFramebuffer);
+        gl.glBindRenderbuffer(GL_RENDERBUFFER, msaaColor);
+        gl.glRenderbufferStorageMultisample(GL_RENDERBUFFER,
+                                            4,
+                                            GL_RGBA8,
+                                            kCanvasWidth,
+                                            kCanvasHeight);
+        gl.glFramebufferRenderbuffer(GL_FRAMEBUFFER,
+                                     GL_COLOR_ATTACHMENT0,
+                                     GL_RENDERBUFFER,
+                                     msaaColor);
+        const GLenum drawBuffer = GL_COLOR_ATTACHMENT0;
+        gl.glDrawBuffers(1, &drawBuffer);
+        gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+        const GLenum status = gl.glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        bool ok = status == GL_FRAMEBUFFER_COMPLETE;
+        if (!ok) {
+            std::ostringstream stream;
+            stream << "live-present MSAA FBO incomplete 0x"
+                   << std::hex << status;
+            message = stream.str();
+        }
+        if (ok) {
+            ok = expectNoError(gl, "live-present MSAA setup", message);
+        }
+
+        if (ok) {
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            gl.glViewport(0, 0, kCanvasWidth, kCanvasHeight);
+            gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            gl.glClear(GL_COLOR_BUFFER_BIT);
+            gl.glUseProgram(program);
+            gl.glBindVertexArray(vao);
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+            gl.glBindVertexArray(0);
+            gl.glUseProgram(0);
+            ok = expectNoError(
+                gl, "live-present MSAA default warmup", message);
+        }
+        if (ok) {
+            context->swapBuffers();
+            pumpRunLoopOnce();
+        }
+
+        const auto before = context->metalResourceInventory();
+        if (ok) {
+            ok = renderMSAAResolveToDefaultFrame(
+                gl, program, vao, msaaFramebuffer, message);
+        }
+
+        std::array<std::uint8_t, 4> pixel = {};
+        if (ok) {
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            gl.glReadBuffer(GL_BACK);
+            gl.glReadPixels(kCanvasWidth / 2,
+                            kCanvasHeight / 2,
+                            1,
+                            1,
+                            GL_RGBA,
+                            GL_UNSIGNED_BYTE,
+                            pixel.data());
+            ok = expectNoError(
+                gl, "live-present MSAA default readback", message);
+        }
+        if (ok && (pixel[1] < 180 || pixel[0] > 48 || pixel[2] > 48)) {
+            std::ostringstream stream;
+            stream << "live-present MSAA default center pixel rgba=("
+                   << static_cast<int>(pixel[0]) << ","
+                   << static_cast<int>(pixel[1]) << ","
+                   << static_cast<int>(pixel[2]) << ","
+                   << static_cast<int>(pixel[3]) << ")";
+            message = stream.str();
+            ok = false;
+        }
+
+        const auto after = context->metalResourceInventory();
+        if (ok &&
+            after.frameGraphMsaaDefaultColorResolveCopyResolves <=
+                before.frameGraphMsaaDefaultColorResolveCopyResolves) {
+            std::ostringstream stream;
+            stream << "live-present MSAA default BGRA copy path did not fire"
+                   << " before="
+                   << before.frameGraphMsaaDefaultColorResolveCopyResolves
+                   << " after="
+                   << after.frameGraphMsaaDefaultColorResolveCopyResolves
+                   << " calls=" << after.frameGraphMsaaDefaultColorResolveCalls
+                   << " successes="
+                   << after.frameGraphMsaaDefaultColorResolveSuccesses
+                   << " failures="
+                   << after.frameGraphMsaaDefaultColorResolveFailures
+                   << " direct="
+                   << after.frameGraphMsaaDefaultColorResolveDirectResolves
+                   << " drawable="
+                   << after.frameGraphCurrentDrawableWidth << "x"
+                   << after.frameGraphCurrentDrawableHeight
+                   << " fmt="
+                   << after.frameGraphCurrentDrawablePixelFormat
+                   << " sample="
+                   << after.frameGraphCurrentDrawableSampleCount;
+            message = stream.str();
+            ok = false;
+        }
+        if (ok) {
+            context->swapBuffers();
+            pumpRunLoopOnce();
+            message =
+                "layer-backed BGRA default framebuffer accepted 4x RGBA8 MSAA resolve blit";
+        }
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glBindRenderbuffer(GL_RENDERBUFFER, 0);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteRenderbuffers(1, &msaaColor);
+        gl.glDeleteFramebuffers(1, &msaaFramebuffer);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteProgram(program);
         Runtime::shared().makeCurrent(nullptr);
         context.reset();
         [window close];

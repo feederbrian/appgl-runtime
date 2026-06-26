@@ -1324,6 +1324,10 @@ public:
                                         bool writeDepth,
                                         std::uint8_t stencilValue,
                                         bool writeStencil);
+    bool resolveMultisampleColorToDefaultFramebuffer(void* srcTex,
+                                                     std::uint32_t srcSlice,
+                                                     GLsizei width,
+                                                     GLsizei height);
 
     // Compile a compute shader's MSL source into a retained
     // MTLComputePipelineState and return it as a type-erased void*
@@ -1767,6 +1771,11 @@ public:
         std::uint64_t presentCommandBufferPresentCalls = 0;
         std::uint64_t presentCommandBufferNilCalls = 0;
         std::uint64_t commandBuffersCommitted = 0;
+        std::uint64_t msaaDefaultColorResolveCalls = 0;
+        std::uint64_t msaaDefaultColorResolveSuccesses = 0;
+        std::uint64_t msaaDefaultColorResolveFailures = 0;
+        std::uint64_t msaaDefaultColorResolveDirectResolves = 0;
+        std::uint64_t msaaDefaultColorResolveCopyResolves = 0;
         std::uint64_t presentNoWorkReturns = 0;
         std::uint64_t presentCommitAttempts = 0;
         std::uint64_t presentCommitSuccesses = 0;

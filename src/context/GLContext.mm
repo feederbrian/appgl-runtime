@@ -25483,6 +25483,118 @@ struct GLContext::Impl {
             }
             return clipped.data();
         };
+        struct MetalAttachmentBlitView {
+            id<MTLTexture> texture = nil;
+            GLTextureObject* textureObject = nullptr;
+            GLRenderbufferObject* renderbufferObject = nullptr;
+            NSUInteger level = 0;
+            NSUInteger slice = 0;
+            GLsizei width = 0;
+            GLsizei height = 0;
+            bool yFlip = false;
+        };
+        auto resolveMetalAttachmentBlitView =
+            [&](const GLFramebufferAttachment& attachment)
+                -> MetalAttachmentBlitView {
+            MetalAttachmentBlitView view;
+            if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
+                const ResolvedTextureAttachment resolved =
+                    resolveTextureAttachmentStorage(attachment);
+                GLTextureObject* texture = resolved.storageTexture;
+                if (!resolved.valid || texture == nullptr ||
+                    texture->metalTexture == nullptr) {
+                    return view;
+                }
+                auto levelIt = texture->levels.find(resolved.level);
+                if (levelIt == texture->levels.end() ||
+                    !levelIt->second.defined) {
+                    return view;
+                }
+                view.texture = (__bridge id<MTLTexture>)texture->metalTexture;
+                view.textureObject = texture;
+                view.level =
+                    static_cast<NSUInteger>(std::max<GLint>(resolved.level, 0));
+                view.width = std::max<GLsizei>(levelIt->second.desc.width, 1);
+                view.height = texture->target == GL_TEXTURE_1D
+                    ? 1 : std::max<GLsizei>(levelIt->second.desc.height, 1);
+                const MTLTextureType texType = view.texture.textureType;
+                if (texType == MTLTextureType2DArray ||
+                    texType == MTLTextureType2DMultisampleArray ||
+                    texType == MTLTextureTypeCube ||
+                    texType == MTLTextureTypeCubeArray) {
+                    view.slice = static_cast<NSUInteger>(
+                        std::max<GLint>(resolved.layer, 0));
+                }
+                view.yFlip =
+                    (texture->wasFramebufferRenderedTo ||
+                     texture->wasViewportRenderedTo) &&
+                    state->clipOrigin() != GL_UPPER_LEFT;
+                return view;
+            }
+            if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+                GLRenderbufferObject* renderbuffer =
+                    objects->renderbuffers().get(attachment.object);
+                if (renderbuffer == nullptr || !renderbuffer->storageDefined ||
+                    renderbuffer->metalTexture == nullptr) {
+                    return view;
+                }
+                view.texture =
+                    (__bridge id<MTLTexture>)renderbuffer->metalTexture;
+                view.renderbufferObject = renderbuffer;
+                view.width = renderbuffer->width;
+                view.height = renderbuffer->height;
+                view.yFlip = renderbuffer->framebufferReadbackYFlip &&
+                    state->clipOrigin() != GL_UPPER_LEFT;
+                return view;
+            }
+            return view;
+        };
+        auto isExactFullColorResolveRect =
+            [&](const MetalAttachmentBlitView& srcView,
+                GLsizei dstViewWidth,
+                GLsizei dstViewHeight) {
+            if (needsScale || writeWindow.empty ||
+                srcX0 >= srcX1 || srcY0 >= srcY1 ||
+                dstX0 >= dstX1 || dstY0 >= dstY1) {
+                return false;
+            }
+            if (writeWindow.x != dstX || writeWindow.y != dstY ||
+                writeWindow.width != dstWidth ||
+                writeWindow.height != dstHeight) {
+                return false;
+            }
+            return srcX == 0 && srcY == 0 && dstX == 0 && dstY == 0 &&
+                   copyWidth == srcView.width &&
+                   copyHeight == srcView.height &&
+                   dstWidth == dstViewWidth &&
+                   dstHeight == dstViewHeight;
+        };
+        auto tryMetalDefaultColorResolveBlit =
+            [&](const GLFramebufferAttachment& srcAttachment) {
+            if (frameGraph == nullptr || device == nil || commandQueue == nil) {
+                return false;
+            }
+            const MetalAttachmentBlitView srcView =
+                resolveMetalAttachmentBlitView(srcAttachment);
+            if (srcView.texture == nil || srcView.texture.sampleCount <= 1 ||
+                !isExactFullColorResolveRect(srcView, dstWidth, dstHeight)) {
+                return false;
+            }
+            drainFramebufferAttachmentProducer(srcAttachment,
+                                               kProducerFboColorWrite |
+                                               kProducerCopyWrite);
+            frameGraph->endRenderPass();
+            if (!frameGraph->resolveMultisampleColorToDefaultFramebuffer(
+                    (__bridge void*)srcView.texture,
+                    static_cast<std::uint32_t>(srcView.slice),
+                    dstWidth,
+                    dstHeight)) {
+                return false;
+            }
+            defaultFramebufferShadowValid = false;
+            defaultFbShadowClearPending = false;
+            return true;
+        };
         if (drawDefaultFramebuffer) {
             bool wroteDefaultDepthStencil = false;
             if ((mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0) {
@@ -25716,6 +25828,10 @@ struct GLContext::Impl {
             if (srcAttachment == nullptr || writeWindow.empty) {
                 return true;
             }
+            if (mask == GL_COLOR_BUFFER_BIT &&
+                tryMetalDefaultColorResolveBlit(*srcAttachment)) {
+                return true;
+            }
             std::vector<std::uint8_t> srcStage(
                 static_cast<std::size_t>(copyWidth) *
                 static_cast<std::size_t>(copyHeight) * 4u);
@@ -25775,72 +25891,6 @@ struct GLContext::Impl {
             }
             return true;
         }
-        struct MetalAttachmentBlitView {
-            id<MTLTexture> texture = nil;
-            GLTextureObject* textureObject = nullptr;
-            GLRenderbufferObject* renderbufferObject = nullptr;
-            NSUInteger level = 0;
-            NSUInteger slice = 0;
-            GLsizei width = 0;
-            GLsizei height = 0;
-            bool yFlip = false;
-        };
-        auto resolveMetalAttachmentBlitView =
-            [&](const GLFramebufferAttachment& attachment)
-                -> MetalAttachmentBlitView {
-            MetalAttachmentBlitView view;
-            if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
-                const ResolvedTextureAttachment resolved =
-                    resolveTextureAttachmentStorage(attachment);
-                GLTextureObject* texture = resolved.storageTexture;
-                if (!resolved.valid || texture == nullptr ||
-                    texture->metalTexture == nullptr) {
-                    return view;
-                }
-                auto levelIt = texture->levels.find(resolved.level);
-                if (levelIt == texture->levels.end() ||
-                    !levelIt->second.defined) {
-                    return view;
-                }
-                view.texture = (__bridge id<MTLTexture>)texture->metalTexture;
-                view.textureObject = texture;
-                view.level =
-                    static_cast<NSUInteger>(std::max<GLint>(resolved.level, 0));
-                view.width = std::max<GLsizei>(levelIt->second.desc.width, 1);
-                view.height = texture->target == GL_TEXTURE_1D
-                    ? 1 : std::max<GLsizei>(levelIt->second.desc.height, 1);
-                const MTLTextureType texType = view.texture.textureType;
-                if (texType == MTLTextureType2DArray ||
-                    texType == MTLTextureType2DMultisampleArray ||
-                    texType == MTLTextureTypeCube ||
-                    texType == MTLTextureTypeCubeArray) {
-                    view.slice = static_cast<NSUInteger>(
-                        std::max<GLint>(resolved.layer, 0));
-                }
-                view.yFlip =
-                    (texture->wasFramebufferRenderedTo ||
-                     texture->wasViewportRenderedTo) &&
-                    state->clipOrigin() != GL_UPPER_LEFT;
-                return view;
-            }
-            if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
-                GLRenderbufferObject* renderbuffer =
-                    objects->renderbuffers().get(attachment.object);
-                if (renderbuffer == nullptr || !renderbuffer->storageDefined ||
-                    renderbuffer->metalTexture == nullptr) {
-                    return view;
-                }
-                view.texture =
-                    (__bridge id<MTLTexture>)renderbuffer->metalTexture;
-                view.renderbufferObject = renderbuffer;
-                view.width = renderbuffer->width;
-                view.height = renderbuffer->height;
-                view.yFlip = renderbuffer->framebufferReadbackYFlip &&
-                    state->clipOrigin() != GL_UPPER_LEFT;
-                return view;
-            }
-            return view;
-        };
         auto metalFormatCoversAspects =
             [](MTLPixelFormat format, GLbitfield aspects) {
             const bool wantsDepth =
@@ -25870,16 +25920,29 @@ struct GLContext::Impl {
             [&](const GLFramebufferAttachment& attachment,
                 GLbitfield aspects,
                 const MetalAttachmentBlitView& dstView) {
+            const bool writesColor =
+                (aspects & GL_COLOR_BUFFER_BIT) != 0;
+            const bool writesDepthStencil =
+                (aspects & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0;
             if (dstView.textureObject != nullptr) {
-                dstView.textureObject->depthStencilShadowAuthoritative = false;
-                maybeDropStaleDepth32FRgba8ShadowForAttachment(
-                    *dstView.textureObject, attachment);
+                if (writesColor) {
+                    dstView.textureObject->colorShadowAuthoritative = false;
+                }
+                if (writesDepthStencil) {
+                    dstView.textureObject->depthStencilShadowAuthoritative = false;
+                    maybeDropStaleDepth32FRgba8ShadowForAttachment(
+                        *dstView.textureObject, attachment);
+                }
                 if (state->clipOrigin() != GL_UPPER_LEFT) {
                     dstView.textureObject->wasFramebufferRenderedTo = true;
                 }
                 dstView.textureObject->swizzleDirty = true;
             }
             if (dstView.renderbufferObject != nullptr) {
+                if (writesColor) {
+                    dstView.renderbufferObject->rgba8ShadowClearPending = false;
+                    dstView.renderbufferObject->colorShadowAuthoritative = false;
+                }
                 if ((aspects & GL_DEPTH_BUFFER_BIT) != 0) {
                     dstView.renderbufferObject->wasMetalDepthRendered = true;
                 }
@@ -25887,9 +25950,92 @@ struct GLContext::Impl {
                     dstView.renderbufferObject->wasMetalStencilRendered = true;
                 }
             }
+            std::uint32_t producerBits = kProducerCopyWrite;
+            if (writesColor) {
+                producerBits |= kProducerFboColorWrite;
+            }
+            if (writesDepthStencil) {
+                producerBits |= kProducerFboDepthStencilWrite;
+            }
             markFramebufferAttachmentWrite(
                 attachment,
-                kProducerCopyWrite | kProducerFboDepthStencilWrite);
+                producerBits);
+        };
+        auto tryMetalFullColorResolveBlit =
+            [&](const GLFramebufferAttachment& srcAttachment,
+                const GLFramebufferAttachment& dstAttachment) {
+            if (device == nil || commandQueue == nil || writeWindow.empty) {
+                return false;
+            }
+            const MetalAttachmentBlitView srcView =
+                resolveMetalAttachmentBlitView(srcAttachment);
+            const MetalAttachmentBlitView dstView =
+                resolveMetalAttachmentBlitView(dstAttachment);
+            if (srcView.texture == nil || dstView.texture == nil ||
+                srcView.texture.sampleCount <= 1 ||
+                dstView.texture.sampleCount != 1 ||
+                srcView.texture.pixelFormat != dstView.texture.pixelFormat ||
+                srcView.yFlip != dstView.yFlip ||
+                !isExactFullColorResolveRect(srcView,
+                                             dstView.width,
+                                             dstView.height)) {
+                return false;
+            }
+            if (srcView.texture == dstView.texture &&
+                srcView.level == dstView.level &&
+                srcView.slice == dstView.slice) {
+                return false;
+            }
+            const bool sourceIsArray =
+                srcView.texture.textureType == MTLTextureType2DMultisampleArray;
+            if (!sourceIsArray && srcView.slice != 0) {
+                return false;
+            }
+            if (sourceIsArray && srcView.slice >= srcView.texture.arrayLength) {
+                return false;
+            }
+            drainFramebufferAttachmentProducer(srcAttachment,
+                                               kProducerFboColorWrite |
+                                               kProducerCopyWrite);
+            if (frameGraph != nullptr && dstView.texture != nil) {
+                frameGraph->materializePendingFboClearsForTexture(
+                    (__bridge void*)dstView.texture);
+                frameGraph->endRenderPass();
+            }
+
+            auto lease = makeCommandBuffer(AppGLCommandReason::CopyImageBlit);
+            id<MTLCommandBuffer> cmd = lease.get();
+            if (cmd == nil) {
+                return false;
+            }
+            MTLRenderPassDescriptor* pass =
+                [MTLRenderPassDescriptor renderPassDescriptor];
+            pass.colorAttachments[0].texture = srcView.texture;
+            pass.colorAttachments[0].level = srcView.level;
+            pass.colorAttachments[0].slice =
+                sourceIsArray ? srcView.slice : 0;
+            pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            pass.colorAttachments[0].storeAction =
+                MTLStoreActionMultisampleResolve;
+            pass.colorAttachments[0].resolveTexture = dstView.texture;
+            pass.colorAttachments[0].resolveLevel = dstView.level;
+            pass.colorAttachments[0].resolveSlice = dstView.slice;
+            id<MTLRenderCommandEncoder> enc =
+                [cmd renderCommandEncoderWithDescriptor:pass];
+            if (enc == nil) {
+                return false;
+            }
+            [enc endEncoding];
+            if (!lease.commitAndWait(AppGLCommandReason::CopyImageBlit)) {
+                return false;
+            }
+            if (dstView.renderbufferObject != nullptr) {
+                dstView.renderbufferObject->framebufferReadbackYFlip =
+                    srcView.yFlip;
+            }
+            markMetalAttachmentBlitDestination(
+                dstAttachment, GL_COLOR_BUFFER_BIT, dstView);
+            return true;
         };
         auto multisamplePackedRenderbufferForAttachment =
             [&](const GLFramebufferAttachment* attachment)
@@ -26157,6 +26303,32 @@ struct GLContext::Impl {
             // depth-only FBOs. Treat a missing color attachment as a color
             // no-op, matching the depth/stencil branches below.
             if (srcAttachment != nullptr) {
+                bool metalResolvedColor = false;
+                if (mask == GL_COLOR_BUFFER_BIT && !writeWindow.empty) {
+                    bool sawColorDestination = false;
+                    bool allColorDestinationsResolved = true;
+                    for (GLenum buffer : drawFb->drawBuffers) {
+                        if (buffer == GL_NONE) {
+                            continue;
+                        }
+                        const GLFramebufferAttachment* dstAttachment =
+                            framebufferAttachment(*drawFb, buffer);
+                        if (dstAttachment == nullptr) {
+                            continue;
+                        }
+                        sawColorDestination = true;
+                        if (!tryMetalFullColorResolveBlit(
+                                *srcAttachment, *dstAttachment)) {
+                            allColorDestinationsResolved = false;
+                            break;
+                        }
+                    }
+                    metalResolvedColor =
+                        sawColorDestination && allColorDestinationsResolved;
+                }
+                if (metalResolvedColor) {
+                    return true;
+                }
                 // Read src region at src resolution.
                 std::vector<std::uint8_t> srcStage(
                     static_cast<std::size_t>(copyWidth) *
@@ -30746,6 +30918,16 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             frameGraphMetal.presentCommandBufferNilCalls;
         inventory.frameGraphCommandBuffersCommitted =
             frameGraphMetal.commandBuffersCommitted;
+        inventory.frameGraphMsaaDefaultColorResolveCalls =
+            frameGraphMetal.msaaDefaultColorResolveCalls;
+        inventory.frameGraphMsaaDefaultColorResolveSuccesses =
+            frameGraphMetal.msaaDefaultColorResolveSuccesses;
+        inventory.frameGraphMsaaDefaultColorResolveFailures =
+            frameGraphMetal.msaaDefaultColorResolveFailures;
+        inventory.frameGraphMsaaDefaultColorResolveDirectResolves =
+            frameGraphMetal.msaaDefaultColorResolveDirectResolves;
+        inventory.frameGraphMsaaDefaultColorResolveCopyResolves =
+            frameGraphMetal.msaaDefaultColorResolveCopyResolves;
         inventory.frameGraphPresentNoWorkReturns =
             frameGraphMetal.presentNoWorkReturns;
         inventory.frameGraphPresentCommitAttempts =

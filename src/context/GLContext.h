@@ -929,6 +929,11 @@ public:
         std::uint64_t frameGraphPresentCommandBufferPresentCalls = 0;
         std::uint64_t frameGraphPresentCommandBufferNilCalls = 0;
         std::uint64_t frameGraphCommandBuffersCommitted = 0;
+        std::uint64_t frameGraphMsaaDefaultColorResolveCalls = 0;
+        std::uint64_t frameGraphMsaaDefaultColorResolveSuccesses = 0;
+        std::uint64_t frameGraphMsaaDefaultColorResolveFailures = 0;
+        std::uint64_t frameGraphMsaaDefaultColorResolveDirectResolves = 0;
+        std::uint64_t frameGraphMsaaDefaultColorResolveCopyResolves = 0;
         std::uint64_t frameGraphPresentNoWorkReturns = 0;
         std::uint64_t frameGraphPresentCommitAttempts = 0;
         std::uint64_t frameGraphPresentCommitSuccesses = 0;
