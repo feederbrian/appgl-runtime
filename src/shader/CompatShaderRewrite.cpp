@@ -541,6 +541,66 @@ static const GpuShader4ShadowWrapper kGpuShader4ShadowWrappers[] = {
     },
 };
 
+struct GpuShader4TextureAlias {
+    const char* legacyName;
+    const char* coreName;
+};
+
+static const GpuShader4TextureAlias kGpuShader4TextureAliases[] = {
+    {"textureSize1D", "textureSize"},
+    {"textureSize2D", "textureSize"},
+    {"textureSize3D", "textureSize"},
+    {"textureSizeCube", "textureSize"},
+
+    {"texelFetch1DOffset", "texelFetchOffset"},
+    {"texelFetch2DOffset", "texelFetchOffset"},
+    {"texelFetch3DOffset", "texelFetchOffset"},
+    {"texelFetch1D", "texelFetch"},
+    {"texelFetch2D", "texelFetch"},
+    {"texelFetch3D", "texelFetch"},
+
+    {"texture1DProjGradOffset", "textureProjGradOffset"},
+    {"texture2DProjGradOffset", "textureProjGradOffset"},
+    {"texture3DProjGradOffset", "textureProjGradOffset"},
+    {"texture1DProjLodOffset", "textureProjLodOffset"},
+    {"texture2DProjLodOffset", "textureProjLodOffset"},
+    {"texture3DProjLodOffset", "textureProjLodOffset"},
+    {"texture1DProjOffset", "textureProjOffset"},
+    {"texture2DProjOffset", "textureProjOffset"},
+    {"texture3DProjOffset", "textureProjOffset"},
+    {"texture1DProjGrad", "textureProjGrad"},
+    {"texture2DProjGrad", "textureProjGrad"},
+    {"texture3DProjGrad", "textureProjGrad"},
+    {"texture1DProjLod", "textureProjLod"},
+    {"texture2DProjLod", "textureProjLod"},
+    {"texture3DProjLod", "textureProjLod"},
+    {"texture1DProj", "textureProj"},
+    {"texture2DProj", "textureProj"},
+    {"texture3DProj", "textureProj"},
+
+    {"texture1DGradOffset", "textureGradOffset"},
+    {"texture2DGradOffset", "textureGradOffset"},
+    {"texture3DGradOffset", "textureGradOffset"},
+    {"texture1DLodOffset", "textureLodOffset"},
+    {"texture2DLodOffset", "textureLodOffset"},
+    {"texture3DLodOffset", "textureLodOffset"},
+    {"texture1DOffset", "textureOffset"},
+    {"texture2DOffset", "textureOffset"},
+    {"texture3DOffset", "textureOffset"},
+    {"texture1DGrad", "textureGrad"},
+    {"texture2DGrad", "textureGrad"},
+    {"texture3DGrad", "textureGrad"},
+    {"textureCubeGrad", "textureGrad"},
+    {"texture1DLod", "textureLod"},
+    {"texture2DLod", "textureLod"},
+    {"texture3DLod", "textureLod"},
+    {"textureCubeLod", "textureLod"},
+    {"texture1D", "texture"},
+    {"texture2D", "texture"},
+    {"texture3D", "texture"},
+    {"textureCube", "texture"},
+};
+
 // Replace every literal occurrence of `from` with `to`. Used for
 // dotted field-access rewrites (`gl_Fog.color` → `appgl_FogColor`)
 // where the leading and trailing boundaries are already partly
@@ -1774,9 +1834,25 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
             }
         }
     }
+    bool didGpuShader4TextureAliasFixup = false;
+    if (hasGpuShader4Directive &&
+        (result.source.find("texture") != std::string::npos ||
+         result.source.find("texelFetch") != std::string::npos)) {
+        for (const auto& alias : kGpuShader4TextureAliases) {
+            if (!containsIdentifier(result.source, alias.legacyName)) {
+                continue;
+            }
+            didGpuShader4TextureAliasFixup =
+                replaceCodeFunctionIdentifier(result.source,
+                                              alias.legacyName,
+                                              alias.coreName) ||
+                didGpuShader4TextureAliasFixup;
+        }
+    }
 
     if (!didAnyRewrite && !didSamplerFixup && !didGpuShader4TruncateFixup &&
-        !didGpuShader4LexicalFixup && !didGpuShader4ShadowFixup) {
+        !didGpuShader4LexicalFixup && !didGpuShader4ShadowFixup &&
+        !didGpuShader4TextureAliasFixup) {
         return result;
     }
     result.didRewrite = true;
