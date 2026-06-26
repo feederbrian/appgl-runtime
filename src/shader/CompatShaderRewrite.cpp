@@ -927,6 +927,8 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
 
     const bool isVertex = (stage == GL_VERTEX_SHADER);
     const bool isFragment = (stage == GL_FRAGMENT_SHADER);
+    const bool hasGpuShader4Directive =
+        result.source.find("GL_EXT_gpu_shader4") != std::string::npos;
 
     // ---- 1. Identifier scan (against the ORIGINAL, unrewritten source) ---
     // Scan the original source for matrix-family fixed-function builtins.
@@ -1006,6 +1008,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         const bool needsFloorUpgrade =
             versionNumber > 0 &&
             ((versionNumber < 140 && !isCompat) ||
+             (hasGpuShader4Directive && versionNumber < 150) ||
              (needsExplicitLocationPreamble && versionNumber < 330));
         if (needsFloorUpgrade) {
             legacy.upgradedVersion = true;
@@ -1036,7 +1039,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         }
     }
 
-    // ---- 2b. Strip GL_ARB extension directives unknown to glslang ---------
+    // ---- 2b. Strip extension directives unknown to glslang ----------------
     // Under Vulkan-targeted compilation, some GL_ARB extensions exist as
     // core features in Vulkan/SPIR-V but glslang's Vulkan front-end
     // doesn't register them as known extension names. The `#extension`
@@ -1050,9 +1053,11 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
             "GL_ARB_cull_distance",
             "GL_ARB_shader_" "subroutine",
             "GL_ARB_texture_query_levels",
+            "GL_EXT_gpu_shader4",
         };
         bool strippedCullDistance = false;
         bool strippedTextureQueryLevels = false;
+        bool strippedGpuShader4 = false;
         for (const char* ext : kUnknownExtensions) {
             std::string needle = std::string("#extension ") + ext;
             std::size_t pos = 0;
@@ -1066,9 +1071,12 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
                     strippedCullDistance = true;
                 } else if (std::string(ext) == "GL_ARB_texture_query_levels") {
                     strippedTextureQueryLevels = true;
+                } else if (std::string(ext) == "GL_EXT_gpu_shader4") {
+                    strippedGpuShader4 = true;
                 }
             }
         }
+        (void)strippedGpuShader4;
         if (strippedTextureQueryLevels) {
             // Glslang's Vulkan front-end does not know the ARB extension
             // token, but textureQueryLevels is accepted as core GLSL 4.30.
