@@ -3373,8 +3373,40 @@ void GLContext::endImmediate() {
         if (!filledPrimitiveMode) {
             return false;
         }
-        if (impl_->state->isEnabled(GL_TEXTURE_1D) ||
-            impl_->state->isEnabled(GL_TEXTURE_2D)) {
+        const bool texture1D = impl_->state->isEnabled(GL_TEXTURE_1D);
+        const bool texture2DEnabled = impl_->state->isEnabled(GL_TEXTURE_2D);
+        const bool projectiveTexcoord =
+            drawVerts != nullptr &&
+            std::any_of(drawVerts, drawVerts + drawCount,
+                        [](const Impl::ImmediateModeVertex& v) {
+                            return std::fabs(v.texcoord[3] - 1.0f) > 0.00001f;
+                        });
+        auto texture2DShadowPaintSafe = [&]() {
+            if (!texture2DEnabled) {
+                return true;
+            }
+            if (texture1D || projectiveTexcoord ||
+                impl_->texEnv.mode != GL_REPLACE) {
+                return false;
+            }
+            GLTextureObject* texture = impl_->currentTexture(GL_TEXTURE_2D);
+            if (texture == nullptr) {
+                return false;
+            }
+            const auto& params = texture->params;
+            const bool identitySwizzle =
+                params.swizzle[0] == GL_RED &&
+                params.swizzle[1] == GL_GREEN &&
+                params.swizzle[2] == GL_BLUE &&
+                params.swizzle[3] == GL_ALPHA;
+            return params.wrapS == GL_CLAMP_TO_EDGE &&
+                   params.wrapT == GL_CLAMP_TO_EDGE &&
+                   params.minFilter == GL_NEAREST &&
+                   params.magFilter == GL_NEAREST &&
+                   identitySwizzle;
+        };
+        if (texture1D ||
+            (texture2DEnabled && !texture2DShadowPaintSafe())) {
             return false;
         }
         if (drawMode != GL_TRIANGLES ||
