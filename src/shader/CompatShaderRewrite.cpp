@@ -100,6 +100,163 @@ bool replaceFunctionIdentifier(std::string& src,
     }
 }
 
+bool isPreprocessorDirectiveLine(const std::string& src, std::size_t pos) {
+    std::size_t lineStart = src.rfind('\n', pos);
+    lineStart = (lineStart == std::string::npos) ? 0 : lineStart + 1;
+    while (lineStart < src.size() &&
+           (src[lineStart] == ' ' || src[lineStart] == '\t' ||
+            src[lineStart] == '\r')) {
+        ++lineStart;
+    }
+    return lineStart < src.size() && src[lineStart] == '#';
+}
+
+std::size_t skipPreprocessorDirective(const std::string& src,
+                                      std::size_t pos) {
+    while (pos < src.size()) {
+        std::size_t eol = src.find('\n', pos);
+        if (eol == std::string::npos) {
+            return src.size();
+        }
+        std::size_t last = eol;
+        while (last > pos &&
+               (src[last - 1] == ' ' || src[last - 1] == '\t' ||
+                src[last - 1] == '\r')) {
+            --last;
+        }
+        const bool continued = last > pos && src[last - 1] == '\\';
+        pos = eol + 1;
+        if (!continued) {
+            return pos;
+        }
+    }
+    return pos;
+}
+
+std::size_t skipStringLiteral(const std::string& src, std::size_t pos) {
+    const char quote = src[pos];
+    ++pos;
+    while (pos < src.size()) {
+        if (src[pos] == '\\' && pos + 1 < src.size()) {
+            pos += 2;
+            continue;
+        }
+        if (src[pos] == quote) {
+            return pos + 1;
+        }
+        ++pos;
+    }
+    return pos;
+}
+
+std::size_t skipLineComment(const std::string& src, std::size_t pos) {
+    const std::size_t eol = src.find('\n', pos);
+    return (eol == std::string::npos) ? src.size() : eol + 1;
+}
+
+std::size_t skipBlockComment(const std::string& src, std::size_t pos) {
+    const std::size_t end = src.find("*/", pos + 2);
+    return (end == std::string::npos) ? src.size() : end + 2;
+}
+
+bool replaceCodeIdentifier(std::string& src,
+                           std::string_view from,
+                           std::string_view to) {
+    bool didReplace = false;
+    std::size_t pos = 0;
+    while (pos < src.size()) {
+        if (isPreprocessorDirectiveLine(src, pos)) {
+            pos = skipPreprocessorDirective(src, pos);
+            continue;
+        }
+        if (src.compare(pos, 2, "//") == 0) {
+            pos = skipLineComment(src, pos);
+            continue;
+        }
+        if (src.compare(pos, 2, "/*") == 0) {
+            pos = skipBlockComment(src, pos);
+            continue;
+        }
+        if (src[pos] == '"' || src[pos] == '\'') {
+            pos = skipStringLiteral(src, pos);
+            continue;
+        }
+        if (src.compare(pos, from.size(), from) == 0) {
+            const bool leftOk = (pos == 0) || !isIdentChar(src[pos - 1]);
+            const std::size_t end = pos + from.size();
+            const bool rightOk =
+                (end >= src.size()) || !isIdentChar(src[end]);
+            if (leftOk && rightOk) {
+                src.replace(pos, from.size(), to);
+                didReplace = true;
+                pos += to.size();
+                continue;
+            }
+        }
+        ++pos;
+    }
+    return didReplace;
+}
+
+bool replaceCodeUnsignedInt(std::string& src) {
+    static constexpr std::string_view kUnsigned = "unsigned";
+    static constexpr std::string_view kInt = "int";
+    bool didReplace = false;
+    std::size_t pos = 0;
+    while (pos < src.size()) {
+        if (isPreprocessorDirectiveLine(src, pos)) {
+            pos = skipPreprocessorDirective(src, pos);
+            continue;
+        }
+        if (src.compare(pos, 2, "//") == 0) {
+            pos = skipLineComment(src, pos);
+            continue;
+        }
+        if (src.compare(pos, 2, "/*") == 0) {
+            pos = skipBlockComment(src, pos);
+            continue;
+        }
+        if (src[pos] == '"' || src[pos] == '\'') {
+            pos = skipStringLiteral(src, pos);
+            continue;
+        }
+        if (src.compare(pos, kUnsigned.size(), kUnsigned) != 0) {
+            ++pos;
+            continue;
+        }
+        const bool leftOk = (pos == 0) || !isIdentChar(src[pos - 1]);
+        const std::size_t unsignedEnd = pos + kUnsigned.size();
+        const bool unsignedRightOk =
+            (unsignedEnd >= src.size()) || !isIdentChar(src[unsignedEnd]);
+        if (!leftOk || !unsignedRightOk) {
+            ++pos;
+            continue;
+        }
+        std::size_t intStart = unsignedEnd;
+        while (intStart < src.size() &&
+               (src[intStart] == ' ' || src[intStart] == '\t' ||
+                src[intStart] == '\r')) {
+            ++intStart;
+        }
+        if (intStart == unsignedEnd ||
+            src.compare(intStart, kInt.size(), kInt) != 0) {
+            pos = unsignedEnd;
+            continue;
+        }
+        const std::size_t intEnd = intStart + kInt.size();
+        const bool intRightOk =
+            (intEnd >= src.size()) || !isIdentChar(src[intEnd]);
+        if (!intRightOk) {
+            pos = unsignedEnd;
+            continue;
+        }
+        src.replace(pos, intEnd - pos, "uint");
+        didReplace = true;
+        pos += std::strlen("uint");
+    }
+    return didReplace;
+}
+
 // Replace every literal occurrence of `from` with `to`. Used for
 // dotted field-access rewrites (`gl_Fog.color` → `appgl_FogColor`)
 // where the leading and trailing boundaries are already partly
@@ -1303,8 +1460,20 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         didGpuShader4TruncateFixup =
             replaceFunctionIdentifier(result.source, "truncate", "trunc");
     }
+    bool didGpuShader4LexicalFixup = false;
+    if (hasGpuShader4Directive) {
+        if (isVertex && containsIdentifier(result.source, "attribute")) {
+            didGpuShader4LexicalFixup =
+                replaceCodeIdentifier(result.source, "attribute", "in");
+        }
+        if (containsIdentifier(result.source, "unsigned")) {
+            didGpuShader4LexicalFixup =
+                replaceCodeUnsignedInt(result.source) || didGpuShader4LexicalFixup;
+        }
+    }
 
-    if (!didAnyRewrite && !didSamplerFixup && !didGpuShader4TruncateFixup) {
+    if (!didAnyRewrite && !didSamplerFixup && !didGpuShader4TruncateFixup &&
+        !didGpuShader4LexicalFixup) {
         return result;
     }
     result.didRewrite = true;
