@@ -358,6 +358,9 @@ static bool appglHotpathInvariantHoistSubflagEnabled(const char* name) {
 #ifndef GL_INTENSITY8
 #define GL_INTENSITY8 0x804B
 #endif
+#ifndef GL_CLAMP
+#define GL_CLAMP 0x2900
+#endif
 
 // GL_DEPTH_TEXTURE_MODE is a compat-profile glTexParameteri pname that
 // existed from GL 1.4 to 3.0 to control how shadow-map textures sampled
@@ -7574,6 +7577,7 @@ std::vector<std::uint8_t> downsampleRGBA8NearestHigh(
 
 MTLSamplerAddressMode metalAddressMode(GLint mode) {
     switch (mode) {
+        case GL_CLAMP:
         case GL_CLAMP_TO_EDGE:
             return MTLSamplerAddressModeClampToEdge;
         case GL_CLAMP_TO_BORDER:
@@ -7771,7 +7775,8 @@ static bool isValidTexParameterEnumValue(GLenum pname, GLint v) {
         case GL_TEXTURE_WRAP_R:
             return v == GL_CLAMP_TO_EDGE || v == GL_CLAMP_TO_BORDER ||
                    v == GL_MIRRORED_REPEAT || v == GL_REPEAT ||
-                   v == GL_MIRROR_CLAMP_TO_EDGE;
+                   v == GL_MIRROR_CLAMP_TO_EDGE ||
+                   (appglCompatProfileEnabled() && v == GL_CLAMP);
         case GL_TEXTURE_COMPARE_MODE:
             return v == GL_NONE || v == GL_COMPARE_REF_TO_TEXTURE;
         case GL_TEXTURE_COMPARE_FUNC:
@@ -14575,15 +14580,19 @@ struct GLContext::Impl {
         // this mode in `metalAddressMode()` — so this override aligns
         // with the non-compat path.
         const GLenum internalFormat = object.desc.internalFormat;
+        const bool isCompatGlyphAtlasSize =
+            object.target == GL_TEXTURE_2D &&
+            (object.desc.width >= 64 || object.desc.height >= 64);
         const bool isCompatGlyphFormat =
-            internalFormat == GL_ALPHA ||
-            internalFormat == GL_ALPHA8 ||
-            internalFormat == GL_LUMINANCE ||
-            internalFormat == GL_LUMINANCE8 ||
-            internalFormat == GL_LUMINANCE_ALPHA ||
-            internalFormat == GL_LUMINANCE8_ALPHA8 ||
-            internalFormat == GL_INTENSITY ||
-            internalFormat == GL_INTENSITY8;
+            isCompatGlyphAtlasSize &&
+            (internalFormat == GL_ALPHA ||
+             internalFormat == GL_ALPHA8 ||
+             internalFormat == GL_LUMINANCE ||
+             internalFormat == GL_LUMINANCE8 ||
+             internalFormat == GL_LUMINANCE_ALPHA ||
+             internalFormat == GL_LUMINANCE8_ALPHA8 ||
+             internalFormat == GL_INTENSITY ||
+             internalFormat == GL_INTENSITY8);
         if (isCompatGlyphFormat) {
             descriptor.minFilter = MTLSamplerMinMagFilterLinear;
             descriptor.magFilter = MTLSamplerMinMagFilterLinear;
@@ -14755,6 +14764,70 @@ struct GLContext::Impl {
     static bool isDefaultSwizzle(const std::array<GLint, 4>& sw) {
         return sw[0] == GL_RED && sw[1] == GL_GREEN &&
                sw[2] == GL_BLUE && sw[3] == GL_ALPHA;
+    }
+
+    static bool legacyCompatBaseSamplingSwizzle(GLenum internalFormat,
+                                                std::array<GLint, 4>& swizzle) {
+        if (!appglCompatProfileEnabled()) {
+            return false;
+        }
+        switch (internalFormat) {
+            case GL_ALPHA:
+            case GL_ALPHA4:
+            case GL_ALPHA8:
+            case GL_ALPHA12:
+            case GL_ALPHA16:
+                swizzle = {GL_ZERO, GL_ZERO, GL_ZERO, GL_ALPHA};
+                return true;
+            case GL_LUMINANCE:
+            case GL_LUMINANCE4:
+            case GL_LUMINANCE8:
+            case GL_LUMINANCE12:
+            case GL_LUMINANCE16:
+            case GL_SLUMINANCE8:
+                swizzle = {GL_RED, GL_RED, GL_RED, GL_ONE};
+                return true;
+            case GL_LUMINANCE_ALPHA:
+            case GL_LUMINANCE4_ALPHA4:
+            case GL_LUMINANCE6_ALPHA2:
+            case GL_LUMINANCE8_ALPHA8:
+            case GL_LUMINANCE12_ALPHA4:
+            case GL_LUMINANCE12_ALPHA12:
+            case GL_LUMINANCE16_ALPHA16:
+            case GL_SLUMINANCE8_ALPHA8:
+                swizzle = {GL_RED, GL_RED, GL_RED, GL_ALPHA};
+                return true;
+            case GL_INTENSITY:
+            case GL_INTENSITY4:
+            case GL_INTENSITY8:
+            case GL_INTENSITY12:
+            case GL_INTENSITY16:
+                swizzle = {GL_RED, GL_RED, GL_RED, GL_RED};
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    static GLint composeLegacyCompatSamplingSwizzle(
+        GLint requested,
+        const std::array<GLint, 4>& baseSwizzle
+    ) {
+        switch (requested) {
+            case GL_RED:
+                return baseSwizzle[0];
+            case GL_GREEN:
+                return baseSwizzle[1];
+            case GL_BLUE:
+                return baseSwizzle[2];
+            case GL_ALPHA:
+                return baseSwizzle[3];
+            case GL_ZERO:
+            case GL_ONE:
+                return requested;
+            default:
+                return requested;
+        }
     }
 
     static bool isPackedDepthStencilInternalFormat(GLenum internalFormat) {
@@ -15380,6 +15453,21 @@ struct GLContext::Impl {
             (void)restoreR5PrimaryTextureIfNeeded(texObj, 0);
         }
         const auto& sw = texObj.params.swizzle;
+        std::array<GLint, 4> legacyBaseSwizzle = {
+            GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA
+        };
+        const bool hasLegacyBaseSwizzle =
+            legacyCompatBaseSamplingSwizzle(texObj.desc.internalFormat,
+                                            legacyBaseSwizzle);
+        std::array<GLint, 4> effectiveSwizzle = sw;
+        if (hasLegacyBaseSwizzle) {
+            for (std::size_t component = 0; component < effectiveSwizzle.size();
+                 ++component) {
+                effectiveSwizzle[component] =
+                    composeLegacyCompatSamplingSwizzle(sw[component],
+                                                       legacyBaseSwizzle);
+            }
+        }
         void* baseTextureRaw = texObj.metalTexture;
         id<MTLTexture> baseTex = metalTextureFromRaw(baseTextureRaw);
         if (baseTex == nil) {
@@ -15445,7 +15533,7 @@ struct GLContext::Impl {
             validMipRange &&
             (viewBaseMip != 0 || viewLastMip + 1 < mipCount);
         const bool needsView =
-            !isDefaultSwizzle(sw) ||
+            !isDefaultSwizzle(effectiveSwizzle) ||
             samplingPixelFormat != baseTex.pixelFormat ||
             depthStencilNeedsSamplingFlip ||
             depthStencilNeedsSwizzleProxy ||
@@ -15518,17 +15606,17 @@ struct GLContext::Impl {
         const bool alphaReadsOne =
             isRGBFamilyWithoutAlpha(texObj.desc.internalFormat);
         MTLTextureSwizzleChannels channels;
-        channels.red   = metalTextureSwizzle(sw[0], alphaReadsOne);
-        channels.green = metalTextureSwizzle(sw[1], alphaReadsOne);
-        channels.blue  = metalTextureSwizzle(sw[2], alphaReadsOne);
-        channels.alpha = metalTextureSwizzle(sw[3], alphaReadsOne);
+        channels.red   = metalTextureSwizzle(effectiveSwizzle[0], alphaReadsOne);
+        channels.green = metalTextureSwizzle(effectiveSwizzle[1], alphaReadsOne);
+        channels.blue  = metalTextureSwizzle(effectiveSwizzle[2], alphaReadsOne);
+        channels.alpha = metalTextureSwizzle(effectiveSwizzle[3], alphaReadsOne);
 
         if (depthStencilNeedsSwizzleProxy) {
             if (id<MTLTexture> proxy =
                     buildDepthStencilSwizzleSamplingTexture(texObj, baseTex, depthStencilProxyFormat)) {
                 id<MTLTexture> viewSource = proxy;
                 id<MTLTexture> swizzledProxy = nil;
-                if (!isDefaultSwizzle(sw)) {
+                if (!isDefaultSwizzle(effectiveSwizzle)) {
                     swizzledProxy = [proxy
                         newTextureViewWithPixelFormat:proxy.pixelFormat
                                          textureType:proxy.textureType
@@ -27027,6 +27115,11 @@ struct GLContext::Impl {
     void resolveBindingConstructionForTranslatedDraw(GLProgramObject& program,
                                                      TranslatedDrawInfo& info,
                                                      double uniformPackUs = 0.0);
+    bool encodeImmediateTranslatedProgramDraw(GLenum mode,
+                                              const void* vertices,
+                                              std::size_t vertexCount,
+                                              std::size_t vertexStride,
+                                              const char* label);
 
     // Sprint 17 Day 7+ Bank-Group-H Path B Phase 3 day 4 — wrapper around
     // `frameGraph->encodeTranslatedDraw` that marks the bound draw FBO's
@@ -41872,6 +41965,165 @@ void GLContext::Impl::resolveBindingConstructionForTranslatedDraw(
             glDrawProfileElapsedUs(replayStart, glDrawProfileNow());
         bindingConstructionSizingProfile.record(sizingSample);
     }
+}
+
+bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
+    GLenum mode,
+    const void* vertices,
+    std::size_t vertexCount,
+    std::size_t vertexStride,
+    const char* label)
+{
+    if (!appglCompatProfileEnabled() ||
+        frameGraph == nullptr ||
+        state == nullptr ||
+        objects == nullptr ||
+        owner == nullptr ||
+        vertices == nullptr ||
+        vertexCount == 0 ||
+        vertexStride == 0 ||
+        vertexCount > static_cast<std::size_t>(
+            std::numeric_limits<GLsizei>::max()) ||
+        vertexCount > (std::numeric_limits<std::size_t>::max() / vertexStride)) {
+        return false;
+    }
+
+    const GLuint programName = state->currentProgram();
+    if (programName == 0) {
+        return false;
+    }
+    GLProgramObject* program = objects->programs().get(programName);
+    if (program == nullptr ||
+        !program->linked ||
+        !program->hasTranslatedPipeline ||
+        program->hasTessellation ||
+        program->gsPresent ||
+        program->geometryEmulated ||
+        program->vertexMSL.empty() ||
+        program->fragmentMSL.empty()) {
+        return false;
+    }
+
+    // Fragment-only compat programs synthesize a small legacy VS that takes
+    // Piglit's fixed-function position/texcoord stream. Feed glBegin/glEnd
+    // captures through the normal translated path for those programs; leave
+    // other immediate-mode draws on the fixed-function immediate encoder.
+    if (program->vertexMSL.find("piglit_vertex") == std::string::npos ||
+        program->vertexMSL.find("piglit_texcoord") == std::string::npos) {
+        return false;
+    }
+
+    auto hasVertexInput = [&](GLuint location) {
+        for (const auto& input : program->vertexReflection.vertexInputs) {
+            if (input.location == location || input.sourceLocation == location) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (!hasVertexInput(0) || !hasVertexInput(1)) {
+        return false;
+    }
+
+    TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
+    tdi.mode = mode;
+    tdi.vertexCount = static_cast<GLsizei>(vertexCount);
+    tdi.baseVertex = 0;
+    tdi.vertexData = vertices;
+    tdi.vertexDataByteCount = vertexCount * vertexStride;
+    tdi.vertexStride = vertexStride;
+
+    tdi.vertexAttributeLayouts.clear();
+    {
+        TranslatedDrawInfo::VertexAttributeLayout layout;
+        layout.location = 0;
+        layout.offset = 0;
+        layout.glType = GL_FLOAT;
+        layout.glComponentCount = 4;
+        layout.glNormalized = GL_FALSE;
+        layout.glIsInteger = false;
+        tdi.vertexAttributeLayouts.push_back(layout);
+    }
+    {
+        TranslatedDrawInfo::VertexAttributeLayout layout;
+        layout.location = 1;
+        layout.offset = sizeof(float) * 8u;
+        layout.glType = GL_FLOAT;
+        layout.glComponentCount = 2;
+        layout.glNormalized = GL_FALSE;
+        layout.glIsInteger = false;
+        tdi.vertexAttributeLayouts.push_back(layout);
+    }
+
+    populateTranslatedDrawFixedFunctionState(
+        tdi,
+        *state,
+        effectiveFragmentShadingRateForProgram(*owner, program),
+        owner);
+    assignTranslatedDrawProgramMsl(tdi, *program);
+    tdi.vertexReflection = &program->vertexReflection;
+    tdi.fragmentReflection = &program->fragmentReflection;
+    tdi.pipelineStateOut = &program->metalPipelineState;
+    tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
+    tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+    tdi.pipelineStateCacheLastUseOut = &program->metalPipelineStateCacheLastUse;
+    tdi.pipelineStateCacheHighWaterOut = &program->metalPipelineStateCacheHighWater;
+    tdi.pipelineStateCacheHitsOut = &program->metalPipelineStateCacheHits;
+    tdi.pipelineStateCacheMissesOut = &program->metalPipelineStateCacheMisses;
+    tdi.pipelineStateCacheEvictionsOut = &program->metalPipelineStateCacheEvictions;
+    tdi.metalVertexFunction = program->metalVertexFunction;
+    tdi.metalFragmentFunction = program->metalFragmentFunction;
+    tdi.metalVertexFunctionOut = &program->metalVertexFunction;
+    tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
+    tdi.program = programName;
+    tdi.pipelineEmulationFragmentProgram =
+        program->pipelineEmulationFragmentProgram;
+
+    const double bindingConstructionUniformPackUs =
+        prepareBindingConstructionUniformBuffers(
+            *program, programName, 0, tdi,
+            label != nullptr ? label : "immediate-translated");
+    resolveBindingConstructionForTranslatedDraw(
+        *program, tdi, bindingConstructionUniformPackUs);
+
+    {
+        GLsizei fboW = 0;
+        GLsizei fboH = 0;
+        void* fboDSTex = nullptr;
+        std::uint32_t fboDSSlice = 0;
+        std::uint32_t fboDSLevel = 0;
+        std::array<void*, 7> extraColTex = {};
+        std::array<std::uint32_t, 8> colSlices = {};
+        std::array<std::uint32_t, 8> colLevels = {};
+        void* fboColTex = resolveFBOColorTarget(
+            fboW, fboH, fboDSTex, nullptr,
+            &extraColTex, &colSlices, &colLevels,
+            &fboDSSlice, &fboDSLevel);
+        if (fboColTex != nullptr || fboDSTex != nullptr) {
+            tdi.fboColorTexture = fboColTex;
+            tdi.fboAdditionalColorTextures = extraColTex;
+            tdi.fboColorSlices = colSlices;
+            tdi.fboColorLevels = colLevels;
+            tdi.fboDepthStencilTexture = fboDSTex;
+            tdi.fboDepthStencilSlice = fboDSSlice;
+            tdi.fboDepthStencilLevel = fboDSLevel;
+            tdi.fboWidth = fboW;
+            tdi.fboHeight = fboH;
+        }
+    }
+
+    thread_local std::string immediateTranslatedPipelineBuildError;
+    immediateTranslatedPipelineBuildError.clear();
+    tdi.pipelineBuildErrorOut = &immediateTranslatedPipelineBuildError;
+
+    const GLuint vaoName = state->boundVertexArray();
+    const GLVertexArrayObject* vao =
+        vaoName != 0 ? objects->vertexArrays().get(vaoName) : nullptr;
+    const TranslatedDrawPreflightSnapshot preflight =
+        makeTranslatedDrawPreflightSnapshot(
+            vaoName, vao,
+            /*genericVertexAttributesPrepared=*/true);
+    return encodeTranslatedDrawAndMarkFbo(tdi, &preflight);
 }
 
 bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,

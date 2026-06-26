@@ -3780,6 +3780,15 @@ void GLContext::endImmediate() {
         return impl_->resolveSwizzledTexture(*tex);
     };
 
+    if (impl_->encodeImmediateTranslatedProgramDraw(
+            drawMode,
+            drawVerts,
+            drawCount,
+            sizeof(Impl::ImmediateModeVertex),
+            "glEnd-immediate-translated")) {
+        return;
+    }
+
     ImmediateDrawInfo info;
     info.mode = drawMode;
     info.vertices = drawVerts;

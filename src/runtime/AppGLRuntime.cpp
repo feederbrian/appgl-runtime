@@ -1366,6 +1366,10 @@ bool isFormatTypeCompatible_extern(GLenum format, GLenum type) {
 
 namespace {
 
+#ifndef GL_CLAMP
+#define GL_CLAMP 0x2900
+#endif
+
 bool isValidTextureFilter(GLint filter, bool minFilter) {
     if (filter == GL_NEAREST || filter == GL_LINEAR) {
         return true;
@@ -1378,7 +1382,9 @@ bool isValidTextureFilter(GLint filter, bool minFilter) {
 }
 
 bool isValidTextureWrap(GLint wrap) {
-    return wrap == GL_REPEAT || wrap == GL_MIRRORED_REPEAT || wrap == GL_CLAMP_TO_EDGE || wrap == GL_CLAMP_TO_BORDER;
+    return wrap == GL_REPEAT || wrap == GL_MIRRORED_REPEAT ||
+           wrap == GL_CLAMP_TO_EDGE || wrap == GL_CLAMP_TO_BORDER ||
+           (appglCompatProfileEnabled() && wrap == GL_CLAMP);
 }
 
 bool isValidTextureCompareMode(GLint mode) {

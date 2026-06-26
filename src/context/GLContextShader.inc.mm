@@ -250,6 +250,47 @@ static bool appglUniformTypeIsSampler(GLenum type) {
     }
 }
 
+static bool appglUniformTypeIsBool(GLenum type) {
+    switch (type) {
+        case GL_BOOL:
+        case GL_BOOL_VEC2:
+        case GL_BOOL_VEC3:
+        case GL_BOOL_VEC4:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static void writeBoolUniformValues(GLProgramUniformValue& slot,
+                                   GLContext::UniformElementType element,
+                                   const void* values,
+                                   std::size_t writeCount,
+                                   std::size_t fullCount,
+                                   std::size_t writeOffset) {
+    if (slot.ints.size() < fullCount) {
+        slot.ints.resize(fullCount, 0);
+    }
+
+    for (std::size_t i = 0; i < writeCount; ++i) {
+        bool truthy = false;
+        switch (element) {
+            case GLContext::UniformElementType::Float:
+                truthy = static_cast<const GLfloat*>(values)[i] != 0.0f;
+                break;
+            case GLContext::UniformElementType::Int:
+                truthy = static_cast<const GLint*>(values)[i] != 0;
+                break;
+            case GLContext::UniformElementType::UnsignedInt:
+                truthy = static_cast<const GLuint*>(values)[i] != 0u;
+                break;
+        }
+        slot.ints[writeOffset + i] = truthy ? 1 : 0;
+    }
+    slot.floats.clear();
+    slot.uints.clear();
+}
+
 bool GLContext::setUniformScalarVector(GLint location, UniformElementType element, GLint vectorSize, GLsizei count, const void* values) {
     if (location < 0) {
         return true;  // -1 silently no-ops per spec.
@@ -319,16 +360,21 @@ bool GLContext::setUniformScalarVector(GLint location, UniformElementType elemen
             std::memcmp(slot->ints.data() + writeOffset, srcInts,
                         writeCount * sizeof(GLint)) != 0;
     }
-    switch (element) {
-        case UniformElementType::Float:
-            writeInto(slot->floats, slot->ints, slot->uints, static_cast<const GLfloat*>(values));
-            break;
-        case UniformElementType::Int:
-            writeInto(slot->ints, slot->floats, slot->uints, static_cast<const GLint*>(values));
-            break;
-        case UniformElementType::UnsignedInt:
-            writeInto(slot->uints, slot->floats, slot->ints, static_cast<const GLuint*>(values));
-            break;
+    if (appglUniformTypeIsBool(ref.type)) {
+        writeBoolUniformValues(
+            *slot, element, values, writeCount, fullCount, writeOffset);
+    } else {
+        switch (element) {
+            case UniformElementType::Float:
+                writeInto(slot->floats, slot->ints, slot->uints, static_cast<const GLfloat*>(values));
+                break;
+            case UniformElementType::Int:
+                writeInto(slot->ints, slot->floats, slot->uints, static_cast<const GLint*>(values));
+                break;
+            case UniformElementType::UnsignedInt:
+                writeInto(slot->uints, slot->floats, slot->ints, static_cast<const GLuint*>(values));
+                break;
+        }
     }
     slot->doubles.clear();
     slot->df64TransportWords.clear();
@@ -645,13 +691,18 @@ bool GLContext::setUniformScalarVectorForProgram(GLuint program, GLint location,
             std::memcmp(slot->ints.data() + writeOffset, srcInts,
                         writeCount * sizeof(GLint)) != 0;
     }
-    switch (element) {
-        case UniformElementType::Float:
-            writeInto(slot->floats, slot->ints, slot->uints, static_cast<const GLfloat*>(values)); break;
-        case UniformElementType::Int:
-            writeInto(slot->ints, slot->floats, slot->uints, static_cast<const GLint*>(values)); break;
-        case UniformElementType::UnsignedInt:
-            writeInto(slot->uints, slot->floats, slot->ints, static_cast<const GLuint*>(values)); break;
+    if (appglUniformTypeIsBool(ref.type)) {
+        writeBoolUniformValues(
+            *slot, element, values, writeCount, fullCount, writeOffset);
+    } else {
+        switch (element) {
+            case UniformElementType::Float:
+                writeInto(slot->floats, slot->ints, slot->uints, static_cast<const GLfloat*>(values)); break;
+            case UniformElementType::Int:
+                writeInto(slot->ints, slot->floats, slot->uints, static_cast<const GLint*>(values)); break;
+            case UniformElementType::UnsignedInt:
+                writeInto(slot->uints, slot->floats, slot->ints, static_cast<const GLuint*>(values)); break;
+        }
     }
     slot->doubles.clear();
     slot->df64TransportWords.clear();
