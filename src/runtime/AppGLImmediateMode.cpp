@@ -554,12 +554,151 @@ extern "C" void APIENTRY glRasterPos2sv(const GLshort* v) {
     glRasterPos2s(v[0], v[1]);
 }
 
+extern "C" void APIENTRY glRasterPos3d(GLdouble x, GLdouble y, GLdouble z) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->setRasterPosition(static_cast<float>(x),
+                           static_cast<float>(y),
+                           static_cast<float>(z),
+                           1.0f);
+}
+
+extern "C" void APIENTRY glRasterPos3dv(const GLdouble* v) {
+    if (v == nullptr) {
+        return;
+    }
+    glRasterPos3d(v[0], v[1], v[2]);
+}
+
+extern "C" void APIENTRY glRasterPos3f(GLfloat x, GLfloat y, GLfloat z) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->setRasterPosition(x, y, z, 1.0f);
+}
+
+extern "C" void APIENTRY glRasterPos3fv(const GLfloat* v) {
+    if (v == nullptr) {
+        return;
+    }
+    glRasterPos3f(v[0], v[1], v[2]);
+}
+
+extern "C" void APIENTRY glRasterPos3i(GLint x, GLint y, GLint z) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->setRasterPosition(static_cast<float>(x),
+                           static_cast<float>(y),
+                           static_cast<float>(z),
+                           1.0f);
+}
+
+extern "C" void APIENTRY glRasterPos3iv(const GLint* v) {
+    if (v == nullptr) {
+        return;
+    }
+    glRasterPos3i(v[0], v[1], v[2]);
+}
+
+extern "C" void APIENTRY glRasterPos3s(GLshort x, GLshort y, GLshort z) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->setRasterPosition(static_cast<float>(x),
+                           static_cast<float>(y),
+                           static_cast<float>(z),
+                           1.0f);
+}
+
+extern "C" void APIENTRY glRasterPos3sv(const GLshort* v) {
+    if (v == nullptr) {
+        return;
+    }
+    glRasterPos3s(v[0], v[1], v[2]);
+}
+
+extern "C" void APIENTRY glRasterPos4d(GLdouble x, GLdouble y, GLdouble z, GLdouble w) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->setRasterPosition(static_cast<float>(x),
+                           static_cast<float>(y),
+                           static_cast<float>(z),
+                           static_cast<float>(w));
+}
+
+extern "C" void APIENTRY glRasterPos4dv(const GLdouble* v) {
+    if (v == nullptr) {
+        return;
+    }
+    glRasterPos4d(v[0], v[1], v[2], v[3]);
+}
+
+extern "C" void APIENTRY glRasterPos4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->setRasterPosition(x, y, z, w);
+}
+
+extern "C" void APIENTRY glRasterPos4fv(const GLfloat* v) {
+    if (v == nullptr) {
+        return;
+    }
+    glRasterPos4f(v[0], v[1], v[2], v[3]);
+}
+
+extern "C" void APIENTRY glRasterPos4i(GLint x, GLint y, GLint z, GLint w) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->setRasterPosition(static_cast<float>(x),
+                           static_cast<float>(y),
+                           static_cast<float>(z),
+                           static_cast<float>(w));
+}
+
+extern "C" void APIENTRY glRasterPos4iv(const GLint* v) {
+    if (v == nullptr) {
+        return;
+    }
+    glRasterPos4i(v[0], v[1], v[2], v[3]);
+}
+
+extern "C" void APIENTRY glRasterPos4s(GLshort x, GLshort y, GLshort z, GLshort w) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->setRasterPosition(static_cast<float>(x),
+                           static_cast<float>(y),
+                           static_cast<float>(z),
+                           static_cast<float>(w));
+}
+
+extern "C" void APIENTRY glRasterPos4sv(const GLshort* v) {
+    if (v == nullptr) {
+        return;
+    }
+    glRasterPos4s(v[0], v[1], v[2], v[3]);
+}
+
 extern "C" void APIENTRY glWindowPos2i(GLint x, GLint y) {
     auto* ctx = immediateContext();
     if (ctx == nullptr) {
         return;
     }
-    ctx->setWindowRasterPosition(x, y);
+    ctx->setWindowRasterPosition(static_cast<GLfloat>(x),
+                                 static_cast<GLfloat>(y));
 }
 
 extern "C" void APIENTRY glWindowPos2iv(const GLint* v) {
@@ -574,8 +713,7 @@ extern "C" void APIENTRY glWindowPos2f(GLfloat x, GLfloat y) {
     if (ctx == nullptr) {
         return;
     }
-    ctx->setWindowRasterPosition(static_cast<GLint>(std::lround(x)),
-                                 static_cast<GLint>(std::lround(y)));
+    ctx->setWindowRasterPosition(x, y);
 }
 
 extern "C" void APIENTRY glWindowPos2fv(const GLfloat* v) {
@@ -612,9 +750,7 @@ extern "C" void APIENTRY glWindowPos3f(GLfloat x, GLfloat y, GLfloat z) {
     if (ctx == nullptr) {
         return;
     }
-    ctx->setWindowRasterPosition(static_cast<GLint>(std::lround(x)),
-                                 static_cast<GLint>(std::lround(y)),
-                                 z);
+    ctx->setWindowRasterPosition(x, y, z);
 }
 
 extern "C" void APIENTRY glWindowPos3fv(const GLfloat* v) {
@@ -642,7 +778,9 @@ extern "C" void APIENTRY glWindowPos3i(GLint x, GLint y, GLint z) {
     if (ctx == nullptr) {
         return;
     }
-    ctx->setWindowRasterPosition(x, y, static_cast<GLfloat>(z));
+    ctx->setWindowRasterPosition(static_cast<GLfloat>(x),
+                                 static_cast<GLfloat>(y),
+                                 static_cast<GLfloat>(z));
 }
 
 extern "C" void APIENTRY glWindowPos3iv(const GLint* v) {
@@ -1080,6 +1218,21 @@ extern "C" void APIENTRY glColor4fv(const GLfloat* v) {
         return;
     }
     ctx->immediateColor(v[0], v[1], v[2], v[3]);
+}
+
+extern "C" void APIENTRY glSecondaryColor3f(GLfloat red, GLfloat green, GLfloat blue) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->setSecondaryColorCompat(red, green, blue);
+}
+
+extern "C" void APIENTRY glSecondaryColor3fv(const GLfloat* v) {
+    if (v == nullptr) {
+        return;
+    }
+    glSecondaryColor3f(v[0], v[1], v[2]);
 }
 
 // glColor3ub / glColor4ub — 0..255 byte channels, normalized to 0..1.

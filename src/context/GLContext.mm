@@ -76,6 +76,27 @@
 #ifndef GL_SMOOTH
 #define GL_SMOOTH 0x1D01
 #endif
+#ifndef GL_CURRENT_RASTER_COLOR
+#define GL_CURRENT_RASTER_COLOR 0x0B04
+#endif
+#ifndef GL_CURRENT_RASTER_INDEX
+#define GL_CURRENT_RASTER_INDEX 0x0B05
+#endif
+#ifndef GL_CURRENT_RASTER_TEXTURE_COORDS
+#define GL_CURRENT_RASTER_TEXTURE_COORDS 0x0B06
+#endif
+#ifndef GL_CURRENT_RASTER_POSITION
+#define GL_CURRENT_RASTER_POSITION 0x0B07
+#endif
+#ifndef GL_CURRENT_RASTER_POSITION_VALID
+#define GL_CURRENT_RASTER_POSITION_VALID 0x0B08
+#endif
+#ifndef GL_CURRENT_RASTER_DISTANCE
+#define GL_CURRENT_RASTER_DISTANCE 0x0B09
+#endif
+#ifndef GL_CURRENT_RASTER_SECONDARY_COLOR
+#define GL_CURRENT_RASTER_SECONDARY_COLOR 0x845F
+#endif
 #ifndef GL_COLOR_ARRAY
 #define GL_COLOR_ARRAY 0x8076
 #endif
@@ -337,6 +358,9 @@ static bool appglHotpathInvariantHoistSubflagEnabled(const char* name) {
 // without polluting the public header surface or the codegen tables.
 // See GLCapabilities.mm for the matching format-table registrations
 // and the upload channel-fill rules in buildRGBA8Upload.
+#ifndef GL_CLAMP
+#define GL_CLAMP 0x2900
+#endif
 #ifndef GL_ALPHA8
 #define GL_ALPHA8 0x803C
 #endif
@@ -8907,6 +8931,10 @@ struct GLContext::Impl {
             slot = {0u, 0u, 0u, 1u};
         }
         immediateAttribKinds.fill(GLVertexAttributeState::ImmediateKind::Float);
+        for (auto& coord : fixedFunctionCurrentTexcoords) {
+            coord = {0.0f, 0.0f, 0.0f, 1.0f};
+        }
+        fixedFunctionRasterTexcoords = fixedFunctionCurrentTexcoords;
     }
 
     struct GpuResourceAccess {
@@ -28652,6 +28680,13 @@ struct GLContext::Impl {
     GLint fixedFunctionRasterX = 0;
     GLint fixedFunctionRasterY = 0;
     GLfloat fixedFunctionRasterZ = 0.0f;
+    GLfloat fixedFunctionRasterPosition[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    GLfloat fixedFunctionRasterColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    GLfloat fixedFunctionRasterSecondaryColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    static constexpr std::size_t kCompatRasterTextureUnits = 8;
+    std::array<std::array<GLfloat, 4>, kCompatRasterTextureUnits> fixedFunctionRasterTexcoords{};
+    GLfloat fixedFunctionCurrentSecondaryColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<std::array<GLfloat, 4>, kCompatRasterTextureUnits> fixedFunctionCurrentTexcoords{};
     GLenum fixedFunctionLogicOp = GL_COPY;
     GLint fixedFunctionLineStippleFactor = 1;
     GLushort fixedFunctionLineStipplePattern = 0xffffu;

@@ -16505,11 +16505,32 @@ static float4 appgl_immediate_finish_sample(float4 color,
                                             constant AppGLImmediateTextureState& textureState) {
     constexpr uint kEnvReplace = 0x1E01u;
     constexpr uint kBaseAlpha = 1u;
+    constexpr uint kBaseLuminance = 2u;
+    constexpr uint kBaseLuminanceAlpha = 3u;
+    constexpr uint kBaseIntensity = 4u;
     if (textureState.envMode == kEnvReplace) {
         if (textureState.baseClass == kBaseAlpha) {
             return float4(color.rgb, sample.a);
         }
+        if (textureState.baseClass == kBaseLuminance) {
+            return float4(sample.r, sample.r, sample.r, color.a);
+        }
+        if (textureState.baseClass == kBaseLuminanceAlpha) {
+            return float4(sample.r, sample.r, sample.r, sample.a);
+        }
+        if (textureState.baseClass == kBaseIntensity) {
+            return float4(sample.r, sample.r, sample.r, sample.r);
+        }
         return sample;
+    }
+    if (textureState.baseClass == kBaseLuminance) {
+        return float4(color.rgb * sample.r, color.a);
+    }
+    if (textureState.baseClass == kBaseLuminanceAlpha) {
+        return float4(color.rgb * sample.r, color.a * sample.a);
+    }
+    if (textureState.baseClass == kBaseIntensity) {
+        return color * sample.r;
     }
     return color * sample;
 }

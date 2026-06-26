@@ -136,6 +136,10 @@ bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
         *data = impl_->fixedFunctionShadeModel != 0 ? GL_TRUE : GL_FALSE;
         return true;
     }
+    if (pname == GL_CURRENT_RASTER_POSITION_VALID) {
+        *data = impl_->fixedFunctionRasterPositionValid ? GL_TRUE : GL_FALSE;
+        return true;
+    }
     // Transform feedback state — gluStateReset queries these via getBooleanv;
     // returning GL_INVALID_ENUM here aborts the reset and bleeds state across
     // CTS tests (active/paused/binding all default to GL_FALSE/0 since we
@@ -229,6 +233,43 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
     }
     if (pname == GL_SELECTION_BUFFER_SIZE) {
         *data = impl_->selection.bufferSize;
+        return true;
+    }
+    if (pname == GL_CURRENT_RASTER_POSITION_VALID) {
+        *data = impl_->fixedFunctionRasterPositionValid ? GL_TRUE : GL_FALSE;
+        return true;
+    }
+    if (pname == GL_CURRENT_RASTER_POSITION) {
+        data[0] = static_cast<GLint>(std::lround(impl_->fixedFunctionRasterPosition[0]));
+        data[1] = static_cast<GLint>(std::lround(impl_->fixedFunctionRasterPosition[1]));
+        data[2] = static_cast<GLint>(std::lround(impl_->fixedFunctionRasterPosition[2]));
+        data[3] = static_cast<GLint>(std::lround(impl_->fixedFunctionRasterPosition[3]));
+        return true;
+    }
+    if (pname == GL_CURRENT_RASTER_COLOR) {
+        for (int i = 0; i < 4; ++i) {
+            data[i] = static_cast<GLint>(std::lround(impl_->fixedFunctionRasterColor[i]));
+        }
+        return true;
+    }
+    if (pname == GL_CURRENT_RASTER_SECONDARY_COLOR) {
+        for (int i = 0; i < 4; ++i) {
+            data[i] = static_cast<GLint>(std::lround(impl_->fixedFunctionRasterSecondaryColor[i]));
+        }
+        return true;
+    }
+    if (pname == GL_CURRENT_RASTER_TEXTURE_COORDS) {
+        const GLuint unit = impl_->state->activeTextureUnit();
+        const auto& coords = unit < Impl::kCompatRasterTextureUnits
+            ? impl_->fixedFunctionRasterTexcoords[unit]
+            : impl_->fixedFunctionRasterTexcoords[0];
+        for (int i = 0; i < 4; ++i) {
+            data[i] = static_cast<GLint>(std::lround(coords[i]));
+        }
+        return true;
+    }
+    if (pname == GL_CURRENT_RASTER_DISTANCE || pname == GL_CURRENT_RASTER_INDEX) {
+        *data = 0;
         return true;
     }
     if (pname == GL_READ_BUFFER) {
@@ -423,12 +464,27 @@ bool GLContext::queryInteger64(GLenum pname, GLint64* data) {
         return true;
     }
     if (pname == GL_RENDER_MODE || pname == GL_NAME_STACK_DEPTH ||
-        pname == GL_MAX_NAME_STACK_DEPTH || pname == GL_SELECTION_BUFFER_SIZE) {
+        pname == GL_MAX_NAME_STACK_DEPTH || pname == GL_SELECTION_BUFFER_SIZE ||
+        pname == GL_CURRENT_RASTER_POSITION_VALID || pname == GL_CURRENT_RASTER_INDEX ||
+        pname == GL_CURRENT_RASTER_DISTANCE) {
         GLint integerValue = 0;
         if (!queryInteger(pname, &integerValue)) {
             return false;
         }
         *data = static_cast<GLint64>(integerValue);
+        return true;
+    }
+    if (pname == GL_CURRENT_RASTER_POSITION ||
+        pname == GL_CURRENT_RASTER_COLOR ||
+        pname == GL_CURRENT_RASTER_SECONDARY_COLOR ||
+        pname == GL_CURRENT_RASTER_TEXTURE_COORDS) {
+        GLint integerValues[4] = {};
+        if (!queryInteger(pname, integerValues)) {
+            return false;
+        }
+        for (int i = 0; i < 4; ++i) {
+            data[i] = static_cast<GLint64>(integerValues[i]);
+        }
         return true;
     }
     bool fragmentShadingRateHandled = false;
@@ -671,6 +727,36 @@ bool GLContext::queryFloat(GLenum pname, GLfloat* data) {
         *data = static_cast<GLfloat>(impl_->fixedFunctionShadeModel);
         return true;
     }
+    if (pname == GL_CURRENT_RASTER_POSITION) {
+        std::memcpy(data, impl_->fixedFunctionRasterPosition, 4 * sizeof(GLfloat));
+        return true;
+    }
+    if (pname == GL_CURRENT_RASTER_COLOR) {
+        std::memcpy(data, impl_->fixedFunctionRasterColor, 4 * sizeof(GLfloat));
+        return true;
+    }
+    if (pname == GL_CURRENT_RASTER_SECONDARY_COLOR) {
+        std::memcpy(data, impl_->fixedFunctionRasterSecondaryColor, 4 * sizeof(GLfloat));
+        return true;
+    }
+    if (pname == GL_CURRENT_RASTER_TEXTURE_COORDS) {
+        const GLuint unit = impl_->state->activeTextureUnit();
+        const auto& coords = unit < Impl::kCompatRasterTextureUnits
+            ? impl_->fixedFunctionRasterTexcoords[unit]
+            : impl_->fixedFunctionRasterTexcoords[0];
+        std::memcpy(data, coords.data(), 4 * sizeof(GLfloat));
+        return true;
+    }
+    if (pname == GL_CURRENT_RASTER_POSITION_VALID ||
+        pname == GL_CURRENT_RASTER_DISTANCE ||
+        pname == GL_CURRENT_RASTER_INDEX) {
+        GLint integerValue = 0;
+        if (!queryInteger(pname, &integerValue)) {
+            return false;
+        }
+        *data = static_cast<GLfloat>(integerValue);
+        return true;
+    }
     bool fragmentShadingRateHandled = false;
     if (!queryFragmentShadingRateFloat(*this, pname, data, fragmentShadingRateHandled)) {
         return false;
@@ -720,6 +806,29 @@ bool GLContext::queryDouble(GLenum pname, GLdouble* data) {
     }
     if (pname == GL_SHADE_MODEL) {
         *data = static_cast<GLdouble>(impl_->fixedFunctionShadeModel);
+        return true;
+    }
+    if (pname == GL_CURRENT_RASTER_POSITION ||
+        pname == GL_CURRENT_RASTER_COLOR ||
+        pname == GL_CURRENT_RASTER_SECONDARY_COLOR ||
+        pname == GL_CURRENT_RASTER_TEXTURE_COORDS) {
+        GLfloat floatValues[4] = {};
+        if (!queryFloat(pname, floatValues)) {
+            return false;
+        }
+        for (int i = 0; i < 4; ++i) {
+            data[i] = static_cast<GLdouble>(floatValues[i]);
+        }
+        return true;
+    }
+    if (pname == GL_CURRENT_RASTER_POSITION_VALID ||
+        pname == GL_CURRENT_RASTER_DISTANCE ||
+        pname == GL_CURRENT_RASTER_INDEX) {
+        GLint integerValue = 0;
+        if (!queryInteger(pname, &integerValue)) {
+            return false;
+        }
+        *data = static_cast<GLdouble>(integerValue);
         return true;
     }
     bool fragmentShadingRateHandled = false;

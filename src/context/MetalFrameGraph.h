@@ -789,7 +789,8 @@ struct ImmediateDrawInfo {
     void* metalSamplerState = nullptr; // id<MTLSamplerState> or nullptr
     GLenum textureTarget = 0;
     GLenum textureEnvMode = 0;
-    std::uint32_t textureBaseClass = 0; // 1 = legacy GL_ALPHA-family texture.
+    // 1 = ALPHA, 2 = LUMINANCE, 3 = LUMINANCE_ALPHA, 4 = INTENSITY.
+    std::uint32_t textureBaseClass = 0;
     GLint textureWrapS = GL_REPEAT;
     GLint textureWrapT = GL_REPEAT;
     GLint textureMinFilter = GL_NEAREST_MIPMAP_LINEAR;

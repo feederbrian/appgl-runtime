@@ -12,7 +12,16 @@
 // per-vertex registers updated by glColor*/glTexCoord* without
 // emitting a vertex; only glVertex* pushes into the capture vector.
 
+#ifndef GL_CLAMP
+#define GL_CLAMP 0x2900
+#endif
+
 namespace {
+
+constexpr std::uint32_t kAppGLImmediateTextureBaseAlpha = 1u;
+constexpr std::uint32_t kAppGLImmediateTextureBaseLuminance = 2u;
+constexpr std::uint32_t kAppGLImmediateTextureBaseLuminanceAlpha = 3u;
+constexpr std::uint32_t kAppGLImmediateTextureBaseIntensity = 4u;
 
 std::uint32_t appglImmediateTextureBaseClass(GLenum internalFormat) {
     switch (internalFormat) {
@@ -21,7 +30,29 @@ std::uint32_t appglImmediateTextureBaseClass(GLenum internalFormat) {
         case GL_ALPHA8:
         case GL_ALPHA12:
         case GL_ALPHA16:
-            return 1u;
+            return kAppGLImmediateTextureBaseAlpha;
+        case GL_LUMINANCE:
+        case GL_LUMINANCE4:
+        case GL_LUMINANCE8:
+        case GL_LUMINANCE12:
+        case GL_LUMINANCE16:
+        case GL_SLUMINANCE8:
+            return kAppGLImmediateTextureBaseLuminance;
+        case GL_LUMINANCE_ALPHA:
+        case GL_LUMINANCE4_ALPHA4:
+        case GL_LUMINANCE6_ALPHA2:
+        case GL_LUMINANCE8_ALPHA8:
+        case GL_LUMINANCE12_ALPHA4:
+        case GL_LUMINANCE12_ALPHA12:
+        case GL_LUMINANCE16_ALPHA16:
+        case GL_SLUMINANCE8_ALPHA8:
+            return kAppGLImmediateTextureBaseLuminanceAlpha;
+        case GL_INTENSITY:
+        case GL_INTENSITY4:
+        case GL_INTENSITY8:
+        case GL_INTENSITY12:
+        case GL_INTENSITY16:
+            return kAppGLImmediateTextureBaseIntensity;
         default:
             return 0u;
     }
@@ -115,7 +146,139 @@ std::array<GLfloat, 4> appglImmediateResolvedBorderColor(
     };
 }
 
+std::uint8_t appglImmediateMultiplyByte(std::uint8_t a, std::uint8_t b) {
+    return static_cast<std::uint8_t>(
+        (static_cast<unsigned>(a) * static_cast<unsigned>(b) + 127u) / 255u);
+}
+
+std::uint8_t appglImmediateSwizzleComponent(const std::uint8_t texel[4], GLint swizzle) {
+    switch (swizzle) {
+        case GL_RED: return texel[0];
+        case GL_GREEN: return texel[1];
+        case GL_BLUE: return texel[2];
+        case GL_ALPHA: return texel[3];
+        case GL_ONE: return 255u;
+        case GL_ZERO:
+        default:
+            return 0u;
+    }
+}
+
+void appglImmediateApplyTextureEnv(GLenum envMode,
+                                   std::uint32_t textureBaseClass,
+                                   const std::uint8_t incoming[4],
+                                   const std::uint8_t sampled[4],
+                                   std::uint8_t out[4]) {
+    if (envMode == GL_REPLACE) {
+        switch (textureBaseClass) {
+            case kAppGLImmediateTextureBaseAlpha:
+                out[0] = incoming[0];
+                out[1] = incoming[1];
+                out[2] = incoming[2];
+                out[3] = sampled[3];
+                return;
+            case kAppGLImmediateTextureBaseLuminance:
+                out[0] = sampled[0];
+                out[1] = sampled[0];
+                out[2] = sampled[0];
+                out[3] = incoming[3];
+                return;
+            case kAppGLImmediateTextureBaseLuminanceAlpha:
+                out[0] = sampled[0];
+                out[1] = sampled[0];
+                out[2] = sampled[0];
+                out[3] = sampled[3];
+                return;
+            case kAppGLImmediateTextureBaseIntensity:
+                out[0] = sampled[0];
+                out[1] = sampled[0];
+                out[2] = sampled[0];
+                out[3] = sampled[0];
+                return;
+            default:
+                std::memcpy(out, sampled, 4u);
+                return;
+        }
+    }
+
+    switch (textureBaseClass) {
+        case kAppGLImmediateTextureBaseAlpha:
+            out[0] = appglImmediateMultiplyByte(incoming[0], sampled[0]);
+            out[1] = appglImmediateMultiplyByte(incoming[1], sampled[1]);
+            out[2] = appglImmediateMultiplyByte(incoming[2], sampled[2]);
+            out[3] = appglImmediateMultiplyByte(incoming[3], sampled[3]);
+            return;
+        case kAppGLImmediateTextureBaseLuminance:
+            out[0] = appglImmediateMultiplyByte(incoming[0], sampled[0]);
+            out[1] = appglImmediateMultiplyByte(incoming[1], sampled[0]);
+            out[2] = appglImmediateMultiplyByte(incoming[2], sampled[0]);
+            out[3] = incoming[3];
+            return;
+        case kAppGLImmediateTextureBaseLuminanceAlpha:
+            out[0] = appglImmediateMultiplyByte(incoming[0], sampled[0]);
+            out[1] = appglImmediateMultiplyByte(incoming[1], sampled[0]);
+            out[2] = appglImmediateMultiplyByte(incoming[2], sampled[0]);
+            out[3] = appglImmediateMultiplyByte(incoming[3], sampled[3]);
+            return;
+        case kAppGLImmediateTextureBaseIntensity:
+            out[0] = appglImmediateMultiplyByte(incoming[0], sampled[0]);
+            out[1] = appglImmediateMultiplyByte(incoming[1], sampled[0]);
+            out[2] = appglImmediateMultiplyByte(incoming[2], sampled[0]);
+            out[3] = appglImmediateMultiplyByte(incoming[3], sampled[0]);
+            return;
+        default:
+            for (int c = 0; c < 4; ++c) {
+                out[c] = appglImmediateMultiplyByte(incoming[c], sampled[c]);
+            }
+            return;
+    }
+}
+
+GLsizei appglImmediateWrappedTexel(float coord,
+                                   GLsizei extent,
+                                   GLint wrapMode,
+                                   bool& borderSample) {
+    if (extent <= 0) {
+        borderSample = true;
+        return 0;
+    }
+    const GLint texel = static_cast<GLint>(
+        std::floor(coord * static_cast<float>(extent)));
+    auto positiveModulo = [](GLint value, GLint divisor) {
+        GLint result = value % divisor;
+        return result < 0 ? result + divisor : result;
+    };
+    switch (wrapMode) {
+        case GL_REPEAT:
+            return positiveModulo(texel, extent);
+        case GL_MIRRORED_REPEAT: {
+            const GLint period = extent * 2;
+            GLint mirrored = positiveModulo(texel, period);
+            if (mirrored >= extent) {
+                mirrored = period - 1 - mirrored;
+            }
+            return mirrored;
+        }
+        case GL_CLAMP_TO_BORDER:
+            if (texel < 0 || texel >= extent) {
+                borderSample = true;
+            }
+            return std::clamp<GLint>(texel, 0, extent - 1);
+        case GL_CLAMP:
+        case GL_CLAMP_TO_EDGE:
+        default:
+            return std::clamp<GLint>(texel, 0, extent - 1);
+    }
+}
+
 }  // namespace
+
+static GLint appglRasterIntegerCoordinate(GLfloat value) {
+    if (!std::isfinite(value)) {
+        return 0;
+    }
+    return static_cast<GLint>(std::lround(value));
+}
 
 #ifndef GL_LINE_STIPPLE
 #define GL_LINE_STIPPLE 0x0B24
@@ -352,19 +515,47 @@ void GLContext::setRasterPosition(float x, float y, float z, float w) {
         static_cast<float>(dr.nearValue) +
         (ndcZ + 1.0f) * 0.5f *
             static_cast<float>(dr.farValue - dr.nearValue);
-    impl_->fixedFunctionRasterX =
-        static_cast<GLint>(std::lround(windowX));
-    impl_->fixedFunctionRasterY =
-        static_cast<GLint>(std::lround(windowY));
+    impl_->fixedFunctionRasterX = appglRasterIntegerCoordinate(windowX);
+    impl_->fixedFunctionRasterY = appglRasterIntegerCoordinate(windowY);
     impl_->fixedFunctionRasterZ = windowZ;
+    impl_->fixedFunctionRasterPosition[0] = windowX;
+    impl_->fixedFunctionRasterPosition[1] = windowY;
+    impl_->fixedFunctionRasterPosition[2] = windowZ;
+    impl_->fixedFunctionRasterPosition[3] = clip[3];
+    std::memcpy(impl_->fixedFunctionRasterColor,
+                impl_->immediate.currentColor,
+                sizeof(impl_->fixedFunctionRasterColor));
+    std::memcpy(impl_->fixedFunctionRasterSecondaryColor,
+                impl_->fixedFunctionCurrentSecondaryColor,
+                sizeof(impl_->fixedFunctionRasterSecondaryColor));
+    impl_->fixedFunctionRasterTexcoords = impl_->fixedFunctionCurrentTexcoords;
     impl_->fixedFunctionRasterPositionValid = true;
 }
 
-void GLContext::setWindowRasterPosition(GLint x, GLint y, GLfloat z) {
-    impl_->fixedFunctionRasterX = x;
-    impl_->fixedFunctionRasterY = y;
-    impl_->fixedFunctionRasterZ = z;
+void GLContext::setWindowRasterPosition(GLfloat x, GLfloat y, GLfloat z) {
+    const GLfloat clampedZ = std::clamp(z, 0.0f, 1.0f);
+    impl_->fixedFunctionRasterX = appglRasterIntegerCoordinate(x);
+    impl_->fixedFunctionRasterY = appglRasterIntegerCoordinate(y);
+    impl_->fixedFunctionRasterZ = clampedZ;
+    impl_->fixedFunctionRasterPosition[0] = x;
+    impl_->fixedFunctionRasterPosition[1] = y;
+    impl_->fixedFunctionRasterPosition[2] = clampedZ;
+    impl_->fixedFunctionRasterPosition[3] = 1.0f;
+    std::memcpy(impl_->fixedFunctionRasterColor,
+                impl_->immediate.currentColor,
+                sizeof(impl_->fixedFunctionRasterColor));
+    std::memcpy(impl_->fixedFunctionRasterSecondaryColor,
+                impl_->fixedFunctionCurrentSecondaryColor,
+                sizeof(impl_->fixedFunctionRasterSecondaryColor));
+    impl_->fixedFunctionRasterTexcoords = impl_->fixedFunctionCurrentTexcoords;
     impl_->fixedFunctionRasterPositionValid = true;
+}
+
+void GLContext::setSecondaryColorCompat(GLfloat r, GLfloat g, GLfloat b) {
+    impl_->fixedFunctionCurrentSecondaryColor[0] = r;
+    impl_->fixedFunctionCurrentSecondaryColor[1] = g;
+    impl_->fixedFunctionCurrentSecondaryColor[2] = b;
+    impl_->fixedFunctionCurrentSecondaryColor[3] = 1.0f;
 }
 
 void GLContext::setLogicOp(GLenum opcode) {
@@ -2249,6 +2440,9 @@ void GLContext::immediateColor(float r, float g, float b, float a) {
 }
 
 void GLContext::immediateTexCoord(unsigned int unit, float s, float t, float r, float q) {
+    if (unit < Impl::kCompatRasterTextureUnits) {
+        impl_->fixedFunctionCurrentTexcoords[unit] = {s, t, r, q};
+    }
     // Only texture unit 0 is captured for the built-in immediate-mode
     // pipeline (Chobby/Chili UI only uses unit 0). Multi-texturing on
     // other units is silently ignored — this matches the single-
@@ -3585,6 +3779,11 @@ void GLContext::endImmediate() {
         const GLTextureImageLevel* sampledImage = nullptr;
         GLsizei sampledWidth = 1;
         GLsizei sampledHeight = 1;
+        std::uint32_t sampledTextureBaseClass = 0u;
+        std::array<GLint, 4> sampledSwizzle = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA};
+        GLint sampledWrapS = GL_CLAMP_TO_EDGE;
+        GLint sampledWrapT = GL_CLAMP_TO_EDGE;
+        std::uint8_t sampledBorderRGBA[4] = {0u, 0u, 0u, 0u};
         float minS = std::numeric_limits<float>::infinity();
         float minT = std::numeric_limits<float>::infinity();
         float maxS = -std::numeric_limits<float>::infinity();
@@ -3609,6 +3808,15 @@ void GLContext::endImmediate() {
                 return false;
             }
             const GLTextureImageLevel& baseImage = baseIt->second;
+            sampledTextureBaseClass =
+                appglImmediateTextureBaseClass(texture->desc.internalFormat);
+            sampledSwizzle = texture->params.swizzle;
+            sampledWrapS = texture->params.wrapS;
+            sampledWrapT = texture->params.wrapT;
+            sampledBorderRGBA[0] = normalizedByte(texture->params.borderColor[0]);
+            sampledBorderRGBA[1] = normalizedByte(texture->params.borderColor[1]);
+            sampledBorderRGBA[2] = normalizedByte(texture->params.borderColor[2]);
+            sampledBorderRGBA[3] = normalizedByte(texture->params.borderColor[3]);
             for (std::size_t i = 0; i < drawCount; ++i) {
                 const auto st = projectedST(drawVerts[i]);
                 minS = std::min(minS, st[0]);
@@ -3695,34 +3903,29 @@ void GLContext::endImmediate() {
                     static_cast<float>(y1 - y0);
             const float s = minS + std::clamp(u, 0.0f, 1.0f) * (maxS - minS);
             const float t = minT + std::clamp(v, 0.0f, 1.0f) * (maxT - minT);
-            const auto texelCoord = [](float coord, GLsizei extent) {
-                return std::clamp<GLsizei>(
-                    static_cast<GLsizei>(
-                        std::floor(coord * static_cast<float>(extent))),
-                    0,
-                    extent - 1);
-            };
-            const GLsizei tx = texelCoord(s, sampledWidth);
-            const GLsizei ty = texelCoord(t, sampledHeight);
+            bool borderSample = false;
+            const GLsizei tx = appglImmediateWrappedTexel(
+                s, sampledWidth, sampledWrapS, borderSample);
+            const GLsizei ty = appglImmediateWrappedTexel(
+                t, sampledHeight, sampledWrapT, borderSample);
             const std::size_t texOffset =
                 (static_cast<std::size_t>(ty) *
                  static_cast<std::size_t>(sampledWidth) +
                  static_cast<std::size_t>(tx)) * 4u;
-            const std::uint8_t texel[4] = {
-                sampledImage->rgba8[texOffset + 0],
-                sampledImage->rgba8[texOffset + 1],
-                sampledImage->rgba8[texOffset + 2],
-                sampledImage->rgba8[texOffset + 3],
+            const std::uint8_t storageTexel[4] = {
+                borderSample ? sampledBorderRGBA[0] : sampledImage->rgba8[texOffset + 0],
+                borderSample ? sampledBorderRGBA[1] : sampledImage->rgba8[texOffset + 1],
+                borderSample ? sampledBorderRGBA[2] : sampledImage->rgba8[texOffset + 2],
+                borderSample ? sampledBorderRGBA[3] : sampledImage->rgba8[texOffset + 3],
             };
-            if (impl_->texEnv.mode == GL_REPLACE) {
-                std::memcpy(out, texel, 4u);
-                return;
-            }
-            for (int c = 0; c < 4; ++c) {
-                out[c] = static_cast<std::uint8_t>(
-                    (static_cast<unsigned>(out[c]) *
-                     static_cast<unsigned>(texel[c]) + 127u) / 255u);
-            }
+            const std::uint8_t texel[4] = {
+                appglImmediateSwizzleComponent(storageTexel, sampledSwizzle[0]),
+                appglImmediateSwizzleComponent(storageTexel, sampledSwizzle[1]),
+                appglImmediateSwizzleComponent(storageTexel, sampledSwizzle[2]),
+                appglImmediateSwizzleComponent(storageTexel, sampledSwizzle[3]),
+            };
+            appglImmediateApplyTextureEnv(
+                impl_->texEnv.mode, sampledTextureBaseClass, baseRGBA, texel, out);
         };
         auto insideScissor = [&](GLint x, GLint y) {
             if (!impl_->state->isEnabled(GL_SCISSOR_TEST)) {

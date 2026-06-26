@@ -656,7 +656,8 @@ public:
     bool isLegacyClientArrayEnabled(GLenum array) const;
     bool encodeLegacyClientArrayDraw(GLenum mode, GLint first, GLsizei count, const void* indices, GLenum indexType, const char* debugLabel);
     void setRasterPosition(float x, float y, float z, float w);
-    void setWindowRasterPosition(GLint x, GLint y, GLfloat z = 0.0f);
+    void setWindowRasterPosition(GLfloat x, GLfloat y, GLfloat z = 0.0f);
+    void setSecondaryColorCompat(GLfloat r, GLfloat g, GLfloat b);
     void setLogicOp(GLenum opcode);
     void setLineStipple(GLint factor, GLushort pattern);
     void setFogFloat(GLenum pname, GLfloat value);
