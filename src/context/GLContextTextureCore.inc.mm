@@ -262,6 +262,10 @@ bool GLContext::texImage(
         return false;
     }
     const GLenum internalFormatEnum = static_cast<GLenum>(internalformat);
+    const GLenum storageInternalFormatEnum =
+        internalFormatEnum == GL_DEPTH_STENCIL
+            ? GL_DEPTH24_STENCIL8
+            : internalFormatEnum;
     const bool compatComponentCountInternalFormat =
         appglCompatProfileEnabled() &&
         isLegacyCompatComponentCountInternalFormat(internalFormatEnum);
@@ -383,7 +387,7 @@ bool GLContext::texImage(
 
         GLTextureImageLevel image;
         image.desc.target = target;
-        image.desc.internalFormat = static_cast<GLenum>(internalformat);
+        image.desc.internalFormat = storageInternalFormatEnum;
         image.desc.sourceFormat = format;
         image.desc.sourceType = type;
         image.desc.width = fitsLimits ? width : 0;
@@ -478,7 +482,7 @@ bool GLContext::texImage(
 
     GLTextureImageLevel image;
     image.desc.target = target;
-    image.desc.internalFormat = static_cast<GLenum>(internalformat);
+    image.desc.internalFormat = storageInternalFormatEnum;
     image.desc.sourceFormat = format;
     image.desc.sourceType = type;
     image.desc.width = width;
@@ -567,7 +571,7 @@ bool GLContext::texImage(
         shouldNormalizeLegacyCompatTextureUpload(internalFormatEnum, format) ||
         impl_->shouldApplyCompatPixelTransfer(internalFormatEnum, format, type);
     if (!impl_->buildRGBA8Upload(
-            internalFormatEnum,
+            storageInternalFormatEnum,
             image.desc.width, image.desc.height, image.desc.depth,
             format, type, resolvedPixels, image.rgba8,
             normalizeCompatUpload,
@@ -577,7 +581,7 @@ bool GLContext::texImage(
     }
     // Also build native-format data for non-RGBA8 internal formats.
     impl_->buildNativeUpload(
-        static_cast<GLenum>(internalformat),
+        storageInternalFormatEnum,
         image.desc.width, image.desc.height, image.desc.depth,
         format, type, resolvedPixels, image.nativeData, image.nativeBpp,
         normalizeCompatUpload,
@@ -783,9 +787,66 @@ bool GLContext::copyTexImage2D(
 
     if (isDepthStencilCopy) {
         const GLuint readFboName = impl_->state->boundReadFramebuffer();
+        if (readFboName == 0) {
+            const std::size_t pixelCount =
+                static_cast<std::size_t>(std::max<GLsizei>(width, 0)) *
+                static_cast<std::size_t>(std::max<GLsizei>(height, 0));
+            std::vector<std::uint8_t> uploadBytes(
+                pixelCount * uploadPixelBytes, 0);
+            if (pixelCount > 0) {
+                std::vector<GLfloat> depthStage(pixelCount, 1.0f);
+                if (!impl_->copyDefaultFramebufferDepthPixels(
+                        x, y, width, height, depthStage.data())) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
+                std::vector<std::uint8_t> stencilStage(pixelCount, 0);
+                (void)impl_->copyDefaultFramebufferStencilPixels(
+                    x, y, width, height, stencilStage.data());
+                if (uploadType == GL_FLOAT_32_UNSIGNED_INT_24_8_REV) {
+                    for (std::size_t i = 0; i < pixelCount; ++i) {
+                        std::uint8_t* dst = uploadBytes.data() + i * uploadPixelBytes;
+                        const GLfloat depth =
+                            std::clamp(depthStage[i], 0.0f, 1.0f);
+                        const std::uint32_t stencilSlot =
+                            static_cast<std::uint32_t>(stencilStage[i]);
+                        std::memcpy(dst, &depth, sizeof(depth));
+                        std::memcpy(dst + sizeof(depth), &stencilSlot,
+                                    sizeof(stencilSlot));
+                    }
+                } else {
+                    for (std::size_t i = 0; i < pixelCount; ++i) {
+                        std::uint8_t* dst = uploadBytes.data() + i * uploadPixelBytes;
+                        const GLfloat clampedDepth =
+                            std::clamp(depthStage[i], 0.0f, 1.0f);
+                        const std::uint32_t depth24 =
+                            Impl::packReadbackBits(
+                                static_cast<double>(clampedDepth),
+                                0x00ffffffu, false);
+                        const std::uint32_t packed =
+                            (depth24 << 8) |
+                            static_cast<std::uint32_t>(stencilStage[i]);
+                        std::memcpy(dst, &packed, sizeof(packed));
+                    }
+                }
+            }
+            const bool copied = texImage(
+                target, level, static_cast<GLint>(uploadInternalFormat),
+                width, height, 1, border, uploadFormat, uploadType,
+                uploadBytes.empty() ? nullptr : uploadBytes.data());
+            if (copied) {
+                impl_->markGpuResourceWrites({
+                    {Impl::GpuResourceAccess::Kind::Texture,
+                     impl_->state->boundTexture(target),
+                     kProducerCopyWrite}
+                });
+            }
+            return copied;
+        }
+
         const GLFramebufferObject* readFbo =
             impl_->objects->framebuffers().get(readFboName);
-        if (readFboName == 0 || readFbo == nullptr) {
+        if (readFbo == nullptr) {
             pushError(GL_INVALID_OPERATION);
             return false;
         }
