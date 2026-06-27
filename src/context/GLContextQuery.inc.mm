@@ -298,20 +298,19 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
         *data = static_cast<GLint>(impl_->boundTransformFeedbackId);
         return true;
     }
-    // GL 4.6 §22.3 — per-context MSAA sample state. `glGetIntegerv`
-    // with these pnames queries the CURRENT read framebuffer's
-    // sample configuration. Without MSAA infrastructure we advertise
-    // zero samples on both default and user FBOs. CTS
-    // `framebuffer_blit.scissor_blit` calls `getIntegerv(
-    // GL_SAMPLE_BUFFERS)` to decide whether to verify cleared
-    // colours (skipped if MSAA); our returning INVALID_ENUM aborted
-    // the entire test before the scissor code ran.
+    // GL 4.6 §22.3 — sample state follows the current read framebuffer.
+    // Phase-3 default-FB MSAA is default-off; when opted in, only FB0
+    // reports samples here. User FBO MSAA remains outside this slice.
     if (pname == GL_SAMPLE_BUFFERS) {
-        *data = 0;
+        *data = impl_->state->boundReadFramebuffer() == 0
+            ? impl_->defaultFramebufferSampleBuffers()
+            : 0;
         return true;
     }
     if (pname == GL_SAMPLES) {
-        *data = 0;
+        *data = impl_->state->boundReadFramebuffer() == 0
+            ? impl_->defaultFramebufferSampleCount()
+            : 0;
         return true;
     }
     if (pname == GL_DEPTH_BITS || pname == GL_STENCIL_BITS) {

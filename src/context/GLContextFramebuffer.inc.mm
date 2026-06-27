@@ -1327,8 +1327,12 @@ bool GLContext::getFramebufferParameteriv(GLenum target, GLenum pname, GLint* pa
             case GL_DOUBLEBUFFER:                     *params = GL_TRUE;  return true;
             case GL_IMPLEMENTATION_COLOR_READ_FORMAT: *params = GL_RGBA;  return true;
             case GL_IMPLEMENTATION_COLOR_READ_TYPE:   *params = GL_UNSIGNED_BYTE; return true;
-            case GL_SAMPLES:                          *params = 0;        return true;
-            case GL_SAMPLE_BUFFERS:                   *params = 0;        return true;
+            case GL_SAMPLES:
+                *params = impl_->defaultFramebufferSampleCount();
+                return true;
+            case GL_SAMPLE_BUFFERS:
+                *params = impl_->defaultFramebufferSampleBuffers();
+                return true;
             case GL_STEREO:                           *params = GL_FALSE; return true;
             default:
                 // Wrong pname class for the default FB (e.g. one of the

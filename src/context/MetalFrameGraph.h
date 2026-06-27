@@ -1125,7 +1125,8 @@ public:
                     void* layer,
                     void* device,
                     void* commandQueue,
-                    MetalCommandSubmission* commandSubmission);
+                    MetalCommandSubmission* commandSubmission,
+                    std::uint32_t defaultFramebufferSamples = 1);
     ~MetalFrameGraph();
 
     MetalFrameGraph(const MetalFrameGraph&) = delete;
@@ -1328,6 +1329,8 @@ public:
                                                      std::uint32_t srcSlice,
                                                      GLsizei width,
                                                      GLsizei height);
+    bool resolveDefaultFramebufferMsaaColor();
+    std::uint32_t defaultFramebufferSampleCount() const;
 
     // Compile a compute shader's MSL source into a retained
     // MTLComputePipelineState and return it as a type-erased void*
@@ -1839,6 +1842,23 @@ public:
         std::uint64_t offscreenColorRebuilds = 0;
         std::uint64_t offscreenColorReleases = 0;
         std::uint64_t offscreenColorAllocatedBytes = 0;
+        std::uint64_t defaultMsaaColorTextureBytes = 0;
+        std::uint64_t defaultMsaaColorTextureWidth = 0;
+        std::uint64_t defaultMsaaColorTextureHeight = 0;
+        std::uint64_t defaultMsaaColorTextureSampleCount = 0;
+        std::uint64_t defaultMsaaColorTexturePixelFormat = 0;
+        std::uint64_t defaultMsaaColorRebuilds = 0;
+        std::uint64_t defaultMsaaColorReleases = 0;
+        std::uint64_t defaultMsaaColorAllocatedBytes = 0;
+        std::uint64_t defaultMsaaDepthStencilTextureBytes = 0;
+        std::uint64_t defaultMsaaDepthStencilTextureWidth = 0;
+        std::uint64_t defaultMsaaDepthStencilTextureHeight = 0;
+        std::uint64_t defaultMsaaDepthStencilTextureSampleCount = 0;
+        std::uint64_t defaultMsaaDepthStencilTexturePixelFormat = 0;
+        std::uint64_t defaultMsaaDepthStencilRebuilds = 0;
+        std::uint64_t defaultMsaaDepthStencilReleases = 0;
+        std::uint64_t defaultMsaaDepthStencilAllocatedBytes = 0;
+        std::uint64_t defaultMsaaColorResolveDirty = 0;
         std::uint64_t dummyColorTextureAllocations = 0;
         std::uint64_t dummyColorTextureAllocatedBytes = 0;
         std::uint64_t dummyColorTextureCacheHits = 0;

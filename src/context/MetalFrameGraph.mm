@@ -5461,12 +5461,17 @@ struct MetalFrameGraph::Impl {
          void* rawLayer,
          void* rawDevice,
          void* rawCommandQueue,
-         MetalCommandSubmission* rawCommandSubmission)
+         MetalCommandSubmission* rawCommandSubmission,
+         std::uint32_t rawDefaultFramebufferSamples)
         : owner(ownerContext),
           layer((__bridge CAMetalLayer*)rawLayer),
           device((__bridge id<MTLDevice>)rawDevice),
           commandQueue((__bridge id<MTLCommandQueue>)rawCommandQueue),
-          commandSubmission(rawCommandSubmission) {
+          commandSubmission(rawCommandSubmission),
+          defaultFramebufferSamples((rawDefaultFramebufferSamples == 2u ||
+                                     rawDefaultFramebufferSamples == 4u)
+                                        ? rawDefaultFramebufferSamples
+                                        : 1u) {
 #if !__has_feature(objc_arc)
         [layer retain];
 #endif
@@ -5596,6 +5601,8 @@ struct MetalFrameGraph::Impl {
     void releaseDefaultFramebufferTextures() {
         releaseDepthStencilTexture();
         releaseOffscreenColorTexture();
+        releaseDefaultMsaaColorTexture();
+        releaseDefaultMsaaDepthStencilTexture();
     }
 
     void releaseOwnedTexture(id<MTLTexture>& texture) {
@@ -5631,6 +5638,24 @@ struct MetalFrameGraph::Impl {
         if (texture != nil) {
             ++offscreenColorTextureRebuilds;
             offscreenColorTextureAllocatedBytes += metalAllocatedSize(texture);
+        }
+        return texture;
+    }
+
+    id<MTLTexture> newDefaultMsaaColorTexture(MTLTextureDescriptor* descriptor) {
+        id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
+        if (texture != nil) {
+            ++defaultMsaaColorTextureRebuilds;
+            defaultMsaaColorTextureAllocatedBytes += metalAllocatedSize(texture);
+        }
+        return texture;
+    }
+
+    id<MTLTexture> newDefaultMsaaDepthStencilTexture(MTLTextureDescriptor* descriptor) {
+        id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
+        if (texture != nil) {
+            ++defaultMsaaDepthStencilTextureRebuilds;
+            defaultMsaaDepthStencilTextureAllocatedBytes += metalAllocatedSize(texture);
         }
         return texture;
     }
@@ -5743,6 +5768,21 @@ struct MetalFrameGraph::Impl {
         releaseOwnedTexture(offscreenColorTexture);
     }
 
+    void releaseDefaultMsaaColorTexture() {
+        if (defaultMsaaColorTexture != nil) {
+            ++defaultMsaaColorTextureReleases;
+        }
+        releaseOwnedTexture(defaultMsaaColorTexture);
+        defaultMsaaColorResolveDirty = false;
+    }
+
+    void releaseDefaultMsaaDepthStencilTexture() {
+        if (defaultMsaaDepthStencilTexture != nil) {
+            ++defaultMsaaDepthStencilTextureReleases;
+        }
+        releaseOwnedTexture(defaultMsaaDepthStencilTexture);
+    }
+
     void replaceDepthStencilTexture(id<MTLTexture> replacement) {
         if (depthStencilTexture != replacement && depthStencilTexture != nil) {
             ++depthStencilTextureReleases;
@@ -5755,6 +5795,50 @@ struct MetalFrameGraph::Impl {
             ++offscreenColorTextureReleases;
         }
         replaceOwnedTexture(offscreenColorTexture, replacement);
+    }
+
+    void replaceDefaultMsaaColorTexture(id<MTLTexture> replacement) {
+        if (defaultMsaaColorTexture != replacement && defaultMsaaColorTexture != nil) {
+            ++defaultMsaaColorTextureReleases;
+        }
+        replaceOwnedTexture(defaultMsaaColorTexture, replacement);
+        defaultMsaaColorResolveDirty = replacement != nil;
+    }
+
+    void replaceDefaultMsaaDepthStencilTexture(id<MTLTexture> replacement) {
+        if (defaultMsaaDepthStencilTexture != replacement &&
+            defaultMsaaDepthStencilTexture != nil) {
+            ++defaultMsaaDepthStencilTextureReleases;
+        }
+        replaceOwnedTexture(defaultMsaaDepthStencilTexture, replacement);
+    }
+
+    bool defaultFramebufferMsaaEnabled() const {
+        return defaultFramebufferSamples == 2u || defaultFramebufferSamples == 4u;
+    }
+
+    id<MTLTexture> defaultSingleSampleColorTexture() const {
+        return usesOffscreenTarget
+            ? offscreenColorTexture
+            : (currentDrawable != nil ? currentDrawable.texture : nil);
+    }
+
+    id<MTLTexture> defaultColorRenderTargetTexture() const {
+        return defaultFramebufferMsaaEnabled()
+            ? defaultMsaaColorTexture
+            : defaultSingleSampleColorTexture();
+    }
+
+    id<MTLTexture> defaultDepthStencilRenderTargetTexture() const {
+        return defaultFramebufferMsaaEnabled()
+            ? defaultMsaaDepthStencilTexture
+            : depthStencilTexture;
+    }
+
+    void markDefaultMsaaColorDirty() {
+        if (defaultFramebufferMsaaEnabled()) {
+            defaultMsaaColorResolveDirty = true;
+        }
     }
 
     void replaceOwnedObjCObject(id& slot, id replacement) {
@@ -5954,21 +6038,25 @@ struct MetalFrameGraph::Impl {
         }
 
         MTLRenderPassDescriptor* pass = getReusablePassDescriptor();  // ADV-4
-        id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
+        id<MTLTexture> colorTexture = defaultColorRenderTargetTexture();
+        if (colorTexture == nil) {
+            return;
+        }
         pass.colorAttachments[0].texture = colorTexture;
         pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         readbackSourceTexture = colorTexture;
         readbackSourceIsBGRA = colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
-        pass.depthAttachment.texture = depthStencilTexture;
+        pass.depthAttachment.texture = defaultDepthStencilRenderTargetTexture();
         pass.depthAttachment.loadAction = MTLLoadActionLoad;
         pass.depthAttachment.storeAction = MTLStoreActionStore;
-        pass.stencilAttachment.texture = depthStencilTexture;
+        pass.stencilAttachment.texture = defaultDepthStencilRenderTargetTexture();
         pass.stencilAttachment.loadAction = MTLLoadActionLoad;
         pass.stencilAttachment.storeAction = MTLStoreActionStore;
         const GLenum fragmentRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
         attachFragmentShadingRateMap(pass, fragmentRate, colorTexture, 1);
         openCurrentRenderEncoder(pass);
+        markDefaultMsaaColorDirty();
         activeRenderPassFragmentShadingRate = fragmentRate;
         resetCachedEncoderState();
     }
@@ -6457,7 +6545,7 @@ struct MetalFrameGraph::Impl {
             hasPendingClear = false; return;
         }
 
-        id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
+        id<MTLTexture> colorTexture = defaultColorRenderTargetTexture();
         if (colorTexture == nil) { hasPendingClear = false; return; }
 
         MTLRenderPassDescriptor* pass = getReusablePassDescriptor();  // ADV-4
@@ -6465,12 +6553,13 @@ struct MetalFrameGraph::Impl {
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         pass.colorAttachments[0].loadAction = (pendingClearMask & GL_COLOR_BUFFER_BIT) ? MTLLoadActionClear : MTLLoadActionLoad;
         pass.colorAttachments[0].clearColor = pendingClearColor;
-        if (depthStencilTexture != nil) {
-            pass.depthAttachment.texture = depthStencilTexture;
+        id<MTLTexture> passDepthStencil = defaultDepthStencilRenderTargetTexture();
+        if (passDepthStencil != nil) {
+            pass.depthAttachment.texture = passDepthStencil;
             pass.depthAttachment.storeAction = MTLStoreActionStore;
             pass.depthAttachment.loadAction = (pendingClearMask & GL_DEPTH_BUFFER_BIT) ? MTLLoadActionClear : MTLLoadActionLoad;
             pass.depthAttachment.clearDepth = pendingClearDepth;
-            pass.stencilAttachment.texture = depthStencilTexture;
+            pass.stencilAttachment.texture = passDepthStencil;
             pass.stencilAttachment.storeAction = MTLStoreActionStore;
             pass.stencilAttachment.loadAction = (pendingClearMask & GL_STENCIL_BUFFER_BIT) ? MTLLoadActionClear : MTLLoadActionLoad;
             pass.stencilAttachment.clearStencil = pendingClearStencil;
@@ -6482,6 +6571,7 @@ struct MetalFrameGraph::Impl {
         [encoder endEncoding];
         readbackSourceTexture = colorTexture;
         readbackSourceIsBGRA = colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
+        markDefaultMsaaColorDirty();
         hasPendingClear = false;
         pendingPresent = true;
     }
@@ -6540,7 +6630,7 @@ struct MetalFrameGraph::Impl {
             return false;
         }
 
-        id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
+        id<MTLTexture> colorTexture = defaultColorRenderTargetTexture();
         if (colorTexture == nil) {
             return false;
         }
@@ -6555,10 +6645,11 @@ struct MetalFrameGraph::Impl {
         } else {
             pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
         }
-        if (depthStencilTexture != nil) {
-            pass.depthAttachment.texture = depthStencilTexture;
+        id<MTLTexture> passDepthStencil = defaultDepthStencilRenderTargetTexture();
+        if (passDepthStencil != nil) {
+            pass.depthAttachment.texture = passDepthStencil;
             pass.depthAttachment.storeAction = MTLStoreActionStore;
-            pass.stencilAttachment.texture = depthStencilTexture;
+            pass.stencilAttachment.texture = passDepthStencil;
             pass.stencilAttachment.storeAction = MTLStoreActionStore;
             if (hasPendingClear && (pendingClearMask & GL_DEPTH_BUFFER_BIT)) {
                 pass.depthAttachment.loadAction = MTLLoadActionClear;
@@ -6583,7 +6674,7 @@ struct MetalFrameGraph::Impl {
         }
         [encoder setRenderPipelineState:solidColorPipelineState];
 
-        if (depthStencilTexture != nil) {
+        if (passDepthStencil != nil) {
             id<MTLDepthStencilState> dsState = depthStencilStateForDraw(info);
             if (dsState != nil) {
                 [encoder setDepthStencilState:dsState];
@@ -6657,6 +6748,7 @@ struct MetalFrameGraph::Impl {
         [encoder endEncoding];
         readbackSourceTexture = colorTexture;
         readbackSourceIsBGRA = colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
+        markDefaultMsaaColorDirty();
         pendingPresent = true;
         return true;
     }
@@ -6837,7 +6929,9 @@ struct MetalFrameGraph::Impl {
 
         // Lazily create the MTLRenderPipelineState from translated MSL.
         id<MTLTexture> colorTexture = isFBODraw ? fboColorTex
-            : (usesOffscreenTarget ? offscreenColorTexture : nil);
+            : (defaultFramebufferMsaaEnabled()
+                ? defaultMsaaColorTexture
+                : (usesOffscreenTarget ? offscreenColorTexture : nil));
         // §11: record this FBO's render epoch (the CB it renders on) so the
         // composition's later read can be checked for same-CB-after ordering.
         if (survivalContentProbeLatched && isFBODraw && colorTexture != nil) {
@@ -8320,23 +8414,25 @@ struct MetalFrameGraph::Impl {
                 if (probeComposite) {
                     compositeSerialAcqOkThisFrame = true;  // (b) serial DID acquire
                 }
-                colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
+                colorTexture = defaultColorRenderTargetTexture();
             }
             if (colorTexture == nil) {
                 return false;
             }
 
             // Resolve depth/stencil for this render pass.
-            id<MTLTexture> passDepthStencil = isFBODraw ? fboDepthStencilTex : depthStencilTexture;
+            id<MTLTexture> passDepthStencil = isFBODraw
+                ? fboDepthStencilTex
+                : defaultDepthStencilRenderTargetTexture();
 
             // Ensure depth/stencil texture matches color attachment dimensions.
             // A mismatch here triggers Metal validation assertions on draw.
-            if (!isFBODraw && depthStencilTexture != nil &&
-                (depthStencilTexture.width != colorTexture.width ||
-                 depthStencilTexture.height != colorTexture.height)) {
+            if (!isFBODraw && passDepthStencil != nil &&
+                (passDepthStencil.width != colorTexture.width ||
+                 passDepthStencil.height != colorTexture.height)) {
                 APPGL_LOG(PIPELINE, @"[FG] depth/color size MISMATCH: depth=%lux%lu color=%lux%lu — rebuilding depth",
-                      (unsigned long)depthStencilTexture.width,
-                      (unsigned long)depthStencilTexture.height,
+                      (unsigned long)passDepthStencil.width,
+                      (unsigned long)passDepthStencil.height,
                       (unsigned long)colorTexture.width,
                       (unsigned long)colorTexture.height);
                 id<MTLTexture> replacement = nil;
@@ -8348,13 +8444,24 @@ struct MetalFrameGraph::Impl {
                                                 mipmapped:NO];
                     dd.storageMode = MTLStorageModePrivate;
                     dd.usage = MTLTextureUsageRenderTarget;
-                    replacement = newDepthStencilTexture(dd);
+                    if (defaultFramebufferMsaaEnabled()) {
+                        dd.textureType = MTLTextureType2DMultisample;
+                        dd.sampleCount = defaultFramebufferSamples;
+                        replacement = newDefaultMsaaDepthStencilTexture(dd);
+                    } else {
+                        replacement = newDepthStencilTexture(dd);
+                    }
                 }
                 if (replacement != nil) {
                     ++depthStencilRebuildsFromColorSizeMismatch;
                 }
-                replaceDepthStencilTexture(replacement);
-                passDepthStencil = depthStencilTexture;
+                if (defaultFramebufferMsaaEnabled()) {
+                    replaceDefaultMsaaDepthStencilTexture(replacement);
+                    passDepthStencil = defaultMsaaDepthStencilTexture;
+                } else {
+                    replaceDepthStencilTexture(replacement);
+                    passDepthStencil = depthStencilTexture;
+                }
                 drawableWidth = static_cast<GLsizei>(colorTexture.width);
                 drawableHeight = static_cast<GLsizei>(colorTexture.height);
             }
@@ -8391,13 +8498,22 @@ struct MetalFrameGraph::Impl {
                             dd.textureType = MTLTextureType2DMultisample;
                             dd.sampleCount = colorTexture.sampleCount;
                         }
-                        replacement = newDepthStencilTexture(dd);
+                        if (defaultFramebufferMsaaEnabled()) {
+                            replacement = newDefaultMsaaDepthStencilTexture(dd);
+                        } else {
+                            replacement = newDepthStencilTexture(dd);
+                        }
                     }
                     if (replacement != nil) {
                         ++depthStencilRebuildsFromSampleMismatch;
                     }
-                    replaceDepthStencilTexture(replacement);
-                    passDepthStencil = depthStencilTexture;
+                    if (defaultFramebufferMsaaEnabled()) {
+                        replaceDefaultMsaaDepthStencilTexture(replacement);
+                        passDepthStencil = defaultMsaaDepthStencilTexture;
+                    } else {
+                        replaceDepthStencilTexture(replacement);
+                        passDepthStencil = depthStencilTexture;
+                    }
                 } else {
                     APPGL_LOG(PIPELINE, @"[FG] FBO depth/color sample-count MISMATCH: depth=%lu color=%lu — dropping depth",
                           (unsigned long)passDepthStencil.sampleCount,
@@ -8588,6 +8704,7 @@ struct MetalFrameGraph::Impl {
             }
             if (!isFBODraw) {
                 hasPendingClear = false;
+                markDefaultMsaaColorDirty();
             }
 
             attachFragmentShadingRateMap(pass, info.fragmentShadingRate, colorTexture, rateMapLayerCount);
@@ -16735,6 +16852,35 @@ fragment float4 appgl_msaa_color_resolve_copy_fs(
         return true;
     }
 
+    bool resolveDefaultFramebufferMsaaColor() {
+        if (!defaultFramebufferMsaaEnabled()) {
+            return true;
+        }
+        ensureDrawableResources();
+        if (defaultMsaaColorTexture == nil) {
+            return false;
+        }
+        if (!defaultMsaaColorResolveDirty && !hasPendingClear) {
+            id<MTLTexture> resolved = defaultSingleSampleColorTexture();
+            if (resolved != nil) {
+                readbackSourceTexture = resolved;
+                readbackSourceIsBGRA =
+                    resolved.pixelFormat == MTLPixelFormatBGRA8Unorm ||
+                    resolved.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB;
+            }
+            return true;
+        }
+        const bool ok = resolveMultisampleColorToDefaultFramebuffer(
+            (__bridge void*)defaultMsaaColorTexture,
+            0,
+            drawableWidth,
+            drawableHeight);
+        if (ok) {
+            defaultMsaaColorResolveDirty = false;
+        }
+        return ok;
+    }
+
     // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
     // shader library and three pipeline states (vertex-color-only,
     // vertex-color × texture2D, and vertex-color × native texture1D).
@@ -18057,7 +18203,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         if (hasPendingClear) {
             flushPendingClear();
         }
-        return writeDepthStencilRegion((__bridge void*)depthStencilTexture,
+        id<MTLTexture> target = defaultDepthStencilRenderTargetTexture();
+        return writeDepthStencilRegion((__bridge void*)target,
                                        x, y, width, height,
                                        depthPixels, writeDepth,
                                        stencilValue, writeStencil);
@@ -18120,14 +18267,14 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             if (!acquireDrawableIfNeeded()) {  // ADV-7
                 return false;
             }
-            colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
+            colorTexture = defaultColorRenderTargetTexture();
         }
         if (colorTexture == nil) {
             return false;
         }
         id<MTLTexture> passDepthStencil = isFBODraw
             ? (__bridge id<MTLTexture>)(info.fboDepthStencilTexture)
-            : depthStencilTexture;
+            : defaultDepthStencilRenderTargetTexture();
 
         const MTLPixelFormat colorFormat = colorTexture.pixelFormat;
         if (!ensureImmediateModePipelines(colorFormat, info.blend)) {
@@ -18365,6 +18512,9 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         [encoder endEncoding];
         readbackSourceTexture = colorTexture;
         readbackSourceIsBGRA = colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
+        if (!isFBODraw) {
+            markDefaultMsaaColorDirty();
+        }
         pendingPresent = true;
         return true;
     }
@@ -19769,6 +19919,11 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         if (hasPendingClear) {
             flushPendingClear();
         }
+        if (defaultFramebufferMsaaEnabled() &&
+            !resolveDefaultFramebufferMsaaColor()) {
+            attributionScope.markFailed();
+            return;
+        }
         ++presentCalls;
         // S25 commit B: frame boundary drains the copy-headroom retain
         // arena (probe retains only — the encoder/CB machinery holds its
@@ -19891,6 +20046,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         // for readback — otherwise Metal asserts on uncommitted encoder.
         endRenderPass();
         ensureDrawableResources();
+        if (defaultFramebufferMsaaEnabled() &&
+            !resolveDefaultFramebufferMsaaColor()) {
+            return false;
+        }
         id<MTLTexture> sourceTexture = readbackSourceTexture != nil
             ? readbackSourceTexture
             : (usesOffscreenTarget ? offscreenColorTexture : nil);
@@ -23676,6 +23835,32 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         inventory.offscreenColorReleases = offscreenColorTextureReleases;
         inventory.offscreenColorAllocatedBytes =
             offscreenColorTextureAllocatedBytes;
+        snapshotTexture(defaultMsaaColorTexture,
+                        inventory.defaultMsaaColorTextureBytes,
+                        inventory.defaultMsaaColorTextureWidth,
+                        inventory.defaultMsaaColorTextureHeight,
+                        inventory.defaultMsaaColorTextureSampleCount,
+                        inventory.defaultMsaaColorTexturePixelFormat);
+        inventory.defaultMsaaColorRebuilds =
+            defaultMsaaColorTextureRebuilds;
+        inventory.defaultMsaaColorReleases =
+            defaultMsaaColorTextureReleases;
+        inventory.defaultMsaaColorAllocatedBytes =
+            defaultMsaaColorTextureAllocatedBytes;
+        snapshotTexture(defaultMsaaDepthStencilTexture,
+                        inventory.defaultMsaaDepthStencilTextureBytes,
+                        inventory.defaultMsaaDepthStencilTextureWidth,
+                        inventory.defaultMsaaDepthStencilTextureHeight,
+                        inventory.defaultMsaaDepthStencilTextureSampleCount,
+                        inventory.defaultMsaaDepthStencilTexturePixelFormat);
+        inventory.defaultMsaaDepthStencilRebuilds =
+            defaultMsaaDepthStencilTextureRebuilds;
+        inventory.defaultMsaaDepthStencilReleases =
+            defaultMsaaDepthStencilTextureReleases;
+        inventory.defaultMsaaDepthStencilAllocatedBytes =
+            defaultMsaaDepthStencilTextureAllocatedBytes;
+        inventory.defaultMsaaColorResolveDirty =
+            defaultMsaaColorResolveDirty ? 1 : 0;
         inventory.dummyColorTextureAllocations = dummyColorTextureAllocations;
         inventory.dummyColorTextureAllocatedBytes =
             dummyColorTextureAllocatedBytes;
@@ -23761,6 +23946,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         return inventory;
     }
 
+    std::uint32_t defaultFramebufferSampleCount() const {
+        return defaultFramebufferSamples;
+    }
+
 private:
     void ensureDrawableResources() {
         if (device == nil) {
@@ -23821,6 +24010,59 @@ private:
                 replacement = newOffscreenColorTexture(colorDescriptor);
             }
             replaceOffscreenColorTexture(replacement);
+        }
+
+        if (!defaultFramebufferMsaaEnabled()) {
+            releaseDefaultMsaaColorTexture();
+            releaseDefaultMsaaDepthStencilTexture();
+            return;
+        }
+
+        const MTLPixelFormat defaultMsaaColorFormat =
+            usesOffscreenTarget ? MTLPixelFormatRGBA8Unorm : MTLPixelFormatBGRA8Unorm;
+        const bool needsDefaultMsaaColorRebuild =
+            defaultMsaaColorTexture == nil ||
+            defaultMsaaColorTexture.width != static_cast<NSUInteger>(drawableWidth) ||
+            defaultMsaaColorTexture.height != static_cast<NSUInteger>(drawableHeight) ||
+            defaultMsaaColorTexture.sampleCount != defaultFramebufferSamples ||
+            defaultMsaaColorTexture.pixelFormat != defaultMsaaColorFormat;
+        if (needsDefaultMsaaColorRebuild) {
+            id<MTLTexture> replacement = nil;
+            @autoreleasepool {
+                MTLTextureDescriptor* colorDescriptor =
+                    [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:defaultMsaaColorFormat
+                                                                        width:static_cast<NSUInteger>(drawableWidth)
+                                                                       height:static_cast<NSUInteger>(drawableHeight)
+                                                                    mipmapped:NO];
+                colorDescriptor.textureType = MTLTextureType2DMultisample;
+                colorDescriptor.sampleCount = defaultFramebufferSamples;
+                colorDescriptor.storageMode = MTLStorageModePrivate;
+                colorDescriptor.usage = MTLTextureUsageRenderTarget;
+                replacement = newDefaultMsaaColorTexture(colorDescriptor);
+            }
+            replaceDefaultMsaaColorTexture(replacement);
+        }
+
+        const bool needsDefaultMsaaDepthStencilRebuild =
+            defaultMsaaDepthStencilTexture == nil ||
+            defaultMsaaDepthStencilTexture.width != static_cast<NSUInteger>(drawableWidth) ||
+            defaultMsaaDepthStencilTexture.height != static_cast<NSUInteger>(drawableHeight) ||
+            defaultMsaaDepthStencilTexture.sampleCount != defaultFramebufferSamples;
+        if (needsDefaultMsaaDepthStencilRebuild) {
+            id<MTLTexture> replacement = nil;
+            @autoreleasepool {
+                MTLTextureDescriptor* descriptor =
+                    [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                                                        width:static_cast<NSUInteger>(drawableWidth)
+                                                                       height:static_cast<NSUInteger>(drawableHeight)
+                                                                    mipmapped:NO];
+                descriptor.textureType = MTLTextureType2DMultisample;
+                descriptor.sampleCount = defaultFramebufferSamples;
+                descriptor.storageMode = MTLStorageModePrivate;
+                descriptor.usage = MTLTextureUsageRenderTarget;
+                replacement = newDefaultMsaaDepthStencilTexture(descriptor);
+            }
+            replaceDefaultMsaaDepthStencilTexture(replacement);
         }
     }
 
@@ -23963,8 +24205,12 @@ private:
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> commandQueue = nil;
     MetalCommandSubmission* commandSubmission = nullptr;
+    std::uint32_t defaultFramebufferSamples = 1;
     id<MTLTexture> depthStencilTexture = nil;
     id<MTLTexture> offscreenColorTexture = nil;
+    id<MTLTexture> defaultMsaaColorTexture = nil;
+    id<MTLTexture> defaultMsaaDepthStencilTexture = nil;
+    bool defaultMsaaColorResolveDirty = false;
     id<MTLTexture> readbackSourceTexture = nil;
     id<MTLCommandBuffer> currentCommandBuffer = nil;
     MetalCommandBufferLease currentCommandBufferLease;
@@ -24643,6 +24889,12 @@ private:
     std::uint64_t offscreenColorTextureRebuilds = 0;
     std::uint64_t offscreenColorTextureReleases = 0;
     std::uint64_t offscreenColorTextureAllocatedBytes = 0;
+    std::uint64_t defaultMsaaColorTextureRebuilds = 0;
+    std::uint64_t defaultMsaaColorTextureReleases = 0;
+    std::uint64_t defaultMsaaColorTextureAllocatedBytes = 0;
+    std::uint64_t defaultMsaaDepthStencilTextureRebuilds = 0;
+    std::uint64_t defaultMsaaDepthStencilTextureReleases = 0;
+    std::uint64_t defaultMsaaDepthStencilTextureAllocatedBytes = 0;
     std::uint64_t dummyColorTextureAllocations = 0;
     std::uint64_t dummyColorTextureAllocatedBytes = 0;
     std::uint64_t dummyColorTextureCacheHits = 0;
@@ -27684,8 +27936,11 @@ MetalFrameGraph::MetalFrameGraph(GLContext* context,
                                  void* layer,
                                  void* device,
                                  void* commandQueue,
-                                 MetalCommandSubmission* commandSubmission)
-    : impl_(std::make_unique<Impl>(context, layer, device, commandQueue, commandSubmission)) {
+                                 MetalCommandSubmission* commandSubmission,
+                                 std::uint32_t defaultFramebufferSamples)
+    : impl_(std::make_unique<Impl>(context, layer, device, commandQueue,
+                                   commandSubmission,
+                                   defaultFramebufferSamples)) {
     // S25 W2: in BOUNDED-window mode (on-degraded / at-frame), defer the start to
     // Impl::present — don't open a whole-lifetime capture at launch.
     {
@@ -27899,6 +28154,14 @@ bool MetalFrameGraph::resolveMultisampleColorToDefaultFramebuffer(
     GLsizei height) {
     return impl_->resolveMultisampleColorToDefaultFramebuffer(
         srcTex, srcSlice, width, height);
+}
+
+bool MetalFrameGraph::resolveDefaultFramebufferMsaaColor() {
+    return impl_->resolveDefaultFramebufferMsaaColor();
+}
+
+std::uint32_t MetalFrameGraph::defaultFramebufferSampleCount() const {
+    return impl_->defaultFramebufferSampleCount();
 }
 
 void* MetalFrameGraph::buildComputePipelineState(const std::string& msl, std::string* outError,

@@ -744,6 +744,16 @@ std::uint64_t envUInt64OrDefault(const char* primaryName,
     return static_cast<std::uint64_t>(parsed);
 }
 
+GLsizei defaultFramebufferMsaaSamplesFromEnv() {
+    const std::uint64_t requested = envUInt64OrDefault(
+        "APPGL_DEFAULT_FB_MSAA_SAMPLES",
+        "APPGL_DEFAULT_FRAMEBUFFER_MSAA_SAMPLES",
+        1);
+    return (requested == 2 || requested == 4)
+        ? static_cast<GLsizei>(requested)
+        : 1;
+}
+
 bool samplerGpuOrderSkipEnabled() {
     // C47 posture: default ON. The skip removed ~33.8s sampler-drain CPU
     // + 33.4s FlushForReadback completion waits per 210s live window
@@ -8870,6 +8880,7 @@ struct GLContext::Impl {
          bool offscreen)
         : owner(ownerContext) {
         registerProfileContext(this);
+        defaultFramebufferMsaaSamples = defaultFramebufferMsaaSamplesFromEnv();
         layer = (__bridge CAMetalLayer*)rawLayer;
         appgl::diagnostics::diagnosticOptions();
         device = MTLCreateSystemDefaultDevice();
@@ -8897,7 +8908,9 @@ struct GLContext::Impl {
                                                        (__bridge void*)layer,
                                                        (__bridge void*)device,
                                                        (__bridge void*)commandQueue,
-                                                       commandSubmission.get());
+                                                       commandSubmission.get(),
+                                                       static_cast<std::uint32_t>(
+                                                           defaultFramebufferMsaaSamples));
         capabilities = std::make_unique<GLCapabilities>((__bridge void*)device);
         // Must match GL_MAX_VERTEX_ATTRIBS reported via GLCapabilities (32).
         // CTS cull_distance uses 17+ attributes (8 clip + 8 cull + 1 pos),
@@ -28397,6 +28410,7 @@ struct GLContext::Impl {
     GLint viewportY = 0;
     GLsizei viewportWidth = 1280;
     GLsizei viewportHeight = 720;
+    GLsizei defaultFramebufferMsaaSamples = 1;
 
     // RC-A02: compute the minimum drawable size that covers the viewport
     // extent (offset + dimensions).  Used by draw paths and setViewport.
@@ -28415,6 +28429,23 @@ struct GLContext::Impl {
         return defaultDrawableGrowOnlyEnabled()
             ? std::max<GLsizei>(viewportHeight, 1)
             : drawableSurfaceHeight();
+    }
+    bool defaultFramebufferMsaaEnabled() const {
+        return defaultFramebufferMsaaSamples == 2 ||
+               defaultFramebufferMsaaSamples == 4;
+    }
+    GLsizei defaultFramebufferSampleBuffers() const {
+        return defaultFramebufferMsaaEnabled() ? 1 : 0;
+    }
+    GLsizei defaultFramebufferSampleCount() const {
+        return defaultFramebufferMsaaEnabled()
+            ? defaultFramebufferMsaaSamples
+            : 0;
+    }
+    bool resolveDefaultFramebufferMsaaColorIfNeeded() {
+        return frameGraph == nullptr ||
+               !defaultFramebufferMsaaEnabled() ||
+               frameGraph->resolveDefaultFramebufferMsaaColor();
     }
 
     void invalidateDefaultFramebufferShadow() {
@@ -31054,6 +31085,40 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
             frameGraphMetal.offscreenColorReleases;
         inventory.frameGraphOffscreenColorAllocatedBytes =
             frameGraphMetal.offscreenColorAllocatedBytes;
+        inventory.frameGraphDefaultMsaaColorTextureBytes =
+            frameGraphMetal.defaultMsaaColorTextureBytes;
+        inventory.frameGraphDefaultMsaaColorTextureWidth =
+            frameGraphMetal.defaultMsaaColorTextureWidth;
+        inventory.frameGraphDefaultMsaaColorTextureHeight =
+            frameGraphMetal.defaultMsaaColorTextureHeight;
+        inventory.frameGraphDefaultMsaaColorTextureSampleCount =
+            frameGraphMetal.defaultMsaaColorTextureSampleCount;
+        inventory.frameGraphDefaultMsaaColorTexturePixelFormat =
+            frameGraphMetal.defaultMsaaColorTexturePixelFormat;
+        inventory.frameGraphDefaultMsaaColorRebuilds =
+            frameGraphMetal.defaultMsaaColorRebuilds;
+        inventory.frameGraphDefaultMsaaColorReleases =
+            frameGraphMetal.defaultMsaaColorReleases;
+        inventory.frameGraphDefaultMsaaColorAllocatedBytes =
+            frameGraphMetal.defaultMsaaColorAllocatedBytes;
+        inventory.frameGraphDefaultMsaaDepthStencilTextureBytes =
+            frameGraphMetal.defaultMsaaDepthStencilTextureBytes;
+        inventory.frameGraphDefaultMsaaDepthStencilTextureWidth =
+            frameGraphMetal.defaultMsaaDepthStencilTextureWidth;
+        inventory.frameGraphDefaultMsaaDepthStencilTextureHeight =
+            frameGraphMetal.defaultMsaaDepthStencilTextureHeight;
+        inventory.frameGraphDefaultMsaaDepthStencilTextureSampleCount =
+            frameGraphMetal.defaultMsaaDepthStencilTextureSampleCount;
+        inventory.frameGraphDefaultMsaaDepthStencilTexturePixelFormat =
+            frameGraphMetal.defaultMsaaDepthStencilTexturePixelFormat;
+        inventory.frameGraphDefaultMsaaDepthStencilRebuilds =
+            frameGraphMetal.defaultMsaaDepthStencilRebuilds;
+        inventory.frameGraphDefaultMsaaDepthStencilReleases =
+            frameGraphMetal.defaultMsaaDepthStencilReleases;
+        inventory.frameGraphDefaultMsaaDepthStencilAllocatedBytes =
+            frameGraphMetal.defaultMsaaDepthStencilAllocatedBytes;
+        inventory.frameGraphDefaultMsaaColorResolveDirty =
+            frameGraphMetal.defaultMsaaColorResolveDirty;
         inventory.frameGraphDummyColorTextureAllocations =
             frameGraphMetal.dummyColorTextureAllocations;
         inventory.frameGraphDummyColorTextureAllocatedBytes =

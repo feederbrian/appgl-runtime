@@ -1244,18 +1244,25 @@ bool GLContext::drawPixelsCompat(GLsizei width,
         }
     };
 
-	    if (format == GL_DEPTH_COMPONENT ||
-            format == GL_STENCIL_INDEX ||
-            format == GL_DEPTH_STENCIL) {
-	        impl_->ensureDefaultFramebufferDepthStencilShadow();
-	        if (format == GL_DEPTH_COMPONENT) {
-	            impl_->ensureDefaultFramebufferShadow();
-	            impl_->materializeDefaultFbShadowClear();
-	        }
-	    } else {
-	        impl_->ensureDefaultFramebufferShadow();
-	        impl_->materializeDefaultFbShadowClear();
-	    }
+    if (impl_->state->boundDrawFramebuffer() == 0 &&
+        !impl_->resolveDefaultFramebufferMsaaColorIfNeeded()) {
+        pushError(GL_INVALID_OPERATION, "glDrawPixels",
+                  "failed to resolve default framebuffer MSAA color");
+        return false;
+    }
+
+    if (format == GL_DEPTH_COMPONENT ||
+        format == GL_STENCIL_INDEX ||
+        format == GL_DEPTH_STENCIL) {
+        impl_->ensureDefaultFramebufferDepthStencilShadow();
+        if (format == GL_DEPTH_COMPONENT) {
+            impl_->ensureDefaultFramebufferShadow();
+            impl_->materializeDefaultFbShadowClear();
+        }
+    } else {
+        impl_->ensureDefaultFramebufferShadow();
+        impl_->materializeDefaultFbShadowClear();
+    }
     const auto& blend = impl_->state->blendState();
     const bool blendEnabled = impl_->state->isEnabled(GL_BLEND);
     auto blendFactor = [](GLenum factor,
