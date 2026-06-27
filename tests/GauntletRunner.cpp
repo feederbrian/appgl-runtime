@@ -13912,6 +13912,188 @@ TestResult runS25LiveMSAAResolveToDefaultPathSentinel() {
     return result;
 }
 
+static constexpr GLsizei kS25DefaultFbMsaaCanvas = 64;
+
+static constexpr const char* kS25DefaultFbMsaaVS =
+    "#version 330 core\n"
+    "layout(location = 0) in vec2 aPosition;\n"
+    "void main() {\n"
+    "    gl_Position = vec4(aPosition, 0.0, 1.0);\n"
+    "}\n";
+
+static constexpr const char* kS25DefaultFbMsaaFS =
+    "#version 330 core\n"
+    "out vec4 fragColor;\n"
+    "void main() {\n"
+    "    fragColor = vec4(0.0, 1.0, 0.0, 1.0);\n"
+    "}\n";
+
+TestResult runS25DefaultFramebufferMSAAHeadlessSentinel() {
+    struct EdgeCounts {
+        std::size_t partial = 0;
+        std::size_t full = 0;
+        std::size_t black = 0;
+    };
+
+    EdgeCounts edgeCounts{};
+    GLint sampleBuffers = 0;
+    GLint samples = 0;
+    std::uint64_t colorSamples = 0;
+    std::uint64_t depthSamples = 0;
+    std::uint64_t directResolvesBefore = 0;
+    std::uint64_t directResolvesAfter = 0;
+
+    auto result = runDirectSentinel("s25.default-fb-msaa.headless-resolve", [&] {
+        {
+            ScopedEnvVar defaultOff("APPGL_DEFAULT_FB_MSAA_SAMPLES", "1");
+            ScopedSentinelContext scoped(16, 16);
+            auto& gl = scoped.gl();
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            GLint offSampleBuffers = -1;
+            GLint offSamples = -1;
+            gl.glGetIntegerv(GL_SAMPLE_BUFFERS, &offSampleBuffers);
+            gl.glGetIntegerv(GL_SAMPLES, &offSamples);
+            expectGLError(gl, GL_NO_ERROR, "default-FB MSAA default-off queries");
+            expectCondition(offSampleBuffers == 0 && offSamples == 0,
+                            "default-FB MSAA remains default-off without opt-in");
+        }
+
+        ScopedEnvVar enabled("APPGL_DEFAULT_FB_MSAA_SAMPLES", "4");
+        ScopedSentinelContext scoped(kS25DefaultFbMsaaCanvas,
+                                     kS25DefaultFbMsaaCanvas);
+        auto& context = scoped.context();
+        auto& gl = scoped.gl();
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.glGetIntegerv(GL_SAMPLE_BUFFERS, &sampleBuffers);
+        gl.glGetIntegerv(GL_SAMPLES, &samples);
+        expectGLError(gl, GL_NO_ERROR, "default-FB MSAA opt-in queries");
+        expectCondition(sampleBuffers == 1 && samples == 4,
+                        "default-FB MSAA opt-in reports 4x samples");
+
+        const GLuint program =
+            buildBenchProgram(kS25DefaultFbMsaaVS, kS25DefaultFbMsaaFS);
+        GLint linked = GL_FALSE;
+        gl.glGetProgramiv(program, GL_LINK_STATUS, &linked);
+        if (linked != GL_TRUE) {
+            const std::string log = programInfoLog(gl, program);
+            gl.glDeleteProgram(program);
+            throw std::runtime_error(
+                "default-FB MSAA headless program link failed" +
+                (log.empty() ? std::string{} : ": " + log));
+        }
+
+        const std::array<float, 6> vertices = {
+            -1.0f, -1.0f,
+             1.0f, -1.0f,
+            -1.0f,  0.73f,
+        };
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        gl.glGenVertexArrays(1, &vao);
+        gl.glGenBuffers(1, &vbo);
+        gl.glBindVertexArray(vao);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        gl.glBufferData(GL_ARRAY_BUFFER,
+                        static_cast<GLsizeiptr>(vertices.size() * sizeof(float)),
+                        vertices.data(),
+                        GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE,
+                                 2 * static_cast<GLsizei>(sizeof(float)),
+                                 reinterpret_cast<void*>(0));
+
+        const auto before = context.metalResourceInventory();
+        directResolvesBefore =
+            before.frameGraphMsaaDefaultColorResolveDirectResolves;
+
+        gl.glViewport(0, 0, kS25DefaultFbMsaaCanvas, kS25DefaultFbMsaaCanvas);
+        gl.glDisable(GL_BLEND);
+        gl.glDisable(GL_CULL_FACE);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glDisable(GL_SCISSOR_TEST);
+        gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        gl.glUseProgram(program);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        expectGLError(gl, GL_NO_ERROR, "default-FB MSAA headless draw");
+        gl.glFinish();
+        expectGLError(gl, GL_NO_ERROR, "default-FB MSAA headless finish");
+
+        std::array<std::uint8_t,
+                   kS25DefaultFbMsaaCanvas * kS25DefaultFbMsaaCanvas * 4>
+            pixels = {};
+        gl.glReadBuffer(GL_BACK);
+        gl.glReadPixels(0,
+                        0,
+                        kS25DefaultFbMsaaCanvas,
+                        kS25DefaultFbMsaaCanvas,
+                        GL_RGBA,
+                        GL_UNSIGNED_BYTE,
+                        pixels.data());
+        expectGLError(gl, GL_NO_ERROR, "default-FB MSAA headless readback");
+
+        for (GLsizei y = 0; y < kS25DefaultFbMsaaCanvas; ++y) {
+            for (GLsizei x = 0; x < kS25DefaultFbMsaaCanvas; ++x) {
+                const std::size_t offset =
+                    (static_cast<std::size_t>(y) *
+                         static_cast<std::size_t>(kS25DefaultFbMsaaCanvas) +
+                     static_cast<std::size_t>(x)) * 4u;
+                const std::uint8_t r = pixels[offset + 0u];
+                const std::uint8_t g = pixels[offset + 1u];
+                const std::uint8_t b = pixels[offset + 2u];
+                const std::uint8_t a = pixels[offset + 3u];
+                if (a < 200 || r > 32 || b > 32) {
+                    continue;
+                }
+                if (g > 224) {
+                    ++edgeCounts.full;
+                } else if (g < 16) {
+                    ++edgeCounts.black;
+                } else if (g >= 32 && g <= 224) {
+                    ++edgeCounts.partial;
+                }
+            }
+        }
+
+        const auto after = context.metalResourceInventory();
+        colorSamples = after.frameGraphDefaultMsaaColorTextureSampleCount;
+        depthSamples = after.frameGraphDefaultMsaaDepthStencilTextureSampleCount;
+        directResolvesAfter =
+            after.frameGraphMsaaDefaultColorResolveDirectResolves;
+
+        gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteProgram(program);
+
+        expectCondition(edgeCounts.partial > 0,
+                        "default-FB MSAA headless resolve produced AA edge pixels");
+        expectCondition(colorSamples == 4 && depthSamples == 4,
+                        "default-FB MSAA headless textures are 4x");
+        expectCondition(directResolvesAfter > directResolvesBefore,
+                        "default-FB MSAA headless direct resolve fired");
+    });
+
+    if (result.status == "passed") {
+        std::ostringstream stream;
+        stream << "PASSES drawable-free: default-off 0/0, opt-in "
+               << "GL_SAMPLE_BUFFERS=" << sampleBuffers
+               << " GL_SAMPLES=" << samples
+               << " partialEdgePixels=" << edgeCounts.partial
+               << " fullGreen=" << edgeCounts.full
+               << " black=" << edgeCounts.black
+               << " colorSamples=" << colorSamples
+               << " depthSamples=" << depthSamples
+               << " directResolves="
+               << (directResolvesAfter - directResolvesBefore);
+        result.message = stream.str();
+    }
+    return result;
+}
+
 TestResult runMipOversizedLevelProbe() {
     auto result = runDirectSentinel("mip.oversized-level-subimage", [&] {
         ScopedSentinelContext scoped(32, 32);
@@ -21272,6 +21454,11 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
 
     if (normalizedPhase == "s25-msaa-default-resolve-sentinel") {
         tests.push_back(runS25LiveMSAAResolveToDefaultPathSentinel());
+        return buildJSON(normalizedPhase, tests);
+    }
+
+    if (normalizedPhase == "s25-default-fb-msaa-headless-sentinel") {
+        tests.push_back(runS25DefaultFramebufferMSAAHeadlessSentinel());
         return buildJSON(normalizedPhase, tests);
     }
 
