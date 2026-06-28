@@ -2,7 +2,7 @@
 // It contains the GLContext draw base-vertex method definitions split out for navigation only.
 
 #line 935 "/private/tmp/appgl-bug3-clean/src/context/GLContextDraw.inc.mm" // Preserve source identity so this relocation stays codegen-neutral; __FILE__/__LINE__/debug-info intentionally report the original GLContextDraw.inc.mm.
-bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basevertex, GLuint drawID) {
+bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basevertex, GLuint drawID, bool forceDrawPrepReset) {
     // GL 4.6 §10.5: mode must be a valid primitive-assembly enum.
     if (!isValidDrawMode(mode)) {
         pushError(GL_INVALID_ENUM);
@@ -29,7 +29,8 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
     }
     if (isTransformFeedbackActive()) {
         return drawElementsInstancedBaseVertex(
-            mode, count, type, indices, 1, basevertex, 0, drawID);
+            mode, count, type, indices, 1, basevertex, 0, drawID,
+            forceDrawPrepReset);
     }
     // GL 4.6 §22.1 / §22.3 — pipeline-stats counter update for
     // non-GS indexed draws. GS path is handled via
@@ -370,7 +371,7 @@ bool GLContext::drawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint en
     return drawElementsBaseVertex(mode, count, type, indices, basevertex);
 }
 
-bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance, GLuint drawID) {
+bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance, GLuint drawID, bool forceDrawPrepReset) {
     if (!isValidDrawMode(mode)) {
         pushError(GL_INVALID_ENUM);
         return false;
@@ -803,7 +804,9 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     bool memoHit = false;
                     bool memoHazard = false;
                     bool memoHazardComputed = false;
-                    if (impl_->drawPrepMemoEnabled()) {
+                    if (forceDrawPrepReset) {
+                        impl_->drawPrepMemo.valid = false;
+                    } else if (impl_->drawPrepMemoEnabled()) {
                         const bool hazard =
                             currentDrawHasProgramPipelineOrSubroutinePlanCacheHazard(
                                 impl_->state.get(), impl_->objects.get());
@@ -1136,10 +1139,18 @@ bool GLContext::multiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, G
         }
     }
     // Multi-draw decomposes into individual draws per the GL spec.
+    const bool sparseMultiDrawState =
+        impl_->currentDrawStateReferencesSparseBuffer(/*indirectBufferName=*/0);
     for (GLsizei i = 0; i < drawcount; ++i) {
         if (count[i] > 0) {
+            const bool forceDrawPrepReset =
+                sparseMultiDrawState ||
+                drawcount > 1 ||
+                static_cast<GLuint>(i) != 0 ||
+                basevertex[i] != 0;
             drawElementsBaseVertex(mode, count[i], type, indices[i],
-                                   basevertex[i], static_cast<GLuint>(i));
+                                   basevertex[i], static_cast<GLuint>(i),
+                                   forceDrawPrepReset);
         }
     }
     return true;

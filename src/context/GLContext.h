@@ -278,9 +278,9 @@ public:
     bool drawElements(GLenum mode, GLsizei count, GLenum type, const void* indices, GLuint drawID = 0);
 
     // GL 3.2 — base-vertex indexed drawing (ARB_draw_elements_base_vertex).
-    bool drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basevertex, GLuint drawID = 0);
+    bool drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basevertex, GLuint drawID = 0, bool forceDrawPrepReset = false);
     bool drawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void* indices, GLint basevertex);
-    bool drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance = 0, GLuint drawID = 0);
+    bool drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance = 0, GLuint drawID = 0, bool forceDrawPrepReset = false);
     bool multiDrawArrays(GLenum mode, const GLint* first, const GLsizei* count, GLsizei drawcount);
     bool multiDrawElements(GLenum mode, const GLsizei* count, GLenum type, const void* const* indices, GLsizei drawcount);
     bool multiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum type, const void* const* indices, GLsizei drawcount, const GLint* basevertex);
@@ -312,7 +312,7 @@ public:
     // GL 4.2 — advanced instanced drawing with base instance.
     bool drawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count, GLsizei instancecount, GLuint baseinstance, GLuint drawID = 0);
     bool drawElementsInstancedBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLuint baseinstance, GLuint drawID = 0);
-    bool drawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance, GLuint drawID = 0);
+    bool drawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance, GLuint drawID = 0, bool forceDrawPrepReset = false);
 
     // GL 4.0/4.3 — indirect draw helpers.
     // Reads `size` bytes from the bound GL_DRAW_INDIRECT_BUFFER at byte offset

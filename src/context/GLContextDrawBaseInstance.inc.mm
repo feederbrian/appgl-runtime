@@ -29,7 +29,7 @@ bool GLContext::drawElementsInstancedBaseInstance(GLenum mode, GLsizei count, GL
                                            instancecount, 0, baseinstance, drawID);
 }
 
-bool GLContext::drawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance, GLuint drawID) {
+bool GLContext::drawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance, GLuint drawID, bool forceDrawPrepReset) {
     if (count < 0 || instancecount < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -43,5 +43,6 @@ bool GLContext::drawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei
     }
     return drawElementsInstancedBaseVertex(mode, count, type, indices,
                                            instancecount, basevertex,
-                                           baseinstance, drawID);
+                                           baseinstance, drawID,
+                                           forceDrawPrepReset);
 }

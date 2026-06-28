@@ -316,12 +316,19 @@ bool GLContext::multiDrawElementsIndirect(GLenum mode, GLenum type, const void* 
         }
         const void* indexOffset = reinterpret_cast<const void*>(
             static_cast<uintptr_t>(cmd.firstIndex) * static_cast<uintptr_t>(indexSize));
+        const bool forceDrawPrepReset =
+            bypassSamplerRecipeForSparseMdi ||
+            drawcount > 1 ||
+            static_cast<GLuint>(i) != 0 ||
+            cmd.baseVertex != 0 ||
+            cmd.baseInstance != 0;
         drawElementsInstancedBaseVertexBaseInstance(mode,
             static_cast<GLsizei>(cmd.count), type, indexOffset,
             static_cast<GLsizei>(cmd.instanceCount),
             static_cast<GLint>(cmd.baseVertex),
             cmd.baseInstance,
-            static_cast<GLuint>(i));
+            static_cast<GLuint>(i),
+            forceDrawPrepReset);
     }
     return true;
 }
