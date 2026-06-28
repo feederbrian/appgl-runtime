@@ -1144,18 +1144,18 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // 1 but the CTS limits suite (gl4cLimitsTests.cpp:236) insists on
     // at least 4. Atomic counters in AppGL lower to MSL atomic<uint>
     // backed by the program's UBO — each binding is a uniform-buffer
-    // index, not a scarce resource. Advertise 8 to match what the
-    // shader-side built-in constant reports.
+    // index, not a scarce resource. Advertise 8 binding points, and
+    // allow the CPU-emulated GS path to use CTS' four-counter workload.
     integerLimits_[GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS] = 8;
     integerLimits_[GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE] = 32;
     integerLimits_[GL_MAX_COMBINED_ATOMIC_COUNTER_BUFFERS] = 8;
-    integerLimits_[GL_MAX_COMBINED_ATOMIC_COUNTERS] = 10;
+    integerLimits_[GL_MAX_COMBINED_ATOMIC_COUNTERS] = 12;
     integerLimits_[GL_MAX_VERTEX_ATOMIC_COUNTER_BUFFERS] = 0;
     integerLimits_[GL_MAX_VERTEX_ATOMIC_COUNTERS] = 0;
     integerLimits_[GL_MAX_FRAGMENT_ATOMIC_COUNTER_BUFFERS] = 2;
     integerLimits_[GL_MAX_FRAGMENT_ATOMIC_COUNTERS] = 8;
-    integerLimits_[GL_MAX_GEOMETRY_ATOMIC_COUNTER_BUFFERS] = 2;
-    integerLimits_[GL_MAX_GEOMETRY_ATOMIC_COUNTERS] = 2;
+    integerLimits_[GL_MAX_GEOMETRY_ATOMIC_COUNTER_BUFFERS] = 4;
+    integerLimits_[GL_MAX_GEOMETRY_ATOMIC_COUNTERS] = 4;
     integerLimits_[GL_MAX_TESS_CONTROL_ATOMIC_COUNTER_BUFFERS] = 0;
     integerLimits_[GL_MAX_TESS_CONTROL_ATOMIC_COUNTERS] = 0;
     integerLimits_[GL_MAX_TESS_EVALUATION_ATOMIC_COUNTER_BUFFERS] = 0;
