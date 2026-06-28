@@ -10646,6 +10646,20 @@ void APIENTRY glDeleteTransformFeedbacks(GLsizei n, const GLuint* ids) {
     }
     for (GLsizei i = 0; i < n; ++i) {
         if (ids[i] != 0) {
+            if (ids[i] == ctx->boundTransformFeedback()) {
+                ctx->setBoundTransformFeedback(0);
+                for (std::size_t index = 0;
+                     index < GLTransformFeedbackObject::kMaxTfBuffers;
+                     ++index) {
+                    ctx->state().bindIndexedBuffer(
+                        GL_TRANSFORM_FEEDBACK_BUFFER,
+                        static_cast<GLuint>(index),
+                        0,
+                        0,
+                        0);
+                }
+                ctx->state().bindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
+            }
             ctx->objects().transformFeedbacks().erase(ids[i]);
         }
     }
