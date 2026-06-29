@@ -295,6 +295,11 @@ struct TranslatedDrawInfo {
     };
     std::vector<TextureBinding> fragmentTextures;
     std::vector<TextureBinding> vertexTextures;
+    std::vector<std::uint32_t> multisampleStorageImageSampleCounts;
+    bool fragmentUsesMultisampleStorageImageSampleCounts = false;
+    bool vertexUsesMultisampleStorageImageSampleCounts = false;
+    std::uint32_t fragmentMultisampleStorageImageSampleCountSlot = 30;
+    std::uint32_t vertexMultisampleStorageImageSampleCountSlot = 30;
 
     // Phase 8X Group 4d follow-up⁸ — diagnostic-only GL program name,
     // populated by GLContext::drawArrays / drawArraysInstanced /

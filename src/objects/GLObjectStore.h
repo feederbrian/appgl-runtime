@@ -904,6 +904,7 @@ struct GLSamplerBindingStageRecipe {
     const void* uniformData = nullptr;
     std::size_t uniformCount = 0;
     bool usesSparseSampledSidecars = false;
+    bool usesMSSampledSidecars = false;
     bool stageUsesArgumentBufferSet0 = false;
     std::size_t bindingReserve = 0;
     std::vector<GLSamplerBindingRecipeEntry> entries;

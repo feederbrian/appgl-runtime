@@ -9756,6 +9756,31 @@ struct MetalFrameGraph::Impl {
                     static_cast<NSUInteger>(fragmentDepthCompareFlipSlot),
                     EncodeMarshalClass::SetBytes);
             }
+            if (!info.multisampleStorageImageSampleCounts.empty()) {
+                const void* sampleCounts =
+                    info.multisampleStorageImageSampleCounts.data();
+                const std::size_t sampleCountBytes =
+                    info.multisampleStorageImageSampleCounts.size() *
+                    sizeof(std::uint32_t);
+                if (info.fragmentUsesMultisampleStorageImageSampleCounts) {
+                    bindFragmentBytesIfNeeded(
+                        encodeSubtimeSamplePtr,
+                        sampleCounts,
+                        sampleCountBytes,
+                        static_cast<NSUInteger>(
+                            info.fragmentMultisampleStorageImageSampleCountSlot),
+                        EncodeMarshalClass::SetBytes);
+                }
+                if (info.vertexUsesMultisampleStorageImageSampleCounts) {
+                    bindVertexBytesIfNeeded(
+                        encodeSubtimeSamplePtr,
+                        sampleCounts,
+                        sampleCountBytes,
+                        static_cast<NSUInteger>(
+                            info.vertexMultisampleStorageImageSampleCountSlot),
+                        EncodeMarshalClass::SetBytes);
+                }
+            }
 
             setFloorUniformBytesClass(
                 ArgEncoderSetupFloorProfileSample::UniformBytesClass::
@@ -12824,15 +12849,14 @@ struct MetalFrameGraph::Impl {
                 (__bridge id<MTLTexture>)binding.metalTexture;
             id<MTLSamplerState> smp =
                 (__bridge id<MTLSamplerState>)binding.metalSamplerState;
-            if (smp == nil) {
-                return false;
-            }
             [encoder setFragmentTexture:tex
                                 atIndex:static_cast<NSUInteger>(
                                             binding.metalSlot)];
-            [encoder setFragmentSamplerState:smp
-                                     atIndex:static_cast<NSUInteger>(
-                                                 binding.metalSlot)];
+            if (smp != nil) {
+                [encoder setFragmentSamplerState:smp
+                                         atIndex:static_cast<NSUInteger>(
+                                                     binding.metalSlot)];
+            }
         }
         for (std::size_t i = 0;
              i < descriptor.vertexTextureCount;
@@ -12845,15 +12869,14 @@ struct MetalFrameGraph::Impl {
                 (__bridge id<MTLTexture>)binding.metalTexture;
             id<MTLSamplerState> smp =
                 (__bridge id<MTLSamplerState>)binding.metalSamplerState;
-            if (smp == nil) {
-                return false;
-            }
             [encoder setVertexTexture:tex
                               atIndex:static_cast<NSUInteger>(
                                           binding.metalSlot)];
-            [encoder setVertexSamplerState:smp
-                                   atIndex:static_cast<NSUInteger>(
-                                               binding.metalSlot)];
+            if (smp != nil) {
+                [encoder setVertexSamplerState:smp
+                                       atIndex:static_cast<NSUInteger>(
+                                                   binding.metalSlot)];
+            }
         }
 
         MTLPrimitiveType primitive;
@@ -13373,6 +13396,26 @@ struct MetalFrameGraph::Impl {
                 }
             }
         }
+        if (!info.multisampleStorageImageSampleCounts.empty()) {
+            const void* sampleCounts =
+                info.multisampleStorageImageSampleCounts.data();
+            const NSUInteger sampleCountBytes =
+                static_cast<NSUInteger>(
+                    info.multisampleStorageImageSampleCounts.size() *
+                    sizeof(std::uint32_t));
+            if (info.fragmentUsesMultisampleStorageImageSampleCounts) {
+                [encoder setFragmentBytes:sampleCounts
+                                    length:sampleCountBytes
+                                   atIndex:static_cast<NSUInteger>(
+                                               info.fragmentMultisampleStorageImageSampleCountSlot)];
+            }
+            if (info.vertexUsesMultisampleStorageImageSampleCounts) {
+                [encoder setVertexBytes:sampleCounts
+                                  length:sampleCountBytes
+                                 atIndex:static_cast<NSUInteger>(
+                                             info.vertexMultisampleStorageImageSampleCountSlot)];
+            }
+        }
 
         for (const auto& binding : info.fragmentTextures) {
             if (binding.metalTexture == nullptr) {
@@ -13382,13 +13425,12 @@ struct MetalFrameGraph::Impl {
                 (__bridge id<MTLTexture>)binding.metalTexture;
             id<MTLSamplerState> smp =
                 (__bridge id<MTLSamplerState>)binding.metalSamplerState;
-            if (smp == nil) {
-                return false;
-            }
             [encoder setFragmentTexture:tex
                                 atIndex:static_cast<NSUInteger>(binding.metalSlot)];
-            [encoder setFragmentSamplerState:smp
-                                     atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+            if (smp != nil) {
+                [encoder setFragmentSamplerState:smp
+                                         atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+            }
         }
         for (const auto& binding : info.vertexTextures) {
             if (binding.metalTexture == nullptr) {
@@ -13398,13 +13440,12 @@ struct MetalFrameGraph::Impl {
                 (__bridge id<MTLTexture>)binding.metalTexture;
             id<MTLSamplerState> smp =
                 (__bridge id<MTLSamplerState>)binding.metalSamplerState;
-            if (smp == nil) {
-                return false;
-            }
             [encoder setVertexTexture:tex
                               atIndex:static_cast<NSUInteger>(binding.metalSlot)];
-            [encoder setVertexSamplerState:smp
-                                   atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+            if (smp != nil) {
+                [encoder setVertexSamplerState:smp
+                                       atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+            }
         }
 
         MTLPrimitiveType primitive;

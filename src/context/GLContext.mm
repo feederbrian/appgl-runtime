@@ -16762,6 +16762,9 @@ struct GLContext::Impl {
             recipe.usesSparseSampledSidecars =
                 stageMSL != nullptr &&
                 stageMSL->find("appgl_sparse_sampled_sidecar_") != std::string::npos;
+            recipe.usesMSSampledSidecars =
+                stageMSL != nullptr &&
+                stageMSL->find("appgl_ms_sampled_sidecar_") != std::string::npos;
             recipe.stageUsesArgumentBufferSet0 = mslUsesArgumentBufferSet0(stageMSL);
 
             std::vector<ShaderReflection::ResourceBinding> synthesizedBindings;
@@ -16795,6 +16798,29 @@ struct GLContext::Impl {
                 recipe.entries.push_back(std::move(entry));
             }
             return recipe;
+        };
+
+        auto ensureMultisampleStorageImageSampleCounts =
+            [&](const std::string* stageMSL,
+                bool isFragmentStage) -> std::vector<std::uint32_t>* {
+            if (stageMSL == nullptr ||
+                stageMSL->find("appgl_ms_storage_image_samples") ==
+                    std::string::npos) {
+                return nullptr;
+            }
+            if (info.multisampleStorageImageSampleCounts.empty()) {
+                info.multisampleStorageImageSampleCounts.assign(128, 0u);
+            }
+            const std::uint32_t slot =
+                multisampleStorageImageSampleCountSlotForMSL(*stageMSL);
+            if (isFragmentStage) {
+                info.fragmentUsesMultisampleStorageImageSampleCounts = true;
+                info.fragmentMultisampleStorageImageSampleCountSlot = slot;
+            } else {
+                info.vertexUsesMultisampleStorageImageSampleCounts = true;
+                info.vertexMultisampleStorageImageSampleCountSlot = slot;
+            }
+            return &info.multisampleStorageImageSampleCounts;
         };
 
         auto resolveStage = [&](const char* stageTag,
@@ -16846,6 +16872,12 @@ struct GLContext::Impl {
                     stageTag, recipe.entries.size());
             }
             const bool usesSparseSampledSidecars = recipe.usesSparseSampledSidecars;
+            const bool usesMSSampledSidecars = recipe.usesMSSampledSidecars;
+            std::vector<std::uint32_t>* msImageSampleCounts =
+                usesMSSampledSidecars
+                    ? ensureMultisampleStorageImageSampleCounts(
+                          stageMSL, stageTag[0] == 'f')
+                    : nullptr;
             for (const auto& sampledTex : recipe.entries) {
                 // Program-static sampler metadata was resolved when the
                 // recipe was built. Keep only the live GL state reads below.
@@ -17536,6 +17568,58 @@ struct GLContext::Impl {
                                  binding.metalSamplerState,
                                  "resolved");
                 outBindings.push_back(binding);
+                if (usesMSSampledSidecars &&
+                    extensions::sparse_texture::isMultisampleStorageImageTarget(
+                        resolvedTarget)) {
+                    if (msImageSampleCounts != nullptr) {
+                        const std::uint32_t slot = binding.metalSlot;
+                        if (slot >= msImageSampleCounts->size()) {
+                            msImageSampleCounts->resize(
+                                static_cast<std::size_t>(slot) + 1u, 0u);
+                        }
+                        (*msImageSampleCounts)[slot] = 0u;
+                    }
+                    if (owner != nullptr) {
+                        ExtensionContext extensionContext(*owner);
+                        extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
+                        if (extensions::sparse_texture::getMultisampleStorageImageSidecar(
+                                extensionContext, *texObject, sidecarInfo)) {
+                            TranslatedDrawInfo::TextureBinding sidecarBinding;
+                            sidecarBinding.textureName = texName;
+                            sidecarBinding.metalSamplerState = nullptr;
+                            sidecarBinding.metalSlot =
+                                binding.metalSlot +
+                                kMultisampleSampledSidecarTextureSlotOffset;
+                            sidecarBinding.metalTexture = sidecarInfo.metalTexture;
+                            if (sidecarBinding.metalTexture != nullptr) {
+                                outBindings.push_back(sidecarBinding);
+                                if (msImageSampleCounts != nullptr) {
+                                    const std::uint32_t slot = binding.metalSlot;
+                                    if (slot >= msImageSampleCounts->size()) {
+                                        msImageSampleCounts->resize(
+                                            static_cast<std::size_t>(slot) + 1u, 0u);
+                                    }
+                                    (*msImageSampleCounts)[slot] =
+                                        static_cast<std::uint32_t>(
+                                            std::max<GLsizei>(
+                                                sidecarInfo.samples, 1));
+                                }
+                                if (std::getenv("APPGL_TRACE_IMG_BIND") != nullptr) {
+                                    std::fprintf(stderr,
+                                        "[IMG-BIND] %s sampler_ms_sidecar tex=%u baseSlot=%u sidecarSlot=%u sidecar=%p samples=%d\n",
+                                        stageTag, texName, binding.metalSlot,
+                                        sidecarBinding.metalSlot,
+                                        sidecarInfo.metalTexture,
+                                        sidecarInfo.samples);
+                                }
+                            }
+                        } else if (std::getenv("APPGL_TRACE_IMG_BIND") != nullptr) {
+                            std::fprintf(stderr,
+                                "[IMG-BIND] %s sampler_ms_sidecar_miss tex=%u baseSlot=%u\n",
+                                stageTag, texName, binding.metalSlot);
+                        }
+                    }
+                }
                 const GLenum sparseSidecarTarget =
                     resolvedTarget;
                 if (sparseSampledFeedback) {
@@ -19193,6 +19277,27 @@ struct GLContext::Impl {
             info.readImageTextureNames.size() + vertexImageCount + fragmentImageCount);
         info.writtenImageTextureNames.reserve(
             info.writtenImageTextureNames.size() + vertexImageCount + fragmentImageCount);
+        auto ensureMultisampleStorageImageSampleCounts =
+            [&](const std::string& stageMSL,
+                bool isFragmentStage) -> std::vector<std::uint32_t>* {
+            if (stageMSL.find("appgl_ms_storage_image_samples") ==
+                std::string::npos) {
+                return nullptr;
+            }
+            if (info.multisampleStorageImageSampleCounts.empty()) {
+                info.multisampleStorageImageSampleCounts.assign(128, 0u);
+            }
+            const std::uint32_t slot =
+                multisampleStorageImageSampleCountSlotForMSL(stageMSL);
+            if (isFragmentStage) {
+                info.fragmentUsesMultisampleStorageImageSampleCounts = true;
+                info.fragmentMultisampleStorageImageSampleCountSlot = slot;
+            } else {
+                info.vertexUsesMultisampleStorageImageSampleCounts = true;
+                info.vertexMultisampleStorageImageSampleCountSlot = slot;
+            }
+            return &info.multisampleStorageImageSampleCounts;
+        };
         auto resolveStage = [&](const char* stageName, const ShaderReflection* reflection,
                                 const std::string& stageMSL,
                                 std::vector<TranslatedDrawInfo::TextureBinding>& outList) {
@@ -19266,10 +19371,61 @@ struct GLContext::Impl {
                         info.writtenImageTextureNames.push_back(ib.texture);
                     }
                     TranslatedDrawInfo::TextureBinding tb;
-                    // CKPT119: prefer level-restricted view when ib.level > 0
-                    // so imageSize() returns LEVEL-N dimensions.
-                    tb.metalTexture = resolveImageMetalTexture(
-                        ib, texObj, img.storageImageTarget);
+                    tb.textureName = ib.texture;
+                    const bool stageUsesMultisampleStorageSidecars =
+                        stageMSL.find("appgl_ms_storage_image_samples") !=
+                        std::string::npos;
+                    const bool useMultisampleStorageSidecar =
+                        stageUsesMultisampleStorageSidecars &&
+                        (img.multisampleStorageImage ||
+                         extensions::sparse_texture::isMultisampleStorageImageTarget(
+                             img.storageImageTarget) ||
+                         extensions::sparse_texture::isMultisampleStorageImageTarget(
+                             texObj->target));
+                    if (useMultisampleStorageSidecar) {
+                        extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
+                        std::vector<std::uint32_t>* msImageSampleCounts =
+                            ensureMultisampleStorageImageSampleCounts(
+                                stageMSL, stageName[0] == 'F');
+                        if (owner == nullptr) {
+                            if (trace) std::fprintf(stderr,
+                                " SKIP=ms_storage_sidecar_no_owner tex=%u\n",
+                                ib.texture);
+                            continue;
+                        }
+                        ExtensionContext extensionContext(*owner);
+                        if (!extensions::sparse_texture::ensureMultisampleStorageImageSidecar(
+                                extensionContext, *texObj, &sidecarInfo)) {
+                            if (trace) std::fprintf(stderr,
+                                " SKIP=ms_storage_sidecar_unavailable tex=%u\n",
+                                ib.texture);
+                            continue;
+                        }
+                        tb.metalTexture = sidecarInfo.metalTexture;
+                        if (msImageSampleCounts != nullptr) {
+                            const std::uint32_t slot =
+                                img.metalBinding +
+                                static_cast<std::uint32_t>(arrayElement);
+                            if (slot >= msImageSampleCounts->size()) {
+                                msImageSampleCounts->resize(
+                                    static_cast<std::size_t>(slot) + 1u, 0u);
+                            }
+                            (*msImageSampleCounts)[slot] =
+                                static_cast<std::uint32_t>(
+                                    std::max<GLsizei>(sidecarInfo.samples, 1));
+                        }
+                        if (trace) {
+                            std::fprintf(stderr,
+                                " MS-SIDECAR sidecar=%p samples=%d",
+                                sidecarInfo.metalTexture,
+                                sidecarInfo.samples);
+                        }
+                    } else {
+                        // CKPT119: prefer level-restricted view when ib.level > 0
+                        // so imageSize() returns LEVEL-N dimensions.
+                        tb.metalTexture = resolveImageMetalTexture(
+                            ib, texObj, img.storageImageTarget);
+                    }
                     if (tb.metalTexture == nullptr) {
                         if (trace) std::fprintf(stderr,
                             " SKIP=image_view_nil tex=%u fmt=0x%X\n",
@@ -43790,7 +43946,11 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                 tdi,
                 hotpathInvariantMslPredicatesEnabled,
                 hotpathInvariantMslPredicatesValidateEnabled) &&
-            tdi.clipOrigin == GL_LOWER_LEFT) {
+            tdi.clipOrigin == GL_LOWER_LEFT &&
+            !translatedDrawUsesClipControlYSign(
+                tdi,
+                hotpathInvariantMslPredicatesEnabled,
+                hotpathInvariantMslPredicatesValidateEnabled)) {
             phase2PlanSetFixedStateBool(
                 tdi, tdi.markColorAttachmentReadbackFlip, true);
         }
@@ -44161,15 +44321,20 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                 const bool lowerLeftFramebufferReadbackFlip =
                     tdi.clipOrigin == GL_LOWER_LEFT &&
                     !clipControlShaderYFixup;
-                const bool fragCoordClipControlReadbackFlip =
+                const bool usesMSSampledSidecars =
+                    tdi.fragmentMSL != nullptr &&
+                    tdi.fragmentMSL->find("appgl_ms_sampled_sidecar_") !=
+                        std::string::npos;
+                const bool shaderYFixupReadbackFlip =
                     tdi.clipOrigin == GL_LOWER_LEFT &&
                     clipControlShaderYFixup &&
+                    !usesMSSampledSidecars &&
                     translatedDrawUsesFragCoordParams(
                         tdi,
                         hotpathInvariantMslPredicatesEnabled,
                         hotpathInvariantMslPredicatesValidateEnabled);
                 if (lowerLeftFramebufferReadbackFlip ||
-                    fragCoordClipControlReadbackFlip ||
+                    shaderYFixupReadbackFlip ||
                     clipControlShaderYFixup ||
                     tdi.markColorAttachmentReadbackFlip) {
                     for (const auto& kv : fbo->attachments) {
@@ -44180,7 +44345,7 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                                     objects->renderbuffers().get(kv.second.object)) {
                                 rb->framebufferReadbackYFlip =
                                     lowerLeftFramebufferReadbackFlip ||
-                                    fragCoordClipControlReadbackFlip ||
+                                    shaderYFixupReadbackFlip ||
                                     tdi.markColorAttachmentReadbackFlip;
                             }
                             continue;
@@ -44190,7 +44355,8 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                         if (GLTextureObject* tex =
                                 objects->textures().get(kv.second.object)) {
                             if (lowerLeftFramebufferReadbackFlip ||
-                                clipControlShaderYFixup) {
+                                (clipControlShaderYFixup &&
+                                 !usesMSSampledSidecars)) {
                                 tex->wasFramebufferRenderedTo = true;
                             }
                             if (tdi.markColorAttachmentReadbackFlip) {

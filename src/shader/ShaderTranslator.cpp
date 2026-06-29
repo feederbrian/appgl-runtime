@@ -1179,6 +1179,99 @@ bool injectFragmentCoordYFixup(std::string& msl,
     return true;
 }
 
+bool eraseNoOpFragDepthWrite(std::string& msl) {
+    static constexpr const char* kDepthField =
+        "float gl_FragDepth [[depth(any)]];";
+    static constexpr const char* kDepthAssign =
+        "out.gl_FragDepth = gl_FragCoord.z;";
+    if (msl.find("float4 gl_FragCoord [[position]]") == std::string::npos ||
+        msl.find(kDepthField) == std::string::npos ||
+        msl.find(kDepthAssign) == std::string::npos) {
+        return false;
+    }
+
+    std::size_t depthMentions = 0;
+    std::size_t search = 0;
+    while ((search = msl.find("gl_FragDepth", search)) != std::string::npos) {
+        ++depthMentions;
+        search += std::strlen("gl_FragDepth");
+    }
+    if (depthMentions != 2) {
+        return false;
+    }
+
+    auto eraseLineContaining = [&](const char* needle) -> bool {
+        const std::size_t pos = msl.find(needle);
+        if (pos == std::string::npos) {
+            return false;
+        }
+        const std::size_t lineStart = msl.rfind('\n', pos);
+        const std::size_t eraseStart =
+            (lineStart == std::string::npos) ? 0 : lineStart + 1;
+        const std::size_t lineEnd = msl.find('\n', pos);
+        const std::size_t eraseEnd =
+            (lineEnd == std::string::npos) ? msl.size() : lineEnd + 1;
+        msl.erase(eraseStart, eraseEnd - eraseStart);
+        return true;
+    };
+    auto eraseOnce = [](std::string& text,
+                        const std::string& needle) -> bool {
+        const std::size_t pos = text.find(needle);
+        if (pos == std::string::npos) {
+            return false;
+        }
+        text.erase(pos, needle.size());
+        return true;
+    };
+    auto eraseFragCoordFixupBlock = [](std::string& text) -> bool {
+        static constexpr const char* kMarker =
+            "    // Sprint 18 Bank D-3: shader-side FragCoord-Y synthesis.";
+        const std::size_t begin = text.find(kMarker);
+        if (begin == std::string::npos) {
+            return false;
+        }
+        const std::size_t zLine = text.find("_appgl_FragCoordParams.z", begin);
+        if (zLine == std::string::npos) {
+            return false;
+        }
+        const std::size_t semi = text.find(';', zLine);
+        if (semi == std::string::npos) {
+            return false;
+        }
+        const std::size_t lineEnd = text.find('\n', semi);
+        const std::size_t end =
+            (lineEnd == std::string::npos) ? text.size() : lineEnd + 1;
+        text.erase(begin, end - begin);
+        return true;
+    };
+
+    // GLSL `gl_FragDepth = gl_FragCoord.z` is a semantic no-op. Keeping it as
+    // an explicit Metal depth output can introduce a strict-compare precision
+    // edge versus fixed-function raster depth, so let Metal use its native
+    // raster depth when SPIRV-Cross emitted exactly this pattern.
+    const bool erasedAssign = eraseLineContaining(kDepthAssign);
+    const bool erasedField = eraseLineContaining(kDepthField);
+    if (erasedAssign && erasedField) {
+        std::string trial = msl;
+        (void)eraseFragCoordFixupBlock(trial);
+        (void)eraseOnce(trial, ", float4 gl_FragCoord [[position]]");
+        (void)eraseOnce(trial, "float4 gl_FragCoord [[position]], ");
+        const std::string fragCoordParams =
+            ", constant float4& _appgl_FragCoordParams [[buffer(" +
+            std::to_string(kFragCoordParamsBufferSlot) + ")]]";
+        const std::string leadingFragCoordParams =
+            "constant float4& _appgl_FragCoordParams [[buffer(" +
+            std::to_string(kFragCoordParamsBufferSlot) + ")]], ";
+        (void)eraseOnce(trial, fragCoordParams);
+        (void)eraseOnce(trial, leadingFragCoordParams);
+        if (trial.find("gl_FragCoord") == std::string::npos &&
+            trial.find("_appgl_FragCoordParams") == std::string::npos) {
+            msl = std::move(trial);
+        }
+    }
+    return erasedAssign && erasedField;
+}
+
 bool findMain0ParameterEnd(const std::string& msl, std::size_t& paramEnd) {
     const std::size_t mainPos = msl.find("main0(");
     if (mainPos == std::string::npos) return false;
@@ -3127,6 +3220,299 @@ collectTextureVariableSlotsForMetalSlots(
     }
 
     return variableSlots;
+}
+
+bool rewriteMultisampleStorageImageWritesToSidecars(
+    std::string& msl,
+    const std::vector<std::uint32_t>& metalTextureSlots,
+    const std::vector<std::uint32_t>& arrayMetalTextureSlots) {
+    struct StorageMSVar {
+        std::string name;
+        std::uint32_t metalSlot = 0;
+        bool arrayed = false;
+    };
+    std::vector<StorageMSVar> variables;
+    std::set<std::pair<std::string, std::uint32_t>> seen;
+    const std::set<std::uint32_t> arraySlots(
+        arrayMetalTextureSlots.begin(), arrayMetalTextureSlots.end());
+    bool changed = false;
+
+    auto collectAndRetargetAtAttr =
+        [&](const std::string& attr, std::uint32_t metalSlot) {
+        std::size_t search = 0;
+        while ((search = msl.find(attr, search)) != std::string::npos) {
+            const std::size_t lineStart = msl.rfind('\n', search);
+            const std::size_t lineBegin =
+                (lineStart == std::string::npos) ? 0 : lineStart + 1u;
+            auto validTypePos = [&](std::size_t pos,
+                                    std::size_t len) -> bool {
+                return pos != std::string::npos &&
+                    pos >= lineBegin &&
+                    pos < search &&
+                    (pos == 0 || !isIdentifierChar(msl[pos - 1])) &&
+                    (pos + len >= msl.size() ||
+                     !isIdentifierChar(msl[pos + len]));
+            };
+            std::size_t typePos = std::string::npos;
+            bool arrayedByType = false;
+            const std::size_t arrayTypeLen =
+                std::strlen("texture2d_ms_array");
+            const std::size_t plainTypeLen = std::strlen("texture2d_ms");
+            const std::size_t arrayTypePos =
+                msl.rfind("texture2d_ms_array", search);
+            if (validTypePos(arrayTypePos, arrayTypeLen)) {
+                typePos = arrayTypePos;
+                arrayedByType = true;
+            }
+            const std::size_t plainTypePos =
+                msl.rfind("texture2d_ms", search);
+            if (validTypePos(plainTypePos, plainTypeLen) &&
+                (typePos == std::string::npos || plainTypePos > typePos)) {
+                typePos = plainTypePos;
+                arrayedByType = false;
+            }
+            if (typePos == std::string::npos) {
+                search += attr.size();
+                continue;
+            }
+            const bool arrayed =
+                arrayedByType ||
+                arraySlots.find(metalSlot) != arraySlots.end();
+            const std::size_t typeNameLen = arrayed
+                ? arrayTypeLen
+                : plainTypeLen;
+            const std::size_t typeTemplate = msl.find('<', typePos);
+            if (typeTemplate == std::string::npos || typeTemplate > search) {
+                search += attr.size();
+                continue;
+            }
+            const std::size_t typeEnd = msl.find('>', typeTemplate);
+            if (typeEnd == std::string::npos || typeEnd > search) {
+                search += attr.size();
+                continue;
+            }
+            const bool writable =
+                msl.find("access::write", typeTemplate) < typeEnd ||
+                msl.find("access::read_write", typeTemplate) < typeEnd;
+            if (!writable) {
+                search += attr.size();
+                continue;
+            }
+
+            std::size_t nameStart = typeEnd + 1;
+            while (nameStart < search &&
+                   std::isspace(static_cast<unsigned char>(msl[nameStart]))) {
+                ++nameStart;
+            }
+            std::size_t nameEnd = nameStart;
+            while (nameEnd < search && isIdentifierChar(msl[nameEnd])) {
+                ++nameEnd;
+            }
+            if (nameEnd > nameStart) {
+                std::string name = msl.substr(nameStart, nameEnd - nameStart);
+                if (seen.insert({name, metalSlot}).second) {
+                    variables.push_back({std::move(name), metalSlot, arrayed});
+                }
+            }
+
+            msl.replace(typePos, typeNameLen, "texture2d_array");
+            const std::ptrdiff_t delta =
+                static_cast<std::ptrdiff_t>(std::strlen("texture2d_array")) -
+                static_cast<std::ptrdiff_t>(typeNameLen);
+            search = static_cast<std::size_t>(
+                static_cast<std::ptrdiff_t>(search) + delta) + attr.size();
+            changed = true;
+        }
+    };
+
+    for (std::uint32_t slot : metalTextureSlots) {
+        collectAndRetargetAtAttr(
+            "[[texture(" + std::to_string(slot) + ")]]", slot);
+        collectAndRetargetAtAttr(
+            "[[id(" + std::to_string(slot) + ")]]", slot);
+    }
+    {
+        std::set<std::uint32_t> fallbackTextureSlots;
+        std::set<std::uint32_t> fallbackIdSlots;
+        std::size_t typePos = 0;
+        while ((typePos = msl.find("texture2d_ms", typePos)) !=
+               std::string::npos) {
+            const std::size_t templateStart = msl.find('<', typePos);
+            const std::size_t templateEnd = msl.find('>', templateStart);
+            if (templateStart == std::string::npos ||
+                templateEnd == std::string::npos) {
+                typePos += std::strlen("texture2d_ms");
+                continue;
+            }
+            const bool writable =
+                msl.find("access::write", templateStart) < templateEnd ||
+                msl.find("access::read_write", templateStart) < templateEnd;
+            if (!writable) {
+                typePos += std::strlen("texture2d_ms");
+                continue;
+            }
+            const std::size_t paramEnd =
+                msl.find_first_of(",)", templateEnd);
+            auto collectSlot = [&](const char* attrPrefix,
+                                   std::set<std::uint32_t>& slots) {
+                const std::size_t attr = msl.find(attrPrefix, templateEnd);
+                if (attr == std::string::npos ||
+                    (paramEnd != std::string::npos && attr > paramEnd)) {
+                    return;
+                }
+                std::uint32_t slot = 0;
+                std::size_t after = 0;
+                if (parseUnsignedAfter(
+                        msl,
+                        attr + std::strlen(attrPrefix),
+                        slot,
+                        &after)) {
+                    slots.insert(slot);
+                }
+            };
+            collectSlot("[[texture(", fallbackTextureSlots);
+            collectSlot("[[id(", fallbackIdSlots);
+            typePos = templateEnd + 1;
+        }
+        for (std::uint32_t slot : fallbackTextureSlots) {
+            collectAndRetargetAtAttr(
+                "[[texture(" + std::to_string(slot) + ")]]", slot);
+        }
+        for (std::uint32_t slot : fallbackIdSlots) {
+            collectAndRetargetAtAttr(
+                "[[id(" + std::to_string(slot) + ")]]", slot);
+        }
+    }
+
+    auto identifierBeforeMember =
+        [](const std::string& expr,
+           const std::string& member) -> std::string {
+        const std::size_t memberPos = expr.find(member);
+        if (memberPos == std::string::npos) {
+            return {};
+        }
+        std::size_t nameBegin = memberPos;
+        while (nameBegin > 0 && isIdentifierChar(expr[nameBegin - 1])) {
+            --nameBegin;
+        }
+        if (nameBegin == memberPos) {
+            return {};
+        }
+        return expr.substr(nameBegin, memberPos - nameBegin);
+    };
+    auto findVectorTempInitializer =
+        [&](const std::string& tempName,
+            std::size_t before,
+            std::string& xy,
+            std::string& z) -> bool {
+        if (tempName.empty()) {
+            return false;
+        }
+        for (const char* ctor : {"int3(", "uint3("}) {
+            const std::string needle = tempName + " = " + ctor;
+            const std::size_t assign = msl.rfind(needle, before);
+            if (assign == std::string::npos) {
+                continue;
+            }
+            if (assign > 0 && isIdentifierChar(msl[assign - 1])) {
+                continue;
+            }
+            const std::size_t open =
+                assign + tempName.size() + std::strlen(" = ");
+            std::size_t close = std::string::npos;
+            if (!findMatchingParen(msl, open + std::strlen(ctor) - 1u, close)) {
+                continue;
+            }
+            const auto ctorArgs = splitTopLevelCommas(
+                msl.substr(open + std::strlen(ctor),
+                           close - open - std::strlen(ctor)));
+            if (ctorArgs.size() < 2u) {
+                continue;
+            }
+            xy = ctorArgs[0];
+            z = ctorArgs[1];
+            return true;
+        }
+        return false;
+    };
+    auto implicitArraySampleKey =
+        [&](const std::string& coord,
+            const std::string& layer,
+            std::size_t before) -> std::string {
+        std::string keyCoord = coord;
+        std::string keyLayer = layer;
+        const std::string coordTemp =
+            identifierBeforeMember(coord, ".xy");
+        const std::string layerTemp =
+            identifierBeforeMember(layer, ".z");
+        std::string sourceCoord;
+        std::string sourceLayer;
+        if (!layerTemp.empty() &&
+            findVectorTempInitializer(
+                layerTemp, before, sourceCoord, sourceLayer)) {
+            keyLayer = sourceLayer;
+            if (!coordTemp.empty() && coordTemp == layerTemp) {
+                keyCoord = sourceCoord;
+            }
+        }
+        return keyCoord + "|" + keyLayer;
+    };
+
+    for (const auto& var : variables) {
+        const std::string sampleCount =
+            "max(appgl_ms_storage_image_samples[" +
+            std::to_string(var.metalSlot) + "], 1u)";
+        const std::string needle = var.name + ".write(";
+        std::unordered_map<std::string, std::uint32_t> implicitSampleByLayer;
+        std::size_t pos = 0;
+        while ((pos = msl.find(needle, pos)) != std::string::npos) {
+            if (pos > 0 && isIdentifierChar(msl[pos - 1])) {
+                pos += needle.size();
+                continue;
+            }
+            const std::size_t open = pos + needle.size() - 1u;
+            std::size_t close = std::string::npos;
+            if (!findMatchingParen(msl, open, close)) {
+                break;
+            }
+
+            const auto args = splitTopLevelCommas(
+                msl.substr(open + 1u, close - open - 1u));
+            if ((!var.arrayed && args.size() < 2u) ||
+                (var.arrayed && args.size() < 3u)) {
+                pos = close + 1u;
+                continue;
+            }
+
+            const std::string value = args[0];
+            const std::string coord = args[1];
+            const std::string layer = var.arrayed ? args[2] : std::string("0u");
+            std::string sample;
+            if ((!var.arrayed && args.size() >= 3u) ||
+                (var.arrayed && args.size() >= 4u)) {
+                sample = var.arrayed ? args[3] : args[2];
+            } else {
+                const std::string key = var.arrayed
+                    ? implicitArraySampleKey(coord, layer, pos)
+                    : coord + "|" + layer;
+                const std::uint32_t ordinal = implicitSampleByLayer[key]++;
+                sample = std::to_string(ordinal) + "u";
+            }
+
+            const std::string sidecarSlice = var.arrayed
+                ? "(uint(" + layer + ") * " + sampleCount +
+                      " + uint(" + sample + "))"
+                : "uint(" + sample + ")";
+            const std::string replacement =
+                var.name + ".write(" + value + ", " + coord +
+                ", " + sidecarSlice + ")";
+            msl.replace(pos, close + 1u - pos, replacement);
+            pos += replacement.size();
+            changed = true;
+        }
+    }
+
+    return changed;
 }
 
 bool rewriteMultisampleStorageImageArraySizes(
@@ -6919,13 +7305,19 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         if (!resources.storage_images.empty()) {
             (void)retargetCubeArrayStorageImagesAs2DArray(
                 msl, cubeArrayStorageImageSlots);
+            (void)rewriteMultisampleStorageImageWritesToSidecars(
+                msl,
+                multisampleStorageImageSlots,
+                multisampleStorageImageArraySlots);
             (void)rewriteMultisampleStorageImageSampleQueries(
                 msl, multisampleStorageImageSlots);
             (void)rewriteMultisampleStorageImageArraySizes(
                 msl, multisampleStorageImageArraySlots);
         }
 
-        if (execModel == spv::ExecutionModelGLCompute) {
+        if (execModel == spv::ExecutionModelGLCompute ||
+            execModel == spv::ExecutionModelFragment ||
+            execModel == spv::ExecutionModelVertex) {
             (void)rewriteMultisampleSampledImageReads(msl);
         }
         (void)injectMultisampleSampledImageSidecars(msl);
@@ -7444,6 +7836,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         }
         if (execModel == spv::ExecutionModelFragment) {
             (void)injectFixedFunctionSampleMask(msl);
+            (void)eraseNoOpFragDepthWrite(msl);
         }
 
         if (execModel == spv::ExecutionModelFragment ||
