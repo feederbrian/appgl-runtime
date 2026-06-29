@@ -34369,11 +34369,14 @@ void GLContext::Impl::flushPendingImageWritesForStage(
             }
         }
         if (effUnit >= kMaxImageUnits) continue;
-        const auto& ib = imageBindings[effUnit];
+        auto& ib = imageBindings[effUnit];
         if (ib.texture == 0) continue;
         GLTextureObject* texObj = objects->textures().get(ib.texture);
         if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
-        id<MTLTexture> mtlTex = (__bridge id<MTLTexture>)texObj->metalTexture;
+        void* resolvedMetalTexture =
+            resolveImageMetalTexture(ib, texObj, imgRefl->storageImageTarget);
+        if (resolvedMetalTexture == nullptr) continue;
+        id<MTLTexture> mtlTex = (__bridge id<MTLTexture>)resolvedMetalTexture;
         if (mtlTex.width == 0 || mtlTex.height == 0) continue;
         // Encode the texel into a small native-format buffer per the
         // stored internalFormat. Initial format set covers the cases
@@ -34404,6 +34407,10 @@ void GLContext::Impl::flushPendingImageWritesForStage(
             return static_cast<std::int32_t>(
                 clamped >= 0.0 ? (clamped * maxValue + 0.5)
                                : (clamped * maxValue - 0.5));
+        };
+        auto clampUnsigned = [](std::uint32_t value,
+                                std::uint32_t maxValue) -> std::uint32_t {
+            return std::min(value, maxValue);
         };
         switch (pw.internalFormat) {
             case GL_RGBA32I:
@@ -34462,10 +34469,10 @@ void GLContext::Impl::flushPendingImageWritesForStage(
             }
             case GL_RGB10_A2UI: {
                 const std::uint32_t packed =
-                    ((pw.value[3] & 0x3u) << 30) |
-                    ((pw.value[2] & 0x3FFu) << 20) |
-                    ((pw.value[1] & 0x3FFu) << 10) |
-                    (pw.value[0] & 0x3FFu);
+                    (clampUnsigned(pw.value[3], 0x3u) << 30) |
+                    (clampUnsigned(pw.value[2], 0x3FFu) << 20) |
+                    (clampUnsigned(pw.value[1], 0x3FFu) << 10) |
+                    clampUnsigned(pw.value[0], 0x3FFu);
                 std::memcpy(buf, &packed, sizeof(packed));
                 texelBytes = 4;
                 break;
@@ -34509,8 +34516,16 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                 texelBytes = 1;
                 break;
             }
-            case GL_RGBA16I:
             case GL_RGBA16UI: {
+                for (int k = 0; k < 4; ++k) {
+                    const std::uint16_t v = static_cast<std::uint16_t>(
+                        clampUnsigned(pw.value[k], 0xFFFFu));
+                    std::memcpy(buf + k * 2, &v, sizeof(v));
+                }
+                texelBytes = 8;
+                break;
+            }
+            case GL_RGBA16I: {
                 for (int k = 0; k < 4; ++k) {
                     const std::uint16_t v = static_cast<std::uint16_t>(pw.value[k] & 0xFFFFu);
                     std::memcpy(buf + k * 2, &v, sizeof(v));
@@ -34518,8 +34533,17 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                 texelBytes = 8;
                 break;
             }
-            case GL_RG16I:
             case GL_RG16UI: {
+                const std::uint16_t x = static_cast<std::uint16_t>(
+                    clampUnsigned(pw.value[0], 0xFFFFu));
+                const std::uint16_t y = static_cast<std::uint16_t>(
+                    clampUnsigned(pw.value[1], 0xFFFFu));
+                std::memcpy(buf, &x, sizeof(x));
+                std::memcpy(buf + 2, &y, sizeof(y));
+                texelBytes = 4;
+                break;
+            }
+            case GL_RG16I: {
                 const std::uint16_t x = static_cast<std::uint16_t>(pw.value[0] & 0xFFFFu);
                 const std::uint16_t y = static_cast<std::uint16_t>(pw.value[1] & 0xFFFFu);
                 std::memcpy(buf, &x, sizeof(x));
@@ -34527,8 +34551,14 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                 texelBytes = 4;
                 break;
             }
-            case GL_R16I:
             case GL_R16UI: {
+                const std::uint16_t x = static_cast<std::uint16_t>(
+                    clampUnsigned(pw.value[0], 0xFFFFu));
+                std::memcpy(buf, &x, sizeof(x));
+                texelBytes = 2;
+                break;
+            }
+            case GL_R16I: {
                 const std::uint16_t x = static_cast<std::uint16_t>(pw.value[0] & 0xFFFFu);
                 std::memcpy(buf, &x, sizeof(x));
                 texelBytes = 2;
@@ -34620,6 +34650,12 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                 break;
             }
             case GL_RGBA8UI:
+                buf[0] = static_cast<std::uint8_t>(clampUnsigned(pw.value[0], 0xFFu));
+                buf[1] = static_cast<std::uint8_t>(clampUnsigned(pw.value[1], 0xFFu));
+                buf[2] = static_cast<std::uint8_t>(clampUnsigned(pw.value[2], 0xFFu));
+                buf[3] = static_cast<std::uint8_t>(clampUnsigned(pw.value[3], 0xFFu));
+                texelBytes = 4;
+                break;
             case GL_RGBA8I: {
                 buf[0] = static_cast<std::uint8_t>(pw.value[0] & 0xFFu);
                 buf[1] = static_cast<std::uint8_t>(pw.value[1] & 0xFFu);
@@ -34629,6 +34665,10 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                 break;
             }
             case GL_RG8UI:
+                buf[0] = static_cast<std::uint8_t>(clampUnsigned(pw.value[0], 0xFFu));
+                buf[1] = static_cast<std::uint8_t>(clampUnsigned(pw.value[1], 0xFFu));
+                texelBytes = 2;
+                break;
             case GL_RG8I: {
                 buf[0] = static_cast<std::uint8_t>(pw.value[0] & 0xFFu);
                 buf[1] = static_cast<std::uint8_t>(pw.value[1] & 0xFFu);
@@ -34636,6 +34676,9 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                 break;
             }
             case GL_R8UI:
+                buf[0] = static_cast<std::uint8_t>(clampUnsigned(pw.value[0], 0xFFu));
+                texelBytes = 1;
+                break;
             case GL_R8I: {
                 buf[0] = static_cast<std::uint8_t>(pw.value[0] & 0xFFu);
                 texelBytes = 1;

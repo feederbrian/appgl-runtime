@@ -3457,8 +3457,8 @@ bool GLContext::linkProgram(GLuint program) {
     const bool fp64EmulationAvailable =
         extensions::fp64::shaderTranslationSupported(fp64ExtensionContext);
 
-    auto spirvUsesStorageBuffers = [](const std::uint32_t* spirvData,
-                                      std::size_t spirvWords) -> bool {
+    auto spirvNeedsArgumentBuffers = [](const std::uint32_t* spirvData,
+                                        std::size_t spirvWords) -> bool {
         if (spirvData == nullptr || spirvWords == 0) return false;
         try {
             spirv_cross::Compiler compiler(spirvData, spirvWords);
@@ -3487,7 +3487,33 @@ bool GLContext::linkProgram(GLuint program) {
             }
             // Direct graphics SSBO slots occupy 28..30. Only force argument
             // buffers when the translated stage would outgrow that range.
-            return directSlotSpan > 3;
+            if (directSlotSpan > 3) {
+                return true;
+            }
+            // Metal's direct function-parameter path accepts only eight
+            // read_write texture arguments per stage. GL 4.6 exposes 16 image
+            // uniforms, and the translator/runtime argbuf path already packs
+            // storage images at [[id(128+)]]. Flip only active storage-image
+            // stages whose array-expanded span would exceed Metal's direct
+            // read_write cap, preserving the direct path for the smaller
+            // shader_image_load_store cases.
+            const auto activeVars = compiler.get_active_interface_variables();
+            std::uint32_t activeStorageImageSpan = 0;
+            for (const auto& image : resources.storage_images) {
+                if (activeVars.find(image.id) == activeVars.end()) {
+                    continue;
+                }
+                std::uint32_t slotSpan = 1;
+                try {
+                    const auto& type = compiler.get_type(image.type_id);
+                    if (!type.array.empty() && type.array[0] > 0) {
+                        slotSpan = type.array[0];
+                    }
+                } catch (...) {
+                }
+                activeStorageImageSpan += slotSpan;
+            }
+            return activeStorageImageSpan > 8;
         } catch (...) {
             return false;
         }
@@ -3932,8 +3958,8 @@ bool GLContext::linkProgram(GLuint program) {
             // reaches past Metal's 0..30 range. Apply per-program so VS
             // and FS share one resource-binding mode.
             const bool forceRasterArgBuf =
-                spirvUsesStorageBuffers(vsSpirvData, vsSpirvWords) ||
-                spirvUsesStorageBuffers(fsSpirvData, fsSpirvWords);
+                spirvNeedsArgumentBuffers(vsSpirvData, vsSpirvWords) ||
+                spirvNeedsArgumentBuffers(fsSpirvData, fsSpirvWords);
             appgl::TranslatorOptions vsOptions;
             vsOptions.disableCullDistanceClipRouting = vsCullPrepass;
             vsOptions.forceArgumentBuffers = forceRasterArgBuf;
@@ -4167,7 +4193,7 @@ bool GLContext::linkProgram(GLuint program) {
             ShaderReflection vsRefl;
             appgl::TranslatorOptions vsOptions;
             if (vertexShader != nullptr) {
-                vsOptions.forceArgumentBuffers = spirvUsesStorageBuffers(
+                vsOptions.forceArgumentBuffers = spirvNeedsArgumentBuffers(
                     vertexShader->spirv.data(), vertexShader->spirv.size());
             }
             const bool vsOk = translateCachedStage(
@@ -4268,9 +4294,9 @@ bool GLContext::linkProgram(GLuint program) {
                         });
                     } else {
                         const bool forceRasterArgBuf =
-                            spirvUsesStorageBuffers(linked.vertexSpirv.data(),
+                            spirvNeedsArgumentBuffers(linked.vertexSpirv.data(),
                                                     linked.vertexSpirv.size()) ||
-                            spirvUsesStorageBuffers(linked.fragmentSpirv.data(),
+                            spirvNeedsArgumentBuffers(linked.fragmentSpirv.data(),
                                                     linked.fragmentSpirv.size());
                         appgl::TranslatorOptions vsOptions;
                         vsOptions.forceArgumentBuffers = forceRasterArgBuf;
@@ -4309,7 +4335,7 @@ bool GLContext::linkProgram(GLuint program) {
             ShaderReflection fsRefl;
             appgl::TranslatorOptions fsOptions;
             if (fragmentShader != nullptr) {
-                fsOptions.forceArgumentBuffers = spirvUsesStorageBuffers(
+                fsOptions.forceArgumentBuffers = spirvNeedsArgumentBuffers(
                     fragmentShader->spirv.data(), fragmentShader->spirv.size());
             }
             const bool fsOk = translateCachedStage(
@@ -4511,8 +4537,8 @@ bool GLContext::linkProgram(GLuint program) {
                     spirvEntryPointNameFor(vertexShader),
                     spirvSpecializationConstantsFor(vertexShader));
             const bool forceRasterArgBufVgf =
-                spirvUsesStorageBuffers(vsSpirvData, vsSpirvWords) ||
-                spirvUsesStorageBuffers(fsSpirvData, fsSpirvWords);
+                spirvNeedsArgumentBuffers(vsSpirvData, vsSpirvWords) ||
+                spirvNeedsArgumentBuffers(fsSpirvData, fsSpirvWords);
             appgl::TranslatorOptions vsOptionsVgf;
             vsOptionsVgf.disableCullDistanceClipRouting = vsCullPrepassVgf;
             vsOptionsVgf.forceArgumentBuffers = forceRasterArgBufVgf;
@@ -5179,7 +5205,7 @@ bool GLContext::linkProgram(GLuint program) {
             ShaderReflection vsRefl, gsRefl;
             appgl::TranslatorOptions vsOptionsVg;
             if (vertexShader != nullptr) {
-                vsOptionsVg.forceArgumentBuffers = spirvUsesStorageBuffers(
+                vsOptionsVg.forceArgumentBuffers = spirvNeedsArgumentBuffers(
                     vertexShader->spirv.data(), vertexShader->spirv.size());
             }
             const bool vsOk = translateCachedStage(
@@ -5233,7 +5259,7 @@ bool GLContext::linkProgram(GLuint program) {
             ShaderReflection vsRefl, gsRefl;
             appgl::TranslatorOptions vsOptionsVtg;
             if (vertexShader != nullptr) {
-                vsOptionsVtg.forceArgumentBuffers = spirvUsesStorageBuffers(
+                vsOptionsVtg.forceArgumentBuffers = spirvNeedsArgumentBuffers(
                     vertexShader->spirv.data(), vertexShader->spirv.size());
             }
             const bool vsOk = translateCachedStage(
@@ -5345,7 +5371,7 @@ bool GLContext::linkProgram(GLuint program) {
             ShaderReflection vsRefl;
             appgl::TranslatorOptions vsOptionsVt;
             if (vertexShader != nullptr) {
-                vsOptionsVt.forceArgumentBuffers = spirvUsesStorageBuffers(
+                vsOptionsVt.forceArgumentBuffers = spirvNeedsArgumentBuffers(
                     vertexShader->spirv.data(), vertexShader->spirv.size());
             }
             const bool vsOk = translateCachedStage(
@@ -5487,8 +5513,8 @@ bool GLContext::linkProgram(GLuint program) {
             }
             ShaderReflection vsRefl, fsRefl, tcRefl, teRefl;
             const bool forceRasterArgBufVtf =
-                spirvUsesStorageBuffers(vsSpirvData, vsSpirvWords) ||
-                spirvUsesStorageBuffers(fsSpirvData, fsSpirvWords);
+                spirvNeedsArgumentBuffers(vsSpirvData, vsSpirvWords) ||
+                spirvNeedsArgumentBuffers(fsSpirvData, fsSpirvWords);
             appgl::TranslatorOptions vsOptionsVtf;
             vsOptionsVtf.forceArgumentBuffers = forceRasterArgBufVtf;
             appgl::TranslatorOptions fsOptionsVtf;
@@ -6190,7 +6216,7 @@ bool GLContext::linkProgram(GLuint program) {
                 BindingMap stageBindings;
                 appgl::TranslatorOptions stageOptions;
                 stageOptions.fp64EmulationAvailable = fp64EmulationAvailable;
-                stageOptions.forceArgumentBuffers = spirvUsesStorageBuffers(
+                stageOptions.forceArgumentBuffers = spirvNeedsArgumentBuffers(
                     sh->spirv.data(), sh->spirv.size());
                 applyShaderSpirvOptions(stageOptions, sh);
                 if (stageEnum == GL_FRAGMENT_SHADER) {
