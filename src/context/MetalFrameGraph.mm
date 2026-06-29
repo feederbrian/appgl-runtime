@@ -54,6 +54,7 @@ namespace appgl {
 
 static constexpr NSUInteger kAppGLFragCoordParamsBufferSlot = 15;
 static constexpr NSUInteger kAppGLFragmentShadingRateParamsBufferSlot = 30;
+static constexpr NSUInteger kAppGLAdvancedBlendSourceTextureSlot = 62;
 
 static void releaseOwnedObjCObject(id object) {
 #if __has_feature(objc_arc)
@@ -4992,6 +4993,56 @@ static MTLBlendOperation glBlendEqToMTL(GLenum eq) {
     }
 }
 
+static bool isAdvancedBlendEquationKHR(GLenum mode) {
+    switch (mode) {
+        case GL_MULTIPLY_KHR:
+        case GL_SCREEN_KHR:
+        case GL_OVERLAY_KHR:
+        case GL_DARKEN_KHR:
+        case GL_LIGHTEN_KHR:
+        case GL_COLORDODGE_KHR:
+        case GL_COLORBURN_KHR:
+        case GL_HARDLIGHT_KHR:
+        case GL_SOFTLIGHT_KHR:
+        case GL_DIFFERENCE_KHR:
+        case GL_EXCLUSION_KHR:
+        case GL_HSL_HUE_KHR:
+        case GL_HSL_SATURATION_KHR:
+        case GL_HSL_COLOR_KHR:
+        case GL_HSL_LUMINOSITY_KHR:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool isIntegerColorFormat(MTLPixelFormat fmt) {
+    switch (fmt) {
+        case MTLPixelFormatR8Sint:
+        case MTLPixelFormatR8Uint:
+        case MTLPixelFormatR16Sint:
+        case MTLPixelFormatR16Uint:
+        case MTLPixelFormatR32Sint:
+        case MTLPixelFormatR32Uint:
+        case MTLPixelFormatRG8Sint:
+        case MTLPixelFormatRG8Uint:
+        case MTLPixelFormatRG16Sint:
+        case MTLPixelFormatRG16Uint:
+        case MTLPixelFormatRG32Sint:
+        case MTLPixelFormatRG32Uint:
+        case MTLPixelFormatRGBA8Sint:
+        case MTLPixelFormatRGBA8Uint:
+        case MTLPixelFormatRGBA16Sint:
+        case MTLPixelFormatRGBA16Uint:
+        case MTLPixelFormatRGBA32Sint:
+        case MTLPixelFormatRGBA32Uint:
+        case MTLPixelFormatRGB10A2Uint:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Phase 8X Group 4d follow-up¹⁴ — pipeline cache key. A 64-bit hash
 // of the state tuple that drives pipeline creation. The key includes
 // the shader MSL because separable-program pipelines can splice
@@ -5105,6 +5156,9 @@ static std::uint64_t computePipelineCacheKeyPrefix(
         mix(l.glIsInteger ? 1u : 0u);
     };
     mix(static_cast<std::uint32_t>(info.vertexStride));
+    mix(info.blend.advancedEquation ? 1u : 0u);
+    mix(static_cast<std::uint32_t>(
+        info.blend.advancedEquation ? info.blend.equationRGB : 0u));
     for (const auto& l : info.vertexAttributeLayouts) {
         hashLayout(l);
     }
@@ -5376,6 +5430,312 @@ static std::string rewriteFragmentMSLForPerSample(const std::string& fsMsl)
         working = std::move(out);
     } while (false);
 
+    return working;
+}
+
+static bool appglMslIdentifierChar(char c)
+{
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+static std::size_t appglFindMatchingBrace(const std::string& text,
+                                          std::size_t openBrace)
+{
+    if (openBrace == std::string::npos || openBrace >= text.size() ||
+        text[openBrace] != '{') {
+        return std::string::npos;
+    }
+    std::size_t depth = 1;
+    for (std::size_t pos = openBrace + 1; pos < text.size(); ++pos) {
+        if (text[pos] == '{') {
+            ++depth;
+        } else if (text[pos] == '}') {
+            --depth;
+            if (depth == 0) {
+                return pos;
+            }
+        }
+    }
+    return std::string::npos;
+}
+
+static std::string appglFragmentColor0FieldName(const std::string& fsMsl)
+{
+    if (fsMsl.find("[[color(1)]]") != std::string::npos) {
+        return {};
+    }
+    const std::size_t structPos = fsMsl.find("struct main0_out");
+    if (structPos == std::string::npos) {
+        return {};
+    }
+    const std::size_t openBrace = fsMsl.find('{', structPos);
+    const std::size_t closeBrace = appglFindMatchingBrace(fsMsl, openBrace);
+    if (openBrace == std::string::npos || closeBrace == std::string::npos) {
+        return {};
+    }
+    const std::size_t attrStart = fsMsl.find("[[color(0)]]", openBrace);
+    if (attrStart == std::string::npos || attrStart >= closeBrace) {
+        return {};
+    }
+    std::size_t lineStart = fsMsl.rfind('\n', attrStart);
+    lineStart = (lineStart == std::string::npos) ? openBrace + 1 : lineStart + 1;
+    const std::string decl = fsMsl.substr(lineStart, attrStart - lineStart);
+    if (decl.find("float4") == std::string::npos) {
+        return {};
+    }
+
+    std::size_t nameEnd = attrStart;
+    while (nameEnd > lineStart &&
+           std::isspace(static_cast<unsigned char>(fsMsl[nameEnd - 1]))) {
+        --nameEnd;
+    }
+    std::size_t nameStart = nameEnd;
+    while (nameStart > lineStart &&
+           appglMslIdentifierChar(fsMsl[nameStart - 1])) {
+        --nameStart;
+    }
+    if (nameStart == nameEnd) {
+        return {};
+    }
+    return fsMsl.substr(nameStart, nameEnd - nameStart);
+}
+
+static const char* appglAdvancedBlendMSLHelpers()
+{
+    return R"MSL(
+static inline float _appgl_ab_lum(float3 c) {
+    return 0.30f * c.r + 0.59f * c.g + 0.11f * c.b;
+}
+static inline float _appgl_ab_sat(float3 c) {
+    return max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b));
+}
+static inline float3 _appgl_ab_set_lum(float3 base, float3 lumSource) {
+    float lum = _appgl_ab_lum(lumSource);
+    float d = lum - _appgl_ab_lum(base);
+    float3 c = base + float3(d);
+    float minC = min(c.r, min(c.g, c.b));
+    float maxC = max(c.r, max(c.g, c.b));
+    if (minC < 0.0f && lum != minC) {
+        c = lum + ((c - float3(lum)) * lum) / (lum - minC);
+    } else if (maxC > 1.0f && maxC != lum) {
+        c = lum + ((c - float3(lum)) * (1.0f - lum)) / (maxC - lum);
+    }
+    return c;
+}
+static inline float3 _appgl_ab_set_lum_sat(float3 base, float3 satSource, float3 lumSource) {
+    float minBase = min(base.r, min(base.g, base.b));
+    float satBase = _appgl_ab_sat(base);
+    float sat = _appgl_ab_sat(satSource);
+    float3 c = float3(0.0f);
+    if (satBase > 0.0f) {
+        c = (base - float3(minBase)) * sat / satBase;
+    }
+    return _appgl_ab_set_lum(c, lumSource);
+}
+static inline float4 _appgl_ab_norm(float4 c) {
+    return c.a == 0.0f ? float4(0.0f) : float4(c.rgb / c.a, c.a);
+}
+static inline float4 _appgl_ab_compose(float3 rgb, float4 src, float4 dst) {
+    float p0 = src.a * dst.a;
+    float p1 = src.a * (1.0f - dst.a);
+    float p2 = dst.a * (1.0f - src.a);
+    return float4(p0 * rgb + p1 * src.rgb + p2 * dst.rgb, p0 + p1 + p2);
+}
+static inline float _appgl_ab_overlay(float s, float d) {
+    return d <= 0.5f ? 2.0f * s * d : 1.0f - 2.0f * (1.0f - s) * (1.0f - d);
+}
+static inline float _appgl_ab_hardlight(float s, float d) {
+    return s <= 0.5f ? 2.0f * s * d : 1.0f - 2.0f * (1.0f - s) * (1.0f - d);
+}
+static inline float _appgl_ab_colordodge(float s, float d) {
+    if (d <= 0.0f) return 0.0f;
+    if (s < 1.0f) return min(1.0f, d / (1.0f - s));
+    return 1.0f;
+}
+static inline float _appgl_ab_colorburn(float s, float d) {
+    if (d >= 1.0f) return 1.0f;
+    if (s > 0.0f) return 1.0f - min(1.0f, (1.0f - d) / s);
+    return 0.0f;
+}
+static inline float _appgl_ab_softlight(float s, float d) {
+    if (s <= 0.5f) return d - (1.0f - 2.0f * s) * d * (1.0f - d);
+    if (d <= 0.25f) return d + (2.0f * s - 1.0f) * d * ((16.0f * d - 12.0f) * d + 3.0f);
+    return d + (2.0f * s - 1.0f) * (sqrt(d) - d);
+}
+static inline float4 _appgl_ab_eval(int mode, float4 premulSrc, float4 premulDst) {
+    float4 src = _appgl_ab_norm(premulSrc);
+    float4 dst = _appgl_ab_norm(premulDst);
+    float3 rgb = src.rgb;
+    switch (mode) {
+        case 0x9294: rgb = src.rgb * dst.rgb; break;
+        case 0x9295: rgb = src.rgb + dst.rgb - src.rgb * dst.rgb; break;
+        case 0x9296: rgb = float3(_appgl_ab_overlay(src.r, dst.r), _appgl_ab_overlay(src.g, dst.g), _appgl_ab_overlay(src.b, dst.b)); break;
+        case 0x9297: rgb = min(src.rgb, dst.rgb); break;
+        case 0x9298: rgb = max(src.rgb, dst.rgb); break;
+        case 0x9299: rgb = float3(_appgl_ab_colordodge(src.r, dst.r), _appgl_ab_colordodge(src.g, dst.g), _appgl_ab_colordodge(src.b, dst.b)); break;
+        case 0x929A: rgb = float3(_appgl_ab_colorburn(src.r, dst.r), _appgl_ab_colorburn(src.g, dst.g), _appgl_ab_colorburn(src.b, dst.b)); break;
+        case 0x929B: rgb = float3(_appgl_ab_hardlight(src.r, dst.r), _appgl_ab_hardlight(src.g, dst.g), _appgl_ab_hardlight(src.b, dst.b)); break;
+        case 0x929C: rgb = float3(_appgl_ab_softlight(src.r, dst.r), _appgl_ab_softlight(src.g, dst.g), _appgl_ab_softlight(src.b, dst.b)); break;
+        case 0x929E: rgb = fabs(src.rgb - dst.rgb); break;
+        case 0x92A0: rgb = src.rgb + dst.rgb - 2.0f * src.rgb * dst.rgb; break;
+        case 0x92AD: rgb = _appgl_ab_set_lum_sat(src.rgb, dst.rgb, dst.rgb); break;
+        case 0x92AE: rgb = _appgl_ab_set_lum_sat(dst.rgb, src.rgb, dst.rgb); break;
+        case 0x92AF: rgb = _appgl_ab_set_lum(src.rgb, dst.rgb); break;
+        case 0x92B0: rgb = _appgl_ab_set_lum(dst.rgb, src.rgb); break;
+        default: break;
+    }
+    return _appgl_ab_compose(rgb, src, dst);
+}
+)MSL";
+}
+
+static std::string rewriteFragmentMSLForAdvancedBlend(const std::string& fsMsl,
+                                                      GLenum equation,
+                                                      bool* rewritten)
+{
+    if (rewritten != nullptr) {
+        *rewritten = false;
+    }
+    if (!isAdvancedBlendEquationKHR(equation) ||
+        fsMsl.find("_appglAdvancedBlendSource") != std::string::npos ||
+        fsMsl.find("_appglAdvancedBlendDst") != std::string::npos) {
+        return fsMsl;
+    }
+
+    const std::string colorField = appglFragmentColor0FieldName(fsMsl);
+    if (colorField.empty()) {
+        return fsMsl;
+    }
+
+    std::string working = fsMsl;
+    const std::size_t colorAttr = working.find("[[color(0)]]");
+    if (colorAttr != std::string::npos) {
+        working.replace(colorAttr, std::strlen("[[color(0)]]"),
+                        "[[color(0), raster_order_group(0)]]");
+    }
+
+    const std::size_t usingPos = working.find("using namespace metal;");
+    if (usingPos != std::string::npos) {
+        const std::size_t insertPos =
+            working.find('\n', usingPos + std::strlen("using namespace metal;"));
+        working.insert(insertPos == std::string::npos ? working.size() : insertPos + 1,
+                       appglAdvancedBlendMSLHelpers());
+    } else {
+        working.insert(0, appglAdvancedBlendMSLHelpers());
+    }
+
+    const std::size_t openParen = working.find("main0(");
+    if (openParen == std::string::npos) {
+        return fsMsl;
+    }
+    const std::size_t paramStart = openParen + 6;
+    std::size_t depth = 1;
+    std::size_t paramEnd = paramStart;
+    while (paramEnd < working.size() && depth > 0) {
+        const char c = working[paramEnd];
+        if (c == '(') ++depth;
+        else if (c == ')') { --depth; if (depth == 0) break; }
+        ++paramEnd;
+    }
+    if (depth != 0 || paramEnd >= working.size()) {
+        return fsMsl;
+    }
+    std::size_t sigLineStart = working.rfind('\n', openParen);
+    sigLineStart = (sigLineStart == std::string::npos) ? 0 : sigLineStart + 1;
+    const std::size_t fragmentKeyword = working.find("fragment", sigLineStart);
+    if (fragmentKeyword == std::string::npos || fragmentKeyword > openParen) {
+        return fsMsl;
+    }
+
+    const std::string paramSlice =
+        working.substr(paramStart, paramEnd - paramStart);
+    const bool hasExistingParams =
+        paramSlice.find_first_not_of(" \t\n\r") != std::string::npos;
+    std::string positionExpr = "_appglAdvancedBlendPos";
+    bool addPositionParam = true;
+    const std::size_t positionAttr = paramSlice.find("[[position]]");
+    if (positionAttr != std::string::npos) {
+        std::size_t nameEnd = positionAttr;
+        while (nameEnd > 0 &&
+               std::isspace(static_cast<unsigned char>(paramSlice[nameEnd - 1]))) {
+            --nameEnd;
+        }
+        std::size_t nameStart = nameEnd;
+        while (nameStart > 0 &&
+               appglMslIdentifierChar(paramSlice[nameStart - 1])) {
+            --nameStart;
+        }
+        if (nameStart == nameEnd) {
+            return fsMsl;
+        }
+        positionExpr = paramSlice.substr(nameStart, nameEnd - nameStart);
+        addPositionParam = false;
+    }
+    std::string dstParams =
+        "texture2d<float, access::read> _appglAdvancedBlendSource [[texture(";
+    dstParams.append(std::to_string(
+        static_cast<unsigned long long>(kAppGLAdvancedBlendSourceTextureSlot)));
+    dstParams.append(")]]");
+    if (addPositionParam) {
+        dstParams.append(", float4 _appglAdvancedBlendPos [[position]]");
+    }
+    working.insert(paramEnd, (hasExistingParams ? ", " : "") + dstParams);
+
+    const std::size_t bodyStart = working.find('{', paramEnd);
+    const std::size_t bodyEnd = appglFindMatchingBrace(working, bodyStart);
+    if (bodyStart == std::string::npos || bodyEnd == std::string::npos) {
+        return fsMsl;
+    }
+    const std::size_t returnPos = working.rfind("return ", bodyEnd);
+    if (returnPos == std::string::npos || returnPos < bodyStart) {
+        return fsMsl;
+    }
+    const std::size_t semicolon = working.find(';', returnPos);
+    if (semicolon == std::string::npos || semicolon > bodyEnd) {
+        return fsMsl;
+    }
+    const std::string returnExpr = appglTrimCopy(
+        working.substr(returnPos + std::strlen("return "),
+                       semicolon - (returnPos + std::strlen("return "))));
+    if (returnExpr.empty() ||
+        !std::all_of(returnExpr.begin(), returnExpr.end(), appglMslIdentifierChar)) {
+        return fsMsl;
+    }
+
+    char modeLiteral[32];
+    std::snprintf(modeLiteral, sizeof(modeLiteral), "0x%04X",
+                  static_cast<unsigned>(equation));
+    std::string pixelExpr = "uint2(";
+    pixelExpr.append(positionExpr);
+    pixelExpr.append(".xy)");
+    const std::string dstExpr =
+        std::string("_appglAdvancedBlendSource.read(") + pixelExpr + ")";
+    std::string colorExpr;
+    colorExpr.append("_appgl_ab_eval(");
+    colorExpr.append(modeLiteral);
+    colorExpr.append(", ");
+    colorExpr.append(returnExpr);
+    colorExpr.append(".");
+    colorExpr.append(colorField);
+    colorExpr.append(", ");
+    colorExpr.append(dstExpr);
+    colorExpr.append(")");
+    std::string replacement;
+    replacement.reserve(256);
+    replacement.append("float4 _appglAdvancedBlendColor = ");
+    replacement.append(colorExpr);
+    replacement.append(";\n    ");
+    replacement.append(returnExpr);
+    replacement.append(".");
+    replacement.append(colorField);
+    replacement.append(" = _appglAdvancedBlendColor");
+    replacement.append(";\n    return ");
+    replacement.append(returnExpr);
+    replacement.append(";");
+    working.replace(returnPos, semicolon + 1 - returnPos, replacement);
+    if (rewritten != nullptr) {
+        *rewritten = true;
+    }
     return working;
 }
 
@@ -6972,6 +7332,15 @@ struct MetalFrameGraph::Impl {
         const bool forcePerSampleFS =
             info.sampleShadingEnabled && info.minSampleShading > 0.0f &&
             attachmentSampleCount > 1;
+        const bool forceAdvancedBlendFS =
+            hasFragmentStage &&
+            info.blend.enabled &&
+            info.blend.advancedEquation &&
+            info.blend.equationAlpha == info.blend.equationRGB &&
+            !isIntegerColorFormat(colorFormat);
+        const bool advancedBlendShaderTargetDraw = forceAdvancedBlendFS;
+        ScopedOwnedObjCObject advancedBlendSourceCopyRelease;
+        id<MTLTexture> advancedBlendSourceCopyTexture = nil;
 
         // Step 7-3: argument-buffer mode. When APPGL_ENABLE_ARGUMENT_BUFFERS
         // is set, the fragment/vertex shader was compiled to read resources
@@ -7376,11 +7745,27 @@ struct MetalFrameGraph::Impl {
                 // compiles. Keyed on `forcePerSampleFS` so the rewrite
                 // cost is only paid for MS + GL_SAMPLE_SHADING draws.
                 std::string rewrittenFragmentMSL;
+                const std::string* fragmentSourceForRewrite = info.fragmentMSL;
                 if (forcePerSampleFS) {
                     rewrittenFragmentMSL = rewriteFragmentMSLForPerSample(*info.fragmentMSL);
+                    fragmentSourceForRewrite = &rewrittenFragmentMSL;
                 }
-                const std::string& fragSource = forcePerSampleFS
-                    ? rewrittenFragmentMSL : *info.fragmentMSL;
+                if (forceAdvancedBlendFS) {
+                    bool advancedBlendRewritten = false;
+                    std::string advancedBlendMSL =
+                        rewriteFragmentMSLForAdvancedBlend(
+                            *fragmentSourceForRewrite,
+                            info.blend.equationRGB,
+                            &advancedBlendRewritten);
+                    if (!advancedBlendRewritten) {
+                        FG_TRACE(@"encodeTranslatedDraw: advanced blend rewrite failed");
+                        recordBuildFailure("fragment-advanced-blend-rewrite", nil);
+                        return false;
+                    }
+                    rewrittenFragmentMSL = std::move(advancedBlendMSL);
+                    fragmentSourceForRewrite = &rewrittenFragmentMSL;
+                }
+                const std::string& fragSource = *fragmentSourceForRewrite;
                 id<MTLLibrary> fragLib = getOrCompileLibrary(fragSource);
                 if (fragLib == nil) {
                     FG_TRACE(@"encodeTranslatedDraw: newLibraryWithSource(fragment) failed");
@@ -7717,35 +8102,11 @@ struct MetalFrameGraph::Impl {
             // (CKPT43 cap-bump cascade). Force-disable blending for
             // integer pipeline-color formats so the pipeline-state
             // build matches GL's silent semantics.
-            auto isIntegerColorFormat = [](MTLPixelFormat fmt) -> bool {
-                switch (fmt) {
-                    case MTLPixelFormatR8Sint:
-                    case MTLPixelFormatR8Uint:
-                    case MTLPixelFormatR16Sint:
-                    case MTLPixelFormatR16Uint:
-                    case MTLPixelFormatR32Sint:
-                    case MTLPixelFormatR32Uint:
-                    case MTLPixelFormatRG8Sint:
-                    case MTLPixelFormatRG8Uint:
-                    case MTLPixelFormatRG16Sint:
-                    case MTLPixelFormatRG16Uint:
-                    case MTLPixelFormatRG32Sint:
-                    case MTLPixelFormatRG32Uint:
-                    case MTLPixelFormatRGBA8Sint:
-                    case MTLPixelFormatRGBA8Uint:
-                    case MTLPixelFormatRGBA16Sint:
-                    case MTLPixelFormatRGBA16Uint:
-                    case MTLPixelFormatRGBA32Sint:
-                    case MTLPixelFormatRGBA32Uint:
-                    case MTLPixelFormatRGB10A2Uint:
-                        return true;
-                    default:
-                        return false;
-                }
-            };
             const bool integerColorTarget = isIntegerColorFormat(colorFormat);
             colorDesc.blendingEnabled =
-                (info.blend.enabled && !integerColorTarget) ? YES : NO;
+                (info.blend.enabled &&
+                 !info.blend.advancedEquation &&
+                 !integerColorTarget) ? YES : NO;
             colorDesc.sourceRGBBlendFactor        = glBlendFactorToMTL(info.blend.srcRGB);
             colorDesc.destinationRGBBlendFactor   = glBlendFactorToMTL(info.blend.dstRGB);
             colorDesc.sourceAlphaBlendFactor      = glBlendFactorToMTL(info.blend.srcAlpha);
@@ -8228,8 +8589,9 @@ struct MetalFrameGraph::Impl {
             const bool activeSignatureMatches =
                 fboPassActive && fboPassSignatureMatches(info);
             const bool feedbackHit =
-                eligibleForContinuation && activeSignatureMatches &&
-                fboSampledTexturesTouchActiveTargets(info);
+                (eligibleForContinuation && activeSignatureMatches &&
+                 fboSampledTexturesTouchActiveTargets(info)) ||
+                (advancedBlendShaderTargetDraw && activeSignatureMatches);
             const bool canContinue =
                 fboPassContinuationLatched && fboPassActive &&
                 eligibleForContinuation &&
@@ -8319,6 +8681,7 @@ struct MetalFrameGraph::Impl {
                 const bool rtalClampPossible = info.maxEmittedLayer > 0;
                 PendingFboClear folded;
                 if (info.fboColorTexture != nullptr && !rtalClampPossible &&
+                    !advancedBlendShaderTargetDraw &&
                     consumePendingFboClearForAttachment(
                         info.fboColorTexture, /*isColor=*/true,
                         /*isDepth=*/false, /*isStencil=*/false,
@@ -8418,6 +8781,46 @@ struct MetalFrameGraph::Impl {
             }
             if (colorTexture == nil) {
                 return false;
+            }
+
+            if (advancedBlendShaderTargetDraw) {
+                if (colorTexture.textureType != MTLTextureType2D ||
+                    colorTexture.sampleCount != 1) {
+                    return false;
+                }
+                @autoreleasepool {
+                    MTLTextureDescriptor* copyDesc =
+                        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:colorTexture.pixelFormat
+                                                                            width:colorTexture.width
+                                                                           height:colorTexture.height
+                                                                        mipmapped:NO];
+                    copyDesc.storageMode = MTLStorageModePrivate;
+                    copyDesc.usage = MTLTextureUsageShaderRead;
+                    advancedBlendSourceCopyTexture =
+                        [device newTextureWithDescriptor:copyDesc];
+                    advancedBlendSourceCopyRelease.reset(
+                        advancedBlendSourceCopyTexture);
+                }
+                if (advancedBlendSourceCopyTexture == nil) {
+                    return false;
+                }
+                id<MTLBlitCommandEncoder> blit =
+                    [currentCommandBuffer blitCommandEncoder];
+                if (blit == nil) {
+                    return false;
+                }
+                [blit copyFromTexture:colorTexture
+                          sourceSlice:static_cast<NSUInteger>(info.fboColorSlices[0])
+                          sourceLevel:static_cast<NSUInteger>(info.fboColorLevels[0])
+                         sourceOrigin:MTLOriginMake(0, 0, 0)
+                           sourceSize:MTLSizeMake(colorTexture.width,
+                                                  colorTexture.height,
+                                                  1)
+                            toTexture:advancedBlendSourceCopyTexture
+                     destinationSlice:0
+                     destinationLevel:0
+                    destinationOrigin:MTLOriginMake(0, 0, 0)];
+                [blit endEncoding];
             }
 
             // Resolve depth/stencil for this render pass.
@@ -10555,6 +10958,20 @@ struct MetalFrameGraph::Impl {
                         EncodeMarshalClass::Sampler);
                 }
             }
+        }
+        if (advancedBlendShaderTargetDraw && colorTexture != nil) {
+            id<MTLTexture> advancedBlendSourceTexture =
+                advancedBlendSourceCopyTexture != nil
+                    ? advancedBlendSourceCopyTexture
+                    : colorTexture;
+            bindFragmentTextureIfNeeded(
+                encodeSubtimeSamplePtr,
+                advancedBlendSourceTexture,
+                kAppGLAdvancedBlendSourceTextureSlot,
+                EncodeMarshalClass::Texture);
+            [currentRenderEncoder useResource:advancedBlendSourceTexture
+                                        usage:MTLResourceUsageRead
+                                       stages:MTLRenderStageFragment];
         }
         recordFloorResourceBindSlice(
             floorProfileSample.resourceBindDirectTextureSamplerUs);

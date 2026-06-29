@@ -3945,6 +3945,7 @@ static std::uint64_t phase2PlanBuildFixedStateSegmentHash(
     phase2PlanHashU64(hash, tdi.blend.dstAlpha);
     phase2PlanHashU64(hash, tdi.blend.equationRGB);
     phase2PlanHashU64(hash, tdi.blend.equationAlpha);
+    phase2PlanHashBool(hash, tdi.blend.advancedEquation);
     phase2PlanHashBool(hash, tdi.blend.colorMaskR);
     phase2PlanHashBool(hash, tdi.blend.colorMaskG);
     phase2PlanHashBool(hash, tdi.blend.colorMaskB);
@@ -4004,6 +4005,7 @@ static std::uint64_t phase2PlanBuildFixedStateReferenceSegmentHash(
     phase2PlanHashU64(hash, tdi.blend.dstAlpha);
     phase2PlanHashU64(hash, tdi.blend.equationRGB);
     phase2PlanHashU64(hash, tdi.blend.equationAlpha);
+    phase2PlanHashBool(hash, tdi.blend.advancedEquation);
     phase2PlanHashBool(hash, tdi.blend.colorMaskR);
     phase2PlanHashBool(hash, tdi.blend.colorMaskG);
     phase2PlanHashBool(hash, tdi.blend.colorMaskB);
@@ -7173,6 +7175,36 @@ bool sourceDisablesAdvancedBlendLayouts(const std::string& source) {
         pos = eol;
     }
     return false;
+}
+
+bool fragmentMslSupportsAdvancedBlendGpuPath(const std::string& msl) {
+    if (msl.find("[[color(1)]]") != std::string::npos ||
+        msl.find("[[color(0)]]") == std::string::npos ||
+        msl.find("return ") == std::string::npos) {
+        return false;
+    }
+    const std::size_t structPos = msl.find("struct main0_out");
+    if (structPos == std::string::npos) {
+        return false;
+    }
+    const std::size_t openBrace = msl.find('{', structPos);
+    const std::size_t attrStart = msl.find("[[color(0)]]", openBrace);
+    if (openBrace == std::string::npos || attrStart == std::string::npos) {
+        return false;
+    }
+    std::size_t lineStart = msl.rfind('\n', attrStart);
+    lineStart = (lineStart == std::string::npos) ? openBrace + 1 : lineStart + 1;
+    return msl.substr(lineStart, attrStart - lineStart).find("float4") !=
+        std::string::npos;
+}
+
+bool programSupportsAdvancedBlendGpuPath(const GLProgramObject& program) {
+    if (envVarPresent("APPGL_DISABLE_ADVANCED_BLEND_GPU")) {
+        return false;
+    }
+    return program.hasTranslatedPipeline &&
+        !program.fragmentMSL.empty() &&
+        fragmentMslSupportsAdvancedBlendGpuPath(program.fragmentMSL);
 }
 
 struct AdvancedBlendColor {
@@ -23024,6 +23056,27 @@ struct GLContext::Impl {
                 return false;
             }
             attachment = &attIt->second;
+        }
+
+        if (programSupportsAdvancedBlendGpuPath(*program)) {
+            bool materializedGpuDestination = false;
+            if (!defaultTarget && attachment != nullptr &&
+                attachment->kind == GLFramebufferAttachment::Kind::Texture) {
+                GLTextureObject* textureTarget =
+                    objects->textures().get(attachment->object);
+                if (textureTarget != nullptr) {
+                    auto levelIt = textureTarget->levels.find(attachment->level);
+                    if (levelIt != textureTarget->levels.end() &&
+                        levelIt->second.defined) {
+                        materializedGpuDestination =
+                            replaceMetalTexture(*textureTarget);
+                    }
+                }
+            }
+            if (materializedGpuDestination) {
+                handled = false;
+                return false;
+            }
         }
 
         AdvancedBlendColor src{};
@@ -39573,6 +39626,9 @@ static void populateTranslatedDrawFixedFunctionState(
     tdi.blend.dstAlpha = gl.dstAlpha;
     tdi.blend.equationRGB = gl.equationRGB;
     tdi.blend.equationAlpha = gl.equationAlpha;
+    tdi.blend.advancedEquation =
+        isAdvancedBlendEquationKHR(gl.equationRGB) &&
+        gl.equationAlpha == gl.equationRGB;
     tdi.blend.colorMaskR = (gl.colorMask[0] != GL_FALSE);
     tdi.blend.colorMaskG = (gl.colorMask[1] != GL_FALSE);
     tdi.blend.colorMaskB = (gl.colorMask[2] != GL_FALSE);

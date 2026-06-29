@@ -523,6 +523,7 @@ struct TranslatedDrawInfo {
         GLenum dstAlpha = GL_ZERO;
         GLenum equationRGB = GL_FUNC_ADD;
         GLenum equationAlpha = GL_FUNC_ADD;
+        bool advancedEquation = false;
         bool colorMaskR = true;
         bool colorMaskG = true;
         bool colorMaskB = true;
