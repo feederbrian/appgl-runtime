@@ -3362,6 +3362,8 @@ static void phase2PlanHashResourceBindingShape(
     phase2PlanHashBool(hash, binding.multisampleStorageImage);
     phase2PlanHashBool(hash, binding.multisampleStorageImageArray);
     phase2PlanHashU64(hash, binding.storageImageTarget);
+    phase2PlanHashBool(hash, binding.storageImageNonWritable);
+    phase2PlanHashBool(hash, binding.storageImageNonReadable);
     phase2PlanHashU64(hash, binding.metalAtomicBufferBinding);
     phase2PlanHashBool(hash, binding.sparseStorageImageRead);
     phase2PlanHashBool(hash, binding.sparseStorageImageWrite);
@@ -9419,6 +9421,22 @@ struct GLContext::Impl {
         markGpuResourceWritesRange(writes);
     }
 
+    void appendTextureBufferImageBackingWrite(GpuResourceWriteSet& writes,
+                                              GLuint textureName) const {
+        if (textureName == 0 || objects == nullptr) {
+            return;
+        }
+        const GLTextureObject* tex = objects->textures().get(textureName);
+        if (tex == nullptr ||
+            tex->target != GL_TEXTURE_BUFFER ||
+            tex->desc.sourceBuffer == 0) {
+            return;
+        }
+        writes.push_back(
+            {GpuResourceAccess::Kind::Buffer, tex->desc.sourceBuffer,
+             kProducerStorageImageWrite});
+    }
+
     template <typename Reads>
     void drainPendingGpuProducersRange(const Reads& reads) const {
         if (producerTokenProfile.enabled) {
@@ -9858,6 +9876,16 @@ struct GLContext::Impl {
             for (GLuint textureName : tdi.readImageTextureNames) {
                 group.addRead(AppGLSubmissionResourceKind::Texture,
                               textureName, kProducerAll);
+                if (objects != nullptr) {
+                    const GLTextureObject* tex =
+                        objects->textures().get(textureName);
+                    if (tex != nullptr &&
+                        tex->target == GL_TEXTURE_BUFFER &&
+                        tex->desc.sourceBuffer != 0) {
+                        group.addRead(AppGLSubmissionResourceKind::Buffer,
+                                      tex->desc.sourceBuffer, kProducerAll);
+                    }
+                }
             }
         }
         {
@@ -9866,6 +9894,17 @@ struct GLContext::Impl {
             for (GLuint textureName : tdi.writtenImageTextureNames) {
                 group.addWrite(AppGLSubmissionResourceKind::Texture,
                                textureName, kProducerStorageImageWrite);
+                if (objects != nullptr) {
+                    const GLTextureObject* tex =
+                        objects->textures().get(textureName);
+                    if (tex != nullptr &&
+                        tex->target == GL_TEXTURE_BUFFER &&
+                        tex->desc.sourceBuffer != 0) {
+                        group.addWrite(AppGLSubmissionResourceKind::Buffer,
+                                       tex->desc.sourceBuffer,
+                                       kProducerStorageImageWrite);
+                    }
+                }
             }
             for (const auto& ssbo : tdi.ssboBindings) {
                 group.addRead(AppGLSubmissionResourceKind::Buffer,
@@ -9959,10 +9998,29 @@ struct GLContext::Impl {
         for (GLuint textureName : textureInfo.readImageTextureNames) {
             group.addRead(AppGLSubmissionResourceKind::Texture,
                           textureName, kProducerAll);
+            if (objects != nullptr) {
+                const GLTextureObject* tex = objects->textures().get(textureName);
+                if (tex != nullptr &&
+                    tex->target == GL_TEXTURE_BUFFER &&
+                    tex->desc.sourceBuffer != 0) {
+                    group.addRead(AppGLSubmissionResourceKind::Buffer,
+                                  tex->desc.sourceBuffer, kProducerAll);
+                }
+            }
         }
         for (GLuint textureName : textureInfo.writtenImageTextureNames) {
             group.addWrite(AppGLSubmissionResourceKind::Texture,
                            textureName, kProducerStorageImageWrite);
+            if (objects != nullptr) {
+                const GLTextureObject* tex = objects->textures().get(textureName);
+                if (tex != nullptr &&
+                    tex->target == GL_TEXTURE_BUFFER &&
+                    tex->desc.sourceBuffer != 0) {
+                    group.addWrite(AppGLSubmissionResourceKind::Buffer,
+                                   tex->desc.sourceBuffer,
+                                   kProducerStorageImageWrite);
+                }
+            }
         }
         appendBoundDrawFramebufferSubmissionWrites(group);
         group.addTransient(
@@ -19361,10 +19419,17 @@ struct GLContext::Impl {
                         continue;
                     }
                     if (ib.access != GL_WRITE_ONLY) {
-                        drainPendingGpuProducers({
+                        GpuResourceReadSet imageReads = {
                             {GpuResourceAccess::Kind::Texture,
                              ib.texture, kProducerAll},
-                        });
+                        };
+                        if (texObj->target == GL_TEXTURE_BUFFER &&
+                            texObj->desc.sourceBuffer != 0) {
+                            imageReads.push_back(
+                                {GpuResourceAccess::Kind::Buffer,
+                                 texObj->desc.sourceBuffer, kProducerAll});
+                        }
+                        drainPendingGpuProducers(imageReads);
                         info.readImageTextureNames.push_back(ib.texture);
                     }
                     if (ib.access != GL_READ_ONLY) {
@@ -19372,16 +19437,73 @@ struct GLContext::Impl {
                     }
                     TranslatedDrawInfo::TextureBinding tb;
                     tb.textureName = ib.texture;
+                    const std::uint32_t imageMetalSlot =
+                        img.metalBinding + static_cast<std::uint32_t>(arrayElement);
                     const bool stageUsesMultisampleStorageSidecars =
                         stageMSL.find("appgl_ms_storage_image_samples") !=
                         std::string::npos;
+                    const bool shaderReadsOnly =
+                        ib.access == GL_READ_ONLY ||
+                        (img.storageImageNonWritable &&
+                         !img.storageImageNonReadable);
+                    const bool stageUsesOptionalMSStorageReadSidecar =
+                        shaderReadsOnly &&
+                        stageMSL.find("appgl_ms_storage_read_sidecar_") !=
+                            std::string::npos;
                     const bool useMultisampleStorageSidecar =
                         stageUsesMultisampleStorageSidecars &&
+                        !stageUsesOptionalMSStorageReadSidecar &&
                         (img.multisampleStorageImage ||
                          extensions::sparse_texture::isMultisampleStorageImageTarget(
                              img.storageImageTarget) ||
                          extensions::sparse_texture::isMultisampleStorageImageTarget(
                              texObj->target));
+                    TranslatedDrawInfo::TextureBinding optionalMSReadSidecarBinding;
+                    bool hasOptionalMSReadSidecarBinding = false;
+                    if (stageUsesOptionalMSStorageReadSidecar &&
+                        (img.multisampleStorageImage ||
+                         extensions::sparse_texture::isMultisampleStorageImageTarget(
+                             img.storageImageTarget) ||
+                         extensions::sparse_texture::isMultisampleStorageImageTarget(
+                             texObj->target))) {
+                        std::vector<std::uint32_t>* msImageSampleCounts =
+                            ensureMultisampleStorageImageSampleCounts(
+                                stageMSL, stageName[0] == 'F');
+                        if (msImageSampleCounts != nullptr) {
+                            if (imageMetalSlot >= msImageSampleCounts->size()) {
+                                msImageSampleCounts->resize(
+                                    static_cast<std::size_t>(imageMetalSlot) + 1u, 0u);
+                            }
+                            (*msImageSampleCounts)[imageMetalSlot] = 0u;
+                        }
+                        if (owner != nullptr) {
+                            ExtensionContext extensionContext(*owner);
+                            extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
+                            if (extensions::sparse_texture::getMultisampleStorageImageSidecar(
+                                    extensionContext, *texObj, sidecarInfo)) {
+                                optionalMSReadSidecarBinding.textureName = ib.texture;
+                                optionalMSReadSidecarBinding.metalTexture =
+                                    sidecarInfo.metalTexture;
+                                optionalMSReadSidecarBinding.metalSamplerState = nullptr;
+                                optionalMSReadSidecarBinding.metalSlot =
+                                    imageMetalSlot +
+                                    kMultisampleSampledSidecarTextureSlotOffset;
+                                hasOptionalMSReadSidecarBinding =
+                                    sidecarInfo.metalTexture != nullptr;
+                                if (msImageSampleCounts != nullptr) {
+                                    (*msImageSampleCounts)[imageMetalSlot] =
+                                        static_cast<std::uint32_t>(
+                                            std::max<GLsizei>(sidecarInfo.samples, 1));
+                                }
+                                if (trace) {
+                                    std::fprintf(stderr,
+                                        " MS-READ-SIDECAR sidecar=%p samples=%d",
+                                        sidecarInfo.metalTexture,
+                                        sidecarInfo.samples);
+                                }
+                            }
+                        }
+                    }
                     if (useMultisampleStorageSidecar) {
                         extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
                         std::vector<std::uint32_t>* msImageSampleCounts =
@@ -19403,14 +19525,11 @@ struct GLContext::Impl {
                         }
                         tb.metalTexture = sidecarInfo.metalTexture;
                         if (msImageSampleCounts != nullptr) {
-                            const std::uint32_t slot =
-                                img.metalBinding +
-                                static_cast<std::uint32_t>(arrayElement);
-                            if (slot >= msImageSampleCounts->size()) {
+                            if (imageMetalSlot >= msImageSampleCounts->size()) {
                                 msImageSampleCounts->resize(
-                                    static_cast<std::size_t>(slot) + 1u, 0u);
+                                    static_cast<std::size_t>(imageMetalSlot) + 1u, 0u);
                             }
-                            (*msImageSampleCounts)[slot] =
+                            (*msImageSampleCounts)[imageMetalSlot] =
                                 static_cast<std::uint32_t>(
                                     std::max<GLsizei>(sidecarInfo.samples, 1));
                         }
@@ -19433,7 +19552,7 @@ struct GLContext::Impl {
                         continue;
                     }
                     tb.metalSamplerState = nullptr;  // no sampler for storage images
-                    tb.metalSlot = img.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                    tb.metalSlot = imageMetalSlot;
                     if (img.metalAtomicBufferBinding != 0xFFFFFFFFu) {
                         const std::string atomicNeedle = img.name + "_atomic";
                         const bool stageUsesImageAtomic =
@@ -19467,6 +19586,9 @@ struct GLContext::Impl {
                         }
                     }
                     outList.push_back(tb);
+                    if (hasOptionalMSReadSidecarBinding) {
+                        outList.push_back(optionalMSReadSidecarBinding);
+                    }
                     if (trace) std::fprintf(stderr, " BOUND tex=%u\n", ib.texture);
                 }
             }
@@ -42309,6 +42431,7 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
             producerWrites.push_back(
                 {GpuResourceAccess::Kind::Texture, texName,
                  kProducerStorageImageWrite});
+            appendTextureBufferImageBackingWrite(producerWrites, texName);
         }
         markGpuResourceWrites(producerWrites);
         if (drawFboName == 0) {
@@ -44247,6 +44370,7 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
             producerWrites.push_back(
                 {GpuResourceAccess::Kind::Texture, texName,
                  kProducerStorageImageWrite});
+            appendTextureBufferImageBackingWrite(producerWrites, texName);
             if (producerTokenProfile.enabled) {
                 ++producerTokenProfile.translatedDrawStorageImageWrites;
             }
@@ -44325,14 +44449,11 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                     tdi.fragmentMSL != nullptr &&
                     tdi.fragmentMSL->find("appgl_ms_sampled_sidecar_") !=
                         std::string::npos;
-                const bool shaderYFixupReadbackFlip =
-                    tdi.clipOrigin == GL_LOWER_LEFT &&
-                    clipControlShaderYFixup &&
-                    !usesMSSampledSidecars &&
-                    translatedDrawUsesFragCoordParams(
-                        tdi,
-                        hotpathInvariantMslPredicatesEnabled,
-                        hotpathInvariantMslPredicatesValidateEnabled);
+                // Clip-control Y-sign draws keep the Metal viewport in GL
+                // coordinates; _appgl_FragCoordParams only repairs the
+                // shader-visible gl_FragCoord. The produced color rows are
+                // already in the orientation glReadPixels expects.
+                const bool shaderYFixupReadbackFlip = false;
                 if (lowerLeftFramebufferReadbackFlip ||
                     shaderYFixupReadbackFlip ||
                     clipControlShaderYFixup ||

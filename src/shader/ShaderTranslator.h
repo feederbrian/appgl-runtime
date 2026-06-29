@@ -145,6 +145,8 @@ struct ShaderReflection {
         bool multisampleStorageImage = false;
         bool multisampleStorageImageArray = false;
         GLenum storageImageTarget = 0;
+        bool storageImageNonWritable = false;
+        bool storageImageNonReadable = false;
         std::uint32_t metalAtomicBufferBinding = 0xFFFFFFFFu;
         bool sparseStorageImageRead = false;
         bool sparseStorageImageWrite = false;
