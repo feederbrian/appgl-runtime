@@ -44449,11 +44449,27 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                     tdi.fragmentMSL != nullptr &&
                     tdi.fragmentMSL->find("appgl_ms_sampled_sidecar_") !=
                         std::string::npos;
-                // Clip-control Y-sign draws keep the Metal viewport in GL
-                // coordinates; _appgl_FragCoordParams only repairs the
-                // shader-visible gl_FragCoord. The produced color rows are
-                // already in the orientation glReadPixels expects.
-                const bool shaderYFixupReadbackFlip = false;
+                const bool usesMSStorageSidecars =
+                    tdi.fragmentMSL != nullptr &&
+                    (tdi.fragmentMSL->find("appgl_ms_storage_image_samples") !=
+                         std::string::npos ||
+                     tdi.fragmentMSL->find("appgl_ms_storage_read_sidecar_") !=
+                         std::string::npos ||
+                     tdi.fragmentMSL->find("appgl_ms_storage_sparse_") !=
+                         std::string::npos);
+                const bool usesShaderImageBindings =
+                    !tdi.readImageTextureNames.empty() ||
+                    !tdi.writtenImageTextureNames.empty();
+                const bool shaderYFixupReadbackFlip =
+                    tdi.clipOrigin == GL_LOWER_LEFT &&
+                    clipControlShaderYFixup &&
+                    !usesMSSampledSidecars &&
+                    !usesMSStorageSidecars &&
+                    !usesShaderImageBindings &&
+                    translatedDrawUsesFragCoordParams(
+                        tdi,
+                        hotpathInvariantMslPredicatesEnabled,
+                        hotpathInvariantMslPredicatesValidateEnabled);
                 if (lowerLeftFramebufferReadbackFlip ||
                     shaderYFixupReadbackFlip ||
                     clipControlShaderYFixup ||

@@ -1161,16 +1161,14 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_TESS_EVALUATION_ATOMIC_COUNTER_BUFFERS] = 0;
     integerLimits_[GL_MAX_TESS_EVALUATION_ATOMIC_COUNTERS] = 0;
 
-    // Image uniforms — per-stage and combined. Metal limits a shader
-    // function to eight read_write textures, so expose the GL 4.6 floor
-    // per stage instead of inviting shaders the backend cannot compile.
+    // Image uniforms — per-stage and combined.
     integerLimits_[GL_MAX_IMAGE_UNITS] = 16;
-    integerLimits_[GL_MAX_VERTEX_IMAGE_UNIFORMS] = 8;
-    integerLimits_[GL_MAX_FRAGMENT_IMAGE_UNIFORMS] = 8;
-    integerLimits_[GL_MAX_GEOMETRY_IMAGE_UNIFORMS] = 8;
-    integerLimits_[GL_MAX_TESS_CONTROL_IMAGE_UNIFORMS] = 8;
-    integerLimits_[GL_MAX_TESS_EVALUATION_IMAGE_UNIFORMS] = 8;
-    integerLimits_[GL_MAX_COMPUTE_IMAGE_UNIFORMS] = 8;
+    integerLimits_[GL_MAX_VERTEX_IMAGE_UNIFORMS] = 16;
+    integerLimits_[GL_MAX_FRAGMENT_IMAGE_UNIFORMS] = 16;
+    integerLimits_[GL_MAX_GEOMETRY_IMAGE_UNIFORMS] = 16;
+    integerLimits_[GL_MAX_TESS_CONTROL_IMAGE_UNIFORMS] = 16;
+    integerLimits_[GL_MAX_TESS_EVALUATION_IMAGE_UNIFORMS] = 16;
+    integerLimits_[GL_MAX_COMPUTE_IMAGE_UNIFORMS] = 16;
     integerLimits_[GL_MAX_COMBINED_IMAGE_UNIFORMS] = 48;
     integerLimits_[GL_MAX_COMBINED_SHADER_OUTPUT_RESOURCES] = 48;
 
