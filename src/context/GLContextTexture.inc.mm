@@ -27,8 +27,50 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
             impl_->frameGraph->flushForReadback();
         }
     }
-    auto ensureColorShadowBacking = [&](GLTextureImageLevel& img,
+    auto ensureClearShadowBacking = [&](GLTextureImageLevel& img,
                                         GLint shadowLevel) -> bool {
+        if (!isColorFormat(img.desc.internalFormat)) {
+            std::size_t nativeBpp = 0;
+            switch (img.desc.internalFormat) {
+                case GL_DEPTH_COMPONENT16:
+                case GL_DEPTH_COMPONENT:
+                case GL_DEPTH_COMPONENT24:
+                case GL_DEPTH_COMPONENT32:
+                case GL_DEPTH_COMPONENT32F:
+                case GL_DEPTH24_STENCIL8:
+                    nativeBpp = 4u;
+                    break;
+                case GL_DEPTH32F_STENCIL8:
+                    nativeBpp = 8u;
+                    break;
+                case GL_STENCIL_INDEX:
+                case GL_STENCIL_INDEX8:
+                    nativeBpp = 1u;
+                    break;
+                default:
+                    break;
+            }
+            if (nativeBpp == 0u) {
+                return true;
+            }
+            const std::size_t texelCount =
+                static_cast<std::size_t>(std::max<GLsizei>(img.desc.width, 1)) *
+                static_cast<std::size_t>(std::max<GLsizei>(img.desc.height, 1)) *
+                static_cast<std::size_t>(std::max<GLsizei>(img.desc.depth, 1));
+            const std::size_t requiredBytes = texelCount * nativeBpp;
+            if (img.nativeBpp != nativeBpp) {
+                img.nativeBpp = nativeBpp;
+                img.nativeData.assign(requiredBytes, 0);
+            } else if (img.nativeData.size() < requiredBytes) {
+                img.nativeData.resize(requiredBytes, 0);
+            }
+            img.exactReadbackData.clear();
+            img.exactReadbackBpp = 0;
+            img.mipShadowEvicted = false;
+            img.mipShadowEvictedRgba8Bytes = 0;
+            img.mipShadowEvictedNativeBytes = 0;
+            return true;
+        }
         if (!isColorFormat(img.desc.internalFormat)) {
             return true;
         }
@@ -72,7 +114,7 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
                     pushError(GL_INVALID_OPERATION);
                     return false;
                 }
-                if (!ensureColorShadowBacking(img, lvl)) {
+                if (!ensureClearShadowBacking(img, lvl)) {
                     pushError(GL_INVALID_OPERATION);
                     return false;
                 }
@@ -84,6 +126,7 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
             }
         }
         tex->colorShadowAuthoritative = true;
+        tex->depthStencilShadowAuthoritative = true;
         if (tex->metalTexture != nullptr) {
             impl_->replaceMetalTexture(*tex, texture);
         }
@@ -115,7 +158,7 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    if (!ensureColorShadowBacking(it->second, level)) {
+    if (!ensureClearShadowBacking(it->second, level)) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -127,6 +170,9 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
                             it->second.desc.depth,
                             format, type, data);
     tex->colorShadowAuthoritative = true;
+    if (!isColorFormat(internalFormat)) {
+        tex->depthStencilShadowAuthoritative = true;
+    }
     if (tex->metalTexture != nullptr) {
         impl_->replaceMetalTexture(*tex, texture);
     }
@@ -156,14 +202,14 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    // Zero-dimension sub-image is a no-op per GL spec — accept and return.
-    if (width == 0 || height == 0 || depth == 0) return true;
     const GLenum internalFormat = it->second.desc.internalFormat;
     if (isCompressedInternalFormat(internalFormat) ||
         !clearTexFormatCompatible(internalFormat, format)) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // Zero-dimension sub-image is a validated no-op per GL spec.
+    if (width == 0 || height == 0 || depth == 0) return true;
     if (impl_->frameGraph != nullptr) {
         impl_->frameGraph->flushParallelEncodeBoundary();
         const bool materialized =
@@ -173,8 +219,50 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
             impl_->frameGraph->flushForReadback();
         }
     }
-    auto ensureColorShadowBacking = [&](GLTextureImageLevel& img,
+    auto ensureClearShadowBacking = [&](GLTextureImageLevel& img,
                                         GLint shadowLevel) -> bool {
+        if (!isColorFormat(img.desc.internalFormat)) {
+            std::size_t nativeBpp = 0;
+            switch (img.desc.internalFormat) {
+                case GL_DEPTH_COMPONENT16:
+                case GL_DEPTH_COMPONENT:
+                case GL_DEPTH_COMPONENT24:
+                case GL_DEPTH_COMPONENT32:
+                case GL_DEPTH_COMPONENT32F:
+                case GL_DEPTH24_STENCIL8:
+                    nativeBpp = 4u;
+                    break;
+                case GL_DEPTH32F_STENCIL8:
+                    nativeBpp = 8u;
+                    break;
+                case GL_STENCIL_INDEX:
+                case GL_STENCIL_INDEX8:
+                    nativeBpp = 1u;
+                    break;
+                default:
+                    break;
+            }
+            if (nativeBpp == 0u) {
+                return true;
+            }
+            const std::size_t texelCount =
+                static_cast<std::size_t>(std::max<GLsizei>(img.desc.width, 1)) *
+                static_cast<std::size_t>(std::max<GLsizei>(img.desc.height, 1)) *
+                static_cast<std::size_t>(std::max<GLsizei>(img.desc.depth, 1));
+            const std::size_t requiredBytes = texelCount * nativeBpp;
+            if (img.nativeBpp != nativeBpp) {
+                img.nativeBpp = nativeBpp;
+                img.nativeData.assign(requiredBytes, 0);
+            } else if (img.nativeData.size() < requiredBytes) {
+                img.nativeData.resize(requiredBytes, 0);
+            }
+            img.exactReadbackData.clear();
+            img.exactReadbackBpp = 0;
+            img.mipShadowEvicted = false;
+            img.mipShadowEvictedRgba8Bytes = 0;
+            img.mipShadowEvictedNativeBytes = 0;
+            return true;
+        }
         if (!isColorFormat(img.desc.internalFormat)) {
             return true;
         }
@@ -214,7 +302,7 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    if (!ensureColorShadowBacking(it->second, level)) {
+    if (!ensureClearShadowBacking(it->second, level)) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -224,6 +312,9 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
                             width, height, depth,
                             format, type, data);
     tex->colorShadowAuthoritative = true;
+    if (!isColorFormat(internalFormat)) {
+        tex->depthStencilShadowAuthoritative = true;
+    }
     if (tex->metalTexture != nullptr) {
         impl_->replaceMetalTexture(*tex, texture);
     }
@@ -1299,6 +1390,10 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                 for (GLenum f : lst) if (f == fmt) return true;
                 return false;
             };
+            if (isDepthFormat(fmt) || isStencilFormat(fmt)) {
+                *params = GL_NONE;
+                return true;
+            }
             int nChannels = 4;  // default (RGBA)
             if (match({GL_R8, GL_R8_SNORM, GL_R16, GL_R16_SNORM, GL_R16F, GL_R32F,
                        GL_R8I, GL_R8UI, GL_R16I, GL_R16UI, GL_R32I, GL_R32UI})) {
@@ -3547,23 +3642,148 @@ bool GLContext::getCompressedTextureSubImage(GLuint texture, GLint level, GLint 
                                               GLsizei bufSize, void* pixels) {
     auto* obj = impl_->objects->textures().get(texture);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    if (!isCompressedInternalFormat(obj->desc.internalFormat)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     if (!validateGetTextureSubImageCommon(this, *obj, level, xoffset, yoffset, zoffset,
                                            width, height, depth)) {
         return false;
     }
     const CompressedBlockInfo block = compressedBlockInfoForInternalFormat(obj->desc.internalFormat);
-    const GLsizei blockW = block.width != 0 ? static_cast<GLsizei>(block.width) : 4;
-    const GLsizei blockH = block.height != 0 ? static_cast<GLsizei>(block.height) : 4;
-    const GLsizei blockBytes = block.bytes != 0 ? static_cast<GLsizei>(block.bytes) : 16;
-    const GLsizei blocksX = (width + blockW - 1) / blockW;
-    const GLsizei blocksY = (height + blockH - 1) / blockH;
-    const GLsizei blocksZ = std::max<GLsizei>(depth, 1);
-    const GLsizei requiredLow = blockBytes * blocksX * blocksY * blocksZ;
-    if (bufSize < requiredLow) {
+    if (block.bytes == 0 || block.width == 0 || block.height == 0) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    (void)pixels;
+    const NSUInteger blockW = block.width;
+    const NSUInteger blockH = block.height;
+    const NSUInteger blockBytes = block.bytes;
+    const NSUInteger blockX0 = static_cast<NSUInteger>(xoffset) / blockW;
+    const NSUInteger blockY0 = static_cast<NSUInteger>(yoffset) / blockH;
+    const NSUInteger blockX1 = ceilDivBlocks(
+        static_cast<NSUInteger>(xoffset + width), blockW);
+    const NSUInteger blockY1 = ceilDivBlocks(
+        static_cast<NSUInteger>(yoffset + height), blockH);
+    const NSUInteger outBlocksX = blockX1 > blockX0 ? blockX1 - blockX0 : 0u;
+    const NSUInteger outBlocksY = blockY1 > blockY0 ? blockY1 - blockY0 : 0u;
+    const NSUInteger outSlices = static_cast<NSUInteger>(std::max<GLsizei>(depth, 1));
+    const NSUInteger outRowBytes = outBlocksX * blockBytes;
+    const NSUInteger outImageBytes = outRowBytes * outBlocksY;
+    const NSUInteger requiredBytes = outImageBytes * outSlices;
+    if (bufSize < 0 || static_cast<NSUInteger>(bufSize) < requiredBytes) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (pixels == nullptr || requiredBytes == 0) {
+        return true;
+    }
+    auto* out = static_cast<std::uint8_t*>(pixels);
+    auto copyCompressedShadow =
+        [&](const GLTextureImageLevel& image, NSUInteger srcSlice,
+            NSUInteger dstSlice) -> bool {
+            if (image.compressedData.empty()) {
+                return false;
+            }
+            const NSUInteger texW = static_cast<NSUInteger>(
+                std::max<GLsizei>(image.desc.width, 1));
+            const NSUInteger texH = static_cast<NSUInteger>(
+                std::max<GLsizei>(image.desc.height, 1));
+            const NSUInteger srcBlocksX = ceilDivBlocks(texW, blockW);
+            const NSUInteger srcBlocksY = ceilDivBlocks(texH, blockH);
+            const NSUInteger srcRowBytes = srcBlocksX * blockBytes;
+            const NSUInteger srcImageBytes = srcRowBytes * srcBlocksY;
+            const NSUInteger needed =
+                (srcSlice + 1u) * srcImageBytes;
+            if (image.compressedData.size() < needed) {
+                return false;
+            }
+            for (NSUInteger row = 0; row < outBlocksY; ++row) {
+                const NSUInteger srcOffset =
+                    srcSlice * srcImageBytes +
+                    (blockY0 + row) * srcRowBytes +
+                    blockX0 * blockBytes;
+                const NSUInteger dstOffset =
+                    dstSlice * outImageBytes +
+                    row * outRowBytes;
+                if (srcOffset + outRowBytes > image.compressedData.size()) {
+                    return false;
+                }
+                std::memcpy(out + dstOffset,
+                            image.compressedData.data() + srcOffset,
+                            outRowBytes);
+            }
+            return true;
+        };
+    bool copiedFromShadow = false;
+    if (obj->target == GL_TEXTURE_CUBE_MAP) {
+        copiedFromShadow = true;
+        for (NSUInteger dz = 0; dz < outSlices; ++dz) {
+            const NSUInteger face = static_cast<NSUInteger>(zoffset) + dz;
+            if (face >= obj->cubeFaceLevels.size()) {
+                copiedFromShadow = false;
+                break;
+            }
+            const auto faceIt = obj->cubeFaceLevels[face].find(level);
+            if (faceIt == obj->cubeFaceLevels[face].end() ||
+                !copyCompressedShadow(faceIt->second, 0u, dz)) {
+                copiedFromShadow = false;
+                break;
+            }
+        }
+    } else {
+        const auto levelIt = obj->levels.find(level);
+        if (levelIt != obj->levels.end()) {
+            copiedFromShadow = true;
+            for (NSUInteger dz = 0; dz < outSlices; ++dz) {
+                const NSUInteger srcSlice =
+                    static_cast<NSUInteger>(zoffset) + dz;
+                if (!copyCompressedShadow(levelIt->second, srcSlice, dz)) {
+                    copiedFromShadow = false;
+                    break;
+                }
+            }
+        }
+    }
+    if (copiedFromShadow) {
+        return true;
+    }
+    if (obj->metalTexture != nullptr) {
+        id<MTLTexture> metalTex = (__bridge id<MTLTexture>)obj->metalTexture;
+        const NSUInteger mipLevel = static_cast<NSUInteger>(level);
+        const NSUInteger texW = mipDimensionAtLevel(metalTex.width, mipLevel);
+        const NSUInteger texH = mipDimensionAtLevel(metalTex.height, mipLevel);
+        const NSUInteger regionX = blockX0 * blockW;
+        const NSUInteger regionY = blockY0 * blockH;
+        const NSUInteger regionW = std::min<NSUInteger>(outBlocksX * blockW,
+            texW > regionX ? texW - regionX : 0u);
+        const NSUInteger regionH = std::min<NSUInteger>(outBlocksY * blockH,
+            texH > regionY ? texH - regionY : 0u);
+        MTLRegion region = MTLRegionMake2D(regionX, regionY, regionW, regionH);
+        if (regionW == 0 || regionH == 0) {
+            return true;
+        }
+        const bool sliced =
+            metalTex.textureType == MTLTextureType2DArray ||
+            metalTex.textureType == MTLTextureTypeCube ||
+            metalTex.textureType == MTLTextureTypeCubeArray;
+        for (NSUInteger dz = 0; dz < outSlices; ++dz) {
+            const NSUInteger slice = static_cast<NSUInteger>(zoffset) + dz;
+            std::uint8_t* dst = out + dz * outImageBytes;
+            if (sliced) {
+                [metalTex getBytes:dst
+                       bytesPerRow:outRowBytes
+                     bytesPerImage:outImageBytes
+                        fromRegion:region
+                       mipmapLevel:mipLevel
+                             slice:slice];
+            } else {
+                [metalTex getBytes:dst
+                       bytesPerRow:outRowBytes
+                        fromRegion:region
+                       mipmapLevel:mipLevel];
+            }
+        }
+    }
     return true;
 }
 

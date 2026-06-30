@@ -10761,10 +10761,11 @@ std::unordered_map<std::string, std::uint32_t> buildVsInputLocationOverrides(
         const std::size_t bracket = base.find('[');
         if (bracket != std::string::npos) base.resize(bracket);
         auto it = overrides.find(base);
-        if (it == overrides.end() || it->second > vi.location) {
-            overrides[base] = vi.location;
+        if (it == overrides.end() || it->second > vi.sourceLocation) {
+            overrides[base] = vi.sourceLocation;
         }
     }
+    std::unordered_map<std::string, std::uint32_t> attributeOverrides;
     for (const auto& attrib : program.attributes) {
         if (attrib.location < 0 || attrib.name.empty()) continue;
         std::string base = attrib.name;
@@ -10789,10 +10790,13 @@ std::unordered_map<std::string, std::uint32_t> buildVsInputLocationOverrides(
             }
             base.resize(bracket);
         }
-        auto it = overrides.find(base);
-        if (it == overrides.end() || it->second > baseLocation) {
-            overrides[base] = baseLocation;
+        auto it = attributeOverrides.find(base);
+        if (it == attributeOverrides.end() || it->second > baseLocation) {
+            attributeOverrides[base] = baseLocation;
         }
+    }
+    for (const auto& [base, location] : attributeOverrides) {
+        overrides[base] = location;
     }
     return overrides;
 }
@@ -13648,13 +13652,13 @@ bool runVsForVertex(
     }
 
     // Sprint 17 Day 7+ Bank-Group-H Path B Phase 3 day 5 — build the
-    // base-name → base-Location override map for the interpreter from
+    // base-name → base GL source-location override map for the interpreter from
     // `program.vertexReflection.vertexInputs` (SPIRV-Cross's reflection
     // recovers explicit `layout(location=N)` qualifiers, including for
     // arrays-of-floats whose per-element entries SPIRV-Cross splits as
     // `name[K]` in the reflection list). Key = base name (`[K]` suffix
-    // stripped); value = minimum location across split entries (i.e.,
-    // location of element [0]). The interpreter consumes this map in
+    // stripped); value = minimum sourceLocation across split entries (i.e.,
+    // GL location of element [0]). The interpreter consumes this map in
     // `initVariables` to override implicit auto-assign for variables
     // that lack `OpDecorate <var> Location <N>` in the SPIR-V (sister
     // precedent: glslang's xfb path strips those decorations from

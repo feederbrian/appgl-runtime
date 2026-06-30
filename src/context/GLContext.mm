@@ -841,15 +841,31 @@ bool isRedR8TextureShadowDropShape(const GLTextureImageLevel& image) {
         !image.nativeData.empty();
 }
 
-bool isDepth32FTextureShadowDropShape(const GLTextureImageLevel& image) {
+bool isFloatDepthTextureShadowDropShape(const GLTextureImageLevel& image) {
     const std::size_t texelCount =
         static_cast<std::size_t>(std::max<GLsizei>(image.desc.width, 1)) *
         static_cast<std::size_t>(std::max<GLsizei>(image.desc.height, 1)) *
         static_cast<std::size_t>(std::max<GLsizei>(image.desc.depth, 1));
-    return image.defined &&
-        image.desc.internalFormat == GL_DEPTH_COMPONENT32F &&
-        image.nativeBpp == sizeof(float) &&
-        image.nativeData.size() >= texelCount * sizeof(float);
+    if (!image.defined ||
+        image.nativeBpp != sizeof(float) ||
+        image.nativeData.size() < texelCount * sizeof(float)) {
+        return false;
+    }
+    switch (image.desc.internalFormat) {
+        case GL_DEPTH_COMPONENT:
+        case GL_DEPTH_COMPONENT16:
+        case GL_DEPTH_COMPONENT24:
+        case GL_DEPTH_COMPONENT32:
+        case GL_DEPTH_COMPONENT32F:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isDepth32FTextureShadowDropShape(const GLTextureImageLevel& image) {
+    return image.desc.internalFormat == GL_DEPTH_COMPONENT32F &&
+        isFloatDepthTextureShadowDropShape(image);
 }
 
 bool isDefaultTextureSwizzle(const std::array<GLint, 4>& swizzle) {
@@ -11931,6 +11947,71 @@ struct GLContext::Impl {
             return true;
         }
 
+        if (mtlFmt == MTLPixelFormatRGB9E5Float) {
+            outBpp = 4u;
+            const std::size_t totalPixels = static_cast<std::size_t>(width)
+                                          * static_cast<std::size_t>(height)
+                                          * static_cast<std::size_t>(depth);
+            nativeData.assign(totalPixels * outBpp, 0);
+            if (pixels == nullptr || totalPixels == 0) return true;
+
+            const std::size_t srcComponents = componentCountForFormat(format);
+            const std::size_t srcPixelBytes = bytesPerPixel(format, type);
+            if (srcComponents == 0 || srcPixelBytes == 0) return false;
+
+            const auto& store = state->pixelStore();
+            const bool unpackSwapBytes = (store.unpackSwapBytes == GL_TRUE);
+            const std::size_t sourceWidth =
+                static_cast<std::size_t>(store.unpackRowLength > 0 ? store.unpackRowLength : width);
+            const std::size_t sourceHeight =
+                static_cast<std::size_t>(store.unpackImageHeight > 0 ? store.unpackImageHeight : height);
+            const std::size_t rowBytes =
+                alignByteCount(sourceWidth * srcPixelBytes, store.unpackAlignment);
+            const std::size_t imageBytes = rowBytes * sourceHeight;
+            const std::size_t sourceOffset =
+                unpackSkipImages(store) * imageBytes
+                + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
+                + static_cast<std::size_t>(store.unpackSkipPixels) * srcPixelBytes;
+            const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
+
+            for (GLsizei z = 0; z < depth; ++z) {
+                for (GLsizei y = 0; y < height; ++y) {
+                    const std::uint8_t* srcRow =
+                        source + static_cast<std::size_t>(z) * imageBytes
+                               + static_cast<std::size_t>(y) * rowBytes;
+                    std::uint8_t* dstRow = nativeData.data()
+                        + (static_cast<std::size_t>(z) * static_cast<std::size_t>(height)
+                           + static_cast<std::size_t>(y))
+                          * static_cast<std::size_t>(width) * outBpp;
+                    for (GLsizei x = 0; x < width; ++x) {
+                        const std::uint8_t* pixel =
+                            srcRow + static_cast<std::size_t>(x) * srcPixelBytes;
+                        double comps[4] = {0.0, 0.0, 0.0, 1.0};
+                        if (normalizeCompatUpload) {
+                            readCompatUploadSourceRGBA(pixel, format, type,
+                                                       false, unpackSwapBytes, comps);
+                            applyCompatUploadInternalBase(internalFormat, comps);
+                        } else if (format == GL_BGR || format == GL_BGRA) {
+                            if (srcComponents >= 3) {
+                                comps[0] = readSourceComponentDouble(pixel, type, 2, false, unpackSwapBytes);
+                                comps[1] = readSourceComponentDouble(pixel, type, 1, false, unpackSwapBytes);
+                                comps[2] = readSourceComponentDouble(pixel, type, 0, false, unpackSwapBytes);
+                            }
+                        } else {
+                            for (std::size_t c = 0; c < srcComponents && c < 3; ++c) {
+                                comps[c] = readSourceComponentDouble(pixel, type, c, false, unpackSwapBytes);
+                            }
+                        }
+                        const std::uint32_t word =
+                            packUF_5_9_9_9_REV(comps[0], comps[1], comps[2]);
+                        std::memcpy(dstRow + static_cast<std::size_t>(x) * outBpp,
+                                    &word, sizeof(word));
+                    }
+                }
+            }
+            return true;
+        }
+
         // RGBA8Unorm is already handled perfectly by the rgba8 path.
         if (mtlFmt == MTLPixelFormatRGBA8Unorm) return false;
 
@@ -12009,6 +12090,9 @@ struct GLContext::Impl {
                         for (std::size_t c = 0; c < srcComponents && c < 4; ++c) {
                             comps[c] = readSourceComponentDouble(pixel, type, c, asInteger, unpackSwapBytes);
                         }
+                    }
+                    if (isRGBFamilyWithoutAlpha(internalFormat)) {
+                        comps[3] = 1.0;
                     }
 
                     // Write to native format.
@@ -12120,6 +12204,7 @@ struct GLContext::Impl {
              || format == GL_BLUE_INTEGER || format == GL_RG_INTEGER
              || format == GL_RGB_INTEGER || format == GL_RGBA_INTEGER
              || format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER);
+        const bool forceRGBAlphaOne = isRGBFamilyWithoutAlpha(internalFormat);
         auto packedToU8 = [&](std::uint32_t maskedVal, std::uint32_t maskMax) -> std::uint8_t {
             if (formatIsInteger) {
                 return static_cast<std::uint8_t>(
@@ -12353,6 +12438,9 @@ struct GLContext::Impl {
                         rgba8[destIndex + 1] = components > 1 ? readComponentAsU8(pixel, type, 1, unpackSwapBytes) : 0;
                         rgba8[destIndex + 2] = components > 2 ? readComponentAsU8(pixel, type, 2, unpackSwapBytes) : 0;
                         rgba8[destIndex + 3] = components > 3 ? readComponentAsU8(pixel, type, 3, unpackSwapBytes) : 255;
+                    }
+                    if (forceRGBAlphaOne) {
+                        rgba8[destIndex + 3] = 255u;
                     }
                 }
             }
@@ -14970,6 +15058,7 @@ struct GLContext::Impl {
     static bool depthStencilSwizzleProxyTarget(GLenum target) {
         return target == GL_TEXTURE_1D ||
                target == GL_TEXTURE_2D ||
+               target == GL_TEXTURE_RECTANGLE ||
                target == GL_TEXTURE_1D_ARRAY ||
                target == GL_TEXTURE_2D_ARRAY ||
                target == GL_TEXTURE_CUBE_MAP_ARRAY;
@@ -14999,6 +15088,10 @@ struct GLContext::Impl {
         const MTLPixelFormat proxyFormat = depthStencilSwizzleProxyFormat(texObj);
         if (proxyFormat == MTLPixelFormatInvalid) {
             return false;
+        }
+        if (proxyFormat == MTLPixelFormatR32Float &&
+            isDepthFormat(texObj.desc.internalFormat)) {
+            return true;
         }
         return !isDefaultSwizzle(texObj.params.swizzle) ||
                proxyFormat == MTLPixelFormatR8Uint;
@@ -18384,7 +18477,7 @@ struct GLContext::Impl {
                     }
                     continue;
                 }
-                if (texObject->desc.internalFormat == GL_DEPTH_COMPONENT32F) {
+                if (isDepthFormat(texObject->desc.internalFormat)) {
                     auto levelIt = texObject->levels.find(0);
                     if (levelIt == texObject->levels.end() ||
                         !levelIt->second.defined) {
@@ -27386,6 +27479,12 @@ struct GLContext::Impl {
                     vals[c] = readSrcComponent(srcPixel, readComp);
                 }
                 remapLegacyAttachmentReadback(vals);
+                if (srcType == SrcType::SNorm8 ||
+                    srcType == SrcType::SNorm16) {
+                    for (double& v : vals) {
+                        v = std::clamp(v, 0.0, 1.0);
+                    }
+                }
 
                 // Packed-type encoding: one packed word per pixel rather
                 // than per-component. GL 4.6 §8.4.4.4 + Table 8.8 define
@@ -45925,6 +46024,70 @@ static bool clearTexFormatCompatible(GLenum internalFormat, GLenum format) {
 
 }  // namespace
 
+static bool writeSimpleDepthComponent(std::uint8_t* dst,
+                                      GLenum type,
+                                      GLfloat depth,
+                                      bool packSwapBytes) {
+    if (dst == nullptr) {
+        return false;
+    }
+    const GLfloat d = std::clamp(depth, 0.0f, 1.0f);
+    std::size_t bytes = 0;
+    switch (type) {
+        case GL_UNSIGNED_BYTE: {
+            const std::uint8_t v = static_cast<std::uint8_t>(d * 255.0f + 0.5f);
+            std::memcpy(dst, &v, sizeof(v));
+            bytes = sizeof(v);
+            break;
+        }
+        case GL_BYTE: {
+            const std::int8_t v = static_cast<std::int8_t>(d * 127.0f + 0.5f);
+            std::memcpy(dst, &v, sizeof(v));
+            bytes = sizeof(v);
+            break;
+        }
+        case GL_UNSIGNED_SHORT: {
+            const std::uint16_t v = static_cast<std::uint16_t>(d * 65535.0f + 0.5f);
+            std::memcpy(dst, &v, sizeof(v));
+            bytes = sizeof(v);
+            break;
+        }
+        case GL_SHORT: {
+            const std::int16_t v = static_cast<std::int16_t>(d * 32767.0f + 0.5f);
+            std::memcpy(dst, &v, sizeof(v));
+            bytes = sizeof(v);
+            break;
+        }
+        case GL_UNSIGNED_INT: {
+            const double scaled = static_cast<double>(d) * 4294967295.0 + 0.5;
+            const std::uint32_t v = d >= 1.0f
+                ? 0xFFFFFFFFu
+                : static_cast<std::uint32_t>(scaled);
+            std::memcpy(dst, &v, sizeof(v));
+            bytes = sizeof(v);
+            break;
+        }
+        case GL_INT: {
+            const std::int32_t v = static_cast<std::int32_t>(
+                static_cast<double>(d) * 2147483647.0 + 0.5);
+            std::memcpy(dst, &v, sizeof(v));
+            bytes = sizeof(v);
+            break;
+        }
+        case GL_FLOAT: {
+            std::memcpy(dst, &d, sizeof(d));
+            bytes = sizeof(d);
+            break;
+        }
+        default:
+            return false;
+    }
+    if (packSwapBytes && bytes > 1) {
+        std::reverse(dst, dst + bytes);
+    }
+    return true;
+}
+
 static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
                                          const GLTextureImageLevel& image,
                                          GLenum format,
@@ -45949,6 +46112,9 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
         image.rgba8.empty() &&
         object.depthStencilShadowAuthoritative &&
         isDepth32FTextureShadowDropShape(image);
+    const bool useNativeFloatDepthAsDepth =
+        format == GL_DEPTH_COMPONENT &&
+        isFloatDepthTextureShadowDropShape(image);
     if (dstPixelBytes == 0 || dstBpc == 0 || dstComponents == 0) {
         return false;
     }
@@ -45981,7 +46147,7 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
         sourceBytes = image.nativeData.data();
         sourceBpp = image.nativeBpp;
         sourceByteCount = image.nativeData.size();
-    } else if (useNativeDepth32FAsRgba8) {
+    } else if (useNativeDepth32FAsRgba8 || useNativeFloatDepthAsDepth) {
         sourceBytes = image.nativeData.data();
         sourceBpp = image.nativeBpp;
         sourceByteCount = image.nativeData.size();
@@ -46054,7 +46220,8 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
     auto* dstBase = static_cast<std::uint8_t*>(pixels) + dstSkipBytes;
     const bool packSwapBytes = (packStore.packSwapBytes == GL_TRUE);
     const bool applyDepthYFlip =
-        useNativeDepth32FAsRgba8 &&
+        (useNativeDepth32FAsRgba8 || useNativeFloatDepthAsDepth) &&
+        object.depthStencilShadowAuthoritative &&
         yFlipDepthReadback &&
         object.target != GL_TEXTURE_1D_ARRAY;
     for (GLsizei z = 0; z < texD; ++z) {
@@ -46066,7 +46233,7 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
             std::uint8_t* dstRow = dstBase +
                 static_cast<std::size_t>(z) * dstSliceBytes +
                 static_cast<std::size_t>(y) * dstRowBytes;
-            if (useNativeDepth32FAsRgba8) {
+            if (useNativeDepth32FAsRgba8 || useNativeFloatDepthAsDepth) {
                 const GLsizei sourceY = applyDepthYFlip
                     ? (texH - 1 - y)
                     : y;
@@ -46086,13 +46253,21 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
                     }
                     std::uint8_t* dstPixel =
                         dstRow + static_cast<std::size_t>(x) * dstPixelBytes;
-                    const GLfloat clamped =
-                        std::clamp(depthValue, 0.0f, 1.0f);
-                    dstPixel[0] = static_cast<std::uint8_t>(
-                        clamped * 255.0f + 0.5f);
-                    dstPixel[1] = 0u;
-                    dstPixel[2] = 0u;
-                    dstPixel[3] = 255u;
+                    if (useNativeDepth32FAsRgba8) {
+                        const GLfloat clamped =
+                            std::clamp(depthValue, 0.0f, 1.0f);
+                        dstPixel[0] = static_cast<std::uint8_t>(
+                            clamped * 255.0f + 0.5f);
+                        dstPixel[1] = 0u;
+                        dstPixel[2] = 0u;
+                        dstPixel[3] = 255u;
+                    } else if (!writeSimpleDepthComponent(
+                                   dstPixel,
+                                   type,
+                                   depthValue,
+                                   packSwapBytes)) {
+                        return false;
+                    }
                 }
                 continue;
             }

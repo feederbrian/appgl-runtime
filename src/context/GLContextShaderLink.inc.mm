@@ -6266,7 +6266,31 @@ bool GLContext::linkProgram(GLuint program) {
             if (programObject->vertexReflection.vertexInputs.empty()) {
                 return;
             }
+            auto resolvedAttributeCovers = [&](GLint location,
+                                               const std::string& name) -> bool {
+                for (const auto& attr : programObject->attributes) {
+                    if (!name.empty() && attr.name == name) {
+                        return true;
+                    }
+                    if (attr.location < 0 || location < 0) {
+                        continue;
+                    }
+                    const GLuint slotCount =
+                        vertexInputLocationSlotCount(attr.type, attr.arraySize);
+                    const GLint begin = attr.location;
+                    const GLint end = begin + static_cast<GLint>(std::max<GLuint>(1u, slotCount));
+                    if (location >= begin && location < end) {
+                        return true;
+                    }
+                }
+                return false;
+            };
             for (const auto& input : programObject->vertexReflection.vertexInputs) {
+                const GLint inputLocation =
+                    static_cast<GLint>(input.sourceLocation);
+                if (resolvedAttributeCovers(inputLocation, input.name)) {
+                    continue;
+                }
                 const auto attrExists = std::find_if(
                     programObject->attributes.begin(),
                     programObject->attributes.end(),
@@ -6274,13 +6298,13 @@ bool GLContext::linkProgram(GLuint program) {
                         if (!input.name.empty() && attr.name == input.name) {
                             return true;
                         }
-                        return attr.location == static_cast<GLint>(input.sourceLocation);
+                        return attr.location == inputLocation;
                     });
                 if (attrExists == programObject->attributes.end()) {
                     GLProgramAttributeInfo attr;
                     attr.name = input.name;
                     attr.type = input.type;
-                    attr.location = static_cast<GLint>(input.sourceLocation);
+                    attr.location = inputLocation;
                     attr.arraySize = 1;
                     attr.isArray = false;
                     programObject->attributes.push_back(std::move(attr));
@@ -6293,7 +6317,7 @@ bool GLContext::linkProgram(GLuint program) {
                         if (!input.name.empty() && entry.name == input.name) {
                             return true;
                         }
-                        return entry.location == static_cast<GLint>(input.sourceLocation) &&
+                        return entry.location == inputLocation &&
                                entry.referencedBy == kBitVertex;
                     });
                 if (resourceExists != programObject->resourceInputs.end()) {
@@ -6302,7 +6326,7 @@ bool GLContext::linkProgram(GLuint program) {
                 GLProgramResourceEntry entry;
                 entry.name = input.name;
                 entry.type = input.type;
-                entry.location = static_cast<GLint>(input.sourceLocation);
+                entry.location = inputLocation;
                 entry.arraySize = 1;
                 entry.referencedBy = kBitVertex;
                 programObject->resourceInputs.push_back(std::move(entry));

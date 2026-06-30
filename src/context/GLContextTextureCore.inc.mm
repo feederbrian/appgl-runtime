@@ -1631,6 +1631,12 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
                          effectiveTarget == GL_TEXTURE_CUBE_MAP_ARRAY) ? depth : 1;
     image.desc.levels = object->desc.levels;
     image.defined = true;
+    if (data != nullptr && imageSize > 0) {
+        const auto* bytes = static_cast<const std::uint8_t*>(data);
+        image.compressedData.assign(bytes, bytes + imageSize);
+    } else {
+        image.compressedData.clear();
+    }
     if (cubeFace >= 0) {
         object->cubeFaceLevels[static_cast<std::size_t>(cubeFace)][level] = image;
         object->levels[level] = image;

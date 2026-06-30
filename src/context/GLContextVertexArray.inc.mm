@@ -1010,17 +1010,35 @@ bool GLContext::vertexArrayElementBuffer(GLuint vaobj, GLuint buffer) {
 }
 
 bool GLContext::enableVertexArrayAttrib(GLuint vaobj, GLuint index) {
-    DSA_VAO_WRAP(vaobj, {
-        bool ok = enableVertexAttribArray(index, true);
-        return ok;
-    })
+    DSA_VAO_CHECK(vaobj)
+    if (index >= _vao->attributes.size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    _vao->instantiated = true;
+    if (_vao->attributes[index].enabled) {
+        return true;
+    }
+    _vao->attributes[index].enabled = GL_TRUE;
+    markVertexDescriptorDirty(*_vao);
+    impl_->state->markDirty(DirtyBit::VertexInput);
+    return true;
 }
 
 bool GLContext::disableVertexArrayAttrib(GLuint vaobj, GLuint index) {
-    DSA_VAO_WRAP(vaobj, {
-        bool ok = enableVertexAttribArray(index, false);
-        return ok;
-    })
+    DSA_VAO_CHECK(vaobj)
+    if (index >= _vao->attributes.size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    _vao->instantiated = true;
+    if (!_vao->attributes[index].enabled) {
+        return true;
+    }
+    _vao->attributes[index].enabled = GL_FALSE;
+    markVertexDescriptorDirty(*_vao);
+    impl_->state->markDirty(DirtyBit::VertexInput);
+    return true;
 }
 
 bool GLContext::getVertexArrayiv(GLuint vaobj, GLenum pname, GLint* param) {

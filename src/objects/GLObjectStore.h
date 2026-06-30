@@ -233,6 +233,10 @@ struct GLTextureImageLevel {
     // the rgba8 shadow in that case.
     std::vector<std::uint8_t> nativeData;
     std::size_t nativeBpp = 0; // bytes-per-pixel for nativeData (0 = not available)
+    // Tight block-compressed payload for GL compressed texture uploads.
+    // Kept as CPU-side source-of-truth for readback paths whose Metal
+    // backing is intentionally partial (notably cube faces).
+    std::vector<std::uint8_t> compressedData;
     // Exact source-layout bytes retained only for compat-profile legacy
     // upload/download tests. Unlike nativeData, this is never used as the
     // Metal upload source.

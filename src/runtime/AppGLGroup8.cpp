@@ -597,6 +597,14 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                 for (GLenum f : lst) if (f == fmt) return true;
                 return false;
             };
+            if (match({GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT16,
+                       GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT32,
+                       GL_DEPTH_COMPONENT32F, GL_DEPTH_STENCIL,
+                       GL_DEPTH24_STENCIL8, GL_DEPTH32F_STENCIL8,
+                       GL_STENCIL_INDEX, GL_STENCIL_INDEX8})) {
+                *params = GL_NONE;
+                break;
+            }
             int nChannels = 4;
             if (match({GL_R8, GL_R8_SNORM, GL_R16, GL_R16_SNORM, GL_R16F, GL_R32F,
                        GL_R8I, GL_R8UI, GL_R16I, GL_R16UI, GL_R32I, GL_R32UI})) {
