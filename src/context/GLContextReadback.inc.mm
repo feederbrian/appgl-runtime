@@ -437,9 +437,6 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
             }
         }
         auto fboColorAttachmentPrefersRGBA8Shadow = [&]() -> bool {
-            if (!appglCompatProfileEnabled()) {
-                return false;
-            }
             const GLuint fbName = impl_->state->boundReadFramebuffer();
             const GLFramebufferObject* fb =
                 impl_->objects->framebuffers().get(fbName);
@@ -449,6 +446,20 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
             const GLFramebufferAttachment* att =
                 impl_->framebufferAttachment(*fb, fb->readBuffer);
             if (att == nullptr) {
+                return false;
+            }
+            if (att->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+                const GLRenderbufferObject* rb =
+                    impl_->objects->renderbuffers().get(att->object);
+                if (rb != nullptr &&
+                    Impl::isIntegerInternalFormat(rb->internalFormat)) {
+                    return false;
+                }
+                return rb != nullptr && rb->storageDefined &&
+                       rb->colorShadowAuthoritative &&
+                       !rb->rgba8.empty();
+            }
+            if (!appglCompatProfileEnabled()) {
                 return false;
             }
             if (att->kind == GLFramebufferAttachment::Kind::Texture) {
@@ -463,13 +474,6 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
                 return level != texture->levels.end() &&
                        level->second.defined &&
                        !level->second.rgba8.empty();
-            }
-            if (att->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
-                const GLRenderbufferObject* rb =
-                    impl_->objects->renderbuffers().get(att->object);
-                return rb != nullptr && rb->storageDefined &&
-                       rb->colorShadowAuthoritative &&
-                       !rb->rgba8.empty();
             }
             return false;
         };

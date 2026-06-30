@@ -9796,7 +9796,7 @@ struct GLContext::Impl {
             }
             if (GLRenderbufferObject* rb =
                     objects->renderbuffers().get(attachment.object)) {
-                rb->colorShadowAuthoritative = false;
+                invalidateRenderbufferColorShadow(*rb);
             }
         }
     }
@@ -10296,6 +10296,106 @@ struct GLContext::Impl {
         }
     }
 
+    void clearRenderbufferColorShadowCoverage(GLRenderbufferObject& object) const {
+        object.colorShadowCoverage.clear();
+        object.colorShadowCoveredPixels = 0;
+    }
+
+    void invalidateRenderbufferColorShadow(GLRenderbufferObject& object) const {
+        object.rgba8ShadowClearPending = false;
+        object.colorShadowAuthoritative = false;
+        clearRenderbufferColorShadowCoverage(object);
+    }
+
+    bool ensureRenderbufferColorShadowCoverage(GLRenderbufferObject& object) const {
+        if (object.width <= 0 || object.height <= 0) {
+            clearRenderbufferColorShadowCoverage(object);
+            return false;
+        }
+        const std::size_t pixelCount =
+            static_cast<std::size_t>(object.width) *
+            static_cast<std::size_t>(object.height);
+        if (object.colorShadowCoverage.size() != pixelCount) {
+            object.colorShadowCoverage.assign(pixelCount, 0);
+            object.colorShadowCoveredPixels = 0;
+        }
+        return true;
+    }
+
+    void markRenderbufferColorShadowCoverage(GLRenderbufferObject& object,
+                                             GLint minX,
+                                             GLint maxX,
+                                             GLint minStorageY,
+                                             GLint maxStorageY) const {
+        if (!ensureRenderbufferColorShadowCoverage(object)) {
+            return;
+        }
+        minX = std::max<GLint>(0, minX);
+        maxX = std::min<GLint>(object.width, maxX);
+        minStorageY = std::max<GLint>(0, minStorageY);
+        maxStorageY = std::min<GLint>(object.height, maxStorageY);
+        if (minX >= maxX || minStorageY >= maxStorageY) {
+            return;
+        }
+        for (GLint y = minStorageY; y < maxStorageY; ++y) {
+            for (GLint x = minX; x < maxX; ++x) {
+                const std::size_t idx =
+                    static_cast<std::size_t>(y) *
+                    static_cast<std::size_t>(object.width) +
+                    static_cast<std::size_t>(x);
+                if (object.colorShadowCoverage[idx] == 0) {
+                    object.colorShadowCoverage[idx] = 1;
+                    ++object.colorShadowCoveredPixels;
+                }
+            }
+        }
+        const std::size_t pixelCount =
+            static_cast<std::size_t>(object.width) *
+            static_cast<std::size_t>(object.height);
+        if (object.colorShadowCoveredPixels >= pixelCount) {
+            object.colorShadowAuthoritative = true;
+            clearRenderbufferColorShadowCoverage(object);
+        }
+    }
+
+    bool renderbufferColorShadowCoversReadRect(
+        const GLRenderbufferObject& object,
+        GLint x,
+        GLint y,
+        GLsizei width,
+        GLsizei height,
+        bool yFlipCpuReadback) const {
+        if (object.colorShadowAuthoritative) {
+            return true;
+        }
+        if (object.colorShadowCoverage.empty() ||
+            object.colorShadowCoverage.size() <
+                static_cast<std::size_t>(object.width) *
+                static_cast<std::size_t>(object.height)) {
+            return false;
+        }
+        for (GLsizei row = 0; row < height; ++row) {
+            for (GLsizei col = 0; col < width; ++col) {
+                const GLint srcX = x + col;
+                const GLint glY = y + row;
+                const GLint srcY = yFlipCpuReadback
+                    ? (object.height - 1 - glY) : glY;
+                if (srcX < 0 || srcY < 0 ||
+                    srcX >= object.width || srcY >= object.height) {
+                    return false;
+                }
+                const std::size_t idx =
+                    static_cast<std::size_t>(srcY) *
+                    static_cast<std::size_t>(object.width) +
+                    static_cast<std::size_t>(srcX);
+                if (object.colorShadowCoverage[idx] == 0) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     void releaseRenderbufferStorage(GLRenderbufferObject& object) {
         drainPendingGpuProducers(object);
         releaseRetainedMetalObject(object.metalTexture);
@@ -10308,6 +10408,7 @@ struct GLContext::Impl {
         object.rgba8ShadowClearPending = false;
         object.rgba8ShadowClearValue = {0, 0, 0, 0};
         object.colorShadowAuthoritative = false;
+        clearRenderbufferColorShadowCoverage(object);
         object.nativeData.clear();
         object.nativeBpp = 0;
         object.depth32.clear();
@@ -16530,8 +16631,12 @@ struct GLContext::Impl {
         }
 
         const NSUInteger depthBpp = 4;
-        const NSUInteger depthRowBytes = static_cast<NSUInteger>(width) * depthBpp;
-        const NSUInteger depthImageBytes = depthRowBytes * static_cast<NSUInteger>(height);
+        const NSUInteger depthTightRowBytes =
+            static_cast<NSUInteger>(width) * depthBpp;
+        const NSUInteger depthRowBytes = static_cast<NSUInteger>(
+            alignByteCount(static_cast<std::size_t>(depthTightRowBytes), 256));
+        const NSUInteger depthImageBytes =
+            depthRowBytes * static_cast<NSUInteger>(height);
         std::vector<std::uint8_t> depthBytes(depthImageBytes, 0);
         for (GLsizei row = 0; row < height; ++row) {
             std::uint8_t* dstRow = depthBytes.data()
@@ -16606,15 +16711,19 @@ struct GLContext::Impl {
             return false;
         }
 
-        const NSUInteger stencilRowBytes = static_cast<NSUInteger>(width);
-        const NSUInteger stencilImageBytes = stencilRowBytes * static_cast<NSUInteger>(height);
+        const NSUInteger stencilTightRowBytes = static_cast<NSUInteger>(width);
+        const NSUInteger stencilRowBytes = static_cast<NSUInteger>(
+            alignByteCount(static_cast<std::size_t>(stencilTightRowBytes), 256));
+        const NSUInteger stencilImageBytes =
+            stencilRowBytes * static_cast<NSUInteger>(height);
         std::vector<std::uint8_t> stencilBytes(stencilImageBytes, 0);
         for (GLsizei row = 0; row < height; ++row) {
             const std::uint8_t* srcRow = pixels
                 + static_cast<std::size_t>(row) * static_cast<std::size_t>(width);
             std::uint8_t* dstRow = stencilBytes.data()
                 + static_cast<std::size_t>(height - 1 - row) * stencilRowBytes;
-            std::memcpy(dstRow, srcRow, static_cast<std::size_t>(width));
+            std::memcpy(dstRow, srcRow,
+                        static_cast<std::size_t>(stencilTightRowBytes));
         }
 
         id<MTLBuffer> staging = [device newBufferWithBytes:stencilBytes.data()
@@ -22427,6 +22536,123 @@ struct GLContext::Impl {
     template <typename IntT>
     bool clearColorAttachmentIntImpl(const GLFramebufferAttachment& attachment,
                                       const IntT value[4]) {
+        auto integerComponentCount = [](GLenum internalFormat) -> std::size_t {
+            switch (internalFormat) {
+                case GL_R8I: case GL_R8UI: case GL_R16I: case GL_R16UI:
+                case GL_R32I: case GL_R32UI:
+                    return 1;
+                case GL_RG8I: case GL_RG8UI: case GL_RG16I: case GL_RG16UI:
+                case GL_RG32I: case GL_RG32UI:
+                    return 2;
+                case GL_RGB8I: case GL_RGB8UI: case GL_RGB16I: case GL_RGB16UI:
+                case GL_RGB32I: case GL_RGB32UI:
+                    return 3;
+                case GL_RGB10_A2UI:
+                    return 4;
+                default:
+                    return 4;
+            }
+        };
+        auto buildIntegerPattern =
+            [&](GLenum internalFormat,
+                std::size_t nativeBpp,
+                std::vector<std::uint8_t>& pattern) -> bool {
+            if (nativeBpp == 0) {
+                return false;
+            }
+            pattern.assign(nativeBpp, 0);
+            if (internalFormat == GL_RGB10_A2UI) {
+                if (nativeBpp != 4) {
+                    return false;
+                }
+                auto component = [&](std::size_t c,
+                                     std::uint32_t maxValue) {
+                    std::uint64_t raw = 0;
+                    if (std::numeric_limits<IntT>::is_signed) {
+                        const long long signedValue =
+                            static_cast<long long>(value[c]);
+                        raw = signedValue < 0
+                            ? 0ull
+                            : static_cast<std::uint64_t>(signedValue);
+                    } else {
+                        raw = static_cast<std::uint64_t>(value[c]);
+                    }
+                    return static_cast<std::uint32_t>(
+                        std::min<std::uint64_t>(raw, maxValue));
+                };
+                const std::uint32_t packed =
+                    (component(0, 1023u) & 0x3FFu) |
+                    ((component(1, 1023u) & 0x3FFu) << 10) |
+                    ((component(2, 1023u) & 0x3FFu) << 20) |
+                    ((component(3, 3u) & 0x003u) << 30);
+                std::memcpy(pattern.data(), &packed, sizeof(packed));
+                return true;
+            }
+            const std::size_t components =
+                integerComponentCount(internalFormat);
+            if (components == 0 || nativeBpp % components != 0) {
+                return false;
+            }
+            const std::size_t bytesPerComponent = nativeBpp / components;
+            if (bytesPerComponent == 0 || bytesPerComponent > 4) {
+                return false;
+            }
+            for (std::size_t c = 0; c < components && c < 4; ++c) {
+                const std::uint64_t v = std::numeric_limits<IntT>::is_signed
+                    ? static_cast<std::uint64_t>(
+                        static_cast<long long>(value[c]))
+                    : static_cast<std::uint64_t>(value[c]);
+                for (std::size_t b = 0; b < bytesPerComponent; ++b) {
+                    pattern[c * bytesPerComponent + b] =
+                        static_cast<std::uint8_t>((v >> (b * 8)) & 0xFFu);
+                }
+            }
+            return true;
+        };
+
+        if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+            GLRenderbufferObject* renderbuffer =
+                objects->renderbuffers().get(attachment.object);
+            if (renderbuffer == nullptr || !renderbuffer->storageDefined ||
+                !isColorFormat(renderbuffer->internalFormat) ||
+                !isIntegerInternalFormat(renderbuffer->internalFormat) ||
+                renderbuffer->width <= 0 || renderbuffer->height <= 0) {
+                return false;
+            }
+            if (renderbuffer->nativeBpp == 0) {
+                const MTLPixelFormat mtlFormat =
+                    metalRenderbufferFormat(renderbuffer->internalFormat);
+                const NativeFormatInfo info = nativeFormatInfo(mtlFormat);
+                if (info.bytesPerPixel <= 0) {
+                    return false;
+                }
+                renderbuffer->nativeBpp =
+                    static_cast<std::size_t>(info.bytesPerPixel);
+            }
+            std::vector<std::uint8_t> pattern;
+            if (!buildIntegerPattern(renderbuffer->internalFormat,
+                                     renderbuffer->nativeBpp,
+                                     pattern)) {
+                return false;
+            }
+            const std::size_t pixelCount =
+                static_cast<std::size_t>(renderbuffer->width) *
+                static_cast<std::size_t>(renderbuffer->height);
+            const std::size_t required = pixelCount * renderbuffer->nativeBpp;
+            if (renderbuffer->nativeData.size() < required) {
+                renderbuffer->nativeData.resize(required, 0);
+            }
+            for (std::size_t p = 0; p < pixelCount; ++p) {
+                std::memcpy(renderbuffer->nativeData.data() +
+                                p * renderbuffer->nativeBpp,
+                            pattern.data(),
+                            renderbuffer->nativeBpp);
+            }
+            renderbuffer->rgba8ShadowClearPending = false;
+            renderbuffer->colorShadowAuthoritative = true;
+            clearRenderbufferColorShadowCoverage(*renderbuffer);
+            return true;
+        }
         if (attachment.kind != GLFramebufferAttachment::Kind::Texture) {
             return false;
         }
@@ -22450,34 +22676,12 @@ struct GLContext::Impl {
         if (firstLayer < 0 || firstLayer >= sourceDepth || lastLayer > sourceDepth) {
             return false;
         }
-        // Determine component count / per-component width from nativeBpp.
-        // Integer formats are tightly packed: 4B (R8I), 8B (RG8I/R16I/R32I_single),
-        // 16B (RGBA32I). Per-component bytes derive from nativeBpp /
-        // components. We can infer components from the internal format.
-        std::size_t components = 4;
-        switch (image.desc.internalFormat) {
-            case GL_R8I: case GL_R8UI: case GL_R16I: case GL_R16UI:
-            case GL_R32I: case GL_R32UI:
-                components = 1; break;
-            case GL_RG8I: case GL_RG8UI: case GL_RG16I: case GL_RG16UI:
-            case GL_RG32I: case GL_RG32UI:
-                components = 2; break;
-            case GL_RGB8I: case GL_RGB8UI: case GL_RGB16I: case GL_RGB16UI:
-            case GL_RGB32I: case GL_RGB32UI:
-                components = 3; break;
-            default:
-                components = 4; break;  // RGBA*I, etc.
-        }
-        const std::size_t bytesPerComponent = image.nativeBpp / components;
-        if (bytesPerComponent == 0 || bytesPerComponent > 4) return false;
         // Build the per-pixel pattern at the native bit-width.
-        std::vector<std::uint8_t> pattern(image.nativeBpp);
-        for (std::size_t c = 0; c < components; ++c) {
-            std::uint64_t v = static_cast<std::uint64_t>(value[c]);
-            for (std::size_t b = 0; b < bytesPerComponent; ++b) {
-                pattern[c * bytesPerComponent + b] =
-                    static_cast<std::uint8_t>((v >> (b * 8)) & 0xFF);
-            }
+        std::vector<std::uint8_t> pattern;
+        if (!buildIntegerPattern(image.desc.internalFormat,
+                                 image.nativeBpp,
+                                 pattern)) {
+            return false;
         }
         // Stamp across every pixel of every selected layer.
         const std::size_t pixelsPerLayer =
@@ -22579,8 +22783,7 @@ struct GLContext::Impl {
                     mipmapLevel:0
                       withBytes:renderbuffer.rgba8.data()
                     bytesPerRow:static_cast<NSUInteger>(renderbuffer.width) * 4u];
-        renderbuffer.colorShadowAuthoritative = false;
-        renderbuffer.rgba8ShadowClearPending = false;
+        invalidateRenderbufferColorShadow(renderbuffer);
         return true;
     }
 
@@ -23439,7 +23642,51 @@ struct GLContext::Impl {
                             0,
                             0)) {
                         renderbuffer->rgba8ShadowClearPending = false;
-                        renderbuffer->colorShadowAuthoritative = false;
+                        const bool keepResolveShadow =
+                            renderbufferPixels <= 16u * 1024u * 1024u;
+                        if (keepResolveShadow) {
+                            const std::size_t rbBytes =
+                                static_cast<std::size_t>(renderbuffer->width) *
+                                static_cast<std::size_t>(renderbuffer->height) *
+                                4u;
+                            if (renderbuffer->rgba8.size() < rbBytes) {
+                                renderbuffer->rgba8.assign(rbBytes, 0);
+                            }
+                            for (std::size_t offset = 0;
+                                 offset + 4u <= rbBytes;
+                                 offset += 4u) {
+                                std::memcpy(renderbuffer->rgba8.data() + offset,
+                                            rgba,
+                                            4u);
+                            }
+                            if (renderbuffer->nativeBpp > 0) {
+                                const MTLPixelFormat nativeFormat =
+                                    metalRenderbufferFormat(
+                                        renderbuffer->internalFormat);
+                                const std::size_t nativeBytes =
+                                    renderbufferPixels *
+                                    renderbuffer->nativeBpp;
+                                if (renderbuffer->nativeData.size() <
+                                    nativeBytes) {
+                                    renderbuffer->nativeData.resize(
+                                        nativeBytes, 0);
+                                }
+                                for (std::size_t p = 0;
+                                     p < renderbufferPixels;
+                                     ++p) {
+                                    (void)encodeColorNativePixelFromRGBA8(
+                                        nativeFormat,
+                                        rgba,
+                                        renderbuffer->nativeData.data() +
+                                            p * renderbuffer->nativeBpp,
+                                        renderbuffer->nativeBpp);
+                                }
+                            }
+                            renderbuffer->colorShadowAuthoritative = true;
+                        } else {
+                            renderbuffer->colorShadowAuthoritative = false;
+                        }
+                        clearRenderbufferColorShadowCoverage(*renderbuffer);
                         return true;
                     }
                 }
@@ -23483,6 +23730,8 @@ struct GLContext::Impl {
                         renderbuffer->rgba8ShadowClearValue = {
                             rgba[0], rgba[1], rgba[2], rgba[3]
                         };
+                        renderbuffer->colorShadowAuthoritative = false;
+                        clearRenderbufferColorShadowCoverage(*renderbuffer);
                         return true;
                     }
                 }
@@ -23523,8 +23772,7 @@ struct GLContext::Impl {
                                 mipmapLevel:0
                                   withBytes:region.data()
                                 bytesPerRow:static_cast<NSUInteger>(regionWidth) * 4u];
-                    renderbuffer->rgba8ShadowClearPending = false;
-                    renderbuffer->colorShadowAuthoritative = false;
+                    invalidateRenderbufferColorShadow(*renderbuffer);
                     recordCpuSideClear(
                         scissorNativeClearStart,
                         renderbufferClearBytes);
@@ -23548,6 +23796,19 @@ struct GLContext::Impl {
             if (renderbuffer->rgba8.size() < rbBytes) {
                 renderbuffer->rgba8.assign(rbBytes, 0);
             }
+            const bool updateNativeShadow =
+                renderbuffer->nativeBpp > 0 &&
+                renderbufferPixels > 0;
+            MTLPixelFormat nativeClearFormat = MTLPixelFormatInvalid;
+            if (updateNativeShadow) {
+                const std::size_t nativeBytes =
+                    renderbufferPixels * renderbuffer->nativeBpp;
+                if (renderbuffer->nativeData.size() < nativeBytes) {
+                    renderbuffer->nativeData.resize(nativeBytes, 0);
+                }
+                nativeClearFormat =
+                    metalRenderbufferFormat(renderbuffer->internalFormat);
+            }
             recordClearCallOnce(renderbufferClearBytes);
             const auto renderbufferCpuClearStart = clearSizing
                 ? glDrawProfileNow()
@@ -23561,11 +23822,33 @@ struct GLContext::Impl {
                          static_cast<std::size_t>(renderbuffer->width) +
                          static_cast<std::size_t>(x)) * 4u;
                     std::memcpy(renderbuffer->rgba8.data() + offset, rgba, 4);
+                    if (updateNativeShadow) {
+                        const std::size_t nativeOffset =
+                            (static_cast<std::size_t>(storageY) *
+                             static_cast<std::size_t>(renderbuffer->width) +
+                             static_cast<std::size_t>(x)) *
+                            renderbuffer->nativeBpp;
+                        (void)encodeColorNativePixelFromRGBA8(
+                            nativeClearFormat,
+                            rgba,
+                            renderbuffer->nativeData.data() + nativeOffset,
+                            renderbuffer->nativeBpp);
+                    }
                 }
             }
             renderbuffer->rgba8ShadowClearPending = false;
             renderbuffer->colorShadowAuthoritative =
                 renderbufferShadowValidForWholeTarget;
+            if (renderbuffer->colorShadowAuthoritative) {
+                clearRenderbufferColorShadowCoverage(*renderbuffer);
+            } else {
+                const GLint storageMinY =
+                    lowerLeft ? (renderbuffer->height - maxY) : minY;
+                const GLint storageMaxY =
+                    lowerLeft ? (renderbuffer->height - minY) : maxY;
+                markRenderbufferColorShadowCoverage(
+                    *renderbuffer, minX, maxX, storageMinY, storageMaxY);
+            }
             // Also clear the Metal texture so that readPixels — which
             // prefers the Metal texture over the CPU shadow — sees the
             // cleared value at the texture's native precision.
@@ -24855,14 +25138,16 @@ struct GLContext::Impl {
                 metalTex = (__bridge id<MTLTexture>)rb->metalTexture;
             }
             sourceNeedsFboYFlip = rb->framebufferReadbackYFlip;
+            const bool yFlipCpuReadback =
+                sourceNeedsFboYFlip &&
+                state->clipOrigin() != GL_UPPER_LEFT;
             const bool preferRenderbufferShadow =
-                rb->colorShadowAuthoritative;
+                rb->colorShadowAuthoritative ||
+                renderbufferColorShadowCoversReadRect(
+                    *rb, x, y, width, height, yFlipCpuReadback);
             if (metalTex == nil || preferRenderbufferShadow) {
                 if (rb->rgba8.empty()) return false;
                 const std::uint8_t* source = rb->rgba8.data();
-                const bool yFlipCpuReadback =
-                    sourceNeedsFboYFlip &&
-                    state->clipOrigin() != GL_UPPER_LEFT;
                 auto* out = static_cast<std::uint8_t*>(pixels);
                 for (GLsizei row = 0; row < height; ++row) {
                     for (GLsizei col = 0; col < width; ++col) {
@@ -24886,6 +25171,15 @@ struct GLContext::Impl {
             }
         } else {
             return false;
+        }
+
+        if (frameGraph != nullptr && metalTex != nil) {
+            const bool materialized =
+                frameGraph->materializePendingFboClearsForTexture(
+                    (__bridge void*)metalTex);
+            if (materialized) {
+                frameGraph->flushForReadback();
+            }
         }
 
         // Read from the Metal texture — this has the actual GPU-rendered data.
@@ -25261,7 +25555,9 @@ struct GLContext::Impl {
             if (mtlDevice == nil || mtlQueue == nil) {
                 return false;
             }
-            const NSUInteger stagingSize = rawByteCount;
+            const NSUInteger stagingBytesPerRow = static_cast<NSUInteger>(
+                alignByteCount(static_cast<std::size_t>(bytesPerRow), 256));
+            const NSUInteger stagingSize = stagingBytesPerRow * readHeight;
             id<MTLBuffer> staging = [mtlDevice newBufferWithLength:stagingSize
                                                           options:MTLResourceStorageModeShared];
             if (staging == nil) return false;
@@ -25281,12 +25577,18 @@ struct GLContext::Impl {
                        sourceSize:region.size
                          toBuffer:staging
                 destinationOffset:0
-           destinationBytesPerRow:bytesPerRow
+           destinationBytesPerRow:stagingBytesPerRow
          destinationBytesPerImage:stagingSize
                          options:depthStencilBlitOptions];
             [blit endEncoding];
             readbackLease.commitAndWait(AppGLCommandReason::FlushForReadback);
-            std::memcpy(raw.data(), [staging contents], stagingSize);
+            const auto* stagingBytes =
+                static_cast<const std::uint8_t*>([staging contents]);
+            for (NSUInteger row = 0; row < readHeight; ++row) {
+                std::memcpy(raw.data() + row * bytesPerRow,
+                            stagingBytes + row * stagingBytesPerRow,
+                            bytesPerRow);
+            }
         }
         auto readDepth = [&](NSUInteger srcX, NSUInteger srcY) -> float {
             if (srcX < readX || srcY < readY ||
@@ -25631,7 +25933,9 @@ struct GLContext::Impl {
             readHeight = static_cast<NSUInteger>(height);
         }
         const NSUInteger bytesPerRow = readWidth;
-        const NSUInteger stagingSize = bytesPerRow * readHeight;
+        const NSUInteger stagingBytesPerRow = static_cast<NSUInteger>(
+            alignByteCount(static_cast<std::size_t>(bytesPerRow), 256));
+        const NSUInteger stagingSize = stagingBytesPerRow * readHeight;
         id<MTLBuffer> staging =
             [mtlDevice newBufferWithLength:stagingSize
                                    options:MTLResourceStorageModeShared];
@@ -25654,14 +25958,21 @@ struct GLContext::Impl {
                  sourceOrigin:region.origin
                    sourceSize:region.size
                      toBuffer:staging
-            destinationOffset:0
-       destinationBytesPerRow:bytesPerRow
+           destinationOffset:0
+       destinationBytesPerRow:stagingBytesPerRow
      destinationBytesPerImage:stagingSize
                       options:stencilOption];
         [blit endEncoding];
         readbackLease.commitAndWait(AppGLCommandReason::FlushForReadback);
-        std::vector<std::uint8_t> raw(stagingSize);
-        std::memcpy(raw.data(), [staging contents], stagingSize);
+        const NSUInteger tightSize = bytesPerRow * readHeight;
+        std::vector<std::uint8_t> raw(tightSize);
+        const auto* stagingBytes =
+            static_cast<const std::uint8_t*>([staging contents]);
+        for (NSUInteger row = 0; row < readHeight; ++row) {
+            std::memcpy(raw.data() + row * bytesPerRow,
+                        stagingBytes + row * stagingBytesPerRow,
+                        bytesPerRow);
+        }
 
         auto readStencil = [&](NSUInteger srcX, NSUInteger srcY) -> std::uint8_t {
             if (srcX < readX || srcY < readY ||
@@ -26172,8 +26483,9 @@ struct GLContext::Impl {
                                 mipmapLevel:0
                                   withBytes:flipped.data()
                                 bytesPerRow:static_cast<NSUInteger>(width) * 4u];
-                    renderbuffer->rgba8ShadowClearPending = false;
-                    renderbuffer->colorShadowAuthoritative = false;
+                    renderbuffer->framebufferReadbackYFlip =
+                        state->clipOrigin() != GL_UPPER_LEFT;
+                    invalidateRenderbufferColorShadow(*renderbuffer);
                     return true;
                 }
             }
@@ -26184,6 +26496,21 @@ struct GLContext::Impl {
             dest = renderbuffer->rgba8.data();
             destWidth = renderbuffer->width;
             destHeight = renderbuffer->height;
+            const bool updateRenderbufferNative =
+                renderbuffer->nativeBpp > 0;
+            const MTLPixelFormat renderbufferNativeFormat =
+                updateRenderbufferNative
+                    ? metalRenderbufferFormat(renderbuffer->internalFormat)
+                    : MTLPixelFormatInvalid;
+            if (updateRenderbufferNative) {
+                const std::size_t nativeBytes =
+                    static_cast<std::size_t>(destWidth) *
+                    static_cast<std::size_t>(destHeight) *
+                    renderbuffer->nativeBpp;
+                if (renderbuffer->nativeData.size() < nativeBytes) {
+                    renderbuffer->nativeData.resize(nativeBytes, 0);
+                }
+            }
             // Scope the metalTexture update below to this branch; needed
             // so glBlitFramebuffer's shadow-only write is visible to the
             // subsequent glReadPixels → Metal-texture readback path.
@@ -26200,6 +26527,21 @@ struct GLContext::Impl {
                          static_cast<std::size_t>(destWidth) +
                          static_cast<std::size_t>(dstX)) * 4u;
                     std::memcpy(dest + dstOffset, pixels + srcOffset, 4);
+                    if (updateRenderbufferNative) {
+                        const std::size_t nativeOffset =
+                            (static_cast<std::size_t>(dstY) *
+                             static_cast<std::size_t>(destWidth) +
+                             static_cast<std::size_t>(dstX)) *
+                            renderbuffer->nativeBpp;
+                        if (nativeOffset + renderbuffer->nativeBpp <=
+                            renderbuffer->nativeData.size()) {
+                            (void)encodeColorNativePixelFromRGBA8(
+                                renderbufferNativeFormat,
+                                pixels + srcOffset,
+                                renderbuffer->nativeData.data() + nativeOffset,
+                                renderbuffer->nativeBpp);
+                        }
+                    }
                 }
             }
             // Mirror the shadow write to the Metal texture so readback
@@ -26301,7 +26643,9 @@ struct GLContext::Impl {
                     }
                 }
             }
+            renderbuffer->framebufferReadbackYFlip = false;
             renderbuffer->colorShadowAuthoritative = true;
+            clearRenderbufferColorShadowCoverage(*renderbuffer);
             return true;
         } else {
             return false;
@@ -26545,18 +26889,8 @@ struct GLContext::Impl {
         GLFramebufferObject* drawFb =
             drawName == 0 ? nullptr : objects->framebuffers().get(drawName);
         const bool drawDefaultFramebuffer = (drawName == 0);
-        const bool defaultDepthStencilBlit =
-            appglCompatProfileEnabled() &&
-            readDefaultFramebuffer && drawDefaultFramebuffer &&
-            (mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0;
         if ((!readDefaultFramebuffer && readFb == nullptr) ||
-            (readDefaultFramebuffer && !defaultDepthStencilBlit) ||
             (!drawDefaultFramebuffer && drawFb == nullptr)) {
-            return false;
-        }
-        if (drawDefaultFramebuffer &&
-            (mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0 &&
-            !appglCompatProfileEnabled()) {
             return false;
         }
         if ((!readDefaultFramebuffer &&
@@ -26805,6 +27139,33 @@ struct GLContext::Impl {
                    dstWidth == dstViewWidth &&
                    dstHeight == dstViewHeight;
         };
+        auto attachmentHasAuthoritativeColorShadow =
+            [&](const GLFramebufferAttachment& attachment) {
+            if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
+                const ResolvedTextureAttachment resolved =
+                    resolveTextureAttachmentStorage(attachment);
+                const GLTextureObject* texture = resolved.storageTexture;
+                if (!resolved.valid || texture == nullptr ||
+                    !texture->colorShadowAuthoritative) {
+                    return false;
+                }
+                const auto level = texture->levels.find(resolved.level);
+                return level != texture->levels.end() &&
+                       level->second.defined &&
+                       !level->second.rgba8.empty();
+            }
+            if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+                const GLRenderbufferObject* renderbuffer =
+                    objects->renderbuffers().get(attachment.object);
+                return renderbuffer != nullptr &&
+                       renderbuffer->storageDefined &&
+                       (renderbuffer->rgba8ShadowClearPending ||
+                        (renderbuffer->colorShadowAuthoritative &&
+                         (!renderbuffer->rgba8.empty() ||
+                          !renderbuffer->nativeData.empty())));
+            }
+            return false;
+        };
         auto tryMetalDefaultColorResolveBlit =
             [&](const GLFramebufferAttachment& srcAttachment) {
             if (frameGraph == nullptr || device == nil || commandQueue == nil) {
@@ -26837,9 +27198,9 @@ struct GLContext::Impl {
                 if (writeWindow.empty) {
                     wroteDefaultDepthStencil = true;
                 } else {
-                    const bool copyDepth =
+                    bool copyDepth =
                         (mask & GL_DEPTH_BUFFER_BIT) != 0;
-                    const bool copyStencil =
+                    bool copyStencil =
                         (mask & GL_STENCIL_BUFFER_BIT) != 0;
                     std::vector<GLfloat> srcDepthStage;
                     std::vector<std::uint8_t> srcStencilStage;
@@ -26872,16 +27233,20 @@ struct GLContext::Impl {
                         const GLFramebufferAttachment* srcStencil =
                             copyStencil ? framebufferAttachment(
                                 *readFb, GL_STENCIL_ATTACHMENT) : nullptr;
+                        if (copyDepth && srcDepth == nullptr) {
+                            copyDepth = false;
+                        }
+                        if (copyStencil && srcStencil == nullptr) {
+                            copyStencil = false;
+                        }
                         if ((copyDepth &&
-                             (srcDepth == nullptr ||
-                              !readDepthAttachmentPixels(
+                             !readDepthAttachmentPixels(
                                   *srcDepth, srcX, srcY, copyWidth,
-                                  copyHeight, srcDepthStage.data()))) ||
+                                  copyHeight, srcDepthStage.data())) ||
                             (copyStencil &&
-                             (srcStencil == nullptr ||
-                              !readStencilAttachmentPixels(
+                             !readStencilAttachmentPixels(
                                   *srcStencil, srcX, srcY, copyWidth,
-                                  copyHeight, srcStencilStage.data())))) {
+                                  copyHeight, srcStencilStage.data()))) {
                             return false;
                         }
                     }
@@ -27176,8 +27541,8 @@ struct GLContext::Impl {
             }
             if (dstView.renderbufferObject != nullptr) {
                 if (writesColor) {
-                    dstView.renderbufferObject->rgba8ShadowClearPending = false;
-                    dstView.renderbufferObject->colorShadowAuthoritative = false;
+                    invalidateRenderbufferColorShadow(
+                        *dstView.renderbufferObject);
                 }
                 if ((aspects & GL_DEPTH_BUFFER_BIT) != 0) {
                     dstView.renderbufferObject->wasMetalDepthRendered = true;
@@ -27201,6 +27566,10 @@ struct GLContext::Impl {
             [&](const GLFramebufferAttachment& srcAttachment,
                 const GLFramebufferAttachment& dstAttachment) {
             if (device == nil || commandQueue == nil || writeWindow.empty) {
+                return false;
+            }
+            if (attachmentHasAuthoritativeColorShadow(srcAttachment) ||
+                attachmentHasAuthoritativeColorShadow(dstAttachment)) {
                 return false;
             }
             const MetalAttachmentBlitView srcView =
@@ -27273,6 +27642,87 @@ struct GLContext::Impl {
                 dstAttachment, GL_COLOR_BUFFER_BIT, dstView);
             return true;
         };
+        auto tryRenderbufferNativeShadowColorBlit =
+            [&](const GLFramebufferAttachment& srcAttachment,
+                const GLFramebufferAttachment& dstAttachment) {
+            if (needsScale || writeWindow.empty ||
+                srcAttachment.kind != GLFramebufferAttachment::Kind::Renderbuffer ||
+                dstAttachment.kind != GLFramebufferAttachment::Kind::Renderbuffer) {
+                return false;
+            }
+            GLRenderbufferObject* srcRenderbuffer =
+                objects->renderbuffers().get(srcAttachment.object);
+            GLRenderbufferObject* dstRenderbuffer =
+                objects->renderbuffers().get(dstAttachment.object);
+            if (srcRenderbuffer == nullptr || dstRenderbuffer == nullptr ||
+                !srcRenderbuffer->storageDefined ||
+                !dstRenderbuffer->storageDefined ||
+                srcRenderbuffer == dstRenderbuffer ||
+                srcRenderbuffer->internalFormat != dstRenderbuffer->internalFormat ||
+                !srcRenderbuffer->colorShadowAuthoritative ||
+                srcRenderbuffer->nativeBpp == 0 ||
+                srcRenderbuffer->nativeData.empty()) {
+                return false;
+            }
+            if (dstRenderbuffer->nativeBpp == 0) {
+                const MTLPixelFormat mtlFormat =
+                    metalRenderbufferFormat(dstRenderbuffer->internalFormat);
+                const NativeFormatInfo info = nativeFormatInfo(mtlFormat);
+                if (info.bytesPerPixel <= 0) {
+                    return false;
+                }
+                dstRenderbuffer->nativeBpp =
+                    static_cast<std::size_t>(info.bytesPerPixel);
+            }
+            if (srcRenderbuffer->nativeBpp != dstRenderbuffer->nativeBpp ||
+                srcX != 0 || srcY != 0 || dstX != 0 || dstY != 0 ||
+                writeWindow.x != 0 || writeWindow.y != 0 ||
+                copyWidth != srcRenderbuffer->width ||
+                copyHeight != srcRenderbuffer->height ||
+                dstWidth != dstRenderbuffer->width ||
+                dstHeight != dstRenderbuffer->height ||
+                writeWindow.width != dstRenderbuffer->width ||
+                writeWindow.height != dstRenderbuffer->height) {
+                return false;
+            }
+            const std::size_t srcBytes =
+                static_cast<std::size_t>(srcRenderbuffer->width) *
+                static_cast<std::size_t>(srcRenderbuffer->height) *
+                srcRenderbuffer->nativeBpp;
+            const std::size_t dstBytes =
+                static_cast<std::size_t>(dstRenderbuffer->width) *
+                static_cast<std::size_t>(dstRenderbuffer->height) *
+                dstRenderbuffer->nativeBpp;
+            if (srcRenderbuffer->nativeData.size() < srcBytes ||
+                srcBytes != dstBytes) {
+                return false;
+            }
+            drainFramebufferAttachmentProducer(srcAttachment,
+                                               kProducerFboColorWrite |
+                                               kProducerCopyWrite);
+            dstRenderbuffer->nativeData.assign(
+                srcRenderbuffer->nativeData.begin(),
+                srcRenderbuffer->nativeData.begin() +
+                    static_cast<std::ptrdiff_t>(srcBytes));
+            const std::size_t rgba8Bytes =
+                static_cast<std::size_t>(srcRenderbuffer->width) *
+                static_cast<std::size_t>(srcRenderbuffer->height) * 4u;
+            if (srcRenderbuffer->rgba8.size() >= rgba8Bytes) {
+                dstRenderbuffer->rgba8.assign(
+                    srcRenderbuffer->rgba8.begin(),
+                    srcRenderbuffer->rgba8.begin() +
+                        static_cast<std::ptrdiff_t>(rgba8Bytes));
+            }
+            dstRenderbuffer->framebufferReadbackYFlip =
+                srcRenderbuffer->framebufferReadbackYFlip;
+            dstRenderbuffer->rgba8ShadowClearPending = false;
+            dstRenderbuffer->colorShadowAuthoritative = true;
+            clearRenderbufferColorShadowCoverage(*dstRenderbuffer);
+            markFramebufferAttachmentWrite(dstAttachment,
+                                           kProducerCopyWrite |
+                                           kProducerFboColorWrite);
+            return true;
+        };
         auto multisamplePackedRenderbufferForAttachment =
             [&](const GLFramebufferAttachment* attachment)
                 -> GLRenderbufferObject* {
@@ -27319,7 +27769,7 @@ struct GLContext::Impl {
                 const GLFramebufferAttachment& dstAttachment,
                 GLbitfield aspects) {
             if (device == nil || commandQueue == nil || needsScale ||
-                writeWindow.empty) {
+                writeWindow.empty || state->isEnabled(GL_SCISSOR_TEST)) {
                 return false;
             }
             const MetalAttachmentBlitView srcView =
@@ -27405,7 +27855,8 @@ struct GLContext::Impl {
         };
         bool metalCopiedDepth = false;
         bool metalCopiedStencil = false;
-        if ((mask & GL_DEPTH_BUFFER_BIT) != 0 &&
+        if (!readDefaultFramebuffer &&
+            (mask & GL_DEPTH_BUFFER_BIT) != 0 &&
             (mask & GL_STENCIL_BUFFER_BIT) != 0) {
             const GLFramebufferAttachment* srcDepth =
                 framebufferAttachment(*readFb, GL_DEPTH_ATTACHMENT);
@@ -27430,7 +27881,8 @@ struct GLContext::Impl {
         // Metal blit encoders cannot replicate single-sample packed D/S into a
         // multisample target. For the common packed-renderbuffer path, mirror
         // the CPU blit result back to every MS sample with a draw pass.
-        if ((mask & GL_DEPTH_BUFFER_BIT) != 0 &&
+        if (!readDefaultFramebuffer &&
+            (mask & GL_DEPTH_BUFFER_BIT) != 0 &&
             (mask & GL_STENCIL_BUFFER_BIT) != 0 &&
             !metalCopiedDepth && !metalCopiedStencil &&
             !writeWindow.empty && frameGraph != nullptr) {
@@ -27534,13 +27986,22 @@ struct GLContext::Impl {
         }
 
         if ((mask & GL_COLOR_BUFFER_BIT) != 0) {
-            const GLFramebufferAttachment* srcAttachment = framebufferAttachment(*readFb, readFb->readBuffer);
+            const GLFramebufferAttachment* srcAttachment =
+                readDefaultFramebuffer ? nullptr
+                    : framebufferAttachment(*readFb, readFb->readBuffer);
             // Depth/stencil CTS cases pass an all-bits blit mask against
             // depth-only FBOs. Treat a missing color attachment as a color
             // no-op, matching the depth/stencil branches below.
-            if (srcAttachment != nullptr) {
+            if (readDefaultFramebuffer || srcAttachment != nullptr) {
+                const GLBlendState& blitBlend = state->blendState();
+                const bool fullBlitColorMask =
+                    blitBlend.colorMask[0] != GL_FALSE &&
+                    blitBlend.colorMask[1] != GL_FALSE &&
+                    blitBlend.colorMask[2] != GL_FALSE &&
+                    blitBlend.colorMask[3] != GL_FALSE;
                 bool metalResolvedColor = false;
-                if (mask == GL_COLOR_BUFFER_BIT && !writeWindow.empty) {
+                if (!readDefaultFramebuffer &&
+                    !writeWindow.empty && fullBlitColorMask) {
                     bool sawColorDestination = false;
                     bool allColorDestinationsResolved = true;
                     for (GLenum buffer : drawFb->drawBuffers) {
@@ -27553,6 +28014,10 @@ struct GLContext::Impl {
                             continue;
                         }
                         sawColorDestination = true;
+                        if (tryRenderbufferNativeShadowColorBlit(
+                                *srcAttachment, *dstAttachment)) {
+                            continue;
+                        }
                         if (!tryMetalFullColorResolveBlit(
                                 *srcAttachment, *dstAttachment)) {
                             allColorDestinationsResolved = false;
@@ -27563,85 +28028,107 @@ struct GLContext::Impl {
                         sawColorDestination && allColorDestinationsResolved;
                 }
                 if (metalResolvedColor) {
-                    return true;
-                }
-                // Read src region at src resolution.
-                std::vector<std::uint8_t> srcStage(
-                    static_cast<std::size_t>(copyWidth) *
-                    static_cast<std::size_t>(copyHeight) * 4u);
-                if (!readColorAttachmentPixels(*srcAttachment, srcX, srcY,
-                                               copyWidth, copyHeight, srcStage.data())) {
-                    return false;
-                }
-                // Scale to dst size (nearest for non-linear filter or equal size).
-                const std::uint8_t* copySrc = srcStage.data();
-                std::vector<std::uint8_t> dstStage;
-                if (needsScale) {
-                    dstStage.resize(static_cast<std::size_t>(dstWidth) *
-                                    static_cast<std::size_t>(dstHeight) * 4u);
-                    for (GLsizei dy = 0; dy < dstHeight; ++dy) {
-                        for (GLsizei dx = 0; dx < dstWidth; ++dx) {
-                            GLsizei sx = 0, sy = 0;
-                            sampleSrcIndex(dx, dy, sx, sy);
-                            const std::size_t srcIdx =
-                                (static_cast<std::size_t>(sy) *
-                                 static_cast<std::size_t>(copyWidth) +
-                                 static_cast<std::size_t>(sx)) * 4u;
-                            const std::size_t dstIdx =
-                                (static_cast<std::size_t>(dy) *
-                                 static_cast<std::size_t>(dstWidth) +
-                                 static_cast<std::size_t>(dx)) * 4u;
-                            std::memcpy(&dstStage[dstIdx], &srcStage[srcIdx], 4u);
+                    if ((mask & ~GL_COLOR_BUFFER_BIT) == 0) {
+                        return true;
+                    }
+                } else {
+                    // Read src region at src resolution.
+                    std::vector<std::uint8_t> srcStage(
+                        static_cast<std::size_t>(copyWidth) *
+                        static_cast<std::size_t>(copyHeight) * 4u);
+                    if (readDefaultFramebuffer) {
+                        if (!copyDefaultFramebufferShadowPixels(
+                                srcX, srcY, copyWidth, copyHeight,
+                                srcStage.data())) {
+                            return false;
                         }
-                    }
-                    copySrc = dstStage.data();
-                }
-                for (GLenum buffer : drawFb->drawBuffers) {
-                    if (buffer == GL_NONE) {
-                        continue;
-                    }
-                    if (writeWindow.empty) {
-                        continue;
-                    }
-                    const GLFramebufferAttachment* dstAttachment = framebufferAttachment(*drawFb, buffer);
-                    if (dstAttachment == nullptr) {
-                        continue;
-                    }
-                    std::vector<std::uint8_t> clippedColor;
-                    const std::uint8_t* writeSrc =
-                        copyColorWindow(copySrc, clippedColor);
-                    if (!writeColorAttachmentPixels(*dstAttachment,
-                                                    writeWindow.x, writeWindow.y,
-                                                    writeWindow.width,
-                                                    writeWindow.height,
-                                                    writeSrc)) {
+                    } else if (!readColorAttachmentPixels(*srcAttachment,
+                                                          srcX, srcY,
+                                                          copyWidth,
+                                                          copyHeight,
+                                                          srcStage.data())) {
                         return false;
                     }
-                    markFramebufferAttachmentWrite(*dstAttachment,
-                                                   kProducerCopyWrite |
-                                                   kProducerFboColorWrite);
+                    // Scale to dst size (nearest for non-linear filter or equal size).
+                    const std::uint8_t* copySrc = srcStage.data();
+                    std::vector<std::uint8_t> dstStage;
+                    if (needsScale) {
+                        dstStage.resize(static_cast<std::size_t>(dstWidth) *
+                                        static_cast<std::size_t>(dstHeight) * 4u);
+                        for (GLsizei dy = 0; dy < dstHeight; ++dy) {
+                            for (GLsizei dx = 0; dx < dstWidth; ++dx) {
+                                GLsizei sx = 0, sy = 0;
+                                sampleSrcIndex(dx, dy, sx, sy);
+                                const std::size_t srcIdx =
+                                    (static_cast<std::size_t>(sy) *
+                                     static_cast<std::size_t>(copyWidth) +
+                                     static_cast<std::size_t>(sx)) * 4u;
+                                const std::size_t dstIdx =
+                                    (static_cast<std::size_t>(dy) *
+                                     static_cast<std::size_t>(dstWidth) +
+                                     static_cast<std::size_t>(dx)) * 4u;
+                                std::memcpy(&dstStage[dstIdx], &srcStage[srcIdx], 4u);
+                            }
+                        }
+                        copySrc = dstStage.data();
+                    }
+                    for (GLenum buffer : drawFb->drawBuffers) {
+                        if (buffer == GL_NONE) {
+                            continue;
+                        }
+                        if (writeWindow.empty) {
+                            continue;
+                        }
+                        const GLFramebufferAttachment* dstAttachment = framebufferAttachment(*drawFb, buffer);
+                        if (dstAttachment == nullptr) {
+                            continue;
+                        }
+                        std::vector<std::uint8_t> clippedColor;
+                        const std::uint8_t* writeSrc =
+                            copyColorWindow(copySrc, clippedColor);
+                        if (!writeColorAttachmentPixels(*dstAttachment,
+                                                        writeWindow.x, writeWindow.y,
+                                                        writeWindow.width,
+                                                        writeWindow.height,
+                                                        writeSrc)) {
+                            return false;
+                        }
+                        markFramebufferAttachmentWrite(*dstAttachment,
+                                                       kProducerCopyWrite |
+                                                       kProducerFboColorWrite);
+                    }
                 }
             }
         }
 
         if ((mask & GL_DEPTH_BUFFER_BIT) != 0 && !metalCopiedDepth) {
-            const GLFramebufferAttachment* srcAttachment = framebufferAttachment(*readFb, GL_DEPTH_ATTACHMENT);
+            const GLFramebufferAttachment* srcAttachment =
+                readDefaultFramebuffer ? nullptr
+                    : framebufferAttachment(*readFb, GL_DEPTH_ATTACHMENT);
             const GLFramebufferAttachment* dstAttachment = framebufferAttachment(*drawFb, GL_DEPTH_ATTACHMENT);
-            if (srcAttachment != nullptr && dstAttachment != nullptr) {
+            if (!readDefaultFramebuffer &&
+                srcAttachment != nullptr && dstAttachment != nullptr) {
                 if (tryMetalExactDepthStencilBlit(
                         *srcAttachment, *dstAttachment,
                         GL_DEPTH_BUFFER_BIT)) {
                     metalCopiedDepth = true;
                 }
             }
-            if (srcAttachment != nullptr && dstAttachment != nullptr &&
+            if ((readDefaultFramebuffer || srcAttachment != nullptr) &&
+                dstAttachment != nullptr &&
                 !metalCopiedDepth) {
                 std::vector<GLfloat> srcStage(
                     static_cast<std::size_t>(copyWidth) *
                     static_cast<std::size_t>(copyHeight));
-                if (!readDepthAttachmentPixels(*srcAttachment, srcX, srcY,
-                                                copyWidth, copyHeight,
-                                                srcStage.data())) {
+                if (readDefaultFramebuffer) {
+                    if (!copyDefaultFramebufferDepthPixels(
+                            srcX, srcY, copyWidth, copyHeight,
+                            srcStage.data())) {
+                        return false;
+                    }
+                } else if (!readDepthAttachmentPixels(*srcAttachment, srcX, srcY,
+                                                       copyWidth, copyHeight,
+                                                       srcStage.data())) {
                     return false;
                 }
                 const GLfloat* stagePtr = srcStage.data();
@@ -27682,23 +28169,35 @@ struct GLContext::Impl {
         }
 
         if ((mask & GL_STENCIL_BUFFER_BIT) != 0 && !metalCopiedStencil) {
-            const GLFramebufferAttachment* srcAttachment = framebufferAttachment(*readFb, GL_STENCIL_ATTACHMENT);
+            const GLFramebufferAttachment* srcAttachment =
+                readDefaultFramebuffer ? nullptr
+                    : framebufferAttachment(*readFb, GL_STENCIL_ATTACHMENT);
             const GLFramebufferAttachment* dstAttachment = framebufferAttachment(*drawFb, GL_STENCIL_ATTACHMENT);
-            if (srcAttachment != nullptr && dstAttachment != nullptr) {
+            if (!readDefaultFramebuffer &&
+                srcAttachment != nullptr && dstAttachment != nullptr) {
                 if (tryMetalExactDepthStencilBlit(
                         *srcAttachment, *dstAttachment,
                         GL_STENCIL_BUFFER_BIT)) {
                     metalCopiedStencil = true;
                 }
             }
-            if (srcAttachment != nullptr && dstAttachment != nullptr &&
+            if ((readDefaultFramebuffer || srcAttachment != nullptr) &&
+                dstAttachment != nullptr &&
                 !metalCopiedStencil) {
                 std::vector<std::uint8_t> srcStage(
                     static_cast<std::size_t>(copyWidth) *
                     static_cast<std::size_t>(copyHeight));
-                if (!readStencilAttachmentPixels(*srcAttachment, srcX, srcY,
-                                                  copyWidth, copyHeight,
-                                                  srcStage.data())) {
+                if (readDefaultFramebuffer) {
+                    if (!copyDefaultFramebufferStencilPixels(
+                            srcX, srcY, copyWidth, copyHeight,
+                            srcStage.data())) {
+                        return false;
+                    }
+                } else if (!readStencilAttachmentPixels(*srcAttachment,
+                                                         srcX, srcY,
+                                                         copyWidth,
+                                                         copyHeight,
+                                                         srcStage.data())) {
                     return false;
                 }
                 const std::uint8_t* stagePtr = srcStage.data();
@@ -27785,6 +28284,8 @@ struct GLContext::Impl {
         GLsizei sourceWidth = 0, sourceHeight = 0;
         NSUInteger metalMipLevel = 0;
         NSUInteger metalSlice = 0;
+        const std::vector<std::uint8_t>* renderbufferNativeShadow = nullptr;
+        std::size_t renderbufferNativeBpp = 0;
         // For 3D textures, `attachment.layer` is a Z coordinate into the
         // region, not a Metal slice. Track separately so the
         // getBytes: call below can use MTLRegionMake3D with Z.
@@ -27806,6 +28307,12 @@ struct GLContext::Impl {
             sourceHeight = rb->height;
             sourceInternalFormat = rb->internalFormat;
             sourceNeedsFboYFlip = rb->framebufferReadbackYFlip;
+            if (rb->colorShadowAuthoritative &&
+                rb->nativeBpp > 0 &&
+                !rb->nativeData.empty()) {
+                renderbufferNativeShadow = &rb->nativeData;
+                renderbufferNativeBpp = rb->nativeBpp;
+            }
         } else if (att->kind == GLFramebufferAttachment::Kind::Texture) {
             const GLTextureObject* tex = objects->textures().get(att->object);
             if (!tex || tex->metalTexture == nullptr) return false;
@@ -27830,7 +28337,9 @@ struct GLContext::Impl {
             return false;
         }
 
-        if (metalTex == nil) return false;
+        const bool useRenderbufferNativeShadow =
+            renderbufferNativeShadow != nullptr;
+        if (metalTex == nil && !useRenderbufferNativeShadow) return false;
 
         // MSAA source textures can't be read via `getBytes:` — Metal
         // aborts with a SIGSEGV inside AGX. `readColorAttachmentPixels`
@@ -27840,10 +28349,12 @@ struct GLContext::Impl {
         // the RGBA8 fallback. Without this, the full CTS cold sweep
         // crashes at `framebuffer_blit.multisampled_to_single_sampled_*`
         // after ~865 tests and loses the remaining ~18,000-test body.
-        if (metalTex.sampleCount > 1) return false;
+        if (!useRenderbufferNativeShadow && metalTex.sampleCount > 1) return false;
 
         // Determine source bytes-per-pixel from the Metal pixel format.
-        MTLPixelFormat pf = metalTex.pixelFormat;
+        MTLPixelFormat pf = useRenderbufferNativeShadow
+            ? metalRenderbufferFormat(sourceInternalFormat)
+            : metalTex.pixelFormat;
         NSUInteger srcBpp = 0;
         NSUInteger srcComponents = 0;
         enum class SrcType { Float32, Float16, UNorm8, SNorm8, UNorm16, SNorm16, UInt8, SInt8, UInt16, SInt16, UInt32, SInt32, Packed };
@@ -27902,19 +28413,29 @@ struct GLContext::Impl {
         const NSUInteger bytesPerRow = static_cast<NSUInteger>(sourceWidth) * srcBpp;
         const std::size_t totalBytes = static_cast<std::size_t>(sourceWidth) * static_cast<std::size_t>(sourceHeight) * srcBpp;
         std::vector<std::uint8_t> raw(totalBytes);
-        MTLRegion region = is3DTextureSrc
-            ? MTLRegionMake3D(0, 0, depthSlice3D,
-                static_cast<NSUInteger>(sourceWidth),
-                static_cast<NSUInteger>(sourceHeight), 1)
-            : MTLRegionMake2D(0, 0,
-                static_cast<NSUInteger>(sourceWidth),
-                static_cast<NSUInteger>(sourceHeight));
-        [metalTex getBytes:raw.data()
-               bytesPerRow:bytesPerRow
-             bytesPerImage:0
-                fromRegion:region
-               mipmapLevel:metalMipLevel
-                     slice:metalSlice];
+        if (useRenderbufferNativeShadow) {
+            if (renderbufferNativeBpp != srcBpp ||
+                renderbufferNativeShadow->size() < totalBytes) {
+                return false;
+            }
+            std::memcpy(raw.data(),
+                        renderbufferNativeShadow->data(),
+                        totalBytes);
+        } else {
+            MTLRegion region = is3DTextureSrc
+                ? MTLRegionMake3D(0, 0, depthSlice3D,
+                    static_cast<NSUInteger>(sourceWidth),
+                    static_cast<NSUInteger>(sourceHeight), 1)
+                : MTLRegionMake2D(0, 0,
+                    static_cast<NSUInteger>(sourceWidth),
+                    static_cast<NSUInteger>(sourceHeight));
+            [metalTex getBytes:raw.data()
+                   bytesPerRow:bytesPerRow
+                 bytesPerImage:0
+                    fromRegion:region
+                   mipmapLevel:metalMipLevel
+                         slice:metalSlice];
+        }
 
         // Helper: read one source component as a double.
         auto readSrcComponent = [&](const std::uint8_t* srcPixel, NSUInteger comp) -> double {
@@ -29712,6 +30233,7 @@ struct GLContext::Impl {
             case GL_RGB32I: case GL_RGB32UI:
             case GL_RGBA8I: case GL_RGBA8UI: case GL_RGBA16I: case GL_RGBA16UI:
             case GL_RGBA32I: case GL_RGBA32UI:
+            case GL_RGB10_A2UI:
                 return true;
             default:
                 return false;
@@ -45460,8 +45982,7 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                             GLFramebufferAttachment::Kind::Renderbuffer) continue;
                     if (GLRenderbufferObject* rb =
                             objects->renderbuffers().get(kv.second.object)) {
-                        rb->colorShadowAuthoritative = false;
-                        rb->rgba8ShadowClearPending = false;
+                        invalidateRenderbufferColorShadow(*rb);
                     }
                 }
                 for (const auto& kv : fbo->attachments) {
