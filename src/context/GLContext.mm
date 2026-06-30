@@ -21728,6 +21728,61 @@ struct GLContext::Impl {
         renderbuffer.rgba8ShadowClearPending = false;
     }
 
+    bool materializeRenderbufferForAdvancedBlendGpuPath(
+        GLRenderbufferObject& renderbuffer) {
+        if (!renderbuffer.storageDefined ||
+            !isColorFormat(renderbuffer.internalFormat) ||
+            isIntegerInternalFormat(renderbuffer.internalFormat) ||
+            renderbuffer.metalTexture == nullptr ||
+            renderbuffer.width <= 0 ||
+            renderbuffer.height <= 0) {
+            return false;
+        }
+
+        id<MTLTexture> metalTex =
+            (__bridge id<MTLTexture>)renderbuffer.metalTexture;
+        if (metalTex.textureType != MTLTextureType2D ||
+            metalTex.sampleCount != 1) {
+            return false;
+        }
+
+        const MTLPixelFormat pf = metalTex.pixelFormat;
+        if (pf != MTLPixelFormatRGBA8Unorm &&
+            pf != MTLPixelFormatRGBA8Unorm_sRGB) {
+            return false;
+        }
+
+        if (frameGraph != nullptr) {
+            frameGraph->materializePendingFboClearsForTexture(
+                renderbuffer.metalTexture);
+        }
+
+        if (!renderbuffer.colorShadowAuthoritative &&
+            !renderbuffer.rgba8ShadowClearPending) {
+            return true;
+        }
+
+        materializeRenderbufferRGBA8Clear(renderbuffer);
+        const std::size_t rbBytes =
+            static_cast<std::size_t>(renderbuffer.width) *
+            static_cast<std::size_t>(renderbuffer.height) * 4u;
+        if (renderbuffer.rgba8.size() < rbBytes) {
+            return false;
+        }
+
+        MTLRegion fullRegion = MTLRegionMake2D(
+            0, 0,
+            static_cast<NSUInteger>(renderbuffer.width),
+            static_cast<NSUInteger>(renderbuffer.height));
+        [metalTex replaceRegion:fullRegion
+                    mipmapLevel:0
+                      withBytes:renderbuffer.rgba8.data()
+                    bytesPerRow:static_cast<NSUInteger>(renderbuffer.width) * 4u];
+        renderbuffer.colorShadowAuthoritative = false;
+        renderbuffer.rgba8ShadowClearPending = false;
+        return true;
+    }
+
     bool clearColorAttachment(const GLFramebufferAttachment& attachment,
                               const GLfloat color[4],
                               bool allowNativeRenderbufferClear) {
@@ -22679,6 +22734,10 @@ struct GLContext::Impl {
             if (renderbuffer->rgba8ShadowClearPending) {
                 drainPendingGpuProducers(*renderbuffer);
             }
+            const bool renderbufferShadowValidForWholeTarget =
+                renderbufferFullCoverage ||
+                renderbuffer->colorShadowAuthoritative ||
+                renderbuffer->rgba8ShadowClearPending;
             if (clearScissorActive) {
                 materializeRenderbufferRGBA8Clear(*renderbuffer);
             }
@@ -22704,7 +22763,8 @@ struct GLContext::Impl {
                 }
             }
             renderbuffer->rgba8ShadowClearPending = false;
-            renderbuffer->colorShadowAuthoritative = true;
+            renderbuffer->colorShadowAuthoritative =
+                renderbufferShadowValidForWholeTarget;
             // Also clear the Metal texture so that readPixels — which
             // prefers the Metal texture over the CPU shadow — sees the
             // cleared value at the texture's native precision.
@@ -22731,11 +22791,32 @@ struct GLContext::Impl {
                      pf == MTLPixelFormatRGBA8Unorm_sRGB)) {
                     const NSUInteger width = static_cast<NSUInteger>(renderbuffer->width);
                     const NSUInteger height = static_cast<NSUInteger>(renderbuffer->height);
-                    MTLRegion fullRegion = MTLRegionMake2D(0, 0, width, height);
-                    [metalTex replaceRegion:fullRegion
-                                mipmapLevel:0
-                                  withBytes:renderbuffer->rgba8.data()
-                                bytesPerRow:width * 4u];
+                    if (renderbuffer->colorShadowAuthoritative) {
+                        MTLRegion fullRegion = MTLRegionMake2D(0, 0, width, height);
+                        [metalTex replaceRegion:fullRegion
+                                    mipmapLevel:0
+                                      withBytes:renderbuffer->rgba8.data()
+                                    bytesPerRow:width * 4u];
+                    } else {
+                        const GLsizei regionWidth = maxX - minX;
+                        const GLsizei regionHeight = maxY - minY;
+                        const GLsizei storageMinY =
+                            lowerLeft ? (renderbuffer->height - maxY) : minY;
+                        const std::size_t sourceOffset =
+                            (static_cast<std::size_t>(storageMinY) *
+                                 static_cast<std::size_t>(renderbuffer->width) +
+                             static_cast<std::size_t>(minX)) * 4u;
+                        MTLRegion clearRegion = MTLRegionMake2D(
+                            static_cast<NSUInteger>(minX),
+                            static_cast<NSUInteger>(storageMinY),
+                            static_cast<NSUInteger>(regionWidth),
+                            static_cast<NSUInteger>(regionHeight));
+                        [metalTex replaceRegion:clearRegion
+                                    mipmapLevel:0
+                                      withBytes:renderbuffer->rgba8.data() +
+                                                sourceOffset
+                                    bytesPerRow:width * 4u];
+                    }
                     recordCpuSideClear(
                         renderbufferCpuClearStart,
                         renderbufferClearBytes);
@@ -23071,6 +23152,16 @@ struct GLContext::Impl {
                         materializedGpuDestination =
                             replaceMetalTexture(*textureTarget);
                     }
+                }
+            } else if (!defaultTarget && attachment != nullptr &&
+                       attachment->kind ==
+                           GLFramebufferAttachment::Kind::Renderbuffer) {
+                GLRenderbufferObject* renderbufferTarget =
+                    objects->renderbuffers().get(attachment->object);
+                if (renderbufferTarget != nullptr) {
+                    materializedGpuDestination =
+                        materializeRenderbufferForAdvancedBlendGpuPath(
+                            *renderbufferTarget);
                 }
             }
             if (materializedGpuDestination) {
@@ -44095,6 +44186,14 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                     framebufferUsesRenderbufferOnlyColorTargets(*fbo));
             }
         } else {
+            phase2PlanSetFixedStateBool(
+                tdi, tdi.clipControlYSignFixupEnabled, false);
+        }
+        if (tdi.blend.enabled && tdi.blend.advancedEquation) {
+            // Advanced-blend sidecar shaders read the destination snapshot
+            // by Metal [[position]], so keep the legacy FBO viewport/scissor
+            // Y-flip contract instead of the renderbuffer-only shader
+            // Y-sign path.
             phase2PlanSetFixedStateBool(
                 tdi, tdi.clipControlYSignFixupEnabled, false);
         }
