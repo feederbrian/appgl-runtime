@@ -15514,6 +15514,12 @@ struct GLContext::Impl {
         if (proxyFormat == MTLPixelFormatInvalid) {
             return nil;
         }
+        const NativeFormatInfo proxyInfo = nativeFormatInfo(proxyFormat);
+        const NSUInteger proxyBytesPerTexel =
+            static_cast<NSUInteger>(proxyInfo.bytesPerPixel);
+        if (proxyBytesPerTexel == 0 || proxyBytesPerTexel < classBytes) {
+            return nil;
+        }
 
         MTLTextureDescriptor* descriptor = [[MTLTextureDescriptor alloc] init];
         ScopedOwnedMetalObject descriptorRelease(descriptor);
@@ -15575,20 +15581,54 @@ struct GLContext::Impl {
                 rootObj.target == GL_TEXTURE_2D_ARRAY
                     ? static_cast<NSUInteger>(safeDimension(image.desc.depth))
                     : 1u;
-            const NSUInteger bytesPerRow = mipWidth * classBytes;
-            const NSUInteger bytesPerImage = bytesPerRow * mipHeight;
+            const NSUInteger sourceBytesPerRow = mipWidth * classBytes;
+            const NSUInteger sourceBytesPerImage =
+                sourceBytesPerRow * mipHeight;
+            const NSUInteger proxyBytesPerRow =
+                mipWidth * proxyBytesPerTexel;
+            const NSUInteger proxyBytesPerImage =
+                proxyBytesPerRow * mipHeight;
             if (mipWidth == 0 || mipHeight == 0 ||
-                bytesPerRow == 0 || bytesPerImage == 0 ||
+                sourceBytesPerRow == 0 || sourceBytesPerImage == 0 ||
+                proxyBytesPerRow == 0 || proxyBytesPerImage == 0 ||
                 sourceLayers == 0) {
                 return nil;
             }
             const std::size_t requiredBytes =
-                static_cast<std::size_t>(bytesPerImage) *
+                static_cast<std::size_t>(sourceBytesPerImage) *
                 static_cast<std::size_t>(sourceLayers);
             if (sourceSize < requiredBytes ||
                 sliceStart >= sourceLayers) {
                 return nil;
             }
+            auto expandLayerForProxy =
+                [&](const std::uint8_t* layerBytes,
+                    std::vector<std::uint8_t>& expanded) -> const std::uint8_t* {
+                    if (proxyBytesPerTexel == classBytes) {
+                        return layerBytes;
+                    }
+                    expanded.assign(
+                        static_cast<std::size_t>(proxyBytesPerImage), 0u);
+                    for (NSUInteger row = 0; row < mipHeight; ++row) {
+                        const std::uint8_t* srcRow =
+                            layerBytes +
+                            static_cast<std::size_t>(row * sourceBytesPerRow);
+                        std::uint8_t* dstRow =
+                            expanded.data() +
+                            static_cast<std::size_t>(row * proxyBytesPerRow);
+                        for (NSUInteger col = 0; col < mipWidth; ++col) {
+                            std::memcpy(
+                                dstRow +
+                                    static_cast<std::size_t>(
+                                        col * proxyBytesPerTexel),
+                                srcRow +
+                                    static_cast<std::size_t>(
+                                        col * classBytes),
+                                static_cast<std::size_t>(classBytes));
+                        }
+                    }
+                    return expanded.data();
+                };
 
             const MTLRegion region = MTLRegionMake2D(0, 0, mipWidth, mipHeight);
             if (viewObj.target == GL_TEXTURE_2D_ARRAY) {
@@ -15599,22 +15639,30 @@ struct GLContext::Impl {
                     const NSUInteger sourceSlice = sliceStart + slice;
                     const std::uint8_t* layerBytes =
                         sourceBytes +
-                        static_cast<std::size_t>(sourceSlice * bytesPerImage);
+                        static_cast<std::size_t>(
+                            sourceSlice * sourceBytesPerImage);
+                    std::vector<std::uint8_t> expandedLayer;
+                    const std::uint8_t* uploadBytes =
+                        expandLayerForProxy(layerBytes, expandedLayer);
                     [proxy replaceRegion:region
                               mipmapLevel:mip
                                     slice:slice
-                                withBytes:layerBytes
-                              bytesPerRow:bytesPerRow
-                            bytesPerImage:bytesPerImage];
+                                withBytes:uploadBytes
+                              bytesPerRow:proxyBytesPerRow
+                            bytesPerImage:proxyBytesPerImage];
                 }
             } else {
                 const std::uint8_t* layerBytes =
                     sourceBytes +
-                    static_cast<std::size_t>(sliceStart * bytesPerImage);
+                    static_cast<std::size_t>(
+                        sliceStart * sourceBytesPerImage);
+                std::vector<std::uint8_t> expandedLayer;
+                const std::uint8_t* uploadBytes =
+                    expandLayerForProxy(layerBytes, expandedLayer);
                 [proxy replaceRegion:region
                           mipmapLevel:mip
-                            withBytes:layerBytes
-                          bytesPerRow:bytesPerRow];
+                            withBytes:uploadBytes
+                          bytesPerRow:proxyBytesPerRow];
             }
         }
         return proxy;
@@ -19158,7 +19206,7 @@ struct GLContext::Impl {
                 const std::uint32_t shadowBpp =
                     sampledTextureBytesPerTexelForSamplerMap(
                         texObject->desc.internalFormat);
-                if (shadowBpp > 0 && shadowBpp <= 2) {
+                if (shadowBpp > 0) {
                     appgl::SampledTextureSlot& slot = slots[i];
                     if (populateTextureShadowSlot(
                             *texObject, slot, shadowBpp)) {
@@ -19230,6 +19278,13 @@ struct GLContext::Impl {
                 const std::uint32_t bpp =
                     sampledTextureBytesPerTexelForSamplerMap(intFmt);
                 if (bpp == 0) continue;
+                const NativeFormatInfo metalFormatInfo =
+                    nativeFormatInfo(mtlTex.pixelFormat);
+                const std::uint32_t metalBpp =
+                    static_cast<std::uint32_t>(
+                        std::max(metalFormatInfo.bytesPerPixel, 0));
+                const bool compactMetalReadback =
+                    metalBpp > bpp && metalFormatInfo.channels > 0;
                 slot.bytesPerRow = slot.width * bpp;
                 const std::uint32_t storageHeight =
                     static_cast<std::uint32_t>(
@@ -19262,6 +19317,10 @@ struct GLContext::Impl {
                         const std::uint32_t mipBytesPerRow = mipWidth * bpp;
                         const std::uint32_t mipBytesPerImage =
                             mipBytesPerRow * mipHeight;
+                        const std::uint32_t metalMipBytesPerRow =
+                            mipWidth * (compactMetalReadback ? metalBpp : bpp);
+                        const std::uint32_t metalMipBytesPerImage =
+                            metalMipBytesPerRow * mipHeight;
                         std::uint32_t mipLayerFaces = slot.layerFaces != 0
                             ? slot.layerFaces
                             : 1u;
@@ -19287,19 +19346,30 @@ struct GLContext::Impl {
                         const bool native1D =
                             mtlTex.textureType == MTLTextureType1D ||
                             mtlTex.textureType == MTLTextureType1DArray;
+                        std::vector<std::uint8_t> metalLevelData;
+                        std::uint8_t* readBase = slot.data.data() + offset;
+                        if (compactMetalReadback) {
+                            metalLevelData.assign(
+                                static_cast<std::size_t>(metalMipBytesPerImage) *
+                                    static_cast<std::size_t>(
+                                        std::max<std::uint32_t>(
+                                            mipLayerFaces, 1u)),
+                                0u);
+                            readBase = metalLevelData.data();
+                        }
                         const NSUInteger metalBytesPerRow =
-                            native1D ? 0u : mipBytesPerRow;
+                            native1D ? 0u : metalMipBytesPerRow;
                         const NSUInteger metalBytesPerImage =
-                            native1D ? 0u : mipBytesPerImage;
+                            native1D ? 0u : metalMipBytesPerImage;
                         if (mtlTex.textureType == MTLTextureType3D) {
                             MTLRegion region3D =
                                 MTLRegionMake3D(0, 0, 0,
                                                 mipWidth,
                                                 mipHeight,
                                                 mipLayerFaces);
-                            [mtlTex getBytes:slot.data.data() + offset
-                                 bytesPerRow:mipBytesPerRow
-                               bytesPerImage:mipBytesPerImage
+                            [mtlTex getBytes:readBase
+                                 bytesPerRow:metalMipBytesPerRow
+                               bytesPerImage:metalMipBytesPerImage
                                   fromRegion:region3D
                                  mipmapLevel:level
                                        slice:0];
@@ -19307,9 +19377,9 @@ struct GLContext::Impl {
                             for (NSUInteger slice = 0;
                                  slice < static_cast<NSUInteger>(mipLayerFaces);
                                  ++slice) {
-                                [mtlTex getBytes:slot.data.data() + offset +
+                                [mtlTex getBytes:readBase +
                                                   static_cast<std::size_t>(slice) *
-                                                      mipBytesPerImage
+                                                      metalMipBytesPerImage
                                      bytesPerRow:metalBytesPerRow
                                    bytesPerImage:metalBytesPerImage
                                       fromRegion:region
@@ -19317,10 +19387,44 @@ struct GLContext::Impl {
                                            slice:slice];
                             }
                         } else {
-                            [mtlTex getBytes:slot.data.data() + offset
+                            [mtlTex getBytes:readBase
                                  bytesPerRow:metalBytesPerRow
                                   fromRegion:region
                                  mipmapLevel:level];
+                        }
+                        if (compactMetalReadback) {
+                            for (std::uint32_t layer = 0;
+                                 layer < std::max<std::uint32_t>(mipLayerFaces, 1u);
+                                 ++layer) {
+                                for (std::uint32_t row = 0;
+                                     row < mipHeight;
+                                     ++row) {
+                                    const std::uint8_t* srcRow =
+                                        metalLevelData.data() +
+                                        static_cast<std::size_t>(layer) *
+                                            metalMipBytesPerImage +
+                                        static_cast<std::size_t>(row) *
+                                            metalMipBytesPerRow;
+                                    std::uint8_t* dstRow =
+                                        slot.data.data() + offset +
+                                        static_cast<std::size_t>(layer) *
+                                            mipBytesPerImage +
+                                        static_cast<std::size_t>(row) *
+                                            mipBytesPerRow;
+                                    for (std::uint32_t col = 0;
+                                         col < mipWidth;
+                                         ++col) {
+                                        std::memcpy(
+                                            dstRow +
+                                                static_cast<std::size_t>(col) *
+                                                    bpp,
+                                            srcRow +
+                                                static_cast<std::size_t>(col) *
+                                                    metalBpp,
+                                            bpp);
+                                    }
+                                }
+                            }
                         }
                     }
                     populatedFromMetal = true;
