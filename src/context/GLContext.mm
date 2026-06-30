@@ -18450,18 +18450,25 @@ struct GLContext::Impl {
                         static_cast<std::uint32_t>(
                             texObject->target == GL_TEXTURE_1D
                                 ? 1 : safeDimension(image.desc.height));
-                    const std::uint32_t layers =
+                    const std::uint32_t layerFaces =
                         static_cast<std::uint32_t>(
                             std::max<GLsizei>(image.desc.depth, 1));
-                    if (width == 0 || height == 0 || layers == 0) {
+                    if (width == 0 || height == 0 || layerFaces == 0) {
                         continue;
                     }
+                    const bool cubeArrayDepth =
+                        texObject->target == GL_TEXTURE_CUBE_MAP_ARRAY;
+                    const std::uint32_t cubeCount = cubeArrayDepth
+                        ? std::max<std::uint32_t>(layerFaces / 6u, 1u)
+                        : layerFaces;
 
                     appgl::SampledTextureSlot& slot = slots[i];
                     slot.width = width;
                     slot.height = height;
-                    slot.depth = layers > 1 ? layers : 0;
-                    slot.layerFaces = layers;
+                    slot.depth = cubeArrayDepth
+                        ? cubeCount
+                        : (layerFaces > 1 ? layerFaces : 0);
+                    slot.layerFaces = layerFaces;
                     slot.internalFormat = proxyFormat;
                     slot.samplerType = samplerGLType;
                     applySamplingState(slot);
@@ -18472,15 +18479,15 @@ struct GLContext::Impl {
                     slot.mipHeights = {height};
                     slot.mipBytesPerRow = {slot.bytesPerRow};
                     slot.mipBytesPerImage = {slot.bytesPerImage};
-                    slot.mipLayerFaces = {layers};
+                    slot.mipLayerFaces = {layerFaces};
                     slot.data.assign(
                         static_cast<std::size_t>(slot.bytesPerImage) *
-                            static_cast<std::size_t>(layers),
+                            static_cast<std::size_t>(layerFaces),
                         0u);
                     const std::size_t pixelCount =
                         static_cast<std::size_t>(width) *
                         static_cast<std::size_t>(height) *
-                        static_cast<std::size_t>(layers);
+                        static_cast<std::size_t>(layerFaces);
                     if (stencilMode) {
                         for (std::size_t p = 0; p < pixelCount; ++p) {
                             slot.data[p] = stencilSampleProxyValue(image, p);
@@ -18520,18 +18527,25 @@ struct GLContext::Impl {
                         static_cast<std::uint32_t>(
                             texObject->target == GL_TEXTURE_1D
                                 ? 1 : safeDimension(image.desc.height));
-                    const std::uint32_t layers =
+                    const std::uint32_t layerFaces =
                         static_cast<std::uint32_t>(
                             std::max<GLsizei>(image.desc.depth, 1));
-                    if (width == 0 || height == 0 || layers == 0) {
+                    if (width == 0 || height == 0 || layerFaces == 0) {
                         continue;
                     }
+                    const bool cubeArrayDepth =
+                        texObject->target == GL_TEXTURE_CUBE_MAP_ARRAY;
+                    const std::uint32_t cubeCount = cubeArrayDepth
+                        ? std::max<std::uint32_t>(layerFaces / 6u, 1u)
+                        : layerFaces;
 
                     appgl::SampledTextureSlot& slot = slots[i];
                     slot.width = width;
                     slot.height = height;
-                    slot.depth = layers > 1 ? layers : 0;
-                    slot.layerFaces = layers;
+                    slot.depth = cubeArrayDepth
+                        ? cubeCount
+                        : (layerFaces > 1 ? layerFaces : 0);
+                    slot.layerFaces = layerFaces;
                     slot.internalFormat =
                         static_cast<std::uint32_t>(GL_DEPTH_COMPONENT32F);
                     slot.samplerType = samplerGLType;
@@ -18543,11 +18557,11 @@ struct GLContext::Impl {
                     slot.mipHeights = {height};
                     slot.mipBytesPerRow = {slot.bytesPerRow};
                     slot.mipBytesPerImage = {slot.bytesPerImage};
-                    slot.mipLayerFaces = {layers};
+                    slot.mipLayerFaces = {layerFaces};
                     const std::size_t pixelCount =
                         static_cast<std::size_t>(width) *
                         static_cast<std::size_t>(height) *
-                        static_cast<std::size_t>(layers);
+                        static_cast<std::size_t>(layerFaces);
                     slot.data.assign(pixelCount * sizeof(float), 0u);
                     for (std::size_t p = 0; p < pixelCount; ++p) {
                         const float value = depthSampleProxyValue(image, p);
@@ -33107,6 +33121,10 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
         layered == GL_TRUE &&
         shaderTarget == GL_TEXTURE_CUBE_MAP_ARRAY &&
         baseTex.textureType == MTLTextureTypeCubeArray;
+    const bool cubeStorageAs2DArray =
+        layered == GL_TRUE &&
+        shaderTarget == GL_TEXTURE_CUBE_MAP &&
+        baseTex.textureType == MTLTextureTypeCube;
     if (singleLayerView &&
         (layer < 0 || static_cast<NSUInteger>(layer) >= availableSlices)) {
         if (trace) {
@@ -33118,6 +33136,7 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
         return nullptr;
     }
     if (!cubeArrayStorageAs2DArray &&
+        !cubeStorageAs2DArray &&
         !singleLayerView && level == 0 && imagePixelFormat == baseTex.pixelFormat) {
         if (trace) {
             std::fprintf(stderr,
@@ -33158,7 +33177,7 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
         ? NSMakeRange(static_cast<NSUInteger>(layer), 1)
         : NSMakeRange(0, sliceCount);
     const MTLTextureType viewTextureType =
-        cubeArrayStorageAs2DArray
+        (cubeArrayStorageAs2DArray || cubeStorageAs2DArray)
             ? MTLTextureType2DArray
             : (singleLayerView ? MTLTextureType2D : baseTex.textureType);
     id<MTLTexture> levelView = [baseTex newTextureViewWithPixelFormat:imagePixelFormat

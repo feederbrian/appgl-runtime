@@ -3222,6 +3222,105 @@ bool retargetCubeArrayStorageImagesAs2DArray(
     return changed;
 }
 
+bool retargetCubeStorageImagesAs2DArray(
+    std::string& msl,
+    const std::vector<std::uint32_t>& metalTextureSlots) {
+    std::vector<std::string> variableNames;
+    std::unordered_set<std::string> variableNameSet;
+    bool changed = false;
+    auto retargetAtTextureAttr = [&](std::size_t search,
+                                     bool requireAccessQualifier) {
+        const std::size_t typePos = msl.rfind("texturecube<", search);
+        if (typePos == std::string::npos) {
+            return;
+        }
+        const std::size_t typeEnd = msl.find('>', typePos);
+        if (typeEnd == std::string::npos || typeEnd > search) {
+            return;
+        }
+        const bool hasAccessQualifier = msl.find("access::", typePos) < typeEnd;
+        if (requireAccessQualifier && !hasAccessQualifier) {
+            return;
+        }
+        std::size_t nameStart = typeEnd + 1;
+        while (nameStart < search &&
+               std::isspace(static_cast<unsigned char>(msl[nameStart]))) {
+            ++nameStart;
+        }
+        std::size_t nameEnd = nameStart;
+        while (nameEnd < search && isIdentifierChar(msl[nameEnd])) {
+            ++nameEnd;
+        }
+        if (nameStart >= search || nameEnd <= nameStart) {
+            return;
+        }
+        const std::string variableName =
+            msl.substr(nameStart, nameEnd - nameStart);
+        if (variableNameSet.insert(variableName).second) {
+            variableNames.push_back(variableName);
+        }
+        msl.replace(typePos, std::strlen("texturecube"), "texture2d_array");
+        changed = true;
+    };
+
+    for (std::uint32_t slot : metalTextureSlots) {
+        const std::string attr = "[[texture(" + std::to_string(slot) + ")]]";
+        std::size_t search = 0;
+        while ((search = msl.find(attr, search)) != std::string::npos) {
+            retargetAtTextureAttr(search, false);
+            search += attr.size();
+        }
+    }
+    if (metalTextureSlots.empty()) {
+        std::size_t typePos = 0;
+        while ((typePos = msl.find("texturecube<", typePos)) !=
+               std::string::npos) {
+            const std::size_t attrPos = msl.find("[[texture(", typePos);
+            if (attrPos != std::string::npos) {
+                const std::size_t attrEnd = msl.find(")]]", attrPos);
+                if (attrEnd != std::string::npos) {
+                    retargetAtTextureAttr(attrPos, true);
+                }
+            }
+            typePos += std::strlen("texturecube");
+        }
+    }
+
+    auto retargetVariableDeclarations = [&](const std::string& varName) {
+        std::size_t typePos = 0;
+        while ((typePos = msl.find("texturecube<", typePos)) !=
+               std::string::npos) {
+            const std::size_t typeEnd = msl.find('>', typePos);
+            if (typeEnd == std::string::npos) {
+                break;
+            }
+            std::size_t nameStart = typeEnd + 1;
+            while (nameStart < msl.size() &&
+                   std::isspace(static_cast<unsigned char>(msl[nameStart]))) {
+                ++nameStart;
+            }
+            const std::size_t nameEnd = nameStart + varName.size();
+            if (nameEnd <= msl.size() &&
+                msl.compare(nameStart, varName.size(), varName) == 0 &&
+                (nameEnd == msl.size() || !isIdentifierChar(msl[nameEnd]))) {
+                msl.replace(typePos,
+                            std::strlen("texturecube"),
+                            "texture2d_array");
+                typePos += std::strlen("texture2d_array");
+                changed = true;
+            } else {
+                typePos += std::strlen("texturecube");
+            }
+        }
+    };
+
+    for (const auto& name : variableNames) {
+        retargetVariableDeclarations(name);
+    }
+
+    return changed;
+}
+
 std::vector<std::pair<std::string, std::uint32_t>>
 collectTextureVariableSlotsForMetalSlots(
     const std::string& msl,
@@ -6975,6 +7074,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             bool nonReadable = false;
         };
         std::vector<StorageImageAccessFixup> storageImageAccessFixups;
+        std::vector<std::uint32_t> cubeStorageImageSlots;
         std::vector<std::uint32_t> cubeArrayStorageImageSlots;
         std::vector<std::uint32_t> multisampleStorageImageSlots;
         std::vector<std::uint32_t> multisampleStorageImageArraySlots;
@@ -7153,6 +7253,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 std::uint32_t arraySize;
                 bool nonWritable;
                 bool nonReadable;
+                bool cube = false;
                 bool cubeArray = false;
                 bool multisample = false;
                 bool multisampleArray = false;
@@ -7172,6 +7273,11 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 const auto& imageType =
                     imgType.basetype == spirv_cross::SPIRType::Image
                         ? imgType : baseType;
+                r.cube =
+                    imageType.basetype == spirv_cross::SPIRType::Image &&
+                    imageType.image.dim == spv::DimCube &&
+                    !imageType.image.arrayed &&
+                    !imageType.image.ms;
                 r.cubeArray =
                     imageType.basetype == spirv_cross::SPIRType::Image &&
                     imageType.image.dim == spv::DimCube &&
@@ -7221,13 +7327,17 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                         bindings.storageImageAtomicBufferBase + static_cast<std::uint32_t>(i);
                     nextArgBufStorageImageSlot += std::max<std::uint32_t>(
                         entry.arraySize, 1u);
-                    if (isGraphicsStage) {
+                    if (isGraphicsStage ||
+                        execModel == spv::ExecutionModelGLCompute) {
                         storageImageAccessFixups.push_back({
                             binding.msl_texture, true,
                             entry.nonWritable, entry.nonReadable});
                     }
                     if (entry.cubeArray) {
                         cubeArrayStorageImageSlots.push_back(binding.msl_texture);
+                    }
+                    if (entry.cube) {
+                        cubeStorageImageSlots.push_back(binding.msl_texture);
                     }
                     if (entry.multisample) {
                         multisampleStorageImageSlots.push_back(binding.msl_texture);
@@ -7260,13 +7370,17 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                     binding.msl_buffer =
                         bindings.storageImageAtomicBufferBase + static_cast<std::uint32_t>(i);
                     unifiedNextTextureSlot += 1;
-                    if (isGraphicsStage) {
+                    if (isGraphicsStage ||
+                        execModel == spv::ExecutionModelGLCompute) {
                         storageImageAccessFixups.push_back({
                             binding.msl_texture, false,
                             entry.nonWritable, entry.nonReadable});
                     }
                     if (entry.cubeArray) {
                         cubeArrayStorageImageSlots.push_back(binding.msl_texture);
+                    }
+                    if (entry.cube) {
+                        cubeStorageImageSlots.push_back(binding.msl_texture);
                     }
                     if (entry.multisample) {
                         multisampleStorageImageSlots.push_back(binding.msl_texture);
@@ -7458,12 +7572,13 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         //   readonly  => NonWritable => Metal access::read
         //   writeonly => NonReadable => Metal access::write
         // SPIRV-Cross's AppGL fork intentionally emits read_write for
-        // readonly storage images to satisfy compute/argbuf reflection,
-        // but direct graphics storage images on Metal need the precise
-        // access qualifier or shader_image_load_store read paths return
-        // zero. Keep this scoped to graphics-stage storage images so the
-        // already-passing compute cases stay on the existing path.
-        if (isGraphicsStage && !storageImageAccessFixups.empty()) {
+        // readonly storage images to keep reflection conservative, but
+        // direct Metal pipelines need the precise access qualifier:
+        // graphics image-read paths otherwise return zero, and compute
+        // shaders with many readonly images can exceed writable-texture
+        // limits before dispatch.
+        if ((isGraphicsStage || execModel == spv::ExecutionModelGLCompute) &&
+            !storageImageAccessFixups.empty()) {
             auto accessChar = [](char ch) {
                 return (ch >= 'a' && ch <= 'z') ||
                        (ch >= 'A' && ch <= 'Z') ||
@@ -7528,6 +7643,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         }
 
         if (!resources.storage_images.empty()) {
+            (void)retargetCubeStorageImagesAs2DArray(
+                msl, cubeStorageImageSlots);
             (void)retargetCubeArrayStorageImagesAs2DArray(
                 msl, cubeArrayStorageImageSlots);
             (void)rewriteMultisampleStorageImageWritesToSidecars(

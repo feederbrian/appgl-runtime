@@ -1690,16 +1690,16 @@ images.
 `texture2d_array<T, access::read_write>` sidecars because Metal does not
 support read/write `texture2d_ms*` storage images. `imageLoad` and
 `imageStore` map `(layer, sample)` into sidecar slices through
-`appgl_ms_storage_image_samples`. For sparse MS storage images, the
-emitter also writes an `APPGL_MS_STORAGE_SPARSE_RESIDENCY_SLOT` marker
-and guards sidecar reads/writes with native `texture2d_ms*::sparse_read`
-residency, returning the GL default uncommitted-region color when the
-native page is not resident.
+`appgl_ms_storage_image_samples`. `imageLoad` reads the sidecar directly
+so ordinary MS storage image reads do not require high-index sparse
+residency companion textures. For sparse MS storage-image stores, the
+emitter still writes an `APPGL_MS_STORAGE_SPARSE_RESIDENCY_SLOT` marker
+and guards writes with native `texture2d_ms*::sparse_read` residency.
 
 **Regression-safe:** The lowering is gated to compute-stage storage
 images with `sampled == 2`, `Dim2D`, and `ms == true`. Non-MS storage
 images keep the normal MSL texture type, and sparse residency companion
-textures are injected only when the marker is present.
+textures are injected only for sparse-guarded stores.
 
 ### `spirv-cross-msl-ms-sparse-fetch.patch`
 
@@ -1782,7 +1782,7 @@ non-multisample storage images whose dimensions can be Metal sparse
 textures.
 
 **Summary:** Routes compute `imageLoad` on 2D, 2D-array, 3D,
-cube/cube-array, and rectangle storage images through Metal
+and rectangle storage images through Metal
 `sparse_read(...)`. The emitted expression uses `.resident()` to select
 between the sparse texel value and the GL default uncommitted-region
 color, including alpha=1 defaults for R/RG/R11 formats.
@@ -1797,10 +1797,11 @@ path, so the first texel of the second page still returned the uploaded
 restore the GL uncommitted-region contract.
 
 **Regression-safe:** The path is gated to compute-stage storage-image
-reads, non-MS images, and sparse-capable dimensions. Non-sparse storage
-image reads still use the same runtime texture binding and observe
-`.resident() == true` on ordinary textures, while writable sparse image
-stores remain routed to the AppGL sidecar by the separate write patch.
+reads, non-MS images, and sparse-capable 2D/3D/rectangle dimensions.
+Cube and cube-array storage image reads stay on ordinary Metal reads
+because ordinary cube storage textures did not reliably report residency
+through `sparse_read(...)`. Writable sparse image stores remain routed to
+the AppGL sidecar by the separate write patch.
 
 ### `spirv-cross-msl-sparse-storage-image-write.patch`
 

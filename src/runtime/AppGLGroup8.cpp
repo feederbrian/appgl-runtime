@@ -281,8 +281,25 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
         return;
     }
 
+    // GL cube-face queries address the texture object bound to the parent
+    // cube target. Keep the original face target as requestTarget so the
+    // context-level path can still apply target-specific semantics later.
+    GLenum bindTarget = target;
+    switch (target) {
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_X:
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_Y:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
+            bindTarget = GL_TEXTURE_CUBE_MAP;
+            break;
+        default:
+            break;
+    }
+
     // Find the bound texture for this target
-    GLuint texName = context->state().boundTexture(target);
+    GLuint texName = context->state().boundTexture(bindTarget);
     if (texName == 0 && appglCompatProfileEnabled()) {
         (void)context->getTextureLevelParameteriv(texName, level, pname, params, target);
         return;

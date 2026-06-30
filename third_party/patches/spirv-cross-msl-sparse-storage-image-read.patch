@@ -2,7 +2,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 index e36a861c..3f6b7760 100644
 --- a/spirv_msl.cpp
 +++ b/spirv_msl.cpp
-@@ -9908,6 +9908,72 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+@@ -9908,6 +9908,71 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
  			inherit_expression_dependencies(id, sample);
  			break;
  		}
@@ -14,7 +14,6 @@ index e36a861c..3f6b7760 100644
 +		    !img_type.image.ms &&
 +		    (img_type.image.dim == Dim2D ||
 +		     img_type.image.dim == Dim3D ||
-+		     img_type.image.dim == DimCube ||
 +		     img_type.image.dim == DimRect);
 +		if (appgl_sparse_storage_image_read)
 +		{
