@@ -11948,6 +11948,13 @@ struct GLContext::Impl {
         }
 
         if (mtlFmt == MTLPixelFormatRGB9E5Float) {
+            const bool rgb9e5NativeSource =
+                type == GL_FLOAT ||
+                type == GL_HALF_FLOAT ||
+                type == GL_UNSIGNED_INT_5_9_9_9_REV;
+            if (!normalizeCompatUpload && !rgb9e5NativeSource) {
+                return false;
+            }
             outBpp = 4u;
             const std::size_t totalPixels = static_cast<std::size_t>(width)
                                           * static_cast<std::size_t>(height)
@@ -15840,13 +15847,36 @@ struct GLContext::Impl {
                     buildDepthStencilSwizzleSamplingTexture(texObj, baseTex, depthStencilProxyFormat)) {
                 id<MTLTexture> viewSource = proxy;
                 id<MTLTexture> swizzledProxy = nil;
-                if (!isDefaultSwizzle(effectiveSwizzle)) {
+                const NSUInteger proxyMipCount =
+                    nonZeroMipLevelCount(proxy.mipmapLevelCount);
+                NSRange proxyViewLevels = viewLevels;
+                if (proxyMipCount > 0) {
+                    if (proxyViewLevels.location >= proxyMipCount) {
+                        proxyViewLevels = NSMakeRange(0, proxyMipCount);
+                    } else {
+                        proxyViewLevels.length = std::min<NSUInteger>(
+                            proxyViewLevels.length,
+                            proxyMipCount - proxyViewLevels.location);
+                    }
+                    if (proxyViewLevels.length == 0) {
+                        proxyViewLevels = NSMakeRange(0, proxyMipCount);
+                    }
+                }
+                const bool proxyNeedsSwizzleView =
+                    !isDefaultSwizzle(effectiveSwizzle);
+                if (proxyNeedsSwizzleView) {
                     swizzledProxy = [proxy
                         newTextureViewWithPixelFormat:proxy.pixelFormat
                                          textureType:proxy.textureType
-                                         levels:NSMakeRange(0, nonZeroMipLevelCount(proxy.mipmapLevelCount))
+                                         levels:proxyViewLevels
                                               slices:textureViewSliceRange(proxy)
                                              swizzle:channels];
+                } else if (needsMipRangeView) {
+                    swizzledProxy = [proxy
+                        newTextureViewWithPixelFormat:proxy.pixelFormat
+                                         textureType:proxy.textureType
+                                              levels:proxyViewLevels
+                                              slices:textureViewSliceRange(proxy)];
                 }
                 if (swizzledProxy != nil) {
                     viewSource = swizzledProxy;
