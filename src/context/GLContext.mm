@@ -15427,9 +15427,201 @@ struct GLContext::Impl {
         }
     }
 
+    static NSUInteger textureViewClassByteWidth(TextureViewClass cls) {
+        switch (cls) {
+            case TextureViewClass::Bits128: return 16u;
+            case TextureViewClass::Bits96:  return 12u;
+            case TextureViewClass::Bits64:  return 8u;
+            case TextureViewClass::Bits48:  return 6u;
+            case TextureViewClass::Bits32:  return 4u;
+            case TextureViewClass::Bits24:  return 3u;
+            case TextureViewClass::Bits16:  return 2u;
+            case TextureViewClass::Bits8:   return 1u;
+            default:                        return 0u;
+        }
+    }
+
+    static bool textureViewRawProxyTargetSupported(GLenum target) {
+        return target == GL_TEXTURE_2D ||
+               target == GL_TEXTURE_2D_ARRAY;
+    }
+
+    id<MTLTexture> buildTextureViewClassSamplingProxy(GLTextureObject& viewObj,
+                                                      GLTextureObject& rootObj) {
+        if (device == nil ||
+            !textureViewRawProxyTargetSupported(viewObj.target) ||
+            !textureViewRawProxyTargetSupported(rootObj.target) ||
+            rootObj.desc.internalFormat == viewObj.desc.internalFormat) {
+            return nil;
+        }
+        if (rootObj.producerPending.hasAny(kProducerAll) ||
+            rootObj.wasFramebufferRenderedTo ||
+            rootObj.wasViewportRenderedTo ||
+            rootObj.imageAtomicBufferDirtyToTexture) {
+            return nil;
+        }
+
+        const TextureViewClass sourceClass =
+            textureViewClassForInternalFormat(rootObj.desc.internalFormat);
+        const TextureViewClass viewClass =
+            textureViewClassForInternalFormat(viewObj.desc.internalFormat);
+        if (sourceClass == TextureViewClass::Undefined ||
+            sourceClass != viewClass) {
+            return nil;
+        }
+        const NSUInteger classBytes = textureViewClassByteWidth(viewClass);
+        if (classBytes == 0) {
+            return nil;
+        }
+
+        if (!materializeAllTextureMipShadowsFromMetal(
+                rootObj,
+                TextureMipShadowMaterializeConsumer::UploadRebuild)) {
+            return nil;
+        }
+
+        const NSUInteger levelStart =
+            static_cast<NSUInteger>(std::max<GLint>(viewObj.viewMinLevel, 0));
+        const NSUInteger levelCount = static_cast<NSUInteger>(
+            std::max<GLint>(
+                viewObj.viewNumLevels > 0 ? viewObj.viewNumLevels : viewObj.desc.levels,
+                1));
+        const NSUInteger sliceStart =
+            static_cast<NSUInteger>(std::max<GLint>(viewObj.viewMinLayer, 0));
+        const NSUInteger sliceCount = static_cast<NSUInteger>(
+            std::max<GLint>(
+                viewObj.viewNumLayers > 0 ? viewObj.viewNumLayers : viewObj.desc.layers,
+                1));
+        if (levelCount == 0 || sliceCount == 0) {
+            return nil;
+        }
+
+        const auto baseIt = rootObj.levels.find(static_cast<GLint>(levelStart));
+        if (baseIt == rootObj.levels.end() || !baseIt->second.defined) {
+            return nil;
+        }
+        const GLTextureImageLevel& baseImage = baseIt->second;
+        const NSUInteger baseWidth =
+            static_cast<NSUInteger>(safeDimension(baseImage.desc.width));
+        const NSUInteger baseHeight =
+            static_cast<NSUInteger>(safeDimension(baseImage.desc.height));
+        if (baseWidth == 0 || baseHeight == 0) {
+            return nil;
+        }
+
+        const MTLPixelFormat proxyFormat =
+            metalRenderbufferFormat(viewObj.desc.internalFormat);
+        if (proxyFormat == MTLPixelFormatInvalid) {
+            return nil;
+        }
+
+        MTLTextureDescriptor* descriptor = [[MTLTextureDescriptor alloc] init];
+        ScopedOwnedMetalObject descriptorRelease(descriptor);
+        descriptor.textureType = metalTextureTypeForTarget(viewObj.target);
+        descriptor.pixelFormat = proxyFormat;
+        descriptor.width = baseWidth;
+        descriptor.height = baseHeight;
+        descriptor.depth = 1u;
+        descriptor.mipmapLevelCount = metalMipLevelCountForTexture(
+            viewObj.target,
+            /*use2DFor1D=*/false,
+            levelCount,
+            descriptor.width,
+            descriptor.height,
+            descriptor.depth);
+        descriptor.arrayLength =
+            viewObj.target == GL_TEXTURE_2D_ARRAY
+                ? std::max<NSUInteger>(sliceCount, 1u)
+                : 1u;
+        descriptor.usage = MTLTextureUsageShaderRead |
+                           MTLTextureUsagePixelFormatView;
+        descriptor.storageMode = MTLStorageModeShared;
+
+        id<MTLTexture> proxy = [device newTextureWithDescriptor:descriptor];
+        if (proxy == nil) {
+            return nil;
+        }
+
+        const NSUInteger proxyLevelCount =
+            nonZeroMipLevelCount(proxy.mipmapLevelCount);
+        for (NSUInteger mip = 0; mip < proxyLevelCount; ++mip) {
+            const GLint sourceLevel = static_cast<GLint>(levelStart + mip);
+            const auto levelIt = rootObj.levels.find(sourceLevel);
+            if (levelIt == rootObj.levels.end() || !levelIt->second.defined) {
+                return nil;
+            }
+            const GLTextureImageLevel& image = levelIt->second;
+            const std::uint8_t* sourceBytes = nullptr;
+            std::size_t sourceSize = 0;
+            if (image.rawUploadBpp == classBytes &&
+                !image.rawUploadData.empty()) {
+                sourceBytes = image.rawUploadData.data();
+                sourceSize = image.rawUploadData.size();
+            } else if (image.nativeBpp == classBytes && !image.nativeData.empty()) {
+                sourceBytes = image.nativeData.data();
+                sourceSize = image.nativeData.size();
+            } else if (classBytes == 4u && !image.rgba8.empty()) {
+                sourceBytes = image.rgba8.data();
+                sourceSize = image.rgba8.size();
+            } else {
+                return nil;
+            }
+
+            const NSUInteger mipWidth =
+                static_cast<NSUInteger>(safeDimension(image.desc.width));
+            const NSUInteger mipHeight =
+                static_cast<NSUInteger>(safeDimension(image.desc.height));
+            const NSUInteger sourceLayers =
+                rootObj.target == GL_TEXTURE_2D_ARRAY
+                    ? static_cast<NSUInteger>(safeDimension(image.desc.depth))
+                    : 1u;
+            const NSUInteger bytesPerRow = mipWidth * classBytes;
+            const NSUInteger bytesPerImage = bytesPerRow * mipHeight;
+            if (mipWidth == 0 || mipHeight == 0 ||
+                bytesPerRow == 0 || bytesPerImage == 0 ||
+                sourceLayers == 0) {
+                return nil;
+            }
+            const std::size_t requiredBytes =
+                static_cast<std::size_t>(bytesPerImage) *
+                static_cast<std::size_t>(sourceLayers);
+            if (sourceSize < requiredBytes ||
+                sliceStart >= sourceLayers) {
+                return nil;
+            }
+
+            const MTLRegion region = MTLRegionMake2D(0, 0, mipWidth, mipHeight);
+            if (viewObj.target == GL_TEXTURE_2D_ARRAY) {
+                if (sliceCount > sourceLayers - sliceStart) {
+                    return nil;
+                }
+                for (NSUInteger slice = 0; slice < sliceCount; ++slice) {
+                    const NSUInteger sourceSlice = sliceStart + slice;
+                    const std::uint8_t* layerBytes =
+                        sourceBytes +
+                        static_cast<std::size_t>(sourceSlice * bytesPerImage);
+                    [proxy replaceRegion:region
+                              mipmapLevel:mip
+                                    slice:slice
+                                withBytes:layerBytes
+                              bytesPerRow:bytesPerRow
+                            bytesPerImage:bytesPerImage];
+                }
+            } else {
+                const std::uint8_t* layerBytes =
+                    sourceBytes +
+                    static_cast<std::size_t>(sliceStart * bytesPerImage);
+                [proxy replaceRegion:region
+                          mipmapLevel:mip
+                            withBytes:layerBytes
+                          bytesPerRow:bytesPerRow];
+            }
+        }
+        return proxy;
+    }
+
     id<MTLTexture> buildTextureViewSamplingProxy(GLTextureObject& viewObj) {
         if (viewObj.viewSourceTexture == 0 ||
-            !isCubeFamilyTextureTarget(viewObj.target) ||
             objects == nullptr ||
             device == nil) {
             return nil;
@@ -15445,7 +15637,13 @@ struct GLContext::Impl {
             rootName = rootObj->viewSourceTexture;
             rootObj = objects->textures().get(rootName);
         }
-        if (rootObj == nullptr || rootObj->target == viewObj.target) {
+        if (rootObj == nullptr) {
+            return nil;
+        }
+        if (!isCubeFamilyTextureTarget(viewObj.target)) {
+            return buildTextureViewClassSamplingProxy(viewObj, *rootObj);
+        }
+        if (rootObj->target == viewObj.target) {
             return nil;
         }
 
@@ -15701,10 +15899,6 @@ struct GLContext::Impl {
         }
         void* baseTextureRaw = texObj.metalTexture;
         id<MTLTexture> baseTex = metalTextureFromRaw(baseTextureRaw);
-        if (baseTex == nil) {
-            texObj.swizzleDirty = false;
-            return texObj.metalTexture;
-        }
         if (texObj.viewSourceTexture != 0) {
             id<MTLTexture> samplingProxy = buildTextureViewSamplingProxy(texObj);
             if (samplingProxy != nil) {
@@ -15721,6 +15915,10 @@ struct GLContext::Impl {
                 baseTextureRaw = texObj.metalTexture;
                 baseTex = metalTextureFromRaw(baseTextureRaw);
             }
+        }
+        if (baseTex == nil) {
+            texObj.swizzleDirty = false;
+            return texObj.metalTexture;
         }
 
         const bool isMSTarget =
@@ -17552,6 +17750,9 @@ struct GLContext::Impl {
                 }
                 bool textureStorageReady =
                     texObject->instantiated && texObject->metalTexture != nullptr;
+                if (!textureStorageReady && texObject->viewSourceTexture != 0) {
+                    textureStorageReady = true;
+                }
 
                 // Step 4: determine sampler state — stand-alone
                 // sampler object if one is attached, otherwise fall
@@ -18073,19 +18274,29 @@ struct GLContext::Impl {
                     return 0;
             }
         };
-        auto bufferTextureBytesPerTexelForSamplerMap = [](GLenum fmt) -> std::uint32_t {
+        auto sampledTextureBytesPerTexelForSamplerMap =
+            [](GLenum fmt) -> std::uint32_t {
             switch (fmt) {
                 case GL_R8: case GL_R8I: case GL_R8UI:
+                case GL_R8_SNORM: case GL_STENCIL_INDEX8:
                     return 1;
                 case GL_R16: case GL_R16I: case GL_R16UI: case GL_R16F:
+                case GL_R16_SNORM:
                 case GL_RG8: case GL_RG8I: case GL_RG8UI:
+                case GL_RG8_SNORM:
                     return 2;
                 case GL_R32I: case GL_R32UI: case GL_R32F:
+                case GL_DEPTH_COMPONENT32F:
                 case GL_RG16: case GL_RG16I: case GL_RG16UI: case GL_RG16F:
+                case GL_RG16_SNORM:
                 case GL_RGBA8: case GL_RGBA8I: case GL_RGBA8UI:
+                case GL_RGBA8_SNORM: case GL_SRGB8_ALPHA8:
+                case GL_R11F_G11F_B10F: case GL_RGB10_A2:
+                case GL_RGB10_A2UI: case GL_RGB9_E5:
                     return 4;
                 case GL_RG32I: case GL_RG32UI: case GL_RG32F:
-                case GL_RGBA16: case GL_RGBA16I: case GL_RGBA16UI: case GL_RGBA16F:
+                case GL_RGBA16: case GL_RGBA16I: case GL_RGBA16UI:
+                case GL_RGBA16F: case GL_RGBA16_SNORM:
                     return 8;
                 case GL_RGB32I: case GL_RGB32UI: case GL_RGB32F:
                     return 12;
@@ -18237,12 +18448,358 @@ struct GLContext::Impl {
                                 effectiveSamplerParams->borderColor[component];
                         }
                     };
+                auto populateTextureShadowSlot =
+                    [&](GLTextureObject& object,
+                        appgl::SampledTextureSlot& slot,
+                        std::uint32_t bpp) -> bool {
+                        if (bpp == 0 ||
+                            !textureViewRawProxyTargetSupported(object.target) ||
+                            object.producerPending.hasAny(kProducerAll) ||
+                            object.wasFramebufferRenderedTo ||
+                            object.wasViewportRenderedTo ||
+                            object.imageAtomicBufferDirtyToTexture ||
+                            !materializeAllTextureMipShadowsFromMetal(
+                                object,
+                                TextureMipShadowMaterializeConsumer::UploadRebuild)) {
+                            return false;
+                        }
+                        const auto baseIt = object.levels.find(0);
+                        if (baseIt == object.levels.end() ||
+                            !baseIt->second.defined) {
+                            return false;
+                        }
+                        const GLTextureImageLevel& baseImage = baseIt->second;
+                        const std::uint32_t baseWidth =
+                            static_cast<std::uint32_t>(
+                                safeDimension(baseImage.desc.width));
+                        const std::uint32_t baseHeight =
+                            static_cast<std::uint32_t>(
+                                safeDimension(baseImage.desc.height));
+                        const std::uint32_t baseLayers =
+                            object.target == GL_TEXTURE_2D_ARRAY
+                                ? static_cast<std::uint32_t>(
+                                      safeDimension(baseImage.desc.depth))
+                                : 1u;
+                        if (baseWidth == 0 || baseHeight == 0 ||
+                            baseLayers == 0) {
+                            return false;
+                        }
+
+                        appgl::SampledTextureSlot built;
+                        built.width = baseWidth;
+                        built.height = baseHeight;
+                        built.depth = object.target == GL_TEXTURE_2D_ARRAY
+                            ? baseLayers
+                            : 0u;
+                        built.layerFaces = object.target == GL_TEXTURE_2D_ARRAY
+                            ? baseLayers
+                            : 1u;
+                        built.internalFormat = static_cast<std::uint32_t>(
+                            object.desc.internalFormat);
+                        built.samplerType = samplerGLType;
+                        built.textureTarget = static_cast<std::uint32_t>(
+                            object.target);
+                        applySamplingState(built);
+
+                        GLint maxLevel = -1;
+                        for (const auto& [levelIndex, image] : object.levels) {
+                            if (levelIndex >= 0 && image.defined) {
+                                maxLevel = std::max(maxLevel, levelIndex);
+                            }
+                        }
+                        if (maxLevel < 0) {
+                            return false;
+                        }
+                        for (GLint level = 0; level <= maxLevel; ++level) {
+                            const auto levelIt = object.levels.find(level);
+                            if (levelIt == object.levels.end() ||
+                                !levelIt->second.defined) {
+                                break;
+                            }
+                            const GLTextureImageLevel& image = levelIt->second;
+                            const std::uint32_t mipWidth =
+                                static_cast<std::uint32_t>(
+                                    safeDimension(image.desc.width));
+                            const std::uint32_t mipHeight =
+                                static_cast<std::uint32_t>(
+                                    safeDimension(image.desc.height));
+                            const std::uint32_t mipLayers =
+                                object.target == GL_TEXTURE_2D_ARRAY
+                                    ? static_cast<std::uint32_t>(
+                                          safeDimension(image.desc.depth))
+                                    : 1u;
+                            if (mipWidth == 0 || mipHeight == 0 ||
+                                mipLayers == 0) {
+                                return false;
+                            }
+                            const std::uint8_t* sourceBytes = nullptr;
+                            std::size_t sourceSize = 0;
+                            if (image.rawUploadBpp == bpp &&
+                                !image.rawUploadData.empty()) {
+                                sourceBytes = image.rawUploadData.data();
+                                sourceSize = image.rawUploadData.size();
+                            } else if (image.nativeBpp == bpp &&
+                                       !image.nativeData.empty()) {
+                                sourceBytes = image.nativeData.data();
+                                sourceSize = image.nativeData.size();
+                            } else if (bpp == 4u && !image.rgba8.empty()) {
+                                sourceBytes = image.rgba8.data();
+                                sourceSize = image.rgba8.size();
+                            } else {
+                                return false;
+                            }
+
+                            const std::uint32_t mipBytesPerRow =
+                                mipWidth * bpp;
+                            const std::uint32_t mipBytesPerImage =
+                                mipBytesPerRow * mipHeight;
+                            const std::size_t byteCount =
+                                static_cast<std::size_t>(mipBytesPerImage) *
+                                static_cast<std::size_t>(mipLayers);
+                            if (mipBytesPerRow == 0 ||
+                                mipBytesPerImage == 0 ||
+                                sourceSize < byteCount) {
+                                return false;
+                            }
+
+                            const std::size_t offset = built.data.size();
+                            built.mipOffsets.push_back(
+                                static_cast<std::uint32_t>(offset));
+                            built.mipWidths.push_back(mipWidth);
+                            built.mipHeights.push_back(mipHeight);
+                            built.mipBytesPerRow.push_back(mipBytesPerRow);
+                            built.mipBytesPerImage.push_back(mipBytesPerImage);
+                            built.mipLayerFaces.push_back(mipLayers);
+                            built.data.resize(offset + byteCount, 0u);
+                            std::memcpy(built.data.data() + offset,
+                                        sourceBytes,
+                                        byteCount);
+                        }
+                        if (built.mipOffsets.empty()) {
+                            return false;
+                        }
+                        built.bytesPerRow = built.mipBytesPerRow.front();
+                        built.bytesPerImage = built.mipBytesPerImage.front();
+                        slot = std::move(built);
+                        if (trace) {
+                            std::fprintf(stderr,
+                                "[GS-tex]   texture-shadow snapshot tex=%u "
+                                "fmt=0x%X bytes=%zu bpp=%u levels=%zu "
+                                "layers=%u\n",
+                                texName,
+                                static_cast<unsigned>(
+                                    object.desc.internalFormat),
+                                slot.data.size(), bpp,
+                                slot.mipOffsets.size(),
+                                slot.layerFaces);
+                        }
+                        return true;
+                    };
+                auto populateTextureViewClassSlot =
+                    [&](GLTextureObject& viewObj,
+                        GLTextureObject& rootObj,
+                        appgl::SampledTextureSlot& slot) -> bool {
+                        if (!textureViewRawProxyTargetSupported(viewObj.target) ||
+                            !textureViewRawProxyTargetSupported(rootObj.target) ||
+                            rootObj.desc.internalFormat == viewObj.desc.internalFormat) {
+                            return false;
+                        }
+                        if (rootObj.producerPending.hasAny(kProducerAll) ||
+                            rootObj.wasFramebufferRenderedTo ||
+                            rootObj.wasViewportRenderedTo ||
+                            rootObj.imageAtomicBufferDirtyToTexture) {
+                            return false;
+                        }
+                        const TextureViewClass sourceClass =
+                            textureViewClassForInternalFormat(rootObj.desc.internalFormat);
+                        const TextureViewClass viewClass =
+                            textureViewClassForInternalFormat(viewObj.desc.internalFormat);
+                        if (sourceClass == TextureViewClass::Undefined ||
+                            sourceClass != viewClass) {
+                            return false;
+                        }
+                        const NSUInteger classBytes =
+                            textureViewClassByteWidth(viewClass);
+                        if (classBytes == 0 ||
+                            !materializeAllTextureMipShadowsFromMetal(
+                                rootObj,
+                                TextureMipShadowMaterializeConsumer::UploadRebuild)) {
+                            return false;
+                        }
+
+                        const NSUInteger levelStart =
+                            static_cast<NSUInteger>(
+                                std::max<GLint>(viewObj.viewMinLevel, 0));
+                        const NSUInteger levelCount =
+                            static_cast<NSUInteger>(
+                                std::max<GLint>(
+                                    viewObj.viewNumLevels > 0
+                                        ? viewObj.viewNumLevels
+                                        : viewObj.desc.levels,
+                                    1));
+                        const NSUInteger sliceStart =
+                            static_cast<NSUInteger>(
+                                std::max<GLint>(viewObj.viewMinLayer, 0));
+                        const NSUInteger sliceCount =
+                            viewObj.target == GL_TEXTURE_2D_ARRAY
+                                ? static_cast<NSUInteger>(
+                                      std::max<GLint>(
+                                          viewObj.viewNumLayers > 0
+                                              ? viewObj.viewNumLayers
+                                              : viewObj.desc.layers,
+                                          1))
+                                : 1u;
+
+                        const auto baseIt =
+                            rootObj.levels.find(static_cast<GLint>(levelStart));
+                        if (baseIt == rootObj.levels.end() ||
+                            !baseIt->second.defined) {
+                            return false;
+                        }
+                        const GLTextureImageLevel& baseImage = baseIt->second;
+                        const std::uint32_t baseWidth =
+                            static_cast<std::uint32_t>(
+                                safeDimension(baseImage.desc.width));
+                        const std::uint32_t baseHeight =
+                            static_cast<std::uint32_t>(
+                                safeDimension(baseImage.desc.height));
+                        if (baseWidth == 0 || baseHeight == 0) {
+                            return false;
+                        }
+
+                        appgl::SampledTextureSlot built;
+                        built.width = baseWidth;
+                        built.height = baseHeight;
+                        built.depth = viewObj.target == GL_TEXTURE_2D_ARRAY
+                            ? static_cast<std::uint32_t>(sliceCount)
+                            : 0u;
+                        built.layerFaces = viewObj.target == GL_TEXTURE_2D_ARRAY
+                            ? static_cast<std::uint32_t>(sliceCount)
+                            : 1u;
+                        built.internalFormat = static_cast<std::uint32_t>(
+                            viewObj.desc.internalFormat);
+                        built.samplerType = samplerGLType;
+                        built.textureTarget = static_cast<std::uint32_t>(
+                            viewObj.target);
+                        applySamplingState(built);
+
+                        for (NSUInteger mip = 0; mip < levelCount; ++mip) {
+                            const GLint sourceLevel =
+                                static_cast<GLint>(levelStart + mip);
+                            const auto levelIt = rootObj.levels.find(sourceLevel);
+                            if (levelIt == rootObj.levels.end() ||
+                                !levelIt->second.defined) {
+                                return false;
+                            }
+                            const GLTextureImageLevel& image = levelIt->second;
+                            const std::uint8_t* sourceBytes = nullptr;
+                            std::size_t sourceSize = 0;
+                            if (image.rawUploadBpp == classBytes &&
+                                !image.rawUploadData.empty()) {
+                                sourceBytes = image.rawUploadData.data();
+                                sourceSize = image.rawUploadData.size();
+                            } else if (image.nativeBpp == classBytes &&
+                                !image.nativeData.empty()) {
+                                sourceBytes = image.nativeData.data();
+                                sourceSize = image.nativeData.size();
+                            } else if (classBytes == 4u && !image.rgba8.empty()) {
+                                sourceBytes = image.rgba8.data();
+                                sourceSize = image.rgba8.size();
+                            } else {
+                                return false;
+                            }
+
+                            const std::uint32_t mipWidth =
+                                static_cast<std::uint32_t>(
+                                    safeDimension(image.desc.width));
+                            const std::uint32_t mipHeight =
+                                static_cast<std::uint32_t>(
+                                    safeDimension(image.desc.height));
+                            const std::uint32_t sourceLayers =
+                                rootObj.target == GL_TEXTURE_2D_ARRAY
+                                    ? static_cast<std::uint32_t>(
+                                          safeDimension(image.desc.depth))
+                                    : 1u;
+                            if (mipWidth == 0 || mipHeight == 0 ||
+                                sourceLayers == 0 ||
+                                sliceStart >= sourceLayers ||
+                                sliceCount > sourceLayers - sliceStart) {
+                                return false;
+                            }
+                            const std::uint32_t mipBytesPerRow =
+                                static_cast<std::uint32_t>(
+                                    static_cast<NSUInteger>(mipWidth) * classBytes);
+                            const std::uint32_t mipBytesPerImage =
+                                mipBytesPerRow * mipHeight;
+                            const std::size_t requiredBytes =
+                                static_cast<std::size_t>(mipBytesPerImage) *
+                                static_cast<std::size_t>(sourceLayers);
+                            if (mipBytesPerRow == 0 ||
+                                mipBytesPerImage == 0 ||
+                                sourceSize < requiredBytes) {
+                                return false;
+                            }
+
+                            const std::size_t offset = built.data.size();
+                            built.mipOffsets.push_back(
+                                static_cast<std::uint32_t>(offset));
+                            built.mipWidths.push_back(mipWidth);
+                            built.mipHeights.push_back(mipHeight);
+                            built.mipBytesPerRow.push_back(mipBytesPerRow);
+                            built.mipBytesPerImage.push_back(mipBytesPerImage);
+                            built.mipLayerFaces.push_back(
+                                static_cast<std::uint32_t>(sliceCount));
+                            built.data.resize(
+                                offset +
+                                static_cast<std::size_t>(mipBytesPerImage) *
+                                    static_cast<std::size_t>(sliceCount),
+                                0u);
+                            for (NSUInteger slice = 0;
+                                 slice < sliceCount;
+                                 ++slice) {
+                                const NSUInteger sourceSlice =
+                                    sliceStart + slice;
+                                const std::uint8_t* layerBytes =
+                                    sourceBytes +
+                                    static_cast<std::size_t>(
+                                        sourceSlice * mipBytesPerImage);
+                                std::memcpy(
+                                    built.data.data() + offset +
+                                        static_cast<std::size_t>(slice) *
+                                            mipBytesPerImage,
+                                    layerBytes,
+                                    mipBytesPerImage);
+                            }
+                        }
+                        if (built.mipOffsets.empty()) {
+                            return false;
+                        }
+                        built.bytesPerRow = built.mipBytesPerRow.front();
+                        built.bytesPerImage = built.mipBytesPerImage.front();
+                        slot = std::move(built);
+                        if (trace) {
+                            std::fprintf(stderr,
+                                "[GS-tex]   texture-view class snapshot "
+                                "viewTex=%u srcFmt=0x%X viewFmt=0x%X "
+                                "bytes=%zu bpp=%lu levels=%zu layers=%u\n",
+                                texName,
+                                static_cast<unsigned>(
+                                    rootObj.desc.internalFormat),
+                                static_cast<unsigned>(
+                                    viewObj.desc.internalFormat),
+                                slot.data.size(),
+                                static_cast<unsigned long>(classBytes),
+                                slot.mipOffsets.size(),
+                                slot.layerFaces);
+                        }
+                        return true;
+                    };
                 if (texObject->target == GL_TEXTURE_BUFFER) {
                     const GLuint sourceBuffer = texObject->desc.sourceBuffer;
                     GLBufferObject* bufferObject =
                         sourceBuffer != 0 ? objects->buffers().get(sourceBuffer) : nullptr;
                     const std::uint32_t bpp =
-                        bufferTextureBytesPerTexelForSamplerMap(
+                        sampledTextureBytesPerTexelForSamplerMap(
                             texObject->desc.internalFormat);
                     if (bufferObject == nullptr || bpp == 0) continue;
 
@@ -18308,14 +18865,33 @@ struct GLContext::Impl {
                     (void)materializeTextureView(*texObject);
                     // Texture views require exact byte reinterpretation.
                     // Metal getBytes on a different-format view can expose
-                    // converted/expanded values, so keep rejecting those.
-                    // Same-format views, however, are byte-identical and CTS
-                    // texture_view samples them from VS/TCS/TES/GS paths that
-                    // currently use this CPU snapshot.
+                    // converted/expanded values, so build the CPU interpreter
+                    // slot from the source texture's raw same-class bytes.
+                    // Same-format views remain byte-identical and can use the
+                    // regular Metal readback path below.
                     GLTextureObject* sourceObject =
                         objects->textures().get(texObject->viewSourceTexture);
-                    if (sourceObject == nullptr ||
-                        sourceObject->desc.internalFormat != texObject->desc.internalFormat) {
+                    std::unordered_set<GLuint> visitedViews;
+                    GLuint sourceName = texObject->viewSourceTexture;
+                    while (sourceObject != nullptr &&
+                           sourceObject->viewSourceTexture != 0) {
+                        if (!visitedViews.insert(sourceName).second) {
+                            sourceObject = nullptr;
+                            break;
+                        }
+                        sourceName = sourceObject->viewSourceTexture;
+                        sourceObject = objects->textures().get(sourceName);
+                    }
+                    if (sourceObject == nullptr) {
+                        return {};
+                    }
+                    if (sourceObject->desc.internalFormat !=
+                        texObject->desc.internalFormat) {
+                        appgl::SampledTextureSlot& slot = slots[i];
+                        if (populateTextureViewClassSlot(
+                                *texObject, *sourceObject, slot)) {
+                            continue;
+                        }
                         return {};
                     }
                 }
@@ -18579,6 +19155,16 @@ struct GLContext::Impl {
                     }
                     continue;
                 }
+                const std::uint32_t shadowBpp =
+                    sampledTextureBytesPerTexelForSamplerMap(
+                        texObject->desc.internalFormat);
+                if (shadowBpp > 0 && shadowBpp <= 2) {
+                    appgl::SampledTextureSlot& slot = slots[i];
+                    if (populateTextureShadowSlot(
+                            *texObject, slot, shadowBpp)) {
+                        continue;
+                    }
+                }
                 drainPendingGpuProducers({
                     {GpuResourceAccess::Kind::Texture,
                      texName,
@@ -18641,46 +19227,8 @@ struct GLContext::Impl {
                 // Format gating — minimal initial set.
                 const std::uint32_t intFmt =
                     static_cast<std::uint32_t>(texObject->desc.internalFormat);
-                std::uint32_t bpp = 0;
-                switch (intFmt) {
-                    case GL_R32UI:
-                    case GL_R32I:
-                    case GL_R32F:
-                    case GL_DEPTH_COMPONENT32F:
-                    case GL_RGBA8:
-                    case GL_RG16F:
-                    case GL_RG16:
-                    case GL_RG16_SNORM:
-                    case GL_RG16I:
-                    case GL_RG16UI:
-                    case GL_RGBA8I:
-                    case GL_RGBA8UI:
-                    case GL_RGBA8_SNORM:
-                    case GL_R11F_G11F_B10F:
-                    case GL_RGB10_A2:
-                    case GL_RGB10_A2UI:
-                    case GL_SRGB8_ALPHA8:
-                    case GL_RGB9_E5:
-                        bpp = 4;
-                        break;
-                    case GL_RG32F:
-                    case GL_RG32I:
-                    case GL_RG32UI:
-                    case GL_RGBA16F:
-                    case GL_RGBA16I:
-                    case GL_RGBA16UI:
-                    case GL_RGBA16:
-                    case GL_RGBA16_SNORM:
-                        bpp = 8;
-                        break;
-                    case GL_RGBA32F:
-                    case GL_RGBA32I:
-                    case GL_RGBA32UI:
-                        bpp = 16;
-                        break;
-                    default:
-                        break;
-                }
+                const std::uint32_t bpp =
+                    sampledTextureBytesPerTexelForSamplerMap(intFmt);
                 if (bpp == 0) continue;
                 slot.bytesPerRow = slot.width * bpp;
                 const std::uint32_t storageHeight =
@@ -18702,6 +19250,7 @@ struct GLContext::Impl {
                 slot.mipBytesPerImage.reserve(mipCount);
                 slot.mipLayerFaces.reserve(mipCount);
                 slot.data.clear();
+                bool populatedFromMetal = false;
                 @try {
                     for (NSUInteger level = 0; level < mipCount; ++level) {
                         const std::uint32_t mipWidth =
@@ -18774,11 +19323,22 @@ struct GLContext::Impl {
                                  mipmapLevel:level];
                         }
                     }
+                    populatedFromMetal = true;
                 } @catch (NSException* exc) {
                     // Private storage textures don't support getBytes.
                     // Keep descriptor dimensions for textureSize();
                     // sampling/fetching from an empty data vector still
                     // returns zero.
+                    slot.data.clear();
+                    slot.mipOffsets.clear();
+                    slot.mipWidths.clear();
+                    slot.mipHeights.clear();
+                    slot.mipBytesPerRow.clear();
+                    slot.mipBytesPerImage.clear();
+                    slot.mipLayerFaces.clear();
+                }
+                if ((!populatedFromMetal || slot.data.empty()) &&
+                    !populateTextureShadowSlot(*texObject, slot, bpp)) {
                     slot.data.clear();
                     slot.mipOffsets.clear();
                     slot.mipWidths.clear();
@@ -43431,7 +43991,22 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             ? replayDraw.varyingWidths : replayDraw.varyingStageSlotWidths;
         const auto& stageSlotBaseType = replayDraw.varyingStageSlotBaseType.empty()
             ? replayDraw.varyingBaseType : replayDraw.varyingStageSlotBaseType;
-        for (std::size_t i = 0; i < stageSlotWidths.size(); ++i) {
+        constexpr GLuint kMaxMetalStageInAttributes = 31; // valid attribute indices: 0..30
+        GLuint nextStageInAttribute = 1; // 0 is gl_Position.
+        std::size_t stageInUserSlotCount = 0;
+        while (stageInUserSlotCount < stageSlotWidths.size() &&
+               nextStageInAttribute < kMaxMetalStageInAttributes) {
+            ++stageInUserSlotCount;
+            ++nextStageInAttribute;
+        }
+        const GLuint clipStageInCount =
+            std::min<GLuint>(replayDraw.clipDistanceLen,
+                             kMaxMetalStageInAttributes - nextStageInAttribute);
+        nextStageInAttribute += clipStageInCount;
+        const GLuint cullStageInCount =
+            std::min<GLuint>(replayDraw.cullDistanceLen,
+                             kMaxMetalStageInAttributes - nextStageInAttribute);
+        for (std::size_t i = 0; i < stageInUserSlotCount; ++i) {
             ShaderReflection::VertexInput vi;
             vi.location = static_cast<GLuint>(i + 1);
             vi.sourceLocation = vi.location;
@@ -43472,8 +44047,8 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         // follow the varying block; Metal attribute indices are
         // allocated the same way in the synth VS MSL so these match.
         const GLuint clipBaseLoc =
-            static_cast<GLuint>(stageSlotWidths.size() + 1);
-        for (std::uint32_t i = 0; i < replayDraw.clipDistanceLen; ++i) {
+            static_cast<GLuint>(stageInUserSlotCount + 1);
+        for (GLuint i = 0; i < clipStageInCount; ++i) {
             ShaderReflection::VertexInput vi;
             vi.location = clipBaseLoc + i;
             vi.sourceLocation = vi.location;
@@ -43481,8 +44056,8 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             vi.name = "vsin_clip" + std::to_string(i);
             program.gsPassThroughReflection.vertexInputs.push_back(vi);
         }
-        const GLuint cullBaseLoc = clipBaseLoc + replayDraw.clipDistanceLen;
-        for (std::uint32_t i = 0; i < replayDraw.cullDistanceLen; ++i) {
+        const GLuint cullBaseLoc = clipBaseLoc + clipStageInCount;
+        for (GLuint i = 0; i < cullStageInCount; ++i) {
             ShaderReflection::VertexInput vi;
             vi.location = cullBaseLoc + i;
             vi.sourceLocation = vi.location;
@@ -43532,23 +44107,40 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             ? replayDraw.varyingWidths : replayDraw.varyingStageSlotWidths;
         const auto& stageSlotBaseType = replayDraw.varyingStageSlotBaseType.empty()
             ? replayDraw.varyingBaseType : replayDraw.varyingStageSlotBaseType;
+        constexpr GLuint kMaxMetalStageInAttributes = 31; // valid attribute indices: 0..30
+        GLuint nextStageInAttribute = 1; // 0 is gl_Position.
+        std::size_t stageInUserSlotCount = 0;
+        while (stageInUserSlotCount < stageSlotWidths.size() &&
+               nextStageInAttribute < kMaxMetalStageInAttributes) {
+            ++stageInUserSlotCount;
+            ++nextStageInAttribute;
+        }
+        const GLuint clipStageInCount =
+            std::min<GLuint>(replayDraw.clipDistanceLen,
+                             kMaxMetalStageInAttributes - nextStageInAttribute);
+        nextStageInAttribute += clipStageInCount;
+        const GLuint cullStageInCount =
+            std::min<GLuint>(replayDraw.cullDistanceLen,
+                             kMaxMetalStageInAttributes - nextStageInAttribute);
         for (std::size_t i = 0; i < stageSlotWidths.size(); ++i) {
-            TranslatedDrawInfo::VertexAttributeLayout la;
-            la.location = static_cast<GLuint>(i + 1);
-            la.offset = offset;
-            const std::uint8_t bt = (i < stageSlotBaseType.size())
-                ? stageSlotBaseType[i] : 0;
-            if (bt == 1) {
-                la.glType = GL_INT;
-                la.glIsInteger = true;
-            } else if (bt == 2) {
-                la.glType = GL_UNSIGNED_INT;
-                la.glIsInteger = true;
-            } else {
-                la.glType = GL_FLOAT;
+            if (i < stageInUserSlotCount) {
+                TranslatedDrawInfo::VertexAttributeLayout la;
+                la.location = static_cast<GLuint>(i + 1);
+                la.offset = offset;
+                const std::uint8_t bt = (i < stageSlotBaseType.size())
+                    ? stageSlotBaseType[i] : 0;
+                if (bt == 1) {
+                    la.glType = GL_INT;
+                    la.glIsInteger = true;
+                } else if (bt == 2) {
+                    la.glType = GL_UNSIGNED_INT;
+                    la.glIsInteger = true;
+                } else {
+                    la.glType = GL_FLOAT;
+                }
+                la.glComponentCount = static_cast<GLint>(stageSlotWidths[i]);
+                tdi.vertexAttributeLayouts.push_back(la);
             }
-            la.glComponentCount = static_cast<GLint>(stageSlotWidths[i]);
-            tdi.vertexAttributeLayouts.push_back(la);
             offset += stageSlotWidths[i] * sizeof(float);
         }
         // Clip / cull distance attribute layouts, in order, one float
@@ -43557,24 +44149,28 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         // TranslatedDrawInfo::vertexAttributeLayouts to set up
         // MTLVertexDescriptor's per-attribute format + offset.
         const GLuint clipBaseLoc =
-            static_cast<GLuint>(stageSlotWidths.size() + 1);
+            static_cast<GLuint>(stageInUserSlotCount + 1);
         for (std::uint32_t i = 0; i < replayDraw.clipDistanceLen; ++i) {
-            TranslatedDrawInfo::VertexAttributeLayout la;
-            la.location = clipBaseLoc + i;
-            la.offset = offset;
-            la.glType = GL_FLOAT;
-            la.glComponentCount = 1;
-            tdi.vertexAttributeLayouts.push_back(la);
+            if (i < clipStageInCount) {
+                TranslatedDrawInfo::VertexAttributeLayout la;
+                la.location = clipBaseLoc + i;
+                la.offset = offset;
+                la.glType = GL_FLOAT;
+                la.glComponentCount = 1;
+                tdi.vertexAttributeLayouts.push_back(la);
+            }
             offset += sizeof(float);
         }
-        const GLuint cullBaseLoc = clipBaseLoc + replayDraw.clipDistanceLen;
+        const GLuint cullBaseLoc = clipBaseLoc + clipStageInCount;
         for (std::uint32_t i = 0; i < replayDraw.cullDistanceLen; ++i) {
-            TranslatedDrawInfo::VertexAttributeLayout la;
-            la.location = cullBaseLoc + i;
-            la.offset = offset;
-            la.glType = GL_FLOAT;
-            la.glComponentCount = 1;
-            tdi.vertexAttributeLayouts.push_back(la);
+            if (i < cullStageInCount) {
+                TranslatedDrawInfo::VertexAttributeLayout la;
+                la.location = cullBaseLoc + i;
+                la.offset = offset;
+                la.glType = GL_FLOAT;
+                la.glComponentCount = 1;
+                tdi.vertexAttributeLayouts.push_back(la);
+            }
             offset += sizeof(float);
         }
         // Sprint 7 Phase 1 #6 (CKPT58): no vertex attribute layouts
@@ -43589,6 +44185,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         if (replayDraw.hasLayer)        offset += sizeof(std::int32_t);
         if (replayDraw.hasPointSize)    offset += sizeof(float);
         if (replayDraw.hasPrimitiveID)  offset += sizeof(std::int32_t);
+        if (replayDraw.hasViewportIndex) offset += sizeof(std::int32_t);
     }
 
     populateTranslatedDrawFixedFunctionState(tdi, *state, GL_SHADING_RATE_1X1_PIXELS_EXT);

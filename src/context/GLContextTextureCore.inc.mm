@@ -586,6 +586,86 @@ bool GLContext::texImage(
         format, type, resolvedPixels, image.nativeData, image.nativeBpp,
         normalizeCompatUpload,
         ignoreUnpackSkipImages);
+
+    image.rawUploadData.clear();
+    image.rawUploadBpp = 0;
+    const TextureViewClass uploadViewClass =
+        textureViewClassForInternalFormat(storageInternalFormatEnum);
+    const std::size_t uploadViewClassBytes =
+        static_cast<std::size_t>(
+            Impl::textureViewClassByteWidth(uploadViewClass));
+    if (resolvedPixels != nullptr &&
+        pxBytes > 0 &&
+        uploadViewClassBytes == pxBytes) {
+        image.rawUploadBpp = pxBytes;
+        const std::size_t totalBytes =
+            static_cast<std::size_t>(image.desc.width) *
+            static_cast<std::size_t>(image.desc.height) *
+            static_cast<std::size_t>(image.desc.depth) *
+            image.rawUploadBpp;
+        image.rawUploadData.assign(totalBytes, 0);
+
+        const auto& store = impl_->state->pixelStore();
+        const std::size_t sourceWidth =
+            static_cast<std::size_t>(store.unpackRowLength > 0
+                ? store.unpackRowLength
+                : image.desc.width);
+        const std::size_t sourceHeight =
+            static_cast<std::size_t>(store.unpackImageHeight > 0
+                ? store.unpackImageHeight
+                : image.desc.height);
+        const std::size_t rowBytes =
+            alignByteCount(sourceWidth * image.rawUploadBpp,
+                           store.unpackAlignment);
+        const std::size_t imageBytes = rowBytes * sourceHeight;
+        const std::size_t unpackSkipImages =
+            ignoreUnpackSkipImages ? 0u
+                                   : static_cast<std::size_t>(
+                                         store.unpackSkipImages);
+        const std::size_t sourceOffset =
+            unpackSkipImages * imageBytes +
+            static_cast<std::size_t>(store.unpackSkipRows) * rowBytes +
+            static_cast<std::size_t>(store.unpackSkipPixels) *
+                image.rawUploadBpp;
+        const auto* source =
+            static_cast<const std::uint8_t*>(resolvedPixels) + sourceOffset;
+        const bool swapBytes = store.unpackSwapBytes == GL_TRUE;
+        const std::size_t components = isPackedPixelType(type)
+            ? 1u
+            : std::max<std::size_t>(componentCountForFormat(format), 1u);
+        for (GLsizei z = 0; z < image.desc.depth; ++z) {
+            for (GLsizei y = 0; y < image.desc.height; ++y) {
+                const std::uint8_t* srcRow =
+                    source + static_cast<std::size_t>(z) * imageBytes +
+                    static_cast<std::size_t>(y) * rowBytes;
+                std::uint8_t* dstRow =
+                    image.rawUploadData.data() +
+                    (static_cast<std::size_t>(z) *
+                     static_cast<std::size_t>(image.desc.height) +
+                     static_cast<std::size_t>(y)) *
+                    static_cast<std::size_t>(image.desc.width) *
+                    image.rawUploadBpp;
+                std::memcpy(dstRow, srcRow,
+                            static_cast<std::size_t>(image.desc.width) *
+                            image.rawUploadBpp);
+                if (swapBytes && typeBytes > 1) {
+                    for (GLsizei x = 0; x < image.desc.width; ++x) {
+                        std::uint8_t* pixel =
+                            dstRow + static_cast<std::size_t>(x) *
+                            image.rawUploadBpp;
+                        if (isPackedPixelType(type)) {
+                            std::reverse(pixel, pixel + typeBytes);
+                        } else {
+                            for (std::size_t c = 0; c < components; ++c) {
+                                std::reverse(pixel + c * typeBytes,
+                                             pixel + (c + 1u) * typeBytes);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     if (normalizeCompatUpload && !isPackedPixelType(type)) {
         GLenum exactFormat = 0;
         switch (Impl::compatUploadBaseForInternalFormat(internalFormatEnum)) {
@@ -1423,6 +1503,87 @@ bool GLContext::texSubImage(
                 }
             }
         }
+    }
+
+    const TextureViewClass uploadViewClass =
+        textureViewClassForInternalFormat(image.desc.internalFormat);
+    const std::size_t uploadViewClassBytes =
+        static_cast<std::size_t>(
+            Impl::textureViewClassByteWidth(uploadViewClass));
+    if (resolvedPixels != nullptr &&
+        pxBytes > 0 &&
+        uploadViewClassBytes == pxBytes) {
+        const std::size_t totalBytes =
+            static_cast<std::size_t>(image.desc.width) *
+            static_cast<std::size_t>(image.desc.height) *
+            static_cast<std::size_t>(image.desc.depth) *
+            pxBytes;
+        if (image.rawUploadBpp != pxBytes ||
+            image.rawUploadData.size() < totalBytes) {
+            image.rawUploadBpp = pxBytes;
+            image.rawUploadData.assign(totalBytes, 0);
+        }
+
+        const auto& store = impl_->state->pixelStore();
+        const std::size_t sourceWidth =
+            static_cast<std::size_t>(store.unpackRowLength > 0
+                ? store.unpackRowLength
+                : width);
+        const std::size_t sourceHeight =
+            static_cast<std::size_t>(store.unpackImageHeight > 0
+                ? store.unpackImageHeight
+                : height);
+        const std::size_t rowBytes =
+            alignByteCount(sourceWidth * pxBytes, store.unpackAlignment);
+        const std::size_t imageBytes = rowBytes * sourceHeight;
+        const std::size_t unpackSkipImages =
+            ignoreUnpackSkipImages ? 0u
+                                   : static_cast<std::size_t>(
+                                         store.unpackSkipImages);
+        const std::size_t sourceOffset =
+            unpackSkipImages * imageBytes +
+            static_cast<std::size_t>(store.unpackSkipRows) * rowBytes +
+            static_cast<std::size_t>(store.unpackSkipPixels) * pxBytes;
+        const auto* source =
+            static_cast<const std::uint8_t*>(resolvedPixels) + sourceOffset;
+        const bool swapBytes = store.unpackSwapBytes == GL_TRUE;
+        const std::size_t components = isPackedPixelType(type)
+            ? 1u
+            : std::max<std::size_t>(componentCountForFormat(format), 1u);
+        for (GLsizei z = 0; z < depth; ++z) {
+            for (GLsizei y = 0; y < height; ++y) {
+                const std::uint8_t* srcRow =
+                    source + static_cast<std::size_t>(z) * imageBytes +
+                    static_cast<std::size_t>(y) * rowBytes;
+                std::uint8_t* dstRow =
+                    image.rawUploadData.data() +
+                    ((static_cast<std::size_t>(z + effectiveZoffset) *
+                      static_cast<std::size_t>(image.desc.height) +
+                      static_cast<std::size_t>(y + yoffset)) *
+                     static_cast<std::size_t>(image.desc.width) +
+                     static_cast<std::size_t>(xoffset)) *
+                    pxBytes;
+                std::memcpy(dstRow, srcRow,
+                            static_cast<std::size_t>(width) * pxBytes);
+                if (swapBytes && typeBytes > 1) {
+                    for (GLsizei x = 0; x < width; ++x) {
+                        std::uint8_t* pixel =
+                            dstRow + static_cast<std::size_t>(x) * pxBytes;
+                        if (isPackedPixelType(type)) {
+                            std::reverse(pixel, pixel + typeBytes);
+                        } else {
+                            for (std::size_t c = 0; c < components; ++c) {
+                                std::reverse(pixel + c * typeBytes,
+                                             pixel + (c + 1u) * typeBytes);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        image.rawUploadData.clear();
+        image.rawUploadBpp = 0;
     }
 
     // Phase 8X Group 4d follow-up¹¹ — §Secondary per-subregion

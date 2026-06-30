@@ -338,22 +338,25 @@ float imageSnorm16(std::int16_t v) {
 
 std::uint32_t sampledTextureBytesPerTexel(std::uint32_t fmt) {
     switch (fmt) {
-        case GL_R8: case GL_R8I: case GL_R8UI:
+        case GL_R8: case GL_R8I: case GL_R8UI: case GL_R8_SNORM:
         case GL_STENCIL_INDEX8:
             return 1;
         case GL_R16: case GL_R16I: case GL_R16UI: case GL_R16F:
-        case GL_RG8: case GL_RG8I: case GL_RG8UI:
+        case GL_R16_SNORM:
+        case GL_RG8: case GL_RG8I: case GL_RG8UI: case GL_RG8_SNORM:
             return 2;
         case GL_R32I: case GL_R32UI: case GL_R32F:
         case 0x8CAC: // GL_DEPTH_COMPONENT32F
         case GL_RG16: case GL_RG16I: case GL_RG16UI: case GL_RG16F:
+        case GL_RG16_SNORM:
         case GL_RGBA8: case GL_RGBA8I: case GL_RGBA8UI:
+        case GL_RGBA8_SNORM: case GL_SRGB8_ALPHA8:
         case GL_R11F_G11F_B10F: case GL_RGB10_A2: case GL_RGB10_A2UI:
         case GL_RGB9_E5:
             return 4;
         case GL_RG32I: case GL_RG32UI: case GL_RG32F:
         case GL_RGBA16: case GL_RGBA16I: case GL_RGBA16UI:
-        case GL_RGBA16F:
+        case GL_RGBA16F: case GL_RGBA16_SNORM:
             return 8;
         case GL_RGB32I: case GL_RGB32UI: case GL_RGB32F:
             return 12;
@@ -412,6 +415,12 @@ Value decodeSampledTextureTexel(const SampledTextureSlot& slot,
         std::memcpy(&f, &bits, sizeof(f));
         return f;
     };
+    auto decodeSrgb = [](std::uint8_t c) -> float {
+        const float srgb = static_cast<float>(c) / 255.0f;
+        return srgb <= 0.04045f
+            ? (srgb / 12.92f)
+            : std::pow((srgb + 0.055f) / 1.055f, 2.4f);
+    };
 
     switch (slot.internalFormat) {
         case GL_R8:
@@ -432,6 +441,31 @@ Value decodeSampledTextureTexel(const SampledTextureSlot& slot,
             out.f[2] = static_cast<float>(readU8(2)) / 255.0f;
             out.f[3] = static_cast<float>(readU8(3)) / 255.0f;
             break;
+        case GL_R8_SNORM:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = imageSnorm8(readI8(0));
+            out.f[1] = 0.0f; out.f[2] = 0.0f; out.f[3] = 1.0f;
+            break;
+        case GL_RG8_SNORM:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = imageSnorm8(readI8(0));
+            out.f[1] = imageSnorm8(readI8(1));
+            out.f[2] = 0.0f; out.f[3] = 1.0f;
+            break;
+        case GL_RGBA8_SNORM:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = imageSnorm8(readI8(0));
+            out.f[1] = imageSnorm8(readI8(1));
+            out.f[2] = imageSnorm8(readI8(2));
+            out.f[3] = imageSnorm8(readI8(3));
+            break;
+        case GL_SRGB8_ALPHA8:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = decodeSrgb(readU8(0));
+            out.f[1] = decodeSrgb(readU8(1));
+            out.f[2] = decodeSrgb(readU8(2));
+            out.f[3] = static_cast<float>(readU8(3)) / 255.0f;
+            break;
         case GL_R16:
             out.kind = Value::Kind::Float4;
             out.f[0] = static_cast<float>(readU16(0)) / 65535.0f;
@@ -449,6 +483,24 @@ Value decodeSampledTextureTexel(const SampledTextureSlot& slot,
             out.f[1] = static_cast<float>(readU16(1)) / 65535.0f;
             out.f[2] = static_cast<float>(readU16(2)) / 65535.0f;
             out.f[3] = static_cast<float>(readU16(3)) / 65535.0f;
+            break;
+        case GL_R16_SNORM:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = imageSnorm16(readI16(0));
+            out.f[1] = 0.0f; out.f[2] = 0.0f; out.f[3] = 1.0f;
+            break;
+        case GL_RG16_SNORM:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = imageSnorm16(readI16(0));
+            out.f[1] = imageSnorm16(readI16(1));
+            out.f[2] = 0.0f; out.f[3] = 1.0f;
+            break;
+        case GL_RGBA16_SNORM:
+            out.kind = Value::Kind::Float4;
+            out.f[0] = imageSnorm16(readI16(0));
+            out.f[1] = imageSnorm16(readI16(1));
+            out.f[2] = imageSnorm16(readI16(2));
+            out.f[3] = imageSnorm16(readI16(3));
             break;
         case GL_R16F:
             out.kind = Value::Kind::Float4;
@@ -6351,6 +6403,13 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             out.f[2] = 0.0f; out.f[3] = 1.0f;
                             break;
                         }
+                        case 0x822D: { // GL_R16F
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = imageHalfToFloat(readU16(0));
+                            out.f[1] = 0.0f; out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
+                            break;
+                        }
                         case 0x8C3A: { // GL_R11F_G11F_B10F
                             out.kind = Value::Kind::Float4;
                             decodeImageRG11B10F(raw, out.f[0], out.f[1], out.f[2]);
@@ -6455,6 +6514,20 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             out.f[3] = static_cast<float>(readU8(3)) / 255.0f;
                             break;
                         }
+                        case 0x822B: { // GL_RG8
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = static_cast<float>(readU8(0)) / 255.0f;
+                            out.f[1] = static_cast<float>(readU8(1)) / 255.0f;
+                            out.f[2] = 0.0f; out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x8229: { // GL_R8
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = static_cast<float>(readU8(0)) / 255.0f;
+                            out.f[1] = 0.0f; out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
+                            break;
+                        }
                         case 0x8C43: { // GL_SRGB8_ALPHA8
                             auto decodeSrgb = [](std::uint8_t c) -> float {
                                 const float x = static_cast<float>(c) / 255.0f;
@@ -6484,6 +6557,13 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             out.i[2] = 0; out.i[3] = static_cast<std::int32_t>(1u);
                             break;
                         }
+                        case 0x8234: { // GL_R16UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(readU16(0));
+                            out.i[1] = 0; out.i[2] = 0;
+                            out.i[3] = static_cast<std::int32_t>(1u);
+                            break;
+                        }
                         case 0x8D88: { // GL_RGBA16I
                             out.kind = Value::Kind::Int4;
                             out.i[0] = static_cast<std::int32_t>(readI16(0));
@@ -6499,12 +6579,26 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             out.i[2] = 0; out.i[3] = 1;
                             break;
                         }
+                        case 0x8233: { // GL_R16I
+                            out.kind = Value::Kind::Int4;
+                            out.i[0] = static_cast<std::int32_t>(readI16(0));
+                            out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
+                            break;
+                        }
                         case 0x8D7C: { // GL_RGBA8UI
                             out.kind = Value::Kind::UInt4;
                             out.i[0] = static_cast<std::int32_t>(readU8(0));
                             out.i[1] = static_cast<std::int32_t>(readU8(1));
                             out.i[2] = static_cast<std::int32_t>(readU8(2));
                             out.i[3] = static_cast<std::int32_t>(readU8(3));
+                            break;
+                        }
+                        case 0x8238: { // GL_RG8UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(readU8(0));
+                            out.i[1] = static_cast<std::int32_t>(readU8(1));
+                            out.i[2] = 0;
+                            out.i[3] = static_cast<std::int32_t>(1u);
                             break;
                         }
                         case 0x8D8E: { // GL_RGBA8I
@@ -6515,11 +6609,25 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             out.i[3] = static_cast<std::int32_t>(readI8(3));
                             break;
                         }
+                        case 0x8237: { // GL_RG8I
+                            out.kind = Value::Kind::Int4;
+                            out.i[0] = static_cast<std::int32_t>(readI8(0));
+                            out.i[1] = static_cast<std::int32_t>(readI8(1));
+                            out.i[2] = 0; out.i[3] = 1;
+                            break;
+                        }
                         case 0x822C: { // GL_RG16
                             out.kind = Value::Kind::Float4;
                             out.f[0] = static_cast<float>(readU16(0)) / 65535.0f;
                             out.f[1] = static_cast<float>(readU16(1)) / 65535.0f;
                             out.f[2] = 0.0f; out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x822A: { // GL_R16
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = static_cast<float>(readU16(0)) / 65535.0f;
+                            out.f[1] = 0.0f; out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
                             break;
                         }
                         case 0x8F97: { // GL_RGBA8_SNORM
@@ -6530,11 +6638,32 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             out.f[3] = imageSnorm8(readI8(3));
                             break;
                         }
+                        case 0x8F95: { // GL_RG8_SNORM
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = imageSnorm8(readI8(0));
+                            out.f[1] = imageSnorm8(readI8(1));
+                            out.f[2] = 0.0f; out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x8F94: { // GL_R8_SNORM
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = imageSnorm8(readI8(0));
+                            out.f[1] = 0.0f; out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
+                            break;
+                        }
                         case 0x8F99: { // GL_RG16_SNORM
                             out.kind = Value::Kind::Float4;
                             out.f[0] = imageSnorm16(readI16(0));
                             out.f[1] = imageSnorm16(readI16(1));
                             out.f[2] = 0.0f; out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x8F98: { // GL_R16_SNORM
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = imageSnorm16(readI16(0));
+                            out.f[1] = 0.0f; out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
                             break;
                         }
                         default: {
@@ -12831,6 +12960,32 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
         ? draw.varyingInterp : draw.varyingStageSlotInterp;
     const auto& slotBaseType = draw.varyingStageSlotBaseType.empty()
         ? draw.varyingBaseType : draw.varyingStageSlotBaseType;
+    constexpr std::uint32_t kMaxMetalStageInAttributes = 31; // valid attribute indices: 0..30
+    std::uint32_t nextStageInAttribute = 1; // 0 is gl_Position.
+    std::size_t stageInUserSlotCount = 0;
+    while (stageInUserSlotCount < slotWidths.size() &&
+           nextStageInAttribute < kMaxMetalStageInAttributes) {
+        ++stageInUserSlotCount;
+        ++nextStageInAttribute;
+    }
+    const std::uint32_t clipStageInCount =
+        std::min<std::uint32_t>(draw.clipDistanceLen,
+                                kMaxMetalStageInAttributes - nextStageInAttribute);
+    nextStageInAttribute += clipStageInCount;
+    const std::uint32_t cullStageInCount =
+        std::min<std::uint32_t>(draw.cullDistanceLen,
+                                kMaxMetalStageInAttributes - nextStageInAttribute);
+    const bool hasPackedOnlyUserSlots = stageInUserSlotCount < slotWidths.size();
+    const bool hasPackedOnlyClipSlots = clipStageInCount < draw.clipDistanceLen;
+    const bool hasPackedOnlyCullSlots = cullStageInCount < draw.cullDistanceLen;
+
+    std::vector<std::uint32_t> slotFloatOffsets;
+    slotFloatOffsets.reserve(slotWidths.size());
+    std::uint32_t slotOffset = 4;
+    for (std::uint32_t w : slotWidths) {
+        slotFloatOffsets.push_back(slotOffset);
+        slotOffset += w;
+    }
 
     std::string src;
     src.reserve(512);
@@ -12840,7 +12995,7 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     // ─ Vertex input struct (stage_in).
     src += "struct VsIn {\n";
     src += "    float4 vsin_position [[attribute(0)]];\n";
-    for (std::size_t i = 0; i < slotWidths.size(); ++i) {
+    for (std::size_t i = 0; i < stageInUserSlotCount; ++i) {
         const std::uint8_t bt = (i < slotBaseType.size()) ? slotBaseType[i] : 0;
         src += "    ";
         src += mslTypeFor(slotWidths[i], bt);
@@ -12856,16 +13011,16 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     // builder emits matching per-scalar attributes so Metal's vertex
     // fetcher pulls one float from the packed expanded buffer.
     const std::uint32_t clipBaseAttrib =
-        static_cast<std::uint32_t>(slotWidths.size() + 1);
-    for (std::uint32_t i = 0; i < draw.clipDistanceLen; ++i) {
+        static_cast<std::uint32_t>(stageInUserSlotCount + 1);
+    for (std::uint32_t i = 0; i < clipStageInCount; ++i) {
         src += "    float vsin_clip";
         src += std::to_string(i);
         src += " [[attribute(";
         src += std::to_string(clipBaseAttrib + i);
         src += ")]];\n";
     }
-    const std::uint32_t cullBaseAttrib = clipBaseAttrib + draw.clipDistanceLen;
-    for (std::uint32_t i = 0; i < draw.cullDistanceLen; ++i) {
+    const std::uint32_t cullBaseAttrib = clipBaseAttrib + clipStageInCount;
+    for (std::uint32_t i = 0; i < cullStageInCount; ++i) {
         src += "    float vsin_cull";
         src += std::to_string(i);
         src += " [[attribute(";
@@ -12887,8 +13042,8 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     src += "};\n\n";
 
     // Compute the per-vertex stride (in floats) and the offsets to
-    // each trailing slot. These match the encoder-side packing in
-    // `emulateGeometryDraw` (search for `dst[layerOff]`).
+    // manually-read packed slots. These match the encoder-side packing
+    // in `emulateGeometryDraw` (search for `dst[layerOff]`).
     std::uint32_t totalVaryingWidth = 0;
     for (auto w : draw.varyingWidths) totalVaryingWidth += w;
     const std::uint32_t strideFloats =
@@ -12897,8 +13052,9 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
         + (draw.hasPointSize ? 1u : 0u)
         + (draw.hasPrimitiveID ? 1u : 0u)
         + (draw.hasViewportIndex ? 1u : 0u);
-    const std::uint32_t layerFloatOff = 4 + totalVaryingWidth
-        + draw.clipDistanceLen + draw.cullDistanceLen;
+    const std::uint32_t clipFloatOff = 4 + totalVaryingWidth;
+    const std::uint32_t cullFloatOff = clipFloatOff + draw.clipDistanceLen;
+    const std::uint32_t layerFloatOff = cullFloatOff + draw.cullDistanceLen;
     const std::uint32_t psFloatOff =
         layerFloatOff + (draw.hasLayer ? 1u : 0u);
     const std::uint32_t pidFloatOff =
@@ -12910,6 +13066,37 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     const bool needsTrailingBuffer =
         draw.hasLayer || draw.hasPointSize || draw.hasPrimitiveID
         || draw.hasViewportIndex;
+    const bool needsPackedBuffer = needsTrailingBuffer
+        || hasPackedOnlyUserSlots || hasPackedOnlyClipSlots || hasPackedOnlyCullSlots;
+    auto packedValueExpr = [&](std::uint32_t offset,
+                               std::uint32_t width,
+                               std::uint8_t baseType) -> std::string {
+        auto scalarExpr = [&](std::uint32_t component) -> std::string {
+            std::string expr = "gs_packed[gs_vid * ";
+            expr += std::to_string(strideFloats);
+            expr += " + ";
+            expr += std::to_string(offset + component);
+            expr += "]";
+            if (baseType == 1) {
+                return "as_type<int>(" + expr + ")";
+            }
+            if (baseType == 2) {
+                return "as_type<uint>(" + expr + ")";
+            }
+            return expr;
+        };
+        if (width <= 1) {
+            return scalarExpr(0);
+        }
+        std::string expr = mslTypeFor(width, baseType);
+        expr += "(";
+        for (std::uint32_t component = 0; component < width; ++component) {
+            if (component != 0) expr += ", ";
+            expr += scalarExpr(component);
+        }
+        expr += ")";
+        return expr;
+    };
 
     // ─ Vertex output struct.
     auto interpTag = [](std::uint8_t interp) -> const char* {
@@ -13002,7 +13189,7 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     // bind on the encoder side. `[[vertex_id]]` lets us index into
     // gs_packed for the trailing slots that no longer have stage_in
     // attributes (Sprint 7 #6 / CKPT58).
-    if (needsTrailingBuffer) {
+    if (needsPackedBuffer) {
         src += "vertex VsOut main0(VsIn in [[stage_in]],\n";
         src += "                   uint gs_vid [[vertex_id]],\n";
         src += "                   device const float* gs_packed [[buffer(0)]])\n";
@@ -13037,10 +13224,16 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
         }
     }
     for (std::size_t i = 0; i < slotWidths.size(); ++i) {
+        const std::uint8_t bt = (i < slotBaseType.size()) ? slotBaseType[i] : 0;
         src += "    out.vsout_v";
         src += std::to_string(i);
-        src += " = in.vsin_v";
-        src += std::to_string(i);
+        src += " = ";
+        if (i < stageInUserSlotCount) {
+            src += "in.vsin_v";
+            src += std::to_string(i);
+        } else {
+            src += packedValueExpr(slotFloatOffsets[i], slotWidths[i], bt);
+        }
         src += ";\n";
     }
     // Fill gl_ClipDistance with clip values then cull values. MSL
@@ -13049,15 +13242,25 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     for (std::uint32_t i = 0; i < draw.clipDistanceLen; ++i) {
         src += "    out.gl_ClipDistance[";
         src += std::to_string(i);
-        src += "] = in.vsin_clip";
-        src += std::to_string(i);
+        src += "] = ";
+        if (i < clipStageInCount) {
+            src += "in.vsin_clip";
+            src += std::to_string(i);
+        } else {
+            src += packedValueExpr(clipFloatOff + i, 1, 0);
+        }
         src += ";\n";
     }
     for (std::uint32_t i = 0; i < draw.cullDistanceLen; ++i) {
         src += "    out.gl_ClipDistance[";
         src += std::to_string(draw.clipDistanceLen + i);
-        src += "] = in.vsin_cull";
-        src += std::to_string(i);
+        src += "] = ";
+        if (i < cullStageInCount) {
+            src += "in.vsin_cull";
+            src += std::to_string(i);
+        } else {
+            src += packedValueExpr(cullFloatOff + i, 1, 0);
+        }
         src += ";\n";
     }
     // Route layer index to render_target_array_index. Cast to uint

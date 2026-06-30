@@ -856,8 +856,10 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     // doesn't have geometryEmulated, and VS-only-TF skipped → no
     // capturedVertexCount accumulation → glDrawTransformFeedbackInstanced
     // gets count=0 → test fails.
+    const bool transformFeedbackActiveForDraw =
+        isTransformFeedbackActive();  // CKPT85: per-bound-object
     if (program != nullptr &&
-        isTransformFeedbackActive() &&  // CKPT85: per-bound-object
+        transformFeedbackActiveForDraw &&
         !program->transformFeedbackVaryingNames.empty() &&
         (emulProgram == nullptr || !emulProgram->geometryEmulated) &&
         !program->geometryEmulated &&
@@ -911,8 +913,13 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             // + `buildStageUniformBuffer`). The cached layout on the
             // program object survives across draws (link-time stable);
             // packing the byte buffer per draw is cheap.
+            // The compute encoder currently binds the packed VS
+            // uniforms/output buffer only; sampled textures and image
+            // resources must stay on the CPU interpreter path.
             bool gpuTfHandled = false;
             if (dispatchGateOn &&
+                program->vertexReflection.sampledTextures.empty() &&
+                program->vertexReflection.storageImages.empty() &&
                 !useTfCaptureIndices &&
                 program->metalVsTfTier ==
                     GLProgramObject::MetalVsTfTier::VsAsCompute &&
