@@ -7587,10 +7587,64 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             };
             auto setTextureAccess = [&](const StorageImageAccessFixup& fixup,
                                         const char* access) {
+                std::vector<std::string> variableNames;
+                std::unordered_set<std::string> variableNameSet;
                 const std::string attr =
                     std::string("[[") +
                     (fixup.argumentBufferId ? "id(" : "texture(") +
                     std::to_string(fixup.metalSlot) + ")]]";
+                const std::string replacement =
+                    std::string("access::") + access;
+
+                auto rememberVariableName = [&](std::size_t close,
+                                                std::size_t limit) {
+                    std::size_t nameStart = close + 1;
+                    while (nameStart < limit &&
+                           std::isspace(static_cast<unsigned char>(msl[nameStart]))) {
+                        ++nameStart;
+                    }
+                    while (nameStart < limit && msl[nameStart] == '&') {
+                        ++nameStart;
+                        while (nameStart < limit &&
+                               std::isspace(static_cast<unsigned char>(msl[nameStart]))) {
+                            ++nameStart;
+                        }
+                    }
+                    std::size_t nameEnd = nameStart;
+                    while (nameEnd < limit && isIdentifierChar(msl[nameEnd])) {
+                        ++nameEnd;
+                    }
+                    if (nameEnd <= nameStart) {
+                        return;
+                    }
+                    const std::string variableName =
+                        msl.substr(nameStart, nameEnd - nameStart);
+                    if (variableNameSet.insert(variableName).second) {
+                        variableNames.push_back(variableName);
+                    }
+                };
+
+                auto applyTextureAccess = [&](std::size_t typePos,
+                                              std::size_t close) {
+                    const std::size_t accessPos = msl.find("access::", typePos);
+                    if (accessPos != std::string::npos && accessPos < close) {
+                        std::size_t accessEnd = accessPos;
+                        while (accessEnd < close && accessChar(msl[accessEnd])) {
+                            ++accessEnd;
+                        }
+                        const std::size_t oldAccessLen = accessEnd - accessPos;
+                        msl.replace(accessPos, accessEnd - accessPos,
+                                    replacement);
+                        return
+                            static_cast<std::ptrdiff_t>(replacement.size()) -
+                            static_cast<std::ptrdiff_t>(oldAccessLen);
+                    }
+                    const std::string insertion =
+                        std::string(", ") + replacement;
+                    msl.insert(close, insertion);
+                    return static_cast<std::ptrdiff_t>(insertion.size());
+                };
+
                 std::size_t search = 0;
                 while ((search = msl.find(attr, search)) != std::string::npos) {
                     const std::size_t attrPos = search;
@@ -7607,28 +7661,54 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                         search += attr.size();
                         continue;
                     }
-                    const std::string replacement =
-                        std::string("access::") + access;
-                    const std::size_t accessPos = msl.find("access::", typePos);
-                    if (accessPos != std::string::npos && accessPos < close) {
-                        std::size_t accessEnd = accessPos;
-                        while (accessEnd < close && accessChar(msl[accessEnd])) {
-                            ++accessEnd;
+                    rememberVariableName(close, search);
+                    const auto delta = applyTextureAccess(typePos, close);
+                    search = static_cast<std::size_t>(
+                        static_cast<std::ptrdiff_t>(attrPos) + delta) +
+                        attr.size();
+                }
+
+                // Compute subroutine lowering threads storage images through
+                // helper signatures; keep those parameter types consistent
+                // with the bound entry-point texture declaration.
+                for (const auto& variableName : variableNames) {
+                    std::size_t typePos = 0;
+                    while ((typePos = msl.find("texture", typePos)) !=
+                           std::string::npos) {
+                        const std::size_t close = msl.find('>', typePos);
+                        if (close == std::string::npos) {
+                            break;
                         }
-                        const std::size_t oldAccessLen = accessEnd - accessPos;
-                        msl.replace(accessPos, accessEnd - accessPos,
-                                    replacement);
-                        const auto delta =
-                            static_cast<std::ptrdiff_t>(replacement.size()) -
-                            static_cast<std::ptrdiff_t>(oldAccessLen);
-                        search = static_cast<std::size_t>(
-                            static_cast<std::ptrdiff_t>(attrPos) + delta) +
-                            attr.size();
-                    } else {
-                        const std::string insertion =
-                            std::string(", ") + replacement;
-                        msl.insert(close, insertion);
-                        search = attrPos + insertion.size() + attr.size();
+                        std::size_t nameStart = close + 1;
+                        while (nameStart < msl.size() &&
+                               std::isspace(static_cast<unsigned char>(
+                                   msl[nameStart]))) {
+                            ++nameStart;
+                        }
+                        while (nameStart < msl.size() &&
+                               msl[nameStart] == '&') {
+                            ++nameStart;
+                            while (nameStart < msl.size() &&
+                                   std::isspace(static_cast<unsigned char>(
+                                       msl[nameStart]))) {
+                                ++nameStart;
+                            }
+                        }
+                        const std::size_t nameEnd =
+                            nameStart + variableName.size();
+                        if (nameEnd <= msl.size() &&
+                            msl.compare(nameStart, variableName.size(),
+                                        variableName) == 0 &&
+                            (nameEnd == msl.size() ||
+                             !isIdentifierChar(msl[nameEnd]))) {
+                            const auto delta =
+                                applyTextureAccess(typePos, close);
+                            typePos = static_cast<std::size_t>(
+                                static_cast<std::ptrdiff_t>(typePos) +
+                                delta) + std::strlen("texture");
+                        } else {
+                            typePos += std::strlen("texture");
+                        }
                     }
                 }
             };
