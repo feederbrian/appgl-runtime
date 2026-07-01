@@ -1057,49 +1057,126 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
         pushError(GL_INVALID_ENUM);
         return false;
     }
-    auto* dest = static_cast<std::uint8_t*>(pixels);
-    for (std::size_t i = 0; i < pixelCount; ++i) {
-        std::uint8_t src[4] = { rgba8[i*4], rgba8[i*4+1], rgba8[i*4+2], rgba8[i*4+3] };
-        if (format == GL_BGR || format == GL_BGR_INTEGER) {
-            std::swap(src[0], src[2]);
-        } else if (format == GL_BGRA || format == GL_BGRA_INTEGER) {
-            std::swap(src[0], src[2]);
-        }
-        auto componentByte = [&](std::size_t c) -> std::uint8_t {
-            if (format == GL_LUMINANCE || format == GL_LUMINANCE_ALPHA) {
-                const unsigned l = std::min<unsigned>(
-                    255u,
-                    static_cast<unsigned>(src[0]) +
-                    static_cast<unsigned>(src[1]) +
-                    static_cast<unsigned>(src[2]));
-                if (c == 0) {
-                    return static_cast<std::uint8_t>(l);
-                }
-                return format == GL_LUMINANCE_ALPHA && c == 1 ? src[3] : 0;
+    const auto& packStore = impl_->state->pixelStore();
+    const bool packSwapBytes = (packStore.packSwapBytes == GL_TRUE);
+    const std::size_t dstPixelBytes = components * bpc;
+    const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+        ? static_cast<std::size_t>(packStore.packRowLength)
+        : static_cast<std::size_t>(width);
+    const std::size_t dstRowBytes = alignByteCount(
+        dstRowStridePixels * dstPixelBytes, packStore.packAlignment);
+    auto* dest = static_cast<std::uint8_t*>(pixels)
+        + static_cast<std::size_t>(packStore.packSkipRows) * dstRowBytes
+        + static_cast<std::size_t>(packStore.packSkipPixels) * dstPixelBytes;
+    for (GLsizei row = 0; row < height; ++row) {
+        for (GLsizei col = 0; col < width; ++col) {
+            const std::size_t i =
+                static_cast<std::size_t>(row) * static_cast<std::size_t>(width) +
+                static_cast<std::size_t>(col);
+            const std::uint8_t r = rgba8[i * 4 + 0];
+            const std::uint8_t g = rgba8[i * 4 + 1];
+            const std::uint8_t b = rgba8[i * 4 + 2];
+            const std::uint8_t a = rgba8[i * 4 + 3];
+            std::uint8_t src[4] = { r, g, b, a };
+            if (format == GL_BGR || format == GL_BGR_INTEGER) {
+                src[0] = b; src[1] = g; src[2] = r;
+            } else if (format == GL_BGRA || format == GL_BGRA_INTEGER) {
+                src[0] = b; src[1] = g; src[2] = r; src[3] = a;
+            } else if (format == GL_GREEN || format == GL_GREEN_INTEGER) {
+                src[0] = g;
+            } else if (format == GL_BLUE || format == GL_BLUE_INTEGER) {
+                src[0] = b;
+            } else if (format == GL_ALPHA) {
+                src[0] = a;
+            } else if (format == GL_LUMINANCE) {
+                const unsigned lum =
+                    static_cast<unsigned>(r) +
+                    static_cast<unsigned>(g) +
+                    static_cast<unsigned>(b);
+                src[0] = static_cast<std::uint8_t>(
+                    std::min<unsigned>(lum, 255u));
+            } else if (format == GL_LUMINANCE_ALPHA) {
+                const unsigned lum =
+                    static_cast<unsigned>(r) +
+                    static_cast<unsigned>(g) +
+                    static_cast<unsigned>(b);
+                src[0] = static_cast<std::uint8_t>(
+                    std::min<unsigned>(lum, 255u));
+                src[1] = a;
             }
-            return src[c];
-        };
-        for (std::size_t c = 0; c < components; ++c) {
-            const std::uint8_t value = componentByte(c);
-            const float normalized = static_cast<float>(value) / 255.0f;
-            switch (type) {
-                case GL_UNSIGNED_BYTE:
-                    dest[i * components + c] = value;
-                    break;
-                case GL_FLOAT:
-                    reinterpret_cast<float*>(dest)[i * components + c] = normalized;
-                    break;
-                case GL_UNSIGNED_SHORT:
-                    reinterpret_cast<std::uint16_t*>(dest)[i * components + c] =
-                        static_cast<std::uint16_t>(value * 257);
-                    break;
-                case GL_UNSIGNED_INT:
-                    reinterpret_cast<std::uint32_t*>(dest)[i * components + c] =
-                        static_cast<std::uint32_t>(value) * 16843009u;
-                    break;
-                default:
-                    dest[i * components + c] = value;
-                    break;
+            std::uint8_t* dstPixelBase = dest
+                + static_cast<std::size_t>(row) * dstRowBytes
+                + static_cast<std::size_t>(col) * dstPixelBytes;
+            for (std::size_t c = 0; c < components; ++c) {
+                const std::uint8_t value = src[c];
+                const float normalized = static_cast<float>(value) / 255.0f;
+                std::uint8_t* dstP = dstPixelBase + c * bpc;
+                switch (type) {
+                    case GL_UNSIGNED_BYTE:
+                        dstP[0] = value;
+                        break;
+                    case GL_BYTE: {
+                        const std::int8_t v =
+                            static_cast<std::int8_t>(value * 127 / 255);
+                        std::memcpy(dstP, &v, sizeof(v));
+                        break;
+                    }
+                    case GL_FLOAT:
+                        std::memcpy(dstP, &normalized, sizeof(normalized));
+                        break;
+                    case GL_UNSIGNED_SHORT: {
+                        const std::uint16_t v =
+                            static_cast<std::uint16_t>(value * 257);
+                        std::memcpy(dstP, &v, sizeof(v));
+                        break;
+                    }
+                    case GL_SHORT: {
+                        const std::int16_t v =
+                            static_cast<std::int16_t>(value * 32767 / 255);
+                        std::memcpy(dstP, &v, sizeof(v));
+                        break;
+                    }
+                    case GL_UNSIGNED_INT: {
+                        const std::uint32_t v =
+                            static_cast<std::uint32_t>(value) * 16843009u;
+                        std::memcpy(dstP, &v, sizeof(v));
+                        break;
+                    }
+                    case GL_INT: {
+                        const std::int32_t v = static_cast<std::int32_t>(
+                            static_cast<double>(value) * 2147483647.0 /
+                            255.0);
+                        std::memcpy(dstP, &v, sizeof(v));
+                        break;
+                    }
+                    case GL_HALF_FLOAT: {
+                        std::uint32_t fbits;
+                        std::memcpy(&fbits, &normalized, sizeof(fbits));
+                        const std::uint32_t sign = (fbits >> 16) & 0x8000;
+                        const std::int32_t exp =
+                            static_cast<std::int32_t>((fbits >> 23) & 0xFF) -
+                            127 + 15;
+                        const std::uint32_t mant = (fbits >> 13) & 0x3FF;
+                        std::uint16_t half;
+                        if (exp <= 0) {
+                            half = static_cast<std::uint16_t>(sign);
+                        } else if (exp >= 31) {
+                            half = static_cast<std::uint16_t>(sign | 0x7C00);
+                        } else {
+                            half = static_cast<std::uint16_t>(
+                                sign | (static_cast<std::uint32_t>(exp) << 10) |
+                                mant);
+                        }
+                        std::memcpy(dstP, &half, sizeof(half));
+                        break;
+                    }
+                    default:
+                        dstP[0] = value;
+                        break;
+                }
+                if (packSwapBytes) {
+                    Impl::swapPixelStoreBytes(dstP, bpc);
+                }
             }
         }
     }

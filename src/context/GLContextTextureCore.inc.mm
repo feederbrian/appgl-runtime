@@ -238,6 +238,56 @@ static bool appglProxyLevelIsMipped(GLenum target) {
     return target != GL_PROXY_TEXTURE_RECTANGLE;
 }
 
+static bool appglIsCopyTexImage1DTarget(GLenum target) {
+    return target == GL_TEXTURE_1D;
+}
+
+static bool appglIsCopyTexImage2DTarget(GLenum target) {
+    switch (target) {
+        case GL_TEXTURE_2D:
+        case GL_TEXTURE_RECTANGLE:
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_X:
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_Y:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool appglTextureSubImageFormatMatchesStorage(GLenum internalFormat,
+                                                     GLenum format) {
+    const bool formatIsDepth = format == GL_DEPTH_COMPONENT;
+    const bool formatIsStencil = format == GL_STENCIL_INDEX;
+    const bool formatIsDepthStencil = format == GL_DEPTH_STENCIL;
+    const bool formatIsDepthClass =
+        formatIsDepth || formatIsStencil || formatIsDepthStencil;
+    const bool internalIsDepth = isDepthFormat(internalFormat);
+    const bool internalIsStencil = isStencilFormat(internalFormat);
+    const bool internalIsDepthStencil =
+        internalFormat == GL_DEPTH_STENCIL ||
+        internalFormat == GL_DEPTH24_STENCIL8 ||
+        internalFormat == GL_DEPTH32F_STENCIL8;
+    const bool internalIsColor = !internalIsDepth && !internalIsStencil;
+
+    if (internalIsColor) {
+        return !formatIsDepthClass;
+    }
+    if (formatIsDepth) {
+        return internalIsDepth;
+    }
+    if (formatIsDepthStencil) {
+        return internalIsDepth;
+    }
+    if (formatIsStencil) {
+        return internalIsStencil && !internalIsDepthStencil;
+    }
+    return false;
+}
+
 bool GLContext::texImage(
     GLenum target,
     GLint level,
@@ -805,13 +855,78 @@ bool GLContext::copyTexImage2D(
     GLsizei height,
     GLint border
 ) {
+    return copyTexImage2DImpl(target, level, internalformat, x, y,
+                              width, height, border, false);
+}
+
+bool GLContext::copyTexImage2DImpl(
+    GLenum target,
+    GLint level,
+    GLenum internalformat,
+    GLint x,
+    GLint y,
+    GLsizei width,
+    GLsizei height,
+    GLint border,
+    bool allowOneDimensionalTarget
+) {
+    const bool oneDimensionalTarget =
+        allowOneDimensionalTarget && appglIsCopyTexImage1DTarget(target);
+    if (!oneDimensionalTarget && !appglIsCopyTexImage2DTarget(target)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
     if (isLegacyCompatComponentCountInternalFormat(internalformat)) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
-    if (width < 0 || height < 0) {
+    if (level < 0 || width < 0 || height < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    if (impl_->capabilities != nullptr) {
+        GLint maxTex = 0;
+        GLint maxRect = 0;
+        GLint maxCube = 0;
+        impl_->capabilities->queryInteger(GL_MAX_TEXTURE_SIZE, &maxTex);
+        impl_->capabilities->queryInteger(GL_MAX_RECTANGLE_TEXTURE_SIZE, &maxRect);
+        impl_->capabilities->queryInteger(GL_MAX_CUBE_MAP_TEXTURE_SIZE, &maxCube);
+        if (maxRect <= 0) maxRect = maxTex;
+        if (maxCube <= 0) maxCube = maxTex;
+        GLint limit = maxTex;
+        const bool rectangleTarget = target == GL_TEXTURE_RECTANGLE;
+        const bool cubeTarget = Impl::cubeFaceIndexForTarget(target) >= 0;
+        if (rectangleTarget) {
+            limit = maxRect;
+        } else if (cubeTarget) {
+            limit = maxCube;
+        }
+        if (rectangleTarget && level != 0) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if (limit > 0) {
+            GLsizei maxLevel = 0;
+            if (!rectangleTarget) {
+                maxLevel = appglLog2TextureLimit(limit);
+                if (level > maxLevel) {
+                    pushError(GL_INVALID_VALUE);
+                    return false;
+                }
+            }
+            GLsizei levelLimit = limit;
+            for (GLint i = 0; i < level && levelLimit > 1; ++i) {
+                levelLimit >>= 1;
+            }
+            if (width > levelLimit || height > levelLimit) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+        }
+        if (cubeTarget && width != height) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
     }
 
     GLenum uploadInternalFormat = internalformat;
@@ -1135,7 +1250,35 @@ bool GLContext::copyTexImage1D(
     GLsizei width,
     GLint border
 ) {
-    return copyTexImage2D(target, level, internalformat, x, y, width, 1, border);
+    if (!appglIsCopyTexImage1DTarget(target)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (level < 0 || width < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (impl_->capabilities != nullptr) {
+        GLint maxTex = 0;
+        impl_->capabilities->queryInteger(GL_MAX_TEXTURE_SIZE, &maxTex);
+        if (maxTex > 0) {
+            const GLsizei maxLevel = appglLog2TextureLimit(maxTex);
+            if (level > maxLevel) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            GLsizei levelLimit = maxTex;
+            for (GLint i = 0; i < level && levelLimit > 1; ++i) {
+                levelLimit >>= 1;
+            }
+            if (width > levelLimit) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+        }
+    }
+    return copyTexImage2DImpl(target, level, internalformat, x, y,
+                              width, 1, border, true);
 }
 
 bool GLContext::copyTexSubImage1D(
@@ -1146,9 +1289,17 @@ bool GLContext::copyTexSubImage1D(
     GLint y,
     GLsizei width
 ) {
-    const GLuint texture = impl_->state->boundTexture(target);
+    if (!appglIsCopyTexImage1DTarget(target)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    const GLenum bindingTarget = Impl::normalizeTextureBindingTarget(target);
+    const GLuint texture = impl_->state->boundTexture(bindingTarget);
+    GLTextureObject* boundFallback =
+        texture == 0 ? impl_->currentTexture(target) : nullptr;
     if (!validateCopyTextureSubImage(texture, 1, level,
-                                     xoffset, 0, 0, width, 1)) {
+                                     xoffset, 0, 0, width, 1,
+                                     boundFallback)) {
         return false;
     }
     if (width == 0) {
@@ -1185,9 +1336,17 @@ bool GLContext::copyTexSubImage2D(
     GLsizei width,
     GLsizei height
 ) {
-    const GLuint texture = impl_->state->boundTexture(target);
+    if (!appglIsCopyTexImage2DTarget(target)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    const GLenum bindingTarget = Impl::normalizeTextureBindingTarget(target);
+    const GLuint texture = impl_->state->boundTexture(bindingTarget);
+    GLTextureObject* boundFallback =
+        texture == 0 ? impl_->currentTexture(target) : nullptr;
     if (!validateCopyTextureSubImage(texture, 2, level,
-                                     xoffset, yoffset, 0, width, height)) {
+                                     xoffset, yoffset, 0, width, height,
+                                     boundFallback)) {
         return false;
     }
     if (width == 0 || height == 0) {
@@ -1368,6 +1527,23 @@ bool GLContext::texSubImage(
         imagePtr = &faceIt->second;
     }
     GLTextureImageLevel& image = *imagePtr;
+    GLint effectiveZoffset = zoffset;
+    if (sparseCubeFace >= 0) {
+        effectiveZoffset = sparseCubeFace;
+    } else if (writeThroughView && storageCubeFaceForSubImage < 0) {
+        effectiveZoffset += storageLayerBase;
+    }
+    if (xoffset > image.desc.width || width > image.desc.width - xoffset
+        || yoffset > image.desc.height || height > image.desc.height - yoffset
+        || effectiveZoffset > image.desc.depth || depth > image.desc.depth - effectiveZoffset) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (!appglTextureSubImageFormatMatchesStorage(
+            image.desc.internalFormat, format)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     if (storageObject->desc.internalFormat == GL_DEPTH_COMPONENT32F &&
         !storageObject->depthStencilShadowAuthoritative) {
         (void)impl_->syncDepth32FTextureLevelNativeFromMetal(
@@ -1383,18 +1559,6 @@ bool GLContext::texSubImage(
     image.generatedMipLevel = false;
     image.exactReadbackData.clear();
     image.exactReadbackBpp = 0;
-    GLint effectiveZoffset = zoffset;
-    if (sparseCubeFace >= 0) {
-        effectiveZoffset = sparseCubeFace;
-    } else if (writeThroughView && storageCubeFaceForSubImage < 0) {
-        effectiveZoffset += storageLayerBase;
-    }
-    if (xoffset > image.desc.width || width > image.desc.width - xoffset
-        || yoffset > image.desc.height || height > image.desc.height - yoffset
-        || effectiveZoffset > image.desc.depth || depth > image.desc.depth - effectiveZoffset) {
-        pushError(GL_INVALID_VALUE);
-        return false;
-    }
     const bool ignoreUnpackSkipImages =
         appglCompatProfileEnabled() &&
         isLegacyCompatTextureFormatCombo(image.desc.internalFormat, format) &&

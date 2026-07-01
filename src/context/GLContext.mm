@@ -10613,10 +10613,7 @@ struct GLContext::Impl {
     GLTextureObject* currentTexture(GLenum target) {
         const GLuint name = state->boundTexture(normalizeTextureBindingTarget(target));
         if (name == 0) {
-            if (appglCompatProfileEnabled()) {
-                return compatDefaultTexture(target);
-            }
-            return nullptr;
+            return compatDefaultTexture(target);
         }
         return objects->textures().get(name);
     }
@@ -14996,7 +14993,6 @@ struct GLContext::Impl {
             // path that might leave them mismatched).
             descriptor.magFilter = descriptor.minFilter;
         }
-
         id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:descriptor];
         if (sampler == nil) {
             return false;
@@ -15209,10 +15205,37 @@ struct GLContext::Impl {
                                        std::size_t pixelIndex) {
         if (image.nativeBpp >= 4 && !image.nativeData.empty()) {
             const std::size_t offset = pixelIndex * image.nativeBpp;
-            if (offset + sizeof(float) <= image.nativeData.size()) {
-                float value = 0.0f;
-                std::memcpy(&value, image.nativeData.data() + offset, sizeof(value));
-                return value;
+            switch (image.desc.internalFormat) {
+                case GL_DEPTH_STENCIL:
+                case GL_DEPTH24_STENCIL8: {
+                    if (offset + sizeof(std::uint32_t) <= image.nativeData.size()) {
+                        std::uint32_t packed = 0;
+                        std::memcpy(&packed,
+                                    image.nativeData.data() + offset,
+                                    sizeof(packed));
+                        return static_cast<float>(packed & 0x00FFFFFFu) /
+                               static_cast<float>(0x00FFFFFFu);
+                    }
+                    break;
+                }
+                default:
+                    if (offset + sizeof(float) <= image.nativeData.size()) {
+                        float value = 0.0f;
+                        std::memcpy(&value,
+                                    image.nativeData.data() + offset,
+                                    sizeof(value));
+                        return value;
+                    }
+                    break;
+            }
+        }
+        if (image.nativeBpp == 2 && !image.nativeData.empty()) {
+            const std::size_t offset = pixelIndex * image.nativeBpp;
+            if (offset + sizeof(std::uint16_t) <= image.nativeData.size()) {
+                std::uint16_t value = 0;
+                std::memcpy(&value, image.nativeData.data() + offset,
+                            sizeof(value));
+                return static_cast<float>(value) / 65535.0f;
             }
         }
         if (!image.rgba8.empty()) {
@@ -15272,7 +15295,6 @@ struct GLContext::Impl {
             }
             return data;
         }
-
         std::vector<std::uint8_t> data(pixelCount * sizeof(float), 0);
         for (std::size_t i = 0; i < pixelCount; ++i) {
             const float value = depthSampleProxyValue(image, i);
@@ -15308,12 +15330,17 @@ struct GLContext::Impl {
             return nil;
         }
 
-        if (texObj.desc.internalFormat == GL_DEPTH_COMPONENT32F &&
-            !texObj.depthStencilShadowAuthoritative) {
+        if (!texObj.depthStencilShadowAuthoritative &&
+            (isDepthFormat(texObj.desc.internalFormat) ||
+             isStencilFormat(texObj.desc.internalFormat))) {
+            const bool syncDepthPlane =
+                proxyFormat == MTLPixelFormatR32Float;
+            const bool syncStencilPlane =
+                proxyFormat == MTLPixelFormatR8Uint;
             for (const auto& [levelIndex, image] : texObj.levels) {
                 if (image.defined) {
-                    (void)syncDepth32FTextureLevelNativeFromMetal(
-                        texObj, levelIndex);
+                    (void)syncDepthStencilTextureLevelNativeFromMetal(
+                        texObj, levelIndex, syncDepthPlane, syncStencilPlane);
                 }
             }
         }
@@ -24536,6 +24563,7 @@ struct GLContext::Impl {
                           GLfloat depth) const {
         const float d = std::clamp(depth, 0.0f, 1.0f);
         switch (image.desc.internalFormat) {
+            case GL_DEPTH_STENCIL:
             case GL_DEPTH24_STENCIL8: {
                 std::uint32_t packed = 0;
                 if (offset + sizeof(packed) <= image.nativeData.size()) {
@@ -24568,6 +24596,7 @@ struct GLContext::Impl {
     void storeNativeStencil(GLTextureImageLevel& image, std::size_t offset,
                             std::uint8_t stencil) const {
         switch (image.desc.internalFormat) {
+            case GL_DEPTH_STENCIL:
             case GL_DEPTH24_STENCIL8: {
                 if (offset + 4u <= image.nativeData.size()) {
                     image.nativeData[offset + 3u] = stencil;
@@ -24590,6 +24619,7 @@ struct GLContext::Impl {
     GLfloat loadNativeDepth(const GLTextureImageLevel& image,
                             std::size_t offset) const {
         switch (image.desc.internalFormat) {
+            case GL_DEPTH_STENCIL:
             case GL_DEPTH24_STENCIL8: {
                 std::uint32_t packed = 0;
                 if (offset + sizeof(packed) <= image.nativeData.size()) {
@@ -24613,6 +24643,7 @@ struct GLContext::Impl {
     std::uint8_t loadNativeStencil(const GLTextureImageLevel& image,
                                    std::size_t offset) const {
         switch (image.desc.internalFormat) {
+            case GL_DEPTH_STENCIL:
             case GL_DEPTH24_STENCIL8:
                 return offset + 3u < image.nativeData.size()
                     ? image.nativeData[offset + 3u] : 0;
@@ -24731,7 +24762,38 @@ struct GLContext::Impl {
                 return replaceMetalTexture(*texture);
             }
             if (frameGraph != nullptr && texture->metalTexture != nullptr) {
-                texture->depthStencilShadowAuthoritative = false;
+                GLTextureImageLevel& image = level->second;
+                const GLsizei width = std::max<GLsizei>(image.desc.width, 1);
+                const GLsizei height =
+                    texture->target == GL_TEXTURE_1D ? 1
+                    : std::max<GLsizei>(image.desc.height, 1);
+                const GLsizei layerCount =
+                    textureFramebufferLayerCount(*texture, image);
+                const GLsizei firstLayer = attachment.layered
+                    ? 0 : textureFramebufferLayerIndex(*texture, attachment);
+                const GLsizei lastLayer = attachment.layered
+                    ? layerCount : firstLayer + 1;
+                if (firstLayer < 0 || firstLayer >= layerCount ||
+                    lastLayer > layerCount) {
+                    return false;
+                }
+                if (ensureDepthStencilNativeShadow(
+                        image, width, height, layerCount)) {
+                    for (GLsizei layerIndex = firstLayer;
+                         layerIndex < lastLayer; ++layerIndex) {
+                        for (GLsizei row = 0; row < height; ++row) {
+                            for (GLsizei col = 0; col < width; ++col) {
+                                const std::size_t offset = nativeShadowOffset(
+                                    image, width, height,
+                                    layerIndex, col, row);
+                                storeNativeDepth(image, offset, depth);
+                            }
+                        }
+                    }
+                    texture->depthStencilShadowAuthoritative = true;
+                } else {
+                    texture->depthStencilShadowAuthoritative = false;
+                }
                 maybeDropStaleDepth32FRgba8ShadowForAttachment(
                     *texture, attachment);
                 return frameGraph->clearTextureDepth(
@@ -25702,6 +25764,134 @@ struct GLContext::Impl {
                 out[dstOffset] = readDepth(static_cast<NSUInteger>(srcX),
                                            static_cast<NSUInteger>(srcY));
             }
+        }
+        return true;
+    }
+
+    bool syncDepthStencilTextureLevelNativeFromMetal(GLTextureObject& object,
+                                                     GLint level,
+                                                     bool syncDepthPlane,
+                                                     bool syncStencilPlane) {
+        if (object.metalTexture == nullptr) {
+            return false;
+        }
+        auto levelIt = object.levels.find(level);
+        if (levelIt == object.levels.end() || !levelIt->second.defined) {
+            return false;
+        }
+        GLTextureImageLevel& image = levelIt->second;
+        const bool internalHasDepth = isDepthFormat(image.desc.internalFormat);
+        const bool internalHasStencil = isStencilFormat(image.desc.internalFormat);
+        const bool hasDepth = syncDepthPlane && internalHasDepth;
+        const bool hasStencil = syncStencilPlane && internalHasStencil;
+        if (!hasDepth && !hasStencil) {
+            return false;
+        }
+        id<MTLTexture> metalTex = (__bridge id<MTLTexture>)object.metalTexture;
+        if (metalTex == nil ||
+            static_cast<NSUInteger>(level) >=
+                nonZeroMipLevelCount(metalTex.mipmapLevelCount)) {
+            return false;
+        }
+
+        GLsizei width = std::max<GLsizei>(image.desc.width, 1);
+        GLsizei height = std::max<GLsizei>(image.desc.height, 1);
+        GLsizei slices = 1;
+        bool slicedTarget = false;
+        switch (object.target) {
+            case GL_TEXTURE_1D:
+                height = 1;
+                break;
+            case GL_TEXTURE_RECTANGLE:
+            case GL_TEXTURE_2D:
+                break;
+            case GL_TEXTURE_1D_ARRAY:
+                height = 1;
+                slices = std::max<GLsizei>(
+                    std::max<GLsizei>(image.desc.height, image.desc.layers), 1);
+                slicedTarget = true;
+                break;
+            case GL_TEXTURE_2D_ARRAY:
+                slices = std::max<GLsizei>(
+                    std::max<GLsizei>(image.desc.depth, image.desc.layers), 1);
+                slicedTarget = true;
+                break;
+            case GL_TEXTURE_CUBE_MAP:
+                slices = 6;
+                slicedTarget = true;
+                break;
+            case GL_TEXTURE_CUBE_MAP_ARRAY:
+                slices = std::max<GLsizei>(
+                    std::max<GLsizei>(image.desc.depth, image.desc.layers), 1);
+                slicedTarget = true;
+                break;
+            default:
+                return false;
+        }
+        if (!ensureDepthStencilNativeShadow(image, width, height, slices)) {
+            return false;
+        }
+
+        drainPendingGpuProducers(object);
+        std::vector<GLfloat> depthValues(
+            static_cast<std::size_t>(width) *
+            static_cast<std::size_t>(height),
+            0.0f);
+        std::vector<std::uint8_t> stencilValues(
+            static_cast<std::size_t>(width) *
+            static_cast<std::size_t>(height),
+            0u);
+        for (GLsizei slice = 0; slice < slices; ++slice) {
+            const NSUInteger sourceSlice =
+                slicedTarget ? static_cast<NSUInteger>(slice) : 0u;
+            if (hasDepth &&
+                !readDepthFromMetalTexture(metalTex,
+                                           static_cast<NSUInteger>(level),
+                                           sourceSlice,
+                                           0,
+                                           0,
+                                           width,
+                                           height,
+                                           depthValues.data(),
+                                           false,
+                                           DepthReadbackConsumer::SyncNative)) {
+                return false;
+            }
+            if (hasStencil &&
+                !readStencilFromMetalTexture(metalTex,
+                                             static_cast<NSUInteger>(level),
+                                             sourceSlice,
+                                             0,
+                                             0,
+                                             width,
+                                             height,
+                                             stencilValues.data(),
+                                             false)) {
+                return false;
+            }
+            for (GLsizei row = 0; row < height; ++row) {
+                for (GLsizei col = 0; col < width; ++col) {
+                    const std::size_t pixel =
+                        static_cast<std::size_t>(row) *
+                        static_cast<std::size_t>(width) +
+                        static_cast<std::size_t>(col);
+                    const std::size_t nativeOffset =
+                        nativeShadowOffset(image, width, height,
+                                           slice, col, row);
+                    if (hasDepth) {
+                        storeNativeDepth(image, nativeOffset,
+                                         depthValues[pixel]);
+                    }
+                    if (hasStencil) {
+                        storeNativeStencil(image, nativeOffset,
+                                           stencilValues[pixel]);
+                    }
+                }
+            }
+        }
+        if ((!internalHasDepth || hasDepth) &&
+            (!internalHasStencil || hasStencil)) {
+            object.depthStencilShadowAuthoritative = true;
         }
         return true;
     }

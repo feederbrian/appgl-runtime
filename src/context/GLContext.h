@@ -175,6 +175,7 @@ public:
     bool texImage(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type, const void* pixels);
     bool copyTexImage1D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLint border);
     bool copyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border);
+    bool copyTexImage2DImpl(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border, bool allowOneDimensionalTarget);
     bool texSubImage(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* pixels);
     bool copyTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width);
     bool copyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height);
@@ -439,7 +440,8 @@ public:
     bool validateCopyTextureSubImage(
         GLuint texture, int dim, GLint level,
         GLint xoffset, GLint yoffset, GLint zoffset,
-        GLsizei width, GLsizei height);
+        GLsizei width, GLsizei height,
+        GLTextureObject* boundFallback = nullptr);
     bool textureParameterf(GLuint texture, GLenum pname, GLfloat param);
     bool textureParameterfv(GLuint texture, GLenum pname, const GLfloat* param);
     bool textureParameteri(GLuint texture, GLenum pname, GLint param);

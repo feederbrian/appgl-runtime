@@ -1041,8 +1041,20 @@ bool GLContext::compressedTextureSubImage3D(GLuint texture, GLint level, GLint x
 bool GLContext::validateCopyTextureSubImage(
     GLuint texture, int dim, GLint level,
     GLint xoffset, GLint yoffset, GLint zoffset,
-    GLsizei width, GLsizei height) {
+    GLsizei width, GLsizei height,
+    GLTextureObject* boundFallback) {
+    if (level < 0 || width < 0 || height < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (xoffset < 0 || (dim >= 2 && yoffset < 0) || (dim >= 3 && zoffset < 0)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
     auto* obj = impl_->objects->textures().get(texture);
+    if (obj == nullptr && texture == 0 && boundFallback != nullptr) {
+        obj = boundFallback;
+    }
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
     // GL 4.6 §8.6: effective target must match the call's dim.
     const GLenum effectiveTarget = obj->target != 0 ? obj->target : GL_TEXTURE_2D;
@@ -1064,14 +1076,6 @@ bool GLContext::validateCopyTextureSubImage(
     }
     if (!targetOk) {
         pushError(GL_INVALID_OPERATION);
-        return false;
-    }
-    if (level < 0 || width < 0 || height < 0) {
-        pushError(GL_INVALID_VALUE);
-        return false;
-    }
-    if (xoffset < 0 || (dim >= 2 && yoffset < 0) || (dim >= 3 && zoffset < 0)) {
-        pushError(GL_INVALID_VALUE);
         return false;
     }
     // Target-max width/height/depth bounds per §8.6.
