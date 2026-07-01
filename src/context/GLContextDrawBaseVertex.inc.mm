@@ -211,7 +211,10 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     tdi.indexCount = count;
                     tdi.indexType = effectiveType;
                     tdi.glIndexBuffer = elementBufferName;
-                    if (!elementIndexTypeNeedsExpansion(type) && elementBuffer->metalBuffer != nullptr) {
+                    tdi.metalIndexBuffer = nullptr;
+                    tdi.metalIndexBufferOffset = 0;
+                    if (!elementIndexTypeNeedsExpansion(type) &&
+                        elementBuffer->metalBuffer != nullptr) {
                         tdi.metalIndexBuffer = elementBuffer->metalBuffer;
                         if (impl_->frameGraph != nullptr) {
                             elementBuffer->liveBindSubmitIndex =

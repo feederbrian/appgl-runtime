@@ -31469,8 +31469,8 @@ GLContext::GLContext(void* layer)
     : impl_(std::make_unique<Impl>(
           this,
           layer,
-          appglCompatProfileEnabled() ? 0 : 1280,
-          appglCompatProfileEnabled() ? 0 : 720,
+          0,
+          0,
           false)) {
     Runtime::shared().registerContext(this);
     ExtensionContext extensionContext(*this);
