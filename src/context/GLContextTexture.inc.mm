@@ -583,8 +583,182 @@ bool GLContext::compressedTextureSubImage1D(GLuint texture, GLint level, GLint x
 bool GLContext::compressedTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void* data) {
     auto* obj = impl_->objects->textures().get(texture);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
-    (void)level; (void)xoffset; (void)yoffset; (void)width; (void)height; (void)format; (void)imageSize; (void)data;
-    warnBypassOnce("compressedTextureSubImage2D", texture);
+    if (level < 0 || xoffset < 0 || yoffset < 0 ||
+        width < 0 || height < 0 || imageSize < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (width == 0 || height == 0) {
+        return true;
+    }
+    const GLenum effectiveTarget = obj->target != 0 ? obj->target : obj->desc.target;
+    if (effectiveTarget != GL_TEXTURE_2D &&
+        effectiveTarget != GL_TEXTURE_1D_ARRAY &&
+        effectiveTarget != GL_TEXTURE_RECTANGLE) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!isCompressedInternalFormat(obj->desc.internalFormat)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const CompressedBlockInfo block =
+        compressedBlockInfoForInternalFormat(obj->desc.internalFormat);
+    const CompressedBlockInfo uploadBlock =
+        compressedBlockInfoForInternalFormat(format);
+    if (block.bytes == 0 || block.width == 0 || block.height == 0 ||
+        uploadBlock.bytes == 0 || uploadBlock.width == 0 ||
+        uploadBlock.height == 0) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (uploadBlock.width != block.width ||
+        uploadBlock.height != block.height ||
+        uploadBlock.bytes != block.bytes) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    auto levelIt = obj->levels.find(level);
+    if (levelIt == obj->levels.end() || !levelIt->second.defined) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLTextureImageLevel& image = levelIt->second;
+    const GLsizei texW = std::max<GLsizei>(
+        image.desc.width > 0 ? image.desc.width :
+            glMipDimensionAtLevel(std::max<GLsizei>(obj->desc.width, 1), level),
+        1);
+    const GLsizei texH = std::max<GLsizei>(
+        image.desc.height > 0 ? image.desc.height :
+            glMipDimensionAtLevel(std::max<GLsizei>(obj->desc.height, 1), level),
+        1);
+    if (xoffset + width > texW || yoffset + height > texH) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const NSUInteger blockW = block.width;
+    const NSUInteger blockH = block.height;
+    const NSUInteger blockBytes = block.bytes;
+    if ((static_cast<NSUInteger>(xoffset) % blockW) != 0 ||
+        (static_cast<NSUInteger>(yoffset) % blockH) != 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const bool widthAligned =
+        (static_cast<NSUInteger>(width) % blockW) == 0 ||
+        (xoffset + width) == texW;
+    const bool heightAligned =
+        (static_cast<NSUInteger>(height) % blockH) == 0 ||
+        (yoffset + height) == texH;
+    if (!widthAligned || !heightAligned) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const NSUInteger blockX0 = static_cast<NSUInteger>(xoffset) / blockW;
+    const NSUInteger blockY0 = static_cast<NSUInteger>(yoffset) / blockH;
+    const NSUInteger blockX1 = ceilDivBlocks(
+        static_cast<NSUInteger>(xoffset + width), blockW);
+    const NSUInteger blockY1 = ceilDivBlocks(
+        static_cast<NSUInteger>(yoffset + height), blockH);
+    const NSUInteger subBlocksX = blockX1 > blockX0 ? blockX1 - blockX0 : 0u;
+    const NSUInteger subBlocksY = blockY1 > blockY0 ? blockY1 - blockY0 : 0u;
+    const NSUInteger tightRowBytes = subBlocksX * blockBytes;
+    const NSUInteger tightImageBytes = tightRowBytes * subBlocksY;
+    if (static_cast<NSUInteger>(imageSize) < tightImageBytes) {
+        return true;
+    }
+    if (data == nullptr) {
+        return true;
+    }
+
+    const GLPixelStoreState& store = impl_->state->pixelStore();
+    const NSUInteger layoutBlockW = store.unpackCompressedBlockWidth > 0
+        ? static_cast<NSUInteger>(store.unpackCompressedBlockWidth)
+        : blockW;
+    const NSUInteger layoutBlockH = store.unpackCompressedBlockHeight > 0
+        ? static_cast<NSUInteger>(store.unpackCompressedBlockHeight)
+        : blockH;
+    const NSUInteger layoutBlockBytes = store.unpackCompressedBlockSize > 0
+        ? static_cast<NSUInteger>(store.unpackCompressedBlockSize)
+        : blockBytes;
+    if (layoutBlockW == 0 || layoutBlockH == 0 || layoutBlockBytes == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const NSUInteger srcWidth = static_cast<NSUInteger>(
+        store.unpackRowLength > 0 ? store.unpackRowLength : width);
+    const NSUInteger srcBlocksX = ceilDivBlocks(srcWidth, layoutBlockW);
+    const NSUInteger srcRowBytes = srcBlocksX * layoutBlockBytes;
+    const NSUInteger skipBlockX =
+        static_cast<NSUInteger>(store.unpackSkipPixels) / layoutBlockW;
+    const NSUInteger skipBlockY =
+        static_cast<NSUInteger>(store.unpackSkipRows) / layoutBlockH;
+    const NSUInteger srcStart =
+        skipBlockY * srcRowBytes + skipBlockX * layoutBlockBytes;
+    const NSUInteger srcNeeded = srcStart +
+        (subBlocksY > 0 ? (subBlocksY - 1u) * srcRowBytes + tightRowBytes : 0u);
+    if (srcNeeded > static_cast<NSUInteger>(imageSize) ||
+        srcRowBytes < tightRowBytes) {
+        return true;
+    }
+
+    const NSUInteger texBlocksX =
+        ceilDivBlocks(static_cast<NSUInteger>(texW), blockW);
+    const NSUInteger texBlocksY =
+        ceilDivBlocks(static_cast<NSUInteger>(texH), blockH);
+    const NSUInteger dstRowBytes = texBlocksX * blockBytes;
+    const NSUInteger dstImageBytes = dstRowBytes * texBlocksY;
+    if (image.compressedData.size() < dstImageBytes) {
+        image.compressedData.resize(dstImageBytes, 0);
+    }
+    image.desc.internalFormat = obj->desc.internalFormat;
+    image.mipShadowEvicted = false;
+    image.mipShadowEvictedRgba8Bytes = 0;
+    image.mipShadowEvictedNativeBytes = 0;
+    const auto* bytes = static_cast<const std::uint8_t*>(data);
+    for (NSUInteger row = 0; row < subBlocksY; ++row) {
+        const NSUInteger srcOffset = srcStart + row * srcRowBytes;
+        const NSUInteger dstOffset =
+            (blockY0 + row) * dstRowBytes + blockX0 * blockBytes;
+        std::memcpy(image.compressedData.data() + dstOffset,
+                    bytes + srcOffset,
+                    tightRowBytes);
+    }
+
+    id<MTLTexture> metalTex = (__bridge id<MTLTexture>)obj->metalTexture;
+    if (metalTex != nil && impl_->capabilities != nullptr) {
+        auto fmtCap = impl_->capabilities->format(obj->desc.internalFormat);
+        const MTLPixelFormat expectedFormat =
+            fmtCap.has_value()
+                ? static_cast<MTLPixelFormat>(fmtCap->metalPixelFormat)
+                : MTLPixelFormatInvalid;
+        if (expectedFormat != MTLPixelFormatInvalid &&
+            metalTex.pixelFormat == expectedFormat &&
+            static_cast<NSUInteger>(level) <
+                nonZeroMipLevelCount(metalTex.mipmapLevelCount)) {
+            const NSUInteger mipLevel = static_cast<NSUInteger>(level);
+            const NSUInteger mipW = mipDimensionAtLevel(metalTex.width, mipLevel);
+            const NSUInteger mipH = mipDimensionAtLevel(metalTex.height, mipLevel);
+            MTLRegion region = MTLRegionMake2D(
+                static_cast<NSUInteger>(xoffset),
+                static_cast<NSUInteger>(yoffset),
+                std::min<NSUInteger>(static_cast<NSUInteger>(width),
+                    mipW > static_cast<NSUInteger>(xoffset)
+                        ? mipW - static_cast<NSUInteger>(xoffset) : 0u),
+                std::min<NSUInteger>(static_cast<NSUInteger>(height),
+                    mipH > static_cast<NSUInteger>(yoffset)
+                        ? mipH - static_cast<NSUInteger>(yoffset) : 0u));
+            if (region.size.width != 0 && region.size.height != 0) {
+                [metalTex replaceRegion:region
+                            mipmapLevel:mipLevel
+                              withBytes:bytes + srcStart
+                            bytesPerRow:srcRowBytes];
+                if (obj->metalSwizzledView != nullptr) {
+                    obj->swizzleDirty = true;
+                }
+            }
+        }
+    }
     return true;
 }
 
@@ -3596,6 +3770,31 @@ bool GLContext::getCompressedTextureImage(GLuint texture, GLint level, GLsizei b
     // path validated args + returned true with `pixels` untouched, so
     // the test saw 16 zeros instead of the input bytes.
     //
+    if (pixels != nullptr) {
+        const auto levelIt = obj->levels.find(level);
+        if (levelIt != obj->levels.end() &&
+            !levelIt->second.compressedData.empty()) {
+            const GLTextureImageLevel& image = levelIt->second;
+            const NSUInteger w = static_cast<NSUInteger>(
+                std::max<GLsizei>(image.desc.width, 1));
+            const NSUInteger h = static_cast<NSUInteger>(
+                std::max<GLsizei>(image.desc.height, 1));
+            const NSUInteger d = static_cast<NSUInteger>(
+                std::max<GLsizei>(image.desc.depth, 1));
+            const NSUInteger blocksX = ceilDivBlocks(w, blockW);
+            const NSUInteger blocksY = ceilDivBlocks(h, blockH);
+            const NSUInteger required = blocksX * blocksY * d * blockBytes;
+            if (bufSize >= 0 &&
+                static_cast<NSUInteger>(bufSize) < required) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            if (image.compressedData.size() >= required) {
+                std::memcpy(pixels, image.compressedData.data(), required);
+                return true;
+            }
+        }
+    }
     if (pixels != nullptr && obj->metalTexture != nullptr) {
         id<MTLTexture> metalTex = (__bridge id<MTLTexture>)obj->metalTexture;
         if (block.bytes != 0) {
