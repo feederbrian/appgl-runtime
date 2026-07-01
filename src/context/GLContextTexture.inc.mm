@@ -765,8 +765,272 @@ bool GLContext::compressedTextureSubImage2D(GLuint texture, GLint level, GLint x
 bool GLContext::compressedTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void* data) {
     auto* obj = impl_->objects->textures().get(texture);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
-    (void)level; (void)xoffset; (void)yoffset; (void)zoffset; (void)width; (void)height; (void)depth; (void)format; (void)imageSize; (void)data;
-    warnBypassOnce("compressedTextureSubImage3D", texture);
+    if (level < 0 || xoffset < 0 || yoffset < 0 || zoffset < 0 ||
+        width < 0 || height < 0 || depth < 0 || imageSize < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (width == 0 || height == 0 || depth == 0) {
+        return true;
+    }
+    const GLenum effectiveTarget = obj->target != 0 ? obj->target : obj->desc.target;
+    if (effectiveTarget != GL_TEXTURE_3D &&
+        effectiveTarget != GL_TEXTURE_2D_ARRAY &&
+        effectiveTarget != GL_TEXTURE_CUBE_MAP_ARRAY) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!isCompressedInternalFormat(obj->desc.internalFormat)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const CompressedBlockInfo block =
+        compressedBlockInfoForInternalFormat(obj->desc.internalFormat);
+    const CompressedBlockInfo uploadBlock =
+        compressedBlockInfoForInternalFormat(format);
+    if (block.bytes == 0 || block.width == 0 || block.height == 0 ||
+        block.depth == 0 || uploadBlock.bytes == 0 ||
+        uploadBlock.width == 0 || uploadBlock.height == 0 ||
+        uploadBlock.depth == 0) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (uploadBlock.width != block.width ||
+        uploadBlock.height != block.height ||
+        uploadBlock.depth != block.depth ||
+        uploadBlock.bytes != block.bytes) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    auto levelIt = obj->levels.find(level);
+    if (levelIt == obj->levels.end() || !levelIt->second.defined) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLTextureImageLevel& image = levelIt->second;
+    const GLsizei texW = std::max<GLsizei>(
+        image.desc.width > 0 ? image.desc.width :
+            glMipDimensionAtLevel(std::max<GLsizei>(obj->desc.width, 1), level),
+        1);
+    const GLsizei texH = std::max<GLsizei>(
+        image.desc.height > 0 ? image.desc.height :
+            glMipDimensionAtLevel(std::max<GLsizei>(obj->desc.height, 1), level),
+        1);
+    GLsizei texD = std::max<GLsizei>(image.desc.depth, 1);
+    if (effectiveTarget == GL_TEXTURE_2D_ARRAY ||
+        effectiveTarget == GL_TEXTURE_CUBE_MAP_ARRAY) {
+        texD = std::max<GLsizei>(
+            std::max<GLsizei>(image.desc.depth, image.desc.layers),
+            std::max<GLsizei>(obj->desc.depth, obj->desc.layers));
+        texD = std::max<GLsizei>(texD, 1);
+    } else if (image.desc.depth <= 0) {
+        texD = glMipDimensionAtLevel(std::max<GLsizei>(obj->desc.depth, 1), level);
+    }
+    if (xoffset + width > texW ||
+        yoffset + height > texH ||
+        zoffset + depth > texD) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const NSUInteger blockW = block.width;
+    const NSUInteger blockH = block.height;
+    const NSUInteger blockD = block.depth;
+    const NSUInteger blockBytes = block.bytes;
+    if ((static_cast<NSUInteger>(xoffset) % blockW) != 0 ||
+        (static_cast<NSUInteger>(yoffset) % blockH) != 0 ||
+        (static_cast<NSUInteger>(zoffset) % blockD) != 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const bool widthAligned =
+        (static_cast<NSUInteger>(width) % blockW) == 0 ||
+        (xoffset + width) == texW;
+    const bool heightAligned =
+        (static_cast<NSUInteger>(height) % blockH) == 0 ||
+        (yoffset + height) == texH;
+    const bool depthAligned =
+        (static_cast<NSUInteger>(depth) % blockD) == 0 ||
+        (zoffset + depth) == texD;
+    if (!widthAligned || !heightAligned || !depthAligned) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const NSUInteger blockX0 = static_cast<NSUInteger>(xoffset) / blockW;
+    const NSUInteger blockY0 = static_cast<NSUInteger>(yoffset) / blockH;
+    const NSUInteger blockZ0 = static_cast<NSUInteger>(zoffset) / blockD;
+    const NSUInteger blockX1 = ceilDivBlocks(
+        static_cast<NSUInteger>(xoffset + width), blockW);
+    const NSUInteger blockY1 = ceilDivBlocks(
+        static_cast<NSUInteger>(yoffset + height), blockH);
+    const NSUInteger blockZ1 = ceilDivBlocks(
+        static_cast<NSUInteger>(zoffset + depth), blockD);
+    const NSUInteger subBlocksX = blockX1 > blockX0 ? blockX1 - blockX0 : 0u;
+    const NSUInteger subBlocksY = blockY1 > blockY0 ? blockY1 - blockY0 : 0u;
+    const NSUInteger subBlocksZ = blockZ1 > blockZ0 ? blockZ1 - blockZ0 : 0u;
+    const NSUInteger tightRowBytes = subBlocksX * blockBytes;
+    const NSUInteger tightImageBytes = tightRowBytes * subBlocksY;
+    const NSUInteger tightVolumeBytes = tightImageBytes * subBlocksZ;
+    if (static_cast<NSUInteger>(imageSize) < tightVolumeBytes) {
+        return true;
+    }
+    if (data == nullptr) {
+        return true;
+    }
+
+    const GLPixelStoreState& store = impl_->state->pixelStore();
+    const NSUInteger layoutBlockW = store.unpackCompressedBlockWidth > 0
+        ? static_cast<NSUInteger>(store.unpackCompressedBlockWidth)
+        : blockW;
+    const NSUInteger layoutBlockH = store.unpackCompressedBlockHeight > 0
+        ? static_cast<NSUInteger>(store.unpackCompressedBlockHeight)
+        : blockH;
+    const NSUInteger layoutBlockD = store.unpackCompressedBlockDepth > 0
+        ? static_cast<NSUInteger>(store.unpackCompressedBlockDepth)
+        : blockD;
+    const NSUInteger layoutBlockBytes = store.unpackCompressedBlockSize > 0
+        ? static_cast<NSUInteger>(store.unpackCompressedBlockSize)
+        : blockBytes;
+    if (layoutBlockW == 0 || layoutBlockH == 0 ||
+        layoutBlockD == 0 || layoutBlockBytes == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const NSUInteger srcWidth = static_cast<NSUInteger>(
+        store.unpackRowLength > 0 ? store.unpackRowLength : width);
+    const NSUInteger srcHeight = static_cast<NSUInteger>(
+        store.unpackImageHeight > 0 ? store.unpackImageHeight : height);
+    const NSUInteger srcBlocksX = ceilDivBlocks(srcWidth, layoutBlockW);
+    const NSUInteger srcBlocksY = ceilDivBlocks(srcHeight, layoutBlockH);
+    const NSUInteger srcRowBytes = srcBlocksX * layoutBlockBytes;
+    const NSUInteger srcImageBytes = srcRowBytes * srcBlocksY;
+    const NSUInteger skipBlockX =
+        static_cast<NSUInteger>(store.unpackSkipPixels) / layoutBlockW;
+    const NSUInteger skipBlockY =
+        static_cast<NSUInteger>(store.unpackSkipRows) / layoutBlockH;
+    const NSUInteger skipBlockZ =
+        static_cast<NSUInteger>(store.unpackSkipImages) / layoutBlockD;
+    const NSUInteger srcStart =
+        skipBlockZ * srcImageBytes +
+        skipBlockY * srcRowBytes +
+        skipBlockX * layoutBlockBytes;
+    const NSUInteger srcNeeded = srcStart +
+        (subBlocksZ > 0 ? (subBlocksZ - 1u) * srcImageBytes : 0u) +
+        (subBlocksY > 0 ? (subBlocksY - 1u) * srcRowBytes : 0u) +
+        tightRowBytes;
+    if (srcNeeded > static_cast<NSUInteger>(imageSize) ||
+        srcRowBytes < tightRowBytes ||
+        srcImageBytes < tightImageBytes) {
+        return true;
+    }
+
+    const NSUInteger texBlocksX =
+        ceilDivBlocks(static_cast<NSUInteger>(texW), blockW);
+    const NSUInteger texBlocksY =
+        ceilDivBlocks(static_cast<NSUInteger>(texH), blockH);
+    const NSUInteger texBlocksZ =
+        ceilDivBlocks(static_cast<NSUInteger>(texD), blockD);
+    const NSUInteger dstRowBytes = texBlocksX * blockBytes;
+    const NSUInteger dstImageBytes = dstRowBytes * texBlocksY;
+    const NSUInteger dstTotalBytes = dstImageBytes * texBlocksZ;
+    if (image.compressedData.size() < dstTotalBytes) {
+        image.compressedData.resize(dstTotalBytes, 0);
+    }
+    image.desc.internalFormat = obj->desc.internalFormat;
+    image.mipShadowEvicted = false;
+    image.mipShadowEvictedRgba8Bytes = 0;
+    image.mipShadowEvictedNativeBytes = 0;
+    const auto* bytes = static_cast<const std::uint8_t*>(data);
+    for (NSUInteger slice = 0; slice < subBlocksZ; ++slice) {
+        for (NSUInteger row = 0; row < subBlocksY; ++row) {
+            const NSUInteger srcOffset =
+                srcStart + slice * srcImageBytes + row * srcRowBytes;
+            const NSUInteger dstOffset =
+                (blockZ0 + slice) * dstImageBytes +
+                (blockY0 + row) * dstRowBytes +
+                blockX0 * blockBytes;
+            std::memcpy(image.compressedData.data() + dstOffset,
+                        bytes + srcOffset,
+                        tightRowBytes);
+        }
+    }
+
+    id<MTLTexture> metalTex = (__bridge id<MTLTexture>)obj->metalTexture;
+    if (metalTex != nil && impl_->capabilities != nullptr) {
+        auto fmtCap = impl_->capabilities->format(obj->desc.internalFormat);
+        const MTLPixelFormat expectedFormat =
+            fmtCap.has_value()
+                ? static_cast<MTLPixelFormat>(fmtCap->metalPixelFormat)
+                : MTLPixelFormatInvalid;
+        if (expectedFormat != MTLPixelFormatInvalid &&
+            metalTex.pixelFormat == expectedFormat &&
+            static_cast<NSUInteger>(level) <
+                nonZeroMipLevelCount(metalTex.mipmapLevelCount)) {
+            const NSUInteger mipLevel = static_cast<NSUInteger>(level);
+            const NSUInteger mipW = mipDimensionAtLevel(metalTex.width, mipLevel);
+            const NSUInteger mipH = mipDimensionAtLevel(metalTex.height, mipLevel);
+            const NSUInteger regionX = static_cast<NSUInteger>(xoffset);
+            const NSUInteger regionY = static_cast<NSUInteger>(yoffset);
+            const NSUInteger regionW = std::min<NSUInteger>(
+                static_cast<NSUInteger>(width),
+                mipW > regionX ? mipW - regionX : 0u);
+            const NSUInteger regionH = std::min<NSUInteger>(
+                static_cast<NSUInteger>(height),
+                mipH > regionY ? mipH - regionY : 0u);
+            if (regionW != 0 && regionH != 0) {
+                if (metalTex.textureType == MTLTextureType3D) {
+                    const NSUInteger mipD = mipDimensionAtLevel(
+                        metalTex.depth, mipLevel);
+                    const NSUInteger firstSlice = static_cast<NSUInteger>(zoffset);
+                    const NSUInteger uploadSlices = std::min<NSUInteger>(
+                        static_cast<NSUInteger>(depth),
+                        mipD > firstSlice ? mipD - firstSlice : 0u);
+                    for (NSUInteger slice = 0; slice < uploadSlices; ++slice) {
+                        MTLRegion region = MTLRegionMake3D(
+                            regionX, regionY, firstSlice + slice,
+                            regionW, regionH, 1u);
+                        const std::uint8_t* sliceBytes =
+                            bytes + srcStart + slice * srcImageBytes;
+                        [metalTex replaceRegion:region
+                                    mipmapLevel:mipLevel
+                                      withBytes:sliceBytes
+                                    bytesPerRow:srcRowBytes];
+                    }
+                } else {
+                    const bool slicedTexture =
+                        metalTex.textureType == MTLTextureType2DArray ||
+                        metalTex.textureType == MTLTextureTypeCube ||
+                        metalTex.textureType == MTLTextureTypeCubeArray;
+                    if (slicedTexture) {
+                        const NSUInteger metalSlices =
+                            metalTex.textureType == MTLTextureTypeCubeArray
+                                ? metalTex.arrayLength * 6u
+                                : metalTex.arrayLength;
+                        const NSUInteger firstSlice =
+                            static_cast<NSUInteger>(zoffset);
+                        const NSUInteger uploadSlices = std::min<NSUInteger>(
+                            static_cast<NSUInteger>(depth),
+                            metalSlices > firstSlice
+                                ? metalSlices - firstSlice : 0u);
+                        MTLRegion region = MTLRegionMake2D(
+                            regionX, regionY, regionW, regionH);
+                        for (NSUInteger slice = 0; slice < uploadSlices; ++slice) {
+                            const std::uint8_t* sliceBytes =
+                                bytes + srcStart + slice * srcImageBytes;
+                            [metalTex replaceRegion:region
+                                        mipmapLevel:mipLevel
+                                              slice:firstSlice + slice
+                                          withBytes:sliceBytes
+                                        bytesPerRow:srcRowBytes
+                                      bytesPerImage:srcImageBytes];
+                        }
+                    }
+                }
+                if (obj->metalSwizzledView != nullptr) {
+                    obj->swizzleDirty = true;
+                }
+            }
+        }
+    }
     return true;
 }
 
