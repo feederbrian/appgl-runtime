@@ -51,23 +51,97 @@ void GLContext::clear(GLbitfield mask) {
         };
     }
     if ((pendingBits & GL_DEPTH_BUFFER_BIT) != 0) {
-        impl_->ensureDefaultFramebufferDepthStencilShadow();
-        std::fill(impl_->defaultFramebufferDepth32.begin(),
-                  impl_->defaultFramebufferDepth32.end(),
-                  static_cast<GLfloat>(std::clamp(clearState.depth, 0.0, 1.0)));
+        GLsizei minX = 0;
+        GLsizei minY = 0;
+        GLsizei maxX = 0;
+        GLsizei maxY = 0;
+        const bool scissorActive = impl_->state->isEnabled(GL_SCISSOR_TEST);
+        if (scissorActive) {
+            const GLScissorState& s = impl_->state->scissor();
+            if (s.width > 0 && s.height > 0) {
+                maxX = std::max<GLsizei>(0, s.x + s.width);
+                maxY = std::max<GLsizei>(0, s.y + s.height);
+            }
+        }
+        impl_->ensureDefaultFramebufferDepthStencilShadowAtLeast(maxX, maxY);
+        const GLfloat depthValue =
+            static_cast<GLfloat>(std::clamp(clearState.depth, 0.0, 1.0));
+        if (scissorActive) {
+            const GLScissorState& s = impl_->state->scissor();
+            minX = std::max<GLsizei>(0, s.x);
+            minY = std::max<GLsizei>(0, s.y);
+            maxX = std::min<GLsizei>(
+                impl_->defaultFramebufferDepthStencilShadowWidth,
+                s.x + s.width);
+            maxY = std::min<GLsizei>(
+                impl_->defaultFramebufferDepthStencilShadowHeight,
+                s.y + s.height);
+            for (GLsizei y = minY; y < maxY; ++y) {
+                std::fill(
+                    impl_->defaultFramebufferDepth32.begin() +
+                        static_cast<std::size_t>(y) *
+                            static_cast<std::size_t>(
+                                impl_->defaultFramebufferDepthStencilShadowWidth) +
+                        static_cast<std::size_t>(minX),
+                    impl_->defaultFramebufferDepth32.begin() +
+                        static_cast<std::size_t>(y) *
+                            static_cast<std::size_t>(
+                                impl_->defaultFramebufferDepthStencilShadowWidth) +
+                        static_cast<std::size_t>(maxX),
+                    depthValue);
+            }
+        } else {
+            std::fill(impl_->defaultFramebufferDepth32.begin(),
+                      impl_->defaultFramebufferDepth32.end(),
+                      depthValue);
+        }
         impl_->defaultFramebufferDepthShadowValid = true;
         impl_->pendingClearDepth = clearState.depth;
     }
     if ((mask & GL_STENCIL_BUFFER_BIT) != 0) {
-        impl_->ensureDefaultFramebufferDepthStencilShadow();
+        GLsizei requiredWidth = 0;
+        GLsizei requiredHeight = 0;
+        const bool scissorActive = impl_->state->isEnabled(GL_SCISSOR_TEST);
+        if (scissorActive) {
+            const GLScissorState& s = impl_->state->scissor();
+            if (s.width > 0 && s.height > 0) {
+                requiredWidth = std::max<GLsizei>(0, s.x + s.width);
+                requiredHeight = std::max<GLsizei>(0, s.y + s.height);
+            }
+        }
+        impl_->ensureDefaultFramebufferDepthStencilShadowAtLeast(
+            requiredWidth, requiredHeight);
         const std::uint8_t writeMask =
             static_cast<std::uint8_t>(impl_->state->stencilState().front.writeMask & 0xFFu);
         if (writeMask != 0) {
             const std::uint8_t clearStencil =
                 static_cast<std::uint8_t>(clearState.stencil & 0xFF);
-            for (std::uint8_t& stencil : impl_->defaultFramebufferStencil8) {
-                stencil = static_cast<std::uint8_t>(
-                    (stencil & ~writeMask) | (clearStencil & writeMask));
+            GLsizei minX = 0;
+            GLsizei minY = 0;
+            GLsizei maxX = impl_->defaultFramebufferDepthStencilShadowWidth;
+            GLsizei maxY = impl_->defaultFramebufferDepthStencilShadowHeight;
+            if (scissorActive) {
+                const GLScissorState& s = impl_->state->scissor();
+                minX = std::max<GLsizei>(0, s.x);
+                minY = std::max<GLsizei>(0, s.y);
+                maxX = std::min<GLsizei>(
+                    impl_->defaultFramebufferDepthStencilShadowWidth,
+                    s.x + s.width);
+                maxY = std::min<GLsizei>(
+                    impl_->defaultFramebufferDepthStencilShadowHeight,
+                    s.y + s.height);
+            }
+            for (GLsizei y = minY; y < maxY; ++y) {
+                for (GLsizei x = minX; x < maxX; ++x) {
+                    std::uint8_t& stencil =
+                        impl_->defaultFramebufferStencil8[
+                            static_cast<std::size_t>(y) *
+                                static_cast<std::size_t>(
+                                    impl_->defaultFramebufferDepthStencilShadowWidth) +
+                            static_cast<std::size_t>(x)];
+                    stencil = static_cast<std::uint8_t>(
+                        (stencil & ~writeMask) | (clearStencil & writeMask));
+                }
             }
             impl_->defaultFramebufferStencilShadowValid = true;
         }

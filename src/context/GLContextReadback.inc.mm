@@ -437,6 +437,22 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
             }
         }
         auto fboColorAttachmentPrefersRGBA8Shadow = [&]() -> bool {
+            auto rgba8ShadowMatchesNativeFormat =
+                [&](GLenum internalFormat) -> bool {
+                    const MTLPixelFormat pf =
+                        metalRenderbufferFormat(internalFormat);
+                    switch (pf) {
+                        case MTLPixelFormatR8Unorm:
+                        case MTLPixelFormatRG8Unorm:
+                        case MTLPixelFormatRGBA8Unorm:
+                        case MTLPixelFormatRGBA8Unorm_sRGB:
+                        case MTLPixelFormatBGRA8Unorm:
+                        case MTLPixelFormatBGRA8Unorm_sRGB:
+                            return true;
+                        default:
+                            return false;
+                    }
+                };
             const GLuint fbName = impl_->state->boundReadFramebuffer();
             const GLFramebufferObject* fb =
                 impl_->objects->framebuffers().get(fbName);
@@ -456,6 +472,7 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
                     return false;
                 }
                 return rb != nullptr && rb->storageDefined &&
+                       rgba8ShadowMatchesNativeFormat(rb->internalFormat) &&
                        rb->colorShadowAuthoritative &&
                        !rb->rgba8.empty();
             }
@@ -473,6 +490,8 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
                 const auto level = texture->levels.find(resolved.level);
                 return level != texture->levels.end() &&
                        level->second.defined &&
+                       rgba8ShadowMatchesNativeFormat(
+                           level->second.desc.internalFormat) &&
                        !level->second.rgba8.empty();
             }
             return false;

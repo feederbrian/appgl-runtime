@@ -23674,15 +23674,17 @@ struct GLContext::Impl {
                                 for (std::size_t p = 0;
                                      p < renderbufferPixels;
                                      ++p) {
-                                    (void)encodeColorNativePixelFromRGBA8(
+                                    (void)encodeColorNativePixelFromRGBAF(
                                         nativeFormat,
-                                        rgba,
+                                        color,
                                         renderbuffer->nativeData.data() +
                                             p * renderbuffer->nativeBpp,
                                         renderbuffer->nativeBpp);
                                 }
                             }
                             renderbuffer->colorShadowAuthoritative = true;
+                            renderbuffer->framebufferReadbackYFlip =
+                                state->clipOrigin() != GL_UPPER_LEFT;
                         } else {
                             renderbuffer->colorShadowAuthoritative = false;
                         }
@@ -23730,6 +23732,8 @@ struct GLContext::Impl {
                         renderbuffer->rgba8ShadowClearValue = {
                             rgba[0], rgba[1], rgba[2], rgba[3]
                         };
+                        renderbuffer->framebufferReadbackYFlip =
+                            state->clipOrigin() != GL_UPPER_LEFT;
                         renderbuffer->colorShadowAuthoritative = false;
                         clearRenderbufferColorShadowCoverage(*renderbuffer);
                         return true;
@@ -23772,6 +23776,8 @@ struct GLContext::Impl {
                                 mipmapLevel:0
                                   withBytes:region.data()
                                 bytesPerRow:static_cast<NSUInteger>(regionWidth) * 4u];
+                    renderbuffer->framebufferReadbackYFlip =
+                        state->clipOrigin() != GL_UPPER_LEFT;
                     invalidateRenderbufferColorShadow(*renderbuffer);
                     recordCpuSideClear(
                         scissorNativeClearStart,
@@ -23828,15 +23834,16 @@ struct GLContext::Impl {
                              static_cast<std::size_t>(renderbuffer->width) +
                              static_cast<std::size_t>(x)) *
                             renderbuffer->nativeBpp;
-                        (void)encodeColorNativePixelFromRGBA8(
+                        (void)encodeColorNativePixelFromRGBAF(
                             nativeClearFormat,
-                            rgba,
+                            color,
                             renderbuffer->nativeData.data() + nativeOffset,
                             renderbuffer->nativeBpp);
                     }
                 }
             }
             renderbuffer->rgba8ShadowClearPending = false;
+            renderbuffer->framebufferReadbackYFlip = lowerLeft;
             renderbuffer->colorShadowAuthoritative =
                 renderbufferShadowValidForWholeTarget;
             if (renderbuffer->colorShadowAuthoritative) {
@@ -24717,6 +24724,8 @@ struct GLContext::Impl {
             if (!clearScissorActive &&
                 frameGraph->clearLayeredTextureDepth(renderbuffer->metalTexture, 0, depth)) {
                 renderbuffer->wasMetalDepthRendered = true;
+                renderbuffer->framebufferReadbackYFlip =
+                    state->clipOrigin() != GL_UPPER_LEFT;
                 metalClearApplied = true;
                 if (metalTex.sampleCount <= 1) {
                     return true;
@@ -24732,6 +24741,8 @@ struct GLContext::Impl {
             if (mirrorDepthRenderbufferRegionToMetal(
                     *renderbuffer, minX, minY, regionWidth, regionHeight,
                     region.data())) {
+                renderbuffer->framebufferReadbackYFlip =
+                    state->clipOrigin() != GL_UPPER_LEFT;
                 return true;
             }
         }
@@ -24769,6 +24780,10 @@ struct GLContext::Impl {
             mirrorDepthRenderbufferRegionToMetal(
                 *renderbuffer, minX, minY, regionWidth, regionHeight,
                 region.data());
+        if (mirroredDepth) {
+            renderbuffer->framebufferReadbackYFlip =
+                state->clipOrigin() != GL_UPPER_LEFT;
+        }
         if (!mirroredDepth) {
             renderbuffer->wasMetalDepthRendered = false;
         }
@@ -26333,6 +26348,54 @@ struct GLContext::Impl {
         return true;
     }
 
+    bool encodeColorNativePixelFromRGBAF(MTLPixelFormat mtlFormat,
+                                         const GLfloat rgba[4],
+                                         std::uint8_t* dst,
+                                         std::size_t dstBytes) {
+        const NativeFormatInfo info = nativeFormatInfo(mtlFormat);
+        if (info.bytesPerPixel <= 0 ||
+            dstBytes < static_cast<std::size_t>(info.bytesPerPixel)) {
+            return false;
+        }
+        std::memset(dst, 0, static_cast<std::size_t>(info.bytesPerPixel));
+        if (info.channels <= 0) {
+            std::uint32_t packed = 0;
+            if (mtlFormat == MTLPixelFormatRG11B10Float) {
+                packed = packUF_10F11F11F_REV(rgba[0], rgba[1], rgba[2]);
+            } else if (mtlFormat == MTLPixelFormatRGB9E5Float) {
+                packed = packUF_5_9_9_9_REV(rgba[0], rgba[1], rgba[2]);
+            } else if (mtlFormat == MTLPixelFormatRGB10A2Unorm ||
+                       mtlFormat == MTLPixelFormatRGB10A2Uint) {
+                const bool asInteger =
+                    mtlFormat == MTLPixelFormatRGB10A2Uint;
+                const std::uint32_t pr =
+                    packReadbackBits(rgba[0], 1023u, asInteger);
+                const std::uint32_t pg =
+                    packReadbackBits(rgba[1], 1023u, asInteger);
+                const std::uint32_t pb =
+                    packReadbackBits(rgba[2], 1023u, asInteger);
+                const std::uint32_t pa =
+                    packReadbackBits(rgba[3], 3u, asInteger);
+                packed = (pr & 0x3FFu) |
+                         ((pg & 0x3FFu) << 10) |
+                         ((pb & 0x3FFu) << 20) |
+                         ((pa & 0x003u) << 30);
+            } else {
+                return false;
+            }
+            std::memcpy(dst, &packed, sizeof(packed));
+            return true;
+        }
+        for (int c = 0; c < info.channels && c < 4; ++c) {
+            writeNativeComponent(
+                dst + static_cast<std::size_t>(c * info.bytesPerChannel),
+                info.compType,
+                info.bytesPerChannel,
+                static_cast<double>(rgba[c]));
+        }
+        return true;
+    }
+
     bool storeColorNativePixelFromRGBA8(GLTextureImageLevel& image,
                                         GLsizei width,
                                         GLsizei height,
@@ -26743,6 +26806,8 @@ struct GLContext::Impl {
             if (renderbuffer->depth32.empty() &&
                 mirrorDepthRenderbufferRegionToMetal(
                     *renderbuffer, x, y, width, height, pixels)) {
+                renderbuffer->framebufferReadbackYFlip =
+                    state->clipOrigin() != GL_UPPER_LEFT;
                 return true;
             }
             if (renderbuffer->depth32.empty()) {
@@ -26763,6 +26828,10 @@ struct GLContext::Impl {
             const bool mirroredDepth =
                 mirrorDepthRenderbufferRegionToMetal(*renderbuffer, x, y,
                                                      width, height, pixels);
+            if (mirroredDepth) {
+                renderbuffer->framebufferReadbackYFlip =
+                    state->clipOrigin() != GL_UPPER_LEFT;
+            }
             if (!mirroredDepth) {
                 renderbuffer->wasMetalDepthRendered = false;
             }
@@ -27306,7 +27375,9 @@ struct GLContext::Impl {
                         ? copyStencilWindow(stencilStagePtr, clippedStencil)
                         : nullptr;
 
-                    ensureDefaultFramebufferDepthStencilShadow();
+                    ensureDefaultFramebufferDepthStencilShadowAtLeast(
+                        writeWindow.x + writeWindow.width,
+                        writeWindow.y + writeWindow.height);
                     for (GLsizei row = 0; row < writeWindow.height; ++row) {
                         const GLint dstRow = writeWindow.y + row;
                         if (dstRow < 0 ||
@@ -27467,7 +27538,9 @@ struct GLContext::Impl {
             std::vector<std::uint8_t> clippedColor;
             const std::uint8_t* writeSrc =
                 copyColorWindow(copySrc, clippedColor);
-            ensureDefaultFramebufferShadow();
+            ensureDefaultFramebufferShadowAtLeast(
+                writeWindow.x + writeWindow.width,
+                writeWindow.y + writeWindow.height);
             for (GLsizei row = 0; row < writeWindow.height; ++row) {
                 const GLint dstRow = writeWindow.y + row;
                 if (dstRow < 0 || dstRow >= defaultFramebufferShadowHeight) {
@@ -30271,11 +30344,19 @@ struct GLContext::Impl {
         shadowClearMaterializeBytes += defaultFramebufferRGBA8.size();
     }
 
-    void ensureDefaultFramebufferShadow(bool materializePendingClear = true) {
+    void ensureDefaultFramebufferShadowAtLeast(
+        GLsizei minWidth,
+        GLsizei minHeight,
+        bool materializePendingClear = true
+    ) {
         const GLsizei requestedWidth =
-            std::max<GLsizei>(defaultDrawableRequestWidth(), 1);
+            std::max<GLsizei>(
+                std::max<GLsizei>(defaultDrawableRequestWidth(), minWidth),
+                1);
         const GLsizei requestedHeight =
-            std::max<GLsizei>(defaultDrawableRequestHeight(), 1);
+            std::max<GLsizei>(
+                std::max<GLsizei>(defaultDrawableRequestHeight(), minHeight),
+                1);
         const GLsizei width = defaultDrawableGrowOnlyEnabled()
             ? std::max<GLsizei>(requestedWidth, defaultFramebufferShadowWidth)
             : requestedWidth;
@@ -30314,11 +30395,22 @@ struct GLContext::Impl {
         }
     }
 
-    void ensureDefaultFramebufferDepthStencilShadow() {
+    void ensureDefaultFramebufferShadow(bool materializePendingClear = true) {
+        ensureDefaultFramebufferShadowAtLeast(0, 0, materializePendingClear);
+    }
+
+    void ensureDefaultFramebufferDepthStencilShadowAtLeast(
+        GLsizei minWidth,
+        GLsizei minHeight
+    ) {
         const GLsizei requestedWidth =
-            std::max<GLsizei>(defaultDrawableRequestWidth(), 1);
+            std::max<GLsizei>(
+                std::max<GLsizei>(defaultDrawableRequestWidth(), minWidth),
+                1);
         const GLsizei requestedHeight =
-            std::max<GLsizei>(defaultDrawableRequestHeight(), 1);
+            std::max<GLsizei>(
+                std::max<GLsizei>(defaultDrawableRequestHeight(), minHeight),
+                1);
         const GLsizei width = defaultDrawableGrowOnlyEnabled()
             ? std::max<GLsizei>(requestedWidth, defaultFramebufferDepthStencilShadowWidth)
             : requestedWidth;
@@ -30357,6 +30449,10 @@ struct GLContext::Impl {
         defaultFramebufferStencil8.swap(resizedStencil);
         defaultFramebufferDepthStencilShadowWidth = width;
         defaultFramebufferDepthStencilShadowHeight = height;
+    }
+
+    void ensureDefaultFramebufferDepthStencilShadow() {
+        ensureDefaultFramebufferDepthStencilShadowAtLeast(0, 0);
     }
 
     bool copyDefaultFramebufferDepthPixels(GLint x, GLint y, GLsizei width,
@@ -30448,7 +30544,18 @@ struct GLContext::Impl {
     }
 
     void applyDefaultFramebufferColorClear() {
-        ensureDefaultFramebufferShadow(/*materializePendingClear=*/false);
+        GLsizei requiredWidth = 0;
+        GLsizei requiredHeight = 0;
+        if (state->isEnabled(GL_SCISSOR_TEST)) {
+            const GLScissorState& s = state->scissor();
+            if (s.width > 0 && s.height > 0) {
+                requiredWidth = std::max<GLsizei>(0, s.x + s.width);
+                requiredHeight = std::max<GLsizei>(0, s.y + s.height);
+            }
+        }
+        ensureDefaultFramebufferShadowAtLeast(
+            requiredWidth, requiredHeight,
+            /*materializePendingClear=*/false);
         const GLBlendState& blendForMask = state->blendState();
         const bool fullUnmasked =
             !state->isEnabled(GL_SCISSOR_TEST) &&
@@ -43538,10 +43645,19 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
                 state->clipOrigin() == GL_LOWER_LEFT;
             for (const auto& kv : fbo->attachments) {
                 if (!isColorAttachment(kv.first)) continue;
+                if (kv.second.kind ==
+                        GLFramebufferAttachment::Kind::Renderbuffer) {
+                    if (GLRenderbufferObject* rb =
+                            objects->renderbuffers().get(kv.second.object)) {
+                        invalidateRenderbufferColorShadow(*rb);
+                    }
+                    continue;
+                }
                 if (kv.second.kind !=
                         GLFramebufferAttachment::Kind::Texture) continue;
                 if (GLTextureObject* tex =
                         objects->textures().get(kv.second.object)) {
+                    tex->colorShadowAuthoritative = false;
                     tex->wasFramebufferRenderedTo = true;
                     if (markViewportReadback) {
                         tex->wasViewportRenderedTo = true;
