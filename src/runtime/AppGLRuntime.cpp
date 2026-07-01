@@ -1718,6 +1718,33 @@ bool isValidRenderbufferFormat(GLenum internalFormat) {
         case GL_RGBA4:
         case GL_RGB5_A1:
         case GL_RGBA12:
+        // Legacy compat color formats required by GL 3.x renderbuffer
+        // attachment coverage; GLContext promotes them to renderable
+        // RGBA/sRGB Metal storage.
+        case GL_ALPHA:
+        case GL_ALPHA4:
+        case GL_ALPHA8:
+        case GL_ALPHA12:
+        case GL_ALPHA16:
+        case GL_LUMINANCE:
+        case GL_LUMINANCE4:
+        case GL_LUMINANCE8:
+        case GL_LUMINANCE12:
+        case GL_LUMINANCE16:
+        case GL_LUMINANCE_ALPHA:
+        case GL_LUMINANCE4_ALPHA4:
+        case GL_LUMINANCE6_ALPHA2:
+        case GL_LUMINANCE8_ALPHA8:
+        case GL_LUMINANCE12_ALPHA4:
+        case GL_LUMINANCE12_ALPHA12:
+        case GL_LUMINANCE16_ALPHA16:
+        case GL_INTENSITY:
+        case GL_INTENSITY4:
+        case GL_INTENSITY8:
+        case GL_INTENSITY12:
+        case GL_INTENSITY16:
+        case GL_SLUMINANCE8:
+        case GL_SLUMINANCE8_ALPHA8:
         // Depth
         case GL_DEPTH_COMPONENT:
         case GL_DEPTH_COMPONENT16:

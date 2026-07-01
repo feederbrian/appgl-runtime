@@ -140,6 +140,10 @@ bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
         *data = impl_->fixedFunctionRasterPositionValid ? GL_TRUE : GL_FALSE;
         return true;
     }
+    if (pname == GL_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION) {
+        *data = GL_TRUE;
+        return true;
+    }
     // Transform feedback state — gluStateReset queries these via getBooleanv;
     // returning GL_INVALID_ENUM here aborts the reset and bleeds state across
     // CTS tests (active/paused/binding all default to GL_FALSE/0 since we
@@ -237,6 +241,10 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
     }
     if (pname == GL_CURRENT_RASTER_POSITION_VALID) {
         *data = impl_->fixedFunctionRasterPositionValid ? GL_TRUE : GL_FALSE;
+        return true;
+    }
+    if (pname == GL_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION) {
+        *data = GL_TRUE;
         return true;
     }
     if (pname == GL_CURRENT_RASTER_POSITION) {

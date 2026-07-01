@@ -6168,14 +6168,10 @@ MTLPixelFormat metalRenderbufferFormat(GLenum internalFormat) {
         case GL_INTENSITY8:
         case GL_INTENSITY12:
         case GL_INTENSITY16:
-            return appglCompatProfileEnabled()
-                ? MTLPixelFormatRGBA8Unorm
-                : MTLPixelFormatInvalid;
+            return MTLPixelFormatRGBA8Unorm;
         case GL_SLUMINANCE8:
         case GL_SLUMINANCE8_ALPHA8:
-            return appglCompatProfileEnabled()
-                ? MTLPixelFormatRGBA8Unorm_sRGB
-                : MTLPixelFormatInvalid;
+            return MTLPixelFormatRGBA8Unorm_sRGB;
         // Generic "compressed" internal formats — resolve to the
         // uncompressed base type on Metal. GL 4.6 §8.5.3 allows the
         // driver to choose compression or keep the texture uncompressed.
@@ -19248,21 +19244,22 @@ struct GLContext::Impl {
                     continue;
                 }
                 if (isDepthFormat(texObject->desc.internalFormat)) {
-                    auto levelIt = texObject->levels.find(0);
-                    if (levelIt == texObject->levels.end() ||
-                        !levelIt->second.defined) {
+                    auto baseIt = texObject->levels.find(0);
+                    if (baseIt == texObject->levels.end() ||
+                        !baseIt->second.defined) {
                         continue;
                     }
-                    const GLTextureImageLevel& image = levelIt->second;
+                    const GLTextureImageLevel& baseImage = baseIt->second;
                     const std::uint32_t width =
-                        static_cast<std::uint32_t>(safeDimension(image.desc.width));
+                        static_cast<std::uint32_t>(
+                            safeDimension(baseImage.desc.width));
                     const std::uint32_t height =
                         static_cast<std::uint32_t>(
                             texObject->target == GL_TEXTURE_1D
-                                ? 1 : safeDimension(image.desc.height));
+                                ? 1 : safeDimension(baseImage.desc.height));
                     const std::uint32_t layerFaces =
                         static_cast<std::uint32_t>(
-                            std::max<GLsizei>(image.desc.depth, 1));
+                            std::max<GLsizei>(baseImage.desc.depth, 1));
                     if (width == 0 || height == 0 || layerFaces == 0) {
                         continue;
                     }
@@ -19285,28 +19282,74 @@ struct GLContext::Impl {
                     applySamplingState(slot);
                     slot.bytesPerRow = width * sizeof(float);
                     slot.bytesPerImage = slot.bytesPerRow * height;
-                    slot.mipOffsets = {0u};
-                    slot.mipWidths = {width};
-                    slot.mipHeights = {height};
-                    slot.mipBytesPerRow = {slot.bytesPerRow};
-                    slot.mipBytesPerImage = {slot.bytesPerImage};
-                    slot.mipLayerFaces = {layerFaces};
-                    const std::size_t pixelCount =
-                        static_cast<std::size_t>(width) *
-                        static_cast<std::size_t>(height) *
-                        static_cast<std::size_t>(layerFaces);
-                    slot.data.assign(pixelCount * sizeof(float), 0u);
-                    for (std::size_t p = 0; p < pixelCount; ++p) {
-                        const float value = depthSampleProxyValue(image, p);
-                        std::memcpy(slot.data.data() + p * sizeof(float),
-                                    &value, sizeof(value));
+                    slot.mipOffsets.clear();
+                    slot.mipWidths.clear();
+                    slot.mipHeights.clear();
+                    slot.mipBytesPerRow.clear();
+                    slot.mipBytesPerImage.clear();
+                    slot.mipLayerFaces.clear();
+                    slot.data.clear();
+
+                    GLint maxLevel = 0;
+                    for (const auto& [levelIndex, levelImage] : texObject->levels) {
+                        if (levelIndex >= 0 && levelImage.defined) {
+                            maxLevel = std::max(maxLevel, levelIndex);
+                        }
+                    }
+                    for (GLint level = 0; level <= maxLevel; ++level) {
+                        auto levelIt = texObject->levels.find(level);
+                        if (levelIt == texObject->levels.end() ||
+                            !levelIt->second.defined) {
+                            break;
+                        }
+                        const GLTextureImageLevel& image = levelIt->second;
+                        const std::uint32_t mipWidth =
+                            static_cast<std::uint32_t>(
+                                safeDimension(image.desc.width));
+                        const std::uint32_t mipHeight =
+                            static_cast<std::uint32_t>(
+                                texObject->target == GL_TEXTURE_1D
+                                    ? 1 : safeDimension(image.desc.height));
+                        const std::uint32_t mipLayerFaces =
+                            static_cast<std::uint32_t>(
+                                std::max<GLsizei>(image.desc.depth, 1));
+                        if (mipWidth == 0 || mipHeight == 0 ||
+                            mipLayerFaces == 0) {
+                            break;
+                        }
+                        const std::uint32_t mipBytesPerRow =
+                            mipWidth * sizeof(float);
+                        const std::uint32_t mipBytesPerImage =
+                            mipBytesPerRow * mipHeight;
+                        const std::size_t pixelCount =
+                            static_cast<std::size_t>(mipWidth) *
+                            static_cast<std::size_t>(mipHeight) *
+                            static_cast<std::size_t>(mipLayerFaces);
+                        const std::size_t offset = slot.data.size();
+                        slot.mipOffsets.push_back(
+                            static_cast<std::uint32_t>(offset));
+                        slot.mipWidths.push_back(mipWidth);
+                        slot.mipHeights.push_back(mipHeight);
+                        slot.mipBytesPerRow.push_back(mipBytesPerRow);
+                        slot.mipBytesPerImage.push_back(mipBytesPerImage);
+                        slot.mipLayerFaces.push_back(mipLayerFaces);
+                        slot.data.resize(
+                            offset + pixelCount * sizeof(float), 0u);
+                        for (std::size_t p = 0; p < pixelCount; ++p) {
+                            const float value =
+                                depthSampleProxyValue(image, p);
+                            std::memcpy(slot.data.data() + offset +
+                                            p * sizeof(float),
+                                        &value, sizeof(value));
+                        }
                     }
                     if (trace) {
                         std::fprintf(stderr,
                             "[GS-tex]   depth snapshot tex=%u fmt=0x%X "
-                            "nativeBpp=%zu bytes=%zu first=%02X\n",
+                            "nativeBpp=%zu mips=%zu bytes=%zu first=%02X\n",
                             texName, texObject->desc.internalFormat,
-                            image.nativeBpp,
+                            baseImage.nativeBpp,
+                            slot.mipOffsets.size(),
                             slot.data.size(),
                             slot.data.empty() ? 0u : slot.data[0]);
                     }

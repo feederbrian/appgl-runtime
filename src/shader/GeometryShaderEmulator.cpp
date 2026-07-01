@@ -3243,7 +3243,9 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                         if (uIt != uniforms_->end()) {
                             const auto& src = uIt->second;
                             for (std::size_t k = 0; k < src.size() && runningScalarOffset + k < storage.size(); ++k) {
-                                storage[runningScalarOffset + k] = src[k];
+                                std::memcpy(&storage[runningScalarOffset + k],
+                                            &src[k],
+                                            sizeof(float));
                             }
                         }
                     }
@@ -3257,7 +3259,7 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                 if (uIt != uniforms_->end()) {
                     const auto& src = uIt->second;
                     for (std::size_t k = 0; k < src.size() && k < storage.size(); ++k) {
-                        storage[k] = src[k];
+                        std::memcpy(&storage[k], &src[k], sizeof(float));
                     }
                 }
             }
@@ -12808,7 +12810,9 @@ EmulatedDraw emulateGeometryDraw(
                         auto& dst = emittedAll[i + k].varyings;
                         if (dst.size() < varyOff + width) continue;
                         for (std::uint32_t w = 0; w < width; ++w) {
-                            dst[varyOff + w] = emittedAll[last].varyings[varyOff + w];
+                            std::memcpy(&dst[varyOff + w],
+                                        &emittedAll[last].varyings[varyOff + w],
+                                        sizeof(float));
                         }
                     }
                 }
@@ -12836,7 +12840,7 @@ EmulatedDraw emulateGeometryDraw(
         }
         for (int k = 0; k < 4; ++k) dst[k] = emittedAll[v].position[k];
         for (std::size_t j = 0; j < emittedAll[v].varyings.size() && j + 4 < fpv; ++j) {
-            dst[4 + j] = emittedAll[v].varyings[j];
+            std::memcpy(&dst[4 + j], &emittedAll[v].varyings[j], sizeof(float));
         }
         // Append clip then cull after the user varyings.
         const std::size_t clipBase = 4 + totalVaryingWidth;
