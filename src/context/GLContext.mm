@@ -6168,10 +6168,14 @@ MTLPixelFormat metalRenderbufferFormat(GLenum internalFormat) {
         case GL_INTENSITY8:
         case GL_INTENSITY12:
         case GL_INTENSITY16:
-            return MTLPixelFormatRGBA8Unorm;
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatRGBA8Unorm
+                : MTLPixelFormatInvalid;
         case GL_SLUMINANCE8:
         case GL_SLUMINANCE8_ALPHA8:
-            return MTLPixelFormatRGBA8Unorm_sRGB;
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatRGBA8Unorm_sRGB
+                : MTLPixelFormatInvalid;
         // Generic "compressed" internal formats — resolve to the
         // uncompressed base type on Metal. GL 4.6 §8.5.3 allows the
         // driver to choose compression or keep the texture uncompressed.
