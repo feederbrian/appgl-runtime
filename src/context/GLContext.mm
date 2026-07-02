@@ -828,7 +828,11 @@ bool textureShadowDropUploadedMipLevelsEnabled() {
 }
 
 bool defaultDrawableGrowOnlyEnabled() {
-    return appglEnvEnabledDefaultOff(
+    if (appglEnvEnabledDefaultOff(
+            "APPGL_DISABLE_DEFAULT_DRAWABLE_GROW_ONLY")) {
+        return false;
+    }
+    return appglEnvEnabledDefaultOn(
         "APPGL_DEFAULT_DRAWABLE_GROW_ONLY");
 }
 
@@ -30685,14 +30689,10 @@ struct GLContext::Impl {
         return static_cast<GLsizei>(std::max(0, viewportY)) + viewportHeight;
     }
     GLsizei defaultDrawableRequestWidth() const {
-        return defaultDrawableGrowOnlyEnabled()
-            ? std::max<GLsizei>(viewportWidth, 1)
-            : drawableSurfaceWidth();
+        return std::max<GLsizei>(drawableSurfaceWidth(), 1);
     }
     GLsizei defaultDrawableRequestHeight() const {
-        return defaultDrawableGrowOnlyEnabled()
-            ? std::max<GLsizei>(viewportHeight, 1)
-            : drawableSurfaceHeight();
+        return std::max<GLsizei>(drawableSurfaceHeight(), 1);
     }
     bool defaultFramebufferMsaaEnabled() const {
         return defaultFramebufferMsaaSamples == 2 ||
@@ -46198,11 +46198,12 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
         GLDrawDetailScope detail(
             drawDetailProfile,
             GLDrawDetailBucket::TranslatedFixedFunctionTransientHazards);
-        if (drawFboName != 0 &&
+        const bool hasClipControlYSignParameter =
             translatedDrawHasClipControlYSignParameter(
                 tdi,
                 hotpathInvariantMslPredicatesEnabled,
-                hotpathInvariantMslPredicatesValidateEnabled)) {
+                hotpathInvariantMslPredicatesValidateEnabled);
+        if (hasClipControlYSignParameter && drawFboName != 0) {
             if (const GLFramebufferObject* fbo =
                     objects->framebuffers().get(drawFboName)) {
                 phase2PlanSetFixedStateBool(

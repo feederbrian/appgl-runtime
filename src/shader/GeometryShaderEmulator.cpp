@@ -13176,6 +13176,9 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
         || draw.hasViewportIndex;
     const bool needsPackedBuffer = needsTrailingBuffer
         || hasPackedOnlyUserSlots || hasPackedOnlyClipSlots || hasPackedOnlyCullSlots;
+    const bool useClipControlYSign =
+        draw.clipDistanceLen == 0 && draw.cullDistanceLen == 0;
+    constexpr std::uint32_t kClipControlYSignBufferSlot = 29u;
     auto packedValueExpr = [&](std::uint32_t offset,
                                std::uint32_t width,
                                std::uint8_t baseType) -> std::string {
@@ -13300,13 +13303,30 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     if (needsPackedBuffer) {
         src += "vertex VsOut main0(VsIn in [[stage_in]],\n";
         src += "                   uint gs_vid [[vertex_id]],\n";
-        src += "                   device const float* gs_packed [[buffer(0)]])\n";
+        src += "                   device const float* gs_packed [[buffer(0)]]";
+        if (useClipControlYSign) {
+            src += ",\n";
+            src += "                   constant float& _appgl_ClipControlYSign [[buffer(";
+            src += std::to_string(kClipControlYSignBufferSlot);
+            src += ")]]";
+        }
+        src += ")\n";
     } else {
-        src += "vertex VsOut main0(VsIn in [[stage_in]])\n";
+        src += "vertex VsOut main0(VsIn in [[stage_in]]";
+        if (useClipControlYSign) {
+            src += ",\n";
+            src += "                   constant float& _appgl_ClipControlYSign [[buffer(";
+            src += std::to_string(kClipControlYSignBufferSlot);
+            src += ")]]";
+        }
+        src += ")\n";
     }
     src += "{\n";
     src += "    VsOut out = {};\n";
     src += "    out.gl_Position = in.vsin_position;\n";
+    if (useClipControlYSign) {
+        src += "    out.gl_Position.y *= _appgl_ClipControlYSign;\n";
+    }
     // GL→Metal depth fixup. Mirrors what SPIRV-Cross emits for every
     // non-geometry VS today.
     src += "    out.gl_Position.z = (out.gl_Position.z + out.gl_Position.w) * 0.5;\n";
