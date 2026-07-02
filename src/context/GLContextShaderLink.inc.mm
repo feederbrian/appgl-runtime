@@ -3141,7 +3141,9 @@ bool GLContext::linkProgram(GLuint program) {
         // program inputs per GL 4.6 §7.3.1.1. CTS
         // `separate-programs-fragment` declares `in vec4 vs_color;`
         // and expects ACTIVE_RESOURCES=1 on GL_PROGRAM_INPUT.
-        if (programObject->separable && vsShader == nullptr && fsShader != nullptr) {
+        if (programObject->separable && vsShader == nullptr &&
+            geometryShader == nullptr && tessControlShader == nullptr &&
+            tessEvalShader == nullptr && fsShader != nullptr) {
             GLint nextInputLoc = 0;
             for (const auto& input : fsShader->declaredInputs) {
                 GLProgramResourceEntry entry;
@@ -3168,7 +3170,7 @@ bool GLContext::linkProgram(GLuint program) {
         // are prefixed with the block TYPE name.
         {
             GLShaderObject* firstNonVsStage = nullptr;
-            if (programObject->separable && vsShader == nullptr && fsShader == nullptr) {
+            if (programObject->separable && vsShader == nullptr) {
                 for (GLuint shaderId : programObject->attachedShaders) {
                     GLShaderObject* s = impl_->objects->shaders().get(shaderId);
                     if (s == nullptr) continue;
@@ -3187,6 +3189,31 @@ bool GLContext::linkProgram(GLuint program) {
                     (firstNonVsStage->stage == GL_TESS_EVALUATION_SHADER) ? 0x10 : 0;
                 const std::string& src = firstNonVsStage->source;
                 GLint nextInputLoc = 0;
+                auto pushInputIfMissing = [&](GLProgramResourceEntry entry) {
+                    const auto existing = std::find_if(
+                        programObject->resourceInputs.begin(),
+                        programObject->resourceInputs.end(),
+                        [&](const GLProgramResourceEntry& e) {
+                            return e.name == entry.name;
+                        });
+                    if (existing == programObject->resourceInputs.end()) {
+                        programObject->resourceInputs.push_back(std::move(entry));
+                    }
+                };
+                for (const auto& input : firstNonVsStage->declaredInputs) {
+                    GLProgramResourceEntry entry;
+                    entry.name = input.isArray
+                        ? (input.name + "[0]") : input.name;
+                    entry.type = input.type;
+                    entry.arraySize = input.arraySize;
+                    entry.isArray = input.isArray;
+                    entry.location = input.explicitLocation >= 0
+                        ? input.explicitLocation : nextInputLoc;
+                    entry.referencedBy = stageBit;
+                    const GLint consumed = std::max<GLint>(1, input.arraySize);
+                    nextInputLoc = entry.location + consumed;
+                    pushInputIfMissing(std::move(entry));
+                }
                 // Per-stage built-in inputs exposed on separable
                 // programs. GL 4.6 §7.3.1.1 treats these as
                 // GL_PROGRAM_INPUT when the stage is the first stage
@@ -3213,7 +3240,7 @@ bool GLContext::linkProgram(GLuint program) {
                     entry.location = -1;
                     entry.arraySize = 1;
                     entry.referencedBy = stageBit;
-                    programObject->resourceInputs.push_back(std::move(entry));
+                    pushInputIfMissing(std::move(entry));
                 };
                 if (firstNonVsStage->stage == GL_TESS_CONTROL_SHADER ||
                     firstNonVsStage->stage == GL_TESS_EVALUATION_SHADER) {
@@ -3344,7 +3371,7 @@ bool GLContext::linkProgram(GLuint program) {
                             entry.arraySize = 1;
                             entry.location = nextInputLoc++;
                             entry.referencedBy = stageBit;
-                            programObject->resourceInputs.push_back(std::move(entry));
+                            pushInputIfMissing(std::move(entry));
                             // Advance past any trailing `,`.
                             while (namePos < rest.size() &&
                                    (rest[namePos] == ' ' || rest[namePos] == '\t' ||
@@ -5020,6 +5047,27 @@ bool GLContext::linkProgram(GLuint program) {
                 }
                 return refl;
             };
+            auto reflectionHasResourcesVgf = [](const ShaderReflection& refl) {
+                return !refl.vertexInputs.empty() ||
+                       !refl.uniformBlocks.empty() ||
+                       !refl.storageBuffers.empty() ||
+                       !refl.sampledTextures.empty() ||
+                       !refl.storageImages.empty();
+            };
+            if (!reflectionHasResourcesVgf(vsRefl)) {
+                ShaderReflection reflectedVs =
+                    reflectStageOnlyVgf(vertexShader, vsOptionsVgf);
+                if (reflectionHasResourcesVgf(reflectedVs)) {
+                    vsRefl = std::move(reflectedVs);
+                }
+            }
+            if (!reflectionHasResourcesVgf(fsRefl)) {
+                ShaderReflection reflectedFs =
+                    reflectStageOnlyVgf(fragmentShader, fsOptionsVgf);
+                if (reflectionHasResourcesVgf(reflectedFs)) {
+                    fsRefl = std::move(reflectedFs);
+                }
+            }
             if (gsRefl.uniformBlocks.empty() &&
                 gsRefl.storageBuffers.empty() &&
                 gsRefl.sampledTextures.empty() &&
@@ -5614,10 +5662,14 @@ bool GLContext::linkProgram(GLuint program) {
                 });
             }
             if (vsOk && fsOk) {
-                programObject->vertexReflection = std::move(vsRefl);
-                programObject->fragmentReflection = std::move(fsRefl);
                 programObject->hasTranslatedPipeline = true;
                 rasterTranslationOk = true;
+            }
+            if (reflectionHasResourcesVgf(vsRefl)) {
+                programObject->vertexReflection = std::move(vsRefl);
+            }
+            if (reflectionHasResourcesVgf(fsRefl)) {
+                programObject->fragmentReflection = std::move(fsRefl);
             }
             break;
         }
@@ -6694,7 +6746,7 @@ bool GLContext::linkProgram(GLuint program) {
     // locations and zero-seeded values.  This lets glGetUniformLocation /
     // glUniform* work for struct members (e.g. "s.a"), array-of-struct
     // elements ("s[0].a"), and any other uniform type the scanner can't parse.
-    if (rasterTranslationOk || kind == ProgramKind::Compute) {
+    if (programObject->linked) {
         auto addReflectionVertexInputs = [&]() {
             if (programObject->vertexReflection.vertexInputs.empty()) {
                 return;
@@ -6978,9 +7030,15 @@ bool GLContext::linkProgram(GLuint program) {
                                             GLbitfield stageBit,
                                             const std::string& stageSrc) {
             if (refl.uniformBlocks.empty()) return;
-            // The _DefaultUniforms block is always at index 0 when present.
-            const auto& block = refl.uniformBlocks[0];
-            if (block.name != "_DefaultUniforms") return;
+            const ShaderReflection::ResourceBinding* defaultBlock = nullptr;
+            for (const auto& candidate : refl.uniformBlocks) {
+                if (candidate.name == "_DefaultUniforms") {
+                    defaultBlock = &candidate;
+                    break;
+                }
+            }
+            if (defaultBlock == nullptr) return;
+            const auto& block = *defaultBlock;
             std::unordered_map<std::string, GLint> explicitMemberNextLoc;
             for (const auto& member : block.members) {
                 // Sprint 17 Day 7+ Bank-Group-C: skip synthetic
@@ -7400,8 +7458,15 @@ bool GLContext::linkProgram(GLuint program) {
         // the VS/FS/TCS/TES paths.
         auto processSubroutineDispatchUniforms = [&](const ShaderReflection& refl) {
             if (refl.uniformBlocks.empty()) return;
-            const auto& block = refl.uniformBlocks[0];
-            if (block.name != "_DefaultUniforms") return;
+            const ShaderReflection::ResourceBinding* defaultBlock = nullptr;
+            for (const auto& candidate : refl.uniformBlocks) {
+                if (candidate.name == "_DefaultUniforms") {
+                    defaultBlock = &candidate;
+                    break;
+                }
+            }
+            if (defaultBlock == nullptr) return;
+            const auto& block = *defaultBlock;
             for (const auto& member : block.members) {
                 if (member.name.compare(0, 11, "_appgl_sub_") != 0) continue;
                 // Side-channel keyed by ORIGINAL subroutine-uniform
@@ -7475,7 +7540,7 @@ bool GLContext::linkProgram(GLuint program) {
     // Each block also pushes its members into resourceBufferVariables with
     // `blockIndex` pointing back to the block entry so
     // glGetProgramResourceiv(GL_BUFFER_VARIABLE, ...) can find them.
-    if (rasterTranslationOk || kind == ProgramKind::Compute) {
+    if (programObject->linked) {
         auto mergeBlocks = [&](const std::vector<ShaderReflection::ResourceBinding>& blocks,
                                GLbitfield stageBit,
                                const std::string& glslSource) {
@@ -7616,9 +7681,11 @@ bool GLContext::linkProgram(GLuint program) {
                     }
                 }
 
-                // Skip member creation if this block was already processed
-                // by an earlier stage (all entries deduped — no new blocks).
-                if (!anyNewBlocks) continue;
+                // Member-level merge must run for every stage, even when
+                // the block entries were created by an earlier stage. GS
+                // reflection in particular often arrives after VS/FS and
+                // needs to OR stage bits plus repair active-variable lists.
+                (void)anyNewBlocks;
 
                 for (const auto& member : block.members) {
                     // Push into resourceUniforms — the CTS and
@@ -7639,7 +7706,7 @@ bool GLContext::linkProgram(GLuint program) {
                     if (member.isArray) {
                         uniformName += "[0]";
                     }
-                    memberEntry.name = std::move(uniformName);
+                    memberEntry.name = uniformName;
                     memberEntry.type = member.type;
                     // SPIR-V represents bool in UBOs as uint — detect the
                     // original bool type from the GLSL source.
@@ -7670,9 +7737,35 @@ bool GLContext::linkProgram(GLuint program) {
                     memberEntry.isRowMajor = member.isRowMajor;
                     memberEntry.arrayStride = member.arrayStride;
                     memberEntry.matrixStride = member.matrixStride;
-                    const GLint newUniformIndex =
-                        static_cast<GLint>(programObject->resourceUniforms.size());
-                    programObject->resourceUniforms.push_back(std::move(memberEntry));
+                    GLint uniformIndex = -1;
+                    auto memberIt = std::find_if(
+                        programObject->resourceUniforms.begin(),
+                        programObject->resourceUniforms.end(),
+                        [&](const GLProgramResourceEntry& entry) {
+                            if (entry.name != memberEntry.name) {
+                                return false;
+                            }
+                            return firstBlockIndex < 0 ||
+                                   entry.blockIndex == firstBlockIndex;
+                        });
+                    if (memberIt != programObject->resourceUniforms.end()) {
+                        memberIt->type = memberEntry.type;
+                        memberIt->location = memberEntry.location;
+                        memberIt->offset = memberEntry.offset;
+                        memberIt->arraySize = memberEntry.arraySize;
+                        memberIt->isArray = memberEntry.isArray;
+                        memberIt->blockIndex = memberEntry.blockIndex;
+                        memberIt->referencedBy |= memberEntry.referencedBy;
+                        memberIt->isRowMajor = memberEntry.isRowMajor;
+                        memberIt->arrayStride = memberEntry.arrayStride;
+                        memberIt->matrixStride = memberEntry.matrixStride;
+                        uniformIndex = static_cast<GLint>(
+                            memberIt - programObject->resourceUniforms.begin());
+                    } else {
+                        uniformIndex =
+                            static_cast<GLint>(programObject->resourceUniforms.size());
+                        programObject->resourceUniforms.push_back(std::move(memberEntry));
+                    }
 
                     // Record the member's index on the first-instance
                     // block entry so GL_NUM_ACTIVE_VARIABLES and
@@ -7688,8 +7781,8 @@ bool GLContext::linkProgram(GLuint program) {
                             programObject->resourceUniformBlocks[firstBlockIndex];
                         if (std::find(blockEntry.activeVariables.begin(),
                                       blockEntry.activeVariables.end(),
-                                      newUniformIndex) == blockEntry.activeVariables.end()) {
-                            blockEntry.activeVariables.push_back(newUniformIndex);
+                                      uniformIndex) == blockEntry.activeVariables.end()) {
+                            blockEntry.activeVariables.push_back(uniformIndex);
                         }
                     }
 
@@ -7710,7 +7803,23 @@ bool GLContext::linkProgram(GLuint program) {
                     bvEntry.offset = static_cast<GLint>(member.offset);
                     bvEntry.blockIndex = firstBlockIndex;
                     bvEntry.referencedBy = firstInstStageBit;
-                    programObject->resourceBufferVariables.push_back(std::move(bvEntry));
+                    auto bvIt = std::find_if(
+                        programObject->resourceBufferVariables.begin(),
+                        programObject->resourceBufferVariables.end(),
+                        [&](const GLProgramResourceEntry& entry) {
+                            return entry.name == bvEntry.name &&
+                                   entry.blockIndex == firstBlockIndex;
+                        });
+                    if (bvIt != programObject->resourceBufferVariables.end()) {
+                        bvIt->type = bvEntry.type;
+                        bvIt->location = bvEntry.location;
+                        bvIt->offset = bvEntry.offset;
+                        bvIt->blockIndex = bvEntry.blockIndex;
+                        bvIt->referencedBy |= bvEntry.referencedBy;
+                    } else {
+                        programObject->resourceBufferVariables.push_back(
+                            std::move(bvEntry));
+                    }
                 }
             }
 
@@ -7936,7 +8045,18 @@ bool GLContext::linkProgram(GLuint program) {
                         [&](const GLProgramResourceEntry& e) { return e.name == bvName; });
                     GLint bvIndex = -1;
                     if (bvIt != programObject->resourceBufferVariables.end()) {
+                        bvIt->type = member.type;
+                        bvIt->location = -1;
+                        bvIt->offset = static_cast<GLint>(member.offset);
+                        bvIt->arraySize = static_cast<GLint>(member.arraySize);
+                        bvIt->isArray = member.isArray;
+                        bvIt->blockIndex = firstBlockIdx;
                         bvIt->referencedBy |= firstInstStageBit;
+                        bvIt->isRowMajor = member.isRowMajor;
+                        bvIt->arrayStride = member.arrayStride;
+                        bvIt->matrixStride = member.matrixStride;
+                        bvIt->topLevelArraySize = member.topLevelArraySize;
+                        bvIt->topLevelArrayStride = member.topLevelArrayStride;
                         bvIndex = static_cast<GLint>(bvIt - programObject->resourceBufferVariables.begin());
                     } else {
                         GLProgramResourceEntry bv;

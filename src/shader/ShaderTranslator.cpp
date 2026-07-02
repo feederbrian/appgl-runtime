@@ -9277,11 +9277,12 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             // Default 1 (scalar top). Set when we enter an array-of-
             // struct at the TOP LEVEL only (isTopLevel=true) so that
             // deeper arrays don't overwrite it.
-            std::function<void(const spirv_cross::SPIRType&, const std::string&, std::size_t, GLint, bool)>
+            std::function<void(const spirv_cross::SPIRType&, const std::string&, std::size_t, GLint, GLint, bool)>
                 flattenSSBO = [&](const spirv_cross::SPIRType& parentType,
                                    const std::string& prefix,
                                    std::size_t baseOffset,
                                    GLint topLevelArraySize,
+                                   GLint topLevelArrayStride,
                                    bool isTopLevel) {
                 for (std::uint32_t mi = 0; mi < parentType.member_types.size(); ++mi) {
                     const auto& memberType = compiler.get_type(parentType.member_types[mi]);
@@ -9300,22 +9301,39 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                         ? memberType.array[0] : 0;
                     const std::uint32_t outermostDim = hasArr
                         ? memberType.array.back() : 0;
+                    GLint reflectedArrayStride = 0;
+                    if (hasArr) {
+                        try {
+                            reflectedArrayStride = static_cast<GLint>(
+                                compiler.type_struct_member_array_stride(parentType, mi));
+                        } catch (...) {}
+                        if (reflectedArrayStride <= 0 &&
+                            compiler.has_member_decoration(parentType.self, mi,
+                                spv::DecorationArrayStride)) {
+                            reflectedArrayStride = static_cast<GLint>(
+                                compiler.get_member_decoration(parentType.self, mi,
+                                    spv::DecorationArrayStride));
+                        }
+                    }
 
                     // Compute this member's effective top-level size:
                     // - at the top level, it's the member's own
                     //   outermost array dim (or 1 if not an array).
-                    // - unbounded top-level arrays (`data[]`) report
-                    //   1 per GL 4.6 §7.3.1 ("If the top-level member
-                    //   is an unsized array, the value returned is 1").
+                    // - unbounded top-level arrays (`data[]`) report 0,
+                    //   matching Piglit's ARB_ssbo program-interface query.
                     // - below the top level, inherit the incoming value.
                     GLint effTopLevel = topLevelArraySize;
+                    GLint effTopLevelStride = topLevelArrayStride;
                     if (isTopLevel) {
                         if (!hasArr) {
                             effTopLevel = 1;
+                            effTopLevelStride = 0;
                         } else if (outermostDim > 0) {
                             effTopLevel = static_cast<GLint>(outermostDim);
+                            effTopLevelStride = reflectedArrayStride;
                         } else {
-                            effTopLevel = 1;  // unbounded top-level array
+                            effTopLevel = 0;  // unbounded top-level array
+                            effTopLevelStride = reflectedArrayStride;
                         }
                     }
 
@@ -9324,25 +9342,20 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                         memberType.columns == 1 && memberType.array.empty()) {
                         std::string childPrefix = prefix.empty()
                             ? memberName : (prefix + "." + memberName);
-                        flattenSSBO(memberType, childPrefix, memberOffset, effTopLevel, false);
+                        flattenSSBO(memberType, childPrefix, memberOffset,
+                                    effTopLevel, effTopLevelStride, false);
                         continue;
                     }
-                    // Recurse into arrays of structs (single-dim for now
-                    // — nested struct-arrays-of-arrays are rarer and not
-                    // exercised by current CTS).
+                    // Recurse into arrays of structs. SSBO buffer-variable
+                    // enumeration exposes only the first element of an array
+                    // member, including unsized tails (`s[]`), then recurses
+                    // into that element's aggregate leaves.
                     if (memberType.basetype == spirv_cross::SPIRType::Struct &&
-                        !memberType.array.empty() && memberType.array[0] > 0) {
-                        std::size_t elemStride = 0;
-                        try {
-                            elemStride = compiler.get_declared_struct_member_size(parentType, mi)
-                                / memberType.array[0];
-                        } catch (...) {}
-                        for (std::uint32_t ai = 0; ai < memberType.array[0]; ++ai) {
-                            std::string elemPrefix = (prefix.empty() ? memberName : (prefix + "." + memberName))
-                                + "[" + std::to_string(ai) + "]";
-                            flattenSSBO(memberType, elemPrefix, memberOffset + ai * elemStride,
-                                        effTopLevel, false);
-                        }
+                        !memberType.array.empty()) {
+                        std::string elemPrefix =
+                            (prefix.empty() ? memberName : (prefix + "." + memberName)) + "[0]";
+                        flattenSSBO(memberType, elemPrefix, memberOffset,
+                                    effTopLevel, effTopLevelStride, false);
                         continue;
                     }
 
@@ -9357,18 +9370,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                         // Outer dims are array[1..end-1] in SPIR-V order;
                         // walk them in reverse so we emit names in
                         // GLSL subscript order (outermost first).
-                        GLint baseArrayStride = 0;
-                        try {
-                            baseArrayStride = static_cast<GLint>(
-                                compiler.type_struct_member_array_stride(parentType, mi));
-                        } catch (...) {}
-                        if (baseArrayStride <= 0 &&
-                            compiler.has_member_decoration(parentType.self, mi,
-                                spv::DecorationArrayStride)) {
-                            baseArrayStride = static_cast<GLint>(
-                                compiler.get_member_decoration(parentType.self, mi,
-                                    spv::DecorationArrayStride));
-                        }
+                        GLint baseArrayStride = reflectedArrayStride;
                         // Total product of outer dims (dims above array[0]).
                         std::uint32_t totalCombos = 1;
                         for (std::size_t d = 1; d < memberType.array.size(); ++d) {
@@ -9464,6 +9466,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                     member.containsFp64 = spirvTypeUsesFp64(compiler, memberType);
                     rb.containsFp64 = rb.containsFp64 || member.containsFp64;
                     member.topLevelArraySize = effTopLevel;
+                    member.topLevelArrayStride = effTopLevelStride;
                     // Row-major decoration (matrix members only).
                     if (memberType.columns > 1) {
                         member.isRowMajor = compiler.has_member_decoration(
@@ -9485,6 +9488,14 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                             member.topLevelArrayStride = member.arrayStride;
                         }
                     }
+                    if (hasArr && member.arrayStride == 0) {
+                        member.arrayStride = reflectedArrayStride;
+                    }
+                    if (hasArr && member.arraySize > 0 &&
+                        member.arrayStride == 0 && member.size > 0) {
+                        member.arrayStride = static_cast<GLint>(
+                            member.size / static_cast<std::size_t>(member.arraySize));
+                    }
                     if (compiler.has_member_decoration(parentType.self, mi,
                             spv::DecorationMatrixStride)) {
                         member.matrixStride = static_cast<GLint>(
@@ -9494,7 +9505,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                     rb.members.push_back(std::move(member));
                 }
             };
-            flattenSSBO(ssboType, "", 0, 1, true);
+            flattenSSBO(ssboType, "", 0, 1, 0, true);
             result.storageBuffers.push_back(std::move(rb));
         }
 
