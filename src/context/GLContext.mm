@@ -7873,8 +7873,9 @@ static bool isValidTexParameterEnumValue(GLenum pname, GLint v) {
         case GL_DEPTH_STENCIL_TEXTURE_MODE:
             return v == GL_DEPTH_COMPONENT || v == GL_STENCIL_INDEX;
         case GL_DEPTH_TEXTURE_MODE:
-            return v == GL_LUMINANCE || v == GL_INTENSITY ||
-                   v == GL_ALPHA || v == GL_RED;
+            return appglCompatProfileEnabled() &&
+                   (v == GL_LUMINANCE || v == GL_INTENSITY ||
+                    v == GL_ALPHA || v == GL_RED);
         case GL_GENERATE_MIPMAP:
             return v == GL_FALSE || v == GL_TRUE;
         case GL_TEXTURE_SWIZZLE_R:
@@ -7964,7 +7965,7 @@ bool setTextureParameterInteger(GLTextureParameters& params, GLenum pname, const
             // and discard so legacy initializers don't trip GL_INVALID_ENUM.
             (void)params;
             (void)values;
-            return true;
+            return appglCompatProfileEnabled();
         case GL_GENERATE_MIPMAP:
             params.generateMipmap = values[0] ? GL_TRUE : GL_FALSE;
             return true;
@@ -32181,6 +32182,9 @@ inline void logTFReadback(GLenum target,
 #include "GLContextVertexArray.inc.mm"
 #undef APPGL_GLCONTEXT_VERTEX_ATTRIB_DOUBLE_IMMEDIATE
 
+static bool textureStorageFormatCompatibleWithTarget(GLenum target,
+                                                     GLenum internalformat);
+
 #define APPGL_GLCONTEXT_TEXTURE_CORE
 #include "GLContextTexture.inc.mm"
 #undef APPGL_GLCONTEXT_TEXTURE_CORE
@@ -48291,6 +48295,14 @@ static bool targetIsValidForTexStorage2D(GLenum t) {
 static bool targetIsValidForTexStorage3D(GLenum t) {
     return t == GL_TEXTURE_3D || t == GL_TEXTURE_2D_ARRAY ||
            t == GL_TEXTURE_CUBE_MAP_ARRAY;
+}
+static bool textureStorageFormatCompatibleWithTarget(GLenum target,
+                                                     GLenum internalformat) {
+    if (target == GL_TEXTURE_3D &&
+        (isDepthFormat(internalformat) || isStencilFormat(internalformat))) {
+        return false;
+    }
+    return true;
 }
 static bool targetIsValidForTexStorage2DMultisample(GLenum t) {
     return t == GL_TEXTURE_2D_MULTISAMPLE;

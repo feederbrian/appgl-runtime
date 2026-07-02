@@ -1428,7 +1428,6 @@ bool isValidTextureParameterPname(GLenum pname) {
         case GL_TEXTURE_MAX_ANISOTROPY:
         case GL_TEXTURE_REDUCTION_MODE_ARB:
         case GL_DEPTH_STENCIL_TEXTURE_MODE:
-        case GL_DEPTH_TEXTURE_MODE:
         case GL_GENERATE_MIPMAP:
         // ARB_sparse_texture scaffold. These are per-texture state, not
         // sampler-object state, and remain queryable even while runtime
@@ -1456,6 +1455,8 @@ bool isValidTextureParameterPname(GLenum pname) {
         case GL_IMAGE_FORMAT_COMPATIBILITY_TYPE:
         case GL_NUM_SPARSE_LEVELS_ARB:
             return true;
+        case GL_DEPTH_TEXTURE_MODE:
+            return appglCompatProfileEnabled();
         default:
             return false;
     }
@@ -1530,8 +1531,9 @@ bool validateTextureParameterValues(GLenum pname, const GLint* params) {
         case GL_DEPTH_STENCIL_TEXTURE_MODE:
             return params[0] == GL_DEPTH_COMPONENT || params[0] == GL_STENCIL_INDEX;
         case GL_DEPTH_TEXTURE_MODE:
-            return params[0] == GL_LUMINANCE || params[0] == GL_INTENSITY ||
-                   params[0] == GL_ALPHA || params[0] == GL_RED;
+            return appglCompatProfileEnabled() &&
+                   (params[0] == GL_LUMINANCE || params[0] == GL_INTENSITY ||
+                    params[0] == GL_ALPHA || params[0] == GL_RED);
         case GL_GENERATE_MIPMAP:
             return params[0] == GL_FALSE || params[0] == GL_TRUE;
         case GL_TEXTURE_SPARSE_ARB:

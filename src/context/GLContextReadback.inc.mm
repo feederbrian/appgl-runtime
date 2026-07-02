@@ -165,6 +165,17 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
             pushError(GL_INVALID_OPERATION);
             return false;
         }
+        if (isColorReadback) {
+            const GLuint fbName = impl_->state->boundReadFramebuffer();
+            const GLFramebufferObject* fb =
+                impl_->objects->framebuffers().get(fbName);
+            if (fb != nullptr &&
+                (fb->readBuffer == GL_NONE ||
+                 impl_->framebufferAttachment(*fb, fb->readBuffer) == nullptr)) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+        }
         // GL 4.6 §18.3.2: *_INTEGER output formats require the color
         // buffer's internal format to be integer too. Otherwise
         // GL_INVALID_OPERATION. Resolve the bound read-FBO attachment's

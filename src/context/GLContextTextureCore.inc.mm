@@ -2211,6 +2211,10 @@ bool GLContext::texStorage(
         pushError(GL_INVALID_ENUM);
         return false;
     }
+    if (!textureStorageFormatCompatibleWithTarget(target, internalformat)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
 
     // GL 4.6 §8.19 / Khronos bug 11239: compressed internal formats
     // are NOT valid on TEXTURE_3D (RGTC1/RGTC2/BPTC were never
