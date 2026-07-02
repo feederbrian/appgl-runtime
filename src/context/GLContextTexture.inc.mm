@@ -2070,6 +2070,30 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
         }
     }
 
+    if (!packPBOBound &&
+        obj->colorShadowAuthoritative &&
+        isSRGBTextureFormat(obj->desc.internalFormat)) {
+        const auto levelIt = obj->levels.find(level);
+        if (levelIt != obj->levels.end() && levelIt->second.defined &&
+            copySimpleTextureLevelShadow(*obj,
+                                         levelIt->second,
+                                         format,
+                                         type,
+                                         bufSize,
+                                         impl_->state->pixelStore(),
+                                         pixels,
+                                         (obj->wasFramebufferRenderedTo ||
+                                          obj->wasViewportRenderedTo) &&
+                                             impl_->state->clipOrigin() != GL_UPPER_LEFT)) {
+            impl_->drainPendingGpuProducers({
+                {Impl::GpuResourceAccess::Kind::Texture,
+                 texture,
+                 kProducerAll},
+            });
+            return true;
+        }
+    }
+
     if (obj->viewSourceTexture != 0) {
         (void)impl_->materializeTextureView(*obj);
     }

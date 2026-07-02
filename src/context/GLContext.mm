@@ -7112,6 +7112,49 @@ std::uint8_t normalizedByte(GLfloat value) {
     return static_cast<std::uint8_t>(clamped * 255.0f + 0.5f);
 }
 
+GLfloat linearToSRGBValue(GLfloat value) {
+    const GLfloat clamped = std::clamp(value, 0.0f, 1.0f);
+    if (clamped <= 0.0031308f) {
+        return 12.92f * clamped;
+    }
+    return 1.055f * std::pow(clamped, 1.0f / 2.4f) - 0.055f;
+}
+
+std::uint8_t normalizedSignedByte(GLfloat value) {
+    const GLfloat clamped = std::clamp(value, -1.0f, 1.0f);
+    const std::int8_t signedValue =
+        static_cast<std::int8_t>(std::lround(clamped * 127.0f));
+    std::uint8_t byte = 0;
+    std::memcpy(&byte, &signedValue, sizeof(byte));
+    return byte;
+}
+
+void encodeRGBA8ClearBytesForAttachment(GLenum internalFormat,
+                                        bool framebufferSRGBEnabled,
+                                        const GLfloat color[4],
+                                        std::uint8_t rgba[4]) {
+    if (internalFormat == GL_RGBA8_SNORM) {
+        rgba[0] = normalizedSignedByte(color[0]);
+        rgba[1] = normalizedSignedByte(color[1]);
+        rgba[2] = normalizedSignedByte(color[2]);
+        rgba[3] = normalizedSignedByte(color[3]);
+        return;
+    }
+
+    if (framebufferSRGBEnabled && isSRGBTextureFormat(internalFormat)) {
+        rgba[0] = normalizedByte(linearToSRGBValue(color[0]));
+        rgba[1] = normalizedByte(linearToSRGBValue(color[1]));
+        rgba[2] = normalizedByte(linearToSRGBValue(color[2]));
+        rgba[3] = normalizedByte(color[3]);
+        return;
+    }
+
+    rgba[0] = normalizedByte(color[0]);
+    rgba[1] = normalizedByte(color[1]);
+    rgba[2] = normalizedByte(color[2]);
+    rgba[3] = normalizedByte(color[3]);
+}
+
 std::size_t rgba8ByteCount(GLsizei width, GLsizei height, GLsizei depth) {
     return safeDimension(width) * safeDimension(height) * safeDimension(depth) * 4u;
 }
@@ -23128,14 +23171,30 @@ struct GLContext::Impl {
         };
 
         if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
-            GLTextureObject* texture = objects->textures().get(attachment.object);
-            if (texture == nullptr) {
+            const ResolvedTextureAttachment resolved =
+                resolveTextureAttachmentStorage(attachment);
+            GLTextureObject* texture = resolved.storageTexture;
+            GLTextureObject* attachedTexture = resolved.attachedTexture;
+            if (!resolved.valid || texture == nullptr ||
+                attachedTexture == nullptr) {
                 return false;
             }
-            auto level = texture->levels.find(attachment.level);
+            auto level = texture->levels.find(resolved.level);
             if (level == texture->levels.end() || !level->second.defined) {
                 return false;
             }
+            const GLenum clearInternalFormat =
+                attachedTexture->desc.internalFormat != 0
+                    ? attachedTexture->desc.internalFormat
+                    : level->second.desc.internalFormat;
+            const bool textureViewFormatMatchesStorage =
+                clearInternalFormat == level->second.desc.internalFormat;
+            std::uint8_t textureRgba[4] = {0, 0, 0, 0};
+            encodeRGBA8ClearBytesForAttachment(
+                clearInternalFormat,
+                state->isEnabled(GL_FRAMEBUFFER_SRGB),
+                color,
+                textureRgba);
             if (state->clipOrigin() == GL_LOWER_LEFT) {
                 texture->wasFramebufferRenderedTo = true;
             }
@@ -23208,9 +23267,26 @@ struct GLContext::Impl {
                 if (texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
                     if (attachment.layered) {
                         const GLTextureImageLevel& image = level->second;
-                        arrayLength = static_cast<std::uint32_t>(std::max<GLsizei>(image.desc.depth, 1));
+                        const GLsizei sourceDepth =
+                            textureFramebufferLayerCount(*texture, image);
+                        const GLsizei viewLayerCount =
+                            resolved.throughView
+                                ? std::max<GLsizei>(
+                                      attachedTexture->viewNumLayers > 0
+                                          ? attachedTexture->viewNumLayers
+                                          : attachedTexture->desc.layers,
+                                      1)
+                                : sourceDepth;
+                        arrayLength = static_cast<std::uint32_t>(
+                            std::min<GLsizei>(
+                                viewLayerCount,
+                                std::max<GLsizei>(
+                                    sourceDepth - resolved.layer, 0)));
+                        clearSlice = static_cast<std::uint32_t>(
+                            std::max<GLint>(resolved.layer, 0));
                     } else {
-                        clearSlice = static_cast<std::uint32_t>(std::max<GLint>(attachment.layer, 0));
+                        clearSlice = static_cast<std::uint32_t>(
+                            std::max<GLint>(resolved.layer, 0));
                     }
                 }
                 texture->colorShadowAuthoritative = false;
@@ -23219,7 +23295,7 @@ struct GLContext::Impl {
                     texture->metalTexture,
                     arrayLength,
                     rgbaF,
-                    static_cast<std::uint32_t>(std::max<GLint>(attachment.level, 0)),
+                    static_cast<std::uint32_t>(std::max<GLint>(resolved.level, 0)),
                     clearSlice);
             }
             GLTextureImageLevel& image = level->second;
@@ -23250,8 +23326,20 @@ struct GLContext::Impl {
             if (image.rgba8.size() < rgba8ByteCount(sourceWidth, sourceHeight, sourceDepth)) {
                 image.rgba8.assign(rgba8ByteCount(sourceWidth, sourceHeight, sourceDepth), 0);
             }
-            const GLsizei firstLayer = attachment.layered ? 0 : attachment.layer;
-            const GLsizei lastLayer = attachment.layered ? sourceDepth : firstLayer + 1;
+            const GLsizei viewLayerCount =
+                resolved.throughView
+                    ? std::max<GLsizei>(
+                          attachedTexture->viewNumLayers > 0
+                              ? attachedTexture->viewNumLayers
+                              : attachedTexture->desc.layers,
+                          1)
+                    : sourceDepth;
+            const GLsizei firstLayer = attachment.layered
+                ? (resolved.throughView ? resolved.layer : 0)
+                : resolved.layer;
+            const GLsizei lastLayer = attachment.layered
+                ? std::min<GLsizei>(sourceDepth, firstLayer + viewLayerCount)
+                : firstLayer + 1;
             if (firstLayer < 0 || firstLayer >= sourceDepth || lastLayer > sourceDepth) {
                 return false;
             }
@@ -23386,6 +23474,7 @@ struct GLContext::Impl {
                 !isMSColorTexture &&
                 f1TextureTargetSupported &&
                 f1TextureFormatSupported &&
+                textureViewFormatMatchesStorage &&
                 mipShadowEvictionTargetSupported(texture->target) &&
                 image.nativeBpp == 0 &&
                 image.nativeData.empty()) {
@@ -23399,8 +23488,9 @@ struct GLContext::Impl {
                         arrayLength,
                         rgbaF,
                         static_cast<std::uint32_t>(
-                            std::max<GLint>(attachment.level, 0)),
-                        0u)) {
+                            std::max<GLint>(resolved.level, 0)),
+                        static_cast<std::uint32_t>(
+                            std::max<GLint>(firstLayer, 0)))) {
                     markTextureMipShadowNeedsMetalMaterialize(*texture, image);
                     ++shadowClearsDeferred;
                     return true;
@@ -23419,7 +23509,10 @@ struct GLContext::Impl {
                                 * static_cast<std::size_t>(sourceWidth)
                                 + static_cast<std::size_t>(x))
                             * 4u;
-                        std::memcpy(image.rgba8.data() + offset, rgba, 4);
+                        std::memcpy(
+                            image.rgba8.data() + offset,
+                            textureRgba,
+                            4);
                     }
                 }
             }
@@ -23686,6 +23779,7 @@ struct GLContext::Impl {
                  image.desc.internalFormat == GL_SRGB8_ALPHA8 ||
                  image.desc.internalFormat == GL_RGBA ||
                  image.desc.internalFormat == GL_RGB) &&
+                textureViewFormatMatchesStorage &&
                 firstLayer == 0 && lastLayer == sourceDepth) {
                 const float rgbaF[4] = {color[0], color[1], color[2], color[3]};
                 const std::uint32_t arrayLength = sourceDepth > 1
@@ -23697,8 +23791,10 @@ struct GLContext::Impl {
                         texture->metalTexture,
                         arrayLength,
                         rgbaF,
-                        static_cast<std::uint32_t>(std::max<GLint>(attachment.level, 0)),
-                        0u)) {
+                        static_cast<std::uint32_t>(
+                            std::max<GLint>(resolved.level, 0)),
+                        static_cast<std::uint32_t>(
+                            std::max<GLint>(firstLayer, 0)))) {
                     return true;
                 }
             }
@@ -47870,6 +47966,10 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
         image.rgba8.empty() &&
         object.depthStencilShadowAuthoritative &&
         isDepth32FTextureShadowDropShape(image);
+    const bool useRGBA8ShadowAsFloat =
+        format == GL_RGBA &&
+        type == GL_FLOAT &&
+        !image.rgba8.empty();
     const bool useNativeFloatDepthAsDepth =
         format == GL_DEPTH_COMPONENT &&
         isFloatDepthTextureShadowDropShape(image);
@@ -47885,7 +47985,9 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
         isLegacyCompatTextureFormatCombo(
             image.desc.internalFormat,
             image.desc.sourceFormat);
-    if (format == GL_RGBA && type == GL_UNSIGNED_BYTE && !image.rgba8.empty()) {
+    if (((format == GL_RGBA && type == GL_UNSIGNED_BYTE) ||
+         useRGBA8ShadowAsFloat) &&
+        !image.rgba8.empty()) {
         sourceBytes = image.rgba8.data();
         sourceBpp = 4;
         sourceByteCount = image.rgba8.size();
@@ -48025,6 +48127,28 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
                                    depthValue,
                                    packSwapBytes)) {
                         return false;
+                    }
+                }
+                continue;
+            }
+            if (useRGBA8ShadowAsFloat) {
+                for (GLsizei x = 0; x < texW; ++x) {
+                    const std::uint8_t* srcPixel =
+                        srcRow + static_cast<std::size_t>(x) * sourceBpp;
+                    std::uint8_t* dstPixel =
+                        dstRow + static_cast<std::size_t>(x) * dstPixelBytes;
+                    for (std::size_t c = 0; c < 4; ++c) {
+                        GLfloat value =
+                            static_cast<GLfloat>(srcPixel[c]) / 255.0f;
+                        std::memcpy(
+                            dstPixel + c * sizeof(GLfloat),
+                            &value,
+                            sizeof(value));
+                        if (packSwapBytes) {
+                            std::reverse(
+                                dstPixel + c * sizeof(GLfloat),
+                                dstPixel + (c + 1u) * sizeof(GLfloat));
+                        }
                     }
                 }
                 continue;
