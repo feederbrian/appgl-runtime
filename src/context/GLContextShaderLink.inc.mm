@@ -357,6 +357,17 @@ bool GLContext::linkProgram(GLuint program) {
             });
             return false;
         }
+        if (!validateLinkedShaderStorageBlockLimits(
+                attachedShaderObjects,
+                impl_->capabilities.get(),
+                validationError)) {
+            programObject->linkLog = std::move(validationError);
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
     }
 
     {
@@ -1189,11 +1200,12 @@ bool GLContext::linkProgram(GLuint program) {
         }
 
         // GL 4.6 §11.1.2.1 — TFB varyings inside named interface blocks
-        // are referenced as either `BlockType.member` or
-        // `instance.member`. Struct leaves are captured by spelling the
-        // full path (`v[0].e[1].a`) rather than the whole aggregate. Build
-        // synthetic lookup entries for those leaves and record the flat
-        // scalar slice that draw-time transform feedback needs to pack.
+        // are referenced through the API with block names, not instance
+        // names; blocks declared as arrays require an explicit block
+        // index. Struct leaves are captured by spelling the full path
+        // (`v[0].e[1].a`) rather than the whole aggregate. Build synthetic
+        // lookup entries for those leaves and record the flat scalar slice
+        // that draw-time transform feedback needs to pack.
         {
             const std::string& src = xfbStage->source;
             auto typeFromKeyword = [](const std::string& k) -> GLenum {
@@ -1553,14 +1565,23 @@ bool GLContext::linkProgram(GLuint program) {
                     if (p < toks.size() && isIdent(toks[p])) {
                         instanceName = toks[p++];
                     }
+                    TfMemberSpec blockArraySpec;
+                    parseArraySuffix(p, toks.size(), blockArraySpec);
+                    const bool blockIsArray = blockArraySpec.isArray;
+                    const GLint blockArraySize =
+                        blockIsArray ? std::max<GLint>(1, blockArraySpec.arraySize) : 1;
                     for (const auto& member : members) {
-                        addOutputDecl(blockName + "." + member.name, member,
-                                      member.name);
-                        if (!instanceName.empty()) {
-                            addOutputDecl(instanceName + "." + member.name,
-                                          member, member.name);
-                        } else {
+                        if (instanceName.empty()) {
                             addOutputDecl(member.name, member, member.name);
+                        } else if (blockIsArray) {
+                            for (GLint elem = 0; elem < blockArraySize; ++elem) {
+                                addOutputDecl(blockName + "[" + std::to_string(elem) + "]." +
+                                                  member.name,
+                                              member, member.name);
+                            }
+                        } else {
+                            addOutputDecl(blockName + "." + member.name,
+                                          member, member.name);
                         }
                     }
                     i = p;
@@ -1669,6 +1690,15 @@ bool GLContext::linkProgram(GLuint program) {
                     if (it == outputTypeMap.end()) {
                         programObject->linkLog = "transform feedback varying '" + varyName +
                             "' is not an output of the last vertex-processing stage";
+                        Runtime::shared().recordShaderTranslation({
+                            programTag, "link", "", "", "", programObject->linkLog, "", false
+                        });
+                        return false;
+                    }
+                    if (captureIsArrayElement && it->second.isArray &&
+                        captureArrayElementIndex >= it->second.arraySize) {
+                        programObject->linkLog = "transform feedback varying '" + varyName +
+                            "' array index is out of bounds";
                         Runtime::shared().recordShaderTranslation({
                             programTag, "link", "", "", "", programObject->linkLog, "", false
                         });
@@ -7628,6 +7658,38 @@ bool GLContext::linkProgram(GLuint program) {
     // `blockIndex` pointing back to the block entry so
     // glGetProgramResourceiv(GL_BUFFER_VARIABLE, ...) can find them.
     if (programObject->linked) {
+        auto parsedBlockInstanceCount =
+            [](const ParsedInterfaceBlockForValidation* parsed,
+               std::uint32_t reflectedCount) -> int {
+                if (parsed != nullptr && parsed->instanceIsArray) {
+                    return std::max(1, parsed->instanceArraySize);
+                }
+                return reflectedCount > 0 ? static_cast<int>(reflectedCount) : 1;
+            };
+        auto parsedBlockInstanceName =
+            [](const std::string& baseName,
+               const ParsedInterfaceBlockForValidation* parsed,
+               int linearIndex) {
+                std::string out = baseName;
+                if (parsed == nullptr ||
+                    !parsed->instanceIsArray ||
+                    parsed->instanceArrayDimensions.empty()) {
+                    out += "[" + std::to_string(linearIndex) + "]";
+                    return out;
+                }
+                std::vector<int> indices(parsed->instanceArrayDimensions.size(), 0);
+                int remain = linearIndex;
+                for (std::size_t rev = parsed->instanceArrayDimensions.size(); rev > 0; --rev) {
+                    const std::size_t dimIndex = rev - 1;
+                    const int dim = std::max(1, parsed->instanceArrayDimensions[dimIndex]);
+                    indices[dimIndex] = remain % dim;
+                    remain /= dim;
+                }
+                for (int idx : indices) {
+                    out += "[" + std::to_string(idx) + "]";
+                }
+                return out;
+            };
         auto mergeBlocks = [&](const std::vector<ShaderReflection::ResourceBinding>& blocks,
                                GLbitfield stageBit,
                                const std::string& glslSource) {
@@ -7695,10 +7757,7 @@ bool GLContext::linkProgram(GLuint program) {
                 // block entry per array element: "BlockName[0]", "BlockName[1]", ...
                 // For non-array blocks, create a single entry: "BlockName".
                 const int numInstances =
-                    parsedBlock != nullptr && parsedBlock->instanceIsArray
-                        ? std::max(1, parsedBlock->instanceArraySize)
-                        : ((block.blockArraySize > 0)
-                            ? static_cast<int>(block.blockArraySize) : 1);
+                    parsedBlockInstanceCount(parsedBlock, block.blockArraySize);
                 const bool isArray =
                     parsedBlock != nullptr
                         ? parsedBlock->instanceIsArray
@@ -7725,10 +7784,9 @@ bool GLContext::linkProgram(GLuint program) {
                         effStageBit = 0;
                     }
                     if (inst == 0) firstInstStageBit = effStageBit;
-                    std::string entryName = block.name;
-                    if (isArray) {
-                        entryName += "[" + std::to_string(inst) + "]";
-                    }
+                    std::string entryName = isArray
+                        ? parsedBlockInstanceName(block.name, parsedBlock, inst)
+                        : block.name;
                     auto existing = std::find_if(
                         programObject->resourceUniformBlocks.begin(),
                         programObject->resourceUniformBlocks.end(),
@@ -7914,10 +7972,10 @@ bool GLContext::linkProgram(GLuint program) {
                 if (!parsed.instanceIsArray) {
                     continue;
                 }
-                const int numInstances = std::max(1, parsed.instanceArraySize);
+                const int numInstances = parsedBlockInstanceCount(&parsed, 0);
                 for (int inst = 0; inst < numInstances; ++inst) {
                     std::string entryName =
-                        parsed.name + "[" + std::to_string(inst) + "]";
+                        parsedBlockInstanceName(parsed.name, &parsed, inst);
                     const auto existing = std::find_if(
                         programObject->resourceUniformBlocks.begin(),
                         programObject->resourceUniformBlocks.end(),
@@ -8024,10 +8082,7 @@ bool GLContext::linkProgram(GLuint program) {
                 const bool useInstanceNarrowing = !usedInstanceIndices.empty();
 
                 const int numInstances =
-                    parsedBlock != nullptr && parsedBlock->instanceIsArray
-                        ? std::max(1, parsedBlock->instanceArraySize)
-                        : ((block.blockArraySize > 0)
-                            ? static_cast<int>(block.blockArraySize) : 1);
+                    parsedBlockInstanceCount(parsedBlock, block.blockArraySize);
                 const bool isBlockArray =
                     parsedBlock != nullptr
                         ? parsedBlock->instanceIsArray
@@ -8059,10 +8114,9 @@ bool GLContext::linkProgram(GLuint program) {
                         effStageBit = 0;
                     }
                     if (inst == 0) firstInstStageBit = effStageBit;
-                    std::string entryName = block.name;
-                    if (isBlockArray) {
-                        entryName += "[" + std::to_string(inst) + "]";
-                    }
+                    std::string entryName = isBlockArray
+                        ? parsedBlockInstanceName(block.name, parsedBlock, inst)
+                        : block.name;
                     auto existing = std::find_if(
                         programObject->resourceStorageBlocks.begin(),
                         programObject->resourceStorageBlocks.end(),
@@ -8185,10 +8239,10 @@ bool GLContext::linkProgram(GLuint program) {
                 if (!parsed.instanceIsArray) {
                     continue;
                 }
-                const int numInstances = std::max(1, parsed.instanceArraySize);
+                const int numInstances = parsedBlockInstanceCount(&parsed, 0);
                 for (int inst = 0; inst < numInstances; ++inst) {
                     std::string entryName =
-                        parsed.name + "[" + std::to_string(inst) + "]";
+                        parsedBlockInstanceName(parsed.name, &parsed, inst);
                     const auto existing = std::find_if(
                         programObject->resourceStorageBlocks.begin(),
                         programObject->resourceStorageBlocks.end(),
@@ -8284,6 +8338,39 @@ bool GLContext::linkProgram(GLuint program) {
         }
     }
 
+    auto parsedFallbackBlockInstanceCount =
+        [](const ParsedInterfaceBlockForValidation* parsed,
+           std::uint32_t reflectedCount) -> int {
+            if (parsed != nullptr && parsed->instanceIsArray) {
+                return std::max(1, parsed->instanceArraySize);
+            }
+            return reflectedCount > 0 ? static_cast<int>(reflectedCount) : 1;
+        };
+    auto parsedFallbackBlockInstanceName =
+        [](const std::string& baseName,
+           const ParsedInterfaceBlockForValidation* parsed,
+           int linearIndex) {
+            std::string out = baseName;
+            if (parsed == nullptr ||
+                !parsed->instanceIsArray ||
+                parsed->instanceArrayDimensions.empty()) {
+                out += "[" + std::to_string(linearIndex) + "]";
+                return out;
+            }
+            std::vector<int> indices(parsed->instanceArrayDimensions.size(), 0);
+            int remain = linearIndex;
+            for (std::size_t rev = parsed->instanceArrayDimensions.size(); rev > 0; --rev) {
+                const std::size_t dimIndex = rev - 1;
+                const int dim = std::max(1, parsed->instanceArrayDimensions[dimIndex]);
+                indices[dimIndex] = remain % dim;
+                remain /= dim;
+            }
+            for (int idx : indices) {
+                out += "[" + std::to_string(idx) + "]";
+            }
+            return out;
+        };
+
     auto addParsedBlockArrayResources =
         [&](const std::string& source, GLbitfield stageBit, bool storage) {
             const auto parsedBlocks = storage
@@ -8297,10 +8384,10 @@ bool GLContext::linkProgram(GLuint program) {
                 if (!parsed.instanceIsArray) {
                     continue;
                 }
-                const int numInstances = std::max(1, parsed.instanceArraySize);
+                const int numInstances = parsedFallbackBlockInstanceCount(&parsed, 0);
                 for (int inst = 0; inst < numInstances; ++inst) {
                     std::string entryName =
-                        parsed.name + "[" + std::to_string(inst) + "]";
+                        parsedFallbackBlockInstanceName(parsed.name, &parsed, inst);
                     auto existing = std::find_if(
                         table.begin(),
                         table.end(),

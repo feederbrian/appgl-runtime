@@ -7459,9 +7459,9 @@ struct MetalFrameGraph::Impl {
                 forceArgBufEnv || shaderSlots.fragmentMslUsesArgBuf;
             useArgBuf = vertexUsesArgBuf || fragmentUsesArgBuf;
             vertexNeedsSSBOSizeBuffer =
-                vertexUsesArgBuf && shaderSlots.vertexHasSSBOSizeBuffer;
+                shaderSlots.vertexHasSSBOSizeBuffer;
             fragmentNeedsSSBOSizeBuffer =
-                fragmentUsesArgBuf && shaderSlots.fragmentHasSSBOSizeBuffer;
+                shaderSlots.fragmentHasSSBOSizeBuffer;
             fragmentNeedsFragCoordParams =
                 shaderSlots.fragmentNeedsFragCoordParams;
             fragmentNeedsGlNumSamplesArgBuf =
@@ -10252,16 +10252,51 @@ struct MetalFrameGraph::Impl {
         // sampled/storage images) further below. Skip this direct-
         // binding loop when argbuf is on to avoid double-binding at
         // the wrong slot.
+        struct ResolvedSSBOEncodeBuffer {
+            id<MTLBuffer> buffer = nil;
+            NSUInteger offset = 0;
+            bool staged = false;
+        };
+        auto resolveSSBOEncodeBuffer =
+            [&](const TranslatedDrawInfo::SSBOBinding& ssbo)
+                -> ResolvedSSBOEncodeBuffer {
+            if (!ssbo.ownedData.empty()) {
+                RingAlloc alloc = ringSuballocate(
+                    ssbo.ownedData.data(),
+                    ssbo.ownedData.size());
+                if (alloc.buffer != nil) {
+                    info.submissionGroup.addTransient(
+                        AppGLSubmissionTransientKind::UniformRingBytes,
+                        AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
+                        AppGLCommandReason::TranslatedDraw,
+                        ssbo.metalSlot,
+                        ssbo.ownedData.size());
+                    return {
+                        alloc.buffer,
+                        static_cast<NSUInteger>(alloc.offset),
+                        true,
+                    };
+                }
+            }
+            if (ssbo.metalBuffer == nullptr) {
+                return {};
+            }
+            return {
+                (__bridge id<MTLBuffer>)ssbo.metalBuffer,
+                static_cast<NSUInteger>(ssbo.offset),
+                false,
+            };
+        };
         for (const auto& ssbo : info.ssboBindings) {
-            if (ssbo.metalBuffer == nullptr) continue;
-            id<MTLBuffer> buf = (__bridge id<MTLBuffer>)ssbo.metalBuffer;
+            ResolvedSSBOEncodeBuffer resolved =
+                resolveSSBOEncodeBuffer(ssbo);
+            if (resolved.buffer == nil) continue;
             const NSUInteger slot = static_cast<NSUInteger>(ssbo.metalSlot);
-            const NSUInteger off = static_cast<NSUInteger>(ssbo.offset);
             if (ssbo.isVertex && !vertexUsesArgBuf) {
                 bindVertexBufferIfNeeded(
                     encodeSubtimeSamplePtr,
-                    buf,
-                    off,
+                    resolved.buffer,
+                    resolved.offset,
                     slot,
                     EncodeMarshalClass::UboBuffer,
                     static_cast<std::uint64_t>(ssbo.size));
@@ -10269,12 +10304,75 @@ struct MetalFrameGraph::Impl {
             if (ssbo.isFragment && !fragmentUsesArgBuf) {
                 bindFragmentBufferIfNeeded(
                     encodeSubtimeSamplePtr,
-                    buf,
-                    off,
+                    resolved.buffer,
+                    resolved.offset,
                     slot,
                     EncodeMarshalClass::UboBuffer,
                     static_cast<std::uint64_t>(ssbo.size));
             }
+        }
+        auto bindDirectSSBOSizeBuffer = [&](bool isFragment) {
+            std::uint32_t maxSlot = 0;
+            bool anySizedSSBO = false;
+            for (const auto& ssbo : info.ssboBindings) {
+                if (ssbo.metalBuffer == nullptr || ssbo.size == 0) continue;
+                if (isFragment && !ssbo.isFragment) continue;
+                if (!isFragment && !ssbo.isVertex) continue;
+                maxSlot = std::max(maxSlot, ssbo.metalSlot);
+                anySizedSSBO = true;
+            }
+            if (!anySizedSSBO) return;
+
+            static thread_local std::vector<std::uint32_t> sizes;
+            sizes.assign(static_cast<std::size_t>(maxSlot) + 1u, 0u);
+            for (const auto& ssbo : info.ssboBindings) {
+                if (ssbo.metalBuffer == nullptr || ssbo.size == 0) continue;
+                if (isFragment && !ssbo.isFragment) continue;
+                if (!isFragment && !ssbo.isVertex) continue;
+                if (ssbo.metalSlot >= sizes.size()) continue;
+                sizes[ssbo.metalSlot] =
+                    static_cast<std::uint32_t>(std::min<std::size_t>(
+                        ssbo.size,
+                        static_cast<std::size_t>(
+                            std::numeric_limits<std::uint32_t>::max())));
+            }
+
+            RingAlloc sizeAlloc = ringSuballocate(
+                sizes.data(),
+                sizes.size() * sizeof(std::uint32_t));
+            if (sizeAlloc.buffer == nil) return;
+
+            info.submissionGroup.addTransient(
+                AppGLSubmissionTransientKind::SsboSizeBuffer,
+                AppGLSubmissionOrderingMechanism::CpuBeforeEncodeSameCommandBuffer,
+                AppGLCommandReason::TranslatedDraw,
+                25,
+                sizes.size() * sizeof(std::uint32_t));
+            if (isFragment) {
+                bindFragmentBufferIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    sizeAlloc.buffer,
+                    sizeAlloc.offset,
+                    25);
+                [currentRenderEncoder useResource:sizeAlloc.buffer
+                                            usage:MTLResourceUsageRead
+                                           stages:MTLRenderStageFragment];
+            } else {
+                bindVertexBufferIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    sizeAlloc.buffer,
+                    sizeAlloc.offset,
+                    25);
+                [currentRenderEncoder useResource:sizeAlloc.buffer
+                                            usage:MTLResourceUsageRead
+                                           stages:MTLRenderStageVertex];
+            }
+        };
+        if (vertexNeedsSSBOSizeBuffer && !vertexUsesArgBuf) {
+            bindDirectSSBOSizeBuffer(false);
+        }
+        if (fragmentNeedsSSBOSizeBuffer && !fragmentUsesArgBuf) {
+            bindDirectSSBOSizeBuffer(true);
         }
         for (const auto& atomic : info.atomicCounterBindings) {
             if (atomic.metalBuffer == nullptr) continue;
@@ -10687,15 +10785,20 @@ struct MetalFrameGraph::Impl {
                 // [[id(192 + glBinding)]]. Direct mode uses sequential
                 // 28+N slots via setVertexBuffer/setFragmentBuffer.
                 for (const auto& ssbo : info.ssboBindings) {
-                    if (ssbo.metalBuffer == nullptr) continue;
                     if (isFragment && !ssbo.isFragment) continue;
                     if (!isFragment && !ssbo.isVertex) continue;
-                    id<MTLBuffer> buf = (__bridge id<MTLBuffer>)(ssbo.metalBuffer);
-                    [encoder setBuffer:buf
-                                offset:static_cast<NSUInteger>(ssbo.offset)
+                    ResolvedSSBOEncodeBuffer resolved =
+                        resolveSSBOEncodeBuffer(ssbo);
+                    if (resolved.buffer == nil) continue;
+                    [encoder setBuffer:resolved.buffer
+                                offset:resolved.offset
                                atIndex:static_cast<NSUInteger>(ssbo.metalSlot)];
-                    [currentRenderEncoder useResource:buf
-                                                usage:MTLResourceUsageRead|MTLResourceUsageWrite
+                    MTLResourceUsage usage = MTLResourceUsageRead;
+                    if (ssbo.shaderWrites) {
+                        usage |= MTLResourceUsageWrite;
+                    }
+                    [currentRenderEncoder useResource:resolved.buffer
+                                                usage:usage
                                                stages:stage];
                 }
                 for (const auto& atomic : info.atomicCounterBindings) {
@@ -25918,9 +26021,9 @@ private:
         out.fragmentUsesArgumentBuffer = fragmentUsesArgBuf;
         out.useArgumentBuffers = false;
         out.vertexNeedsSSBOSizeBuffer =
-            vertexUsesArgBuf && slots.vertexHasSSBOSizeBuffer;
+            slots.vertexHasSSBOSizeBuffer;
         out.fragmentNeedsSSBOSizeBuffer =
-            fragmentUsesArgBuf && slots.fragmentHasSSBOSizeBuffer;
+            slots.fragmentHasSSBOSizeBuffer;
         out.fragmentNeedsFragCoordParams = slots.fragmentNeedsFragCoordParams;
         out.fragmentNeedsGlNumSamplesArgBuf =
             fragmentUsesArgBuf && slots.fragmentNeedsGlNumSamplesArgBuf;

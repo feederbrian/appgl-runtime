@@ -2273,6 +2273,8 @@ static void bindingConstructionSizingValidateWalk(
         bindingConstructionHashMix(hash, ssbo.offset);
         bindingConstructionHashMix(hash, ssbo.size);
         bindingConstructionHashMix(hash, ssbo.metalSlot);
+        bindingConstructionHashMix(hash, ssbo.ownedData.empty() ? 0u : 1u);
+        bindingConstructionHashMix(hash, ssbo.shaderWrites ? 1u : 0u);
     }
     sample.referencedAtomicBindings =
         static_cast<std::uint64_t>(info.atomicCounterBindings.size());
@@ -3384,6 +3386,7 @@ static void phase2PlanHashResourceBindingShape(
     phase2PlanHashU64(hash, binding.storageImageTarget);
     phase2PlanHashBool(hash, binding.storageImageNonWritable);
     phase2PlanHashBool(hash, binding.storageImageNonReadable);
+    phase2PlanHashBool(hash, binding.storageBufferWritten);
     phase2PlanHashU64(hash, binding.metalAtomicBufferBinding);
     phase2PlanHashBool(hash, binding.sparseStorageImageRead);
     phase2PlanHashBool(hash, binding.sparseStorageImageWrite);
@@ -3740,6 +3743,23 @@ static void phase2PlanHashTextureBindings(
 }
 
 template <typename Binding>
+static void phase2PlanHashBufferBindingExtra(
+    std::uint64_t& hash,
+    const Binding& binding)
+{
+    (void)hash;
+    (void)binding;
+}
+
+static void phase2PlanHashBufferBindingExtra(
+    std::uint64_t& hash,
+    const TranslatedDrawInfo::SSBOBinding& binding)
+{
+    phase2PlanHashBool(hash, !binding.ownedData.empty());
+    phase2PlanHashBool(hash, binding.shaderWrites);
+}
+
+template <typename Binding>
 static void phase2PlanHashBufferBindings(
     std::uint64_t& hash,
     const std::vector<Binding>& bindings)
@@ -3750,6 +3770,7 @@ static void phase2PlanHashBufferBindings(
         phase2PlanHashBool(hash, binding.metalBuffer != nullptr);
         phase2PlanHashBool(hash, binding.isVertex);
         phase2PlanHashBool(hash, binding.isFragment);
+        phase2PlanHashBufferBindingExtra(hash, binding);
     }
 }
 
@@ -3813,6 +3834,8 @@ static std::uint64_t phase2PlanBuildBindingShapeReferenceSegmentHash(
         phase2PlanHashBool(hash, ssbo.metalBuffer != nullptr);
         phase2PlanHashBool(hash, ssbo.isVertex);
         phase2PlanHashBool(hash, ssbo.isFragment);
+        phase2PlanHashBool(hash, !ssbo.ownedData.empty());
+        phase2PlanHashBool(hash, ssbo.shaderWrites);
     }
     phase2PlanHashU64(hash, tdi.atomicCounterBindings.size());
     for (const auto& atomic : tdi.atomicCounterBindings) {
@@ -4367,12 +4390,16 @@ struct Phase2PlanMemoBufferBinding {
     bool metalBufferPresent = false;
     bool isVertex = false;
     bool isFragment = false;
+    bool ownedDataPresent = false;
+    bool shaderWrites = false;
 
     bool operator==(const Phase2PlanMemoBufferBinding& other) const {
         return metalSlot == other.metalSlot &&
                metalBufferPresent == other.metalBufferPresent &&
                isVertex == other.isVertex &&
-               isFragment == other.isFragment;
+               isFragment == other.isFragment &&
+               ownedDataPresent == other.ownedDataPresent &&
+               shaderWrites == other.shaderWrites;
     }
 };
 
@@ -4769,6 +4796,19 @@ static Phase2PlanMemoBufferBinding phase2PlanMemoBufferBindingFor(
     memo.metalBufferPresent = binding.metalBuffer != nullptr;
     memo.isVertex = binding.isVertex;
     memo.isFragment = binding.isFragment;
+    return memo;
+}
+
+static Phase2PlanMemoBufferBinding phase2PlanMemoBufferBindingFor(
+    const TranslatedDrawInfo::SSBOBinding& binding)
+{
+    Phase2PlanMemoBufferBinding memo;
+    memo.metalSlot = binding.metalSlot;
+    memo.metalBufferPresent = binding.metalBuffer != nullptr;
+    memo.isVertex = binding.isVertex;
+    memo.isFragment = binding.isFragment;
+    memo.ownedDataPresent = !binding.ownedData.empty();
+    memo.shaderWrites = binding.shaderWrites;
     return memo;
 }
 
@@ -10016,8 +10056,10 @@ struct GLContext::Impl {
             for (const auto& ssbo : tdi.ssboBindings) {
                 group.addRead(AppGLSubmissionResourceKind::Buffer,
                               ssbo.glBufferName, kProducerAll);
-                group.addWrite(AppGLSubmissionResourceKind::Buffer,
-                               ssbo.glBufferName, kProducerShaderStorageWrite);
+                if (ssbo.shaderWrites) {
+                    group.addWrite(AppGLSubmissionResourceKind::Buffer,
+                                   ssbo.glBufferName, kProducerShaderStorageWrite);
+                }
             }
             for (const auto& atomic : tdi.atomicCounterBindings) {
                 group.addRead(AppGLSubmissionResourceKind::Buffer,
@@ -19984,6 +20026,7 @@ struct GLContext::Impl {
                     sb.metalBuffer = bufObj->metalBuffer;
                     sb.glBufferName = binding.buffer;
                     sb.offset = static_cast<std::size_t>(binding.offset);
+                    sb.shaderWrites = ssbo.storageBufferWritten;
                     if (binding.size > 0) {
                         sb.size = static_cast<std::size_t>(binding.size);
                     } else if (binding.offset >= 0 && bufObj->size > binding.offset) {
@@ -20004,9 +20047,27 @@ struct GLContext::Impl {
                                 extensionContext, sb.size);
                         }
                     }
+                    if (!sb.shaderWrites && sb.size > 0 &&
+                        binding.offset >= 0 && !bufObj->shadowBytes.empty()) {
+                        const std::size_t sourceOffset =
+                            static_cast<std::size_t>(binding.offset);
+                        if (sourceOffset < bufObj->shadowBytes.size()) {
+                            const std::size_t available =
+                                bufObj->shadowBytes.size() - sourceOffset;
+                            const std::size_t copyBytes =
+                                std::min<std::size_t>(sb.size, available);
+                            const auto* begin =
+                                bufObj->shadowBytes.data() + sourceOffset;
+                            sb.ownedData.assign(begin, begin + copyBytes);
+                        }
+                    }
                     sb.isVertex = isVertex;
                     sb.isFragment = isFragment;
                     info.ssboBindings.push_back(sb);
+                    if (frameGraph != nullptr && bufObj->metalBuffer != nullptr) {
+                        bufObj->liveBindSubmitIndex =
+                            frameGraph->openCommandBufferSubmitIndex();
+                    }
                 }
             }
         };
@@ -38923,6 +38984,7 @@ struct ParsedInterfaceBlockForValidation {
     std::string instanceName;
     bool instanceIsArray = false;
     int instanceArraySize = 1;
+    std::vector<int> instanceArrayDimensions;
     bool hasExplicitBinding = false;
     int explicitBinding = 0;
 };
@@ -38990,16 +39052,26 @@ parseGlslInterfaceBlocksForValidation(const std::string& rawSource,
             skipGlslWs(s, after);
             if (after < s.size() && s[after] == '[') {
                 block.instanceIsArray = true;
-                const std::size_t close = s.find(']', after + 1);
-                if (close != std::string::npos) {
+                int product = 1;
+                while (after < s.size() && s[after] == '[') {
+                    const std::size_t close = s.find(']', after + 1);
+                    if (close == std::string::npos) {
+                        break;
+                    }
                     int arraySize = 1;
                     if (parseGlslIntegerExpression(
                             std::string_view(s).substr(after + 1, close - after - 1),
                             defines,
                             arraySize) &&
                         arraySize > 0) {
-                        block.instanceArraySize = arraySize;
+                        block.instanceArrayDimensions.push_back(arraySize);
+                        product *= arraySize;
                     }
+                    after = close + 1;
+                    skipGlslWs(s, after);
+                }
+                if (!block.instanceArrayDimensions.empty()) {
+                    block.instanceArraySize = product;
                 }
             }
         }
@@ -39368,6 +39440,90 @@ bool validateLinkedShaderStorageBlocks(const std::vector<GLShaderObject*>& shade
             }
         }
     }
+    return true;
+}
+
+GLenum shaderStorageBlockLimitPnameForStage(GLenum stage) {
+    switch (stage) {
+        case GL_VERTEX_SHADER: return GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS;
+        case GL_FRAGMENT_SHADER: return GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS;
+        case GL_GEOMETRY_SHADER: return GL_MAX_GEOMETRY_SHADER_STORAGE_BLOCKS;
+        case GL_TESS_CONTROL_SHADER: return GL_MAX_TESS_CONTROL_SHADER_STORAGE_BLOCKS;
+        case GL_TESS_EVALUATION_SHADER: return GL_MAX_TESS_EVALUATION_SHADER_STORAGE_BLOCKS;
+        case GL_COMPUTE_SHADER: return GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS;
+        default: return 0;
+    }
+}
+
+const char* shaderStageNameForLinkLimit(GLenum stage) {
+    switch (stage) {
+        case GL_VERTEX_SHADER: return "vertex";
+        case GL_FRAGMENT_SHADER: return "fragment";
+        case GL_GEOMETRY_SHADER: return "geometry";
+        case GL_TESS_CONTROL_SHADER: return "tess-control";
+        case GL_TESS_EVALUATION_SHADER: return "tess-evaluation";
+        case GL_COMPUTE_SHADER: return "compute";
+        default: return "unknown";
+    }
+}
+
+bool validateLinkedShaderStorageBlockLimits(
+    const std::vector<GLShaderObject*>& shaders,
+    const GLCapabilities* caps,
+    std::string& error) {
+    if (caps == nullptr) {
+        return true;
+    }
+
+    std::unordered_map<GLenum, int> blocksByStage;
+    int combinedBlocks = 0;
+    for (const GLShaderObject* shader : shaders) {
+        if (shader == nullptr) {
+            continue;
+        }
+        int blockCount = 0;
+        for (const auto& block : parseShaderStorageBlocksForValidation(shader->source)) {
+            blockCount += block.instanceIsArray
+                ? std::max(1, block.instanceArraySize)
+                : 1;
+        }
+        blocksByStage[shader->stage] += blockCount;
+        combinedBlocks += blockCount;
+    }
+
+    for (const auto& [stage, count] : blocksByStage) {
+        const GLenum limitPname = shaderStorageBlockLimitPnameForStage(stage);
+        if (limitPname == 0) {
+            continue;
+        }
+        GLint limit = 0;
+        caps->queryInteger(limitPname, &limit);
+        if (limit > 0 && count > limit) {
+            error = std::string("too many active shader storage blocks in ") +
+                    shaderStageNameForLinkLimit(stage) + " shader: " +
+                    std::to_string(count) + " > " + std::to_string(limit);
+            return false;
+        }
+    }
+
+    GLint combinedLimit = 0;
+    caps->queryInteger(GL_MAX_COMBINED_SHADER_STORAGE_BLOCKS, &combinedLimit);
+    if (combinedLimit > 0 && combinedBlocks > combinedLimit) {
+        error = "too many combined active shader storage blocks: " +
+                std::to_string(combinedBlocks) + " > " +
+                std::to_string(combinedLimit);
+        return false;
+    }
+
+    GLint combinedOutputLimit = 0;
+    caps->queryInteger(GL_MAX_COMBINED_SHADER_OUTPUT_RESOURCES, &combinedOutputLimit);
+    if (combinedOutputLimit > 0 && combinedBlocks > combinedOutputLimit) {
+        error = "too many combined shader output resources from shader storage blocks: " +
+                std::to_string(combinedBlocks) + " > " +
+                std::to_string(combinedOutputLimit);
+        return false;
+    }
+
     return true;
 }
 

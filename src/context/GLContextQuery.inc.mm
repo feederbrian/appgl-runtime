@@ -2,6 +2,28 @@
 // It contains GLContext query-domain method definitions split out for navigation only.
 
 #if defined(APPGL_GLCONTEXT_QUERY_INDEXED)
+namespace {
+GLenum indexedBufferQueryLimitPname(GLenum target) {
+    switch (target) {
+        case GL_UNIFORM_BUFFER: return GL_MAX_UNIFORM_BUFFER_BINDINGS;
+        case GL_SHADER_STORAGE_BUFFER: return GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS;
+        case GL_ATOMIC_COUNTER_BUFFER: return GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS;
+        case GL_TRANSFORM_FEEDBACK_BUFFER: return GL_MAX_TRANSFORM_FEEDBACK_BUFFERS;
+        default: return 0;
+    }
+}
+
+GLint64 indexedBufferQueryLimit(const GLCapabilities* caps, GLenum target) {
+    const GLenum pname = indexedBufferQueryLimitPname(target);
+    if (caps == nullptr || pname == 0) {
+        return 0;
+    }
+    GLint64 value = 0;
+    caps->queryInteger64(pname, &value);
+    return value;
+}
+}  // namespace
+
 bool GLContext::queryFloatIndexed(GLenum target, GLuint index, GLfloat* data) {
     if (data == nullptr) return false;
     // GL 4.1 §13.6.1 — viewport-array targets reject out-of-range
@@ -21,6 +43,12 @@ bool GLContext::queryFloatIndexed(GLenum target, GLuint index, GLfloat* data) {
     // which calls glGetFloati_v on the SSBO_BINDING/START/SIZE pnames.
     IndexedBufferPname ibp;
     if (lookupIndexedBufferPname(target, ibp)) {
+        const GLint64 maxIndex =
+            indexedBufferQueryLimit(impl_->capabilities.get(), ibp.target);
+        if (maxIndex > 0 && static_cast<GLint64>(index) >= maxIndex) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
         const auto b = impl_->state->indexedBufferBinding(ibp.target, index);
         switch (ibp.field) {
             case IndexedBufferPname::Buffer: *data = static_cast<GLfloat>(b.buffer); break;
@@ -57,6 +85,12 @@ bool GLContext::queryDoubleIndexed(GLenum target, GLuint index, GLdouble* data) 
     if (impl_->state->queryDoubleIndexed(target, index, data)) return true;
     IndexedBufferPname ibp;
     if (lookupIndexedBufferPname(target, ibp)) {
+        const GLint64 maxIndex =
+            indexedBufferQueryLimit(impl_->capabilities.get(), ibp.target);
+        if (maxIndex > 0 && static_cast<GLint64>(index) >= maxIndex) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
         const auto b = impl_->state->indexedBufferBinding(ibp.target, index);
         switch (ibp.field) {
             case IndexedBufferPname::Buffer: *data = static_cast<GLdouble>(b.buffer); break;
@@ -83,6 +117,12 @@ bool GLContext::queryBooleanIndexed(GLenum target, GLuint index, GLboolean* data
     if (data == nullptr) return false;
     IndexedBufferPname ibp;
     if (lookupIndexedBufferPname(target, ibp)) {
+        const GLint64 maxIndex =
+            indexedBufferQueryLimit(impl_->capabilities.get(), ibp.target);
+        if (maxIndex > 0 && static_cast<GLint64>(index) >= maxIndex) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
         const auto b = impl_->state->indexedBufferBinding(ibp.target, index);
         GLint64 value = 0;
         switch (ibp.field) {
@@ -643,6 +683,12 @@ bool GLContext::queryIntegerIndexed(GLenum pname, GLuint index, GLint* data) {
     // indexed targets. Lives on the state tracker, not the cap layer.
     IndexedBufferPname ibp;
     if (lookupIndexedBufferPname(pname, ibp)) {
+        const GLint64 maxIndex =
+            indexedBufferQueryLimit(impl_->capabilities.get(), ibp.target);
+        if (maxIndex > 0 && static_cast<GLint64>(index) >= maxIndex) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
         const auto b = impl_->state->indexedBufferBinding(ibp.target, index);
         switch (ibp.field) {
             case IndexedBufferPname::Buffer: *data = static_cast<GLint>(b.buffer); break;
@@ -694,6 +740,12 @@ bool GLContext::queryInteger64Indexed(GLenum pname, GLuint index, GLint64* data)
     }
     IndexedBufferPname ibp;
     if (lookupIndexedBufferPname(pname, ibp)) {
+        const GLint64 maxIndex =
+            indexedBufferQueryLimit(impl_->capabilities.get(), ibp.target);
+        if (maxIndex > 0 && static_cast<GLint64>(index) >= maxIndex) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
         const auto b = impl_->state->indexedBufferBinding(ibp.target, index);
         switch (ibp.field) {
             case IndexedBufferPname::Buffer: *data = static_cast<GLint64>(b.buffer); break;

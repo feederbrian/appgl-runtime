@@ -234,6 +234,10 @@ struct StorageImageAccessVariables {
     std::unordered_set<std::uint32_t> writes;
 };
 
+struct StorageBufferAccessVariables {
+    std::unordered_set<std::uint32_t> writes;
+};
+
 template <typename ResourceList>
 StorageImageAccessVariables storageImageAccessVariables(
     const std::uint32_t* spirv,
@@ -322,6 +326,100 @@ StorageImageAccessVariables storageImageAccessVariables(
                     if (storageIds.find(base) != storageIds.end()) {
                         access.reads.insert(base);
                     }
+                }
+                break;
+            default:
+                break;
+        }
+
+        cursor += length;
+    }
+    return access;
+}
+
+template <typename ResourceList>
+StorageBufferAccessVariables storageBufferAccessVariables(
+    const std::uint32_t* spirv,
+    std::size_t wordCount,
+    const ResourceList& storageBuffers) {
+    std::unordered_set<std::uint32_t> storageIds;
+    std::unordered_map<std::uint32_t, std::uint32_t> baseForId;
+    for (const auto& buffer : storageBuffers) {
+        storageIds.insert(buffer.id);
+        baseForId[buffer.id] = buffer.id;
+    }
+
+    StorageBufferAccessVariables access;
+    std::size_t cursor = 5;  // SPIR-V header.
+    while (spirv != nullptr && cursor < wordCount) {
+        const std::uint32_t first = spirv[cursor];
+        const std::uint16_t op = static_cast<std::uint16_t>(first & 0xffffu);
+        const std::uint16_t length = static_cast<std::uint16_t>(first >> 16u);
+        if (length == 0 || cursor + length > wordCount) {
+            break;
+        }
+        const std::uint32_t* inst = spirv + cursor;
+        auto baseFor = [&](std::uint32_t id) -> std::uint32_t {
+            auto it = baseForId.find(id);
+            return it == baseForId.end() ? 0u : it->second;
+        };
+        auto mapResultFrom = [&](std::uint32_t resultId,
+                                 std::uint32_t sourceId) {
+            const std::uint32_t base = baseFor(sourceId);
+            if (base != 0) {
+                baseForId[resultId] = base;
+            }
+        };
+        auto markWrite = [&](std::uint32_t pointerId) {
+            const std::uint32_t base = baseFor(pointerId);
+            if (storageIds.find(base) != storageIds.end()) {
+                access.writes.insert(base);
+            }
+        };
+
+        switch (static_cast<spv::Op>(op)) {
+            case spv::OpLoad:
+                if (length >= 4) {
+                    mapResultFrom(inst[2], inst[3]);
+                }
+                break;
+            case spv::OpAccessChain:
+            case spv::OpInBoundsAccessChain:
+            case spv::OpPtrAccessChain:
+                if (length >= 4) {
+                    mapResultFrom(inst[2], inst[3]);
+                }
+                break;
+            case spv::OpCopyObject:
+                if (length >= 4) {
+                    mapResultFrom(inst[2], inst[3]);
+                }
+                break;
+            case spv::OpPhi:
+                if (length >= 5) {
+                    for (std::uint16_t i = 3; i + 1 < length; i += 2) {
+                        const std::uint32_t base = baseFor(inst[i]);
+                        if (base != 0) {
+                            baseForId[inst[2]] = base;
+                            break;
+                        }
+                    }
+                }
+                break;
+            case spv::OpSelect:
+                if (length >= 6) {
+                    const std::uint32_t trueBase = baseFor(inst[4]);
+                    const std::uint32_t falseBase = baseFor(inst[5]);
+                    if (trueBase != 0 && trueBase == falseBase) {
+                        baseForId[inst[2]] = trueBase;
+                    }
+                }
+                break;
+            case spv::OpStore:
+            case spv::OpCopyMemory:
+            case spv::OpCopyMemorySized:
+                if (length >= 2) {
+                    markWrite(inst[1]);
                 }
                 break;
             default:
@@ -6821,6 +6919,13 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             // Sort by GL binding to get a deterministic assignment order
             // that matches between spirvToMSL and reflect.
             struct UBOEntry { std::uint32_t glBinding; spirv_cross::Resource* res; std::uint32_t arraySize; };
+            auto spirvArrayElementCount = [](const spirv_cross::SPIRType& type) -> std::uint32_t {
+                std::uint32_t count = 1;
+                for (const auto dim : type.array) {
+                    count *= dim > 0 ? static_cast<std::uint32_t>(dim) : 1u;
+                }
+                return count;
+            };
             std::vector<UBOEntry> sortedUBOs;
             for (auto& ubo : resources.uniform_buffers) {
                 // Skip UBOs not actively referenced in this stage.
@@ -6829,7 +6934,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 e.glBinding = compiler.get_decoration(ubo.id, spv::DecorationBinding);
                 e.res = &ubo;
                 const auto& varType = compiler.get_type(ubo.type_id);
-                e.arraySize = (!varType.array.empty() && varType.array[0] > 0) ? varType.array[0] : 1;
+                e.arraySize = !varType.array.empty() ? spirvArrayElementCount(varType) : 1;
                 sortedUBOs.push_back(e);
             }
             std::sort(sortedUBOs.begin(), sortedUBOs.end(),
@@ -6970,8 +7075,11 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 auto& entry = sortedSSBOs[i];
                 std::uint32_t slotSpan = 1;
                 const auto& varType = compiler.get_type(entry.res->type_id);
-                if (!varType.array.empty() && varType.array[0] > 0) {
-                    slotSpan = varType.array[0];
+                if (!varType.array.empty()) {
+                    slotSpan = 1;
+                    for (const auto dim : varType.array) {
+                        slotSpan *= dim > 0 ? static_cast<std::uint32_t>(dim) : 1u;
+                    }
                 }
                 spirv_cross::MSLResourceBinding binding;
                 binding.stage = compiler.get_execution_model();
@@ -8494,12 +8602,19 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         {
             struct UBORef { std::uint32_t glBinding; std::uint32_t arraySize;
                             spirv_cross::Resource* res; bool active; };
+            auto spirvArrayElementCount = [](const spirv_cross::SPIRType& type) -> std::uint32_t {
+                std::uint32_t count = 1;
+                for (const auto dim : type.array) {
+                    count *= dim > 0 ? static_cast<std::uint32_t>(dim) : 1u;
+                }
+                return count;
+            };
             std::vector<UBORef> sortedUBOs;
             for (auto& ubo : resources.uniform_buffers) {
                 UBORef r;
                 r.glBinding = compiler.get_decoration(ubo.id, spv::DecorationBinding);
                 const auto& vt = compiler.get_type(ubo.type_id);
-                r.arraySize = (!vt.array.empty() && vt.array[0] > 0) ? vt.array[0] : 1;
+                r.arraySize = !vt.array.empty() ? spirvArrayElementCount(vt) : 1;
                 r.res = &ubo;
                 r.active = (activeVars.find(ubo.id) != activeVars.end());
                 sortedUBOs.push_back(r);
@@ -8563,7 +8678,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             {
                 const auto& varType = compiler.get_type(ubo.type_id);
                 if (!varType.array.empty()) {
-                    rb.blockArraySize = entry.arraySize; // true array (even if [1])
+                    rb.blockArraySize = entry.arraySize; // true array product (even if [1])
                 }
             }
 
@@ -8762,16 +8877,18 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                         memberExtent = 12; break;
                     case GL_FLOAT_VEC4: case GL_INT_VEC4: case GL_UNSIGNED_INT_VEC4: case GL_BOOL_VEC4:
                         memberExtent = 16; break;
-                    // Matrices: cols × 16 (each column is vec4-padded in std140)
+                    // Matrices: major vectors × 16 in std140. Row-major
+                    // rectangular matrices are reflected with RowMajor
+                    // decoration, so their major vector count is rows.
                     case GL_FLOAT_MAT2:   memberExtent = 2 * 16; break;
                     case GL_FLOAT_MAT3:   memberExtent = 3 * 16; break;
                     case GL_FLOAT_MAT4:   memberExtent = 4 * 16; break;
-                    case GL_FLOAT_MAT2x3: memberExtent = 2 * 16; break;
-                    case GL_FLOAT_MAT2x4: memberExtent = 2 * 16; break;
-                    case GL_FLOAT_MAT3x2: memberExtent = 3 * 16; break;
-                    case GL_FLOAT_MAT3x4: memberExtent = 3 * 16; break;
-                    case GL_FLOAT_MAT4x2: memberExtent = 4 * 16; break;
-                    case GL_FLOAT_MAT4x3: memberExtent = 4 * 16; break;
+                    case GL_FLOAT_MAT2x3: memberExtent = (m.isRowMajor ? 3 : 2) * 16; break;
+                    case GL_FLOAT_MAT2x4: memberExtent = (m.isRowMajor ? 4 : 2) * 16; break;
+                    case GL_FLOAT_MAT3x2: memberExtent = (m.isRowMajor ? 2 : 3) * 16; break;
+                    case GL_FLOAT_MAT3x4: memberExtent = (m.isRowMajor ? 4 : 3) * 16; break;
+                    case GL_FLOAT_MAT4x2: memberExtent = (m.isRowMajor ? 2 : 4) * 16; break;
+                    case GL_FLOAT_MAT4x3: memberExtent = (m.isRowMajor ? 3 : 4) * 16; break;
                     default: break;
                 }
                 // For arrays, total extent = arraySize × stride (stride = vec4-aligned element)
@@ -8785,6 +8902,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                     rb.byteSize = (memberEnd + 15) & ~std::size_t(15);
                 }
             }
+            rb.byteSize = (rb.byteSize + 15) & ~std::size_t(15);
 
             result.uniformBlocks.push_back(std::move(rb));
             } // end for sortedUBOs
@@ -9212,6 +9330,8 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         // First: collect and sort SSBOs by glBinding to match spirvToMSL.
         std::vector<std::pair<std::uint32_t, spirv_cross::Resource*>> sortedSSBOs;
         auto ssboActive = compiler.get_active_interface_variables();
+        auto ssboAccesses =
+            storageBufferAccessVariables(spirv, wordCount, resources.storage_buffers);
         for (auto& ssbo : resources.storage_buffers) {
             if (isAtomicCounterStorageBuffer(ssbo)) continue;
             sortedSSBOs.emplace_back(
@@ -9227,7 +9347,11 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             {
                 const auto& varType = compiler.get_type(ssbo.type_id);
                 if (!varType.array.empty()) {
-                    rb.blockArraySize = varType.array[0];
+                    std::uint32_t count = 1;
+                    for (const auto dim : varType.array) {
+                        count *= dim > 0 ? static_cast<std::uint32_t>(dim) : 1u;
+                    }
+                    rb.blockArraySize = count;
                 }
             }
             const std::uint32_t slotSpan =
@@ -9247,6 +9371,8 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 nextSSBOSlot += slotSpan;
             }
             rb.active = (ssboActive.find(ssbo.id) != ssboActive.end());
+            rb.storageBufferWritten =
+                ssboAccesses.writes.find(ssbo.id) != ssboAccesses.writes.end();
             const auto& ssboType = compiler.get_type(ssbo.base_type_id);
             rb.containsFp64 = spirvTypeUsesFp64(compiler, ssboType);
             const std::string typeName = compiler.get_name(ssboType.self);
@@ -9506,6 +9632,15 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 }
             };
             flattenSSBO(ssboType, "", 0, 1, 0, true);
+            for (const auto& member : rb.members) {
+                if (member.size == 0) {
+                    continue;
+                }
+                rb.byteSize = std::max(
+                    rb.byteSize,
+                    member.offset + member.size);
+            }
+            rb.byteSize = (rb.byteSize + 15) & ~std::size_t(15);
             result.storageBuffers.push_back(std::move(rb));
         }
 

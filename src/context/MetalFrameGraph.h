@@ -574,8 +574,10 @@ struct TranslatedDrawInfo {
         // Effective bound byte range. Used by the Sprint 18 Item42
         // graphics argbuf sidecar for SSBO `.length()` / OpArrayLength.
         std::size_t size = 0;
+        std::vector<std::uint8_t> ownedData;
         bool isVertex = false;
         bool isFragment = false;
+        bool shaderWrites = false;
     };
     std::vector<SSBOBinding> ssboBindings;
 
