@@ -12333,12 +12333,19 @@ EmulatedDraw emulateGeometryDraw(
     const Interpreter::UniformBufferMap* gsUboMapPtr =
         gsUboMap.empty() ? nullptr : &gsUboMap;
 
+    std::unordered_map<std::string, std::uint32_t> vsInputLocOverrides;
+    std::vector<VsAttribFetchSource> vsAttribSources;
+    if (haveVs) {
+        vsInputLocOverrides = buildVsInputLocationOverrides(program);
+        vsAttribSources = buildVsAttribFetchSources(vao, objects);
+    }
+
     const GLsizei effectiveInstances = std::max<GLsizei>(1, instanceCount);
     for (GLsizei instanceIdx = 0; instanceIdx < effectiveInstances; ++instanceIdx) {
         const std::int32_t glInstanceID = static_cast<std::int32_t>(instanceIdx);
         const std::int32_t shaderInstanceID = glInstanceID +
             static_cast<std::int32_t>(baseInstance);
-        (void)shaderInstanceID;   // gl_InstanceID = instanceIdx per spec; baseInstance affects VBO fetch.
+        // gl_InstanceID = instanceIdx per spec; baseInstance affects VBO fetch.
 
         // Per-instance VS pre-pass. Results live in a local vector
         // and flow into the per-primitive GS run for THIS instance.
@@ -12381,12 +12388,11 @@ EmulatedDraw emulateGeometryDraw(
                     ? static_cast<std::size_t>(elementIndices[vi])
                     : static_cast<std::size_t>(first + vi);
                 vsAttribs.clear();
-                for (std::size_t ai = 0; ai < vao.attributes.size(); ++ai) {
-                    if (!vao.attributes[ai].enabled) continue;
-                    Value v = readVertexAttribFromVAO(
-                        vao, objects, ai, vboSlot, /*instanceIdx=*/0);
+                for (const auto& src : vsAttribSources) {
+                    Value v = readVertexAttribFromSource(
+                        src, vboSlot, shaderInstanceID);
                     if (v.kind != Value::Kind::Invalid) {
-                        vsAttribs[static_cast<std::uint32_t>(ai)] = v;
+                        vsAttribs[src.location] = v;
                     }
                 }
                 Interpreter vsInterp(vsMod, Interpreter::Stage::Vertex,
@@ -12394,6 +12400,9 @@ EmulatedDraw emulateGeometryDraw(
                 vsInterp.setUniforms(&vsUniforms);
                 vsInterp.setVsInputs(&vsAttribs,
                     static_cast<std::int32_t>(vboSlot), glInstanceID);
+                if (!vsInputLocOverrides.empty()) {
+                    vsInterp.setVsInputLocationOverrides(&vsInputLocOverrides);
+                }
                 if (vsSampledTextures != nullptr) {
                     vsInterp.setSampledTextures(vsSampledTextures);
                 }
