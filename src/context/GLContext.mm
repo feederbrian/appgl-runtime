@@ -20054,6 +20054,8 @@ struct GLContext::Impl {
                     if (binding.buffer == 0) continue;
                     GLBufferObject* bufObj = objects->buffers().get(binding.buffer);
                     if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+                    const bool bufferGpuAuthored =
+                        bufObj->gpuAuthoredSinceCpuWrite;
                     drainPendingGpuProducers({
                         {GpuResourceAccess::Kind::Buffer,
                          binding.buffer, kProducerAll},
@@ -20068,7 +20070,9 @@ struct GLContext::Impl {
                     // same GL binding to real-buffer mode only when any stage
                     // actually writes that binding; read-only SSBOs keep their
                     // per-draw CPU snapshot path for glBufferSubData cadence.
-                    sb.shaderWrites = storageBindingHasStageWrite(glBindingPoint);
+                    const bool stageWrites =
+                        storageBindingHasStageWrite(glBindingPoint);
+                    sb.shaderWrites = stageWrites;
                     if (binding.size > 0) {
                         sb.size = static_cast<std::size_t>(binding.size);
                     } else if (binding.offset >= 0 && bufObj->size > binding.offset) {
@@ -20089,7 +20093,9 @@ struct GLContext::Impl {
                                 extensionContext, sb.size);
                         }
                     }
-                    if (!sb.shaderWrites && sb.size > 0 &&
+                    const bool useCpuSnapshot =
+                        !stageWrites && !bufferGpuAuthored;
+                    if (useCpuSnapshot && sb.size > 0 &&
                         binding.offset >= 0 && !bufObj->shadowBytes.empty()) {
                         const std::size_t sourceOffset =
                             static_cast<std::size_t>(binding.offset);
@@ -46836,6 +46842,9 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
             }
         }
         for (const auto& ssbo : tdi.ssboBindings) {
+            if (!ssbo.shaderWrites) {
+                continue;
+            }
             producerWrites.push_back(
                 {GpuResourceAccess::Kind::Buffer, ssbo.glBufferName,
                  kProducerShaderStorageWrite});
