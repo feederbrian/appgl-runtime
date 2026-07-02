@@ -19983,6 +19983,43 @@ struct GLContext::Impl {
         info.atomicCounterBindings.reserve(
             program.resourceAtomicCounterBuffers.size() * 2);
 
+        auto storageBindingHasStageWrite = [&](GLuint glBindingPoint) -> bool {
+            auto stageHasWrite = [&](const ShaderReflection* reflection) -> bool {
+                if (reflection == nullptr) return false;
+                for (const auto& ssbo : reflection->storageBuffers) {
+                    GLuint effectiveBinding = ssbo.glBinding;
+                    for (const auto& rb : program.resourceStorageBlocks) {
+                        if (rb.name == ssbo.name && rb.location >= 0) {
+                            effectiveBinding = static_cast<GLuint>(rb.location);
+                            break;
+                        }
+                    }
+                    const int numInstances = (ssbo.blockArraySize > 0)
+                        ? static_cast<int>(ssbo.blockArraySize) : 1;
+                    const bool isArray = (ssbo.blockArraySize > 0);
+                    for (int inst = 0; inst < numInstances; ++inst) {
+                        std::string lookupName = ssbo.name;
+                        if (isArray) lookupName += "[" + std::to_string(inst) + "]";
+                        GLuint candidateBinding =
+                            effectiveBinding + static_cast<GLuint>(inst);
+                        for (const auto& rb : program.resourceStorageBlocks) {
+                            if (rb.name == lookupName && rb.location >= 0) {
+                                candidateBinding = static_cast<GLuint>(rb.location);
+                                break;
+                            }
+                        }
+                        if (candidateBinding == glBindingPoint &&
+                            ssbo.storageBufferWritten) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            };
+            return stageHasWrite(info.vertexReflection) ||
+                   stageHasWrite(info.fragmentReflection);
+        };
+
         auto resolveStage = [&](const ShaderReflection* reflection,
                                 bool isVertex, bool isFragment) {
             if (reflection == nullptr) return;
@@ -20026,7 +20063,12 @@ struct GLContext::Impl {
                     sb.metalBuffer = bufObj->metalBuffer;
                     sb.glBufferName = binding.buffer;
                     sb.offset = static_cast<std::size_t>(binding.offset);
-                    sb.shaderWrites = ssbo.storageBufferWritten;
+                    // Graphics SSBOs can be written in one stage and read in
+                    // another during the same draw. Promote all stages of the
+                    // same GL binding to real-buffer mode only when any stage
+                    // actually writes that binding; read-only SSBOs keep their
+                    // per-draw CPU snapshot path for glBufferSubData cadence.
+                    sb.shaderWrites = storageBindingHasStageWrite(glBindingPoint);
                     if (binding.size > 0) {
                         sb.size = static_cast<std::size_t>(binding.size);
                     } else if (binding.offset >= 0 && bufObj->size > binding.offset) {

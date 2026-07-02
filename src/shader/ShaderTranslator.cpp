@@ -422,6 +422,29 @@ StorageBufferAccessVariables storageBufferAccessVariables(
                     markWrite(inst[1]);
                 }
                 break;
+            case spv::OpAtomicStore:
+                if (length >= 2) {
+                    markWrite(inst[1]);
+                }
+                break;
+            case spv::OpAtomicExchange:
+            case spv::OpAtomicCompareExchange:
+            case spv::OpAtomicCompareExchangeWeak:
+            case spv::OpAtomicIIncrement:
+            case spv::OpAtomicIDecrement:
+            case spv::OpAtomicIAdd:
+            case spv::OpAtomicISub:
+            case spv::OpAtomicSMin:
+            case spv::OpAtomicUMin:
+            case spv::OpAtomicSMax:
+            case spv::OpAtomicUMax:
+            case spv::OpAtomicAnd:
+            case spv::OpAtomicOr:
+            case spv::OpAtomicXor:
+                if (length >= 4) {
+                    markWrite(inst[3]);
+                }
+                break;
             default:
                 break;
         }
@@ -9445,8 +9468,12 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                     // Compute this member's effective top-level size:
                     // - at the top level, it's the member's own
                     //   outermost array dim (or 1 if not an array).
-                    // - unbounded top-level arrays (`data[]`) report 0,
-                    //   matching Piglit's ARB_ssbo program-interface query.
+                    // - unbounded top-level arrays of scalars/vectors
+                    //   (`data[]`) still report a top-level array size of 1;
+                    //   the member's GL_ARRAY_SIZE below remains 0 to
+                    //   represent the runtime array.
+                    // - unbounded top-level arrays of structs (`s[]`) keep 0,
+                    //   and nested leaves inherit that unsized top-level.
                     // - below the top level, inherit the incoming value.
                     GLint effTopLevel = topLevelArraySize;
                     GLint effTopLevelStride = topLevelArrayStride;
@@ -9457,8 +9484,11 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                         } else if (outermostDim > 0) {
                             effTopLevel = static_cast<GLint>(outermostDim);
                             effTopLevelStride = reflectedArrayStride;
+                        } else if (memberType.basetype == spirv_cross::SPIRType::Struct) {
+                            effTopLevel = 0;  // unsized top-level struct array
+                            effTopLevelStride = reflectedArrayStride;
                         } else {
-                            effTopLevel = 0;  // unbounded top-level array
+                            effTopLevel = 1;  // runtime array, top-level member count
                             effTopLevelStride = reflectedArrayStride;
                         }
                     }

@@ -10799,7 +10799,7 @@ struct MetalFrameGraph::Impl {
                     }
                     [currentRenderEncoder useResource:resolved.buffer
                                                 usage:usage
-                                               stages:stage];
+                                                stages:stage];
                 }
                 for (const auto& atomic : info.atomicCounterBindings) {
                     if (atomic.metalBuffer == nullptr) continue;
