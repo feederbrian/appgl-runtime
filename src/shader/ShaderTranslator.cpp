@@ -4432,7 +4432,7 @@ static inline uint4 appgl_texture_border_u_1d(texture1d<uint> tex, sampler smp, 
 
 static inline int4 appgl_texture_border_i_1d_array(texture1d_array<int> tex, sampler smp, float coord, uint layer, constant uint* modes, constant int4* colors, uint slot) {
     if (appgl_integer_border_oob_1d(coord, modes, slot)) return colors[slot];
-    return float4(1.0f / 3.0f);
+    return tex.sample(smp, coord, layer);
 }
 
 static inline uint4 appgl_texture_border_u_1d_array(texture1d_array<uint> tex, sampler smp, float coord, uint layer, constant uint* modes, constant int4* colors, uint slot) {
