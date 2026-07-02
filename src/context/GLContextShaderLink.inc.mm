@@ -52,6 +52,26 @@ bool GLContext::linkProgram(GLuint program) {
     const auto priorSsboBindingRemap = programObject->ssboBindingRemap;
     const auto priorSamplerExplicitBindings = programObject->samplerExplicitBindings;
     const auto priorImageExplicitBindings = programObject->imageExplicitBindings;
+    const bool priorHasTranslatedPipeline =
+        programObject->hasTranslatedPipeline;
+    const auto priorVertexMSL = programObject->vertexMSL;
+    const auto priorFragmentMSL = programObject->fragmentMSL;
+    const bool priorVertexMslUsesArgumentBuffer =
+        programObject->vertexMslUsesArgumentBuffer;
+    const bool priorFragmentMslUsesArgumentBuffer =
+        programObject->fragmentMslUsesArgumentBuffer;
+    const bool priorVertexMslWritesRenderTargetArrayIndex =
+        programObject->vertexMslWritesRenderTargetArrayIndex;
+    const bool priorVertexMslWritesViewportArrayIndex =
+        programObject->vertexMslWritesViewportArrayIndex;
+    const bool priorVertexMslHasClipControlYSignParameter =
+        programObject->vertexMslHasClipControlYSignParameter;
+    const bool priorFragmentMslUsesFragCoordParams =
+        programObject->fragmentMslUsesFragCoordParams;
+    const auto priorVertexReflection = programObject->vertexReflection;
+    const auto priorFragmentReflection = programObject->fragmentReflection;
+    const auto priorVertexSourceHash = programObject->vertexSourceHash;
+    const auto priorFragmentSourceHash = programObject->fragmentSourceHash;
     auto restorePriorExecutableForFailedRelink = [&]() {
         if (!hadPriorExecutable) {
             return;
@@ -83,6 +103,35 @@ bool GLContext::linkProgram(GLuint program) {
         programObject->ssboBindingRemap = priorSsboBindingRemap;
         programObject->samplerExplicitBindings = priorSamplerExplicitBindings;
         programObject->imageExplicitBindings = priorImageExplicitBindings;
+        programObject->hasTranslatedPipeline = priorHasTranslatedPipeline;
+        programObject->vertexMSL = priorVertexMSL;
+        programObject->fragmentMSL = priorFragmentMSL;
+        programObject->vertexMslUsesArgumentBuffer =
+            priorVertexMslUsesArgumentBuffer;
+        programObject->fragmentMslUsesArgumentBuffer =
+            priorFragmentMslUsesArgumentBuffer;
+        programObject->vertexMslWritesRenderTargetArrayIndex =
+            priorVertexMslWritesRenderTargetArrayIndex;
+        programObject->vertexMslWritesViewportArrayIndex =
+            priorVertexMslWritesViewportArrayIndex;
+        programObject->vertexMslHasClipControlYSignParameter =
+            priorVertexMslHasClipControlYSignParameter;
+        programObject->fragmentMslUsesFragCoordParams =
+            priorFragmentMslUsesFragCoordParams;
+        programObject->vertexReflection = priorVertexReflection;
+        programObject->fragmentReflection = priorFragmentReflection;
+        programObject->vertexSourceHash = priorVertexSourceHash;
+        programObject->fragmentSourceHash = priorFragmentSourceHash;
+        programObject->uniformLayoutComputed = false;
+        programObject->invalidateUniformBufferCache();
+        programObject->invalidateSamplerBindingRecipeCache();
+        phase2PlanInvalidateProgramStructuralFingerprint(*programObject);
+        if (impl_->frameGraph != nullptr) {
+            impl_->frameGraph->invalidateMslHashMemoForStringObject(
+                &programObject->vertexMSL);
+            impl_->frameGraph->invalidateMslHashMemoForStringObject(
+                &programObject->fragmentMSL);
+        }
         programObject->linked = false;
     };
 

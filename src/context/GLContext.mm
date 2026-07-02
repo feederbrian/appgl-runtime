@@ -30694,6 +30694,23 @@ struct GLContext::Impl {
     GLsizei defaultDrawableRequestHeight() const {
         return std::max<GLsizei>(drawableSurfaceHeight(), 1);
     }
+    bool defaultDrawableLayerBoundsExceedRequest() const {
+        if (layer == nil) {
+            return false;
+        }
+        const CGSize bounds = layer.bounds.size;
+        return bounds.width >
+                   static_cast<CGFloat>(defaultDrawableRequestWidth()) ||
+               bounds.height >
+                   static_cast<CGFloat>(defaultDrawableRequestHeight());
+    }
+    bool defaultDrawableGrowOnlyActiveForViewport() const {
+        if (!defaultDrawableGrowOnlyEnabled()) {
+            return false;
+        }
+        return viewportX > 0 || viewportY > 0 ||
+               defaultDrawableLayerBoundsExceedRequest();
+    }
     bool defaultFramebufferMsaaEnabled() const {
         return defaultFramebufferMsaaSamples == 2 ||
                defaultFramebufferMsaaSamples == 4;
@@ -30798,10 +30815,11 @@ struct GLContext::Impl {
             std::max<GLsizei>(
                 std::max<GLsizei>(defaultDrawableRequestHeight(), minHeight),
                 1);
-        const GLsizei width = defaultDrawableGrowOnlyEnabled()
+        const bool growOnly = defaultDrawableGrowOnlyActiveForViewport();
+        const GLsizei width = growOnly
             ? std::max<GLsizei>(requestedWidth, defaultFramebufferShadowWidth)
             : requestedWidth;
-        const GLsizei height = defaultDrawableGrowOnlyEnabled()
+        const GLsizei height = growOnly
             ? std::max<GLsizei>(requestedHeight, defaultFramebufferShadowHeight)
             : requestedHeight;
         const std::size_t byteCount =
@@ -30852,10 +30870,11 @@ struct GLContext::Impl {
             std::max<GLsizei>(
                 std::max<GLsizei>(defaultDrawableRequestHeight(), minHeight),
                 1);
-        const GLsizei width = defaultDrawableGrowOnlyEnabled()
+        const bool growOnly = defaultDrawableGrowOnlyActiveForViewport();
+        const GLsizei width = growOnly
             ? std::max<GLsizei>(requestedWidth, defaultFramebufferDepthStencilShadowWidth)
             : requestedWidth;
-        const GLsizei height = defaultDrawableGrowOnlyEnabled()
+        const GLsizei height = growOnly
             ? std::max<GLsizei>(requestedHeight, defaultFramebufferDepthStencilShadowHeight)
             : requestedHeight;
         const std::size_t pixelCount =
@@ -30977,7 +30996,7 @@ struct GLContext::Impl {
         }
         const GLsizei width = defaultDrawableRequestWidth();
         const GLsizei height = defaultDrawableRequestHeight();
-        if (defaultDrawableGrowOnlyEnabled()) {
+        if (defaultDrawableGrowOnlyActiveForViewport()) {
             frameGraph->ensureDrawableSizeAtLeast(width, height);
         } else {
             frameGraph->resizeDrawable(width, height);
@@ -31074,7 +31093,7 @@ struct GLContext::Impl {
             width < 0 || height < 0) {
             return false;
         }
-        if (defaultDrawableGrowOnlyEnabled() &&
+        if (defaultDrawableGrowOnlyActiveForViewport() &&
             (x < 0 || y < 0 ||
              x + width > defaultFramebufferShadowWidth ||
              y + height > defaultFramebufferShadowHeight)) {
@@ -42903,6 +42922,7 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
     if (ppo->fragmentProgram != 0) {
         GLProgramObject* fsProg = objects->programs().get(ppo->fragmentProgram);
         if (fsProg != nullptr) {
+            bool importedFragmentUniformValues = false;
             vsProg->fragmentMSL = fsProg->fragmentMSL;
             vsProg->fragmentMslUsesArgumentBuffer =
                 fsProg->fragmentMslUsesArgumentBuffer;
@@ -42924,8 +42944,26 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
                 }
                 auto valueIt = fsProg->uniformValues.find(fsUniform.location);
                 if (valueIt != fsProg->uniformValues.end()) {
-                    vsProg->uniformValues[fsUniform.location] = valueIt->second;
+                    auto targetIt = vsProg->uniformValues.find(fsUniform.location);
+                    const GLProgramUniformValue& sourceValue = valueIt->second;
+                    const bool valueChanged =
+                        targetIt == vsProg->uniformValues.end() ||
+                        targetIt->second.type != sourceValue.type ||
+                        targetIt->second.arraySize != sourceValue.arraySize ||
+                        targetIt->second.floats != sourceValue.floats ||
+                        targetIt->second.ints != sourceValue.ints ||
+                        targetIt->second.uints != sourceValue.uints ||
+                        targetIt->second.doubles != sourceValue.doubles ||
+                        targetIt->second.df64TransportWords !=
+                            sourceValue.df64TransportWords;
+                    if (valueChanged) {
+                        vsProg->uniformValues[fsUniform.location] = sourceValue;
+                        importedFragmentUniformValues = true;
+                    }
                 }
+            }
+            if (importedFragmentUniformValues) {
+                vsProg->markUniformsDirty();
             }
             for (const auto& fsAc : fsProg->resourceAtomicCounterBuffers) {
                 auto existing = std::find_if(

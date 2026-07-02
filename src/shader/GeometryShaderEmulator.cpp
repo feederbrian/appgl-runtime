@@ -13216,6 +13216,7 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     const bool needsPackedBuffer = needsTrailingBuffer
         || hasPackedOnlyUserSlots || hasPackedOnlyClipSlots || hasPackedOnlyCullSlots;
     const bool useClipControlYSign =
+        !emitViewportArrayIndex &&
         draw.clipDistanceLen == 0 && draw.cullDistanceLen == 0;
     constexpr std::uint32_t kClipControlYSignBufferSlot = 29u;
     auto packedValueExpr = [&](std::uint32_t offset,

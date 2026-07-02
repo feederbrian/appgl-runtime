@@ -50,7 +50,8 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 ? impl_->objects->programPipelines().get(pipelineName)
                 : nullptr;
             const GLuint vsProg = ppo ? ppo->vertexProgram : 0;
-            if (vsProg == 0) {
+            const GLuint gsProg = ppo ? ppo->geometryProgram : 0;
+            if (gsProg != 0 && vsProg == 0) {
                 pushError(GL_INVALID_OPERATION);
                 return false;
             }
@@ -62,7 +63,6 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     return false;
                 }
             }
-            const GLuint gsProg = ppo ? ppo->geometryProgram : 0;
             if (gsProg != 0) {
                 const GLProgramObject* gsP = impl_->objects->programs().get(gsProg);
                 bool pipelineHasTess = false;

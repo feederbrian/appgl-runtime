@@ -54,17 +54,18 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             pushError(GL_INVALID_OPERATION);
             return false;
         }
-        // GL 4.6 §7.3 & §11 — when no program is currently in use,
-        // drawing requires a program pipeline whose vertex stage is
-        // non-zero and linked. CTS
+        // A GS-only separable pipeline has no VS output to consume; CTS
         // geometry_shader.api.{fs_gs_draw_call,
-        // pipeline_program_without_active_vs} exercises this.
+        // pipeline_program_without_active_vs} requires GL_INVALID_OPERATION.
+        // Fragment-only/no-pipeline draws are undefined, but must not raise a
+        // draw error (covered by separate_shader_objects.StateInteraction).
         if (progName == 0) {
             const GLProgramPipelineObject* ppo = (pipelineName != 0)
                 ? impl_->objects->programPipelines().get(pipelineName)
                 : nullptr;
             const GLuint vsProg = ppo ? ppo->vertexProgram : 0;
-            if (vsProg == 0) {
+            const GLuint gsProg = ppo ? ppo->geometryProgram : 0;
+            if (gsProg != 0 && vsProg == 0) {
                 pushError(GL_INVALID_OPERATION);
                 return false;
             }
@@ -78,7 +79,6 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             }
             // Check GS stage topology compatibility too — a pipeline
             // with a GS program follows the same §11.3.1 rule.
-            const GLuint gsProg = ppo ? ppo->geometryProgram : 0;
             if (gsProg != 0) {
                 const GLProgramObject* gsP = impl_->objects->programs().get(gsProg);
                 // Tess-in-pipeline suppression: if any other stage
