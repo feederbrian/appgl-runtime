@@ -420,6 +420,21 @@ bool GLContext::linkProgram(GLuint program) {
         }
         return columns * static_cast<GLuint>(std::max<GLint>(1, arraySize));
     };
+    auto arrayElementCount = [](const std::vector<GLint>& dims,
+                                GLint fallback,
+                                std::size_t first = 0) -> GLint {
+        if (dims.empty() || first >= dims.size()) {
+            return fallback;
+        }
+        GLint count = 1;
+        for (std::size_t i = first; i < dims.size(); ++i) {
+            if (dims[i] <= 0) {
+                return fallback;
+            }
+            count *= dims[i];
+        }
+        return count;
+    };
     if (vertexShader != nullptr) {
         std::unordered_set<GLuint> usedAttribLocations;
         auto reserveAttribLocationRange = [&usedAttribLocations](
@@ -459,8 +474,10 @@ bool GLContext::linkProgram(GLuint program) {
         };
 
         for (const auto& input : vertexShader->declaredInputs) {
+            const GLint locationArraySize =
+                arrayElementCount(input.arrayDimensions, input.arraySize);
             const GLuint slotCount =
-                vertexInputLocationSlotCount(input.type, input.arraySize);
+                vertexInputLocationSlotCount(input.type, locationArraySize);
             if (input.explicitLocation >= 0) {
                 reserveAttribLocationRange(input.explicitLocation, slotCount);
                 continue;
@@ -478,8 +495,11 @@ bool GLContext::linkProgram(GLuint program) {
             attrib.type = input.type;
             attrib.arraySize = input.arraySize;
             attrib.isArray = input.isArray;
+            attrib.arrayDimensions = input.arrayDimensions;
+            const GLint locationArraySize =
+                arrayElementCount(input.arrayDimensions, input.arraySize);
             const GLuint slotCount =
-                vertexInputLocationSlotCount(input.type, input.arraySize);
+                vertexInputLocationSlotCount(input.type, locationArraySize);
             if (input.explicitLocation >= 0) {
                 attrib.location = input.explicitLocation;
                 attrib.locationExplicit = true;
@@ -2962,12 +2982,35 @@ bool GLContext::linkProgram(GLuint program) {
     }
     // ─── End ATOMIC_COUNTER_BUFFER build ────────────────────────────────
     for (const auto& a : programObject->attributes) {
-        GLProgramResourceEntry entry;
         // GL 4.6 §7.3.1: for array inputs, the resource name ends
         // with "[0]" — even for 1-element arrays like `in vec4
         // c[1]`. `a.isArray` is the authoritative "declared with
         // array syntax" flag (`a.arraySize==1` alone can't
         // distinguish non-arrays from 1-element arrays).
+        if (a.arrayDimensions.size() > 1 && a.arrayDimensions[0] > 0) {
+            const GLint innerArraySize =
+                arrayElementCount(a.arrayDimensions, 1, 1);
+            const GLuint slotsPerOuter =
+                vertexInputLocationSlotCount(a.type, innerArraySize);
+            for (GLint outer = 0; outer < a.arrayDimensions[0]; ++outer) {
+                GLProgramResourceEntry entry;
+                entry.name = a.name + "[" + std::to_string(outer) + "]";
+                entry.type = a.type;
+                entry.location = a.location >= 0
+                    ? a.location + static_cast<GLint>(outer * slotsPerOuter)
+                    : a.location;
+                entry.arraySize = innerArraySize;
+                entry.isArray = true;
+                entry.arrayDimensions.assign(
+                    a.arrayDimensions.begin() + 1,
+                    a.arrayDimensions.end());
+                entry.referencedBy = 0x01; // vertex
+                programObject->resourceInputs.push_back(std::move(entry));
+            }
+            continue;
+        }
+
+        GLProgramResourceEntry entry;
         entry.name = a.isArray ? (a.name + "[0]") : a.name;
         entry.type = a.type;
         entry.location = a.location;
@@ -6760,8 +6803,10 @@ bool GLContext::linkProgram(GLuint program) {
                     if (attr.location < 0 || location < 0) {
                         continue;
                     }
+                    const GLint locationArraySize =
+                        arrayElementCount(attr.arrayDimensions, attr.arraySize);
                     const GLuint slotCount =
-                        vertexInputLocationSlotCount(attr.type, attr.arraySize);
+                        vertexInputLocationSlotCount(attr.type, locationArraySize);
                     const GLint begin = attr.location;
                     const GLint end = begin + static_cast<GLint>(std::max<GLuint>(1u, slotCount));
                     if (location >= begin && location < end) {
@@ -6983,7 +7028,6 @@ bool GLContext::linkProgram(GLuint program) {
                 }
                 return -1;
             };
-
             std::string statement;
             statement.reserve(256);
             int braceDepth = 0;
@@ -7004,6 +7048,45 @@ bool GLContext::linkProgram(GLuint program) {
             }
             return -1;
         };
+        auto aggregateArrayElementReferenced =
+            [](const std::string& src,
+               const std::string& flatName,
+               const std::string& topName) {
+                if (topName.empty() ||
+                    flatName.compare(0, topName.size(), topName) != 0 ||
+                    flatName.size() <= topName.size() ||
+                    flatName[topName.size()] != '[') {
+                    return true;
+                }
+                const std::size_t close = flatName.find(']', topName.size() + 1);
+                if (close == std::string::npos ||
+                    close + 1 >= flatName.size() ||
+                    flatName[close + 1] != '.') {
+                    return true;
+                }
+                std::string compactSrc;
+                compactSrc.reserve(src.size());
+                for (char c : src) {
+                    if (!std::isspace(static_cast<unsigned char>(c))) {
+                        compactSrc.push_back(c);
+                    }
+                }
+                const std::string elementPrefix = flatName.substr(0, close + 1);
+                if (compactSrc.find(elementPrefix) != std::string::npos) {
+                    return true;
+                }
+                const std::string anyElementPrefix = topName + "[";
+                std::size_t pos = 0;
+                while ((pos = compactSrc.find(anyElementPrefix, pos)) != std::string::npos) {
+                    const std::size_t idxStart = pos + anyElementPrefix.size();
+                    if (idxStart >= compactSrc.size() ||
+                        !std::isdigit(static_cast<unsigned char>(compactSrc[idxStart]))) {
+                        return true;
+                    }
+                    pos = idxStart;
+                }
+                return compactSrc.find(anyElementPrefix) == std::string::npos;
+            };
         // Extract the top-level uniform name from a flattened member
         // name. `j.b` → `j`, `k.a[0].c` → `k`, `l[2].b[1].d[0]` → `l`.
         auto topLevelName = [](const std::string& flat) -> std::string {
@@ -7088,6 +7171,10 @@ bool GLContext::linkProgram(GLuint program) {
                     stageReferences =
                         gsRefSet.count(member.name) != 0 ||
                         gsRefSet.count(topName) != 0;
+                }
+                if (stageReferences &&
+                    !aggregateArrayElementReferenced(stageSrc, member.name, topName)) {
+                    stageReferences = false;
                 }
                 const GLbitfield effStageBit = stageReferences ? stageBit : 0;
                 // GL 4.6 §7.3.1 canonical resource name for an array

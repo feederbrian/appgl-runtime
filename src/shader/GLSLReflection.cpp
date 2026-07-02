@@ -787,6 +787,7 @@ bool parseDeclTail(std::vector<std::string>& tokens, GLShaderDeclaration& out) {
     out.type = entry->type;
     out.arraySize = 1;
     out.isArray = false;
+    out.arrayDimensions.clear();
     std::size_t nameIdx = 1;
     if (nameIdx < tokens.size() && tokens[nameIdx] == "[") {
         std::size_t closeBracket = nameIdx;
@@ -796,6 +797,7 @@ bool parseDeclTail(std::vector<std::string>& tokens, GLShaderDeclaration& out) {
         }
         out.arraySize = arraySize;
         out.isArray = true;
+        out.arrayDimensions.push_back(arraySize);
         nameIdx = closeBracket + 1;
     }
     if (nameIdx >= tokens.size()) {
@@ -817,24 +819,29 @@ bool parseDeclTail(std::vector<std::string>& tokens, GLShaderDeclaration& out) {
         }
         out.name.erase(bracket);
         out.isArray = true;
+        out.arrayDimensions.push_back(out.arraySize);
     } else if (postNameIdx < tokens.size() && tokens[postNameIdx] == "[") {
         // GL 4.6 §4.3: `T name [N]` is a sized array; `T name []`
         // is an unsized array (arraySize stays 0, allowed for
         // SSBO trailing members and runtime-sized arrays). The
         // distinction lets the atomic_uint rejection at link/
         // compile time fire on `atomic_uint ac[];`.
-        std::size_t closeBracket = postNameIdx;
-        GLint suffixArraySize = 0;
-        if (!parseArraySuffix(tokens, postNameIdx, closeBracket, suffixArraySize)) {
-            return false;
+        const bool hadArrayBeforeName = out.isArray;
+        bool sawPostNameArray = false;
+        while (postNameIdx < tokens.size() && tokens[postNameIdx] == "[") {
+            std::size_t closeBracket = postNameIdx;
+            GLint suffixArraySize = 0;
+            if (!parseArraySuffix(tokens, postNameIdx, closeBracket, suffixArraySize)) {
+                return false;
+            }
+            if (!sawPostNameArray && !hadArrayBeforeName) {
+                out.arraySize = suffixArraySize;
+            }
+            out.arrayDimensions.push_back(suffixArraySize);
+            out.isArray = true;
+            sawPostNameArray = true;
+            postNameIdx = closeBracket + 1;
         }
-        if (out.isArray && out.arraySize > 0 && suffixArraySize > 0) {
-            out.arraySize *= suffixArraySize;
-        } else {
-            out.arraySize = suffixArraySize;
-        }
-        out.isArray = true;
-        postNameIdx = closeBracket + 1;
     }
     if (out.name.empty()) {
         return false;

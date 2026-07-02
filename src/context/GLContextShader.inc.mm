@@ -971,7 +971,7 @@ bool GLContext::getProgramInterfaceiv(GLuint program, GLenum programInterface, G
                 return false;
         }
     } else if (table == nullptr) {
-        pushError(GL_INVALID_ENUM);
+        pushError(GL_INVALID_OPERATION);
         return false;
     }
     switch (pname) {
@@ -1045,7 +1045,7 @@ bool GLContext::getProgramInterfaceiv(GLuint program, GLenum programInterface, G
                     return false;
             }
         default:
-            pushError(GL_INVALID_ENUM);
+            pushError(isLinked ? GL_INVALID_OPERATION : GL_INVALID_ENUM);
             return false;
     }
 }
@@ -1309,7 +1309,6 @@ bool GLContext::getProgramResourceName(GLuint program, GLenum programInterface, 
 
 GLuint GLContext::getProgramResourceIndex(GLuint program, GLenum programInterface, const GLchar* name) {
     if (name == nullptr) {
-        pushError(GL_INVALID_VALUE);
         return GL_INVALID_INDEX;
     }
     // GL 4.6 §7.3.1: `GL_ATOMIC_COUNTER_BUFFER` buffers have no
@@ -1383,7 +1382,8 @@ GLuint GLContext::getProgramResourceIndex(GLuint program, GLenum programInterfac
     {
         const std::string suffixed = query + "[0]";
         for (std::size_t i = 0; i < table->size(); ++i) {
-            if ((*table)[i].name == suffixed) {
+            if ((*table)[i].name == suffixed &&
+                (*table)[i].arrayDimensions.empty()) {
                 if (isSubroutineResourceInterface(programInterface) &&
                     (*table)[i].subroutineIndex >= 0) {
                     return static_cast<GLuint>((*table)[i].subroutineIndex);

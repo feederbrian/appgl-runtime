@@ -1767,6 +1767,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
             "GL_ARB_texture_query_levels",
             "GL_EXT_gpu_shader4",
         };
+        bool strippedArraysOfArrays = false;
         bool strippedCullDistance = false;
         bool strippedTextureQueryLevels = false;
         bool strippedGpuShader4 = false;
@@ -1779,7 +1780,9 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
                 result.source.replace(pos, 10, "// xtensio");
                 result.didRewrite = true;
                 pos += 10;
-                if (std::string(ext) == "GL_ARB_cull_distance") {
+                if (std::string(ext) == "GL_ARB_arrays_of_arrays") {
+                    strippedArraysOfArrays = true;
+                } else if (std::string(ext) == "GL_ARB_cull_distance") {
                     strippedCullDistance = true;
                 } else if (std::string(ext) == "GL_ARB_texture_query_levels") {
                     strippedTextureQueryLevels = true;
@@ -1789,6 +1792,27 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
             }
         }
         (void)strippedGpuShader4;
+        if (strippedArraysOfArrays) {
+            // Glslang's Vulkan front-end does not recognize the ARB token,
+            // and after we comment out the directive it still gates
+            // arrays-of-arrays syntax on GLSL 4.30. Upgrade the frontend
+            // view only; AppGL still exposes the original GL extension.
+            std::size_t versionPos = result.source.find("#version");
+            if (versionPos != std::string::npos) {
+                std::size_t eol = result.source.find('\n', versionPos);
+                if (eol != std::string::npos) {
+                    const std::string_view versionLine(
+                        result.source.data() + versionPos,
+                        eol - versionPos);
+                    const int versionNumber = parseVersionNumber(versionLine);
+                    if (versionNumber > 0 && versionNumber < 430) {
+                        const std::size_t lineLen = eol - versionPos;
+                        const std::string newLine = "#version 430 core";
+                        result.source.replace(versionPos, lineLen, newLine);
+                    }
+                }
+            }
+        }
         if (strippedTextureQueryLevels) {
             // Glslang's Vulkan front-end does not know the ARB extension
             // token, but textureQueryLevels is accepted as core GLSL 4.30.

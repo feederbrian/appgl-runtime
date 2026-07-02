@@ -645,6 +645,10 @@ struct GLShaderDeclaration {
     // alone can't distinguish the two cases because the
     // GL_ARRAY_SIZE query returns 1 for both.
     bool isArray = false;
+    // Sized array dimensions in declaration order. Simple arrays keep
+    // one dimension; arrays-of-arrays carry the outer-to-inner shape
+    // without changing arraySize's top-level GL query meaning.
+    std::vector<GLint> arrayDimensions;
     GLint explicitLocation = -1;
     // `layout(index=N)` on a fragment output — dual-source-blend
     // color index per GL 4.6 §15.2. -1 = unspecified.
@@ -784,6 +788,11 @@ struct GLProgramAttributeInfo {
     // with "[0]" suffix, even when arraySize==1, so we can't
     // derive this from arraySize alone.
     bool isArray = false;
+    // Declaration dimensions for arrays-of-arrays. `arraySize`
+    // remains the top-level GL_ARRAY_SIZE value, while this carries
+    // enough shape to reserve attribute locations and publish outer
+    // element resource names.
+    std::vector<GLint> arrayDimensions;
 };
 
 struct GLProgramUniformValue {
