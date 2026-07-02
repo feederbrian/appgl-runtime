@@ -47966,10 +47966,14 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
         image.rgba8.empty() &&
         object.depthStencilShadowAuthoritative &&
         isDepth32FTextureShadowDropShape(image);
+    const bool nativeShadowCanServeRequest =
+        image.nativeBpp >= dstPixelBytes &&
+        !image.nativeData.empty();
     const bool useRGBA8ShadowAsFloat =
         format == GL_RGBA &&
         type == GL_FLOAT &&
-        !image.rgba8.empty();
+        !image.rgba8.empty() &&
+        !nativeShadowCanServeRequest;
     const bool useNativeFloatDepthAsDepth =
         format == GL_DEPTH_COMPONENT &&
         isFloatDepthTextureShadowDropShape(image);
