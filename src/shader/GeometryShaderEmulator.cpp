@@ -792,6 +792,58 @@ bool constantVec2AsInt(const SpirvModule& module,
     return false;
 }
 
+bool constantVec3AsInt(const SpirvModule& module,
+                       std::uint32_t valueId,
+                       std::int32_t& x,
+                       std::int32_t& y,
+                       std::int32_t& z) {
+    x = 0;
+    y = 0;
+    z = 0;
+    auto cIt = module.constants.find(valueId);
+    if (cIt != module.constants.end()) {
+        x = valueLaneAsInt(cIt->second, 0);
+        y = cIt->second.componentCount() >= 2
+            ? valueLaneAsInt(cIt->second, 1) : 0;
+        z = cIt->second.componentCount() >= 3
+            ? valueLaneAsInt(cIt->second, 2) : 0;
+        return true;
+    }
+    auto ccIt = module.constantComposites.find(valueId);
+    if (ccIt == module.constantComposites.end()) {
+        return false;
+    }
+    const ConstantCompositeInfo& cc = ccIt->second;
+    if (cc.constituents.empty()) {
+        return false;
+    }
+    auto readScalar = [&](std::size_t index, std::int32_t& out) -> bool {
+        if (index >= cc.constituents.size()) {
+            out = 0;
+            return true;
+        }
+        auto scalarIt = module.constants.find(cc.constituents[index]);
+        if (scalarIt == module.constants.end()) {
+            return false;
+        }
+        out = valueLaneAsInt(scalarIt->second, 0);
+        return true;
+    };
+    if (readScalar(0, x) && readScalar(1, y) && readScalar(2, z)) {
+        return true;
+    }
+    auto vecIt = module.constants.find(cc.constituents[0]);
+    if (vecIt != module.constants.end()) {
+        x = valueLaneAsInt(vecIt->second, 0);
+        y = vecIt->second.componentCount() >= 2
+            ? valueLaneAsInt(vecIt->second, 1) : 0;
+        z = vecIt->second.componentCount() >= 3
+            ? valueLaneAsInt(vecIt->second, 2) : 0;
+        return true;
+    }
+    return false;
+}
+
 bool constantOffsets4AsInt(const SpirvModule& module,
                            std::uint32_t valueId,
                            std::array<std::array<std::int32_t, 2>, 4>& offsets) {
@@ -7003,7 +7055,8 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 break;
             }
             case spv::OpImageFetch: {
-                // w[0]=resultType, w[1]=resultId, w[2]=image, w[3]=coord.
+                // w[0]=resultType, w[1]=resultId, w[2]=image, w[3]=coord,
+                // optional w[4]=imageOperands, ...
                 auto sIt = sampledImages_.find(w[2]);
                 if (sIt == sampledImages_.end() ||
                     sampledTextures_ == nullptr) {
@@ -7025,6 +7078,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 Value coord{};
                 std::int32_t ix = 0;
                 std::int32_t iy = 0;
+                std::int32_t iz = 0;
                 if (tryGetValue(w[3], coord)) {
                     auto pickI = [&](int idx) -> std::int32_t {
                         if (idx >= coord.componentCount()) return 0;
@@ -7039,6 +7093,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     };
                     ix = pickI(0);
                     iy = pickI(1);
+                    iz = pickI(2);
                 }
                 const bool isBufferSampler =
                     slot.samplerType == GL_SAMPLER_BUFFER ||
@@ -7047,21 +7102,220 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 const std::uint32_t texelBytes =
                     sampledTextureBytesPerTexel(slot.internalFormat);
                 Value out{};
+                out.kind = vec4KindForResultType(module_, w[0]);
                 std::size_t off = 0;
                 if (isBufferSampler) {
                     const std::uint32_t idx =
                         ix < 0 ? 0u : static_cast<std::uint32_t>(ix);
                     off = static_cast<std::size_t>(idx) * texelBytes;
                 } else {
-                    const std::uint32_t u =
-                        ix < 0 ? 0u : static_cast<std::uint32_t>(ix);
-                    const std::uint32_t v =
-                        iy < 0 ? 0u : static_cast<std::uint32_t>(iy);
-                    const std::uint32_t bpr = slot.bytesPerRow != 0
-                        ? slot.bytesPerRow
-                        : slot.width * texelBytes;
-                    off = static_cast<std::size_t>(v) * bpr +
-                          static_cast<std::size_t>(u) * texelBytes;
+                    std::uint32_t mipLevel = 0;
+                    std::int32_t offX = 0;
+                    std::int32_t offY = 0;
+                    std::int32_t offZ = 0;
+                    if (wc > 4u) {
+                        constexpr std::uint32_t kBiasMask = 0x00000001u;
+                        constexpr std::uint32_t kLodMask = 0x00000002u;
+                        constexpr std::uint32_t kGradMask = 0x00000004u;
+                        constexpr std::uint32_t kConstOffsetMask = 0x00000008u;
+                        constexpr std::uint32_t kOffsetMask = 0x00000010u;
+                        constexpr std::uint32_t kConstOffsetsMask = 0x00000020u;
+                        constexpr std::uint32_t kSampleMask = 0x00000040u;
+                        constexpr std::uint32_t kMinLodMask = 0x00000080u;
+                        constexpr std::uint32_t kMakeTexelAvailableMask = 0x00000100u;
+                        constexpr std::uint32_t kMakeTexelVisibleMask = 0x00000200u;
+                        constexpr std::uint32_t kOffsetsMask = 0x00010000u;
+                        const std::uint32_t operands = w[4];
+                        std::uint32_t cursor = 5u;
+                        auto skipOperand = [&]() {
+                            if (cursor < wc) {
+                                ++cursor;
+                            }
+                        };
+                        if ((operands & kBiasMask) != 0u) skipOperand();
+                        if ((operands & kLodMask) != 0u && cursor < wc) {
+                            Value lodValue;
+                            if (tryGetValue(w[cursor], lodValue)) {
+                                std::int32_t lod = 0;
+                                if (lodValue.isFloatKind()) {
+                                    const float lodFloat = lodValue.f[0];
+                                    if (std::isfinite(lodFloat)) {
+                                        lod = static_cast<std::int32_t>(
+                                            std::floor(lodFloat));
+                                    }
+                                } else if (lodValue.isIntKind()) {
+                                    lod = valueLaneAsInt(lodValue, 0);
+                                }
+                                if (lod > 0) {
+                                    mipLevel = static_cast<std::uint32_t>(lod);
+                                }
+                            }
+                            ++cursor;
+                        }
+                        if ((operands & kGradMask) != 0u) {
+                            skipOperand();
+                            skipOperand();
+                        }
+                        if ((operands & kConstOffsetMask) != 0u &&
+                            cursor < wc) {
+                            (void)constantVec3AsInt(
+                                module_, w[cursor], offX, offY, offZ);
+                            ++cursor;
+                        }
+                        if ((operands & kOffsetMask) != 0u &&
+                            cursor < wc) {
+                            Value offsetValue;
+                            if (tryGetValue(w[cursor], offsetValue)) {
+                                offX = valueLaneAsInt(offsetValue, 0);
+                                offY = offsetValue.componentCount() >= 2
+                                    ? valueLaneAsInt(offsetValue, 1) : 0;
+                                offZ = offsetValue.componentCount() >= 3
+                                    ? valueLaneAsInt(offsetValue, 2) : 0;
+                            }
+                            ++cursor;
+                        }
+                        if ((operands & kConstOffsetsMask) != 0u) skipOperand();
+                        if ((operands & kSampleMask) != 0u) skipOperand();
+                        if ((operands & kMinLodMask) != 0u) skipOperand();
+                        if ((operands & kMakeTexelAvailableMask) != 0u) skipOperand();
+                        if ((operands & kMakeTexelVisibleMask) != 0u) skipOperand();
+                        if ((operands & kOffsetsMask) != 0u) skipOperand();
+                    }
+
+                    const std::uint32_t mipCount =
+                        slot.mipOffsets.empty()
+                            ? 1u
+                            : static_cast<std::uint32_t>(slot.mipOffsets.size());
+                    if (mipCount > 0u && mipLevel >= mipCount) {
+                        mipLevel = mipCount - 1u;
+                    }
+                    auto fallbackMipDim = [mipLevel](std::uint32_t base)
+                        -> std::uint32_t {
+                        if (base == 0u) return 0u;
+                        if (mipLevel == 0u) return base;
+                        if (mipLevel >= 31u) return 1u;
+                        return std::max<std::uint32_t>(
+                            base >> mipLevel, 1u);
+                    };
+                    const std::uint32_t mipWidth =
+                        (!slot.mipWidths.empty() &&
+                         mipLevel < slot.mipWidths.size())
+                            ? slot.mipWidths[mipLevel]
+                            : fallbackMipDim(slot.width);
+                    const std::uint32_t mipHeight =
+                        (!slot.mipHeights.empty() &&
+                         mipLevel < slot.mipHeights.size())
+                            ? slot.mipHeights[mipLevel]
+                            : fallbackMipDim(slot.height);
+                    const std::uint32_t mipBase =
+                        (!slot.mipOffsets.empty() &&
+                         mipLevel < slot.mipOffsets.size())
+                            ? slot.mipOffsets[mipLevel]
+                            : 0u;
+                    const std::uint32_t mipLayerFaces =
+                        (!slot.mipLayerFaces.empty() &&
+                         mipLevel < slot.mipLayerFaces.size())
+                            ? std::max<std::uint32_t>(
+                                  slot.mipLayerFaces[mipLevel], 1u)
+                            : std::max<std::uint32_t>(
+                                  slot.layerFaces != 0 ? slot.layerFaces
+                                                       : (slot.depth != 0 ? fallbackMipDim(slot.depth) : 1u),
+                                  1u);
+                    const bool sampler1DArray =
+                        slot.samplerType == GL_SAMPLER_1D_ARRAY ||
+                        slot.samplerType == GL_INT_SAMPLER_1D_ARRAY ||
+                        slot.samplerType == GL_UNSIGNED_INT_SAMPLER_1D_ARRAY ||
+                        slot.samplerType == GL_SAMPLER_1D_ARRAY_SHADOW;
+                    const bool sampler2DArray =
+                        slot.samplerType == GL_SAMPLER_2D_ARRAY ||
+                        slot.samplerType == GL_INT_SAMPLER_2D_ARRAY ||
+                        slot.samplerType == GL_UNSIGNED_INT_SAMPLER_2D_ARRAY ||
+                        slot.samplerType == GL_SAMPLER_2D_ARRAY_SHADOW;
+                    const bool sampler3D =
+                        slot.samplerType == GL_SAMPLER_3D ||
+                        slot.samplerType == GL_INT_SAMPLER_3D ||
+                        slot.samplerType == GL_UNSIGNED_INT_SAMPLER_3D;
+                    const bool sampler1D =
+                        slot.samplerType == GL_SAMPLER_1D ||
+                        slot.samplerType == GL_INT_SAMPLER_1D ||
+                        slot.samplerType == GL_UNSIGNED_INT_SAMPLER_1D ||
+                        slot.samplerType == GL_SAMPLER_1D_SHADOW;
+                    const bool sampler2D =
+                        slot.samplerType == GL_SAMPLER_2D ||
+                        slot.samplerType == GL_INT_SAMPLER_2D ||
+                        slot.samplerType == GL_UNSIGNED_INT_SAMPLER_2D ||
+                        slot.samplerType == GL_SAMPLER_2D_SHADOW ||
+                        slot.samplerType == GL_SAMPLER_2D_RECT ||
+                        slot.samplerType == GL_INT_SAMPLER_2D_RECT ||
+                        slot.samplerType == GL_UNSIGNED_INT_SAMPLER_2D_RECT ||
+                        slot.samplerType == GL_SAMPLER_2D_RECT_SHADOW;
+
+                    ix += offX;
+                    if (sampler2D || sampler2DArray || sampler3D) {
+                        iy += offY;
+                    }
+                    if (sampler3D) {
+                        iz += offZ;
+                    }
+
+                    const std::int32_t layerCoord =
+                        sampler1DArray ? iy : (sampler2DArray || sampler3D ? iz : 0);
+                    auto inRange = [](std::int32_t value,
+                                      std::uint32_t size) -> bool {
+                        return value >= 0 &&
+                               size > 0u &&
+                               static_cast<std::uint32_t>(value) < size;
+                    };
+                    bool valid = inRange(ix, mipWidth);
+                    if (!sampler1D && !sampler1DArray) {
+                        valid = valid && inRange(iy, mipHeight);
+                    }
+                    if (sampler1DArray || sampler2DArray || sampler3D) {
+                        valid = valid && inRange(layerCoord, mipLayerFaces);
+                    }
+                    if (valid) {
+                        const std::uint32_t u =
+                            static_cast<std::uint32_t>(ix);
+                        const std::uint32_t v =
+                            (sampler1D || sampler1DArray)
+                                ? 0u
+                                : static_cast<std::uint32_t>(iy);
+                        const std::uint32_t layer =
+                            (sampler1DArray || sampler2DArray || sampler3D)
+                                ? static_cast<std::uint32_t>(layerCoord)
+                                : 0u;
+                        const std::uint32_t bpr =
+                            (!slot.mipBytesPerRow.empty() &&
+                             mipLevel < slot.mipBytesPerRow.size())
+                                ? slot.mipBytesPerRow[mipLevel]
+                                : (slot.bytesPerRow != 0
+                                       ? slot.bytesPerRow
+                                       : mipWidth * texelBytes);
+                        const std::uint32_t bpi =
+                            (!slot.mipBytesPerImage.empty() &&
+                             mipLevel < slot.mipBytesPerImage.size())
+                                ? slot.mipBytesPerImage[mipLevel]
+                                : (slot.bytesPerImage != 0
+                                       ? slot.bytesPerImage
+                                       : bpr * std::max<std::uint32_t>(
+                                                   mipHeight, 1u));
+                        off = static_cast<std::size_t>(mipBase) +
+                              static_cast<std::size_t>(layer) * bpi +
+                              static_cast<std::size_t>(v) * bpr +
+                              static_cast<std::size_t>(u) * texelBytes;
+                    } else {
+                        off = slot.data.size();
+                    }
+                    if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
+                        std::fprintf(stderr,
+                            "[GS-tex] fetch: var=%u elem=%u xyz=(%d,%d,%d) "
+                            "ofs=(%d,%d,%d) lod=%u fmt=0x%X dim=%ux%u "
+                            "layers=%u valid=%d datasz=%zu\n",
+                            h.arrayVarId, h.elementIdx, ix, iy, iz,
+                            offX, offY, offZ, mipLevel,
+                            slot.internalFormat, mipWidth, mipHeight,
+                            mipLayerFaces, valid ? 1 : 0, slot.data.size());
+                    }
                 }
                 if (texelBytes != 0 && off < slot.data.size()) {
                     const std::size_t available =
@@ -7070,7 +7324,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     out = decodeSampledTextureTexel(
                         slot, slot.data.data() + off, available);
                 } else {
-                    out.kind = Value::Kind::UInt4;
+                    out.kind = vec4KindForResultType(module_, w[0]);
                 }
                 valueStore_[w[1]] = out;
                 pc += wc;
