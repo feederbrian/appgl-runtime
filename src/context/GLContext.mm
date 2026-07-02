@@ -11680,6 +11680,73 @@ struct GLContext::Impl {
             return true;
         }
 
+        if ((internalFormat == GL_DEPTH24_STENCIL8 ||
+             internalFormat == GL_DEPTH32F_STENCIL8) &&
+            format == GL_DEPTH_COMPONENT &&
+            (mtlFmt == MTLPixelFormatDepth32Float_Stencil8 ||
+             mtlFmt == MTLPixelFormatDepth24Unorm_Stencil8)) {
+            outBpp = (mtlFmt == MTLPixelFormatDepth32Float_Stencil8) ? 8u : 4u;
+            const std::size_t totalPixels = static_cast<std::size_t>(width)
+                                          * static_cast<std::size_t>(height)
+                                          * static_cast<std::size_t>(depth);
+            nativeData.assign(totalPixels * outBpp, 0);
+            if (pixels == nullptr || totalPixels == 0) return true;
+
+            const std::size_t srcPixelBytes = bytesPerPixel(format, type);
+            if (srcPixelBytes == 0) return false;
+
+            const auto& store = state->pixelStore();
+            const bool unpackSwapBytes = (store.unpackSwapBytes == GL_TRUE);
+            const std::size_t sourceWidth =
+                static_cast<std::size_t>(store.unpackRowLength > 0
+                    ? store.unpackRowLength : width);
+            const std::size_t sourceHeight =
+                static_cast<std::size_t>(store.unpackImageHeight > 0
+                    ? store.unpackImageHeight : height);
+            const std::size_t rowBytes =
+                alignByteCount(sourceWidth * srcPixelBytes,
+                               store.unpackAlignment);
+            const std::size_t imageBytes = rowBytes * sourceHeight;
+            const std::size_t sourceOffset =
+                unpackSkipImages(store) * imageBytes
+                + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
+                + static_cast<std::size_t>(store.unpackSkipPixels) * srcPixelBytes;
+            const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
+
+            for (GLsizei z = 0; z < depth; ++z) {
+                for (GLsizei y = 0; y < height; ++y) {
+                    const std::uint8_t* srcRow =
+                        source + static_cast<std::size_t>(z) * imageBytes
+                               + static_cast<std::size_t>(y) * rowBytes;
+                    std::uint8_t* dstRow = nativeData.data()
+                        + (static_cast<std::size_t>(z) * static_cast<std::size_t>(height)
+                           + static_cast<std::size_t>(y))
+                          * static_cast<std::size_t>(width) * outBpp;
+                    for (GLsizei x = 0; x < width; ++x) {
+                        const std::uint8_t* srcPixel =
+                            srcRow + static_cast<std::size_t>(x) * srcPixelBytes;
+                        std::uint8_t* dstPixel =
+                            dstRow + static_cast<std::size_t>(x) * outBpp;
+                        const float depthValue = static_cast<float>(std::clamp(
+                            readSourceComponentDouble(srcPixel, type, 0,
+                                                      false, unpackSwapBytes),
+                            0.0,
+                            1.0));
+                        if (mtlFmt == MTLPixelFormatDepth32Float_Stencil8) {
+                            std::memcpy(dstPixel, &depthValue, sizeof(depthValue));
+                        } else {
+                            const std::uint32_t depth24 =
+                                static_cast<std::uint32_t>(
+                                    static_cast<double>(depthValue) *
+                                    static_cast<double>(0x00FFFFFFu) + 0.5);
+                            std::memcpy(dstPixel, &depth24, sizeof(depth24));
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+
         // Sprint 18 texture_repeat_mode.depth24_stencil8: D24S8 native
         // upload, sister to the existing Depth16/Depth32 native depth
         // upload path. GL packs depth in high 24 bits and stencil in
@@ -15208,6 +15275,14 @@ struct GLContext::Impl {
             switch (image.desc.internalFormat) {
                 case GL_DEPTH_STENCIL:
                 case GL_DEPTH24_STENCIL8: {
+                    if (image.nativeBpp >= 8 &&
+                        offset + sizeof(float) <= image.nativeData.size()) {
+                        float value = 0.0f;
+                        std::memcpy(&value,
+                                    image.nativeData.data() + offset,
+                                    sizeof(value));
+                        return value;
+                    }
                     if (offset + sizeof(std::uint32_t) <= image.nativeData.size()) {
                         std::uint32_t packed = 0;
                         std::memcpy(&packed,
@@ -24565,6 +24640,14 @@ struct GLContext::Impl {
         switch (image.desc.internalFormat) {
             case GL_DEPTH_STENCIL:
             case GL_DEPTH24_STENCIL8: {
+                if (image.nativeBpp >= 8) {
+                    if (offset + sizeof(d) <= image.nativeData.size()) {
+                        std::memcpy(image.nativeData.data() + offset,
+                                    &d,
+                                    sizeof(d));
+                    }
+                    break;
+                }
                 std::uint32_t packed = 0;
                 if (offset + sizeof(packed) <= image.nativeData.size()) {
                     std::memcpy(&packed, image.nativeData.data() + offset,
@@ -24598,8 +24681,10 @@ struct GLContext::Impl {
         switch (image.desc.internalFormat) {
             case GL_DEPTH_STENCIL:
             case GL_DEPTH24_STENCIL8: {
-                if (offset + 4u <= image.nativeData.size()) {
-                    image.nativeData[offset + 3u] = stencil;
+                const std::size_t stencilOffset =
+                    image.nativeBpp >= 8 ? offset + 4u : offset + 3u;
+                if (stencilOffset < image.nativeData.size()) {
+                    image.nativeData[stencilOffset] = stencil;
                 }
                 break;
             }
@@ -24621,6 +24706,14 @@ struct GLContext::Impl {
         switch (image.desc.internalFormat) {
             case GL_DEPTH_STENCIL:
             case GL_DEPTH24_STENCIL8: {
+                if (image.nativeBpp >= 8) {
+                    float depth = 0.0f;
+                    if (offset + sizeof(depth) <= image.nativeData.size()) {
+                        std::memcpy(&depth, image.nativeData.data() + offset,
+                                    sizeof(depth));
+                    }
+                    return depth;
+                }
                 std::uint32_t packed = 0;
                 if (offset + sizeof(packed) <= image.nativeData.size()) {
                     std::memcpy(&packed, image.nativeData.data() + offset,
@@ -24645,8 +24738,11 @@ struct GLContext::Impl {
         switch (image.desc.internalFormat) {
             case GL_DEPTH_STENCIL:
             case GL_DEPTH24_STENCIL8:
-                return offset + 3u < image.nativeData.size()
-                    ? image.nativeData[offset + 3u] : 0;
+                return image.nativeBpp >= 8
+                    ? (offset + 4u < image.nativeData.size()
+                        ? image.nativeData[offset + 4u] : 0)
+                    : (offset + 3u < image.nativeData.size()
+                        ? image.nativeData[offset + 3u] : 0);
             case GL_DEPTH32F_STENCIL8:
                 return offset + 4u < image.nativeData.size()
                     ? image.nativeData[offset + 4u] : 0;

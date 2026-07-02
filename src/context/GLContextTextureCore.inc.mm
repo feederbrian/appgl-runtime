@@ -630,12 +630,19 @@ bool GLContext::texImage(
         return false;
     }
     // Also build native-format data for non-RGBA8 internal formats.
-    impl_->buildNativeUpload(
+    const bool nativeUploadBuilt = impl_->buildNativeUpload(
         storageInternalFormatEnum,
         image.desc.width, image.desc.height, image.desc.depth,
         format, type, resolvedPixels, image.nativeData, image.nativeBpp,
         normalizeCompatUpload,
         ignoreUnpackSkipImages);
+    const bool nativeDepthStencilUploadBuilt =
+        resolvedPixels != nullptr &&
+        nativeUploadBuilt &&
+        image.nativeBpp > 0 &&
+        !image.nativeData.empty() &&
+        (isDepthFormat(storageInternalFormatEnum) ||
+         isStencilFormat(storageInternalFormatEnum));
 
     image.rawUploadData.clear();
     image.rawUploadBpp = 0;
@@ -815,6 +822,9 @@ bool GLContext::texImage(
         object->cubeFaceLevels[static_cast<std::size_t>(faceIdx)][level] = image;
     }
     object->levels[level] = std::move(image);
+    if (nativeDepthStencilUploadBuilt) {
+        object->depthStencilShadowAuthoritative = true;
+    }
     // Track cube-face definition for cube-completeness checking at
     // glGenerateMipmap time. Only level-0 face definitions count toward
     // cube completeness (GL 4.6 §8.17).
@@ -1640,6 +1650,7 @@ bool GLContext::texSubImage(
     }
 
     // Also update native-format data when present.
+    bool nativeSubImageUpdated = false;
     if (image.nativeBpp > 0 && !image.nativeData.empty()) {
         std::vector<std::uint8_t> nativeUpload;
         std::size_t nativeBpp = 0;
@@ -1661,11 +1672,12 @@ bool GLContext::texSubImage(
                          + static_cast<std::size_t>(xoffset))
                         * nativeBpp;
                     std::memcpy(
-                        image.nativeData.data() + dstOff,
-                        nativeUpload.data() + srcOff,
-                        static_cast<std::size_t>(width) * nativeBpp);
+                            image.nativeData.data() + dstOff,
+                            nativeUpload.data() + srcOff,
+                            static_cast<std::size_t>(width) * nativeBpp);
                 }
             }
+            nativeSubImageUpdated = true;
         }
     }
 
@@ -1813,6 +1825,12 @@ bool GLContext::texSubImage(
 
     if (storageCubeFaceForSubImage >= 0 && sparseCubeFace < 0) {
         storageObject->levels[storageLevel] = image;
+    }
+
+    if (nativeSubImageUpdated &&
+        (isDepthFormat(storageObject->desc.internalFormat) ||
+         isStencilFormat(storageObject->desc.internalFormat))) {
+        storageObject->depthStencilShadowAuthoritative = true;
     }
 
     if (!impl_->replaceMetalTexture(*storageObject, storageTextureName)) {
