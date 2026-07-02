@@ -245,6 +245,10 @@ public:
     void setColorMaski(GLuint index, GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha);
     void setMinSampleShading(GLfloat value);
     const GLBlendState& blendState() const;
+    void setSampleCoverage(GLfloat value, GLboolean invert);
+    GLfloat sampleCoverageValue() const;
+    GLboolean sampleCoverageInvert() const;
+    GLbitfield sampleCoverageMask() const;
     void setSampleMask(GLuint index, GLbitfield mask);
     GLbitfield sampleMask(GLuint index) const;
 
@@ -414,6 +418,8 @@ private:
     // casts of that value.
     GLuint maxShaderCompilerThreads_ = 0;
     GLBlendState blend_;
+    GLfloat sampleCoverageValue_ = 1.0f;
+    GLboolean sampleCoverageInvert_ = GL_FALSE;
     std::array<GLbitfield, 1> sampleMasks_ = {~0u};
     GLDepthState depth_;
     GLStencilState stencil_;

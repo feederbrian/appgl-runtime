@@ -873,6 +873,33 @@ const GLBlendState& GLStateTracker::blendState() const {
     return blend_;
 }
 
+void GLStateTracker::setSampleCoverage(GLfloat value, GLboolean invert) {
+    sampleCoverageValue_ = std::clamp(value, 0.0f, 1.0f);
+    sampleCoverageInvert_ = invert ? GL_TRUE : GL_FALSE;
+}
+
+GLfloat GLStateTracker::sampleCoverageValue() const {
+    return sampleCoverageValue_;
+}
+
+GLboolean GLStateTracker::sampleCoverageInvert() const {
+    return sampleCoverageInvert_;
+}
+
+GLbitfield GLStateTracker::sampleCoverageMask() const {
+    GLbitfield mask = 0;
+    float previous = 0.0f;
+    for (GLuint bit = 0; bit < 32; ++bit) {
+        const float next =
+            static_cast<float>(bit + 1) * sampleCoverageValue_;
+        if (std::floor(next) > std::floor(previous)) {
+            mask |= (GLbitfield{1} << bit);
+        }
+        previous = next;
+    }
+    return sampleCoverageInvert_ ? ~mask : mask;
+}
+
 void GLStateTracker::setSampleMask(GLuint index, GLbitfield mask) {
     if (index >= sampleMasks_.size()) {
         return;
@@ -1151,6 +1178,12 @@ bool GLStateTracker::queryBoolean(GLenum pname, GLboolean* out) const {
             case GL_FOG_START:
                 *out = fog_.start != 0.0f ? GL_TRUE : GL_FALSE;
                 return true;
+            case GL_SAMPLE_COVERAGE_VALUE:
+                *out = sampleCoverageValue_ != 0.0f ? GL_TRUE : GL_FALSE;
+                return true;
+            case GL_SAMPLE_COVERAGE_INVERT:
+                *out = sampleCoverageInvert_;
+                return true;
             case 0x91B0:   // GL_MAX_SHADER_COMPILER_THREADS_KHR / _ARB
                 *out = maxShaderCompilerThreads_ != 0 ? GL_TRUE : GL_FALSE;
                 return true;
@@ -1222,6 +1255,12 @@ bool GLStateTracker::queryInteger(GLenum pname, GLint* out) const {
             case GL_MIN_SAMPLE_SHADING_VALUE:
                 *out = static_cast<GLint>(blend_.minSampleShading);
                 return true;
+            case GL_SAMPLE_COVERAGE_VALUE:
+                *out = roundFloatStateToInteger<GLint>(sampleCoverageValue_);
+                return true;
+            case GL_SAMPLE_COVERAGE_INVERT:
+                *out = sampleCoverageInvert_ ? 1 : 0;
+                return true;
             default:
                 break;
         }
@@ -1282,6 +1321,12 @@ bool GLStateTracker::queryInteger64(GLenum pname, GLint64* out) const {
                 return true;
             case GL_MIN_SAMPLE_SHADING_VALUE:
                 *out = static_cast<GLint64>(blend_.minSampleShading);
+                return true;
+            case GL_SAMPLE_COVERAGE_VALUE:
+                *out = roundFloatStateToInteger<GLint64>(sampleCoverageValue_);
+                return true;
+            case GL_SAMPLE_COVERAGE_INVERT:
+                *out = sampleCoverageInvert_ ? 1 : 0;
                 return true;
             default:
                 break;
@@ -1344,6 +1389,12 @@ bool GLStateTracker::queryFloat(GLenum pname, GLfloat* out) const {
                 // verify` probes the value after glMinSampleShading.
                 *out = blend_.minSampleShading;
                 return true;
+            case GL_SAMPLE_COVERAGE_VALUE:
+                *out = sampleCoverageValue_;
+                return true;
+            case GL_SAMPLE_COVERAGE_INVERT:
+                *out = sampleCoverageInvert_ ? 1.0f : 0.0f;
+                return true;
             case GL_FOG_START:
                 *out = fog_.start;
                 return true;
@@ -1404,6 +1455,12 @@ bool GLStateTracker::queryDouble(GLenum pname, GLdouble* out) const {
                 return true;
             case GL_MIN_SAMPLE_SHADING_VALUE:
                 *out = static_cast<GLdouble>(blend_.minSampleShading);
+                return true;
+            case GL_SAMPLE_COVERAGE_VALUE:
+                *out = static_cast<GLdouble>(sampleCoverageValue_);
+                return true;
+            case GL_SAMPLE_COVERAGE_INVERT:
+                *out = sampleCoverageInvert_ ? 1.0 : 0.0;
                 return true;
             case GL_FOG_START:
                 *out = static_cast<GLdouble>(fog_.start);

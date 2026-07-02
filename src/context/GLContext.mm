@@ -6354,6 +6354,17 @@ bool isFramebufferAttachmentEnum(GLenum attachment) {
         || attachment == GL_DEPTH_STENCIL_ATTACHMENT;
 }
 
+std::uint32_t combinedFragmentSampleMask(const GLStateTracker& state) {
+    GLbitfield mask = ~GLbitfield{0};
+    if (state.isEnabled(GL_SAMPLE_COVERAGE)) {
+        mask &= state.sampleCoverageMask();
+    }
+    if (state.isEnabled(GL_SAMPLE_MASK)) {
+        mask &= state.sampleMask(0);
+    }
+    return static_cast<std::uint32_t>(mask);
+}
+
 bool isFramebufferColorBuffer(GLenum buffer) {
     return buffer >= GL_COLOR_ATTACHMENT0 && buffer < GL_COLOR_ATTACHMENT0 + 8;
 }
@@ -41537,10 +41548,7 @@ static void populateTranslatedDrawFixedFunctionState(
     tdi.cullFaceMode = state.rasterState().cullFaceMode;
     tdi.frontFace = state.rasterState().frontFace;
     tdi.wireframe = (state.rasterState().polygonFillMode == GL_LINE);
-    tdi.sampleMask =
-        state.isEnabled(GL_SAMPLE_MASK)
-            ? static_cast<std::uint32_t>(state.sampleMask(0))
-            : 0xFFFFFFFFu;
+    tdi.sampleMask = combinedFragmentSampleMask(state);
     tdi.rasterizerDiscard = state.isEnabled(GL_RASTERIZER_DISCARD);
     // Phase 6-1d: sample-shading snapshot. The Metal side uses this
     // to force per-sample FS invocation when the bound attachment
@@ -42240,10 +42248,7 @@ SolidColorDrawSetup buildSolidColorDrawSetup(GLStateTracker& state,
     setup.info.cullFaceMode = state.rasterState().cullFaceMode;
     setup.info.frontFace = state.rasterState().frontFace;
     setup.info.wireframe = (state.rasterState().polygonFillMode == GL_LINE);
-    setup.info.sampleMask =
-        state.isEnabled(GL_SAMPLE_MASK)
-            ? static_cast<std::uint32_t>(state.sampleMask(0))
-            : 0xFFFFFFFFu;
+    setup.info.sampleMask = combinedFragmentSampleMask(state);
     setup.info.fragmentShadingRate = fragmentShadingRate;
     // Sprint 7 Phase 1 #11 (CKPT57): stencil state for solid-color path.
     {
@@ -43811,10 +43816,7 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     info.cullFaceMode = state->rasterState().cullFaceMode;
     info.frontFace = state->rasterState().frontFace;
     info.wireframe = (state->rasterState().polygonFillMode == GL_LINE);
-    info.sampleMask =
-        state->isEnabled(GL_SAMPLE_MASK)
-            ? static_cast<std::uint32_t>(state->sampleMask(0))
-            : 0xFFFFFFFFu;
+    info.sampleMask = combinedFragmentSampleMask(*state);
     // Sprint 7 Phase 1 #11 (CKPT57): tess Phase-2 render encoder
     // stencil state — required for primitive_coverage's two-phase
     // stencil-replace + stencil-notequal pattern. Same shape as the
@@ -44392,10 +44394,7 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     info.cullFaceMode = state->rasterState().cullFaceMode;
     info.frontFace = state->rasterState().frontFace;
     info.wireframe = (state->rasterState().polygonFillMode == GL_LINE);
-    info.sampleMask =
-        state->isEnabled(GL_SAMPLE_MASK)
-            ? static_cast<std::uint32_t>(state->sampleMask(0))
-            : 0xFFFFFFFFu;
+    info.sampleMask = combinedFragmentSampleMask(*state);
     info.polygonOffsetEnabled =
         state->isEnabled(GL_POLYGON_OFFSET_FILL) ||
         state->isEnabled(GL_POLYGON_OFFSET_LINE) ||

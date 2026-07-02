@@ -793,8 +793,9 @@ static void APIENTRY glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffs
 }
 
 static void APIENTRY glSampleCoverage(GLfloat value, GLboolean invert) {
-    (void)value;
-    (void)invert;
+    auto* ctx = appgl::Runtime::shared().currentContext();
+    if (ctx == nullptr) return;
+    ctx->state().setSampleCoverage(value, invert);
 }
 
 static void APIENTRY glCompressedTexImage3D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLsizei imageSize, const void *data) {
