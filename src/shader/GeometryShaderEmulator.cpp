@@ -11132,6 +11132,75 @@ std::vector<VsOutputVaryingInfo> discoverVsOutputVaryings(
     return result;
 }
 
+static std::optional<VsOutputVaryingInfo> findVsOutputAggregateByName(
+    const SpirvModule& mod,
+    const std::string& wantedName)
+{
+    if (wantedName.empty()) return std::nullopt;
+
+    auto makeInfo = [&](const std::string& name, std::uint32_t typeId,
+                        std::uint32_t location) -> std::optional<VsOutputVaryingInfo> {
+        const std::uint32_t width = mod.scalarWidth(typeId);
+        if (width == 0) return std::nullopt;
+        VsOutputVaryingInfo info;
+        info.name = name;
+        info.width = width;
+        info.location = location;
+        info.baseType = baseTypeForType(mod, typeId);
+        info.scalarByteSize = scalarByteSizeForType(mod, typeId);
+        return info;
+    };
+
+    for (const auto& [varId, info] : mod.variables) {
+        if (info.storageClass != spv::StorageClassOutput) continue;
+        auto dIt = mod.decorations.find(varId);
+        if (dIt != mod.decorations.end() && dIt->second.hasBuiltIn) continue;
+
+        auto tIt = mod.types.find(info.typeId);
+        if (tIt == mod.types.end()) continue;
+        const std::uint32_t pointeeId = tIt->second.pointeeType;
+        if (pointeeId == 0) continue;
+
+        const std::uint32_t baseLocation =
+            (dIt != mod.decorations.end() && dIt->second.hasLocation)
+                ? dIt->second.location : 0u;
+
+        if (info.name == wantedName) {
+            if (auto aggregate = makeInfo(wantedName, pointeeId, baseLocation)) {
+                return aggregate;
+            }
+        }
+
+        auto pIt = mod.types.find(pointeeId);
+        if (pIt == mod.types.end() || pIt->second.kind != TypeInfo::Kind::Struct) {
+            continue;
+        }
+        auto mnIt = mod.memberNames.find(pointeeId);
+        if (mnIt == mod.memberNames.end()) continue;
+        auto mdIt = mod.memberDecorations.find(pointeeId);
+        for (std::size_t m = 0; m < pIt->second.memberTypes.size(); ++m) {
+            auto nameIt = mnIt->second.find(static_cast<std::uint32_t>(m));
+            if (nameIt == mnIt->second.end() || nameIt->second != wantedName) {
+                continue;
+            }
+            std::uint32_t location = baseLocation;
+            if (mdIt != mod.memberDecorations.end()) {
+                auto memDecor =
+                    mdIt->second.perMember.find(static_cast<std::uint32_t>(m));
+                if (memDecor != mdIt->second.perMember.end() &&
+                    memDecor->second.hasLocation) {
+                    location = memDecor->second.location;
+                }
+            }
+            if (auto aggregate =
+                    makeInfo(wantedName, pIt->second.memberTypes[m], location)) {
+                return aggregate;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 // Sprint 7 Phase 2 #7 (CKPT59): VS-only TF emulation. Runs the VS
 // interpreter once per draw vertex and produces an EmulatedDraw
 // shaped exactly like the GS-emul / tess-emul output (per-vertex
@@ -11268,13 +11337,21 @@ EmulatedDraw emulateVsOnlyDrawForTf(
             appendCapturedOnce(captured, v);
         }
     }
-    for (const auto& tfName : program.transformFeedbackVaryingNames) {
+    for (std::size_t tfIndex = 0;
+         tfIndex < program.transformFeedbackVaryingNames.size();
+         ++tfIndex) {
+        const auto& tfName = program.transformFeedbackVaryingNames[tfIndex];
         if (tfName == "gl_Position") continue;   // handled by position[4]
 
         const std::string lookupName = stripArrayElementName(tfName);
+        std::string sourceName;
+        if (tfIndex < program.resourceTransformFeedbackVaryings.size()) {
+            sourceName = program.resourceTransformFeedbackVaryings[tfIndex].tfSourceName;
+        }
         const VsOutputVaryingInfo* exact = nullptr;
         for (const auto& v : allOutputs) {
-            if (v.name == tfName || v.name == lookupName) {
+            if (v.name == tfName || v.name == lookupName ||
+                (!sourceName.empty() && v.name == sourceName)) {
                 exact = &v;
                 break;
             }
@@ -11284,10 +11361,19 @@ EmulatedDraw emulateVsOnlyDrawForTf(
             continue;
         }
 
+        if (!sourceName.empty()) {
+            if (auto aggregate = findVsOutputAggregateByName(vsMod, sourceName)) {
+                appendCapturedOnce(captured, *aggregate);
+                continue;
+            }
+        }
+
         const VsOutputVaryingInfo* alias = nullptr;
         std::size_t aliasCount = 0;
         for (const auto& v : allOutputs) {
-            if (tfMemberAliasMatches(v.name, lookupName)) {
+            if (tfMemberAliasMatches(v.name, lookupName) ||
+                (!sourceName.empty() &&
+                 tfMemberAliasMatches(v.name, sourceName))) {
                 alias = &v;
                 ++aliasCount;
             }

@@ -861,6 +861,12 @@ struct GLProgramResourceEntry {
     // GL 4.6 §7.3.1 `GL_IS_PER_PATCH`: true when a TCS output or
     // TES input was declared with the `patch` storage qualifier.
     bool isPerPatch = false;
+    // Runtime-only transform feedback packing metadata. These fields are
+    // populated on GL_TRANSFORM_FEEDBACK_VARYING entries when the public
+    // varying name is a struct leaf such as `Blk.v[0].a`.
+    std::string tfSourceName;
+    GLint tfComponentOffset = 0;
+    GLint tfComponentCount = 0;
 };
 
 // Cached uniform locations for the synthesized `appgl_*` fixed-function

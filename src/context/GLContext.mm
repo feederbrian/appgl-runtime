@@ -36872,10 +36872,10 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
             return glTypeScalarCount(
                 program.resourceTransformFeedbackVaryings[tfIndex].type);
         };
-	        auto resolveTfSource = [&](const std::string& name,
-	                                   std::size_t tfIndex,
-	                                   TfSource& src,
-	                                   std::uint32_t* streamOut = nullptr) -> bool {
+        auto resolveTfSource = [&](const std::string& name,
+                                   std::size_t tfIndex,
+                                   TfSource& src,
+                                   std::uint32_t* streamOut = nullptr) -> bool {
             if (name == "gl_Position") {
                 src = {0, 4, sizeof(float)};
                 if (streamOut != nullptr) *streamOut = 0;
@@ -36884,92 +36884,127 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
 
             std::string lookupName = name;
             std::size_t arrayElement = 0;
-	            const bool arrayElementCapture =
-	                parseArrayElementName(name, lookupName, arrayElement);
+            const bool arrayElementCapture =
+                parseArrayElementName(name, lookupName, arrayElement);
+            const GLProgramResourceEntry* tfEntry =
+                (tfIndex < program.resourceTransformFeedbackVaryings.size())
+                    ? &program.resourceTransformFeedbackVaryings[tfIndex]
+                    : nullptr;
+            const std::string sourceName =
+                (tfEntry != nullptr) ? tfEntry->tfSourceName : std::string();
 
-	            auto tfMemberAliasMatches = [](const std::string& candidate,
-	                                           const std::string& requested) -> bool {
-	                const auto dot = requested.rfind('.');
-	                if (dot == std::string::npos || dot + 1 >= requested.size()) {
-	                    return false;
-	                }
-	                const std::string tail = requested.substr(dot + 1);
-	                if (candidate == tail) {
-	                    return true;
-	                }
-	                const auto cDot = candidate.rfind('.');
-	                if (cDot != std::string::npos &&
-	                    cDot + 1 < candidate.size() &&
-	                    candidate.substr(cDot + 1) == tail) {
-	                    return true;
-	                }
-	                const auto cUnderscore = candidate.rfind('_');
-	                return cUnderscore != std::string::npos &&
-	                       cUnderscore + 1 < candidate.size() &&
-	                       candidate.substr(cUnderscore + 1) == tail;
-	            };
-	            auto resolveVaryingIndex = [&](std::size_t& outIndex,
-	                                           std::size_t& outOffset) -> bool {
-	                std::size_t off = 4;   // skip position
-	                for (std::size_t k = 0; k < ed.varyingNames.size(); ++k) {
-	                    if (ed.varyingNames[k] == lookupName) {
-	                        outIndex = k;
-	                        outOffset = off;
-	                        return true;
-	                    }
-	                    off += ed.varyingWidths[k];
-	                }
-	                off = 4;
-	                std::size_t matches = 0;
-	                std::size_t matchedIndex = 0;
-	                std::size_t matchedOffset = 0;
-	                for (std::size_t k = 0; k < ed.varyingNames.size(); ++k) {
-	                    if (tfMemberAliasMatches(ed.varyingNames[k], lookupName)) {
-	                        matchedIndex = k;
-	                        matchedOffset = off;
-	                        ++matches;
-	                    }
-	                    off += ed.varyingWidths[k];
-	                }
-	                if (matches == 1) {
-	                    outIndex = matchedIndex;
-	                    outOffset = matchedOffset;
-	                    return true;
-	                }
-	                return false;
-	            };
-
-	            std::size_t k = 0;
-	            std::size_t off = 0;
-	            if (resolveVaryingIndex(k, off)) {
-	                    const std::size_t scalarBytes =
-	                        (k < ed.varyingScalarByteSize.size() &&
-	                         k < ed.varyingBaseType.size() &&
-                         ed.varyingBaseType[k] == 0 &&
-                         ed.varyingScalarByteSize[k] == sizeof(double))
-                            ? sizeof(double) : sizeof(float);
-                    std::size_t count = ed.varyingWidths[k];
-                    if (arrayElementCapture) {
-                        std::size_t elementCount = tfResourceElementCount(tfIndex);
-                        if (elementCount == 0) {
-                            elementCount = count;
-                        }
-                        const std::size_t elementOffset = arrayElement * elementCount;
-                        if (elementOffset + elementCount > count) {
-                            return false;
-                        }
-                        off += elementOffset;
-                        count = elementCount;
+            auto tfMemberAliasMatches = [](const std::string& candidate,
+                                           const std::string& requested) -> bool {
+                const auto dot = requested.rfind('.');
+                if (dot == std::string::npos || dot + 1 >= requested.size()) {
+                    return false;
+                }
+                const std::string tail = requested.substr(dot + 1);
+                if (candidate == tail) {
+                    return true;
+                }
+                const auto cDot = candidate.rfind('.');
+                if (cDot != std::string::npos &&
+                    cDot + 1 < candidate.size() &&
+                    candidate.substr(cDot + 1) == tail) {
+                    return true;
+                }
+                const auto cUnderscore = candidate.rfind('_');
+                return cUnderscore != std::string::npos &&
+                       cUnderscore + 1 < candidate.size() &&
+                       candidate.substr(cUnderscore + 1) == tail;
+            };
+            auto resolveVaryingIndex = [&](std::size_t& outIndex,
+                                           std::size_t& outOffset,
+                                           bool& outMatchedSource) -> bool {
+                std::size_t off = 4;   // skip position
+                for (std::size_t k = 0; k < ed.varyingNames.size(); ++k) {
+                    if (ed.varyingNames[k] == lookupName) {
+                        outIndex = k;
+                        outOffset = off;
+                        outMatchedSource = false;
+                        return true;
                     }
-                    src = {off, count, scalarBytes};
+                    if (!sourceName.empty() && ed.varyingNames[k] == sourceName) {
+                        outIndex = k;
+                        outOffset = off;
+                        outMatchedSource = true;
+                        return true;
+                    }
+                    off += ed.varyingWidths[k];
+                }
+                off = 4;
+                std::size_t matches = 0;
+                std::size_t matchedIndex = 0;
+                std::size_t matchedOffset = 0;
+                for (std::size_t k = 0; k < ed.varyingNames.size(); ++k) {
+                    if (tfMemberAliasMatches(ed.varyingNames[k], lookupName)) {
+                        matchedIndex = k;
+                        matchedOffset = off;
+                        ++matches;
+                    }
+                    off += ed.varyingWidths[k];
+                }
+                if (matches == 1) {
+                    outIndex = matchedIndex;
+                    outOffset = matchedOffset;
+                    outMatchedSource = false;
+                    return true;
+                }
+                return false;
+            };
+
+            std::size_t k = 0;
+            std::size_t off = 0;
+            bool matchedSource = false;
+            if (resolveVaryingIndex(k, off, matchedSource)) {
+                const std::size_t scalarBytes =
+                    (k < ed.varyingScalarByteSize.size() &&
+                     k < ed.varyingBaseType.size() &&
+                     ed.varyingBaseType[k] == 0 &&
+                     ed.varyingScalarByteSize[k] == sizeof(double))
+                        ? sizeof(double) : sizeof(float);
+                std::size_t count = ed.varyingWidths[k];
+                if (matchedSource &&
+                    tfEntry != nullptr &&
+                    !tfEntry->tfSourceName.empty() &&
+                    tfEntry->tfComponentCount > 0) {
+                    const std::size_t componentOffset =
+                        static_cast<std::size_t>(
+                            std::max<GLint>(0, tfEntry->tfComponentOffset));
+                    const std::size_t componentCount =
+                        static_cast<std::size_t>(tfEntry->tfComponentCount);
+                    if (componentOffset + componentCount > count) {
+                        return false;
+                    }
+                    src = {off + componentOffset, componentCount, scalarBytes};
                     if (streamOut != nullptr &&
                         k < ed.varyingStreams.size()) {
                         *streamOut = ed.varyingStreams[k];
-	                    }
-	                    return true;
-	            }
-	            return false;
-	        };
+                    }
+                    return true;
+                }
+                if (arrayElementCapture) {
+                    std::size_t elementCount = tfResourceElementCount(tfIndex);
+                    if (elementCount == 0) {
+                        elementCount = count;
+                    }
+                    const std::size_t elementOffset = arrayElement * elementCount;
+                    if (elementOffset + elementCount > count) {
+                        return false;
+                    }
+                    off += elementOffset;
+                    count = elementCount;
+                }
+                src = {off, count, scalarBytes};
+                if (streamOut != nullptr &&
+                    k < ed.varyingStreams.size()) {
+                    *streamOut = ed.varyingStreams[k];
+                }
+                return true;
+            }
+            return false;
+        };
         std::vector<TfSource> sources(tfNames.size());
         for (std::size_t i = 0; i < tfNames.size(); ++i) {
             (void)resolveTfSource(tfNames[i], i, sources[i]);

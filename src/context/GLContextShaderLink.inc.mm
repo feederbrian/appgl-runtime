@@ -1036,201 +1036,14 @@ bool GLContext::linkProgram(GLuint program) {
         // and report size 1. CTS
         // `program_interface_query.transform-feedback-types` asserts
         // both shapes.
-        struct OutputInfo { GLenum type = 0; GLint arraySize = 1; bool isArray = false; };
-        std::unordered_map<std::string, OutputInfo> outputTypeMap;
-        for (const auto& decl : xfbStage->declaredOutputs) {
-            OutputInfo info;
-            info.type = decl.type;
-            info.arraySize = decl.arraySize > 0 ? decl.arraySize : 1;
-            info.isArray = decl.isArray;
-            outputTypeMap[decl.name] = info;
-        }
-        // Built-in outputs that are always available for capture.
-        outputTypeMap["gl_Position"]     = OutputInfo{GL_FLOAT_VEC4, 1, false};
-        outputTypeMap["gl_PointSize"]    = OutputInfo{GL_FLOAT, 1, false};
-        outputTypeMap["gl_ClipDistance"] = OutputInfo{GL_FLOAT, 1, false};
-
-        // GL 4.6 §11.1.2.1 — TFB varyings inside named interface blocks
-        // are referenced as either `BlockType.member` or
-        // `instance.member`. Our GLSL scanner can't see block members
-        // (braceDepth > 0 skips them to avoid parsing function bodies),
-        // so do a focused source-text scan here to build synthetic
-        // outputTypeMap entries. CTS `vertex_attrib_binding.basic-
-        // input*` uses `"StageData.attrib[0]"` through `"StageData.
-        // attrib[15]"` — without this, glTransformFeedbackVaryings
-        // rejects the program at link time.
-        {
-            const std::string& src = xfbStage->source;
-            const std::string outKw = "out ";
-            std::size_t scanPos = 0;
-            while ((scanPos = src.find(outKw, scanPos)) != std::string::npos) {
-                const bool leftBoundary = (scanPos == 0) ||
-                    !(std::isalnum(static_cast<unsigned char>(src[scanPos - 1])) ||
-                      src[scanPos - 1] == '_');
-                if (!leftBoundary) { scanPos += outKw.size(); continue; }
-                std::size_t p = scanPos + outKw.size();
-                while (p < src.size() && (src[p] == ' ' || src[p] == '\t')) { ++p; }
-                const std::size_t nameStart = p;
-                while (p < src.size() &&
-                       (std::isalnum(static_cast<unsigned char>(src[p])) || src[p] == '_')) { ++p; }
-                const std::string blockName(src, nameStart, p - nameStart);
-                if (blockName.empty() || blockName == "gl_PerVertex") {
-                    scanPos += outKw.size();
-                    continue;
-                }
-                while (p < src.size() &&
-                       (src[p] == ' ' || src[p] == '\t' || src[p] == '\n' || src[p] == '\r')) { ++p; }
-                if (p >= src.size() || src[p] != '{') {
-                    scanPos += outKw.size();
-                    continue;
-                }
-                const std::size_t bodyStart = p + 1;
-                int depth = 1;
-                ++p;
-                while (p < src.size() && depth > 0) {
-                    if (src[p] == '{') ++depth;
-                    else if (src[p] == '}') --depth;
-                    ++p;
-                }
-                if (depth != 0) { scanPos += outKw.size(); continue; }
-                std::string body(src, bodyStart, p - 1 - bodyStart);
-                // Split body on `;`, parse each member.
-                std::size_t bp = 0;
-                while (bp < body.size()) {
-                    auto semi = body.find(';', bp);
-                    if (semi == std::string::npos) break;
-                    std::string member = body.substr(bp, semi - bp);
-                    bp = semi + 1;
-                    // Strip whitespace + precision/interpolation quals.
-                    auto isWS = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
-                    std::size_t mp = 0;
-                    while (mp < member.size() && isWS(member[mp])) ++mp;
-                    member = member.substr(mp);
-                    // Tokenize. Format: [quals...] type name[,name...];
-                    std::vector<std::string> toks;
-                    std::string cur;
-                    for (char c : member) {
-                        if (isWS(c) || c == ',' || c == '[' || c == ']') {
-                            if (!cur.empty()) { toks.push_back(cur); cur.clear(); }
-                            if (c == ',' || c == '[' || c == ']') toks.emplace_back(1, c);
-                        } else {
-                            cur.push_back(c);
-                        }
-                    }
-                    if (!cur.empty()) toks.push_back(cur);
-                    // Drop quals until we hit a known type. Only the
-                    // types that show up as XFB-capture interface-block
-                    // members in CTS need to be recognised here;
-                    // anything else stays out of outputTypeMap and the
-                    // link-time check falls back to the spec-correct
-                    // "not found" path. Keep in sync with the larger
-                    // typeTable() in GLSLReflection.cpp.
-	                    auto typeFromKeyword = [](const std::string& k) -> GLenum {
-	                        if (k == "float") return GL_FLOAT;
-	                        if (k == "vec2")  return GL_FLOAT_VEC2;
-	                        if (k == "vec3")  return GL_FLOAT_VEC3;
-	                        if (k == "vec4")  return GL_FLOAT_VEC4;
-                        if (k == "int")   return GL_INT;
-                        if (k == "ivec2") return GL_INT_VEC2;
-                        if (k == "ivec3") return GL_INT_VEC3;
-                        if (k == "ivec4") return GL_INT_VEC4;
-                        if (k == "uint")  return GL_UNSIGNED_INT;
-                        if (k == "uvec2") return GL_UNSIGNED_INT_VEC2;
-                        if (k == "uvec3") return GL_UNSIGNED_INT_VEC3;
-                        if (k == "uvec4") return GL_UNSIGNED_INT_VEC4;
-	                        if (k == "double") return GL_DOUBLE;
-	                        if (k == "dvec2") return GL_DOUBLE_VEC2;
-	                        if (k == "dvec3") return GL_DOUBLE_VEC3;
-	                        if (k == "dvec4") return GL_DOUBLE_VEC4;
-	                        if (k == "mat2")  return GL_FLOAT_MAT2;
-	                        if (k == "mat3")  return GL_FLOAT_MAT3;
-	                        if (k == "mat4")  return GL_FLOAT_MAT4;
-	                        if (k == "mat2x2") return GL_FLOAT_MAT2;
-	                        if (k == "mat3x3") return GL_FLOAT_MAT3;
-	                        if (k == "mat4x4") return GL_FLOAT_MAT4;
-	                        if (k == "mat2x3") return GL_FLOAT_MAT2x3;
-	                        if (k == "mat2x4") return GL_FLOAT_MAT2x4;
-	                        if (k == "mat3x2") return GL_FLOAT_MAT3x2;
-	                        if (k == "mat3x4") return GL_FLOAT_MAT3x4;
-	                        if (k == "mat4x2") return GL_FLOAT_MAT4x2;
-	                        if (k == "mat4x3") return GL_FLOAT_MAT4x3;
-	                        if (k == "dmat2") return GL_DOUBLE_MAT2;
-	                        if (k == "dmat3") return GL_DOUBLE_MAT3;
-	                        if (k == "dmat4") return GL_DOUBLE_MAT4;
-	                        if (k == "dmat2x2") return GL_DOUBLE_MAT2;
-	                        if (k == "dmat3x3") return GL_DOUBLE_MAT3;
-	                        if (k == "dmat4x4") return GL_DOUBLE_MAT4;
-	                        if (k == "dmat2x3") return GL_DOUBLE_MAT2x3;
-	                        if (k == "dmat2x4") return GL_DOUBLE_MAT2x4;
-	                        if (k == "dmat3x2") return GL_DOUBLE_MAT3x2;
-	                        if (k == "dmat3x4") return GL_DOUBLE_MAT3x4;
-	                        if (k == "dmat4x2") return GL_DOUBLE_MAT4x2;
-	                        if (k == "dmat4x3") return GL_DOUBLE_MAT4x3;
-	                        return 0;
-	                    };
-	                    std::string instanceName;
-	                    {
-	                        std::size_t q = p;
-	                        while (q < src.size() &&
-	                               (src[q] == ' ' || src[q] == '\t' ||
-	                                src[q] == '\n' || src[q] == '\r')) { ++q; }
-	                        const std::size_t instStart = q;
-	                        while (q < src.size() &&
-	                               (std::isalnum(static_cast<unsigned char>(src[q])) ||
-	                                src[q] == '_')) { ++q; }
-	                        if (q > instStart) {
-	                            instanceName.assign(src, instStart, q - instStart);
-	                        }
-	                    }
-	                    std::size_t ti = 0;
-	                    GLenum memberType = 0;
-	                    while (ti < toks.size()) {
-	                        GLenum t = typeFromKeyword(toks[ti]);
-                        if (t != 0) { memberType = t; ++ti; break; }
-                        ++ti;
-                    }
-                    if (memberType == 0) continue;
-                    // Names: collect identifiers (with optional [N]).
-                    while (ti < toks.size()) {
-                        if (!std::isalpha(static_cast<unsigned char>(toks[ti][0])) &&
-                            toks[ti][0] != '_') { ++ti; continue; }
-                        std::string name = toks[ti++];
-                        GLint arraySize = 1;
-                        bool isArray = false;
-                        if (ti < toks.size() && toks[ti] == "[") {
-                            ++ti;
-                            if (ti < toks.size()) {
-                                arraySize = static_cast<GLint>(std::strtol(toks[ti].c_str(), nullptr, 10));
-                                ++ti;
-                            }
-                            if (ti < toks.size() && toks[ti] == "]") ++ti;
-                            isArray = true;
-                        }
-                        OutputInfo info;
-	                        info.type = memberType;
-	                        info.arraySize = arraySize > 0 ? arraySize : 1;
-	                        info.isArray = isArray;
-	                        outputTypeMap[blockName + "." + name] = info;
-	                        if (!instanceName.empty()) {
-	                            outputTypeMap[instanceName + "." + name] = info;
-	                        } else {
-	                            outputTypeMap[name] = info;
-	                        }
-	                        // Skip past `,`
-	                        if (ti < toks.size() && toks[ti] == ",") ++ti;
-	                    }
-                }
-                scanPos = p;
-            }
-        }
-
-        // Special interleaved-mode names that are NOT real varyings:
-        auto isSpecialName = [](const std::string& n) {
-            return n == "gl_NextBuffer" ||
-                   n == "gl_SkipComponents1" || n == "gl_SkipComponents2" ||
-                   n == "gl_SkipComponents3" || n == "gl_SkipComponents4";
+        struct OutputInfo {
+            GLenum type = 0;
+            GLint arraySize = 1;
+            bool isArray = false;
+            std::string tfSourceName;
+            GLint tfComponentOffset = 0;
+            GLint tfComponentCount = 0;
         };
-
         // Helper: component count for a GL type.
         auto glTypeComponents = [](GLenum t) -> GLsizei {
             switch (t) {
@@ -1257,6 +1070,431 @@ bool GLContext::linkProgram(GLuint program) {
                 case GL_FLOAT_MAT4x3: case GL_DOUBLE_MAT4x3: return 12;
                 default: return 1;
             }
+        };
+        auto makeOutputInfo = [&](GLenum type, GLint arraySize, bool isArray,
+                                  std::string sourceName, GLint componentOffset,
+                                  GLint componentCount) {
+            OutputInfo info;
+            info.type = type;
+            info.arraySize = arraySize > 0 ? arraySize : 1;
+            info.isArray = isArray;
+            info.tfSourceName = std::move(sourceName);
+            info.tfComponentOffset = componentOffset;
+            info.tfComponentCount = componentCount;
+            return info;
+        };
+        std::unordered_map<std::string, OutputInfo> outputTypeMap;
+        for (const auto& decl : xfbStage->declaredOutputs) {
+            if (decl.type == 0) {
+                continue;
+            }
+            const GLint arraySize = decl.arraySize > 0 ? decl.arraySize : 1;
+            outputTypeMap[decl.name] = makeOutputInfo(
+                decl.type, arraySize, decl.isArray, decl.name, 0,
+                glTypeComponents(decl.type) * arraySize);
+        }
+        // Built-in outputs that are always available for capture.
+        outputTypeMap["gl_Position"] = makeOutputInfo(
+            GL_FLOAT_VEC4, 1, false, "gl_Position", 0, 4);
+        outputTypeMap["gl_PointSize"] = makeOutputInfo(
+            GL_FLOAT, 1, false, "gl_PointSize", 0, 1);
+        outputTypeMap["gl_ClipDistance"] = makeOutputInfo(
+            GL_FLOAT, 1, false, "gl_ClipDistance", 0, 1);
+
+        // GL 4.6 §11.1.2.1 — TFB varyings inside named interface blocks
+        // are referenced as either `BlockType.member` or
+        // `instance.member`. Struct leaves are captured by spelling the
+        // full path (`v[0].e[1].a`) rather than the whole aggregate. Build
+        // synthetic lookup entries for those leaves and record the flat
+        // scalar slice that draw-time transform feedback needs to pack.
+        {
+            const std::string& src = xfbStage->source;
+            auto typeFromKeyword = [](const std::string& k) -> GLenum {
+                if (k == "float") return GL_FLOAT;
+                if (k == "vec2")  return GL_FLOAT_VEC2;
+                if (k == "vec3")  return GL_FLOAT_VEC3;
+                if (k == "vec4")  return GL_FLOAT_VEC4;
+                if (k == "int")   return GL_INT;
+                if (k == "ivec2") return GL_INT_VEC2;
+                if (k == "ivec3") return GL_INT_VEC3;
+                if (k == "ivec4") return GL_INT_VEC4;
+                if (k == "uint")  return GL_UNSIGNED_INT;
+                if (k == "uvec2") return GL_UNSIGNED_INT_VEC2;
+                if (k == "uvec3") return GL_UNSIGNED_INT_VEC3;
+                if (k == "uvec4") return GL_UNSIGNED_INT_VEC4;
+                if (k == "double") return GL_DOUBLE;
+                if (k == "dvec2") return GL_DOUBLE_VEC2;
+                if (k == "dvec3") return GL_DOUBLE_VEC3;
+                if (k == "dvec4") return GL_DOUBLE_VEC4;
+                if (k == "mat2" || k == "mat2x2") return GL_FLOAT_MAT2;
+                if (k == "mat3" || k == "mat3x3") return GL_FLOAT_MAT3;
+                if (k == "mat4" || k == "mat4x4") return GL_FLOAT_MAT4;
+                if (k == "mat2x3") return GL_FLOAT_MAT2x3;
+                if (k == "mat2x4") return GL_FLOAT_MAT2x4;
+                if (k == "mat3x2") return GL_FLOAT_MAT3x2;
+                if (k == "mat3x4") return GL_FLOAT_MAT3x4;
+                if (k == "mat4x2") return GL_FLOAT_MAT4x2;
+                if (k == "mat4x3") return GL_FLOAT_MAT4x3;
+                if (k == "dmat2" || k == "dmat2x2") return GL_DOUBLE_MAT2;
+                if (k == "dmat3" || k == "dmat3x3") return GL_DOUBLE_MAT3;
+                if (k == "dmat4" || k == "dmat4x4") return GL_DOUBLE_MAT4;
+                if (k == "dmat2x3") return GL_DOUBLE_MAT2x3;
+                if (k == "dmat2x4") return GL_DOUBLE_MAT2x4;
+                if (k == "dmat3x2") return GL_DOUBLE_MAT3x2;
+                if (k == "dmat3x4") return GL_DOUBLE_MAT3x4;
+                if (k == "dmat4x2") return GL_DOUBLE_MAT4x2;
+                if (k == "dmat4x3") return GL_DOUBLE_MAT4x3;
+                return 0;
+            };
+            auto isIdent = [](const std::string& tok) {
+                return !tok.empty() &&
+                    (std::isalpha(static_cast<unsigned char>(tok[0])) ||
+                     tok[0] == '_');
+            };
+            auto isQualifier = [](const std::string& tok) {
+                return tok == "flat" || tok == "smooth" ||
+                       tok == "noperspective" || tok == "centroid" ||
+                       tok == "sample" || tok == "invariant" ||
+                       tok == "highp" || tok == "mediump" || tok == "lowp" ||
+                       tok == "patch" || tok == "precise" || tok == "readonly" ||
+                       tok == "writeonly" || tok == "coherent" ||
+                       tok == "volatile" || tok == "restrict";
+            };
+            auto parsePositiveInt = [](const std::string& tok, GLint& value) {
+                if (tok.empty()) return false;
+                for (char c : tok) {
+                    if (!std::isdigit(static_cast<unsigned char>(c))) return false;
+                }
+                value = static_cast<GLint>(std::strtol(tok.c_str(), nullptr, 10));
+                return value > 0;
+            };
+            std::vector<std::string> toks;
+            toks.reserve(src.size() / 4);
+            for (std::size_t i = 0; i < src.size();) {
+                const unsigned char c = static_cast<unsigned char>(src[i]);
+                if (std::isspace(c)) { ++i; continue; }
+                if (std::isalpha(c) || src[i] == '_') {
+                    std::size_t j = i + 1;
+                    while (j < src.size()) {
+                        const unsigned char d = static_cast<unsigned char>(src[j]);
+                        if (!std::isalnum(d) && src[j] != '_') break;
+                        ++j;
+                    }
+                    toks.emplace_back(src, i, j - i);
+                    i = j;
+                    continue;
+                }
+                if (std::isdigit(c)) {
+                    std::size_t j = i + 1;
+                    while (j < src.size() &&
+                           std::isdigit(static_cast<unsigned char>(src[j]))) {
+                        ++j;
+                    }
+                    toks.emplace_back(src, i, j - i);
+                    i = j;
+                    continue;
+                }
+                if (src[i] == '/' && i + 1 < src.size() && src[i + 1] == '/') {
+                    while (i < src.size() && src[i] != '\n') ++i;
+                    continue;
+                }
+                if (src[i] == '/' && i + 1 < src.size() && src[i + 1] == '*') {
+                    i += 2;
+                    while (i + 1 < src.size() && !(src[i] == '*' && src[i + 1] == '/')) ++i;
+                    i = std::min<std::size_t>(src.size(), i + 2);
+                    continue;
+                }
+                toks.emplace_back(1, src[i]);
+                ++i;
+            }
+
+            struct TfMemberSpec {
+                std::string name;
+                std::string typeName;
+                GLenum glType = 0;
+                GLint arraySize = 1;
+                bool isArray = false;
+            };
+            struct TfStructSpec {
+                std::vector<TfMemberSpec> members;
+                GLint componentCount = 0;
+            };
+            std::unordered_map<std::string, TfStructSpec> structDefs;
+
+            std::function<GLint(const TfMemberSpec&)> typeComponentCount =
+                [&](const TfMemberSpec& spec) -> GLint {
+                    const GLint arraySize = spec.isArray
+                        ? std::max<GLint>(1, spec.arraySize) : 1;
+                    if (spec.glType != 0) {
+                        return glTypeComponents(spec.glType) * arraySize;
+                    }
+                    auto sIt = structDefs.find(spec.typeName);
+                    if (sIt == structDefs.end()) {
+                        return 0;
+                    }
+                    return sIt->second.componentCount * arraySize;
+                };
+            auto parseArraySuffix = [&](std::size_t& i, std::size_t end,
+                                        TfMemberSpec& spec) {
+                if (i + 2 >= end || toks[i] != "[") return;
+                GLint parsed = 1;
+                if (parsePositiveInt(toks[i + 1], parsed) && toks[i + 2] == "]") {
+                    spec.arraySize *= parsed;
+                    spec.isArray = true;
+                    i += 3;
+                }
+            };
+            auto parseTypeSpec = [&](std::size_t& i, std::size_t end,
+                                     TfMemberSpec& spec) -> bool {
+                while (i < end && isQualifier(toks[i])) ++i;
+                if (i >= end || !isIdent(toks[i])) return false;
+                spec = TfMemberSpec{};
+                spec.typeName = toks[i++];
+                spec.glType = typeFromKeyword(spec.typeName);
+                if (spec.glType == 0 && structDefs.count(spec.typeName) == 0) {
+                    return false;
+                }
+                parseArraySuffix(i, end, spec);
+                return true;
+            };
+            auto parseMemberDecls = [&](std::size_t begin, std::size_t end,
+                                        std::vector<TfMemberSpec>& outMembers) {
+                std::size_t p = begin;
+                while (p < end) {
+                    std::size_t semi = p;
+                    while (semi < end && toks[semi] != ";") ++semi;
+                    std::size_t q = p;
+                    TfMemberSpec baseSpec;
+                    if (parseTypeSpec(q, semi, baseSpec)) {
+                        while (q < semi) {
+                            if (!isIdent(toks[q])) { ++q; continue; }
+                            TfMemberSpec member = baseSpec;
+                            member.name = toks[q++];
+                            parseArraySuffix(q, semi, member);
+                            if (!member.name.empty()) {
+                                outMembers.push_back(std::move(member));
+                            }
+                            if (q < semi && toks[q] == ",") ++q;
+                        }
+                    }
+                    p = semi + (semi < end ? 1 : 0);
+                }
+            };
+
+            for (std::size_t i = 0; i + 3 < toks.size(); ++i) {
+                if (toks[i] != "struct" || !isIdent(toks[i + 1]) ||
+                    toks[i + 2] != "{") {
+                    continue;
+                }
+                std::size_t p = i + 3;
+                int depth = 1;
+                while (p < toks.size() && depth > 0) {
+                    if (toks[p] == "{") ++depth;
+                    else if (toks[p] == "}") --depth;
+                    ++p;
+                }
+                if (depth != 0) continue;
+                const std::size_t bodyEnd = p - 1;
+                TfStructSpec spec;
+                parseMemberDecls(i + 3, bodyEnd, spec.members);
+                for (const auto& member : spec.members) {
+                    spec.componentCount += typeComponentCount(member);
+                }
+                if (!spec.members.empty() && spec.componentCount > 0) {
+                    structDefs[toks[i + 1]] = std::move(spec);
+                }
+                i = p;
+            }
+
+            std::function<void(const std::string&, const TfMemberSpec&,
+                               const std::string&, GLint)> addFlattened;
+            addFlattened = [&](const std::string& publicName,
+                               const TfMemberSpec& spec,
+                               const std::string& sourceName,
+                               GLint componentOffset) {
+                const GLint arraySize = spec.isArray
+                    ? std::max<GLint>(1, spec.arraySize) : 1;
+                if (spec.glType != 0) {
+                    const GLint elemComponents = glTypeComponents(spec.glType);
+                    outputTypeMap[publicName] = makeOutputInfo(
+                        spec.glType, arraySize, spec.isArray, sourceName,
+                        componentOffset, elemComponents * arraySize);
+                    if (spec.isArray) {
+                        for (GLint elem = 0; elem < arraySize; ++elem) {
+                            outputTypeMap[publicName + "[" + std::to_string(elem) + "]"] =
+                                makeOutputInfo(spec.glType, 1, false, sourceName,
+                                               componentOffset + elem * elemComponents,
+                                               elemComponents);
+                        }
+                    }
+                    return;
+                }
+                auto sIt = structDefs.find(spec.typeName);
+                if (sIt == structDefs.end()) return;
+                const GLint structComponents = sIt->second.componentCount;
+                auto addStructMembers = [&](const std::string& prefix,
+                                            GLint baseOffset) {
+                    GLint cursor = baseOffset;
+                    for (const auto& member : sIt->second.members) {
+                        addFlattened(prefix + "." + member.name, member,
+                                     sourceName, cursor);
+                        cursor += typeComponentCount(member);
+                    }
+                };
+                if (spec.isArray) {
+                    for (GLint elem = 0; elem < arraySize; ++elem) {
+                        addStructMembers(publicName + "[" + std::to_string(elem) + "]",
+                                         componentOffset + elem * structComponents);
+                    }
+                } else {
+                    addStructMembers(publicName, componentOffset);
+                }
+            };
+            auto addOutputDecl = [&](const std::string& publicName,
+                                     const TfMemberSpec& spec,
+                                     const std::string& sourceName) {
+                if (publicName.empty() || sourceName.empty()) return;
+                addFlattened(publicName, spec, sourceName, 0);
+            };
+
+            std::string macroBlockName;
+            std::string macroInstanceName;
+            for (std::size_t i = 0; i + 4 < toks.size(); ++i) {
+                if (toks[i] != "DECLARE_VARYING" || toks[i + 1] != "(" ||
+                    toks[i + 2] != "DIR") {
+                    continue;
+                }
+                std::size_t p = i + 2;
+                int depth = 1;
+                while (p < toks.size() && depth > 0) {
+                    if (toks[p] == "(") ++depth;
+                    else if (toks[p] == ")") --depth;
+                    ++p;
+                }
+                for (std::size_t q = p; q + 2 < toks.size() && q < p + 24; ++q) {
+                    if (toks[q] == "DIR" && isIdent(toks[q + 1]) &&
+                        toks[q + 2] == "{") {
+                        macroBlockName = toks[q + 1];
+                        std::size_t r = q + 3;
+                        int braceDepth = 1;
+                        while (r < toks.size() && braceDepth > 0) {
+                            if (toks[r] == "{") ++braceDepth;
+                            else if (toks[r] == "}") --braceDepth;
+                            ++r;
+                        }
+                        if (r < toks.size() && isIdent(toks[r])) {
+                            macroInstanceName = toks[r];
+                        }
+                        break;
+                    }
+                }
+            }
+
+            auto parseDeclareVaryingCall = [&](std::size_t i, std::size_t& endOut) {
+                endOut = i + 1;
+                if (i + 1 >= toks.size() || toks[i + 1] != "(") return;
+                std::array<std::vector<std::string>, 3> args;
+                std::size_t arg = 0;
+                int depth = 0;
+                std::size_t p = i + 1;
+                for (; p < toks.size(); ++p) {
+                    if (toks[p] == "(") {
+                        if (depth++ > 0 && arg < args.size()) args[arg].push_back(toks[p]);
+                    } else if (toks[p] == ")") {
+                        if (--depth == 0) { ++p; break; }
+                        if (arg < args.size()) args[arg].push_back(toks[p]);
+                    } else if (toks[p] == "," && depth == 1) {
+                        if (arg + 1 < args.size()) ++arg;
+                    } else if (arg < args.size()) {
+                        args[arg].push_back(toks[p]);
+                    }
+                }
+                endOut = p;
+                if (args[0].size() != 1 || args[0][0] != "out" ||
+                    args[1].empty() || args[2].empty()) {
+                    return;
+                }
+                std::size_t q = 0;
+                std::vector<std::string> saved;
+                saved.swap(toks);
+                toks = args[1];
+                TfMemberSpec spec;
+                const bool ok = parseTypeSpec(q, toks.size(), spec);
+                toks.swap(saved);
+                if (!ok) return;
+                std::string name;
+                for (const auto& tok : args[2]) {
+                    if (isIdent(tok)) { name = tok; break; }
+                }
+                if (name.empty()) return;
+                if (!macroBlockName.empty()) {
+                    addOutputDecl(macroBlockName + "." + name, spec, name);
+                    if (!macroInstanceName.empty()) {
+                        addOutputDecl(macroInstanceName + "." + name, spec, name);
+                    } else {
+                        addOutputDecl(name, spec, name);
+                    }
+                } else {
+                    addOutputDecl(name, spec, name);
+                }
+            };
+            for (std::size_t i = 0; i < toks.size(); ++i) {
+                if (toks[i] == "DECLARE_VARYING") {
+                    std::size_t end = i + 1;
+                    parseDeclareVaryingCall(i, end);
+                    i = end > i ? end - 1 : i;
+                }
+            }
+
+            for (std::size_t i = 0; i + 2 < toks.size(); ++i) {
+                if (toks[i] != "out") continue;
+                if (toks[i + 2] == "{") {
+                    const std::string blockName = toks[i + 1];
+                    if (blockName.empty() || blockName == "gl_PerVertex") continue;
+                    std::size_t p = i + 3;
+                    int depth = 1;
+                    while (p < toks.size() && depth > 0) {
+                        if (toks[p] == "{") ++depth;
+                        else if (toks[p] == "}") --depth;
+                        ++p;
+                    }
+                    if (depth != 0) continue;
+                    const std::size_t bodyEnd = p - 1;
+                    std::vector<TfMemberSpec> members;
+                    parseMemberDecls(i + 3, bodyEnd, members);
+                    std::string instanceName;
+                    if (p < toks.size() && isIdent(toks[p])) {
+                        instanceName = toks[p++];
+                    }
+                    for (const auto& member : members) {
+                        addOutputDecl(blockName + "." + member.name, member,
+                                      member.name);
+                        if (!instanceName.empty()) {
+                            addOutputDecl(instanceName + "." + member.name,
+                                          member, member.name);
+                        } else {
+                            addOutputDecl(member.name, member, member.name);
+                        }
+                    }
+                    i = p;
+                    continue;
+                }
+                std::size_t q = i + 1;
+                TfMemberSpec spec;
+                if (!parseTypeSpec(q, toks.size(), spec)) continue;
+                if (q < toks.size() && isIdent(toks[q])) {
+                    spec.name = toks[q++];
+                    parseArraySuffix(q, toks.size(), spec);
+                    addOutputDecl(spec.name, spec, spec.name);
+                }
+            }
+        }
+
+        // Special interleaved-mode names that are NOT real varyings:
+        auto isSpecialName = [](const std::string& n) {
+            return n == "gl_NextBuffer" ||
+                   n == "gl_SkipComponents1" || n == "gl_SkipComponents2" ||
+                   n == "gl_SkipComponents3" || n == "gl_SkipComponents4";
         };
 
         // (2) Validate each varying name and resolve types.
@@ -1307,40 +1545,58 @@ bool GLContext::linkProgram(GLuint program) {
             GLenum resolvedType = GL_FLOAT; // fallback
             GLint resolvedArraySize = 1;
             bool captureIsArrayElement = false;
+            GLint captureArrayElementIndex = 0;
+            OutputInfo resolvedInfo;
+            bool haveResolvedInfo = false;
             // Array-element capture: `b[0]` / `b[1]` reference a single
-            // element of `out float b[2]`. Strip the trailing `[N]`
-            // subscript and look up the base name; size is 1 per GL 4.6
-            // §11.1.2.1.
+            // element of `out float b[2]`. Prefer exact struct-leaf entries
+            // such as `v.a[0]`; otherwise strip the trailing `[N]` subscript
+            // and look up the base name. Size is 1 per GL 4.6 §11.1.2.1.
             std::string lookupName = varyName;
-            {
-                const auto bracket = varyName.rfind('[');
-                if (bracket != std::string::npos && !varyName.empty() &&
-                    varyName.back() == ']') {
+            auto parseTrailingArrayElement = [&](const std::string& name,
+                                                 std::string& base,
+                                                 GLint& element) -> bool {
+                const auto bracket = name.rfind('[');
+                if (bracket != std::string::npos && !name.empty() &&
+                    name.back() == ']') {
                     const std::string idxStr =
-                        varyName.substr(bracket + 1, varyName.size() - bracket - 2);
+                        name.substr(bracket + 1, name.size() - bracket - 2);
                     if (!idxStr.empty() &&
                         std::all_of(idxStr.begin(), idxStr.end(),
                                     [](char c) { return std::isdigit(static_cast<unsigned char>(c)); })) {
-                        lookupName = varyName.substr(0, bracket);
-                        captureIsArrayElement = true;
+                        base = name.substr(0, bracket);
+                        element = static_cast<GLint>(std::strtol(idxStr.c_str(), nullptr, 10));
+                        return !base.empty();
                     }
                 }
-            }
+                return false;
+            };
             if (haveOutputDecls) {
-                auto it = outputTypeMap.find(lookupName);
+                auto it = outputTypeMap.find(varyName);
                 if (it == outputTypeMap.end()) {
-                    programObject->linkLog = "transform feedback varying '" + varyName +
-                        "' is not an output of the last vertex-processing stage";
-                    Runtime::shared().recordShaderTranslation({
-                        programTag, "link", "", "", "", programObject->linkLog, "", false
-                    });
-                    return false;
+                    if (parseTrailingArrayElement(varyName, lookupName,
+                                                  captureArrayElementIndex)) {
+                        captureIsArrayElement = true;
+                        it = outputTypeMap.find(lookupName);
+                    }
+                    if (it == outputTypeMap.end()) {
+                        programObject->linkLog = "transform feedback varying '" + varyName +
+                            "' is not an output of the last vertex-processing stage";
+                        Runtime::shared().recordShaderTranslation({
+                            programTag, "link", "", "", "", programObject->linkLog, "", false
+                        });
+                        return false;
+                    }
+                } else {
+                    lookupName = varyName;
                 }
                 resolvedType = it->second.type;
                 // Whole-array capture → report the declared array size.
                 // Single-element capture → report 1.
                 resolvedArraySize = (captureIsArrayElement || !it->second.isArray)
                     ? 1 : it->second.arraySize;
+                resolvedInfo = it->second;
+                haveResolvedInfo = true;
             }
 
             // (3) Duplicate check (applies to both interleaved and separate).
@@ -1359,6 +1615,21 @@ bool GLContext::linkProgram(GLuint program) {
             entry.name = varyName;
             entry.type = resolvedType;
             entry.arraySize = resolvedArraySize;
+            if (haveResolvedInfo) {
+                entry.isArray = !captureIsArrayElement && resolvedInfo.isArray;
+                entry.tfSourceName = resolvedInfo.tfSourceName;
+                entry.tfComponentOffset = resolvedInfo.tfComponentOffset;
+                entry.tfComponentCount = resolvedInfo.tfComponentCount;
+                if (captureIsArrayElement && resolvedInfo.isArray) {
+                    const GLint elemComponents = glTypeComponents(resolvedType);
+                    entry.tfComponentOffset += captureArrayElementIndex * elemComponents;
+                    entry.tfComponentCount = elemComponents;
+                }
+                if (entry.tfComponentCount <= 0) {
+                    entry.tfComponentCount =
+                        glTypeComponents(resolvedType) * resolvedArraySize;
+                }
+            }
             programObject->resourceTransformFeedbackVaryings.push_back(std::move(entry));
         }
 
