@@ -66,7 +66,9 @@ namespace spv {
         OpConvertFToS = 110, OpConvertFToU = 109,
         OpConvertSToF = 111, OpConvertUToF = 112, OpFConvert = 115,
         OpBitcast = 124,
-        OpBitwiseAnd = 199, OpShiftLeftLogical = 196,
+        OpBitwiseOr = 197, OpBitwiseXor = 198,
+        OpBitwiseAnd = 199, OpShiftRightLogical = 194,
+        OpShiftRightArithmetic = 195, OpShiftLeftLogical = 196,
         OpIEqual = 170, OpINotEqual = 171,
         OpUGreaterThan = 172,
         OpSLessThan = 177, OpSGreaterThan = 173,
@@ -8493,12 +8495,45 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 pc += wc;
                 break;
             }
+            case spv::OpBitwiseOr:
+            case spv::OpBitwiseXor: {
+                Value a, b;
+                if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("OpBitwise: unknown operand"); break; }
+                Value r = a;
+                for (int k = 0; k < a.componentCount(); ++k) {
+                    r.i[k] = (opcode == spv::OpBitwiseOr)
+                        ? (a.i[k] | b.i[k])
+                        : (a.i[k] ^ b.i[k]);
+                }
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
             case spv::OpShiftLeftLogical: {
                 Value a, b;
                 if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("OpShiftLeftLogical: unknown operand"); break; }
                 Value r = a;
                 for (int k = 0; k < a.componentCount(); ++k) {
                     r.i[k] = a.i[k] << (b.i[k] & 31);
+                }
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            case spv::OpShiftRightLogical:
+            case spv::OpShiftRightArithmetic: {
+                Value a, b;
+                if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("OpShiftRight: unknown operand"); break; }
+                Value r = a;
+                for (int k = 0; k < a.componentCount(); ++k) {
+                    const std::uint32_t shift =
+                        static_cast<std::uint32_t>(b.i[k]) & 31u;
+                    if (opcode == spv::OpShiftRightLogical) {
+                        r.i[k] = static_cast<std::int32_t>(
+                            static_cast<std::uint32_t>(a.i[k]) >> shift);
+                    } else {
+                        r.i[k] = a.i[k] >> shift;
+                    }
                 }
                 valueStore_[w[1]] = r;
                 pc += wc;
@@ -9195,7 +9230,11 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpUMod:
         case spv::OpSNegate:
         // ─ Bit ops ─
+        case spv::OpBitwiseOr:
+        case spv::OpBitwiseXor:
         case spv::OpBitwiseAnd:
+        case spv::OpShiftRightLogical:
+        case spv::OpShiftRightArithmetic:
         case spv::OpShiftLeftLogical:
         // ─ SSBO integer atomics ─
         case spv::OpAtomicLoad:
