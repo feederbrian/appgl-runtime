@@ -46962,14 +46962,150 @@ static bool appendPrimitiveRestartSegment(GLenum mode,
     }
 }
 
-static bool buildPrimitiveRestartExpandedElements(GLenum mode,
-                                                  GLenum originalIndexType,
-                                                  GLenum effectiveIndexType,
-                                                  const void* indices,
-                                                  GLsizei count,
-                                                  const GLStateTracker& state,
-                                                  std::vector<std::uint32_t>& out,
-                                                  GLenum& outMode) {
+static bool appendGsPrimitiveRestartSegment(GLenum mode,
+                                            const std::vector<std::uint32_t>& segment,
+                                            std::vector<std::uint32_t>& out,
+                                            GLenum& outMode) {
+    const std::size_t n = segment.size();
+    switch (mode) {
+        case GL_POINTS:
+            outMode = GL_POINTS;
+            out.insert(out.end(), segment.begin(), segment.end());
+            return true;
+        case GL_LINES:
+            outMode = GL_LINES;
+            for (std::size_t i = 0; i + 1 < n; i += 2) {
+                out.push_back(segment[i]);
+                out.push_back(segment[i + 1]);
+            }
+            return true;
+        case GL_LINE_STRIP:
+            outMode = GL_LINES;
+            for (std::size_t i = 0; i + 1 < n; ++i) {
+                out.push_back(segment[i]);
+                out.push_back(segment[i + 1]);
+            }
+            return true;
+        case GL_LINE_LOOP:
+            outMode = GL_LINES;
+            if (n >= 2) {
+                for (std::size_t i = 0; i + 1 < n; ++i) {
+                    out.push_back(segment[i]);
+                    out.push_back(segment[i + 1]);
+                }
+                out.push_back(segment[n - 1]);
+                out.push_back(segment[0]);
+            }
+            return true;
+        case GL_LINES_ADJACENCY:
+            outMode = GL_LINES_ADJACENCY;
+            for (std::size_t i = 0; i + 3 < n; i += 4) {
+                out.push_back(segment[i]);
+                out.push_back(segment[i + 1]);
+                out.push_back(segment[i + 2]);
+                out.push_back(segment[i + 3]);
+            }
+            return true;
+        case GL_LINE_STRIP_ADJACENCY:
+            outMode = GL_LINES_ADJACENCY;
+            for (std::size_t i = 0; i + 3 < n; ++i) {
+                out.push_back(segment[i]);
+                out.push_back(segment[i + 1]);
+                out.push_back(segment[i + 2]);
+                out.push_back(segment[i + 3]);
+            }
+            return true;
+        case GL_TRIANGLES:
+            outMode = GL_TRIANGLES;
+            for (std::size_t i = 0; i + 2 < n; i += 3) {
+                out.push_back(segment[i]);
+                out.push_back(segment[i + 1]);
+                out.push_back(segment[i + 2]);
+            }
+            return true;
+        case GL_TRIANGLE_STRIP:
+            outMode = GL_TRIANGLES;
+            for (std::size_t i = 0; i + 2 < n; ++i) {
+                if ((i & 1u) == 0u) {
+                    out.push_back(segment[i]);
+                    out.push_back(segment[i + 1]);
+                    out.push_back(segment[i + 2]);
+                } else {
+                    out.push_back(segment[i + 1]);
+                    out.push_back(segment[i]);
+                    out.push_back(segment[i + 2]);
+                }
+            }
+            return true;
+        case GL_TRIANGLE_FAN:
+            outMode = GL_TRIANGLES;
+            for (std::size_t i = 1; i + 1 < n; ++i) {
+                out.push_back(segment[0]);
+                out.push_back(segment[i]);
+                out.push_back(segment[i + 1]);
+            }
+            return true;
+        case GL_TRIANGLES_ADJACENCY:
+            outMode = GL_TRIANGLES_ADJACENCY;
+            for (std::size_t i = 0; i + 5 < n; i += 6) {
+                for (std::size_t v = 0; v < 6; ++v) {
+                    out.push_back(segment[i + v]);
+                }
+            }
+            return true;
+        case GL_TRIANGLE_STRIP_ADJACENCY: {
+            outMode = GL_TRIANGLES_ADJACENCY;
+            const std::size_t primCount = (n >= 6) ? ((n - 4) / 2) : 0;
+            auto pushTuple = [&](std::initializer_list<std::size_t> tuple) {
+                for (std::size_t v : tuple) {
+                    out.push_back(segment[v]);
+                }
+            };
+            for (std::size_t i = 0; i < primCount; ++i) {
+                const bool isFirst = (i == 0);
+                const bool isLast = (i == primCount - 1);
+                const bool isOdd = (i & 1u) != 0u;
+                if (isFirst && isLast) {
+                    pushTuple({0, 1, 2, 5, 4, 3});
+                } else if (isFirst) {
+                    pushTuple({0, 1, 2, 6, 4, 3});
+                } else if (isOdd && isLast) {
+                    pushTuple({2 * i + 2, 2 * i - 2, 2 * i,
+                               2 * i + 3, 2 * i + 4, 2 * i + 5});
+                } else if (isOdd) {
+                    pushTuple({2 * i + 2, 2 * i - 2, 2 * i,
+                               2 * i + 3, 2 * i + 4, 2 * i + 6});
+                } else if (isLast) {
+                    pushTuple({2 * i, 2 * i - 2, 2 * i + 2,
+                               2 * i + 5, 2 * i + 4, 2 * i + 3});
+                } else {
+                    pushTuple({2 * i, 2 * i - 2, 2 * i + 2,
+                               2 * i + 6, 2 * i + 4, 2 * i + 3});
+                }
+            }
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+using PrimitiveRestartSegmentAppender = bool (*)(
+    GLenum,
+    const std::vector<std::uint32_t>&,
+    std::vector<std::uint32_t>&,
+    GLenum&);
+
+static bool buildPrimitiveRestartExpandedElementsWithAppender(
+    GLenum mode,
+    GLenum originalIndexType,
+    GLenum effectiveIndexType,
+    const void* indices,
+    GLsizei count,
+    const GLStateTracker& state,
+    std::vector<std::uint32_t>& out,
+    GLenum& outMode,
+    PrimitiveRestartSegmentAppender appendSegment) {
     out.clear();
     outMode = mode;
     if (indices == nullptr || count <= 0) {
@@ -46990,7 +47126,7 @@ static bool buildPrimitiveRestartExpandedElements(GLenum mode,
         if (value == restartValue) {
             sawRestart = true;
             if (!segment.empty()) {
-                supported = appendPrimitiveRestartSegment(mode, segment, out, outMode);
+                supported = appendSegment(mode, segment, out, outMode);
                 segment.clear();
                 if (!supported) {
                     out.clear();
@@ -47006,7 +47142,7 @@ static bool buildPrimitiveRestartExpandedElements(GLenum mode,
         return false;
     }
     if (!segment.empty()) {
-        supported = appendPrimitiveRestartSegment(mode, segment, out, outMode);
+        supported = appendSegment(mode, segment, out, outMode);
         if (!supported) {
             out.clear();
             outMode = mode;
@@ -47014,6 +47150,32 @@ static bool buildPrimitiveRestartExpandedElements(GLenum mode,
         }
     }
     return true;
+}
+
+static bool buildPrimitiveRestartExpandedElements(GLenum mode,
+                                                  GLenum originalIndexType,
+                                                  GLenum effectiveIndexType,
+                                                  const void* indices,
+                                                  GLsizei count,
+                                                  const GLStateTracker& state,
+                                                  std::vector<std::uint32_t>& out,
+                                                  GLenum& outMode) {
+    return buildPrimitiveRestartExpandedElementsWithAppender(
+        mode, originalIndexType, effectiveIndexType, indices, count, state,
+        out, outMode, appendPrimitiveRestartSegment);
+}
+
+static bool buildGsPrimitiveRestartExpandedElements(GLenum mode,
+                                                    GLenum originalIndexType,
+                                                    GLenum effectiveIndexType,
+                                                    const void* indices,
+                                                    GLsizei count,
+                                                    const GLStateTracker& state,
+                                                    std::vector<std::uint32_t>& out,
+                                                    GLenum& outMode) {
+    return buildPrimitiveRestartExpandedElementsWithAppender(
+        mode, originalIndexType, effectiveIndexType, indices, count, state,
+        out, outMode, appendGsPrimitiveRestartSegment);
 }
 
 #define APPGL_GLCONTEXT_DRAW_ARRAYS

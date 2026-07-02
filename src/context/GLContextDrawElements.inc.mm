@@ -33,6 +33,57 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     if (!impl_->validateCurrentProgramPipelineForDraw()) {
         return false;
     }
+    {
+        const GLuint progName = impl_->state->currentProgram();
+        const GLuint pipelineName = impl_->state->currentProgramPipeline();
+        const GLProgramObject* p = nullptr;
+        if (progName != 0) {
+            p = impl_->objects->programs().get(progName);
+        }
+        if (p != nullptr && p->gsPresent && !p->hasTessellation &&
+            !isDrawModeCompatibleWithGs(mode, p->gsInputTopology)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        if (progName == 0) {
+            const GLProgramPipelineObject* ppo = (pipelineName != 0)
+                ? impl_->objects->programPipelines().get(pipelineName)
+                : nullptr;
+            const GLuint vsProg = ppo ? ppo->vertexProgram : 0;
+            if (vsProg == 0) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            if (mode == GL_PATCHES && ppo != nullptr) {
+                const bool hasTcs = ppo->tessControlProgram != 0;
+                const bool hasTes = ppo->tessEvalProgram != 0;
+                if (hasTcs && !hasTes) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
+            }
+            const GLuint gsProg = ppo ? ppo->geometryProgram : 0;
+            if (gsProg != 0) {
+                const GLProgramObject* gsP = impl_->objects->programs().get(gsProg);
+                bool pipelineHasTess = false;
+                if (ppo != nullptr) {
+                    for (GLuint ps : {ppo->tessControlProgram, ppo->tessEvalProgram}) {
+                        if (ps == 0) continue;
+                        const GLProgramObject* tsP = impl_->objects->programs().get(ps);
+                        if (tsP != nullptr && tsP->hasTessellation) {
+                            pipelineHasTess = true;
+                            break;
+                        }
+                    }
+                }
+                if (gsP != nullptr && gsP->gsPresent && !pipelineHasTess &&
+                    !isDrawModeCompatibleWithGs(mode, gsP->gsInputTopology)) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
+            }
+        }
+    }
     impl_->touchR5Residency(MetalR5ResidencyTouchKind::Draw);
     drawProfile.mark(GLDrawProfileBucket::Validation);
     // GL 4.6 §22.1 / §22.3 — pipeline-stats counter update for non-GS
@@ -221,6 +272,26 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             return true;
         }
     }
+    std::vector<std::uint32_t> gsPrimitiveRestartIndices;
+    GLenum gsDrawElementsMode = mode;
+    GLsizei gsDrawElementsCount = count;
+    GLenum gsDrawElementsIndexType = effectiveType;
+    const void* gsDrawElementsIndexPtr = effectivePtr;
+    const bool useGsPrimitiveRestartIndices =
+        program != nullptr && program->geometryEmulated &&
+        buildGsPrimitiveRestartExpandedElements(
+            mode, type, effectiveType, effectivePtr, count, *impl_->state,
+            gsPrimitiveRestartIndices, gsDrawElementsMode);
+    if (useGsPrimitiveRestartIndices) {
+        gsDrawElementsCount = static_cast<GLsizei>(gsPrimitiveRestartIndices.size());
+        gsDrawElementsIndexType = GL_UNSIGNED_INT;
+        gsDrawElementsIndexPtr = gsPrimitiveRestartIndices.empty()
+            ? nullptr
+            : gsPrimitiveRestartIndices.data();
+        if (gsDrawElementsCount == 0) {
+            return true;
+        }
+    }
 
     // Phase 3f-16: CPU TES emulation hook for drawElements. Mirrors
     // the drawArrays block but feeds the resolved index buffer into
@@ -264,20 +335,24 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     // what KHR-GL46.geometry_shader.adjacency.*_indiced and the
     // primitive_counter tests exercise); a drawElements GS-emul
     // encode path with synthesised pass-through VS is a follow-up.
-    if (program != nullptr && program->geometryEmulated && count > 0) {
+    if (program != nullptr && program->geometryEmulated && gsDrawElementsCount > 0) {
         const bool dcr4eExactNoLegacy =
             dcr4eRequiresExactCpuGsNoLegacyFallback(
-                program, mode, isTransformFeedbackActive());
+                program, gsDrawElementsMode, isTransformFeedbackActive());
         // Resolve effectivePtr (uint16 / uint32) into a uint32 vector
         // scoped to this draw. Small allocation cost — CTS draws
         // never exceed a few hundred indices.
-        std::vector<std::uint32_t> idx32(static_cast<std::size_t>(count));
-        if (effectiveType == GL_UNSIGNED_INT) {
-            const std::uint32_t* src32 = static_cast<const std::uint32_t*>(effectivePtr);
-            std::memcpy(idx32.data(), src32, count * sizeof(std::uint32_t));
-        } else if (effectiveType == GL_UNSIGNED_SHORT) {
-            const std::uint16_t* src16 = static_cast<const std::uint16_t*>(effectivePtr);
-            for (GLsizei i = 0; i < count; ++i) idx32[i] = src16[i];
+        std::vector<std::uint32_t> idx32(static_cast<std::size_t>(gsDrawElementsCount));
+        if (gsDrawElementsIndexType == GL_UNSIGNED_INT) {
+            const std::uint32_t* src32 =
+                static_cast<const std::uint32_t*>(gsDrawElementsIndexPtr);
+            std::memcpy(
+                idx32.data(), src32,
+                static_cast<std::size_t>(gsDrawElementsCount) * sizeof(std::uint32_t));
+        } else if (gsDrawElementsIndexType == GL_UNSIGNED_SHORT) {
+            const std::uint16_t* src16 =
+                static_cast<const std::uint16_t*>(gsDrawElementsIndexPtr);
+            for (GLsizei i = 0; i < gsDrawElementsCount; ++i) idx32[i] = src16[i];
         } else {
             // GL_UNSIGNED_BYTE never reaches here — elementIndex-
             // TypeNeedsExpansion promotes it to uint16 above.
@@ -327,7 +402,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                         static_cast<GLsizei>(tessIdx32.size());
                     priorStage = appgl::emulateTessellationDraw(
                         *program, *vao, *impl_->objects, *impl_->state,
-                        mode, tessCount, /*first=*/0, tessIdx32.data(),
+                        gsDrawElementsMode, tessCount, /*first=*/0, tessIdx32.data(),
                         /*instanceCount=*/1, /*baseInstance=*/0,
                         tcsSamMap.empty() ? nullptr : &tcsSamMap,
                         tcsImgMap.empty() ? nullptr : &tcsImgMap,
@@ -343,7 +418,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             }
             appgl::EmulatedDraw ed = appgl::emulateGeometryDraw(
                 *program, *vao, *impl_->objects, *impl_->state,
-                mode, count, /*first=*/0, idx32.data(),
+                gsDrawElementsMode, gsDrawElementsCount, /*first=*/0, idx32.data(),
                 /*instanceCount=*/1, /*baseInstance=*/0,
                 vsTexMap.empty() ? nullptr : &vsTexMap,
                 gsTexMap.empty() ? nullptr : &gsTexMap,
