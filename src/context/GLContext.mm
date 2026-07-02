@@ -37003,6 +37003,77 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                     : nullptr;
             const std::string sourceName =
                 (tfEntry != nullptr) ? tfEntry->tfSourceName : std::string();
+            const auto userVaryingWidth = [&]() -> std::size_t {
+                std::size_t width = 0;
+                for (std::uint32_t w : ed.varyingWidths) {
+                    width += w;
+                }
+                return width;
+            };
+            const auto resolvePackedBuiltin =
+                [&](const char* builtinName,
+                    std::size_t baseOffset,
+                    std::size_t availableCount,
+                    TfSource& out) -> bool {
+                if (lookupName != builtinName && sourceName != builtinName) {
+                    return false;
+                }
+                if (availableCount == 0) {
+                    return false;
+                }
+
+                std::size_t componentOffset = 0;
+                std::size_t componentCount = availableCount;
+                if (arrayElementCapture) {
+                    std::size_t elementCount = tfResourceElementCount(tfIndex);
+                    if (elementCount == 0 || elementCount > availableCount) {
+                        elementCount = 1;
+                    }
+                    componentOffset = arrayElement * elementCount;
+                    componentCount = elementCount;
+                } else if (tfEntry != nullptr && tfEntry->tfComponentCount > 0) {
+                    componentOffset = static_cast<std::size_t>(
+                        std::max<GLint>(0, tfEntry->tfComponentOffset));
+                    componentCount = static_cast<std::size_t>(tfEntry->tfComponentCount);
+                    if ((lookupName == "gl_ClipDistance" ||
+                         lookupName == "gl_CullDistance") &&
+                        componentOffset == 0 &&
+                        componentCount < availableCount) {
+                        componentCount = availableCount;
+                    }
+                }
+                if (componentOffset + componentCount > availableCount) {
+                    return false;
+                }
+                out = {baseOffset + componentOffset, componentCount, sizeof(float)};
+                return true;
+            };
+            {
+                const std::size_t clipBase = 4 + userVaryingWidth();
+                const std::size_t cullBase = clipBase + ed.clipDistanceLen;
+                const std::size_t builtinBase = cullBase + ed.cullDistanceLen;
+                const std::size_t layerSlot = ed.hasLayer ? 1 : 0;
+                const std::size_t pointSizeSlot = ed.hasPointSize ? 1 : 0;
+                const std::size_t primIdSlot = ed.hasPrimitiveID ? 1 : 0;
+                if (resolvePackedBuiltin("gl_ClipDistance", clipBase,
+                                         ed.clipDistanceLen, src) ||
+                    resolvePackedBuiltin("gl_CullDistance", cullBase,
+                                         ed.cullDistanceLen, src) ||
+                    resolvePackedBuiltin("gl_Layer", builtinBase,
+                                         layerSlot, src) ||
+                    resolvePackedBuiltin("gl_PointSize",
+                                         builtinBase + layerSlot,
+                                         pointSizeSlot, src) ||
+                    resolvePackedBuiltin("gl_PrimitiveID",
+                                         builtinBase + layerSlot + pointSizeSlot,
+                                         primIdSlot, src) ||
+                    resolvePackedBuiltin("gl_ViewportIndex",
+                                         builtinBase + layerSlot + pointSizeSlot + primIdSlot,
+                                         ed.hasViewportIndex ? 1 : 0, src)) {
+                    if (streamOut != nullptr) *streamOut = 0;
+                    return true;
+                }
+            }
 
             auto tfMemberAliasMatches = [](const std::string& candidate,
                                            const std::string& requested) -> bool {

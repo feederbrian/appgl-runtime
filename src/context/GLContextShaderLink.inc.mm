@@ -156,6 +156,11 @@ bool GLContext::linkProgram(GLuint program) {
     int shaderCount = 0;
     int computeShaderCount = 0;
     std::vector<GLShaderObject*> attachedShaderObjects;
+    std::vector<GLShaderObject*> vertexShaderObjects;
+    std::vector<GLShaderObject*> fragmentShaderObjects;
+    std::vector<GLShaderObject*> geometryShaderObjects;
+    std::vector<GLShaderObject*> tessControlShaderObjects;
+    std::vector<GLShaderObject*> tessEvalShaderObjects;
     std::vector<GLShaderObject*> computeShaderObjects;
 
     for (GLuint shaderId : programObject->attachedShaders) {
@@ -187,10 +192,12 @@ bool GLContext::linkProgram(GLuint program) {
         switch (shaderObject->stage) {
             case GL_VERTEX_SHADER:
                 vertexShader = shaderObject;
+                vertexShaderObjects.push_back(shaderObject);
                 programObject->linkedStageBits |= GL_VERTEX_SHADER_BIT;
                 break;
             case GL_FRAGMENT_SHADER:
                 fragmentShader = shaderObject;
+                fragmentShaderObjects.push_back(shaderObject);
                 programObject->linkedStageBits |= GL_FRAGMENT_SHADER_BIT;
                 programObject->advancedBlendSupportMask |=
                     shaderObject->advancedBlendSupportMask;
@@ -206,14 +213,17 @@ bool GLContext::linkProgram(GLuint program) {
                 break;
             case GL_GEOMETRY_SHADER:
                 geometryShader = shaderObject;
+                geometryShaderObjects.push_back(shaderObject);
                 programObject->linkedStageBits |= GL_GEOMETRY_SHADER_BIT;
                 break;
             case GL_TESS_CONTROL_SHADER:
                 tessControlShader = shaderObject;
+                tessControlShaderObjects.push_back(shaderObject);
                 programObject->linkedStageBits |= GL_TESS_CONTROL_SHADER_BIT;
                 break;
             case GL_TESS_EVALUATION_SHADER:
                 tessEvalShader = shaderObject;
+                tessEvalShaderObjects.push_back(shaderObject);
                 programObject->linkedStageBits |= GL_TESS_EVALUATION_SHADER_BIT;
                 break;
             default: break;
@@ -1100,6 +1110,14 @@ bool GLContext::linkProgram(GLuint program) {
             GL_FLOAT, 1, false, "gl_PointSize", 0, 1);
         outputTypeMap["gl_ClipDistance"] = makeOutputInfo(
             GL_FLOAT, 1, false, "gl_ClipDistance", 0, 1);
+        if (xfbStage->stage == GL_GEOMETRY_SHADER) {
+            outputTypeMap["gl_Layer"] = makeOutputInfo(
+                GL_INT, 1, false, "gl_Layer", 0, 1);
+            outputTypeMap["gl_PrimitiveID"] = makeOutputInfo(
+                GL_INT, 1, false, "gl_PrimitiveID", 0, 1);
+            outputTypeMap["gl_ViewportIndex"] = makeOutputInfo(
+                GL_INT, 1, false, "gl_ViewportIndex", 0, 1);
+        }
 
         // GL 4.6 §11.1.2.1 — TFB varyings inside named interface blocks
         // are referenced as either `BlockType.member` or
@@ -3708,6 +3726,7 @@ bool GLContext::linkProgram(GLuint program) {
     releaseRetainedMetalObject(programObject->metalGSFragmentFunction);
     programObject->metalGSFragmentFunction = nullptr;
     programObject->geometryEmulated = false;
+    programObject->geometryEmulatedTransformFeedbackOnly = false;
     programObject->geometrySpirv.clear();
     programObject->vertexSpirv.clear();
     programObject->vertexSpirvEntryPoint.clear();
@@ -3727,6 +3746,100 @@ bool GLContext::linkProgram(GLuint program) {
     ExtensionContext fp64ExtensionContext(*this);
     const bool fp64EmulationAvailable =
         extensions::fp64::shaderTranslationSupported(fp64ExtensionContext);
+
+    auto linkSameStageSourceObjects =
+        [&](std::vector<GLShaderObject*>& stageObjects,
+            GLenum stage,
+            GLShaderObject* selected,
+            const char* stageName) -> bool {
+        if (selected == nullptr || stageObjects.empty()) {
+            return true;
+        }
+        bool needsStageLink = stageObjects.size() > 1 || selected->spirv.empty();
+        bool hasSpirvBinary = false;
+        for (const GLShaderObject* shader : stageObjects) {
+            if (shader != nullptr && shader->isSpirvBinary) {
+                hasSpirvBinary = true;
+                break;
+            }
+        }
+        if (!needsStageLink || hasSpirvBinary) {
+            return true;
+        }
+        std::vector<std::string> sources;
+        sources.reserve(stageObjects.size());
+        std::string linkedSource;
+        for (const GLShaderObject* shader : stageObjects) {
+            if (shader == nullptr) {
+                continue;
+            }
+            CompatShaderRewriteResult rewrite =
+                rewriteCompatShader(shader->source, stage);
+            std::string source = rewrite.didRewrite ? rewrite.source : shader->source;
+            source = rewriteShaderDrawParametersForSpirv(source, stage);
+            source = rewriteUnsizedUniformArrayInitializersForSpirv(source);
+            source = rewriteSsboConsecutiveRuntimeArraysForSpirv(source);
+            source = rewrite420packImplicitConversionsForSpirv(source);
+            source = rewrite420packQualifierOrderInvariantInputsForSpirv(source);
+            if (!linkedSource.empty()) {
+                linkedSource += "\n";
+            }
+            linkedSource += source;
+            sources.push_back(std::move(source));
+        }
+        std::string linkedLog;
+        std::vector<std::uint32_t> linkedSpirv =
+            translator.compileGLSLStageProgram(sources, stage, 330, &linkedLog);
+        if (linkedSpirv.empty()) {
+            programObject->linkLog = std::string(stageName) +
+                " same-stage link failed";
+            if (!linkedLog.empty()) {
+                programObject->linkLog += ": " + linkedLog;
+            }
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag + "-" + stageName + "-stage-link",
+                stageName,
+                quickHash(linkedSource),
+                linkVertexHash,
+                linkFragmentHash,
+                programObject->linkLog,
+                "",
+                false
+            });
+            restorePriorExecutableForFailedRelink();
+            return false;
+        }
+        selected->spirv = std::move(linkedSpirv);
+        selected->compiled = true;
+        selected->compileLog.clear();
+        Runtime::shared().recordShaderTranslation({
+            programTag + "-" + stageName + "-stage-link",
+            stageName,
+            quickHash(linkedSource),
+            linkVertexHash,
+            linkFragmentHash,
+            "",
+            "",
+            true
+        });
+        return true;
+    };
+
+    if (!linkSameStageSourceObjects(vertexShaderObjects, GL_VERTEX_SHADER,
+                                    vertexShader, "vertex") ||
+        !linkSameStageSourceObjects(tessControlShaderObjects,
+                                    GL_TESS_CONTROL_SHADER,
+                                    tessControlShader, "tess-control") ||
+        !linkSameStageSourceObjects(tessEvalShaderObjects,
+                                    GL_TESS_EVALUATION_SHADER,
+                                    tessEvalShader, "tess-eval") ||
+        !linkSameStageSourceObjects(geometryShaderObjects, GL_GEOMETRY_SHADER,
+                                    geometryShader, "geometry") ||
+        !linkSameStageSourceObjects(fragmentShaderObjects, GL_FRAGMENT_SHADER,
+                                    fragmentShader, "fragment")) {
+        return false;
+    }
 
     auto spirvNeedsArgumentBuffers = [](const std::uint32_t* spirvData,
                                         std::size_t spirvWords) -> bool {

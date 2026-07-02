@@ -5635,7 +5635,6 @@ std::vector<std::uint32_t> ShaderTranslator::compileGLSL(std::string_view source
         source.find("\nbuffer ") != std::string_view::npos;
     const bool redeclaresPerVertexBlock =
         source.find("gl_PerVertex") != std::string_view::npos &&
-        source.find("gl_Position") != std::string_view::npos &&
         source.find('{') != std::string_view::npos;
 
     // Sprint 9 Phase 3 (CKPT103): glslang's strict version-based gating of
@@ -5791,7 +5790,6 @@ std::vector<std::uint32_t> ShaderTranslator::compileGLSLStageProgram(
             source.find("\nbuffer ") != std::string_view::npos;
         const bool redeclaresPerVertexBlock =
             source.find("gl_PerVertex") != std::string_view::npos &&
-            source.find("gl_Position") != std::string_view::npos &&
             source.find('{') != std::string_view::npos;
 
         std::string preamble;

@@ -430,17 +430,22 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     return true;
                 }
                 if (ed.vertexCount == 0) return true;
-                // Non-discard path — the expanded vertex buffer is
-                // already flat, so the encode is identical to
-                // drawArrays. This covers CTS rendering tests that
-                // use DRAW_ELEMENTS* variants.
-                if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) {
-                    return true;
-                }
-                if (dcr4eExactNoLegacy) {
-                    appgl::AppGLSubmissionGroup fallbackGroup;
-                    impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
-                    return true;
+                if (program->geometryEmulatedTransformFeedbackOnly) {
+                    APPGL_LOG(SHADER,
+                              @"drawElements GS-emul TF-only clip/cull path captured XFB; falling through to legacy raster");
+                } else {
+                    // Non-discard path — the expanded vertex buffer is
+                    // already flat, so the encode is identical to
+                    // drawArrays. This covers CTS rendering tests that
+                    // use DRAW_ELEMENTS* variants.
+                    if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) {
+                        return true;
+                    }
+                    if (dcr4eExactNoLegacy) {
+                        appgl::AppGLSubmissionGroup fallbackGroup;
+                        impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
+                        return true;
+                    }
                 }
             } else {
                 const std::string gsDiag = ed.diagnostic.empty()

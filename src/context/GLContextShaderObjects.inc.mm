@@ -1948,11 +1948,28 @@ bool GLContext::compileShader(GLuint shader) {
 
     object->compileLog = std::move(compileLog);
     if (spirv.empty()) {
+        const bool sameStageLinkOnlyDiagnostic =
+            object->compileLog.find("Missing entry point") != std::string::npos ||
+            object->compileLog.find("Each stage requires one entry point") != std::string::npos ||
+            object->compileLog.find("No function definition") != std::string::npos;
+        const bool graphicSameStageLinkOnlyFailure =
+            sameStageLinkOnlyDiagnostic &&
+            (object->stage == GL_VERTEX_SHADER ||
+             object->stage == GL_TESS_CONTROL_SHADER ||
+             object->stage == GL_TESS_EVALUATION_SHADER ||
+             object->stage == GL_GEOMETRY_SHADER ||
+             object->stage == GL_FRAGMENT_SHADER);
         const bool computeSameStageLinkOnlyFailure =
-            object->stage == GL_COMPUTE_SHADER &&
-            (object->compileLog.find("Missing entry point") != std::string::npos ||
-             object->compileLog.find("Each stage requires one entry point") != std::string::npos ||
-             object->compileLog.find("No function definition") != std::string::npos);
+            sameStageLinkOnlyDiagnostic && object->stage == GL_COMPUTE_SHADER;
+        if (graphicSameStageLinkOnlyFailure) {
+            object->compiled = true;
+            object->compileLog.clear();
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", "", "", true
+            });
+            return true;
+        }
         if (computeSameStageLinkOnlyFailure) {
             object->compiled = true;
             object->compileLog.clear();
@@ -2001,4 +2018,3 @@ bool GLContext::compileShader(GLuint shader) {
     });
     return true;
 }
-

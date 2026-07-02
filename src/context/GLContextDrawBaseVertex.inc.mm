@@ -143,8 +143,10 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
             if (ed.ok) {
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) return true;
                 if (ed.vertexCount == 0) return true;
-                if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) return true;
-                if (dcr4eExactNoLegacy) {
+                if (!program->geometryEmulatedTransformFeedbackOnly &&
+                    impl_->encodeEmulatedGsDraw(*program, programName, ed)) return true;
+                if (!program->geometryEmulatedTransformFeedbackOnly &&
+                    dcr4eExactNoLegacy) {
                     appgl::AppGLSubmissionGroup fallbackGroup;
                     impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
                     return true;
@@ -627,8 +629,10 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
             if (ed.ok) {
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) return true;
                 if (ed.vertexCount == 0) return true;
-                if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) return true;
-                if (dcr4eExactNoLegacy) {
+                if (!program->geometryEmulatedTransformFeedbackOnly &&
+                    impl_->encodeEmulatedGsDraw(*program, programName, ed)) return true;
+                if (!program->geometryEmulatedTransformFeedbackOnly &&
+                    dcr4eExactNoLegacy) {
                     appgl::AppGLSubmissionGroup fallbackGroup;
                     impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
                     return true;

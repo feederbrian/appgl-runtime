@@ -794,22 +794,27 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     APPGL_LOG(DRAW, @"drawArrays GS-emul: zero primitives");
                     return true;
                 }
-                if (impl_->encodeEmulatedGsDraw(
-                        *emulProgram, emulProgramName, ed,
-                        meshGsNativeAttempted
-                            ? AppGLSubmissionGroupKind::FallbackNs
-                            : AppGLSubmissionGroupKind::None)) {
-                    APPGL_LOG(DRAW, @"drawArrays GS-emul ok: verts=%zu topo=0x%X",
-                              ed.vertexCount, ed.topology);
-                    return true;
-                }
-                APPGL_LOG(SHADER, @"drawArrays GS-emul encode failed");
-                if (dcr4eExactNoLegacy) {
-                    appgl::AppGLSubmissionGroup fallbackGroup;
-                    impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
+                if (emulProgram->geometryEmulatedTransformFeedbackOnly) {
                     APPGL_LOG(SHADER,
-                              @"drawArrays GS-emul exact path failed — consuming as unsupported");
-                    return true;
+                              @"drawArrays GS-emul TF-only clip/cull path captured XFB; falling through to legacy raster");
+                } else {
+                    if (impl_->encodeEmulatedGsDraw(
+                            *emulProgram, emulProgramName, ed,
+                            meshGsNativeAttempted
+                                ? AppGLSubmissionGroupKind::FallbackNs
+                                : AppGLSubmissionGroupKind::None)) {
+                        APPGL_LOG(DRAW, @"drawArrays GS-emul ok: verts=%zu topo=0x%X",
+                                  ed.vertexCount, ed.topology);
+                        return true;
+                    }
+                    APPGL_LOG(SHADER, @"drawArrays GS-emul encode failed");
+                    if (dcr4eExactNoLegacy) {
+                        appgl::AppGLSubmissionGroup fallbackGroup;
+                        impl_->declareCpuGsFallbackSubmissionGroup(fallbackGroup);
+                        APPGL_LOG(SHADER,
+                                  @"drawArrays GS-emul exact path failed — consuming as unsupported");
+                        return true;
+                    }
                 }
                 // Fall through to the legacy path if encode fails
                 // for non-B4 draws.

@@ -9328,6 +9328,7 @@ GLenum outputModeToGL(std::uint32_t mode) {
 
 bool detectGeometryEmulatable(GLProgramObject& program) {
     program.geometryEmulated = false;
+    program.geometryEmulatedTransformFeedbackOnly = false;
     program.geometryEmulationDiagnostic.clear();
     program.gsPresent = false;
     program.gsInputTopology = 0;
@@ -9527,8 +9528,12 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     // synth VS when the cull count is ambiguous, or
     // reflecting the FS input layout).
     if (programStoresClipOrCull() && !geometryStoresLayerOrViewport()) {
-        return reject("VS stores gl_Clip/CullDistance; GS emulator path still "
-                      "has pixel-coverage gaps for CTS cull_distance.*");
+        if (!program.transformFeedbackVaryingNames.empty()) {
+            program.geometryEmulatedTransformFeedbackOnly = true;
+        } else {
+            return reject("VS stores gl_Clip/CullDistance; GS emulator path still "
+                          "has pixel-coverage gaps for CTS cull_distance.*");
+        }
     }
 
     // Walk the function body and reject on any unsupported opcode.
@@ -12771,6 +12776,9 @@ EmulatedDraw emulateGeometryDraw(
         d.primitiveIDLocation = locs.empty() ? 0u : (maxLoc + 1u);
     }
 
+    const bool rasterizerDiscarded =
+        state.isEnabled(GL_RASTERIZER_DISCARD);
+
     // Per-primitive gl_Layer propagation. GL 4.6 §14.5.1 with
     // `GL_LAST_VERTEX_CONVENTION` (our advertised default — see
     // commit 5588d41) routes the provoking-vertex's gl_Layer to
@@ -12783,7 +12791,10 @@ EmulatedDraw emulateGeometryDraw(
     // previous strip's GS iteration). Normalising every vertex
     // to the primitive's last vertex makes both conventions
     // agree.
-    if (d.hasLayer && expandedTopo != 0) {
+    // This is a rasterization-side normalization. Transform feedback
+    // under GL_RASTERIZER_DISCARD must observe the value at each
+    // EmitVertex, so leave the per-vertex snapshots untouched there.
+    if (d.hasLayer && expandedTopo != 0 && !rasterizerDiscarded) {
         std::size_t primSize = 0;
         switch (expandedTopo) {
             case GL_POINTS:        primSize = 1; break;
@@ -12804,7 +12815,7 @@ EmulatedDraw emulateGeometryDraw(
     // primitive propagation. Sister to gl_Layer pattern. LAST_VERTEX_
     // CONVENTION (default user provoking) — copy provoking vertex's
     // value to all vertices in the primitive.
-    if (d.hasViewportIndex && expandedTopo != 0) {
+    if (d.hasViewportIndex && expandedTopo != 0 && !rasterizerDiscarded) {
         std::size_t primSize = 0;
         switch (expandedTopo) {
             case GL_POINTS:        primSize = 1; break;
@@ -12866,8 +12877,6 @@ EmulatedDraw emulateGeometryDraw(
     // (the original 96d16b0 fix target) is unaffected — it does NOT
     // enable GL_RASTERIZER_DISCARD, so propagation continues to fire
     // correctly for the FS's per-primitive layer_id case-match.
-    const bool rasterizerDiscarded =
-        state.isEnabled(GL_RASTERIZER_DISCARD);
     if (!d.varyingInterp.empty() && !rasterizerDiscarded) {
         std::size_t primSize = 0;
         switch (expandedTopo) {

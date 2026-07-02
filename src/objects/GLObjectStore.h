@@ -1132,6 +1132,11 @@ struct GLProgramObject {
     // branches on `geometryEmulated` before the normal translated-
     // pipeline path. See docs/geometry-shader-emulation.md.
     bool geometryEmulated = false;
+    // Narrow override for GS programs where the VS writes clip/cull
+    // distances. Those remain unsafe for the synthetic raster path, but
+    // TF-configured programs still need CPU GS execution under rasterizer
+    // discard so captures observe GS outputs instead of the VS fallback.
+    bool geometryEmulatedTransformFeedbackOnly = false;
     std::string geometryEmulationDiagnostic;
     std::vector<std::uint32_t> geometrySpirv;
     // Tessellation-emulation flag. Set by
