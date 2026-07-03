@@ -722,6 +722,11 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
                 (void)impl_->restoreR5PrimaryTextureIfNeeded(*texObj,
                                                              ib.texture);
             }
+            if (texObj != nullptr &&
+                texObj->target == GL_TEXTURE_BUFFER &&
+                texObj->desc.sourceBuffer != 0) {
+                (void)impl_->refreshBufferTextureView(*texObj);
+            }
             if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
             if (!impl_->imageBindingLevelAvailable(ib, texObj)) continue;
             const bool textureBufferImage =
@@ -805,6 +810,21 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             }
             tb.metalSamplerState = nullptr;  // no sampler for storage images
             tb.metalSlot = img.metalBinding + static_cast<std::uint32_t>(arrayElement);
+            if (textureBufferImage) {
+                tb.textureBufferLogicalSize =
+                    impl_->textureBufferLogicalTexelCount(*texObj);
+                if (texObj->textureBufferExpandedMetalBuffer != nullptr) {
+                    tb.textureBufferBackingMetalBuffer =
+                        texObj->textureBufferExpandedMetalBuffer;
+                } else {
+                    GLBufferObject* backingBuffer =
+                        impl_->objects->buffers().get(texObj->desc.sourceBuffer);
+                    if (backingBuffer != nullptr) {
+                        tb.textureBufferBackingMetalBuffer =
+                            backingBuffer->metalBuffer;
+                    }
+                }
+            }
             if (img.metalAtomicBufferBinding != 0xFFFFFFFFu) {
                 const std::string atomicNeedle = img.name + "_atomic";
                 const bool usesImageAtomic =

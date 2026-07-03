@@ -53,7 +53,8 @@
 namespace appgl {
 
 static constexpr NSUInteger kAppGLFragCoordParamsBufferSlot = 15;
-static constexpr NSUInteger kAppGLTextureBufferSizesBufferSlot = 22;
+static constexpr NSUInteger kAppGLGraphicsTextureBufferSizesBufferSlot = 22;
+static constexpr NSUInteger kAppGLComputeTextureBufferSizesBufferSlot = 29;
 static constexpr NSUInteger kAppGLFragmentShadingRateParamsBufferSlot = 30;
 static constexpr NSUInteger kAppGLAdvancedBlendSourceTextureSlot = 62;
 
@@ -10042,7 +10043,7 @@ struct MetalFrameGraph::Impl {
                         sizes.data(),
                         static_cast<NSUInteger>(
                             sizes.size() * sizeof(std::uint32_t)),
-                        kAppGLTextureBufferSizesBufferSlot,
+                        kAppGLGraphicsTextureBufferSizesBufferSlot,
                         EncodeMarshalClass::SetBytes);
                 }
             }
@@ -10055,7 +10056,7 @@ struct MetalFrameGraph::Impl {
                         sizes.data(),
                         static_cast<NSUInteger>(
                             sizes.size() * sizeof(std::uint32_t)),
-                        kAppGLTextureBufferSizesBufferSlot,
+                        kAppGLGraphicsTextureBufferSizesBufferSlot,
                         EncodeMarshalClass::SetBytes);
                 }
             }
@@ -13976,12 +13977,12 @@ struct MetalFrameGraph::Impl {
             return sizes;
         };
         setTextureModeBytes(
-            static_cast<NSInteger>(kAppGLTextureBufferSizesBufferSlot),
+            static_cast<NSInteger>(kAppGLGraphicsTextureBufferSizesBufferSlot),
             info.vertexTextures,
             false,
             buildTextureBufferSizes);
         setTextureModeBytes(
-            static_cast<NSInteger>(kAppGLTextureBufferSizesBufferSlot),
+            static_cast<NSInteger>(kAppGLGraphicsTextureBufferSizesBufferSlot),
             info.fragmentTextures,
             true,
             buildTextureBufferSizes);
@@ -24220,7 +24221,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                            length:static_cast<NSUInteger>(
                                       textureBufferSizes.size() *
                                       sizeof(textureBufferSizes[0]))
-                          atIndex:kAppGLTextureBufferSizesBufferSlot];
+                          atIndex:kAppGLComputeTextureBufferSizesBufferSlot];
                 }
             }
         } else {
@@ -24290,7 +24291,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                            length:static_cast<NSUInteger>(
                                       textureBufferSizes.size() *
                                       sizeof(textureBufferSizes[0]))
-                          atIndex:kAppGLTextureBufferSizesBufferSlot];
+                          atIndex:kAppGLComputeTextureBufferSizesBufferSlot];
                 }
             }
         }

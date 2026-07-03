@@ -42,7 +42,8 @@ constexpr std::uint32_t kTextureLodBiasesPreferredBufferSlot = 13u;
 constexpr std::uint32_t kImplicitLodBiasCorrectionPreferredBufferSlot = 12u;
 constexpr std::uint32_t kTextureBorderClampModesPreferredBufferSlot = 11u;
 constexpr std::uint32_t kTextureBorderClampColorsPreferredBufferSlot = 10u;
-constexpr std::uint32_t kTextureBufferSizesBufferSlot = 22u;
+constexpr std::uint32_t kTextureBufferSizesGraphicsBufferSlot = 22u;
+constexpr std::uint32_t kTextureBufferSizesComputeBufferSlot = 29u;
 constexpr std::uint32_t kMaxMetalBufferSlot = 30u;
 constexpr std::uint32_t kMaxDirectMetalSamplerSlots = 16u;
 constexpr std::uint32_t kMultisampleSampledSidecarTextureSlotOffset = 64u;
@@ -464,6 +465,8 @@ bool isIdentifierChar(char ch) {
 }
 
 bool findMain0ParameterEnd(const std::string& msl, std::size_t& paramEnd);
+void threadTextureReductionModesThroughHelpers(std::string& msl,
+                                               const std::string& paramName);
 
 bool replaceWholeToken(std::string& text,
                        std::size_t begin,
@@ -1464,22 +1467,40 @@ bool eraseNoOpFragDepthWrite(std::string& msl) {
 }
 
 bool findMain0ParameterEnd(const std::string& msl, std::size_t& paramEnd) {
-    const std::size_t mainPos = msl.find("main0(");
-    if (mainPos == std::string::npos) return false;
-    const std::size_t paramStart = mainPos + 6;
-    std::size_t depth = 1;
-    paramEnd = paramStart;
-    while (paramEnd < msl.size() && depth > 0) {
-        const char c = msl[paramEnd];
-        if (c == '(') {
-            ++depth;
-        } else if (c == ')') {
-            --depth;
-            if (depth == 0) break;
+    std::size_t searchPos = 0;
+    while (true) {
+        const std::size_t mainPos = msl.find("main0(", searchPos);
+        if (mainPos == std::string::npos) return false;
+        if (mainPos > 0 && isIdentifierChar(msl[mainPos - 1])) {
+            searchPos = mainPos + 1;
+            continue;
         }
-        ++paramEnd;
+        const std::size_t paramStart = mainPos + 6;
+        std::size_t depth = 1;
+        paramEnd = paramStart;
+        while (paramEnd < msl.size() && depth > 0) {
+            const char c = msl[paramEnd];
+            if (c == '(') {
+                ++depth;
+            } else if (c == ')') {
+                --depth;
+                if (depth == 0) break;
+            }
+            ++paramEnd;
+        }
+        if (depth != 0 || paramEnd >= msl.size()) {
+            return false;
+        }
+        std::size_t afterParams = paramEnd + 1;
+        while (afterParams < msl.size() &&
+               std::isspace(static_cast<unsigned char>(msl[afterParams]))) {
+            ++afterParams;
+        }
+        if (afterParams < msl.size() && msl[afterParams] == '{') {
+            return true;
+        }
+        searchPos = paramStart;
     }
-    return depth == 0 && paramEnd < msl.size();
 }
 
 std::unordered_set<std::string> collectTextureBufferResourceNames(
@@ -1520,11 +1541,14 @@ std::unordered_set<std::string> collectTextureBufferResourceNames(
 
 bool injectTextureBufferSizeSidecar(
     std::string& msl,
-    const std::unordered_set<std::string>& textureBufferNames) {
+    const std::unordered_set<std::string>& textureBufferNames,
+    std::uint32_t bufferSlot) {
     static constexpr const char* kSidecarName = "_appgl_TextureBufferSizes";
+    const std::string bufferAttribute =
+        "[[buffer(" + std::to_string(bufferSlot) + ")]]";
     if (textureBufferNames.empty() ||
         msl.find(kSidecarName) != std::string::npos ||
-        msl.find("[[buffer(22)]]") != std::string::npos) {
+        msl.find(bufferAttribute) != std::string::npos) {
         return false;
     }
     std::size_t paramEnd = 0;
@@ -1532,7 +1556,7 @@ bool injectTextureBufferSizeSidecar(
         return false;
     }
 
-    bool changed = false;
+    std::vector<std::pair<std::string, std::string>> replacements;
     for (const std::string& name : textureBufferNames) {
         if (name.empty()) {
             continue;
@@ -1559,21 +1583,26 @@ bool injectTextureBufferSizeSidecar(
             name + ".get_width() * " + name + ".get_height()";
         const std::string sidecarExpr =
             std::string(kSidecarName) + "[" + std::to_string(slot) + "]";
-        std::size_t pos = 0;
-        while ((pos = msl.find(textureSizeExpr, pos)) != std::string::npos) {
-            msl.replace(pos, textureSizeExpr.size(), sidecarExpr);
-            pos += sidecarExpr.size();
-            changed = true;
+        if (msl.find(textureSizeExpr) != std::string::npos) {
+            replacements.emplace_back(textureSizeExpr, sidecarExpr);
         }
     }
 
-    if (!changed) {
+    if (replacements.empty()) {
         return false;
     }
     const std::string param =
         ", constant uint* " + std::string(kSidecarName) + " [[buffer(" +
-        std::to_string(kTextureBufferSizesBufferSlot) + ")]]";
+        std::to_string(bufferSlot) + ")]]";
     msl.insert(paramEnd, param);
+    for (const auto& replacement : replacements) {
+        std::size_t pos = 0;
+        while ((pos = msl.find(replacement.first, pos)) != std::string::npos) {
+            msl.replace(pos, replacement.first.size(), replacement.second);
+            pos += replacement.second.size();
+        }
+    }
+    threadTextureReductionModesThroughHelpers(msl, kSidecarName);
     return true;
 }
 
@@ -7699,7 +7728,12 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         }
         (void)rewriteVectorImageAtomicBufferSubscripts(msl);
         (void)rewriteTexelBufferImageAtomicReads(msl);
-        (void)injectTextureBufferSizeSidecar(msl, textureBufferResourceNames);
+        const std::uint32_t textureBufferSizeSlot =
+            execModel == spv::ExecutionModelGLCompute
+                ? kTextureBufferSizesComputeBufferSlot
+                : kTextureBufferSizesGraphicsBufferSlot;
+        (void)injectTextureBufferSizeSidecar(
+            msl, textureBufferResourceNames, textureBufferSizeSlot);
         (void)fixUnsafeArrayDoubleIndex(msl);
 
         if (isVertex && mslOpts.appgl_fp64_emulation) {

@@ -20793,6 +20793,11 @@ struct GLContext::Impl {
                         (void)restoreR5PrimaryTextureIfNeeded(*texObj,
                                                               ib.texture);
                     }
+                    if (texObj != nullptr &&
+                        texObj->target == GL_TEXTURE_BUFFER &&
+                        texObj->desc.sourceBuffer != 0) {
+                        (void)refreshBufferTextureView(*texObj);
+                    }
                     if (texObj == nullptr || texObj->metalTexture == nullptr) {
                         if (trace) std::fprintf(stderr, " SKIP=metalTexture_null tex=%u\n", ib.texture);
                         continue;
@@ -20938,6 +20943,22 @@ struct GLContext::Impl {
                     }
                     tb.metalSamplerState = nullptr;  // no sampler for storage images
                     tb.metalSlot = imageMetalSlot;
+                    if (texObj->target == GL_TEXTURE_BUFFER &&
+                        texObj->desc.sourceBuffer != 0) {
+                        tb.textureBufferLogicalSize =
+                            textureBufferLogicalTexelCount(*texObj);
+                        if (texObj->textureBufferExpandedMetalBuffer != nullptr) {
+                            tb.textureBufferBackingMetalBuffer =
+                                texObj->textureBufferExpandedMetalBuffer;
+                        } else {
+                            GLBufferObject* backingBuffer =
+                                objects->buffers().get(texObj->desc.sourceBuffer);
+                            if (backingBuffer != nullptr) {
+                                tb.textureBufferBackingMetalBuffer =
+                                    backingBuffer->metalBuffer;
+                            }
+                        }
+                    }
                     if (img.metalAtomicBufferBinding != 0xFFFFFFFFu) {
                         const std::string atomicNeedle = img.name + "_atomic";
                         const bool stageUsesImageAtomic =
