@@ -17776,6 +17776,9 @@ struct GLContext::Impl {
             }
             const bool usesSparseSampledSidecars = recipe.usesSparseSampledSidecars;
             const bool usesMSSampledSidecars = recipe.usesMSSampledSidecars;
+            const bool stageUsesTextureQueryLevels =
+                stageMSL != nullptr &&
+                stageMSL->find("get_num_mip_levels(") != std::string::npos;
             std::vector<std::uint32_t>* msImageSampleCounts =
                 usesMSSampledSidecars
                     ? ensureMultisampleStorageImageSampleCounts(
@@ -18369,6 +18372,7 @@ struct GLContext::Impl {
                 binding.metalTexture = nullptr;
                 bool usedIncompleteFallback = false;
                 if (!sampledComplete &&
+                    !stageUsesTextureQueryLevels &&
                     !sparseSampledTexture &&
                     supportsIncompleteSampledColorFallback(samplerGLType,
                                                            resolvedTarget,
@@ -43852,6 +43856,28 @@ static bool translatedDrawHasVertexLayoutAt(
     return false;
 }
 
+static bool eraseVertexLayoutsAt(TranslatedDrawInfo& tdi, GLuint location)
+{
+    bool mutated = false;
+    const auto eraseAt = [&](auto& layouts) {
+        const auto oldSize = layouts.size();
+        layouts.erase(
+            std::remove_if(
+                layouts.begin(),
+                layouts.end(),
+                [&](const auto& layout) {
+                    return layout.location == location;
+                }),
+            layouts.end());
+        mutated = mutated || layouts.size() != oldSize;
+    };
+    eraseAt(tdi.vertexAttributeLayouts);
+    for (auto& evb : tdi.extraVertexBuffers) {
+        eraseAt(evb.attributes);
+    }
+    return mutated;
+}
+
 static bool cloneVertexLayoutForAliasedInput(
     TranslatedDrawInfo& tdi,
     GLuint sourceLocation,
@@ -43881,14 +43907,27 @@ static bool cloneVertexLayoutForAliasedInput(
     return false;
 }
 
-static void expandAliasedVertexAttributeLayouts(TranslatedDrawInfo& tdi)
+static void expandAliasedVertexAttributeLayouts(
+    TranslatedDrawInfo& tdi,
+    const GLVertexArrayObject* vao)
 {
     if (tdi.vertexReflection == nullptr) {
         return;
     }
     bool mutated = false;
     for (const auto& input : tdi.vertexReflection->vertexInputs) {
-        if (input.containsFp64 || input.location == input.sourceLocation) {
+        if (input.containsFp64) {
+            continue;
+        }
+        if (input.location == input.sourceLocation) {
+            continue;
+        }
+        const bool sourceEnabled =
+            vao != nullptr &&
+            input.sourceLocation < vao->attributes.size() &&
+            vao->attributes[input.sourceLocation].enabled;
+        if (!sourceEnabled) {
+            mutated = eraseVertexLayoutsAt(tdi, input.location) || mutated;
             continue;
         }
         mutated = cloneVertexLayoutForAliasedInput(
@@ -44478,18 +44517,25 @@ bool appendProgramSamplerBindings(
     if (!program.linked) {
         return false;
     }
-    for (const GLProgramUniformInfo& uniform : program.uniforms) {
-        if (uniform.location < 0 ||
-            !pipelineUniformTypeIsSampler(uniform.type)) {
-            continue;
+    auto appendBinding = [&](GLint uniformLocation,
+                             GLenum samplerType,
+                             GLsizei arraySize,
+                             GLuint reflectedBinding,
+                             bool reflectedExplicitBinding) -> bool {
+        if (!pipelineUniformTypeIsSampler(samplerType) ||
+            (uniformLocation < 0 && !reflectedExplicitBinding)) {
+            return false;
         }
-        const auto valueIt = program.uniformValues.find(uniform.location);
+        const auto valueIt = uniformLocation >= 0
+            ? program.uniformValues.find(uniformLocation)
+            : program.uniformValues.end();
         const GLProgramUniformValue* value =
             (valueIt != program.uniformValues.end()) ? &valueIt->second : nullptr;
-        const GLint elementCount = std::max<GLint>(uniform.arraySize, 1);
+        const GLint elementCount = std::max<GLint>(arraySize, 1);
         for (GLint element = 0; element < elementCount; ++element) {
-            GLint unit = (uniform.explicitBinding >= 0)
-                ? (uniform.explicitBinding + element) : 0;
+            GLint unit = reflectedExplicitBinding
+                ? static_cast<GLint>(reflectedBinding) + element
+                : 0;
             bool hasElementValue = false;
             if (value != nullptr &&
                 static_cast<std::size_t>(element) < value->ints.size()) {
@@ -44497,13 +44543,93 @@ bool appendProgramSamplerBindings(
                 hasElementValue = true;
             }
             if (elementCount > 1 &&
-                uniform.explicitBinding < 0 &&
+                !reflectedExplicitBinding &&
                 (!hasElementValue || unit == 0)) {
                 continue;
             }
             const auto [it, inserted] =
-                typeByTextureUnit.emplace(unit, uniform.type);
-            if (!inserted && it->second != uniform.type) {
+                typeByTextureUnit.emplace(unit, samplerType);
+            if (!inserted && it->second != samplerType) {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto appendReflection = [&](const ShaderReflection* reflection) -> bool {
+        if (reflection == nullptr) {
+            return false;
+        }
+        auto findUniformInfo = [&](const ShaderReflection::ResourceBinding& sampled)
+            -> const GLProgramUniformInfo* {
+            for (const GLProgramUniformInfo& uniform : program.uniforms) {
+                if (!pipelineUniformTypeIsSampler(uniform.type)) {
+                    continue;
+                }
+                if (sampled.uniformLocation >= 0 &&
+                    uniform.location == sampled.uniformLocation) {
+                    return &uniform;
+                }
+                if (!sampled.name.empty() && uniform.name == sampled.name) {
+                    return &uniform;
+                }
+            }
+            return nullptr;
+        };
+        for (const auto& sampled : reflection->sampledTextures) {
+            if (!sampled.active) {
+                continue;
+            }
+            const GLProgramUniformInfo* uniform = findUniformInfo(sampled);
+            const GLint uniformLocation = sampled.uniformLocation >= 0
+                ? sampled.uniformLocation
+                : (uniform != nullptr ? uniform->location : -1);
+            const GLenum samplerType = sampled.glType != 0
+                ? sampled.glType
+                : (uniform != nullptr ? uniform->type : 0);
+            const GLsizei arraySize = sampled.arraySize > 0
+                ? static_cast<GLsizei>(sampled.arraySize)
+                : (uniform != nullptr ? uniform->arraySize : 1);
+            const bool hasExplicitBinding =
+                sampled.hasExplicitBinding ||
+                (uniform != nullptr && uniform->explicitBinding >= 0);
+            const GLuint explicitBinding =
+                sampled.hasExplicitBinding
+                    ? sampled.glBinding
+                    : static_cast<GLuint>(std::max<GLint>(
+                          uniform != nullptr ? uniform->explicitBinding : -1,
+                          0));
+            if (appendBinding(uniformLocation,
+                              samplerType,
+                              arraySize,
+                              hasExplicitBinding
+                                  ? explicitBinding
+                                  : sampled.glBinding,
+                              hasExplicitBinding)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (appendReflection(&program.vertexReflection) ||
+        appendReflection(&program.tessControlReflection) ||
+        appendReflection(&program.tessEvalAsComputeReflection) ||
+        appendReflection(&program.geometryReflection) ||
+        appendReflection(&program.fragmentReflection) ||
+        appendReflection(&program.computeReflection)) {
+        return true;
+    }
+    if (program.vertexReflection.sampledTextures.empty() &&
+        program.tessControlReflection.sampledTextures.empty() &&
+        program.tessEvalAsComputeReflection.sampledTextures.empty() &&
+        program.geometryReflection.sampledTextures.empty() &&
+        program.fragmentReflection.sampledTextures.empty() &&
+        program.computeReflection.sampledTextures.empty()) {
+        for (const GLProgramUniformInfo& uniform : program.uniforms) {
+            if (appendBinding(uniform.location,
+                              uniform.type,
+                              uniform.arraySize,
+                              static_cast<GLuint>(std::max<GLint>(uniform.explicitBinding, 0)),
+                              uniform.explicitBinding >= 0)) {
                 return true;
             }
         }
@@ -48152,7 +48278,7 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                 currentVao = currentVertexArrayOrDefault();
             }
         }
-        expandAliasedVertexAttributeLayouts(tdi);
+        expandAliasedVertexAttributeLayouts(tdi, currentVao);
         if (preflight == nullptr ||
             !preflight->genericVertexAttributesPrepared) {
             appendCurrentGenericVertexAttributes(

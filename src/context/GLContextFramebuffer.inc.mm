@@ -1345,11 +1345,8 @@ bool GLContext::getFramebufferParameteriv(GLenum target, GLenum pname, GLint* pa
     const bool isDefaultFb = (fbName == 0);
     if (isDefaultFb) {
         switch (pname) {
-            case GL_DOUBLEBUFFER:
-            case GL_STEREO:
-                *params = 0;
-                pushError(GL_INVALID_ENUM);
-                return false;
+            case GL_DOUBLEBUFFER:                     *params = GL_TRUE;  return true;
+            case GL_STEREO:                           *params = GL_FALSE; return true;
             case GL_IMPLEMENTATION_COLOR_READ_FORMAT: *params = GL_RGBA;  return true;
             case GL_IMPLEMENTATION_COLOR_READ_TYPE:   *params = GL_UNSIGNED_BYTE; return true;
             case GL_SAMPLES:
@@ -1394,11 +1391,8 @@ bool GLContext::getFramebufferParameteriv(GLenum target, GLenum pname, GLint* pa
         case GL_IMPLEMENTATION_COLOR_READ_TYPE:   *params = GL_UNSIGNED_BYTE; return true;
         case GL_SAMPLES:                          *params = 0;               return true;
         case GL_SAMPLE_BUFFERS:                   *params = 0;               return true;
-        case GL_DOUBLEBUFFER:
-        case GL_STEREO:
-            *params = 0;
-            pushError(GL_INVALID_ENUM);
-            return false;
+        case GL_DOUBLEBUFFER:                    *params = GL_TRUE;         return true;
+        case GL_STEREO:                          *params = GL_FALSE;        return true;
         default:
             pushError(GL_INVALID_ENUM);
             return false;

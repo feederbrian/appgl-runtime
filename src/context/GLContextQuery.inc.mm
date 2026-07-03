@@ -213,6 +213,14 @@ bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
         *data = GL_FALSE;
         return true;
     }
+    if (pname == GL_DOUBLEBUFFER || pname == GL_STEREO) {
+        GLint value = 0;
+        if (!queryInteger(pname, &value)) {
+            return false;
+        }
+        *data = value != 0 ? GL_TRUE : GL_FALSE;
+        return true;
+    }
     if (pname == GL_RGBA_INTEGER_MODE_EXT) {
         bool integerMode = false;
         const GLuint framebufferName = impl_->state->boundDrawFramebuffer();
@@ -384,6 +392,14 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
         *data = impl_->state->boundReadFramebuffer() == 0
             ? impl_->defaultFramebufferSampleCount()
             : 0;
+        return true;
+    }
+    if (pname == GL_DOUBLEBUFFER) {
+        *data = GL_TRUE;
+        return true;
+    }
+    if (pname == GL_STEREO) {
+        *data = GL_FALSE;
         return true;
     }
     if (pname == GL_RGBA_INTEGER_MODE_EXT) {
