@@ -49668,6 +49668,197 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
     return true;
 }
 
+static std::size_t textureViewClassReadbackBytes(TextureViewClass cls) {
+    switch (cls) {
+        case TextureViewClass::Bits128: return 16u;
+        case TextureViewClass::Bits96:  return 12u;
+        case TextureViewClass::Bits64:  return 8u;
+        case TextureViewClass::Bits48:  return 6u;
+        case TextureViewClass::Bits32:  return 4u;
+        case TextureViewClass::Bits24:  return 3u;
+        case TextureViewClass::Bits16:  return 2u;
+        case TextureViewClass::Bits8:   return 1u;
+        default:                        return 0u;
+    }
+}
+
+static bool copyTextureViewClassRawShadow(const GLTextureObject& viewObject,
+                                          const GLTextureObject& sourceObject,
+                                          GLint level,
+                                          GLenum format,
+                                          GLenum type,
+                                          GLsizei bufSize,
+                                          const GLPixelStoreState& packStore,
+                                          void* pixels) {
+    if (pixels == nullptr || isPackedPixelType(type) ||
+        sourceObject.desc.internalFormat == viewObject.desc.internalFormat) {
+        return false;
+    }
+
+    const TextureViewClass sourceClass =
+        textureViewClassForInternalFormat(sourceObject.desc.internalFormat);
+    const TextureViewClass viewClass =
+        textureViewClassForInternalFormat(viewObject.desc.internalFormat);
+    if (sourceClass == TextureViewClass::Undefined ||
+        sourceClass != viewClass) {
+        return false;
+    }
+
+    const std::size_t classBytes = textureViewClassReadbackBytes(viewClass);
+    const std::size_t dstPixelBytes = bytesPerPixel(format, type);
+    const std::size_t dstBpc = bytesPerComponent(type);
+    const std::size_t dstComponents = componentCountForFormat(format);
+    if (classBytes == 0 || dstPixelBytes != classBytes ||
+        dstBpc == 0 || dstComponents == 0) {
+        return false;
+    }
+
+    const GLint sourceLevel =
+        std::max<GLint>(viewObject.viewMinLevel, 0) + level;
+    const auto levelIt = sourceObject.levels.find(sourceLevel);
+    if (levelIt == sourceObject.levels.end() ||
+        !levelIt->second.defined) {
+        return false;
+    }
+    const GLTextureImageLevel& image = levelIt->second;
+
+    const std::uint8_t* sourceBytes = nullptr;
+    std::size_t sourceByteCount = 0;
+    if (image.rawUploadBpp == classBytes &&
+        !image.rawUploadData.empty()) {
+        sourceBytes = image.rawUploadData.data();
+        sourceByteCount = image.rawUploadData.size();
+    } else if (image.nativeBpp == classBytes &&
+               !image.nativeData.empty()) {
+        sourceBytes = image.nativeData.data();
+        sourceByteCount = image.nativeData.size();
+    } else if (classBytes == 4u && !image.rgba8.empty()) {
+        sourceBytes = image.rgba8.data();
+        sourceByteCount = image.rgba8.size();
+    } else {
+        return false;
+    }
+
+    const GLsizei texW = std::max<GLsizei>(image.desc.width, 1);
+    GLsizei texH = std::max<GLsizei>(image.desc.height, 1);
+    GLsizei texD = 1;
+    switch (viewObject.target) {
+        case GL_TEXTURE_1D:
+            texH = 1;
+            texD = 1;
+            break;
+        case GL_TEXTURE_1D_ARRAY:
+            texD = 1;
+            break;
+        case GL_TEXTURE_3D:
+            texD = std::max<GLsizei>(viewObject.viewNumLayers, 1);
+            break;
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+            texD = std::max<GLsizei>(viewObject.viewNumLayers, 1);
+            break;
+        default:
+            texD = 1;
+            break;
+    }
+
+    GLsizei sourceH = std::max<GLsizei>(image.desc.height, 1);
+    GLsizei sourceD = 1;
+    switch (sourceObject.target) {
+        case GL_TEXTURE_1D:
+            sourceH = 1;
+            sourceD = 1;
+            break;
+        case GL_TEXTURE_1D_ARRAY:
+            sourceD = 1;
+            break;
+        case GL_TEXTURE_3D:
+            sourceD = std::max<GLsizei>(image.desc.depth, 1);
+            break;
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+            sourceD = std::max<GLsizei>(
+                std::max<GLsizei>(image.desc.depth, image.desc.layers), 1);
+            break;
+        default:
+            sourceD = 1;
+            break;
+    }
+
+    const GLint sourceLayerBase = std::max<GLint>(viewObject.viewMinLayer, 0);
+    if (sourceLayerBase + texD > sourceD) {
+        return false;
+    }
+
+    const std::size_t sourceTexelCount =
+        static_cast<std::size_t>(texW) *
+        static_cast<std::size_t>(sourceH) *
+        static_cast<std::size_t>(sourceD);
+    if (sourceByteCount < sourceTexelCount * classBytes) {
+        return false;
+    }
+
+    const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+        ? static_cast<std::size_t>(packStore.packRowLength)
+        : static_cast<std::size_t>(texW);
+    const std::size_t dstRowBytes = alignByteCount(
+        dstRowStridePixels * dstPixelBytes, packStore.packAlignment);
+    const std::size_t dstImageHeight = packStore.packImageHeight > 0
+        ? static_cast<std::size_t>(packStore.packImageHeight)
+        : static_cast<std::size_t>(texH);
+    const std::size_t dstSliceBytes = dstRowBytes * dstImageHeight;
+    const std::size_t dstSkipBytes =
+        static_cast<std::size_t>(packStore.packSkipImages) * dstSliceBytes +
+        static_cast<std::size_t>(packStore.packSkipRows) * dstRowBytes +
+        static_cast<std::size_t>(packStore.packSkipPixels) * dstPixelBytes;
+    const std::size_t lastByte =
+        dstSkipBytes +
+        (static_cast<std::size_t>(texD) - 1u) * dstSliceBytes +
+        (static_cast<std::size_t>(texH) - 1u) * dstRowBytes +
+        static_cast<std::size_t>(texW) * dstPixelBytes;
+    if (bufSize > 0 && static_cast<std::size_t>(bufSize) < lastByte) {
+        return false;
+    }
+
+    auto* dstBase = static_cast<std::uint8_t*>(pixels) + dstSkipBytes;
+    const bool packSwapBytes = (packStore.packSwapBytes == GL_TRUE);
+    const std::size_t sourceRowBytes =
+        static_cast<std::size_t>(texW) * classBytes;
+    const std::size_t sourceSliceBytes =
+        sourceRowBytes * static_cast<std::size_t>(sourceH);
+    for (GLsizei z = 0; z < texD; ++z) {
+        const GLsizei sourceZ = sourceLayerBase + z;
+        for (GLsizei y = 0; y < texH; ++y) {
+            const std::uint8_t* srcRow =
+                sourceBytes +
+                static_cast<std::size_t>(sourceZ) * sourceSliceBytes +
+                static_cast<std::size_t>(y) * sourceRowBytes;
+            std::uint8_t* dstRow =
+                dstBase +
+                static_cast<std::size_t>(z) * dstSliceBytes +
+                static_cast<std::size_t>(y) * dstRowBytes;
+            if (!packSwapBytes) {
+                std::memcpy(dstRow, srcRow, sourceRowBytes);
+                continue;
+            }
+            for (GLsizei x = 0; x < texW; ++x) {
+                const std::uint8_t* srcPixel =
+                    srcRow + static_cast<std::size_t>(x) * classBytes;
+                std::uint8_t* dstPixel =
+                    dstRow + static_cast<std::size_t>(x) * dstPixelBytes;
+                std::memcpy(dstPixel, srcPixel, dstPixelBytes);
+                if (dstBpc > 1) {
+                    for (std::size_t c = 0; c < dstComponents; ++c) {
+                        std::reverse(dstPixel + c * dstBpc,
+                                     dstPixel + (c + 1u) * dstBpc);
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
 // Helper: fill an existing level's rgba8 + native-format buffers with
 // a single `data` texel (or zeros). `data==nullptr` means GL-spec-zero
 // (RGBA8 {0,0,0,0}, native zero-fill; alpha defaults to 1 for formats

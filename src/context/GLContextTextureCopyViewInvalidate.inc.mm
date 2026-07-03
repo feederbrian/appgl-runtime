@@ -956,8 +956,50 @@ bool GLContext::textureView(GLuint texture, GLenum target, GLuint origtexture, G
         pushError(GL_INVALID_ENUM);
         return false;
     }
+    auto isKnownTextureViewFormatEnum = [](GLenum format) {
+        if (textureViewClassForInternalFormat(format) !=
+            TextureViewClass::Undefined) {
+            return true;
+        }
+        constexpr GLenum kCompressedAlpha = 0x84E9;
+        constexpr GLenum kCompressedLuminance = 0x84EA;
+        constexpr GLenum kCompressedLuminanceAlpha = 0x84EB;
+        constexpr GLenum kCompressedIntensity = 0x84EC;
+        constexpr GLenum kCompressedSLuminance = 0x8C4A;
+        constexpr GLenum kCompressedSLuminanceAlpha = 0x8C4B;
+        switch (format) {
+            case GL_ALPHA:
+            case GL_LUMINANCE:
+            case GL_LUMINANCE_ALPHA:
+            case GL_INTENSITY:
+            case GL_RED:
+            case GL_RG:
+            case GL_RGB:
+            case GL_RGBA:
+            case GL_DEPTH_COMPONENT:
+            case GL_DEPTH_STENCIL:
+            case GL_STENCIL_INDEX:
+            case kCompressedAlpha:
+            case kCompressedLuminanceAlpha:
+            case kCompressedLuminance:
+            case kCompressedIntensity:
+            case GL_COMPRESSED_RED:
+            case GL_COMPRESSED_RG:
+            case GL_COMPRESSED_RGB:
+            case GL_COMPRESSED_RGBA:
+            case GL_COMPRESSED_SRGB:
+            case GL_COMPRESSED_SRGB_ALPHA:
+            case kCompressedSLuminance:
+            case kCompressedSLuminanceAlpha:
+                return true;
+            default:
+                return false;
+        }
+    };
     if (!isSupportedInternalTextureFormat(*impl_->capabilities, internalformat)) {
-        pushError(GL_INVALID_ENUM);
+        pushError(isKnownTextureViewFormatEnum(internalformat)
+                      ? GL_INVALID_OPERATION
+                      : GL_INVALID_ENUM);
         return false;
     }
     if (!textureViewInternalFormatsCompatible(origObj->desc.internalFormat, internalformat)) {

@@ -2124,6 +2124,37 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
         }
     }
 
+    if (obj->viewSourceTexture != 0 && !packPBOBound) {
+        GLuint sourceName = obj->viewSourceTexture;
+        GLTextureObject* sourceObj =
+            impl_->objects->textures().get(sourceName);
+        std::unordered_set<GLuint> visitedViews;
+        while (sourceObj != nullptr && sourceObj->viewSourceTexture != 0) {
+            if (!visitedViews.insert(sourceName).second) {
+                sourceObj = nullptr;
+                break;
+            }
+            sourceName = sourceObj->viewSourceTexture;
+            sourceObj = impl_->objects->textures().get(sourceName);
+        }
+        if (sourceObj != nullptr &&
+            copyTextureViewClassRawShadow(*obj,
+                                          *sourceObj,
+                                          level,
+                                          format,
+                                          type,
+                                          bufSize,
+                                          impl_->state->pixelStore(),
+                                          pixels)) {
+            impl_->drainPendingGpuProducers({
+                {Impl::GpuResourceAccess::Kind::Texture,
+                 sourceName,
+                 kProducerAll},
+            });
+            return true;
+        }
+    }
+
     if (obj->viewSourceTexture != 0) {
         (void)impl_->materializeTextureView(*obj);
     }
