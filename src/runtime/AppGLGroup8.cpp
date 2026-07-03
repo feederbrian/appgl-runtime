@@ -488,15 +488,13 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                 if (match({GL_RG32F, GL_RG32I, GL_RG32UI})) {
                     return (channel < 2) ? 32 : 0;
                 }
-                if (appglCompatProfileEnabled()) {
-                    if (match({GL_COMPRESSED_RED_RGTC1,
-                               GL_COMPRESSED_SIGNED_RED_RGTC1})) {
-                        return channel == 0 ? -1 : 0;
-                    }
-                    if (match({GL_COMPRESSED_RG_RGTC2,
-                               GL_COMPRESSED_SIGNED_RG_RGTC2})) {
-                        return channel < 2 ? -1 : 0;
-                    }
+                if (match({GL_COMPRESSED_RED_RGTC1,
+                           GL_COMPRESSED_SIGNED_RED_RGTC1})) {
+                    return channel == 0 ? 8 : 0;
+                }
+                if (match({GL_COMPRESSED_RG_RGTC2,
+                           GL_COMPRESSED_SIGNED_RG_RGTC2})) {
+                    return channel < 2 ? 8 : 0;
                 }
                 if (match({GL_RGB8, GL_RGB8_SNORM, GL_RGB8I, GL_RGB8UI, GL_SRGB, GL_SRGB8, GL_RGB,
                            GL_COMPRESSED_RGB, GL_COMPRESSED_RGB_S3TC_DXT1_EXT})) {
@@ -624,10 +622,12 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
             }
             int nChannels = 4;
             if (match({GL_R8, GL_R8_SNORM, GL_R16, GL_R16_SNORM, GL_R16F, GL_R32F,
-                       GL_R8I, GL_R8UI, GL_R16I, GL_R16UI, GL_R32I, GL_R32UI})) {
+                       GL_R8I, GL_R8UI, GL_R16I, GL_R16UI, GL_R32I, GL_R32UI,
+                       GL_COMPRESSED_RED_RGTC1, GL_COMPRESSED_SIGNED_RED_RGTC1})) {
                 nChannels = 1;
             } else if (match({GL_RG8, GL_RG8_SNORM, GL_RG16, GL_RG16_SNORM, GL_RG16F, GL_RG32F,
-                              GL_RG8I, GL_RG8UI, GL_RG16I, GL_RG16UI, GL_RG32I, GL_RG32UI})) {
+                              GL_RG8I, GL_RG8UI, GL_RG16I, GL_RG16UI, GL_RG32I, GL_RG32UI,
+                              GL_COMPRESSED_RG_RGTC2, GL_COMPRESSED_SIGNED_RG_RGTC2})) {
                 nChannels = 2;
             } else if (match({GL_RGB8, GL_RGB8_SNORM, GL_RGB16, GL_RGB16_SNORM, GL_RGB16F, GL_RGB32F,
                               GL_RGB8I, GL_RGB8UI, GL_RGB16I, GL_RGB16UI, GL_RGB32I, GL_RGB32UI,
@@ -654,7 +654,8 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                 || fmt == GL_RGB10_A2UI) {
                 *params = GL_UNSIGNED_INT;
             } else if (fmt == GL_R8_SNORM || fmt == GL_RG8_SNORM || fmt == GL_RGB8_SNORM || fmt == GL_RGBA8_SNORM
-                || fmt == GL_R16_SNORM || fmt == GL_RG16_SNORM || fmt == GL_RGB16_SNORM || fmt == GL_RGBA16_SNORM) {
+                || fmt == GL_R16_SNORM || fmt == GL_RG16_SNORM || fmt == GL_RGB16_SNORM || fmt == GL_RGBA16_SNORM
+                || fmt == GL_COMPRESSED_SIGNED_RED_RGTC1 || fmt == GL_COMPRESSED_SIGNED_RG_RGTC2) {
                 *params = GL_SIGNED_NORMALIZED;
             } else {
                 *params = GL_UNSIGNED_NORMALIZED;
