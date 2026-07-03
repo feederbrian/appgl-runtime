@@ -1025,6 +1025,10 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     } else {
                         discard = impl_->writeGsXfbAndCheckDiscard(*program, ed);
                     }
+                    if (!program->gsPresent) {
+                        impl_->updatePrimitiveGeneratedForNonGsDraw(
+                            vsTfMode, vsTfCount, 1);
+                    }
                     if (discard) {
                         return true;
                     }

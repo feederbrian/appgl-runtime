@@ -482,19 +482,26 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         !program->geometryEmulated &&
         !program->tessellationEmulated &&
         !program->tessellationInterpreted &&
-        count > 0 &&
-        effectivePtr != nullptr) {
-        // Resolve effectivePtr (uint16 / uint32) into a uint32 vector
-        // matching the new emulateVsOnlyDrawForTf elementIndices param
-        // shape. Small allocation cost — CTS draws never exceed a few
+        drawElementsCount > 0 &&
+        drawElementsIndexPtr != nullptr) {
+        // Resolve the post-primitive-restart drawElements stream
+        // (uint16 / uint32) into a uint32 vector matching the
+        // emulateVsOnlyDrawForTf elementIndices param shape.
+        // Primitive-restart expansion above may already have split
+        // strips/fans into list topology, which is exactly the stream
+        // GL transform feedback captures after primitive assembly.
+        //
+        // Small allocation cost — CTS draws never exceed a few
         // hundred indices for these tests.
-        std::vector<std::uint32_t> idx32(static_cast<std::size_t>(count));
-        if (effectiveType == GL_UNSIGNED_INT) {
-            std::memcpy(idx32.data(), effectivePtr, count * sizeof(std::uint32_t));
-        } else if (effectiveType == GL_UNSIGNED_SHORT) {
+        std::vector<std::uint32_t> idx32(static_cast<std::size_t>(drawElementsCount));
+        if (drawElementsIndexType == GL_UNSIGNED_INT) {
+            std::memcpy(idx32.data(), drawElementsIndexPtr,
+                        static_cast<std::size_t>(drawElementsCount) *
+                            sizeof(std::uint32_t));
+        } else if (drawElementsIndexType == GL_UNSIGNED_SHORT) {
             const std::uint16_t* src16 =
-                static_cast<const std::uint16_t*>(effectivePtr);
-            for (GLsizei i = 0; i < count; ++i) idx32[i] = src16[i];
+                static_cast<const std::uint16_t*>(drawElementsIndexPtr);
+            for (GLsizei i = 0; i < drawElementsCount; ++i) idx32[i] = src16[i];
         } else {
             idx32.clear();
         }
@@ -508,7 +515,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         std::vector<std::uint32_t> capIdx;
         if (!idx32.empty()) {
             const std::size_t n = idx32.size();
-            switch (mode) {
+            switch (drawElementsMode) {
                 case GL_POINTS:
                 case GL_LINES:
                 case GL_TRIANGLES:
@@ -571,8 +578,10 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             // The reassembled discrete-primitive topology fed to
             // writeGsXfbAndCheckDiscard via EmulatedDraw.topology.
             const GLenum capTopology =
-                (mode == GL_POINTS) ? GL_POINTS :
-                (mode == GL_LINES || mode == GL_LINE_STRIP || mode == GL_LINE_LOOP) ? GL_LINES :
+                (drawElementsMode == GL_POINTS) ? GL_POINTS :
+                (drawElementsMode == GL_LINES ||
+                 drawElementsMode == GL_LINE_STRIP ||
+                 drawElementsMode == GL_LINE_LOOP) ? GL_LINES :
                 GL_TRIANGLES;
             const auto vsTexMap = impl_->buildSampledTextureMap(
                 program->vertexSpirv,
@@ -596,6 +605,10 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                         appgl::vsOnlyTfTimingNowNs() - t0);
                 } else {
                     discard = impl_->writeGsXfbAndCheckDiscard(*program, ed);
+                }
+                if (!program->gsPresent) {
+                    impl_->updatePrimitiveGeneratedForNonGsDraw(
+                        capTopology, static_cast<GLsizei>(capIdx.size()), 1);
                 }
                 if (discard) {
                     return true;

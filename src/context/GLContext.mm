@@ -30160,6 +30160,9 @@ struct GLContext::Impl {
                                              GLsizei vertexCount,
                                              GLsizei instanceCount,
                                              GLsizei restartSkipCount = 0);
+    void updatePrimitiveGeneratedForNonGsDraw(GLenum mode,
+                                              GLsizei vertexCount,
+                                              GLsizei instanceCount);
     void updateSubmittedPipelineStatsForNonGsDraw(GLenum mode,
                                                   GLsizei vertexCount,
                                                   GLsizei instanceCount,
@@ -35850,6 +35853,42 @@ static bool appglDepthCompareForOcclusion(GLenum func, float incoming,
         case GL_ALWAYS: return true;
         default: return true;
     }
+}
+
+void GLContext::Impl::updatePrimitiveGeneratedForNonGsDraw(
+    GLenum mode, GLsizei vertexCount, GLsizei instanceCount)
+{
+    if (vertexCount <= 0 || instanceCount <= 0) return;
+
+    std::size_t prims = 0;
+    const std::size_t n = static_cast<std::size_t>(vertexCount);
+    switch (mode) {
+        case GL_POINTS:                   prims = n; break;
+        case GL_LINES:                    prims = n / 2; break;
+        case GL_LINE_STRIP:               prims = (n >= 2) ? n - 1 : 0; break;
+        case GL_LINE_LOOP:                prims = (n >= 2) ? n : 0; break;
+        case GL_TRIANGLES:                prims = n / 3; break;
+        case GL_TRIANGLE_STRIP:
+        case GL_TRIANGLE_FAN:             prims = (n >= 3) ? n - 2 : 0; break;
+        case GL_LINES_ADJACENCY:          prims = n / 4; break;
+        case GL_LINE_STRIP_ADJACENCY:     prims = (n >= 4) ? n - 3 : 0; break;
+        case GL_TRIANGLES_ADJACENCY:      prims = n / 6; break;
+        case GL_TRIANGLE_STRIP_ADJACENCY: prims = (n >= 6) ? (n - 4) / 2 : 0; break;
+        case GL_PATCHES: {
+            const GLint pv = state ? state->tessellationState().patchVertices : 3;
+            prims = (pv > 0) ? (n / static_cast<std::size_t>(pv)) : 0;
+            break;
+        }
+        default: break;
+    }
+    prims *= static_cast<std::size_t>(instanceCount);
+    if (prims == 0 || objects == nullptr) return;
+
+    objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
+        if (q.active && q.target == GL_PRIMITIVES_GENERATED) {
+            q.result += static_cast<GLuint64>(prims);
+        }
+    });
 }
 
 void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
