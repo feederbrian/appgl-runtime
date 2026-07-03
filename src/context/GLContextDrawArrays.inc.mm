@@ -385,6 +385,17 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 }
                 if (program->vertexSsboEmulatedDraw &&
                     impl_->encodeEmulatedGsDraw(*program, programName, ed)) {
+                    if (!ed.pendingImageWrites.empty()) {
+                        std::vector<GLuint> cpuImageWriteTextures;
+                        impl_->flushPendingImageWritesForStage(
+                            ed.pendingImageWrites,
+                            &program->vertexReflection,
+                            program->vertexSpirv,
+                            *program,
+                            GL_VERTEX_SHADER,
+                            &cpuImageWriteTextures);
+                        impl_->markCpuInterpreterImageWrites(cpuImageWriteTextures);
+                    }
                     return true;
                 }
             } else if (!ed.diagnostic.empty()) {
@@ -1025,7 +1036,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     } else {
                         discard = impl_->writeGsXfbAndCheckDiscard(*program, ed);
                     }
-                    if (!program->gsPresent) {
+                    if (discard && !program->gsPresent) {
                         impl_->updatePrimitiveGeneratedForNonGsDraw(
                             vsTfMode, vsTfCount, 1);
                     }
@@ -1990,7 +2001,22 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     ed.diagnostic.c_str());
             }
             if (ed.ok) {
+                auto flushVsImageWrites = [&]() {
+                    if (ed.pendingImageWrites.empty()) {
+                        return;
+                    }
+                    std::vector<GLuint> cpuImageWriteTextures;
+                    impl_->flushPendingImageWritesForStage(
+                        ed.pendingImageWrites,
+                        &program->vertexReflection,
+                        program->vertexSpirv,
+                        *program,
+                        GL_VERTEX_SHADER,
+                        &cpuImageWriteTextures);
+                    impl_->markCpuInterpreterImageWrites(cpuImageWriteTextures);
+                };
                 if (impl_->state->isEnabled(GL_RASTERIZER_DISCARD)) {
+                    flushVsImageWrites();
                     return true;
                 }
                 auto writeAdvancedMatrixSideEffects = [&]() -> bool {
@@ -2146,6 +2172,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                             replayEncoded ? 1 : 0);
                     }
                     if (replayEncoded) {
+                        flushVsImageWrites();
                         return true;
                     }
                 }

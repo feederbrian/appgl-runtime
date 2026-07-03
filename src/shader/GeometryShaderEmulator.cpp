@@ -11759,6 +11759,43 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     Interpreter::StorageBufferMap vsSsboMap;
     addStorageBuffersFromModule(program.vertexSpirv, objects, state, program,
                                 vsSsboMap, entryPointName, specializationConstants);
+    for (const auto& ac : program.resourceAtomicCounterBuffers) {
+        const std::uint32_t glBinding =
+            static_cast<std::uint32_t>(ac.binding < 0 ? 0 : ac.binding);
+        const std::uint32_t mapBinding =
+            kAtomicCounterStorageBindingBase + glBinding;
+        if (vsSsboMap.find(mapBinding) != vsSsboMap.end()) {
+            continue;
+        }
+        const GLIndexedBufferBinding bb =
+            state.indexedBufferBinding(GL_ATOMIC_COUNTER_BUFFER, glBinding);
+        if (bb.buffer == 0) {
+            continue;
+        }
+        GLBufferObject* bufObj = objects.buffers().get(bb.buffer);
+        if (bufObj == nullptr || bufObj->metalBuffer == nullptr) {
+            continue;
+        }
+        void* base = metalBufferContents(bufObj->metalBuffer);
+        if (base == nullptr) {
+            continue;
+        }
+        const std::size_t totalSize =
+            static_cast<std::size_t>(bufObj->size);
+        const std::size_t off =
+            static_cast<std::size_t>(bb.offset < 0 ? 0 : bb.offset);
+        if (off >= totalSize) {
+            continue;
+        }
+        const std::size_t span = (bb.size > 0)
+            ? std::min<std::size_t>(static_cast<std::size_t>(bb.size),
+                                    totalSize - off)
+            : (totalSize - off);
+        Interpreter::StorageBufferRegion r;
+        r.ptr = static_cast<std::uint8_t*>(base) + off;
+        r.size = span;
+        vsSsboMap[mapBinding] = r;
+    }
     const Interpreter::StorageBufferMap* vsSsboMapPtr =
         vsSsboMap.empty() ? nullptr : &vsSsboMap;
 
@@ -12331,13 +12368,72 @@ EmulatedDraw emulateGeometryDraw(
                 }
                 return p + v;
             case PrimIndexing::StripAdjacency: {
-                // GS input arrays for GL_TRIANGLE_STRIP_ADJACENCY use
-                // a sliding six-vertex window. The main triangle is
-                // gl_in[0], gl_in[2], gl_in[4]; provoking-vertex tests
-                // depend on odd primitives still exposing raw vertex
-                // 2p at gl_in[0], so do not apply the raster strip
-                // winding swap here.
-                return 2 * p + v;
+                // GL 4.6 §10.1.14 Table 10.4 — TRIANGLE_STRIP_ADJACENCY
+                // exposes a six-vertex input tuple whose adjacency
+                // slots depend on first/last and even/odd primitive
+                // position. This is not the same as the raw sliding
+                // window used by LINE_STRIP_ADJACENCY.
+                const std::size_t i = p;
+                const std::size_t N = primCount;
+                const bool isFirst = (i == 0);
+                const bool isLast = (N > 0 && i == N - 1);
+                const bool isOdd = (i & 1u) != 0u;
+                if (isFirst && isLast) {
+                    switch (v) {
+                        case 0: return 0;
+                        case 1: return 1;
+                        case 2: return 2;
+                        case 3: return 5;
+                        case 4: return 4;
+                        case 5: return 3;
+                    }
+                } else if (isFirst) {
+                    switch (v) {
+                        case 0: return 0;
+                        case 1: return 1;
+                        case 2: return 2;
+                        case 3: return 6;
+                        case 4: return 4;
+                        case 5: return 3;
+                    }
+                } else if (isOdd && isLast) {
+                    switch (v) {
+                        case 0: return 2 * i + 2;
+                        case 1: return 2 * i - 2;
+                        case 2: return 2 * i;
+                        case 3: return 2 * i + 3;
+                        case 4: return 2 * i + 4;
+                        case 5: return 2 * i + 5;
+                    }
+                } else if (isOdd) {
+                    switch (v) {
+                        case 0: return 2 * i + 2;
+                        case 1: return 2 * i - 2;
+                        case 2: return 2 * i;
+                        case 3: return 2 * i + 3;
+                        case 4: return 2 * i + 4;
+                        case 5: return 2 * i + 6;
+                    }
+                } else if (isLast) {
+                    switch (v) {
+                        case 0: return 2 * i;
+                        case 1: return 2 * i - 2;
+                        case 2: return 2 * i + 2;
+                        case 3: return 2 * i + 5;
+                        case 4: return 2 * i + 4;
+                        case 5: return 2 * i + 3;
+                    }
+                } else {
+                    switch (v) {
+                        case 0: return 2 * i;
+                        case 1: return 2 * i - 2;
+                        case 2: return 2 * i + 2;
+                        case 3: return 2 * i + 6;
+                        case 4: return 2 * i + 4;
+                        case 5: return 2 * i + 3;
+                    }
+                }
+                return 2 * i + v;
             }
             case PrimIndexing::Loop:
                 return (p + v) % static_cast<std::size_t>(count);
@@ -12903,24 +12999,12 @@ EmulatedDraw emulateGeometryDraw(
             }
             expandedTopo = GL_LINES;
         } else {
-            std::size_t stripOrdinal = 0;
             for (std::size_t endIdx : primEndsAll) {
                 if (endIdx <= prev) continue;
                 // Each strip of N verts → (N-2) triangles with
                 // alternating winding.
-                const bool triangleStripAdjacencyInput =
-                    drawMode == GL_TRIANGLE_STRIP_ADJACENCY;
-                const bool singleTriangleFromAdjacency =
-                    triangleStripAdjacencyInput && (endIdx - prev == 3);
                 for (std::size_t i = prev; i + 2 < endIdx; ++i) {
                     const std::size_t offset = i - prev;
-                    if (singleTriangleFromAdjacency &&
-                        (stripOrdinal & 1u) != 0u) {
-                        expanded.push_back(emittedAll[i]);
-                        expanded.push_back(emittedAll[i + 2]);
-                        expanded.push_back(emittedAll[i + 1]);
-                        continue;
-                    }
                     // Odd offset flips winding — this preserves the
                     // GL-spec front-facing order of every triangle
                     // once decomposed into a list.
@@ -12935,7 +13019,6 @@ EmulatedDraw emulateGeometryDraw(
                     }
                 }
                 prev = endIdx;
-                ++stripOrdinal;
             }
             expandedTopo = GL_TRIANGLES;
         }
@@ -13040,13 +13123,17 @@ EmulatedDraw emulateGeometryDraw(
     auto provokingVertexOffset = [&](std::size_t primIndex,
                                      std::size_t primSize) -> std::size_t {
         if (firstVertexProvoking) {
+            // Triangle-strip-adjacency presents odd primitives in a
+            // cyclic table order for correct winding. For flat output
+            // semantics, the raw strip's first provoking vertex is the
+            // second emitted vertex of the decomposed triangle.
+            if (drawMode == GL_TRIANGLE_STRIP_ADJACENCY &&
+                expandedTopo == GL_TRIANGLES &&
+                primSize == 3 &&
+                (primIndex & 1u) != 0u) {
+                return 1;
+            }
             return 0;
-        }
-        if (drawMode == GL_TRIANGLE_STRIP_ADJACENCY &&
-            expandedTopo == GL_TRIANGLES &&
-            primSize == 3 &&
-            (primIndex & 1u) != 0u) {
-            return 1;
         }
         return primSize - 1;
     };
@@ -13154,7 +13241,21 @@ EmulatedDraw emulateGeometryDraw(
     // (the original 96d16b0 fix target) is unaffected — it does NOT
     // enable GL_RASTERIZER_DISCARD, so propagation continues to fire
     // correctly for the FS's per-primitive layer_id case-match.
-    if (!d.varyingInterp.empty() && !rasterizerDiscarded) {
+    //
+    // Exception: GL_TRIANGLE_STRIP_ADJACENCY with first-vertex
+    // convention has odd primitives whose spec table order is a cyclic
+    // winding-preserving rotation. The raw strip's first provoking
+    // vertex is the second emitted output vertex for those odd
+    // triangles; propagate flat varyings for that focused case even
+    // under discard so transform-feedback rows that capture a flat GS
+    // output observe the same provoking value as rasterization.
+    const bool propagateAdjStripFirstFlatUnderDiscard =
+        rasterizerDiscarded &&
+        firstVertexProvoking &&
+        drawMode == GL_TRIANGLE_STRIP_ADJACENCY &&
+        expandedTopo == GL_TRIANGLES;
+    if (!d.varyingInterp.empty() &&
+        (!rasterizerDiscarded || propagateAdjStripFirstFlatUnderDiscard)) {
         std::size_t primSize = 0;
         switch (expandedTopo) {
             case GL_POINTS:    primSize = 1; break;
@@ -13193,6 +13294,15 @@ EmulatedDraw emulateGeometryDraw(
                         auto& dst = emittedAll[i + k].varyings;
                         if (dst.size() < varyOff + width) continue;
                         for (std::uint32_t w = 0; w < width; ++w) {
+                            const bool preserveAdjStripFirstAlpha =
+                                firstVertexProvoking &&
+                                drawMode == GL_TRIANGLE_STRIP_ADJACENCY &&
+                                expandedTopo == GL_TRIANGLES &&
+                                primSize == 3 &&
+                                (primIndex & 1u) != 0u &&
+                                width == 4 &&
+                                w == 3;
+                            if (preserveAdjStripFirstAlpha) continue;
                             std::memcpy(&dst[varyOff + w],
                                         &emittedAll[provoking].varyings[varyOff + w],
                                         sizeof(float));

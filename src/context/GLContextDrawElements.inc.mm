@@ -606,7 +606,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 } else {
                     discard = impl_->writeGsXfbAndCheckDiscard(*program, ed);
                 }
-                if (!program->gsPresent) {
+                if (discard && !program->gsPresent) {
                     impl_->updatePrimitiveGeneratedForNonGsDraw(
                         capTopology, static_cast<GLsizei>(capIdx.size()), 1);
                 }

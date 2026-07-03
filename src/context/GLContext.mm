@@ -40789,7 +40789,9 @@ bool sourceNeedsVertexSsboEmulatedDraw(const std::string& source) {
             s.find("position2[]") != std::string::npos) ||
            s.find("g_buffer12[2]") != std::string::npos ||
            s.find("g_data0[g_index1][g_index2]") != std::string::npos ||
-           s.find("g_color[gl_InstanceID]") != std::string::npos;
+           s.find("g_color[gl_InstanceID]") != std::string::npos ||
+           (s.find("imageStore") != std::string::npos &&
+            s.find("atomicCounter") != std::string::npos);
 }
 
 }  // namespace
