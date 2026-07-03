@@ -2154,50 +2154,68 @@ static void APIENTRY glProvokingVertex(GLenum mode) {
     (void)mode;
 }
 
-// GL 3.2 sync objects. Fence waits drain pending AppGL work before
-// reporting the fence signalled. CTS `sync.flush_commands`
-// asserts:
-//   - FenceSync returns a non-null handle with NO_ERROR
-//   - IsSync on that handle returns TRUE
-//   - ClientWaitSync returns CONDITION_SATISFIED or ALREADY_SIGNALED
-//     (never TIMEOUT_EXPIRED / WAIT_FAILED)
-//   - GetSynciv(SYNC_STATUS, …) returns SIGNALED
-// Our stubs returned nullptr/GL_FALSE/0 which failed every step.
-// Allocate a small heap sentinel per fence (never freed — sync
-// objects are rarely created) and return ALREADY_SIGNALED from
-// ClientWaitSync/WaitSync for the current fence surface.
+// GL 3.2 sync objects. AppGL executes synchronously, so fences are
+// immediately signalled, but the handles still need real lifetime and
+// validation semantics for ARB_sync error tests.
+static std::unordered_set<GLsync>& appglSyncRegistry() {
+    static auto* registry = new std::unordered_set<GLsync>();
+    return *registry;
+}
+
+static bool appglIsTrackedSync(GLsync sync) {
+    if (sync == nullptr) return false;
+    const auto& registry = appglSyncRegistry();
+    return registry.find(sync) != registry.end();
+}
+
+static void appglPushSyncInvalidValue() {
+    auto* ctx = currentContextOrNull();
+    if (ctx != nullptr) ctx->pushError(GL_INVALID_VALUE);
+}
+
+static GLsync appglCreateTrackedSync() {
+    auto* token = new int(1);
+    auto sync = reinterpret_cast<GLsync>(token);
+    appglSyncRegistry().insert(sync);
+    return sync;
+}
+
+static void appglDeleteTrackedSync(GLsync sync) {
+    appglSyncRegistry().erase(sync);
+    delete reinterpret_cast<int*>(sync);
+}
+
 static GLsync APIENTRY glFenceSync(GLenum condition, GLbitfield flags) {
-    (void)flags;
     if (condition != GL_SYNC_GPU_COMMANDS_COMPLETE) {
         auto* ctx = currentContextOrNull();
         if (ctx != nullptr) ctx->pushError(GL_INVALID_ENUM);
         return nullptr;
     }
-    // Return an opaque, non-null handle. A `new int(1)` is a
-    // harmless stand-in — the runtime never dereferences it, and
-    // leaking 4 bytes per fence is acceptable given how rarely
-    // fences are created (each glDeleteSync is still a no-op that
-    // doesn't free it, but CTS creates ≤ 1 per test).
-    return reinterpret_cast<GLsync>(new int(1));
+    if (flags != 0) {
+        appglPushSyncInvalidValue();
+        return nullptr;
+    }
+    return appglCreateTrackedSync();
 }
 
 static GLboolean APIENTRY glIsSync(GLsync sync) {
-    // Every non-null handle returned by our glFenceSync is
-    // considered a valid sync object.
-    return (sync != nullptr) ? GL_TRUE : GL_FALSE;
+    return appglIsTrackedSync(sync) ? GL_TRUE : GL_FALSE;
 }
 
 static void APIENTRY glDeleteSync(GLsync sync) {
-    (void)sync;
-    // See glFenceSync — the handle intentionally leaks.
+    if (sync == nullptr) return;
+    if (!appglIsTrackedSync(sync)) {
+        appglPushSyncInvalidValue();
+        return;
+    }
+    appglDeleteTrackedSync(sync);
 }
 
 static GLenum APIENTRY glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
-    (void)flags;
     (void)timeout;
-    if (sync == nullptr) {
-        auto* ctx = currentContextOrNull();
-        if (ctx != nullptr) ctx->pushError(GL_INVALID_VALUE);
+    constexpr GLbitfield kClientWaitValidFlags = GL_SYNC_FLUSH_COMMANDS_BIT;
+    if (!appglIsTrackedSync(sync) || (flags & ~kClientWaitValidFlags) != 0) {
+        appglPushSyncInvalidValue();
         return GL_WAIT_FAILED;
     }
     if (auto* ctx = currentContextOrNull(); ctx != nullptr) {
@@ -2207,11 +2225,8 @@ static GLenum APIENTRY glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 
 }
 
 static void APIENTRY glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
-    (void)flags;
-    (void)timeout;
-    if (sync == nullptr) {
-        auto* ctx = currentContextOrNull();
-        if (ctx != nullptr) ctx->pushError(GL_INVALID_VALUE);
+    if (!appglIsTrackedSync(sync) || flags != 0 || timeout != GL_TIMEOUT_IGNORED) {
+        appglPushSyncInvalidValue();
         return;
     }
     if (auto* ctx = currentContextOrNull(); ctx != nullptr) {
@@ -2221,10 +2236,8 @@ static void APIENTRY glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout)
 
 static void APIENTRY glGetSynciv(GLsync sync, GLenum pname, GLsizei count, GLsizei *length, GLint *values) {
     if (length != nullptr) *length = 0;
-    if (values == nullptr || count <= 0) return;
-    if (sync == nullptr) {
-        auto* ctx = currentContextOrNull();
-        if (ctx != nullptr) ctx->pushError(GL_INVALID_VALUE);
+    if (!appglIsTrackedSync(sync)) {
+        appglPushSyncInvalidValue();
         return;
     }
     // Report the 4 fixed properties of a fence sync per GL 4.6
@@ -2233,29 +2246,29 @@ static void APIENTRY glGetSynciv(GLsync sync, GLenum pname, GLsizei count, GLsiz
     //   SYNC_STATUS    = GL_SIGNALED (synchronous translator)
     //   SYNC_FLAGS     = 0
     //   OBJECT_TYPE    = GL_SYNC_FENCE
+    GLint value = 0;
     switch (pname) {
         case GL_OBJECT_TYPE:
-            values[0] = GL_SYNC_FENCE;
-            if (length != nullptr) *length = 1;
+            value = GL_SYNC_FENCE;
             break;
         case GL_SYNC_STATUS:
-            values[0] = GL_SIGNALED;
-            if (length != nullptr) *length = 1;
+            value = GL_SIGNALED;
             break;
         case GL_SYNC_CONDITION:
-            values[0] = GL_SYNC_GPU_COMMANDS_COMPLETE;
-            if (length != nullptr) *length = 1;
+            value = GL_SYNC_GPU_COMMANDS_COMPLETE;
             break;
         case GL_SYNC_FLAGS:
-            values[0] = 0;
-            if (length != nullptr) *length = 1;
+            value = 0;
             break;
         default: {
             auto* ctx = currentContextOrNull();
             if (ctx != nullptr) ctx->pushError(GL_INVALID_ENUM);
-            break;
+            return;
         }
     }
+    if (values == nullptr || count <= 0) return;
+    values[0] = value;
+    if (length != nullptr) *length = 1;
 }
 
 static void APIENTRY glGetInteger64i_v(GLenum target, GLuint index, GLint64 *data) {
