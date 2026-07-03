@@ -6125,6 +6125,29 @@ bool textureBufferFormatNeedsRGB32Expansion(GLenum internalFormat) {
     }
 }
 
+GLint textureBufferBytesPerTexelForFormat(GLenum fmt) {
+    switch (fmt) {
+        case GL_R8: case GL_R8I: case GL_R8UI:
+            return 1;
+        case GL_R16: case GL_R16I: case GL_R16UI: case GL_R16F:
+        case GL_RG8: case GL_RG8I: case GL_RG8UI:
+            return 2;
+        case GL_R32I: case GL_R32UI: case GL_R32F:
+        case GL_RG16: case GL_RG16I: case GL_RG16UI: case GL_RG16F:
+        case GL_RGBA8: case GL_RGBA8I: case GL_RGBA8UI:
+            return 4;
+        case GL_RG32I: case GL_RG32UI: case GL_RG32F:
+        case GL_RGBA16: case GL_RGBA16I: case GL_RGBA16UI: case GL_RGBA16F:
+            return 8;
+        case GL_RGB32I: case GL_RGB32UI: case GL_RGB32F:
+            return 12;
+        case GL_RGBA32I: case GL_RGBA32UI: case GL_RGBA32F:
+            return 16;
+        default:
+            return 0;
+    }
+}
+
 bool uses2DBackingFor1DTextures() {
     return extensions::ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture_clamp") ||
            extensions::ExtensionRegistry::isExtensionActive("GL_ARB_texture_query_levels");
@@ -10349,6 +10372,71 @@ struct GLContext::Impl {
         object.textureBufferExpandedInternalFormat = 0;
     }
 
+    void clearTextureBufferViewCache(GLTextureObject& object) {
+        object.textureBufferViewSourceMetalBuffer = nullptr;
+        object.textureBufferViewSourceBuffer = 0;
+        object.textureBufferViewOffset = 0;
+        object.textureBufferViewSize = 0;
+        object.textureBufferViewInternalFormat = 0;
+    }
+
+    void releaseTextureBufferMaterializedView(GLTextureObject& object) {
+        releaseRetainedMetalObject(object.metalTexture);
+        object.metalTexture = nullptr;
+        releaseRetainedMetalObject(object.metalSwizzledView);
+        object.metalSwizzledView = nullptr;
+        object.swizzleDirty = true;
+        releaseRetainedMetalObject(object.metalSamplingProxy);
+        object.metalSamplingProxy = nullptr;
+        clearTextureBufferViewCache(object);
+    }
+
+    GLsizeiptr effectiveTextureBufferSize(
+        const GLTextureObject& object,
+        const GLBufferObject& sourceBuffer) const {
+        if (object.desc.bufferWholeStorage) {
+            return sourceBuffer.size;
+        }
+        return object.desc.bufferSize;
+    }
+
+    std::uint32_t textureBufferLogicalTexelCount(
+        const GLTextureObject& object) const {
+        if (object.target != GL_TEXTURE_BUFFER ||
+            object.desc.sourceBuffer == 0 ||
+            object.desc.bufferOffset < 0) {
+            return 0;
+        }
+        GLBufferObject* sourceBuffer =
+            objects != nullptr ? objects->buffers().get(object.desc.sourceBuffer) : nullptr;
+        if (sourceBuffer == nullptr ||
+            object.desc.bufferOffset > sourceBuffer->size) {
+            return 0;
+        }
+        const GLsizeiptr effectiveSize =
+            effectiveTextureBufferSize(object, *sourceBuffer);
+        if (effectiveSize <= 0 ||
+            effectiveSize > sourceBuffer->size - object.desc.bufferOffset) {
+            return 0;
+        }
+        const GLint bytesPerTexel =
+            textureBufferBytesPerTexelForFormat(object.desc.internalFormat);
+        if (bytesPerTexel <= 0) {
+            return 0;
+        }
+        GLint64 maxTexels = 0;
+        if (capabilities != nullptr) {
+            capabilities->queryInteger64(GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels);
+        }
+        if (maxTexels <= 0) {
+            return 0;
+        }
+        const GLint64 texels =
+            static_cast<GLint64>(effectiveSize) / bytesPerTexel;
+        return static_cast<std::uint32_t>(
+            std::min<GLint64>(texels, maxTexels));
+    }
+
     void releaseTextureStorage(GLTextureObject& object) {
         drainPendingGpuProducers(object);
         releaseRetainedMetalObject(object.metalTexture);
@@ -10360,6 +10448,7 @@ struct GLContext::Impl {
         object.r5TextureViewLastUseBoundarySerial = 0;
         object.r5TextureViewEvicted = false;
         releaseTextureBufferExpansion(object);
+        clearTextureBufferViewCache(object);
         if (owner != nullptr) {
             ExtensionContext extensionContext(*owner);
             extensions::sparse_texture::resetStorage(extensionContext, object);
@@ -18185,7 +18274,7 @@ struct GLContext::Impl {
                 }
                 if (texObject->target == GL_TEXTURE_BUFFER &&
                     texObject->desc.sourceBuffer != 0) {
-                    (void)refreshRGB32BufferTextureView(*texObject);
+                    (void)refreshBufferTextureView(*texObject);
                     textureStorageReady =
                         texObject->instantiated && texObject->metalTexture != nullptr;
                 }
@@ -18281,6 +18370,24 @@ struct GLContext::Impl {
                         : metalSamplerState;
                 if (texObject->target == GL_TEXTURE_BUFFER &&
                     texObject->desc.sourceBuffer != 0) {
+                    binding.textureBufferLogicalSize =
+                        textureBufferLogicalTexelCount(*texObject);
+                    static const bool traceTextureBufferBind =
+                        std::getenv("APPGL_TRACE_TBO_BIND") != nullptr;
+                    if (traceTextureBufferBind) {
+                        std::fprintf(stderr,
+                                     "[APPGL_TRACE_TBO_BIND] stage=%s tex=%u slot=%u target=0x%04X source=%u whole=%d offset=%lld range=%lld logical=%u hasMetal=%d\n",
+                                     stageTag,
+                                     texName,
+                                     binding.metalSlot,
+                                     texObject->target,
+                                     texObject->desc.sourceBuffer,
+                                     texObject->desc.bufferWholeStorage ? 1 : 0,
+                                     static_cast<long long>(texObject->desc.bufferOffset),
+                                     static_cast<long long>(texObject->desc.bufferSize),
+                                     binding.textureBufferLogicalSize,
+                                     binding.metalTexture != nullptr ? 1 : 0);
+                    }
                     if (texObject->textureBufferExpandedMetalBuffer != nullptr) {
                         binding.textureBufferBackingMetalBuffer =
                             texObject->textureBufferExpandedMetalBuffer;
@@ -18290,6 +18397,12 @@ struct GLContext::Impl {
                         if (backingBuffer != nullptr) {
                             binding.textureBufferBackingMetalBuffer =
                                 backingBuffer->metalBuffer;
+                            if (frameGraph != nullptr &&
+                                texObject->textureBufferExpandedMetalBuffer == nullptr &&
+                                backingBuffer->metalBuffer != nullptr) {
+                                backingBuffer->liveBindSubmitIndex =
+                                    frameGraph->openCommandBufferSubmitIndex();
+                            }
                         }
                     }
                 }
@@ -21369,10 +21482,23 @@ struct GLContext::Impl {
     // the flush, rename or not.
     void flushEncodeBoundaryForBufferWrite(GLBufferObject& object,
                                            bool subsequentWritesBypassSync = false) {
-        if (frameGraph == nullptr || !frameGraph->hasPendingDeferredDrawBatch()) {
+        if (frameGraph == nullptr) {
             return;
         }
         const BufferWriteLiveness liveness = classifyBufferWriteLiveness(object);
+        if (liveness == BufferWriteLiveness::NoLiveReaders) {
+            return;
+        }
+        if (object.textureBufferSource &&
+            liveness == BufferWriteLiveness::LiveUnrenameable) {
+            (void)frameGraph->finish();
+            object.liveBindSubmitIndex = 0;
+            ++bufferBoundaryFlushesForced;
+            return;
+        }
+        if (!frameGraph->hasPendingDeferredDrawBatch()) {
+            return;
+        }
         const bool mustFlush =
             liveness == BufferWriteLiveness::LiveUnrenameable ||
             (subsequentWritesBypassSync &&
@@ -21616,13 +21742,15 @@ struct GLContext::Impl {
     std::uint64_t bufferBoundaryFlushesNarrowed = 0;
 
     bool refreshRGB32BufferTextureView(GLTextureObject& object) {
+        clearTextureBufferViewCache(object);
         if (object.target != GL_TEXTURE_BUFFER ||
             !textureBufferFormatNeedsRGB32Expansion(object.desc.internalFormat)) {
             releaseTextureBufferExpansion(object);
             return false;
         }
         if (device == nil || object.desc.sourceBuffer == 0 ||
-            object.desc.bufferOffset < 0 || object.desc.bufferSize <= 0) {
+            object.desc.bufferOffset < 0 ||
+            (!object.desc.bufferWholeStorage && object.desc.bufferSize <= 0)) {
             releaseTextureBufferExpansion(object);
             return false;
         }
@@ -21631,7 +21759,14 @@ struct GLContext::Impl {
             objects != nullptr ? objects->buffers().get(object.desc.sourceBuffer) : nullptr;
         if (sourceBuffer == nullptr ||
             object.desc.bufferOffset > sourceBuffer->size ||
-            object.desc.bufferSize > sourceBuffer->size - object.desc.bufferOffset) {
+            effectiveTextureBufferSize(object, *sourceBuffer) >
+                sourceBuffer->size - object.desc.bufferOffset) {
+            releaseTextureBufferExpansion(object);
+            return false;
+        }
+        const GLsizeiptr effectiveSize =
+            effectiveTextureBufferSize(object, *sourceBuffer);
+        if (effectiveSize <= 0) {
             releaseTextureBufferExpansion(object);
             return false;
         }
@@ -21649,7 +21784,7 @@ struct GLContext::Impl {
             object.textureBufferExpandedSourceBuffer == object.desc.sourceBuffer &&
             object.textureBufferExpandedSourceGeneration == sourceGeneration &&
             object.textureBufferExpandedOffset == object.desc.bufferOffset &&
-            object.textureBufferExpandedSize == object.desc.bufferSize &&
+            object.textureBufferExpandedSize == effectiveSize &&
             object.textureBufferExpandedInternalFormat == object.desc.internalFormat;
         if (cached) {
             return true;
@@ -21658,7 +21793,7 @@ struct GLContext::Impl {
         constexpr NSUInteger kGLRGB32BytesPerTexel = 12;
         constexpr NSUInteger kMetalRGBA32BytesPerTexel = 16;
         const NSUInteger sourceTexelCount =
-            static_cast<NSUInteger>(object.desc.bufferSize) / kGLRGB32BytesPerTexel;
+            static_cast<NSUInteger>(effectiveSize) / kGLRGB32BytesPerTexel;
         if (sourceTexelCount == 0) {
             releaseRetainedMetalObject(object.metalTexture);
             object.metalTexture = nullptr;
@@ -21767,8 +21902,230 @@ struct GLContext::Impl {
         object.textureBufferExpandedSourceBuffer = object.desc.sourceBuffer;
         object.textureBufferExpandedSourceGeneration = sourceGeneration;
         object.textureBufferExpandedOffset = object.desc.bufferOffset;
-        object.textureBufferExpandedSize = object.desc.bufferSize;
+        object.textureBufferExpandedSize = effectiveSize;
         object.textureBufferExpandedInternalFormat = object.desc.internalFormat;
+        return true;
+    }
+
+    bool refreshBufferTextureView(GLTextureObject& object) {
+        if (object.target != GL_TEXTURE_BUFFER) {
+            releaseTextureBufferExpansion(object);
+            clearTextureBufferViewCache(object);
+            return false;
+        }
+        if (textureBufferFormatNeedsRGB32Expansion(object.desc.internalFormat)) {
+            return refreshRGB32BufferTextureView(object);
+        }
+
+        releaseTextureBufferExpansion(object);
+        if (device == nil || object.desc.sourceBuffer == 0 ||
+            object.desc.bufferOffset < 0 ||
+            (!object.desc.bufferWholeStorage && object.desc.bufferSize <= 0)) {
+            releaseTextureBufferMaterializedView(object);
+            return false;
+        }
+
+        GLBufferObject* sourceBuffer =
+            objects != nullptr ? objects->buffers().get(object.desc.sourceBuffer) : nullptr;
+        if (sourceBuffer == nullptr ||
+            object.desc.bufferOffset > sourceBuffer->size ||
+            sourceBuffer->metalBuffer == nullptr) {
+            releaseTextureBufferMaterializedView(object);
+            return false;
+        }
+        const GLsizeiptr effectiveSize =
+            effectiveTextureBufferSize(object, *sourceBuffer);
+        if (effectiveSize <= 0 ||
+            effectiveSize > sourceBuffer->size - object.desc.bufferOffset) {
+            releaseTextureBufferMaterializedView(object);
+            return false;
+        }
+
+        const bool cached =
+            object.metalTexture != nullptr &&
+            object.textureBufferViewSourceMetalBuffer == sourceBuffer->metalBuffer &&
+            object.textureBufferViewSourceBuffer == object.desc.sourceBuffer &&
+            object.textureBufferViewOffset == object.desc.bufferOffset &&
+            object.textureBufferViewSize == effectiveSize &&
+            object.textureBufferViewInternalFormat == object.desc.internalFormat;
+        if (cached) {
+            return true;
+        }
+
+        MTLPixelFormat pf = metalRenderbufferFormat(object.desc.internalFormat);
+        if (pf == MTLPixelFormatInvalid) {
+            releaseTextureBufferMaterializedView(object);
+            return false;
+        }
+        const NativeFormatInfo formatInfo = nativeFormatInfo(pf);
+        if (formatInfo.bytesPerPixel <= 0) {
+            releaseTextureBufferMaterializedView(object);
+            return false;
+        }
+
+        const NSUInteger bpp = static_cast<NSUInteger>(formatInfo.bytesPerPixel);
+        const NSUInteger byteLen = static_cast<NSUInteger>(effectiveSize);
+        const NSUInteger texelCount = byteLen / bpp;
+        constexpr NSUInteger kTexelBufferRowTexels = 8192;
+        GLint64 maxTextureHeight = 16384;
+        if (capabilities != nullptr) {
+            capabilities->queryInteger64(GL_MAX_TEXTURE_SIZE, &maxTextureHeight);
+        }
+        const NSUInteger maxRows = static_cast<NSUInteger>(
+            std::max<GLint64>(maxTextureHeight, 1));
+        const NSUInteger visibleTexelCount = std::min<NSUInteger>(
+            texelCount,
+            kTexelBufferRowTexels * maxRows);
+        const NSUInteger rowTexels = std::min<NSUInteger>(
+            visibleTexelCount,
+            kTexelBufferRowTexels);
+        const NSUInteger rowBytesUnaligned = rowTexels * bpp;
+        const NSUInteger rowBytes = ((rowBytesUnaligned + 15u) / 16u) * 16u;
+        const NSUInteger rowCount =
+            rowTexels > 0 ? (visibleTexelCount + rowTexels - 1u) / rowTexels : 0;
+        const NSUInteger requiredViewBytes =
+            rowCount > 0 ? rowBytes * (rowCount - 1u) + rowBytesUnaligned : 0u;
+        id<MTLBuffer> mtlBuffer = metalBufferFromRaw(sourceBuffer->metalBuffer);
+        const NSUInteger sourceOffset =
+            static_cast<NSUInteger>(object.desc.bufferOffset);
+        if (mtlBuffer == nil || rowTexels == 0 || rowCount == 0 ||
+            sourceOffset > mtlBuffer.length ||
+            static_cast<NSUInteger>(effectiveSize) > mtlBuffer.length - sourceOffset) {
+            releaseTextureBufferMaterializedView(object);
+            return false;
+        }
+        const NSUInteger availableViewBytes = mtlBuffer.length - sourceOffset;
+        const bool sourceViewFits = requiredViewBytes <= availableViewBytes;
+
+        if (!sourceViewFits) {
+            const std::uint32_t sourceGeneration =
+                sourceBuffer->indexExpansionGeneration;
+            const bool cachedPadded =
+                object.textureBufferExpandedMetalBuffer != nullptr &&
+                object.metalTexture != nullptr &&
+                object.textureBufferExpandedSourceBuffer ==
+                    object.desc.sourceBuffer &&
+                object.textureBufferExpandedSourceGeneration ==
+                    sourceGeneration &&
+                object.textureBufferExpandedOffset == object.desc.bufferOffset &&
+                object.textureBufferExpandedSize == effectiveSize &&
+                object.textureBufferExpandedInternalFormat ==
+                    object.desc.internalFormat;
+            if (cachedPadded) {
+                clearTextureBufferViewCache(object);
+                return true;
+            }
+
+            const std::uint8_t* sourceBytes = readableBufferContents(*sourceBuffer);
+            if (sourceBytes == nullptr || requiredViewBytes == 0) {
+                releaseTextureBufferMaterializedView(object);
+                releaseTextureBufferExpansion(object);
+                return false;
+            }
+
+            id<MTLBuffer> expandedBuffer =
+                metalBufferFromRaw(object.textureBufferExpandedMetalBuffer);
+            if (expandedBuffer == nil ||
+                [expandedBuffer length] < requiredViewBytes) {
+                releaseTextureBufferExpansion(object);
+                expandedBuffer =
+                    [device newBufferWithLength:requiredViewBytes
+                                        options:mtlBuffer.resourceOptions];
+                if (expandedBuffer == nil) {
+                    releaseTextureBufferMaterializedView(object);
+                    return false;
+                }
+                object.textureBufferExpandedMetalBuffer =
+                    transferRetainedMetalObject(expandedBuffer);
+            }
+
+            std::uint8_t* expandedBytes =
+                static_cast<std::uint8_t*>([expandedBuffer contents]);
+            if (expandedBytes == nullptr) {
+                releaseTextureBufferMaterializedView(object);
+                releaseTextureBufferExpansion(object);
+                return false;
+            }
+            std::memset(expandedBytes, 0, requiredViewBytes);
+            NSUInteger remainingTexels = visibleTexelCount;
+            for (NSUInteger row = 0; row < rowCount && remainingTexels > 0; ++row) {
+                const NSUInteger texelsThisRow =
+                    std::min<NSUInteger>(remainingTexels, rowTexels);
+                const NSUInteger rowCopyBytes = texelsThisRow * bpp;
+                const std::size_t srcByte =
+                    static_cast<std::size_t>(sourceOffset) +
+                    static_cast<std::size_t>(row) *
+                        static_cast<std::size_t>(rowTexels * bpp);
+                const std::size_t dstByte =
+                    static_cast<std::size_t>(row) *
+                    static_cast<std::size_t>(rowBytes);
+                std::memcpy(expandedBytes + dstByte,
+                            sourceBytes + srcByte,
+                            static_cast<std::size_t>(rowCopyBytes));
+                remainingTexels -= texelsThisRow;
+            }
+
+            MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+            ScopedOwnedMetalObject descRelease(desc);
+            desc.textureType = MTLTextureType2D;
+            desc.pixelFormat = pf;
+            desc.width = rowTexels;
+            desc.height = rowCount;
+            desc.depth = 1;
+            desc.mipmapLevelCount = singleMipLevelCount<NSUInteger>();
+            desc.arrayLength = 1;
+            desc.resourceOptions = expandedBuffer.resourceOptions;
+            desc.usage = MTLTextureUsageShaderRead;
+            id<MTLTexture> texture =
+                [expandedBuffer newTextureWithDescriptor:desc
+                                                  offset:0
+                                             bytesPerRow:rowBytes];
+            if (texture == nil) {
+                releaseTextureBufferMaterializedView(object);
+                releaseTextureBufferExpansion(object);
+                return false;
+            }
+
+            releaseTextureBufferMaterializedView(object);
+            object.metalTexture = transferRetainedMetalObject(texture);
+            object.textureBufferExpandedSourceBuffer =
+                object.desc.sourceBuffer;
+            object.textureBufferExpandedSourceGeneration = sourceGeneration;
+            object.textureBufferExpandedOffset = object.desc.bufferOffset;
+            object.textureBufferExpandedSize = effectiveSize;
+            object.textureBufferExpandedInternalFormat =
+                object.desc.internalFormat;
+            return true;
+        }
+
+        MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+        ScopedOwnedMetalObject descRelease(desc);
+        desc.textureType = MTLTextureType2D;
+        desc.pixelFormat = pf;
+        desc.width = rowTexels;
+        desc.height = rowCount;
+        desc.depth = 1;
+        desc.mipmapLevelCount = singleMipLevelCount<NSUInteger>();
+        desc.arrayLength = 1;
+        desc.resourceOptions = mtlBuffer.resourceOptions;
+        desc.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> texture =
+            [mtlBuffer newTextureWithDescriptor:desc
+                                         offset:sourceOffset
+                                    bytesPerRow:rowBytes];
+        if (texture == nil) {
+            releaseTextureBufferMaterializedView(object);
+            return false;
+        }
+
+        releaseTextureBufferMaterializedView(object);
+        releaseTextureBufferExpansion(object);
+        object.metalTexture = transferRetainedMetalObject(texture);
+        object.textureBufferViewSourceMetalBuffer = sourceBuffer->metalBuffer;
+        object.textureBufferViewSourceBuffer = object.desc.sourceBuffer;
+        object.textureBufferViewOffset = object.desc.bufferOffset;
+        object.textureBufferViewSize = effectiveSize;
+        object.textureBufferViewInternalFormat = object.desc.internalFormat;
         return true;
     }
 

@@ -38,6 +38,7 @@ constexpr std::uint32_t kTextureLodBiasesPreferredBufferSlot = 13u;
 constexpr std::uint32_t kImplicitLodBiasCorrectionPreferredBufferSlot = 12u;
 constexpr std::uint32_t kTextureBorderClampModesPreferredBufferSlot = 11u;
 constexpr std::uint32_t kTextureBorderClampColorsPreferredBufferSlot = 10u;
+constexpr std::uint32_t kTextureBufferSizesBufferSlot = 22u;
 constexpr std::uint32_t kMaxMetalBufferSlot = 30u;
 constexpr std::uint32_t kMaxDirectMetalSamplerSlots = 16u;
 constexpr std::uint32_t kMultisampleSampledSidecarTextureSlotOffset = 64u;
@@ -1410,6 +1411,101 @@ bool findMain0ParameterEnd(const std::string& msl, std::size_t& paramEnd) {
         ++paramEnd;
     }
     return depth == 0 && paramEnd < msl.size();
+}
+
+std::unordered_set<std::string> collectTextureBufferResourceNames(
+    spirv_cross::Compiler& compiler,
+    const spirv_cross::ShaderResources& resources) {
+    std::unordered_set<std::string> names;
+    auto isBufferImageType = [&](std::uint32_t typeId) {
+        if (typeId == 0) {
+            return false;
+        }
+        try {
+            const auto& type = compiler.get_type(typeId);
+            return type.image.dim == spv::DimBuffer;
+        } catch (...) {
+            return false;
+        }
+    };
+    auto visit = [&](const auto& list) {
+        for (const auto& res : list) {
+            if (!isBufferImageType(res.type_id) &&
+                !isBufferImageType(res.base_type_id)) {
+                continue;
+            }
+            if (!res.name.empty()) {
+                names.insert(res.name);
+            }
+            const std::string compilerName = compiler.get_name(res.id);
+            if (!compilerName.empty()) {
+                names.insert(compilerName);
+            }
+        }
+    };
+    visit(resources.sampled_images);
+    visit(resources.separate_images);
+    visit(resources.storage_images);
+    return names;
+}
+
+bool injectTextureBufferSizeSidecar(
+    std::string& msl,
+    const std::unordered_set<std::string>& textureBufferNames) {
+    static constexpr const char* kSidecarName = "_appgl_TextureBufferSizes";
+    if (textureBufferNames.empty() ||
+        msl.find(kSidecarName) != std::string::npos ||
+        msl.find("[[buffer(22)]]") != std::string::npos) {
+        return false;
+    }
+    std::size_t paramEnd = 0;
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return false;
+    }
+
+    bool changed = false;
+    for (const std::string& name : textureBufferNames) {
+        if (name.empty()) {
+            continue;
+        }
+        const std::string textureMarker = name + " [[texture(";
+        std::size_t markerPos = msl.find(textureMarker);
+        if (markerPos == std::string::npos) {
+            continue;
+        }
+        std::size_t slotPos = markerPos + textureMarker.size();
+        std::uint32_t slot = 0;
+        bool haveDigit = false;
+        while (slotPos < msl.size() &&
+               std::isdigit(static_cast<unsigned char>(msl[slotPos]))) {
+            haveDigit = true;
+            slot = slot * 10u + static_cast<std::uint32_t>(msl[slotPos] - '0');
+            ++slotPos;
+        }
+        if (!haveDigit) {
+            continue;
+        }
+
+        const std::string textureSizeExpr =
+            name + ".get_width() * " + name + ".get_height()";
+        const std::string sidecarExpr =
+            std::string(kSidecarName) + "[" + std::to_string(slot) + "]";
+        std::size_t pos = 0;
+        while ((pos = msl.find(textureSizeExpr, pos)) != std::string::npos) {
+            msl.replace(pos, textureSizeExpr.size(), sidecarExpr);
+            pos += sidecarExpr.size();
+            changed = true;
+        }
+    }
+
+    if (!changed) {
+        return false;
+    }
+    const std::string param =
+        ", constant uint* " + std::string(kSidecarName) + " [[buffer(" +
+        std::to_string(kTextureBufferSizesBufferSlot) + ")]]";
+    msl.insert(paramEnd, param);
+    return true;
 }
 
 // Shadow-compare Y fixup. FBO-rendered depth content is stored
@@ -7522,6 +7618,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             }
         }
 
+        const std::unordered_set<std::string> textureBufferResourceNames =
+            collectTextureBufferResourceNames(compiler, resources);
         std::string msl = compiler.compile();
 
         if (!useArgBuf) {
@@ -7532,6 +7630,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         }
         (void)rewriteVectorImageAtomicBufferSubscripts(msl);
         (void)rewriteTexelBufferImageAtomicReads(msl);
+        (void)injectTextureBufferSizeSidecar(msl, textureBufferResourceNames);
         (void)fixUnsafeArrayDoubleIndex(msl);
 
         if (isVertex && mslOpts.appgl_fp64_emulation) {

@@ -1781,7 +1781,7 @@ static void APIENTRY glTexBuffer(GLenum target, GLenum internalformat, GLuint bu
         return;
     }
     const GLsizeiptr size = static_cast<GLsizeiptr>(bo->size);
-    ctx->texBufferRange(target, internalformat, buffer, 0, size > 0 ? size : 1);
+    ctx->texBufferRange(target, internalformat, buffer, 0, size, true);
     // CKPT159 (Sprint 14 Day 4): glTexBuffer attaches a buffer to a
     // GL_TEXTURE_BUFFER target; the texture object has NO storage of its
     // own (storage lives in the linked buffer). GL spec treats buffer
@@ -2154,10 +2154,8 @@ static void APIENTRY glProvokingVertex(GLenum mode) {
     (void)mode;
 }
 
-// GL 3.2 sync objects. Our translator is fully synchronous —
-// `glFlush`/`glFinish` already force the Metal command buffer to
-// commit and wait, so by the time the caller can observe a fence
-// it has always already been signalled. CTS `sync.flush_commands`
+// GL 3.2 sync objects. Fence waits drain pending AppGL work before
+// reporting the fence signalled. CTS `sync.flush_commands`
 // asserts:
 //   - FenceSync returns a non-null handle with NO_ERROR
 //   - IsSync on that handle returns TRUE
@@ -2167,7 +2165,7 @@ static void APIENTRY glProvokingVertex(GLenum mode) {
 // Our stubs returned nullptr/GL_FALSE/0 which failed every step.
 // Allocate a small heap sentinel per fence (never freed — sync
 // objects are rarely created) and return ALREADY_SIGNALED from
-// ClientWaitSync for the synchronous translator case.
+// ClientWaitSync/WaitSync for the current fence surface.
 static GLsync APIENTRY glFenceSync(GLenum condition, GLbitfield flags) {
     (void)flags;
     if (condition != GL_SYNC_GPU_COMMANDS_COMPLETE) {
@@ -2202,19 +2200,23 @@ static GLenum APIENTRY glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 
         if (ctx != nullptr) ctx->pushError(GL_INVALID_VALUE);
         return GL_WAIT_FAILED;
     }
-    // Synchronous translator: every prior GL call has already
-    // committed its Metal command buffer and waited for
-    // completion, so the fence is always signalled by the time
-    // the client can observe it.
+    if (auto* ctx = currentContextOrNull(); ctx != nullptr) {
+        ctx->finish();
+    }
     return GL_ALREADY_SIGNALED;
 }
 
 static void APIENTRY glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
-    (void)sync;
     (void)flags;
     (void)timeout;
-    // Server-side wait: same no-op as ClientWaitSync — all prior
-    // work is already committed.
+    if (sync == nullptr) {
+        auto* ctx = currentContextOrNull();
+        if (ctx != nullptr) ctx->pushError(GL_INVALID_VALUE);
+        return;
+    }
+    if (auto* ctx = currentContextOrNull(); ctx != nullptr) {
+        ctx->finish();
+    }
 }
 
 static void APIENTRY glGetSynciv(GLsync sync, GLenum pname, GLsizei count, GLsizei *length, GLint *values) {

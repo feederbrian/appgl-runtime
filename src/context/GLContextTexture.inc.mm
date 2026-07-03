@@ -518,7 +518,7 @@ bool GLContext::textureBuffer(GLuint texture, GLenum internalformat, GLuint buff
         if (buffer == 0) {
             return true;
         }
-        bool ok = texBufferRange(GL_TEXTURE_BUFFER, internalformat, buffer, 0, bufSize);
+        bool ok = texBufferRange(GL_TEXTURE_BUFFER, internalformat, buffer, 0, bufSize, true);
         return ok;
     })
 }
@@ -566,7 +566,7 @@ bool GLContext::textureBufferRange(GLuint texture, GLenum internalformat, GLuint
         if (buffer == 0) {
             return true;
         }
-        bool ok = texBufferRange(GL_TEXTURE_BUFFER, internalformat, buffer, offset, size);
+        bool ok = texBufferRange(GL_TEXTURE_BUFFER, internalformat, buffer, offset, size, false);
         return ok;
     })
 }

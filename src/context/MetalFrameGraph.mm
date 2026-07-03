@@ -53,6 +53,7 @@
 namespace appgl {
 
 static constexpr NSUInteger kAppGLFragCoordParamsBufferSlot = 15;
+static constexpr NSUInteger kAppGLTextureBufferSizesBufferSlot = 22;
 static constexpr NSUInteger kAppGLFragmentShadingRateParamsBufferSlot = 30;
 static constexpr NSUInteger kAppGLAdvancedBlendSourceTextureSlot = 62;
 
@@ -3896,6 +3897,78 @@ static void buildTextureBorderClampColors(
     }
 }
 
+static void buildTextureBufferLogicalSizes(
+    const std::vector<TranslatedDrawInfo::TextureBinding>& textures,
+    std::vector<std::uint32_t>& sizes) {
+    bool any = false;
+    std::uint32_t maxSlot = 0;
+    for (const auto& binding : textures) {
+        if (binding.metalTexture == nullptr ||
+            binding.textureBufferLogicalSize == 0) {
+            continue;
+        }
+        any = true;
+        maxSlot = std::max(maxSlot, binding.metalSlot);
+    }
+    if (!any) {
+        sizes.clear();
+        return;
+    }
+    sizes.assign(static_cast<std::size_t>(maxSlot) + 1u, 0u);
+    for (const auto& binding : textures) {
+        if (binding.metalTexture == nullptr ||
+            binding.textureBufferLogicalSize == 0 ||
+            binding.metalSlot >= sizes.size()) {
+            continue;
+        }
+        sizes[binding.metalSlot] = binding.textureBufferLogicalSize;
+        static const bool traceTextureBufferSize =
+            std::getenv("APPGL_TRACE_TBO_SIZE") != nullptr;
+        if (traceTextureBufferSize) {
+            std::fprintf(stderr,
+                         "[APPGL_TRACE_TBO_SIZE] graphics slot=%u logical=%u\n",
+                         binding.metalSlot,
+                         binding.textureBufferLogicalSize);
+        }
+    }
+}
+
+static void buildComputeTextureBufferLogicalSizes(
+    const std::vector<ComputeDispatchInfo::TextureBinding>& textures,
+    std::vector<std::uint32_t>& sizes) {
+    bool any = false;
+    std::uint32_t maxSlot = 0;
+    for (const auto& binding : textures) {
+        if (binding.metalTexture == nullptr ||
+            binding.textureBufferLogicalSize == 0) {
+            continue;
+        }
+        any = true;
+        maxSlot = std::max(maxSlot, binding.metalSlot);
+    }
+    if (!any) {
+        sizes.clear();
+        return;
+    }
+    sizes.assign(static_cast<std::size_t>(maxSlot) + 1u, 0u);
+    for (const auto& binding : textures) {
+        if (binding.metalTexture == nullptr ||
+            binding.textureBufferLogicalSize == 0 ||
+            binding.metalSlot >= sizes.size()) {
+            continue;
+        }
+        sizes[binding.metalSlot] = binding.textureBufferLogicalSize;
+        static const bool traceTextureBufferSize =
+            std::getenv("APPGL_TRACE_TBO_SIZE") != nullptr;
+        if (traceTextureBufferSize) {
+            std::fprintf(stderr,
+                         "[APPGL_TRACE_TBO_SIZE] compute slot=%u logical=%u\n",
+                         binding.metalSlot,
+                         binding.textureBufferLogicalSize);
+        }
+    }
+}
+
 static std::vector<std::uint32_t>& textureUIntScratch() {
     thread_local std::vector<std::uint32_t> scratch;
     return scratch;
@@ -6799,10 +6872,12 @@ struct MetalFrameGraph::Impl {
         // invalidateTransientState dropped the drawable + pendingPresent,
         // splitting the rest of the frame onto a different drawable.
         // Frame-semantic state (drawable, pendingPresent, pending clear)
-        // survives a pressure commit; only CB/encoder-coupled state
-        // resets. Frame-boundary reasons keep the historical tail.
+        // survives a pressure or glFinish/glClientWaitSync drain; only
+        // CB/encoder-coupled state resets. Present/swap/end-frame reasons
+        // keep the historical tail.
         const bool frameBoundaryCommit =
-            reason != AppGLCommandReason::PressureFlush;
+            reason != AppGLCommandReason::PressureFlush &&
+            reason != AppGLCommandReason::FinishWait;
         if (frameBoundaryCommit) {
             // S25 W2.1 §1: read the scene region of the FINAL drawable (after
             // all passes, before present) — armed only on swap-present frames
@@ -9958,6 +10033,32 @@ struct MetalFrameGraph::Impl {
             setFloorUniformBytesClass(
                 ArgEncoderSetupFloorProfileSample::UniformBytesClass::
                     TextureState);
+            {
+                std::vector<std::uint32_t> sizes;
+                buildTextureBufferLogicalSizes(info.vertexTextures, sizes);
+                if (!sizes.empty()) {
+                    bindVertexBytesIfNeeded(
+                        encodeSubtimeSamplePtr,
+                        sizes.data(),
+                        static_cast<NSUInteger>(
+                            sizes.size() * sizeof(std::uint32_t)),
+                        kAppGLTextureBufferSizesBufferSlot,
+                        EncodeMarshalClass::SetBytes);
+                }
+            }
+            {
+                std::vector<std::uint32_t> sizes;
+                buildTextureBufferLogicalSizes(info.fragmentTextures, sizes);
+                if (!sizes.empty()) {
+                    bindFragmentBytesIfNeeded(
+                        encodeSubtimeSamplePtr,
+                        sizes.data(),
+                        static_cast<NSUInteger>(
+                            sizes.size() * sizeof(std::uint32_t)),
+                        kAppGLTextureBufferSizesBufferSlot,
+                        EncodeMarshalClass::SetBytes);
+                }
+            }
             const NSInteger vertexReductionModesSlot =
                 shaderSlots.vertexReductionModesSlot;
             if (vertexReductionModesSlot >= 0) {
@@ -13869,6 +13970,21 @@ struct MetalFrameGraph::Impl {
             buildTextureBorderClampColors(textures, colors);
             return colors;
         };
+        auto buildTextureBufferSizes = [](const auto& textures) {
+            std::vector<std::uint32_t> sizes;
+            buildTextureBufferLogicalSizes(textures, sizes);
+            return sizes;
+        };
+        setTextureModeBytes(
+            static_cast<NSInteger>(kAppGLTextureBufferSizesBufferSlot),
+            info.vertexTextures,
+            false,
+            buildTextureBufferSizes);
+        setTextureModeBytes(
+            static_cast<NSInteger>(kAppGLTextureBufferSizesBufferSlot),
+            info.fragmentTextures,
+            true,
+            buildTextureBufferSizes);
         setTextureModeBytes(shaderSlots.vertexReductionModesSlot,
                             info.vertexTextures, false, buildModes);
         setTextureModeBytes(shaderSlots.vertexLodBiasesSlot,
@@ -24095,6 +24211,18 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                     }
                 }
             }
+            {
+                std::vector<std::uint32_t> textureBufferSizes;
+                buildComputeTextureBufferLogicalSizes(
+                    info.textures, textureBufferSizes);
+                if (!textureBufferSizes.empty()) {
+                    [enc setBytes:textureBufferSizes.data()
+                           length:static_cast<NSUInteger>(
+                                      textureBufferSizes.size() *
+                                      sizeof(textureBufferSizes[0]))
+                          atIndex:kAppGLTextureBufferSizesBufferSlot];
+                }
+            }
         } else {
             // SSBO `.length()` / OpArrayLength support for direct compute.
             // SPIRV-Cross emits `constant uint* spvBufferSizeConstants
@@ -24151,6 +24279,18 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                                atIndex:static_cast<NSUInteger>(
                                            tb.imageAtomicBufferSlot)];
                     }
+                }
+            }
+            {
+                std::vector<std::uint32_t> textureBufferSizes;
+                buildComputeTextureBufferLogicalSizes(info.textures,
+                                                      textureBufferSizes);
+                if (!textureBufferSizes.empty()) {
+                    [enc setBytes:textureBufferSizes.data()
+                           length:static_cast<NSUInteger>(
+                                      textureBufferSizes.size() *
+                                      sizeof(textureBufferSizes[0]))
+                          atIndex:kAppGLTextureBufferSizesBufferSlot];
                 }
             }
         }

@@ -569,7 +569,7 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             if (texObj != nullptr &&
                 texObj->target == GL_TEXTURE_BUFFER &&
                 texObj->desc.sourceBuffer != 0) {
-                (void)impl_->refreshRGB32BufferTextureView(*texObj);
+                (void)impl_->refreshBufferTextureView(*texObj);
             }
             if (texObj != nullptr && texObj->viewSourceTexture == 0) {
                 (void)impl_->restoreR5PrimaryTextureIfNeeded(*texObj,
@@ -611,6 +611,8 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             tb.metalSamplerState = metalSamplerState;
             if (texObj->target == GL_TEXTURE_BUFFER &&
                 texObj->desc.sourceBuffer != 0) {
+                tb.textureBufferLogicalSize =
+                    impl_->textureBufferLogicalTexelCount(*texObj);
                 if (texObj->textureBufferExpandedMetalBuffer != nullptr) {
                     tb.textureBufferBackingMetalBuffer =
                         texObj->textureBufferExpandedMetalBuffer;
@@ -1221,7 +1223,7 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             if (texObj != nullptr &&
                 texObj->target == GL_TEXTURE_BUFFER &&
                 texObj->desc.sourceBuffer != 0) {
-                (void)impl_->refreshRGB32BufferTextureView(*texObj);
+                (void)impl_->refreshBufferTextureView(*texObj);
             }
             if (texObj != nullptr && texObj->viewSourceTexture == 0) {
                 (void)impl_->restoreR5PrimaryTextureIfNeeded(*texObj,
@@ -1244,6 +1246,8 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             tb.metalSamplerState = texObj->metalSampler;
             if (texObj->target == GL_TEXTURE_BUFFER &&
                 texObj->desc.sourceBuffer != 0) {
+                tb.textureBufferLogicalSize =
+                    impl_->textureBufferLogicalTexelCount(*texObj);
                 if (texObj->textureBufferExpandedMetalBuffer != nullptr) {
                     tb.textureBufferBackingMetalBuffer =
                         texObj->textureBufferExpandedMetalBuffer;

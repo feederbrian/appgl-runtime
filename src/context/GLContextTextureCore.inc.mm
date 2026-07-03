@@ -2670,7 +2670,8 @@ bool GLContext::texBufferRange(
     GLenum internalformat,
     GLuint buffer,
     GLintptr offset,
-    GLsizeiptr size
+    GLsizeiptr size,
+    bool wholeBuffer
 ) {
     if (target != GL_TEXTURE_BUFFER) {
         pushError(GL_INVALID_ENUM);
@@ -2683,7 +2684,7 @@ bool GLContext::texBufferRange(
         pushError(GL_INVALID_ENUM);
         return false;
     }
-    if (offset < 0 || size <= 0) {
+    if (offset < 0 || (!wholeBuffer && size <= 0) || (wholeBuffer && size < 0)) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
@@ -2714,8 +2715,10 @@ bool GLContext::texBufferRange(
             pushError(GL_INVALID_OPERATION);
             return false;
         }
-        // offset + size must be <= buffer's current size.
-        if (static_cast<GLsizeiptr>(offset) + size > checkBuf->size) {
+        // offset + size must be <= buffer's current size. Whole-buffer
+        // glTexBuffer may attach an object before it has a data store; it
+        // tracks future glBufferData reallocations through sourceBuffer.
+        if (!wholeBuffer && static_cast<GLsizeiptr>(offset) + size > checkBuf->size) {
             pushError(GL_INVALID_VALUE);
             return false;
         }
@@ -2731,6 +2734,7 @@ bool GLContext::texBufferRange(
     object->desc.sourceBuffer = buffer;
     object->desc.bufferOffset = offset;
     object->desc.bufferSize = size;
+    object->desc.bufferWholeStorage = wholeBuffer;
     object->desc.immutable = true;
     {
         GLint64 maxTexels = 0;
@@ -2748,81 +2752,7 @@ bool GLContext::texBufferRange(
     }
     object->target = target;
 
-    if (textureBufferFormatNeedsRGB32Expansion(internalformat)) {
-        (void)impl_->refreshRGB32BufferTextureView(*object);
-        return true;
-    }
-    impl_->releaseTextureBufferExpansion(*object);
-
-    // SPIRV-Cross lowers GL samplerBuffer to a synthetic texture2d<T>
-    // with texel coordinates (index % 8192, index / 8192). Build the
-    // Metal view with the same 8192-wide row layout so accesses past
-    // the first row remain valid.
-    GLBufferObject* bufObj = impl_->objects->buffers().get(buffer);
-    if (bufObj != nullptr && bufObj->metalBuffer != nullptr) {
-        id<MTLBuffer> mtlBuffer = (__bridge id<MTLBuffer>)bufObj->metalBuffer;
-        MTLPixelFormat pf = metalRenderbufferFormat(internalformat);
-        if (pf != MTLPixelFormatInvalid) {
-            MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
-            ScopedOwnedMetalObject descRelease(desc);
-            desc.textureType = MTLTextureType2D;
-            desc.pixelFormat = pf;
-            const NSUInteger bpp = [&](MTLPixelFormat p) -> NSUInteger {
-                auto info = Impl::nativeFormatInfo(p);
-                return static_cast<NSUInteger>(info.bytesPerPixel);
-            }(pf);
-            if (bpp > 0) {
-                const NSUInteger byteLen = static_cast<NSUInteger>(size);
-                const NSUInteger texelCount = byteLen / bpp;
-                constexpr NSUInteger kTexelBufferRowTexels = 8192;
-                GLint64 maxTextureHeight = 16384;
-                if (impl_->capabilities != nullptr) {
-                    impl_->capabilities->queryInteger64(GL_MAX_TEXTURE_SIZE, &maxTextureHeight);
-                }
-                const NSUInteger maxRows = static_cast<NSUInteger>(
-                    std::max<GLint64>(maxTextureHeight, 1));
-                const NSUInteger visibleTexelCount = std::min<NSUInteger>(
-                    texelCount,
-                    kTexelBufferRowTexels * maxRows);
-                const NSUInteger rowTexels = std::min<NSUInteger>(
-                    visibleTexelCount,
-                    kTexelBufferRowTexels);
-                const NSUInteger rowBytesUnaligned = rowTexels * bpp;
-                const NSUInteger rowBytes =
-                    ((rowBytesUnaligned + 15u) / 16u) * 16u;
-                const NSUInteger rowCount =
-                    rowTexels > 0 ? (visibleTexelCount + rowTexels - 1u) / rowTexels : 0;
-                const NSUInteger requiredViewBytes =
-                    rowCount > 0 ? rowBytes * (rowCount - 1u) + rowBytesUnaligned : 0u;
-                // Metal asserts on zero dimensions or when the strided
-                // 2D buffer view exceeds the buffer length. The final row
-                // does not require trailing stride padding in the GL buffer;
-                // requiring it incorrectly drops small 1/2/4-byte texel
-                // buffer views used by DSA texture-buffer CTS cases.
-                if (rowTexels > 0 && rowCount > 0 &&
-                    static_cast<NSUInteger>(offset) + requiredViewBytes <= mtlBuffer.length) {
-                    desc.width = rowTexels;
-                    desc.height = rowCount;
-                    desc.depth = 1;
-                    desc.mipmapLevelCount = singleMipLevelCount<NSUInteger>();
-                    desc.arrayLength = 1;
-                    desc.resourceOptions = mtlBuffer.resourceOptions;
-                    desc.usage = MTLTextureUsageShaderRead;
-                    id<MTLTexture> tex = [mtlBuffer newTextureWithDescriptor:desc
-                                                                      offset:static_cast<NSUInteger>(offset)
-                                                                 bytesPerRow:rowBytes];
-                    // Release any prior metalTexture before retaining the new one.
-                    if (object->metalTexture != nullptr) {
-                        releaseRetainedMetalObject(object->metalTexture);
-                        object->metalTexture = nullptr;
-                    }
-                    if (tex != nil) {
-                        object->metalTexture = transferRetainedMetalObject(tex);
-                    }
-                }
-            }
-        }
-    }
+    (void)impl_->refreshBufferTextureView(*object);
     return true;
 }
 

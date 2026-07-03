@@ -197,7 +197,7 @@ public:
     bool texStorageMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations);
     bool texPageCommitment(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLboolean commit);
     bool texturePageCommitment(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLboolean commit);
-    bool texBufferRange(GLenum target, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size);
+    bool texBufferRange(GLenum target, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size, bool wholeBuffer = false);
     bool pixelStore(GLenum pname, GLint value);
     bool genRenderbuffers(GLsizei count, GLuint* renderbuffers);
     bool deleteRenderbuffers(GLsizei count, const GLuint* renderbuffers);

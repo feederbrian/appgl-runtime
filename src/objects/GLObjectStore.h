@@ -220,6 +220,7 @@ struct GLTextureDesc {
     GLuint sourceBuffer = 0;
     GLintptr bufferOffset = 0;
     GLsizeiptr bufferSize = 0;
+    bool bufferWholeStorage = false;
 };
 
 struct GLTextureImageLevel {
@@ -368,6 +369,15 @@ struct GLTextureObject {
     GLintptr textureBufferExpandedOffset = 0;
     GLsizeiptr textureBufferExpandedSize = 0;
     GLenum textureBufferExpandedInternalFormat = 0;
+
+    // Non-RGB32 GL_TEXTURE_BUFFER storage is a direct Metal texture view over
+    // the source MTLBuffer. Track the source storage so glBufferData after
+    // glTexBuffer can rebuild the view before the next sample.
+    void* textureBufferViewSourceMetalBuffer = nullptr;
+    GLuint textureBufferViewSourceBuffer = 0;
+    GLintptr textureBufferViewOffset = 0;
+    GLsizeiptr textureBufferViewSize = 0;
+    GLenum textureBufferViewInternalFormat = 0;
 
     // SPIRV-Cross lowers imageAtomic* on Metal without native texture
     // atomics to a companion `device atomic_*` buffer. For ordinary
