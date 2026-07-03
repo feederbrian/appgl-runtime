@@ -1009,14 +1009,26 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // components count we advertise so the derived
     // COMBINED always satisfies the spec formula.
     const GLint64 effUniformBlocks = std::max<GLint64>(uniformBindings, 14);
-    const GLint64 combinedUniforms =
-        effUniformBlocks * (maxUniformBlockSize / 4) + 1024;
-    integerLimits_[GL_MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS] = combinedUniforms;
-    integerLimits_[GL_MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS] = combinedUniforms;
-    integerLimits_[GL_MAX_COMBINED_GEOMETRY_UNIFORM_COMPONENTS] = combinedUniforms;
-    integerLimits_[GL_MAX_COMBINED_COMPUTE_UNIFORM_COMPONENTS] = combinedUniforms;
-    integerLimits_[GL_MAX_COMBINED_TESS_CONTROL_UNIFORM_COMPONENTS] = combinedUniforms;
-    integerLimits_[GL_MAX_COMBINED_TESS_EVALUATION_UNIFORM_COMPONENTS] = combinedUniforms;
+    const GLint64 combinedUniformBlockComponents =
+        effUniformBlocks * (maxUniformBlockSize / 4);
+    integerLimits_[GL_MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS] =
+        combinedUniformBlockComponents +
+        integerLimits_[GL_MAX_VERTEX_UNIFORM_COMPONENTS];
+    integerLimits_[GL_MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS] =
+        combinedUniformBlockComponents +
+        integerLimits_[GL_MAX_FRAGMENT_UNIFORM_COMPONENTS];
+    integerLimits_[GL_MAX_COMBINED_GEOMETRY_UNIFORM_COMPONENTS] =
+        combinedUniformBlockComponents +
+        integerLimits_[GL_MAX_GEOMETRY_UNIFORM_COMPONENTS];
+    integerLimits_[GL_MAX_COMBINED_COMPUTE_UNIFORM_COMPONENTS] =
+        combinedUniformBlockComponents +
+        integerLimits_[GL_MAX_COMPUTE_UNIFORM_COMPONENTS];
+    integerLimits_[GL_MAX_COMBINED_TESS_CONTROL_UNIFORM_COMPONENTS] =
+        combinedUniformBlockComponents +
+        integerLimits_[GL_MAX_TESS_CONTROL_UNIFORM_COMPONENTS];
+    integerLimits_[GL_MAX_COMBINED_TESS_EVALUATION_UNIFORM_COMPONENTS] =
+        combinedUniformBlockComponents +
+        integerLimits_[GL_MAX_TESS_EVALUATION_UNIFORM_COMPONENTS];
     integerLimits_[GL_MAX_COMBINED_UNIFORM_BLOCKS] = std::max<GLint64>(uniformBindings * 6, 84);
 
     // GL_MAX_UNIFORM_LOCATIONS — the total number of discrete location
@@ -1080,6 +1092,7 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_CLIP_DISTANCES] = 8;
     integerLimits_[GL_MAX_CULL_DISTANCES] = 8;
     integerLimits_[GL_MAX_COMBINED_CLIP_AND_CULL_DISTANCES] = 8;
+    integerLimits_[GL_SUBPIXEL_BITS] = 4;
     integerLimits_[GL_MAX_VIEWPORTS] = 16;
     // GL 4.1 ARB_viewport_array required integer + float queries.
     // CTS `viewport_array.queries` exercises both forms; without
@@ -1209,7 +1222,7 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS] = 1024;
 
     // Sync / server wait timeout (int64).
-    integerLimits_[GL_MAX_SERVER_WAIT_TIMEOUT] = 0;
+    integerLimits_[GL_MAX_SERVER_WAIT_TIMEOUT] = 1000000000;
 }
 
 }  // namespace appgl
