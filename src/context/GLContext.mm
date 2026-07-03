@@ -39331,6 +39331,224 @@ std::string injectResolvedVertexAttribLocationsForSpirv(
     return source;
 }
 
+std::string rewriteDuplicateVertexInputLocationsForSpirv(std::string source) {
+    struct Declaration {
+        std::size_t numberBegin = 0;
+        std::size_t numberEnd = 0;
+        GLint location = -1;
+    };
+    struct Replacement {
+        std::size_t begin = 0;
+        std::size_t end = 0;
+        std::string text;
+    };
+
+    auto parseLocationLiteralRange =
+        [&](std::size_t begin, std::size_t end, GLint& location,
+            std::size_t& numberBegin, std::size_t& numberEnd) -> bool {
+        auto skipWsLocal = [&](std::size_t& p) {
+            while (p < source.size() &&
+                   std::isspace(static_cast<unsigned char>(source[p]))) {
+                ++p;
+            }
+        };
+        auto matchingParenLocal = [&](std::size_t open) -> std::size_t {
+            int depth = 0;
+            for (std::size_t p = open; p < source.size(); ++p) {
+                if (source[p] == '(') {
+                    ++depth;
+                } else if (source[p] == ')') {
+                    --depth;
+                    if (depth == 0) {
+                        return p;
+                    }
+                }
+            }
+            return std::string::npos;
+        };
+        std::size_t layout = begin;
+        while ((layout = source.find("layout", layout)) != std::string::npos &&
+               layout < end) {
+            if (!tokenAt(source, layout, "layout")) {
+                layout += 6;
+                continue;
+            }
+            std::size_t p = layout + 6;
+            skipWsLocal(p);
+            if (p >= end || source[p] != '(') {
+                layout += 6;
+                continue;
+            }
+            const std::size_t close = matchingParenLocal(p);
+            if (close == std::string::npos || close >= end) {
+                return false;
+            }
+            std::size_t q = p + 1;
+            while ((q = source.find("location", q)) != std::string::npos &&
+                   q < close) {
+                if (!tokenAt(source, q, "location")) {
+                    q += 8;
+                    continue;
+                }
+                std::size_t eq = source.find('=', q + 8);
+                if (eq == std::string::npos || eq > close) {
+                    return false;
+                }
+                ++eq;
+                while (eq < close &&
+                       std::isspace(static_cast<unsigned char>(source[eq]))) {
+                    ++eq;
+                }
+                std::size_t digits = eq;
+                if (digits < close &&
+                    (source[digits] == '+' || source[digits] == '-')) {
+                    ++digits;
+                }
+                const std::size_t firstDigit = digits;
+                while (digits < close &&
+                       std::isdigit(static_cast<unsigned char>(source[digits]))) {
+                    ++digits;
+                }
+                if (digits == firstDigit) {
+                    return false;
+                }
+                const std::string literal = source.substr(eq, digits - eq);
+                char* endPtr = nullptr;
+                const long parsed = std::strtol(literal.c_str(), &endPtr, 10);
+                if (endPtr == literal.c_str() || *endPtr != '\0') {
+                    return false;
+                }
+                location = static_cast<GLint>(parsed);
+                numberBegin = eq;
+                numberEnd = digits;
+                return true;
+            }
+            layout = close + 1;
+        }
+        return false;
+    };
+
+    auto vertexInputDeclarationName =
+        [](const std::vector<GlslToken>& tokens, std::string& nameOut) {
+        for (std::size_t pos = 0; pos < tokens.size(); ++pos) {
+            if (!tokens[pos].ident ||
+                (tokens[pos].text != "in" &&
+                 tokens[pos].text != "attribute" &&
+                 tokens[pos].text != "VERTEX_INPUT")) {
+                continue;
+            }
+            ++pos;
+            while (pos < tokens.size() &&
+                   tokens[pos].ident &&
+                   isResolvedAttribQualifier(tokens[pos].text)) {
+                ++pos;
+            }
+            if (pos >= tokens.size() || !tokens[pos].ident) {
+                return false;
+            }
+            ++pos;  // type
+            while (pos < tokens.size() &&
+                   tokens[pos].ident &&
+                   isResolvedAttribQualifier(tokens[pos].text)) {
+                ++pos;
+            }
+            if (pos >= tokens.size() || !tokens[pos].ident) {
+                return false;
+            }
+            nameOut = tokens[pos].text;
+            return true;
+        }
+        return false;
+    };
+
+    std::vector<Declaration> declarations;
+    std::size_t stmtBegin = 0;
+    std::size_t depth = 0;
+    for (std::size_t pos = 0; pos < source.size(); ++pos) {
+        const std::size_t commentEnd = skipGlslComment(source, pos);
+        if (commentEnd != pos) {
+            pos = commentEnd == 0 ? 0 : commentEnd - 1;
+            continue;
+        }
+        const char c = source[pos];
+        if (c == '{') {
+            ++depth;
+            continue;
+        }
+        if (c == '}') {
+            if (depth > 0) {
+                --depth;
+            }
+            continue;
+        }
+        if (c != ';' || depth != 0) {
+            continue;
+        }
+
+        const std::size_t effectiveBegin =
+            skipGlslTriviaAndPreprocessor(source, stmtBegin, pos);
+        if (effectiveBegin < pos) {
+            const std::vector<GlslToken> tokens =
+                collectGlslStatementTokens(source, effectiveBegin, pos);
+            std::string name;
+            GLint location = -1;
+            std::size_t numberBegin = 0;
+            std::size_t numberEnd = 0;
+            if (!tokens.empty() &&
+                !statementContainsPunctuation(tokens, "{") &&
+                !statementContainsPunctuation(tokens, "}") &&
+                statementContainsIdentifier(tokens, "layout") &&
+                vertexInputDeclarationName(tokens, name) &&
+                parseLocationLiteralRange(
+                    effectiveBegin, pos, location, numberBegin, numberEnd) &&
+                location >= 0) {
+                declarations.push_back({numberBegin, numberEnd, location});
+            }
+        }
+        stmtBegin = pos + 1;
+    }
+
+    if (declarations.size() < 2) {
+        return source;
+    }
+
+    std::unordered_set<GLint> usedLocations;
+    std::unordered_set<GLint> seenLocations;
+    for (const auto& declaration : declarations) {
+        usedLocations.insert(declaration.location);
+    }
+
+    std::vector<Replacement> replacements;
+    GLint nextLocation = 0;
+    for (const auto& declaration : declarations) {
+        if (seenLocations.insert(declaration.location).second) {
+            continue;
+        }
+        while (usedLocations.count(nextLocation) != 0) {
+            ++nextLocation;
+        }
+        replacements.push_back({
+            declaration.numberBegin,
+            declaration.numberEnd,
+            std::to_string(nextLocation)
+        });
+        usedLocations.insert(nextLocation);
+        ++nextLocation;
+    }
+
+    std::sort(replacements.begin(), replacements.end(),
+              [](const Replacement& a, const Replacement& b) {
+                  return a.begin > b.begin;
+              });
+    for (const auto& replacement : replacements) {
+        source.replace(
+            replacement.begin,
+            replacement.end - replacement.begin,
+            replacement.text);
+    }
+    return source;
+}
+
 std::string stripGlslCommentsForAppglValidation(std::string_view src) {
     std::string out;
     out.reserve(src.size());
@@ -43612,6 +43830,54 @@ static bool translatedDrawHasVertexLayoutAt(
     return false;
 }
 
+static bool cloneVertexLayoutForAliasedInput(
+    TranslatedDrawInfo& tdi,
+    GLuint sourceLocation,
+    GLuint metalLocation)
+{
+    if (translatedDrawHasVertexLayoutAt(tdi, metalLocation)) {
+        return false;
+    }
+    for (auto& layout : tdi.vertexAttributeLayouts) {
+        if (layout.location == sourceLocation) {
+            auto clone = layout;
+            clone.location = metalLocation;
+            tdi.vertexAttributeLayouts.push_back(clone);
+            return true;
+        }
+    }
+    for (auto& evb : tdi.extraVertexBuffers) {
+        for (auto& layout : evb.attributes) {
+            if (layout.location == sourceLocation) {
+                auto clone = layout;
+                clone.location = metalLocation;
+                evb.attributes.push_back(clone);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static void expandAliasedVertexAttributeLayouts(TranslatedDrawInfo& tdi)
+{
+    if (tdi.vertexReflection == nullptr) {
+        return;
+    }
+    bool mutated = false;
+    for (const auto& input : tdi.vertexReflection->vertexInputs) {
+        if (input.containsFp64 || input.location == input.sourceLocation) {
+            continue;
+        }
+        mutated = cloneVertexLayoutForAliasedInput(
+                      tdi, input.sourceLocation, input.location) ||
+                  mutated;
+    }
+    if (mutated) {
+        phase2PlanInvalidateVaoLayoutSegmentHash(tdi);
+    }
+}
+
 static void appendCurrentGenericVertexAttributes(
     TranslatedDrawInfo& tdi,
     const GLVertexArrayObject* vao,
@@ -47864,6 +48130,7 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                 currentVao = currentVertexArrayOrDefault();
             }
         }
+        expandAliasedVertexAttributeLayouts(tdi);
         if (preflight == nullptr ||
             !preflight->genericVertexAttributesPrepared) {
             appendCurrentGenericVertexAttributes(

@@ -1511,6 +1511,15 @@ bool GLContext::compileShader(GLuint shader) {
         (afterSsboRuntimeArrayRewrite != sourceAfterImageSamplesRewrite)
             ? afterSsboRuntimeArrayRewrite
             : sourceAfterImageSamplesRewrite;
+    std::string afterVertexInputAliasRewrite;
+    const std::string* glslangCompileSource = &compileSource;
+    if (object->stage == GL_VERTEX_SHADER) {
+        afterVertexInputAliasRewrite =
+            rewriteDuplicateVertexInputLocationsForSpirv(compileSource);
+        if (afterVertexInputAliasRewrite != compileSource) {
+            glslangCompileSource = &afterVertexInputAliasRewrite;
+        }
+    }
 
     // GLSL texture lookup bias arguments are fragment-stage only. Glslang's
     // relaxed Vulkan path accepts some GL_EXT_texture_shadow_lod shadow-sampler
@@ -2007,7 +2016,6 @@ bool GLContext::compileShader(GLuint shader) {
     ShaderTranslator translator;
     std::string compileLog;
     std::string geometryGlslangCompileSource;
-    const std::string* glslangCompileSource = &compileSource;
     if (object->stage == GL_GEOMETRY_SHADER &&
         !geometryShaderSourceHasOutputLayoutForGlslang(compileSource)) {
         geometryGlslangCompileSource =

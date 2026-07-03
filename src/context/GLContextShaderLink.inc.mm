@@ -3971,6 +3971,10 @@ bool GLContext::linkProgram(GLuint program) {
             source = rewriteSsboConsecutiveRuntimeArraysForSpirv(source);
             source = rewrite420packImplicitConversionsForSpirv(source);
             source = rewrite420packQualifierOrderInvariantInputsForSpirv(source);
+            if (stage == GL_VERTEX_SHADER) {
+                source = rewriteDuplicateVertexInputLocationsForSpirv(
+                    std::move(source));
+            }
             if (!linkedSource.empty()) {
                 linkedSource += "\n";
             }
@@ -4265,6 +4269,35 @@ bool GLContext::linkProgram(GLuint program) {
         return false;
     };
 
+    auto applyResolvedVertexInputSourceLocations =
+        [&](ShaderReflection& reflection) {
+        if (reflection.vertexInputs.empty() ||
+            programObject->attributes.empty()) {
+            return;
+        }
+        std::unordered_map<std::string, GLuint> locationsByName;
+        for (const auto& attr : programObject->attributes) {
+            if (!attr.name.empty() && attr.location >= 0) {
+                locationsByName[attr.name] = static_cast<GLuint>(attr.location);
+            }
+        }
+        if (locationsByName.empty()) {
+            return;
+        }
+        for (auto& input : reflection.vertexInputs) {
+            auto it = locationsByName.find(input.name);
+            if (it == locationsByName.end()) {
+                const std::size_t bracket = input.name.find('[');
+                if (bracket != std::string::npos) {
+                    it = locationsByName.find(input.name.substr(0, bracket));
+                }
+            }
+            if (it != locationsByName.end()) {
+                input.sourceLocation = it->second;
+            }
+        }
+    };
+
     // Translate one stage: spirvToMSL + reflect. Writes the result into the
     // provided output slots on success, records a diagnostic in both the
     // success and failure cases. Returns true iff MSL was produced.
@@ -4369,6 +4402,9 @@ bool GLContext::linkProgram(GLuint program) {
         try {
             reflectionOut = translator.reflect(
                 spirvData, spirvWords, bindings, nullptr, options);
+            if (std::strcmp(stageName, "vertex") == 0) {
+                applyResolvedVertexInputSourceLocations(reflectionOut);
+            }
         } catch (const std::exception& e) {
             APPGL_LOG(SHADER, @"[GL] linkProgram-step=reflect program=%u stage=%s THREW: %s",
                   program, stageName, e.what());
@@ -4538,6 +4574,9 @@ bool GLContext::linkProgram(GLuint program) {
                     true,
                     &attribInjectionTrace);
         }
+        vs420packLinkSource =
+            rewriteDuplicateVertexInputLocationsForSpirv(
+                std::move(vs420packLinkSource));
         if (traceAttribInjection) {
             std::fprintf(stderr,
                 "[APPGL_ATTRIB] program=%u link-gate mayInject=%d "
