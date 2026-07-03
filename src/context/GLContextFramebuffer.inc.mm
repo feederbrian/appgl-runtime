@@ -623,29 +623,34 @@ bool GLContext::framebufferTextureMultiviewOVR(GLenum target,
                                                GLint level,
                                                GLint baseViewIndex,
                                                GLsizei numViews) {
-    if (baseViewIndex < 0 || numViews <= 0) {
-        pushError(GL_INVALID_VALUE);
-        return false;
-    }
-    if (impl_->capabilities != nullptr) {
-        GLint maxViews = 0;
-        if (impl_->capabilities->queryInteger(GL_MAX_VIEWS_OVR, &maxViews) &&
-            maxViews > 0 &&
-            numViews > maxViews) {
+    if (texture != 0) {
+        if (baseViewIndex < 0 || numViews <= 0) {
             pushError(GL_INVALID_VALUE);
             return false;
         }
-    }
-    if (texture != 0) {
+        if (impl_->capabilities != nullptr) {
+            GLint maxViews = 0;
+            if (impl_->capabilities->queryInteger(GL_MAX_VIEWS_OVR, &maxViews) &&
+                maxViews > 0 &&
+                numViews > maxViews) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            GLint maxArrayLayers = 0;
+            if (impl_->capabilities->queryInteger(GL_MAX_ARRAY_TEXTURE_LAYERS,
+                                                  &maxArrayLayers) &&
+                maxArrayLayers > 0 &&
+                static_cast<GLint64>(baseViewIndex) +
+                    static_cast<GLint64>(numViews) >
+                    static_cast<GLint64>(maxArrayLayers)) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+        }
         const GLTextureObject* textureObject = impl_->objects->textures().get(texture);
         if (textureObject != nullptr && textureObject->instantiated) {
             if (textureObject->target != GL_TEXTURE_2D_ARRAY) {
                 pushError(GL_INVALID_OPERATION);
-                return false;
-            }
-            const GLsizei layers = std::max<GLsizei>(textureObject->desc.layers, 1);
-            if (baseViewIndex + numViews > layers) {
-                pushError(GL_INVALID_VALUE);
                 return false;
             }
         }
@@ -669,6 +674,7 @@ bool GLContext::framebufferTextureMultiviewOVR(GLenum target,
         auto found = framebuffer->attachments.find(attachment);
         if (found != framebuffer->attachments.end()) {
             found->second.multiview = true;
+            found->second.layered = false;
             found->second.baseViewIndex = baseViewIndex;
             found->second.numViews = numViews;
         }
@@ -757,6 +763,10 @@ bool GLContext::blitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint src
     const GLbitfield kSupportedMask = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
     if ((mask & ~kSupportedMask) != 0) {
         pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (impl_->boundReadFramebufferHasMultipleViews()) {
+        pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
         return false;
     }
     if (!impl_->blitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter)) {
@@ -957,7 +967,7 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
             } else if (pname == GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER) {
                 params[0] = attachmentState.layer;
             } else if (pname == GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_NUM_VIEWS_OVR) {
-                params[0] = attachmentState.multiview ? attachmentState.numViews : 1;
+                params[0] = attachmentState.multiview ? attachmentState.numViews : 0;
             } else if (pname == GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_BASE_VIEW_INDEX_OVR) {
                 params[0] = attachmentState.multiview ? attachmentState.baseViewIndex : 0;
             } else {

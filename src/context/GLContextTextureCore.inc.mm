@@ -968,6 +968,11 @@ bool GLContext::copyTexImage2DImpl(
     const bool isRGB10A2Copy =
         internalformat == GL_RGB10_A2 || isRGB10A2UintCopy;
 
+    if (impl_->boundReadFramebufferHasMultipleViews()) {
+        pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return false;
+    }
+
     if (isRGB10A2Copy) {
         uploadFormat = isRGB10A2UintCopy ? GL_RGBA_INTEGER : GL_RGBA;
         uploadType = GL_UNSIGNED_INT_2_10_10_10_REV;
@@ -1366,6 +1371,10 @@ bool GLContext::copyTexSubImage2D(
     }
     if (width == 0 || height == 0) {
         return true;
+    }
+    if (impl_->boundReadFramebufferHasMultipleViews()) {
+        pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return false;
     }
 
     std::vector<std::uint8_t> uploadBytes(

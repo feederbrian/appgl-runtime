@@ -22799,6 +22799,70 @@ struct GLContext::Impl {
         return info;
     }
 
+    bool multiviewAttachmentRangeComplete(
+        const GLFramebufferAttachment& attachment) const {
+        if (!attachment.multiview) {
+            return true;
+        }
+        if (attachment.kind != GLFramebufferAttachment::Kind::Texture ||
+            attachment.object == 0 ||
+            attachment.baseViewIndex < 0 ||
+            attachment.numViews <= 0) {
+            return false;
+        }
+        const ResolvedTextureAttachment resolved =
+            resolveTextureAttachmentStorage(attachment);
+        const GLTextureObject* texture = resolved.storageTexture;
+        if (!resolved.valid || texture == nullptr ||
+            texture->target != GL_TEXTURE_2D_ARRAY) {
+            return false;
+        }
+        const auto level = texture->levels.find(resolved.level);
+        if (level == texture->levels.end() || !level->second.defined) {
+            return false;
+        }
+        const GLsizei layerCount =
+            textureFramebufferLayerCount(*texture, level->second);
+        return static_cast<GLint64>(attachment.baseViewIndex) +
+            static_cast<GLint64>(attachment.numViews) <=
+            static_cast<GLint64>(layerCount);
+    }
+
+    GLsizei framebufferViewCountForCompleteness(
+        const GLFramebufferAttachment& attachment) const {
+        return attachment.multiview
+            ? std::max<GLsizei>(attachment.numViews, 0)
+            : 1;
+    }
+
+    bool boundReadFramebufferHasMultipleViews() const {
+        if (state == nullptr || objects == nullptr) {
+            return false;
+        }
+        const GLuint readName = state->boundReadFramebuffer();
+        if (readName == 0) {
+            return false;
+        }
+        const GLFramebufferObject* framebuffer =
+            objects->framebuffers().get(readName);
+        if (framebuffer == nullptr || !framebuffer->instantiated) {
+            return false;
+        }
+        for (const auto& [attachmentPoint, attachment] :
+             framebuffer->attachments) {
+            (void)attachmentPoint;
+            if (attachment.multiview && attachment.numViews > 1) {
+                const AttachmentInfo info =
+                    framebufferAttachmentInfo(attachment);
+                if (info.present && info.complete &&
+                    multiviewAttachmentRangeComplete(attachment)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     GLenum framebufferStatus(const GLFramebufferObject& framebuffer) const {
         bool hasAttachment = false;
         bool hasColorAttachment = false;
@@ -22817,6 +22881,9 @@ struct GLContext::Impl {
                 hasColorAttachment = true;
             }
             if (!info.complete) {
+                return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            }
+            if (!multiviewAttachmentRangeComplete(attachment)) {
                 return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
             }
             if (!hasDimensions) {
@@ -22845,6 +22912,28 @@ struct GLContext::Impl {
 
         if (!hasAttachment) {
             return GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
+        }
+
+        {
+            bool haveViewCount = false;
+            GLsizei firstViewCount = 0;
+            for (const auto& [attachmentPoint, attachment] :
+                 framebuffer.attachments) {
+                (void)attachmentPoint;
+                const AttachmentInfo info =
+                    framebufferAttachmentInfo(attachment);
+                if (!info.present) {
+                    continue;
+                }
+                const GLsizei viewCount =
+                    framebufferViewCountForCompleteness(attachment);
+                if (!haveViewCount) {
+                    haveViewCount = true;
+                    firstViewCount = viewCount;
+                } else if (viewCount != firstViewCount) {
+                    return GL_FRAMEBUFFER_INCOMPLETE_VIEW_TARGETS_OVR;
+                }
+            }
         }
 
         // Spec: if separate depth and stencil attachments are present, they must
@@ -23089,7 +23178,8 @@ struct GLContext::Impl {
                     // CTS layered_rendering.layered_rendering's
                     // cubemap iteration where the GS emits
                     // gl_Layer = n for n in 0..5.
-                    if (outColorArrayLength != nullptr && att->layered && !primarySet) {
+                    if (outColorArrayLength != nullptr &&
+                        (att->layered || att->multiview) && !primarySet) {
                         GLsizei layers = std::max<GLsizei>(texObj->desc.layers, 1);
                         if (texObj->target == GL_TEXTURE_3D) {
                             layers = std::max<GLsizei>(texObj->desc.depth, 1);

@@ -54,6 +54,10 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
     }
 
     if (impl_->state->boundReadFramebuffer() != 0) {
+        if (impl_->boundReadFramebufferHasMultipleViews()) {
+            pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+            return false;
+        }
         // Widen FBO readback acceptance to match GL 4.6 §18.3.2. The
         // single-component formats (GL_GREEN / GL_BLUE / GL_ALPHA) and
         // their _INTEGER variants were missing, which made
