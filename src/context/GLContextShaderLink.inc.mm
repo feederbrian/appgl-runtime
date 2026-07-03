@@ -7668,6 +7668,36 @@ bool GLContext::linkProgram(GLuint program) {
                     (!binding.name.empty() && arraySize > 1)
                         ? (binding.name + "[0]")
                         : binding.name;
+                auto withoutArrayZero = [](std::string name) {
+                    if (name.size() > 3 &&
+                        name.compare(name.size() - 3, 3, "[0]") == 0) {
+                        name.resize(name.size() - 3);
+                    }
+                    return name;
+                };
+                static constexpr const char* kAppglPrefix = "_appgl_";
+                static constexpr std::size_t kAppglPrefixLen = 7;
+                const std::string bindingBaseName =
+                    withoutArrayZero(binding.name);
+                const bool internalCompatName =
+                    bindingBaseName.compare(0, kAppglPrefixLen, kAppglPrefix) == 0;
+                const std::string sourceVisibleName =
+                    internalCompatName
+                        ? bindingBaseName.substr(kAppglPrefixLen)
+                        : std::string{};
+                const std::string sourceCanonicalName =
+                    (!sourceVisibleName.empty() && arraySize > 1)
+                        ? (sourceVisibleName + "[0]")
+                        : sourceVisibleName;
+                auto bindingMatchesName = [&](const std::string& name) {
+                    if (!binding.name.empty() &&
+                        (name == binding.name || name == canonicalName)) {
+                        return true;
+                    }
+                    return !sourceVisibleName.empty() &&
+                        (name == sourceVisibleName ||
+                         name == sourceCanonicalName);
+                };
                 GLuint explicitSourceBinding = 0;
                 auto hasExplicitSourceBinding = [&]() {
                     auto probe = [&](std::string name) -> bool {
@@ -7683,8 +7713,6 @@ bool GLContext::linkProgram(GLuint program) {
                             explicitSourceBinding = it->second;
                             return true;
                         }
-                        static constexpr const char* kAppglPrefix = "_appgl_";
-                        static constexpr std::size_t kAppglPrefixLen = 7;
                         if (name.compare(0, kAppglPrefixLen, kAppglPrefix) == 0) {
                             it = explicitBindings.find(name.substr(kAppglPrefixLen));
                             if (it != explicitBindings.end()) {
@@ -7705,7 +7733,7 @@ bool GLContext::linkProgram(GLuint program) {
                     programObject->uniforms.begin(),
                     programObject->uniforms.end(),
                     [&](const GLProgramUniformInfo& info) {
-                        if (!binding.name.empty() && info.name == binding.name) {
+                        if (bindingMatchesName(info.name)) {
                             return true;
                         }
                         return binding.uniformLocation >= 0 &&
@@ -7714,10 +7742,7 @@ bool GLContext::linkProgram(GLuint program) {
                     });
                 if (uniformIt != programObject->uniforms.end()) {
                     for (auto& resource : programObject->resourceUniforms) {
-                        const bool sameNamed =
-                            !canonicalName.empty() &&
-                            (resource.name == canonicalName ||
-                             resource.name == binding.name);
+                        const bool sameNamed = bindingMatchesName(resource.name);
                         const bool sameLocation =
                             resource.location == uniformIt->location &&
                             resource.type == glType;
@@ -7739,7 +7764,10 @@ bool GLContext::linkProgram(GLuint program) {
 
                 if (!canonicalName.empty() &&
                     (knownUniformNames.count(canonicalName) ||
-                     knownUniformNames.count(binding.name))) {
+                     knownUniformNames.count(binding.name) ||
+                     (!sourceVisibleName.empty() &&
+                      (knownUniformNames.count(sourceVisibleName) ||
+                       knownUniformNames.count(sourceCanonicalName))))) {
                     return;
                 }
 

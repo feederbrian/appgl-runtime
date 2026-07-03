@@ -94,6 +94,9 @@ GLenum sampledImageUniformTypeForType(spirv_cross::Compiler& compiler,
         scalarBase = compiler.get_type(imageType.image.type).basetype;
     } catch (...) {
     }
+    const bool isShadowSampler =
+        imageType.image.depth == 1 &&
+        scalarBase == spirv_cross::SPIRType::Float;
     auto choose = [&](GLenum floatType, GLenum intType, GLenum uintType) {
         if (scalarBase == spirv_cross::SPIRType::Int) return intType;
         if (scalarBase == spirv_cross::SPIRType::UInt) return uintType;
@@ -101,6 +104,11 @@ GLenum sampledImageUniformTypeForType(spirv_cross::Compiler& compiler,
     };
     switch (imageType.image.dim) {
         case spv::Dim1D:
+            if (isShadowSampler) {
+                return imageType.image.arrayed
+                    ? GL_SAMPLER_1D_ARRAY_SHADOW
+                    : GL_SAMPLER_1D_SHADOW;
+            }
             return imageType.image.arrayed
                 ? choose(GL_SAMPLER_1D_ARRAY, GL_INT_SAMPLER_1D_ARRAY, GL_UNSIGNED_INT_SAMPLER_1D_ARRAY)
                 : choose(GL_SAMPLER_1D, GL_INT_SAMPLER_1D, GL_UNSIGNED_INT_SAMPLER_1D);
@@ -110,16 +118,29 @@ GLenum sampledImageUniformTypeForType(spirv_cross::Compiler& compiler,
                     ? choose(GL_SAMPLER_2D_MULTISAMPLE_ARRAY, GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY, GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY)
                     : choose(GL_SAMPLER_2D_MULTISAMPLE, GL_INT_SAMPLER_2D_MULTISAMPLE, GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE);
             }
+            if (isShadowSampler) {
+                return imageType.image.arrayed
+                    ? GL_SAMPLER_2D_ARRAY_SHADOW
+                    : GL_SAMPLER_2D_SHADOW;
+            }
             return imageType.image.arrayed
                 ? choose(GL_SAMPLER_2D_ARRAY, GL_INT_SAMPLER_2D_ARRAY, GL_UNSIGNED_INT_SAMPLER_2D_ARRAY)
                 : choose(GL_SAMPLER_2D, GL_INT_SAMPLER_2D, GL_UNSIGNED_INT_SAMPLER_2D);
         case spv::Dim3D:
             return choose(GL_SAMPLER_3D, GL_INT_SAMPLER_3D, GL_UNSIGNED_INT_SAMPLER_3D);
         case spv::DimCube:
+            if (isShadowSampler) {
+                return imageType.image.arrayed
+                    ? GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW
+                    : GL_SAMPLER_CUBE_SHADOW;
+            }
             return imageType.image.arrayed
                 ? choose(GL_SAMPLER_CUBE_MAP_ARRAY, GL_INT_SAMPLER_CUBE_MAP_ARRAY, GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY)
                 : choose(GL_SAMPLER_CUBE, GL_INT_SAMPLER_CUBE, GL_UNSIGNED_INT_SAMPLER_CUBE);
         case spv::DimRect:
+            if (isShadowSampler) {
+                return GL_SAMPLER_2D_RECT_SHADOW;
+            }
             return choose(GL_SAMPLER_2D_RECT, GL_INT_SAMPLER_2D_RECT, GL_UNSIGNED_INT_SAMPLER_2D_RECT);
         case spv::DimBuffer:
             return choose(GL_SAMPLER_BUFFER, GL_INT_SAMPLER_BUFFER, GL_UNSIGNED_INT_SAMPLER_BUFFER);
