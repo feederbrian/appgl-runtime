@@ -41693,6 +41693,10 @@ static void rewriteMslOutputLocationsForFragmentInputs(
     std::string& vertexMSL,
     const std::string& fragmentMSL);
 
+namespace {
+bool programHasSamplerTypeConflict(const GLProgramObject& program);
+}
+
 #define APPGL_GLCONTEXT_SHADER_LINK
 #include "GLContextShader.inc.mm"
 #undef APPGL_GLCONTEXT_SHADER_LINK
@@ -43988,6 +43992,50 @@ bool pipelineUniformTypeIsSampler(GLenum type) {
     }
 }
 
+bool appendProgramSamplerBindings(
+    const GLProgramObject& program,
+    std::unordered_map<GLint, GLenum>& typeByTextureUnit) {
+    if (!program.linked) {
+        return false;
+    }
+    for (const GLProgramUniformInfo& uniform : program.uniforms) {
+        if (uniform.location < 0 ||
+            !pipelineUniformTypeIsSampler(uniform.type)) {
+            continue;
+        }
+        const auto valueIt = program.uniformValues.find(uniform.location);
+        const GLProgramUniformValue* value =
+            (valueIt != program.uniformValues.end()) ? &valueIt->second : nullptr;
+        const GLint elementCount = std::max<GLint>(uniform.arraySize, 1);
+        for (GLint element = 0; element < elementCount; ++element) {
+            GLint unit = (uniform.explicitBinding >= 0)
+                ? (uniform.explicitBinding + element) : 0;
+            bool hasElementValue = false;
+            if (value != nullptr &&
+                static_cast<std::size_t>(element) < value->ints.size()) {
+                unit = value->ints[static_cast<std::size_t>(element)];
+                hasElementValue = true;
+            }
+            if (elementCount > 1 &&
+                uniform.explicitBinding < 0 &&
+                (!hasElementValue || unit == 0)) {
+                continue;
+            }
+            const auto [it, inserted] =
+                typeByTextureUnit.emplace(unit, uniform.type);
+            if (!inserted && it->second != uniform.type) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool programHasSamplerTypeConflict(const GLProgramObject& program) {
+    std::unordered_map<GLint, GLenum> typeByTextureUnit;
+    return appendProgramSamplerBindings(program, typeByTextureUnit);
+}
+
 bool pipelineHasMiddleStageWithoutVertex(const GLProgramPipelineObject& ppo) {
     return ppo.vertexProgram == 0 &&
         (ppo.tessControlProgram != 0 ||
@@ -44102,38 +44150,11 @@ bool pipelineHasSamplerTypeConflict(
     std::unordered_map<GLint, GLenum> typeByTextureUnit;
     for (std::size_t i = 0; i < uniqueCount; ++i) {
         const GLProgramObject* program = objects.programs().get(uniquePrograms[i]);
-        if (program == nullptr || !program->linked) {
+        if (program == nullptr) {
             continue;
         }
-        for (const GLProgramUniformInfo& uniform : program->uniforms) {
-            if (uniform.location < 0 ||
-                !pipelineUniformTypeIsSampler(uniform.type)) {
-                continue;
-            }
-            const auto valueIt = program->uniformValues.find(uniform.location);
-            const GLProgramUniformValue* value =
-                (valueIt != program->uniformValues.end()) ? &valueIt->second : nullptr;
-            const GLint elementCount = std::max<GLint>(uniform.arraySize, 1);
-            for (GLint element = 0; element < elementCount; ++element) {
-                GLint unit = (uniform.explicitBinding >= 0)
-                    ? (uniform.explicitBinding + element) : 0;
-                bool hasElementValue = false;
-                if (value != nullptr &&
-                    static_cast<std::size_t>(element) < value->ints.size()) {
-                    unit = value->ints[static_cast<std::size_t>(element)];
-                    hasElementValue = true;
-                }
-                if (elementCount > 1 &&
-                    uniform.explicitBinding < 0 &&
-                    (!hasElementValue || unit == 0)) {
-                    continue;
-                }
-                const auto [it, inserted] =
-                    typeByTextureUnit.emplace(unit, uniform.type);
-                if (!inserted && it->second != uniform.type) {
-                    return true;
-                }
-            }
+        if (appendProgramSamplerBindings(*program, typeByTextureUnit)) {
+            return true;
         }
     }
     return false;
@@ -44142,7 +44163,19 @@ bool pipelineHasSamplerTypeConflict(
 } // namespace
 
 bool GLContext::Impl::validateCurrentProgramPipelineForDraw() const {
-    if (state == nullptr || objects == nullptr || state->currentProgram() != 0) {
+    if (state == nullptr || objects == nullptr) {
+        return true;
+    }
+    const GLuint currentProgramName = state->currentProgram();
+    if (currentProgramName != 0) {
+        const GLProgramObject* program =
+            objects->programs().get(currentProgramName);
+        if (program != nullptr && programHasSamplerTypeConflict(*program)) {
+            if (owner != nullptr) {
+                owner->pushError(GL_INVALID_OPERATION);
+            }
+            return false;
+        }
         return true;
     }
     const GLuint pipelineName = state->currentProgramPipeline();

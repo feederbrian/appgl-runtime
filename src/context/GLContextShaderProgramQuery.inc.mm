@@ -55,8 +55,19 @@ bool GLContext::validateProgram(GLuint program) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    object->validated = object->linked;
-    object->validateLog = object->linked ? "validation passed" : "program is not linked";
+    if (!object->linked) {
+        object->validated = false;
+        object->validateLog = "program is not linked";
+        return false;
+    }
+    if (programHasSamplerTypeConflict(*object)) {
+        object->validated = false;
+        object->validateLog =
+            "Program has active samplers of different types on the same texture unit.";
+        return false;
+    }
+    object->validated = true;
+    object->validateLog = "validation passed";
     return object->validated;
 }
 
