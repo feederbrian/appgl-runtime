@@ -1370,33 +1370,16 @@ GLuint GLContext::getProgramResourceIndex(GLuint program, GLenum programInterfac
             return static_cast<GLuint>(i);
         }
     }
-    // Array-input lookup tolerance: GL 4.6 §7.3.1 says
-    // getProgramResourceIndex("arr") should find the same entry as
-    // "arr[0]" for an array input, and vice versa. Table entries
-    // follow the "[0]"-suffixed convention for arrays
-    // (`c` → "c[0]"); queries with bare base name should still
-    // match. CTS `program_interface_query.input-types` queries
-    // "d" where the table stores "d[0]".
+    // GL 4.6 §7.3.1 name matching is deliberately narrow: accept
+    // either an exact active-resource name, or a query whose single
+    // appended "[0]" exactly matches one. Do not strip suffixes or
+    // resolve prefixes: arrays-of-arrays such as `vs_input2` must not
+    // match the active `vs_input2[0][0]` resource name.
     const std::string query = name;
-    // Bare query → find a "<name>[0]" entry.
     {
         const std::string suffixed = query + "[0]";
         for (std::size_t i = 0; i < table->size(); ++i) {
-            if ((*table)[i].name == suffixed &&
-                (*table)[i].arrayDimensions.empty()) {
-                if (isSubroutineResourceInterface(programInterface) &&
-                    (*table)[i].subroutineIndex >= 0) {
-                    return static_cast<GLuint>((*table)[i].subroutineIndex);
-                }
-                return static_cast<GLuint>(i);
-            }
-        }
-    }
-    // "<base>[0]"-suffixed query → find a bare "<base>" entry.
-    if (query.size() >= 3 && query.compare(query.size() - 3, 3, "[0]") == 0) {
-        const std::string baseOnly = query.substr(0, query.size() - 3);
-        for (std::size_t i = 0; i < table->size(); ++i) {
-            if ((*table)[i].name == baseOnly) {
+            if ((*table)[i].name == suffixed) {
                 if (isSubroutineResourceInterface(programInterface) &&
                     (*table)[i].subroutineIndex >= 0) {
                     return static_cast<GLuint>((*table)[i].subroutineIndex);

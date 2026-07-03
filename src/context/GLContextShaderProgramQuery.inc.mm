@@ -247,7 +247,9 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
             *params = 0;  // No binary program support
             return true;
         case GL_PROGRAM_SEPARABLE:
-            *params = object->separable ? GL_TRUE : GL_FALSE;
+            *params = object->linked
+                ? (object->separable ? GL_TRUE : GL_FALSE)
+                : (object->separableLinked ? GL_TRUE : GL_FALSE);
             return true;
         case GL_PROGRAM_BINARY_RETRIEVABLE_HINT:
             *params = GL_FALSE;

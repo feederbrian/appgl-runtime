@@ -981,13 +981,13 @@ struct GLProgramObject {
     // flag set via `glProgramParameteri`. When true, glLinkProgram
     // accepts incomplete stage combinations (e.g. a GS-only or a
     // GS+FS program) because the pipeline object supplies the
-    // missing stages at draw time. `glGetProgramiv(GL_PROGRAM_
-    // SEPARABLE)` reads this back.
+    // missing stages at draw time. After a successful link,
+    // `glGetProgramiv(GL_PROGRAM_SEPARABLE)` reads this mutable
+    // request back; never-linked programs report the linked snapshot.
     bool separable = false;
-    // Link-time snapshot used by program-pipeline legality checks.
-    // `separable` above is the current request set by
-    // glProgramParameteri and is what getProgramiv(GL_PROGRAM_SEPARABLE)
-    // reports; this snapshot is updated only on successful linkProgram.
+    // Link-time snapshot updated only on successful linkProgram.
+    // glProgramParameteri mutates `separable` above for the next link;
+    // pipeline legality checks use this linked snapshot.
     bool separableLinked = false;
     // Stage bits present in the most recently linked executable.
     // Unlike attachedShaders, this survives glCreateShaderProgramv's

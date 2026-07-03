@@ -3024,7 +3024,7 @@ bool GLContext::linkProgram(GLuint program) {
                 vertexInputLocationSlotCount(a.type, innerArraySize);
             for (GLint outer = 0; outer < a.arrayDimensions[0]; ++outer) {
                 GLProgramResourceEntry entry;
-                entry.name = a.name + "[" + std::to_string(outer) + "]";
+                entry.name = a.name + "[" + std::to_string(outer) + "][0]";
                 entry.type = a.type;
                 entry.location = a.location >= 0
                     ? a.location + static_cast<GLint>(outer * slotsPerOuter)

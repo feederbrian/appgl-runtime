@@ -41419,6 +41419,32 @@ static const std::unordered_map<GLint, GLProgramUniformValue>& uniformValuesForE
     return program.uniformValues;
 }
 
+static void clearPipelineEmulationStageUniforms(GLProgramObject* program)
+{
+    if (program == nullptr) return;
+    for (std::size_t stage = 0;
+         stage < program->pipelineEmulationStageUniforms.size();
+         ++stage) {
+        program->pipelineEmulationStageUniforms[stage].clear();
+        program->pipelineEmulationStageUniformValues[stage].clear();
+        program->pipelineEmulationStageUniformsValid[stage] = false;
+    }
+}
+
+static void setPipelineEmulationStageUniformSnapshot(
+    GLProgramObject* target,
+    int stageIndex,
+    const GLProgramObject* source)
+{
+    if (target == nullptr || source == nullptr || stageIndex < 0 || stageIndex >= 6) {
+        return;
+    }
+    const std::size_t stage = static_cast<std::size_t>(stageIndex);
+    target->pipelineEmulationStageUniforms[stage] = source->uniforms;
+    target->pipelineEmulationStageUniformValues[stage] = source->uniformValues;
+    target->pipelineEmulationStageUniformsValid[stage] = true;
+}
+
 // The output is written into |outBuffer|, which is resized via assign().
 // Callers should pass a thread-local vector so that the allocation persists
 // across draw calls — after the first frame this is a zero-alloc operation.
@@ -41691,9 +41717,9 @@ static void prepareTranslatedDrawUniformBuffers(
 {
     if (!program.uniformLayoutComputed) {
         computeStageUniformLayout(program.vertexUniformLayout,
-            program.vertexReflection, program.uniforms);
+            program.vertexReflection, uniformsForEmulationStage(program, 0));
         computeStageUniformLayout(program.fragmentUniformLayout,
-            program.fragmentReflection, program.uniforms);
+            program.fragmentReflection, uniformsForEmulationStage(program, 4));
         program.uniformLayoutComputed = true;
         program.invalidateUniformBufferCache();
     }
@@ -41707,10 +41733,10 @@ static void prepareTranslatedDrawUniformBuffers(
     const bool rebuilt = program.isUniformBufferDirty();
     if (rebuilt) {
         buildStageUniformBuffer(program.cachedVertexUniformBuffer,
-            program.vertexReflection, program.uniformValues,
+            program.vertexReflection, uniformValuesForEmulationStage(program, 0),
             program.vertexUniformLayout);
         buildStageUniformBuffer(program.cachedFragmentUniformBuffer,
-            program.fragmentReflection, program.uniformValues,
+            program.fragmentReflection, uniformValuesForEmulationStage(program, 4),
             program.fragmentUniformLayout);
         program.markUniformBufferClean();
     }
@@ -41723,10 +41749,10 @@ static void prepareTranslatedDrawUniformBuffers(
 
     if (defaultUniformGenerationBindCacheValidateEnabled()) {
         buildStageUniformBuffer(tdi.defaultUniformValidationVertexBytes,
-            program.vertexReflection, program.uniformValues,
+            program.vertexReflection, uniformValuesForEmulationStage(program, 0),
             program.vertexUniformLayout);
         buildStageUniformBuffer(tdi.defaultUniformValidationFragmentBytes,
-            program.fragmentReflection, program.uniformValues,
+            program.fragmentReflection, uniformValuesForEmulationStage(program, 4),
             program.fragmentUniformLayout);
     } else {
         tdi.defaultUniformValidationVertexBytes.clear();
@@ -42775,14 +42801,6 @@ bool dcr4eRequiresExactCpuGsNoLegacyFallback(
 GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
     GLuint currentProgramName, GLuint& outProgramName)
 {
-    auto clearPipelineEmulationUniforms = [](GLProgramObject* program) {
-        if (program == nullptr) return;
-        for (std::size_t stage = 0; stage < program->pipelineEmulationStageUniforms.size(); ++stage) {
-            program->pipelineEmulationStageUniforms[stage].clear();
-            program->pipelineEmulationStageUniformValues[stage].clear();
-            program->pipelineEmulationStageUniformsValid[stage] = false;
-        }
-    };
     auto invalidateGsPassThroughFragmentCache = [](GLProgramObject* program) {
         if (program == nullptr) return;
         for (auto& entry : program->gsPassThroughPipelineStateCache) {
@@ -42814,7 +42832,7 @@ GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
     if (currentProgramName != 0) {
         outProgramName = currentProgramName;
         GLProgramObject* program = objects->programs().get(currentProgramName);
-        clearPipelineEmulationUniforms(program);
+        clearPipelineEmulationStageUniforms(program);
         return program;
     }
     // No current program; check the pipeline for a GS program.
@@ -42824,14 +42842,12 @@ GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
     if (ppo == nullptr || ppo->geometryProgram == 0) return nullptr;
     GLProgramObject* gsProg = objects->programs().get(ppo->geometryProgram);
     if (gsProg == nullptr || !gsProg->geometryEmulated) return nullptr;
-    clearPipelineEmulationUniforms(gsProg);
+    clearPipelineEmulationStageUniforms(gsProg);
     auto setPipelineEmulationStageUniforms = [&](int stageIndex,
                                                  const GLProgramObject* source) {
         if (source == nullptr || stageIndex < 0 || stageIndex >= 6) return;
         const std::size_t stage = static_cast<std::size_t>(stageIndex);
-        gsProg->pipelineEmulationStageUniforms[stage] = source->uniforms;
-        gsProg->pipelineEmulationStageUniformValues[stage] = source->uniformValues;
-        gsProg->pipelineEmulationStageUniformsValid[stage] = true;
+        setPipelineEmulationStageUniformSnapshot(gsProg, stageIndex, source);
 
         // resolveDrawProgram() may already have spliced the pipeline's
         // fragment uniforms onto the VS container. Subroutine dispatch
@@ -43254,7 +43270,9 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
     // Fast path: a current program is bound (glUseProgram), use it
     // directly. GL 4.6 §7.3 says current program shadows any pipeline.
     if (programName != 0) {
-        return objects->programs().get(programName);
+        GLProgramObject* program = objects->programs().get(programName);
+        clearPipelineEmulationStageUniforms(program);
+        return program;
     }
     // No current program — check for an active program pipeline and
     // synthesise a merged VS+FS container on the pipeline's VS.
@@ -43264,6 +43282,8 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
     if (ppo == nullptr || ppo->vertexProgram == 0) return nullptr;
     GLProgramObject* vsProg = objects->programs().get(ppo->vertexProgram);
     if (vsProg == nullptr || !vsProg->hasTranslatedPipeline) return nullptr;
+    clearPipelineEmulationStageUniforms(vsProg);
+    setPipelineEmulationStageUniformSnapshot(vsProg, 0, vsProg);
     // Splice pipeline's FS MSL + reflection onto the VS container so
     // the downstream translated-draw path sees a single program with
     // both stages populated. Overwrite every call — cheap, keeps a
@@ -43285,6 +43305,7 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
         GLProgramObject* fsProg = objects->programs().get(ppo->fragmentProgram);
         if (fsProg != nullptr) {
             bool importedFragmentUniformValues = false;
+            setPipelineEmulationStageUniformSnapshot(vsProg, 4, fsProg);
             vsProg->fragmentMSL = fsProg->fragmentMSL;
             vsProg->fragmentMslUsesArgumentBuffer =
                 fsProg->fragmentMslUsesArgumentBuffer;
@@ -43300,12 +43321,24 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
                         return u.name == fsUniform.name;
                     });
                 if (existing != vsProg->uniforms.end()) {
-                    *existing = fsUniform;
+                    // The executable pipeline has per-program uniform
+                    // namespaces. Keep the VS table authoritative for
+                    // same-named uniforms; fragment default-uniform packing
+                    // reads the stage-4 snapshot seeded above.
                 } else {
                     vsProg->uniforms.push_back(fsUniform);
                 }
                 auto valueIt = fsProg->uniformValues.find(fsUniform.location);
                 if (valueIt != fsProg->uniformValues.end()) {
+                    const bool conflictsWithVertexLocation = std::any_of(
+                        vsProg->pipelineEmulationStageUniforms[0].begin(),
+                        vsProg->pipelineEmulationStageUniforms[0].end(),
+                        [&](const GLProgramUniformInfo& u) {
+                            return u.location == fsUniform.location;
+                        });
+                    if (conflictsWithVertexLocation) {
+                        continue;
+                    }
                     auto targetIt = vsProg->uniformValues.find(fsUniform.location);
                     const GLProgramUniformValue& sourceValue = valueIt->second;
                     const bool valueChanged =
@@ -43351,6 +43384,8 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
             // the layout recomputed, otherwise the vertex and fragment
             // uniform buffers get built from stale reflection.
             vsProg->uniformLayoutComputed = false;
+            vsProg->markUniformsDirty();
+            vsProg->invalidateSamplerBindingRecipeCache();
         }
     } else {
         // No FS stage on the pipeline — clear the container's fragment
@@ -43361,6 +43396,7 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
         vsProg->fragmentMslUsesFragCoordParams = false;
         vsProg->fragmentReflection = ShaderReflection{};
         vsProg->uniformLayoutComputed = false;
+        vsProg->markUniformsDirty();
     }
     // (c) ABA fix: the spliced container FS MSL is re-derived per draw IN PLACE
     // (same buffer, no relink → flat serial/gen) → mark VOLATILE so the MSL-FNV
@@ -45420,7 +45456,9 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
 
     appgl::EmulatedDraw replayDraw = ed;
     auto remapGsVaryingLocationsFromFragmentMSL =
-        [](appgl::EmulatedDraw& draw, const std::string& fragmentMSL) {
+        [](appgl::EmulatedDraw& draw,
+           const std::string& fragmentMSL,
+           bool preferExplicitLocations) {
             if (draw.varyingNames.empty() || fragmentMSL.empty()) return;
             const std::size_t structPos = fragmentMSL.find("struct main0_in");
             if (structPos == std::string::npos) return;
@@ -45535,18 +45573,25 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                            rangeFreeIn(claimedLocations, loc, count);
                 };
 
-            // Exact names are authoritative. Block-member rewrites can
-            // rename otherwise-linked varyings (`output_block_*` ->
-            // `input_block_*`), so unmatched entries get a second chance
-            // to keep an original FS location before extras are relocated.
+            // Monolithic GS/TES replay has historically used exact-name
+            // remapping first; CTS ShaderViewportIndex depends on that
+            // generated-name swap. Linked separable programs instead need
+            // explicit locations to win when names intentionally disagree
+            // across stages (Piglit rendezvous_by_location).
             for (RemapEntry& entry : entries) {
                 const auto locIt = fsInputLocations.find(
                     draw.varyingNames[entry.varyingIndex]);
                 if (locIt == fsInputLocations.end()) continue;
+                if (preferExplicitLocations && locIt->second != entry.oldLoc) continue;
+                if (!rangeFreeIn(claimedLocations, locIt->second, entry.slotCount)) continue;
                 entry.newLoc = locIt->second;
                 entry.assigned = true;
                 markRange(claimedLocations, entry.newLoc, entry.slotCount);
             }
+            // Explicit locations are authoritative for SSO rendezvous even
+            // when names differ across stages. The Piglit
+            // rendezvous_by_location rows intentionally cross `ga`/`gb`
+            // names while linking by layout(location).
             for (RemapEntry& entry : entries) {
                 if (entry.assigned) continue;
                 if (fsLocations.find(entry.oldLoc) == fsLocations.end()) continue;
@@ -45554,6 +45599,21 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                 entry.newLoc = entry.oldLoc;
                 entry.assigned = true;
                 markRange(claimedLocations, entry.newLoc, entry.slotCount);
+            }
+            if (preferExplicitLocations) {
+                // For separable programs, exact-name matches remain the
+                // fallback for block-member rewrites or generated names whose
+                // original location was not consumed by the FS interface.
+                for (RemapEntry& entry : entries) {
+                    if (entry.assigned) continue;
+                    const auto locIt = fsInputLocations.find(
+                        draw.varyingNames[entry.varyingIndex]);
+                    if (locIt == fsInputLocations.end()) continue;
+                    if (!rangeFreeIn(claimedLocations, locIt->second, entry.slotCount)) continue;
+                    entry.newLoc = locIt->second;
+                    entry.assigned = true;
+                    markRange(claimedLocations, entry.newLoc, entry.slotCount);
+                }
             }
             std::uint32_t nextFreeLocation = 0;
             for (RemapEntry& entry : entries) {
@@ -45596,7 +45656,10 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                 draw.primitiveIDLocation = locs.empty() ? 0u : (maxLoc + 1u);
             }
         };
-    remapGsVaryingLocationsFromFragmentMSL(replayDraw, program.fragmentMSL);
+    remapGsVaryingLocationsFromFragmentMSL(
+        replayDraw,
+        program.fragmentMSL,
+        program.separableLinked);
 
     // Invalidate the cached synth VS when its layered-ness doesn't
     // match the current draw. Metal won't accept swapping the

@@ -960,11 +960,13 @@ public:
     Interpreter(const SpirvModule& mod,
                 std::vector<std::string> inputVaryingNames,
                 std::vector<std::uint32_t> inputVaryingWidths,
+                std::vector<std::uint32_t> inputVaryingLocations,
                 std::vector<std::string> outputVaryingNames,
                 std::vector<std::uint32_t> outputVaryingWidths)
         : module_(mod),
           inputVaryingNames_(std::move(inputVaryingNames)),
           inputVaryingWidths_(std::move(inputVaryingWidths)),
+          inputVaryingLocations_(std::move(inputVaryingLocations)),
           outputVaryingNames_(std::move(outputVaryingNames)),
           outputVaryingWidths_(std::move(outputVaryingWidths)),
           stage_(Stage::Geometry) {}
@@ -991,9 +993,11 @@ public:
     // executeTes / executeVs / execute(GS) all share one entry point.
     // Mirrors the GS constructor's input-varying init path.
     void setInputVaryings(std::vector<std::string> names,
-                          std::vector<std::uint32_t> widths) {
+                          std::vector<std::uint32_t> widths,
+                          std::vector<std::uint32_t> locations = {}) {
         inputVaryingNames_ = std::move(names);
         inputVaryingWidths_ = std::move(widths);
+        inputVaryingLocations_ = std::move(locations);
     }
 
     // Phase 3f-3: SSBO / shader-storage-buffer plumbing. Caller
@@ -1147,6 +1151,7 @@ private:
     const SpirvModule& module_;
     std::vector<std::string> inputVaryingNames_;
     std::vector<std::uint32_t> inputVaryingWidths_;
+    std::vector<std::uint32_t> inputVaryingLocations_;
     std::vector<std::string> outputVaryingNames_;
     std::vector<std::uint32_t> outputVaryingWidths_;
 
@@ -3766,12 +3771,33 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                     }
                 } else {
                     // Flat varying array. Match by variable name to
-                    // driver-supplied inputVaryingNames_.
+                    // driver-supplied inputVaryingNames_. Separable
+                    // pipelines can deliberately use different names
+                    // across stages with explicit Location linkage, so
+                    // fall back to the Location decoration when names
+                    // do not rendezvous.
                     int varyingIdx = -1;
                     for (std::size_t j = 0; j < inputVaryingNames_.size(); ++j) {
                         if (inputVaryingNames_[j] == info.name) {
                             varyingIdx = static_cast<int>(j);
                             break;
+                        }
+                    }
+                    if (varyingIdx < 0) {
+                        auto dIt = module_.decorations.find(varId);
+                        if (dIt != module_.decorations.end() &&
+                            dIt->second.hasLocation) {
+                            const std::uint32_t wantedLocation =
+                                dIt->second.location;
+                            for (std::size_t j = 0;
+                                 j < inputVaryingLocations_.size();
+                                 ++j) {
+                                if (inputVaryingLocations_[j] ==
+                                    wantedLocation) {
+                                    varyingIdx = static_cast<int>(j);
+                                    break;
+                                }
+                            }
                         }
                     }
                     if (varyingIdx >= 0) {
@@ -12810,7 +12836,10 @@ EmulatedDraw emulateGeometryDraw(
                     ? priorStageOutput->varyingNames : vsOutNames;
                 const auto& gsInWidths = (priorStageOutput != nullptr && priorStageOutput->ok)
                     ? priorStageOutput->varyingWidths : vsOutWidths;
+                const auto& gsInLocations = (priorStageOutput != nullptr && priorStageOutput->ok)
+                    ? priorStageOutput->varyingLocations : vsOutLocations;
                 Interpreter interp(mod, gsInNames, gsInWidths,
+                                   gsInLocations,
                                    outNames, outWidths);
                 interp.setUniforms(&gsUniforms);
                 interp.setGsPrimitiveId(static_cast<std::int32_t>(p));
