@@ -3181,6 +3181,20 @@ bool GLContext::linkProgram(GLuint program) {
                              // canonical name (e.g. "gl_SampleMask[0]")
             table.push_back(std::move(entry));
         };
+        auto addActiveBuiltInAttribute = [&](const std::string& name, GLenum type) {
+            for (const auto& attrib : programObject->attributes) {
+                if (attrib.name == name) {
+                    return;
+                }
+            }
+            GLProgramAttributeInfo attrib;
+            attrib.name = name;
+            attrib.type = type;
+            attrib.location = -1;
+            attrib.arraySize = 1;
+            attrib.isArray = false;
+            programObject->attributes.push_back(std::move(attrib));
+        };
         GLShaderObject* vsShader = nullptr;
         GLShaderObject* fsShader = nullptr;
         for (GLuint shaderId : programObject->attachedShaders) {
@@ -3194,11 +3208,13 @@ bool GLContext::linkProgram(GLuint program) {
             if (sourceUsesIdent(src, "gl_VertexID")) {
                 addBuiltIn(programObject->resourceInputs,
                     "gl_VertexID", GL_INT, 0x01 /*vertex*/);
+                addActiveBuiltInAttribute("gl_VertexID", GL_INT);
             }
             if (sourceUsesIdent(src, "gl_InstanceID") ||
                 sourceUsesIdent(src, "gl_InstanceIDARB")) {
                 addBuiltIn(programObject->resourceInputs,
                     "gl_InstanceID", GL_INT, 0x01);
+                addActiveBuiltInAttribute("gl_InstanceID", GL_INT);
             }
             if (sourceUsesIdent(src, "gl_DrawID") ||
                 sourceUsesIdent(src, "gl_DrawIDARB")) {
