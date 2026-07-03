@@ -23902,7 +23902,12 @@ struct GLContext::Impl {
                     /*renderbufferNativeBpp=*/false,
                     /*zeroArea=*/false);
                 if (texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
-                    if (attachment.layered) {
+                    if (attachment.multiview) {
+                        arrayLength = static_cast<std::uint32_t>(
+                            std::max<GLsizei>(attachment.numViews, 0));
+                        clearSlice = static_cast<std::uint32_t>(
+                            std::max<GLint>(resolved.layer, 0));
+                    } else if (attachment.layered) {
                         const GLTextureImageLevel& image = level->second;
                         const GLsizei sourceDepth =
                             textureFramebufferLayerCount(*texture, image);
@@ -23971,10 +23976,14 @@ struct GLContext::Impl {
                               : attachedTexture->desc.layers,
                           1)
                     : sourceDepth;
-            const GLsizei firstLayer = attachment.layered
+            const GLsizei firstLayer = attachment.multiview
+                ? resolved.layer
+                : attachment.layered
                 ? (resolved.throughView ? resolved.layer : 0)
                 : resolved.layer;
-            const GLsizei lastLayer = attachment.layered
+            const GLsizei lastLayer = attachment.multiview
+                ? firstLayer + std::max<GLsizei>(attachment.numViews, 0)
+                : attachment.layered
                 ? std::min<GLsizei>(sourceDepth, firstLayer + viewLayerCount)
                 : firstLayer + 1;
             if (firstLayer < 0 || firstLayer >= sourceDepth || lastLayer > sourceDepth) {
@@ -24116,8 +24125,10 @@ struct GLContext::Impl {
                 image.nativeBpp == 0 &&
                 image.nativeData.empty()) {
                 const float rgbaF[4] = {color[0], color[1], color[2], color[3]};
-                const std::uint32_t arrayLength = sourceDepth > 1
-                    ? static_cast<std::uint32_t>(sourceDepth)
+                const std::uint32_t clearedLayers =
+                    static_cast<std::uint32_t>(lastLayer - firstLayer);
+                const std::uint32_t arrayLength = clearedLayers > 1
+                    ? clearedLayers
                     : 0u;
                 if (callProfiledLayeredColorClear(
                         textureClearBytes,
@@ -25529,7 +25540,10 @@ struct GLContext::Impl {
             const std::uint32_t slice =
                 attachment.layered ? 0u
                                    : static_cast<std::uint32_t>(std::max<GLint>(attachment.layer, 0));
-            if (attachment.layered) {
+            if (attachment.multiview) {
+                const GLsizei layers = std::max<GLsizei>(attachment.numViews, 0);
+                if (layers > 1) arrayLen = static_cast<std::uint32_t>(layers);
+            } else if (attachment.layered) {
                 GLsizei layers = std::max<GLsizei>(level->second.desc.depth, 1);
                 if (texture->target == GL_TEXTURE_CUBE_MAP) {
                     layers = 6;
@@ -25555,8 +25569,9 @@ struct GLContext::Impl {
                     textureFramebufferLayerCount(*texture, image);
                 const GLsizei firstLayer = attachment.layered
                     ? 0 : textureFramebufferLayerIndex(*texture, attachment);
-                const GLsizei lastLayer = attachment.layered
-                    ? layerCount : firstLayer + 1;
+                const GLsizei lastLayer = attachment.multiview
+                    ? firstLayer + std::max<GLsizei>(attachment.numViews, 0)
+                    : attachment.layered ? layerCount : firstLayer + 1;
                 if (firstLayer < 0 || firstLayer >= layerCount ||
                     lastLayer > layerCount) {
                     return false;
@@ -25612,8 +25627,9 @@ struct GLContext::Impl {
                     textureFramebufferLayerCount(*texture, image);
                 const GLsizei firstLayer = attachment.layered
                     ? 0 : textureFramebufferLayerIndex(*texture, attachment);
-                const GLsizei lastLayer = attachment.layered
-                    ? layerCount : firstLayer + 1;
+                const GLsizei lastLayer = attachment.multiview
+                    ? firstLayer + std::max<GLsizei>(attachment.numViews, 0)
+                    : attachment.layered ? layerCount : firstLayer + 1;
                 if (firstLayer < 0 || firstLayer >= layerCount ||
                     lastLayer > layerCount) {
                     return false;
@@ -25763,7 +25779,10 @@ struct GLContext::Impl {
             const std::uint32_t slice =
                 attachment.layered ? 0u
                                    : static_cast<std::uint32_t>(std::max<GLint>(attachment.layer, 0));
-            if (attachment.layered) {
+            if (attachment.multiview) {
+                const GLsizei layers = std::max<GLsizei>(attachment.numViews, 0);
+                if (layers > 1) arrayLen = static_cast<std::uint32_t>(layers);
+            } else if (attachment.layered) {
                 GLsizei layers = std::max<GLsizei>(level->second.desc.depth, 1);
                 if (texture->target == GL_TEXTURE_CUBE_MAP) {
                     layers = 6;
@@ -25789,8 +25808,9 @@ struct GLContext::Impl {
                     textureFramebufferLayerCount(*texture, image);
                 const GLsizei firstLayer = attachment.layered
                     ? 0 : textureFramebufferLayerIndex(*texture, attachment);
-                const GLsizei lastLayer = attachment.layered
-                    ? layerCount : firstLayer + 1;
+                const GLsizei lastLayer = attachment.multiview
+                    ? firstLayer + std::max<GLsizei>(attachment.numViews, 0)
+                    : attachment.layered ? layerCount : firstLayer + 1;
                 if (firstLayer < 0 || firstLayer >= layerCount ||
                     lastLayer > layerCount) {
                     return false;
