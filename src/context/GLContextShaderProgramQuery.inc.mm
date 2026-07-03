@@ -379,7 +379,7 @@ bool GLContext::getActiveAttrib(GLuint program, GLuint index, GLsizei bufSize, G
     }
     const auto& attrib = object->attributes[index];
     if (size != nullptr) {
-        *size = 1;
+        *size = std::max<GLint>(attrib.arraySize, 1);
     }
     if (type != nullptr) {
         *type = attrib.type;
