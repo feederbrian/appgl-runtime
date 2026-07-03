@@ -100,6 +100,7 @@ struct GLRasterState {
     GLfloat polygonOffsetClamp = 0.0f;
     GLfloat lineWidth = 1.0f;
     GLfloat pointSize = 1.0f;
+    GLenum pointSpriteCoordOrigin = GL_UPPER_LEFT;
 };
 
 struct GLFixedFunctionFogState {
@@ -269,6 +270,7 @@ public:
     void setPolygonOffsetClamp(GLfloat factor, GLfloat units, GLfloat clamp);
     void setLineWidth(GLfloat width);
     void setPointSize(GLfloat size);
+    void setPointSpriteCoordOrigin(GLenum origin);
     void setProvokingVertexMode(GLenum mode);
     GLenum provokingVertexMode() const;
     void setHint(GLenum target, GLenum mode);

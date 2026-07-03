@@ -381,6 +381,11 @@ struct TranslatedDrawInfo {
     GLfloat polygonOffsetFactor = 0.0f;
     GLfloat polygonOffsetUnits = 0.0f;
     GLfloat polygonOffsetClamp = 0.0f;
+    // Fixed-function glPointSize snapshot. Normal translated VS MSL does not
+    // declare [[point_size]], so GL_POINTS draws splice this value into a
+    // draw-local MSL variant when the shader did not write gl_PointSize.
+    GLfloat fixedPointSize = 1.0f;
+    GLenum pointSpriteCoordOrigin = GL_UPPER_LEFT;
 
     // GL_RASTERIZER_DISCARD: when true, Metal pipeline has
     // rasterizationEnabled=NO — the VS runs for side effects (SSBO

@@ -5391,6 +5391,81 @@ static std::uint64_t finalizePipelineCacheKeyFromMslFnv(std::uint64_t mslFnv,
     return fnv;
 }
 
+static std::string translatedVertexMslWithFixedPointSize(
+    const std::string& vertexMSL,
+    float pointSize)
+{
+    if (vertexMSL.find("[[point_size]]") != std::string::npos) {
+        return std::string();
+    }
+    const std::size_t structPos = vertexMSL.find("struct main0_out");
+    if (structPos == std::string::npos) {
+        return std::string();
+    }
+    const std::size_t bodyBegin = vertexMSL.find('{', structPos);
+    if (bodyBegin == std::string::npos) {
+        return std::string();
+    }
+    const std::size_t bodyEnd = vertexMSL.find("};", bodyBegin);
+    if (bodyEnd == std::string::npos) {
+        return std::string();
+    }
+    const std::size_t entryPos = vertexMSL.find("vertex main0_out main0(", bodyEnd);
+    if (entryPos == std::string::npos) {
+        return std::string();
+    }
+    const std::size_t returnPos = vertexMSL.find("return out;", entryPos);
+    if (returnPos == std::string::npos) {
+        return std::string();
+    }
+    if (!std::isfinite(pointSize) || pointSize <= 0.0f) {
+        pointSize = 1.0f;
+    }
+    char pointSizeLiteral[64];
+    std::snprintf(pointSizeLiteral, sizeof(pointSizeLiteral), "%.9g",
+                  static_cast<double>(pointSize));
+
+    std::string rewritten = vertexMSL;
+    const std::string field = "    float gl_PointSize [[point_size]];\n";
+    rewritten.insert(bodyEnd, field);
+    const std::size_t adjustedEntryPos = entryPos + field.size();
+    const std::size_t adjustedReturnPos =
+        rewritten.find("return out;", adjustedEntryPos);
+    if (adjustedReturnPos == std::string::npos) {
+        return std::string();
+    }
+    std::string assignment = "    out.gl_PointSize = ";
+    assignment += pointSizeLiteral;
+    assignment += ";\n";
+    rewritten.insert(adjustedReturnPos, assignment);
+    return rewritten;
+}
+
+static std::string translatedFragmentMslWithLowerLeftPointCoord(
+    const std::string& fragmentMSL)
+{
+    if (fragmentMSL.find("[[point_coord]]") == std::string::npos ||
+        fragmentMSL.find("gl_PointCoord") == std::string::npos) {
+        return std::string();
+    }
+    const std::size_t fragmentPos = fragmentMSL.find("fragment ");
+    if (fragmentPos == std::string::npos) {
+        return std::string();
+    }
+    const std::size_t entryPos = fragmentMSL.find(" main0(", fragmentPos);
+    if (entryPos == std::string::npos) {
+        return std::string();
+    }
+    const std::size_t bodyBegin = fragmentMSL.find('{', entryPos);
+    if (bodyBegin == std::string::npos) {
+        return std::string();
+    }
+    std::string rewritten = fragmentMSL;
+    rewritten.insert(bodyBegin + 1,
+                     "\n    gl_PointCoord.y = 1.0 - gl_PointCoord.y;");
+    return rewritten;
+}
+
 // (mslContentSignature removed — superseded by the monotonic program-object
 //  serial in the memo identity: the content-sig was a probabilistic guard
 //  weak for SPIRV-Cross boilerplate; the serial is the absolute realloc guard.)
@@ -7295,6 +7370,18 @@ struct MetalFrameGraph::Impl {
             FG_TRACE(@"encodeTranslatedDraw: no vertex MSL, returning false");
             return false;
         }
+        std::string fixedPointSizeVertexMSL;
+        if (info.mode == GL_POINTS && info.fixedPointSize > 1.0f) {
+            fixedPointSizeVertexMSL =
+                translatedVertexMslWithFixedPointSize(*info.vertexMSL,
+                                                       info.fixedPointSize);
+            if (!fixedPointSizeVertexMSL.empty()) {
+                info.vertexMSL = &fixedPointSizeVertexMSL;
+                info.programMslVolatile = true;
+                info.metalVertexFunction = nullptr;
+                info.metalVertexFunctionOut = nullptr;
+            }
+        }
         // C52 rider: latched — getenv was paid per draw (Stage-A d3e62ea class).
         static const bool traceViewportLayerArrayEnv =
             std::getenv("APPGL_TRACE_VIEWPORT_LAYER_ARRAY") != nullptr;
@@ -7326,6 +7413,19 @@ struct MetalFrameGraph::Impl {
         if (!hasFragmentStage && !info.rasterizerDiscard) {
             FG_TRACE(@"encodeTranslatedDraw: no fragment MSL and raster enabled, returning false");
             return false;
+        }
+        std::string pointCoordFragmentMSL;
+        if (info.mode == GL_POINTS &&
+            info.pointSpriteCoordOrigin == GL_LOWER_LEFT &&
+            hasFragmentStage) {
+            pointCoordFragmentMSL =
+                translatedFragmentMslWithLowerLeftPointCoord(*info.fragmentMSL);
+            if (!pointCoordFragmentMSL.empty()) {
+                info.fragmentMSL = &pointCoordFragmentMSL;
+                info.programMslVolatile = true;
+                info.metalFragmentFunction = nullptr;
+                info.metalFragmentFunctionOut = nullptr;
+            }
         }
 
         // RC-A02: when an FBO render target is provided, use it instead of

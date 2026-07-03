@@ -3968,6 +3968,8 @@ static std::uint64_t phase2PlanBuildFixedStateSegmentHash(
     phase2PlanHashFloat(hash, tdi.polygonOffsetFactor);
     phase2PlanHashFloat(hash, tdi.polygonOffsetUnits);
     phase2PlanHashFloat(hash, tdi.polygonOffsetClamp);
+    phase2PlanHashFloat(hash, tdi.mode == GL_POINTS ? tdi.fixedPointSize : 1.0f);
+    phase2PlanHashU64(hash, tdi.mode == GL_POINTS ? tdi.pointSpriteCoordOrigin : GL_UPPER_LEFT);
     phase2PlanHashBool(hash, tdi.rasterizerDiscard);
     phase2PlanHashBool(hash, tdi.sampleShadingEnabled);
     phase2PlanHashFloat(hash, tdi.minSampleShading);
@@ -4028,6 +4030,8 @@ static std::uint64_t phase2PlanBuildFixedStateReferenceSegmentHash(
     phase2PlanHashFloat(hash, tdi.polygonOffsetFactor);
     phase2PlanHashFloat(hash, tdi.polygonOffsetUnits);
     phase2PlanHashFloat(hash, tdi.polygonOffsetClamp);
+    phase2PlanHashFloat(hash, tdi.mode == GL_POINTS ? tdi.fixedPointSize : 1.0f);
+    phase2PlanHashU64(hash, tdi.mode == GL_POINTS ? tdi.pointSpriteCoordOrigin : GL_UPPER_LEFT);
     phase2PlanHashBool(hash, tdi.rasterizerDiscard);
     phase2PlanHashBool(hash, tdi.sampleShadingEnabled);
     phase2PlanHashFloat(hash, tdi.minSampleShading);
@@ -42706,6 +42710,12 @@ static void populateTranslatedDrawFixedFunctionState(
     tdi.polygonOffsetFactor = state.rasterState().polygonOffsetFactor;
     tdi.polygonOffsetUnits = state.rasterState().polygonOffsetUnits;
     tdi.polygonOffsetClamp = state.rasterState().polygonOffsetClamp;
+    tdi.fixedPointSize = state.rasterState().pointSize;
+    if (!std::isfinite(tdi.fixedPointSize) || tdi.fixedPointSize <= 0.0f) {
+        tdi.fixedPointSize = 1.0f;
+    }
+    tdi.fixedPointSize = std::max<GLfloat>(1.0f, tdi.fixedPointSize);
+    tdi.pointSpriteCoordOrigin = state.rasterState().pointSpriteCoordOrigin;
 
     const auto& gl = state.blendState();
     tdi.blend.enabled = state.isEnabled(GL_BLEND);

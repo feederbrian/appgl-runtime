@@ -354,6 +354,15 @@ void GLContext::setPointSize(GLfloat size) {
     impl_->state->setPointSize(size);
 }
 
+bool GLContext::setPointSpriteCoordOrigin(GLenum origin) {
+    if (origin != GL_UPPER_LEFT && origin != GL_LOWER_LEFT) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    impl_->state->setPointSpriteCoordOrigin(origin);
+    return true;
+}
+
 bool GLContext::provokingVertex(GLenum mode) {
     if (mode != GL_FIRST_VERTEX_CONVENTION &&
         mode != GL_LAST_VERTEX_CONVENTION) {

@@ -932,23 +932,31 @@ static void APIENTRY glMultiDrawElements(GLenum mode, const GLsizei *count, GLen
 }
 
 static void APIENTRY glPointParameterf(GLenum pname, GLfloat param) {
-    (void)pname;
-    (void)param;
+    if (pname == GL_POINT_SPRITE_COORD_ORIGIN) {
+        if (auto* ctx = currentContextOrNull()) {
+            (void)ctx->setPointSpriteCoordOrigin(static_cast<GLenum>(static_cast<GLint>(param)));
+        }
+    }
 }
 
 static void APIENTRY glPointParameterfv(GLenum pname, const GLfloat *params) {
-    (void)pname;
-    (void)params;
+    if (pname == GL_POINT_SPRITE_COORD_ORIGIN && params != nullptr) {
+        glPointParameterf(pname, params[0]);
+    }
 }
 
 static void APIENTRY glPointParameteri(GLenum pname, GLint param) {
-    (void)pname;
-    (void)param;
+    if (pname == GL_POINT_SPRITE_COORD_ORIGIN) {
+        if (auto* ctx = currentContextOrNull()) {
+            (void)ctx->setPointSpriteCoordOrigin(static_cast<GLenum>(param));
+        }
+    }
 }
 
 static void APIENTRY glPointParameteriv(GLenum pname, const GLint *params) {
-    (void)pname;
-    (void)params;
+    if (pname == GL_POINT_SPRITE_COORD_ORIGIN && params != nullptr) {
+        glPointParameteri(pname, params[0]);
+    }
 }
 
 static void APIENTRY glGetVertexAttribdv(GLuint index, GLenum pname, GLdouble *params) {

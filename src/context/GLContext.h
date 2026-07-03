@@ -76,6 +76,7 @@ public:
     void setPolygonOffset(GLfloat factor, GLfloat units);
     void setLineWidth(GLfloat width);
     void setPointSize(GLfloat size);
+    bool setPointSpriteCoordOrigin(GLenum origin);
     bool provokingVertex(GLenum mode);
     void setHint(GLenum target, GLenum mode);
     void setShadeModel(GLenum mode);

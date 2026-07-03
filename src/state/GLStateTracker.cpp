@@ -296,6 +296,9 @@ bool queryValue(
         case GL_POINT_SIZE:
             writeScalar(out, raster.pointSize);
             return true;
+        case GL_POINT_SPRITE_COORD_ORIGIN:
+            writeScalar(out, raster.pointSpriteCoordOrigin);
+            return true;
         case GL_FRAGMENT_SHADER_DERIVATIVE_HINT:
         case GL_LINE_SMOOTH_HINT:
         case GL_POLYGON_SMOOTH_HINT:
@@ -1031,6 +1034,14 @@ void GLStateTracker::setLineWidth(GLfloat width) {
 
 void GLStateTracker::setPointSize(GLfloat size) {
     raster_.pointSize = size;
+    markDirty(DirtyBit::RasterState);
+}
+
+void GLStateTracker::setPointSpriteCoordOrigin(GLenum origin) {
+    if (raster_.pointSpriteCoordOrigin == origin) {
+        return;
+    }
+    raster_.pointSpriteCoordOrigin = origin;
     markDirty(DirtyBit::RasterState);
 }
 
