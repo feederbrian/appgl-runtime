@@ -17,6 +17,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -13350,7 +13351,8 @@ EmulatedDraw emulateGeometryDraw(
 
 std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
                                            bool layeredFbo,
-                                           bool viewportArrayBound) {
+                                           bool viewportArrayBound,
+                                           float fixedPointSize) {
     // Emit render_target_array_index only when both the GS wrote
     // gl_Layer AND the bound FBO is a layered attachment. On a
     // non-layered FBO, writing [[render_target_array_index]] with
@@ -13563,10 +13565,11 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     }
     // Metal point-output pipelines need [[point_size]] on the VS
     // output; without it, GL_POINTS tests render 0-sized / invisible
-    // points on Apple GPUs. Emit unconditionally at size 1.0 — the
-    // actual GS may have written gl_PointSize, but capturing that
-    // per vertex would require extra plumbing; for the rendering
-    // tests 1.0 matches the expected behaviour.
+    // points on Apple GPUs. If the GS did not write gl_PointSize, use
+    // the fixed-function GL point-size state captured at draw time.
+    if (!std::isfinite(fixedPointSize) || fixedPointSize <= 0.0f) {
+        fixedPointSize = 1.0f;
+    }
     if (draw.topology == GL_POINTS) {
         src += "    float gl_PointSize [[point_size]];\n";
     }
@@ -13655,7 +13658,7 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     src += "    out.gl_Position.z = (out.gl_Position.z + out.gl_Position.w) * 0.5;\n";
     if (draw.topology == GL_POINTS) {
         // If the GS captured a per-vertex gl_PointSize, feed it
-        // through; otherwise keep the historical default 1.0.
+        // through; otherwise use the fixed-function point-size state.
         // CTS `output.primite_end_done_for_single_primitive` writes
         // gl_PointSize = 2.0 from the GS and expects a 2×2-pixel
         // point at NDC (-1,-1) — the fixed 1.0 previously made the
@@ -13671,7 +13674,9 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
             src += std::to_string(psFloatOff);
             src += "];\n";
         } else {
-            src += "    out.gl_PointSize = 1.0;\n";
+            src += "    out.gl_PointSize = ";
+            src += std::to_string(fixedPointSize);
+            src += ";\n";
         }
     }
     for (std::size_t i = 0; i < slotWidths.size(); ++i) {

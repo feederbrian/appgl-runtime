@@ -775,7 +775,8 @@ bool runTcsForVertex(
 // GL 4.6 §9.4.1.
 std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
                                            bool layeredFbo = true,
-                                           bool viewportArrayBound = false);
+                                           bool viewportArrayBound = false,
+                                           float fixedPointSize = 1.0f);
 
 // Post-process the fragment shader MSL that SPIRV-Cross produced
 // for a GS-emulated program so it reads the GS-supplied

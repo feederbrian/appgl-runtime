@@ -1523,6 +1523,44 @@ bool GLContext::compileShader(GLuint shader) {
         }
     }
 
+    if (object->stage == GL_GEOMETRY_SHADER) {
+        GLint maxVertexStreams = 4;
+        GLint maxGeometryShaderInvocations = 32;
+        if (impl_->capabilities != nullptr) {
+            GLint queriedMaxVertexStreams = 0;
+            if (impl_->capabilities->queryInteger(
+                    GL_MAX_VERTEX_STREAMS, &queriedMaxVertexStreams) &&
+                queriedMaxVertexStreams > 0) {
+                maxVertexStreams = queriedMaxVertexStreams;
+            }
+            GLint queriedMaxGeometryShaderInvocations = 0;
+            if (impl_->capabilities->queryInteger(
+                    GL_MAX_GEOMETRY_SHADER_INVOCATIONS,
+                    &queriedMaxGeometryShaderInvocations) &&
+                queriedMaxGeometryShaderInvocations > 0) {
+                maxGeometryShaderInvocations =
+                    queriedMaxGeometryShaderInvocations;
+            }
+        }
+        maxVertexStreams = std::max<GLint>(maxVertexStreams, 4);
+        maxGeometryShaderInvocations =
+            std::max<GLint>(maxGeometryShaderInvocations, 32);
+        std::string validationError;
+        if (!validateGeometryShaderGpu5CompileLimits(
+                compileSource,
+                maxVertexStreams,
+                maxGeometryShaderInvocations,
+                validationError)) {
+            object->compileLog = std::move(validationError);
+            object->compiled = false;
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", object->compileLog, "", false
+            });
+            return true;
+        }
+    }
+
     // 2. Lightweight scanner pass. Still needed for declared attribute inputs
     //    so the vertex-input binding path (glBindAttribLocation /
     //    layout(location=...)) can be resolved without going through
@@ -1943,8 +1981,16 @@ bool GLContext::compileShader(GLuint shader) {
 
     ShaderTranslator translator;
     std::string compileLog;
+    std::string geometryGlslangCompileSource;
+    const std::string* glslangCompileSource = &compileSource;
+    if (object->stage == GL_GEOMETRY_SHADER &&
+        !geometryShaderSourceHasOutputLayoutForGlslang(compileSource)) {
+        geometryGlslangCompileSource =
+            injectDefaultGeometryOutputLayoutForGlslang(compileSource);
+        glslangCompileSource = &geometryGlslangCompileSource;
+    }
     std::vector<std::uint32_t> spirv =
-        translator.compileGLSL(compileSource, object->stage, 330, &compileLog);
+        translator.compileGLSL(*glslangCompileSource, object->stage, 330, &compileLog);
 
     object->compileLog = std::move(compileLog);
     if (spirv.empty()) {

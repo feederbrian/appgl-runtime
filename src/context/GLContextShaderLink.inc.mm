@@ -322,6 +322,30 @@ bool GLContext::linkProgram(GLuint program) {
         !attachedShaderObjects.empty() &&
         attachedShaderObjects.front()->isSpirvBinary;
 
+    if (geometryShader != nullptr && !linkedFromSpirvBinary) {
+        GLint maxVertexStreams = 4;
+        if (impl_->capabilities != nullptr) {
+            GLint queriedMaxVertexStreams = 0;
+            if (impl_->capabilities->queryInteger(
+                    GL_MAX_VERTEX_STREAMS, &queriedMaxVertexStreams) &&
+                queriedMaxVertexStreams > 0) {
+                maxVertexStreams = queriedMaxVertexStreams;
+            }
+        }
+        maxVertexStreams = std::max<GLint>(maxVertexStreams, 4);
+        std::string validationError;
+        if (!validateGeometryShaderGpu5LinkStreamCalls(
+                geometryShader->source, maxVertexStreams, validationError)) {
+            programObject->linkLog = std::move(validationError);
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            restorePriorExecutableForFailedRelink();
+            return false;
+        }
+    }
+
     {
         GLint maxAtomicBindings = 0;
         GLint maxAtomicBufferSize = 0;

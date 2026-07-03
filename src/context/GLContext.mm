@@ -38957,6 +38957,162 @@ bool parseLayoutIntegerQualifier(const std::string& prefix,
     return false;
 }
 
+bool layoutInnerHasToken(const std::string& inner, const char* token) {
+    std::size_t pos = 0;
+    while ((pos = inner.find(token, pos)) != std::string::npos) {
+        if (tokenAt(inner, pos, token)) {
+            return true;
+        }
+        ++pos;
+    }
+    return false;
+}
+
+bool parseFirstGlslCallIntegerArgument(
+    const std::string& source,
+    std::size_t functionPos,
+    const char* functionName,
+    const std::unordered_map<std::string, int>& defines,
+    int& value)
+{
+    std::size_t p = functionPos + std::strlen(functionName);
+    skipGlslWs(source, p);
+    if (p >= source.size() || source[p] != '(') {
+        return false;
+    }
+    const std::size_t close = findMatchingDelimiter(source, p, '(', ')');
+    if (close == std::string::npos) {
+        return false;
+    }
+    return parseGlslIntegerExpression(
+        std::string_view(source).substr(p + 1, close - p - 1),
+        defines,
+        value);
+}
+
+bool geometryShaderSourceHasOutputLayoutForGlslang(const std::string& source) {
+    const std::string clean = stripGlslCommentsForAppglValidation(source);
+    std::size_t layout = 0;
+    while ((layout = clean.find("layout", layout)) != std::string::npos) {
+        if (!tokenAt(clean, layout, "layout")) {
+            layout += 6;
+            continue;
+        }
+        std::size_t open = layout + 6;
+        skipGlslWs(clean, open);
+        if (open >= clean.size() || clean[open] != '(') {
+            layout += 6;
+            continue;
+        }
+        const std::size_t close = findMatchingDelimiter(clean, open, '(', ')');
+        if (close == std::string::npos) {
+            break;
+        }
+        std::size_t after = close + 1;
+        skipGlslWs(clean, after);
+        if (!tokenAt(clean, after, "out")) {
+            layout = close + 1;
+            continue;
+        }
+        const std::string inner = clean.substr(open + 1, close - open - 1);
+        if (layoutInnerHasToken(inner, "max_vertices") ||
+            layoutInnerHasToken(inner, "points") ||
+            layoutInnerHasToken(inner, "line_strip") ||
+            layoutInnerHasToken(inner, "triangle_strip")) {
+            return true;
+        }
+        layout = close + 1;
+    }
+    return false;
+}
+
+std::string injectDefaultGeometryOutputLayoutForGlslang(const std::string& source) {
+    if (geometryShaderSourceHasOutputLayoutForGlslang(source)) {
+        return source;
+    }
+    std::string injected = source;
+    injected.insert(shaderPreambleInsertOffset(injected),
+                    "layout(points, max_vertices = 1) out;\n");
+    return injected;
+}
+
+bool validateGeometryShaderGpu5CompileLimits(
+    const std::string& source,
+    GLint maxVertexStreams,
+    GLint maxGeometryShaderInvocations,
+    std::string& error)
+{
+    const std::string clean = stripGlslCommentsForAppglValidation(source);
+    const auto defines = parseGlslIntegerDefines(clean);
+    std::size_t layout = 0;
+    while ((layout = clean.find("layout", layout)) != std::string::npos) {
+        if (!tokenAt(clean, layout, "layout")) {
+            layout += 6;
+            continue;
+        }
+        std::size_t open = layout + 6;
+        skipGlslWs(clean, open);
+        if (open >= clean.size() || clean[open] != '(') {
+            layout += 6;
+            continue;
+        }
+        const std::size_t close = findMatchingDelimiter(clean, open, '(', ')');
+        if (close == std::string::npos) {
+            break;
+        }
+        const std::string layoutPrefix = clean.substr(layout, close + 1 - layout);
+        int streamValue = 0;
+        if (parseLayoutIntegerQualifier(
+                layoutPrefix, "stream", defines, streamValue)) {
+            if (streamValue < 0 || streamValue >= maxVertexStreams) {
+                error = "geometry shader layout(stream) qualifier exceeds "
+                        "GL_MAX_VERTEX_STREAMS";
+                return false;
+            }
+        }
+        int invocationValue = 0;
+        if (parseLayoutIntegerQualifier(
+                layoutPrefix, "invocations", defines, invocationValue)) {
+            if (invocationValue <= 0 ||
+                invocationValue > maxGeometryShaderInvocations) {
+                error = "geometry shader layout(invocations) qualifier exceeds "
+                        "GL_MAX_GEOMETRY_SHADER_INVOCATIONS";
+                return false;
+            }
+        }
+        layout = close + 1;
+    }
+    return true;
+}
+
+bool validateGeometryShaderGpu5LinkStreamCalls(
+    const std::string& source,
+    GLint maxVertexStreams,
+    std::string& error)
+{
+    const std::string clean = stripGlslCommentsForAppglValidation(source);
+    const auto defines = parseGlslIntegerDefines(clean);
+    for (const char* functionName : {"EmitStreamVertex", "EndStreamPrimitive"}) {
+        std::size_t pos = 0;
+        while ((pos = clean.find(functionName, pos)) != std::string::npos) {
+            if (!tokenAt(clean, pos, functionName)) {
+                ++pos;
+                continue;
+            }
+            int streamValue = 0;
+            if (parseFirstGlslCallIntegerArgument(
+                    clean, pos, functionName, defines, streamValue) &&
+                (streamValue < 0 || streamValue >= maxVertexStreams)) {
+                error = std::string(functionName) +
+                    " stream argument exceeds GL_MAX_VERTEX_STREAMS";
+                return false;
+            }
+            pos += std::strlen(functionName);
+        }
+    }
+    return true;
+}
+
 struct ComputeLocalSizeDecl {
     int x = 1;
     int y = 1;
@@ -45589,6 +45745,95 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     }
 
     appgl::EmulatedDraw replayDraw = ed;
+    auto filterGsRasterReplayToStreamZero = [](appgl::EmulatedDraw& draw) {
+        if (draw.vertexStreams.empty() ||
+            draw.vertexCount == 0 ||
+            draw.floatsPerVertex == 0) {
+            return;
+        }
+        bool hasNonZeroStream = false;
+        const std::size_t streamCount =
+            std::min(draw.vertexCount, draw.vertexStreams.size());
+        for (std::size_t i = 0; i < streamCount; ++i) {
+            if (draw.vertexStreams[i] != 0) {
+                hasNonZeroStream = true;
+                break;
+            }
+        }
+        if (!hasNonZeroStream) {
+            return;
+        }
+
+        std::size_t vertsPerPrimitive = 0;
+        switch (draw.topology) {
+            case GL_POINTS:    vertsPerPrimitive = 1; break;
+            case GL_LINES:     vertsPerPrimitive = 2; break;
+            case GL_TRIANGLES: vertsPerPrimitive = 3; break;
+            default:           vertsPerPrimitive = 1; break;
+        }
+
+        const std::size_t stride = draw.floatsPerVertex;
+        const bool haveDoublePayload =
+            !draw.expandedVertexDoubleData.empty() &&
+            draw.expandedVertexDoubleData.size() >= draw.vertexCount * stride;
+        std::vector<float> filteredFloats;
+        std::vector<double> filteredDoubles;
+        std::vector<std::uint32_t> filteredStreams;
+        filteredFloats.reserve(draw.expandedVertexData.size());
+        if (haveDoublePayload) {
+            filteredDoubles.reserve(draw.expandedVertexDoubleData.size());
+        }
+        filteredStreams.reserve(draw.vertexCount);
+
+        auto appendVertex = [&](std::size_t v) {
+            const std::size_t begin = v * stride;
+            if (begin + stride <= draw.expandedVertexData.size()) {
+                filteredFloats.insert(filteredFloats.end(),
+                                      draw.expandedVertexData.begin() + begin,
+                                      draw.expandedVertexData.begin() + begin + stride);
+            }
+            if (haveDoublePayload && begin + stride <= draw.expandedVertexDoubleData.size()) {
+                filteredDoubles.insert(filteredDoubles.end(),
+                                       draw.expandedVertexDoubleData.begin() + begin,
+                                       draw.expandedVertexDoubleData.begin() + begin + stride);
+            }
+            filteredStreams.push_back(0);
+        };
+
+        for (std::size_t base = 0;
+             base + vertsPerPrimitive <= draw.vertexCount;
+             base += vertsPerPrimitive) {
+            bool primitiveIsStreamZero = true;
+            for (std::size_t k = 0; k < vertsPerPrimitive; ++k) {
+                const std::size_t v = base + k;
+                const std::uint32_t stream =
+                    v < draw.vertexStreams.size() ? draw.vertexStreams[v] : 0u;
+                if (stream != 0) {
+                    primitiveIsStreamZero = false;
+                    break;
+                }
+            }
+            if (!primitiveIsStreamZero) {
+                continue;
+            }
+            for (std::size_t k = 0; k < vertsPerPrimitive; ++k) {
+                appendVertex(base + k);
+            }
+        }
+
+        draw.vertexCount = filteredStreams.size();
+        draw.expandedVertexData = std::move(filteredFloats);
+        draw.expandedVertexDoubleData = haveDoublePayload
+            ? std::move(filteredDoubles)
+            : std::vector<double>();
+        draw.vertexStreams = std::move(filteredStreams);
+        draw.streamVertexCounts = {};
+        draw.streamVertexCounts[0] = draw.vertexCount;
+    };
+    filterGsRasterReplayToStreamZero(replayDraw);
+    if (replayDraw.vertexCount == 0) {
+        return true;
+    }
     auto remapGsVaryingLocationsFromFragmentMSL =
         [](appgl::EmulatedDraw& draw,
            const std::string& fragmentMSL,
@@ -45837,8 +46082,13 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     // draw). Matching reflection + attribute layout built from the
     // same `ed` so Metal's vertex descriptor picks the right formats.
     if (program.gsPassThroughVertexMSL.empty()) {
+        GLfloat fixedPointSize = 1.0f;
+        if (state != nullptr) {
+            fixedPointSize = std::max<GLfloat>(
+                1.0f, state->rasterState().pointSize);
+        }
         program.gsPassThroughVertexMSL = appgl::synthesisePassThroughVertexMSL(
-            replayDraw, routeLayer, routeViewportIndex);
+            replayDraw, routeLayer, routeViewportIndex, fixedPointSize);
         // S25 state_resolve lever: VS MSL content (re)synthesised in place —
         // drop any stale MSL-FNV memo entry referencing it (defense-in-depth
         // beyond the {ptr,size,data} identity self-heal).
