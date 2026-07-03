@@ -124,6 +124,12 @@ bool GLContext::vertexAttribPointer(
             return false;
         }
     }
+    if ((type == GL_INT_2_10_10_10_REV ||
+         type == GL_UNSIGNED_INT_2_10_10_10_REV) &&
+        size != 4) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     // GL 4.6 §10.3 technically requires a user-bound VAO for
     // glVertexAttribPointer, but real drivers (NVIDIA, AMD, Mesa)
     // fall back to an implicit "default VAO" — same accommodation

@@ -2518,58 +2518,70 @@ static GLint APIENTRY glGetFragDataIndex(GLuint program, const GLchar *name) {
     return -1;
 }
 
+static bool validateVertexAttribPType(const char* functionName, GLenum type) {
+    if (type == GL_INT_2_10_10_10_REV ||
+        type == GL_UNSIGNED_INT_2_10_10_10_REV) {
+        return true;
+    }
+    if (auto* ctx = currentContextOrNull()) {
+        ctx->pushError(GL_INVALID_ENUM, functionName,
+                       "type must be GL_INT_2_10_10_10_REV or GL_UNSIGNED_INT_2_10_10_10_REV");
+    }
+    return false;
+}
+
 static void APIENTRY glVertexAttribP1ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) {
+    if (!validateVertexAttribPType("glVertexAttribP1ui", type)) return;
     (void)index;
-    (void)type;
     (void)normalized;
     (void)value;
 }
 
 static void APIENTRY glVertexAttribP1uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint *value) {
+    if (!validateVertexAttribPType("glVertexAttribP1uiv", type)) return;
     (void)index;
-    (void)type;
     (void)normalized;
     (void)value;
 }
 
 static void APIENTRY glVertexAttribP2ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) {
+    if (!validateVertexAttribPType("glVertexAttribP2ui", type)) return;
     (void)index;
-    (void)type;
     (void)normalized;
     (void)value;
 }
 
 static void APIENTRY glVertexAttribP2uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint *value) {
+    if (!validateVertexAttribPType("glVertexAttribP2uiv", type)) return;
     (void)index;
-    (void)type;
     (void)normalized;
     (void)value;
 }
 
 static void APIENTRY glVertexAttribP3ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) {
+    if (!validateVertexAttribPType("glVertexAttribP3ui", type)) return;
     (void)index;
-    (void)type;
     (void)normalized;
     (void)value;
 }
 
 static void APIENTRY glVertexAttribP3uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint *value) {
+    if (!validateVertexAttribPType("glVertexAttribP3uiv", type)) return;
     (void)index;
-    (void)type;
     (void)normalized;
     (void)value;
 }
 
 static void APIENTRY glVertexAttribP4ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) {
+    if (!validateVertexAttribPType("glVertexAttribP4ui", type)) return;
     (void)index;
-    (void)type;
     (void)normalized;
     (void)value;
 }
 
 static void APIENTRY glVertexAttribP4uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint *value) {
+    if (!validateVertexAttribPType("glVertexAttribP4uiv", type)) return;
     (void)index;
-    (void)type;
     (void)normalized;
     (void)value;
 }
