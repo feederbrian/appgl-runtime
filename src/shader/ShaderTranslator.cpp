@@ -27,6 +27,10 @@
 namespace appgl {
 namespace {
 
+bool findMatchingParen(const std::string& text,
+                       std::size_t open,
+                       std::size_t& close);
+
 std::once_flag g_glslangInitFlag;
 constexpr std::uint32_t kDefaultUniformSyntheticBinding = 1024u;
 constexpr std::uint32_t kFragCoordParamsBufferSlot = 15u;
@@ -1317,6 +1321,51 @@ bool rewriteFragmentSamplePositionYForGL(std::string& msl) {
         msl.replace(pos, std::strlen(kSamplePositionDecl), kSamplePositionYFlip);
         pos += std::strlen(kSamplePositionYFlip);
         rewritten = true;
+    }
+    return rewritten;
+}
+
+bool rewriteFragmentInterpolateAtOffsetYForGL(std::string& msl) {
+    static constexpr const char* kCallNeedle = ".interpolate_at_offset(";
+    static constexpr const char* kHelperName =
+        "appgl_gl_to_metal_interpolate_offset";
+    static constexpr const char* kUsingAnchor = "using namespace metal;\n";
+    static constexpr const char* kHelper =
+        "\nstatic inline float2 appgl_gl_to_metal_interpolate_offset(float2 p)\n"
+        "{\n"
+        "    return float2(p.x, 1.0f - p.y);\n"
+        "}\n";
+
+    bool rewritten = false;
+    std::size_t pos = 0;
+    while ((pos = msl.find(kCallNeedle, pos)) != std::string::npos) {
+        const std::size_t open = pos + std::strlen(kCallNeedle) - 1u;
+        std::size_t close = std::string::npos;
+        if (!findMatchingParen(msl, open, close)) {
+            pos += std::strlen(kCallNeedle);
+            continue;
+        }
+        const std::string arg = msl.substr(open + 1u, close - open - 1u);
+        if (arg.find(kHelperName) != std::string::npos) {
+            pos = close + 1u;
+            continue;
+        }
+        const std::string replacement =
+            std::string(kHelperName) + "(" + arg + ")";
+        msl.replace(open + 1u, close - open - 1u, replacement);
+        pos = open + 1u + replacement.size();
+        rewritten = true;
+    }
+
+    if (rewritten &&
+        msl.find("static inline float2 appgl_gl_to_metal_interpolate_offset") ==
+            std::string::npos) {
+        const std::size_t usingPos = msl.find(kUsingAnchor);
+        if (usingPos != std::string::npos) {
+            msl.insert(usingPos + std::strlen(kUsingAnchor), kHelper);
+        } else {
+            msl.insert(0, kHelper);
+        }
     }
     return rewritten;
 }
@@ -7709,6 +7758,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 (void)injectDepthCompareFlip(msl);
             }
             (void)rewriteFragmentSamplePositionYForGL(msl);
+            (void)rewriteFragmentInterpolateAtOffsetYForGL(msl);
         }
 
         // SSBO block arrays are lowered through argument buffers when
