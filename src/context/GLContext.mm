@@ -2778,6 +2778,24 @@ static void assignTranslatedDrawProgramMsl(TranslatedDrawInfo& tdi,
                                            const GLProgramObject& program) {
     tdi.vertexMSL = &program.vertexMSL;
     tdi.fragmentMSL = &program.fragmentMSL;
+    tdi.fragmentOutputLocationCount = 0;
+    for (const auto& output : program.resourceOutputs) {
+        if (output.location < 0 || output.location >= 8) {
+            continue;
+        }
+        if (output.locationIndex > 0) {
+            continue;
+        }
+        if (tdi.fragmentOutputLocationCount >= tdi.fragmentOutputLocations.size()) {
+            break;
+        }
+        auto& entry =
+            tdi.fragmentOutputLocations[tdi.fragmentOutputLocationCount++];
+        entry.name = output.name;
+        entry.type = output.type;
+        entry.location = output.location;
+        entry.locationIndex = output.locationIndex;
+    }
     // S25 state_resolve memo: the program's monotonic serial (absolute realloc
     // guard for the MSL-FNV memo identity); 0 → memo fail-safe.
     tdi.programObjectSerial = program.objectSerial;

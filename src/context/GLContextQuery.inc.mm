@@ -1,6 +1,10 @@
 // This file is textually included by GLContext.mm. Do not compile it directly.
 // It contains GLContext query-domain method definitions split out for navigation only.
 
+#ifndef GL_RGBA_INTEGER_MODE_EXT
+#define GL_RGBA_INTEGER_MODE_EXT 0x8D9E
+#endif
+
 #if defined(APPGL_GLCONTEXT_QUERY_INDEXED)
 namespace {
 GLenum indexedBufferQueryLimitPname(GLenum target) {
@@ -209,6 +213,35 @@ bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
         *data = GL_FALSE;
         return true;
     }
+    if (pname == GL_RGBA_INTEGER_MODE_EXT) {
+        bool integerMode = false;
+        const GLuint framebufferName = impl_->state->boundDrawFramebuffer();
+        if (framebufferName != 0) {
+            if (const GLFramebufferObject* framebuffer =
+                    impl_->objects->framebuffers().get(framebufferName)) {
+                for (GLenum drawBuffer : framebuffer->drawBuffers) {
+                    if (drawBuffer == GL_NONE) {
+                        continue;
+                    }
+                    const GLFramebufferAttachment* attachment =
+                        impl_->framebufferAttachment(*framebuffer, drawBuffer);
+                    if (attachment == nullptr) {
+                        continue;
+                    }
+                    const auto info =
+                        impl_->framebufferAttachmentInfo(*attachment);
+                    if (info.complete &&
+                        GLContext::Impl::isIntegerInternalFormat(
+                            info.internalFormat)) {
+                        integerMode = true;
+                        break;
+                    }
+                }
+            }
+        }
+        *data = integerMode ? GL_TRUE : GL_FALSE;
+        return true;
+    }
     bool fragmentShadingRateHandled = false;
     if (!queryFragmentShadingRateBoolean(*this, pname, data, fragmentShadingRateHandled)) {
         return false;
@@ -351,6 +384,35 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
         *data = impl_->state->boundReadFramebuffer() == 0
             ? impl_->defaultFramebufferSampleCount()
             : 0;
+        return true;
+    }
+    if (pname == GL_RGBA_INTEGER_MODE_EXT) {
+        bool integerMode = false;
+        const GLuint framebufferName = impl_->state->boundDrawFramebuffer();
+        if (framebufferName != 0) {
+            if (const GLFramebufferObject* framebuffer =
+                    impl_->objects->framebuffers().get(framebufferName)) {
+                for (GLenum drawBuffer : framebuffer->drawBuffers) {
+                    if (drawBuffer == GL_NONE) {
+                        continue;
+                    }
+                    const GLFramebufferAttachment* attachment =
+                        impl_->framebufferAttachment(*framebuffer, drawBuffer);
+                    if (attachment == nullptr) {
+                        continue;
+                    }
+                    const auto info =
+                        impl_->framebufferAttachmentInfo(*attachment);
+                    if (info.complete &&
+                        GLContext::Impl::isIntegerInternalFormat(
+                            info.internalFormat)) {
+                        integerMode = true;
+                        break;
+                    }
+                }
+            }
+        }
+        *data = integerMode ? GL_TRUE : GL_FALSE;
         return true;
     }
     if (pname == GL_DEPTH_BITS || pname == GL_STENCIL_BITS) {

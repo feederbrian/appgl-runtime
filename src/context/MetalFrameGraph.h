@@ -636,6 +636,15 @@ struct TranslatedDrawInfo {
     const ShaderReflection* vertexReflection = nullptr;
     const ShaderReflection* fragmentReflection = nullptr;
 
+    struct FragmentOutputLocation {
+        std::string name;
+        GLenum type = 0;
+        GLint location = -1;
+        GLint locationIndex = 0;
+    };
+    std::array<FragmentOutputLocation, 8> fragmentOutputLocations = {};
+    std::uint32_t fragmentOutputLocationCount = 0;
+
     // Pipeline state cache (stored on GLProgramObject, updated by MetalFrameGraph).
     void** pipelineStateOut = nullptr;
     std::uint32_t* pipelineColorFormatOut = nullptr;

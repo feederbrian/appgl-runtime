@@ -5162,6 +5162,267 @@ static bool isIntegerColorFormat(MTLPixelFormat fmt) {
     }
 }
 
+static bool isUnsignedIntegerColorFormat(MTLPixelFormat fmt) {
+    switch (fmt) {
+        case MTLPixelFormatR8Uint:
+        case MTLPixelFormatR16Uint:
+        case MTLPixelFormatR32Uint:
+        case MTLPixelFormatRG8Uint:
+        case MTLPixelFormatRG16Uint:
+        case MTLPixelFormatRG32Uint:
+        case MTLPixelFormatRGBA8Uint:
+        case MTLPixelFormatRGBA16Uint:
+        case MTLPixelFormatRGBA32Uint:
+        case MTLPixelFormatRGB10A2Uint:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool isSignedIntegerColorFormat(MTLPixelFormat fmt) {
+    return isIntegerColorFormat(fmt) && !isUnsignedIntegerColorFormat(fmt);
+}
+
+static std::string stripBracketZeroSuffix(std::string name) {
+    if (name.size() >= 3 &&
+        name.compare(name.size() - 3, 3, "[0]") == 0) {
+        name.resize(name.size() - 3);
+    }
+    return name;
+}
+
+static const TranslatedDrawInfo::FragmentOutputLocation*
+findFragmentOutputLocation(const TranslatedDrawInfo& info,
+                           const std::string& name) {
+    const std::string baseName = stripBracketZeroSuffix(name);
+    for (std::uint32_t i = 0;
+         i < info.fragmentOutputLocationCount &&
+         i < info.fragmentOutputLocations.size();
+         ++i) {
+        const auto& entry = info.fragmentOutputLocations[i];
+        if (entry.location < 0 || entry.location >= 8 ||
+            entry.locationIndex > 0) {
+            continue;
+        }
+        if (entry.name == name ||
+            stripBracketZeroSuffix(entry.name) == baseName) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+static bool parseMslColorOutputField(const std::string& text,
+                                     std::size_t cursor,
+                                     std::size_t semi,
+                                     std::string& type,
+                                     std::size_t& typeBegin,
+                                     std::size_t& typeEnd,
+                                     std::string& name,
+                                     std::size_t& locBegin,
+                                     std::size_t& locEnd,
+                                     std::uint32_t& loc) {
+    const std::size_t colorPos = text.find("[[color(", cursor);
+    if (colorPos == std::string::npos || colorPos > semi) {
+        return false;
+    }
+    locBegin = colorPos + std::strlen("[[color(");
+    locEnd = locBegin;
+    while (locEnd < text.size() &&
+           std::isdigit(static_cast<unsigned char>(text[locEnd]))) {
+        ++locEnd;
+    }
+    if (locEnd == locBegin) {
+        return false;
+    }
+
+    std::size_t nameEnd = colorPos;
+    while (nameEnd > cursor &&
+           std::isspace(static_cast<unsigned char>(text[nameEnd - 1]))) {
+        --nameEnd;
+    }
+    std::size_t nameBegin = nameEnd;
+    while (nameBegin > cursor) {
+        const unsigned char ch =
+            static_cast<unsigned char>(text[nameBegin - 1]);
+        if (!(std::isalnum(ch) || ch == '_')) {
+            break;
+        }
+        --nameBegin;
+    }
+    if (nameBegin == nameEnd) {
+        return false;
+    }
+
+    typeEnd = nameBegin;
+    while (typeEnd > cursor &&
+           std::isspace(static_cast<unsigned char>(text[typeEnd - 1]))) {
+        --typeEnd;
+    }
+    typeBegin = typeEnd;
+    while (typeBegin > cursor) {
+        const unsigned char ch =
+            static_cast<unsigned char>(text[typeBegin - 1]);
+        if (!(std::isalnum(ch) || ch == '_')) {
+            break;
+        }
+        --typeBegin;
+    }
+    if (typeBegin == typeEnd) {
+        return false;
+    }
+
+    type = text.substr(typeBegin, typeEnd - typeBegin);
+    name = text.substr(nameBegin, nameEnd - nameBegin);
+    loc = static_cast<std::uint32_t>(
+        std::strtoul(text.c_str() + locBegin, nullptr, 10));
+    return true;
+}
+
+static const char* integerVectorTypeForTarget(const std::string& currentType,
+                                              MTLPixelFormat targetFormat) {
+    const bool wantsUnsigned = isUnsignedIntegerColorFormat(targetFormat);
+    const bool wantsSigned = isSignedIntegerColorFormat(targetFormat);
+    if (!wantsUnsigned && !wantsSigned) {
+        return nullptr;
+    }
+    if (wantsUnsigned) {
+        if (currentType == "int") return "uint";
+        if (currentType == "int2") return "uint2";
+        if (currentType == "int3") return "uint3";
+        if (currentType == "int4") return "uint4";
+    } else {
+        if (currentType == "uint") return "int";
+        if (currentType == "uint2") return "int2";
+        if (currentType == "uint3") return "int3";
+        if (currentType == "uint4") return "int4";
+    }
+    return nullptr;
+}
+
+static bool wrapMslOutputAssignments(std::string& msl,
+                                     const std::string& outputName,
+                                     const std::string& constructorName) {
+    bool changed = false;
+    const std::string needle = "out." + outputName + " =";
+    std::size_t pos = 0;
+    while ((pos = msl.find(needle, pos)) != std::string::npos) {
+        std::size_t exprBegin = pos + needle.size();
+        while (exprBegin < msl.size() &&
+               std::isspace(static_cast<unsigned char>(msl[exprBegin]))) {
+            ++exprBegin;
+        }
+        const std::size_t semi = msl.find(';', exprBegin);
+        if (semi == std::string::npos) {
+            break;
+        }
+        if (msl.compare(exprBegin, constructorName.size(),
+                        constructorName) == 0 &&
+            exprBegin + constructorName.size() < msl.size() &&
+            msl[exprBegin + constructorName.size()] == '(') {
+            pos = semi + 1;
+            continue;
+        }
+        const std::string expr = msl.substr(exprBegin, semi - exprBegin);
+        const std::string replacement =
+            constructorName + "(" + expr + ")";
+        msl.replace(exprBegin, semi - exprBegin, replacement);
+        pos = exprBegin + replacement.size();
+        changed = true;
+    }
+    return changed;
+}
+
+static bool rewriteFragmentMSLForColorOutputABI(
+    std::string& msl,
+    const TranslatedDrawInfo& info,
+    const std::array<MTLPixelFormat, 8>& colorFormats) {
+    const std::size_t structPos = msl.find("struct main0_out");
+    if (structPos == std::string::npos) {
+        return false;
+    }
+    const std::size_t bodyBegin = msl.find('{', structPos);
+    std::size_t bodyEnd = msl.find("};", bodyBegin);
+    if (bodyBegin == std::string::npos || bodyEnd == std::string::npos) {
+        return false;
+    }
+
+    struct OutputCast {
+        std::string name;
+        std::string constructorName;
+    };
+    std::vector<OutputCast> outputCasts;
+    bool changed = false;
+
+    std::size_t cursor = bodyBegin + 1;
+    while (cursor < bodyEnd) {
+        std::size_t semi = msl.find(';', cursor);
+        if (semi == std::string::npos || semi > bodyEnd) {
+            break;
+        }
+
+        std::string fieldType;
+        std::size_t typeBegin = 0;
+        std::size_t typeEnd = 0;
+        std::string fieldName;
+        std::size_t locBegin = 0;
+        std::size_t locEnd = 0;
+        std::uint32_t loc = 0;
+        if (!parseMslColorOutputField(msl, cursor, semi,
+                                      fieldType, typeBegin, typeEnd,
+                                      fieldName, locBegin, locEnd, loc)) {
+            cursor = semi + 1;
+            continue;
+        }
+
+        if (const auto* linkedOutput =
+                findFragmentOutputLocation(info, fieldName)) {
+            const auto newLoc =
+                static_cast<std::uint32_t>(linkedOutput->location);
+            if (newLoc < colorFormats.size() && newLoc != loc) {
+                const std::string replacement = std::to_string(newLoc);
+                msl.replace(locBegin, locEnd - locBegin, replacement);
+                const std::ptrdiff_t delta =
+                    static_cast<std::ptrdiff_t>(replacement.size()) -
+                    static_cast<std::ptrdiff_t>(locEnd - locBegin);
+                semi = static_cast<std::size_t>(
+                    static_cast<std::ptrdiff_t>(semi) + delta);
+                bodyEnd = static_cast<std::size_t>(
+                    static_cast<std::ptrdiff_t>(bodyEnd) + delta);
+                loc = newLoc;
+                changed = true;
+            }
+        }
+
+        if (loc < colorFormats.size()) {
+            const char* targetType =
+                integerVectorTypeForTarget(fieldType, colorFormats[loc]);
+            if (targetType != nullptr) {
+                const std::string replacement = targetType;
+                msl.replace(typeBegin, typeEnd - typeBegin, replacement);
+                const std::ptrdiff_t delta =
+                    static_cast<std::ptrdiff_t>(replacement.size()) -
+                    static_cast<std::ptrdiff_t>(typeEnd - typeBegin);
+                semi = static_cast<std::size_t>(
+                    static_cast<std::ptrdiff_t>(semi) + delta);
+                bodyEnd = static_cast<std::size_t>(
+                    static_cast<std::ptrdiff_t>(bodyEnd) + delta);
+                outputCasts.push_back({fieldName, replacement});
+                changed = true;
+            }
+        }
+
+        cursor = semi + 1;
+    }
+
+    for (const auto& cast : outputCasts) {
+        changed |= wrapMslOutputAssignments(
+            msl, cast.name, cast.constructorName);
+    }
+    return changed;
+}
+
 // Phase 8X Group 4d follow-up¹⁴ — pipeline cache key. A 64-bit hash
 // of the state tuple that drives pipeline creation. The key includes
 // the shader MSL because separable-program pipelines can splice
@@ -5288,6 +5549,14 @@ static std::uint64_t computePipelineCacheKeyPrefix(
         for (const auto& l : evb.attributes) {
             hashLayout(l);
         }
+    }
+    for (void* rawTex : info.fboAdditionalColorTextures) {
+        if (rawTex == nullptr) {
+            mix(0u);
+            continue;
+        }
+        id<MTLTexture> extraTex = (__bridge id<MTLTexture>)rawTex;
+        mix(static_cast<std::uint32_t>(extraTex.pixelFormat));
     }
     key |= static_cast<std::uint64_t>(hash & 0x0FFFFFFFu);  // 28 bits (bit 28 = rasterizerDiscard)
     return key;
@@ -7528,6 +7797,37 @@ struct MetalFrameGraph::Impl {
         const MTLPixelFormat colorFormat = colorTexture != nil
             ? colorTexture.pixelFormat
             : MTLPixelFormatBGRA8Unorm;
+        std::array<MTLPixelFormat, 8> drawColorFormats = {};
+        drawColorFormats.fill(MTLPixelFormatInvalid);
+        drawColorFormats[0] = colorFormat;
+        bool hasAdditionalColorTargets = false;
+        for (std::size_t ei = 0; ei < info.fboAdditionalColorTextures.size(); ++ei) {
+            void* rawTex = info.fboAdditionalColorTextures[ei];
+            if (rawTex == nullptr) {
+                continue;
+            }
+            hasAdditionalColorTargets = true;
+            id<MTLTexture> extraTex = (__bridge id<MTLTexture>)rawTex;
+            drawColorFormats[ei + 1] = extraTex.pixelFormat;
+        }
+        std::string colorOutputAbiFragmentMSL;
+        bool fragmentOutputAbiRewritten = false;
+        if (hasFragmentStage) {
+            colorOutputAbiFragmentMSL = *info.fragmentMSL;
+            fragmentOutputAbiRewritten =
+                rewriteFragmentMSLForColorOutputABI(
+                    colorOutputAbiFragmentMSL, info, drawColorFormats);
+            if (fragmentOutputAbiRewritten) {
+                info.fragmentMSL = &colorOutputAbiFragmentMSL;
+                info.programMslVolatile = true;
+                info.mslPredicateCacheValid = false;
+                info.fragmentMslUsesArgumentBuffer =
+                    colorOutputAbiFragmentMSL.find(
+                        "spvDescriptorSetBuffer") != std::string::npos;
+                info.metalFragmentFunction = nullptr;
+                info.metalFragmentFunctionOut = nullptr;
+            }
+        }
 
         // Phase 8X Group 4d follow-up¹⁴ — map-based cache lookup.
         // The cache key encodes (colorFormat, blend tuple, per-
@@ -7616,6 +7916,10 @@ struct MetalFrameGraph::Impl {
         if (translatedPlan != nullptr) {
             if (!translatedPlan->valid) {
                 rejectTranslatedPlan("invalid");
+            } else if (fragmentOutputAbiRewritten) {
+                rejectTranslatedPlan("fragment_output_abi");
+            } else if (hasAdditionalColorTargets) {
+                rejectTranslatedPlan("mrt_extra_color");
             } else if (forceArgBufEnv) {
                 rejectTranslatedPlan("argbuf_env");
             } else if (translatedPlan->colorFormat !=
