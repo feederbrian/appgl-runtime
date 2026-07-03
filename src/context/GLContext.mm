@@ -6446,7 +6446,11 @@ bool isDefaultFramebufferBuffer(GLenum buffer) {
         || buffer == GL_BACK
         || buffer == GL_FRONT_AND_BACK
         || buffer == GL_FRONT_LEFT
-        || buffer == GL_BACK_LEFT;
+        || buffer == GL_FRONT_RIGHT
+        || buffer == GL_BACK_LEFT
+        || buffer == GL_BACK_RIGHT
+        || buffer == GL_LEFT
+        || buffer == GL_RIGHT;
 }
 
 bool isTexture3DRGTCFormat(GLenum internalFormat) {

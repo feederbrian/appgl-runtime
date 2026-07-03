@@ -1734,12 +1734,25 @@ static const GLubyte * APIENTRY glGetStringi(GLenum name, GLuint index) {
         }
         return nullptr;
     }
+    if (name == GL_SHADING_LANGUAGE_VERSION) {
+        auto* ctx = currentContextOrNull();
+        if (index == 0) {
+            return ctx != nullptr ? ctx->getString(GL_SHADING_LANGUAGE_VERSION) : nullptr;
+        }
+        if (ctx) ctx->pushError(GL_INVALID_VALUE, "glGetStringi",
+                                "index exceeds GL_NUM_SHADING_LANGUAGE_VERSIONS");
+        return nullptr;
+    }
     if (name == GL_SPIR_V_EXTENSIONS) {
         // No SPIR-V extensions exposed; any index is out of range.
         auto* ctx = currentContextOrNull();
         if (ctx) ctx->pushError(GL_INVALID_VALUE, "glGetStringi",
                                 "index exceeds GL_NUM_SPIR_V_EXTENSIONS");
         return nullptr;
+    }
+    if (auto* ctx = currentContextOrNull()) {
+        ctx->pushError(GL_INVALID_ENUM, "glGetStringi",
+                       "name is not GL_EXTENSIONS, GL_SHADING_LANGUAGE_VERSION, or GL_SPIR_V_EXTENSIONS");
     }
     return nullptr;
 }

@@ -314,9 +314,6 @@ bool isLegacyClientArrayCap(GLenum cap) {
 }
 
 bool isValidEnableCap(GLenum cap) {
-    if (isLegacyClientArrayCap(cap)) {
-        return true;
-    }
     if (cap >= GL_LIGHT0 && cap <= GL_LIGHT7) {
         return true;
     }
@@ -7153,11 +7150,6 @@ void APIENTRY glEnable(GLenum cap) {
     if (context == nullptr) {
         return;
     }
-    if (isLegacyClientArrayCap(cap)) {
-        (void)context->setLegacyClientArrayEnabled(cap, true);
-        Runtime::shared().recordBootstrapTrace("glEnable(" + std::to_string(cap) + ") -> legacy client array");
-        return;
-    }
     if (isCompatNoOpEnableCap(cap)) {
         // Compat-profile no-op: trace the call so diagnostics can show
         // the legacy probe but don't push an error or update state.
@@ -7186,11 +7178,6 @@ void APIENTRY glEnable(GLenum cap) {
 void APIENTRY glDisable(GLenum cap) {
     auto* context = requireCurrentContext("glDisable");
     if (context == nullptr) {
-        return;
-    }
-    if (isLegacyClientArrayCap(cap)) {
-        (void)context->setLegacyClientArrayEnabled(cap, false);
-        Runtime::shared().recordBootstrapTrace("glDisable(" + std::to_string(cap) + ") -> legacy client array");
         return;
     }
     if (isCompatNoOpEnableCap(cap)) {

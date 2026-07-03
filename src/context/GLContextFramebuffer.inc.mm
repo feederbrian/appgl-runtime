@@ -1226,7 +1226,18 @@ bool GLContext::readBuffer(GLenum buffer) {
         // INVALID_OPERATION when the enum is recognised but
         // inappropriate for the target, INVALID_ENUM when unrecognised.
         if (isDefaultFramebufferBuffer(buffer)) {
-            return impl_->state->setReadBuffer(buffer);
+            switch (buffer) {
+                case GL_FRONT_LEFT:
+                case GL_BACK_LEFT:
+                case GL_FRONT:
+                case GL_BACK:
+                case GL_LEFT:
+                case GL_NONE:
+                    return impl_->state->setReadBuffer(buffer);
+                default:
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+            }
         }
         if (isColorAttachmentEnum(buffer)) {
             pushError(GL_INVALID_OPERATION);
@@ -1334,7 +1345,11 @@ bool GLContext::getFramebufferParameteriv(GLenum target, GLenum pname, GLint* pa
     const bool isDefaultFb = (fbName == 0);
     if (isDefaultFb) {
         switch (pname) {
-            case GL_DOUBLEBUFFER:                     *params = GL_TRUE;  return true;
+            case GL_DOUBLEBUFFER:
+            case GL_STEREO:
+                *params = 0;
+                pushError(GL_INVALID_ENUM);
+                return false;
             case GL_IMPLEMENTATION_COLOR_READ_FORMAT: *params = GL_RGBA;  return true;
             case GL_IMPLEMENTATION_COLOR_READ_TYPE:   *params = GL_UNSIGNED_BYTE; return true;
             case GL_SAMPLES:
@@ -1343,7 +1358,6 @@ bool GLContext::getFramebufferParameteriv(GLenum target, GLenum pname, GLint* pa
             case GL_SAMPLE_BUFFERS:
                 *params = impl_->defaultFramebufferSampleBuffers();
                 return true;
-            case GL_STEREO:                           *params = GL_FALSE; return true;
             default:
                 // Wrong pname class for the default FB (e.g. one of the
                 // FRAMEBUFFER_DEFAULT_* user-FB pnames). Spec says this
@@ -1376,12 +1390,15 @@ bool GLContext::getFramebufferParameteriv(GLenum target, GLenum pname, GLint* pa
         case GL_FRAMEBUFFER_DEFAULT_FIXED_SAMPLE_LOCATIONS:
             *params = (fb != nullptr) ? (GLint)fb->defaultFixedSampleLocations : GL_TRUE;
             return true;
-        case GL_DOUBLEBUFFER:                    *params = GL_TRUE;  return true;
         case GL_IMPLEMENTATION_COLOR_READ_FORMAT: *params = GL_RGBA;         return true;
         case GL_IMPLEMENTATION_COLOR_READ_TYPE:   *params = GL_UNSIGNED_BYTE; return true;
         case GL_SAMPLES:                          *params = 0;               return true;
         case GL_SAMPLE_BUFFERS:                   *params = 0;               return true;
-        case GL_STEREO:                           *params = GL_FALSE;        return true;
+        case GL_DOUBLEBUFFER:
+        case GL_STEREO:
+            *params = 0;
+            pushError(GL_INVALID_ENUM);
+            return false;
         default:
             pushError(GL_INVALID_ENUM);
             return false;

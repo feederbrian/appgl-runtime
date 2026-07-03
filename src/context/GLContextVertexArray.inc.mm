@@ -113,6 +113,17 @@ bool GLContext::vertexAttribPointer(
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    if (stride > 0) {
+        GLint64 maxStride = 2048;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger64(
+                GL_MAX_VERTEX_ATTRIB_STRIDE, &maxStride);
+        }
+        if (stride > static_cast<GLsizei>(maxStride)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
     // GL 4.6 §10.3 technically requires a user-bound VAO for
     // glVertexAttribPointer, but real drivers (NVIDIA, AMD, Mesa)
     // fall back to an implicit "default VAO" — same accommodation
@@ -211,6 +222,17 @@ bool GLContext::vertexAttribIPointer(GLuint index, GLint size, GLenum type, GLsi
     if (size < 1 || size > 4 || stride < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    if (stride > 0) {
+        GLint64 maxStride = 2048;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger64(
+                GL_MAX_VERTEX_ATTRIB_STRIDE, &maxStride);
+        }
+        if (stride > static_cast<GLsizei>(maxStride)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
     }
     // Same rationale as vertexAttribPointer — route through the
     // default-VAO fallback so apps that set up attributes without
@@ -746,6 +768,17 @@ bool GLContext::vertexAttribLPointer(GLuint index, GLint size, GLenum type, GLsi
     if (size < 1 || size > 4 || stride < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    if (stride > 0) {
+        GLint64 maxStride = 2048;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger64(
+                GL_MAX_VERTEX_ATTRIB_STRIDE, &maxStride);
+        }
+        if (stride > static_cast<GLsizei>(maxStride)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
     }
     if (type != GL_DOUBLE) {
         pushError(GL_INVALID_ENUM);

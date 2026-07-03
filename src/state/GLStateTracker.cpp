@@ -176,6 +176,7 @@ bool queryValue(
         case GL_CULL_FACE:
         case GL_DEBUG_OUTPUT:
         case GL_DEBUG_OUTPUT_SYNCHRONOUS:
+        case GL_DEPTH_CLAMP:
         case GL_DEPTH_TEST:
         case GL_DITHER:
         case GL_LINE_SMOOTH:

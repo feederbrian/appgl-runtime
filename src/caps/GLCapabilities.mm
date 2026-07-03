@@ -143,6 +143,10 @@ bool GLCapabilities::queryInteger(GLenum pname, GLint* out) const {
         *out = static_cast<GLint>(extensions::ExtensionRegistry::extensionCount());
         return true;
     }
+    if (pname == GL_NUM_SHADING_LANGUAGE_VERSIONS) {
+        *out = 1;
+        return true;
+    }
     // GL 4.6 §22.2 — {min,max} float-pair pnames are also queryable
     // via glGetIntegerv (with value-preserving float→int conversion
     // per §2.2.2). Route through queryFloat so the same {min,max}
@@ -826,6 +830,7 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // glGetStringi(GL_SPIR_V_EXTENSIONS, i).  Report 0 — AppGL does not
     // consume SPIR-V shaders directly, so no SPIR-V extensions are exposed.
     integerLimits_[GL_NUM_SPIR_V_EXTENSIONS] = 0;
+    integerLimits_[GL_NUM_SHADING_LANGUAGE_VERSIONS] = 1;
     // GL 3.0+ core: applications query the context version via
     // glGetIntegerv(GL_MAJOR_VERSION/GL_MINOR_VERSION) rather than parsing
     // the GL_VERSION string. The Recoil engine in particular aborts with
