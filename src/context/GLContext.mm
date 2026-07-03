@@ -42707,11 +42707,34 @@ static void applyCachedVertexArrayLayout(
 }
 
 static bool programUsesDrawArrayVertexBaseBuiltins(
-    const GLProgramObject& program)
+    const GLProgramObject& program,
+    GLObjectStore& objects)
 {
+    if (program.shaderBaseVertexUniformLocation >= 0) {
+        return true;
+    }
     for (const auto& input : program.resourceInputs) {
         if (input.name == "gl_VertexID" ||
             input.name == "gl_BaseVertex") {
+            return true;
+        }
+    }
+    auto sourceUses = [](const std::string& source, const char* token) {
+        std::size_t pos = 0;
+        while ((pos = source.find(token, pos)) != std::string::npos) {
+            if (tokenAt(source, pos, token)) {
+                return true;
+            }
+            pos += std::strlen(token);
+        }
+        return false;
+    };
+    for (GLuint shaderId : program.attachedShaders) {
+        const GLShaderObject* shader = objects.shaders().get(shaderId);
+        if (shader != nullptr &&
+            (sourceUses(shader->source, "gl_VertexID") ||
+             sourceUses(shader->source, "gl_BaseVertex") ||
+             sourceUses(shader->source, "gl_BaseVertexARB"))) {
             return true;
         }
     }

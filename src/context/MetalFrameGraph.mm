@@ -4955,6 +4955,51 @@ static MTLVertexFormat vaoTypeToMTLFormat(
     }
 }
 
+static bool shaderVertexInputTypeIsSignedInteger(GLenum type) {
+    return type == GL_INT ||
+           type == GL_INT_VEC2 ||
+           type == GL_INT_VEC3 ||
+           type == GL_INT_VEC4;
+}
+
+static bool shaderVertexInputTypeIsUnsignedInteger(GLenum type) {
+    return type == GL_UNSIGNED_INT ||
+           type == GL_UNSIGNED_INT_VEC2 ||
+           type == GL_UNSIGNED_INT_VEC3 ||
+           type == GL_UNSIGNED_INT_VEC4;
+}
+
+static GLenum vertexAttribFormatTypeForShaderIntegerInput(
+    GLenum storageType,
+    GLenum shaderInputType)
+{
+    if (shaderVertexInputTypeIsSignedInteger(shaderInputType)) {
+        switch (storageType) {
+            case GL_UNSIGNED_BYTE:
+                return GL_BYTE;
+            case GL_UNSIGNED_SHORT:
+                return GL_SHORT;
+            case GL_UNSIGNED_INT:
+                return GL_INT;
+            default:
+                return storageType;
+        }
+    }
+    if (shaderVertexInputTypeIsUnsignedInteger(shaderInputType)) {
+        switch (storageType) {
+            case GL_BYTE:
+                return GL_UNSIGNED_BYTE;
+            case GL_SHORT:
+                return GL_UNSIGNED_SHORT;
+            case GL_INT:
+                return GL_UNSIGNED_INT;
+            default:
+                return storageType;
+        }
+    }
+    return storageType;
+}
+
 // Phase 8X Group 4d follow-up¹⁴ — GL → Metal blend factor / equation
 // mapping. GL enum namespace is fragmented across separate color and
 // alpha factors, but the Metal side uses a single `MTLBlendFactor`
@@ -7879,8 +7924,17 @@ struct MetalFrameGraph::Impl {
                     // the pre-follow-up¹⁴ behavior for safety.
                     MTLVertexFormat format;
                     if (matched != nullptr && matched->glType != 0) {
+                        // Metal validates vertex descriptor signedness against
+                        // the shader argument type. GL lets integer attribute
+                        // storage and shader signedness meet at draw time, so
+                        // keep the VAO's width/component count but choose the
+                        // signed/unsigned Metal format that matches reflection.
+                        const GLenum formatType = matched->glIsInteger
+                            ? vertexAttribFormatTypeForShaderIntegerInput(
+                                  matched->glType, input.type)
+                            : matched->glType;
                         format = vaoTypeToMTLFormat(
-                            matched->glType,
+                            formatType,
                             matched->glComponentCount,
                             matched->glNormalized,
                             matched->glIsInteger);

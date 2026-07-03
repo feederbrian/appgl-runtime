@@ -1557,7 +1557,12 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             drawProfile.mark(GLDrawProfileBucket::VboResolve);
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
                 const std::size_t posStride = vaoLayout.primaryStride;
-                const std::size_t firstOff = static_cast<std::size_t>(first) * posStride;
+                const bool canRebaseSingleArrayDraw =
+                    !programUsesDrawArrayVertexBaseBuiltins(
+                        *program, *impl_->objects);
+                const std::size_t firstOff = canRebaseSingleArrayDraw
+                    ? static_cast<std::size_t>(first) * posStride
+                    : 0u;
                 const std::size_t startOff =
                     vaoLayout.primaryBaseOffset + firstOff;
 
@@ -1571,6 +1576,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
                     tdi.mode = mode;
                     tdi.vertexCount = count;
+                    tdi.baseVertex = canRebaseSingleArrayDraw ? 0 : first;
                     tdi.vertexData = vbo->shadowBytes.data() + startOff;
                     tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
                     tdi.vertexStride = posStride;
@@ -1625,7 +1631,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
 
                     applyCachedVertexArrayLayout(
                         vaoLayout, *impl_->objects, tdi, first,
-                        true, true, &impl_->coldPathProfile,
+                        canRebaseSingleArrayDraw, true, &impl_->coldPathProfile,
                         impl_->frameGraph.get());
                     appendCurrentGenericVertexAttributes(
                         tdi, vao, &impl_->coldPathProfile);
@@ -2291,7 +2297,8 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                 const bool canRebaseSingleArrayDraw =
                     instancecount == 1 &&
                     baseinstance == 0 &&
-                    !programUsesDrawArrayVertexBaseBuiltins(*program);
+                    !programUsesDrawArrayVertexBaseBuiltins(
+                        *program, *impl_->objects);
                 const std::uint32_t primaryProducerBits =
                     vbo->producerPending.bits();
                 const bool primaryVboGpuAuthored =
