@@ -676,6 +676,7 @@ struct GLDispatchTable {
     PFNGLBLENDBARRIERKHRPROC glBlendBarrierKHR = nullptr;
     PFNGLFRAMEBUFFERTEXTUREMULTIVIEWOVRPROC glFramebufferTextureMultiviewOVR = nullptr;
     PFNGLNAMEDFRAMEBUFFERTEXTUREMULTIVIEWOVRPROC glNamedFramebufferTextureMultiviewOVR = nullptr;
+    PFNGLVERTEXARRAYVERTEXATTRIBDIVISOREXTPROC glVertexArrayVertexAttribDivisorEXT = nullptr;
 };
 
 }  // namespace appgl

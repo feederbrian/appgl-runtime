@@ -675,6 +675,7 @@ enum class FunctionId : std::size_t {
     glBlendBarrierKHR,
     glFramebufferTextureMultiviewOVR,
     glNamedFramebufferTextureMultiviewOVR,
+    glVertexArrayVertexAttribDivisorEXT,
     Count,
 };
 
@@ -1356,6 +1357,7 @@ inline constexpr GLFunctionMetadata kGLFunctionMetadata[] = {
     {FunctionId::glBlendBarrierKHR, "glBlendBarrierKHR", "context and state", "GL_KHR_blend_equation_advanced"},
     {FunctionId::glFramebufferTextureMultiviewOVR, "glFramebufferTextureMultiviewOVR", "framebuffers and renderbuffers", "GL_OVR_multiview"},
     {FunctionId::glNamedFramebufferTextureMultiviewOVR, "glNamedFramebufferTextureMultiviewOVR", "direct state access", "GL_OVR_multiview"},
+    {FunctionId::glVertexArrayVertexAttribDivisorEXT, "glVertexArrayVertexAttribDivisorEXT", "direct state access", "GL_EXT_direct_state_access"},
 };
 
 inline constexpr std::size_t kGLFunctionCount = static_cast<std::size_t>(FunctionId::Count);

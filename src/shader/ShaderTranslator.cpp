@@ -1503,6 +1503,65 @@ bool findMain0ParameterEnd(const std::string& msl, std::size_t& paramEnd) {
     }
 }
 
+bool adjustVertexInstanceIDForMetalBaseInstance(std::string& msl) {
+    static constexpr const char* kInstanceAttr = "[[instance_id]]";
+    static constexpr const char* kBaseInstanceAttr = "[[base_instance]]";
+    std::size_t paramEnd = 0;
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return false;
+    }
+    const std::size_t mainPos = msl.rfind("main0(", paramEnd);
+    if (mainPos == std::string::npos) {
+        return false;
+    }
+    const std::size_t paramStart = mainPos + std::strlen("main0(");
+    const std::size_t instanceAttr = msl.find(kInstanceAttr, paramStart);
+    if (instanceAttr == std::string::npos || instanceAttr > paramEnd) {
+        return false;
+    }
+    const std::size_t existingBaseAttr =
+        msl.find(kBaseInstanceAttr, paramStart);
+    if (existingBaseAttr != std::string::npos && existingBaseAttr < paramEnd) {
+        return false;
+    }
+
+    std::size_t nameEnd = instanceAttr;
+    while (nameEnd > paramStart &&
+           std::isspace(static_cast<unsigned char>(msl[nameEnd - 1]))) {
+        --nameEnd;
+    }
+    std::size_t nameStart = nameEnd;
+    while (nameStart > paramStart && isIdentifierChar(msl[nameStart - 1])) {
+        --nameStart;
+    }
+    if (nameStart == nameEnd) {
+        return false;
+    }
+    const std::string instanceName = msl.substr(nameStart, nameEnd - nameStart);
+
+    std::size_t bodyOpen = paramEnd + 1;
+    while (bodyOpen < msl.size() &&
+           std::isspace(static_cast<unsigned char>(msl[bodyOpen]))) {
+        ++bodyOpen;
+    }
+    if (bodyOpen >= msl.size() || msl[bodyOpen] != '{') {
+        return false;
+    }
+
+    const std::string baseParam = ", uint appgl_BaseInstance [[base_instance]]";
+    const std::string adjustment =
+        "\n    " + instanceName + " -= appgl_BaseInstance;";
+    std::string patched = msl;
+    const std::size_t instanceAttrEnd = instanceAttr + std::strlen(kInstanceAttr);
+    patched.insert(instanceAttrEnd, baseParam);
+    if (instanceAttrEnd <= bodyOpen) {
+        bodyOpen += baseParam.size();
+    }
+    patched.insert(bodyOpen + 1, adjustment);
+    msl = std::move(patched);
+    return true;
+}
+
 std::unordered_set<std::string> collectTextureBufferResourceNames(
     spirv_cross::Compiler& compiler,
     const spirv_cross::ShaderResources& resources) {
@@ -7756,6 +7815,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         }
         if (isVertex) {
             (void)injectPrimitiveFragmentShadingRateCombiner(msl);
+            (void)adjustVertexInstanceIDForMetalBaseInstance(msl);
         }
         if (isVertex && options.enableClipControlYSignFixup) {
             (void)injectClipControlYSignFixup(msl);

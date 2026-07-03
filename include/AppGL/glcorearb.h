@@ -5264,6 +5264,7 @@ typedef void (APIENTRYP PFNGLBLENDBARRIERPROC)(void);
 typedef void (APIENTRYP PFNGLBLENDBARRIERKHRPROC)(void);
 typedef void (APIENTRYP PFNGLFRAMEBUFFERTEXTUREMULTIVIEWOVRPROC)(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews);
 typedef void (APIENTRYP PFNGLNAMEDFRAMEBUFFERTEXTUREMULTIVIEWOVRPROC)(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews);
+typedef void (APIENTRYP PFNGLVERTEXARRAYVERTEXATTRIBDIVISOREXTPROC)(GLuint vaobj, GLuint index, GLuint divisor);
 
 GLAPI void APIENTRY glCullFace(GLenum mode);
 GLAPI void APIENTRY glFrontFace(GLenum mode);
@@ -5935,6 +5936,7 @@ GLAPI void APIENTRY glBlendBarrier(void);
 GLAPI void APIENTRY glBlendBarrierKHR(void);
 GLAPI void APIENTRY glFramebufferTextureMultiviewOVR(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews);
 GLAPI void APIENTRY glNamedFramebufferTextureMultiviewOVR(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews);
+GLAPI void APIENTRY glVertexArrayVertexAttribDivisorEXT(GLuint vaobj, GLuint index, GLuint divisor);
 
 #ifdef __cplusplus
 }

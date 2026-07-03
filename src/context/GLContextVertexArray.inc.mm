@@ -982,6 +982,13 @@ bool GLContext::vertexArrayBindingDivisor(GLuint vaobj, GLuint bindingindex, GLu
     })
 }
 
+bool GLContext::vertexArrayVertexAttribDivisorEXT(GLuint vaobj, GLuint index, GLuint divisor) {
+    DSA_VAO_WRAP(vaobj, {
+        bool ok = vertexAttribDivisor(index, divisor);
+        return ok;
+    })
+}
+
 bool GLContext::vertexArrayVertexBuffer(GLuint vaobj, GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride) {
     DSA_VAO_WRAP(vaobj, {
         bool ok = bindVertexBuffer(bindingindex, buffer, offset, stride);

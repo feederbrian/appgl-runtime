@@ -5990,3 +5990,12 @@ extern "C" void APIENTRY glNamedFramebufferTextureMultiviewOVR(GLuint framebuffe
     }
     appgl::unimplementedReturn<void>(appgl::FunctionId::glNamedFramebufferTextureMultiviewOVR, "glNamedFramebufferTextureMultiviewOVR");
 }
+
+extern "C" void APIENTRY glVertexArrayVertexAttribDivisorEXT(GLuint vaobj, GLuint index, GLuint divisor) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glVertexArrayVertexAttribDivisorEXT, "glVertexArrayVertexAttribDivisorEXT");
+    if (auto fn = appgl::Runtime::shared().dispatch().glVertexArrayVertexAttribDivisorEXT) {
+        fn(vaobj, index, divisor);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glVertexArrayVertexAttribDivisorEXT, "glVertexArrayVertexAttribDivisorEXT");
+}

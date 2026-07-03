@@ -3195,7 +3195,8 @@ bool GLContext::linkProgram(GLuint program) {
                 addBuiltIn(programObject->resourceInputs,
                     "gl_VertexID", GL_INT, 0x01 /*vertex*/);
             }
-            if (sourceUsesIdent(src, "gl_InstanceID")) {
+            if (sourceUsesIdent(src, "gl_InstanceID") ||
+                sourceUsesIdent(src, "gl_InstanceIDARB")) {
                 addBuiltIn(programObject->resourceInputs,
                     "gl_InstanceID", GL_INT, 0x01);
             }

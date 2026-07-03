@@ -981,6 +981,7 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glVertexArrayAttribLFormat = &impl::glVertexArrayAttribLFormat;
     dispatch.glVertexArrayAttribBinding = &impl::glVertexArrayAttribBinding;
     dispatch.glVertexArrayBindingDivisor = &impl::glVertexArrayBindingDivisor;
+    dispatch.glVertexArrayVertexAttribDivisorEXT = &impl::glVertexArrayVertexAttribDivisorEXT;
     dispatch.glVertexArrayVertexBuffer = &impl::glVertexArrayVertexBuffer;
     dispatch.glVertexArrayVertexBuffers = &impl::glVertexArrayVertexBuffers;
     dispatch.glVertexArrayElementBuffer = &impl::glVertexArrayElementBuffer;
@@ -991,7 +992,8 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glGetVertexArrayIndexed64iv = &impl::glGetVertexArrayIndexed64iv;
     for (auto id : {FunctionId::glVertexArrayAttribFormat, FunctionId::glVertexArrayAttribIFormat,
                     FunctionId::glVertexArrayAttribLFormat, FunctionId::glVertexArrayAttribBinding,
-                    FunctionId::glVertexArrayBindingDivisor, FunctionId::glVertexArrayVertexBuffer,
+                    FunctionId::glVertexArrayBindingDivisor, FunctionId::glVertexArrayVertexAttribDivisorEXT,
+                    FunctionId::glVertexArrayVertexBuffer,
                     FunctionId::glVertexArrayVertexBuffers, FunctionId::glVertexArrayElementBuffer,
                     FunctionId::glEnableVertexArrayAttrib, FunctionId::glDisableVertexArrayAttrib,
                     FunctionId::glGetVertexArrayiv, FunctionId::glGetVertexArrayIndexediv,

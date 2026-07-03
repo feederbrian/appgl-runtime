@@ -2387,6 +2387,7 @@ const ProcEntry kProcTable[] = {
     {"glVertexArrayAttribLFormat", reinterpret_cast<AppGLProc>(&::glVertexArrayAttribLFormat)},
     {"glVertexArrayBindingDivisor", reinterpret_cast<AppGLProc>(&::glVertexArrayBindingDivisor)},
     {"glVertexArrayElementBuffer", reinterpret_cast<AppGLProc>(&::glVertexArrayElementBuffer)},
+    {"glVertexArrayVertexAttribDivisorEXT", reinterpret_cast<AppGLProc>(&::glVertexArrayVertexAttribDivisorEXT)},
     {"glVertexArrayVertexBuffer", reinterpret_cast<AppGLProc>(&::glVertexArrayVertexBuffer)},
     {"glVertexArrayVertexBuffers", reinterpret_cast<AppGLProc>(&::glVertexArrayVertexBuffers)},
     {"glVertexAttrib1d", reinterpret_cast<AppGLProc>(&::glVertexAttrib1d)},

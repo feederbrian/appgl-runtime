@@ -166,6 +166,12 @@ EXTRA_EXTENSION_COMMANDS = [
         "GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews",
         "GL_OVR_multiview",
     ),
+    (
+        "glVertexArrayVertexAttribDivisorEXT",
+        "void",
+        "GLuint vaobj, GLuint index, GLuint divisor",
+        "GL_EXT_direct_state_access",
+    ),
 ]
 
 EXTRA_EXTENSION_ENUMS = [

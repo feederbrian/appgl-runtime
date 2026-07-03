@@ -38801,10 +38801,13 @@ std::string rewriteShaderDrawParametersForSpirv(const std::string& in, GLenum st
         replaceShaderDrawIDToken(out, "gl_BaseInstanceARB", "_appgl_BaseInstance");
     const bool changedBaseInstanceCore =
         replaceShaderDrawIDToken(out, "gl_BaseInstance", "_appgl_BaseInstance");
+    const bool changedInstanceIDArb =
+        replaceShaderDrawIDToken(out, "gl_InstanceIDARB", "gl_InstanceID");
     const bool usesDrawID = changedDrawIDArb || changedDrawIDCore;
     const bool usesBaseVertex = changedBaseVertexArb || changedBaseVertexCore;
     const bool usesBaseInstance = changedBaseInstanceArb || changedBaseInstanceCore;
-    if (!usesDrawID && !usesBaseVertex && !usesBaseInstance) {
+    if (!usesDrawID && !usesBaseVertex && !usesBaseInstance &&
+        !changedInstanceIDArb) {
         return in;
     }
     std::string injectedUniforms;

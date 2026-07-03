@@ -6036,6 +6036,15 @@
       "firstPassingTestId": "",
       "firstPassingBenchmarkId": "",
       "notes": ""
+    },
+    {
+      "name": "glVertexArrayVertexAttribDivisorEXT",
+      "subsystem": "direct state access",
+      "introducedVersion": "GL_EXT_direct_state_access",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
     }
   ]
 }

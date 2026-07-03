@@ -501,6 +501,7 @@ public:
     bool vertexArrayAttribLFormat(GLuint vaobj, GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset);
     bool vertexArrayAttribBinding(GLuint vaobj, GLuint attribindex, GLuint bindingindex);
     bool vertexArrayBindingDivisor(GLuint vaobj, GLuint bindingindex, GLuint divisor);
+    bool vertexArrayVertexAttribDivisorEXT(GLuint vaobj, GLuint index, GLuint divisor);
     bool vertexArrayVertexBuffer(GLuint vaobj, GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride);
     bool vertexArrayVertexBuffers(GLuint vaobj, GLuint first, GLsizei count, const GLuint* buffers, const GLintptr* offsets, const GLsizei* strides);
     bool vertexArrayElementBuffer(GLuint vaobj, GLuint buffer);

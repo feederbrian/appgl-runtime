@@ -12075,6 +12075,9 @@ void APIENTRY glVertexArrayAttribBinding(GLuint vaobj, GLuint attribindex, GLuin
 void APIENTRY glVertexArrayBindingDivisor(GLuint vaobj, GLuint bindingindex, GLuint divisor) {
     DSA_VAO_FN(glVertexArrayBindingDivisor, vertexArrayBindingDivisor(vaobj, bindingindex, divisor))
 }
+void APIENTRY glVertexArrayVertexAttribDivisorEXT(GLuint vaobj, GLuint index, GLuint divisor) {
+    DSA_VAO_FN(glVertexArrayVertexAttribDivisorEXT, vertexArrayVertexAttribDivisorEXT(vaobj, index, divisor))
+}
 void APIENTRY glVertexArrayVertexBuffer(GLuint vaobj, GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride) {
     DSA_VAO_FN(glVertexArrayVertexBuffer, vertexArrayVertexBuffer(vaobj, bindingindex, buffer, offset, stride))
 }
