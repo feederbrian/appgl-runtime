@@ -20615,10 +20615,23 @@ struct GLContext::Impl {
             }
             return &info.multisampleStorageImageSampleCounts;
         };
-        auto resolveStage = [&](const char* stageName, const ShaderReflection* reflection,
+        auto resolveStage = [&](const char* stageName, int stageIndex,
+                                const ShaderReflection* reflection,
                                 const std::string& stageMSL,
                                 std::vector<TranslatedDrawInfo::TextureBinding>& outList) {
             if (reflection == nullptr) return;
+            const bool hasStageUniformSnapshot =
+                stageIndex >= 0 && stageIndex < 6 &&
+                program.pipelineEmulationStageUniformsValid[
+                    static_cast<std::size_t>(stageIndex)];
+            const auto& stageUniforms = hasStageUniformSnapshot
+                ? program.pipelineEmulationStageUniforms[
+                    static_cast<std::size_t>(stageIndex)]
+                : program.uniforms;
+            const auto& stageUniformValues = hasStageUniformSnapshot
+                ? program.pipelineEmulationStageUniformValues[
+                    static_cast<std::size_t>(stageIndex)]
+                : program.uniformValues;
             for (const auto& img : reflection->storageImages) {
                 // GL 4.6 §7.6: the effective image unit is the value the
                 // app has set via glUniform1i(loc, K) — the layout
@@ -20632,11 +20645,11 @@ struct GLContext::Impl {
                 // slots; each element resolves to imageBindings[glBinding+i].
                 GLint imageArraySize = 1;
                 const GLProgramUniformValue* imageValue = nullptr;
-                for (const auto& u : program.uniforms) {
+                for (const auto& u : stageUniforms) {
                     if (u.name == img.name) {
                         imageArraySize = std::max<GLint>(u.arraySize, 1);
-                        auto uvIt = program.uniformValues.find(u.location);
-                        if (uvIt != program.uniformValues.end()) {
+                        auto uvIt = stageUniformValues.find(u.location);
+                        if (uvIt != stageUniformValues.end()) {
                             imageValue = &uvIt->second;
                         }
                         break;
@@ -20852,8 +20865,8 @@ struct GLContext::Impl {
                 }
             }
         };
-        resolveStage("VS", info.vertexReflection, program.vertexMSL, info.vertexTextures);
-        resolveStage("FS", info.fragmentReflection, program.fragmentMSL, info.fragmentTextures);
+        resolveStage("VS", 0, info.vertexReflection, program.vertexMSL, info.vertexTextures);
+        resolveStage("FS", 4, info.fragmentReflection, program.fragmentMSL, info.fragmentTextures);
     }
 
     bool bufferUsesSparseStorage(GLuint name) const {
@@ -41197,6 +41210,91 @@ static bool uniformLayoutNamesMatch(const std::string& uniformName,
     return false;
 }
 
+static bool uniformLayoutParseArrayPrefix(
+    const std::string& name,
+    std::string& baseName,
+    std::vector<GLint>& indices) {
+    baseName.clear();
+    indices.clear();
+    const std::size_t firstBracket = name.find('[');
+    if (firstBracket == std::string::npos) {
+        return false;
+    }
+    baseName = name.substr(0, firstBracket);
+    if (baseName.empty()) return false;
+
+    std::size_t p = firstBracket;
+    while (p < name.size()) {
+        if (name[p] != '[') return false;
+        const std::size_t close = name.find(']', p + 1);
+        if (close == std::string::npos || close == p + 1) return false;
+
+        GLint index = 0;
+        for (std::size_t i = p + 1; i < close; ++i) {
+            const char c = name[i];
+            if (c < '0' || c > '9') return false;
+            index = index * 10 + static_cast<GLint>(c - '0');
+        }
+        indices.push_back(index);
+        p = close + 1;
+    }
+    return !indices.empty();
+}
+
+static bool uniformLayoutBaseNamesMatch(const std::string& uniformName,
+                                        const std::string& baseName) {
+    if (uniformName == baseName) return true;
+    constexpr std::size_t kArrayZeroSuffixLen = 3;
+    return uniformName.size() == baseName.size() + kArrayZeroSuffixLen &&
+        uniformName.compare(0, baseName.size(), baseName) == 0 &&
+        uniformName.compare(baseName.size(), kArrayZeroSuffixLen, "[0]") == 0;
+}
+
+static bool uniformLayoutSourceElementOffset(
+    const GLProgramUniformInfo& uniform,
+    const std::vector<GLint>& prefixIndices,
+    std::size_t& outOffset) {
+    outOffset = 0;
+    if (prefixIndices.empty()) return false;
+
+    if (uniform.arrayDimensions.empty()) {
+        if (prefixIndices.size() != 1) return false;
+        const GLint index = prefixIndices.front();
+        if (index < 0 || index >= std::max<GLint>(uniform.arraySize, 1)) {
+            return false;
+        }
+        outOffset = static_cast<std::size_t>(index);
+        return true;
+    }
+
+    if (prefixIndices.size() > uniform.arrayDimensions.size()) {
+        return false;
+    }
+
+    std::size_t flat = 0;
+    for (std::size_t i = 0; i < prefixIndices.size(); ++i) {
+        const GLint dim = uniform.arrayDimensions[i];
+        const GLint index = prefixIndices[i];
+        if (dim <= 0 || index < 0 || index >= dim) {
+            return false;
+        }
+        std::size_t multiplier = 1;
+        for (std::size_t j = i + 1; j < uniform.arrayDimensions.size(); ++j) {
+            const GLint nextDim = uniform.arrayDimensions[j];
+            if (nextDim <= 0) return false;
+            multiplier *= static_cast<std::size_t>(nextDim);
+        }
+        flat += static_cast<std::size_t>(index) * multiplier;
+    }
+
+    if (uniform.arraySize > 0 &&
+        flat >= static_cast<std::size_t>(uniform.arraySize)) {
+        return false;
+    }
+    outOffset = flat;
+    return true;
+}
+
 static void hashCombine(std::size_t& seed, std::size_t value) {
     seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6u) + (seed >> 2u);
 }
@@ -41387,10 +41485,34 @@ static void computeStageUniformLayout(
         }
 
         // One-time name lookup: find the GL uniform location for this member.
-        for (const auto& u : uniforms) {
-            if (uniformLayoutNamesMatch(u.name, member.name)) {
+        // Multidimensional default-block arrays may have reflection members
+        // split as u0[0], u0[1], ... while glUniform(location+k) writes the
+        // scanner-created parent slot u0. Prefer that parent value vector and
+        // copy from the flattened element offset; fall back to exact slice
+        // uniforms if no parent exists.
+        std::string baseName;
+        std::vector<GLint> prefixIndices;
+        if (uniformLayoutParseArrayPrefix(member.name, baseName, prefixIndices)) {
+            for (const auto& u : uniforms) {
+                if (!uniformLayoutBaseNamesMatch(u.name, baseName)) {
+                    continue;
+                }
+                std::size_t sourceElementOffset = 0;
+                if (!uniformLayoutSourceElementOffset(
+                        u, prefixIndices, sourceElementOffset)) {
+                    continue;
+                }
                 entry.location = u.location;
+                entry.sourceElementOffset = sourceElementOffset;
                 break;
+            }
+        }
+        if (entry.location < 0) {
+            for (const auto& u : uniforms) {
+                if (uniformLayoutNamesMatch(u.name, member.name)) {
+                    entry.location = u.location;
+                    break;
+                }
             }
         }
         layout.push_back(entry);
@@ -41695,7 +41817,9 @@ static void buildStageUniformBuffer(
             const std::size_t stride = entry.arrayStride;
             const auto* srcBytesPtr = static_cast<const std::uint8_t*>(srcData);
             for (std::uint32_t k = 0; k < entry.arrayCount; ++k) {
-                const std::size_t srcOff = static_cast<std::size_t>(k) * perEl;
+                const std::size_t srcOff =
+                    (entry.sourceElementOffset + static_cast<std::size_t>(k)) *
+                    perEl;
                 const std::size_t dstOff = static_cast<std::size_t>(k) * stride;
                 if (srcOff + perEl > srcBytes) break;
                 std::memcpy(dst + dstOff, srcBytesPtr + srcOff, perEl);
@@ -41703,7 +41827,17 @@ static void buildStageUniformBuffer(
             continue;
         }
 
-        std::memcpy(dst, srcData, std::min(srcBytes, entry.copyBytes));
+        const std::size_t scalarBytes =
+            entry.glElementBytes > 0
+                ? entry.glElementBytes
+                : uniformComponentCountForPacking(entry.memberType) *
+                      uniformScalarBytes(entry.memberType);
+        const std::size_t srcStart = entry.sourceElementOffset * scalarBytes;
+        if (srcStart >= srcBytes) continue;
+        const auto* srcBytesPtr = static_cast<const std::uint8_t*>(srcData);
+        std::memcpy(dst,
+                    srcBytesPtr + srcStart,
+                    std::min(srcBytes - srcStart, entry.copyBytes));
     }
 }
 

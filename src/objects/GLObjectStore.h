@@ -1716,6 +1716,9 @@ struct GLProgramObject {
         std::uint32_t arrayCount = 0;
         std::size_t arrayStride = 0;
         std::size_t glElementBytes = 0;
+        // First GL-packed element to copy when a reflected member names an
+        // outer slice of a multidimensional uniform array, e.g. u0[1].
+        std::size_t sourceElementOffset = 0;
     };
     std::vector<UniformLayoutEntry> vertexUniformLayout;
     std::vector<UniformLayoutEntry> fragmentUniformLayout;
