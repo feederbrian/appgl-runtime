@@ -2401,7 +2401,9 @@ static void APIENTRY glGetMultisamplefv(GLenum pname, GLuint index, GLfloat *val
     // Standard MSAA sample positions (Metal default = D3D pattern).
     // Metal reports positions relative to the pixel's upper-left corner,
     // while OpenGL exposes GL window coordinates with a lower-left origin.
-    // Keep X as-is and flip Y into the GL-facing convention.
+    // Keep X as-is and flip Y into the GL-facing convention. ShaderTranslator
+    // mirrors this for gl_SamplePosition so CTS fixed-position checks see the
+    // same convention through the API and shader paths.
     static const float positions_1[1][2]  = { {0.5f, 0.5f} };
     static const float positions_2[2][2]  = { {0.75f, 0.25f}, {0.25f, 0.75f} };
     static const float positions_4[4][2]  = {

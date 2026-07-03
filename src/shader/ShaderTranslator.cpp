@@ -1301,6 +1301,26 @@ bool injectFragmentCoordYFixup(std::string& msl,
     return true;
 }
 
+bool rewriteFragmentSamplePositionYForGL(std::string& msl) {
+    static constexpr const char* kSamplePositionDecl =
+        "float2 gl_SamplePosition = get_sample_position(gl_SampleID);";
+    static constexpr const char* kSamplePositionYFlip =
+        "float2 gl_SamplePosition = get_sample_position(gl_SampleID);\n"
+        "    gl_SamplePosition.y = 1.0f - gl_SamplePosition.y;";
+    if (msl.find("gl_SamplePosition.y = 1.0f - gl_SamplePosition.y") !=
+        std::string::npos) {
+        return false;
+    }
+    bool rewritten = false;
+    std::size_t pos = 0;
+    while ((pos = msl.find(kSamplePositionDecl, pos)) != std::string::npos) {
+        msl.replace(pos, std::strlen(kSamplePositionDecl), kSamplePositionYFlip);
+        pos += std::strlen(kSamplePositionYFlip);
+        rewritten = true;
+    }
+    return rewritten;
+}
+
 bool eraseNoOpFragDepthWrite(std::string& msl) {
     static constexpr const char* kDepthField =
         "float gl_FragDepth [[depth(any)]];";
@@ -7688,6 +7708,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 // LOWER_LEFT gate as the gl_FragCoord fixup.
                 (void)injectDepthCompareFlip(msl);
             }
+            (void)rewriteFragmentSamplePositionYForGL(msl);
         }
 
         // SSBO block arrays are lowered through argument buffers when
