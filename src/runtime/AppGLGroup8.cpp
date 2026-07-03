@@ -2151,7 +2151,9 @@ static void APIENTRY glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei *c
 }
 
 static void APIENTRY glProvokingVertex(GLenum mode) {
-    (void)mode;
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    (void)context->provokingVertex(mode);
 }
 
 // GL 3.2 sync objects. AppGL executes synchronously, so fences are
@@ -3407,7 +3409,7 @@ void installGroup8Dispatch(GLDispatchTable& dispatch, CoverageStore& coverage) {
     coverage.markImplemented(FunctionId::glDrawRangeElementsBaseVertex, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glDrawElementsInstancedBaseVertex, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glMultiDrawElementsBaseVertex, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
-    coverage.markImplemented(FunctionId::glProvokingVertex, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
+    coverage.markImplemented(FunctionId::glProvokingVertex, "GL 3.2 provoking-vertex convention state and query routing.");
     coverage.markImplemented(FunctionId::glFenceSync, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glIsSync, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glDeleteSync, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");

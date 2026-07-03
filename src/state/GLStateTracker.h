@@ -269,6 +269,8 @@ public:
     void setPolygonOffsetClamp(GLfloat factor, GLfloat units, GLfloat clamp);
     void setLineWidth(GLfloat width);
     void setPointSize(GLfloat size);
+    void setProvokingVertexMode(GLenum mode);
+    GLenum provokingVertexMode() const;
     void setHint(GLenum target, GLenum mode);
     const GLRasterState& rasterState() const;
     void setFogFloat(GLenum pname, GLfloat value);
@@ -437,6 +439,7 @@ private:
     GLenum readBuffer_ = GL_BACK;
     GLuint currentProgram_ = 0;
     GLuint currentProgramPipeline_ = 0;
+    GLenum provokingVertexMode_ = GL_LAST_VERTEX_CONVENTION;
     GLuint currentVertexArray_ = 0;
     GLuint drawFramebuffer_ = 0;
     GLuint readFramebuffer_ = 0;

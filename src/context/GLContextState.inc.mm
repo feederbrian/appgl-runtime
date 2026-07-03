@@ -354,6 +354,16 @@ void GLContext::setPointSize(GLfloat size) {
     impl_->state->setPointSize(size);
 }
 
+bool GLContext::provokingVertex(GLenum mode) {
+    if (mode != GL_FIRST_VERTEX_CONVENTION &&
+        mode != GL_LAST_VERTEX_CONVENTION) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    impl_->state->setProvokingVertexMode(mode);
+    return true;
+}
+
 void GLContext::setHint(GLenum target, GLenum mode) {
     impl_->state->setHint(target, mode);
 }

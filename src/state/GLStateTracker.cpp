@@ -1034,6 +1034,18 @@ void GLStateTracker::setPointSize(GLfloat size) {
     markDirty(DirtyBit::RasterState);
 }
 
+void GLStateTracker::setProvokingVertexMode(GLenum mode) {
+    if (provokingVertexMode_ == mode) {
+        return;
+    }
+    provokingVertexMode_ = mode;
+    markDirty(DirtyBit::RasterState);
+}
+
+GLenum GLStateTracker::provokingVertexMode() const {
+    return provokingVertexMode_;
+}
+
 void GLStateTracker::setHint(GLenum target, GLenum mode) {
     hints_[target] = mode;
 }
@@ -1228,6 +1240,9 @@ bool GLStateTracker::queryInteger(GLenum pname, GLint* out) const {
             case GL_CLIP_DEPTH_MODE:
                 *out = static_cast<GLint>(clipDepthMode_);
                 return true;
+            case GL_PROVOKING_VERTEX:
+                *out = static_cast<GLint>(provokingVertexMode_);
+                return true;
             case GL_PROGRAM_PIPELINE_BINDING:
                 // GL 4.1+ ARB_separate_shader_objects. CTS
                 // `sepshaderobjs.PipelineApi` asserts
@@ -1302,6 +1317,9 @@ bool GLStateTracker::queryInteger64(GLenum pname, GLint64* out) const {
             case GL_CLIP_DEPTH_MODE:
                 *out = static_cast<GLint64>(clipDepthMode_);
                 return true;
+            case GL_PROVOKING_VERTEX:
+                *out = static_cast<GLint64>(provokingVertexMode_);
+                return true;
             case GL_PATCH_VERTICES:
                 *out = static_cast<GLint64>(tessellation_.patchVertices);
                 return true;
@@ -1368,6 +1386,9 @@ bool GLStateTracker::queryFloat(GLenum pname, GLfloat* out) const {
                 return true;
             case GL_CLIP_DEPTH_MODE:
                 *out = static_cast<GLfloat>(clipDepthMode_);
+                return true;
+            case GL_PROVOKING_VERTEX:
+                *out = static_cast<GLfloat>(provokingVertexMode_);
                 return true;
             case GL_PATCH_VERTICES:
                 *out = static_cast<GLfloat>(tessellation_.patchVertices);
@@ -1438,6 +1459,9 @@ bool GLStateTracker::queryDouble(GLenum pname, GLdouble* out) const {
                 return true;
             case GL_CLIP_DEPTH_MODE:
                 *out = static_cast<GLdouble>(clipDepthMode_);
+                return true;
+            case GL_PROVOKING_VERTEX:
+                *out = static_cast<GLdouble>(provokingVertexMode_);
                 return true;
             case GL_PATCH_VERTICES:
                 *out = static_cast<GLdouble>(tessellation_.patchVertices);

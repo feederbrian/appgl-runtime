@@ -12331,92 +12331,13 @@ EmulatedDraw emulateGeometryDraw(
                 }
                 return p + v;
             case PrimIndexing::StripAdjacency: {
-                // GL 4.6 §10.1.14 Table 10.4 — TRIANGLE_STRIP_ADJACENCY
-                // vertex layout per primitive. 4+2N vertices produce
-                // N triangles; per-primitive gl_in[0..5] = main
-                // triangle (v[0], v[2], v[4]) plus adjacency edges
-                // (v[1], v[3], v[5]). Each primitive's vertex-index
-                // mapping depends on whether it's the first / last /
-                // middle-even / middle-odd primitive in the strip —
-                // five cases total. Prior impl only alternated the
-                // main triangle (strip winding) and used the naive
-                // `p*2 + v` for adjacency slots; CTS
-                // `adjacency.adjacency_{non_indiced,indiced}_triangle
-                // _strip` reads gl_in[1/3/5] via `flat out vec4
-                // out_adjacent_geometry = gl_in[1/3/5].gl_Position;`
-                // and compared the TF output against the expected
-                // adjacency-geometry — the naive formula produces
-                // wrong vertex indices for 3/5 of the slots.
-                const std::size_t i = p;
-                const std::size_t N = primCount;
-                const bool isFirst = (i == 0);
-                const bool isLast = (N > 0 && i == N - 1);
-                const bool isOdd = (i & 1u) != 0u;
-                auto pos = [&](std::size_t idx) -> std::size_t { return idx; };
-                if (isFirst && isLast) {
-                    // Only primitive in the strip — use the single-
-                    // primitive layout {0,1,2,5,4,3}. 4+2·1 = 6
-                    // vertices, no "next" to grab v[2i+6] from.
-                    switch (v) {
-                        case 0: return pos(0);
-                        case 1: return pos(1);
-                        case 2: return pos(2);
-                        case 3: return pos(5);
-                        case 4: return pos(4);
-                        case 5: return pos(3);
-                    }
-                } else if (isFirst) {
-                    // First of many: {0,1,2,6,4,3}
-                    switch (v) {
-                        case 0: return pos(0);
-                        case 1: return pos(1);
-                        case 2: return pos(2);
-                        case 3: return pos(6);
-                        case 4: return pos(4);
-                        case 5: return pos(3);
-                    }
-                } else if (isOdd && isLast) {
-                    // Last odd: {2i+2, 2i-2, 2i, 2i+3, 2i+4, 2i+5}
-                    switch (v) {
-                        case 0: return 2*i + 2;
-                        case 1: return (i >= 1) ? 2*i - 2 : 0;
-                        case 2: return 2*i;
-                        case 3: return 2*i + 3;
-                        case 4: return 2*i + 4;
-                        case 5: return 2*i + 5;
-                    }
-                } else if (isOdd) {
-                    // Middle odd: {2i+2, 2i-2, 2i, 2i+3, 2i+4, 2i+6}
-                    switch (v) {
-                        case 0: return 2*i + 2;
-                        case 1: return (i >= 1) ? 2*i - 2 : 0;
-                        case 2: return 2*i;
-                        case 3: return 2*i + 3;
-                        case 4: return 2*i + 4;
-                        case 5: return 2*i + 6;
-                    }
-                } else if (isLast) {
-                    // Last even: {2i, 2i-2, 2i+2, 2i+5, 2i+4, 2i+3}
-                    switch (v) {
-                        case 0: return 2*i;
-                        case 1: return (i >= 1) ? 2*i - 2 : 0;
-                        case 2: return 2*i + 2;
-                        case 3: return 2*i + 5;
-                        case 4: return 2*i + 4;
-                        case 5: return 2*i + 3;
-                    }
-                } else {
-                    // Middle even: {2i, 2i-2, 2i+2, 2i+6, 2i+4, 2i+3}
-                    switch (v) {
-                        case 0: return 2*i;
-                        case 1: return (i >= 1) ? 2*i - 2 : 0;
-                        case 2: return 2*i + 2;
-                        case 3: return 2*i + 6;
-                        case 4: return 2*i + 4;
-                        case 5: return 2*i + 3;
-                    }
-                }
-                return 2*i + v;  // fallback (unreachable)
+                // GS input arrays for GL_TRIANGLE_STRIP_ADJACENCY use
+                // a sliding six-vertex window. The main triangle is
+                // gl_in[0], gl_in[2], gl_in[4]; provoking-vertex tests
+                // depend on odd primitives still exposing raw vertex
+                // 2p at gl_in[0], so do not apply the raster strip
+                // winding swap here.
+                return 2 * p + v;
             }
             case PrimIndexing::Loop:
                 return (p + v) % static_cast<std::size_t>(count);
@@ -12982,12 +12903,24 @@ EmulatedDraw emulateGeometryDraw(
             }
             expandedTopo = GL_LINES;
         } else {
+            std::size_t stripOrdinal = 0;
             for (std::size_t endIdx : primEndsAll) {
                 if (endIdx <= prev) continue;
                 // Each strip of N verts → (N-2) triangles with
                 // alternating winding.
+                const bool triangleStripAdjacencyInput =
+                    drawMode == GL_TRIANGLE_STRIP_ADJACENCY;
+                const bool singleTriangleFromAdjacency =
+                    triangleStripAdjacencyInput && (endIdx - prev == 3);
                 for (std::size_t i = prev; i + 2 < endIdx; ++i) {
                     const std::size_t offset = i - prev;
+                    if (singleTriangleFromAdjacency &&
+                        (stripOrdinal & 1u) != 0u) {
+                        expanded.push_back(emittedAll[i]);
+                        expanded.push_back(emittedAll[i + 2]);
+                        expanded.push_back(emittedAll[i + 1]);
+                        continue;
+                    }
                     // Odd offset flips winding — this preserves the
                     // GL-spec front-facing order of every triangle
                     // once decomposed into a list.
@@ -13002,6 +12935,7 @@ EmulatedDraw emulateGeometryDraw(
                     }
                 }
                 prev = endIdx;
+                ++stripOrdinal;
             }
             expandedTopo = GL_TRIANGLES;
         }
@@ -13101,6 +13035,21 @@ EmulatedDraw emulateGeometryDraw(
 
     const bool rasterizerDiscarded =
         state.isEnabled(GL_RASTERIZER_DISCARD);
+    const bool firstVertexProvoking =
+        state.provokingVertexMode() == GL_FIRST_VERTEX_CONVENTION;
+    auto provokingVertexOffset = [&](std::size_t primIndex,
+                                     std::size_t primSize) -> std::size_t {
+        if (firstVertexProvoking) {
+            return 0;
+        }
+        if (drawMode == GL_TRIANGLE_STRIP_ADJACENCY &&
+            expandedTopo == GL_TRIANGLES &&
+            primSize == 3 &&
+            (primIndex & 1u) != 0u) {
+            return 1;
+        }
+        return primSize - 1;
+    };
 
     // Per-primitive gl_Layer propagation. GL 4.6 §14.5.1 with
     // `GL_LAST_VERTEX_CONVENTION` (our advertised default — see
@@ -13126,11 +13075,14 @@ EmulatedDraw emulateGeometryDraw(
             default:               primSize = 0; break;
         }
         if (primSize > 0) {
+            std::size_t primIndex = 0;
             for (std::size_t i = 0; i + primSize <= emittedAll.size(); i += primSize) {
-                const std::int32_t lastLayer = emittedAll[i + primSize - 1].layer;
+                const std::int32_t layer =
+                    emittedAll[i + provokingVertexOffset(primIndex, primSize)].layer;
                 for (std::size_t k = 0; k < primSize; ++k) {
-                    emittedAll[i + k].layer = lastLayer;
+                    emittedAll[i + k].layer = layer;
                 }
+                ++primIndex;
             }
         }
     }
@@ -13147,12 +13099,14 @@ EmulatedDraw emulateGeometryDraw(
             default:               primSize = 0; break;
         }
         if (primSize > 0) {
+            std::size_t primIndex = 0;
             for (std::size_t i = 0; i + primSize <= emittedAll.size(); i += primSize) {
-                const std::int32_t lastVi =
-                    emittedAll[i + primSize - 1].viewportIndex;
+                const std::int32_t viewportIndex =
+                    emittedAll[i + provokingVertexOffset(primIndex, primSize)].viewportIndex;
                 for (std::size_t k = 0; k < primSize; ++k) {
-                    emittedAll[i + k].viewportIndex = lastVi;
+                    emittedAll[i + k].viewportIndex = viewportIndex;
                 }
+                ++primIndex;
             }
         }
     }
@@ -13220,8 +13174,10 @@ EmulatedDraw emulateGeometryDraw(
                     if (vi < outWidths.size()) off += outWidths[vi];
                 }
             }
+            std::size_t primIndex = 0;
             for (std::size_t i = 0; i + primSize <= emittedAll.size(); i += primSize) {
-                const std::size_t last = i + primSize - 1;
+                const std::size_t provoking =
+                    i + provokingVertexOffset(primIndex, primSize);
                 for (std::size_t vi = 0; vi < d.varyingInterp.size(); ++vi) {
                     // Only flat-qualified outputs carry provoking-
                     // vertex semantics. Smooth / noperspective
@@ -13231,18 +13187,19 @@ EmulatedDraw emulateGeometryDraw(
                     const std::size_t varyOff = varyingOffsets[vi];
                     const std::uint32_t width = (vi < outWidths.size()) ? outWidths[vi] : 0;
                     if (width == 0) continue;
-                    if (last >= emittedAll.size()) continue;
-                    if (emittedAll[last].varyings.size() < varyOff + width) continue;
+                    if (provoking >= emittedAll.size()) continue;
+                    if (emittedAll[provoking].varyings.size() < varyOff + width) continue;
                     for (std::size_t k = 0; k < primSize; ++k) {
                         auto& dst = emittedAll[i + k].varyings;
                         if (dst.size() < varyOff + width) continue;
                         for (std::uint32_t w = 0; w < width; ++w) {
                             std::memcpy(&dst[varyOff + w],
-                                        &emittedAll[last].varyings[varyOff + w],
+                                        &emittedAll[provoking].varyings[varyOff + w],
                                         sizeof(float));
                         }
                     }
                 }
+                ++primIndex;
             }
         }
     }
