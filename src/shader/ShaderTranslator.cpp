@@ -3927,6 +3927,58 @@ bool rewriteMultisampleStorageImageWritesToSidecars(
         }
     }
 
+    auto retargetVariableDeclarations =
+        [&](const std::string& varName) {
+        std::size_t namePos = 0;
+        while ((namePos = msl.find(varName, namePos)) != std::string::npos) {
+            if ((namePos > 0 && isIdentifierChar(msl[namePos - 1])) ||
+                (namePos + varName.size() < msl.size() &&
+                 isIdentifierChar(msl[namePos + varName.size()]))) {
+                namePos += varName.size();
+                continue;
+            }
+            const std::size_t lineStart = msl.rfind('\n', namePos);
+            std::size_t segmentBegin =
+                (lineStart == std::string::npos) ? 0 : lineStart + 1u;
+            const std::size_t paren = msl.rfind('(', namePos);
+            if (paren != std::string::npos && paren >= segmentBegin) {
+                segmentBegin = paren + 1u;
+            }
+
+            const std::size_t arrayTypeLen =
+                std::strlen("texture2d_ms_array");
+            const std::size_t plainTypeLen = std::strlen("texture2d_ms");
+            std::size_t typePos =
+                msl.rfind("texture2d_ms_array", namePos);
+            std::size_t typeLen = arrayTypeLen;
+            if (typePos == std::string::npos || typePos < segmentBegin ||
+                typePos > namePos) {
+                typePos = msl.rfind("texture2d_ms", namePos);
+                typeLen = plainTypeLen;
+            }
+            if (typePos == std::string::npos || typePos < segmentBegin ||
+                typePos > namePos) {
+                namePos += varName.size();
+                continue;
+            }
+            const std::size_t typeTemplate = msl.find('<', typePos);
+            const std::size_t typeEnd = msl.find('>', typeTemplate);
+            if (typeTemplate == std::string::npos ||
+                typeEnd == std::string::npos ||
+                typeEnd > namePos) {
+                namePos += varName.size();
+                continue;
+            }
+            msl.replace(typePos, typeLen, "texture2d_array");
+            namePos += varName.size();
+            changed = true;
+        }
+    };
+
+    for (const auto& var : variables) {
+        retargetVariableDeclarations(var.name);
+    }
+
     auto identifierBeforeMember =
         [](const std::string& expr,
            const std::string& member) -> std::string {
@@ -4308,6 +4360,119 @@ bool rewriteMultisampleStorageImageSampleQueries(
             pos = exprStart + replacement.size();
             changed = true;
         }
+
+        const std::string shimNeedle =
+            "_appgl_imageSamples_" + varName + "(";
+        pos = 0;
+        while ((pos = msl.find(shimNeedle, pos)) != std::string::npos) {
+            if (pos > 0 && isIdentifierChar(msl[pos - 1])) {
+                pos += shimNeedle.size();
+                continue;
+            }
+            const std::size_t open = pos + shimNeedle.size() - 1u;
+            std::size_t close = std::string::npos;
+            if (!findMatchingParen(msl, open, close)) {
+                pos += shimNeedle.size();
+                continue;
+            }
+            std::size_t afterCall = close + 1u;
+            while (afterCall < msl.size() &&
+                   std::isspace(static_cast<unsigned char>(msl[afterCall]))) {
+                ++afterCall;
+            }
+            if (afterCall < msl.size() && msl[afterCall] == '{') {
+                pos += shimNeedle.size();
+                continue;
+            }
+            const std::string replacement =
+                "appgl_ms_storage_image_samples[" +
+                std::to_string(metalSlot) + "]";
+            msl.replace(pos, close + 1u - pos, replacement);
+            pos += replacement.size();
+            changed = true;
+        }
+    }
+
+    return changed;
+}
+
+bool rewriteAppglImageSamplesShimQueries(std::string& msl) {
+    static constexpr const char* kPrefix = "_appgl_imageSamples_";
+    static constexpr std::size_t kPrefixLen =
+        sizeof("_appgl_imageSamples_") - 1u;
+    bool changed = false;
+
+    auto findTextureSlotForName =
+        [&](const std::string& varName, std::uint32_t& slot) -> bool {
+        std::size_t pos = 0;
+        while ((pos = msl.find(varName, pos)) != std::string::npos) {
+            if ((pos > 0 && isIdentifierChar(msl[pos - 1])) ||
+                (pos + varName.size() < msl.size() &&
+                 isIdentifierChar(msl[pos + varName.size()]))) {
+                pos += varName.size();
+                continue;
+            }
+            std::size_t cursor = pos + varName.size();
+            while (cursor < msl.size() &&
+                   std::isspace(static_cast<unsigned char>(msl[cursor]))) {
+                ++cursor;
+            }
+            static constexpr const char* kTextureAttr = "[[texture(";
+            if (cursor >= msl.size() ||
+                msl.compare(cursor, std::strlen(kTextureAttr), kTextureAttr) !=
+                    0) {
+                pos += varName.size();
+                continue;
+            }
+            return parseUnsignedAfter(
+                msl, cursor + std::strlen(kTextureAttr), slot, nullptr);
+        }
+        return false;
+    };
+
+    std::size_t pos = 0;
+    while ((pos = msl.find(kPrefix, pos)) != std::string::npos) {
+        if (pos > 0 && isIdentifierChar(msl[pos - 1])) {
+            pos += kPrefixLen;
+            continue;
+        }
+        std::size_t nameEnd = pos + kPrefixLen;
+        while (nameEnd < msl.size() && isIdentifierChar(msl[nameEnd])) {
+            ++nameEnd;
+        }
+        if (nameEnd == pos + kPrefixLen ||
+            nameEnd >= msl.size() ||
+            msl[nameEnd] != '(') {
+            pos += kPrefixLen;
+            continue;
+        }
+        std::size_t close = std::string::npos;
+        if (!findMatchingParen(msl, nameEnd, close)) {
+            pos += kPrefixLen;
+            continue;
+        }
+        std::size_t afterCall = close + 1u;
+        while (afterCall < msl.size() &&
+               std::isspace(static_cast<unsigned char>(msl[afterCall]))) {
+            ++afterCall;
+        }
+        if (afterCall < msl.size() && msl[afterCall] == '{') {
+            pos += kPrefixLen;
+            continue;
+        }
+
+        const std::string varName =
+            msl.substr(pos + kPrefixLen, nameEnd - pos - kPrefixLen);
+        std::uint32_t slot = 0;
+        if (!findTextureSlotForName(varName, slot)) {
+            pos += kPrefixLen;
+            continue;
+        }
+        const std::string replacement =
+            "appgl_ms_storage_image_samples[" + std::to_string(slot) + "]";
+        msl.replace(pos, close + 1u - pos, replacement);
+        pos += replacement.size();
+        changed = true;
     }
 
     return changed;
@@ -4537,6 +4702,162 @@ void threadTextureReductionModesThroughHelpers(std::string& msl,
               });
     for (const auto& insertion : insertions) {
         msl.insert(insertion.pos, insertion.text);
+    }
+}
+
+void threadNamedParameterThroughHelpers(std::string& msl,
+                                        const std::string& paramName,
+                                        const std::string& helperParam) {
+    const std::vector<MslFunctionDefinition> functions =
+        findTopLevelFunctionDefinitions(msl);
+    if (functions.empty()) {
+        return;
+    }
+
+    std::unordered_set<std::string> needsParam;
+    for (const auto& fn : functions) {
+        const std::string body =
+            msl.substr(fn.bodyOpen + 1, fn.bodyClose - fn.bodyOpen - 1);
+        if (body.find(paramName) != std::string::npos) {
+            needsParam.insert(fn.name);
+        }
+    }
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto& fn : functions) {
+            if (needsParam.find(fn.name) != needsParam.end()) {
+                continue;
+            }
+            for (const auto& callee : needsParam) {
+                if (containsFunctionCallInRange(
+                        msl, fn.bodyOpen + 1, fn.bodyClose, callee)) {
+                    needsParam.insert(fn.name);
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (needsParam.empty()) {
+        return;
+    }
+
+    struct Insertion {
+        std::size_t pos = 0;
+        std::string text;
+    };
+    std::vector<Insertion> insertions;
+    for (const auto& fn : functions) {
+        for (const auto& callee : needsParam) {
+            if (callee == fn.name && callee != "main0") {
+                continue;
+            }
+            std::size_t pos = fn.bodyOpen + 1;
+            while ((pos = msl.find(callee, pos)) != std::string::npos &&
+                   pos < fn.bodyClose) {
+                const std::size_t afterName = pos + callee.size();
+                if ((pos > 0 && isIdentifierChar(msl[pos - 1])) ||
+                    (afterName < msl.size() &&
+                     isIdentifierChar(msl[afterName]))) {
+                    pos = afterName;
+                    continue;
+                }
+                std::size_t open = afterName;
+                while (open < fn.bodyClose &&
+                       std::isspace(static_cast<unsigned char>(msl[open]))) {
+                    ++open;
+                }
+                if (open >= fn.bodyClose || msl[open] != '(') {
+                    pos = afterName;
+                    continue;
+                }
+                std::size_t close = 0;
+                if (!findMatchingParen(msl, open, close) ||
+                    close > fn.bodyClose) {
+                    break;
+                }
+                const std::string args =
+                    msl.substr(open + 1, close - open - 1);
+                if (args.find(paramName) == std::string::npos) {
+                    const std::string trimmed = trimCopy(args);
+                    insertions.push_back({
+                        close,
+                        trimmed.empty() ? paramName : ", " + paramName});
+                }
+                pos = close + 1;
+            }
+        }
+
+        if (fn.name == "main0" ||
+            needsParam.find(fn.name) == needsParam.end()) {
+            continue;
+        }
+        const std::string params =
+            msl.substr(fn.paramOpen + 1, fn.paramClose - fn.paramOpen - 1);
+        if (params.find(paramName) != std::string::npos) {
+            continue;
+        }
+        insertions.push_back({
+            fn.paramClose,
+            trimCopy(params).empty() ? helperParam : ", " + helperParam});
+    }
+
+    std::sort(insertions.begin(), insertions.end(),
+              [](const Insertion& a, const Insertion& b) {
+                  return a.pos > b.pos;
+              });
+    for (const auto& insertion : insertions) {
+        msl.insert(insertion.pos, insertion.text);
+    }
+}
+
+void threadMainTextureParamsThroughHelpers(std::string& msl,
+                                           const std::string& paramPrefix) {
+    const std::vector<MslFunctionDefinition> functions =
+        findTopLevelFunctionDefinitions(msl);
+    const auto mainIt =
+        std::find_if(functions.begin(), functions.end(),
+                     [](const MslFunctionDefinition& fn) {
+                         return fn.name == "main0";
+                     });
+    if (mainIt == functions.end()) {
+        return;
+    }
+
+    const std::vector<std::string> params = splitTopLevelCommas(
+        msl.substr(mainIt->paramOpen + 1,
+                   mainIt->paramClose - mainIt->paramOpen - 1));
+    for (const std::string& param : params) {
+        if (param.find(paramPrefix) == std::string::npos ||
+            param.find("[[texture(") == std::string::npos) {
+            continue;
+        }
+        const std::size_t attr = param.find("[[texture(");
+        std::string helperParam = trimCopy(param.substr(0, attr));
+        if (helperParam.empty()) {
+            continue;
+        }
+        std::size_t nameEnd = helperParam.size();
+        while (nameEnd > 0 &&
+               std::isspace(static_cast<unsigned char>(
+                   helperParam[nameEnd - 1]))) {
+            --nameEnd;
+        }
+        std::size_t nameBegin = nameEnd;
+        while (nameBegin > 0 && isIdentifierChar(helperParam[nameBegin - 1])) {
+            --nameBegin;
+        }
+        if (nameBegin == nameEnd) {
+            continue;
+        }
+        const std::string paramName =
+            helperParam.substr(nameBegin, nameEnd - nameBegin);
+        if (paramName.find(paramPrefix) != 0) {
+            continue;
+        }
+        threadNamedParameterThroughHelpers(msl, paramName, helperParam);
     }
 }
 
@@ -8130,8 +8451,11 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 multisampleStorageImageArraySlots);
             (void)rewriteMultisampleStorageImageSampleQueries(
                 msl, multisampleStorageImageSlots);
+            (void)rewriteMultisampleStorageImageSampleQueries(
+                msl, multisampleStorageImageArraySlots);
             (void)rewriteMultisampleStorageImageArraySizes(
                 msl, multisampleStorageImageArraySlots);
+            (void)rewriteAppglImageSamplesShimQueries(msl);
         }
 
         if (execModel == spv::ExecutionModelGLCompute ||
@@ -8141,6 +8465,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         }
         (void)injectMultisampleSampledImageSidecars(msl);
         (void)injectMultisampleStorageReadSidecars(msl);
+        threadMainTextureParamsThroughHelpers(
+            msl, "appgl_ms_storage_read_sidecar_");
         (void)injectSparseSampledImageSidecars(msl);
         (void)injectMultisampleStorageImageSampleCounts(msl);
         threadTextureReductionModesThroughHelpers(

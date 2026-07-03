@@ -1498,13 +1498,19 @@ bool GLContext::compileShader(GLuint shader) {
         (afterUnsizedUniformArrayRewrite != sourceAfterDrawIDRewrite)
             ? afterUnsizedUniformArrayRewrite
             : sourceAfterDrawIDRewrite;
+    std::string afterImageSamplesRewrite =
+        rewriteImageSamplesForSpirv(sourceAfterUnsizedUniformArrayRewrite);
+    const std::string& sourceAfterImageSamplesRewrite =
+        (afterImageSamplesRewrite != sourceAfterUnsizedUniformArrayRewrite)
+            ? afterImageSamplesRewrite
+            : sourceAfterUnsizedUniformArrayRewrite;
     std::string afterSsboRuntimeArrayRewrite =
         rewriteSsboConsecutiveRuntimeArraysForSpirv(
-            sourceAfterUnsizedUniformArrayRewrite);
+            sourceAfterImageSamplesRewrite);
     const std::string& compileSource =
-        (afterSsboRuntimeArrayRewrite != sourceAfterUnsizedUniformArrayRewrite)
+        (afterSsboRuntimeArrayRewrite != sourceAfterImageSamplesRewrite)
             ? afterSsboRuntimeArrayRewrite
-            : sourceAfterUnsizedUniformArrayRewrite;
+            : sourceAfterImageSamplesRewrite;
 
     // GLSL texture lookup bias arguments are fragment-stage only. Glslang's
     // relaxed Vulkan path accepts some GL_EXT_texture_shadow_lod shadow-sampler

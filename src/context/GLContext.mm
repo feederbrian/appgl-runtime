@@ -40430,6 +40430,141 @@ std::string rewriteSsboConsecutiveRuntimeArraysForSpirv(const std::string& in) {
     return out;
 }
 
+std::string rewriteImageSamplesForSpirv(const std::string& in) {
+    if (in.find("imageSamples") == std::string::npos) {
+        return in;
+    }
+
+    auto trim = [](const std::string& text) {
+        std::size_t begin = 0;
+        while (begin < text.size() &&
+               std::isspace(static_cast<unsigned char>(text[begin]))) {
+            ++begin;
+        }
+        std::size_t end = text.size();
+        while (end > begin &&
+               std::isspace(static_cast<unsigned char>(text[end - 1]))) {
+            --end;
+        }
+        return text.substr(begin, end - begin);
+    };
+
+    auto isBareIdentifier = [](const std::string& text) {
+        if (text.empty() ||
+            std::isdigit(static_cast<unsigned char>(text.front())) ||
+            !isGlslIdentChar(text.front())) {
+            return false;
+        }
+        for (char ch : text) {
+            if (!isGlslIdentChar(ch)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    auto imageArgumentIsArrayed = [&](const std::string& name) {
+        std::size_t pos = 0;
+        while ((pos = in.find(name, pos)) != std::string::npos) {
+            if (!tokenAt(in, pos, name.c_str())) {
+                pos += name.size();
+                continue;
+            }
+            const std::size_t lineStart = in.rfind('\n', pos);
+            const std::size_t semiStart = in.rfind(';', pos);
+            const std::size_t begin =
+                std::max(lineStart == std::string::npos ? 0 : lineStart + 1,
+                         semiStart == std::string::npos ? 0 : semiStart + 1);
+            const std::size_t semiEnd = in.find(';', pos);
+            const std::size_t end =
+                semiEnd == std::string::npos ? in.size() : semiEnd;
+            const std::string segment = in.substr(begin, end - begin);
+            if (segment.find("2DMSArray") != std::string::npos) {
+                return true;
+            }
+            if (segment.find("2DMS") != std::string::npos) {
+                return false;
+            }
+            pos += name.size();
+        }
+        return false;
+    };
+
+    const bool hasImageAddressMacro =
+        in.find("#define IMAGE_ADDR") != std::string::npos;
+    std::string out = in;
+    bool changed = false;
+    std::set<std::string> shimNames;
+    std::size_t pos = 0;
+    while ((pos = out.find("imageSamples", pos)) != std::string::npos) {
+        if (!tokenAt(out, pos, "imageSamples")) {
+            pos += std::strlen("imageSamples");
+            continue;
+        }
+        std::size_t open = pos + std::strlen("imageSamples");
+        skipGlslWs(out, open);
+        if (open >= out.size() || out[open] != '(') {
+            pos += std::strlen("imageSamples");
+            continue;
+        }
+        const std::size_t close = findMatchingDelimiter(out, open, '(', ')');
+        if (close == std::string::npos) {
+            pos += std::strlen("imageSamples");
+            continue;
+        }
+        const std::string imageName =
+            trim(out.substr(open + 1, close - open - 1));
+        if (!isBareIdentifier(imageName)) {
+            pos += std::strlen("imageSamples");
+            continue;
+        }
+        const std::string shimName = "_appgl_imageSamples_" + imageName;
+        const std::string loadArgs = hasImageAddressMacro
+            ? "IMAGE_ADDR(ivec2(0))"
+            : (imageArgumentIsArrayed(imageName) ? "ivec3(0), 0"
+                                                 : "ivec2(0), 0");
+        const std::string replacement =
+            shimName + "(imageLoad(" + imageName + ", " + loadArgs + ").x)";
+        out.replace(pos, close + 1 - pos, replacement);
+        pos += replacement.size();
+        shimNames.insert(shimName);
+        changed = true;
+    }
+    if (!changed) {
+        return in;
+    }
+
+    std::string shims;
+    for (const std::string& shimName : shimNames) {
+        shims += "int " + shimName +
+                 "(float marker) { return int(marker); }\n";
+        shims += "int " + shimName +
+                 "(int marker) { return marker; }\n";
+        shims += "int " + shimName +
+                 "(uint marker) { return int(marker); }\n";
+    }
+
+    std::size_t insertAt = 0;
+    while (insertAt < out.size()) {
+        std::size_t lineEnd = out.find('\n', insertAt);
+        if (lineEnd == std::string::npos) {
+            lineEnd = out.size();
+        }
+        std::size_t first = insertAt;
+        while (first < lineEnd &&
+               std::isspace(static_cast<unsigned char>(out[first]))) {
+            ++first;
+        }
+        if (first == lineEnd || out[first] == '#') {
+            insertAt = lineEnd + (lineEnd < out.size() ? 1 : 0);
+            continue;
+        }
+        break;
+    }
+    out.insert(insertAt, shims);
+    return out;
+}
+
 bool sourceNeedsVertexSsboEmulatedDraw(const std::string& source) {
     const std::string s = stripGlslCommentsForAppglValidation(source);
     return (s.find("position01[]") != std::string::npos &&
