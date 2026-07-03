@@ -1874,6 +1874,25 @@ bool GLContext::compileShader(GLuint shader) {
         }
     }
 
+    {
+        GLint maxTextureUnits = 0;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(
+                GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &maxTextureUnits);
+        }
+        std::string validationError;
+        if (!validateSamplerBindingRanges(
+                compileSource, maxTextureUnits, validationError)) {
+            object->compileLog = std::move(validationError);
+            object->compiled = false;
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", object->compileLog, "", false
+            });
+            return true;
+        }
+    }
+
     // 3b. Tess-eval primitive-mode injection: GL 4.6 §11.2.3 requires
     //     tess-eval shaders to declare `layout(triangles/quads/isolines)
     //     in;` — but the rule is a LINK-time check, not compile-time.

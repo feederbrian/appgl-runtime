@@ -40441,6 +40441,10 @@ bool sourceNeedsVertexSsboEmulatedDraw(const std::string& source) {
 
 }  // namespace
 
+bool validateSamplerBindingRanges(const std::string& source,
+                                  int maxTextureUnits,
+                                  std::string& error);
+
 #define APPGL_GLCONTEXT_SHADER_OBJECTS
 #include "GLContextShader.inc.mm"
 #undef APPGL_GLCONTEXT_SHADER_OBJECTS
@@ -40545,6 +40549,7 @@ static std::string stripGlslComments(const std::string& source) {
 //   layout(binding = 5, location = 2) uniform sampler2D foo;
 //   layout(location = 2, binding = 5) uniform highp sampler2D foo;
 //   layout(binding=5) uniform sampler2D foo[3];
+//   layout(binding=5) uniform sampler2D foo[2][2];
 //   layout(binding=5, rgba8) readonly uniform image2D img;
 // Does NOT handle macro-expanded names, preprocessor conditionals that
 // leave declarations out, or GLSL #version gates — if those ever matter
@@ -40558,12 +40563,14 @@ enum class ExplicitOpaqueBindingKind {
 struct ExplicitOpaqueBinding {
     GLuint binding = 0;
     ExplicitOpaqueBindingKind kind = ExplicitOpaqueBindingKind::Sampler;
+    GLint arraySize = 1;
 };
 
 static std::unordered_map<std::string, ExplicitOpaqueBinding>
 parseExplicitOpaqueBindings(const std::string& rawSource) {
     std::unordered_map<std::string, ExplicitOpaqueBinding> result;
     const std::string s = stripGlslComments(rawSource);
+    const auto integerDefines = parseGlslIntegerDefines(s);
 
     auto isIdentChar = [](char c) -> bool {
         return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
@@ -40757,6 +40764,32 @@ parseExplicitOpaqueBindings(const std::string& rawSource) {
                     } else if (isAtomicCounterType) {
                         parsed.kind = ExplicitOpaqueBindingKind::AtomicCounter;
                     }
+                    skipWhitespace(cur);
+                    GLint elementCount = 1;
+                    while (cur < s.size() && s[cur] == '[') {
+                        const std::size_t close =
+                            findMatchingDelimiter(s, cur, '[', ']');
+                        if (close == std::string::npos) {
+                            break;
+                        }
+                        int dim = 1;
+                        if (parseGlslIntegerExpression(
+                                std::string_view(s).substr(
+                                    cur + 1, close - cur - 1),
+                                integerDefines,
+                                dim) &&
+                            dim > 0) {
+                            const long long product =
+                                static_cast<long long>(elementCount) *
+                                static_cast<long long>(dim);
+                            elementCount = product > std::numeric_limits<GLint>::max()
+                                ? std::numeric_limits<GLint>::max()
+                                : static_cast<GLint>(product);
+                        }
+                        cur = close + 1;
+                        skipWhitespace(cur);
+                    }
+                    parsed.arraySize = std::max<GLint>(elementCount, 1);
                     result[std::move(name)] = parsed;
                 }
             }
@@ -40765,6 +40798,30 @@ parseExplicitOpaqueBindings(const std::string& rawSource) {
         pos = closeIdx + 1;
     }
     return result;
+}
+
+bool validateSamplerBindingRanges(const std::string& source,
+                                  int maxTextureUnits,
+                                  std::string& error) {
+    if (maxTextureUnits <= 0) {
+        return true;
+    }
+    for (const auto& [name, parsed] : parseExplicitOpaqueBindings(source)) {
+        if (parsed.kind != ExplicitOpaqueBindingKind::Sampler) {
+            continue;
+        }
+        const GLint count = std::max<GLint>(parsed.arraySize, 1);
+        const long long first = static_cast<long long>(parsed.binding);
+        const long long pastLast = first + static_cast<long long>(count);
+        if (first >= maxTextureUnits || pastLast > maxTextureUnits) {
+            error = "ERROR: sampler uniform '" + name +
+                    "' uses layout(binding=" +
+                    std::to_string(parsed.binding) +
+                    ") outside GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS.";
+            return false;
+        }
+    }
+    return true;
 }
 
 std::string trimGlslString(std::string_view text) {
