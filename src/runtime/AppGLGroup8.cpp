@@ -2270,11 +2270,21 @@ static void APIENTRY glGetInteger64i_v(GLenum target, GLuint index, GLint64 *dat
     (void)context->queryInteger64Indexed(target, index, data);
 }
 
+static bool appglIsTexImage2DMultisampleTarget(GLenum target) {
+    return target == GL_TEXTURE_2D_MULTISAMPLE ||
+           target == GL_PROXY_TEXTURE_2D_MULTISAMPLE;
+}
+
+static bool appglIsTexImage3DMultisampleTarget(GLenum target) {
+    return target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
+           target == GL_PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY;
+}
+
 static void APIENTRY glTexImage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations) {
     // RC-C03: Delegate to the existing texStorageMultisample path.
     auto* context = currentContextOrNull();
     if (context == nullptr) return;
-    if (target != GL_TEXTURE_2D_MULTISAMPLE) {
+    if (!appglIsTexImage2DMultisampleTarget(target)) {
         context->pushError(GL_INVALID_ENUM);
         return;
     }
@@ -2290,7 +2300,8 @@ static void APIENTRY glTexImage2DMultisample(GLenum target, GLsizei samples, GLe
     if (width == 0 || height == 0) {
         return; // Silently accept 0-sized multisample textures (no-op)
     }
-    context->texStorageMultisample(target, samples, internalformat, width, height, 1, fixedsamplelocations);
+    const bool stored =
+        context->texStorageMultisample(target, samples, internalformat, width, height, 1, fixedsamplelocations);
     // CKPT159 (Sprint 14 Day 4): glTexImage2DMultisample creates a MUTABLE
     // multisample texture per GL 4.6 §8.5 / Table 8.20 (only glTexStorage*
     // variants create immutable storage). Our impl reuses texStorageMultisample
@@ -2299,7 +2310,7 @@ static void APIENTRY glTexImage2DMultisample(GLenum target, GLsizei samples, GLe
     // entry, and glTextureView with such an origtexture must raise
     // INVALID_OPERATION because the parent is mutable.
     GLuint texName = context->state().boundTexture(target);
-    if (texName != 0) {
+    if (stored && texName != 0 && target == GL_TEXTURE_2D_MULTISAMPLE) {
         if (auto* texObj = context->objects().textures().get(texName)) {
             texObj->desc.immutable = false;
         }
@@ -2310,7 +2321,7 @@ static void APIENTRY glTexImage3DMultisample(GLenum target, GLsizei samples, GLe
     // RC-C03: Same delegation for 3D multisample.
     auto* context = currentContextOrNull();
     if (context == nullptr) return;
-    if (target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
+    if (!appglIsTexImage3DMultisampleTarget(target)) {
         context->pushError(GL_INVALID_ENUM);
         return;
     }
@@ -2325,11 +2336,12 @@ static void APIENTRY glTexImage3DMultisample(GLenum target, GLsizei samples, GLe
     if (width == 0 || height == 0 || depth == 0) {
         return; // Silently accept 0-sized multisample textures (no-op)
     }
-    context->texStorageMultisample(target, samples, internalformat, width, height, depth, fixedsamplelocations);
+    const bool stored =
+        context->texStorageMultisample(target, samples, internalformat, width, height, depth, fixedsamplelocations);
     // CKPT159 (Sprint 14 Day 4): same mutable-flag fixup as
     // glTexImage2DMultisample — see rationale there.
     GLuint texName = context->state().boundTexture(target);
-    if (texName != 0) {
+    if (stored && texName != 0 && target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
         if (auto* texObj = context->objects().textures().get(texName)) {
             texObj->desc.immutable = false;
         }

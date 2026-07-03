@@ -1407,6 +1407,39 @@ static bool isParameterQueryableTarget(GLenum target) {
     }
 }
 
+static bool appglIsProxyTextureLevelTarget(GLenum target) {
+    switch (target) {
+        case GL_PROXY_TEXTURE_1D:
+        case GL_PROXY_TEXTURE_2D:
+        case GL_PROXY_TEXTURE_3D:
+        case GL_PROXY_TEXTURE_1D_ARRAY:
+        case GL_PROXY_TEXTURE_2D_ARRAY:
+        case GL_PROXY_TEXTURE_RECTANGLE:
+        case GL_PROXY_TEXTURE_CUBE_MAP:
+        case GL_PROXY_TEXTURE_CUBE_MAP_ARRAY:
+        case GL_PROXY_TEXTURE_2D_MULTISAMPLE:
+        case GL_PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool appglIsMiplessTextureLevelTarget(GLenum target) {
+    switch (target) {
+        case GL_TEXTURE_BUFFER:
+        case GL_TEXTURE_RECTANGLE:
+        case GL_TEXTURE_2D_MULTISAMPLE:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+        case GL_PROXY_TEXTURE_RECTANGLE:
+        case GL_PROXY_TEXTURE_2D_MULTISAMPLE:
+        case GL_PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool GLContext::getTextureParameterfv(GLuint texture, GLenum pname, GLfloat* params) {
     DSA_TEX_WRAP(texture, {
         if (!isParameterQueryableTarget(_target)) {
@@ -1454,7 +1487,8 @@ bool GLContext::getTextureParameterIuiv(GLuint texture, GLenum pname, GLuint* pa
 bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum pname, GLint* params,
                                            GLenum requestTarget) {
     GLTextureObject* obj = nullptr;
-    if (texture == 0 && requestTarget != 0 && appglCompatProfileEnabled()) {
+    if (texture == 0 && requestTarget != 0 &&
+        (appglCompatProfileEnabled() || appglIsProxyTextureLevelTarget(requestTarget))) {
         obj = impl_->compatDefaultTexture(requestTarget);
     } else {
         obj = impl_->objects->textures().get(texture);
@@ -1468,11 +1502,7 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    if ((obj->target == GL_TEXTURE_BUFFER ||
-         obj->target == GL_TEXTURE_RECTANGLE ||
-         obj->target == GL_TEXTURE_2D_MULTISAMPLE ||
-         obj->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) &&
-        level != 0) {
+    if (appglIsMiplessTextureLevelTarget(obj->target) && level != 0) {
         pushError(GL_INVALID_VALUE);
         return false;
     }

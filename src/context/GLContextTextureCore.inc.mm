@@ -226,6 +226,11 @@ static bool appglIsCompatProxyTextureTarget(GLenum target) {
     }
 }
 
+static bool appglIsMultisampleProxyTextureTarget(GLenum target) {
+    return target == GL_PROXY_TEXTURE_2D_MULTISAMPLE ||
+           target == GL_PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY;
+}
+
 static GLsizei appglLog2TextureLimit(GLint limit) {
     GLsizei logMax = 0;
     for (GLint v = limit; v > 1; v >>= 1) {
@@ -2386,7 +2391,10 @@ bool GLContext::texStorageMultisample(
     GLsizei depth,
     GLboolean fixedsamplelocations
 ) {
-    if (target != GL_TEXTURE_2D_MULTISAMPLE && target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
+    const bool proxyTarget = appglIsMultisampleProxyTextureTarget(target);
+    if (target != GL_TEXTURE_2D_MULTISAMPLE &&
+        target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY &&
+        !proxyTarget) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
@@ -2395,20 +2403,20 @@ bool GLContext::texStorageMultisample(
         return false;
     }
     // Enforce GL_MAX_TEXTURE_SIZE / array layers before reaching Metal
-    // (which asserts on oversize). CTS textures_storage_multisample_errors
-    // deliberately calls this with max_texture_size*2.
-    if (impl_->capabilities != nullptr) {
+    // (which asserts on oversize). Proxy targets instead record a zero
+    // queryable image level, matching the allocation-probe contract.
+    bool fitsProxyLimits = true;
+    if (proxyTarget && impl_->capabilities != nullptr) {
         GLint maxTex = 0, maxLayers = 0;
         impl_->capabilities->queryInteger(GL_MAX_TEXTURE_SIZE, &maxTex);
         impl_->capabilities->queryInteger(GL_MAX_ARRAY_TEXTURE_LAYERS, &maxLayers);
         if (maxTex > 0 && (width > maxTex || height > maxTex)) {
-            pushError(GL_INVALID_VALUE);
-            return false;
+            fitsProxyLimits = false;
         }
-        if (target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY &&
+        if ((target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
+             target == GL_PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY) &&
             maxLayers > 0 && depth > maxLayers) {
-            pushError(GL_INVALID_VALUE);
-            return false;
+            fitsProxyLimits = false;
         }
     }
     if (!isSupportedInternalTextureFormat(*impl_->capabilities, internalformat)) {
@@ -2438,6 +2446,50 @@ bool GLContext::texStorageMultisample(
         clampedSamples = 4;
     }
 
+    if (proxyTarget) {
+        GLTextureImageLevel image;
+        image.desc.target = target;
+        image.desc.internalFormat = internalformat;
+        image.desc.width = fitsProxyLimits ? width : 0;
+        image.desc.height = fitsProxyLimits ? height : 0;
+        image.desc.depth = fitsProxyLimits ?
+            (target == GL_PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY ? depth : 1) : 0;
+        image.desc.layers = fitsProxyLimits ?
+            (target == GL_PROXY_TEXTURE_2D_MULTISAMPLE_ARRAY ? depth : 1) : 0;
+        image.desc.levels = 1;
+        image.desc.samples = fitsProxyLimits ? clampedSamples : 0;
+        image.desc.immutable = false;
+        image.defined = true;
+
+        GLTextureObject* object = impl_->compatDefaultTexture(target);
+        if (object == nullptr) {
+            return true;
+        }
+        object->desc = image.desc;
+        object->target = target;
+        object->instantiated = true;
+        object->levels.clear();
+        object->levels[0] = std::move(image);
+        return true;
+    }
+
+    // Enforce GL_MAX_TEXTURE_SIZE / array layers before reaching Metal
+    // (which asserts on oversize). CTS textures_storage_multisample_errors
+    // deliberately calls this with max_texture_size*2.
+    if (impl_->capabilities != nullptr) {
+        GLint maxTex = 0, maxLayers = 0;
+        impl_->capabilities->queryInteger(GL_MAX_TEXTURE_SIZE, &maxTex);
+        impl_->capabilities->queryInteger(GL_MAX_ARRAY_TEXTURE_LAYERS, &maxLayers);
+        if (maxTex > 0 && (width > maxTex || height > maxTex)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if (target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY &&
+            maxLayers > 0 && depth > maxLayers) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
     // Metal only supports specific sample counts (typically 1, 2, 4, 8).
     // Unsupported values trigger MTLTextureDescriptor validation abort if
     // we pass them through. Check via MTLDevice.supportsTextureSampleCount.
