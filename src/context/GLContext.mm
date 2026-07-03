@@ -13533,6 +13533,7 @@ struct GLContext::Impl {
                 if (faceIt != faceLevels.end() && faceIt->second.defined) {
                     return &faceIt->second;
                 }
+                return nullptr;
             }
             const auto it = object.levels.find(level);
             if (it != object.levels.end() && it->second.defined) {
@@ -13574,6 +13575,15 @@ struct GLContext::Impl {
                 return false;
             }
             return true;
+        };
+        auto cubeFaceUploadCompatible = [&](const GLTextureImageLevel& faceImage,
+                                            const GLTextureImageLevel& referenceImage) -> bool {
+            if (object.target != GL_TEXTURE_CUBE_MAP) {
+                return true;
+            }
+            return faceImage.desc.internalFormat == referenceImage.desc.internalFormat &&
+                   safeDimension(faceImage.desc.width) == safeDimension(referenceImage.desc.width) &&
+                   safeDimension(faceImage.desc.height) == safeDimension(referenceImage.desc.height);
         };
 
         ExtensionContext extensionContext(*owner);
@@ -13924,6 +13934,9 @@ struct GLContext::Impl {
                             const GLTextureImageLevel* faceImage =
                                 cubeFaceLevel(face, levelIndex);
                             if (faceImage == nullptr) {
+                                continue;
+                            }
+                            if (!cubeFaceUploadCompatible(*faceImage, image)) {
                                 continue;
                             }
                             const std::uint8_t* faceBytes = nullptr;
@@ -14402,6 +14415,9 @@ struct GLContext::Impl {
                     const GLTextureImageLevel* faceImage =
                         cubeFaceLevel(face, levelIndex);
                     if (faceImage == nullptr) {
+                        continue;
+                    }
+                    if (!cubeFaceUploadCompatible(*faceImage, image)) {
                         continue;
                     }
                     const std::uint8_t* faceBytes = nullptr;
@@ -16578,7 +16594,8 @@ struct GLContext::Impl {
 
     bool sampledTextureCompleteForSampler(const GLTextureObject& texObj,
                                           const GLTextureParameters& samplerParams) const {
-        const GLenum target = texObj.desc.target != 0 ? texObj.desc.target : texObj.target;
+        const GLenum rawTarget = texObj.desc.target != 0 ? texObj.desc.target : texObj.target;
+        const GLenum target = normalizeTextureBindingTarget(rawTarget);
         if (target == GL_TEXTURE_BUFFER) {
             return texObj.metalTexture != nullptr;
         }
