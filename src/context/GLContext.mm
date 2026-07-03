@@ -28208,19 +28208,22 @@ struct GLContext::Impl {
             if (device == nil || commandQueue == nil || writeWindow.empty) {
                 return false;
             }
-            if (attachmentHasAuthoritativeColorShadow(srcAttachment) ||
-                attachmentHasAuthoritativeColorShadow(dstAttachment)) {
+            if (attachmentHasAuthoritativeColorShadow(srcAttachment)) {
                 return false;
             }
             const MetalAttachmentBlitView srcView =
                 resolveMetalAttachmentBlitView(srcAttachment);
             const MetalAttachmentBlitView dstView =
                 resolveMetalAttachmentBlitView(dstAttachment);
+            const bool yFlipCompatible =
+                srcView.yFlip == dstView.yFlip ||
+                (srcView.width == 1 && srcView.height == 1 &&
+                 dstView.width == 1 && dstView.height == 1);
             if (srcView.texture == nil || dstView.texture == nil ||
                 srcView.texture.sampleCount <= 1 ||
                 dstView.texture.sampleCount != 1 ||
                 srcView.texture.pixelFormat != dstView.texture.pixelFormat ||
-                srcView.yFlip != dstView.yFlip ||
+                !yFlipCompatible ||
                 !isExactFullColorResolveRect(srcView,
                                              dstView.width,
                                              dstView.height)) {
@@ -38746,6 +38749,31 @@ std::string injectResolvedVertexAttribLocationsForSpirv(
               });
     for (const auto& injection : injections) {
         source.insert(injection.pos, injection.text);
+    }
+    if (!injections.empty() &&
+        source.find("GL_ARB_explicit_attrib_location") == std::string::npos) {
+        int version = 0;
+        if (const std::size_t versionPos = source.find("#version");
+            versionPos != std::string::npos) {
+            std::size_t cursor = versionPos + std::strlen("#version");
+            while (cursor < source.size() &&
+                   std::isspace(static_cast<unsigned char>(source[cursor]))) {
+                ++cursor;
+            }
+            while (cursor < source.size() &&
+                   std::isdigit(static_cast<unsigned char>(source[cursor]))) {
+                version = version * 10 + (source[cursor] - '0');
+                ++cursor;
+            }
+            if (version > 0 && version < 330) {
+                const std::size_t lineEnd = source.find('\n', versionPos);
+                source.insert(lineEnd == std::string::npos ? source.size()
+                                                           : lineEnd + 1,
+                              "#extension GL_ARB_explicit_attrib_location : enable\n");
+            }
+        } else {
+            source.insert(0, "#extension GL_ARB_explicit_attrib_location : enable\n");
+        }
     }
     return source;
 }

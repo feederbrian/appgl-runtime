@@ -4076,6 +4076,178 @@ bool GLContext::linkProgram(GLuint program) {
         }
     };
 
+    auto collectFlatFragmentInputs = [](const std::string& source) {
+        std::vector<std::string> names;
+        std::string cleaned;
+        cleaned.reserve(source.size());
+        bool lineComment = false;
+        bool blockComment = false;
+        for (std::size_t i = 0; i < source.size(); ++i) {
+            const char c = source[i];
+            const char next = (i + 1 < source.size()) ? source[i + 1] : '\0';
+            if (lineComment) {
+                if (c == '\n') {
+                    lineComment = false;
+                    cleaned.push_back(c);
+                } else {
+                    cleaned.push_back(' ');
+                }
+                continue;
+            }
+            if (blockComment) {
+                if (c == '*' && next == '/') {
+                    blockComment = false;
+                    cleaned.append("  ");
+                    ++i;
+                } else {
+                    cleaned.push_back(std::isspace(static_cast<unsigned char>(c)) ? c : ' ');
+                }
+                continue;
+            }
+            if (c == '/' && next == '/') {
+                lineComment = true;
+                cleaned.append("  ");
+                ++i;
+                continue;
+            }
+            if (c == '/' && next == '*') {
+                blockComment = true;
+                cleaned.append("  ");
+                ++i;
+                continue;
+            }
+            cleaned.push_back(c);
+        }
+
+        auto isIdentChar = [](unsigned char c) {
+            return std::isalnum(c) || c == '_';
+        };
+        auto isNumberToken = [](const std::string& token) {
+            return !token.empty() &&
+                std::all_of(token.begin(), token.end(), [](unsigned char c) {
+                    return std::isdigit(c);
+                });
+        };
+        auto isNonNameToken = [](const std::string& token) {
+            return token == "flat" || token == "in" || token == "out" ||
+                   token == "smooth" || token == "noperspective" ||
+                   token == "centroid" || token == "sample" ||
+                   token == "invariant" || token == "patch" ||
+                   token == "layout" || token == "location" ||
+                   token == "index" || token == "highp" ||
+                   token == "mediump" || token == "lowp" ||
+                   token == "const" || token == "readonly" ||
+                   token == "writeonly" || token == "coherent" ||
+                   token == "volatile" || token == "restrict";
+        };
+        auto appendStatement = [&](std::string_view stmt) {
+            std::vector<std::string> tokens;
+            for (std::size_t p = 0; p < stmt.size();) {
+                while (p < stmt.size() &&
+                       !isIdentChar(static_cast<unsigned char>(stmt[p]))) {
+                    ++p;
+                }
+                const std::size_t start = p;
+                while (p < stmt.size() &&
+                       isIdentChar(static_cast<unsigned char>(stmt[p]))) {
+                    ++p;
+                }
+                if (p > start) {
+                    tokens.emplace_back(stmt.substr(start, p - start));
+                }
+            }
+            const bool hasFlat = std::find(tokens.begin(), tokens.end(), "flat") != tokens.end();
+            const bool hasIn = std::find(tokens.begin(), tokens.end(), "in") != tokens.end();
+            if (!hasFlat || !hasIn) {
+                return;
+            }
+            for (auto it = tokens.rbegin(); it != tokens.rend(); ++it) {
+                if (!isNumberToken(*it) && !isNonNameToken(*it)) {
+                    names.push_back(*it);
+                    return;
+                }
+            }
+        };
+
+        std::size_t stmtStart = 0;
+        for (std::size_t pos = 0; pos <= cleaned.size(); ++pos) {
+            if (pos == cleaned.size() || cleaned[pos] == ';') {
+                appendStatement(std::string_view(cleaned).substr(stmtStart, pos - stmtStart));
+                stmtStart = pos + 1;
+            }
+        }
+        std::sort(names.begin(), names.end());
+        names.erase(std::unique(names.begin(), names.end()), names.end());
+        return names;
+    };
+
+    auto rewriteFlatCentroidPullModelMSL =
+        [](std::string& msl, const std::vector<std::string>& flatInputs) {
+        if (flatInputs.empty() ||
+            msl.find("interpolate_at_centroid()") == std::string::npos) {
+            return;
+        }
+        for (const std::string& name : flatInputs) {
+            const std::string from = "." + name + ".interpolate_at_centroid()";
+            const std::string to = "." + name + ".interpolate_at_center()";
+            std::size_t pos = 0;
+            while ((pos = msl.find(from, pos)) != std::string::npos) {
+                msl.replace(pos, from.size(), to);
+                pos += to.size();
+            }
+        }
+    };
+
+    auto sourceUsesInterpolateAtSample = [](const std::string& source) {
+        const char* needle = "interpolateAtSample";
+        constexpr std::size_t needleSize = 19;
+        auto isIdentChar = [](unsigned char c) {
+            return std::isalnum(c) || c == '_';
+        };
+        bool lineComment = false;
+        bool blockComment = false;
+        for (std::size_t i = 0; i < source.size(); ++i) {
+            const char c = source[i];
+            const char next = (i + 1 < source.size()) ? source[i + 1] : '\0';
+            if (lineComment) {
+                if (c == '\n') {
+                    lineComment = false;
+                }
+                continue;
+            }
+            if (blockComment) {
+                if (c == '*' && next == '/') {
+                    blockComment = false;
+                    ++i;
+                }
+                continue;
+            }
+            if (c == '/' && next == '/') {
+                lineComment = true;
+                ++i;
+                continue;
+            }
+            if (c == '/' && next == '*') {
+                blockComment = true;
+                ++i;
+                continue;
+            }
+            if (i + needleSize > source.size() ||
+                source.compare(i, needleSize, needle) != 0) {
+                continue;
+            }
+            const bool beforeIdent =
+                i > 0 && isIdentChar(static_cast<unsigned char>(source[i - 1]));
+            const bool afterIdent =
+                i + needleSize < source.size() &&
+                isIdentChar(static_cast<unsigned char>(source[i + needleSize]));
+            if (!beforeIdent && !afterIdent) {
+                return true;
+            }
+        }
+        return false;
+    };
+
     // Translate one stage: spirvToMSL + reflect. Writes the result into the
     // provided output slots on success, records a diagnostic in both the
     // success and failure cases. Returns true iff MSL was produced.
@@ -4166,6 +4338,10 @@ bool GLContext::linkProgram(GLuint program) {
                 "", false
             });
             return false;
+        }
+        if (std::strcmp(stageName, "fragment") == 0) {
+            rewriteFlatCentroidPullModelMSL(
+                msl, collectFlatFragmentInputs(sourceText));
         }
 
         // Phase 8X Group 4d follow-up²³ — sub-step marker + exception guard
@@ -4520,6 +4696,9 @@ bool GLContext::linkProgram(GLuint program) {
             appgl::TranslatorOptions vsOptions;
             vsOptions.disableCullDistanceClipRouting = vsCullPrepass;
             vsOptions.forceArgumentBuffers = forceRasterArgBuf;
+            if (sourceUsesInterpolateAtSample(fragmentShader->source)) {
+                vsOptions.enableClipControlYSignFixup = true;
+            }
             appgl::TranslatorOptions fsOptions;
             fsOptions.forceArgumentBuffers = forceRasterArgBuf;
             applyShaderSpirvOptions(vsOptions, vertexShader);

@@ -2385,18 +2385,20 @@ static void APIENTRY glGetMultisamplefv(GLenum pname, GLuint index, GLfloat *val
         }
     }
     // Standard MSAA sample positions (Metal default = D3D pattern).
-    // Each row: x, y in [0,1] window coords (origin at upper-left).
+    // Metal reports positions relative to the pixel's upper-left corner,
+    // while OpenGL exposes GL window coordinates with a lower-left origin.
+    // Keep X as-is and flip Y into the GL-facing convention.
     static const float positions_1[1][2]  = { {0.5f, 0.5f} };
-    static const float positions_2[2][2]  = { {0.75f, 0.75f}, {0.25f, 0.25f} };
+    static const float positions_2[2][2]  = { {0.75f, 0.25f}, {0.25f, 0.75f} };
     static const float positions_4[4][2]  = {
-        {0.375f, 0.125f}, {0.875f, 0.375f},
-        {0.125f, 0.625f}, {0.625f, 0.875f}
+        {0.375f, 0.875f}, {0.875f, 0.625f},
+        {0.125f, 0.375f}, {0.625f, 0.125f}
     };
     static const float positions_8[8][2]  = {
-        {0.5625f, 0.3125f}, {0.4375f, 0.6875f},
-        {0.8125f, 0.5625f}, {0.3125f, 0.1875f},
-        {0.1875f, 0.8125f}, {0.0625f, 0.4375f},
-        {0.6875f, 0.9375f}, {0.9375f, 0.0625f}
+        {0.5625f, 0.6875f}, {0.4375f, 0.3125f},
+        {0.8125f, 0.4375f}, {0.3125f, 0.8125f},
+        {0.1875f, 0.1875f}, {0.0625f, 0.5625f},
+        {0.6875f, 0.0625f}, {0.9375f, 0.9375f}
     };
     const float (*table)[2] = nullptr;
     GLint count = 0;
