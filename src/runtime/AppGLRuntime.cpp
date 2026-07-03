@@ -9523,6 +9523,19 @@ bool appglPipelineStageSelectionsMatchExecutables(
     return true;
 }
 
+GLProgramPipelineObject* appglAcquireProgramPipelineState(
+    GLContext* ctx,
+    GLuint pipeline) {
+    if (ctx == nullptr || pipeline == 0) {
+        return nullptr;
+    }
+    GLProgramPipelineObject* ppo = ctx->objects().programPipelines().get(pipeline);
+    if (ppo != nullptr) {
+        ppo->instantiated = true;
+    }
+    return ppo;
+}
+
 } // namespace
 
 void APIENTRY glGenProgramPipelines(GLsizei n, GLuint* pipelines) {
@@ -9614,7 +9627,7 @@ void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint prog
                               "stages contains bits that are not valid shader stages");
         return;
     }
-    auto* ppo = ctx->objects().programPipelines().get(pipeline);
+    auto* ppo = appglAcquireProgramPipelineState(ctx, pipeline);
     if (!ppo) {
         recordValidationError(ctx, "glUseProgramStages", GL_INVALID_OPERATION, "pipeline does not exist");
         return;
@@ -9625,18 +9638,21 @@ void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint prog
     // `sepshaderobjs.UseProgStagesApi` re-links a program with
     // SEPARABLE=FALSE and asserts INVALID_OPERATION on the subsequent
     // useProgramStages.
+    GLProgramObject* prog = nullptr;
+    GLbitfield executableStages = 0;
     if (program != 0) {
-        auto* prog = ctx->objects().programs().get(program);
+        prog = ctx->objects().programs().get(program);
         if (prog == nullptr || !prog->linked) {
             recordValidationError(ctx, "glUseProgramStages", GL_INVALID_OPERATION,
                                   "program is not a valid, linked program");
             return;
         }
-        if (!prog->separable) {
+        if (!prog->separableLinked) {
             recordValidationError(ctx, "glUseProgramStages", GL_INVALID_OPERATION,
                                   "program was not linked with GL_PROGRAM_SEPARABLE=TRUE");
             return;
         }
+        executableStages = prog->linkedStageBits & kAllowedStageMask;
     }
     // Track stage assignments on CPU.
     std::array<GLuint, 6> replacedPrograms{};
@@ -9654,23 +9670,23 @@ void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint prog
             replacedPrograms[replacedProgramCount++] = oldProgram;
         }
     };
-    auto replaceStage = [&](GLuint& stageProgram) {
+    auto replaceStage = [&](GLuint& stageProgram, GLbitfield stageBit) {
         rememberReplacedProgram(stageProgram);
-        stageProgram = program;
+        stageProgram = ((executableStages & stageBit) != 0) ? program : 0;
     };
-    if (stages & GL_VERTEX_SHADER_BIT)          replaceStage(ppo->vertexProgram);
-    if (stages & GL_FRAGMENT_SHADER_BIT)        replaceStage(ppo->fragmentProgram);
-    if (stages & GL_GEOMETRY_SHADER_BIT)        replaceStage(ppo->geometryProgram);
-    if (stages & GL_TESS_CONTROL_SHADER_BIT)    replaceStage(ppo->tessControlProgram);
-    if (stages & GL_TESS_EVALUATION_SHADER_BIT) replaceStage(ppo->tessEvalProgram);
-    if (stages & GL_COMPUTE_SHADER_BIT)         replaceStage(ppo->computeProgram);
+    if (stages & GL_VERTEX_SHADER_BIT)          replaceStage(ppo->vertexProgram, GL_VERTEX_SHADER_BIT);
+    if (stages & GL_FRAGMENT_SHADER_BIT)        replaceStage(ppo->fragmentProgram, GL_FRAGMENT_SHADER_BIT);
+    if (stages & GL_GEOMETRY_SHADER_BIT)        replaceStage(ppo->geometryProgram, GL_GEOMETRY_SHADER_BIT);
+    if (stages & GL_TESS_CONTROL_SHADER_BIT)    replaceStage(ppo->tessControlProgram, GL_TESS_CONTROL_SHADER_BIT);
+    if (stages & GL_TESS_EVALUATION_SHADER_BIT) replaceStage(ppo->tessEvalProgram, GL_TESS_EVALUATION_SHADER_BIT);
+    if (stages & GL_COMPUTE_SHADER_BIT)         replaceStage(ppo->computeProgram, GL_COMPUTE_SHADER_BIT);
     if (stages == GL_ALL_SHADER_BITS) {
-        replaceStage(ppo->vertexProgram);
-        replaceStage(ppo->fragmentProgram);
-        replaceStage(ppo->geometryProgram);
-        replaceStage(ppo->tessControlProgram);
-        replaceStage(ppo->tessEvalProgram);
-        replaceStage(ppo->computeProgram);
+        replaceStage(ppo->vertexProgram, GL_VERTEX_SHADER_BIT);
+        replaceStage(ppo->fragmentProgram, GL_FRAGMENT_SHADER_BIT);
+        replaceStage(ppo->geometryProgram, GL_GEOMETRY_SHADER_BIT);
+        replaceStage(ppo->tessControlProgram, GL_TESS_CONTROL_SHADER_BIT);
+        replaceStage(ppo->tessEvalProgram, GL_TESS_EVALUATION_SHADER_BIT);
+        replaceStage(ppo->computeProgram, GL_COMPUTE_SHADER_BIT);
     }
     for (std::size_t i = 0; i < replacedProgramCount; ++i) {
         ctx->finalizeDeletedProgramIfUnused(replacedPrograms[i]);
@@ -9689,7 +9705,7 @@ void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint prog
 void APIENTRY glActiveShaderProgram(GLuint pipeline, GLuint program) {
     auto* ctx = requireCurrentContext("glActiveShaderProgram");
     if (!ctx) return;
-    auto* ppo = ctx->objects().programPipelines().get(pipeline);
+    auto* ppo = appglAcquireProgramPipelineState(ctx, pipeline);
     if (!ppo) {
         recordValidationError(ctx, "glActiveShaderProgram", GL_INVALID_OPERATION, "pipeline does not exist");
         return;
@@ -9700,10 +9716,20 @@ void APIENTRY glActiveShaderProgram(GLuint pipeline, GLuint program) {
     // INVALID_OPERATION. CTS `sepshaderobjs.PipelineApi` probes
     // both negative paths.
     if (program != 0) {
+        if (ctx->objects().shaders().get(program) != nullptr) {
+            recordValidationError(ctx, "glActiveShaderProgram", GL_INVALID_OPERATION,
+                                  "program names a shader object");
+            return;
+        }
         auto* prog = ctx->objects().programs().get(program);
         if (prog == nullptr) {
             recordValidationError(ctx, "glActiveShaderProgram", GL_INVALID_VALUE,
                                   "program is not the name of an existing program");
+            return;
+        }
+        if (!prog->linked) {
+            recordValidationError(ctx, "glActiveShaderProgram", GL_INVALID_OPERATION,
+                                  "program is not linked");
             return;
         }
     }
@@ -9769,7 +9795,7 @@ GLuint APIENTRY glCreateShaderProgramv(GLenum type, GLsizei count, const GLchar*
 void APIENTRY glValidateProgramPipeline(GLuint pipeline) {
     auto* ctx = requireCurrentContext("glValidateProgramPipeline");
     if (!ctx) return;
-    auto* ppo = ctx->objects().programPipelines().get(pipeline);
+    auto* ppo = appglAcquireProgramPipelineState(ctx, pipeline);
     if (!ppo) {
         recordValidationError(ctx, "glValidateProgramPipeline", GL_INVALID_OPERATION, "pipeline does not exist");
         return;
@@ -9817,7 +9843,7 @@ void APIENTRY glValidateProgramPipeline(GLuint pipeline) {
 void APIENTRY glGetProgramPipelineiv(GLuint pipeline, GLenum pname, GLint* params) {
     auto* ctx = requireCurrentContext("glGetProgramPipelineiv");
     if (!ctx || !params) return;
-    auto* ppo = ctx->objects().programPipelines().get(pipeline);
+    auto* ppo = appglAcquireProgramPipelineState(ctx, pipeline);
     if (!ppo) {
         recordValidationError(ctx, "glGetProgramPipelineiv", GL_INVALID_OPERATION, "pipeline does not exist");
         return;
