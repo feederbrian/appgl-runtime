@@ -979,12 +979,10 @@ struct GLProgramObject {
     // missing stages at draw time. `glGetProgramiv(GL_PROGRAM_
     // SEPARABLE)` reads this back.
     bool separable = false;
-    // GL 4.6 §7.3 — getProgramiv(GL_PROGRAM_SEPARABLE) returns the
-    // link-time snapshot, NOT the requested parameter. `separable`
-    // above is the request (set by glProgramParameteri); this field
-    // is the snapshot, updated on successful linkProgram. Before
-    // any link, the query returns GL_FALSE regardless of request.
-    // CTS `sepshaderobjs.PipelineApi` asserts this exact behavior.
+    // Link-time snapshot used by program-pipeline legality checks.
+    // `separable` above is the current request set by
+    // glProgramParameteri and is what getProgramiv(GL_PROGRAM_SEPARABLE)
+    // reports; this snapshot is updated only on successful linkProgram.
     bool separableLinked = false;
     // Stage bits present in the most recently linked executable.
     // Unlike attachedShaders, this survives glCreateShaderProgramv's

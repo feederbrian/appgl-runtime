@@ -247,10 +247,7 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
             *params = 0;  // No binary program support
             return true;
         case GL_PROGRAM_SEPARABLE:
-            // Query returns the LINK-TIME snapshot, not the request
-            // parameter. Before any successful link, this is FALSE
-            // regardless of glProgramParameteri calls.
-            *params = object->separableLinked ? GL_TRUE : GL_FALSE;
+            *params = object->separable ? GL_TRUE : GL_FALSE;
             return true;
         case GL_PROGRAM_BINARY_RETRIEVABLE_HINT:
             *params = GL_FALSE;
@@ -819,4 +816,3 @@ bool GLContext::getUniformuiv(GLuint program, GLint location, GLuint* params) {
     }
     return true;
 }
-

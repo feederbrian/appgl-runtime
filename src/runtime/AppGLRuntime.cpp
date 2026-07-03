@@ -9472,6 +9472,75 @@ constexpr GLbitfield kAppGLPipelineStageMask =
     GL_FRAGMENT_SHADER_BIT |
     GL_COMPUTE_SHADER_BIT;
 
+bool appglUniformTypeIsSampler(GLenum type) {
+    switch (type) {
+        case GL_SAMPLER_1D: case GL_INT_SAMPLER_1D:
+        case GL_UNSIGNED_INT_SAMPLER_1D: case GL_SAMPLER_1D_SHADOW:
+        case GL_SAMPLER_2D: case GL_INT_SAMPLER_2D:
+        case GL_UNSIGNED_INT_SAMPLER_2D: case GL_SAMPLER_2D_SHADOW:
+        case GL_SAMPLER_3D: case GL_INT_SAMPLER_3D:
+        case GL_UNSIGNED_INT_SAMPLER_3D:
+        case GL_SAMPLER_CUBE: case GL_INT_SAMPLER_CUBE:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE: case GL_SAMPLER_CUBE_SHADOW:
+        case GL_SAMPLER_1D_ARRAY: case GL_INT_SAMPLER_1D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY: case GL_SAMPLER_1D_ARRAY_SHADOW:
+        case GL_SAMPLER_2D_ARRAY: case GL_INT_SAMPLER_2D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY: case GL_SAMPLER_2D_ARRAY_SHADOW:
+        case GL_SAMPLER_CUBE_MAP_ARRAY: case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+        case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+        case GL_SAMPLER_2D_RECT: case GL_INT_SAMPLER_2D_RECT:
+        case GL_UNSIGNED_INT_SAMPLER_2D_RECT: case GL_SAMPLER_2D_RECT_SHADOW:
+        case GL_SAMPLER_BUFFER: case GL_INT_SAMPLER_BUFFER:
+        case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+        case GL_SAMPLER_2D_MULTISAMPLE: case GL_INT_SAMPLER_2D_MULTISAMPLE:
+        case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+        case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+        case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool appglPipelineHasMiddleStageWithoutVertex(
+    const GLProgramPipelineObject& ppo) {
+    return ppo.vertexProgram == 0 &&
+        (ppo.tessControlProgram != 0 ||
+         ppo.tessEvalProgram != 0 ||
+         ppo.geometryProgram != 0);
+}
+
+bool appglPipelineHasSplitMultiStageProgram(
+    const GLProgramPipelineObject& ppo) {
+    const std::array<GLuint, 5> orderedGraphicsStages = {
+        ppo.vertexProgram,
+        ppo.tessControlProgram,
+        ppo.tessEvalProgram,
+        ppo.geometryProgram,
+        ppo.fragmentProgram,
+    };
+    for (std::size_t first = 0; first < orderedGraphicsStages.size(); ++first) {
+        const GLuint program = orderedGraphicsStages[first];
+        if (program == 0) {
+            continue;
+        }
+        for (std::size_t last = first + 1; last < orderedGraphicsStages.size(); ++last) {
+            if (orderedGraphicsStages[last] != program) {
+                continue;
+            }
+            for (std::size_t mid = first + 1; mid < last; ++mid) {
+                const GLuint middleProgram = orderedGraphicsStages[mid];
+                if (middleProgram != 0 && middleProgram != program) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 bool appglPipelineStageSelectionsMatchExecutables(
     GLContext* ctx,
     const GLProgramPipelineObject& ppo,
@@ -9521,6 +9590,79 @@ bool appglPipelineStageSelectionsMatchExecutables(
         }
     }
     return true;
+}
+
+bool appglPipelineHasSamplerTypeConflict(
+    GLContext* ctx,
+    const GLProgramPipelineObject& ppo) {
+    if (ctx == nullptr) {
+        return false;
+    }
+    const std::array<GLuint, 6> stagePrograms = {
+        ppo.vertexProgram,
+        ppo.tessControlProgram,
+        ppo.tessEvalProgram,
+        ppo.geometryProgram,
+        ppo.fragmentProgram,
+        ppo.computeProgram,
+    };
+    std::array<GLuint, 6> uniquePrograms{};
+    std::size_t uniqueCount = 0;
+    for (GLuint programName : stagePrograms) {
+        if (programName == 0) {
+            continue;
+        }
+        bool seen = false;
+        for (std::size_t i = 0; i < uniqueCount; ++i) {
+            if (uniquePrograms[i] == programName) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen && uniqueCount < uniquePrograms.size()) {
+            uniquePrograms[uniqueCount++] = programName;
+        }
+    }
+
+    std::unordered_map<GLint, GLenum> typeByTextureUnit;
+    for (std::size_t i = 0; i < uniqueCount; ++i) {
+        const GLProgramObject* program =
+            ctx->objects().programs().get(uniquePrograms[i]);
+        if (program == nullptr || !program->linked) {
+            continue;
+        }
+        for (const GLProgramUniformInfo& uniform : program->uniforms) {
+            if (uniform.location < 0 ||
+                !appglUniformTypeIsSampler(uniform.type)) {
+                continue;
+            }
+            const auto valueIt = program->uniformValues.find(uniform.location);
+            const GLProgramUniformValue* value =
+                (valueIt != program->uniformValues.end()) ? &valueIt->second : nullptr;
+            const GLint elementCount = std::max<GLint>(uniform.arraySize, 1);
+            for (GLint element = 0; element < elementCount; ++element) {
+                GLint unit = (uniform.explicitBinding >= 0)
+                    ? (uniform.explicitBinding + element) : 0;
+                bool hasElementValue = false;
+                if (value != nullptr &&
+                    static_cast<std::size_t>(element) < value->ints.size()) {
+                    unit = value->ints[static_cast<std::size_t>(element)];
+                    hasElementValue = true;
+                }
+                if (elementCount > 1 &&
+                    uniform.explicitBinding < 0 &&
+                    (!hasElementValue || unit == 0)) {
+                    continue;
+                }
+                const auto [it, inserted] =
+                    typeByTextureUnit.emplace(unit, uniform.type);
+                if (!inserted && it->second != uniform.type) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 GLProgramPipelineObject* appglAcquireProgramPipelineState(
@@ -9829,9 +9971,18 @@ void APIENTRY glValidateProgramPipeline(GLuint pipeline) {
     } else if (!allSeparable) {
         ppo->validated = false;
         ppo->infoLog = "One or more stage programs are not separable or not linked.";
+    } else if (appglPipelineHasMiddleStageWithoutVertex(*ppo)) {
+        ppo->validated = false;
+        ppo->infoLog = "Pipeline has tessellation or geometry stages without an active vertex stage.";
+    } else if (appglPipelineHasSplitMultiStageProgram(*ppo)) {
+        ppo->validated = false;
+        ppo->infoLog = "Pipeline has a multi-stage program split by another active program.";
     } else if (!appglPipelineStageSelectionsMatchExecutables(ctx, *ppo, true)) {
         ppo->validated = false;
         ppo->infoLog = "One or more stage programs contain executable stages not active in the pipeline.";
+    } else if (appglPipelineHasSamplerTypeConflict(ctx, *ppo)) {
+        ppo->validated = false;
+        ppo->infoLog = "Pipeline has active samplers of different types on the same texture unit.";
     } else {
         ppo->validated = true;
         ppo->infoLog = "Validation successful (AppGL stub).";

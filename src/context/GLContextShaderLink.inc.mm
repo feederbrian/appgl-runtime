@@ -2821,10 +2821,9 @@ bool GLContext::linkProgram(GLuint program) {
 
     programObject->linked = true;
     programObject->linkLog = "ok";
-    // Snapshot the separability request at link time. The query
-    // `glGetProgramiv(program, GL_PROGRAM_SEPARABLE)` returns this
-    // snapshot — it matches the program's *linked* binary, not the
-    // request-level parameter. See GLProgramObject::separableLinked.
+    // Snapshot the separability request at link time. Program-pipeline
+    // legality uses this linked-binary state rather than the current
+    // request-level parameter.
     programObject->separableLinked = programObject->separable;
 
     // Populate GL 4.3 program resource introspection tables from the

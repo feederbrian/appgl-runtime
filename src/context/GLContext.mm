@@ -43021,6 +43021,73 @@ constexpr GLbitfield kAppGLPipelineStageMask =
     GL_FRAGMENT_SHADER_BIT |
     GL_COMPUTE_SHADER_BIT;
 
+bool pipelineUniformTypeIsSampler(GLenum type) {
+    switch (type) {
+        case GL_SAMPLER_1D: case GL_INT_SAMPLER_1D:
+        case GL_UNSIGNED_INT_SAMPLER_1D: case GL_SAMPLER_1D_SHADOW:
+        case GL_SAMPLER_2D: case GL_INT_SAMPLER_2D:
+        case GL_UNSIGNED_INT_SAMPLER_2D: case GL_SAMPLER_2D_SHADOW:
+        case GL_SAMPLER_3D: case GL_INT_SAMPLER_3D:
+        case GL_UNSIGNED_INT_SAMPLER_3D:
+        case GL_SAMPLER_CUBE: case GL_INT_SAMPLER_CUBE:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE: case GL_SAMPLER_CUBE_SHADOW:
+        case GL_SAMPLER_1D_ARRAY: case GL_INT_SAMPLER_1D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY: case GL_SAMPLER_1D_ARRAY_SHADOW:
+        case GL_SAMPLER_2D_ARRAY: case GL_INT_SAMPLER_2D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY: case GL_SAMPLER_2D_ARRAY_SHADOW:
+        case GL_SAMPLER_CUBE_MAP_ARRAY: case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+        case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+        case GL_SAMPLER_2D_RECT: case GL_INT_SAMPLER_2D_RECT:
+        case GL_UNSIGNED_INT_SAMPLER_2D_RECT: case GL_SAMPLER_2D_RECT_SHADOW:
+        case GL_SAMPLER_BUFFER: case GL_INT_SAMPLER_BUFFER:
+        case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+        case GL_SAMPLER_2D_MULTISAMPLE: case GL_INT_SAMPLER_2D_MULTISAMPLE:
+        case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+        case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+        case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool pipelineHasMiddleStageWithoutVertex(const GLProgramPipelineObject& ppo) {
+    return ppo.vertexProgram == 0 &&
+        (ppo.tessControlProgram != 0 ||
+         ppo.tessEvalProgram != 0 ||
+         ppo.geometryProgram != 0);
+}
+
+bool pipelineHasSplitMultiStageProgram(const GLProgramPipelineObject& ppo) {
+    const std::array<GLuint, 5> orderedGraphicsStages = {
+        ppo.vertexProgram,
+        ppo.tessControlProgram,
+        ppo.tessEvalProgram,
+        ppo.geometryProgram,
+        ppo.fragmentProgram,
+    };
+    for (std::size_t first = 0; first < orderedGraphicsStages.size(); ++first) {
+        const GLuint program = orderedGraphicsStages[first];
+        if (program == 0) {
+            continue;
+        }
+        for (std::size_t last = first + 1; last < orderedGraphicsStages.size(); ++last) {
+            if (orderedGraphicsStages[last] != program) {
+                continue;
+            }
+            for (std::size_t mid = first + 1; mid < last; ++mid) {
+                const GLuint middleProgram = orderedGraphicsStages[mid];
+                if (middleProgram != 0 && middleProgram != program) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 bool pipelineStageSelectionsMatchExecutables(
     GLObjectStore& objects,
     const GLProgramPipelineObject& ppo,
@@ -43068,6 +43135,75 @@ bool pipelineStageSelectionsMatchExecutables(
     return true;
 }
 
+bool pipelineHasSamplerTypeConflict(
+    GLObjectStore& objects,
+    const GLProgramPipelineObject& ppo) {
+    const std::array<GLuint, 6> stagePrograms = {
+        ppo.vertexProgram,
+        ppo.tessControlProgram,
+        ppo.tessEvalProgram,
+        ppo.geometryProgram,
+        ppo.fragmentProgram,
+        ppo.computeProgram,
+    };
+    std::array<GLuint, 6> uniquePrograms{};
+    std::size_t uniqueCount = 0;
+    for (GLuint programName : stagePrograms) {
+        if (programName == 0) {
+            continue;
+        }
+        bool seen = false;
+        for (std::size_t i = 0; i < uniqueCount; ++i) {
+            if (uniquePrograms[i] == programName) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen && uniqueCount < uniquePrograms.size()) {
+            uniquePrograms[uniqueCount++] = programName;
+        }
+    }
+
+    std::unordered_map<GLint, GLenum> typeByTextureUnit;
+    for (std::size_t i = 0; i < uniqueCount; ++i) {
+        const GLProgramObject* program = objects.programs().get(uniquePrograms[i]);
+        if (program == nullptr || !program->linked) {
+            continue;
+        }
+        for (const GLProgramUniformInfo& uniform : program->uniforms) {
+            if (uniform.location < 0 ||
+                !pipelineUniformTypeIsSampler(uniform.type)) {
+                continue;
+            }
+            const auto valueIt = program->uniformValues.find(uniform.location);
+            const GLProgramUniformValue* value =
+                (valueIt != program->uniformValues.end()) ? &valueIt->second : nullptr;
+            const GLint elementCount = std::max<GLint>(uniform.arraySize, 1);
+            for (GLint element = 0; element < elementCount; ++element) {
+                GLint unit = (uniform.explicitBinding >= 0)
+                    ? (uniform.explicitBinding + element) : 0;
+                bool hasElementValue = false;
+                if (value != nullptr &&
+                    static_cast<std::size_t>(element) < value->ints.size()) {
+                    unit = value->ints[static_cast<std::size_t>(element)];
+                    hasElementValue = true;
+                }
+                if (elementCount > 1 &&
+                    uniform.explicitBinding < 0 &&
+                    (!hasElementValue || unit == 0)) {
+                    continue;
+                }
+                const auto [it, inserted] =
+                    typeByTextureUnit.emplace(unit, uniform.type);
+                if (!inserted && it->second != uniform.type) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 bool GLContext::Impl::validateCurrentProgramPipelineForDraw() const {
@@ -43083,7 +43219,10 @@ bool GLContext::Impl::validateCurrentProgramPipelineForDraw() const {
     if (ppo == nullptr) {
         return true;
     }
-    if (!pipelineStageSelectionsMatchExecutables(*objects, *ppo, false)) {
+    if (pipelineHasMiddleStageWithoutVertex(*ppo) ||
+        pipelineHasSplitMultiStageProgram(*ppo) ||
+        !pipelineStageSelectionsMatchExecutables(*objects, *ppo, false) ||
+        pipelineHasSamplerTypeConflict(*objects, *ppo)) {
         if (owner != nullptr) {
             owner->pushError(GL_INVALID_OPERATION);
         }
