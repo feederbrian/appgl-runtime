@@ -159,6 +159,42 @@ std::size_t skipBlockComment(const std::string& src, std::size_t pos) {
     return (end == std::string::npos) ? src.size() : end + 2;
 }
 
+bool containsCodeIdentifier(const std::string& src, std::string_view needle) {
+    if (needle.empty() || src.size() < needle.size()) {
+        return false;
+    }
+    std::size_t pos = 0;
+    while (pos < src.size()) {
+        if (isPreprocessorDirectiveLine(src, pos)) {
+            pos = skipPreprocessorDirective(src, pos);
+            continue;
+        }
+        if (src.compare(pos, 2, "//") == 0) {
+            pos = skipLineComment(src, pos);
+            continue;
+        }
+        if (src.compare(pos, 2, "/*") == 0) {
+            pos = skipBlockComment(src, pos);
+            continue;
+        }
+        if (src[pos] == '"' || src[pos] == '\'') {
+            pos = skipStringLiteral(src, pos);
+            continue;
+        }
+        if (src.compare(pos, needle.size(), needle) == 0) {
+            const bool leftOk = (pos == 0) || !isIdentChar(src[pos - 1]);
+            const std::size_t end = pos + needle.size();
+            const bool rightOk =
+                (end >= src.size()) || !isIdentChar(src[end]);
+            if (leftOk && rightOk) {
+                return true;
+            }
+        }
+        ++pos;
+    }
+    return false;
+}
+
 bool replaceCodeIdentifier(std::string& src,
                            std::string_view from,
                            std::string_view to) {
@@ -1678,7 +1714,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         legacy.usesClipVertex = containsIdentifier(source, "gl_ClipVertex");
     }
     if (isFragment) {
-        legacy.fragColor = containsIdentifier(source, "gl_FragColor");
+        legacy.fragColor = containsCodeIdentifier(result.source, "gl_FragColor");
         legacy.fragDataMax = scanFragDataMax(source);
     }
     legacy.texCoordMax = scanTexCoordMax(source);

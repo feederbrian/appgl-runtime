@@ -397,10 +397,88 @@ GLint GLContext::getUniformLocation(GLuint program, const GLchar* name) {
         return -1;
     }
     const std::string lookup = name;
-    for (const auto& uniform : object->uniforms) {
-        if (uniform.name == lookup) {
-            return uniform.location;
+    auto parseStrictArrayIndex = [](const std::string& s, long& out) -> bool {
+        if (s.empty()) return false;
+        for (char c : s) {
+            if (c < '0' || c > '9') return false;
         }
+        char* endp = nullptr;
+        out = std::strtol(s.c_str(), &endp, 10);
+        return endp != nullptr && *endp == '\0' && out >= 0;
+    };
+    auto parsePureArrayElementLookup =
+        [&](const std::string& text,
+            std::string& baseName,
+            std::vector<GLint>& indices) -> bool {
+        indices.clear();
+        const std::size_t firstBracket = text.find('[');
+        if (firstBracket == std::string::npos) {
+            baseName = text;
+            return !baseName.empty();
+        }
+        baseName = text.substr(0, firstBracket);
+        if (baseName.empty()) return false;
+        std::size_t p = firstBracket;
+        while (p < text.size()) {
+            if (text[p] != '[') return false;
+            const std::size_t close = text.find(']', p + 1);
+            if (close == std::string::npos) return false;
+            long idx = 0;
+            if (!parseStrictArrayIndex(text.substr(p + 1, close - p - 1), idx)) {
+                return false;
+            }
+            indices.push_back(static_cast<GLint>(idx));
+            p = close + 1;
+        }
+        return !indices.empty();
+    };
+    auto flattenUniformArrayIndex =
+        [](const GLProgramUniformInfo& uniform,
+           const std::vector<GLint>& indices,
+           GLint& flatIndex) -> bool {
+        if (indices.empty()) {
+            flatIndex = 0;
+            return true;
+        }
+        if (uniform.arrayDimensions.empty()) {
+            if (indices.size() != 1) return false;
+            if (indices[0] < 0 || indices[0] >= uniform.arraySize) return false;
+            flatIndex = indices[0];
+            return true;
+        }
+        if (indices.size() != uniform.arrayDimensions.size()) return false;
+        GLint flat = 0;
+        for (std::size_t i = 0; i < indices.size(); ++i) {
+            const GLint dim = uniform.arrayDimensions[i];
+            if (dim <= 0 || indices[i] < 0 || indices[i] >= dim) return false;
+            flat = flat * dim + indices[i];
+        }
+        if (flat < 0 || flat >= uniform.arraySize) return false;
+        flatIndex = flat;
+        return true;
+    };
+    auto lookupUniformLocation = [&](const std::string& text) -> GLint {
+        for (const auto& uniform : object->uniforms) {
+            if (uniform.name == text) {
+                return uniform.location;
+            }
+        }
+        std::string baseName;
+        std::vector<GLint> indices;
+        if (parsePureArrayElementLookup(text, baseName, indices)) {
+            for (const auto& uniform : object->uniforms) {
+                GLint flatIndex = 0;
+                if (uniform.name == baseName && uniform.location >= 0 &&
+                    flattenUniformArrayIndex(uniform, indices, flatIndex)) {
+                    return uniform.location + flatIndex;
+                }
+            }
+        }
+        return -1;
+    };
+    const GLint directLocation = lookupUniformLocation(lookup);
+    if (directLocation >= 0) {
+        return directLocation;
     }
     // GL 4.6 §7.6.1: array-element lookup — `glGetUniformLocation(prog,
     // "u[k]")` for a uniform declared `uniform T u[N]` must return
@@ -461,11 +539,9 @@ GLint GLContext::getUniformLocation(GLuint program, const GLchar* name) {
             }
         }
         if (changed) {
-            // Pass 1: exact match on rewritten name.
-            for (const auto& uniform : object->uniforms) {
-                if (uniform.name == rewritten) {
-                    return uniform.location;
-                }
+            const GLint rewrittenLocation = lookupUniformLocation(rewritten);
+            if (rewrittenLocation >= 0) {
+                return rewrittenLocation;
             }
             // Pass 2: array-element subscript lookup on the rewritten name.
             // Mirrors the non-rewritten `lookup[k]` → `base + k` path above.

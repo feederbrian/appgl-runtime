@@ -38192,6 +38192,19 @@ void appendDeclarationsAsUniforms(
     std::vector<GLProgramUniformInfo>& out,
     const std::vector<GLShaderDeclaration>& decls
 ) {
+    auto flattenedArraySizeFor = [](const GLShaderDeclaration& d) -> GLint {
+        if (d.arrayDimensions.empty()) {
+            return d.arraySize > 0 ? d.arraySize : 1;
+        }
+        GLint count = 1;
+        for (GLint dim : d.arrayDimensions) {
+            if (dim <= 0) {
+                return d.arraySize > 0 ? d.arraySize : 1;
+            }
+            count *= dim;
+        }
+        return count;
+    };
     for (const auto& decl : decls) {
         const auto existing = std::find_if(out.begin(), out.end(),
             [&](const GLProgramUniformInfo& u) { return u.name == decl.name; });
@@ -38233,8 +38246,13 @@ void appendDeclarationsAsUniforms(
             // stages. GLSL 4.6 technically flags differing array sizes as a
             // link error, but desktop drivers commonly relax to the maximum;
             // CTS tests assume that behaviour.
-            if (decl.arraySize > existing->arraySize) {
-                existing->arraySize = decl.arraySize;
+            const GLint flattenedArraySize = flattenedArraySizeFor(decl);
+            if (flattenedArraySize > existing->arraySize) {
+                existing->arraySize = flattenedArraySize;
+                existing->arrayDimensions = decl.arrayDimensions;
+            } else if (existing->arrayDimensions.empty() &&
+                       !decl.arrayDimensions.empty()) {
+                existing->arrayDimensions = decl.arrayDimensions;
             }
             if (decl.isArray) {
                 existing->isArray = true;
@@ -38244,8 +38262,9 @@ void appendDeclarationsAsUniforms(
         GLProgramUniformInfo info;
         info.name = decl.name;
         info.type = decl.type;
-        info.arraySize = decl.arraySize > 0 ? decl.arraySize : 1;
+        info.arraySize = flattenedArraySizeFor(decl);
         info.isArray = decl.isArray;
+        info.arrayDimensions = decl.arrayDimensions;
         info.location = -1;  // assigned below in link-time location pass
         info.explicitLocation = decl.explicitLocation;
         info.explicitBinding = decl.explicitBinding;

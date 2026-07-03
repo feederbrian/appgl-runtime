@@ -745,6 +745,11 @@ struct GLProgramUniformInfo {
     // resource-interface queries can append the "[0]" suffix even
     // for 1-element arrays.
     bool isArray = false;
+    // Full GLSL declaration shape for arrays-of-arrays. `arraySize`
+    // is the flattened uniform-location slot count used by glUniform
+    // addressing, while this preserves the authored dimensions for
+    // glGetUniformLocation("u[i][j]") linearization.
+    std::vector<GLint> arrayDimensions;
     GLint location = -1;
     // RC-D06: explicit location from GLSL `layout(location=N)`.  -1 means
     // the author did not specify one and linkProgram assigns a dense

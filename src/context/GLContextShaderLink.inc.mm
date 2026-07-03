@@ -2940,6 +2940,7 @@ bool GLContext::linkProgram(GLuint program) {
         entry.binding = u.explicitBinding;  // RC-D08
         entry.arraySize = u.arraySize;
         entry.isArray = u.isArray;
+        entry.arrayDimensions = u.arrayDimensions;
         entry.referencedBy = computeStageMask(u.name);
         if (u.type == GL_UNSIGNED_INT_ATOMIC_COUNTER) {
             // Offset defaults to 0 when the GLSL didn't carry
