@@ -481,6 +481,15 @@ void GLContext::setShadeModel(GLenum mode) {
                   "mode is not GL_FLAT or GL_SMOOTH");
         return;
     }
+    if (impl_->displayLists.compiling && !impl_->displayLists.replaying) {
+        Impl::DisplayListCommand command;
+        command.kind = Impl::DisplayListCommand::Kind::ShadeModel;
+        command.enumValue = mode;
+        impl_->displayLists.compileCommands.push_back(command);
+        if (!impl_->displayLists.compileAndExecute) {
+            return;
+        }
+    }
     impl_->fixedFunctionShadeModel = mode;
 }
 
@@ -725,6 +734,17 @@ void GLContext::setLightModelFloatCompat(GLenum pname, const GLfloat* params) {
 }
 
 void GLContext::setNormalCompat(GLfloat x, GLfloat y, GLfloat z) {
+    if (impl_->displayLists.compiling && !impl_->displayLists.replaying) {
+        Impl::DisplayListCommand command;
+        command.kind = Impl::DisplayListCommand::Kind::Normal;
+        command.values[0] = x;
+        command.values[1] = y;
+        command.values[2] = z;
+        impl_->displayLists.compileCommands.push_back(command);
+        if (!impl_->displayLists.compileAndExecute) {
+            return;
+        }
+    }
     impl_->lighting.currentNormal[0] = x;
     impl_->lighting.currentNormal[1] = y;
     impl_->lighting.currentNormal[2] = z;
@@ -2171,6 +2191,16 @@ void GLContext::setColorMaterialCompat(GLenum face, GLenum mode) {
             pushError(GL_INVALID_ENUM, "glColorMaterial", "mode is invalid");
             return;
     }
+    if (impl_->displayLists.compiling && !impl_->displayLists.replaying) {
+        Impl::DisplayListCommand command;
+        command.kind = Impl::DisplayListCommand::Kind::ColorMaterial;
+        command.enumValue = face;
+        command.enumValue2 = mode;
+        impl_->displayLists.compileCommands.push_back(command);
+        if (!impl_->displayLists.compileAndExecute) {
+            return;
+        }
+    }
     impl_->material.colorMaterialFace = face;
     impl_->material.colorMaterialMode = mode;
 }
@@ -2194,6 +2224,20 @@ void GLContext::setMaterialFloatCompat(GLenum face, GLenum pname, const GLfloat*
         default:
             pushError(GL_INVALID_ENUM, "glMaterialfv", "pname is invalid");
             return;
+    }
+    if (impl_->displayLists.compiling && !impl_->displayLists.replaying) {
+        Impl::DisplayListCommand command;
+        command.kind = Impl::DisplayListCommand::Kind::Material;
+        command.enumValue = face;
+        command.enumValue2 = pname;
+        command.values[0] = params[0];
+        command.values[1] = params[1];
+        command.values[2] = params[2];
+        command.values[3] = params[3];
+        impl_->displayLists.compileCommands.push_back(command);
+        if (!impl_->displayLists.compileAndExecute) {
+            return;
+        }
     }
 
     if (impl_->state->isEnabled(GL_COLOR_MATERIAL)) {
@@ -2953,6 +2997,36 @@ bool GLContext::isLegacyClientArrayEnabled(GLenum array) const {
     }
 }
 
+void GLContext::pushMatrixCompat() {
+    if (impl_->displayLists.compiling && !impl_->displayLists.replaying) {
+        Impl::DisplayListCommand command;
+        command.kind = Impl::DisplayListCommand::Kind::PushMatrix;
+        impl_->displayLists.compileCommands.push_back(command);
+        if (!impl_->displayLists.compileAndExecute) {
+            return;
+        }
+    }
+    if (!matrixState().pushMatrix()) {
+        pushError(GL_STACK_OVERFLOW, "glPushMatrix",
+                  "matrix stack would exceed maximum depth");
+    }
+}
+
+void GLContext::popMatrixCompat() {
+    if (impl_->displayLists.compiling && !impl_->displayLists.replaying) {
+        Impl::DisplayListCommand command;
+        command.kind = Impl::DisplayListCommand::Kind::PopMatrix;
+        impl_->displayLists.compileCommands.push_back(command);
+        if (!impl_->displayLists.compileAndExecute) {
+            return;
+        }
+    }
+    if (!matrixState().popMatrix()) {
+        pushError(GL_STACK_UNDERFLOW, "glPopMatrix",
+                  "matrix stack would underflow below the implicit identity entry");
+    }
+}
+
 void GLContext::beginImmediate(GLenum mode) {
     switch (mode) {
         case GL_TRIANGLES:
@@ -2967,6 +3041,13 @@ void GLContext::beginImmediate(GLenum mode) {
         case GL_POINTS:
             break;
         default:
+            if (impl_->displayLists.compiling && !impl_->displayLists.replaying) {
+                Impl::DisplayListCommand command;
+                command.kind = Impl::DisplayListCommand::Kind::InvalidBegin;
+                command.enumValue = mode;
+                impl_->displayLists.compileCommands.push_back(command);
+                impl_->immediate.suppressNextInvalidEnd = true;
+            }
             pushError(GL_INVALID_ENUM);
             return;
     }
@@ -2982,16 +3063,13 @@ void GLContext::beginImmediate(GLenum mode) {
         impl_->displayLists.compileCommands.push_back(command);
     }
     impl_->immediate.active = true;
+    impl_->immediate.suppressNextInvalidEnd = false;
     impl_->immediate.mode = mode;
     impl_->immediate.vertices.clear();
+    impl_->immediate.materialSnapshots.clear();
 }
 
 void GLContext::immediateVertex(float x, float y, float z, float w) {
-    if (!impl_->immediate.active) {
-        // glVertex* outside glBegin/glEnd is silently ignored per GL 1.x.
-        // (The function exists but does nothing when not inside a begin/end pair.)
-        return;
-    }
     if (impl_->displayLists.compiling && !impl_->displayLists.replaying) {
         Impl::DisplayListCommand command;
         command.kind = Impl::DisplayListCommand::Kind::Vertex;
@@ -3003,6 +3081,11 @@ void GLContext::immediateVertex(float x, float y, float z, float w) {
         if (!impl_->displayLists.compileAndExecute) {
             return;
         }
+    }
+    if (!impl_->immediate.active) {
+        // glVertex* outside glBegin/glEnd is silently ignored per GL 1.x.
+        // During list compilation it must still be recorded for replay.
+        return;
     }
     Impl::ImmediateModeVertex v;
     v.position[0] = x;
@@ -3018,6 +3101,34 @@ void GLContext::immediateVertex(float x, float y, float z, float w) {
     v.texcoord[2] = impl_->immediate.currentTexcoord[2];
     v.texcoord[3] = impl_->immediate.currentTexcoord[3];
     impl_->immediate.vertices.push_back(v);
+
+    Impl::ImmediateModeMaterialSnapshot materialSnapshot;
+    materialSnapshot.valid = true;
+    std::memcpy(materialSnapshot.frontAmbient,
+                impl_->material.front.ambient,
+                sizeof(materialSnapshot.frontAmbient));
+    std::memcpy(materialSnapshot.frontDiffuse,
+                impl_->material.front.diffuse,
+                sizeof(materialSnapshot.frontDiffuse));
+    std::memcpy(materialSnapshot.frontSpecular,
+                impl_->material.front.specular,
+                sizeof(materialSnapshot.frontSpecular));
+    std::memcpy(materialSnapshot.frontEmission,
+                impl_->material.front.emission,
+                sizeof(materialSnapshot.frontEmission));
+    std::memcpy(materialSnapshot.backAmbient,
+                impl_->material.back.ambient,
+                sizeof(materialSnapshot.backAmbient));
+    std::memcpy(materialSnapshot.backDiffuse,
+                impl_->material.back.diffuse,
+                sizeof(materialSnapshot.backDiffuse));
+    std::memcpy(materialSnapshot.backSpecular,
+                impl_->material.back.specular,
+                sizeof(materialSnapshot.backSpecular));
+    std::memcpy(materialSnapshot.backEmission,
+                impl_->material.back.emission,
+                sizeof(materialSnapshot.backEmission));
+    impl_->immediate.materialSnapshots.push_back(materialSnapshot);
 }
 
 void GLContext::immediateColor(float r, float g, float b, float a) {
@@ -3110,24 +3221,31 @@ void GLContext::immediateTexCoord(unsigned int unit, float s, float t, float r, 
 }
 
 void GLContext::endImmediate() {
-    if (!impl_->immediate.active) {
-        pushError(GL_INVALID_OPERATION);
-        return;
-    }
     if (impl_->displayLists.compiling && !impl_->displayLists.replaying) {
+        if (impl_->immediate.suppressNextInvalidEnd) {
+            impl_->immediate.suppressNextInvalidEnd = false;
+            return;
+        }
         Impl::DisplayListCommand command;
         command.kind = Impl::DisplayListCommand::Kind::End;
         impl_->displayLists.compileCommands.push_back(command);
         if (!impl_->displayLists.compileAndExecute) {
             impl_->immediate.active = false;
+            impl_->immediate.suppressNextInvalidEnd = false;
             impl_->immediate.vertices.clear();
+            impl_->immediate.materialSnapshots.clear();
             return;
         }
+    }
+    if (!impl_->immediate.active) {
+        pushError(GL_INVALID_OPERATION);
+        return;
     }
     impl_->immediate.active = false;
 
     const GLenum mode = impl_->immediate.mode;
     auto& captured = impl_->immediate.vertices;
+    auto& capturedMaterials = impl_->immediate.materialSnapshots;
     if (captured.empty()) {
         return;
     }
@@ -3326,36 +3444,74 @@ void GLContext::endImmediate() {
     }
     const Impl::ImmediateModeVertex* drawVerts = captured.data();
     std::size_t drawCount = captured.size();
+    const bool haveCapturedMaterials =
+        capturedMaterials.size() == captured.size();
+    const Impl::ImmediateModeMaterialSnapshot* drawMaterials =
+        haveCapturedMaterials ? capturedMaterials.data() : nullptr;
     GLenum drawMode = mode;
     Matrix4 drawMvp = mvp;
     const bool flat = (impl_->fixedFunctionShadeModel == GL_FLAT);
+    std::vector<Impl::ImmediateModeMaterialSnapshot> expandedMaterials;
+    auto materialAt = [&](std::size_t index) -> const Impl::ImmediateModeMaterialSnapshot* {
+        return drawMaterials != nullptr ? &drawMaterials[index] : nullptr;
+    };
+    auto appendExpandedMaterial =
+        [&](const Impl::ImmediateModeMaterialSnapshot* material) {
+            if (drawMaterials != nullptr) {
+                expandedMaterials.push_back(material != nullptr
+                    ? *material
+                    : Impl::ImmediateModeMaterialSnapshot{});
+            }
+        };
     auto appendTriangle = [&](const Impl::ImmediateModeVertex& a,
                               const Impl::ImmediateModeVertex& b,
                               const Impl::ImmediateModeVertex& c,
-                              const Impl::ImmediateModeVertex& provoking) {
+                              const Impl::ImmediateModeVertex& provoking,
+                              const Impl::ImmediateModeMaterialSnapshot* ma,
+                              const Impl::ImmediateModeMaterialSnapshot* mb,
+                              const Impl::ImmediateModeMaterialSnapshot* mc,
+                              const Impl::ImmediateModeMaterialSnapshot* mp) {
         Impl::ImmediateModeVertex ta = a;
         Impl::ImmediateModeVertex tb = b;
         Impl::ImmediateModeVertex tc = c;
+        const auto* outMa = ma;
+        const auto* outMb = mb;
+        const auto* outMc = mc;
         if (flat) {
             std::memcpy(ta.color, provoking.color, sizeof(ta.color));
             std::memcpy(tb.color, provoking.color, sizeof(tb.color));
             std::memcpy(tc.color, provoking.color, sizeof(tc.color));
+            outMa = mp;
+            outMb = mp;
+            outMc = mp;
         }
         expanded.push_back(ta);
         expanded.push_back(tb);
         expanded.push_back(tc);
+        appendExpandedMaterial(outMa);
+        appendExpandedMaterial(outMb);
+        appendExpandedMaterial(outMc);
     };
     auto appendLine = [&](const Impl::ImmediateModeVertex& a,
                           const Impl::ImmediateModeVertex& b,
-                          const Impl::ImmediateModeVertex& provoking) {
+                          const Impl::ImmediateModeVertex& provoking,
+                          const Impl::ImmediateModeMaterialSnapshot* ma,
+                          const Impl::ImmediateModeMaterialSnapshot* mb,
+                          const Impl::ImmediateModeMaterialSnapshot* mp) {
         Impl::ImmediateModeVertex ta = a;
         Impl::ImmediateModeVertex tb = b;
+        const auto* outMa = ma;
+        const auto* outMb = mb;
         if (flat) {
             std::memcpy(ta.color, provoking.color, sizeof(ta.color));
             std::memcpy(tb.color, provoking.color, sizeof(tb.color));
+            outMa = mp;
+            outMb = mp;
         }
         expanded.push_back(ta);
         expanded.push_back(tb);
+        appendExpandedMaterial(outMa);
+        appendExpandedMaterial(outMb);
     };
     const auto& rasterStateForPolygonMode = impl_->state->rasterState();
     auto polygonIsFrontFacing = [&](const Impl::ImmediateModeVertex* verts,
@@ -3395,9 +3551,13 @@ void GLContext::endImmediate() {
             if (flat) {
                 expanded.reserve((captured.size() / 3) * 3);
                 for (std::size_t i = 0; i + 2 < captured.size(); i += 3) {
-                    appendTriangle(captured[i + 0], captured[i + 1], captured[i + 2], captured[i + 2]);
+                    appendTriangle(captured[i + 0], captured[i + 1], captured[i + 2], captured[i + 2],
+                                   materialAt(i + 0), materialAt(i + 1), materialAt(i + 2), materialAt(i + 2));
                 }
                 drawVerts = expanded.data();
+                if (drawMaterials != nullptr) {
+                    drawMaterials = expandedMaterials.data();
+                }
                 drawCount = expanded.size();
             }
             drawMode = GL_TRIANGLES;
@@ -3406,9 +3566,13 @@ void GLContext::endImmediate() {
             if (captured.size() >= 3) {
                 expanded.reserve((captured.size() - 2) * 3);
                 for (std::size_t i = 0; i + 2 < captured.size(); ++i) {
-                    appendTriangle(captured[i + 0], captured[i + 1], captured[i + 2], captured[i + 2]);
+                    appendTriangle(captured[i + 0], captured[i + 1], captured[i + 2], captured[i + 2],
+                                   materialAt(i + 0), materialAt(i + 1), materialAt(i + 2), materialAt(i + 2));
                 }
                 drawVerts = expanded.data();
+                if (drawMaterials != nullptr) {
+                    drawMaterials = expandedMaterials.data();
+                }
                 drawCount = expanded.size();
                 drawMode = GL_TRIANGLES;
             }
@@ -3417,9 +3581,13 @@ void GLContext::endImmediate() {
             if (captured.size() >= 3) {
                 expanded.reserve((captured.size() - 2) * 3);
                 for (std::size_t i = 1; i + 1 < captured.size(); ++i) {
-                    appendTriangle(captured[0], captured[i], captured[i + 1], captured[i + 1]);
+                    appendTriangle(captured[0], captured[i], captured[i + 1], captured[i + 1],
+                                   materialAt(0), materialAt(i), materialAt(i + 1), materialAt(i + 1));
                 }
                 drawVerts = expanded.data();
+                if (drawMaterials != nullptr) {
+                    drawMaterials = expandedMaterials.data();
+                }
                 drawCount = expanded.size();
                 drawMode = GL_TRIANGLES;
             }
@@ -3427,10 +3595,15 @@ void GLContext::endImmediate() {
         case GL_QUADS:
             expanded.reserve((captured.size() / 4) * 6);
             for (std::size_t i = 0; i + 3 < captured.size(); i += 4) {
-                appendTriangle(captured[i + 0], captured[i + 1], captured[i + 2], captured[i + 3]);
-                appendTriangle(captured[i + 0], captured[i + 2], captured[i + 3], captured[i + 3]);
+                appendTriangle(captured[i + 0], captured[i + 1], captured[i + 2], captured[i + 3],
+                               materialAt(i + 0), materialAt(i + 1), materialAt(i + 2), materialAt(i + 3));
+                appendTriangle(captured[i + 0], captured[i + 2], captured[i + 3], captured[i + 3],
+                               materialAt(i + 0), materialAt(i + 2), materialAt(i + 3), materialAt(i + 3));
             }
             drawVerts = expanded.data();
+            if (drawMaterials != nullptr) {
+                drawMaterials = expandedMaterials.data();
+            }
             drawCount = expanded.size();
             drawMode = GL_TRIANGLES;
             break;
@@ -3438,10 +3611,15 @@ void GLContext::endImmediate() {
             if (captured.size() >= 4) {
                 expanded.reserve(((captured.size() - 2) / 2) * 6);
                 for (std::size_t i = 0; i + 3 < captured.size(); i += 2) {
-                    appendTriangle(captured[i + 0], captured[i + 1], captured[i + 3], captured[i + 3]);
-                    appendTriangle(captured[i + 0], captured[i + 3], captured[i + 2], captured[i + 3]);
+                    appendTriangle(captured[i + 0], captured[i + 1], captured[i + 3], captured[i + 3],
+                                   materialAt(i + 0), materialAt(i + 1), materialAt(i + 3), materialAt(i + 3));
+                    appendTriangle(captured[i + 0], captured[i + 3], captured[i + 2], captured[i + 3],
+                                   materialAt(i + 0), materialAt(i + 3), materialAt(i + 2), materialAt(i + 3));
                 }
                 drawVerts = expanded.data();
+                if (drawMaterials != nullptr) {
+                    drawMaterials = expandedMaterials.data();
+                }
                 drawCount = expanded.size();
                 drawMode = GL_TRIANGLES;
             }
@@ -3459,10 +3637,15 @@ void GLContext::endImmediate() {
                     case GL_LINE:
                         expanded.reserve(captured.size() * 2);
                         for (std::size_t i = 0; i + 1 < captured.size(); ++i) {
-                            appendLine(captured[i], captured[i + 1], captured[0]);
+                            appendLine(captured[i], captured[i + 1], captured[0],
+                                       materialAt(i), materialAt(i + 1), materialAt(0));
                         }
-                        appendLine(captured.back(), captured.front(), captured[0]);
+                        appendLine(captured.back(), captured.front(), captured[0],
+                                   materialAt(captured.size() - 1), materialAt(0), materialAt(0));
                         drawVerts = expanded.data();
+                        if (drawMaterials != nullptr) {
+                            drawMaterials = expandedMaterials.data();
+                        }
                         drawCount = expanded.size();
                         drawMode = GL_LINES;
                         break;
@@ -3475,9 +3658,13 @@ void GLContext::endImmediate() {
                     default:
                         expanded.reserve((captured.size() - 2) * 3);
                         for (std::size_t i = 1; i + 1 < captured.size(); ++i) {
-                            appendTriangle(captured[0], captured[i], captured[i + 1], captured[0]);
+                            appendTriangle(captured[0], captured[i], captured[i + 1], captured[0],
+                                           materialAt(0), materialAt(i), materialAt(i + 1), materialAt(0));
                         }
                         drawVerts = expanded.data();
+                        if (drawMaterials != nullptr) {
+                            drawMaterials = expandedMaterials.data();
+                        }
                         drawCount = expanded.size();
                         drawMode = GL_TRIANGLES;
                         break;
@@ -3488,9 +3675,13 @@ void GLContext::endImmediate() {
             if (flat) {
                 expanded.reserve((captured.size() / 2) * 2);
                 for (std::size_t i = 0; i + 1 < captured.size(); i += 2) {
-                    appendLine(captured[i], captured[i + 1], captured[i + 1]);
+                    appendLine(captured[i], captured[i + 1], captured[i + 1],
+                               materialAt(i), materialAt(i + 1), materialAt(i + 1));
                 }
                 drawVerts = expanded.data();
+                if (drawMaterials != nullptr) {
+                    drawMaterials = expandedMaterials.data();
+                }
                 drawCount = expanded.size();
             }
             drawMode = GL_LINES;
@@ -3499,9 +3690,13 @@ void GLContext::endImmediate() {
             if (flat && captured.size() >= 2) {
                 expanded.reserve((captured.size() - 1) * 2);
                 for (std::size_t i = 0; i + 1 < captured.size(); ++i) {
-                    appendLine(captured[i], captured[i + 1], captured[i + 1]);
+                    appendLine(captured[i], captured[i + 1], captured[i + 1],
+                               materialAt(i), materialAt(i + 1), materialAt(i + 1));
                 }
                 drawVerts = expanded.data();
+                if (drawMaterials != nullptr) {
+                    drawMaterials = expandedMaterials.data();
+                }
                 drawCount = expanded.size();
                 drawMode = GL_LINES;
             }
@@ -3510,10 +3705,15 @@ void GLContext::endImmediate() {
             if (captured.size() >= 2) {
                 expanded.reserve(captured.size() * 2);
                 for (std::size_t i = 0; i + 1 < captured.size(); ++i) {
-                    appendLine(captured[i], captured[i + 1], captured[i + 1]);
+                    appendLine(captured[i], captured[i + 1], captured[i + 1],
+                               materialAt(i), materialAt(i + 1), materialAt(i + 1));
                 }
-                appendLine(captured.back(), captured.front(), captured.front());
+                appendLine(captured.back(), captured.front(), captured.front(),
+                           materialAt(captured.size() - 1), materialAt(0), materialAt(0));
                 drawVerts = expanded.data();
+                if (drawMaterials != nullptr) {
+                    drawMaterials = expandedMaterials.data();
+                }
                 drawCount = expanded.size();
                 drawMode = GL_LINES;
             }
@@ -3546,7 +3746,8 @@ void GLContext::endImmediate() {
         return polygonIsFrontFacing(tri, 3);
     };
     auto applyCompatVertexState = [&](Impl::ImmediateModeVertex v,
-                                      bool frontFacing) {
+                                      bool frontFacing,
+                                      const Impl::ImmediateModeMaterialSnapshot* materialSnapshot) {
         const auto applyTexGenCoord = [&](GLenum cap, std::size_t index) {
             if (!impl_->state->isEnabled(cap) || index >= 2) {
                 return;
@@ -3565,10 +3766,30 @@ void GLContext::endImmediate() {
         applyTexGenCoord(GL_TEXTURE_GEN_T, 1);
 
         if (impl_->state->isEnabled(GL_LIGHTING)) {
-            const auto& material =
-                impl_->lighting.twoSide && !frontFacing
-                    ? impl_->material.back
-                    : impl_->material.front;
+            const bool useBackMaterial = impl_->lighting.twoSide && !frontFacing;
+            const auto& liveMaterial = useBackMaterial
+                ? impl_->material.back
+                : impl_->material.front;
+            Impl::FixedFunctionMaterial capturedMaterial;
+            const auto* materialPtr = &liveMaterial;
+            if (materialSnapshot != nullptr && materialSnapshot->valid) {
+                const auto copy4 = [](float* dst, const float* src) {
+                    std::memcpy(dst, src, sizeof(float) * 4);
+                };
+                if (useBackMaterial) {
+                    copy4(capturedMaterial.ambient, materialSnapshot->backAmbient);
+                    copy4(capturedMaterial.diffuse, materialSnapshot->backDiffuse);
+                    copy4(capturedMaterial.specular, materialSnapshot->backSpecular);
+                    copy4(capturedMaterial.emission, materialSnapshot->backEmission);
+                } else {
+                    copy4(capturedMaterial.ambient, materialSnapshot->frontAmbient);
+                    copy4(capturedMaterial.diffuse, materialSnapshot->frontDiffuse);
+                    copy4(capturedMaterial.specular, materialSnapshot->frontSpecular);
+                    copy4(capturedMaterial.emission, materialSnapshot->frontEmission);
+                }
+                materialPtr = &capturedMaterial;
+            }
+            const auto& material = *materialPtr;
             float out[4] = {material.emission[0],
                             material.emission[1],
                             material.emission[2],
@@ -3687,15 +3908,18 @@ void GLContext::endImmediate() {
                     continue;
                 }
                 const bool frontFacing = triangleFrontFacing(a, b, c);
-                fixedFunctionVertices.push_back(applyCompatVertexState(a, frontFacing));
-                fixedFunctionVertices.push_back(applyCompatVertexState(b, frontFacing));
-                fixedFunctionVertices.push_back(applyCompatVertexState(c, frontFacing));
+                fixedFunctionVertices.push_back(applyCompatVertexState(
+                    a, frontFacing, drawMaterials != nullptr ? &drawMaterials[i + 0] : nullptr));
+                fixedFunctionVertices.push_back(applyCompatVertexState(
+                    b, frontFacing, drawMaterials != nullptr ? &drawMaterials[i + 1] : nullptr));
+                fixedFunctionVertices.push_back(applyCompatVertexState(
+                    c, frontFacing, drawMaterials != nullptr ? &drawMaterials[i + 2] : nullptr));
             }
         } else {
             for (std::size_t i = 0; i < drawCount; ++i) {
                 if (!compatClipRejects(drawVerts[i])) {
-                    fixedFunctionVertices.push_back(
-                        applyCompatVertexState(drawVerts[i], true));
+                    fixedFunctionVertices.push_back(applyCompatVertexState(
+                        drawVerts[i], true, drawMaterials != nullptr ? &drawMaterials[i] : nullptr));
                 }
             }
         }
@@ -4924,6 +5148,10 @@ void GLContext::endListCompat() {
     state.compileAndExecute = false;
     state.currentList = 0;
     state.compileCommands.clear();
+    impl_->immediate.active = false;
+    impl_->immediate.suppressNextInvalidEnd = false;
+    impl_->immediate.vertices.clear();
+    impl_->immediate.materialSnapshots.clear();
 }
 
 void GLContext::callListCompat(GLuint list) {
@@ -4998,6 +5226,28 @@ void GLContext::callListCompat(GLuint list) {
                 break;
             case Impl::DisplayListCommand::Kind::PixelZoom:
                 setPixelZoomCompat(command.values[0], command.values[1]);
+                break;
+            case Impl::DisplayListCommand::Kind::InvalidBegin:
+                pushError(GL_INVALID_ENUM, "glBegin",
+                          "mode is not a valid primitive mode");
+                break;
+            case Impl::DisplayListCommand::Kind::ShadeModel:
+                setShadeModel(command.enumValue);
+                break;
+            case Impl::DisplayListCommand::Kind::Normal:
+                setNormalCompat(command.values[0], command.values[1], command.values[2]);
+                break;
+            case Impl::DisplayListCommand::Kind::ColorMaterial:
+                setColorMaterialCompat(command.enumValue, command.enumValue2);
+                break;
+            case Impl::DisplayListCommand::Kind::Material:
+                setMaterialFloatCompat(command.enumValue, command.enumValue2, command.values);
+                break;
+            case Impl::DisplayListCommand::Kind::PushMatrix:
+                pushMatrixCompat();
+                break;
+            case Impl::DisplayListCommand::Kind::PopMatrix:
+                popMatrixCompat();
                 break;
         }
     }

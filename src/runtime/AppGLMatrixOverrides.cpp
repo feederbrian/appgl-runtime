@@ -131,10 +131,7 @@ extern "C" void APIENTRY glPushMatrix(void) {
     if (ctx == nullptr) {
         return;
     }
-    if (!ctx->matrixState().pushMatrix()) {
-        ctx->pushError(GL_STACK_OVERFLOW, "glPushMatrix",
-                       "matrix stack would exceed maximum depth");
-    }
+    ctx->pushMatrixCompat();
 }
 
 extern "C" void APIENTRY glPopMatrix(void) {
@@ -142,10 +139,7 @@ extern "C" void APIENTRY glPopMatrix(void) {
     if (ctx == nullptr) {
         return;
     }
-    if (!ctx->matrixState().popMatrix()) {
-        ctx->pushError(GL_STACK_UNDERFLOW, "glPopMatrix",
-                       "matrix stack would underflow below the implicit identity entry");
-    }
+    ctx->popMatrixCompat();
 }
 
 extern "C" void APIENTRY glTranslatef(GLfloat x, GLfloat y, GLfloat z) {

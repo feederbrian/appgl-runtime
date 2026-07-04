@@ -31931,12 +31931,25 @@ struct GLContext::Impl {
     };
     static_assert(sizeof(ImmediateModeVertex) == 48,
                   "ImmediateModeVertex must be 48 bytes to match the vertex descriptor in MetalFrameGraph::ensureImmediateModePipeline");
+    struct ImmediateModeMaterialSnapshot {
+        bool valid = false;
+        float frontAmbient[4] = {0.2f, 0.2f, 0.2f, 1.0f};
+        float frontDiffuse[4] = {0.8f, 0.8f, 0.8f, 1.0f};
+        float frontSpecular[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        float frontEmission[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        float backAmbient[4] = {0.2f, 0.2f, 0.2f, 1.0f};
+        float backDiffuse[4] = {0.8f, 0.8f, 0.8f, 1.0f};
+        float backSpecular[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        float backEmission[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    };
     struct ImmediateModeCapture {
         bool active = false;
+        bool suppressNextInvalidEnd = false;
         GLenum mode = 0;
         float currentColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
         float currentTexcoord[4] = {0.0f, 0.0f, 0.0f, 1.0f};
         std::vector<ImmediateModeVertex> vertices;
+        std::vector<ImmediateModeMaterialSnapshot> materialSnapshots;
     };
     ImmediateModeCapture immediate;
     std::vector<ImmediateModeVertex> legacyClientArrayVertices;
@@ -31958,9 +31971,17 @@ struct GLContext::Impl {
             CallList,
             Bitmap,
             PixelZoom,
+            InvalidBegin,
+            ShadeModel,
+            Normal,
+            ColorMaterial,
+            Material,
+            PushMatrix,
+            PopMatrix,
         };
         Kind kind = Kind::Clear;
         GLenum enumValue = 0;
+        GLenum enumValue2 = 0;
         GLuint list = 0;
         GLsizei width = 0;
         GLsizei height = 0;

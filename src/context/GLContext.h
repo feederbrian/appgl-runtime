@@ -620,6 +620,8 @@ public:
     // uniform value buffer at draw time.
     MatrixStateMirror& matrixState();
     const MatrixStateMirror& matrixState() const;
+    void pushMatrixCompat();
+    void popMatrixCompat();
 
     // Compat-profile immediate-mode geometry capture.
     //
