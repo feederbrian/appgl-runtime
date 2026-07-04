@@ -19,6 +19,7 @@ namespace flags = appgl::feature_flags;
 namespace diagnostics = appgl::diagnostics;
 using appgl::AppGLCompatAdmissionMode;
 using appgl::AppGLCompatFeature;
+using appgl::AppGLCompatRequestProfile;
 using appgl::AppGLCompatSemanticTier;
 
 class ScopedEnv {
@@ -178,14 +179,14 @@ void runCompatPolicySelfTest(TestState& state) {
                "scoped admission parses with disabled legacy alias");
         expect(state, appgl::appglAdvertiseCompatProfile(policy),
                "scoped admission advertises compatibility");
-        expect(state, !appgl::appglCompatProfileEnabled(policy),
-               "scoped admission leaves broad semantic tier disabled");
-        expect(state, policy.semanticTier == AppGLCompatSemanticTier::Core,
-               "scoped admission records core semantic tier");
+        expect(state, appgl::appglCompatProfileEnabled(policy),
+               "scoped admission enables broad semantic tier");
+        expect(state, policy.semanticTier == AppGLCompatSemanticTier::BroadLegacy,
+               "scoped admission records broad semantic tier");
         expect(state, policy.advertiseArbCompatibility,
                "scoped admission advertises GL_ARB_compatibility");
-        expect(state, !appgl::appglCompatFeatureEnabled(policy, AppGLCompatFeature::GpuShader4),
-               "scoped admission does not advertise gpu_shader4");
+        expect(state, appgl::appglCompatFeatureEnabled(policy, AppGLCompatFeature::GpuShader4),
+               "scoped admission advertises gpu_shader4");
         expect(state, appgl::appglContextProfileMask(policy) ==
                           appgl::kAppGLCompatibilityProfileBit,
                "scoped admission reports compatibility profile mask");
@@ -206,8 +207,32 @@ void runCompatPolicySelfTest(TestState& state) {
         expect(state, std::string(appgl::appglClaimedVersionString(policy)) ==
                           "2.1 AppGL compatibility",
                "compat-X.Y controls claimed version string");
+        expect(state, appgl::appglCompatProfileEnabled(policy),
+               "compat-X.Y admission enables broad semantic tier");
+        expect(state, appgl::appglCompatFeatureEnabled(policy, AppGLCompatFeature::GpuShader4),
+               "compat-X.Y admission advertises gpu_shader4");
+    }
+
+    {
+        auto policy = appgl::appglCompatPolicyFromEnv(nullptr, "compat-4.6", nullptr, "core");
+        expect(state, policy.requestProfile == AppGLCompatRequestProfile::Core,
+               "core request profile is parsed");
+        expect(state, !appgl::appglAdvertiseCompatProfile(policy),
+               "core request profile suppresses compat admission advertising");
         expect(state, !appgl::appglCompatProfileEnabled(policy),
-               "compat-X.Y admission remains advertising-only");
+               "core request profile suppresses compat semantic tier");
+        expect(state, std::string(appgl::appglClaimedVersionString(policy)) == "4.6 AppGL core",
+               "core request profile preserves core claimed version");
+    }
+
+    {
+        auto policy = appgl::appglCompatPolicyFromEnv(nullptr, "compat-2.1", nullptr, "compatibility");
+        expect(state, policy.requestProfile == AppGLCompatRequestProfile::Compatibility,
+               "compat request profile is parsed");
+        expect(state, appgl::appglAdvertiseCompatProfile(policy),
+               "compat request profile admits compat advertising");
+        expect(state, appgl::appglCompatProfileEnabled(policy),
+               "compat request profile admits compat semantics");
     }
 
     {

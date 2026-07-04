@@ -32,6 +32,12 @@ enum class AppGLCompatExtensionTier {
     BroadLegacy,
 };
 
+enum class AppGLCompatRequestProfile {
+    Unknown,
+    Core,
+    Compatibility,
+};
+
 enum class AppGLCompatFeature {
     LegacyTextureFormats,
     VaoZeroDraw,
@@ -56,6 +62,7 @@ struct CompatPolicy {
     bool advertiseCompatProfile = false;
     bool advertiseArbCompatibility = false;
     bool advertiseGpuShader4 = false;
+    AppGLCompatRequestProfile requestProfile = AppGLCompatRequestProfile::Unknown;
     std::string requestedSource = "default-off";
     std::string claimedVersionString = "4.6 AppGL core";
 };
@@ -89,6 +96,25 @@ inline bool appglParseCompatVersion(const char* value, int& major, int& minor) {
     return true;
 }
 
+inline AppGLCompatRequestProfile appglParseCompatRequestProfile(const char* value) {
+    if (value == nullptr || value[0] == '\0') {
+        return AppGLCompatRequestProfile::Unknown;
+    }
+    if (std::strcmp(value, "core") == 0 ||
+        std::strcmp(value, "core-profile") == 0 ||
+        std::strcmp(value, "GLUT_CORE_PROFILE") == 0 ||
+        std::strcmp(value, "GLUT_3_2_CORE_PROFILE") == 0) {
+        return AppGLCompatRequestProfile::Core;
+    }
+    if (std::strcmp(value, "compat") == 0 ||
+        std::strcmp(value, "compatibility") == 0 ||
+        std::strcmp(value, "compatibility-profile") == 0 ||
+        std::strcmp(value, "GLUT_COMPATIBILITY_PROFILE") == 0) {
+        return AppGLCompatRequestProfile::Compatibility;
+    }
+    return AppGLCompatRequestProfile::Unknown;
+}
+
 inline std::string appglBuildClaimedVersionString(int major, int minor, bool compat) {
     char buffer[48];
     std::snprintf(buffer,
@@ -112,6 +138,9 @@ inline void appglApplyCompatAdmission(CompatPolicy& policy,
     policy.advertisedProfileMask = kAppGLCompatibilityProfileBit;
     policy.advertiseCompatProfile = true;
     policy.advertiseArbCompatibility = true;
+    policy.semanticTier = AppGLCompatSemanticTier::BroadLegacy;
+    policy.extensionTier = AppGLCompatExtensionTier::BroadLegacy;
+    policy.advertiseGpuShader4 = true;
     policy.requestedSource = std::move(source);
     policy.claimedVersionString = appglBuildClaimedVersionString(major, minor, true);
 }
@@ -120,19 +149,19 @@ inline void appglApplyBroadLegacyCompat(CompatPolicy& policy,
                                         AppGLCompatAdmissionMode mode,
                                         std::string source) {
     appglApplyCompatAdmission(policy, mode, 4, 6, std::move(source));
-    policy.semanticTier = AppGLCompatSemanticTier::BroadLegacy;
-    policy.extensionTier = AppGLCompatExtensionTier::BroadLegacy;
-    policy.advertiseGpuShader4 = true;
 }
 
 inline CompatPolicy appglCompatPolicyFromEnv(const char* compatProfile,
                                              const char* compatAdmission,
-                                             const char* compatVersion = nullptr) {
+                                             const char* compatVersion = nullptr,
+                                             const char* compatRequestProfile = nullptr) {
     CompatPolicy policy;
+    policy.requestProfile = appglParseCompatRequestProfile(compatRequestProfile);
     if (appglCompatLegacyAliasEnabled(compatProfile)) {
         appglApplyBroadLegacyCompat(policy,
                                     AppGLCompatAdmissionMode::LegacyAlias,
                                     "APPGL_COMPAT_PROFILE");
+        policy.requestProfile = appglParseCompatRequestProfile(compatRequestProfile);
         return policy;
     }
 
@@ -140,6 +169,11 @@ inline CompatPolicy appglCompatPolicyFromEnv(const char* compatProfile,
         compatAdmission[0] == '\0' ||
         std::strcmp(compatAdmission, "0") == 0 ||
         std::strcmp(compatAdmission, "off") == 0) {
+        return policy;
+    }
+
+    if (policy.requestProfile == AppGLCompatRequestProfile::Core) {
+        policy.requestedSource = "APPGL_COMPAT_REQUEST_PROFILE=core";
         return policy;
     }
 
@@ -190,7 +224,8 @@ inline const CompatPolicy& appglCurrentCompatPolicy() {
     static const CompatPolicy policy = appglCompatPolicyFromEnv(
         std::getenv("APPGL_COMPAT_PROFILE"),
         std::getenv("APPGL_COMPAT_ADMISSION"),
-        std::getenv("APPGL_COMPAT_VERSION"));
+        std::getenv("APPGL_COMPAT_VERSION"),
+        std::getenv("APPGL_COMPAT_REQUEST_PROFILE"));
     return policy;
 }
 
