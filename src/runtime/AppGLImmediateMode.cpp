@@ -1138,6 +1138,28 @@ extern "C" void APIENTRY glTexGeni(GLenum coord, GLenum pname, GLint param) {
 
 // ── glVertex* ────────────────────────────────────────────────────────
 
+extern "C" void APIENTRY glVertex2d(GLdouble x, GLdouble y) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->immediateVertex(static_cast<float>(x),
+                         static_cast<float>(y),
+                         0.0f,
+                         1.0f);
+}
+
+extern "C" void APIENTRY glVertex2dv(const GLdouble* v) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr || v == nullptr) {
+        return;
+    }
+    ctx->immediateVertex(static_cast<float>(v[0]),
+                         static_cast<float>(v[1]),
+                         0.0f,
+                         1.0f);
+}
+
 extern "C" void APIENTRY glVertex2f(GLfloat x, GLfloat y) {
     auto* ctx = immediateContext();
     if (ctx == nullptr) {
@@ -1152,6 +1174,72 @@ extern "C" void APIENTRY glVertex2fv(const GLfloat* v) {
         return;
     }
     ctx->immediateVertex(v[0], v[1], 0.0f, 1.0f);
+}
+
+extern "C" void APIENTRY glVertex2i(GLint x, GLint y) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->immediateVertex(static_cast<float>(x),
+                         static_cast<float>(y),
+                         0.0f,
+                         1.0f);
+}
+
+extern "C" void APIENTRY glVertex2iv(const GLint* v) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr || v == nullptr) {
+        return;
+    }
+    ctx->immediateVertex(static_cast<float>(v[0]),
+                         static_cast<float>(v[1]),
+                         0.0f,
+                         1.0f);
+}
+
+extern "C" void APIENTRY glVertex2s(GLshort x, GLshort y) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->immediateVertex(static_cast<float>(x),
+                         static_cast<float>(y),
+                         0.0f,
+                         1.0f);
+}
+
+extern "C" void APIENTRY glVertex2sv(const GLshort* v) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr || v == nullptr) {
+        return;
+    }
+    ctx->immediateVertex(static_cast<float>(v[0]),
+                         static_cast<float>(v[1]),
+                         0.0f,
+                         1.0f);
+}
+
+extern "C" void APIENTRY glVertex3d(GLdouble x, GLdouble y, GLdouble z) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->immediateVertex(static_cast<float>(x),
+                         static_cast<float>(y),
+                         static_cast<float>(z),
+                         1.0f);
+}
+
+extern "C" void APIENTRY glVertex3dv(const GLdouble* v) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr || v == nullptr) {
+        return;
+    }
+    ctx->immediateVertex(static_cast<float>(v[0]),
+                         static_cast<float>(v[1]),
+                         static_cast<float>(v[2]),
+                         1.0f);
 }
 
 extern "C" void APIENTRY glVertex3f(GLfloat x, GLfloat y, GLfloat z) {
@@ -1170,6 +1258,72 @@ extern "C" void APIENTRY glVertex3fv(const GLfloat* v) {
     ctx->immediateVertex(v[0], v[1], v[2], 1.0f);
 }
 
+extern "C" void APIENTRY glVertex3i(GLint x, GLint y, GLint z) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->immediateVertex(static_cast<float>(x),
+                         static_cast<float>(y),
+                         static_cast<float>(z),
+                         1.0f);
+}
+
+extern "C" void APIENTRY glVertex3iv(const GLint* v) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr || v == nullptr) {
+        return;
+    }
+    ctx->immediateVertex(static_cast<float>(v[0]),
+                         static_cast<float>(v[1]),
+                         static_cast<float>(v[2]),
+                         1.0f);
+}
+
+extern "C" void APIENTRY glVertex3s(GLshort x, GLshort y, GLshort z) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->immediateVertex(static_cast<float>(x),
+                         static_cast<float>(y),
+                         static_cast<float>(z),
+                         1.0f);
+}
+
+extern "C" void APIENTRY glVertex3sv(const GLshort* v) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr || v == nullptr) {
+        return;
+    }
+    ctx->immediateVertex(static_cast<float>(v[0]),
+                         static_cast<float>(v[1]),
+                         static_cast<float>(v[2]),
+                         1.0f);
+}
+
+extern "C" void APIENTRY glVertex4d(GLdouble x, GLdouble y, GLdouble z, GLdouble w) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->immediateVertex(static_cast<float>(x),
+                         static_cast<float>(y),
+                         static_cast<float>(z),
+                         static_cast<float>(w));
+}
+
+extern "C" void APIENTRY glVertex4dv(const GLdouble* v) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr || v == nullptr) {
+        return;
+    }
+    ctx->immediateVertex(static_cast<float>(v[0]),
+                         static_cast<float>(v[1]),
+                         static_cast<float>(v[2]),
+                         static_cast<float>(v[3]));
+}
+
 extern "C" void APIENTRY glVertex4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
     auto* ctx = immediateContext();
     if (ctx == nullptr) {
@@ -1184,6 +1338,50 @@ extern "C" void APIENTRY glVertex4fv(const GLfloat* v) {
         return;
     }
     ctx->immediateVertex(v[0], v[1], v[2], v[3]);
+}
+
+extern "C" void APIENTRY glVertex4i(GLint x, GLint y, GLint z, GLint w) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->immediateVertex(static_cast<float>(x),
+                         static_cast<float>(y),
+                         static_cast<float>(z),
+                         static_cast<float>(w));
+}
+
+extern "C" void APIENTRY glVertex4iv(const GLint* v) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr || v == nullptr) {
+        return;
+    }
+    ctx->immediateVertex(static_cast<float>(v[0]),
+                         static_cast<float>(v[1]),
+                         static_cast<float>(v[2]),
+                         static_cast<float>(v[3]));
+}
+
+extern "C" void APIENTRY glVertex4s(GLshort x, GLshort y, GLshort z, GLshort w) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->immediateVertex(static_cast<float>(x),
+                         static_cast<float>(y),
+                         static_cast<float>(z),
+                         static_cast<float>(w));
+}
+
+extern "C" void APIENTRY glVertex4sv(const GLshort* v) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr || v == nullptr) {
+        return;
+    }
+    ctx->immediateVertex(static_cast<float>(v[0]),
+                         static_cast<float>(v[1]),
+                         static_cast<float>(v[2]),
+                         static_cast<float>(v[3]));
 }
 
 // ── glColor* ─────────────────────────────────────────────────────────
