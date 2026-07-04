@@ -844,6 +844,28 @@ extern "C" void APIENTRY glDrawPixels(GLsizei width,
     (void)ctx->drawPixelsCompat(width, height, format, type, pixels);
 }
 
+extern "C" void APIENTRY glBitmap(GLsizei width,
+                                  GLsizei height,
+                                  GLfloat xorig,
+                                  GLfloat yorig,
+                                  GLfloat xmove,
+                                  GLfloat ymove,
+                                  const GLubyte* bitmap) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    (void)ctx->bitmapCompat(width, height, xorig, yorig, xmove, ymove, bitmap);
+}
+
+extern "C" void APIENTRY glPixelZoom(GLfloat xfactor, GLfloat yfactor) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->setPixelZoomCompat(xfactor, yfactor);
+}
+
 extern "C" void APIENTRY glPixelMapfv(GLenum map,
                                       GLsizei mapsize,
                                       const GLfloat* values) {

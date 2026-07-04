@@ -31868,6 +31868,8 @@ struct GLContext::Impl {
     GLfloat fixedFunctionRasterPosition[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     GLfloat fixedFunctionRasterColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     GLfloat fixedFunctionRasterSecondaryColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    GLfloat fixedFunctionPixelZoomX = 1.0f;
+    GLfloat fixedFunctionPixelZoomY = 1.0f;
     static constexpr std::size_t kCompatRasterTextureUnits = 8;
     std::array<std::array<GLfloat, 4>, kCompatRasterTextureUnits> fixedFunctionRasterTexcoords{};
     GLfloat fixedFunctionCurrentSecondaryColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -31954,11 +31956,16 @@ struct GLContext::Impl {
             TexCoord,
             Enable,
             CallList,
+            Bitmap,
+            PixelZoom,
         };
         Kind kind = Kind::Clear;
         GLenum enumValue = 0;
         GLuint list = 0;
+        GLsizei width = 0;
+        GLsizei height = 0;
         float values[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        std::vector<std::uint8_t> bitmapMask;
     };
     struct DisplayListObject {
         std::vector<DisplayListCommand> commands;

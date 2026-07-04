@@ -39,18 +39,6 @@ extern "C" void APIENTRY glArrayElement(GLint i) {
     return;
 }
 
-extern "C" void APIENTRY glBitmap(GLsizei width, GLsizei height, GLfloat xorig, GLfloat yorig, GLfloat xmove, GLfloat ymove, const GLubyte *bitmap) {
-    (void)width;
-    (void)height;
-    (void)xorig;
-    (void)yorig;
-    (void)xmove;
-    (void)ymove;
-    (void)bitmap;
-    appgl::Runtime::shared().recordFixedFunctionStub("glBitmap");
-    return;
-}
-
 extern "C" void APIENTRY glClearIndex(GLfloat c) {
     (void)c;
     appgl::Runtime::shared().recordFixedFunctionStub("glClearIndex");
@@ -1093,13 +1081,6 @@ extern "C" void APIENTRY glNormalPointer(GLenum type, GLsizei stride, const void
 extern "C" void APIENTRY glPassThrough(GLfloat token) {
     (void)token;
     appgl::Runtime::shared().recordFixedFunctionStub("glPassThrough");
-    return;
-}
-
-extern "C" void APIENTRY glPixelZoom(GLfloat xfactor, GLfloat yfactor) {
-    (void)xfactor;
-    (void)yfactor;
-    appgl::Runtime::shared().recordFixedFunctionStub("glPixelZoom");
     return;
 }
 

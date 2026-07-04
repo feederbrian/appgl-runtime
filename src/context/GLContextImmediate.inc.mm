@@ -280,6 +280,17 @@ static GLint appglRasterIntegerCoordinate(GLfloat value) {
     return static_cast<GLint>(std::lround(value));
 }
 
+static void appglPixelZoomSpan(GLfloat a, GLfloat b, GLint& lo, GLint& hi) {
+    constexpr GLfloat kPixelBoundaryEpsilon = 1.0e-4f;
+    const GLfloat minV = std::min(a, b);
+    const GLfloat maxV = std::max(a, b);
+    lo = static_cast<GLint>(std::floor(minV + kPixelBoundaryEpsilon));
+    hi = static_cast<GLint>(std::ceil(maxV - kPixelBoundaryEpsilon));
+    if (hi < lo) {
+        hi = lo;
+    }
+}
+
 #ifndef GL_LINE_STIPPLE
 #define GL_LINE_STIPPLE 0x0B24
 #endif
@@ -825,6 +836,436 @@ bool GLContext::accumCompat(GLenum op, GLfloat value) {
     return true;
 }
 
+void GLContext::setPixelZoomCompat(GLfloat xfactor, GLfloat yfactor) {
+    if (impl_->immediate.active) {
+        pushError(GL_INVALID_OPERATION, "glPixelZoom",
+                  "cannot change pixel zoom inside glBegin/glEnd");
+        return;
+    }
+    if (impl_->displayLists.compiling && !impl_->displayLists.replaying) {
+        Impl::DisplayListCommand command;
+        command.kind = Impl::DisplayListCommand::Kind::PixelZoom;
+        command.values[0] = xfactor;
+        command.values[1] = yfactor;
+        impl_->displayLists.compileCommands.push_back(std::move(command));
+        if (!impl_->displayLists.compileAndExecute) {
+            return;
+        }
+    }
+    impl_->fixedFunctionPixelZoomX = xfactor;
+    impl_->fixedFunctionPixelZoomY = yfactor;
+}
+
+bool GLContext::bitmapCompat(GLsizei width,
+                             GLsizei height,
+                             GLfloat xorig,
+                             GLfloat yorig,
+                             GLfloat xmove,
+                             GLfloat ymove,
+                             const GLubyte* bitmap) {
+    if (width < 0 || height < 0) {
+        pushError(GL_INVALID_VALUE, "glBitmap",
+                  "width and height must be non-negative");
+        return false;
+    }
+    if (impl_->immediate.active) {
+        pushError(GL_INVALID_OPERATION, "glBitmap",
+                  "cannot draw bitmap inside glBegin/glEnd");
+        return false;
+    }
+
+    std::vector<std::uint8_t> mask(
+        static_cast<std::size_t>(width) *
+        static_cast<std::size_t>(height),
+        0);
+    if (bitmap != nullptr && width > 0 && height > 0) {
+        const auto& store = impl_->state->pixelStore();
+        const std::size_t sourceWidth =
+            static_cast<std::size_t>(store.unpackRowLength > 0
+                ? store.unpackRowLength
+                : width);
+        const std::size_t rowBytes =
+            alignByteCount((sourceWidth + 7u) / 8u, store.unpackAlignment);
+        const std::size_t skipRows =
+            static_cast<std::size_t>(std::max<GLint>(store.unpackSkipRows, 0));
+        const std::size_t skipPixels =
+            static_cast<std::size_t>(std::max<GLint>(store.unpackSkipPixels, 0));
+        const auto* source =
+            static_cast<const std::uint8_t*>(bitmap) + skipRows * rowBytes;
+        const bool lsbFirst = store.unpackLsbFirst == GL_TRUE;
+        for (GLsizei y = 0; y < height; ++y) {
+            const auto* row =
+                source + static_cast<std::size_t>(y) * rowBytes;
+            for (GLsizei x = 0; x < width; ++x) {
+                const std::size_t bitIndex =
+                    skipPixels + static_cast<std::size_t>(x);
+                const std::uint8_t byte = row[bitIndex / 8u];
+                const std::uint8_t bit =
+                    lsbFirst
+                        ? static_cast<std::uint8_t>((byte >> (bitIndex & 7u)) & 1u)
+                        : static_cast<std::uint8_t>((byte >> (7u - (bitIndex & 7u))) & 1u);
+                mask[static_cast<std::size_t>(y) *
+                     static_cast<std::size_t>(width) +
+                     static_cast<std::size_t>(x)] = bit;
+            }
+        }
+    }
+
+    if (impl_->displayLists.compiling && !impl_->displayLists.replaying) {
+        Impl::DisplayListCommand command;
+        command.kind = Impl::DisplayListCommand::Kind::Bitmap;
+        command.width = width;
+        command.height = height;
+        command.values[0] = xorig;
+        command.values[1] = yorig;
+        command.values[2] = xmove;
+        command.values[3] = ymove;
+        command.bitmapMask = mask;
+        impl_->displayLists.compileCommands.push_back(std::move(command));
+        if (!impl_->displayLists.compileAndExecute) {
+            return true;
+        }
+    }
+
+    return bitmapMaskCompat(width, height, xorig, yorig, xmove, ymove, mask.data());
+}
+
+bool GLContext::bitmapMaskCompat(GLsizei width,
+                                 GLsizei height,
+                                 GLfloat xorig,
+                                 GLfloat yorig,
+                                 GLfloat xmove,
+                                 GLfloat ymove,
+                                 const std::uint8_t* mask) {
+    if (width < 0 || height < 0) {
+        pushError(GL_INVALID_VALUE, "glBitmap",
+                  "width and height must be non-negative");
+        return false;
+    }
+    if (impl_->immediate.active) {
+        pushError(GL_INVALID_OPERATION, "glBitmap",
+                  "cannot draw bitmap inside glBegin/glEnd");
+        return false;
+    }
+    if (!impl_->fixedFunctionRasterPositionValid) {
+        return true;
+    }
+
+    auto advanceRasterPosition = [&]() {
+        impl_->fixedFunctionRasterPosition[0] += xmove;
+        impl_->fixedFunctionRasterPosition[1] += ymove;
+        impl_->fixedFunctionRasterX =
+            appglRasterIntegerCoordinate(impl_->fixedFunctionRasterPosition[0]);
+        impl_->fixedFunctionRasterY =
+            appglRasterIntegerCoordinate(impl_->fixedFunctionRasterPosition[1]);
+    };
+    if (width == 0 || height == 0 ||
+        mask == nullptr ||
+        impl_->state->isEnabled(GL_RASTERIZER_DISCARD) ||
+        impl_->shouldSkipDrawForConditionalRender()) {
+        advanceRasterPosition();
+        return true;
+    }
+
+    std::vector<std::uint8_t> mappedRGBA(
+        static_cast<std::size_t>(width) *
+        static_cast<std::size_t>(height) * 4u,
+        0);
+    for (GLsizei row = 0; row < height; ++row) {
+        for (GLsizei col = 0; col < width; ++col) {
+            const std::size_t maskIndex =
+                static_cast<std::size_t>(row) *
+                static_cast<std::size_t>(width) +
+                static_cast<std::size_t>(col);
+            const std::size_t dst = maskIndex * 4u;
+            const std::uint8_t bit = mask[maskIndex] == 0 ? 0 : 1;
+            mappedRGBA[dst + 0] = normalizedByte(impl_->compatPixelMapValue(0, bit));
+            mappedRGBA[dst + 1] = normalizedByte(impl_->compatPixelMapValue(1, bit));
+            mappedRGBA[dst + 2] = normalizedByte(impl_->compatPixelMapValue(2, bit));
+            mappedRGBA[dst + 3] = normalizedByte(impl_->compatPixelMapValue(3, bit));
+        }
+    }
+
+    const GLfloat zoomX = impl_->fixedFunctionPixelZoomX;
+    const GLfloat zoomY = impl_->fixedFunctionPixelZoomY;
+    if (zoomX == 0.0f || zoomY == 0.0f) {
+        advanceRasterPosition();
+        return true;
+    }
+
+    const auto& blend = impl_->state->blendState();
+    const bool blendEnabled = impl_->state->isEnabled(GL_BLEND);
+    auto blendFactor = [](GLenum factor,
+                          int component,
+                          const GLfloat src[4],
+                          const GLfloat dst[4],
+                          const GLfloat constant[4]) -> GLfloat {
+        switch (factor) {
+            case GL_ZERO: return 0.0f;
+            case GL_ONE: return 1.0f;
+            case GL_SRC_COLOR: return src[component];
+            case GL_ONE_MINUS_SRC_COLOR: return 1.0f - src[component];
+            case GL_DST_COLOR: return dst[component];
+            case GL_ONE_MINUS_DST_COLOR: return 1.0f - dst[component];
+            case GL_SRC_ALPHA: return src[3];
+            case GL_ONE_MINUS_SRC_ALPHA: return 1.0f - src[3];
+            case GL_DST_ALPHA: return dst[3];
+            case GL_ONE_MINUS_DST_ALPHA: return 1.0f - dst[3];
+            case GL_CONSTANT_COLOR: return constant[component];
+            case GL_ONE_MINUS_CONSTANT_COLOR: return 1.0f - constant[component];
+            case GL_CONSTANT_ALPHA: return constant[3];
+            case GL_ONE_MINUS_CONSTANT_ALPHA: return 1.0f - constant[3];
+            default: return 1.0f;
+        }
+    };
+    auto applyBlend = [&](std::uint8_t rgba[4],
+                          std::vector<std::uint8_t>& target,
+                          std::size_t offset) {
+        if (!blendEnabled) {
+            return;
+        }
+        const GLfloat src[4] = {
+            static_cast<GLfloat>(rgba[0]) / 255.0f,
+            static_cast<GLfloat>(rgba[1]) / 255.0f,
+            static_cast<GLfloat>(rgba[2]) / 255.0f,
+            static_cast<GLfloat>(rgba[3]) / 255.0f,
+        };
+        const GLfloat dst[4] = {
+            static_cast<GLfloat>(target[offset + 0]) / 255.0f,
+            static_cast<GLfloat>(target[offset + 1]) / 255.0f,
+            static_cast<GLfloat>(target[offset + 2]) / 255.0f,
+            static_cast<GLfloat>(target[offset + 3]) / 255.0f,
+        };
+        GLfloat out[4] = {};
+        for (int c = 0; c < 3; ++c) {
+            const GLfloat sf = blendFactor(blend.srcRGB, c, src, dst, blend.color);
+            const GLfloat df = blendFactor(blend.dstRGB, c, src, dst, blend.color);
+            out[c] = src[c] * sf + dst[c] * df;
+        }
+        const GLfloat saf = blendFactor(blend.srcAlpha, 3, src, dst, blend.color);
+        const GLfloat daf = blendFactor(blend.dstAlpha, 3, src, dst, blend.color);
+        out[3] = src[3] * saf + dst[3] * daf;
+        for (int c = 0; c < 4; ++c) {
+            rgba[c] = normalizedByte(std::clamp(out[c], 0.0f, 1.0f));
+        }
+    };
+    auto insideScissor = [&](GLint x, GLint y) -> bool {
+        if (!impl_->state->isEnabled(GL_SCISSOR_TEST)) {
+            return true;
+        }
+        const auto& sc = impl_->state->scissor();
+        return x >= sc.x && y >= sc.y &&
+               x < sc.x + sc.width &&
+               y < sc.y + sc.height;
+    };
+
+    const GLfloat baseX = impl_->fixedFunctionRasterPosition[0] - xorig;
+    const GLfloat baseY = impl_->fixedFunctionRasterPosition[1] - yorig;
+    auto sourceColor = [&](GLsizei col, GLsizei row, std::uint8_t rgba[4]) {
+        const std::size_t src =
+            (static_cast<std::size_t>(row) *
+             static_cast<std::size_t>(width) +
+             static_cast<std::size_t>(col)) * 4u;
+        for (int c = 0; c < 4; ++c) {
+            const GLfloat mapped =
+                static_cast<GLfloat>(mappedRGBA[src + static_cast<std::size_t>(c)]) /
+                255.0f;
+            rgba[c] = normalizedByte(
+                impl_->fixedFunctionRasterColor[c] * mapped);
+        }
+    };
+    auto destSpan = [](GLfloat a, GLfloat b, GLint& lo, GLint& hi) {
+        appglPixelZoomSpan(a, b, lo, hi);
+    };
+    auto paintToTarget = [&](std::vector<std::uint8_t>& target,
+                             GLsizei targetWidth,
+                             GLsizei targetHeight,
+                             bool flipY,
+                             std::size_t layerOffset) {
+        const std::size_t targetBytes =
+            static_cast<std::size_t>(targetWidth) *
+            static_cast<std::size_t>(targetHeight) * 4u;
+        if (target.size() < layerOffset + targetBytes) {
+            target.resize(layerOffset + targetBytes, 0);
+        }
+        for (GLsizei row = 0; row < height; ++row) {
+            for (GLsizei col = 0; col < width; ++col) {
+                const std::size_t maskIndex =
+                    static_cast<std::size_t>(row) *
+                    static_cast<std::size_t>(width) +
+                    static_cast<std::size_t>(col);
+                if (mask[maskIndex] == 0) {
+                    continue;
+                }
+                GLint x0 = 0;
+                GLint x1 = 0;
+                GLint y0 = 0;
+                GLint y1 = 0;
+                destSpan(baseX + static_cast<GLfloat>(col) * zoomX,
+                         baseX + static_cast<GLfloat>(col + 1) * zoomX,
+                         x0,
+                         x1);
+                destSpan(baseY + static_cast<GLfloat>(row) * zoomY,
+                         baseY + static_cast<GLfloat>(row + 1) * zoomY,
+                         y0,
+                         y1);
+                x0 = std::max<GLint>(x0, 0);
+                y0 = std::max<GLint>(y0, 0);
+                x1 = std::min<GLint>(x1, targetWidth);
+                y1 = std::min<GLint>(y1, targetHeight);
+                if (x0 >= x1 || y0 >= y1) {
+                    continue;
+                }
+                std::uint8_t srcRGBA[4];
+                sourceColor(col, row, srcRGBA);
+                for (GLint y = y0; y < y1; ++y) {
+                    if (!insideScissor(x0, y) && !insideScissor(x1 - 1, y)) {
+                        bool rowVisible = false;
+                        for (GLint x = x0; x < x1; ++x) {
+                            if (insideScissor(x, y)) {
+                                rowVisible = true;
+                                break;
+                            }
+                        }
+                        if (!rowVisible) {
+                            continue;
+                        }
+                    }
+                    const GLint storageY =
+                        flipY ? (targetHeight - 1 - y) : y;
+                    for (GLint x = x0; x < x1; ++x) {
+                        if (!insideScissor(x, y)) {
+                            continue;
+                        }
+                        const std::size_t offset =
+                            layerOffset +
+                            (static_cast<std::size_t>(storageY) *
+                             static_cast<std::size_t>(targetWidth) +
+                             static_cast<std::size_t>(x)) * 4u;
+                        std::uint8_t outRGBA[4] = {
+                            srcRGBA[0], srcRGBA[1], srcRGBA[2], srcRGBA[3]
+                        };
+                        applyBlend(outRGBA, target, offset);
+                        for (int c = 0; c < 4; ++c) {
+                            if (blend.colorMask[c] != GL_FALSE) {
+                                target[offset + static_cast<std::size_t>(c)] =
+                                    outRGBA[c];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    bool ok = true;
+    if (impl_->state->boundDrawFramebuffer() == 0) {
+        impl_->ensureDefaultFramebufferShadow();
+        impl_->materializeDefaultFbShadowClear();
+        paintToTarget(impl_->defaultFramebufferRGBA8,
+                      impl_->defaultFramebufferShadowWidth,
+                      impl_->defaultFramebufferShadowHeight,
+                      false,
+                      0);
+        impl_->defaultFramebufferShadowValid = true;
+    } else {
+        GLFramebufferObject* fbo =
+            impl_->objects->framebuffers().get(impl_->state->boundDrawFramebuffer());
+        if (fbo == nullptr) {
+            ok = false;
+        } else {
+            const bool lowerLeft = impl_->state->clipOrigin() != GL_UPPER_LEFT;
+            for (GLenum drawBuffer : fbo->drawBuffers) {
+                if (drawBuffer == GL_NONE) {
+                    continue;
+                }
+                const GLFramebufferAttachment* attachment =
+                    impl_->framebufferAttachment(*fbo, drawBuffer);
+                if (attachment == nullptr) {
+                    continue;
+                }
+                if (attachment->kind == GLFramebufferAttachment::Kind::Texture) {
+                    const auto resolved =
+                        impl_->resolveTextureAttachmentStorage(*attachment);
+                    GLTextureObject* texture = resolved.storageTexture;
+                    if (!resolved.valid || texture == nullptr) {
+                        continue;
+                    }
+                    auto levelIt = texture->levels.find(resolved.level);
+                    if (levelIt == texture->levels.end() ||
+                        !levelIt->second.defined) {
+                        continue;
+                    }
+                    GLTextureImageLevel& image = levelIt->second;
+                    const GLsizei targetWidth = std::max<GLsizei>(image.desc.width, 1);
+                    const GLsizei targetHeight =
+                        texture->target == GL_TEXTURE_1D
+                            ? 1
+                            : std::max<GLsizei>(image.desc.height, 1);
+                    const GLint layer = std::max<GLint>(resolved.layer, 0);
+                    const GLsizei depth = std::max<GLsizei>(image.desc.depth, 1);
+                    if (layer >= depth) {
+                        continue;
+                    }
+                    const std::size_t layerBytes =
+                        static_cast<std::size_t>(targetWidth) *
+                        static_cast<std::size_t>(targetHeight) * 4u;
+                    paintToTarget(image.rgba8,
+                                  targetWidth,
+                                  targetHeight,
+                                  lowerLeft,
+                                  static_cast<std::size_t>(layer) * layerBytes);
+                    texture->colorShadowAuthoritative = true;
+                    if (lowerLeft) {
+                        texture->wasFramebufferRenderedTo = true;
+                    }
+                    ok = impl_->replaceMetalTexture(*texture) && ok;
+                } else if (attachment->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+                    GLRenderbufferObject* rb =
+                        impl_->objects->renderbuffers().get(attachment->object);
+                    if (rb == nullptr || !rb->storageDefined ||
+                        rb->width <= 0 || rb->height <= 0) {
+                        continue;
+                    }
+                    impl_->materializeRenderbufferRGBA8Clear(*rb);
+                    paintToTarget(rb->rgba8,
+                                  rb->width,
+                                  rb->height,
+                                  lowerLeft,
+                                  0);
+                    rb->rgba8ShadowClearPending = false;
+                    rb->colorShadowAuthoritative = true;
+                    rb->framebufferReadbackYFlip = lowerLeft;
+                    if (rb->metalTexture != nullptr) {
+                        id<MTLTexture> metalTex =
+                            (__bridge id<MTLTexture>)rb->metalTexture;
+                        if (metalTex.sampleCount <= 1 &&
+                            (metalTex.pixelFormat == MTLPixelFormatRGBA8Unorm ||
+                             metalTex.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB)) {
+                            if (impl_->frameGraph != nullptr) {
+                                impl_->frameGraph->materializePendingFboClearsForTexture(
+                                    rb->metalTexture);
+                            }
+                            MTLRegion fullRegion = MTLRegionMake2D(
+                                0,
+                                0,
+                                static_cast<NSUInteger>(rb->width),
+                                static_cast<NSUInteger>(rb->height));
+                            [metalTex replaceRegion:fullRegion
+                                        mipmapLevel:0
+                                          withBytes:rb->rgba8.data()
+                                        bytesPerRow:static_cast<NSUInteger>(rb->width) * 4u];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    advanceRasterPosition();
+    return ok;
+}
+
 bool GLContext::drawPixelsCompat(GLsizei width,
                                  GLsizei height,
                                  GLenum format,
@@ -926,6 +1367,11 @@ bool GLContext::drawPixelsCompat(GLsizei width,
         return false;
     }
     if (pixels == nullptr) {
+        return true;
+    }
+    const GLfloat zoomX = impl_->fixedFunctionPixelZoomX;
+    const GLfloat zoomY = impl_->fixedFunctionPixelZoomY;
+    if (zoomX == 0.0f || zoomY == 0.0f) {
         return true;
     }
     const std::size_t pixelBytes =
@@ -1347,130 +1793,180 @@ bool GLContext::drawPixelsCompat(GLsizei width,
 	            case GL_ALWAYS:
 	            default:          return true;
 	        }
-		        };
+    };
         const auto& stencilFace = impl_->state->stencilState().front;
         const std::uint8_t stencilWriteMask =
             static_cast<std::uint8_t>(stencilFace.writeMask & 0xffu);
-		    for (GLsizei row = 0; row < height; ++row) {
-	        const auto* srcRow = source + static_cast<std::size_t>(row) * rowBytes;
-	        const GLint dstY = impl_->fixedFunctionRasterY + row;
-        if (dstY < 0) {
+    auto insideScissor = [&](GLint dstX, GLint dstY) -> bool {
+        if (!impl_->state->isEnabled(GL_SCISSOR_TEST)) {
+            return true;
+        }
+        const auto& sc = impl_->state->scissor();
+        return dstX >= sc.x && dstY >= sc.y &&
+               dstX < sc.x + sc.width &&
+               dstY < sc.y + sc.height;
+    };
+    GLint touchedMinX = std::numeric_limits<GLint>::max();
+    GLint touchedMinY = std::numeric_limits<GLint>::max();
+    GLint touchedMaxX = std::numeric_limits<GLint>::min();
+    GLint touchedMaxY = std::numeric_limits<GLint>::min();
+    auto noteTouched = [&](GLint dstX, GLint dstY) {
+        touchedMinX = std::min(touchedMinX, dstX);
+        touchedMinY = std::min(touchedMinY, dstY);
+        touchedMaxX = std::max(touchedMaxX, dstX);
+        touchedMaxY = std::max(touchedMaxY, dstY);
+    };
+    const GLsizei clipWidth = std::max<GLsizei>(
+        impl_->defaultFramebufferShadowWidth,
+        impl_->defaultFramebufferDepthStencilShadowWidth);
+    const GLsizei clipHeight = std::max<GLsizei>(
+        impl_->defaultFramebufferShadowHeight,
+        impl_->defaultFramebufferDepthStencilShadowHeight);
+    const GLfloat baseX = impl_->fixedFunctionRasterPosition[0];
+    const GLfloat baseY = impl_->fixedFunctionRasterPosition[1];
+    for (GLsizei row = 0; row < height; ++row) {
+        const auto* srcRow = source + static_cast<std::size_t>(row) * rowBytes;
+        GLint y0 = 0;
+        GLint y1 = 0;
+        appglPixelZoomSpan(baseY + static_cast<GLfloat>(row) * zoomY,
+                           baseY + static_cast<GLfloat>(row + 1) * zoomY,
+                           y0,
+                           y1);
+        y0 = std::max<GLint>(y0, 0);
+        y1 = std::min<GLint>(y1, clipHeight);
+        if (y0 >= y1) {
             continue;
         }
         for (GLsizei col = 0; col < width; ++col) {
-            const GLint dstX = impl_->fixedFunctionRasterX + col;
-            if (dstX < 0) {
+            GLint x0 = 0;
+            GLint x1 = 0;
+            appglPixelZoomSpan(baseX + static_cast<GLfloat>(col) * zoomX,
+                               baseX + static_cast<GLfloat>(col + 1) * zoomX,
+                               x0,
+                               x1);
+            x0 = std::max<GLint>(x0, 0);
+            x1 = std::min<GLint>(x1, clipWidth);
+            if (x0 >= x1) {
                 continue;
             }
-	            const auto* pixel = srcRow + static_cast<std::size_t>(col) * pixelBytes;
-            if (format == GL_DEPTH_STENCIL) {
-                if (dstX >= impl_->defaultFramebufferDepthStencilShadowWidth ||
-                    dstY >= impl_->defaultFramebufferDepthStencilShadowHeight) {
-                    continue;
+            const auto* pixel = srcRow + static_cast<std::size_t>(col) * pixelBytes;
+            for (GLint dstY = y0; dstY < y1; ++dstY) {
+                for (GLint dstX = x0; dstX < x1; ++dstX) {
+                    if (!insideScissor(dstX, dstY)) {
+                        continue;
+                    }
+                    if (format == GL_DEPTH_STENCIL) {
+                        if (dstX >= impl_->defaultFramebufferDepthStencilShadowWidth ||
+                            dstY >= impl_->defaultFramebufferDepthStencilShadowHeight) {
+                            continue;
+                        }
+                        const std::size_t offset =
+                            static_cast<std::size_t>(dstY) *
+                            static_cast<std::size_t>(impl_->defaultFramebufferDepthStencilShadowWidth) +
+                            static_cast<std::size_t>(dstX);
+                        const GLfloat incomingDepth =
+                            std::clamp(readDepthStencilDepth(pixel), 0.0f, 1.0f);
+                        if (!depthPasses(incomingDepth,
+                                         impl_->defaultFramebufferDepth32[offset])) {
+                            continue;
+                        }
+                        if (impl_->state->depthState().writeMask != GL_FALSE) {
+                            impl_->defaultFramebufferDepth32[offset] = incomingDepth;
+                        }
+                        const std::uint8_t incomingStencil =
+                            readDepthStencilStencil(pixel);
+                        impl_->defaultFramebufferStencil8[offset] =
+                            static_cast<std::uint8_t>(
+                                (impl_->defaultFramebufferStencil8[offset] &
+                                 ~stencilWriteMask) |
+                                (incomingStencil & stencilWriteMask));
+                        noteTouched(dstX, dstY);
+                        continue;
+                    }
+                    if (format == GL_DEPTH_COMPONENT) {
+                        if (dstX >= impl_->defaultFramebufferDepthStencilShadowWidth ||
+                            dstY >= impl_->defaultFramebufferDepthStencilShadowHeight) {
+                            continue;
+                        }
+                        const std::size_t offset =
+                            static_cast<std::size_t>(dstY) *
+                            static_cast<std::size_t>(impl_->defaultFramebufferDepthStencilShadowWidth) +
+                            static_cast<std::size_t>(dstX);
+                        const GLfloat incomingDepth =
+                            std::clamp(readScalar(pixel), 0.0f, 1.0f);
+                        if (!depthPasses(incomingDepth,
+                                         impl_->defaultFramebufferDepth32[offset])) {
+                            continue;
+                        }
+                        if (impl_->state->depthState().writeMask != GL_FALSE) {
+                            impl_->defaultFramebufferDepth32[offset] = incomingDepth;
+                        }
+                        if (dstX < impl_->defaultFramebufferShadowWidth &&
+                            dstY < impl_->defaultFramebufferShadowHeight) {
+                            std::uint8_t rgba[4] = {
+                                normalizedByte(impl_->immediate.currentColor[0]),
+                                normalizedByte(impl_->immediate.currentColor[1]),
+                                normalizedByte(impl_->immediate.currentColor[2]),
+                                normalizedByte(impl_->immediate.currentColor[3]),
+                            };
+                            const std::size_t colorOffset =
+                                (static_cast<std::size_t>(dstY) *
+                                 static_cast<std::size_t>(impl_->defaultFramebufferShadowWidth) +
+                                 static_cast<std::size_t>(dstX)) * 4u;
+                            applyBlend(rgba, colorOffset);
+                            if (blend.colorMask[0] != GL_FALSE) impl_->defaultFramebufferRGBA8[colorOffset + 0] = rgba[0];
+                            if (blend.colorMask[1] != GL_FALSE) impl_->defaultFramebufferRGBA8[colorOffset + 1] = rgba[1];
+                            if (blend.colorMask[2] != GL_FALSE) impl_->defaultFramebufferRGBA8[colorOffset + 2] = rgba[2];
+                            if (blend.colorMask[3] != GL_FALSE) impl_->defaultFramebufferRGBA8[colorOffset + 3] = rgba[3];
+                        }
+                        noteTouched(dstX, dstY);
+                        continue;
+                    }
+                    if (format == GL_STENCIL_INDEX) {
+                        if (dstX >= impl_->defaultFramebufferDepthStencilShadowWidth ||
+                            dstY >= impl_->defaultFramebufferDepthStencilShadowHeight) {
+                            continue;
+                        }
+                        const std::size_t offset =
+                            static_cast<std::size_t>(dstY) *
+                            static_cast<std::size_t>(impl_->defaultFramebufferDepthStencilShadowWidth) +
+                            static_cast<std::size_t>(dstX);
+                        impl_->defaultFramebufferStencil8[offset] = readStencilIndex(pixel);
+                        noteTouched(dstX, dstY);
+                        continue;
+                    }
+                    if (dstX >= impl_->defaultFramebufferShadowWidth ||
+                        dstY >= impl_->defaultFramebufferShadowHeight) {
+                        continue;
+                    }
+                    std::uint8_t rgba[4];
+                    readColor(pixel, rgba);
+                    sampleCurrentTexture2D(rgba);
+                    const std::size_t offset =
+                        (static_cast<std::size_t>(dstY) *
+                         static_cast<std::size_t>(impl_->defaultFramebufferShadowWidth) +
+                         static_cast<std::size_t>(dstX)) * 4u;
+                    applyBlend(rgba, offset);
+                    if (blend.colorMask[0] != GL_FALSE) impl_->defaultFramebufferRGBA8[offset + 0] = rgba[0];
+                    if (blend.colorMask[1] != GL_FALSE) impl_->defaultFramebufferRGBA8[offset + 1] = rgba[1];
+                    if (blend.colorMask[2] != GL_FALSE) impl_->defaultFramebufferRGBA8[offset + 2] = rgba[2];
+                    if (blend.colorMask[3] != GL_FALSE) impl_->defaultFramebufferRGBA8[offset + 3] = rgba[3];
+                    noteTouched(dstX, dstY);
                 }
-                const std::size_t offset =
-                    static_cast<std::size_t>(dstY) *
-                    static_cast<std::size_t>(impl_->defaultFramebufferDepthStencilShadowWidth) +
-                    static_cast<std::size_t>(dstX);
-                const GLfloat incomingDepth =
-                    std::clamp(readDepthStencilDepth(pixel), 0.0f, 1.0f);
-                if (!depthPasses(incomingDepth,
-                                 impl_->defaultFramebufferDepth32[offset])) {
-                    continue;
-                }
-                if (impl_->state->depthState().writeMask != GL_FALSE) {
-                    impl_->defaultFramebufferDepth32[offset] = incomingDepth;
-                }
-                const std::uint8_t incomingStencil =
-                    readDepthStencilStencil(pixel);
-                impl_->defaultFramebufferStencil8[offset] =
-                    static_cast<std::uint8_t>(
-                        (impl_->defaultFramebufferStencil8[offset] &
-                         ~stencilWriteMask) |
-                        (incomingStencil & stencilWriteMask));
-                continue;
             }
-	            if (format == GL_DEPTH_COMPONENT) {
-                if (dstX >= impl_->defaultFramebufferDepthStencilShadowWidth ||
-                    dstY >= impl_->defaultFramebufferDepthStencilShadowHeight) {
-                    continue;
-                }
-	                const std::size_t offset =
-	                    static_cast<std::size_t>(dstY) *
-	                    static_cast<std::size_t>(impl_->defaultFramebufferDepthStencilShadowWidth) +
-	                    static_cast<std::size_t>(dstX);
-	                const GLfloat incomingDepth =
-	                    std::clamp(readScalar(pixel), 0.0f, 1.0f);
-	                if (!depthPasses(incomingDepth,
-	                                 impl_->defaultFramebufferDepth32[offset])) {
-	                    continue;
-	                }
-	                if (impl_->state->depthState().writeMask != GL_FALSE) {
-	                    impl_->defaultFramebufferDepth32[offset] = incomingDepth;
-	                }
-	                if (dstX < impl_->defaultFramebufferShadowWidth &&
-	                    dstY < impl_->defaultFramebufferShadowHeight) {
-	                    std::uint8_t rgba[4] = {
-	                        normalizedByte(impl_->immediate.currentColor[0]),
-	                        normalizedByte(impl_->immediate.currentColor[1]),
-	                        normalizedByte(impl_->immediate.currentColor[2]),
-	                        normalizedByte(impl_->immediate.currentColor[3]),
-	                    };
-	                    const std::size_t colorOffset =
-	                        (static_cast<std::size_t>(dstY) *
-	                         static_cast<std::size_t>(impl_->defaultFramebufferShadowWidth) +
-	                         static_cast<std::size_t>(dstX)) * 4u;
-	                    applyBlend(rgba, colorOffset);
-	                    if (blend.colorMask[0] != GL_FALSE) impl_->defaultFramebufferRGBA8[colorOffset + 0] = rgba[0];
-	                    if (blend.colorMask[1] != GL_FALSE) impl_->defaultFramebufferRGBA8[colorOffset + 1] = rgba[1];
-	                    if (blend.colorMask[2] != GL_FALSE) impl_->defaultFramebufferRGBA8[colorOffset + 2] = rgba[2];
-	                    if (blend.colorMask[3] != GL_FALSE) impl_->defaultFramebufferRGBA8[colorOffset + 3] = rgba[3];
-	                }
-	                continue;
-	            }
-            if (format == GL_STENCIL_INDEX) {
-                if (dstX >= impl_->defaultFramebufferDepthStencilShadowWidth ||
-                    dstY >= impl_->defaultFramebufferDepthStencilShadowHeight) {
-                    continue;
-                }
-                const std::size_t offset =
-                    static_cast<std::size_t>(dstY) *
-                    static_cast<std::size_t>(impl_->defaultFramebufferDepthStencilShadowWidth) +
-                    static_cast<std::size_t>(dstX);
-                impl_->defaultFramebufferStencil8[offset] = readStencilIndex(pixel);
-                continue;
-            }
-            if (dstX >= impl_->defaultFramebufferShadowWidth ||
-                dstY >= impl_->defaultFramebufferShadowHeight) {
-                continue;
-            }
-            std::uint8_t rgba[4];
-            readColor(pixel, rgba);
-            sampleCurrentTexture2D(rgba);
-            const std::size_t offset =
-                (static_cast<std::size_t>(dstY) *
-                 static_cast<std::size_t>(impl_->defaultFramebufferShadowWidth) +
-                 static_cast<std::size_t>(dstX)) * 4u;
-            applyBlend(rgba, offset);
-            if (blend.colorMask[0] != GL_FALSE) impl_->defaultFramebufferRGBA8[offset + 0] = rgba[0];
-            if (blend.colorMask[1] != GL_FALSE) impl_->defaultFramebufferRGBA8[offset + 1] = rgba[1];
-            if (blend.colorMask[2] != GL_FALSE) impl_->defaultFramebufferRGBA8[offset + 2] = rgba[2];
-            if (blend.colorMask[3] != GL_FALSE) impl_->defaultFramebufferRGBA8[offset + 3] = rgba[3];
         }
     }
+    const bool touchedPixels = touchedMinX <= touchedMaxX && touchedMinY <= touchedMaxY;
 	    if (format == GL_DEPTH_STENCIL) {
 	        impl_->defaultFramebufferDepthShadowValid = true;
 	        impl_->defaultFramebufferStencilShadowValid = true;
 	        if (impl_->state->boundDrawFramebuffer() == 0 &&
-	            impl_->frameGraph != nullptr) {
-	            const GLint minX = std::max<GLint>(impl_->fixedFunctionRasterX, 0);
-	            const GLint minY = std::max<GLint>(impl_->fixedFunctionRasterY, 0);
-	            const GLint maxX = std::min<GLint>(
-	                impl_->fixedFunctionRasterX + width,
-	                impl_->defaultFramebufferDepthStencilShadowWidth);
-	            const GLint maxY = std::min<GLint>(
-	                impl_->fixedFunctionRasterY + height,
-	                impl_->defaultFramebufferDepthStencilShadowHeight);
+	            impl_->frameGraph != nullptr &&
+                touchedPixels) {
+	            const GLint minX = touchedMinX;
+	            const GLint minY = touchedMinY;
+	            const GLint maxX = touchedMaxX + 1;
+	            const GLint maxY = touchedMaxY + 1;
 	            if (minX < maxX && minY < maxY) {
 	                const GLsizei uploadWidth = maxX - minX;
 	                const GLsizei uploadHeight = maxY - minY;
@@ -1519,15 +2015,12 @@ bool GLContext::drawPixelsCompat(GLsizei width,
 	        impl_->defaultFramebufferDepthShadowValid = true;
 	        impl_->defaultFramebufferShadowValid = true;
 	        if (impl_->state->boundDrawFramebuffer() == 0 &&
-	            impl_->frameGraph != nullptr) {
-            const GLint minX = std::max<GLint>(impl_->fixedFunctionRasterX, 0);
-            const GLint minY = std::max<GLint>(impl_->fixedFunctionRasterY, 0);
-            const GLint maxX = std::min<GLint>(
-                impl_->fixedFunctionRasterX + width,
-                impl_->defaultFramebufferDepthStencilShadowWidth);
-            const GLint maxY = std::min<GLint>(
-                impl_->fixedFunctionRasterY + height,
-                impl_->defaultFramebufferDepthStencilShadowHeight);
+	            impl_->frameGraph != nullptr &&
+                touchedPixels) {
+            const GLint minX = touchedMinX;
+            const GLint minY = touchedMinY;
+            const GLint maxX = touchedMaxX + 1;
+            const GLint maxY = touchedMaxY + 1;
             if (minX < maxX && minY < maxY) {
                 const GLsizei uploadWidth = maxX - minX;
                 const GLsizei uploadHeight = maxY - minY;
@@ -1554,15 +2047,12 @@ bool GLContext::drawPixelsCompat(GLsizei width,
     } else if (format == GL_STENCIL_INDEX) {
         impl_->defaultFramebufferStencilShadowValid = true;
         if (impl_->state->boundDrawFramebuffer() == 0 &&
-            impl_->frameGraph != nullptr) {
-            const GLint minX = std::max<GLint>(impl_->fixedFunctionRasterX, 0);
-            const GLint minY = std::max<GLint>(impl_->fixedFunctionRasterY, 0);
-            const GLint maxX = std::min<GLint>(
-                impl_->fixedFunctionRasterX + width,
-                impl_->defaultFramebufferDepthStencilShadowWidth);
-            const GLint maxY = std::min<GLint>(
-                impl_->fixedFunctionRasterY + height,
-                impl_->defaultFramebufferDepthStencilShadowHeight);
+            impl_->frameGraph != nullptr &&
+            touchedPixels) {
+            const GLint minX = touchedMinX;
+            const GLint minY = touchedMinY;
+            const GLint maxX = touchedMaxX + 1;
+            const GLint maxY = touchedMaxY + 1;
             if (minX < maxX && minY < maxY) {
                 const GLsizei uploadWidth = maxX - minX;
                 const GLsizei uploadHeight = maxY - minY;
@@ -1936,6 +2426,11 @@ bool GLContext::copyPixelsCompat(GLint x,
     if (width == 0 || height == 0 || !impl_->fixedFunctionRasterPositionValid) {
         return true;
     }
+    const GLfloat zoomX = impl_->fixedFunctionPixelZoomX;
+    const GLfloat zoomY = impl_->fixedFunctionPixelZoomY;
+    if (zoomX == 0.0f || zoomY == 0.0f) {
+        return true;
+    }
 
     if (type != GL_COLOR && impl_->state->boundReadFramebuffer() == 0 &&
         impl_->state->boundDrawFramebuffer() == 0) {
@@ -1969,26 +2464,15 @@ bool GLContext::copyPixelsCompat(GLint x,
             }
         }
 
-        GLint minX = impl_->fixedFunctionRasterX;
-        GLint minY = impl_->fixedFunctionRasterY;
-        GLint maxX = minX + width;
-        GLint maxY = minY + height;
-        if (impl_->state->isEnabled(GL_SCISSOR_TEST)) {
+        auto insideScissor = [&](GLint dstX, GLint dstY) -> bool {
+            if (!impl_->state->isEnabled(GL_SCISSOR_TEST)) {
+                return true;
+            }
             const auto& sc = impl_->state->scissor();
-            minX = std::max<GLint>(minX, sc.x);
-            minY = std::max<GLint>(minY, sc.y);
-            maxX = std::min<GLint>(maxX, sc.x + sc.width);
-            maxY = std::min<GLint>(maxY, sc.y + sc.height);
-        }
-        minX = std::max<GLint>(minX, 0);
-        minY = std::max<GLint>(minY, 0);
-        maxX = std::min<GLint>(
-            maxX, impl_->defaultFramebufferDepthStencilShadowWidth);
-        maxY = std::min<GLint>(
-            maxY, impl_->defaultFramebufferDepthStencilShadowHeight);
-        if (minX >= maxX || minY >= maxY) {
-            return true;
-        }
+            return dstX >= sc.x && dstY >= sc.y &&
+                   dstX < sc.x + sc.width &&
+                   dstY < sc.y + sc.height;
+        };
 
         auto depthPasses = [&](GLfloat incoming, GLfloat current) {
             if (!impl_->state->isEnabled(GL_DEPTH_TEST)) {
@@ -2012,36 +2496,82 @@ bool GLContext::copyPixelsCompat(GLint x,
             static_cast<std::uint8_t>(stencilFace.writeMask & 0xffu);
         const bool depthWrite =
             copyDepth && impl_->state->depthState().writeMask != GL_FALSE;
-        for (GLint dstY = minY; dstY < maxY; ++dstY) {
-            for (GLint dstX = minX; dstX < maxX; ++dstX) {
-                const GLsizei srcX = dstX - impl_->fixedFunctionRasterX;
-                const GLsizei srcY = dstY - impl_->fixedFunctionRasterY;
+        GLint touchedMinX = std::numeric_limits<GLint>::max();
+        GLint touchedMinY = std::numeric_limits<GLint>::max();
+        GLint touchedMaxX = std::numeric_limits<GLint>::min();
+        GLint touchedMaxY = std::numeric_limits<GLint>::min();
+        auto noteTouched = [&](GLint dstX, GLint dstY) {
+            touchedMinX = std::min(touchedMinX, dstX);
+            touchedMinY = std::min(touchedMinY, dstY);
+            touchedMaxX = std::max(touchedMaxX, dstX);
+            touchedMaxY = std::max(touchedMaxY, dstY);
+        };
+        const GLfloat baseX = impl_->fixedFunctionRasterPosition[0];
+        const GLfloat baseY = impl_->fixedFunctionRasterPosition[1];
+        for (GLsizei srcY = 0; srcY < height; ++srcY) {
+            GLint y0 = 0;
+            GLint y1 = 0;
+            appglPixelZoomSpan(baseY + static_cast<GLfloat>(srcY) * zoomY,
+                               baseY + static_cast<GLfloat>(srcY + 1) * zoomY,
+                               y0,
+                               y1);
+            y0 = std::max<GLint>(y0, 0);
+            y1 = std::min<GLint>(
+                y1,
+                impl_->defaultFramebufferDepthStencilShadowHeight);
+            if (y0 >= y1) {
+                continue;
+            }
+            for (GLsizei srcX = 0; srcX < width; ++srcX) {
+                GLint x0 = 0;
+                GLint x1 = 0;
+                appglPixelZoomSpan(baseX + static_cast<GLfloat>(srcX) * zoomX,
+                                   baseX + static_cast<GLfloat>(srcX + 1) * zoomX,
+                                   x0,
+                                   x1);
+                x0 = std::max<GLint>(x0, 0);
+                x1 = std::min<GLint>(
+                    x1,
+                    impl_->defaultFramebufferDepthStencilShadowWidth);
+                if (x0 >= x1) {
+                    continue;
+                }
                 const std::size_t srcOffset =
                     static_cast<std::size_t>(srcY) *
                     static_cast<std::size_t>(width) +
                     static_cast<std::size_t>(srcX);
-                const std::size_t dstOffset =
-                    static_cast<std::size_t>(dstY) *
-                    static_cast<std::size_t>(
-                        impl_->defaultFramebufferDepthStencilShadowWidth) +
-                    static_cast<std::size_t>(dstX);
+                for (GLint dstY = y0; dstY < y1; ++dstY) {
+                    for (GLint dstX = x0; dstX < x1; ++dstX) {
+                        if (!insideScissor(dstX, dstY)) {
+                            continue;
+                        }
+                        const std::size_t dstOffset =
+                            static_cast<std::size_t>(dstY) *
+                            static_cast<std::size_t>(
+                                impl_->defaultFramebufferDepthStencilShadowWidth) +
+                            static_cast<std::size_t>(dstX);
 
-                bool depthPassed = true;
-                if (copyDepth) {
-                    depthPassed = depthPasses(
-                        sourceDepth[srcOffset],
-                        impl_->defaultFramebufferDepth32[dstOffset]);
-                    if (depthPassed && depthWrite) {
-                        impl_->defaultFramebufferDepth32[dstOffset] =
-                            sourceDepth[srcOffset];
+                        bool depthPassed = true;
+                        if (copyDepth) {
+                            depthPassed = depthPasses(
+                                sourceDepth[srcOffset],
+                                impl_->defaultFramebufferDepth32[dstOffset]);
+                            if (depthPassed && depthWrite) {
+                                impl_->defaultFramebufferDepth32[dstOffset] =
+                                    sourceDepth[srcOffset];
+                            }
+                        }
+                        if (copyStencil && depthPassed) {
+                            impl_->defaultFramebufferStencil8[dstOffset] =
+                                static_cast<std::uint8_t>(
+                                    (impl_->defaultFramebufferStencil8[dstOffset] &
+                                     ~stencilWriteMask) |
+                                    (sourceStencil[srcOffset] & stencilWriteMask));
+                        }
+                        if (depthPassed) {
+                            noteTouched(dstX, dstY);
+                        }
                     }
-                }
-                if (copyStencil && depthPassed) {
-                    impl_->defaultFramebufferStencil8[dstOffset] =
-                        static_cast<std::uint8_t>(
-                            (impl_->defaultFramebufferStencil8[dstOffset] &
-                             ~stencilWriteMask) |
-                            (sourceStencil[srcOffset] & stencilWriteMask));
                 }
             }
         }
@@ -2052,7 +2582,13 @@ bool GLContext::copyPixelsCompat(GLint x,
         if (copyStencil) {
             impl_->defaultFramebufferStencilShadowValid = true;
         }
-        if (impl_->frameGraph != nullptr) {
+        const bool touchedPixels = touchedMinX <= touchedMaxX &&
+                                  touchedMinY <= touchedMaxY;
+        if (impl_->frameGraph != nullptr && touchedPixels) {
+            const GLint minX = touchedMinX;
+            const GLint minY = touchedMinY;
+            const GLint maxX = touchedMaxX + 1;
+            const GLint maxY = touchedMaxY + 1;
             const GLsizei uploadWidth = maxX - minX;
             const GLsizei uploadHeight = maxY - minY;
             std::vector<GLfloat> depthUpload;
@@ -2182,54 +2718,79 @@ bool GLContext::copyPixelsCompat(GLint x,
             }
         }
     }
-    GLint minX = impl_->fixedFunctionRasterX;
-    GLint minY = impl_->fixedFunctionRasterY;
-    GLint maxX = minX + width;
-    GLint maxY = minY + height;
-    if (impl_->state->isEnabled(GL_SCISSOR_TEST)) {
+    auto insideScissor = [&](GLint dstX, GLint dstY) -> bool {
+        if (!impl_->state->isEnabled(GL_SCISSOR_TEST)) {
+            return true;
+        }
         const auto& sc = impl_->state->scissor();
-        minX = std::max<GLint>(minX, sc.x);
-        minY = std::max<GLint>(minY, sc.y);
-        maxX = std::min<GLint>(maxX, sc.x + sc.width);
-        maxY = std::min<GLint>(maxY, sc.y + sc.height);
-    }
-    minX = std::max<GLint>(minX, 0);
-    minY = std::max<GLint>(minY, 0);
-    maxX = std::min<GLint>(maxX, impl_->defaultFramebufferShadowWidth);
-    maxY = std::min<GLint>(maxY, impl_->defaultFramebufferShadowHeight);
-    if (minX >= maxX || minY >= maxY) {
-        return true;
-    }
+        return dstX >= sc.x && dstY >= sc.y &&
+               dstX < sc.x + sc.width &&
+               dstY < sc.y + sc.height;
+    };
 
-    for (GLint dstY = minY; dstY < maxY; ++dstY) {
-        for (GLint dstX = minX; dstX < maxX; ++dstX) {
-            const GLsizei srcX = dstX - impl_->fixedFunctionRasterX;
-            const GLsizei srcY = dstY - impl_->fixedFunctionRasterY;
+    const GLfloat baseX = impl_->fixedFunctionRasterPosition[0];
+    const GLfloat baseY = impl_->fixedFunctionRasterPosition[1];
+    bool touchedPixels = false;
+    for (GLsizei srcY = 0; srcY < height; ++srcY) {
+        GLint y0 = 0;
+        GLint y1 = 0;
+        appglPixelZoomSpan(baseY + static_cast<GLfloat>(srcY) * zoomY,
+                           baseY + static_cast<GLfloat>(srcY + 1) * zoomY,
+                           y0,
+                           y1);
+        y0 = std::max<GLint>(y0, 0);
+        y1 = std::min<GLint>(y1, impl_->defaultFramebufferShadowHeight);
+        if (y0 >= y1) {
+            continue;
+        }
+        for (GLsizei srcX = 0; srcX < width; ++srcX) {
+            GLint x0 = 0;
+            GLint x1 = 0;
+            appglPixelZoomSpan(baseX + static_cast<GLfloat>(srcX) * zoomX,
+                               baseX + static_cast<GLfloat>(srcX + 1) * zoomX,
+                               x0,
+                               x1);
+            x0 = std::max<GLint>(x0, 0);
+            x1 = std::min<GLint>(x1, impl_->defaultFramebufferShadowWidth);
+            if (x0 >= x1) {
+                continue;
+            }
             const std::size_t srcOffset =
                 (static_cast<std::size_t>(srcY) *
                  static_cast<std::size_t>(width) +
                  static_cast<std::size_t>(srcX)) * 4u;
-            const std::size_t dstOffset =
-                (static_cast<std::size_t>(dstY) *
-                 static_cast<std::size_t>(impl_->defaultFramebufferShadowWidth) +
-                 static_cast<std::size_t>(dstX)) * 4u;
-            for (int c = 0; c < 4; ++c) {
-                if (blend.colorMask[c] != GL_FALSE) {
-                    const std::uint8_t src =
-                        source[srcOffset + static_cast<std::size_t>(c)];
-                    const std::uint8_t dst =
-                        impl_->defaultFramebufferRGBA8[
-                            dstOffset + static_cast<std::size_t>(c)];
-                    const std::uint8_t out =
-                        logicOpEnabled && impl_->fixedFunctionLogicOp == GL_XOR
-                            ? static_cast<std::uint8_t>(src ^ dst)
-                            : src;
-                    impl_->defaultFramebufferRGBA8[
-                        dstOffset + static_cast<std::size_t>(c)] =
-                        out;
+            for (GLint dstY = y0; dstY < y1; ++dstY) {
+                for (GLint dstX = x0; dstX < x1; ++dstX) {
+                    if (!insideScissor(dstX, dstY)) {
+                        continue;
+                    }
+                    const std::size_t dstOffset =
+                        (static_cast<std::size_t>(dstY) *
+                         static_cast<std::size_t>(impl_->defaultFramebufferShadowWidth) +
+                         static_cast<std::size_t>(dstX)) * 4u;
+                    for (int c = 0; c < 4; ++c) {
+                        if (blend.colorMask[c] != GL_FALSE) {
+                            const std::uint8_t src =
+                                source[srcOffset + static_cast<std::size_t>(c)];
+                            const std::uint8_t dst =
+                                impl_->defaultFramebufferRGBA8[
+                                    dstOffset + static_cast<std::size_t>(c)];
+                            const std::uint8_t out =
+                                logicOpEnabled && impl_->fixedFunctionLogicOp == GL_XOR
+                                    ? static_cast<std::uint8_t>(src ^ dst)
+                                    : src;
+                            impl_->defaultFramebufferRGBA8[
+                                dstOffset + static_cast<std::size_t>(c)] =
+                                out;
+                        }
+                    }
+                    touchedPixels = true;
                 }
             }
         }
+    }
+    if (!touchedPixels) {
+        return true;
     }
     impl_->defaultFramebufferShadowValid = true;
     return true;
@@ -4352,6 +4913,18 @@ void GLContext::callListCompat(GLuint list) {
                 break;
             case Impl::DisplayListCommand::Kind::CallList:
                 callListCompat(command.list);
+                break;
+            case Impl::DisplayListCommand::Kind::Bitmap:
+                (void)bitmapMaskCompat(command.width,
+                                       command.height,
+                                       command.values[0],
+                                       command.values[1],
+                                       command.values[2],
+                                       command.values[3],
+                                       command.bitmapMask.data());
+                break;
+            case Impl::DisplayListCommand::Kind::PixelZoom:
+                setPixelZoomCompat(command.values[0], command.values[1]);
                 break;
         }
     }

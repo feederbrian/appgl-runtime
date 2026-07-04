@@ -675,7 +675,10 @@ public:
     void setTexGenFloatCompat(GLenum coord, GLenum pname, const GLfloat* params);
     void setAccumClearCompat(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
     bool accumCompat(GLenum op, GLfloat value);
+    bool bitmapCompat(GLsizei width, GLsizei height, GLfloat xorig, GLfloat yorig, GLfloat xmove, GLfloat ymove, const GLubyte* bitmap);
+    bool bitmapMaskCompat(GLsizei width, GLsizei height, GLfloat xorig, GLfloat yorig, GLfloat xmove, GLfloat ymove, const std::uint8_t* mask);
     bool drawPixelsCompat(GLsizei width, GLsizei height, GLenum format, GLenum type, const void* pixels);
+    void setPixelZoomCompat(GLfloat xfactor, GLfloat yfactor);
     bool pixelTransferCompat(GLenum pname, GLfloat param);
     bool pixelMapCompat(GLenum map, GLsizei mapsize, const GLfloat* values);
     void pushAttribCompat(GLbitfield mask);
