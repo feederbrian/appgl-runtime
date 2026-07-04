@@ -11,11 +11,15 @@
 
 #include "../src/runtime/AppGLDiagnostics.h"
 #include "../src/runtime/AppGLFeatureFlags.h"
+#include "../src/runtime/AppGLProfile.h"
 
 namespace {
 
 namespace flags = appgl::feature_flags;
 namespace diagnostics = appgl::diagnostics;
+using appgl::AppGLCompatAdmissionMode;
+using appgl::AppGLCompatFeature;
+using appgl::AppGLCompatSemanticTier;
 
 class ScopedEnv {
 public:
@@ -138,6 +142,100 @@ void resetDiagnosticsForProbe() {
     diagnostics::resetDiagnosticOptionsForTesting();
 }
 
+void runCompatPolicySelfTest(TestState& state) {
+    {
+        auto policy = appgl::appglCompatPolicyFromEnv(nullptr, nullptr);
+        expect(state, !appgl::appglAdvertiseCompatProfile(policy),
+               "compat policy default-off does not advertise compatibility");
+        expect(state, !appgl::appglCompatProfileEnabled(policy),
+               "compat policy default-off keeps semantic tier core");
+        expect(state, appgl::appglContextProfileMask(policy) == appgl::kAppGLCoreProfileBit,
+               "compat policy default-off reports core profile mask");
+        expect(state, std::string(appgl::appglClaimedVersionString(policy)) == "4.6 AppGL core",
+               "compat policy default-off reports core version string");
+        expect(state, !appgl::appglCompatVersionAtLeast(policy, 1, 0),
+               "compat policy default-off has no compat-version admission");
+    }
+
+    {
+        auto policy = appgl::appglCompatPolicyFromEnv("1", "off");
+        expect(state, policy.admissionMode == AppGLCompatAdmissionMode::LegacyAlias,
+               "APPGL_COMPAT_PROFILE remains the legacy alias");
+        expect(state, appgl::appglAdvertiseCompatProfile(policy),
+               "legacy compat alias advertises compatibility");
+        expect(state, appgl::appglCompatProfileEnabled(policy),
+               "legacy compat alias enables broad semantic tier");
+        expect(state, appgl::appglCompatFeatureEnabled(policy, AppGLCompatFeature::GpuShader4),
+               "legacy compat alias preserves gpu_shader4 advertising");
+        expect(state, std::string(appgl::appglClaimedVersionString(policy)) ==
+                          "4.6 AppGL compatibility",
+               "legacy compat alias preserves claimed version string");
+    }
+
+    {
+        auto policy = appgl::appglCompatPolicyFromEnv("0", "scoped");
+        expect(state, policy.admissionMode == AppGLCompatAdmissionMode::Scoped,
+               "scoped admission parses with disabled legacy alias");
+        expect(state, appgl::appglAdvertiseCompatProfile(policy),
+               "scoped admission advertises compatibility");
+        expect(state, !appgl::appglCompatProfileEnabled(policy),
+               "scoped admission leaves broad semantic tier disabled");
+        expect(state, policy.semanticTier == AppGLCompatSemanticTier::Core,
+               "scoped admission records core semantic tier");
+        expect(state, policy.advertiseArbCompatibility,
+               "scoped admission advertises GL_ARB_compatibility");
+        expect(state, !appgl::appglCompatFeatureEnabled(policy, AppGLCompatFeature::GpuShader4),
+               "scoped admission does not advertise gpu_shader4");
+        expect(state, appgl::appglContextProfileMask(policy) ==
+                          appgl::kAppGLCompatibilityProfileBit,
+               "scoped admission reports compatibility profile mask");
+        expect(state, appgl::appglCompatVersionAtLeast(policy, 4, 6),
+               "scoped admission defaults to compatibility 4.6");
+        expect(state, !appgl::appglCompatVersionAtLeast(policy, 4, 7),
+               "scoped admission does not exceed AppGL 4.6");
+    }
+
+    {
+        auto policy = appgl::appglCompatPolicyFromEnv(nullptr, "compat-2.1");
+        expect(state, policy.admissionMode == AppGLCompatAdmissionMode::CompatVersion,
+               "compat-X.Y admission parses requested version");
+        expect(state, appgl::appglCompatVersionAtLeast(policy, 2, 0),
+               "compat-2.1 satisfies lower compat request");
+        expect(state, !appgl::appglCompatVersionAtLeast(policy, 3, 0),
+               "compat-2.1 does not satisfy higher compat request");
+        expect(state, std::string(appgl::appglClaimedVersionString(policy)) ==
+                          "2.1 AppGL compatibility",
+               "compat-X.Y controls claimed version string");
+        expect(state, !appgl::appglCompatProfileEnabled(policy),
+               "compat-X.Y admission remains advertising-only");
+    }
+
+    {
+        auto policy = appgl::appglCompatPolicyFromEnv(nullptr, "scoped", "3.0");
+        expect(state, std::string(appgl::appglClaimedVersionString(policy)) ==
+                          "3.0 AppGL compatibility",
+               "APPGL_COMPAT_VERSION overrides scoped claimed version");
+    }
+
+    {
+        auto policy = appgl::appglCompatPolicyFromEnv(nullptr, "full");
+        expect(state, policy.admissionMode == AppGLCompatAdmissionMode::Full,
+               "full admission parses");
+        expect(state, appgl::appglAdvertiseCompatProfile(policy),
+               "full admission advertises compatibility");
+        expect(state, appgl::appglCompatProfileEnabled(policy),
+               "full admission enables broad semantic tier");
+        expect(state, appgl::appglCompatFeatureEnabled(policy, AppGLCompatFeature::GpuShader4),
+               "full admission preserves broad legacy extensions");
+    }
+
+    {
+        auto policy = appgl::appglCompatPolicyFromEnv(nullptr, "compat-4.7");
+        expect(state, !appgl::appglAdvertiseCompatProfile(policy),
+               "unsupported future compat version falls back to default-off");
+    }
+}
+
 flags::FeatureFlagSpec boolSpec() {
     flags::FeatureFlagSpec spec;
     spec.canonicalName = "stage1-bool";
@@ -251,6 +349,8 @@ bool fp64RuntimeFlagForProbe() {
 
 int runSelfTest() {
     TestState state;
+    runCompatPolicySelfTest(state);
+
     const std::filesystem::path tempDir = makeTempDir();
     const std::filesystem::path jsonTrue = tempDir / "true.json";
     const std::filesystem::path jsonFalse = tempDir / "false.json";
