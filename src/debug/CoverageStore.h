@@ -45,13 +45,13 @@ public:
 
     // Phase 8X Landing C — split into two accessors:
     //
-    //   claimedVersion()           — compile-time constant. This is what
+    //   claimedVersion()           — policy-derived advertised version. This is what
     //                                glGetString(GL_VERSION) and
     //                                Runtime::claimedVersionString consult,
     //                                independent of coverage-store state.
     //                                Returns "4.6 AppGL core", or
-    //                                "4.6 AppGL compatibility" when
-    //                                APPGL_COMPAT_PROFILE is enabled.
+    //                                a compatibility-profile string when
+    //                                compat admission is enabled.
     //
     //   fullyImplementedVersion()  — dynamic walk over the coverage table.
     //                                Reports the highest core version for

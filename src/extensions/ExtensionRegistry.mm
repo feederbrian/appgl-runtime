@@ -170,12 +170,16 @@ void rebuildExtensionBlob(RegistryState& state) {
 
 void seedBaseExtensions(RegistryState& state) {
     state.activeExtensions.assign(kBaseExtensions.begin(), kBaseExtensions.end());
-    if (appglCompatProfileEnabled()) {
+    if (appglAdvertiseCompatProfile()) {
         state.activeExtensions.push_back("GL_ARB_compatibility");
+    }
+    if (appglCompatProfileEnabled()) {
         state.activeExtensions.push_back("GL_EXT_framebuffer_blit");
         state.activeExtensions.push_back("GL_EXT_packed_depth_stencil");
         state.activeExtensions.push_back("GL_ARB_depth_buffer_float");
         state.activeExtensions.push_back("GL_ARB_window_pos");
+    }
+    if (appglCompatFeatureEnabled(AppGLCompatFeature::GpuShader4)) {
         state.activeExtensions.push_back("GL_EXT_gpu_shader4");
     }
     state.sparseTextureHooks = {};

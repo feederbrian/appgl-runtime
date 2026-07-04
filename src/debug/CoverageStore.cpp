@@ -101,13 +101,13 @@ void CoverageStore::recordUnimplementedHit(FunctionId id) {
 }
 
 const char* CoverageStore::claimedVersion() {
-    // Compile-time constant: what AppGL advertises to external GL loaders
-    // via glGetString(GL_VERSION). This is independent of coverage-store
-    // state because engines (Recoil in particular) parse the version string
-    // on context creation — long before any coverage-tracking entry point
-    // has run — and gate entire codepaths on the result. Reporting a
-    // dynamic bootstrap string here caused engines to fall back to GL3
-    // even though the translator actually accepts 4.x source.
+    // Policy-derived advertised version: what AppGL reports to external GL
+    // loaders via glGetString(GL_VERSION). This is independent of
+    // coverage-store state because engines (Recoil in particular) parse the
+    // version string on context creation — long before any coverage-tracking
+    // entry point has run — and gate entire codepaths on the result.
+    // Reporting a dynamic bootstrap string here caused engines to fall back
+    // to GL3 even though the translator actually accepts 4.x source.
     //
     // The coverage-derived dynamic walk still exists on the other side of
     // the split: see fullyImplementedVersion(), consulted by

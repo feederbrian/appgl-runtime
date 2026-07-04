@@ -8896,6 +8896,7 @@ static constexpr std::uint64_t kSubmittedPipelineStatsQueryMask =
 }  // namespace
 
 struct GLContext::Impl {
+    CompatPolicy compatPolicy = appglCurrentCompatPolicy();
     bool hotpathInvariantEnvCacheEnabled =
         appglHotpathInvariantHoistSubflagEnabled(
             "APPGL_HOTPATH_INVARIANT_HOIST_ENV_CACHE");
@@ -32531,8 +32532,7 @@ struct GLContext::Impl {
     std::string vendorString = "AppGL";
     std::string rendererString = "AppGL on Metal";
     // Declarative GL version strings. glGetString(GL_VERSION) returns the
-    // claimed version (a compile-time constant — see
-    // CoverageStore::claimedVersion) rather than the coverage-derived
+    // claimed version (a per-context compat-policy snapshot) rather than the coverage-derived
     // highest-fully-implemented version, so a cold-boot context with no
     // smoke tests run still advertises the full AppGL surface as "4.6 AppGL
     // core" rather than the "4.6 AppGL bootstrap" fallback the walker used
@@ -32540,7 +32540,7 @@ struct GLContext::Impl {
     // back to a GL3 codepath if they see a 3.x string, so both the version
     // string and the shading-language-version string must reflect what the
     // translator is actually capable of accepting.
-    std::string versionString = appglClaimedVersionString();
+    std::string versionString = appglClaimedVersionString(compatPolicy);
     bool claimedVersionStringSeeded = false;
     std::string shadingLanguageVersion = "4.60";
 };
@@ -33430,13 +33430,15 @@ const std::string& GLContext::rendererString() const {
 void GLContext::setClaimedVersionString(std::string value) {
     // In Phase 8X Landing C the runtime switched to a declarative
     // claimed-version constant (core by default, compatibility when
-    // APPGL_COMPAT_PROFILE is enabled — see
+    // the compat policy advertises admission — see
     // CoverageStore::claimedVersion). The only empty-string path that
     // can still reach us is someone calling this method directly with
     // an empty argument; fall through to the same declarative constant
     // so the GL_VERSION string never regresses to a "bootstrap" suffix
     // engines parse as a GL3 context.
-    impl_->versionString = value.empty() ? appglClaimedVersionString() : std::move(value);
+    impl_->versionString = value.empty()
+        ? appglClaimedVersionString(impl_->compatPolicy)
+        : std::move(value);
     impl_->claimedVersionStringSeeded = true;
 }
 

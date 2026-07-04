@@ -163,10 +163,33 @@ bool GLContext::queryBooleanIndexed(GLenum target, GLuint index, GLboolean* data
 }
 
 #elif defined(APPGL_GLCONTEXT_QUERY_CORE)
+namespace {
+bool queryCompatAdmissionInteger(const CompatPolicy& policy, GLenum pname, GLint* data) {
+    switch (pname) {
+        case GL_MAJOR_VERSION:
+            *data = static_cast<GLint>(policy.advertisedMajor);
+            return true;
+        case GL_MINOR_VERSION:
+            *data = static_cast<GLint>(policy.advertisedMinor);
+            return true;
+        case GL_CONTEXT_PROFILE_MASK:
+            *data = static_cast<GLint>(appglContextProfileMask(policy));
+            return true;
+        default:
+            return false;
+    }
+}
+}  // namespace
+
 bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
     if (data == nullptr) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    GLint compatAdmissionValue = 0;
+    if (queryCompatAdmissionInteger(impl_->compatPolicy, pname, &compatAdmissionValue)) {
+        *data = compatAdmissionValue != 0 ? GL_TRUE : GL_FALSE;
+        return true;
     }
     if (pname == GL_DEBUG_GROUP_STACK_DEPTH || pname == GL_DEBUG_NEXT_LOGGED_MESSAGE_LENGTH) {
         GLint integerValue = 0;
@@ -285,6 +308,9 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
             static_cast<unsigned>(pname));
         pushError(GL_INVALID_VALUE, "", pnameBuf);
         return false;
+    }
+    if (queryCompatAdmissionInteger(impl_->compatPolicy, pname, data)) {
+        return true;
     }
     if (pname == GL_DEBUG_GROUP_STACK_DEPTH) {
         *data = static_cast<GLint>(impl_->debugGroupStack.size());
@@ -568,6 +594,11 @@ bool GLContext::queryInteger64(GLenum pname, GLint64* data) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    GLint compatAdmissionValue = 0;
+    if (queryCompatAdmissionInteger(impl_->compatPolicy, pname, &compatAdmissionValue)) {
+        *data = static_cast<GLint64>(compatAdmissionValue);
+        return true;
+    }
     if (pname == GL_DEBUG_GROUP_STACK_DEPTH || pname == GL_DEBUG_NEXT_LOGGED_MESSAGE_LENGTH) {
         GLint integerValue = 0;
         if (!queryInteger(pname, &integerValue)) {
@@ -844,6 +875,11 @@ bool GLContext::queryFloat(GLenum pname, GLfloat* data) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    GLint compatAdmissionValue = 0;
+    if (queryCompatAdmissionInteger(impl_->compatPolicy, pname, &compatAdmissionValue)) {
+        *data = static_cast<GLfloat>(compatAdmissionValue);
+        return true;
+    }
     if (pname == GL_DEBUG_GROUP_STACK_DEPTH || pname == GL_DEBUG_NEXT_LOGGED_MESSAGE_LENGTH) {
         GLint integerValue = 0;
         if (!queryInteger(pname, &integerValue)) {
@@ -924,6 +960,11 @@ bool GLContext::queryDouble(GLenum pname, GLdouble* data) {
     if (data == nullptr) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    GLint compatAdmissionValue = 0;
+    if (queryCompatAdmissionInteger(impl_->compatPolicy, pname, &compatAdmissionValue)) {
+        *data = static_cast<GLdouble>(compatAdmissionValue);
+        return true;
     }
     if (pname == GL_DEBUG_GROUP_STACK_DEPTH || pname == GL_DEBUG_NEXT_LOGGED_MESSAGE_LENGTH) {
         GLint integerValue = 0;
