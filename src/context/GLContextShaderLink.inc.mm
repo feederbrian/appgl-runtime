@@ -5093,6 +5093,7 @@ bool GLContext::linkProgram(GLuint program) {
                                                 linked.fragmentSpirv.size());
                     appgl::TranslatorOptions vsOptions;
                     vsOptions.forceArgumentBuffers = forceRasterArgBuf;
+                    vsOptions.enableClipControlYSignFixup = true;
                     appgl::TranslatorOptions fsOptions;
                     fsOptions.forceArgumentBuffers = forceRasterArgBuf;
                     ShaderReflection vsRefl, fsRefl;
@@ -7473,6 +7474,8 @@ bool GLContext::linkProgram(GLuint program) {
                 // resourceUniforms (which also stores canonical).
                 const std::string canonicalName = member.isArray
                     ? (member.name + "[0]") : member.name;
+                const bool hideFromPublicUniformResources =
+                    member.name.compare(0, 6, "appgl_") == 0;
                 if (knownUniformNames.count(canonicalName) ||
                     knownUniformNames.count(member.name)) {
                     // Existing uniform (from scanner or previous
@@ -7616,7 +7619,9 @@ bool GLContext::linkProgram(GLuint program) {
                 // Default-block uniforms: leave offset / blockIndex
                 // / arrayStride / matrixStride at their default -1
                 // sentinels so getResourceProperty reports -1.
-                programObject->resourceUniforms.push_back(std::move(entry));
+                if (!hideFromPublicUniformResources) {
+                    programObject->resourceUniforms.push_back(std::move(entry));
+                }
 
                 programObject->uniforms.push_back(std::move(info));
             }
@@ -8176,8 +8181,19 @@ bool GLContext::linkProgram(GLuint program) {
                             if (entry.name != memberEntry.name) {
                                 return false;
                             }
-                            return firstBlockIndex < 0 ||
-                                   entry.blockIndex == firstBlockIndex;
+                            if (firstBlockIndex < 0 ||
+                                entry.blockIndex == firstBlockIndex) {
+                                return true;
+                            }
+                            // Some SPIR-V reflection paths seed an
+                            // unqualified uniform-block member as a
+                            // default-block uniform before the UBO merge
+                            // reaches it. Reuse that placeholder instead
+                            // of reporting a duplicate active uniform.
+                            return entry.blockIndex < 0 &&
+                                   entry.offset < 0 &&
+                                   entry.arrayStride < 0 &&
+                                   entry.matrixStride < 0;
                         });
                     if (memberIt != programObject->resourceUniforms.end()) {
                         memberIt->type = memberEntry.type;
