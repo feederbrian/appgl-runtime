@@ -1349,6 +1349,10 @@ public:
                                         bool writeDepth,
                                         std::uint8_t stencilValue,
                                         bool writeStencil);
+    bool writeDefaultColorRegion(GLint x, GLint y,
+                                 GLsizei width, GLsizei height,
+                                 const std::uint8_t* rgbaPixels,
+                                 std::size_t sourceRowBytes);
     bool resolveMultisampleColorToDefaultFramebuffer(void* srcTex,
                                                      std::uint32_t srcSlice,
                                                      GLsizei width,

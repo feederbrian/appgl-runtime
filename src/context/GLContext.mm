@@ -42373,9 +42373,18 @@ static std::size_t uniformComponentCountForPacking(GLenum type) {
     return uniformTypeComponentCount(type);
 }
 
+static bool uniformLayoutPlainNamesMatch(const std::string& uniformName,
+                                         const std::string& memberName) {
+    if (uniformName == memberName) return true;
+    // SPIRV-Cross escapes MSL-reserved identifiers by prefixing an underscore
+    // in the generated default-uniform block, e.g. GLSL `length` -> `_length`.
+    return memberName.size() > 1 && memberName.front() == '_' &&
+        memberName.compare(1, std::string::npos, uniformName) == 0;
+}
+
 static bool uniformLayoutNamesMatch(const std::string& uniformName,
                                     const std::string& memberName) {
-    if (uniformName == memberName) return true;
+    if (uniformLayoutPlainNamesMatch(uniformName, memberName)) return true;
     constexpr std::size_t kArrayZeroSuffixLen = 3;
     auto hasArrayZeroSuffix = [](const std::string& name) {
         return name.size() >= kArrayZeroSuffixLen &&
@@ -42384,13 +42393,15 @@ static bool uniformLayoutNamesMatch(const std::string& uniformName,
                          "[0]") == 0;
     };
     if (hasArrayZeroSuffix(uniformName) &&
-        uniformName.size() == memberName.size() + kArrayZeroSuffixLen &&
-        uniformName.compare(0, memberName.size(), memberName) == 0) {
+        uniformLayoutPlainNamesMatch(
+            uniformName.substr(0, uniformName.size() - kArrayZeroSuffixLen),
+            memberName)) {
         return true;
     }
     if (hasArrayZeroSuffix(memberName) &&
-        memberName.size() == uniformName.size() + kArrayZeroSuffixLen &&
-        memberName.compare(0, uniformName.size(), uniformName) == 0) {
+        uniformLayoutPlainNamesMatch(
+            uniformName,
+            memberName.substr(0, memberName.size() - kArrayZeroSuffixLen))) {
         return true;
     }
     return false;
@@ -42429,11 +42440,15 @@ static bool uniformLayoutParseArrayPrefix(
 
 static bool uniformLayoutBaseNamesMatch(const std::string& uniformName,
                                         const std::string& baseName) {
-    if (uniformName == baseName) return true;
+    if (uniformLayoutPlainNamesMatch(uniformName, baseName)) return true;
     constexpr std::size_t kArrayZeroSuffixLen = 3;
-    return uniformName.size() == baseName.size() + kArrayZeroSuffixLen &&
-        uniformName.compare(0, baseName.size(), baseName) == 0 &&
-        uniformName.compare(baseName.size(), kArrayZeroSuffixLen, "[0]") == 0;
+    return uniformName.size() > kArrayZeroSuffixLen &&
+        uniformName.compare(uniformName.size() - kArrayZeroSuffixLen,
+                            kArrayZeroSuffixLen,
+                            "[0]") == 0 &&
+        uniformLayoutPlainNamesMatch(
+            uniformName.substr(0, uniformName.size() - kArrayZeroSuffixLen),
+            baseName);
 }
 
 static bool uniformLayoutSourceElementOffset(
@@ -42670,6 +42685,17 @@ static void computeStageUniformLayout(
                 uniformScalarBytes(member.type);
         }
 
+        auto assignMatchedUniform = [&](const GLProgramUniformInfo& u,
+                                        std::size_t sourceElementOffset) {
+            entry.location = u.location;
+            entry.sourceElementOffset = sourceElementOffset;
+            if (entry.arrayCount > 0) {
+                entry.glElementBytes =
+                    uniformComponentCountForPacking(u.type) *
+                    uniformScalarBytes(u.type);
+            }
+        };
+
         // One-time name lookup: find the GL uniform location for this member.
         // Multidimensional default-block arrays may have reflection members
         // split as u0[0], u0[1], ... while glUniform(location+k) writes the
@@ -42688,15 +42714,14 @@ static void computeStageUniformLayout(
                         u, prefixIndices, sourceElementOffset)) {
                     continue;
                 }
-                entry.location = u.location;
-                entry.sourceElementOffset = sourceElementOffset;
+                assignMatchedUniform(u, sourceElementOffset);
                 break;
             }
         }
         if (entry.location < 0) {
             for (const auto& u : uniforms) {
                 if (uniformLayoutNamesMatch(u.name, member.name)) {
-                    entry.location = u.location;
+                    assignMatchedUniform(u, 0);
                     break;
                 }
             }
@@ -48588,6 +48613,27 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
         tdi.translatedPlanRejectReasonOut = &translatedPlanRejectReason;
     }
     const auto framegraphEncodeStart = drawPathProfile.enabled ? glDrawProfileNow() : GLDrawProfileTimePoint{};
+    if (drawFboName == 0 &&
+        defaultFramebufferShadowValid &&
+        !defaultFbShadowClearPending &&
+        defaultFramebufferShadowWidth > 0 &&
+        defaultFramebufferShadowHeight > 0 &&
+        frameGraph != nullptr) {
+        const std::size_t shadowRowBytes =
+            static_cast<std::size_t>(defaultFramebufferShadowWidth) * 4u;
+        const std::size_t shadowByteCount =
+            shadowRowBytes *
+            static_cast<std::size_t>(defaultFramebufferShadowHeight);
+        if (!defaultFramebufferRGBA8.empty() &&
+            defaultFramebufferRGBA8.size() >= shadowByteCount) {
+            (void)frameGraph->writeDefaultColorRegion(
+                0, 0,
+                defaultFramebufferShadowWidth,
+                defaultFramebufferShadowHeight,
+                defaultFramebufferRGBA8.data(),
+                shadowRowBytes);
+        }
+    }
     bool ok = false;
     if (serialDeferredRecordProfile.enabled) {
         // 7K-0 records only after GL-thread hazard/boundary and Phase-2

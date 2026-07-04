@@ -19346,6 +19346,114 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                                        stencilValue, writeStencil);
     }
 
+    bool writeDefaultColorRegion(GLint x, GLint y,
+                                 GLsizei width, GLsizei height,
+                                 const std::uint8_t* rgbaPixels,
+                                 std::size_t sourceRowBytes) {
+        if (rgbaPixels == nullptr || width <= 0 || height <= 0 ||
+            sourceRowBytes < static_cast<std::size_t>(width) * 4u ||
+            device == nil || commandQueue == nil ||
+            defaultFramebufferMsaaEnabled()) {
+            return false;
+        }
+        ensureDrawableResources();
+        if (hasPendingClear) {
+            flushPendingClear();
+        }
+        endRenderPass();
+        if (!ensureCurrentCommandBuffer(AppGLCommandReason::TextureUpload) ||
+            !acquireDrawableIfNeeded()) {
+            return false;
+        }
+        id<MTLTexture> target = defaultSingleSampleColorTexture();
+        if (target == nil || target.sampleCount > 1) {
+            return false;
+        }
+
+        const GLint targetWidth = static_cast<GLint>(target.width);
+        const GLint targetHeight = static_cast<GLint>(target.height);
+        const GLint minX = std::max<GLint>(x, 0);
+        const GLint minY = std::max<GLint>(y, 0);
+        const GLint maxX = std::min<GLint>(x + width, targetWidth);
+        const GLint maxY = std::min<GLint>(y + height, targetHeight);
+        if (minX >= maxX || minY >= maxY) {
+            return true;
+        }
+
+        const GLsizei uploadWidth = static_cast<GLsizei>(maxX - minX);
+        const GLsizei uploadHeight = static_cast<GLsizei>(maxY - minY);
+        const std::size_t uploadRowBytes =
+            alignBytesPerRow(static_cast<std::size_t>(uploadWidth) * 4u);
+        id<MTLBuffer> uploadBuffer =
+            [device newBufferWithLength:uploadRowBytes *
+                                        static_cast<std::size_t>(uploadHeight)
+                             options:MTLResourceStorageModeShared];
+        if (uploadBuffer == nil) {
+            return false;
+        }
+        ScopedOwnedObjCObject uploadBufferRelease(uploadBuffer);
+        auto* uploadBytes =
+            static_cast<std::uint8_t*>([uploadBuffer contents]);
+        const bool targetIsBGRA =
+            target.pixelFormat == MTLPixelFormatBGRA8Unorm ||
+            target.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB;
+        const bool targetIsRGBA =
+            target.pixelFormat == MTLPixelFormatRGBA8Unorm ||
+            target.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB;
+        if (!targetIsBGRA && !targetIsRGBA) {
+            return false;
+        }
+
+        for (GLsizei uploadRow = 0; uploadRow < uploadHeight; ++uploadRow) {
+            const GLint glRow = maxY - 1 - uploadRow;
+            const auto* src =
+                rgbaPixels +
+                static_cast<std::size_t>(glRow - y) * sourceRowBytes +
+                static_cast<std::size_t>(minX - x) * 4u;
+            auto* dst = uploadBytes +
+                static_cast<std::size_t>(uploadRow) * uploadRowBytes;
+            if (targetIsRGBA) {
+                std::memcpy(dst, src,
+                            static_cast<std::size_t>(uploadWidth) * 4u);
+                continue;
+            }
+            for (GLsizei col = 0; col < uploadWidth; ++col) {
+                const std::size_t off = static_cast<std::size_t>(col) * 4u;
+                dst[off + 0] = src[off + 2];
+                dst[off + 1] = src[off + 1];
+                dst[off + 2] = src[off + 0];
+                dst[off + 3] = src[off + 3];
+            }
+        }
+
+        id<MTLBlitCommandEncoder> blit =
+            [currentCommandBuffer blitCommandEncoder];
+        if (blit == nil) {
+            return false;
+        }
+        const NSUInteger metalY =
+            static_cast<NSUInteger>(targetHeight - maxY);
+        [blit copyFromBuffer:uploadBuffer
+                sourceOffset:0
+           sourceBytesPerRow:uploadRowBytes
+         sourceBytesPerImage:uploadRowBytes *
+                             static_cast<NSUInteger>(uploadHeight)
+                  sourceSize:MTLSizeMake(static_cast<NSUInteger>(uploadWidth),
+                                         static_cast<NSUInteger>(uploadHeight),
+                                         1)
+                   toTexture:target
+            destinationSlice:0
+            destinationLevel:0
+           destinationOrigin:MTLOriginMake(static_cast<NSUInteger>(minX),
+                                           metalY,
+                                           0)];
+        [blit endEncoding];
+        readbackSourceTexture = target;
+        readbackSourceIsBGRA = targetIsBGRA;
+        pendingPresent = true;
+        return true;
+    }
+
     bool encodeImmediateModeDraw(const ImmediateDrawInfo& info) {
         FG_TRACE(@"encodeImmediateModeDraw: enter mode=0x%X verts=%zu tex=%p",
                  info.mode, info.vertexCount, info.metalTexture);
@@ -29305,6 +29413,17 @@ bool MetalFrameGraph::writeDefaultDepthStencilRegion(
     return impl_->writeDefaultDepthStencilRegion(
         x, y, width, height, depthPixels, writeDepth,
         stencilValue, writeStencil);
+}
+
+bool MetalFrameGraph::writeDefaultColorRegion(
+    GLint x,
+    GLint y,
+    GLsizei width,
+    GLsizei height,
+    const std::uint8_t* rgbaPixels,
+    std::size_t sourceRowBytes) {
+    return impl_->writeDefaultColorRegion(
+        x, y, width, height, rgbaPixels, sourceRowBytes);
 }
 
 bool MetalFrameGraph::resolveMultisampleColorToDefaultFramebuffer(

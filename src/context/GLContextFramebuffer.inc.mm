@@ -51,8 +51,15 @@ bool GLContext::bindRenderbuffer(GLenum target, GLuint renderbuffer) {
     if (renderbuffer != 0) {
         GLRenderbufferObject* object = impl_->objects->renderbuffers().get(renderbuffer);
         if (object == nullptr) {
-            pushError(GL_INVALID_OPERATION);
-            return false;
+            if (!appglCompatProfileEnabled()) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            object = impl_->objects->renderbuffers().insertAt(renderbuffer);
+            if (object == nullptr) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
         }
         object->instantiated = true;
     }
@@ -285,8 +292,15 @@ bool GLContext::bindFramebuffer(GLenum target, GLuint framebuffer) {
     if (framebuffer != 0) {
         GLFramebufferObject* object = impl_->objects->framebuffers().get(framebuffer);
         if (object == nullptr) {
-            pushError(GL_INVALID_OPERATION);
-            return false;
+            if (!appglCompatProfileEnabled()) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            object = impl_->objects->framebuffers().insertAt(framebuffer);
+            if (object == nullptr) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
         }
         object->instantiated = true;
     }

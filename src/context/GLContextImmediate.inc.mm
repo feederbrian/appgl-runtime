@@ -1077,6 +1077,16 @@ bool GLContext::bitmapMaskCompat(GLsizei width,
     auto destSpan = [](GLfloat a, GLfloat b, GLint& lo, GLint& hi) {
         appglPixelZoomSpan(a, b, lo, hi);
     };
+    GLint touchedMinX = std::numeric_limits<GLint>::max();
+    GLint touchedMinY = std::numeric_limits<GLint>::max();
+    GLint touchedMaxX = std::numeric_limits<GLint>::min();
+    GLint touchedMaxY = std::numeric_limits<GLint>::min();
+    auto noteTouched = [&](GLint x, GLint y) {
+        touchedMinX = std::min(touchedMinX, x);
+        touchedMinY = std::min(touchedMinY, y);
+        touchedMaxX = std::max(touchedMaxX, x);
+        touchedMaxY = std::max(touchedMaxY, y);
+    };
     auto paintToTarget = [&](std::vector<std::uint8_t>& target,
                              GLsizei targetWidth,
                              GLsizei targetHeight,
@@ -1152,6 +1162,12 @@ bool GLContext::bitmapMaskCompat(GLsizei width,
                                     outRGBA[c];
                             }
                         }
+                        if (blend.colorMask[0] != GL_FALSE ||
+                            blend.colorMask[1] != GL_FALSE ||
+                            blend.colorMask[2] != GL_FALSE ||
+                            blend.colorMask[3] != GL_FALSE) {
+                            noteTouched(x, y);
+                        }
                     }
                 }
             }
@@ -1168,6 +1184,26 @@ bool GLContext::bitmapMaskCompat(GLsizei width,
                       false,
                       0);
         impl_->defaultFramebufferShadowValid = true;
+        if (impl_->frameGraph != nullptr && touchedMinX <= touchedMaxX &&
+            touchedMinY <= touchedMaxY) {
+            const GLsizei uploadWidth =
+                static_cast<GLsizei>(touchedMaxX - touchedMinX + 1);
+            const GLsizei uploadHeight =
+                static_cast<GLsizei>(touchedMaxY - touchedMinY + 1);
+            const std::size_t sourceRowBytes =
+                static_cast<std::size_t>(impl_->defaultFramebufferShadowWidth) *
+                4u;
+            const std::size_t sourceOffset =
+                static_cast<std::size_t>(touchedMinY) * sourceRowBytes +
+                static_cast<std::size_t>(touchedMinX) * 4u;
+            (void)impl_->frameGraph->writeDefaultColorRegion(
+                touchedMinX,
+                touchedMinY,
+                uploadWidth,
+                uploadHeight,
+                impl_->defaultFramebufferRGBA8.data() + sourceOffset,
+                sourceRowBytes);
+        }
     } else {
         GLFramebufferObject* fbo =
             impl_->objects->framebuffers().get(impl_->state->boundDrawFramebuffer());
@@ -2646,9 +2682,7 @@ bool GLContext::copyPixelsCompat(GLint x,
         return true;
     }
 
-    if (type != GL_COLOR ||
-        impl_->state->boundReadFramebuffer() != 0 ||
-        impl_->state->boundDrawFramebuffer() != 0) {
+    if (type != GL_COLOR) {
         return true;
     }
     if (impl_->state->isEnabled(GL_BLEND) ||
@@ -2668,6 +2702,45 @@ bool GLContext::copyPixelsCompat(GLint x,
         blend.colorMask[1] == GL_FALSE &&
         blend.colorMask[2] == GL_FALSE &&
         blend.colorMask[3] == GL_FALSE) {
+        return true;
+    }
+
+    const bool readDefaultFramebuffer =
+        impl_->state->boundReadFramebuffer() == 0;
+    const bool drawDefaultFramebuffer =
+        impl_->state->boundDrawFramebuffer() == 0;
+    if (!readDefaultFramebuffer || !drawDefaultFramebuffer) {
+        const bool fullColorMask =
+            blend.colorMask[0] != GL_FALSE &&
+            blend.colorMask[1] != GL_FALSE &&
+            blend.colorMask[2] != GL_FALSE &&
+            blend.colorMask[3] != GL_FALSE;
+        if (!fullColorMask ||
+            (logicOpEnabled && impl_->fixedFunctionLogicOp != GL_COPY) ||
+            impl_->boundReadFramebufferHasMultipleViews()) {
+            return true;
+        }
+
+        GLint dstX0 = 0;
+        GLint dstX1 = 0;
+        GLint dstY0 = 0;
+        GLint dstY1 = 0;
+        const GLfloat baseX = impl_->fixedFunctionRasterPosition[0];
+        const GLfloat baseY = impl_->fixedFunctionRasterPosition[1];
+        appglPixelZoomSpan(baseX,
+                           baseX + static_cast<GLfloat>(width) * zoomX,
+                           dstX0,
+                           dstX1);
+        appglPixelZoomSpan(baseY,
+                           baseY + static_cast<GLfloat>(height) * zoomY,
+                           dstY0,
+                           dstY1);
+        if (dstX0 == dstX1 || dstY0 == dstY1) {
+            return true;
+        }
+        (void)impl_->blitFramebuffer(x, y, x + width, y + height,
+                                      dstX0, dstY0, dstX1, dstY1,
+                                      GL_COLOR_BUFFER_BIT, GL_NEAREST);
         return true;
     }
 

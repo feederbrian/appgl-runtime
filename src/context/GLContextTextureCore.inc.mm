@@ -195,8 +195,15 @@ bool GLContext::bindTexture(GLenum target, GLuint texture) {
     }
     GLTextureObject* object = impl_->objects->textures().get(texture);
     if (object == nullptr) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
+        if (!appglCompatProfileEnabled()) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        object = impl_->objects->textures().insertAt(texture);
+        if (object == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
     }
     if (object->target != 0 && object->target != target) {
         pushError(GL_INVALID_OPERATION);

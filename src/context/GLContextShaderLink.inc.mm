@@ -5031,93 +5031,92 @@ bool GLContext::linkProgram(GLuint program) {
                 !fragmentShader->isSpirvBinary) {
                 CompatShaderRewriteResult fsRewrite =
                     rewriteCompatShader(fragmentShader->source, GL_FRAGMENT_SHADER);
-                if (fsRewrite.legacy.texCoordMax >= 0) {
-                    // Piglit's fixed-function teximage helper feeds generic
-                    // attrib 0 for position and attrib 1 for texture coords.
-                    static constexpr const char* kCompatFragmentOnlyVertexSource =
-                        "#version 330 core\n"
-                        "layout(location = 0) in vec4 piglit_vertex;\n"
-                        "layout(location = 1) in vec2 piglit_texcoord;\n"
-                        "uniform mat4 appgl_ModelViewProjectionMatrix;\n"
-                        "out vec4 appgl_TexCoord[8];\n"
-                        "void main() {\n"
-                        "    gl_Position = appgl_ModelViewProjectionMatrix * piglit_vertex;\n"
-                        "    for (int i = 0; i < 8; ++i) {\n"
-                        "        appgl_TexCoord[i] = vec4(0.0, 0.0, 0.0, 1.0);\n"
-                        "    }\n"
-                        "    appgl_TexCoord[0] = vec4(piglit_texcoord, 0.0, 1.0);\n"
-                        "}\n";
-                    std::string vsLinkSource =
-                        rewriteShaderDrawParametersForSpirv(
-                            kCompatFragmentOnlyVertexSource, GL_VERTEX_SHADER);
-                    std::string fsLinkSource =
-                        fsRewrite.didRewrite ? fsRewrite.source : fragmentShader->source;
-                    fsLinkSource =
-                        rewriteShaderDrawParametersForSpirv(
-                            fsLinkSource, GL_FRAGMENT_SHADER);
-                    vsLinkSource =
-                        rewriteUnsizedUniformArrayInitializersForSpirv(vsLinkSource);
-                    fsLinkSource =
-                        rewriteUnsizedUniformArrayInitializersForSpirv(fsLinkSource);
-                    vsLinkSource =
-                        rewriteSsboConsecutiveRuntimeArraysForSpirv(vsLinkSource);
-                    fsLinkSource =
-                        rewriteSsboConsecutiveRuntimeArraysForSpirv(fsLinkSource);
-                    vsLinkSource =
-                        rewrite420packImplicitConversionsForSpirv(vsLinkSource);
-                    fsLinkSource =
-                        rewrite420packImplicitConversionsForSpirv(fsLinkSource);
-                    vsLinkSource =
-                        rewrite420packQualifierOrderInvariantInputsForSpirv(vsLinkSource);
-                    fsLinkSource =
-                        rewrite420packQualifierOrderInvariantInputsForSpirv(fsLinkSource);
+                // Fragment-only compatibility programs are valid GL: fixed-function
+                // vertex processing feeds a user fragment shader. Synthesize the
+                // legacy immediate-mode vertex stage even when the fragment shader
+                // only consumes gl_FragCoord/uniforms and has no texcoord rewrite.
+                static constexpr const char* kCompatFragmentOnlyVertexSource =
+                    "#version 330 core\n"
+                    "layout(location = 0) in vec4 piglit_vertex;\n"
+                    "layout(location = 1) in vec2 piglit_texcoord;\n"
+                    "uniform mat4 appgl_ModelViewProjectionMatrix;\n"
+                    "out vec4 appgl_TexCoord[8];\n"
+                    "void main() {\n"
+                    "    gl_Position = appgl_ModelViewProjectionMatrix * piglit_vertex;\n"
+                    "    for (int i = 0; i < 8; ++i) {\n"
+                    "        appgl_TexCoord[i] = vec4(0.0, 0.0, 0.0, 1.0);\n"
+                    "    }\n"
+                    "    appgl_TexCoord[0] = vec4(piglit_texcoord, 0.0, 1.0);\n"
+                    "}\n";
+                std::string vsLinkSource =
+                    rewriteShaderDrawParametersForSpirv(
+                        kCompatFragmentOnlyVertexSource, GL_VERTEX_SHADER);
+                std::string fsLinkSource =
+                    fsRewrite.didRewrite ? fsRewrite.source : fragmentShader->source;
+                fsLinkSource =
+                    rewriteShaderDrawParametersForSpirv(
+                        fsLinkSource, GL_FRAGMENT_SHADER);
+                vsLinkSource =
+                    rewriteUnsizedUniformArrayInitializersForSpirv(vsLinkSource);
+                fsLinkSource =
+                    rewriteUnsizedUniformArrayInitializersForSpirv(fsLinkSource);
+                vsLinkSource =
+                    rewriteSsboConsecutiveRuntimeArraysForSpirv(vsLinkSource);
+                fsLinkSource =
+                    rewriteSsboConsecutiveRuntimeArraysForSpirv(fsLinkSource);
+                vsLinkSource =
+                    rewrite420packImplicitConversionsForSpirv(vsLinkSource);
+                fsLinkSource =
+                    rewrite420packImplicitConversionsForSpirv(fsLinkSource);
+                vsLinkSource =
+                    rewrite420packQualifierOrderInvariantInputsForSpirv(vsLinkSource);
+                fsLinkSource =
+                    rewrite420packQualifierOrderInvariantInputsForSpirv(fsLinkSource);
 
-                    std::string linkErrorLog;
-                    LinkedProgramSpirv linked = translator.compileGLSLProgram(
-                        vsLinkSource, fsLinkSource, 330, &linkErrorLog);
-                    if (!linked.linkSucceeded) {
-                        Runtime::shared().recordShaderTranslation({
-                            programTag + "-fragmentonly-compat-link-spirv",
-                            "link", "", "", linkFragmentHash,
-                            linkErrorLog.empty()
-                                ? "compileGLSLProgram failed (no log)"
-                                : linkErrorLog,
-                            "", false
-                        });
-                    } else {
-                        const bool forceRasterArgBuf =
-                            spirvNeedsArgumentBuffers(linked.vertexSpirv.data(),
-                                                    linked.vertexSpirv.size()) ||
-                            spirvNeedsArgumentBuffers(linked.fragmentSpirv.data(),
-                                                    linked.fragmentSpirv.size());
-                        appgl::TranslatorOptions vsOptions;
-                        vsOptions.forceArgumentBuffers = forceRasterArgBuf;
-                        vsOptions.enableClipControlYSignFixup = true;
-                        appgl::TranslatorOptions fsOptions;
-                        fsOptions.forceArgumentBuffers = forceRasterArgBuf;
-                        ShaderReflection vsRefl, fsRefl;
-                        const bool vsOk = translateStage(
-                            "vertex", linked.vertexSpirv.data(),
-                            linked.vertexSpirv.size(), vsLinkSource,
-                            programObject->vertexMSL, vsRefl, vsOptions);
-                        const bool fsOk = translateStage(
-                            "fragment", linked.fragmentSpirv.data(),
-                            linked.fragmentSpirv.size(), fragmentShader->source,
-                            programObject->fragmentMSL, fsRefl, fsOptions);
-                        if (vsOk && fsOk) {
-                            rewriteMslOutputLocationsForFragmentInputs(
-                                programObject->vertexMSL, programObject->fragmentMSL);
-                            programObject->vertexReflection = std::move(vsRefl);
-                            programObject->fragmentReflection = std::move(fsRefl);
-                            programObject->vertexSpirv = std::move(linked.vertexSpirv);
-                            programObject->vertexSpirvEntryPoint.clear();
-                            programObject->vertexSpirvSpecializationConstants.clear();
-                            fragmentOnlySyntheticVertexSourceForReflection =
-                                vsLinkSource;
-                            programObject->hasTranslatedPipeline = true;
-                            rasterTranslationOk = true;
-                            synthesizedCompatPipeline = true;
-                        }
+                std::string linkErrorLog;
+                LinkedProgramSpirv linked = translator.compileGLSLProgram(
+                    vsLinkSource, fsLinkSource, 330, &linkErrorLog);
+                if (!linked.linkSucceeded) {
+                    Runtime::shared().recordShaderTranslation({
+                        programTag + "-fragmentonly-compat-link-spirv",
+                        "link", "", "", linkFragmentHash,
+                        linkErrorLog.empty()
+                            ? "compileGLSLProgram failed (no log)"
+                            : linkErrorLog,
+                        "", false
+                    });
+                } else {
+                    const bool forceRasterArgBuf =
+                        spirvNeedsArgumentBuffers(linked.vertexSpirv.data(),
+                                                linked.vertexSpirv.size()) ||
+                        spirvNeedsArgumentBuffers(linked.fragmentSpirv.data(),
+                                                linked.fragmentSpirv.size());
+                    appgl::TranslatorOptions vsOptions;
+                    vsOptions.forceArgumentBuffers = forceRasterArgBuf;
+                    appgl::TranslatorOptions fsOptions;
+                    fsOptions.forceArgumentBuffers = forceRasterArgBuf;
+                    ShaderReflection vsRefl, fsRefl;
+                    const bool vsOk = translateStage(
+                        "vertex", linked.vertexSpirv.data(),
+                        linked.vertexSpirv.size(), vsLinkSource,
+                        programObject->vertexMSL, vsRefl, vsOptions);
+                    const bool fsOk = translateStage(
+                        "fragment", linked.fragmentSpirv.data(),
+                        linked.fragmentSpirv.size(), fragmentShader->source,
+                        programObject->fragmentMSL, fsRefl, fsOptions);
+                    if (vsOk && fsOk) {
+                        rewriteMslOutputLocationsForFragmentInputs(
+                            programObject->vertexMSL, programObject->fragmentMSL);
+                        programObject->vertexReflection = std::move(vsRefl);
+                        programObject->fragmentReflection = std::move(fsRefl);
+                        programObject->vertexSpirv = std::move(linked.vertexSpirv);
+                        programObject->vertexSpirvEntryPoint.clear();
+                        programObject->vertexSpirvSpecializationConstants.clear();
+                        fragmentOnlySyntheticVertexSourceForReflection =
+                            vsLinkSource;
+                        programObject->hasTranslatedPipeline = true;
+                        rasterTranslationOk = true;
+                        synthesizedCompatPipeline = true;
                     }
                 }
             }

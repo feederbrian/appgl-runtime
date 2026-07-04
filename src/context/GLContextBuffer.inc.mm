@@ -59,8 +59,15 @@ bool GLContext::bindBuffer(GLenum target, GLuint buffer) {
     }
     GLBufferObject* object = impl_->objects->buffers().get(buffer);
     if (object == nullptr) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
+        if (!appglCompatProfileEnabled()) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        object = impl_->objects->buffers().insertAt(buffer);
+        if (object == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
     }
     object->instantiated = true;
     impl_->state->bindBuffer(target, buffer);

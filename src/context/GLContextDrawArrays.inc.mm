@@ -137,9 +137,6 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             return advancedBlendOk;
         }
     }
-    if (impl_->state->boundDrawFramebuffer() == 0) {
-        impl_->invalidateDefaultFramebufferShadow();
-    }
     drawProfile.mark(GLDrawProfileBucket::ProgramResolve);
     if (program != nullptr && program->ssboStdLayoutRawCopyFallback &&
         impl_->state->isEnabled(GL_RASTERIZER_DISCARD)) {
