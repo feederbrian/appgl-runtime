@@ -1653,6 +1653,24 @@ bool GLContext::clearNamedFramebufferfv(GLuint framebuffer, GLenum buffer, GLint
         // DSA_FB_CHECK already handles non-existent FB. framebuffer==0 is
         // the default FB, which isn't currently backed as a GLFramebufferObject
         // in our store.
+        if (framebuffer == 0 && buffer == GL_COLOR) {
+            if (drawbuffer != 0) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            const GLClearState previousClear = impl_->state->clearState();
+            impl_->state->setClearColor(value[0], value[1], value[2], value[3]);
+            impl_->applyDefaultFramebufferColorClear();
+            impl_->state->setClearColor(previousClear.color[0],
+                                        previousClear.color[1],
+                                        previousClear.color[2],
+                                        previousClear.color[3]);
+            return true;
+        }
+        if (framebuffer == 0 && buffer != GL_DEPTH) {
+            pushError(GL_INVALID_ENUM);
+            return false;
+        }
         return true;
     }
     if (buffer == GL_COLOR) {

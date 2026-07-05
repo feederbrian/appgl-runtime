@@ -5389,6 +5389,45 @@ void GLContext::callListCompat(GLuint list) {
                                     command.uniformBlockIndex,
                                     command.uniformBlockBinding);
                 break;
+            case Impl::DisplayListCommand::Kind::ClearBuffer:
+                switch (command.enumValue2) {
+                    case GL_FLOAT:
+                        if (!command.uniformFloats.empty()) {
+                            clearNamedFramebufferfv(boundDrawFramebuffer(),
+                                                    command.enumValue,
+                                                    command.first,
+                                                    command.uniformFloats.data());
+                        }
+                        break;
+                    case GL_INT:
+                        if (!command.uniformInts.empty()) {
+                            clearNamedFramebufferiv(boundDrawFramebuffer(),
+                                                    command.enumValue,
+                                                    command.first,
+                                                    command.uniformInts.data());
+                        }
+                        break;
+                    case GL_UNSIGNED_INT:
+                        if (!command.uniformUInts.empty()) {
+                            clearNamedFramebufferuiv(boundDrawFramebuffer(),
+                                                     command.enumValue,
+                                                     command.first,
+                                                     command.uniformUInts.data());
+                        }
+                        break;
+                    case GL_DEPTH_STENCIL:
+                        if (!command.uniformInts.empty()) {
+                            clearNamedFramebufferfi(boundDrawFramebuffer(),
+                                                    command.enumValue,
+                                                    command.first,
+                                                    command.values[0],
+                                                    command.uniformInts[0]);
+                        }
+                        break;
+                    default:
+                        break;
+                }
+                break;
         }
     }
     --state.replayDepth;
@@ -5583,6 +5622,94 @@ bool GLContext::recordDisplayListClear(GLbitfield mask) {
     return !(impl_->displayLists.compiling &&
              !impl_->displayLists.replaying &&
              !impl_->displayLists.compileAndExecute);
+}
+
+bool GLContext::recordDisplayListClearBufferfv(GLenum buffer,
+                                               GLint drawbuffer,
+                                               const GLfloat* value) {
+    if (!impl_->displayLists.compiling || impl_->displayLists.replaying ||
+        value == nullptr || drawbuffer < 0) {
+        return false;
+    }
+
+    const std::size_t elementCount =
+        buffer == GL_COLOR ? 4u :
+        buffer == GL_DEPTH ? 1u : 0u;
+    if (elementCount == 0u) {
+        return false;
+    }
+
+    Impl::DisplayListCommand command;
+    command.kind = Impl::DisplayListCommand::Kind::ClearBuffer;
+    command.enumValue = buffer;
+    command.enumValue2 = GL_FLOAT;
+    command.first = drawbuffer;
+    command.uniformFloats.assign(value, value + elementCount);
+    impl_->displayLists.compileCommands.push_back(std::move(command));
+    return !impl_->displayLists.compileAndExecute;
+}
+
+bool GLContext::recordDisplayListClearBufferiv(GLenum buffer,
+                                               GLint drawbuffer,
+                                               const GLint* value) {
+    if (!impl_->displayLists.compiling || impl_->displayLists.replaying ||
+        value == nullptr || drawbuffer < 0) {
+        return false;
+    }
+
+    const std::size_t elementCount =
+        buffer == GL_COLOR ? 4u :
+        buffer == GL_STENCIL ? 1u : 0u;
+    if (elementCount == 0u) {
+        return false;
+    }
+
+    Impl::DisplayListCommand command;
+    command.kind = Impl::DisplayListCommand::Kind::ClearBuffer;
+    command.enumValue = buffer;
+    command.enumValue2 = GL_INT;
+    command.first = drawbuffer;
+    command.uniformInts.assign(value, value + elementCount);
+    impl_->displayLists.compileCommands.push_back(std::move(command));
+    return !impl_->displayLists.compileAndExecute;
+}
+
+bool GLContext::recordDisplayListClearBufferuiv(GLenum buffer,
+                                                GLint drawbuffer,
+                                                const GLuint* value) {
+    if (!impl_->displayLists.compiling || impl_->displayLists.replaying ||
+        value == nullptr || drawbuffer < 0 || buffer != GL_COLOR) {
+        return false;
+    }
+
+    Impl::DisplayListCommand command;
+    command.kind = Impl::DisplayListCommand::Kind::ClearBuffer;
+    command.enumValue = buffer;
+    command.enumValue2 = GL_UNSIGNED_INT;
+    command.first = drawbuffer;
+    command.uniformUInts.assign(value, value + 4);
+    impl_->displayLists.compileCommands.push_back(std::move(command));
+    return !impl_->displayLists.compileAndExecute;
+}
+
+bool GLContext::recordDisplayListClearBufferfi(GLenum buffer,
+                                               GLint drawbuffer,
+                                               GLfloat depth,
+                                               GLint stencil) {
+    if (!impl_->displayLists.compiling || impl_->displayLists.replaying ||
+        drawbuffer < 0 || buffer != GL_DEPTH_STENCIL) {
+        return false;
+    }
+
+    Impl::DisplayListCommand command;
+    command.kind = Impl::DisplayListCommand::Kind::ClearBuffer;
+    command.enumValue = buffer;
+    command.enumValue2 = GL_DEPTH_STENCIL;
+    command.first = drawbuffer;
+    command.values[0] = depth;
+    command.uniformInts.push_back(stencil);
+    impl_->displayLists.compileCommands.push_back(std::move(command));
+    return !impl_->displayLists.compileAndExecute;
 }
 
 bool GLContext::recordDisplayListUniformScalarVector(GLint location,

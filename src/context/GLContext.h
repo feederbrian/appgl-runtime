@@ -669,6 +669,10 @@ public:
     GLboolean isListCompat(GLuint list) const;
     void listBaseCompat(GLuint base);
     bool recordDisplayListClear(GLbitfield mask);
+    bool recordDisplayListClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat* value);
+    bool recordDisplayListClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint* value);
+    bool recordDisplayListClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint* value);
+    bool recordDisplayListClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil);
     bool recordDisplayListClientArrayDraw(GLenum mode, GLint first, GLsizei count, const void* indices, GLenum indexType, const char* debugLabel);
     bool recordDisplayListUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint program);
     bool recordDisplayListUniformBlockBinding(GLuint program, GLuint uniformBlockIndex, GLuint uniformBlockBinding);

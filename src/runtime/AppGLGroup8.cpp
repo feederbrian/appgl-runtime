@@ -1703,24 +1703,28 @@ static GLint APIENTRY glGetFragDataLocation(GLuint program, const GLchar *name) 
 static void APIENTRY glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint *value) {
     auto* context = currentContextOrNull();
     if (context == nullptr) return;
+    if (context->recordDisplayListClearBufferiv(buffer, drawbuffer, value)) return;
     context->clearNamedFramebufferiv(context->boundDrawFramebuffer(), buffer, drawbuffer, value);
 }
 
 static void APIENTRY glClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint *value) {
     auto* context = currentContextOrNull();
     if (context == nullptr) return;
+    if (context->recordDisplayListClearBufferuiv(buffer, drawbuffer, value)) return;
     context->clearNamedFramebufferuiv(context->boundDrawFramebuffer(), buffer, drawbuffer, value);
 }
 
 static void APIENTRY glClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat *value) {
     auto* context = currentContextOrNull();
     if (context == nullptr) return;
+    if (context->recordDisplayListClearBufferfv(buffer, drawbuffer, value)) return;
     context->clearNamedFramebufferfv(context->boundDrawFramebuffer(), buffer, drawbuffer, value);
 }
 
 static void APIENTRY glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil) {
     auto* context = currentContextOrNull();
     if (context == nullptr) return;
+    if (context->recordDisplayListClearBufferfi(buffer, drawbuffer, depth, stencil)) return;
     context->clearNamedFramebufferfi(context->boundDrawFramebuffer(), buffer, drawbuffer, depth, stencil);
 }
 

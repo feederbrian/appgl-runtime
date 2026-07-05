@@ -31991,6 +31991,7 @@ struct GLContext::Impl {
             ProgramUniformDoubleMatrix,
             UseProgramStages,
             UniformBlockBinding,
+            ClearBuffer,
         };
         Kind kind = Kind::Clear;
         GLenum enumValue = 0;
