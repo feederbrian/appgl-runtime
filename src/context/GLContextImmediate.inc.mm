@@ -5249,10 +5249,101 @@ void GLContext::callListCompat(GLuint list) {
             case Impl::DisplayListCommand::Kind::PopMatrix:
                 popMatrixCompat();
                 break;
+            case Impl::DisplayListCommand::Kind::DrawClientArrays:
+                if (impl_->immediate.active) {
+                    pushError(GL_INVALID_OPERATION,
+                              command.enumValue2 != 0 ? "glRect" : "glDrawArrays",
+                              "display-list draw command is illegal inside glBegin/glEnd");
+                    break;
+                }
+                if (!command.drawClientArrayValid ||
+                    command.drawVertices.empty()) {
+                    break;
+                }
+                beginImmediate(command.enumValue);
+                if (!impl_->immediate.active) {
+                    break;
+                }
+                for (const auto& vertex : command.drawVertices) {
+                    if (command.drawClientArrayHasColor) {
+                        immediateColor(vertex.color[0], vertex.color[1],
+                                       vertex.color[2], vertex.color[3]);
+                    }
+                    if (command.drawClientArrayHasTexCoord) {
+                        immediateTexCoord(0, vertex.texcoord[0],
+                                          vertex.texcoord[1],
+                                          vertex.texcoord[2],
+                                          vertex.texcoord[3]);
+                    }
+                    immediateVertex(vertex.position[0], vertex.position[1],
+                                    vertex.position[2], vertex.position[3]);
+                }
+                endImmediate();
+                break;
         }
     }
     --state.replayDepth;
     state.replaying = previousReplaying;
+}
+
+void GLContext::rectCompat(GLfloat x1, GLfloat y1, GLfloat x2, GLfloat y2) {
+    auto makeRectCommand = [&]() {
+        Impl::DisplayListCommand command;
+        command.kind = Impl::DisplayListCommand::Kind::DrawClientArrays;
+        command.enumValue = GL_QUADS;
+        command.enumValue2 = 1;
+        command.drawClientArrayValid = true;
+        command.drawVertices.resize(4);
+        command.drawVertices[0].position[0] = x1;
+        command.drawVertices[0].position[1] = y1;
+        command.drawVertices[0].position[2] = 0.0f;
+        command.drawVertices[0].position[3] = 1.0f;
+        command.drawVertices[1].position[0] = x2;
+        command.drawVertices[1].position[1] = y1;
+        command.drawVertices[1].position[2] = 0.0f;
+        command.drawVertices[1].position[3] = 1.0f;
+        command.drawVertices[2].position[0] = x2;
+        command.drawVertices[2].position[1] = y2;
+        command.drawVertices[2].position[2] = 0.0f;
+        command.drawVertices[2].position[3] = 1.0f;
+        command.drawVertices[3].position[0] = x1;
+        command.drawVertices[3].position[1] = y2;
+        command.drawVertices[3].position[2] = 0.0f;
+        command.drawVertices[3].position[3] = 1.0f;
+        return command;
+    };
+
+    auto emitRect = [&]() {
+        if (impl_->immediate.active) {
+            pushError(GL_INVALID_OPERATION, "glRect",
+                      "glRect is illegal inside glBegin/glEnd");
+            return;
+        }
+        beginImmediate(GL_QUADS);
+        if (!impl_->immediate.active) {
+            return;
+        }
+        immediateVertex(x1, y1, 0.0f, 1.0f);
+        immediateVertex(x2, y1, 0.0f, 1.0f);
+        immediateVertex(x2, y2, 0.0f, 1.0f);
+        immediateVertex(x1, y2, 0.0f, 1.0f);
+        endImmediate();
+    };
+
+    auto& state = impl_->displayLists;
+    if (state.compiling && !state.replaying) {
+        state.compileCommands.push_back(makeRectCommand());
+        if (!state.compileAndExecute) {
+            return;
+        }
+        const bool previousReplaying = state.replaying;
+        state.replaying = true;
+        emitRect();
+        state.replaying = previousReplaying;
+        return;
+    }
+
+    emitRect();
 }
 
 void GLContext::callListsCompat(GLsizei n, GLenum type, const void* lists) {
@@ -5383,6 +5474,284 @@ bool GLContext::recordDisplayListClear(GLbitfield mask) {
     return !(impl_->displayLists.compiling &&
              !impl_->displayLists.replaying &&
              !impl_->displayLists.compileAndExecute);
+}
+
+bool GLContext::recordDisplayListClientArrayDraw(GLenum mode,
+                                                 GLint first,
+                                                 GLsizei count,
+                                                 const void* indices,
+                                                 GLenum indexType,
+                                                 const char* debugLabel) {
+    if (!impl_->displayLists.compiling || impl_->displayLists.replaying) {
+        return false;
+    }
+
+    Impl::DisplayListCommand command;
+    command.kind = Impl::DisplayListCommand::Kind::DrawClientArrays;
+    command.enumValue = mode;
+
+    if (appglCompatProfileEnabled() && count > 0) {
+        const auto& vertexArray = impl_->legacyVertexArray;
+        const auto& colorArray = impl_->legacyColorArray;
+        const auto& texCoordArray = impl_->legacyTexCoordArray;
+        const bool colorArrayHasSource =
+            colorArray.pointer != nullptr || colorArray.bufferName != 0;
+        const bool colorArrayUsable =
+            colorArray.enabled &&
+            colorArrayHasSource &&
+            colorArray.type == GL_FLOAT &&
+            colorArray.size >= 3 && colorArray.size <= 4;
+        const bool texCoordArrayHasSource =
+            texCoordArray.pointer != nullptr || texCoordArray.bufferName != 0;
+        const bool texCoordArrayUsable =
+            texCoordArray.enabled &&
+            texCoordArrayHasSource &&
+            texCoordArray.type == GL_FLOAT &&
+            texCoordArray.size >= 1 && texCoordArray.size <= 4;
+
+        if (vertexArray.enabled &&
+            (vertexArray.pointer != nullptr || vertexArray.bufferName != 0) &&
+            vertexArray.type == GL_FLOAT &&
+            vertexArray.size >= 2 && vertexArray.size <= 4) {
+            const std::uint8_t* indexBase = nullptr;
+            std::size_t indexAvailableBytes = 0;
+            std::size_t indexSize = 0;
+            bool indexSourceOk = true;
+            if (indexType != 0) {
+                switch (indexType) {
+                    case GL_UNSIGNED_BYTE:
+                        indexSize = sizeof(GLubyte);
+                        break;
+                    case GL_UNSIGNED_SHORT:
+                        indexSize = sizeof(GLushort);
+                        break;
+                    case GL_UNSIGNED_INT:
+                        indexSize = sizeof(GLuint);
+                        break;
+                    default:
+                        indexSourceOk = false;
+                        break;
+                }
+                if (indexSourceOk) {
+                    const GLuint vaoName = impl_->state->boundVertexArray();
+                    const GLVertexArrayObject* vao = vaoName != 0
+                        ? impl_->objects->vertexArrays().get(vaoName)
+                        : nullptr;
+                    const GLuint elementBufferName =
+                        vao != nullptr ? vao->elementArrayBuffer : 0;
+                    if (elementBufferName != 0) {
+                        const GLBufferObject* elementBuffer =
+                            impl_->objects->buffers().get(elementBufferName);
+                        if (elementBuffer == nullptr ||
+                            elementBuffer->shadowBytes.empty()) {
+                            indexSourceOk = false;
+                        } else {
+                            const std::uintptr_t offset =
+                                reinterpret_cast<std::uintptr_t>(indices);
+                            if (offset > elementBuffer->shadowBytes.size()) {
+                                pushError(GL_INVALID_OPERATION,
+                                          debugLabel ? debugLabel : "glDrawElements",
+                                          "element array buffer offset is outside buffer storage");
+                                indexSourceOk = false;
+                            } else {
+                                indexBase = elementBuffer->shadowBytes.data() +
+                                    static_cast<std::size_t>(offset);
+                                indexAvailableBytes =
+                                    elementBuffer->shadowBytes.size() -
+                                    static_cast<std::size_t>(offset);
+                            }
+                        }
+                    } else if (indices != nullptr) {
+                        indexBase = static_cast<const std::uint8_t*>(indices);
+                        indexAvailableBytes = static_cast<std::size_t>(-1);
+                    } else {
+                        pushError(GL_INVALID_OPERATION,
+                                  debugLabel ? debugLabel : "glDrawElements",
+                                  "client element indices are null");
+                        indexSourceOk = false;
+                    }
+                }
+            }
+
+            const std::size_t vertexStride = vertexArray.stride > 0
+                ? static_cast<std::size_t>(vertexArray.stride)
+                : static_cast<std::size_t>(vertexArray.size) * sizeof(GLfloat);
+            const std::size_t colorStride = colorArray.stride > 0
+                ? static_cast<std::size_t>(colorArray.stride)
+                : static_cast<std::size_t>(colorArray.size) * sizeof(GLfloat);
+            const std::size_t texCoordStride = texCoordArray.stride > 0
+                ? static_cast<std::size_t>(texCoordArray.stride)
+                : static_cast<std::size_t>(texCoordArray.size) * sizeof(GLfloat);
+
+            auto resolveArraySource = [&](const Impl::LegacyClientArray& array,
+                                          const char* label,
+                                          const std::uint8_t*& base,
+                                          std::size_t& availableBytes) -> bool {
+                if (array.bufferName != 0) {
+                    const GLBufferObject* buffer =
+                        impl_->objects->buffers().get(array.bufferName);
+                    if (buffer == nullptr || buffer->shadowBytes.empty()) {
+                        return false;
+                    }
+                    const std::uintptr_t offset =
+                        reinterpret_cast<std::uintptr_t>(array.pointer);
+                    if (offset > buffer->shadowBytes.size()) {
+                        pushError(GL_INVALID_OPERATION, label,
+                                  "legacy client array VBO offset is outside buffer storage");
+                        return false;
+                    }
+                    base = buffer->shadowBytes.data() + static_cast<std::size_t>(offset);
+                    availableBytes = buffer->shadowBytes.size() - static_cast<std::size_t>(offset);
+                    return true;
+                }
+                if (array.pointer == nullptr) {
+                    return false;
+                }
+                base = static_cast<const std::uint8_t*>(array.pointer);
+                availableBytes = static_cast<std::size_t>(-1);
+                return true;
+            };
+
+            const std::uint8_t* vertexBase = nullptr;
+            std::size_t vertexAvailableBytes = 0;
+            bool captureOk = indexSourceOk &&
+                resolveArraySource(vertexArray, "glVertexPointer",
+                                   vertexBase, vertexAvailableBytes);
+            const std::uint8_t* colorBase = nullptr;
+            std::size_t colorAvailableBytes = 0;
+            if (captureOk && colorArrayUsable) {
+                captureOk = resolveArraySource(colorArray, "glColorPointer",
+                                               colorBase, colorAvailableBytes);
+            }
+            const std::uint8_t* texCoordBase = nullptr;
+            std::size_t texCoordAvailableBytes = 0;
+            if (captureOk && texCoordArrayUsable) {
+                captureOk = resolveArraySource(texCoordArray, "glTexCoordPointer",
+                                               texCoordBase, texCoordAvailableBytes);
+            }
+
+            auto indexAt = [&](GLsizei i, GLuint& out) -> bool {
+                if (indexType == 0) {
+                    const GLint logical = first + i;
+                    if (logical < 0) {
+                        return false;
+                    }
+                    out = static_cast<GLuint>(logical);
+                    return true;
+                }
+                const std::size_t indexOffset =
+                    static_cast<std::size_t>(i) * indexSize;
+                if (indexOffset > indexAvailableBytes ||
+                    indexSize > indexAvailableBytes - indexOffset) {
+                    return false;
+                }
+                const auto* indexPtr = indexBase + indexOffset;
+                switch (indexType) {
+                    case GL_UNSIGNED_BYTE:
+                        out = *reinterpret_cast<const GLubyte*>(indexPtr);
+                        return true;
+                    case GL_UNSIGNED_SHORT:
+                        out = *reinterpret_cast<const GLushort*>(indexPtr);
+                        return true;
+                    case GL_UNSIGNED_INT:
+                        out = *reinterpret_cast<const GLuint*>(indexPtr);
+                        return true;
+                    default:
+                        return false;
+                }
+            };
+
+            if (captureOk) {
+                command.drawVertices.reserve(static_cast<std::size_t>(count));
+                for (GLsizei i = 0; i < count; ++i) {
+                    GLuint srcIndex = 0;
+                    if (!indexAt(i, srcIndex)) {
+                        captureOk = false;
+                        break;
+                    }
+                    const std::size_t vertexOffset =
+                        static_cast<std::size_t>(srcIndex) * vertexStride;
+                    const std::size_t vertexNeed =
+                        static_cast<std::size_t>(vertexArray.size) * sizeof(GLfloat);
+                    if (vertexOffset > vertexAvailableBytes ||
+                        vertexNeed > vertexAvailableBytes - vertexOffset) {
+                        captureOk = false;
+                        break;
+                    }
+                    const auto* vp =
+                        reinterpret_cast<const GLfloat*>(vertexBase + vertexOffset);
+
+                    const GLfloat* cp = nullptr;
+                    if (colorArrayUsable) {
+                        const std::size_t colorOffset =
+                            static_cast<std::size_t>(srcIndex) * colorStride;
+                        const std::size_t colorNeed =
+                            static_cast<std::size_t>(colorArray.size) * sizeof(GLfloat);
+                        if (colorOffset > colorAvailableBytes ||
+                            colorNeed > colorAvailableBytes - colorOffset) {
+                            captureOk = false;
+                            break;
+                        }
+                        cp = reinterpret_cast<const GLfloat*>(colorBase + colorOffset);
+                    }
+
+                    const GLfloat* tp = nullptr;
+                    if (texCoordArrayUsable) {
+                        const std::size_t texCoordOffset =
+                            static_cast<std::size_t>(srcIndex) * texCoordStride;
+                        const std::size_t texCoordNeed =
+                            static_cast<std::size_t>(texCoordArray.size) * sizeof(GLfloat);
+                        if (texCoordOffset > texCoordAvailableBytes ||
+                            texCoordNeed > texCoordAvailableBytes - texCoordOffset) {
+                            captureOk = false;
+                            break;
+                        }
+                        tp = reinterpret_cast<const GLfloat*>(texCoordBase + texCoordOffset);
+                    }
+
+                    Impl::ImmediateModeVertex v{};
+                    v.position[0] = vp[0];
+                    v.position[1] = vp[1];
+                    v.position[2] = vertexArray.size >= 3 ? vp[2] : 0.0f;
+                    v.position[3] = vertexArray.size >= 4 ? vp[3] : 1.0f;
+                    if (cp != nullptr) {
+                        v.color[0] = cp[0];
+                        v.color[1] = cp[1];
+                        v.color[2] = cp[2];
+                        v.color[3] = colorArray.size >= 4 ? cp[3] : 1.0f;
+                    }
+                    if (tp != nullptr) {
+                        v.texcoord[0] = tp[0];
+                        v.texcoord[1] = texCoordArray.size >= 2 ? tp[1] : 0.0f;
+                        v.texcoord[2] = texCoordArray.size >= 3 ? tp[2] : 0.0f;
+                        v.texcoord[3] = texCoordArray.size >= 4 ? tp[3] : 1.0f;
+                    }
+                    command.drawVertices.push_back(v);
+                }
+            }
+
+            if (captureOk) {
+                command.drawClientArrayValid = true;
+                command.drawClientArrayHasColor = colorArrayUsable;
+                command.drawClientArrayHasTexCoord = texCoordArrayUsable;
+            } else {
+                command.drawVertices.clear();
+            }
+        }
+    }
+
+    impl_->displayLists.compileCommands.push_back(std::move(command));
+    return !impl_->displayLists.compileAndExecute;
+}
+
+bool GLContext::rejectDisplayListCompileInstancedDraw(const char* debugLabel) {
+    if (!impl_->displayLists.compiling || impl_->displayLists.replaying) {
+        return false;
+    }
+    pushError(GL_INVALID_OPERATION,
+              debugLabel ? debugLabel : "glDrawArraysInstanced",
+              "instanced draw commands are invalid during display list compilation");
+    return true;
 }
 
 bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,

@@ -14,6 +14,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     if (count == 0) {
         return true;
     }
+    if (recordDisplayListClientArrayDraw(mode, first, count, nullptr, 0, "glDrawArrays")) {
+        return true;
+    }
     if (!impl_->state->validateForDraw()) {
         pushError(GL_INVALID_OPERATION);
         return false;
@@ -1787,6 +1790,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
 }
 
 bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instancecount, GLuint baseinstance, GLuint drawID) {
+    if (rejectDisplayListCompileInstancedDraw("glDrawArraysInstanced")) {
+        return false;
+    }
     if (!isValidDrawMode(mode)) {
         pushError(GL_INVALID_ENUM);
         return false;

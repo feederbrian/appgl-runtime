@@ -31978,6 +31978,7 @@ struct GLContext::Impl {
             Material,
             PushMatrix,
             PopMatrix,
+            DrawClientArrays,
         };
         Kind kind = Kind::Clear;
         GLenum enumValue = 0;
@@ -31985,8 +31986,12 @@ struct GLContext::Impl {
         GLuint list = 0;
         GLsizei width = 0;
         GLsizei height = 0;
+        bool drawClientArrayValid = false;
+        bool drawClientArrayHasColor = false;
+        bool drawClientArrayHasTexCoord = false;
         float values[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         std::vector<std::uint8_t> bitmapMask;
+        std::vector<ImmediateModeVertex> drawVertices;
     };
     struct DisplayListObject {
         std::vector<DisplayListCommand> commands;

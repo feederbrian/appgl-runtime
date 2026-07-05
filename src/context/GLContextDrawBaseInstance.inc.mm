@@ -3,6 +3,9 @@
 
 #line 14 "/private/tmp/appgl-bug3-clean/src/context/GLContextDraw.inc.mm" // Preserve source identity so this relocation stays codegen-neutral; __FILE__/__LINE__/debug-info intentionally report the original GLContextDraw.inc.mm.
 bool GLContext::drawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count, GLsizei instancecount, GLuint baseinstance, GLuint drawID) {
+    if (rejectDisplayListCompileInstancedDraw("glDrawArraysInstancedBaseInstance")) {
+        return false;
+    }
     if (count < 0 || instancecount < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -14,6 +17,9 @@ bool GLContext::drawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsize
 }
 
 bool GLContext::drawElementsInstancedBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLuint baseinstance, GLuint drawID) {
+    if (rejectDisplayListCompileInstancedDraw("glDrawElementsInstancedBaseInstance")) {
+        return false;
+    }
     if (count < 0 || instancecount < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -30,6 +36,9 @@ bool GLContext::drawElementsInstancedBaseInstance(GLenum mode, GLsizei count, GL
 }
 
 bool GLContext::drawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance, GLuint drawID, bool forceDrawPrepReset) {
+    if (rejectDisplayListCompileInstancedDraw("glDrawElementsInstancedBaseVertexBaseInstance")) {
+        return false;
+    }
     if (count < 0 || instancecount < 0) {
         pushError(GL_INVALID_VALUE);
         return false;

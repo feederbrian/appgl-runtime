@@ -358,6 +358,18 @@ MANUAL_FIXED_FUNCTION_OVERRIDES = {
     "glGenLists",
     "glIsList",
     "glListBase",
+    # glRect* expands to an immediate-mode quad, but in display lists it
+    # must replay as an atomic draw command so it can raise
+    # INVALID_OPERATION without leaking vertices when called inside a
+    # surrounding glBegin/glEnd.
+    "glRectd",
+    "glRectdv",
+    "glRectf",
+    "glRectfv",
+    "glRecti",
+    "glRectiv",
+    "glRects",
+    "glRectsv",
     "glShadeModel",
     "glPushAttrib",
     "glPopAttrib",

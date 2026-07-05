@@ -254,6 +254,65 @@ extern "C" void APIENTRY glListBase(GLuint base) {
     ctx->listBaseCompat(base);
 }
 
+// ── glRect* ─────────────────────────────────────────────────────────
+
+extern "C" void APIENTRY glRectf(GLfloat x1, GLfloat y1, GLfloat x2, GLfloat y2) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->rectCompat(x1, y1, x2, y2);
+}
+
+extern "C" void APIENTRY glRectfv(const GLfloat* v1, const GLfloat* v2) {
+    if (v1 == nullptr || v2 == nullptr) {
+        return;
+    }
+    glRectf(v1[0], v1[1], v2[0], v2[1]);
+}
+
+extern "C" void APIENTRY glRectd(GLdouble x1, GLdouble y1, GLdouble x2, GLdouble y2) {
+    glRectf(static_cast<GLfloat>(x1),
+            static_cast<GLfloat>(y1),
+            static_cast<GLfloat>(x2),
+            static_cast<GLfloat>(y2));
+}
+
+extern "C" void APIENTRY glRectdv(const GLdouble* v1, const GLdouble* v2) {
+    if (v1 == nullptr || v2 == nullptr) {
+        return;
+    }
+    glRectd(v1[0], v1[1], v2[0], v2[1]);
+}
+
+extern "C" void APIENTRY glRecti(GLint x1, GLint y1, GLint x2, GLint y2) {
+    glRectf(static_cast<GLfloat>(x1),
+            static_cast<GLfloat>(y1),
+            static_cast<GLfloat>(x2),
+            static_cast<GLfloat>(y2));
+}
+
+extern "C" void APIENTRY glRectiv(const GLint* v1, const GLint* v2) {
+    if (v1 == nullptr || v2 == nullptr) {
+        return;
+    }
+    glRecti(v1[0], v1[1], v2[0], v2[1]);
+}
+
+extern "C" void APIENTRY glRects(GLshort x1, GLshort y1, GLshort x2, GLshort y2) {
+    glRectf(static_cast<GLfloat>(x1),
+            static_cast<GLfloat>(y1),
+            static_cast<GLfloat>(x2),
+            static_cast<GLfloat>(y2));
+}
+
+extern "C" void APIENTRY glRectsv(const GLshort* v1, const GLshort* v2) {
+    if (v1 == nullptr || v2 == nullptr) {
+        return;
+    }
+    glRects(v1[0], v1[1], v2[0], v2[1]);
+}
+
 extern "C" void APIENTRY glShadeModel(GLenum mode) {
     auto* ctx = immediateContext();
     if (ctx == nullptr) {

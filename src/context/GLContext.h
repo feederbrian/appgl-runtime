@@ -649,6 +649,7 @@ public:
     void immediateColor(float r, float g, float b, float a);
     void immediateTexCoord(unsigned int unit, float s, float t, float r, float q);
     void endImmediate();
+    void rectCompat(GLfloat x1, GLfloat y1, GLfloat x2, GLfloat y2);
     void newListCompat(GLuint list, GLenum mode);
     void endListCompat();
     void callListCompat(GLuint list);
@@ -658,6 +659,8 @@ public:
     GLboolean isListCompat(GLuint list) const;
     void listBaseCompat(GLuint base);
     bool recordDisplayListClear(GLbitfield mask);
+    bool recordDisplayListClientArrayDraw(GLenum mode, GLint first, GLsizei count, const void* indices, GLenum indexType, const char* debugLabel);
+    bool rejectDisplayListCompileInstancedDraw(const char* debugLabel);
     bool setLegacyClientArrayPointer(GLenum array, GLint size, GLenum type, GLsizei stride, const void* pointer);
     bool setLegacyClientArrayEnabled(GLenum array, bool enabled);
     bool isLegacyClientArrayEnabled(GLenum array) const;

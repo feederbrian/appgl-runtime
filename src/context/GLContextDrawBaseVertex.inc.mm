@@ -374,6 +374,9 @@ bool GLContext::drawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint en
 }
 
 bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance, GLuint drawID, bool forceDrawPrepReset) {
+    if (rejectDisplayListCompileInstancedDraw("glDrawElementsInstancedBaseVertex")) {
+        return false;
+    }
     if (!isValidDrawMode(mode)) {
         pushError(GL_INVALID_ENUM);
         return false;

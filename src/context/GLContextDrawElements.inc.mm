@@ -19,6 +19,9 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         pushError(GL_INVALID_ENUM);
         return false;
     }
+    if (recordDisplayListClientArrayDraw(mode, 0, count, indices, type, "glDrawElements")) {
+        return true;
+    }
     if (!impl_->state->validateForDraw()) {
         pushError(GL_INVALID_OPERATION);
         return false;
