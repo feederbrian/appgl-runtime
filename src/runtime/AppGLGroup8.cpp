@@ -2128,14 +2128,7 @@ static void APIENTRY glGetActiveUniformBlockName(GLuint program, GLuint uniformB
 static void APIENTRY glUniformBlockBinding(GLuint program, GLuint uniformBlockIndex, GLuint uniformBlockBinding) {
     auto* context = currentContextOrNull();
     if (context == nullptr) return;
-    GLProgramObject* obj = context->objects().programs().get(program);
-    if (obj == nullptr) {
-        context->pushError(GL_INVALID_VALUE);
-        return;
-    }
-    if (uniformBlockIndex < static_cast<GLuint>(obj->resourceUniformBlocks.size())) {
-        obj->resourceUniformBlocks[uniformBlockIndex].location = static_cast<GLint>(uniformBlockBinding);
-    }
+    (void)context->uniformBlockBinding(program, uniformBlockIndex, uniformBlockBinding);
 }
 
 static void APIENTRY glGetIntegeri_v(GLenum target, GLuint index, GLint *data) {

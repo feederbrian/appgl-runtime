@@ -5280,6 +5280,115 @@ void GLContext::callListCompat(GLuint list) {
                 }
                 endImmediate();
                 break;
+            case Impl::DisplayListCommand::Kind::DrawArraysCall:
+                drawArrays(command.enumValue, command.first, command.count, 0);
+                break;
+            case Impl::DisplayListCommand::Kind::DrawElementsCall: {
+                const void* indexPtr = command.drawIndices.empty()
+                    ? reinterpret_cast<const void*>(command.indexOffset)
+                    : command.drawIndices.data();
+                drawElements(command.enumValue, command.count,
+                             command.enumValue2, indexPtr, 0);
+                break;
+            }
+            case Impl::DisplayListCommand::Kind::UniformScalarVector: {
+                const void* values = nullptr;
+                switch (command.uniformElement) {
+                    case UniformElementType::Float:
+                        values = command.uniformFloats.data();
+                        break;
+                    case UniformElementType::Int:
+                        values = command.uniformInts.data();
+                        break;
+                    case UniformElementType::UnsignedInt:
+                        values = command.uniformUInts.data();
+                        break;
+                }
+                setUniformScalarVector(command.location,
+                                       command.uniformElement,
+                                       command.vectorSize,
+                                       command.count,
+                                       values);
+                break;
+            }
+            case Impl::DisplayListCommand::Kind::UniformMatrix:
+                setUniformMatrix(command.location,
+                                 command.rows,
+                                 command.cols,
+                                 command.count,
+                                 command.transpose,
+                                 command.uniformFloats.data());
+                break;
+            case Impl::DisplayListCommand::Kind::UniformDouble:
+                setUniformDouble(command.location,
+                                 command.vectorSize,
+                                 command.count,
+                                 command.uniformDoubles.data());
+                break;
+            case Impl::DisplayListCommand::Kind::UniformDoubleMatrix:
+                setUniformDoubleMatrix(command.location,
+                                       command.rows,
+                                       command.cols,
+                                       command.count,
+                                       command.transpose,
+                                       command.uniformDoubles.data());
+                break;
+            case Impl::DisplayListCommand::Kind::ProgramUniformScalarVector: {
+                const void* values = nullptr;
+                switch (command.uniformElement) {
+                    case UniformElementType::Float:
+                        values = command.uniformFloats.data();
+                        break;
+                    case UniformElementType::Int:
+                        values = command.uniformInts.data();
+                        break;
+                    case UniformElementType::UnsignedInt:
+                        values = command.uniformUInts.data();
+                        break;
+                }
+                setUniformScalarVectorForProgram(command.program,
+                                                 command.location,
+                                                 command.uniformElement,
+                                                 command.vectorSize,
+                                                 command.count,
+                                                 values);
+                break;
+            }
+            case Impl::DisplayListCommand::Kind::ProgramUniformMatrix:
+                setUniformMatrixForProgram(command.program,
+                                           command.location,
+                                           command.rows,
+                                           command.cols,
+                                           command.count,
+                                           command.transpose,
+                                           command.uniformFloats.data());
+                break;
+            case Impl::DisplayListCommand::Kind::ProgramUniformDouble:
+                setUniformDoubleForProgram(command.program,
+                                           command.location,
+                                           command.vectorSize,
+                                           command.count,
+                                           command.uniformDoubles.data());
+                break;
+            case Impl::DisplayListCommand::Kind::ProgramUniformDoubleMatrix:
+                setUniformDoubleMatrixForProgram(command.program,
+                                                 command.location,
+                                                 command.rows,
+                                                 command.cols,
+                                                 command.count,
+                                                 command.transpose,
+                                                 command.uniformDoubles.data());
+                break;
+            case Impl::DisplayListCommand::Kind::UseProgramStages:
+                useProgramStages(command.pipeline,
+                                 command.stages,
+                                 command.program);
+                break;
+            case Impl::DisplayListCommand::Kind::UniformBlockBinding:
+                uniformBlockBinding(command.program,
+                                    command.uniformBlockIndex,
+                                    command.uniformBlockBinding);
+                break;
         }
     }
     --state.replayDepth;
@@ -5476,6 +5585,270 @@ bool GLContext::recordDisplayListClear(GLbitfield mask) {
              !impl_->displayLists.compileAndExecute);
 }
 
+bool GLContext::recordDisplayListUniformScalarVector(GLint location,
+                                                     UniformElementType element,
+                                                     GLint vectorSize,
+                                                     GLsizei count,
+                                                     const void* values) {
+    if (!impl_->displayLists.compiling || impl_->displayLists.replaying) {
+        return false;
+    }
+
+    Impl::DisplayListCommand command;
+    command.kind = Impl::DisplayListCommand::Kind::UniformScalarVector;
+    command.location = location;
+    command.uniformElement = element;
+    command.vectorSize = vectorSize;
+    command.count = count;
+    const auto elementCount =
+        static_cast<std::size_t>(vectorSize) *
+        static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    switch (element) {
+        case UniformElementType::Float: {
+            const auto* src = static_cast<const GLfloat*>(values);
+            command.uniformFloats.assign(src, src + elementCount);
+            break;
+        }
+        case UniformElementType::Int: {
+            const auto* src = static_cast<const GLint*>(values);
+            command.uniformInts.assign(src, src + elementCount);
+            break;
+        }
+        case UniformElementType::UnsignedInt: {
+            const auto* src = static_cast<const GLuint*>(values);
+            command.uniformUInts.assign(src, src + elementCount);
+            break;
+        }
+    }
+    impl_->displayLists.compileCommands.push_back(std::move(command));
+    return !impl_->displayLists.compileAndExecute;
+}
+
+bool GLContext::recordDisplayListUniformMatrix(GLint location,
+                                               GLint rows,
+                                               GLint cols,
+                                               GLsizei count,
+                                               GLboolean transpose,
+                                               const GLfloat* values) {
+    if (!impl_->displayLists.compiling || impl_->displayLists.replaying) {
+        return false;
+    }
+
+    Impl::DisplayListCommand command;
+    command.kind = Impl::DisplayListCommand::Kind::UniformMatrix;
+    command.location = location;
+    command.rows = rows;
+    command.cols = cols;
+    command.count = count;
+    command.transpose = transpose;
+    const auto elementCount =
+        static_cast<std::size_t>(rows) *
+        static_cast<std::size_t>(cols) *
+        static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    command.uniformFloats.assign(values, values + elementCount);
+    impl_->displayLists.compileCommands.push_back(std::move(command));
+    return !impl_->displayLists.compileAndExecute;
+}
+
+bool GLContext::recordDisplayListUniformDouble(GLint location,
+                                               GLint vectorSize,
+                                               GLsizei count,
+                                               const GLdouble* values) {
+    if (!impl_->displayLists.compiling || impl_->displayLists.replaying) {
+        return false;
+    }
+
+    Impl::DisplayListCommand command;
+    command.kind = Impl::DisplayListCommand::Kind::UniformDouble;
+    command.location = location;
+    command.vectorSize = vectorSize;
+    command.count = count;
+    const auto elementCount =
+        static_cast<std::size_t>(vectorSize) *
+        static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    command.uniformDoubles.assign(values, values + elementCount);
+    impl_->displayLists.compileCommands.push_back(std::move(command));
+    return !impl_->displayLists.compileAndExecute;
+}
+
+bool GLContext::recordDisplayListUniformDoubleMatrix(GLint location,
+                                                     GLint rows,
+                                                     GLint cols,
+                                                     GLsizei count,
+                                                     GLboolean transpose,
+                                                     const GLdouble* values) {
+    if (!impl_->displayLists.compiling || impl_->displayLists.replaying) {
+        return false;
+    }
+
+    Impl::DisplayListCommand command;
+    command.kind = Impl::DisplayListCommand::Kind::UniformDoubleMatrix;
+    command.location = location;
+    command.rows = rows;
+    command.cols = cols;
+    command.count = count;
+    command.transpose = transpose;
+    const auto elementCount =
+        static_cast<std::size_t>(rows) *
+        static_cast<std::size_t>(cols) *
+        static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    command.uniformDoubles.assign(values, values + elementCount);
+    impl_->displayLists.compileCommands.push_back(std::move(command));
+    return !impl_->displayLists.compileAndExecute;
+}
+
+bool GLContext::recordDisplayListProgramUniformScalarVector(GLuint program,
+                                                            GLint location,
+                                                            UniformElementType element,
+                                                            GLint vectorSize,
+                                                            GLsizei count,
+                                                            const void* values) {
+    if (!impl_->displayLists.compiling || impl_->displayLists.replaying) {
+        return false;
+    }
+
+    Impl::DisplayListCommand command;
+    command.kind = Impl::DisplayListCommand::Kind::ProgramUniformScalarVector;
+    command.program = program;
+    command.location = location;
+    command.uniformElement = element;
+    command.vectorSize = vectorSize;
+    command.count = count;
+    const auto elementCount =
+        static_cast<std::size_t>(vectorSize) *
+        static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    switch (element) {
+        case UniformElementType::Float: {
+            const auto* src = static_cast<const GLfloat*>(values);
+            command.uniformFloats.assign(src, src + elementCount);
+            break;
+        }
+        case UniformElementType::Int: {
+            const auto* src = static_cast<const GLint*>(values);
+            command.uniformInts.assign(src, src + elementCount);
+            break;
+        }
+        case UniformElementType::UnsignedInt: {
+            const auto* src = static_cast<const GLuint*>(values);
+            command.uniformUInts.assign(src, src + elementCount);
+            break;
+        }
+    }
+    impl_->displayLists.compileCommands.push_back(std::move(command));
+    return !impl_->displayLists.compileAndExecute;
+}
+
+bool GLContext::recordDisplayListProgramUniformMatrix(GLuint program,
+                                                      GLint location,
+                                                      GLint rows,
+                                                      GLint cols,
+                                                      GLsizei count,
+                                                      GLboolean transpose,
+                                                      const GLfloat* values) {
+    if (!impl_->displayLists.compiling || impl_->displayLists.replaying) {
+        return false;
+    }
+
+    Impl::DisplayListCommand command;
+    command.kind = Impl::DisplayListCommand::Kind::ProgramUniformMatrix;
+    command.program = program;
+    command.location = location;
+    command.rows = rows;
+    command.cols = cols;
+    command.count = count;
+    command.transpose = transpose;
+    const auto elementCount =
+        static_cast<std::size_t>(rows) *
+        static_cast<std::size_t>(cols) *
+        static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    command.uniformFloats.assign(values, values + elementCount);
+    impl_->displayLists.compileCommands.push_back(std::move(command));
+    return !impl_->displayLists.compileAndExecute;
+}
+
+bool GLContext::recordDisplayListProgramUniformDouble(GLuint program,
+                                                      GLint location,
+                                                      GLint vectorSize,
+                                                      GLsizei count,
+                                                      const GLdouble* values) {
+    if (!impl_->displayLists.compiling || impl_->displayLists.replaying) {
+        return false;
+    }
+
+    Impl::DisplayListCommand command;
+    command.kind = Impl::DisplayListCommand::Kind::ProgramUniformDouble;
+    command.program = program;
+    command.location = location;
+    command.vectorSize = vectorSize;
+    command.count = count;
+    const auto elementCount =
+        static_cast<std::size_t>(vectorSize) *
+        static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    command.uniformDoubles.assign(values, values + elementCount);
+    impl_->displayLists.compileCommands.push_back(std::move(command));
+    return !impl_->displayLists.compileAndExecute;
+}
+
+bool GLContext::recordDisplayListProgramUniformDoubleMatrix(GLuint program,
+                                                            GLint location,
+                                                            GLint rows,
+                                                            GLint cols,
+                                                            GLsizei count,
+                                                            GLboolean transpose,
+                                                            const GLdouble* values) {
+    if (!impl_->displayLists.compiling || impl_->displayLists.replaying) {
+        return false;
+    }
+
+    Impl::DisplayListCommand command;
+    command.kind = Impl::DisplayListCommand::Kind::ProgramUniformDoubleMatrix;
+    command.program = program;
+    command.location = location;
+    command.rows = rows;
+    command.cols = cols;
+    command.count = count;
+    command.transpose = transpose;
+    const auto elementCount =
+        static_cast<std::size_t>(rows) *
+        static_cast<std::size_t>(cols) *
+        static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    command.uniformDoubles.assign(values, values + elementCount);
+    impl_->displayLists.compileCommands.push_back(std::move(command));
+    return !impl_->displayLists.compileAndExecute;
+}
+
+bool GLContext::recordDisplayListUseProgramStages(GLuint pipeline,
+                                                  GLbitfield stages,
+                                                  GLuint program) {
+    if (!impl_->displayLists.compiling || impl_->displayLists.replaying) {
+        return false;
+    }
+
+    Impl::DisplayListCommand command;
+    command.kind = Impl::DisplayListCommand::Kind::UseProgramStages;
+    command.pipeline = pipeline;
+    command.stages = stages;
+    command.program = program;
+    impl_->displayLists.compileCommands.push_back(command);
+    return !impl_->displayLists.compileAndExecute;
+}
+
+bool GLContext::recordDisplayListUniformBlockBinding(GLuint program,
+                                                     GLuint uniformBlockIndex,
+                                                     GLuint uniformBlockBinding) {
+    if (!impl_->displayLists.compiling || impl_->displayLists.replaying) {
+        return false;
+    }
+
+    Impl::DisplayListCommand command;
+    command.kind = Impl::DisplayListCommand::Kind::UniformBlockBinding;
+    command.program = program;
+    command.uniformBlockIndex = uniformBlockIndex;
+    command.uniformBlockBinding = uniformBlockBinding;
+    impl_->displayLists.compileCommands.push_back(command);
+    return !impl_->displayLists.compileAndExecute;
+}
+
 bool GLContext::recordDisplayListClientArrayDraw(GLenum mode,
                                                  GLint first,
                                                  GLsizei count,
@@ -5489,6 +5862,7 @@ bool GLContext::recordDisplayListClientArrayDraw(GLenum mode,
     Impl::DisplayListCommand command;
     command.kind = Impl::DisplayListCommand::Kind::DrawClientArrays;
     command.enumValue = mode;
+    bool legacyCaptureAttempted = false;
 
     if (appglCompatProfileEnabled() && count > 0) {
         const auto& vertexArray = impl_->legacyVertexArray;
@@ -5513,6 +5887,7 @@ bool GLContext::recordDisplayListClientArrayDraw(GLenum mode,
             (vertexArray.pointer != nullptr || vertexArray.bufferName != 0) &&
             vertexArray.type == GL_FLOAT &&
             vertexArray.size >= 2 && vertexArray.size <= 4) {
+            legacyCaptureAttempted = true;
             const std::uint8_t* indexBase = nullptr;
             std::size_t indexAvailableBytes = 0;
             std::size_t indexSize = 0;
@@ -5738,6 +6113,56 @@ bool GLContext::recordDisplayListClientArrayDraw(GLenum mode,
                 command.drawVertices.clear();
             }
         }
+    }
+
+    if (!legacyCaptureAttempted) {
+        Impl::DisplayListCommand replayCommand;
+        replayCommand.kind = (indexType == 0)
+            ? Impl::DisplayListCommand::Kind::DrawArraysCall
+            : Impl::DisplayListCommand::Kind::DrawElementsCall;
+        replayCommand.enumValue = mode;
+        replayCommand.enumValue2 = indexType;
+        replayCommand.first = first;
+        replayCommand.count = count;
+
+        if (indexType != 0) {
+            std::size_t indexSize = 0;
+            switch (indexType) {
+                case GL_UNSIGNED_BYTE:
+                    indexSize = sizeof(GLubyte);
+                    break;
+                case GL_UNSIGNED_SHORT:
+                    indexSize = sizeof(GLushort);
+                    break;
+                case GL_UNSIGNED_INT:
+                    indexSize = sizeof(GLuint);
+                    break;
+                default:
+                    return false;
+            }
+
+            const GLuint vaoName = impl_->state->boundVertexArray();
+            const GLVertexArrayObject* vao = vaoName != 0
+                ? impl_->objects->vertexArrays().get(vaoName)
+                : nullptr;
+            const GLuint elementBufferName =
+                vao != nullptr ? vao->elementArrayBuffer : 0;
+            if (elementBufferName != 0) {
+                replayCommand.indexOffset =
+                    reinterpret_cast<std::uintptr_t>(indices);
+            } else {
+                if (indices == nullptr) {
+                    return false;
+                }
+                const auto byteCount =
+                    static_cast<std::size_t>(count) * indexSize;
+                replayCommand.drawIndices.resize(byteCount);
+                std::memcpy(replayCommand.drawIndices.data(), indices, byteCount);
+            }
+        }
+
+        impl_->displayLists.compileCommands.push_back(std::move(replayCommand));
+        return !impl_->displayLists.compileAndExecute;
     }
 
     impl_->displayLists.compileCommands.push_back(std::move(command));

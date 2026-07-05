@@ -9785,6 +9785,9 @@ void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint prog
         }
         executableStages = prog->linkedStageBits & kAllowedStageMask;
     }
+    if (ctx->recordDisplayListUseProgramStages(pipeline, stages, program)) {
+        return;
+    }
     // Track stage assignments on CPU.
     std::array<GLuint, 6> replacedPrograms{};
     std::size_t replacedProgramCount = 0;

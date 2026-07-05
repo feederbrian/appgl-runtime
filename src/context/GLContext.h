@@ -272,6 +272,14 @@ public:
     bool setUniformMatrixForProgram(GLuint program, GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLfloat* values);
     bool setUniformDoubleForProgram(GLuint program, GLint location, GLint vectorSize, GLsizei count, const GLdouble* values);
     bool setUniformDoubleMatrixForProgram(GLuint program, GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLdouble* values);
+    bool recordDisplayListUniformScalarVector(GLint location, UniformElementType element, GLint vectorSize, GLsizei count, const void* values);
+    bool recordDisplayListUniformMatrix(GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLfloat* values);
+    bool recordDisplayListUniformDouble(GLint location, GLint vectorSize, GLsizei count, const GLdouble* values);
+    bool recordDisplayListUniformDoubleMatrix(GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLdouble* values);
+    bool recordDisplayListProgramUniformScalarVector(GLuint program, GLint location, UniformElementType element, GLint vectorSize, GLsizei count, const void* values);
+    bool recordDisplayListProgramUniformMatrix(GLuint program, GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLfloat* values);
+    bool recordDisplayListProgramUniformDouble(GLuint program, GLint location, GLint vectorSize, GLsizei count, const GLdouble* values);
+    bool recordDisplayListProgramUniformDoubleMatrix(GLuint program, GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLdouble* values);
 
     // Phase A Group 7 — drawing. See MetalFrameGraph::encodeSolidColorDraw for
     // the minimal pipeline state we currently support. Additional draw variants
@@ -310,6 +318,7 @@ public:
     GLint getProgramResourceLocationIndex(GLuint program, GLenum programInterface, const GLchar* name);
 
     // GL 4.3 — SSBO binding remapping.
+    bool uniformBlockBinding(GLuint program, GLuint uniformBlockIndex, GLuint uniformBlockBinding);
     bool shaderStorageBlockBinding(GLuint program, GLuint storageBlockIndex, GLuint storageBlockBinding);
 
     // GL 4.2 — advanced instanced drawing with base instance.
@@ -393,6 +402,7 @@ public:
     bool createTransformFeedbacks(GLsizei n, GLuint* ids);
     bool createProgramPipelines(GLsizei n, GLuint* pipelines);
     bool deleteProgramPipelines(GLsizei n, const GLuint* pipelines);
+    bool useProgramStages(GLuint pipeline, GLbitfield stages, GLuint program);
     bool createQueries(GLenum target, GLsizei n, GLuint* ids);
 
     // GL 4.5 — DSA buffer operations.
@@ -660,6 +670,8 @@ public:
     void listBaseCompat(GLuint base);
     bool recordDisplayListClear(GLbitfield mask);
     bool recordDisplayListClientArrayDraw(GLenum mode, GLint first, GLsizei count, const void* indices, GLenum indexType, const char* debugLabel);
+    bool recordDisplayListUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint program);
+    bool recordDisplayListUniformBlockBinding(GLuint program, GLuint uniformBlockIndex, GLuint uniformBlockBinding);
     bool rejectDisplayListCompileInstancedDraw(const char* debugLabel);
     bool setLegacyClientArrayPointer(GLenum array, GLint size, GLenum type, GLsizei stride, const void* pointer);
     bool setLegacyClientArrayEnabled(GLenum array, bool enabled);

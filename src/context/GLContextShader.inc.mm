@@ -329,6 +329,13 @@ bool GLContext::setUniformScalarVector(GLint location, UniformElementType elemen
             element, vectorSize, values, ref.rejectEsImageUnitUpdate)) {
         return false;
     }
+    if (recordDisplayListUniformScalarVector(location,
+                                             element,
+                                             vectorSize,
+                                             count,
+                                             values)) {
+        return true;
+    }
 
     // Clamp count so writes don't overflow the declared array. GL spec: the
     // effective update is min(count, arraySize - elementIndex).
@@ -411,6 +418,14 @@ bool GLContext::setUniformMatrix(GLint location, GLint rows, GLint cols, GLsizei
     if (slot == nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+    if (recordDisplayListUniformMatrix(location,
+                                       rows,
+                                       cols,
+                                       count,
+                                       transpose,
+                                       values)) {
+        return true;
     }
     const std::size_t elements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols) *
                                  static_cast<std::size_t>(std::max<GLsizei>(count, 1));
@@ -543,6 +558,12 @@ bool GLContext::setUniformDouble(GLint location, GLint vectorSize, GLsizei count
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (recordDisplayListUniformDouble(location,
+                                       vectorSize,
+                                       count,
+                                       values)) {
+        return true;
+    }
     writeDoubleUniformSlot(*ref.slot,
                            ref.arraySize,
                            ref.elementIndex,
@@ -587,6 +608,14 @@ bool GLContext::setUniformDoubleMatrix(GLint location, GLint rows, GLint cols, G
         !uniformWriteCountFits(ref, count)) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+    if (recordDisplayListUniformDoubleMatrix(location,
+                                             rows,
+                                             cols,
+                                             count,
+                                             transpose,
+                                             values)) {
+        return true;
     }
     GLProgramUniformValue* slot = ref.slot;
     const GLint remaining = std::max<GLint>(ref.arraySize - ref.elementIndex, 1);
@@ -669,6 +698,14 @@ bool GLContext::setUniformScalarVectorForProgram(GLuint program, GLint location,
             element, vectorSize, values, ref.rejectEsImageUnitUpdate)) {
         return false;
     }
+    if (recordDisplayListProgramUniformScalarVector(program,
+                                                    location,
+                                                    element,
+                                                    vectorSize,
+                                                    count,
+                                                    values)) {
+        return true;
+    }
     GLProgramUniformValue* slot = ref.slot;
     const GLint remaining = std::max<GLint>(ref.arraySize - ref.elementIndex, 1);
     const GLsizei effCount = std::min<GLsizei>(std::max<GLsizei>(count, 1), remaining);
@@ -720,6 +757,15 @@ bool GLContext::setUniformMatrixForProgram(GLuint program, GLint location, GLint
     if (count < 0 || rows < 2 || rows > 4 || cols < 2 || cols > 4 || values == nullptr) { pushError(GL_INVALID_VALUE); return false; }
     GLProgramUniformValue* slot = lookupUniformValue(object, location);
     if (slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    if (recordDisplayListProgramUniformMatrix(program,
+                                              location,
+                                              rows,
+                                              cols,
+                                              count,
+                                              transpose,
+                                              values)) {
+        return true;
+    }
     const std::size_t elements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols) * static_cast<std::size_t>(std::max<GLsizei>(count, 1));
     slot->floats.assign(elements, 0.0f);
     if (transpose == GL_FALSE) {
@@ -754,6 +800,13 @@ bool GLContext::setUniformDoubleForProgram(GLuint program, GLint location, GLint
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (recordDisplayListProgramUniformDouble(program,
+                                              location,
+                                              vectorSize,
+                                              count,
+                                              values)) {
+        return true;
+    }
     writeDoubleUniformSlot(*ref.slot,
                            ref.arraySize,
                            ref.elementIndex,
@@ -778,6 +831,15 @@ bool GLContext::setUniformDoubleMatrixForProgram(GLuint program, GLint location,
         !uniformWriteCountFits(ref, count)) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+    if (recordDisplayListProgramUniformDoubleMatrix(program,
+                                                    location,
+                                                    rows,
+                                                    cols,
+                                                    count,
+                                                    transpose,
+                                                    values)) {
+        return true;
     }
     GLProgramUniformValue* slot = ref.slot;
     const GLint remaining = std::max<GLint>(ref.arraySize - ref.elementIndex, 1);
@@ -1554,8 +1616,37 @@ GLint GLContext::getProgramResourceLocationIndex(GLuint program, GLenum programI
 }
 
 // ---------------------------------------------------------------------------
-// GL 4.3 — Shader Storage Block Binding
+// GL 3.1/4.3 — Program Block Binding
 // ---------------------------------------------------------------------------
+
+bool GLContext::uniformBlockBinding(GLuint program, GLuint uniformBlockIndex, GLuint uniformBlockBinding) {
+    GLProgramObject* prog = impl_->objects->programs().get(program);
+    if (prog == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (uniformBlockIndex >= prog->resourceUniformBlocks.size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLint maxBindings = 8;
+    if (impl_->capabilities != nullptr) {
+        impl_->capabilities->queryInteger(GL_MAX_UNIFORM_BUFFER_BINDINGS,
+                                          &maxBindings);
+    }
+    if (uniformBlockBinding >= static_cast<GLuint>(maxBindings)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (recordDisplayListUniformBlockBinding(program,
+                                             uniformBlockIndex,
+                                             uniformBlockBinding)) {
+        return true;
+    }
+    prog->resourceUniformBlocks[uniformBlockIndex].location =
+        static_cast<GLint>(uniformBlockBinding);
+    return true;
+}
 
 bool GLContext::shaderStorageBlockBinding(GLuint program, GLuint storageBlockIndex, GLuint storageBlockBinding) {
     // GL 4.3 §7.6.1: INVALID_OPERATION when `program` names a
@@ -1640,6 +1731,80 @@ bool GLContext::deleteProgramPipelines(GLsizei n, const GLuint* pipelines) {
         for (GLuint program : referencedPrograms) {
             impl_->finalizeDeletedProgramIfUnused(program);
         }
+    }
+    return true;
+}
+
+bool GLContext::useProgramStages(GLuint pipeline, GLbitfield stages, GLuint program) {
+    constexpr GLbitfield kAllowedStageMask =
+        GL_VERTEX_SHADER_BIT |
+        GL_TESS_CONTROL_SHADER_BIT |
+        GL_TESS_EVALUATION_SHADER_BIT |
+        GL_GEOMETRY_SHADER_BIT |
+        GL_FRAGMENT_SHADER_BIT |
+        GL_COMPUTE_SHADER_BIT;
+    if (stages != GL_ALL_SHADER_BITS && (stages & ~kAllowedStageMask) != 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLProgramPipelineObject* ppo = impl_->objects->programPipelines().get(pipeline);
+    if (ppo == nullptr || !ppo->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    GLbitfield executableStages = 0;
+    if (program != 0) {
+        GLProgramObject* prog = impl_->objects->programs().get(program);
+        if (prog == nullptr || !prog->linked) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        if (!prog->separableLinked) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        executableStages = prog->linkedStageBits & kAllowedStageMask;
+    }
+    if (recordDisplayListUseProgramStages(pipeline, stages, program)) {
+        return true;
+    }
+
+    std::array<GLuint, 6> replacedPrograms{};
+    std::size_t replacedProgramCount = 0;
+    auto rememberReplacedProgram = [&](GLuint oldProgram) {
+        if (oldProgram == 0 || oldProgram == program) {
+            return;
+        }
+        for (std::size_t i = 0; i < replacedProgramCount; ++i) {
+            if (replacedPrograms[i] == oldProgram) {
+                return;
+            }
+        }
+        if (replacedProgramCount < replacedPrograms.size()) {
+            replacedPrograms[replacedProgramCount++] = oldProgram;
+        }
+    };
+    auto replaceStage = [&](GLuint& stageProgram, GLbitfield stageBit) {
+        rememberReplacedProgram(stageProgram);
+        stageProgram = ((executableStages & stageBit) != 0) ? program : 0;
+    };
+    if (stages & GL_VERTEX_SHADER_BIT)          replaceStage(ppo->vertexProgram, GL_VERTEX_SHADER_BIT);
+    if (stages & GL_FRAGMENT_SHADER_BIT)        replaceStage(ppo->fragmentProgram, GL_FRAGMENT_SHADER_BIT);
+    if (stages & GL_GEOMETRY_SHADER_BIT)        replaceStage(ppo->geometryProgram, GL_GEOMETRY_SHADER_BIT);
+    if (stages & GL_TESS_CONTROL_SHADER_BIT)    replaceStage(ppo->tessControlProgram, GL_TESS_CONTROL_SHADER_BIT);
+    if (stages & GL_TESS_EVALUATION_SHADER_BIT) replaceStage(ppo->tessEvalProgram, GL_TESS_EVALUATION_SHADER_BIT);
+    if (stages & GL_COMPUTE_SHADER_BIT)         replaceStage(ppo->computeProgram, GL_COMPUTE_SHADER_BIT);
+    if (stages == GL_ALL_SHADER_BITS) {
+        replaceStage(ppo->vertexProgram, GL_VERTEX_SHADER_BIT);
+        replaceStage(ppo->fragmentProgram, GL_FRAGMENT_SHADER_BIT);
+        replaceStage(ppo->geometryProgram, GL_GEOMETRY_SHADER_BIT);
+        replaceStage(ppo->tessControlProgram, GL_TESS_CONTROL_SHADER_BIT);
+        replaceStage(ppo->tessEvalProgram, GL_TESS_EVALUATION_SHADER_BIT);
+        replaceStage(ppo->computeProgram, GL_COMPUTE_SHADER_BIT);
+    }
+    for (std::size_t i = 0; i < replacedProgramCount; ++i) {
+        impl_->finalizeDeletedProgramIfUnused(replacedPrograms[i]);
     }
     return true;
 }

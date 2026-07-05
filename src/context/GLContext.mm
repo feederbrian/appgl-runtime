@@ -31979,18 +31979,49 @@ struct GLContext::Impl {
             PushMatrix,
             PopMatrix,
             DrawClientArrays,
+            DrawArraysCall,
+            DrawElementsCall,
+            UniformScalarVector,
+            UniformMatrix,
+            UniformDouble,
+            UniformDoubleMatrix,
+            ProgramUniformScalarVector,
+            ProgramUniformMatrix,
+            ProgramUniformDouble,
+            ProgramUniformDoubleMatrix,
+            UseProgramStages,
+            UniformBlockBinding,
         };
         Kind kind = Kind::Clear;
         GLenum enumValue = 0;
         GLenum enumValue2 = 0;
         GLuint list = 0;
+        GLuint program = 0;
+        GLuint pipeline = 0;
+        GLuint uniformBlockIndex = 0;
+        GLuint uniformBlockBinding = 0;
         GLsizei width = 0;
         GLsizei height = 0;
+        GLint first = 0;
+        GLint location = 0;
+        GLint rows = 0;
+        GLint cols = 0;
+        GLint vectorSize = 0;
+        GLsizei count = 0;
+        GLbitfield stages = 0;
+        GLboolean transpose = GL_FALSE;
+        UniformElementType uniformElement = UniformElementType::Float;
+        std::uintptr_t indexOffset = 0;
         bool drawClientArrayValid = false;
         bool drawClientArrayHasColor = false;
         bool drawClientArrayHasTexCoord = false;
         float values[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         std::vector<std::uint8_t> bitmapMask;
+        std::vector<std::uint8_t> drawIndices;
+        std::vector<GLfloat> uniformFloats;
+        std::vector<GLint> uniformInts;
+        std::vector<GLuint> uniformUInts;
+        std::vector<GLdouble> uniformDoubles;
         std::vector<ImmediateModeVertex> drawVertices;
     };
     struct DisplayListObject {
