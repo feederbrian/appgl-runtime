@@ -42909,7 +42909,9 @@ static bool pushSynthesizedMatrixUniforms(
     const MatrixStateMirror& matrixState,
     GLuint drawID = 0,
     GLint baseVertex = 0,
-    GLuint baseInstance = 0)
+    GLuint baseInstance = 0,
+    const GLfloat* textureEnvColor = nullptr,
+    const GLfloat* lightModelAmbient = nullptr)
 {
     bool changed = false;
     if (program.shaderDrawIDUniformLocation >= 0) {
@@ -43004,6 +43006,32 @@ static bool pushSynthesizedMatrixUniforms(
             static_cast<GLint>(kSynthesizedTextureMatrixCount),
             packed.data(),
             packed.size());
+    }
+    if (slots.textureEnvColor >= 0) {
+        const GLfloat defaultColor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        const GLfloat* color = textureEnvColor != nullptr
+            ? textureEnvColor
+            : defaultColor;
+        std::array<GLfloat, kSynthesizedTextureEnvColorCount * 4> packed = {};
+        for (unsigned int i = 0; i < kSynthesizedTextureEnvColorCount; ++i) {
+            std::memcpy(packed.data() + i * 4, color, 4 * sizeof(float));
+        }
+        auto& value = program.uniformValues[slots.textureEnvColor];
+        changed |= assignSynthesizedUniformFloats(
+            value,
+            GL_FLOAT_VEC4,
+            static_cast<GLint>(kSynthesizedTextureEnvColorCount),
+            packed.data(),
+            packed.size());
+    }
+    if (slots.lightModelAmbient >= 0) {
+        const GLfloat defaultAmbient[4] = {0.2f, 0.2f, 0.2f, 1.0f};
+        const GLfloat* ambient = lightModelAmbient != nullptr
+            ? lightModelAmbient
+            : defaultAmbient;
+        auto& value = program.uniformValues[slots.lightModelAmbient];
+        changed |= assignSynthesizedUniformFloats(
+            value, GL_FLOAT_VEC4, 1, ambient, 4);
     }
     return changed;
 }
@@ -43114,6 +43142,8 @@ static void prepareTranslatedDrawUniformBuffers(
     GLProgramObject& program,
     GLuint programName,
     const MatrixStateMirror& matrixState,
+    const GLfloat* textureEnvColor,
+    const GLfloat* lightModelAmbient,
     GLuint drawID,
     TranslatedDrawInfo& tdi,
     const char* path)
@@ -43129,7 +43159,8 @@ static void prepareTranslatedDrawUniformBuffers(
 
     if (pushSynthesizedMatrixUniforms(
             program, matrixState, drawID,
-            tdi.shaderBaseVertex, tdi.baseInstance)) {
+            tdi.shaderBaseVertex, tdi.baseInstance,
+            textureEnvColor, lightModelAmbient)) {
         program.markUniformsDirty();
     }
 
@@ -45968,7 +45999,9 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
             program.fragmentReflection, program.uniforms);
     }
     if (!program.fragmentUniformLayout.empty()) {
-        if (pushSynthesizedMatrixUniforms(program, matrixState)) {
+        if (pushSynthesizedMatrixUniforms(
+                program, matrixState, 0, 0, 0,
+                texEnv.color, lighting.modelAmbient)) {
             program.markUniformsDirty();
         }
         buildStageUniformBuffer(fragUniformScratch,
@@ -46562,7 +46595,9 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     thread_local std::vector<std::uint8_t> meshGsFragUniformScratch;
     thread_local std::vector<std::uint8_t> meshGsGeomUniformScratch;
     thread_local std::vector<GLProgramObject::UniformLayoutEntry> meshGsGeomUniformLayout;
-    if (pushSynthesizedMatrixUniforms(program, matrixState)) {
+    if (pushSynthesizedMatrixUniforms(
+            program, matrixState, 0, 0, 0,
+            texEnv.color, lighting.modelAmbient)) {
         program.markUniformsDirty();
     }
     computeStageUniformLayout(meshGsGeomUniformLayout,
@@ -46703,7 +46738,8 @@ double GLContext::Impl::prepareBindingConstructionUniformBuffers(
         ? glDrawProfileNow()
         : GLDrawProfileTimePoint{};
     prepareTranslatedDrawUniformBuffers(
-        program, programName, matrixState, drawID, info, label);
+        program, programName, matrixState,
+        texEnv.color, lighting.modelAmbient, drawID, info, label);
     return bindingConstructionSizingProfile.enabled
         ? glDrawProfileElapsedUs(start, glDrawProfileNow())
         : 0.0;
@@ -46811,12 +46847,13 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
         return false;
     }
 
-    // Fragment-only compat programs synthesize a small legacy VS that takes
-    // Piglit's fixed-function position/texcoord stream. Feed glBegin/glEnd
-    // captures through the normal translated path for those programs; leave
-    // other immediate-mode draws on the fixed-function immediate encoder.
-    if (program->vertexMSL.find("piglit_vertex") == std::string::npos ||
-        program->vertexMSL.find("piglit_texcoord") == std::string::npos) {
+    // Compat immediate draws can feed translated shaders that consume the
+    // rewriter's legacy gl_Vertex stream. Keep arbitrary user-attribute
+    // programs on the fixed-function immediate encoder.
+    const bool acceptsCompatVertex =
+        program->vertexMSL.find("appgl_Vertex") != std::string::npos ||
+        program->vertexMSL.find("piglit_vertex") != std::string::npos;
+    if (!acceptsCompatVertex) {
         return false;
     }
 
@@ -46828,7 +46865,7 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
         }
         return false;
     };
-    if (!hasVertexInput(0) || !hasVertexInput(1)) {
+    if (!hasVertexInput(0)) {
         return false;
     }
 
@@ -46851,7 +46888,7 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
         layout.glIsInteger = false;
         tdi.vertexAttributeLayouts.push_back(layout);
     }
-    {
+    if (hasVertexInput(1)) {
         TranslatedDrawInfo::VertexAttributeLayout layout;
         layout.location = 1;
         layout.offset = sizeof(float) * 8u;

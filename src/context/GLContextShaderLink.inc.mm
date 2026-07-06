@@ -1095,6 +1095,10 @@ bool GLContext::linkProgram(GLuint program) {
             findLocByName(SUN::kNormalMatrix);
         programObject->synthesizedMatrixSlots.texture =
             findLocByName(SUN::kTextureMatrix);
+        programObject->synthesizedMatrixSlots.textureEnvColor =
+            findLocByName(SUN::kTextureEnvColor);
+        programObject->synthesizedMatrixSlots.lightModelAmbient =
+            findLocByName(SUN::kLightModelAmbient);
         programObject->shaderDrawIDUniformLocation =
             findLocByName("_appgl_DrawID");
         programObject->shaderBaseVertexUniformLocation =

@@ -129,6 +129,11 @@ struct LegacyCompatUsage {
     bool usesFogStart = false;
     bool usesFogEnd = false;
     bool usesFogScale = false;
+    // gl_TextureEnvColor[N] fixed-function texture environment color.
+    // Runtime state is mirrored into appgl_TextureEnvColor[] at draw time.
+    bool usesTextureEnvColor = false;
+    // gl_LightModel.ambient fixed-function lighting model ambient color.
+    bool usesLightModelAmbient = false;
     // gl_LightSource[*].* field accesses (unioned across all observed
     // subscripts). The preamble emits array uniforms for every used
     // field, sized to `kSynthesizedLightSourceCount`. Defaults are
@@ -189,7 +194,8 @@ struct LegacyCompatUsage {
         return upgradedVersion || hadVarying || anyAttribute() ||
                fragColor || fragDataMax >= 0 || texCoordMax >= 0 ||
                usesFogColor || usesFogDensity || usesFogStart ||
-               usesFogEnd || usesFogScale || anyLight() ||
+               usesFogEnd || usesFogScale || usesTextureEnvColor ||
+               usesLightModelAmbient || anyLight() ||
                usesClipVertex || rewroteTexture2D ||
                rewroteTextureCube || rewroteShadow2DProj;
     }
@@ -236,11 +242,19 @@ inline constexpr const char* kNormalMatrix =
     "appgl_NormalMatrix";
 inline constexpr const char* kTextureMatrix =
     "appgl_TextureMatrix";  // mat4[8] array
+inline constexpr const char* kTextureEnvColor =
+    "appgl_TextureEnvColor";  // vec4[8] array
+inline constexpr const char* kLightModelAmbient =
+    "appgl_LightModelAmbient";
 }  // namespace SynthesizedUniformNames
 
 // Length of the synthesized texture matrix array. Matches
 // MatrixStateMirror::kMaxTextureUnits.
 inline constexpr unsigned int kSynthesizedTextureMatrixCount = 8;
+
+// Length of the synthesized texture environment color array. Mirrors the
+// legacy gl_TextureEnvColor[N] surface and matches the texture-matrix count.
+inline constexpr unsigned int kSynthesizedTextureEnvColorCount = 8;
 
 // Phase 8X Group 4d follow-up¹⁹ — length of the synthesized light-source
 // array uniform. Matches the GL 1.x `GL_MAX_LIGHTS` minimum (8) and the

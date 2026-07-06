@@ -5281,9 +5281,21 @@ void GLContext::callListCompat(GLuint list) {
                 endImmediate();
                 break;
             case Impl::DisplayListCommand::Kind::DrawArraysCall:
+                if (impl_->immediate.active) {
+                    pushError(GL_INVALID_OPERATION,
+                              "glDrawArrays",
+                              "display-list draw command is illegal inside glBegin/glEnd");
+                    break;
+                }
                 drawArrays(command.enumValue, command.first, command.count, 0);
                 break;
             case Impl::DisplayListCommand::Kind::DrawElementsCall: {
+                if (impl_->immediate.active) {
+                    pushError(GL_INVALID_OPERATION,
+                              "glDrawElements",
+                              "display-list draw command is illegal inside glBegin/glEnd");
+                    break;
+                }
                 const void* indexPtr = command.drawIndices.empty()
                     ? reinterpret_cast<const void*>(command.indexOffset)
                     : command.drawIndices.data();
@@ -7274,12 +7286,11 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
     };
 
     auto paintSimpleRectToShadow = [&]() -> bool {
-	        if ((mode != GL_TRIANGLE_STRIP && mode != GL_TRIANGLE_FAN) ||
-	            source.size() != 4 ||
-	            colorArrayUsable ||
-	            fillVertices.empty() ||
-	            !lineVertices.empty() ||
-	            !pointVertices.empty() ||
+            if ((mode != GL_TRIANGLE_STRIP && mode != GL_TRIANGLE_FAN) ||
+                source.size() != 4 ||
+                fillVertices.empty() ||
+                !lineVertices.empty() ||
+                !pointVertices.empty() ||
 	            impl_->state->isEnabled(GL_BLEND) ||
 	            resolveFixedFunctionTexture() != nullptr) {
 	            return false;
@@ -7400,6 +7411,21 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         }
         const Impl::ImmediateModeVertex& colorVertex =
             !fillVertices.empty() ? fillVertices[0] : source[0];
+        if (colorArrayUsable) {
+            const auto sameColor = [&](const Impl::ImmediateModeVertex& v) {
+                for (int c = 0; c < 4; ++c) {
+                    if (std::fabs(v.color[c] - colorVertex.color[c]) > 1.0e-6f) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            for (const auto& v : fillVertices) {
+                if (!sameColor(v)) {
+                    return false;
+                }
+            }
+        }
         const std::uint8_t rgba[4] = {
             normalizedByte(colorVertex.color[0]),
             normalizedByte(colorVertex.color[1]),

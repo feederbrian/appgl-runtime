@@ -26,7 +26,26 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     if (impl_->shouldSkipDrawForConditionalRender()) {
         return true;
     }
-    if (encodeLegacyClientArrayDraw(mode, first, count, nullptr, 0, "glDrawArrays")) {
+    bool routeLegacyClientArrayThroughTranslatedProgram = false;
+    {
+        const GLuint programName = impl_->state->currentProgram();
+        const GLProgramObject* program = programName != 0
+            ? impl_->objects->programs().get(programName)
+            : nullptr;
+        if (appglCompatProfileEnabled() &&
+            program != nullptr &&
+            program->linked &&
+            program->hasTranslatedPipeline) {
+            for (const auto& input : program->vertexReflection.vertexInputs) {
+                if (input.location == 0 || input.sourceLocation == 0) {
+                    routeLegacyClientArrayThroughTranslatedProgram = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (!routeLegacyClientArrayThroughTranslatedProgram &&
+        encodeLegacyClientArrayDraw(mode, first, count, nullptr, 0, "glDrawArrays")) {
         return true;
     }
     if (!impl_->validateCurrentProgramPipelineForDraw()) {
@@ -1193,7 +1212,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 vaoName = impl_->state->boundVertexArray();
                 vao = (vaoName != 0)
                     ? impl_->objects->vertexArrays().get(vaoName)
-                    : nullptr;
+                    : (appglCompatProfileEnabled()
+                        ? impl_->currentVertexArrayOrDefault()
+                        : nullptr);
             }
         }
         // Phase 8X Group 4d follow-up³ — name each fall-through gate to BAR's log.
@@ -1214,10 +1235,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             const auto& legacyVertexArray = impl_->legacyVertexArray;
             bool programWantsLegacyVertex = false;
             for (const auto& input : program->vertexReflection.vertexInputs) {
-                if (input.location == 0 &&
-                    (input.sourceLocation == 0 ||
-                     input.name == "appgl_Vertex" ||
-                     input.name == "_appgl_Vertex")) {
+                if (input.location == 0 || input.sourceLocation == 0) {
                     programWantsLegacyVertex = true;
                     break;
                 }
@@ -1353,6 +1371,155 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                         tdi.vertexDataByteCount)) {
                     recordPipelineBuildFailureOnce(
                         program, programName, legacyPipelineBuildError);
+                }
+            }
+        }
+        {
+            bool programWantsGenericCompatVertex = false;
+            for (const auto& input : program->vertexReflection.vertexInputs) {
+                if (input.location == 0 || input.sourceLocation == 0) {
+                    programWantsGenericCompatVertex = true;
+                    break;
+                }
+            }
+            const GLVertexAttributeState* genericPosition = nullptr;
+            if (vao != nullptr &&
+                !vao->attributes.empty() &&
+                vao->attributes[0].enabled) {
+                genericPosition = &vao->attributes[0];
+            }
+            if (appglCompatProfileEnabled() &&
+                programWantsGenericCompatVertex &&
+                genericPosition != nullptr &&
+                genericPosition->buffer == 0 &&
+                genericPosition->pointer != 0 &&
+                genericPosition->type == GL_FLOAT &&
+                genericPosition->size >= 2 &&
+                genericPosition->size <= 4) {
+                const std::size_t genericStride = genericPosition->stride > 0
+                    ? static_cast<std::size_t>(genericPosition->stride)
+                    : static_cast<std::size_t>(genericPosition->size) * sizeof(GLfloat);
+                const auto* genericBase =
+                    reinterpret_cast<const std::uint8_t*>(genericPosition->pointer);
+                std::vector<GLfloat> genericPositions;
+                genericPositions.reserve(static_cast<std::size_t>(count) * 4u);
+                bool genericRangeOk = true;
+                for (GLsizei i = 0; i < count; ++i) {
+                    const GLint logical = first + i;
+                    if (logical < 0) {
+                        genericRangeOk = false;
+                        break;
+                    }
+                    const auto* src = reinterpret_cast<const GLfloat*>(
+                        genericBase + static_cast<std::size_t>(logical) * genericStride);
+                    genericPositions.push_back(src[0]);
+                    genericPositions.push_back(src[1]);
+                    genericPositions.push_back(genericPosition->size >= 3 ? src[2] : 0.0f);
+                    genericPositions.push_back(genericPosition->size >= 4 ? src[3] : 1.0f);
+                }
+                if (!genericRangeOk) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
+
+                TranslatedDrawInfo& tdi = reusableTranslatedDrawInfo();
+                tdi.mode = mode;
+                tdi.vertexCount = count;
+                tdi.baseVertex = 0;
+                tdi.vertexData = genericPositions.data();
+                tdi.vertexDataByteCount =
+                    genericPositions.size() * sizeof(GLfloat);
+                tdi.vertexStride = sizeof(GLfloat) * 4u;
+                tdi.vertexAttributeLayouts.clear();
+                TranslatedDrawInfo::VertexAttributeLayout layout;
+                layout.location = 0;
+                layout.offset = 0;
+                layout.glType = GL_FLOAT;
+                layout.glComponentCount = 4;
+                layout.glNormalized = GL_FALSE;
+                layout.glIsInteger = false;
+                tdi.vertexAttributeLayouts.push_back(layout);
+                populateTranslatedDrawFixedFunctionState(
+                    tdi, *impl_->state,
+                    effectiveFragmentShadingRateForProgram(*this, program),
+                    this);
+                assignTranslatedDrawProgramMsl(tdi, *program);
+                tdi.vertexReflection = &program->vertexReflection;
+                tdi.fragmentReflection = &program->fragmentReflection;
+                tdi.pipelineStateOut = &program->metalPipelineState;
+                tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
+                tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+                tdi.pipelineStateCacheLastUseOut =
+                    &program->metalPipelineStateCacheLastUse;
+                tdi.pipelineStateCacheHighWaterOut =
+                    &program->metalPipelineStateCacheHighWater;
+                tdi.pipelineStateCacheHitsOut =
+                    &program->metalPipelineStateCacheHits;
+                tdi.pipelineStateCacheMissesOut =
+                    &program->metalPipelineStateCacheMisses;
+                tdi.pipelineStateCacheEvictionsOut =
+                    &program->metalPipelineStateCacheEvictions;
+                tdi.metalVertexFunction = program->metalVertexFunction;
+                tdi.metalFragmentFunction = program->metalFragmentFunction;
+                tdi.metalVertexFunctionOut = &program->metalVertexFunction;
+                tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
+                tdi.program = programName;
+                tdi.pipelineEmulationFragmentProgram =
+                    program->pipelineEmulationFragmentProgram;
+
+                const double bindingConstructionUniformPackUs =
+                    impl_->prepareBindingConstructionUniformBuffers(
+                        *program, programName, drawID, tdi,
+                        "drawArrays-generic-client-vertex");
+                impl_->resolveBindingConstructionForTranslatedDraw(
+                    *program, tdi, bindingConstructionUniformPackUs);
+
+                {
+                    GLsizei fboW = 0, fboH = 0;
+                    void* fboDSTex = nullptr;
+                    std::uint32_t fboDSSlice = 0;
+                    std::uint32_t fboDSLevel = 0;
+                    std::array<void*, 7> extraColTex = {};
+                    std::array<std::uint32_t, 8> colSlices = {};
+                    std::array<std::uint32_t, 8> colLevels = {};
+                    void* fboColTex = impl_->resolveFBOColorTarget(
+                        fboW, fboH, fboDSTex, nullptr,
+                        &extraColTex, &colSlices, &colLevels,
+                        &fboDSSlice, &fboDSLevel);
+                    if (fboColTex != nullptr || fboDSTex != nullptr) {
+                        tdi.fboColorTexture = fboColTex;
+                        tdi.fboAdditionalColorTextures = extraColTex;
+                        tdi.fboColorSlices = colSlices;
+                        tdi.fboColorLevels = colLevels;
+                        tdi.fboDepthStencilTexture = fboDSTex;
+                        tdi.fboDepthStencilSlice = fboDSSlice;
+                        tdi.fboDepthStencilLevel = fboDSLevel;
+                        tdi.fboWidth = fboW;
+                        tdi.fboHeight = fboH;
+                    }
+                }
+
+                thread_local std::string genericPipelineBuildError;
+                genericPipelineBuildError.clear();
+                tdi.pipelineBuildErrorOut = &genericPipelineBuildError;
+                const TranslatedDrawPreflightSnapshot preflight =
+                    makeTranslatedDrawPreflightSnapshot(
+                        vaoName, vao,
+                        /*genericVertexAttributesPrepared=*/true);
+                const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(
+                    tdi, &preflight);
+                if (ok) {
+                    return true;
+                }
+                if (reportTranslatedFallbackOnce(program, programName,
+                        TranslatedFallbackGate::EncodeFailed,
+                        "drawArrays-generic-client-vertex",
+                        vaoName,
+                        vao != nullptr ? vao->attributes.size() : 0,
+                        0,
+                        tdi.vertexDataByteCount)) {
+                    recordPipelineBuildFailureOnce(
+                        program, programName, genericPipelineBuildError);
                 }
             }
         }

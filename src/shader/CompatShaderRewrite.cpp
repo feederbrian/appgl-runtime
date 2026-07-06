@@ -1725,6 +1725,10 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     legacy.usesFogStart   = (source.find("gl_Fog.start")   != std::string_view::npos);
     legacy.usesFogEnd     = (source.find("gl_Fog.end")     != std::string_view::npos);
     legacy.usesFogScale   = (source.find("gl_Fog.scale")   != std::string_view::npos);
+    legacy.usesTextureEnvColor =
+        containsIdentifier(source, "gl_TextureEnvColor");
+    legacy.usesLightModelAmbient =
+        (source.find("gl_LightModel.ambient") != std::string_view::npos);
     scanLightSourceFields(source, legacy);
     legacy.rewroteTexture2D = containsIdentifier(source, "texture2D");
     legacy.rewroteTextureCube = containsIdentifier(source, "textureCube");
@@ -2252,6 +2256,11 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     if (legacy.anyLight()) {
         rewriteLightSourceSubscripts(result.source);
     }
+    if (legacy.usesLightModelAmbient) {
+        replaceLiteral(result.source,
+                       "gl_LightModel.ambient",
+                       "appgl_LightModelAmbient");
+    }
 
     // ---- 4b. CTS fixups — (moved to section 3b above for unconditional
     // execution; sampler rename and precision strip run even for modern
@@ -2462,6 +2471,19 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     if (legacy.usesFogScale) {
         preamble.append(
             "uniform float appgl_FogScale = 1.0;\n");
+    }
+
+    if (legacy.usesTextureEnvColor) {
+        char buf[176];
+        std::snprintf(buf, sizeof(buf),
+                      "uniform vec4 %s[%u];\n#define gl_TextureEnvColor %s\n",
+                      SUN::kTextureEnvColor,
+                      kSynthesizedTextureEnvColorCount,
+                      SUN::kTextureEnvColor);
+        preamble.append(buf);
+    }
+    if (legacy.usesLightModelAmbient) {
+        preamble.append("uniform vec4 appgl_LightModelAmbient;\n");
     }
 
     // 5f. fw¹⁹ — light-source array declarations. Only fields that were
