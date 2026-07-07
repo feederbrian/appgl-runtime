@@ -72,6 +72,8 @@ bool GLContext::linkProgram(GLuint program) {
     const auto priorFragmentReflection = programObject->fragmentReflection;
     const auto priorVertexSourceHash = programObject->vertexSourceHash;
     const auto priorFragmentSourceHash = programObject->fragmentSourceHash;
+    const GLsizei priorOvrMultiviewNumViews =
+        programObject->ovrMultiviewNumViews;
     auto restorePriorExecutableForFailedRelink = [&]() {
         if (!hadPriorExecutable) {
             return;
@@ -122,6 +124,8 @@ bool GLContext::linkProgram(GLuint program) {
         programObject->fragmentReflection = priorFragmentReflection;
         programObject->vertexSourceHash = priorVertexSourceHash;
         programObject->fragmentSourceHash = priorFragmentSourceHash;
+        programObject->ovrMultiviewNumViews =
+            priorOvrMultiviewNumViews;
         programObject->uniformLayoutComputed = false;
         programObject->invalidateUniformBufferCache();
         programObject->invalidateSamplerBindingRecipeCache();
@@ -156,6 +160,7 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->linkLog.clear();
     programObject->linked = false;
     programObject->linkedStageBits = 0;
+    programObject->ovrMultiviewNumViews = 0;
     programObject->advancedBlendSupportMask = 0;
     programObject->advancedBlendSupportAll = false;
     phase2PlanInvalidateProgramStructuralFingerprint(*programObject);
@@ -182,6 +187,47 @@ bool GLContext::linkProgram(GLuint program) {
         char buf[18];
         std::snprintf(buf, sizeof(buf), "%016zx", h);
         return buf;
+    };
+    auto parseOVRMultiviewNumViews = [](const std::string& source) -> GLsizei {
+        if (source.find("GL_OVR_multiview") == std::string::npos) {
+            return 0;
+        }
+        std::size_t searchPos = 0;
+        while (searchPos < source.size()) {
+            const std::size_t pos = source.find("num_views", searchPos);
+            if (pos == std::string::npos) {
+                return 0;
+            }
+            const std::size_t qualifierEnd =
+                source.find_first_of(");,\n\r", pos);
+            const std::size_t equals = source.find('=', pos);
+            if (equals == std::string::npos ||
+                (qualifierEnd != std::string::npos && equals > qualifierEnd)) {
+                searchPos = pos + 9;
+                continue;
+            }
+            std::size_t i = equals + 1;
+            while (i < source.size() &&
+                   (source[i] == ' ' || source[i] == '\t' ||
+                    source[i] == '\n' || source[i] == '\r')) {
+                ++i;
+            }
+            GLsizei value = 0;
+            bool haveDigit = false;
+            while (i < source.size() &&
+                   source[i] >= '0' && source[i] <= '9') {
+                haveDigit = true;
+                const GLsizei digit =
+                    static_cast<GLsizei>(source[i] - '0');
+                if (value > (std::numeric_limits<GLsizei>::max() - digit) / 10) {
+                    return std::numeric_limits<GLsizei>::max();
+                }
+                value = static_cast<GLsizei>(value * 10 + digit);
+                ++i;
+            }
+            return haveDigit ? value : 0;
+        }
+        return 0;
     };
 
     if (programObject->attachedShaders.empty()) {
@@ -321,6 +367,9 @@ bool GLContext::linkProgram(GLuint program) {
     const bool linkedFromSpirvBinary =
         !attachedShaderObjects.empty() &&
         attachedShaderObjects.front()->isSpirvBinary;
+    programObject->ovrMultiviewNumViews = vertexShader != nullptr
+        ? parseOVRMultiviewNumViews(vertexShader->source)
+        : 0;
 
     if (geometryShader != nullptr && !linkedFromSpirvBinary) {
         GLint maxVertexStreams = 4;

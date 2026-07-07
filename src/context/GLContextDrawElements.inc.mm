@@ -36,6 +36,62 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     if (!impl_->validateCurrentProgramPipelineForDraw()) {
         return false;
     }
+    auto currentProgramMultiviewNumViews = [&]() -> GLsizei {
+        const GLuint programName = impl_->state->currentProgram();
+        if (programName != 0) {
+            const GLProgramObject* program =
+                impl_->objects->programs().get(programName);
+            return (program != nullptr && program->linked)
+                ? std::max<GLsizei>(program->ovrMultiviewNumViews, 0)
+                : 0;
+        }
+        const GLuint pipelineName =
+            impl_->state->currentProgramPipeline();
+        const GLProgramPipelineObject* pipeline = pipelineName != 0
+            ? impl_->objects->programPipelines().get(pipelineName)
+            : nullptr;
+        if (pipeline == nullptr || pipeline->vertexProgram == 0) {
+            return 0;
+        }
+        const GLProgramObject* vertexProgram =
+            impl_->objects->programs().get(pipeline->vertexProgram);
+        return (vertexProgram != nullptr && vertexProgram->linked)
+            ? std::max<GLsizei>(vertexProgram->ovrMultiviewNumViews, 0)
+            : 0;
+    };
+    auto drawFramebufferMultiviewNumViews = [&]() -> GLsizei {
+        const GLuint framebufferName =
+            impl_->state->boundDrawFramebuffer();
+        if (framebufferName == 0) {
+            return 0;
+        }
+        const GLFramebufferObject* framebuffer =
+            impl_->objects->framebuffers().get(framebufferName);
+        if (framebuffer == nullptr || !framebuffer->instantiated) {
+            return 0;
+        }
+        GLsizei viewCount = 0;
+        for (const auto& [attachmentPoint, attachment] :
+             framebuffer->attachments) {
+            (void)attachmentPoint;
+            if (attachment.multiview &&
+                attachment.kind == GLFramebufferAttachment::Kind::Texture &&
+                attachment.object != 0) {
+                viewCount = std::max<GLsizei>(
+                    viewCount, std::max<GLsizei>(attachment.numViews, 0));
+            }
+        }
+        return viewCount;
+    };
+    {
+        const GLsizei shaderViews = currentProgramMultiviewNumViews();
+        const GLsizei framebufferViews = drawFramebufferMultiviewNumViews();
+        if (shaderViews != framebufferViews &&
+            (shaderViews > 1 || framebufferViews > 1)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
     {
         const GLuint progName = impl_->state->currentProgram();
         const GLuint pipelineName = impl_->state->currentProgramPipeline();

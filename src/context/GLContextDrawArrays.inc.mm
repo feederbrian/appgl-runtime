@@ -26,22 +26,59 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     if (impl_->shouldSkipDrawForConditionalRender()) {
         return true;
     }
+    auto programUsesCompatVertexInput = [](const GLProgramObject* program) {
+        if (program == nullptr || !program->linked ||
+            !program->hasTranslatedPipeline) {
+            return false;
+        }
+        for (const auto& input : program->vertexReflection.vertexInputs) {
+            if (input.location == 0 &&
+                (input.name == "appgl_Vertex" ||
+                 input.name == "_appgl_Vertex")) {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto programUsesFrontFacing = [&](const GLProgramObject* program) {
+        if (program == nullptr) {
+            return false;
+        }
+        if (program->fragmentMSL.find("front_facing") != std::string::npos ||
+            program->fragmentMSL.find("[[front_facing]]") != std::string::npos) {
+            return true;
+        }
+        for (GLuint shaderName : program->attachedShaders) {
+            const GLShaderObject* shader =
+                impl_->objects->shaders().get(shaderName);
+            if (shader != nullptr &&
+                shader->source.find("gl_FrontFacing") != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto legacyVertexArrayHasUsableSource = [&]() {
+        const auto& vertexArray = impl_->legacyVertexArray;
+        return appglCompatProfileEnabled() &&
+            vertexArray.enabled &&
+            (vertexArray.pointer != nullptr || vertexArray.bufferName != 0) &&
+            vertexArray.type == GL_FLOAT &&
+            vertexArray.size >= 2 &&
+            vertexArray.size <= 4;
+    };
     bool routeLegacyClientArrayThroughTranslatedProgram = false;
-    {
+    if (legacyVertexArrayHasUsableSource()) {
         const GLuint programName = impl_->state->currentProgram();
         const GLProgramObject* program = programName != 0
             ? impl_->objects->programs().get(programName)
             : nullptr;
-        if (appglCompatProfileEnabled() &&
-            program != nullptr &&
-            program->linked &&
-            program->hasTranslatedPipeline) {
-            for (const auto& input : program->vertexReflection.vertexInputs) {
-                if (input.location == 0 || input.sourceLocation == 0) {
-                    routeLegacyClientArrayThroughTranslatedProgram = true;
-                    break;
-                }
-            }
+        if (programUsesCompatVertexInput(program) &&
+            !programUsesFrontFacing(program)) {
+            const auto& raster = impl_->state->rasterState();
+            routeLegacyClientArrayThroughTranslatedProgram =
+                raster.polygonModeFront == GL_FILL &&
+                raster.polygonModeBack == GL_FILL;
         }
     }
     if (!routeLegacyClientArrayThroughTranslatedProgram &&
@@ -50,6 +87,62 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     }
     if (!impl_->validateCurrentProgramPipelineForDraw()) {
         return false;
+    }
+    auto currentProgramMultiviewNumViews = [&]() -> GLsizei {
+        const GLuint programName = impl_->state->currentProgram();
+        if (programName != 0) {
+            const GLProgramObject* program =
+                impl_->objects->programs().get(programName);
+            return (program != nullptr && program->linked)
+                ? std::max<GLsizei>(program->ovrMultiviewNumViews, 0)
+                : 0;
+        }
+        const GLuint pipelineName =
+            impl_->state->currentProgramPipeline();
+        const GLProgramPipelineObject* pipeline = pipelineName != 0
+            ? impl_->objects->programPipelines().get(pipelineName)
+            : nullptr;
+        if (pipeline == nullptr || pipeline->vertexProgram == 0) {
+            return 0;
+        }
+        const GLProgramObject* vertexProgram =
+            impl_->objects->programs().get(pipeline->vertexProgram);
+        return (vertexProgram != nullptr && vertexProgram->linked)
+            ? std::max<GLsizei>(vertexProgram->ovrMultiviewNumViews, 0)
+            : 0;
+    };
+    auto drawFramebufferMultiviewNumViews = [&]() -> GLsizei {
+        const GLuint framebufferName =
+            impl_->state->boundDrawFramebuffer();
+        if (framebufferName == 0) {
+            return 0;
+        }
+        const GLFramebufferObject* framebuffer =
+            impl_->objects->framebuffers().get(framebufferName);
+        if (framebuffer == nullptr || !framebuffer->instantiated) {
+            return 0;
+        }
+        GLsizei viewCount = 0;
+        for (const auto& [attachmentPoint, attachment] :
+             framebuffer->attachments) {
+            (void)attachmentPoint;
+            if (attachment.multiview &&
+                attachment.kind == GLFramebufferAttachment::Kind::Texture &&
+                attachment.object != 0) {
+                viewCount = std::max<GLsizei>(
+                    viewCount, std::max<GLsizei>(attachment.numViews, 0));
+            }
+        }
+        return viewCount;
+    };
+    {
+        const GLsizei shaderViews = currentProgramMultiviewNumViews();
+        const GLsizei framebufferViews = drawFramebufferMultiviewNumViews();
+        if (shaderViews != framebufferViews &&
+            (shaderViews > 1 || framebufferViews > 1)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
     }
 
     // GL 4.6 §11.3.1 — GS input topology / draw mode compatibility.
@@ -1303,43 +1396,145 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
         drawProfile.mark(GLDrawProfileBucket::TranslatedPreflight);
         {
             const auto& legacyVertexArray = impl_->legacyVertexArray;
-            bool programWantsLegacyVertex = false;
+            const auto& legacyColorArray = impl_->legacyColorArray;
+            const auto& legacyTexCoordArray = impl_->legacyTexCoordArray;
+            const bool programWantsLegacyVertex =
+                programUsesCompatVertexInput(program);
             bool programWantsLegacyColor = false;
             bool programWantsLegacyTexCoord0 = false;
             for (const auto& input : program->vertexReflection.vertexInputs) {
-                if (input.location == 0 || input.sourceLocation == 0) {
-                    programWantsLegacyVertex = true;
-                }
-                if (input.location == 3 || input.sourceLocation == 3) {
+                if (input.location == 3 &&
+                    (input.name == "appgl_Color" ||
+                     input.name == "_appgl_Color")) {
                     programWantsLegacyColor = true;
                 }
-                if (input.location == 8 || input.sourceLocation == 8) {
+                if (input.location == 8 &&
+                    (input.name == "appgl_MultiTexCoord0" ||
+                     input.name == "_appgl_MultiTexCoord0")) {
                     programWantsLegacyTexCoord0 = true;
                 }
+            }
+            const bool colorArrayHasSource =
+                legacyColorArray.pointer != nullptr ||
+                legacyColorArray.bufferName != 0;
+            const bool colorArrayUsable =
+                legacyColorArray.enabled &&
+                colorArrayHasSource &&
+                legacyColorArray.type == GL_FLOAT &&
+                legacyColorArray.size >= 3 &&
+                legacyColorArray.size <= 4;
+            const bool texCoordArrayHasSource =
+                legacyTexCoordArray.pointer != nullptr ||
+                legacyTexCoordArray.bufferName != 0;
+            const bool texCoordArrayUsable =
+                legacyTexCoordArray.enabled &&
+                texCoordArrayHasSource &&
+                legacyTexCoordArray.type == GL_FLOAT &&
+                legacyTexCoordArray.size >= 1 &&
+                legacyTexCoordArray.size <= 4;
+            auto resolveLegacyArraySource = [&](const auto& array,
+                                                const char* label,
+                                                const std::uint8_t*& base,
+                                                std::size_t& availableBytes) -> bool {
+                if (array.bufferName != 0) {
+                    const GLBufferObject* buffer =
+                        impl_->objects->buffers().get(array.bufferName);
+                    if (buffer == nullptr || buffer->shadowBytes.empty()) {
+                        return false;
+                    }
+                    const std::uintptr_t offset =
+                        reinterpret_cast<std::uintptr_t>(array.pointer);
+                    if (offset > buffer->shadowBytes.size()) {
+                        pushError(GL_INVALID_OPERATION, label,
+                                  "legacy client array VBO offset is outside buffer storage");
+                        return false;
+                    }
+                    base = buffer->shadowBytes.data() +
+                        static_cast<std::size_t>(offset);
+                    availableBytes = buffer->shadowBytes.size() -
+                        static_cast<std::size_t>(offset);
+                    return true;
+                }
+                if (array.pointer == nullptr) {
+                    return false;
+                }
+                base = static_cast<const std::uint8_t*>(array.pointer);
+                availableBytes = static_cast<std::size_t>(-1);
+                return true;
+            };
+            auto legacyArrayElementFits = [](std::size_t offset,
+                                             std::size_t need,
+                                             std::size_t availableBytes) {
+                return offset <= availableBytes &&
+                    need <= availableBytes - offset;
+            };
+            auto addFloatLayout = [](TranslatedDrawInfo& tdi,
+                                     GLuint location,
+                                     std::size_t offset,
+                                     GLint componentCount) {
+                TranslatedDrawInfo::VertexAttributeLayout layout;
+                layout.location = location;
+                layout.offset = offset;
+                layout.glType = GL_FLOAT;
+                layout.glComponentCount = componentCount;
+                layout.glNormalized = GL_FALSE;
+                layout.glIsInteger = false;
+                tdi.vertexAttributeLayouts.push_back(layout);
+            };
+            const bool needsLegacyColorInput = programWantsLegacyColor;
+            const bool needsLegacyTexCoord0Input = programWantsLegacyTexCoord0;
+            if (needsLegacyColorInput && legacyColorArray.enabled &&
+                !colorArrayUsable) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            if (needsLegacyTexCoord0Input && legacyTexCoordArray.enabled &&
+                !texCoordArrayUsable) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
             }
             if (appglCompatProfileEnabled() &&
                 programWantsLegacyVertex &&
                 legacyVertexArray.enabled &&
-                legacyVertexArray.pointer != nullptr &&
+                (legacyVertexArray.pointer != nullptr ||
+                 legacyVertexArray.bufferName != 0) &&
                 legacyVertexArray.type == GL_FLOAT &&
                 legacyVertexArray.size >= 2 &&
                 legacyVertexArray.size <= 4) {
                 const std::size_t legacyStride = legacyVertexArray.stride > 0
                     ? static_cast<std::size_t>(legacyVertexArray.stride)
                     : static_cast<std::size_t>(legacyVertexArray.size) * sizeof(GLfloat);
-                const auto* legacyBase =
-                    static_cast<const std::uint8_t*>(legacyVertexArray.pointer);
-                const std::size_t legacyPackedFloats =
-                    4u +
-                    (programWantsLegacyColor ? 4u : 0u) +
-                    (programWantsLegacyTexCoord0 ? 4u : 0u);
-                const std::size_t legacyColorOffsetFloats = 4u;
-                const std::size_t legacyTexCoord0OffsetFloats =
-                    legacyColorOffsetFloats +
-                    (programWantsLegacyColor ? 4u : 0u);
-                std::vector<GLfloat> legacyVertexData;
-                legacyVertexData.reserve(
-                    static_cast<std::size_t>(count) * legacyPackedFloats);
+                const std::size_t colorStride = legacyColorArray.stride > 0
+                    ? static_cast<std::size_t>(legacyColorArray.stride)
+                    : static_cast<std::size_t>(legacyColorArray.size) * sizeof(GLfloat);
+                const std::size_t texCoordStride = legacyTexCoordArray.stride > 0
+                    ? static_cast<std::size_t>(legacyTexCoordArray.stride)
+                    : static_cast<std::size_t>(legacyTexCoordArray.size) * sizeof(GLfloat);
+                const std::uint8_t* legacyBase = nullptr;
+                std::size_t legacyAvailableBytes = 0;
+                if (!resolveLegacyArraySource(
+                        legacyVertexArray, "glVertexPointer",
+                        legacyBase, legacyAvailableBytes)) {
+                    return false;
+                }
+                const std::uint8_t* colorBase = nullptr;
+                std::size_t colorAvailableBytes = 0;
+                if (colorArrayUsable &&
+                    !resolveLegacyArraySource(
+                        legacyColorArray, "glColorPointer",
+                        colorBase, colorAvailableBytes)) {
+                    return false;
+                }
+                const std::uint8_t* texCoordBase = nullptr;
+                std::size_t texCoordAvailableBytes = 0;
+                if (texCoordArrayUsable &&
+                    !resolveLegacyArraySource(
+                        legacyTexCoordArray, "glTexCoordPointer",
+                        texCoordBase, texCoordAvailableBytes)) {
+                    return false;
+                }
+                std::vector<Impl::ImmediateModeVertex> legacyVertices;
+                legacyVertices.reserve(static_cast<std::size_t>(count));
                 bool legacyRangeOk = true;
                 for (GLsizei i = 0; i < count; ++i) {
                     const GLint logical = first + i;
@@ -1347,24 +1542,68 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                         legacyRangeOk = false;
                         break;
                     }
+                    const auto sourceIndex = static_cast<std::size_t>(logical);
+                    const std::size_t vertexOffset = sourceIndex * legacyStride;
+                    const std::size_t vertexNeed =
+                        static_cast<std::size_t>(legacyVertexArray.size) *
+                        sizeof(GLfloat);
+                    if (!legacyArrayElementFits(
+                            vertexOffset, vertexNeed, legacyAvailableBytes)) {
+                        legacyRangeOk = false;
+                        break;
+                    }
                     const auto* src = reinterpret_cast<const GLfloat*>(
-                        legacyBase + static_cast<std::size_t>(logical) * legacyStride);
-                    legacyVertexData.push_back(src[0]);
-                    legacyVertexData.push_back(src[1]);
-                    legacyVertexData.push_back(legacyVertexArray.size >= 3 ? src[2] : 0.0f);
-                    legacyVertexData.push_back(legacyVertexArray.size >= 4 ? src[3] : 1.0f);
-                    if (programWantsLegacyColor) {
-                        legacyVertexData.push_back(impl_->immediate.currentColor[0]);
-                        legacyVertexData.push_back(impl_->immediate.currentColor[1]);
-                        legacyVertexData.push_back(impl_->immediate.currentColor[2]);
-                        legacyVertexData.push_back(impl_->immediate.currentColor[3]);
+                        legacyBase + vertexOffset);
+                    Impl::ImmediateModeVertex v{};
+                    v.position[0] = src[0];
+                    v.position[1] = src[1];
+                    v.position[2] = legacyVertexArray.size >= 3 ? src[2] : 0.0f;
+                    v.position[3] = legacyVertexArray.size >= 4 ? src[3] : 1.0f;
+                    std::memcpy(v.color, impl_->immediate.currentColor,
+                                sizeof(v.color));
+                    if (colorArrayUsable) {
+                        const std::size_t colorOffset = sourceIndex * colorStride;
+                        const std::size_t colorNeed =
+                            static_cast<std::size_t>(legacyColorArray.size) *
+                            sizeof(GLfloat);
+                        if (!legacyArrayElementFits(
+                                colorOffset, colorNeed, colorAvailableBytes)) {
+                            legacyRangeOk = false;
+                            break;
+                        }
+                        const auto* cp = reinterpret_cast<const GLfloat*>(
+                            colorBase + colorOffset);
+                        v.color[0] = cp[0];
+                        v.color[1] = cp[1];
+                        v.color[2] = cp[2];
+                        v.color[3] =
+                            legacyColorArray.size >= 4 ? cp[3] : v.color[3];
                     }
-                    if (programWantsLegacyTexCoord0) {
-                        legacyVertexData.push_back(impl_->immediate.currentTexcoord[0]);
-                        legacyVertexData.push_back(impl_->immediate.currentTexcoord[1]);
-                        legacyVertexData.push_back(impl_->immediate.currentTexcoord[2]);
-                        legacyVertexData.push_back(impl_->immediate.currentTexcoord[3]);
+                    std::memcpy(v.texcoord, impl_->immediate.currentTexcoord,
+                                sizeof(v.texcoord));
+                    if (texCoordArrayUsable) {
+                        const std::size_t texCoordOffset =
+                            sourceIndex * texCoordStride;
+                        const std::size_t texCoordNeed =
+                            static_cast<std::size_t>(legacyTexCoordArray.size) *
+                            sizeof(GLfloat);
+                        if (!legacyArrayElementFits(
+                                texCoordOffset, texCoordNeed,
+                                texCoordAvailableBytes)) {
+                            legacyRangeOk = false;
+                            break;
+                        }
+                        const auto* tp = reinterpret_cast<const GLfloat*>(
+                            texCoordBase + texCoordOffset);
+                        v.texcoord[0] = tp[0];
+                        v.texcoord[1] =
+                            legacyTexCoordArray.size >= 2 ? tp[1] : v.texcoord[1];
+                        v.texcoord[2] =
+                            legacyTexCoordArray.size >= 3 ? tp[2] : v.texcoord[2];
+                        v.texcoord[3] =
+                            legacyTexCoordArray.size >= 4 ? tp[3] : v.texcoord[3];
                     }
+                    legacyVertices.push_back(v);
                 }
                 if (!legacyRangeOk) {
                     pushError(GL_INVALID_OPERATION);
@@ -1375,30 +1614,23 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 tdi.mode = mode;
                 tdi.vertexCount = count;
                 tdi.baseVertex = 0;
-                tdi.vertexData = legacyVertexData.data();
+                tdi.vertexData = legacyVertices.data();
                 tdi.vertexDataByteCount =
-                    legacyVertexData.size() * sizeof(GLfloat);
-                tdi.vertexStride = sizeof(GLfloat) * legacyPackedFloats;
+                    legacyVertices.size() * sizeof(Impl::ImmediateModeVertex);
+                tdi.vertexStride = sizeof(Impl::ImmediateModeVertex);
                 tdi.vertexAttributeLayouts.clear();
-                auto addLegacyAttributeLayout =
-                    [&](GLuint location,
-                        std::size_t offsetFloats,
-                        GLint componentCount) {
-                    TranslatedDrawInfo::VertexAttributeLayout layout;
-                    layout.location = location;
-                    layout.offset = offsetFloats * sizeof(GLfloat);
-                    layout.glType = GL_FLOAT;
-                    layout.glComponentCount = componentCount;
-                    layout.glNormalized = GL_FALSE;
-                    layout.glIsInteger = false;
-                    tdi.vertexAttributeLayouts.push_back(layout);
-                };
-                addLegacyAttributeLayout(0, 0, 4);
+                addFloatLayout(tdi, 0,
+                               offsetof(Impl::ImmediateModeVertex, position),
+                               4);
                 if (programWantsLegacyColor) {
-                    addLegacyAttributeLayout(3, legacyColorOffsetFloats, 4);
+                    addFloatLayout(tdi, 3,
+                                   offsetof(Impl::ImmediateModeVertex, color),
+                                   4);
                 }
                 if (programWantsLegacyTexCoord0) {
-                    addLegacyAttributeLayout(8, legacyTexCoord0OffsetFloats, 4);
+                    addFloatLayout(tdi, 8,
+                                   offsetof(Impl::ImmediateModeVertex, texcoord),
+                                   4);
                 }
                 populateTranslatedDrawFixedFunctionState(
                     tdi, *impl_->state,
@@ -1485,13 +1717,8 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             }
         }
         {
-            bool programWantsGenericCompatVertex = false;
-            for (const auto& input : program->vertexReflection.vertexInputs) {
-                if (input.location == 0 || input.sourceLocation == 0) {
-                    programWantsGenericCompatVertex = true;
-                    break;
-                }
-            }
+            const bool programWantsGenericCompatVertex =
+                programUsesCompatVertexInput(program);
             const GLVertexAttributeState* genericPosition = nullptr;
             if (vao != nullptr &&
                 !vao->attributes.empty() &&

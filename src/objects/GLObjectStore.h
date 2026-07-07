@@ -1574,6 +1574,10 @@ struct GLProgramObject {
     // don't exist (compute-only programs leave both empty).
     std::string vertexSourceHash;
     std::string fragmentSourceHash;
+    // GL_OVR_multiview: link-time snapshot of the vertex shader's
+    // `layout(num_views = N)` declaration. 0 means the linked executable is
+    // ordinary single-view rendering for draw-time framebuffer mismatch checks.
+    GLsizei ovrMultiviewNumViews = 0;
 
     // Opaque pipeline state handle, owned by MetalFrameGraph.  Stored here so
     // repeated draws skip pipeline creation.  Type-erased to avoid ObjC in this
