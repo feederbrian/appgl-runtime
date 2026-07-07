@@ -849,10 +849,10 @@ void GLStateTracker::setBlendEquationSeparatei(GLuint index, GLenum equationRGB,
 }
 
 void GLStateTracker::setBlendColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
-    blend_.color[0] = std::clamp(red, 0.0f, 1.0f);
-    blend_.color[1] = std::clamp(green, 0.0f, 1.0f);
-    blend_.color[2] = std::clamp(blue, 0.0f, 1.0f);
-    blend_.color[3] = std::clamp(alpha, 0.0f, 1.0f);
+    blend_.color[0] = red;
+    blend_.color[1] = green;
+    blend_.color[2] = blue;
+    blend_.color[3] = alpha;
     markDirty(DirtyBit::BlendState);
 }
 

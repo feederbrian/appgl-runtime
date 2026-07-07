@@ -4048,6 +4048,9 @@ void GLContext::endImmediate() {
             }
         }
         if (impl_->state->isEnabled(GL_FOG)) {
+            for (int c = 0; c < 4; ++c) {
+                v.color[c] = std::clamp(v.color[c], 0.0f, 1.0f);
+            }
             const float z = std::fabs(v.position[2]);
             float factor = 1.0f;
             switch (impl_->fog.mode) {
@@ -5466,13 +5469,16 @@ void GLContext::endImmediate() {
         info.alphaTestFunc = alphaTest.func;
         info.alphaTestRef = alphaTest.ref;
         const auto& glBlend = impl_->state->blendState();
-        info.blend.enabled = impl_->state->isEnabled(GL_BLEND);
+        info.blend.enabled =
+            impl_->state->isEnabled(GL_BLEND) &&
+            !impl_->state->isEnabled(GL_COLOR_LOGIC_OP);
         info.blend.srcRGB = glBlend.srcRGB;
         info.blend.dstRGB = glBlend.dstRGB;
         info.blend.srcAlpha = glBlend.srcAlpha;
         info.blend.dstAlpha = glBlend.dstAlpha;
         info.blend.equationRGB = glBlend.equationRGB;
         info.blend.equationAlpha = glBlend.equationAlpha;
+        std::memcpy(info.blend.color, glBlend.color, sizeof(info.blend.color));
         info.blend.colorMaskR = (glBlend.colorMask[0] != GL_FALSE);
         info.blend.colorMaskG = (glBlend.colorMask[1] != GL_FALSE);
         info.blend.colorMaskB = (glBlend.colorMask[2] != GL_FALSE);
@@ -7430,6 +7436,9 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
                 }
             }
             if (impl_->state->isEnabled(GL_FOG)) {
+                for (int c = 0; c < 4; ++c) {
+                    v.color[c] = std::clamp(v.color[c], 0.0f, 1.0f);
+                }
                 const float z = std::fabs(v.position[2]);
                 float factor = 1.0f;
                 switch (impl_->fog.mode) {
@@ -7682,13 +7691,16 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         info.alphaTestFunc = alphaTest.func;
         info.alphaTestRef = alphaTest.ref;
         const auto& glBlend = impl_->state->blendState();
-        info.blend.enabled = impl_->state->isEnabled(GL_BLEND);
+        info.blend.enabled =
+            impl_->state->isEnabled(GL_BLEND) &&
+            !impl_->state->isEnabled(GL_COLOR_LOGIC_OP);
         info.blend.srcRGB = glBlend.srcRGB;
         info.blend.dstRGB = glBlend.dstRGB;
         info.blend.srcAlpha = glBlend.srcAlpha;
         info.blend.dstAlpha = glBlend.dstAlpha;
         info.blend.equationRGB = glBlend.equationRGB;
         info.blend.equationAlpha = glBlend.equationAlpha;
+        std::memcpy(info.blend.color, glBlend.color, sizeof(info.blend.color));
         info.blend.colorMaskR = (glBlend.colorMask[0] != GL_FALSE);
         info.blend.colorMaskG = (glBlend.colorMask[1] != GL_FALSE);
         info.blend.colorMaskB = (glBlend.colorMask[2] != GL_FALSE);

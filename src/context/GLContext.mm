@@ -4009,6 +4009,9 @@ static std::uint64_t phase2PlanBuildFixedStateSegmentHash(
     phase2PlanHashU64(hash, tdi.blend.equationRGB);
     phase2PlanHashU64(hash, tdi.blend.equationAlpha);
     phase2PlanHashBool(hash, tdi.blend.advancedEquation);
+    for (float c : tdi.blend.color) {
+        phase2PlanHashFloat(hash, c);
+    }
     phase2PlanHashBool(hash, tdi.blend.colorMaskR);
     phase2PlanHashBool(hash, tdi.blend.colorMaskG);
     phase2PlanHashBool(hash, tdi.blend.colorMaskB);
@@ -4071,6 +4074,9 @@ static std::uint64_t phase2PlanBuildFixedStateReferenceSegmentHash(
     phase2PlanHashU64(hash, tdi.blend.equationRGB);
     phase2PlanHashU64(hash, tdi.blend.equationAlpha);
     phase2PlanHashBool(hash, tdi.blend.advancedEquation);
+    for (float c : tdi.blend.color) {
+        phase2PlanHashFloat(hash, c);
+    }
     phase2PlanHashBool(hash, tdi.blend.colorMaskR);
     phase2PlanHashBool(hash, tdi.blend.colorMaskG);
     phase2PlanHashBool(hash, tdi.blend.colorMaskB);
@@ -4596,6 +4602,7 @@ struct Phase2PlanKeyMemoSignature {
     GLenum blendDstAlpha = GL_ZERO;
     GLenum blendEquationRGB = GL_FUNC_ADD;
     GLenum blendEquationAlpha = GL_FUNC_ADD;
+    std::array<std::uint32_t, 4> blendColorBits{};
     bool blendColorMaskR = true;
     bool blendColorMaskG = true;
     bool blendColorMaskB = true;
@@ -4726,6 +4733,7 @@ struct Phase2PlanKeyMemoSignature {
                blendDstAlpha == other.blendDstAlpha &&
                blendEquationRGB == other.blendEquationRGB &&
                blendEquationAlpha == other.blendEquationAlpha &&
+               blendColorBits == other.blendColorBits &&
                blendColorMaskR == other.blendColorMaskR &&
                blendColorMaskG == other.blendColorMaskG &&
                blendColorMaskB == other.blendColorMaskB &&
@@ -5020,6 +5028,9 @@ static bool phase2PlanBuildKeyMemoSignature(const TranslatedDrawInfo& tdi,
     out.blendDstAlpha = tdi.blend.dstAlpha;
     out.blendEquationRGB = tdi.blend.equationRGB;
     out.blendEquationAlpha = tdi.blend.equationAlpha;
+    for (std::size_t i = 0; i < out.blendColorBits.size(); ++i) {
+        out.blendColorBits[i] = phase2PlanFloatBits(tdi.blend.color[i]);
+    }
     out.blendColorMaskR = tdi.blend.colorMaskR;
     out.blendColorMaskG = tdi.blend.colorMaskG;
     out.blendColorMaskB = tdi.blend.colorMaskB;
@@ -24189,140 +24200,11 @@ struct GLContext::Impl {
             // prior native-path upload populated it) or treat the
             // texture as rgba8-only.
             if (image.nativeBpp > 0 && !image.nativeData.empty()) {
-                std::size_t components = 4;
-                switch (image.desc.internalFormat) {
-                    case GL_R8I: case GL_R8UI: case GL_R16I: case GL_R16UI:
-                    case GL_R32I: case GL_R32UI: case GL_R32F: case GL_R16F:
-                    case GL_R8: case GL_R8_SNORM: case GL_R16: case GL_R16_SNORM:
-                        components = 1; break;
-                    case GL_RG8I: case GL_RG8UI: case GL_RG16I: case GL_RG16UI:
-                    case GL_RG32I: case GL_RG32UI: case GL_RG32F: case GL_RG16F:
-                    case GL_RG8: case GL_RG8_SNORM: case GL_RG16: case GL_RG16_SNORM:
-                        components = 2; break;
-                    case GL_RGB8I: case GL_RGB8UI: case GL_RGB16I: case GL_RGB16UI:
-                    case GL_RGB32I: case GL_RGB32UI: case GL_RGB32F: case GL_RGB16F:
-                        components = 3; break;
-                    default:
-                        components = 4; break;
-                }
-                const std::size_t bpc = image.nativeBpp / components;
+                const MTLPixelFormat mtlFormat =
+                    metalRenderbufferFormat(image.desc.internalFormat);
                 std::vector<std::uint8_t> pattern(image.nativeBpp, 0);
-                if (bpc != 0 && bpc <= 4) {
-                    auto encodeI32 = [&](std::size_t c, std::int32_t v) {
-                        std::uint64_t u = static_cast<std::uint64_t>(
-                            static_cast<std::int64_t>(v));
-                        for (std::size_t b = 0; b < bpc; ++b) {
-                            pattern[c * bpc + b] =
-                                static_cast<std::uint8_t>((u >> (b * 8)) & 0xFF);
-                        }
-                    };
-                    auto encodeU32 = [&](std::size_t c, std::uint32_t v) {
-                        for (std::size_t b = 0; b < bpc; ++b) {
-                            pattern[c * bpc + b] =
-                                static_cast<std::uint8_t>((v >> (b * 8)) & 0xFF);
-                        }
-                    };
-                    auto encodeF32 = [&](std::size_t c, float v) {
-                        std::uint32_t u; std::memcpy(&u, &v, 4);
-                        for (std::size_t b = 0; b < 4 && b < bpc; ++b) {
-                            pattern[c * bpc + b] =
-                                static_cast<std::uint8_t>((u >> (b * 8)) & 0xFF);
-                        }
-                    };
-                    auto encodeUNorm = [&](std::size_t c, float v) {
-                        const float clamped = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
-                        const std::uint64_t maxV =
-                            (bpc == 1) ? 0xFFu :
-                            (bpc == 2) ? 0xFFFFu :
-                            (bpc == 4) ? 0xFFFFFFFFull : 0u;
-                        const std::uint64_t scaled = static_cast<std::uint64_t>(
-                            std::llround(static_cast<double>(clamped) *
-                                         static_cast<double>(maxV)));
-                        for (std::size_t b = 0; b < bpc; ++b) {
-                            pattern[c * bpc + b] =
-                                static_cast<std::uint8_t>((scaled >> (b * 8)) & 0xFF);
-                        }
-                    };
-                    auto isIntegerFmt = [](GLenum fmt) {
-                        switch (fmt) {
-                            case GL_R8I: case GL_R8UI: case GL_R16I: case GL_R16UI:
-                            case GL_R32I: case GL_R32UI:
-                            case GL_RG8I: case GL_RG8UI: case GL_RG16I: case GL_RG16UI:
-                            case GL_RG32I: case GL_RG32UI:
-                            case GL_RGB8I: case GL_RGB8UI: case GL_RGB16I: case GL_RGB16UI:
-                            case GL_RGB32I: case GL_RGB32UI:
-                            case GL_RGBA8I: case GL_RGBA8UI: case GL_RGBA16I: case GL_RGBA16UI:
-                            case GL_RGBA32I: case GL_RGBA32UI:
-                                return true;
-                            default: return false;
-                        }
-                    };
-                    auto isFloatFmt = [](GLenum fmt) {
-                        switch (fmt) {
-                            case GL_R32F: case GL_R16F:
-                            case GL_RG32F: case GL_RG16F:
-                            case GL_RGB32F: case GL_RGB16F:
-                            case GL_RGBA32F: case GL_RGBA16F:
-                                return true;
-                            default: return false;
-                        }
-                    };
-                    const GLenum ifmt = image.desc.internalFormat;
-                    const MTLPixelFormat mtlFormat =
-                        metalRenderbufferFormat(ifmt);
-                    bool patternReady = false;
-                    if (mtlFormat == MTLPixelFormatRG11B10Float) {
-                        const std::uint32_t packed =
-                            packUF_10F11F11F_REV(color[0], color[1], color[2]);
-                        std::memcpy(pattern.data(), &packed, sizeof(packed));
-                        patternReady = true;
-                    } else if (mtlFormat == MTLPixelFormatRGB9E5Float) {
-                        const std::uint32_t packed =
-                            packUF_5_9_9_9_REV(color[0], color[1], color[2]);
-                        std::memcpy(pattern.data(), &packed, sizeof(packed));
-                        patternReady = true;
-                    } else if (mtlFormat == MTLPixelFormatRGB10A2Unorm ||
-                               mtlFormat == MTLPixelFormatRGB10A2Uint) {
-                        const bool asInteger =
-                            mtlFormat == MTLPixelFormatRGB10A2Uint;
-                        const std::uint32_t r = packReadbackBits(
-                            color[0], 1023u, asInteger);
-                        const std::uint32_t g = packReadbackBits(
-                            color[1], 1023u, asInteger);
-                        const std::uint32_t b = packReadbackBits(
-                            color[2], 1023u, asInteger);
-                        const std::uint32_t a = packReadbackBits(
-                            color[3], 3u, asInteger);
-                        const std::uint32_t packed =
-                            (r & 0x3FFu) |
-                            ((g & 0x3FFu) << 10) |
-                            ((b & 0x3FFu) << 20) |
-                            ((a & 0x003u) << 30);
-                        std::memcpy(pattern.data(), &packed, sizeof(packed));
-                        patternReady = true;
-                    }
-                    if (!patternReady && isIntegerFmt(ifmt)) {
-                        // GL 4.6 §17.4.3.1: integer attachments cleared via
-                        // glClear take the float clear color cast to
-                        // integer. We use round-to-nearest of the clamped
-                        // value — matches the common driver behaviour for
-                        // the (0,0,0,0) ⇒ 0 case CTS exercises.
-                        for (std::size_t c = 0; c < components && c < 4; ++c) {
-                            encodeI32(c, static_cast<std::int32_t>(
-                                std::lround(color[c])));
-                        }
-                    } else if (!patternReady && isFloatFmt(ifmt)) {
-                        for (std::size_t c = 0; c < components && c < 4; ++c) {
-                            encodeF32(c, color[c]);
-                        }
-                    } else if (!patternReady) {
-                        // Default: treat as UNorm (matches the rgba8
-                        // mirror's normalizedByte() path for canonical
-                        // RGBA8 / R8 / RG8 / etc.).
-                        for (std::size_t c = 0; c < components && c < 4; ++c) {
-                            encodeUNorm(c, color[c]);
-                        }
-                    }
+                if (encodeColorNativePixelFromRGBAF(
+                        mtlFormat, color, pattern.data(), pattern.size())) {
                     const std::size_t pixelsPerLayer =
                         static_cast<std::size_t>(sourceWidth) *
                         static_cast<std::size_t>(sourceHeight);
@@ -43504,6 +43386,7 @@ static void populateTranslatedDrawFixedFunctionState(
     tdi.blend.advancedEquation =
         isAdvancedBlendEquationKHR(gl.equationRGB) &&
         gl.equationAlpha == gl.equationRGB;
+    std::memcpy(tdi.blend.color, gl.color, sizeof(tdi.blend.color));
     tdi.blend.colorMaskR = (gl.colorMask[0] != GL_FALSE);
     tdi.blend.colorMaskG = (gl.colorMask[1] != GL_FALSE);
     tdi.blend.colorMaskB = (gl.colorMask[2] != GL_FALSE);

@@ -19914,6 +19914,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             return false;
         }
         [encoder setRenderPipelineState:pipelineState];
+        [encoder setBlendColorRed:info.blend.color[0]
+                            green:info.blend.color[1]
+                             blue:info.blend.color[2]
+                            alpha:info.blend.color[3]];
         [encoder setCullMode:MTLCullModeNone];
         [encoder setFrontFacingWinding:MTLWindingCounterClockwise];
         [encoder setTriangleFillMode:MTLTriangleFillModeFill];
