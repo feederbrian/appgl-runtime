@@ -326,6 +326,8 @@ bool isValidEnableCap(GLenum cap) {
         return true;
     }
     switch (cap) {
+        case GL_ALPHA_TEST:
+            return appglCompatFeatureEnabled(AppGLCompatFeature::AlphaTest);
         case GL_BLEND:
         case GL_COLOR_LOGIC_OP:
         case GL_CULL_FACE:
@@ -394,7 +396,10 @@ bool isValidEnableCap(GLenum cap) {
 // "unhandled cap" errors for genuinely new probes.
 //
 // Currently:
-//   GL_ALPHA_TEST     (0x0BC0) — alpha-test stage from compat fragment pipeline.
+//   GL_ALPHA_TEST     (0x0BC0) — alpha-test stage from compat fragment pipeline
+//                                outside AppGLCompatFeature::AlphaTest
+//                                admission. Inside that gate it is real
+//                                tracked state and not a no-op.
 //   GL_LIGHTING       (0x0B50) — fixed-function lighting (compat-only since 3.1).
 //   GL_NORMALIZE      (0x0BA1) — fixed-function per-vertex normal rescaling.
 //                                AppGL has no fixed-function lighting pipeline,
@@ -494,6 +499,7 @@ bool isValidEnableCap(GLenum cap) {
 bool isCompatNoOpEnableCap(GLenum cap) {
     switch (cap) {
         case GL_ALPHA_TEST:
+            return !appglCompatFeatureEnabled(AppGLCompatFeature::AlphaTest);
         case GL_NORMALIZE:
         case GL_POINT_SPRITE:
         case GL_MAP1_VERTEX_3:
@@ -2165,10 +2171,9 @@ static bool isSilentlyAcceptedFixedFunctionStub(std::string_view functionName) {
     //                  rationale — the fixed-function lighting pipeline is
     //                  absent, so the exponent upload has no semantic.
     //   glAlphaFunc  — configures the compat-profile alpha-test comparison.
-    //                  The associated GL_ALPHA_TEST cap is already on the
-    //                  silent-accept cap allowlist; this adds the matching
-    //                  configuration setter so the pair is symmetric and
-    //                  the reset path stays noise-free.
+    //                  Outside AppGLCompatFeature::AlphaTest admission it
+    //                  stays silent for legacy reset-path noise; inside that
+    //                  gate the global symbol routes to real context state.
     //   glTexEnvi    — fixed-function texture-environment combiner setup.
     //                  AppGL's translated path runs everything through
     //                  GLSL core-profile shaders, so the compat combiner
@@ -12273,6 +12278,47 @@ void APIENTRY glPolygonOffsetClamp(GLfloat factor, GLfloat units, GLfloat clamp)
 }  // namespace impl
 
 }  // namespace appgl
+
+namespace {
+
+bool appglIsValidAlphaTestFunc(GLenum func) {
+    switch (func) {
+        case GL_NEVER:
+        case GL_LESS:
+        case GL_EQUAL:
+        case GL_LEQUAL:
+        case GL_GREATER:
+        case GL_NOTEQUAL:
+        case GL_GEQUAL:
+        case GL_ALWAYS:
+            return true;
+        default:
+            return false;
+    }
+}
+
+}  // namespace
+
+extern "C" void APIENTRY glAlphaFunc(GLenum func, GLfloat ref) {
+    appgl::GLContext* context = appgl::Runtime::shared().currentContext();
+    if (context == nullptr) {
+        appgl::Runtime::shared().recordBootstrapTrace("glAlphaFunc: no current context");
+        return;
+    }
+    if (!appgl::appglCompatFeatureEnabled(appgl::AppGLCompatFeature::AlphaTest)) {
+        appgl::Runtime::shared().recordFixedFunctionStub("glAlphaFunc");
+        return;
+    }
+    if (!appglIsValidAlphaTestFunc(func)) {
+        context->pushError(GL_INVALID_ENUM,
+                           "glAlphaFunc",
+                           "func is not a valid alpha-test comparison");
+        return;
+    }
+    (void)context->setAlphaFuncCompat(func, ref);
+    appgl::Runtime::shared().recordBootstrapTrace(
+        "glAlphaFunc(" + std::to_string(func) + ", " + std::to_string(ref) + ")");
+}
 
 extern "C" AppGLContext* appglCreateContextForLayer(void* layer) {
     auto* context = new appgl::GLContext(layer);

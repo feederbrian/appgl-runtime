@@ -12,6 +12,12 @@
 #ifndef GL_FOG_START
 #define GL_FOG_START 0x0B63
 #endif
+#ifndef GL_ALPHA_TEST_FUNC
+#define GL_ALPHA_TEST_FUNC 0x0BC1
+#endif
+#ifndef GL_ALPHA_TEST_REF
+#define GL_ALPHA_TEST_REF 0x0BC2
+#endif
 
 namespace appgl {
 namespace {
@@ -173,6 +179,7 @@ bool queryValue(
             writeScalar(out, clear.stencil);
             return true;
         case GL_BLEND:
+        case GL_ALPHA_TEST:
         case GL_CULL_FACE:
         case GL_DEBUG_OUTPUT:
         case GL_DEBUG_OUTPUT_SYNCHRONOUS:
@@ -1066,6 +1073,22 @@ const GLRasterState& GLStateTracker::rasterState() const {
     return raster_;
 }
 
+void GLStateTracker::setAlphaFunc(GLenum func, GLfloat ref) {
+    const GLfloat clampedRef = std::isfinite(ref)
+        ? std::clamp(ref, 0.0f, 1.0f)
+        : 0.0f;
+    if (alphaTest_.func == func && alphaTest_.ref == clampedRef) {
+        return;
+    }
+    alphaTest_.func = func;
+    alphaTest_.ref = clampedRef;
+    markDirty(DirtyBit::Program);
+}
+
+const GLAlphaTestState& GLStateTracker::alphaTestState() const {
+    return alphaTest_;
+}
+
 void GLStateTracker::setFogFloat(GLenum pname, GLfloat value) {
     if (pname == GL_FOG_START) {
         fog_.start = value;
@@ -1106,6 +1129,8 @@ std::uint32_t dirtyBitsForCap(GLenum cap) {
             return static_cast<std::uint32_t>(DB::RasterState);
         case GL_FRAMEBUFFER_SRGB:
             return static_cast<std::uint32_t>(DB::BlendState);
+        case GL_ALPHA_TEST:
+            return 0u;
         // Caps below are dynamic encoder state or no-ops on Metal — toggling
         // them must not invalidate any cached pipeline state object.
         case GL_SCISSOR_TEST:
@@ -1130,7 +1155,11 @@ void GLStateTracker::enable(GLenum cap) {
     const bool wasEnabled = enabledCaps_.contains(cap);
     enabledCaps_.insert(cap);
     if (!wasEnabled) {
-        dirtyMask_ |= dirtyBitsForCap(cap);
+        if (cap == GL_ALPHA_TEST) {
+            markDirty(DirtyBit::Program);
+        } else {
+            dirtyMask_ |= dirtyBitsForCap(cap);
+        }
     }
     // GL 4.1 §17.3.2: Enable(SCISSOR_TEST) is equivalent to
     // Enablei(SCISSOR_TEST, i) for every i in 0..MAX_VIEWPORTS-1.
@@ -1143,7 +1172,11 @@ void GLStateTracker::disable(GLenum cap) {
     const bool wasEnabled = enabledCaps_.contains(cap);
     enabledCaps_.erase(cap);
     if (wasEnabled) {
-        dirtyMask_ |= dirtyBitsForCap(cap);
+        if (cap == GL_ALPHA_TEST) {
+            markDirty(DirtyBit::Program);
+        } else {
+            dirtyMask_ |= dirtyBitsForCap(cap);
+        }
     }
     if (cap == GL_SCISSOR_TEST) {
         for (auto& v : indexedScissorTest_) v = false;
@@ -1201,6 +1234,12 @@ bool GLStateTracker::queryBoolean(GLenum pname, GLboolean* out) const {
                 return true;
             case GL_FOG_START:
                 *out = fog_.start != 0.0f ? GL_TRUE : GL_FALSE;
+                return true;
+            case GL_ALPHA_TEST_FUNC:
+                *out = alphaTest_.func != 0 ? GL_TRUE : GL_FALSE;
+                return true;
+            case GL_ALPHA_TEST_REF:
+                *out = alphaTest_.ref != 0.0f ? GL_TRUE : GL_FALSE;
                 return true;
             case GL_SAMPLE_COVERAGE_VALUE:
                 *out = sampleCoverageValue_ != 0.0f ? GL_TRUE : GL_FALSE;
@@ -1276,6 +1315,12 @@ bool GLStateTracker::queryInteger(GLenum pname, GLint* out) const {
             case GL_FOG_START:
                 *out = roundFloatStateToInteger<GLint>(fog_.start);
                 return true;
+            case GL_ALPHA_TEST_FUNC:
+                *out = static_cast<GLint>(alphaTest_.func);
+                return true;
+            case GL_ALPHA_TEST_REF:
+                *out = roundFloatStateToInteger<GLint>(alphaTest_.ref);
+                return true;
             case 0x91B0:   // GL_MAX_SHADER_COMPILER_THREADS_KHR / _ARB
                 *out = static_cast<std::remove_reference_t<decltype(*out)>>(maxShaderCompilerThreads_);
                 return true;
@@ -1345,6 +1390,12 @@ bool GLStateTracker::queryInteger64(GLenum pname, GLint64* out) const {
                 return true;
             case GL_FOG_START:
                 *out = roundFloatStateToInteger<GLint64>(fog_.start);
+                return true;
+            case GL_ALPHA_TEST_FUNC:
+                *out = static_cast<GLint64>(alphaTest_.func);
+                return true;
+            case GL_ALPHA_TEST_REF:
+                *out = roundFloatStateToInteger<GLint64>(alphaTest_.ref);
                 return true;
             case 0x91B0:   // GL_MAX_SHADER_COMPILER_THREADS_KHR / _ARB
                 *out = static_cast<std::remove_reference_t<decltype(*out)>>(maxShaderCompilerThreads_);
@@ -1431,6 +1482,12 @@ bool GLStateTracker::queryFloat(GLenum pname, GLfloat* out) const {
             case GL_FOG_START:
                 *out = fog_.start;
                 return true;
+            case GL_ALPHA_TEST_FUNC:
+                *out = static_cast<GLfloat>(alphaTest_.func);
+                return true;
+            case GL_ALPHA_TEST_REF:
+                *out = alphaTest_.ref;
+                return true;
             default:
                 break;
         }
@@ -1500,6 +1557,12 @@ bool GLStateTracker::queryDouble(GLenum pname, GLdouble* out) const {
                 return true;
             case GL_FOG_START:
                 *out = static_cast<GLdouble>(fog_.start);
+                return true;
+            case GL_ALPHA_TEST_FUNC:
+                *out = static_cast<GLdouble>(alphaTest_.func);
+                return true;
+            case GL_ALPHA_TEST_REF:
+                *out = static_cast<GLdouble>(alphaTest_.ref);
                 return true;
             default:
                 break;

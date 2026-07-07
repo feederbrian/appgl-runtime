@@ -7,6 +7,16 @@
 
 #include "../../include/AppGL/glcorearb.h"
 
+#ifndef GL_ALPHA_TEST
+#define GL_ALPHA_TEST 0x0BC0
+#endif
+#ifndef GL_ALPHA_TEST_FUNC
+#define GL_ALPHA_TEST_FUNC 0x0BC1
+#endif
+#ifndef GL_ALPHA_TEST_REF
+#define GL_ALPHA_TEST_REF 0x0BC2
+#endif
+
 namespace appgl {
 
 class GLObjectStore;
@@ -105,6 +115,11 @@ struct GLRasterState {
 
 struct GLFixedFunctionFogState {
     GLfloat start = 0.0f;
+};
+
+struct GLAlphaTestState {
+    GLenum func = GL_ALWAYS;
+    GLfloat ref = 0.0f;
 };
 
 struct GLTextureUnitState {
@@ -275,6 +290,8 @@ public:
     GLenum provokingVertexMode() const;
     void setHint(GLenum target, GLenum mode);
     const GLRasterState& rasterState() const;
+    void setAlphaFunc(GLenum func, GLfloat ref);
+    const GLAlphaTestState& alphaTestState() const;
     void setFogFloat(GLenum pname, GLfloat value);
     const GLFixedFunctionFogState& fogState() const;
 
@@ -429,6 +446,7 @@ private:
     GLStencilState stencil_;
     GLRasterState raster_;
     GLFixedFunctionFogState fog_;
+    GLAlphaTestState alphaTest_;
     std::unordered_map<GLenum, GLenum> hints_;
     std::unordered_set<GLenum> enabledCaps_;
     std::unordered_map<GLenum, GLuint> bufferBindings_;

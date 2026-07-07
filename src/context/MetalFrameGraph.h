@@ -386,6 +386,9 @@ struct TranslatedDrawInfo {
     // draw-local MSL variant when the shader did not write gl_PointSize.
     GLfloat fixedPointSize = 1.0f;
     GLenum pointSpriteCoordOrigin = GL_UPPER_LEFT;
+    bool alphaTestEnabled = false;
+    GLenum alphaTestFunc = GL_ALWAYS;
+    GLfloat alphaTestRef = 0.0f;
 
     // GL_RASTERIZER_DISCARD: when true, Metal pipeline has
     // rasterizationEnabled=NO — the VS runs for side effects (SSBO
@@ -815,6 +818,7 @@ struct ImmediateDrawInfo {
     // 1 = ALPHA, 2 = LUMINANCE, 3 = LUMINANCE_ALPHA, 4 = INTENSITY,
     // 5 = RGB, 6 = RGBA.
     std::uint32_t textureBaseClass = 0;
+    bool textureSampleYFlip = false;
     std::array<GLfloat, 4> textureEnvColor = {0.0f, 0.0f, 0.0f, 0.0f};
     GLint textureWrapS = GL_REPEAT;
     GLint textureWrapT = GL_REPEAT;
@@ -854,6 +858,9 @@ struct ImmediateDrawInfo {
     GLfloat polygonOffsetFactor = 0.0f;
     GLfloat polygonOffsetUnits = 0.0f;
     GLfloat polygonOffsetClamp = 0.0f;
+    bool alphaTestEnabled = false;
+    GLenum alphaTestFunc = GL_ALWAYS;
+    GLfloat alphaTestRef = 0.0f;
     TranslatedDrawInfo::BlendState blend;
     bool scissorTestEnabled = false;
     GLint scissorX = 0;

@@ -8105,13 +8105,7 @@ bool setTextureParameterInteger(GLTextureParameters& params, GLenum pname, const
             params.depthStencilTextureMode = values[0];
             return true;
         case GL_DEPTH_TEXTURE_MODE:
-            // Compat-profile shadow-map channel-routing pname (GL 1.4..3.0).
-            // No-op in AppGL: there is no fixed-function pipeline that
-            // would sample the depth channel into RGBA, and core-profile
-            // shaders read the depth channel directly. Silently accept
-            // and discard so legacy initializers don't trip GL_INVALID_ENUM.
-            (void)params;
-            (void)values;
+            params.depthTextureMode = values[0];
             return appglCompatProfileEnabled();
         case GL_GENERATE_MIPMAP:
             params.generateMipmap = values[0] ? GL_TRUE : GL_FALSE;
@@ -8249,7 +8243,7 @@ bool getTextureParameterInteger(const GLTextureParameters& params, GLenum pname,
             values[0] = params.depthStencilTextureMode;
             return true;
         case GL_DEPTH_TEXTURE_MODE:
-            values[0] = GL_LUMINANCE;
+            values[0] = params.depthTextureMode;
             return true;
         case GL_GENERATE_MIPMAP:
             values[0] = params.generateMipmap;
@@ -31976,6 +31970,7 @@ struct GLContext::Impl {
             Normal,
             ColorMaterial,
             Material,
+            AlphaFunc,
             PushMatrix,
             PopMatrix,
             DrawClientArrays,
@@ -43491,6 +43486,12 @@ static void populateTranslatedDrawFixedFunctionState(
     }
     tdi.fixedPointSize = std::max<GLfloat>(1.0f, tdi.fixedPointSize);
     tdi.pointSpriteCoordOrigin = state.rasterState().pointSpriteCoordOrigin;
+    const auto& alphaTest = state.alphaTestState();
+    tdi.alphaTestEnabled =
+        appglCompatFeatureEnabled(AppGLCompatFeature::AlphaTest) &&
+        state.isEnabled(GL_ALPHA_TEST);
+    tdi.alphaTestFunc = alphaTest.func;
+    tdi.alphaTestRef = alphaTest.ref;
 
     const auto& gl = state.blendState();
     tdi.blend.enabled = state.isEnabled(GL_BLEND);
@@ -46895,12 +46896,37 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
         return false;
     }
 
+    auto immediateAttributeLocationSupported = [](GLuint location) {
+        switch (location) {
+            case 0: // position
+            case 1: // texcoord0 vec2
+            case 3: // color
+            case 8: // texcoord0 vec4
+                return true;
+            default:
+                return false;
+        }
+    };
+    auto immediateTranslatedInputsSupported = [&]() {
+        if (program->vertexReflection.vertexInputs.empty()) {
+            return false;
+        }
+        for (const auto& input : program->vertexReflection.vertexInputs) {
+            if (input.containsFp64 ||
+                (!immediateAttributeLocationSupported(input.location) &&
+                 !immediateAttributeLocationSupported(input.sourceLocation))) {
+                return false;
+            }
+        }
+        return true;
+    };
     // Compat immediate draws can feed translated shaders that consume the
-    // rewriter's legacy gl_Vertex stream. Keep arbitrary user-attribute
-    // programs on the fixed-function immediate encoder.
+    // rewriter's legacy gl_Vertex stream, plus simple explicit attributes
+    // whose locations map to the immediate tuple below.
     const bool acceptsCompatVertex =
         program->vertexMSL.find("appgl_Vertex") != std::string::npos ||
-        program->vertexMSL.find("piglit_vertex") != std::string::npos;
+        program->vertexMSL.find("piglit_vertex") != std::string::npos ||
+        immediateTranslatedInputsSupported();
     if (!acceptsCompatVertex) {
         return false;
     }

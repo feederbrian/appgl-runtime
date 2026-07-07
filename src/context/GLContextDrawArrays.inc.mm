@@ -32,9 +32,8 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             return false;
         }
         for (const auto& input : program->vertexReflection.vertexInputs) {
-            if (input.location == 0 &&
-                (input.name == "appgl_Vertex" ||
-                 input.name == "_appgl_Vertex")) {
+            if (!input.containsFp64 &&
+                (input.location == 0 || input.sourceLocation == 0)) {
                 return true;
             }
         }

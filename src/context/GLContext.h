@@ -78,6 +78,7 @@ public:
     void setPointSize(GLfloat size);
     bool setPointSpriteCoordOrigin(GLenum origin);
     bool provokingVertex(GLenum mode);
+    bool setAlphaFuncCompat(GLenum func, GLfloat ref);
     void setHint(GLenum target, GLenum mode);
     void setShadeModel(GLenum mode);
     GLenum shadeModel() const;

@@ -18,13 +18,6 @@
 #include "../../include/AppGL/glcorearb.h"
 #include "../runtime/AppGLRuntime.h"
 
-extern "C" void APIENTRY glAlphaFunc(GLenum func, GLfloat ref) {
-    (void)func;
-    (void)ref;
-    appgl::Runtime::shared().recordFixedFunctionStub("glAlphaFunc");
-    return;
-}
-
 extern "C" GLboolean APIENTRY glAreTexturesResident(GLsizei n, const GLuint *textures, GLboolean *residences) {
     (void)n;
     (void)textures;

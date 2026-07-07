@@ -377,6 +377,21 @@ void GLContext::setHint(GLenum target, GLenum mode) {
     impl_->state->setHint(target, mode);
 }
 
+bool GLContext::setAlphaFuncCompat(GLenum func, GLfloat ref) {
+    if (impl_->displayLists.compiling && !impl_->displayLists.replaying) {
+        Impl::DisplayListCommand command;
+        command.kind = Impl::DisplayListCommand::Kind::AlphaFunc;
+        command.enumValue = func;
+        command.values[0] = ref;
+        impl_->displayLists.compileCommands.push_back(command);
+        if (!impl_->displayLists.compileAndExecute) {
+            return true;
+        }
+    }
+    impl_->state->setAlphaFunc(func, ref);
+    return true;
+}
+
 #elif defined(APPGL_GLCONTEXT_STATE_ENABLE)
 void GLContext::setEnabled(GLenum cap, bool enabled) {
     if (impl_->displayLists.compiling && !impl_->displayLists.replaying) {

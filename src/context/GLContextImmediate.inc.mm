@@ -28,7 +28,41 @@ constexpr std::uint32_t kAppGLImmediateTextureBaseIntensity = 4u;
 constexpr std::uint32_t kAppGLImmediateTextureBaseRGB = 5u;
 constexpr std::uint32_t kAppGLImmediateTextureBaseRGBA = 6u;
 
-std::uint32_t appglImmediateTextureBaseClass(GLenum internalFormat) {
+bool appglImmediateTextureFormatIsDepth(GLenum internalFormat) {
+    switch (internalFormat) {
+        case GL_DEPTH_COMPONENT:
+        case GL_DEPTH_COMPONENT16:
+        case GL_DEPTH_COMPONENT24:
+        case GL_DEPTH_COMPONENT32:
+        case GL_DEPTH_COMPONENT32F:
+            return true;
+        default:
+            return false;
+    }
+}
+
+std::uint32_t appglImmediateDepthTextureBaseClass(GLint depthTextureMode) {
+    switch (depthTextureMode) {
+        case GL_ALPHA:
+            return kAppGLImmediateTextureBaseAlpha;
+        case GL_INTENSITY:
+            return kAppGLImmediateTextureBaseIntensity;
+        case GL_RED:
+            return kAppGLImmediateTextureBaseRGB;
+        case GL_LUMINANCE:
+        default:
+            return kAppGLImmediateTextureBaseLuminance;
+    }
+}
+
+std::uint32_t appglImmediateTextureBaseClass(
+    GLenum internalFormat,
+    const GLTextureParameters* params = nullptr
+) {
+    if (appglImmediateTextureFormatIsDepth(internalFormat)) {
+        return appglImmediateDepthTextureBaseClass(
+            params != nullptr ? params->depthTextureMode : GL_LUMINANCE);
+    }
     switch (internalFormat) {
         case GL_ALPHA:
         case GL_ALPHA4:
@@ -4824,7 +4858,8 @@ void GLContext::endImmediate() {
             }
             const GLTextureImageLevel& baseImage = baseIt->second;
             sampledTextureBaseClass =
-                appglImmediateTextureBaseClass(texture->desc.internalFormat);
+                appglImmediateTextureBaseClass(
+                    texture->desc.internalFormat, &texture->params);
             sampledSwizzle = texture->params.swizzle;
             sampledWrapS = texture->params.wrapS;
             sampledWrapT = texture->params.wrapT;
@@ -5305,6 +5340,7 @@ void GLContext::endImmediate() {
     GLenum fixedFunctionTextureTarget = 0;
     GLTextureParameters fixedFunctionTextureParams;
     bool fixedFunctionTextureParamsValid = false;
+    bool fixedFunctionTextureSampleYFlip = false;
     auto resolveFixedFunctionTexture = [&]() -> void* {
         for (GLenum target : {GL_TEXTURE_2D, GL_TEXTURE_1D}) {
             if (!impl_->state->isEnabled(target)) {
@@ -5324,10 +5360,15 @@ void GLContext::endImmediate() {
             fixedFunctionTextureTarget = target;
             fixedFunctionTextureParams = tex->params;
             fixedFunctionTextureParamsValid = true;
+            fixedFunctionTextureSampleYFlip =
+                target == GL_TEXTURE_2D &&
+                isColorFormat(tex->desc.internalFormat) &&
+                (tex->wasFramebufferRenderedTo || tex->wasViewportRenderedTo);
             return impl_->resolveSwizzledTexture(*tex);
         }
         fixedFunctionTextureTarget = 0;
         fixedFunctionTextureParamsValid = false;
+        fixedFunctionTextureSampleYFlip = false;
         return nullptr;
     };
 
@@ -5349,6 +5390,7 @@ void GLContext::endImmediate() {
     info.metalTexture = resolveFixedFunctionTexture();
     info.metalSamplerState = fixedFunctionSamplerState;
     info.textureTarget = fixedFunctionTextureTarget;
+    info.textureSampleYFlip = fixedFunctionTextureSampleYFlip;
     if (fixedFunctionTextureParamsValid) {
         info.textureWrapS = fixedFunctionTextureParams.wrapS;
         info.textureWrapT = fixedFunctionTextureParams.wrapT;
@@ -5360,7 +5402,9 @@ void GLContext::endImmediate() {
     }
     if (appglCompatProfileEnabled()) {
         const std::uint32_t textureBaseClass =
-            appglImmediateTextureBaseClass(fixedFunctionTextureInternalFormat);
+            appglImmediateTextureBaseClass(
+                fixedFunctionTextureInternalFormat,
+                fixedFunctionTextureParamsValid ? &fixedFunctionTextureParams : nullptr);
         if (textureBaseClass != 0u) {
             info.textureEnvMode = impl_->texEnv.mode;
             info.textureBaseClass = textureBaseClass;
@@ -5415,6 +5459,12 @@ void GLContext::endImmediate() {
         info.polygonOffsetFactor = rasterStateForPolygonMode.polygonOffsetFactor;
         info.polygonOffsetUnits = rasterStateForPolygonMode.polygonOffsetUnits;
         info.polygonOffsetClamp = rasterStateForPolygonMode.polygonOffsetClamp;
+        const auto& alphaTest = impl_->state->alphaTestState();
+        info.alphaTestEnabled =
+            appglCompatFeatureEnabled(AppGLCompatFeature::AlphaTest) &&
+            impl_->state->isEnabled(GL_ALPHA_TEST);
+        info.alphaTestFunc = alphaTest.func;
+        info.alphaTestRef = alphaTest.ref;
         const auto& glBlend = impl_->state->blendState();
         info.blend.enabled = impl_->state->isEnabled(GL_BLEND);
         info.blend.srcRGB = glBlend.srcRGB;
@@ -5586,6 +5636,9 @@ void GLContext::callListCompat(GLuint list) {
                 break;
             case Impl::DisplayListCommand::Kind::Material:
                 setMaterialFloatCompat(command.enumValue, command.enumValue2, command.values);
+                break;
+            case Impl::DisplayListCommand::Kind::AlphaFunc:
+                setAlphaFuncCompat(command.enumValue, command.values[0]);
                 break;
             case Impl::DisplayListCommand::Kind::PushMatrix:
                 pushMatrixCompat();
@@ -6730,6 +6783,7 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
     GLenum fixedFunctionTextureTarget = 0;
     GLTextureParameters fixedFunctionTextureParams;
     bool fixedFunctionTextureParamsValid = false;
+    bool fixedFunctionTextureSampleYFlip = false;
     auto resolveFixedFunctionTexture = [&]() -> void* {
         for (GLenum target : {GL_TEXTURE_2D, GL_TEXTURE_1D}) {
             if (!impl_->state->isEnabled(target)) {
@@ -6749,10 +6803,15 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
             fixedFunctionTextureTarget = target;
             fixedFunctionTextureParams = tex->params;
             fixedFunctionTextureParamsValid = true;
+            fixedFunctionTextureSampleYFlip =
+                target == GL_TEXTURE_2D &&
+                isColorFormat(tex->desc.internalFormat) &&
+                (tex->wasFramebufferRenderedTo || tex->wasViewportRenderedTo);
             return impl_->resolveSwizzledTexture(*tex);
         }
         fixedFunctionTextureTarget = 0;
         fixedFunctionTextureParamsValid = false;
+        fixedFunctionTextureSampleYFlip = false;
         return nullptr;
     };
 
@@ -7542,6 +7601,7 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         info.metalTexture = resolveFixedFunctionTexture();
         info.metalSamplerState = fixedFunctionSamplerState;
         info.textureTarget = fixedFunctionTextureTarget;
+        info.textureSampleYFlip = fixedFunctionTextureSampleYFlip;
         if (fixedFunctionTextureParamsValid) {
             info.textureWrapS = fixedFunctionTextureParams.wrapS;
             info.textureWrapT = fixedFunctionTextureParams.wrapT;
@@ -7553,7 +7613,9 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         }
         if (appglCompatProfileEnabled()) {
             const std::uint32_t textureBaseClass =
-                appglImmediateTextureBaseClass(fixedFunctionTextureInternalFormat);
+                appglImmediateTextureBaseClass(
+                    fixedFunctionTextureInternalFormat,
+                    fixedFunctionTextureParamsValid ? &fixedFunctionTextureParams : nullptr);
             if (textureBaseClass != 0u) {
                 info.textureEnvMode = impl_->texEnv.mode;
                 info.textureBaseClass = textureBaseClass;
@@ -7613,6 +7675,12 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         info.polygonOffsetFactor = raster.polygonOffsetFactor;
         info.polygonOffsetUnits = raster.polygonOffsetUnits;
         info.polygonOffsetClamp = raster.polygonOffsetClamp;
+        const auto& alphaTest = impl_->state->alphaTestState();
+        info.alphaTestEnabled =
+            appglCompatFeatureEnabled(AppGLCompatFeature::AlphaTest) &&
+            impl_->state->isEnabled(GL_ALPHA_TEST);
+        info.alphaTestFunc = alphaTest.func;
+        info.alphaTestRef = alphaTest.ref;
         const auto& glBlend = impl_->state->blendState();
         info.blend.enabled = impl_->state->isEnabled(GL_BLEND);
         info.blend.srcRGB = glBlend.srcRGB;

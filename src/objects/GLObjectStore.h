@@ -13,6 +13,10 @@
 #include "../../include/AppGL/glcorearb.h"
 #include "../shader/ShaderTranslator.h"
 
+#ifndef GL_LUMINANCE
+#define GL_LUMINANCE 0x1909
+#endif
+
 namespace appgl::interp {
 // Forward-declared; full definition in ../shader/ShaderInterpreter.h.
 // Used by GLProgramObject's tess-emul SpirvModule cache (phase 3f-11).
@@ -272,6 +276,7 @@ struct GLTextureParameters {
     std::array<GLfloat, 4> borderColor = {0.0f, 0.0f, 0.0f, 0.0f};
     std::array<GLint, 4> swizzle = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA};
     GLint depthStencilTextureMode = GL_DEPTH_COMPONENT;
+    GLint depthTextureMode = GL_LUMINANCE;
     GLint generateMipmap = GL_FALSE;
     // GL 4.6 §8.10 / GL_ARB_texture_filter_anisotropic defaults. Stored
     // on the object so glGetSamplerParameter / glGetTextureParameter can

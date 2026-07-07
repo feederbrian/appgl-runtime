@@ -373,6 +373,9 @@ MANUAL_FIXED_FUNCTION_OVERRIDES = {
     "glShadeModel",
     "glPushAttrib",
     "glPopAttrib",
+    # Compat alpha-test state is real under AppGLCompatFeature::AlphaTest
+    # admission and feeds fragment-discard synthesis.
+    "glAlphaFunc",
     "glVertexPointer",
     "glColorPointer",
     "glTexCoordPointer",

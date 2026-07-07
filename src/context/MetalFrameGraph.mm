@@ -5963,6 +5963,145 @@ static std::string appglFragmentColor0FieldName(const std::string& fsMsl)
     return fsMsl.substr(nameStart, nameEnd - nameStart);
 }
 
+static std::string appglFragmentAlphaTestColor0FieldName(const std::string& fsMsl)
+{
+    const std::size_t structPos = fsMsl.find("struct main0_out");
+    if (structPos == std::string::npos) {
+        return {};
+    }
+    const std::size_t openBrace = fsMsl.find('{', structPos);
+    const std::size_t closeBrace = appglFindMatchingBrace(fsMsl, openBrace);
+    if (openBrace == std::string::npos || closeBrace == std::string::npos) {
+        return {};
+    }
+    const std::size_t attrStart = fsMsl.find("[[color(0)]]", openBrace);
+    if (attrStart == std::string::npos || attrStart >= closeBrace) {
+        return {};
+    }
+    std::size_t lineStart = fsMsl.rfind('\n', attrStart);
+    lineStart = (lineStart == std::string::npos) ? openBrace + 1 : lineStart + 1;
+    const std::string decl = fsMsl.substr(lineStart, attrStart - lineStart);
+    if (decl.find("float4") == std::string::npos) {
+        return {};
+    }
+
+    std::size_t nameEnd = attrStart;
+    while (nameEnd > lineStart &&
+           std::isspace(static_cast<unsigned char>(fsMsl[nameEnd - 1]))) {
+        --nameEnd;
+    }
+    std::size_t nameStart = nameEnd;
+    while (nameStart > lineStart &&
+           appglMslIdentifierChar(fsMsl[nameStart - 1])) {
+        --nameStart;
+    }
+    if (nameStart == nameEnd) {
+        return {};
+    }
+    return fsMsl.substr(nameStart, nameEnd - nameStart);
+}
+
+static std::string appglFloatLiteral(GLfloat value)
+{
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%.9g", static_cast<double>(value));
+    std::string literal(buffer);
+    if (literal.find_first_of(".eE") == std::string::npos) {
+        literal.append(".0");
+    }
+    literal.push_back('f');
+    return literal;
+}
+
+static std::string appglAlphaTestPassExpression(const std::string& alphaExpr,
+                                                GLenum func,
+                                                GLfloat ref)
+{
+    if (func == GL_ALWAYS) {
+        return "true";
+    }
+    if (func == GL_NEVER) {
+        return "false";
+    }
+    const std::string refLiteral = appglFloatLiteral(ref);
+    const char* op = nullptr;
+    switch (func) {
+        case GL_LESS: op = " < "; break;
+        case GL_EQUAL: op = " == "; break;
+        case GL_LEQUAL: op = " <= "; break;
+        case GL_GREATER: op = " > "; break;
+        case GL_NOTEQUAL: op = " != "; break;
+        case GL_GEQUAL: op = " >= "; break;
+        default: return "true";
+    }
+    return alphaExpr + op + refLiteral;
+}
+
+static std::string rewriteFragmentMSLForAlphaTest(const std::string& fsMsl,
+                                                  GLenum func,
+                                                  GLfloat ref,
+                                                  bool* rewritten)
+{
+    if (rewritten != nullptr) {
+        *rewritten = false;
+    }
+    if (func == GL_ALWAYS) {
+        return fsMsl;
+    }
+
+    const std::string colorField = appglFragmentAlphaTestColor0FieldName(fsMsl);
+    if (colorField.empty()) {
+        return fsMsl;
+    }
+
+    std::string working = fsMsl;
+    const std::size_t openParen = working.find("main0(");
+    if (openParen == std::string::npos) {
+        return fsMsl;
+    }
+    std::size_t sigLineStart = working.rfind('\n', openParen);
+    sigLineStart = (sigLineStart == std::string::npos) ? 0 : sigLineStart + 1;
+    const std::size_t fragmentKeyword = working.find("fragment", sigLineStart);
+    if (fragmentKeyword == std::string::npos || fragmentKeyword > openParen) {
+        return fsMsl;
+    }
+
+    const std::size_t bodyStart = working.find('{', openParen);
+    const std::size_t bodyEnd = appglFindMatchingBrace(working, bodyStart);
+    if (bodyStart == std::string::npos || bodyEnd == std::string::npos) {
+        return fsMsl;
+    }
+    const std::size_t returnPos = working.rfind("return ", bodyEnd);
+    if (returnPos == std::string::npos || returnPos < bodyStart) {
+        return fsMsl;
+    }
+    const std::size_t semicolon = working.find(';', returnPos);
+    if (semicolon == std::string::npos || semicolon > bodyEnd) {
+        return fsMsl;
+    }
+    const std::string returnExpr = appglTrimCopy(
+        working.substr(returnPos + std::strlen("return "),
+                       semicolon - (returnPos + std::strlen("return "))));
+    if (returnExpr.empty() ||
+        !std::all_of(returnExpr.begin(), returnExpr.end(), appglMslIdentifierChar)) {
+        return fsMsl;
+    }
+
+    const std::string alphaExpr = returnExpr + "." + colorField + ".a";
+    const std::string passExpr = appglAlphaTestPassExpression(alphaExpr, func, ref);
+    std::string injection;
+    if (passExpr == "false") {
+        injection = "discard_fragment();\n    ";
+    } else {
+        injection = "if (!(" + passExpr + ")) {\n        discard_fragment();\n    }\n    ";
+    }
+    working.insert(returnPos, injection);
+    if (rewritten != nullptr) {
+        *rewritten = true;
+    }
+    return working;
+}
+
 static const char* appglAdvancedBlendMSLHelpers()
 {
     return R"MSL(
@@ -7696,6 +7835,28 @@ struct MetalFrameGraph::Impl {
                 info.metalFragmentFunctionOut = nullptr;
             }
         }
+        std::string alphaTestFragmentMSL;
+        bool alphaTestFragmentRewritten = false;
+        if (hasFragmentStage &&
+            info.alphaTestEnabled &&
+            info.alphaTestFunc != GL_ALWAYS &&
+            !info.rasterizerDiscard) {
+            alphaTestFragmentMSL =
+                rewriteFragmentMSLForAlphaTest(*info.fragmentMSL,
+                                               info.alphaTestFunc,
+                                               info.alphaTestRef,
+                                               &alphaTestFragmentRewritten);
+            if (alphaTestFragmentRewritten) {
+                info.fragmentMSL = &alphaTestFragmentMSL;
+                info.programMslVolatile = true;
+                info.mslPredicateCacheValid = false;
+                info.fragmentMslUsesArgumentBuffer =
+                    alphaTestFragmentMSL.find(
+                        "spvDescriptorSetBuffer") != std::string::npos;
+                info.metalFragmentFunction = nullptr;
+                info.metalFragmentFunctionOut = nullptr;
+            }
+        }
 
         // RC-A02: when an FBO render target is provided, use it instead of
         // the default framebuffer texture.
@@ -7916,6 +8077,8 @@ struct MetalFrameGraph::Impl {
         if (translatedPlan != nullptr) {
             if (!translatedPlan->valid) {
                 rejectTranslatedPlan("invalid");
+            } else if (alphaTestFragmentRewritten) {
+                rejectTranslatedPlan("alpha_test");
             } else if (fragmentOutputAbiRewritten) {
                 rejectTranslatedPlan("fragment_output_abi");
             } else if (hasAdditionalColorTargets) {
@@ -18060,10 +18223,47 @@ struct AppGLImmediateTextureState {
     uint wrapT;
     uint minFilter;
     uint magFilter;
-    uint _pad;
+    uint textureSampleYFlip;
     float4 borderColor;
     float4 envColor;
+    uint alphaTestEnabled;
+    uint alphaTestFunc;
+    float alphaTestRef;
+    uint _alphaPad;
 };
+
+static bool appgl_immediate_alpha_test_pass(float alpha,
+                                            constant AppGLImmediateTextureState& textureState) {
+    if (textureState.alphaTestEnabled == 0u) {
+        return true;
+    }
+    constexpr uint kNever = 0x0200u;
+    constexpr uint kLess = 0x0201u;
+    constexpr uint kEqual = 0x0202u;
+    constexpr uint kLEqual = 0x0203u;
+    constexpr uint kGreater = 0x0204u;
+    constexpr uint kNotEqual = 0x0205u;
+    constexpr uint kGEqual = 0x0206u;
+    constexpr uint kAlways = 0x0207u;
+    switch (textureState.alphaTestFunc) {
+        case kNever: return false;
+        case kLess: return alpha < textureState.alphaTestRef;
+        case kEqual: return alpha == textureState.alphaTestRef;
+        case kLEqual: return alpha <= textureState.alphaTestRef;
+        case kGreater: return alpha > textureState.alphaTestRef;
+        case kNotEqual: return alpha != textureState.alphaTestRef;
+        case kGEqual: return alpha >= textureState.alphaTestRef;
+        case kAlways: return true;
+        default: return true;
+    }
+}
+
+static void appgl_immediate_alpha_test(float alpha,
+                                       constant AppGLImmediateTextureState& textureState) {
+    if (!appgl_immediate_alpha_test_pass(alpha, textureState)) {
+        discard_fragment();
+    }
+}
 
 static float4 appgl_immediate_finish_sample(float4 color,
                                             float4 sample,
@@ -18222,7 +18422,11 @@ vertex AppGLImmediateOut appgl_immediate_vs(
     return out;
 }
 
-fragment float4 appgl_immediate_color_fs(AppGLImmediateOut in [[stage_in]]) {
+fragment float4 appgl_immediate_color_fs(
+    AppGLImmediateOut in [[stage_in]],
+    constant AppGLImmediateTextureState& textureState [[buffer(0)]]
+) {
+    appgl_immediate_alpha_test(in.color.a, textureState);
     return in.color;
 }
 
@@ -18234,16 +18438,21 @@ fragment float4 appgl_immediate_textured_fs(
 ) {
     constexpr uint kTargetTexture1D = 0x0DE0u;
     const float2 st = appgl_immediate_projected_st(in.texcoord);
-    const float2 coord = textureState.target == kTargetTexture1D
+    float2 coord = textureState.target == kTargetTexture1D
         ? float2(st.x, 0.5f)
         : st;
+    if (textureState.textureSampleYFlip != 0u &&
+        textureState.target != kTargetTexture1D) {
+        coord.y = 1.0f - coord.y;
+    }
     const float4 sample = appgl_immediate_apply_border(
         tex.sample(samp, coord),
         coord,
         textureState.target != kTargetTexture1D,
         textureState);
-    return appgl_immediate_finish_sample(
-        in.color, sample, textureState);
+    const float4 color = appgl_immediate_finish_sample(in.color, sample, textureState);
+    appgl_immediate_alpha_test(color.a, textureState);
+    return color;
 }
 
 fragment float4 appgl_immediate_textured_1d_fs(
@@ -18258,8 +18467,9 @@ fragment float4 appgl_immediate_textured_1d_fs(
         float2(st.x, 0.5f),
         false,
         textureState);
-    return appgl_immediate_finish_sample(
-        in.color, sample, textureState);
+    const float4 color = appgl_immediate_finish_sample(in.color, sample, textureState);
+    appgl_immediate_alpha_test(color.a, textureState);
+    return color;
 }
 )MSL";
         NSError* error = nil;
@@ -18280,6 +18490,8 @@ fragment float4 appgl_immediate_textured_1d_fs(
 
     static std::uint64_t computeImmediateModePipelineKey(
         MTLPixelFormat colorFormat,
+        MTLPixelFormat depthFormat,
+        MTLPixelFormat stencilFormat,
         const TranslatedDrawInfo::BlendState& blend)
     {
         std::uint64_t key = 0;
@@ -18295,13 +18507,17 @@ fragment float4 appgl_immediate_textured_1d_fs(
         key |= (static_cast<std::uint64_t>(glBlendFactorToMTL(blend.dstRGB)) & 0xFULL) << 37;
         key |= (static_cast<std::uint64_t>(glBlendFactorToMTL(blend.srcAlpha)) & 0xFULL) << 33;
         key |= (static_cast<std::uint64_t>(glBlendFactorToMTL(blend.dstAlpha)) & 0xFULL) << 29;
+        key |= (static_cast<std::uint64_t>(depthFormat) & 0xFFULL) << 8;
+        key |= static_cast<std::uint64_t>(stencilFormat) & 0xFFULL;
         return key;
     }
 
     bool ensureImmediateModePipelines(MTLPixelFormat colorFormat,
+                                      MTLPixelFormat depthFormat,
+                                      MTLPixelFormat stencilFormat,
                                       const TranslatedDrawInfo::BlendState& blend) {
         const std::uint64_t pipelineKey =
-            computeImmediateModePipelineKey(colorFormat, blend);
+            computeImmediateModePipelineKey(colorFormat, depthFormat, stencilFormat, blend);
         if (immediateModeColorPipelineState != nil
             && immediateModeTextured2DPipelineState != nil
             && immediateModeTextured1DPipelineState != nil
@@ -18347,8 +18563,8 @@ fragment float4 appgl_immediate_textured_1d_fs(
             if (blend.colorMaskB) writeMask |= MTLColorWriteMaskBlue;
             if (blend.colorMaskA) writeMask |= MTLColorWriteMaskAlpha;
             colorDesc.writeMask = writeMask;
-            desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
-            desc.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+            desc.depthAttachmentPixelFormat = depthFormat;
+            desc.stencilAttachmentPixelFormat = stencilFormat;
             NSError* error = nil;
             id<MTLRenderPipelineState> state = [device newRenderPipelineStateWithDescriptor:desc error:&error];
             if (state == nil) {
@@ -19556,7 +19772,8 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         }
 
         acquireRingSlot();
-        const bool isFBODraw = info.fboColorTexture != nullptr;
+        const bool isFBODraw =
+            info.fboColorTexture != nullptr || info.fboDepthStencilTexture != nullptr;
         if (!isFBODraw) {
             ensureDrawableResources();
         }
@@ -19573,9 +19790,35 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             }
         }
 
+        id<MTLTexture> passDepthStencil = isFBODraw
+            ? (info.fboDepthStencilTexture != nullptr
+                ? (__bridge id<MTLTexture>)(info.fboDepthStencilTexture)
+                : nil)
+            : defaultDepthStencilRenderTargetTexture();
+
         id<MTLTexture> colorTexture = nil;
+        id<MTLTexture> dsOnlyColorTex = nil;
         if (isFBODraw) {
-            colorTexture = (__bridge id<MTLTexture>)(info.fboColorTexture);
+            colorTexture = info.fboColorTexture != nullptr
+                ? (__bridge id<MTLTexture>)(info.fboColorTexture)
+                : nil;
+            if (colorTexture == nil && passDepthStencil != nil) {
+                @autoreleasepool {
+                    MTLTextureDescriptor* dummyDesc =
+                        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                            width:passDepthStencil.width
+                                                                           height:passDepthStencil.height
+                                                                        mipmapped:NO];
+                    dummyDesc.storageMode = MTLStorageModePrivate;
+                    dummyDesc.usage = MTLTextureUsageRenderTarget;
+                    if (passDepthStencil.sampleCount > 1) {
+                        dummyDesc.textureType = MTLTextureType2DMultisample;
+                        dummyDesc.sampleCount = passDepthStencil.sampleCount;
+                    }
+                    dsOnlyColorTex = reusableDummyColorTexture(dummyDesc);
+                }
+                colorTexture = dsOnlyColorTex;
+            }
         } else {
             if (!acquireDrawableIfNeeded()) {  // ADV-7
                 return false;
@@ -19585,12 +19828,27 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         if (colorTexture == nil) {
             return false;
         }
-        id<MTLTexture> passDepthStencil = isFBODraw
-            ? (__bridge id<MTLTexture>)(info.fboDepthStencilTexture)
-            : defaultDepthStencilRenderTargetTexture();
 
         const MTLPixelFormat colorFormat = colorTexture.pixelFormat;
-        if (!ensureImmediateModePipelines(colorFormat, info.blend)) {
+        MTLPixelFormat depthFormat = MTLPixelFormatInvalid;
+        MTLPixelFormat stencilFormat = MTLPixelFormatInvalid;
+        if (passDepthStencil != nil) {
+            const MTLPixelFormat pf = passDepthStencil.pixelFormat;
+            if (pf == MTLPixelFormatDepth16Unorm ||
+                pf == MTLPixelFormatDepth32Float ||
+                pf == MTLPixelFormatDepth32Float_Stencil8 ||
+                pf == MTLPixelFormatDepth24Unorm_Stencil8) {
+                depthFormat = pf;
+            }
+            if (pf == MTLPixelFormatStencil8 ||
+                pf == MTLPixelFormatDepth32Float_Stencil8 ||
+                pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
+                pf == MTLPixelFormatX32_Stencil8 ||
+                pf == MTLPixelFormatX24_Stencil8) {
+                stencilFormat = pf;
+            }
+        }
+        if (!ensureImmediateModePipelines(colorFormat, depthFormat, stencilFormat, info.blend)) {
             return false;
         }
 
@@ -19603,17 +19861,24 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         } else {
             pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
         }
-        pass.depthAttachment.texture = passDepthStencil;
-        pass.stencilAttachment.texture = passDepthStencil;
-        if (passDepthStencil != nil) {
+        pass.depthAttachment.texture =
+            depthFormat != MTLPixelFormatInvalid ? passDepthStencil : nil;
+        pass.stencilAttachment.texture =
+            stencilFormat != MTLPixelFormatInvalid ? passDepthStencil : nil;
+        if (depthFormat != MTLPixelFormatInvalid) {
             pass.depthAttachment.storeAction = MTLStoreActionStore;
-            pass.stencilAttachment.storeAction = MTLStoreActionStore;
             if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_DEPTH_BUFFER_BIT)) {
                 pass.depthAttachment.loadAction = MTLLoadActionClear;
                 pass.depthAttachment.clearDepth = pendingClearDepth;
             } else {
                 pass.depthAttachment.loadAction = MTLLoadActionLoad;
             }
+        } else {
+            pass.depthAttachment.loadAction = MTLLoadActionDontCare;
+            pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+        }
+        if (stencilFormat != MTLPixelFormatInvalid) {
+            pass.stencilAttachment.storeAction = MTLStoreActionStore;
             if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_STENCIL_BUFFER_BIT)) {
                 pass.stencilAttachment.loadAction = MTLLoadActionClear;
                 pass.stencilAttachment.clearStencil = pendingClearStencil;
@@ -19621,8 +19886,6 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 pass.stencilAttachment.loadAction = MTLLoadActionLoad;
             }
         } else {
-            pass.depthAttachment.loadAction = MTLLoadActionDontCare;
-            pass.depthAttachment.storeAction = MTLStoreActionDontCare;
             pass.stencilAttachment.loadAction = MTLLoadActionDontCare;
             pass.stencilAttachment.storeAction = MTLStoreActionDontCare;
         }
@@ -19772,6 +20035,62 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         const Matrix4 mvp = info.mvp;
         [encoder setVertexBytes:mvp.m.data() length:sizeof(float) * 16 atIndex:1];
 
+        struct ImmediateTextureState {
+            std::uint32_t envMode;
+            std::uint32_t baseClass;
+            std::uint32_t target;
+            std::uint32_t wrapS;
+            std::uint32_t wrapT;
+            std::uint32_t minFilter;
+            std::uint32_t magFilter;
+            std::uint32_t textureSampleYFlip;
+            float borderColor[4];
+            float envColor[4];
+            std::uint32_t alphaTestEnabled;
+            std::uint32_t alphaTestFunc;
+            float alphaTestRef;
+            std::uint32_t alphaPad;
+        };
+        const bool compatLegacyTextureState =
+            appglCompatProfileEnabled() && info.textureBaseClass != 0u;
+        const bool compatAlphaTestState =
+            appglCompatFeatureEnabled(AppGLCompatFeature::AlphaTest) &&
+            info.alphaTestEnabled &&
+            info.alphaTestFunc != GL_ALWAYS;
+        const ImmediateTextureState textureState = {
+            compatLegacyTextureState
+                ? static_cast<std::uint32_t>(info.textureEnvMode)
+                : 0u,
+            compatLegacyTextureState ? info.textureBaseClass : 0u,
+            info.textureTarget == GL_TEXTURE_1D
+                ? static_cast<std::uint32_t>(GL_TEXTURE_1D)
+                : 0u,
+            static_cast<std::uint32_t>(info.textureWrapS),
+            static_cast<std::uint32_t>(info.textureWrapT),
+            static_cast<std::uint32_t>(info.textureMinFilter),
+            static_cast<std::uint32_t>(info.textureMagFilter),
+            info.textureSampleYFlip ? 1u : 0u,
+            {
+                info.textureBorderColor[0],
+                info.textureBorderColor[1],
+                info.textureBorderColor[2],
+                info.textureBorderColor[3],
+            },
+            {
+                info.textureEnvColor[0],
+                info.textureEnvColor[1],
+                info.textureEnvColor[2],
+                info.textureEnvColor[3],
+            },
+            compatAlphaTestState ? 1u : 0u,
+            static_cast<std::uint32_t>(info.alphaTestFunc),
+            info.alphaTestRef,
+            0u,
+        };
+        [encoder setFragmentBytes:&textureState
+                            length:sizeof(textureState)
+                           atIndex:0];
+
         if (immediateTexture != nil) {
             [encoder setFragmentTexture:immediateTexture atIndex:0];
             id<MTLSamplerState> samp = info.metalSamplerState != nullptr
@@ -19780,49 +20099,6 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             if (samp != nil) {
                 [encoder setFragmentSamplerState:samp atIndex:0];
             }
-            struct ImmediateTextureState {
-                std::uint32_t envMode;
-                std::uint32_t baseClass;
-                std::uint32_t target;
-                std::uint32_t wrapS;
-                std::uint32_t wrapT;
-                std::uint32_t minFilter;
-                std::uint32_t magFilter;
-                std::uint32_t pad;
-                float borderColor[4];
-                float envColor[4];
-            };
-            const bool compatLegacyTextureState =
-                appglCompatProfileEnabled() && info.textureBaseClass != 0u;
-            const ImmediateTextureState textureState = {
-                compatLegacyTextureState
-                    ? static_cast<std::uint32_t>(info.textureEnvMode)
-                    : 0u,
-                compatLegacyTextureState ? info.textureBaseClass : 0u,
-                info.textureTarget == GL_TEXTURE_1D
-                    ? static_cast<std::uint32_t>(GL_TEXTURE_1D)
-                    : 0u,
-                static_cast<std::uint32_t>(info.textureWrapS),
-                static_cast<std::uint32_t>(info.textureWrapT),
-                static_cast<std::uint32_t>(info.textureMinFilter),
-                static_cast<std::uint32_t>(info.textureMagFilter),
-                0u,
-                {
-                    info.textureBorderColor[0],
-                    info.textureBorderColor[1],
-                    info.textureBorderColor[2],
-                    info.textureBorderColor[3],
-                },
-                {
-                    info.textureEnvColor[0],
-                    info.textureEnvColor[1],
-                    info.textureEnvColor[2],
-                    info.textureEnvColor[3],
-                }
-            };
-            [encoder setFragmentBytes:&textureState
-                                length:sizeof(textureState)
-                               atIndex:0];
         }
 
         [encoder drawPrimitives:primitive
