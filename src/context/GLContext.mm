@@ -23373,8 +23373,8 @@ struct GLContext::Impl {
                         }
                         if (att->multiview) {
                             layers = std::max<GLsizei>(att->numViews, 1);
-                        }
-                        if (layers > 1) {
+                            *outColorArrayLength = static_cast<std::uint32_t>(layers);
+                        } else if (layers > 1) {
                             *outColorArrayLength = static_cast<std::uint32_t>(layers);
                         }
                     }
@@ -47034,13 +47034,14 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
         GLsizei fboW = 0;
         GLsizei fboH = 0;
         void* fboDSTex = nullptr;
+        std::uint32_t fboArrayLen = 0;
         std::uint32_t fboDSSlice = 0;
         std::uint32_t fboDSLevel = 0;
         std::array<void*, 7> extraColTex = {};
         std::array<std::uint32_t, 8> colSlices = {};
         std::array<std::uint32_t, 8> colLevels = {};
         void* fboColTex = resolveFBOColorTarget(
-            fboW, fboH, fboDSTex, nullptr,
+            fboW, fboH, fboDSTex, &fboArrayLen,
             &extraColTex, &colSlices, &colLevels,
             &fboDSSlice, &fboDSLevel);
         if (fboColTex != nullptr || fboDSTex != nullptr) {
@@ -47048,6 +47049,7 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
             tdi.fboAdditionalColorTextures = extraColTex;
             tdi.fboColorSlices = colSlices;
             tdi.fboColorLevels = colLevels;
+            tdi.fboColorArrayLength = fboArrayLen;
             tdi.fboDepthStencilTexture = fboDSTex;
             tdi.fboDepthStencilSlice = fboDSSlice;
             tdi.fboDepthStencilLevel = fboDSLevel;
@@ -48068,13 +48070,14 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
     {
         GLsizei fboW = 0, fboH = 0;
         void* fboDSTex = nullptr;
+        std::uint32_t fboArrayLen = 0;
         std::uint32_t fboDSSlice = 0;
         std::uint32_t fboDSLevel = 0;
         std::array<void*, 7> extraColTex = {};
         std::array<std::uint32_t, 8> colSlices = {};
         std::array<std::uint32_t, 8> colLevels = {};
         void* fboColTex = resolveFBOColorTarget(
-            fboW, fboH, fboDSTex, nullptr,
+            fboW, fboH, fboDSTex, &fboArrayLen,
             &extraColTex, &colSlices, &colLevels,
             &fboDSSlice, &fboDSLevel);
         if (fboColTex != nullptr || fboDSTex != nullptr) {
@@ -48082,6 +48085,7 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
             tdi.fboAdditionalColorTextures = extraColTex;
             tdi.fboColorSlices = colSlices;
             tdi.fboColorLevels = colLevels;
+            tdi.fboColorArrayLength = fboArrayLen;
             tdi.fboDepthStencilTexture = fboDSTex;
             tdi.fboDepthStencilSlice = fboDSSlice;
             tdi.fboDepthStencilLevel = fboDSLevel;

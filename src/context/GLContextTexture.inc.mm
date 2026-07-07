@@ -2098,7 +2098,8 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
     // (== offset 0) is a valid PBO destination.
     if (pixels == nullptr && !packPBOBound) return true;
 
-    if (appglCompatProfileEnabled() && !packPBOBound) {
+    if (appglCompatProfileEnabled() && !packPBOBound &&
+        obj->colorShadowAuthoritative) {
         const auto levelIt = obj->levels.find(level);
         if (levelIt != obj->levels.end() && levelIt->second.defined &&
             isLegacyCompatTextureFormatCombo(

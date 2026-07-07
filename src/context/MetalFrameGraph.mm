@@ -5710,6 +5710,84 @@ static std::string translatedVertexMslWithFixedPointSize(
     return rewritten;
 }
 
+static std::string translatedVertexMslWithoutSingleViewMultiviewLayer(
+    const std::string& vertexMSL)
+{
+    if (vertexMSL.find("spvViewMask") == std::string::npos ||
+        vertexMSL.find("[[render_target_array_index]]") == std::string::npos) {
+        return std::string();
+    }
+
+    std::string rewritten = vertexMSL;
+    const std::string layerField =
+        "    uint gl_Layer [[render_target_array_index]];\n";
+    const std::string layerAssign =
+        "    out.gl_Layer = gl_ViewIndex - spvViewMask[0];\n";
+    const std::string viewIndexAssign =
+        "    uint gl_ViewIndex = spvViewMask[0] + (gl_InstanceIndex - gl_BaseInstance) % spvViewMask[1];\n";
+    const std::string instanceIndexAssign =
+        "    gl_InstanceIndex = (gl_InstanceIndex - gl_BaseInstance) / spvViewMask[1] + gl_BaseInstance;\n";
+    const std::size_t entryPos = rewritten.find("vertex main0_out main0(");
+    const std::size_t bodyPos = entryPos == std::string::npos
+        ? std::string::npos
+        : rewritten.find('{', entryPos);
+    if (entryPos == std::string::npos || bodyPos == std::string::npos) {
+        return std::string();
+    }
+    auto eraseEntryParameter = [&](const std::string& parameter) {
+        const std::string commaParameter = ", " + parameter;
+        std::size_t pos = rewritten.find(commaParameter, entryPos);
+        if (pos != std::string::npos && pos < bodyPos) {
+            rewritten.erase(pos, commaParameter.size());
+            return true;
+        }
+        const std::string parameterComma = parameter + ", ";
+        pos = rewritten.find(parameterComma, entryPos);
+        if (pos != std::string::npos && pos < bodyPos) {
+            rewritten.erase(pos, parameterComma.size());
+            return true;
+        }
+        return false;
+    };
+    const std::size_t fieldPos = rewritten.find(layerField);
+    if (fieldPos == std::string::npos) {
+        return std::string();
+    }
+    rewritten.erase(fieldPos, layerField.size());
+    const std::size_t assignPos = rewritten.find(layerAssign);
+    if (assignPos == std::string::npos) {
+        return std::string();
+    }
+    rewritten.erase(assignPos, layerAssign.size());
+    const std::size_t viewIndexPos = rewritten.find(viewIndexAssign);
+    if (viewIndexPos == std::string::npos) {
+        return std::string();
+    }
+    rewritten.replace(viewIndexPos, viewIndexAssign.size(),
+                      "    uint gl_ViewIndex = 0u;\n");
+    const std::size_t instanceIndexPos = rewritten.find(instanceIndexAssign);
+    if (instanceIndexPos == std::string::npos) {
+        return std::string();
+    }
+    rewritten.erase(instanceIndexPos, instanceIndexAssign.size());
+    if (!eraseEntryParameter("constant uint* spvViewMask [[buffer(24)]]")) {
+        return std::string();
+    }
+    const std::size_t rewrittenBodyPos = rewritten.find('{', entryPos);
+    if (rewrittenBodyPos == std::string::npos) {
+        return std::string();
+    }
+    if (rewritten.find("gl_BaseInstance", rewrittenBodyPos) ==
+        std::string::npos) {
+        eraseEntryParameter("uint gl_BaseInstance [[base_instance]]");
+    }
+    if (rewritten.find("gl_InstanceIndex", rewrittenBodyPos) ==
+        std::string::npos) {
+        eraseEntryParameter("uint gl_InstanceIndex [[instance_id]]");
+    }
+    return rewritten;
+}
+
 static std::string translatedFragmentMslWithLowerLeftPointCoord(
     const std::string& fragmentMSL)
 {
@@ -7790,6 +7868,23 @@ struct MetalFrameGraph::Impl {
                 info.metalVertexFunctionOut = nullptr;
             }
         }
+        std::string singleViewMultiviewVertexMSL;
+        bool singleViewMultiviewLayerRewritten = false;
+        if (info.fboColorArrayLength == 1 &&
+            info.vertexMSL->find("spvViewMask") != std::string::npos &&
+            info.vertexMSL->find("[[render_target_array_index]]") !=
+                std::string::npos) {
+            singleViewMultiviewVertexMSL =
+                translatedVertexMslWithoutSingleViewMultiviewLayer(
+                    *info.vertexMSL);
+            if (!singleViewMultiviewVertexMSL.empty()) {
+                info.vertexMSL = &singleViewMultiviewVertexMSL;
+                info.programMslVolatile = true;
+                info.metalVertexFunction = nullptr;
+                info.metalVertexFunctionOut = nullptr;
+                singleViewMultiviewLayerRewritten = true;
+            }
+        }
         // C52 rider: latched — getenv was paid per draw (Stage-A d3e62ea class).
         static const bool traceViewportLayerArrayEnv =
             std::getenv("APPGL_TRACE_VIEWPORT_LAYER_ARRAY") != nullptr;
@@ -8077,6 +8172,8 @@ struct MetalFrameGraph::Impl {
         if (translatedPlan != nullptr) {
             if (!translatedPlan->valid) {
                 rejectTranslatedPlan("invalid");
+            } else if (singleViewMultiviewLayerRewritten) {
+                rejectTranslatedPlan("single_view_multiview");
             } else if (alphaTestFragmentRewritten) {
                 rejectTranslatedPlan("alpha_test");
             } else if (fragmentOutputAbiRewritten) {
@@ -8220,12 +8317,22 @@ struct MetalFrameGraph::Impl {
                                              AppGLCommandReason::TranslatedDraw);
         }
         info.submissionGroup.argumentBuffersEnabled = useArgBuf;
-        constexpr std::uint32_t kOVRMultiviewViewCount = 2;
-        const std::uint32_t ovrViewMask[2] = {0u, kOVRMultiviewViewCount};
+        const std::uint32_t ovrMultiviewViewCount =
+            vertexUsesMultiviewViewMask
+                ? std::max<std::uint32_t>(
+                      info.fboColorArrayLength > 0
+                          ? info.fboColorArrayLength
+                          : 2u,
+                      1u)
+                : 1u;
+        const std::uint32_t ovrViewMask[2] = {
+            0u,
+            ovrMultiviewViewCount,
+        };
         const GLsizei effectiveInstanceCount =
             vertexUsesMultiviewViewMask
                 ? std::max<GLsizei>(info.instanceCount, 1) *
-                      static_cast<GLsizei>(kOVRMultiviewViewCount)
+                      static_cast<GLsizei>(ovrMultiviewViewCount)
                 : info.instanceCount;
         id<MTLArgumentEncoder> fragArgEncoderSet0 = nil;
         id<MTLArgumentEncoder> vertArgEncoderSet0 = nil;
@@ -9737,8 +9844,10 @@ struct MetalFrameGraph::Impl {
                         if (active < rtal) rtal = active;
                     }
                 }
-                pass.renderTargetArrayLength = rtal;
-                rateMapLayerCount = rtal;
+                if (rtal > 1) {
+                    pass.renderTargetArrayLength = rtal;
+                    rateMapLayerCount = rtal;
+                }
             }
             if (passDepthStencil != nil) {
                 // CKPT168 (Sprint 14 Day 15): attach to depth/stencil
@@ -18605,6 +18714,7 @@ fragment float4 appgl_immediate_textured_1d_fs(
         MTLPixelFormat colorFormat,
         MTLPixelFormat depthFormat,
         MTLPixelFormat stencilFormat,
+        NSUInteger sampleCount,
         const TranslatedDrawInfo::BlendState& blend)
     {
         std::uint64_t key = 0;
@@ -18620,6 +18730,7 @@ fragment float4 appgl_immediate_textured_1d_fs(
         key |= (static_cast<std::uint64_t>(glBlendFactorToMTL(blend.dstRGB)) & 0xFULL) << 37;
         key |= (static_cast<std::uint64_t>(glBlendFactorToMTL(blend.srcAlpha)) & 0xFULL) << 33;
         key |= (static_cast<std::uint64_t>(glBlendFactorToMTL(blend.dstAlpha)) & 0xFULL) << 29;
+        key |= (static_cast<std::uint64_t>(std::max<NSUInteger>(sampleCount, 1u)) & 0x1FULL) << 16;
         key |= (static_cast<std::uint64_t>(depthFormat) & 0xFFULL) << 8;
         key |= static_cast<std::uint64_t>(stencilFormat) & 0xFFULL;
         return key;
@@ -18628,9 +18739,11 @@ fragment float4 appgl_immediate_textured_1d_fs(
     bool ensureImmediateModePipelines(MTLPixelFormat colorFormat,
                                       MTLPixelFormat depthFormat,
                                       MTLPixelFormat stencilFormat,
+                                      NSUInteger sampleCount,
                                       const TranslatedDrawInfo::BlendState& blend) {
         const std::uint64_t pipelineKey =
-            computeImmediateModePipelineKey(colorFormat, depthFormat, stencilFormat, blend);
+            computeImmediateModePipelineKey(
+                colorFormat, depthFormat, stencilFormat, sampleCount, blend);
         if (immediateModeColorPipelineState != nil
             && immediateModeTextured2DPipelineState != nil
             && immediateModeTextured1DPipelineState != nil
@@ -18661,6 +18774,7 @@ fragment float4 appgl_immediate_textured_1d_fs(
             desc.vertexFunction = immediateModeVertexFn;
             desc.fragmentFunction = fragmentFn;
             desc.vertexDescriptor = vertexDescriptor;
+            desc.rasterSampleCount = std::max<NSUInteger>(sampleCount, 1u);
             desc.colorAttachments[0].pixelFormat = colorFormat;
             MTLRenderPipelineColorAttachmentDescriptor* colorDesc = desc.colorAttachments[0];
             colorDesc.blendingEnabled = blend.enabled ? YES : NO;
@@ -19961,7 +20075,14 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 stencilFormat = pf;
             }
         }
-        if (!ensureImmediateModePipelines(colorFormat, depthFormat, stencilFormat, info.blend)) {
+        const NSUInteger attachmentSampleCount =
+            colorTexture != nil ? std::max<NSUInteger>(colorTexture.sampleCount, 1u) : 1u;
+        if (!ensureImmediateModePipelines(
+                colorFormat,
+                depthFormat,
+                stencilFormat,
+                attachmentSampleCount,
+                info.blend)) {
             return false;
         }
 
