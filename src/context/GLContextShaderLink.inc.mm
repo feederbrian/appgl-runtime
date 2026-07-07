@@ -1099,6 +1099,16 @@ bool GLContext::linkProgram(GLuint program) {
             findLocByName(SUN::kTextureEnvColor);
         programObject->synthesizedMatrixSlots.lightModelAmbient =
             findLocByName(SUN::kLightModelAmbient);
+        programObject->synthesizedMatrixSlots.fogColor =
+            findLocByName(SUN::kFogColor);
+        programObject->synthesizedMatrixSlots.fogDensity =
+            findLocByName(SUN::kFogDensity);
+        programObject->synthesizedMatrixSlots.fogStart =
+            findLocByName(SUN::kFogStart);
+        programObject->synthesizedMatrixSlots.fogEnd =
+            findLocByName(SUN::kFogEnd);
+        programObject->synthesizedMatrixSlots.fogScale =
+            findLocByName(SUN::kFogScale);
         programObject->shaderDrawIDUniformLocation =
             findLocByName("_appgl_DrawID");
         programObject->shaderBaseVertexUniformLocation =
@@ -1624,6 +1634,12 @@ bool GLContext::linkProgram(GLuint program) {
                     addOutputDecl(spec.name, spec, spec.name);
                 }
             }
+        }
+        if (auto fogCoordIt = outputTypeMap.find("appgl_FogFragCoord");
+            fogCoordIt != outputTypeMap.end()) {
+            outputTypeMap["gl_FogFragCoord"] = fogCoordIt->second;
+            outputTypeMap["gl_FogFragCoord"].tfSourceName =
+                "appgl_FogFragCoord";
         }
 
         // Special interleaved-mode names that are NOT real varyings:

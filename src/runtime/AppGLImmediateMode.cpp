@@ -1554,6 +1554,22 @@ extern "C" void APIENTRY glColor4ubv(const GLubyte* v) {
 
 // ── glTexCoord* (single-unit convenience — routes to unit 0) ─────────
 
+extern "C" void APIENTRY glTexCoord1f(GLfloat s) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->immediateTexCoord(0u, s, 0.0f, 0.0f, 1.0f);
+}
+
+extern "C" void APIENTRY glTexCoord1fv(const GLfloat* v) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr || v == nullptr) {
+        return;
+    }
+    ctx->immediateTexCoord(0u, v[0], 0.0f, 0.0f, 1.0f);
+}
+
 extern "C" void APIENTRY glTexCoord2f(GLfloat s, GLfloat t) {
     auto* ctx = immediateContext();
     if (ctx == nullptr) {
@@ -1618,6 +1634,22 @@ unsigned int multiTextureUnitIndex(GLenum target) {
 }
 
 }  // namespace
+
+extern "C" void APIENTRY glMultiTexCoord1f(GLenum target, GLfloat s) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->immediateTexCoord(multiTextureUnitIndex(target), s, 0.0f, 0.0f, 1.0f);
+}
+
+extern "C" void APIENTRY glMultiTexCoord1fv(GLenum target, const GLfloat* v) {
+    auto* ctx = immediateContext();
+    if (ctx == nullptr || v == nullptr) {
+        return;
+    }
+    ctx->immediateTexCoord(multiTextureUnitIndex(target), v[0], 0.0f, 0.0f, 1.0f);
+}
 
 extern "C" void APIENTRY glMultiTexCoord2f(GLenum target, GLfloat s, GLfloat t) {
     auto* ctx = immediateContext();

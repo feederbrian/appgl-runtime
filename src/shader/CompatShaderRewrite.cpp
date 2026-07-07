@@ -835,6 +835,89 @@ void replaceLiteral(std::string& src,
     }
 }
 
+bool rewriteFogFragCoordInputAccess(std::string& src) {
+    bool didReplace = false;
+    std::size_t pos = 0;
+    while (true) {
+        const std::size_t found = src.find("gl_in", pos);
+        if (found == std::string::npos) {
+            return didReplace;
+        }
+        const bool leftOk = (found == 0) || !isIdentChar(src[found - 1]);
+        const std::size_t nameEnd = found + 5;
+        const bool rightOk =
+            (nameEnd >= src.size()) || !isIdentChar(src[nameEnd]);
+        if (!leftOk || !rightOk) {
+            pos = found + 1;
+            continue;
+        }
+
+        std::size_t p = nameEnd;
+        while (p < src.size() &&
+               std::isspace(static_cast<unsigned char>(src[p]))) {
+            ++p;
+        }
+        if (p >= src.size() || src[p] != '[') {
+            pos = nameEnd;
+            continue;
+        }
+        const std::size_t bracketStart = p;
+        int depth = 0;
+        while (p < src.size()) {
+            if (src[p] == '[') {
+                ++depth;
+            } else if (src[p] == ']') {
+                --depth;
+                if (depth == 0) {
+                    ++p;
+                    break;
+                }
+            }
+            ++p;
+        }
+        if (depth != 0) {
+            pos = nameEnd;
+            continue;
+        }
+        const std::size_t bracketEnd = p;
+        while (p < src.size() &&
+               std::isspace(static_cast<unsigned char>(src[p]))) {
+            ++p;
+        }
+        if (p >= src.size() || src[p] != '.') {
+            pos = bracketEnd;
+            continue;
+        }
+        ++p;
+        while (p < src.size() &&
+               std::isspace(static_cast<unsigned char>(src[p]))) {
+            ++p;
+        }
+        constexpr std::string_view kFogFragCoord = "gl_FogFragCoord";
+        if (p + kFogFragCoord.size() > src.size() ||
+            src.compare(p, kFogFragCoord.size(), kFogFragCoord) != 0) {
+            pos = p;
+            continue;
+        }
+        const std::size_t coordEnd = p + kFogFragCoord.size();
+        if (coordEnd < src.size() && isIdentChar(src[coordEnd])) {
+            pos = coordEnd;
+            continue;
+        }
+
+        std::string replacement = "appgl_FogFragCoordIn";
+        replacement.append(src, bracketStart, bracketEnd - bracketStart);
+        src.replace(found, coordEnd - found, replacement);
+        pos = found + replacement.size();
+        didReplace = true;
+    }
+}
+
+bool containsFogFragCoordInputAccess(std::string_view src) {
+    std::string scratch(src);
+    return rewriteFogFragCoordInputAccess(scratch);
+}
+
 // Locate the first `#version` directive and the index just past its
 // terminating newline. Returns string::npos on failure.
 //
@@ -1675,6 +1758,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
 
     const bool isVertex = (stage == GL_VERTEX_SHADER);
     const bool isFragment = (stage == GL_FRAGMENT_SHADER);
+    const bool isGeometry = (stage == GL_GEOMETRY_SHADER);
     const bool hasGpuShader4Directive =
         result.source.find("GL_EXT_gpu_shader4") != std::string::npos;
 
@@ -1716,6 +1800,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     if (isFragment) {
         legacy.fragColor = containsCodeIdentifier(result.source, "gl_FragColor");
         legacy.fragDataMax = scanFragDataMax(source);
+        legacy.usesFragmentColor = containsIdentifier(source, "gl_Color");
     }
     legacy.texCoordMax = scanTexCoordMax(source);
     // gl_Fog.* field accesses — individual scan per field so the
@@ -1725,6 +1810,12 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     legacy.usesFogStart   = (source.find("gl_Fog.start")   != std::string_view::npos);
     legacy.usesFogEnd     = (source.find("gl_Fog.end")     != std::string_view::npos);
     legacy.usesFogScale   = (source.find("gl_Fog.scale")   != std::string_view::npos);
+    legacy.usesFogFragCoord = containsIdentifier(source, "gl_FogFragCoord");
+    legacy.usesFogFragCoordInput =
+        isGeometry && containsFogFragCoordInputAccess(source);
+    if (isVertex) {
+        legacy.usesFrontColor = containsIdentifier(source, "gl_FrontColor");
+    }
     legacy.usesTextureEnvColor =
         containsIdentifier(source, "gl_TextureEnvColor");
     legacy.usesLightModelAmbient =
@@ -2253,6 +2344,20 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     if (legacy.usesFogScale) {
         replaceLiteral(result.source, "gl_Fog.scale", "appgl_FogScale");
     }
+    if (legacy.usesFogFragCoordInput) {
+        rewriteFogFragCoordInputAccess(result.source);
+    }
+    if (legacy.usesFogFragCoord) {
+        replaceIdentifier(result.source,
+                          "gl_FogFragCoord",
+                          "appgl_FogFragCoord");
+    }
+    if (legacy.usesFrontColor) {
+        replaceIdentifier(result.source, "gl_FrontColor", "appgl_FrontColor");
+    }
+    if (legacy.usesFragmentColor) {
+        replaceIdentifier(result.source, "gl_Color", "appgl_FrontColor");
+    }
     if (legacy.anyLight()) {
         rewriteLightSourceSubscripts(result.source);
     }
@@ -2444,33 +2549,54 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         }
     }
 
-    // 5e. fw¹⁹ — fog uniforms with GL 1.x spec defaults. fw¹⁵'s uniform
-    // default-initializer scanner picks these up and seeds the link-time
-    // uniform-value table, so the shader sees the same default fog
-    // state a vendor compat driver would expose at boot (clear-color
-    // fog, density 1, linear [0,1]). Spring may change these via glFog*
-    // calls which we currently silently drop — if fw¹⁹ verification
-    // shows fog rendering wrong, the next round adds a state-mirror
-    // capture path for glFog*.
+    // 5d.1. gl_FogFragCoord is a legacy stage varying.
+    if (legacy.usesFogFragCoord) {
+        if (isVertex) {
+            preamble.append("out float appgl_FogFragCoord;\n");
+        } else if (isGeometry) {
+            if (legacy.usesFogFragCoordInput) {
+                preamble.append("in float appgl_FogFragCoordIn[];\n");
+            }
+            preamble.append("out float appgl_FogFragCoord;\n");
+        } else if (isFragment) {
+            preamble.append("in float appgl_FogFragCoord;\n");
+        }
+    }
+
+    if (legacy.usesFrontColor && isVertex) {
+        preamble.append("out vec4 appgl_FrontColor;\n");
+    }
+    if (legacy.usesFragmentColor && isFragment) {
+        preamble.append("in vec4 appgl_FrontColor;\n");
+    }
+
+    // 5e. fw¹⁹/R05-2 — fog uniforms. Declaration initializers preserve
+    // the GL 1.x defaults until draw-time fixed-function state is pushed
+    // through the synthesized-uniform path.
     if (legacy.usesFogColor) {
-        preamble.append(
-            "uniform vec4 appgl_FogColor = vec4(0.0, 0.0, 0.0, 0.0);\n");
+        preamble.append("uniform vec4 ")
+            .append(SUN::kFogColor)
+            .append(" = vec4(0.0, 0.0, 0.0, 0.0);\n");
     }
     if (legacy.usesFogDensity) {
-        preamble.append(
-            "uniform float appgl_FogDensity = 1.0;\n");
+        preamble.append("uniform float ")
+            .append(SUN::kFogDensity)
+            .append(" = 1.0;\n");
     }
     if (legacy.usesFogStart) {
-        preamble.append(
-            "uniform float appgl_FogStart = 0.0;\n");
+        preamble.append("uniform float ")
+            .append(SUN::kFogStart)
+            .append(" = 0.0;\n");
     }
     if (legacy.usesFogEnd) {
-        preamble.append(
-            "uniform float appgl_FogEnd = 1.0;\n");
+        preamble.append("uniform float ")
+            .append(SUN::kFogEnd)
+            .append(" = 1.0;\n");
     }
     if (legacy.usesFogScale) {
-        preamble.append(
-            "uniform float appgl_FogScale = 1.0;\n");
+        preamble.append("uniform float ")
+            .append(SUN::kFogScale)
+            .append(" = 1.0;\n");
     }
 
     if (legacy.usesTextureEnvColor) {

@@ -806,20 +806,6 @@ extern "C" void APIENTRY glMultiTexCoord1dv(GLenum target, const GLdouble *v) {
     return;
 }
 
-extern "C" void APIENTRY glMultiTexCoord1f(GLenum target, GLfloat s) {
-    (void)target;
-    (void)s;
-    appgl::Runtime::shared().recordFixedFunctionStub("glMultiTexCoord1f");
-    return;
-}
-
-extern "C" void APIENTRY glMultiTexCoord1fv(GLenum target, const GLfloat *v) {
-    (void)target;
-    (void)v;
-    appgl::Runtime::shared().recordFixedFunctionStub("glMultiTexCoord1fv");
-    return;
-}
-
 extern "C" void APIENTRY glMultiTexCoord1i(GLenum target, GLint s) {
     (void)target;
     (void)s;
@@ -1239,18 +1225,6 @@ extern "C" void APIENTRY glTexCoord1d(GLdouble s) {
 extern "C" void APIENTRY glTexCoord1dv(const GLdouble *v) {
     (void)v;
     appgl::Runtime::shared().recordFixedFunctionStub("glTexCoord1dv");
-    return;
-}
-
-extern "C" void APIENTRY glTexCoord1f(GLfloat s) {
-    (void)s;
-    appgl::Runtime::shared().recordFixedFunctionStub("glTexCoord1f");
-    return;
-}
-
-extern "C" void APIENTRY glTexCoord1fv(const GLfloat *v) {
-    (void)v;
-    appgl::Runtime::shared().recordFixedFunctionStub("glTexCoord1fv");
     return;
 }
 

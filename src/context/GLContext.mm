@@ -37898,6 +37898,13 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                         outMatchedSource = true;
                         return true;
                     }
+                    if (lookupName == "gl_FogFragCoord" &&
+                        ed.varyingNames[k] == "appgl_FogFragCoord") {
+                        outIndex = k;
+                        outOffset = off;
+                        outMatchedSource = true;
+                        return true;
+                    }
                     off += ed.varyingWidths[k];
                 }
                 off = 4;
@@ -42911,7 +42918,11 @@ static bool pushSynthesizedMatrixUniforms(
     GLint baseVertex = 0,
     GLuint baseInstance = 0,
     const GLfloat* textureEnvColor = nullptr,
-    const GLfloat* lightModelAmbient = nullptr)
+    const GLfloat* lightModelAmbient = nullptr,
+    const GLfloat* fogColor = nullptr,
+    GLfloat fogDensity = 1.0f,
+    GLfloat fogStart = 0.0f,
+    GLfloat fogEnd = 1.0f)
 {
     bool changed = false;
     if (program.shaderDrawIDUniformLocation >= 0) {
@@ -43033,6 +43044,34 @@ static bool pushSynthesizedMatrixUniforms(
         changed |= assignSynthesizedUniformFloats(
             value, GL_FLOAT_VEC4, 1, ambient, 4);
     }
+    if (slots.fogColor >= 0) {
+        const GLfloat defaultFogColor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        const GLfloat* color = fogColor != nullptr ? fogColor : defaultFogColor;
+        auto& value = program.uniformValues[slots.fogColor];
+        changed |= assignSynthesizedUniformFloats(
+            value, GL_FLOAT_VEC4, 1, color, 4);
+    }
+    if (slots.fogDensity >= 0) {
+        auto& value = program.uniformValues[slots.fogDensity];
+        changed |= assignSynthesizedUniformFloats(
+            value, GL_FLOAT, 1, &fogDensity, 1);
+    }
+    if (slots.fogStart >= 0) {
+        auto& value = program.uniformValues[slots.fogStart];
+        changed |= assignSynthesizedUniformFloats(
+            value, GL_FLOAT, 1, &fogStart, 1);
+    }
+    if (slots.fogEnd >= 0) {
+        auto& value = program.uniformValues[slots.fogEnd];
+        changed |= assignSynthesizedUniformFloats(
+            value, GL_FLOAT, 1, &fogEnd, 1);
+    }
+    if (slots.fogScale >= 0) {
+        const GLfloat fogScale = 1.0f / (fogEnd - fogStart);
+        auto& value = program.uniformValues[slots.fogScale];
+        changed |= assignSynthesizedUniformFloats(
+            value, GL_FLOAT, 1, &fogScale, 1);
+    }
     return changed;
 }
 
@@ -43144,6 +43183,10 @@ static void prepareTranslatedDrawUniformBuffers(
     const MatrixStateMirror& matrixState,
     const GLfloat* textureEnvColor,
     const GLfloat* lightModelAmbient,
+    const GLfloat* fogColor,
+    GLfloat fogDensity,
+    GLfloat fogStart,
+    GLfloat fogEnd,
     GLuint drawID,
     TranslatedDrawInfo& tdi,
     const char* path)
@@ -43160,7 +43203,8 @@ static void prepareTranslatedDrawUniformBuffers(
     if (pushSynthesizedMatrixUniforms(
             program, matrixState, drawID,
             tdi.shaderBaseVertex, tdi.baseInstance,
-            textureEnvColor, lightModelAmbient)) {
+            textureEnvColor, lightModelAmbient,
+            fogColor, fogDensity, fogStart, fogEnd)) {
         program.markUniformsDirty();
     }
 
@@ -46001,7 +46045,8 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     if (!program.fragmentUniformLayout.empty()) {
         if (pushSynthesizedMatrixUniforms(
                 program, matrixState, 0, 0, 0,
-                texEnv.color, lighting.modelAmbient)) {
+                texEnv.color, lighting.modelAmbient,
+                fog.color, fog.density, fog.start, fog.end)) {
             program.markUniformsDirty();
         }
         buildStageUniformBuffer(fragUniformScratch,
@@ -46597,7 +46642,8 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     thread_local std::vector<GLProgramObject::UniformLayoutEntry> meshGsGeomUniformLayout;
     if (pushSynthesizedMatrixUniforms(
             program, matrixState, 0, 0, 0,
-            texEnv.color, lighting.modelAmbient)) {
+            texEnv.color, lighting.modelAmbient,
+            fog.color, fog.density, fog.start, fog.end)) {
         program.markUniformsDirty();
     }
     computeStageUniformLayout(meshGsGeomUniformLayout,
@@ -46739,7 +46785,9 @@ double GLContext::Impl::prepareBindingConstructionUniformBuffers(
         : GLDrawProfileTimePoint{};
     prepareTranslatedDrawUniformBuffers(
         program, programName, matrixState,
-        texEnv.color, lighting.modelAmbient, drawID, info, label);
+        texEnv.color, lighting.modelAmbient,
+        fog.color, fog.density, fog.start, fog.end,
+        drawID, info, label);
     return bindingConstructionSizingProfile.enabled
         ? glDrawProfileElapsedUs(start, glDrawProfileNow())
         : 0.0;
@@ -46878,25 +46926,28 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
     tdi.vertexStride = vertexStride;
 
     tdi.vertexAttributeLayouts.clear();
-    {
+    auto addImmediateAttributeLayout =
+        [&](GLuint location,
+            std::size_t offset,
+            GLint componentCount) {
         TranslatedDrawInfo::VertexAttributeLayout layout;
-        layout.location = 0;
-        layout.offset = 0;
+        layout.location = location;
+        layout.offset = offset;
         layout.glType = GL_FLOAT;
-        layout.glComponentCount = 4;
+        layout.glComponentCount = componentCount;
         layout.glNormalized = GL_FALSE;
         layout.glIsInteger = false;
         tdi.vertexAttributeLayouts.push_back(layout);
-    }
+    };
+    addImmediateAttributeLayout(0, 0, 4);
     if (hasVertexInput(1)) {
-        TranslatedDrawInfo::VertexAttributeLayout layout;
-        layout.location = 1;
-        layout.offset = sizeof(float) * 8u;
-        layout.glType = GL_FLOAT;
-        layout.glComponentCount = 2;
-        layout.glNormalized = GL_FALSE;
-        layout.glIsInteger = false;
-        tdi.vertexAttributeLayouts.push_back(layout);
+        addImmediateAttributeLayout(1, sizeof(float) * 8u, 2);
+    }
+    if (hasVertexInput(3)) {
+        addImmediateAttributeLayout(3, sizeof(float) * 4u, 4);
+    }
+    if (hasVertexInput(8)) {
+        addImmediateAttributeLayout(8, sizeof(float) * 8u, 4);
     }
 
     populateTranslatedDrawFixedFunctionState(
@@ -46967,7 +47018,8 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
         makeTranslatedDrawPreflightSnapshot(
             vaoName, vao,
             /*genericVertexAttributesPrepared=*/true);
-    return encodeTranslatedDrawAndMarkFbo(tdi, &preflight);
+    const bool ok = encodeTranslatedDrawAndMarkFbo(tdi, &preflight);
+    return ok;
 }
 
 bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
@@ -47813,33 +47865,9 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     tdi.pipelineEmulationFragmentProgram =
         program.pipelineEmulationFragmentProgram;
 
-    if (!program.uniformLayoutComputed) {
-        computeStageUniformLayout(program.vertexUniformLayout,
-            program.vertexReflection, uniformsForEmulationStage(program, 0));
-        computeStageUniformLayout(program.fragmentUniformLayout,
-            program.fragmentReflection, uniformsForEmulationStage(program, 4));
-        program.uniformLayoutComputed = true;
-    }
-    thread_local std::vector<std::uint8_t> gsFragUniformScratch;
-    double bindingConstructionUniformPackUs = 0.0;
-    const auto bindingConstructionUniformPackStart =
-        bindingConstructionSizingProfile.enabled
-            ? glDrawProfileNow()
-            : GLDrawProfileTimePoint{};
-    buildStageUniformBuffer(gsFragUniformScratch,
-        program.fragmentReflection, uniformValuesForEmulationStage(program, 4),
-        program.fragmentUniformLayout);
-    if (bindingConstructionSizingProfile.enabled) {
-        bindingConstructionUniformPackUs =
-            glDrawProfileElapsedUs(
-                bindingConstructionUniformPackStart,
-                glDrawProfileNow());
-    }
-    tdi.vertexUniformData = nullptr;
-    tdi.vertexUniformSize = 0;
-    tdi.fragmentUniformData = gsFragUniformScratch.data();
-    tdi.fragmentUniformSize = gsFragUniformScratch.size();
-
+    const double bindingConstructionUniformPackUs =
+        prepareBindingConstructionUniformBuffers(
+            program, programName, 0, tdi, "gs-emul");
     resolveBindingConstructionForTranslatedDraw(
         program, tdi, bindingConstructionUniformPackUs);
 

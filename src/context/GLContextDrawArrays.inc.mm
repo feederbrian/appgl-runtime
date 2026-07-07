@@ -693,6 +693,52 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
     GLuint emulProgramName = (glUseProgramName != 0) ? programName : 0;
     GLProgramObject* emulProgram = impl_->resolvePipelineEmulationProgram(
         glUseProgramName, emulProgramName);
+    auto buildCompatLegacyVertexArrayForEmulation =
+        [&](GLVertexArrayObject& out) -> GLVertexArrayObject* {
+        if (!appglCompatProfileEnabled()) {
+            return nullptr;
+        }
+        const auto& legacyVertexArray = impl_->legacyVertexArray;
+        if (!legacyVertexArray.enabled ||
+            (legacyVertexArray.pointer == nullptr &&
+             legacyVertexArray.bufferName == 0) ||
+            legacyVertexArray.type != GL_FLOAT ||
+            legacyVertexArray.size < 2 ||
+            legacyVertexArray.size > 4) {
+            return nullptr;
+        }
+        impl_->objects->initializeVertexArray(out);
+        if (out.attributes.empty()) {
+            return nullptr;
+        }
+        const std::size_t stride = legacyVertexArray.stride > 0
+            ? static_cast<std::size_t>(legacyVertexArray.stride)
+            : static_cast<std::size_t>(legacyVertexArray.size) *
+                  sizeof(GLfloat);
+        GLVertexAttributeState& attr = out.attributes[0];
+        attr.enabled = true;
+        attr.size = legacyVertexArray.size;
+        attr.type = legacyVertexArray.type;
+        attr.normalized = GL_FALSE;
+        attr.stride = static_cast<GLsizei>(stride);
+        attr.pointer =
+            reinterpret_cast<std::uintptr_t>(legacyVertexArray.pointer);
+        attr.buffer = legacyVertexArray.bufferName;
+        attr.divisor = 0;
+        attr.integer = false;
+        attr.longData = false;
+        attr.bindingIndex = 0;
+        attr.relativeOffset = 0;
+        attr.useSeparatedFormat = false;
+        if (!out.bindingPoints.empty()) {
+            out.bindingPoints[0].buffer = legacyVertexArray.bufferName;
+            out.bindingPoints[0].offset =
+                static_cast<GLintptr>(attr.pointer);
+            out.bindingPoints[0].stride = static_cast<GLsizei>(stride);
+            out.bindingPoints[0].divisor = 0;
+        }
+        return &out;
+    };
     const bool gsRasterExpected =
         !impl_->state->isEnabled(GL_RASTERIZER_DISCARD);
     // Sprint 3 Step 2 Phase 2 [metal-mesh-GS]: try the mesh-shader path
@@ -732,7 +778,19 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             dcr4eRequiresExactCpuGsNoLegacyFallback(
                 emulProgram, mode, isTransformFeedbackActive());
         const GLuint vaoName = impl_->state->boundVertexArray();
-        GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+        GLVertexArrayObject* vao = (vaoName != 0)
+            ? impl_->objects->vertexArrays().get(vaoName)
+            : (appglCompatProfileEnabled()
+                ? impl_->currentVertexArrayOrDefault()
+                : nullptr);
+        GLVertexArrayObject legacyClientVao;
+        if (vaoName == 0) {
+            if (GLVertexArrayObject* legacyVao =
+                    buildCompatLegacyVertexArrayForEmulation(
+                        legacyClientVao)) {
+                vao = legacyVao;
+            }
+        }
         if (vao != nullptr) {
             // Sprint 6 P1 sub-task 3 day 3 (CKPT43): build VS + GS
             // sampler-texture maps so CPU emul can sample real texel
@@ -901,7 +959,19 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
         !program->tessellationEmulated &&
         !program->tessellationInterpreted) {
         const GLuint vaoName2 = impl_->state->boundVertexArray();
-        GLVertexArrayObject* vao = (vaoName2 != 0) ? impl_->objects->vertexArrays().get(vaoName2) : nullptr;
+        GLVertexArrayObject* vao = (vaoName2 != 0)
+            ? impl_->objects->vertexArrays().get(vaoName2)
+            : (appglCompatProfileEnabled()
+                ? impl_->currentVertexArrayOrDefault()
+                : nullptr);
+        GLVertexArrayObject legacyClientVao;
+        if (vaoName2 == 0) {
+            if (GLVertexArrayObject* legacyVao =
+                    buildCompatLegacyVertexArrayForEmulation(
+                        legacyClientVao)) {
+                vao = legacyVao;
+            }
+        }
         if (vao != nullptr && !program->vertexSpirv.empty()) {
             std::vector<std::uint32_t> tfCaptureIndices;
             GLenum tfCaptureTopology = mode;
@@ -1234,10 +1304,17 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
         {
             const auto& legacyVertexArray = impl_->legacyVertexArray;
             bool programWantsLegacyVertex = false;
+            bool programWantsLegacyColor = false;
+            bool programWantsLegacyTexCoord0 = false;
             for (const auto& input : program->vertexReflection.vertexInputs) {
                 if (input.location == 0 || input.sourceLocation == 0) {
                     programWantsLegacyVertex = true;
-                    break;
+                }
+                if (input.location == 3 || input.sourceLocation == 3) {
+                    programWantsLegacyColor = true;
+                }
+                if (input.location == 8 || input.sourceLocation == 8) {
+                    programWantsLegacyTexCoord0 = true;
                 }
             }
             if (appglCompatProfileEnabled() &&
@@ -1252,8 +1329,17 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     : static_cast<std::size_t>(legacyVertexArray.size) * sizeof(GLfloat);
                 const auto* legacyBase =
                     static_cast<const std::uint8_t*>(legacyVertexArray.pointer);
-                std::vector<GLfloat> legacyPositions;
-                legacyPositions.reserve(static_cast<std::size_t>(count) * 4u);
+                const std::size_t legacyPackedFloats =
+                    4u +
+                    (programWantsLegacyColor ? 4u : 0u) +
+                    (programWantsLegacyTexCoord0 ? 4u : 0u);
+                const std::size_t legacyColorOffsetFloats = 4u;
+                const std::size_t legacyTexCoord0OffsetFloats =
+                    legacyColorOffsetFloats +
+                    (programWantsLegacyColor ? 4u : 0u);
+                std::vector<GLfloat> legacyVertexData;
+                legacyVertexData.reserve(
+                    static_cast<std::size_t>(count) * legacyPackedFloats);
                 bool legacyRangeOk = true;
                 for (GLsizei i = 0; i < count; ++i) {
                     const GLint logical = first + i;
@@ -1263,10 +1349,22 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     }
                     const auto* src = reinterpret_cast<const GLfloat*>(
                         legacyBase + static_cast<std::size_t>(logical) * legacyStride);
-                    legacyPositions.push_back(src[0]);
-                    legacyPositions.push_back(src[1]);
-                    legacyPositions.push_back(legacyVertexArray.size >= 3 ? src[2] : 0.0f);
-                    legacyPositions.push_back(legacyVertexArray.size >= 4 ? src[3] : 1.0f);
+                    legacyVertexData.push_back(src[0]);
+                    legacyVertexData.push_back(src[1]);
+                    legacyVertexData.push_back(legacyVertexArray.size >= 3 ? src[2] : 0.0f);
+                    legacyVertexData.push_back(legacyVertexArray.size >= 4 ? src[3] : 1.0f);
+                    if (programWantsLegacyColor) {
+                        legacyVertexData.push_back(impl_->immediate.currentColor[0]);
+                        legacyVertexData.push_back(impl_->immediate.currentColor[1]);
+                        legacyVertexData.push_back(impl_->immediate.currentColor[2]);
+                        legacyVertexData.push_back(impl_->immediate.currentColor[3]);
+                    }
+                    if (programWantsLegacyTexCoord0) {
+                        legacyVertexData.push_back(impl_->immediate.currentTexcoord[0]);
+                        legacyVertexData.push_back(impl_->immediate.currentTexcoord[1]);
+                        legacyVertexData.push_back(impl_->immediate.currentTexcoord[2]);
+                        legacyVertexData.push_back(impl_->immediate.currentTexcoord[3]);
+                    }
                 }
                 if (!legacyRangeOk) {
                     pushError(GL_INVALID_OPERATION);
@@ -1277,19 +1375,31 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 tdi.mode = mode;
                 tdi.vertexCount = count;
                 tdi.baseVertex = 0;
-                tdi.vertexData = legacyPositions.data();
+                tdi.vertexData = legacyVertexData.data();
                 tdi.vertexDataByteCount =
-                    legacyPositions.size() * sizeof(GLfloat);
-                tdi.vertexStride = sizeof(GLfloat) * 4u;
+                    legacyVertexData.size() * sizeof(GLfloat);
+                tdi.vertexStride = sizeof(GLfloat) * legacyPackedFloats;
                 tdi.vertexAttributeLayouts.clear();
-                TranslatedDrawInfo::VertexAttributeLayout layout;
-                layout.location = 0;
-                layout.offset = 0;
-                layout.glType = GL_FLOAT;
-                layout.glComponentCount = 4;
-                layout.glNormalized = GL_FALSE;
-                layout.glIsInteger = false;
-                tdi.vertexAttributeLayouts.push_back(layout);
+                auto addLegacyAttributeLayout =
+                    [&](GLuint location,
+                        std::size_t offsetFloats,
+                        GLint componentCount) {
+                    TranslatedDrawInfo::VertexAttributeLayout layout;
+                    layout.location = location;
+                    layout.offset = offsetFloats * sizeof(GLfloat);
+                    layout.glType = GL_FLOAT;
+                    layout.glComponentCount = componentCount;
+                    layout.glNormalized = GL_FALSE;
+                    layout.glIsInteger = false;
+                    tdi.vertexAttributeLayouts.push_back(layout);
+                };
+                addLegacyAttributeLayout(0, 0, 4);
+                if (programWantsLegacyColor) {
+                    addLegacyAttributeLayout(3, legacyColorOffsetFloats, 4);
+                }
+                if (programWantsLegacyTexCoord0) {
+                    addLegacyAttributeLayout(8, legacyTexCoord0OffsetFloats, 4);
+                }
                 populateTranslatedDrawFixedFunctionState(
                     tdi, *impl_->state,
                     effectiveFragmentShadingRateForProgram(*this, program),

@@ -11028,18 +11028,28 @@ Value readVertexAttribFromVAO(
         }
     }
     std::size_t relativeOffset = 0;
-    if (bufferName == 0) return v;
-    GLBufferObject* buf = objects.buffers().get(bufferName);
-    if (buf == nullptr || buf->shadowBytes.empty()) return v;
+    const std::uint8_t* data = nullptr;
+    std::size_t dataSize = 0;
+    if (bufferName == 0) {
+        if (attr.pointer == 0) return v;
+        data = reinterpret_cast<const std::uint8_t*>(attr.pointer);
+        dataSize = static_cast<std::size_t>(-1);
+        baseOffset = 0;
+    } else {
+        GLBufferObject* buf = objects.buffers().get(bufferName);
+        if (buf == nullptr || buf->shadowBytes.empty()) return v;
+        data = buf->shadowBytes.data();
+        dataSize = buf->shadowBytes.size();
+    }
     const std::size_t fetchIdx = divisor > 0
         ? (static_cast<std::size_t>(std::max<std::int32_t>(instanceIdx, 0)) /
            static_cast<std::size_t>(divisor))
         : vertexIdx;
     const std::size_t byteOffset = baseOffset + relativeOffset + stride * fetchIdx;
-    if (byteOffset + attrBytes > buf->shadowBytes.size()) {
+    if (byteOffset > dataSize || attrBytes > dataSize - byteOffset) {
         return v;
     }
-    const std::uint8_t* src = buf->shadowBytes.data() + byteOffset;
+    const std::uint8_t* src = data + byteOffset;
     // GL 4.6 §10.2 (Vertex Arrays) table 10.8: when a vertex
     // attribute declared as vec4 in the shader receives a
     // narrower stream, missing components are filled with
@@ -11149,11 +11159,17 @@ std::vector<VsAttribFetchSource> buildVsAttribFetchSources(
                 src.stride = static_cast<std::size_t>(std::max<GLsizei>(bp.stride, 0));
             }
         }
-        if (bufferName == 0) continue;
-        GLBufferObject* buf = objects.buffers().get(bufferName);
-        if (buf == nullptr || buf->shadowBytes.empty()) continue;
-        src.data = buf->shadowBytes.data();
-        src.dataSize = buf->shadowBytes.size();
+        if (bufferName == 0) {
+            if (attr.pointer == 0) continue;
+            src.data = reinterpret_cast<const std::uint8_t*>(attr.pointer);
+            src.dataSize = static_cast<std::size_t>(-1);
+            src.baseOffset = 0;
+        } else {
+            GLBufferObject* buf = objects.buffers().get(bufferName);
+            if (buf == nullptr || buf->shadowBytes.empty()) continue;
+            src.data = buf->shadowBytes.data();
+            src.dataSize = buf->shadowBytes.size();
+        }
         src.isUInt = attr.integer && vertexAttribUnsignedIntegerType(attr.type);
         src.isInt = attr.integer && !src.isUInt;
         sources.push_back(src);
@@ -11676,7 +11692,9 @@ EmulatedDraw emulateVsOnlyDrawForTf(
         const VsOutputVaryingInfo* exact = nullptr;
         for (const auto& v : allOutputs) {
             if (v.name == tfName || v.name == lookupName ||
-                (!sourceName.empty() && v.name == sourceName)) {
+                (!sourceName.empty() && v.name == sourceName) ||
+                (lookupName == "gl_FogFragCoord" &&
+                 v.name == "appgl_FogFragCoord")) {
                 exact = &v;
                 break;
             }
@@ -12856,8 +12874,47 @@ EmulatedDraw emulateGeometryDraw(
                     ? priorStageOutput->varyingWidths : vsOutWidths;
                 const auto& gsInLocations = (priorStageOutput != nullptr && priorStageOutput->ok)
                     ? priorStageOutput->varyingLocations : vsOutLocations;
-                Interpreter interp(mod, gsInNames, gsInWidths,
-                                   gsInLocations,
+                std::vector<std::string> fogAliasedGsInNames;
+                std::vector<std::uint32_t> fogAliasedGsInWidths;
+                std::vector<std::uint32_t> fogAliasedGsInLocations;
+                const auto* interpGsInNames = &gsInNames;
+                const auto* interpGsInWidths = &gsInWidths;
+                const auto* interpGsInLocations = &gsInLocations;
+                const auto fogOutIt =
+                    std::find(gsInNames.begin(), gsInNames.end(),
+                              "appgl_FogFragCoord");
+                const auto fogInIt =
+                    std::find(gsInNames.begin(), gsInNames.end(),
+                              "appgl_FogFragCoordIn");
+                if (fogOutIt != gsInNames.end() && fogInIt == gsInNames.end()) {
+                    const std::size_t fogIdx = static_cast<std::size_t>(
+                        std::distance(gsInNames.begin(), fogOutIt));
+                    fogAliasedGsInNames = gsInNames;
+                    fogAliasedGsInWidths = gsInWidths;
+                    fogAliasedGsInLocations = gsInLocations;
+                    fogAliasedGsInNames.push_back("appgl_FogFragCoordIn");
+                    fogAliasedGsInWidths.push_back(
+                        fogIdx < gsInWidths.size() ? gsInWidths[fogIdx] : 1u);
+                    fogAliasedGsInLocations.push_back(
+                        fogIdx < gsInLocations.size() ? gsInLocations[fogIdx] : 0u);
+                    const std::size_t aliasIdx = fogAliasedGsInNames.size() - 1u;
+                    const std::uint32_t width = fogAliasedGsInWidths.back();
+                    for (auto& input : inputs) {
+                        if (input.varyings.size() > aliasIdx) {
+                            continue;
+                        }
+                        if (fogIdx < input.varyings.size()) {
+                            input.varyings.push_back(input.varyings[fogIdx]);
+                        } else {
+                            input.varyings.emplace_back(width, 0.0f);
+                        }
+                    }
+                    interpGsInNames = &fogAliasedGsInNames;
+                    interpGsInWidths = &fogAliasedGsInWidths;
+                    interpGsInLocations = &fogAliasedGsInLocations;
+                }
+                Interpreter interp(mod, *interpGsInNames, *interpGsInWidths,
+                                   *interpGsInLocations,
                                    outNames, outWidths);
                 interp.setUniforms(&gsUniforms);
                 interp.setGsPrimitiveId(static_cast<std::int32_t>(p));

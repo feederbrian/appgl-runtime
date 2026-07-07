@@ -122,13 +122,22 @@ struct LegacyCompatUsage {
     int texCoordMax = -1;
     // gl_Fog.* field accesses. Each sub-field records whether the
     // corresponding flat uniform (`appgl_FogColor`, ...) should be
-    // synthesized. The GL 1.x defaults are baked into the declaration
-    // initializer so no runtime-side plumbing is needed.
+    // synthesized and mirrored from draw-time fixed-function state.
     bool usesFogColor = false;
     bool usesFogDensity = false;
     bool usesFogStart = false;
     bool usesFogEnd = false;
     bool usesFogScale = false;
+    // gl_FogFragCoord stage-bridged varying. In geometry shaders the
+    // input spelling is `gl_in[i].gl_FogFragCoord`, so track that
+    // separately from plain read/write use.
+    bool usesFogFragCoord = false;
+    bool usesFogFragCoordInput = false;
+    // Legacy primary color bridge. VS writes gl_FrontColor from the
+    // current color attribute; FS reads gl_Color as the interpolated
+    // front color.
+    bool usesFrontColor = false;
+    bool usesFragmentColor = false;
     // gl_TextureEnvColor[N] fixed-function texture environment color.
     // Runtime state is mirrored into appgl_TextureEnvColor[] at draw time.
     bool usesTextureEnvColor = false;
@@ -246,6 +255,16 @@ inline constexpr const char* kTextureEnvColor =
     "appgl_TextureEnvColor";  // vec4[8] array
 inline constexpr const char* kLightModelAmbient =
     "appgl_LightModelAmbient";
+inline constexpr const char* kFogColor =
+    "appgl_FogColor";
+inline constexpr const char* kFogDensity =
+    "appgl_FogDensity";
+inline constexpr const char* kFogStart =
+    "appgl_FogStart";
+inline constexpr const char* kFogEnd =
+    "appgl_FogEnd";
+inline constexpr const char* kFogScale =
+    "appgl_FogScale";
 }  // namespace SynthesizedUniformNames
 
 // Length of the synthesized texture matrix array. Matches

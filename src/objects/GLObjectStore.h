@@ -919,12 +919,19 @@ struct GLSynthesizedMatrixSlots {
     // Additional fixed-function state synthesized by the compat rewriter.
     GLint textureEnvColor = -1;
     GLint lightModelAmbient = -1;
+    GLint fogColor = -1;
+    GLint fogDensity = -1;
+    GLint fogStart = -1;
+    GLint fogEnd = -1;
+    GLint fogScale = -1;
 
     bool hasAny() const {
         return modelView >= 0 || projection >= 0 || modelViewProjection >= 0 ||
                modelViewInverse >= 0 || projectionInverse >= 0 ||
                modelViewProjectionInverse >= 0 || normal >= 0 || texture >= 0 ||
-               textureEnvColor >= 0 || lightModelAmbient >= 0;
+               textureEnvColor >= 0 || lightModelAmbient >= 0 ||
+               fogColor >= 0 || fogDensity >= 0 || fogStart >= 0 ||
+               fogEnd >= 0 || fogScale >= 0;
     }
 };
 
