@@ -15,6 +15,9 @@
 #ifndef GL_CLAMP
 #define GL_CLAMP 0x2900
 #endif
+#ifndef GL_ADD
+#define GL_ADD 0x0104
+#endif
 
 namespace {
 
@@ -22,6 +25,8 @@ constexpr std::uint32_t kAppGLImmediateTextureBaseAlpha = 1u;
 constexpr std::uint32_t kAppGLImmediateTextureBaseLuminance = 2u;
 constexpr std::uint32_t kAppGLImmediateTextureBaseLuminanceAlpha = 3u;
 constexpr std::uint32_t kAppGLImmediateTextureBaseIntensity = 4u;
+constexpr std::uint32_t kAppGLImmediateTextureBaseRGB = 5u;
+constexpr std::uint32_t kAppGLImmediateTextureBaseRGBA = 6u;
 
 std::uint32_t appglImmediateTextureBaseClass(GLenum internalFormat) {
     switch (internalFormat) {
@@ -53,6 +58,10 @@ std::uint32_t appglImmediateTextureBaseClass(GLenum internalFormat) {
         case GL_INTENSITY12:
         case GL_INTENSITY16:
             return kAppGLImmediateTextureBaseIntensity;
+        case GL_RGB:
+            return kAppGLImmediateTextureBaseRGB;
+        case GL_RGBA:
+            return kAppGLImmediateTextureBaseRGBA;
         default:
             return 0u;
     }
@@ -151,6 +160,22 @@ std::uint8_t appglImmediateMultiplyByte(std::uint8_t a, std::uint8_t b) {
         (static_cast<unsigned>(a) * static_cast<unsigned>(b) + 127u) / 255u);
 }
 
+std::uint8_t appglImmediateBlendByte(std::uint8_t a, std::uint8_t b, std::uint8_t factor) {
+    return static_cast<std::uint8_t>(
+        (static_cast<unsigned>(a) * static_cast<unsigned>(255u - factor) +
+         static_cast<unsigned>(b) * static_cast<unsigned>(factor) + 127u) / 255u);
+}
+
+std::uint8_t appglImmediateAddByte(std::uint8_t a, std::uint8_t b) {
+    return static_cast<std::uint8_t>(
+        std::min<unsigned>(255u, static_cast<unsigned>(a) + static_cast<unsigned>(b)));
+}
+
+std::uint8_t appglImmediateFloatToByte(GLfloat value) {
+    return static_cast<std::uint8_t>(
+        std::lround(std::clamp(value, 0.0f, 1.0f) * 255.0f));
+}
+
 std::uint8_t appglImmediateSwizzleComponent(const std::uint8_t texel[4], GLint swizzle) {
     switch (swizzle) {
         case GL_RED: return texel[0];
@@ -168,68 +193,187 @@ void appglImmediateApplyTextureEnv(GLenum envMode,
                                    std::uint32_t textureBaseClass,
                                    const std::uint8_t incoming[4],
                                    const std::uint8_t sampled[4],
+                                   const std::uint8_t envColor[4],
                                    std::uint8_t out[4]) {
-    if (envMode == GL_REPLACE) {
-        switch (textureBaseClass) {
-            case kAppGLImmediateTextureBaseAlpha:
-                out[0] = incoming[0];
-                out[1] = incoming[1];
-                out[2] = incoming[2];
-                out[3] = sampled[3];
-                return;
-            case kAppGLImmediateTextureBaseLuminance:
+    const std::uint8_t texLum = sampled[0];
+    const std::uint8_t texAlpha = sampled[3];
+    switch (envMode) {
+        case GL_REPLACE:
+            switch (textureBaseClass) {
+                case kAppGLImmediateTextureBaseAlpha:
+                    out[0] = incoming[0];
+                    out[1] = incoming[1];
+                    out[2] = incoming[2];
+                    out[3] = texAlpha;
+                    return;
+                case kAppGLImmediateTextureBaseLuminance:
+                    out[0] = texLum;
+                    out[1] = texLum;
+                    out[2] = texLum;
+                    out[3] = incoming[3];
+                    return;
+                case kAppGLImmediateTextureBaseLuminanceAlpha:
+                    out[0] = texLum;
+                    out[1] = texLum;
+                    out[2] = texLum;
+                    out[3] = texAlpha;
+                    return;
+                case kAppGLImmediateTextureBaseIntensity:
+                    out[0] = texLum;
+                    out[1] = texLum;
+                    out[2] = texLum;
+                    out[3] = texLum;
+                    return;
+                case kAppGLImmediateTextureBaseRGB:
+                    out[0] = sampled[0];
+                    out[1] = sampled[1];
+                    out[2] = sampled[2];
+                    out[3] = incoming[3];
+                    return;
+                case kAppGLImmediateTextureBaseRGBA:
+                default:
+                    std::memcpy(out, sampled, 4u);
+                    return;
+            }
+        case GL_DECAL:
+            if (textureBaseClass == kAppGLImmediateTextureBaseRGB) {
                 out[0] = sampled[0];
-                out[1] = sampled[0];
-                out[2] = sampled[0];
+                out[1] = sampled[1];
+                out[2] = sampled[2];
                 out[3] = incoming[3];
                 return;
-            case kAppGLImmediateTextureBaseLuminanceAlpha:
-                out[0] = sampled[0];
-                out[1] = sampled[0];
-                out[2] = sampled[0];
-                out[3] = sampled[3];
+            }
+            if (textureBaseClass == kAppGLImmediateTextureBaseRGBA) {
+                out[0] = appglImmediateBlendByte(incoming[0], sampled[0], texAlpha);
+                out[1] = appglImmediateBlendByte(incoming[1], sampled[1], texAlpha);
+                out[2] = appglImmediateBlendByte(incoming[2], sampled[2], texAlpha);
+                out[3] = incoming[3];
                 return;
-            case kAppGLImmediateTextureBaseIntensity:
-                out[0] = sampled[0];
-                out[1] = sampled[0];
-                out[2] = sampled[0];
-                out[3] = sampled[0];
-                return;
-            default:
-                std::memcpy(out, sampled, 4u);
-                return;
-        }
+            }
+            std::memcpy(out, incoming, 4u);
+            return;
+        case GL_BLEND:
+            switch (textureBaseClass) {
+                case kAppGLImmediateTextureBaseAlpha:
+                    out[0] = incoming[0];
+                    out[1] = incoming[1];
+                    out[2] = incoming[2];
+                    out[3] = appglImmediateMultiplyByte(incoming[3], texAlpha);
+                    return;
+                case kAppGLImmediateTextureBaseLuminance:
+                    out[0] = appglImmediateBlendByte(incoming[0], envColor[0], texLum);
+                    out[1] = appglImmediateBlendByte(incoming[1], envColor[1], texLum);
+                    out[2] = appglImmediateBlendByte(incoming[2], envColor[2], texLum);
+                    out[3] = incoming[3];
+                    return;
+                case kAppGLImmediateTextureBaseLuminanceAlpha:
+                    out[0] = appglImmediateBlendByte(incoming[0], envColor[0], texLum);
+                    out[1] = appglImmediateBlendByte(incoming[1], envColor[1], texLum);
+                    out[2] = appglImmediateBlendByte(incoming[2], envColor[2], texLum);
+                    out[3] = appglImmediateMultiplyByte(incoming[3], texAlpha);
+                    return;
+                case kAppGLImmediateTextureBaseIntensity:
+                    out[0] = appglImmediateBlendByte(incoming[0], envColor[0], texLum);
+                    out[1] = appglImmediateBlendByte(incoming[1], envColor[1], texLum);
+                    out[2] = appglImmediateBlendByte(incoming[2], envColor[2], texLum);
+                    out[3] = appglImmediateBlendByte(incoming[3], envColor[3], texLum);
+                    return;
+                case kAppGLImmediateTextureBaseRGB:
+                    out[0] = appglImmediateBlendByte(incoming[0], envColor[0], sampled[0]);
+                    out[1] = appglImmediateBlendByte(incoming[1], envColor[1], sampled[1]);
+                    out[2] = appglImmediateBlendByte(incoming[2], envColor[2], sampled[2]);
+                    out[3] = incoming[3];
+                    return;
+                case kAppGLImmediateTextureBaseRGBA:
+                default:
+                    out[0] = appglImmediateBlendByte(incoming[0], envColor[0], sampled[0]);
+                    out[1] = appglImmediateBlendByte(incoming[1], envColor[1], sampled[1]);
+                    out[2] = appglImmediateBlendByte(incoming[2], envColor[2], sampled[2]);
+                    out[3] = appglImmediateMultiplyByte(incoming[3], texAlpha);
+                    return;
+            }
+        case GL_ADD:
+            switch (textureBaseClass) {
+                case kAppGLImmediateTextureBaseAlpha:
+                    out[0] = incoming[0];
+                    out[1] = incoming[1];
+                    out[2] = incoming[2];
+                    out[3] = appglImmediateMultiplyByte(incoming[3], texAlpha);
+                    return;
+                case kAppGLImmediateTextureBaseLuminance:
+                    out[0] = appglImmediateAddByte(incoming[0], texLum);
+                    out[1] = appglImmediateAddByte(incoming[1], texLum);
+                    out[2] = appglImmediateAddByte(incoming[2], texLum);
+                    out[3] = incoming[3];
+                    return;
+                case kAppGLImmediateTextureBaseLuminanceAlpha:
+                    out[0] = appglImmediateAddByte(incoming[0], texLum);
+                    out[1] = appglImmediateAddByte(incoming[1], texLum);
+                    out[2] = appglImmediateAddByte(incoming[2], texLum);
+                    out[3] = appglImmediateMultiplyByte(incoming[3], texAlpha);
+                    return;
+                case kAppGLImmediateTextureBaseIntensity:
+                    out[0] = appglImmediateAddByte(incoming[0], texLum);
+                    out[1] = appglImmediateAddByte(incoming[1], texLum);
+                    out[2] = appglImmediateAddByte(incoming[2], texLum);
+                    out[3] = appglImmediateAddByte(incoming[3], texLum);
+                    return;
+                case kAppGLImmediateTextureBaseRGB:
+                    out[0] = appglImmediateAddByte(incoming[0], sampled[0]);
+                    out[1] = appglImmediateAddByte(incoming[1], sampled[1]);
+                    out[2] = appglImmediateAddByte(incoming[2], sampled[2]);
+                    out[3] = incoming[3];
+                    return;
+                case kAppGLImmediateTextureBaseRGBA:
+                default:
+                    out[0] = appglImmediateAddByte(incoming[0], sampled[0]);
+                    out[1] = appglImmediateAddByte(incoming[1], sampled[1]);
+                    out[2] = appglImmediateAddByte(incoming[2], sampled[2]);
+                    out[3] = appglImmediateMultiplyByte(incoming[3], texAlpha);
+                    return;
+            }
+        case GL_MODULATE:
+        default:
+            break;
     }
 
     switch (textureBaseClass) {
         case kAppGLImmediateTextureBaseAlpha:
-            out[0] = appglImmediateMultiplyByte(incoming[0], sampled[0]);
-            out[1] = appglImmediateMultiplyByte(incoming[1], sampled[1]);
-            out[2] = appglImmediateMultiplyByte(incoming[2], sampled[2]);
-            out[3] = appglImmediateMultiplyByte(incoming[3], sampled[3]);
+            out[0] = incoming[0];
+            out[1] = incoming[1];
+            out[2] = incoming[2];
+            out[3] = appglImmediateMultiplyByte(incoming[3], texAlpha);
             return;
         case kAppGLImmediateTextureBaseLuminance:
-            out[0] = appglImmediateMultiplyByte(incoming[0], sampled[0]);
-            out[1] = appglImmediateMultiplyByte(incoming[1], sampled[0]);
-            out[2] = appglImmediateMultiplyByte(incoming[2], sampled[0]);
+            out[0] = appglImmediateMultiplyByte(incoming[0], texLum);
+            out[1] = appglImmediateMultiplyByte(incoming[1], texLum);
+            out[2] = appglImmediateMultiplyByte(incoming[2], texLum);
             out[3] = incoming[3];
             return;
         case kAppGLImmediateTextureBaseLuminanceAlpha:
-            out[0] = appglImmediateMultiplyByte(incoming[0], sampled[0]);
-            out[1] = appglImmediateMultiplyByte(incoming[1], sampled[0]);
-            out[2] = appglImmediateMultiplyByte(incoming[2], sampled[0]);
-            out[3] = appglImmediateMultiplyByte(incoming[3], sampled[3]);
+            out[0] = appglImmediateMultiplyByte(incoming[0], texLum);
+            out[1] = appglImmediateMultiplyByte(incoming[1], texLum);
+            out[2] = appglImmediateMultiplyByte(incoming[2], texLum);
+            out[3] = appglImmediateMultiplyByte(incoming[3], texAlpha);
             return;
         case kAppGLImmediateTextureBaseIntensity:
-            out[0] = appglImmediateMultiplyByte(incoming[0], sampled[0]);
-            out[1] = appglImmediateMultiplyByte(incoming[1], sampled[0]);
-            out[2] = appglImmediateMultiplyByte(incoming[2], sampled[0]);
-            out[3] = appglImmediateMultiplyByte(incoming[3], sampled[0]);
+            out[0] = appglImmediateMultiplyByte(incoming[0], texLum);
+            out[1] = appglImmediateMultiplyByte(incoming[1], texLum);
+            out[2] = appglImmediateMultiplyByte(incoming[2], texLum);
+            out[3] = appglImmediateMultiplyByte(incoming[3], texLum);
             return;
+        case kAppGLImmediateTextureBaseRGB:
+            out[0] = appglImmediateMultiplyByte(incoming[0], sampled[0]);
+            out[1] = appglImmediateMultiplyByte(incoming[1], sampled[1]);
+            out[2] = appglImmediateMultiplyByte(incoming[2], sampled[2]);
+            out[3] = incoming[3];
+            return;
+        case kAppGLImmediateTextureBaseRGBA:
         default:
-            for (int c = 0; c < 4; ++c) {
-                out[c] = appglImmediateMultiplyByte(incoming[c], sampled[c]);
-            }
+            out[0] = appglImmediateMultiplyByte(incoming[0], sampled[0]);
+            out[1] = appglImmediateMultiplyByte(incoming[1], sampled[1]);
+            out[2] = appglImmediateMultiplyByte(incoming[2], sampled[2]);
+            out[3] = appglImmediateMultiplyByte(incoming[3], texAlpha);
             return;
     }
 }
@@ -431,6 +575,9 @@ static void appglPixelZoomSpan(GLfloat a, GLfloat b, GLint& lo, GLint& hi) {
 #endif
 #ifndef GL_DECAL
 #define GL_DECAL 0x2101
+#endif
+#ifndef GL_ADD
+#define GL_ADD 0x0104
 #endif
 #ifndef GL_REPLACE
 #define GL_REPLACE 0x1E01
@@ -775,8 +922,19 @@ void GLContext::setTexEnvFloatCompat(GLenum target, GLenum pname, const GLfloat*
     }
     switch (pname) {
         case GL_TEXTURE_ENV_MODE:
-            impl_->texEnv.mode = static_cast<GLenum>(params[0]);
-            return;
+            switch (static_cast<GLenum>(params[0])) {
+                case GL_REPLACE:
+                case GL_MODULATE:
+                case GL_DECAL:
+                case GL_BLEND:
+                case GL_ADD:
+                    impl_->texEnv.mode = static_cast<GLenum>(params[0]);
+                    return;
+                default:
+                    pushError(GL_INVALID_ENUM, "glTexEnv",
+                              "texture env mode is invalid");
+                    return;
+            }
         case GL_TEXTURE_ENV_COLOR:
             impl_->texEnv.color[0] = params[0];
             impl_->texEnv.color[1] = params[1];
@@ -1731,19 +1889,21 @@ bool GLContext::drawPixelsCompat(GLsizei width,
             image.rgba8[texOffset + 2],
             image.rgba8[texOffset + 3],
         };
-        switch (impl_->texEnv.mode) {
-            case GL_REPLACE:
-                std::memcpy(rgba, texel, 4u);
-                break;
-            case GL_MODULATE:
-            default:
-                for (int c = 0; c < 4; ++c) {
-                    rgba[c] = static_cast<std::uint8_t>(
-                        (static_cast<unsigned>(rgba[c]) *
-                         static_cast<unsigned>(texel[c]) + 127u) / 255u);
-                }
-                break;
-        }
+        const std::uint8_t envColor[4] = {
+            appglImmediateFloatToByte(impl_->texEnv.color[0]),
+            appglImmediateFloatToByte(impl_->texEnv.color[1]),
+            appglImmediateFloatToByte(impl_->texEnv.color[2]),
+            appglImmediateFloatToByte(impl_->texEnv.color[3]),
+        };
+        std::uint8_t out[4] = {};
+        appglImmediateApplyTextureEnv(
+            impl_->texEnv.mode,
+            appglImmediateTextureBaseClass(image.desc.internalFormat),
+            rgba,
+            texel,
+            envColor,
+            out);
+        std::memcpy(rgba, out, 4u);
     };
 
     if (impl_->state->boundDrawFramebuffer() == 0 &&
@@ -4532,8 +4692,7 @@ void GLContext::endImmediate() {
             if (!texture2DEnabled) {
                 return true;
             }
-            if (texture1D || projectiveTexcoord ||
-                impl_->texEnv.mode != GL_REPLACE) {
+            if (texture1D || projectiveTexcoord) {
                 return false;
             }
             GLTextureObject* texture = impl_->currentTexture(GL_TEXTURE_2D);
@@ -4546,9 +4705,7 @@ void GLContext::endImmediate() {
                 params.swizzle[1] == GL_GREEN &&
                 params.swizzle[2] == GL_BLUE &&
                 params.swizzle[3] == GL_ALPHA;
-            return params.wrapS == GL_CLAMP_TO_EDGE &&
-                   params.wrapT == GL_CLAMP_TO_EDGE &&
-                   params.minFilter == GL_NEAREST &&
+            return params.minFilter == GL_NEAREST &&
                    params.magFilter == GL_NEAREST &&
                    identitySwizzle;
         };
@@ -4561,7 +4718,6 @@ void GLContext::endImmediate() {
             drawCount < 3 ||
             impl_->state->isEnabled(GL_DEPTH_TEST) ||
             impl_->state->isEnabled(GL_STENCIL_TEST) ||
-            impl_->state->isEnabled(GL_BLEND) ||
             impl_->state->isEnabled(GL_COLOR_LOGIC_OP) ||
             impl_->state->isEnabled(GL_FOG) ||
             impl_->state->isEnabled(GL_LIGHTING)) {
@@ -4635,12 +4791,6 @@ void GLContext::endImmediate() {
             }
         }
 
-        const std::uint8_t baseRGBA[4] = {
-            normalizedByte(drawVerts[0].color[0]),
-            normalizedByte(drawVerts[0].color[1]),
-            normalizedByte(drawVerts[0].color[2]),
-            normalizedByte(drawVerts[0].color[3]),
-        };
         const GLTextureImageLevel* sampledImage = nullptr;
         GLsizei sampledWidth = 1;
         GLsizei sampledHeight = 1;
@@ -4750,24 +4900,104 @@ void GLContext::endImmediate() {
             sampledImage = &image;
             sampledWidth = tw;
             sampledHeight = th;
+            if (sampledTextureBaseClass == 0u) {
+                return false;
+            }
         }
 
         const auto& blend = impl_->state->blendState();
-        auto shadePixel = [&](GLint x, GLint y, std::uint8_t out[4]) {
-            std::memcpy(out, baseRGBA, 4u);
+        const bool blendEnabled = impl_->state->isEnabled(GL_BLEND);
+        if (blendEnabled &&
+            mode != GL_QUADS &&
+            mode != GL_QUAD_STRIP &&
+            mode != GL_TRIANGLE_STRIP &&
+            mode != GL_TRIANGLE_FAN) {
+            return false;
+        }
+        auto blendFactor = [](GLenum factor,
+                              int component,
+                              const GLfloat src[4],
+                              const GLfloat dst[4],
+                              const GLfloat constant[4]) -> GLfloat {
+            switch (factor) {
+                case GL_ZERO: return 0.0f;
+                case GL_ONE: return 1.0f;
+                case GL_SRC_COLOR: return src[component];
+                case GL_ONE_MINUS_SRC_COLOR: return 1.0f - src[component];
+                case GL_DST_COLOR: return dst[component];
+                case GL_ONE_MINUS_DST_COLOR: return 1.0f - dst[component];
+                case GL_SRC_ALPHA: return src[3];
+                case GL_ONE_MINUS_SRC_ALPHA: return 1.0f - src[3];
+                case GL_DST_ALPHA: return dst[3];
+                case GL_ONE_MINUS_DST_ALPHA: return 1.0f - dst[3];
+                case GL_CONSTANT_COLOR: return constant[component];
+                case GL_ONE_MINUS_CONSTANT_COLOR: return 1.0f - constant[component];
+                case GL_CONSTANT_ALPHA: return constant[3];
+                case GL_ONE_MINUS_CONSTANT_ALPHA: return 1.0f - constant[3];
+                case GL_SRC_ALPHA_SATURATE:
+                    return component == 3 ? 1.0f : std::min(src[3], 1.0f - dst[3]);
+                default:
+                    return 1.0f;
+            }
+        };
+        auto applyFramebufferBlend = [&](std::uint8_t rgba[4],
+                                         const std::uint8_t* dstBytes) {
+            if (!blendEnabled) {
+                return;
+            }
+            const GLfloat src[4] = {
+                static_cast<GLfloat>(rgba[0]) / 255.0f,
+                static_cast<GLfloat>(rgba[1]) / 255.0f,
+                static_cast<GLfloat>(rgba[2]) / 255.0f,
+                static_cast<GLfloat>(rgba[3]) / 255.0f,
+            };
+            const GLfloat dst[4] = {
+                static_cast<GLfloat>(dstBytes[0]) / 255.0f,
+                static_cast<GLfloat>(dstBytes[1]) / 255.0f,
+                static_cast<GLfloat>(dstBytes[2]) / 255.0f,
+                static_cast<GLfloat>(dstBytes[3]) / 255.0f,
+            };
+            auto blendComponent = [&](GLenum equation,
+                                      GLenum srcFactor,
+                                      GLenum dstFactor,
+                                      int component) -> GLfloat {
+                if (equation == GL_MIN) {
+                    return std::min(src[component], dst[component]);
+                }
+                if (equation == GL_MAX) {
+                    return std::max(src[component], dst[component]);
+                }
+                const GLfloat srcTerm =
+                    src[component] * blendFactor(srcFactor, component, src, dst, blend.color);
+                const GLfloat dstTerm =
+                    dst[component] * blendFactor(dstFactor, component, src, dst, blend.color);
+                if (equation == GL_FUNC_SUBTRACT) {
+                    return srcTerm - dstTerm;
+                }
+                if (equation == GL_FUNC_REVERSE_SUBTRACT) {
+                    return dstTerm - srcTerm;
+                }
+                return srcTerm + dstTerm;
+            };
+            GLfloat out[4] = {};
+            for (int c = 0; c < 3; ++c) {
+                out[c] = blendComponent(
+                    blend.equationRGB, blend.srcRGB, blend.dstRGB, c);
+            }
+            out[3] = blendComponent(
+                blend.equationAlpha, blend.srcAlpha, blend.dstAlpha, 3);
+            for (int c = 0; c < 4; ++c) {
+                rgba[c] = normalizedByte(std::clamp(out[c], 0.0f, 1.0f));
+            }
+        };
+        auto sampleTexture = [&](float s,
+                                 float t,
+                                 const std::uint8_t incoming[4],
+                                 std::uint8_t out[4]) {
+            std::memcpy(out, incoming, 4u);
             if (!texture2D || sampledImage == nullptr) {
                 return;
             }
-            const float u = (x1 == x0)
-                ? 0.0f
-                : (static_cast<float>(x) + 0.5f - static_cast<float>(x0)) /
-                    static_cast<float>(x1 - x0);
-            const float v = (y1 == y0)
-                ? 0.0f
-                : (static_cast<float>(y) + 0.5f - static_cast<float>(y0)) /
-                    static_cast<float>(y1 - y0);
-            const float s = minS + std::clamp(u, 0.0f, 1.0f) * (maxS - minS);
-            const float t = minT + std::clamp(v, 0.0f, 1.0f) * (maxT - minT);
             bool borderSample = false;
             const GLsizei tx = appglImmediateWrappedTexel(
                 s, sampledWidth, sampledWrapS, borderSample);
@@ -4789,8 +5019,19 @@ void GLContext::endImmediate() {
                 appglImmediateSwizzleComponent(storageTexel, sampledSwizzle[2]),
                 appglImmediateSwizzleComponent(storageTexel, sampledSwizzle[3]),
             };
+            const std::uint8_t envColor[4] = {
+                appglImmediateFloatToByte(impl_->texEnv.color[0]),
+                appglImmediateFloatToByte(impl_->texEnv.color[1]),
+                appglImmediateFloatToByte(impl_->texEnv.color[2]),
+                appglImmediateFloatToByte(impl_->texEnv.color[3]),
+            };
             appglImmediateApplyTextureEnv(
-                impl_->texEnv.mode, sampledTextureBaseClass, baseRGBA, texel, out);
+                impl_->texEnv.mode,
+                sampledTextureBaseClass,
+                incoming,
+                texel,
+                envColor,
+                out);
         };
         auto insideScissor = [&](GLint x, GLint y) {
             if (!impl_->state->isEnabled(GL_SCISSOR_TEST)) {
@@ -4801,25 +5042,132 @@ void GLContext::endImmediate() {
                    x < sc.x + sc.width &&
                    y < sc.y + sc.height;
         };
-        auto writeDefaultPixel = [&](GLint x, GLint y) {
-            if (x < 0 || y < 0 ||
-                x >= impl_->defaultFramebufferShadowWidth ||
-                y >= impl_->defaultFramebufferShadowHeight ||
-                !insideScissor(x, y)) {
+        auto shadeTrianglePixel = [&](const Impl::ImmediateModeVertex& a,
+                                      const Impl::ImmediateModeVertex& b,
+                                      const Impl::ImmediateModeVertex& c,
+                                      float wa,
+                                      float wb,
+                                      float wc,
+                                      std::uint8_t out[4]) {
+            const GLfloat color[4] = {
+                a.color[0] * wa + b.color[0] * wb + c.color[0] * wc,
+                a.color[1] * wa + b.color[1] * wb + c.color[1] * wc,
+                a.color[2] * wa + b.color[2] * wb + c.color[2] * wc,
+                a.color[3] * wa + b.color[3] * wb + c.color[3] * wc,
+            };
+            const std::uint8_t incoming[4] = {
+                normalizedByte(color[0]),
+                normalizedByte(color[1]),
+                normalizedByte(color[2]),
+                normalizedByte(color[3]),
+            };
+            if (!texture2D || sampledImage == nullptr) {
+                std::memcpy(out, incoming, 4u);
                 return;
             }
-            const std::size_t offset =
-                (static_cast<std::size_t>(y) *
-                 static_cast<std::size_t>(impl_->defaultFramebufferShadowWidth) +
-                 static_cast<std::size_t>(x)) * 4u;
-            std::uint8_t rgba[4];
-            shadePixel(x, y, rgba);
+            const auto sta = projectedST(a);
+            const auto stb = projectedST(b);
+            const auto stc = projectedST(c);
+            const float s = sta[0] * wa + stb[0] * wb + stc[0] * wc;
+            const float t = sta[1] * wa + stb[1] * wb + stc[1] * wc;
+            sampleTexture(s, t, incoming, out);
+        };
+        auto writeBlendedPixel = [&](std::uint8_t* target,
+                                     std::size_t offset,
+                                     std::uint8_t rgba[4]) {
+            applyFramebufferBlend(rgba, target + offset);
             for (int c = 0; c < 4; ++c) {
                 if (blend.colorMask[c] != GL_FALSE) {
-                    impl_->defaultFramebufferRGBA8[offset + static_cast<std::size_t>(c)] =
-                        rgba[c];
+                    target[offset + static_cast<std::size_t>(c)] = rgba[c];
                 }
             }
+        };
+        auto edge = [](const WindowVertex& a, const WindowVertex& b, float x, float y) {
+            return (x - a.x) * (b.y - a.y) - (y - a.y) * (b.x - a.x);
+        };
+        auto paintTriangles = [&](GLsizei targetWidth,
+                                  GLsizei targetHeight,
+                                  bool lowerLeft,
+                                  auto&& writePixel) {
+            if (targetWidth <= 0 || targetHeight <= 0) {
+                return false;
+            }
+            bool touched = false;
+            std::vector<std::uint8_t> touchedPixels;
+            if (blendEnabled) {
+                touchedPixels.assign(
+                    static_cast<std::size_t>(targetWidth) *
+                    static_cast<std::size_t>(targetHeight),
+                    0u);
+            }
+            for (std::size_t i = 0; i + 2 < drawCount; i += 3) {
+                const Impl::ImmediateModeVertex& va = drawVerts[i + 0];
+                const Impl::ImmediateModeVertex& vb = drawVerts[i + 1];
+                const Impl::ImmediateModeVertex& vc = drawVerts[i + 2];
+                const WindowVertex a = toWindow(va);
+                const WindowVertex b = toWindow(vb);
+                const WindowVertex c = toWindow(vc);
+                if (!a.ok || !b.ok || !c.ok) {
+                    continue;
+                }
+                const float area = edge(a, b, c.x, c.y);
+                if (std::fabs(area) <= 1.0e-6f) {
+                    continue;
+                }
+                const float minTriX = std::min({a.x, b.x, c.x});
+                const float maxTriX = std::max({a.x, b.x, c.x});
+                const float minTriY = std::min({a.y, b.y, c.y});
+                const float maxTriY = std::max({a.y, b.y, c.y});
+                const GLint px0 = std::max<GLint>(
+                    0, static_cast<GLint>(std::floor(minTriX)));
+                const GLint px1 = std::min<GLint>(
+                    targetWidth, static_cast<GLint>(std::ceil(maxTriX)));
+                const GLint py0 = std::max<GLint>(
+                    0, static_cast<GLint>(std::floor(minTriY)));
+                const GLint py1 = std::min<GLint>(
+                    targetHeight, static_cast<GLint>(std::ceil(maxTriY)));
+                if (px0 >= px1 || py0 >= py1) {
+                    continue;
+                }
+                for (GLint y = py0; y < py1; ++y) {
+                    for (GLint x = px0; x < px1; ++x) {
+                        if (!insideScissor(x, y)) {
+                            continue;
+                        }
+                        const float sampleX = static_cast<float>(x) + 0.5f;
+                        const float sampleY = static_cast<float>(y) + 0.5f;
+                        const float ea = edge(b, c, sampleX, sampleY);
+                        const float eb = edge(c, a, sampleX, sampleY);
+                        const float ec = edge(a, b, sampleX, sampleY);
+                        const bool inside = area > 0.0f
+                            ? (ea >= -1.0e-5f && eb >= -1.0e-5f && ec >= -1.0e-5f)
+                            : (ea <=  1.0e-5f && eb <=  1.0e-5f && ec <=  1.0e-5f);
+                        if (!inside) {
+                            continue;
+                        }
+                        const std::size_t pixelIndex =
+                            static_cast<std::size_t>(y) *
+                            static_cast<std::size_t>(targetWidth) +
+                            static_cast<std::size_t>(x);
+                        if (blendEnabled && touchedPixels[pixelIndex] != 0u) {
+                            continue;
+                        }
+                        const float wa = ea / area;
+                        const float wb = eb / area;
+                        const float wc = ec / area;
+                        std::uint8_t rgba[4];
+                        shadeTrianglePixel(va, vb, vc, wa, wb, wc, rgba);
+                        const GLint storageY =
+                            lowerLeft ? (targetHeight - 1 - y) : y;
+                        writePixel(x, storageY, rgba);
+                        if (blendEnabled) {
+                            touchedPixels[pixelIndex] = 1u;
+                        }
+                        touched = true;
+                    }
+                }
+            }
+            return touched;
         };
 
         if (impl_->state->boundDrawFramebuffer() == 0) {
@@ -4831,10 +5179,20 @@ void GLContext::endImmediate() {
             if (!hadValidShadow) {
                 impl_->materializeDefaultFbShadowClear();
             }
-            for (GLint y = y0; y < y1; ++y) {
-                for (GLint x = x0; x < x1; ++x) {
-                    writeDefaultPixel(x, y);
-                }
+            const bool paintedDefault = paintTriangles(
+                impl_->defaultFramebufferShadowWidth,
+                impl_->defaultFramebufferShadowHeight,
+                false,
+                [&](GLint x, GLint storageY, std::uint8_t rgba[4]) {
+                    const std::size_t offset =
+                        (static_cast<std::size_t>(storageY) *
+                         static_cast<std::size_t>(impl_->defaultFramebufferShadowWidth) +
+                         static_cast<std::size_t>(x)) * 4u;
+                    writeBlendedPixel(
+                        impl_->defaultFramebufferRGBA8.data(), offset, rgba);
+                });
+            if (!paintedDefault) {
+                return false;
             }
             impl_->defaultFramebufferShadowValid = true;
             return true;
@@ -4863,35 +5221,26 @@ void GLContext::endImmediate() {
                     rb->width <= 0 || rb->height <= 0) {
                     continue;
                 }
-                const GLint px0 = std::max<GLint>(0, x0);
-                const GLint py0 = std::max<GLint>(0, y0);
-                const GLint px1 = std::min<GLint>(rb->width, x1);
-                const GLint py1 = std::min<GLint>(rb->height, y1);
                 const std::size_t bytes =
                     static_cast<std::size_t>(rb->width) *
                     static_cast<std::size_t>(rb->height) * 4u;
                 if (rb->rgba8.size() < bytes) {
                     rb->rgba8.assign(bytes, 0);
                 }
-                for (GLint y = py0; y < py1; ++y) {
-                    const GLint sy = lowerLeft ? (rb->height - 1 - y) : y;
-                    for (GLint x = px0; x < px1; ++x) {
-                        if (!insideScissor(x, y)) {
-                            continue;
-                        }
+                impl_->materializeRenderbufferRGBA8Clear(*rb);
+                const bool paintedRb = paintTriangles(
+                    rb->width,
+                    rb->height,
+                    lowerLeft,
+                    [&](GLint x, GLint storageY, std::uint8_t rgba[4]) {
                         const std::size_t offset =
-                            (static_cast<std::size_t>(sy) *
+                            (static_cast<std::size_t>(storageY) *
                              static_cast<std::size_t>(rb->width) +
                              static_cast<std::size_t>(x)) * 4u;
-                        std::uint8_t rgba[4];
-                        shadePixel(x, y, rgba);
-                        for (int c = 0; c < 4; ++c) {
-                            if (blend.colorMask[c] != GL_FALSE) {
-                                rb->rgba8[offset + static_cast<std::size_t>(c)] =
-                                    rgba[c];
-                            }
-                        }
-                    }
+                        writeBlendedPixel(rb->rgba8.data(), offset, rgba);
+                    });
+                if (!paintedRb) {
+                    continue;
                 }
                 rb->rgba8ShadowClearPending = false;
                 rb->colorShadowAuthoritative = true;
@@ -4913,10 +5262,6 @@ void GLContext::endImmediate() {
                 const GLsizei th = texture->target == GL_TEXTURE_1D
                     ? 1
                     : std::max<GLsizei>(image.desc.height, 1);
-                const GLint px0 = std::max<GLint>(0, x0);
-                const GLint py0 = std::max<GLint>(0, y0);
-                const GLint px1 = std::min<GLint>(tw, x1);
-                const GLint py1 = std::min<GLint>(th, y1);
                 const GLint layer = std::max<GLint>(resolved.layer, 0);
                 const GLsizei depth = std::max<GLsizei>(image.desc.depth, 1);
                 if (layer >= depth) {
@@ -4930,26 +5275,20 @@ void GLContext::endImmediate() {
                 if (image.rgba8.size() < bytes) {
                     image.rgba8.assign(bytes, 0);
                 }
-                for (GLint y = py0; y < py1; ++y) {
-                    const GLint sy = lowerLeft ? (th - 1 - y) : y;
-                    for (GLint x = px0; x < px1; ++x) {
-                        if (!insideScissor(x, y)) {
-                            continue;
-                        }
+                const bool paintedTexture = paintTriangles(
+                    tw,
+                    th,
+                    lowerLeft,
+                    [&](GLint x, GLint storageY, std::uint8_t rgba[4]) {
                         const std::size_t offset =
                             static_cast<std::size_t>(layer) * layerBytes +
-                            (static_cast<std::size_t>(sy) *
+                            (static_cast<std::size_t>(storageY) *
                              static_cast<std::size_t>(tw) +
                              static_cast<std::size_t>(x)) * 4u;
-                        std::uint8_t rgba[4];
-                        shadePixel(x, y, rgba);
-                        for (int c = 0; c < 4; ++c) {
-                            if (blend.colorMask[c] != GL_FALSE) {
-                                image.rgba8[offset + static_cast<std::size_t>(c)] =
-                                    rgba[c];
-                            }
-                        }
-                    }
+                        writeBlendedPixel(image.rgba8.data(), offset, rgba);
+                    });
+                if (!paintedTexture) {
+                    continue;
                 }
                 texture->colorShadowAuthoritative = true;
                 if (lowerLeft) {
@@ -4979,9 +5318,8 @@ void GLContext::endImmediate() {
             if (!impl_->sampledTextureCompleteForSampler(*tex, tex->params)) {
                 continue;
             }
-            if (impl_->rebuildTextureSamplerState(texName, *tex)) {
-                fixedFunctionSamplerState = tex->metalSampler;
-            }
+            (void)impl_->rebuildTextureSamplerState(texName, *tex);
+            fixedFunctionSamplerState = tex->metalSampler;
             fixedFunctionTextureInternalFormat = tex->desc.internalFormat;
             fixedFunctionTextureTarget = target;
             fixedFunctionTextureParams = tex->params;
@@ -5026,6 +5364,12 @@ void GLContext::endImmediate() {
         if (textureBaseClass != 0u) {
             info.textureEnvMode = impl_->texEnv.mode;
             info.textureBaseClass = textureBaseClass;
+            info.textureEnvColor = {
+                impl_->texEnv.color[0],
+                impl_->texEnv.color[1],
+                impl_->texEnv.color[2],
+                impl_->texEnv.color[3],
+            };
         }
     }
     info.fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
@@ -6399,9 +6743,8 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
             if (!impl_->sampledTextureCompleteForSampler(*tex, tex->params)) {
                 continue;
             }
-            if (impl_->rebuildTextureSamplerState(texName, *tex)) {
-                fixedFunctionSamplerState = tex->metalSampler;
-            }
+            (void)impl_->rebuildTextureSamplerState(texName, *tex);
+            fixedFunctionSamplerState = tex->metalSampler;
             fixedFunctionTextureInternalFormat = tex->desc.internalFormat;
             fixedFunctionTextureTarget = target;
             fixedFunctionTextureParams = tex->params;
@@ -7214,6 +7557,12 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
             if (textureBaseClass != 0u) {
                 info.textureEnvMode = impl_->texEnv.mode;
                 info.textureBaseClass = textureBaseClass;
+                info.textureEnvColor = {
+                    impl_->texEnv.color[0],
+                    impl_->texEnv.color[1],
+                    impl_->texEnv.color[2],
+                    impl_->texEnv.color[3],
+                };
             }
         }
         info.fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;

@@ -18062,41 +18062,110 @@ struct AppGLImmediateTextureState {
     uint magFilter;
     uint _pad;
     float4 borderColor;
+    float4 envColor;
 };
 
 static float4 appgl_immediate_finish_sample(float4 color,
                                             float4 sample,
                                             constant AppGLImmediateTextureState& textureState) {
+    constexpr uint kEnvAdd = 0x0104u;
     constexpr uint kEnvReplace = 0x1E01u;
+    constexpr uint kEnvModulate = 0x2100u;
+    constexpr uint kEnvDecal = 0x2101u;
+    constexpr uint kEnvBlend = 0x0BE2u;
     constexpr uint kBaseAlpha = 1u;
     constexpr uint kBaseLuminance = 2u;
     constexpr uint kBaseLuminanceAlpha = 3u;
     constexpr uint kBaseIntensity = 4u;
+    constexpr uint kBaseRGB = 5u;
+    constexpr uint kBaseRGBA = 6u;
+    const float lum = sample.r;
+    const float texAlpha = sample.a;
     if (textureState.envMode == kEnvReplace) {
         if (textureState.baseClass == kBaseAlpha) {
-            return float4(color.rgb, sample.a);
+            return float4(color.rgb, texAlpha);
         }
         if (textureState.baseClass == kBaseLuminance) {
-            return float4(sample.r, sample.r, sample.r, color.a);
+            return float4(lum, lum, lum, color.a);
         }
         if (textureState.baseClass == kBaseLuminanceAlpha) {
-            return float4(sample.r, sample.r, sample.r, sample.a);
+            return float4(lum, lum, lum, texAlpha);
         }
         if (textureState.baseClass == kBaseIntensity) {
-            return float4(sample.r, sample.r, sample.r, sample.r);
+            return float4(lum, lum, lum, lum);
+        }
+        if (textureState.baseClass == kBaseRGB) {
+            return float4(sample.rgb, color.a);
         }
         return sample;
     }
+    if (textureState.envMode == kEnvDecal) {
+        if (textureState.baseClass == kBaseRGB) {
+            return float4(sample.rgb, color.a);
+        }
+        if (textureState.baseClass == kBaseRGBA) {
+            return float4(mix(color.rgb, sample.rgb, texAlpha), color.a);
+        }
+        return color;
+    }
+    if (textureState.envMode == kEnvBlend) {
+        if (textureState.baseClass == kBaseAlpha) {
+            return float4(color.rgb, color.a * texAlpha);
+        }
+        if (textureState.baseClass == kBaseLuminance) {
+            return float4(mix(color.rgb, textureState.envColor.rgb, lum), color.a);
+        }
+        if (textureState.baseClass == kBaseLuminanceAlpha) {
+            return float4(mix(color.rgb, textureState.envColor.rgb, lum),
+                          color.a * texAlpha);
+        }
+        if (textureState.baseClass == kBaseIntensity) {
+            return mix(color, textureState.envColor, lum);
+        }
+        if (textureState.baseClass == kBaseRGB) {
+            return float4(mix(color.rgb, textureState.envColor.rgb, sample.rgb),
+                          color.a);
+        }
+        return float4(mix(color.rgb, textureState.envColor.rgb, sample.rgb),
+                      color.a * texAlpha);
+    }
+    if (textureState.envMode == kEnvAdd) {
+        if (textureState.baseClass == kBaseAlpha) {
+            return float4(color.rgb, color.a * texAlpha);
+        }
+        if (textureState.baseClass == kBaseLuminance) {
+            return float4(min(color.rgb + float3(lum), float3(1.0f)), color.a);
+        }
+        if (textureState.baseClass == kBaseLuminanceAlpha) {
+            return float4(min(color.rgb + float3(lum), float3(1.0f)),
+                          color.a * texAlpha);
+        }
+        if (textureState.baseClass == kBaseIntensity) {
+            return min(color + float4(lum), float4(1.0f));
+        }
+        if (textureState.baseClass == kBaseRGB) {
+            return float4(min(color.rgb + sample.rgb, float3(1.0f)), color.a);
+        }
+        return float4(min(color.rgb + sample.rgb, float3(1.0f)),
+                      color.a * texAlpha);
+    }
+    (void)kEnvModulate;
     if (textureState.baseClass == kBaseLuminance) {
-        return float4(color.rgb * sample.r, color.a);
+        return float4(color.rgb * lum, color.a);
     }
     if (textureState.baseClass == kBaseLuminanceAlpha) {
-        return float4(color.rgb * sample.r, color.a * sample.a);
+        return float4(color.rgb * lum, color.a * texAlpha);
     }
     if (textureState.baseClass == kBaseIntensity) {
-        return color * sample.r;
+        return color * lum;
     }
-    return color * sample;
+    if (textureState.baseClass == kBaseAlpha) {
+        return float4(color.rgb, color.a * texAlpha);
+    }
+    if (textureState.baseClass == kBaseRGB) {
+        return float4(color.rgb * sample.rgb, color.a);
+    }
+    return float4(color.rgb * sample.rgb, color.a * texAlpha);
 }
 
 static float2 appgl_immediate_projected_st(float4 texcoord) {
@@ -19721,6 +19790,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 std::uint32_t magFilter;
                 std::uint32_t pad;
                 float borderColor[4];
+                float envColor[4];
             };
             const bool compatLegacyTextureState =
                 appglCompatProfileEnabled() && info.textureBaseClass != 0u;
@@ -19742,6 +19812,12 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                     info.textureBorderColor[1],
                     info.textureBorderColor[2],
                     info.textureBorderColor[3],
+                },
+                {
+                    info.textureEnvColor[0],
+                    info.textureEnvColor[1],
+                    info.textureEnvColor[2],
+                    info.textureEnvColor[3],
                 }
             };
             [encoder setFragmentBytes:&textureState
