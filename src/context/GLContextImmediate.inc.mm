@@ -4839,6 +4839,7 @@ void GLContext::endImmediate() {
                         [](const Impl::ImmediateModeVertex& v) {
                             return std::fabs(v.texcoord[3] - 1.0f) > 0.00001f;
                         });
+        const bool blendEnabled = impl_->state->isEnabled(GL_BLEND);
         auto texture2DShadowPaintSafe = [&]() {
             if (!texture2DEnabled) {
                 return true;
@@ -4856,7 +4857,15 @@ void GLContext::endImmediate() {
                 params.swizzle[1] == GL_GREEN &&
                 params.swizzle[2] == GL_BLUE &&
                 params.swizzle[3] == GL_ALPHA;
-            return params.minFilter == GL_NEAREST &&
+            const bool clampWrap =
+                params.wrapS == GL_CLAMP_TO_EDGE &&
+                params.wrapT == GL_CLAMP_TO_EDGE;
+            const bool legacyBlendTexEnv =
+                blendEnabled &&
+                appglImmediateTextureBaseClass(
+                    texture->desc.internalFormat, &params) != 0u;
+            return (clampWrap || legacyBlendTexEnv) &&
+                   params.minFilter == GL_NEAREST &&
                    params.magFilter == GL_NEAREST &&
                    identitySwizzle;
         };
@@ -5052,13 +5061,9 @@ void GLContext::endImmediate() {
             sampledImage = &image;
             sampledWidth = tw;
             sampledHeight = th;
-            if (sampledTextureBaseClass == 0u) {
-                return false;
-            }
         }
 
         const auto& blend = impl_->state->blendState();
-        const bool blendEnabled = impl_->state->isEnabled(GL_BLEND);
         if (blendEnabled &&
             mode != GL_QUADS &&
             mode != GL_QUAD_STRIP &&
