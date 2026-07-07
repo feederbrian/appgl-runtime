@@ -313,6 +313,11 @@ bool isLegacyClientArrayCap(GLenum cap) {
     return cap == GL_VERTEX_ARRAY || cap == GL_COLOR_ARRAY;
 }
 
+bool admitsLegacyClientArrayCap(GLenum cap) {
+    return isLegacyClientArrayCap(cap) &&
+        appglCompatFeatureEnabled(AppGLCompatFeature::ClientArrays);
+}
+
 bool isValidEnableCap(GLenum cap) {
     if (cap >= GL_LIGHT0 && cap <= GL_LIGHT7) {
         return true;
@@ -7150,7 +7155,7 @@ void APIENTRY glEnable(GLenum cap) {
     if (context == nullptr) {
         return;
     }
-    if (isLegacyClientArrayCap(cap)) {
+    if (admitsLegacyClientArrayCap(cap)) {
         (void)context->setLegacyClientArrayEnabled(cap, true);
         Runtime::shared().recordBootstrapTrace("glEnable(" + std::to_string(cap) + ") -> legacy client array");
         return;
@@ -7185,7 +7190,7 @@ void APIENTRY glDisable(GLenum cap) {
     if (context == nullptr) {
         return;
     }
-    if (isLegacyClientArrayCap(cap)) {
+    if (admitsLegacyClientArrayCap(cap)) {
         (void)context->setLegacyClientArrayEnabled(cap, false);
         Runtime::shared().recordBootstrapTrace("glDisable(" + std::to_string(cap) + ") -> legacy client array");
         return;
@@ -7218,7 +7223,7 @@ GLboolean APIENTRY glIsEnabled(GLenum cap) {
     if (context == nullptr) {
         return GL_FALSE;
     }
-    if (isLegacyClientArrayCap(cap)) {
+    if (admitsLegacyClientArrayCap(cap)) {
         Runtime::shared().recordBootstrapTrace("glIsEnabled(" + std::to_string(cap) + ") -> legacy client array");
         return context->isLegacyClientArrayEnabled(cap) ? GL_TRUE : GL_FALSE;
     }
