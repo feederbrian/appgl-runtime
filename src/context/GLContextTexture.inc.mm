@@ -2098,29 +2098,69 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
     // (== offset 0) is a valid PBO destination.
     if (pixels == nullptr && !packPBOBound) return true;
 
-    if (appglCompatProfileEnabled() && !packPBOBound &&
-        obj->colorShadowAuthoritative) {
+    if (appglCompatProfileEnabled() && !packPBOBound) {
         const auto levelIt = obj->levels.find(level);
         if (levelIt != obj->levels.end() && levelIt->second.defined &&
             isLegacyCompatTextureFormatCombo(
                 levelIt->second.desc.internalFormat,
-                levelIt->second.desc.sourceFormat) &&
-            copySimpleTextureLevelShadow(*obj,
-                                         levelIt->second,
-                                         format,
-                                         type,
-                                         bufSize,
-                                         impl_->state->pixelStore(),
-                                         pixels,
-                                         (obj->wasFramebufferRenderedTo ||
-                                          obj->wasViewportRenderedTo) &&
-                                             impl_->state->clipOrigin() != GL_UPPER_LEFT)) {
-            impl_->drainPendingGpuProducers({
-                {Impl::GpuResourceAccess::Kind::Texture,
-                 texture,
-                 kProducerAll},
-            });
-            return true;
+                levelIt->second.desc.sourceFormat)) {
+            const auto legacyFixedExactReadbackFormat = [](GLenum internalFormat) {
+                switch (internalFormat) {
+                    case GL_ALPHA:
+                    case GL_ALPHA4:
+                    case GL_ALPHA8:
+                    case GL_ALPHA12:
+                    case GL_ALPHA16:
+                    case GL_LUMINANCE:
+                    case GL_LUMINANCE4:
+                    case GL_LUMINANCE8:
+                    case GL_LUMINANCE12:
+                    case GL_LUMINANCE16:
+                    case GL_SLUMINANCE8:
+                    case GL_LUMINANCE_ALPHA:
+                    case GL_LUMINANCE4_ALPHA4:
+                    case GL_LUMINANCE6_ALPHA2:
+                    case GL_LUMINANCE8_ALPHA8:
+                    case GL_LUMINANCE12_ALPHA4:
+                    case GL_LUMINANCE12_ALPHA12:
+                    case GL_LUMINANCE16_ALPHA16:
+                    case GL_SLUMINANCE8_ALPHA8:
+                        return true;
+                    default:
+                        return false;
+                }
+            };
+            const GLTextureImageLevel& levelImage = levelIt->second;
+            const std::size_t requestedPixelBytes = bytesPerPixel(format, type);
+            const bool uploadExactLegacyShadow =
+                legacyFixedExactReadbackFormat(levelImage.desc.internalFormat) &&
+                format == levelImage.desc.sourceFormat &&
+                type == levelImage.desc.sourceType &&
+                requestedPixelBytes != 0 &&
+                levelImage.exactReadbackBpp == requestedPixelBytes &&
+                !levelImage.exactReadbackData.empty() &&
+                !levelImage.mipShadowEvicted &&
+                !obj->wasFramebufferRenderedTo &&
+                !obj->wasViewportRenderedTo &&
+                !obj->producerPending.hasAny(kProducerAll);
+            if ((obj->colorShadowAuthoritative || uploadExactLegacyShadow) &&
+                copySimpleTextureLevelShadow(*obj,
+                                             levelImage,
+                                             format,
+                                             type,
+                                             bufSize,
+                                             impl_->state->pixelStore(),
+                                             pixels,
+                                             (obj->wasFramebufferRenderedTo ||
+                                              obj->wasViewportRenderedTo) &&
+                                                 impl_->state->clipOrigin() != GL_UPPER_LEFT)) {
+                impl_->drainPendingGpuProducers({
+                    {Impl::GpuResourceAccess::Kind::Texture,
+                     texture,
+                     kProducerAll},
+                });
+                return true;
+            }
         }
     }
 
@@ -3170,6 +3210,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
     const bool formatIsGreen = (format == GL_GREEN || format == GL_GREEN_INTEGER);
     const bool formatIsBlue = (format == GL_BLUE || format == GL_BLUE_INTEGER);
     const bool formatIsAlpha = (format == GL_ALPHA);
+    const bool formatIsLuminanceAlpha = (format == GL_LUMINANCE_ALPHA);
     auto pickComponent = [&](const double* vals4, int glCompIdx) -> double {
         if (formatIsBGR) {
             static const int map[3] = {2, 1, 0};
@@ -3181,6 +3222,11 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
         if (formatIsGreen) return glCompIdx == 0 ? vals4[1] : 0.0;
         if (formatIsBlue) return glCompIdx == 0 ? vals4[2] : 0.0;
         if (formatIsAlpha) return glCompIdx == 0 ? vals4[3] : 0.0;
+        if (formatIsLuminanceAlpha) {
+            if (glCompIdx == 0) return vals4[0];
+            if (glCompIdx == 1) return vals4[3];
+            return 0.0;
+        }
         return vals4[glCompIdx];
     };
 
