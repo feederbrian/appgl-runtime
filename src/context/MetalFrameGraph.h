@@ -14,6 +14,31 @@
 #include "../shader/ShaderTranslator.h"
 #include "../state/MatrixStateMirror.h"
 
+#ifndef GL_COMBINE
+#define GL_COMBINE 0x8570
+#endif
+#ifndef GL_CONSTANT
+#define GL_CONSTANT 0x8576
+#endif
+#ifndef GL_PRIMARY_COLOR
+#define GL_PRIMARY_COLOR 0x8577
+#endif
+#ifndef GL_PREVIOUS
+#define GL_PREVIOUS 0x8578
+#endif
+#ifndef GL_TEXTURE
+#define GL_TEXTURE 0x1702
+#endif
+#ifndef GL_MODULATE
+#define GL_MODULATE 0x2100
+#endif
+#ifndef GL_SRC_COLOR
+#define GL_SRC_COLOR 0x0300
+#endif
+#ifndef GL_SRC_ALPHA
+#define GL_SRC_ALPHA 0x0302
+#endif
+
 #ifdef __OBJC__
 @class CAMetalLayer;
 @protocol MTLDevice;
@@ -821,6 +846,12 @@ struct ImmediateDrawInfo {
     std::uint32_t textureBaseClass = 0;
     bool textureSampleYFlip = false;
     std::array<GLfloat, 4> textureEnvColor = {0.0f, 0.0f, 0.0f, 0.0f};
+    GLenum textureCombineRGB = GL_MODULATE;
+    GLenum textureCombineAlpha = GL_MODULATE;
+    std::array<GLenum, 3> textureSourceRGB = {GL_TEXTURE, GL_PREVIOUS, GL_CONSTANT};
+    std::array<GLenum, 3> textureSourceAlpha = {GL_TEXTURE, GL_PREVIOUS, GL_CONSTANT};
+    std::array<GLenum, 3> textureOperandRGB = {GL_SRC_COLOR, GL_SRC_COLOR, GL_SRC_ALPHA};
+    std::array<GLenum, 3> textureOperandAlpha = {GL_SRC_ALPHA, GL_SRC_ALPHA, GL_SRC_ALPHA};
     GLint textureWrapS = GL_REPEAT;
     GLint textureWrapT = GL_REPEAT;
     GLint textureMinFilter = GL_NEAREST_MIPMAP_LINEAR;

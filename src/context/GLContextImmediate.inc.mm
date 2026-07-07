@@ -954,21 +954,119 @@ void GLContext::setTexEnvFloatCompat(GLenum target, GLenum pname, const GLfloat*
         pushError(GL_INVALID_ENUM, "glTexEnv", "target is invalid");
         return;
     }
+    const GLenum enumValue = static_cast<GLenum>(params[0]);
+    auto setCombineMode = [&](GLenum& dst) {
+        switch (enumValue) {
+            case GL_REPLACE:
+            case GL_MODULATE:
+            case GL_ADD:
+            case GL_SUBTRACT:
+                dst = enumValue;
+                return true;
+            default:
+                pushError(GL_INVALID_ENUM, "glTexEnv",
+                          "texture combine mode is invalid");
+                return false;
+        }
+    };
+    auto setSource = [&](std::array<GLenum, 3>& dst, std::size_t index) {
+        switch (enumValue) {
+            case GL_TEXTURE:
+            case GL_CONSTANT:
+            case GL_PRIMARY_COLOR:
+            case GL_PREVIOUS:
+                dst[index] = enumValue;
+                return true;
+            default:
+                pushError(GL_INVALID_ENUM, "glTexEnv",
+                          "texture combine source is invalid");
+                return false;
+        }
+    };
+    auto setOperandRGB = [&](std::array<GLenum, 3>& dst, std::size_t index) {
+        switch (enumValue) {
+            case GL_SRC_COLOR:
+            case GL_ONE_MINUS_SRC_COLOR:
+            case GL_SRC_ALPHA:
+            case GL_ONE_MINUS_SRC_ALPHA:
+                dst[index] = enumValue;
+                return true;
+            default:
+                pushError(GL_INVALID_ENUM, "glTexEnv",
+                          "texture combine RGB operand is invalid");
+                return false;
+        }
+    };
+    auto setOperandAlpha = [&](std::array<GLenum, 3>& dst, std::size_t index) {
+        switch (enumValue) {
+            case GL_SRC_ALPHA:
+            case GL_ONE_MINUS_SRC_ALPHA:
+                dst[index] = enumValue;
+                return true;
+            default:
+                pushError(GL_INVALID_ENUM, "glTexEnv",
+                          "texture combine alpha operand is invalid");
+                return false;
+        }
+    };
     switch (pname) {
         case GL_TEXTURE_ENV_MODE:
-            switch (static_cast<GLenum>(params[0])) {
+            switch (enumValue) {
                 case GL_REPLACE:
                 case GL_MODULATE:
                 case GL_DECAL:
                 case GL_BLEND:
                 case GL_ADD:
-                    impl_->texEnv.mode = static_cast<GLenum>(params[0]);
+                case GL_COMBINE:
+                    impl_->texEnv.mode = enumValue;
                     return;
                 default:
                     pushError(GL_INVALID_ENUM, "glTexEnv",
                               "texture env mode is invalid");
                     return;
             }
+        case GL_COMBINE_RGB:
+            (void)setCombineMode(impl_->texEnv.combineRGB);
+            return;
+        case GL_COMBINE_ALPHA:
+            (void)setCombineMode(impl_->texEnv.combineAlpha);
+            return;
+        case GL_SOURCE0_RGB:
+            (void)setSource(impl_->texEnv.sourceRGB, 0u);
+            return;
+        case GL_SOURCE1_RGB:
+            (void)setSource(impl_->texEnv.sourceRGB, 1u);
+            return;
+        case GL_SOURCE2_RGB:
+            (void)setSource(impl_->texEnv.sourceRGB, 2u);
+            return;
+        case GL_SOURCE0_ALPHA:
+            (void)setSource(impl_->texEnv.sourceAlpha, 0u);
+            return;
+        case GL_SOURCE1_ALPHA:
+            (void)setSource(impl_->texEnv.sourceAlpha, 1u);
+            return;
+        case GL_SOURCE2_ALPHA:
+            (void)setSource(impl_->texEnv.sourceAlpha, 2u);
+            return;
+        case GL_OPERAND0_RGB:
+            (void)setOperandRGB(impl_->texEnv.operandRGB, 0u);
+            return;
+        case GL_OPERAND1_RGB:
+            (void)setOperandRGB(impl_->texEnv.operandRGB, 1u);
+            return;
+        case GL_OPERAND2_RGB:
+            (void)setOperandRGB(impl_->texEnv.operandRGB, 2u);
+            return;
+        case GL_OPERAND0_ALPHA:
+            (void)setOperandAlpha(impl_->texEnv.operandAlpha, 0u);
+            return;
+        case GL_OPERAND1_ALPHA:
+            (void)setOperandAlpha(impl_->texEnv.operandAlpha, 1u);
+            return;
+        case GL_OPERAND2_ALPHA:
+            (void)setOperandAlpha(impl_->texEnv.operandAlpha, 2u);
+            return;
         case GL_TEXTURE_ENV_COLOR:
             impl_->texEnv.color[0] = params[0];
             impl_->texEnv.color[1] = params[1];
@@ -5417,6 +5515,12 @@ void GLContext::endImmediate() {
                 impl_->texEnv.color[2],
                 impl_->texEnv.color[3],
             };
+            info.textureCombineRGB = impl_->texEnv.combineRGB;
+            info.textureCombineAlpha = impl_->texEnv.combineAlpha;
+            info.textureSourceRGB = impl_->texEnv.sourceRGB;
+            info.textureSourceAlpha = impl_->texEnv.sourceAlpha;
+            info.textureOperandRGB = impl_->texEnv.operandRGB;
+            info.textureOperandAlpha = impl_->texEnv.operandAlpha;
         }
     }
     info.fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
@@ -7634,6 +7738,12 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
                     impl_->texEnv.color[2],
                     impl_->texEnv.color[3],
                 };
+                info.textureCombineRGB = impl_->texEnv.combineRGB;
+                info.textureCombineAlpha = impl_->texEnv.combineAlpha;
+                info.textureSourceRGB = impl_->texEnv.sourceRGB;
+                info.textureSourceAlpha = impl_->texEnv.sourceAlpha;
+                info.textureOperandRGB = impl_->texEnv.operandRGB;
+                info.textureOperandAlpha = impl_->texEnv.operandAlpha;
             }
         }
         info.fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;

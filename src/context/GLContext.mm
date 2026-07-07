@@ -277,6 +277,78 @@
 #ifndef GL_TEXTURE_ENV_COLOR
 #define GL_TEXTURE_ENV_COLOR 0x2201
 #endif
+#ifndef GL_COMBINE
+#define GL_COMBINE 0x8570
+#endif
+#ifndef GL_COMBINE_RGB
+#define GL_COMBINE_RGB 0x8571
+#endif
+#ifndef GL_COMBINE_ALPHA
+#define GL_COMBINE_ALPHA 0x8572
+#endif
+#ifndef GL_SOURCE0_RGB
+#define GL_SOURCE0_RGB 0x8580
+#endif
+#ifndef GL_SOURCE1_RGB
+#define GL_SOURCE1_RGB 0x8581
+#endif
+#ifndef GL_SOURCE2_RGB
+#define GL_SOURCE2_RGB 0x8582
+#endif
+#ifndef GL_SOURCE0_ALPHA
+#define GL_SOURCE0_ALPHA 0x8588
+#endif
+#ifndef GL_SOURCE1_ALPHA
+#define GL_SOURCE1_ALPHA 0x8589
+#endif
+#ifndef GL_SOURCE2_ALPHA
+#define GL_SOURCE2_ALPHA 0x858A
+#endif
+#ifndef GL_OPERAND0_RGB
+#define GL_OPERAND0_RGB 0x8590
+#endif
+#ifndef GL_OPERAND1_RGB
+#define GL_OPERAND1_RGB 0x8591
+#endif
+#ifndef GL_OPERAND2_RGB
+#define GL_OPERAND2_RGB 0x8592
+#endif
+#ifndef GL_OPERAND0_ALPHA
+#define GL_OPERAND0_ALPHA 0x8598
+#endif
+#ifndef GL_OPERAND1_ALPHA
+#define GL_OPERAND1_ALPHA 0x8599
+#endif
+#ifndef GL_OPERAND2_ALPHA
+#define GL_OPERAND2_ALPHA 0x859A
+#endif
+#ifndef GL_CONSTANT
+#define GL_CONSTANT 0x8576
+#endif
+#ifndef GL_PRIMARY_COLOR
+#define GL_PRIMARY_COLOR 0x8577
+#endif
+#ifndef GL_PREVIOUS
+#define GL_PREVIOUS 0x8578
+#endif
+#ifndef GL_TEXTURE
+#define GL_TEXTURE 0x1702
+#endif
+#ifndef GL_SRC_COLOR
+#define GL_SRC_COLOR 0x0300
+#endif
+#ifndef GL_ONE_MINUS_SRC_COLOR
+#define GL_ONE_MINUS_SRC_COLOR 0x0301
+#endif
+#ifndef GL_SRC_ALPHA
+#define GL_SRC_ALPHA 0x0302
+#endif
+#ifndef GL_ONE_MINUS_SRC_ALPHA
+#define GL_ONE_MINUS_SRC_ALPHA 0x0303
+#endif
+#ifndef GL_SUBTRACT
+#define GL_SUBTRACT 0x84E7
+#endif
 #ifndef GL_MODULATE
 #define GL_MODULATE 0x2100
 #endif
@@ -15211,6 +15283,8 @@ struct GLContext::Impl {
         const GLenum internalFormat = object.desc.internalFormat;
         const bool isCompatGlyphAtlasSize =
             object.target == GL_TEXTURE_2D &&
+            !object.wasFramebufferRenderedTo &&
+            !object.wasViewportRenderedTo &&
             (object.desc.width >= 64 || object.desc.height >= 64);
         const bool isCompatGlyphFormat =
             isCompatGlyphAtlasSize &&
@@ -31977,6 +32051,12 @@ struct GLContext::Impl {
     };
     struct FixedFunctionTexEnvState {
         GLenum mode = GL_MODULATE;
+        GLenum combineRGB = GL_MODULATE;
+        GLenum combineAlpha = GL_MODULATE;
+        std::array<GLenum, 3> sourceRGB = {GL_TEXTURE, GL_PREVIOUS, GL_CONSTANT};
+        std::array<GLenum, 3> sourceAlpha = {GL_TEXTURE, GL_PREVIOUS, GL_CONSTANT};
+        std::array<GLenum, 3> operandRGB = {GL_SRC_COLOR, GL_SRC_COLOR, GL_SRC_ALPHA};
+        std::array<GLenum, 3> operandAlpha = {GL_SRC_ALPHA, GL_SRC_ALPHA, GL_SRC_ALPHA};
         float color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     };
     std::array<FixedFunctionTexGenCoord, 4> texGen{};

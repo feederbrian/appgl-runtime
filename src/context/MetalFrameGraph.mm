@@ -18226,6 +18226,22 @@ struct AppGLImmediateTextureState {
     uint textureSampleYFlip;
     float4 borderColor;
     float4 envColor;
+    uint combineRGB;
+    uint combineAlpha;
+    uint sourceRGB0;
+    uint sourceRGB1;
+    uint sourceRGB2;
+    uint sourceAlpha0;
+    uint sourceAlpha1;
+    uint sourceAlpha2;
+    uint operandRGB0;
+    uint operandRGB1;
+    uint operandRGB2;
+    uint operandAlpha0;
+    uint operandAlpha1;
+    uint operandAlpha2;
+    uint _combinePad0;
+    uint _combinePad1;
     uint alphaTestEnabled;
     uint alphaTestFunc;
     float alphaTestRef;
@@ -18265,6 +18281,78 @@ static void appgl_immediate_alpha_test(float alpha,
     }
 }
 
+static float4 appgl_immediate_combine_source(uint source,
+                                             float4 color,
+                                             float4 sample,
+                                             constant AppGLImmediateTextureState& textureState) {
+    constexpr uint kTexture = 0x1702u;
+    constexpr uint kConstant = 0x8576u;
+    constexpr uint kPrimaryColor = 0x8577u;
+    constexpr uint kPrevious = 0x8578u;
+    switch (source) {
+        case kTexture: return sample;
+        case kConstant: return textureState.envColor;
+        case kPrimaryColor:
+        case kPrevious:
+        default:
+            return color;
+    }
+}
+
+static float3 appgl_immediate_combine_rgb_operand(uint operand, float4 source) {
+    constexpr uint kSrcColor = 0x0300u;
+    constexpr uint kOneMinusSrcColor = 0x0301u;
+    constexpr uint kSrcAlpha = 0x0302u;
+    constexpr uint kOneMinusSrcAlpha = 0x0303u;
+    switch (operand) {
+        case kOneMinusSrcColor: return 1.0f - source.rgb;
+        case kSrcAlpha: return float3(source.a);
+        case kOneMinusSrcAlpha: return float3(1.0f - source.a);
+        case kSrcColor:
+        default:
+            return source.rgb;
+    }
+}
+
+static float appgl_immediate_combine_alpha_operand(uint operand, float4 source) {
+    constexpr uint kOneMinusSrcAlpha = 0x0303u;
+    return operand == kOneMinusSrcAlpha ? 1.0f - source.a : source.a;
+}
+
+static float3 appgl_immediate_apply_combine_rgb(uint combine,
+                                                float3 arg0,
+                                                float3 arg1) {
+    constexpr uint kReplace = 0x1E01u;
+    constexpr uint kModulate = 0x2100u;
+    constexpr uint kAdd = 0x0104u;
+    constexpr uint kSubtract = 0x84E7u;
+    switch (combine) {
+        case kModulate: return arg0 * arg1;
+        case kAdd: return arg0 + arg1;
+        case kSubtract: return arg0 - arg1;
+        case kReplace:
+        default:
+            return arg0;
+    }
+}
+
+static float appgl_immediate_apply_combine_alpha(uint combine,
+                                                 float arg0,
+                                                 float arg1) {
+    constexpr uint kReplace = 0x1E01u;
+    constexpr uint kModulate = 0x2100u;
+    constexpr uint kAdd = 0x0104u;
+    constexpr uint kSubtract = 0x84E7u;
+    switch (combine) {
+        case kModulate: return arg0 * arg1;
+        case kAdd: return arg0 + arg1;
+        case kSubtract: return arg0 - arg1;
+        case kReplace:
+        default:
+            return arg0;
+    }
+}
+
 static float4 appgl_immediate_finish_sample(float4 color,
                                             float4 sample,
                                             constant AppGLImmediateTextureState& textureState) {
@@ -18273,6 +18361,7 @@ static float4 appgl_immediate_finish_sample(float4 color,
     constexpr uint kEnvModulate = 0x2100u;
     constexpr uint kEnvDecal = 0x2101u;
     constexpr uint kEnvBlend = 0x0BE2u;
+    constexpr uint kEnvCombine = 0x8570u;
     constexpr uint kBaseAlpha = 1u;
     constexpr uint kBaseLuminance = 2u;
     constexpr uint kBaseLuminanceAlpha = 3u;
@@ -18281,6 +18370,30 @@ static float4 appgl_immediate_finish_sample(float4 color,
     constexpr uint kBaseRGBA = 6u;
     const float lum = sample.r;
     const float texAlpha = sample.a;
+    if (textureState.envMode == kEnvCombine) {
+        const float4 rgbSrc0 = appgl_immediate_combine_source(
+            textureState.sourceRGB0, color, sample, textureState);
+        const float4 rgbSrc1 = appgl_immediate_combine_source(
+            textureState.sourceRGB1, color, sample, textureState);
+        const float3 rgb0 = appgl_immediate_combine_rgb_operand(
+            textureState.operandRGB0, rgbSrc0);
+        const float3 rgb1 = appgl_immediate_combine_rgb_operand(
+            textureState.operandRGB1, rgbSrc1);
+        const float4 alphaSrc0 = appgl_immediate_combine_source(
+            textureState.sourceAlpha0, color, sample, textureState);
+        const float4 alphaSrc1 = appgl_immediate_combine_source(
+            textureState.sourceAlpha1, color, sample, textureState);
+        const float alpha0 = appgl_immediate_combine_alpha_operand(
+            textureState.operandAlpha0, alphaSrc0);
+        const float alpha1 = appgl_immediate_combine_alpha_operand(
+            textureState.operandAlpha1, alphaSrc1);
+        return clamp(float4(appgl_immediate_apply_combine_rgb(
+                                textureState.combineRGB, rgb0, rgb1),
+                            appgl_immediate_apply_combine_alpha(
+                                textureState.combineAlpha, alpha0, alpha1)),
+                     0.0f,
+                     1.0f);
+    }
     if (textureState.envMode == kEnvReplace) {
         if (textureState.baseClass == kBaseAlpha) {
             return float4(color.rgb, texAlpha);
@@ -20050,6 +20163,22 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             std::uint32_t textureSampleYFlip;
             float borderColor[4];
             float envColor[4];
+            std::uint32_t combineRGB;
+            std::uint32_t combineAlpha;
+            std::uint32_t sourceRGB0;
+            std::uint32_t sourceRGB1;
+            std::uint32_t sourceRGB2;
+            std::uint32_t sourceAlpha0;
+            std::uint32_t sourceAlpha1;
+            std::uint32_t sourceAlpha2;
+            std::uint32_t operandRGB0;
+            std::uint32_t operandRGB1;
+            std::uint32_t operandRGB2;
+            std::uint32_t operandAlpha0;
+            std::uint32_t operandAlpha1;
+            std::uint32_t operandAlpha2;
+            std::uint32_t combinePad0;
+            std::uint32_t combinePad1;
             std::uint32_t alphaTestEnabled;
             std::uint32_t alphaTestFunc;
             float alphaTestRef;
@@ -20086,6 +20215,50 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
                 info.textureEnvColor[2],
                 info.textureEnvColor[3],
             },
+            compatLegacyTextureState
+                ? static_cast<std::uint32_t>(info.textureCombineRGB)
+                : 0u,
+            compatLegacyTextureState
+                ? static_cast<std::uint32_t>(info.textureCombineAlpha)
+                : 0u,
+            compatLegacyTextureState
+                ? static_cast<std::uint32_t>(info.textureSourceRGB[0])
+                : 0u,
+            compatLegacyTextureState
+                ? static_cast<std::uint32_t>(info.textureSourceRGB[1])
+                : 0u,
+            compatLegacyTextureState
+                ? static_cast<std::uint32_t>(info.textureSourceRGB[2])
+                : 0u,
+            compatLegacyTextureState
+                ? static_cast<std::uint32_t>(info.textureSourceAlpha[0])
+                : 0u,
+            compatLegacyTextureState
+                ? static_cast<std::uint32_t>(info.textureSourceAlpha[1])
+                : 0u,
+            compatLegacyTextureState
+                ? static_cast<std::uint32_t>(info.textureSourceAlpha[2])
+                : 0u,
+            compatLegacyTextureState
+                ? static_cast<std::uint32_t>(info.textureOperandRGB[0])
+                : 0u,
+            compatLegacyTextureState
+                ? static_cast<std::uint32_t>(info.textureOperandRGB[1])
+                : 0u,
+            compatLegacyTextureState
+                ? static_cast<std::uint32_t>(info.textureOperandRGB[2])
+                : 0u,
+            compatLegacyTextureState
+                ? static_cast<std::uint32_t>(info.textureOperandAlpha[0])
+                : 0u,
+            compatLegacyTextureState
+                ? static_cast<std::uint32_t>(info.textureOperandAlpha[1])
+                : 0u,
+            compatLegacyTextureState
+                ? static_cast<std::uint32_t>(info.textureOperandAlpha[2])
+                : 0u,
+            0u,
+            0u,
             compatAlphaTestState ? 1u : 0u,
             static_cast<std::uint32_t>(info.alphaTestFunc),
             info.alphaTestRef,
