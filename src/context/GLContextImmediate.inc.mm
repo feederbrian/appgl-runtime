@@ -69,12 +69,16 @@ std::uint32_t appglImmediateTextureBaseClass(
         case GL_ALPHA8:
         case GL_ALPHA12:
         case GL_ALPHA16:
+        case GL_ALPHA16F_ARB:
+        case GL_ALPHA32F_ARB:
             return kAppGLImmediateTextureBaseAlpha;
         case GL_LUMINANCE:
         case GL_LUMINANCE4:
         case GL_LUMINANCE8:
         case GL_LUMINANCE12:
         case GL_LUMINANCE16:
+        case GL_LUMINANCE16F_ARB:
+        case GL_LUMINANCE32F_ARB:
         case GL_SLUMINANCE8:
             return kAppGLImmediateTextureBaseLuminance;
         case GL_LUMINANCE_ALPHA:
@@ -84,6 +88,8 @@ std::uint32_t appglImmediateTextureBaseClass(
         case GL_LUMINANCE12_ALPHA4:
         case GL_LUMINANCE12_ALPHA12:
         case GL_LUMINANCE16_ALPHA16:
+        case GL_LUMINANCE_ALPHA16F_ARB:
+        case GL_LUMINANCE_ALPHA32F_ARB:
         case GL_SLUMINANCE8_ALPHA8:
             return kAppGLImmediateTextureBaseLuminanceAlpha;
         case GL_INTENSITY:
@@ -91,6 +97,8 @@ std::uint32_t appglImmediateTextureBaseClass(
         case GL_INTENSITY8:
         case GL_INTENSITY12:
         case GL_INTENSITY16:
+        case GL_INTENSITY16F_ARB:
+        case GL_INTENSITY32F_ARB:
             return kAppGLImmediateTextureBaseIntensity;
         case GL_RGB:
             return kAppGLImmediateTextureBaseRGB;
@@ -126,12 +134,16 @@ std::array<GLfloat, 4> appglImmediateBaseBorderColor(
         case GL_ALPHA8:
         case GL_ALPHA12:
         case GL_ALPHA16:
+        case GL_ALPHA16F_ARB:
+        case GL_ALPHA32F_ARB:
             return {0.0f, 0.0f, 0.0f, border[3]};
         case GL_LUMINANCE:
         case GL_LUMINANCE4:
         case GL_LUMINANCE8:
         case GL_LUMINANCE12:
         case GL_LUMINANCE16:
+        case GL_LUMINANCE16F_ARB:
+        case GL_LUMINANCE32F_ARB:
             return {border[0], border[0], border[0], 1.0f};
         case GL_LUMINANCE_ALPHA:
         case GL_LUMINANCE4_ALPHA4:
@@ -140,12 +152,16 @@ std::array<GLfloat, 4> appglImmediateBaseBorderColor(
         case GL_LUMINANCE12_ALPHA4:
         case GL_LUMINANCE12_ALPHA12:
         case GL_LUMINANCE16_ALPHA16:
+        case GL_LUMINANCE_ALPHA16F_ARB:
+        case GL_LUMINANCE_ALPHA32F_ARB:
             return {border[0], border[0], border[0], border[3]};
         case GL_INTENSITY:
         case GL_INTENSITY4:
         case GL_INTENSITY8:
         case GL_INTENSITY12:
         case GL_INTENSITY16:
+        case GL_INTENSITY16F_ARB:
+        case GL_INTENSITY32F_ARB:
             return {border[0], border[0], border[0], border[0]};
         case GL_RED:
         case GL_R8:
@@ -7963,6 +7979,30 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
                 if (!sameColor(v)) {
                     return false;
                 }
+            }
+        }
+        const bool alphaTestEnabled =
+            appglCompatFeatureEnabled(AppGLCompatFeature::AlphaTest) &&
+            impl_->state->isEnabled(GL_ALPHA_TEST);
+        if (alphaTestEnabled) {
+            const auto& alphaTest = impl_->state->alphaTestState();
+            const GLfloat alpha = colorVertex.color[3];
+            const GLfloat ref = alphaTest.ref;
+            const bool alphaPasses = [&]() {
+                switch (alphaTest.func) {
+                    case GL_NEVER:    return false;
+                    case GL_LESS:     return alpha < ref;
+                    case GL_LEQUAL:   return alpha <= ref;
+                    case GL_GREATER:  return alpha > ref;
+                    case GL_GEQUAL:   return alpha >= ref;
+                    case GL_EQUAL:    return alpha == ref;
+                    case GL_NOTEQUAL: return alpha != ref;
+                    case GL_ALWAYS:
+                    default:          return true;
+                }
+            }();
+            if (!alphaPasses) {
+                return true;
             }
         }
         const std::uint8_t rgba[4] = {

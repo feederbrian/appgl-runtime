@@ -454,6 +454,30 @@ static bool appglHotpathInvariantHoistSubflagEnabled(const char* name) {
 #ifndef GL_INTENSITY8
 #define GL_INTENSITY8 0x804B
 #endif
+#ifndef GL_ALPHA32F_ARB
+#define GL_ALPHA32F_ARB 0x8816
+#endif
+#ifndef GL_INTENSITY32F_ARB
+#define GL_INTENSITY32F_ARB 0x8817
+#endif
+#ifndef GL_LUMINANCE32F_ARB
+#define GL_LUMINANCE32F_ARB 0x8818
+#endif
+#ifndef GL_LUMINANCE_ALPHA32F_ARB
+#define GL_LUMINANCE_ALPHA32F_ARB 0x8819
+#endif
+#ifndef GL_ALPHA16F_ARB
+#define GL_ALPHA16F_ARB 0x881C
+#endif
+#ifndef GL_INTENSITY16F_ARB
+#define GL_INTENSITY16F_ARB 0x881D
+#endif
+#ifndef GL_LUMINANCE16F_ARB
+#define GL_LUMINANCE16F_ARB 0x881E
+#endif
+#ifndef GL_LUMINANCE_ALPHA16F_ARB
+#define GL_LUMINANCE_ALPHA16F_ARB 0x881F
+#endif
 #ifndef GL_CLAMP
 #define GL_CLAMP 0x2900
 #endif
@@ -6343,6 +6367,20 @@ MTLPixelFormat metalRenderbufferFormat(GLenum internalFormat) {
             return appglCompatProfileEnabled()
                 ? MTLPixelFormatRGBA8Unorm
                 : MTLPixelFormatInvalid;
+        case GL_ALPHA16F_ARB:
+        case GL_LUMINANCE16F_ARB:
+        case GL_LUMINANCE_ALPHA16F_ARB:
+        case GL_INTENSITY16F_ARB:
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatRGBA16Float
+                : MTLPixelFormatInvalid;
+        case GL_ALPHA32F_ARB:
+        case GL_LUMINANCE32F_ARB:
+        case GL_LUMINANCE_ALPHA32F_ARB:
+        case GL_INTENSITY32F_ARB:
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatRGBA32Float
+                : MTLPixelFormatInvalid;
         case GL_SLUMINANCE8:
         case GL_SLUMINANCE8_ALPHA8:
             return appglCompatProfileEnabled()
@@ -6664,6 +6702,14 @@ bool isLegacyCompatTextureInternalFormat(GLenum internalFormat) {
         case GL_INTENSITY8:
         case GL_INTENSITY12:
         case GL_INTENSITY16:
+        case GL_ALPHA16F_ARB:
+        case GL_ALPHA32F_ARB:
+        case GL_LUMINANCE16F_ARB:
+        case GL_LUMINANCE32F_ARB:
+        case GL_LUMINANCE_ALPHA16F_ARB:
+        case GL_LUMINANCE_ALPHA32F_ARB:
+        case GL_INTENSITY16F_ARB:
+        case GL_INTENSITY32F_ARB:
         case GL_SLUMINANCE8:
         case GL_SLUMINANCE8_ALPHA8:
             return true;
@@ -11507,12 +11553,16 @@ struct GLContext::Impl {
             case GL_ALPHA8:
             case GL_ALPHA12:
             case GL_ALPHA16:
+            case GL_ALPHA16F_ARB:
+            case GL_ALPHA32F_ARB:
                 return CompatUploadBase::Alpha;
             case GL_LUMINANCE:
             case GL_LUMINANCE4:
             case GL_LUMINANCE8:
             case GL_LUMINANCE12:
             case GL_LUMINANCE16:
+            case GL_LUMINANCE16F_ARB:
+            case GL_LUMINANCE32F_ARB:
             case GL_SLUMINANCE8:
                 return CompatUploadBase::Luminance;
             case GL_LUMINANCE_ALPHA:
@@ -11522,6 +11572,8 @@ struct GLContext::Impl {
             case GL_LUMINANCE12_ALPHA4:
             case GL_LUMINANCE12_ALPHA12:
             case GL_LUMINANCE16_ALPHA16:
+            case GL_LUMINANCE_ALPHA16F_ARB:
+            case GL_LUMINANCE_ALPHA32F_ARB:
             case GL_SLUMINANCE8_ALPHA8:
                 return CompatUploadBase::LuminanceAlpha;
             case GL_INTENSITY:
@@ -11529,6 +11581,8 @@ struct GLContext::Impl {
             case GL_INTENSITY8:
             case GL_INTENSITY12:
             case GL_INTENSITY16:
+            case GL_INTENSITY16F_ARB:
+            case GL_INTENSITY32F_ARB:
                 return CompatUploadBase::Intensity;
             case GL_RGBA:
             case GL_RGBA_INTEGER:
@@ -29743,6 +29797,8 @@ struct GLContext::Impl {
                 case GL_LUMINANCE8:
                 case GL_LUMINANCE12:
                 case GL_LUMINANCE16:
+                case GL_LUMINANCE16F_ARB:
+                case GL_LUMINANCE32F_ARB:
                 case GL_SLUMINANCE8: {
                     const double l = vals[0];
                     vals[0] = l;
@@ -29758,6 +29814,8 @@ struct GLContext::Impl {
                 case GL_LUMINANCE12_ALPHA4:
                 case GL_LUMINANCE12_ALPHA12:
                 case GL_LUMINANCE16_ALPHA16:
+                case GL_LUMINANCE_ALPHA16F_ARB:
+                case GL_LUMINANCE_ALPHA32F_ARB:
                 case GL_SLUMINANCE8_ALPHA8: {
                     const double l = vals[0];
                     const double a = vals[3];
@@ -29771,7 +29829,9 @@ struct GLContext::Impl {
                 case GL_INTENSITY4:
                 case GL_INTENSITY8:
                 case GL_INTENSITY12:
-                case GL_INTENSITY16: {
+                case GL_INTENSITY16:
+                case GL_INTENSITY16F_ARB:
+                case GL_INTENSITY32F_ARB: {
                     const double i = vals[0];
                     vals[0] = i;
                     vals[1] = 0.0;

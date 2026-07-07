@@ -1556,7 +1556,11 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
     const auto componentType = [](GLenum fmt) -> GLint {
         if (fmt == GL_R32F || fmt == GL_RG32F || fmt == GL_RGB32F || fmt == GL_RGBA32F
             || fmt == GL_R16F || fmt == GL_RG16F || fmt == GL_RGB16F || fmt == GL_RGBA16F
-            || fmt == GL_R11F_G11F_B10F || fmt == GL_RGB9_E5) {
+            || fmt == GL_R11F_G11F_B10F || fmt == GL_RGB9_E5
+            || fmt == GL_ALPHA16F_ARB || fmt == GL_ALPHA32F_ARB
+            || fmt == GL_LUMINANCE16F_ARB || fmt == GL_LUMINANCE32F_ARB
+            || fmt == GL_LUMINANCE_ALPHA16F_ARB || fmt == GL_LUMINANCE_ALPHA32F_ARB
+            || fmt == GL_INTENSITY16F_ARB || fmt == GL_INTENSITY32F_ARB) {
             return GL_FLOAT;
         }
         if (fmt == GL_R8I || fmt == GL_RG8I || fmt == GL_RGB8I || fmt == GL_RGBA8I
@@ -1627,6 +1631,12 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                     case GL_LUMINANCE16:
                     case GL_LUMINANCE16_ALPHA16:
                         return 16;
+                    case GL_LUMINANCE16F_ARB:
+                    case GL_LUMINANCE_ALPHA16F_ARB:
+                        return 16;
+                    case GL_LUMINANCE32F_ARB:
+                    case GL_LUMINANCE_ALPHA32F_ARB:
+                        return 32;
                     default:
                         return 0;
                 }
@@ -1641,7 +1651,10 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                     case GL_INTENSITY12:
                         return 12;
                     case GL_INTENSITY16:
+                    case GL_INTENSITY16F_ARB:
                         return 16;
+                    case GL_INTENSITY32F_ARB:
+                        return 32;
                     default:
                         return 0;
                 }
@@ -1664,6 +1677,12 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                 if (fmt == GL_ALPHA16) {
                     return channel == 3 ? 16 : 0;
                 }
+                if (fmt == GL_ALPHA16F_ARB) {
+                    return channel == 3 ? 16 : 0;
+                }
+                if (fmt == GL_ALPHA32F_ARB) {
+                    return channel == 3 ? 32 : 0;
+                }
                 const GLint luminanceBits = legacyLuminanceSize();
                 if (luminanceBits > 0) {
                     if (channel == 3) {
@@ -1682,7 +1701,10 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                             case GL_LUMINANCE12_ALPHA12:
                                 return 12;
                             case GL_LUMINANCE16_ALPHA16:
+                            case GL_LUMINANCE_ALPHA16F_ARB:
                                 return 16;
+                            case GL_LUMINANCE_ALPHA32F_ARB:
+                                return 32;
                             default:
                                 return 0;
                         }

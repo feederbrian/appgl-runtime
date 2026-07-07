@@ -89,6 +89,30 @@
 #ifndef GL_SLUMINANCE8_ALPHA8
 #define GL_SLUMINANCE8_ALPHA8 0x8C45
 #endif
+#ifndef GL_ALPHA32F_ARB
+#define GL_ALPHA32F_ARB 0x8816
+#endif
+#ifndef GL_INTENSITY32F_ARB
+#define GL_INTENSITY32F_ARB 0x8817
+#endif
+#ifndef GL_LUMINANCE32F_ARB
+#define GL_LUMINANCE32F_ARB 0x8818
+#endif
+#ifndef GL_LUMINANCE_ALPHA32F_ARB
+#define GL_LUMINANCE_ALPHA32F_ARB 0x8819
+#endif
+#ifndef GL_ALPHA16F_ARB
+#define GL_ALPHA16F_ARB 0x881C
+#endif
+#ifndef GL_INTENSITY16F_ARB
+#define GL_INTENSITY16F_ARB 0x881D
+#endif
+#ifndef GL_LUMINANCE16F_ARB
+#define GL_LUMINANCE16F_ARB 0x881E
+#endif
+#ifndef GL_LUMINANCE_ALPHA16F_ARB
+#define GL_LUMINANCE_ALPHA16F_ARB 0x881F
+#endif
 
 // Phase 8X Group 4d follow-up⁶ — fixed-function pname aliases. These are
 // compat-profile scalar queries (GL 1.x–2.x era) that have been removed
@@ -453,6 +477,14 @@ void GLCapabilities::initializeFormatTable(void* rawMetalDevice) {
         add(GL_INTENSITY4, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
         add(GL_INTENSITY12, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
         add(GL_INTENSITY16, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+        add(GL_ALPHA16F_ARB, MTLPixelFormatRGBA16Float, false, true, false, false, false);
+        add(GL_LUMINANCE16F_ARB, MTLPixelFormatRGBA16Float, false, true, false, false, false);
+        add(GL_LUMINANCE_ALPHA16F_ARB, MTLPixelFormatRGBA16Float, false, true, false, false, false);
+        add(GL_INTENSITY16F_ARB, MTLPixelFormatRGBA16Float, false, true, false, false, false);
+        add(GL_ALPHA32F_ARB, MTLPixelFormatRGBA32Float, false, false, false, false, false);
+        add(GL_LUMINANCE32F_ARB, MTLPixelFormatRGBA32Float, false, false, false, false, false);
+        add(GL_LUMINANCE_ALPHA32F_ARB, MTLPixelFormatRGBA32Float, false, false, false, false, false);
+        add(GL_INTENSITY32F_ARB, MTLPixelFormatRGBA32Float, false, false, false, false, false);
         add(GL_SLUMINANCE8, MTLPixelFormatRGBA8Unorm_sRGB, false, true, false, true, false);
         add(GL_SLUMINANCE8_ALPHA8, MTLPixelFormatRGBA8Unorm_sRGB, false, true, false, true, false);
     }

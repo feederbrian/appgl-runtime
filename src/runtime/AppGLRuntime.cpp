@@ -109,6 +109,30 @@
 #ifndef GL_SLUMINANCE8_ALPHA8
 #define GL_SLUMINANCE8_ALPHA8 0x8C45
 #endif
+#ifndef GL_ALPHA32F_ARB
+#define GL_ALPHA32F_ARB 0x8816
+#endif
+#ifndef GL_INTENSITY32F_ARB
+#define GL_INTENSITY32F_ARB 0x8817
+#endif
+#ifndef GL_LUMINANCE32F_ARB
+#define GL_LUMINANCE32F_ARB 0x8818
+#endif
+#ifndef GL_LUMINANCE_ALPHA32F_ARB
+#define GL_LUMINANCE_ALPHA32F_ARB 0x8819
+#endif
+#ifndef GL_ALPHA16F_ARB
+#define GL_ALPHA16F_ARB 0x881C
+#endif
+#ifndef GL_INTENSITY16F_ARB
+#define GL_INTENSITY16F_ARB 0x881D
+#endif
+#ifndef GL_LUMINANCE16F_ARB
+#define GL_LUMINANCE16F_ARB 0x881E
+#endif
+#ifndef GL_LUMINANCE_ALPHA16F_ARB
+#define GL_LUMINANCE_ALPHA16F_ARB 0x881F
+#endif
 #ifndef GL_QUAD_STRIP
 #define GL_QUAD_STRIP 0x0008
 #endif
@@ -1054,17 +1078,25 @@ bool isValidLegacyUploadInternalFormat(GLenum internalFormat) {
         case GL_ALPHA4:
         case GL_ALPHA12:
         case GL_ALPHA16:
+        case GL_ALPHA16F_ARB:
+        case GL_ALPHA32F_ARB:
         case GL_LUMINANCE4:
         case GL_LUMINANCE12:
         case GL_LUMINANCE16:
+        case GL_LUMINANCE16F_ARB:
+        case GL_LUMINANCE32F_ARB:
         case GL_LUMINANCE4_ALPHA4:
         case GL_LUMINANCE6_ALPHA2:
         case GL_LUMINANCE12_ALPHA4:
         case GL_LUMINANCE12_ALPHA12:
         case GL_LUMINANCE16_ALPHA16:
+        case GL_LUMINANCE_ALPHA16F_ARB:
+        case GL_LUMINANCE_ALPHA32F_ARB:
         case GL_INTENSITY4:
         case GL_INTENSITY12:
         case GL_INTENSITY16:
+        case GL_INTENSITY16F_ARB:
+        case GL_INTENSITY32F_ARB:
         case GL_SLUMINANCE8:
         case GL_SLUMINANCE8_ALPHA8:
             return appglCompatProfileEnabled();
