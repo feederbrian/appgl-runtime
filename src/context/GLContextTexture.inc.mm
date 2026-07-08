@@ -2099,7 +2099,10 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
     if (pixels == nullptr && !packPBOBound) return true;
 
     const auto legacyCompressedGetTexImageNoErrorFallback =
-        [](GLenum internalFormat) -> bool {
+        [](GLenum internalFormat, GLenum textureTarget) -> bool {
+            if (textureTarget != GL_TEXTURE_RECTANGLE) {
+                return false;
+            }
             switch (internalFormat) {
                 case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
                 case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
@@ -2121,7 +2124,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
         if (readDesc == nullptr ||
             !isCompressedInternalFormat(readDesc->internalFormat) ||
             !legacyCompressedGetTexImageNoErrorFallback(
-                readDesc->internalFormat) ||
+                readDesc->internalFormat, obj->target) ||
             format == GL_DEPTH_COMPONENT ||
             format == GL_DEPTH_STENCIL ||
             format == GL_STENCIL_INDEX) {
@@ -2323,7 +2326,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
             if (levelIt != obj->levels.end() && levelIt->second.defined &&
                 isCompressedInternalFormat(levelIt->second.desc.internalFormat) &&
                 legacyCompressedGetTexImageNoErrorFallback(
-                    levelIt->second.desc.internalFormat) &&
+                    levelIt->second.desc.internalFormat, obj->target) &&
                 format != GL_DEPTH_COMPONENT &&
                 format != GL_DEPTH_STENCIL &&
                 format != GL_STENCIL_INDEX) {

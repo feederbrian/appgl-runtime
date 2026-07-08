@@ -2145,6 +2145,92 @@ bool GLContext::drawPixelsCompat(GLsizei width,
                dstY < sc.y + sc.height;
     };
 
+    if (format == GL_STENCIL_INDEX &&
+        impl_->state->boundDrawFramebuffer() != 0) {
+        GLFramebufferObject* fbo =
+            impl_->objects->framebuffers().get(
+                impl_->state->boundDrawFramebuffer());
+        if (fbo == nullptr) {
+            return false;
+        }
+        const GLFramebufferAttachment* attachment =
+            impl_->framebufferAttachment(*fbo, GL_STENCIL_ATTACHMENT);
+        if (attachment == nullptr) {
+            return true;
+        }
+        const auto info = impl_->framebufferAttachmentInfo(*attachment);
+        if (!info.complete || !isStencilFormat(info.internalFormat)) {
+            return true;
+        }
+        const GLsizei targetWidth = std::max<GLsizei>(info.width, 1);
+        const GLsizei targetHeight = std::max<GLsizei>(info.height, 1);
+        std::vector<std::uint8_t> stencil(
+            static_cast<std::size_t>(targetWidth) *
+            static_cast<std::size_t>(targetHeight),
+            0);
+        (void)impl_->readStencilAttachmentPixels(
+            *attachment, 0, 0, targetWidth, targetHeight, stencil.data());
+
+        bool touched = false;
+        const GLfloat baseX = impl_->fixedFunctionRasterPosition[0];
+        const GLfloat baseY = impl_->fixedFunctionRasterPosition[1];
+        for (GLsizei row = 0; row < height; ++row) {
+            const auto* srcRow =
+                source + static_cast<std::size_t>(row) * rowBytes;
+            GLint y0 = 0;
+            GLint y1 = 0;
+            appglPixelZoomSpan(baseY + static_cast<GLfloat>(row) * zoomY,
+                               baseY + static_cast<GLfloat>(row + 1) * zoomY,
+                               y0,
+                               y1);
+            y0 = std::max<GLint>(y0, 0);
+            y1 = std::min<GLint>(y1, targetHeight);
+            if (y0 >= y1) {
+                continue;
+            }
+            for (GLsizei col = 0; col < width; ++col) {
+                GLint x0 = 0;
+                GLint x1 = 0;
+                appglPixelZoomSpan(baseX + static_cast<GLfloat>(col) * zoomX,
+                                   baseX + static_cast<GLfloat>(col + 1) * zoomX,
+                                   x0,
+                                   x1);
+                x0 = std::max<GLint>(x0, 0);
+                x1 = std::min<GLint>(x1, targetWidth);
+                if (x0 >= x1) {
+                    continue;
+                }
+                const auto* pixel =
+                    srcRow + static_cast<std::size_t>(col) * pixelBytes;
+                const std::uint8_t stencilValue = readStencilIndex(pixel);
+                for (GLint dstY = y0; dstY < y1; ++dstY) {
+                    for (GLint dstX = x0; dstX < x1; ++dstX) {
+                        if (!insideScissor(dstX, dstY)) {
+                            continue;
+                        }
+                        const std::size_t offset =
+                            static_cast<std::size_t>(dstY) *
+                            static_cast<std::size_t>(targetWidth) +
+                            static_cast<std::size_t>(dstX);
+                        stencil[offset] = stencilValue;
+                        touched = true;
+                    }
+                }
+            }
+        }
+        if (!touched) {
+            return true;
+        }
+        if (!impl_->writeStencilAttachmentPixels(
+                *attachment, 0, 0, targetWidth, targetHeight,
+                stencil.data())) {
+            return false;
+        }
+        impl_->markFramebufferAttachmentWrite(
+            *attachment, kProducerCopyWrite | kProducerFboDepthStencilWrite);
+        return true;
+    }
+
     if (colorDrawPixels && impl_->state->boundDrawFramebuffer() != 0) {
         GLFramebufferObject* fbo =
             impl_->objects->framebuffers().get(impl_->state->boundDrawFramebuffer());
@@ -3283,6 +3369,32 @@ bool GLContext::copyPixelsCompat(GLint x,
                     copyDepth, stencilValue, copyStencil);
             }
         }
+        return true;
+    }
+
+    if (type == GL_STENCIL &&
+        impl_->state->boundReadFramebuffer() != 0 &&
+        impl_->state->boundDrawFramebuffer() != 0) {
+        GLint dstX0 = 0;
+        GLint dstX1 = 0;
+        GLint dstY0 = 0;
+        GLint dstY1 = 0;
+        const GLfloat baseX = impl_->fixedFunctionRasterPosition[0];
+        const GLfloat baseY = impl_->fixedFunctionRasterPosition[1];
+        appglPixelZoomSpan(baseX,
+                           baseX + static_cast<GLfloat>(width) * zoomX,
+                           dstX0,
+                           dstX1);
+        appglPixelZoomSpan(baseY,
+                           baseY + static_cast<GLfloat>(height) * zoomY,
+                           dstY0,
+                           dstY1);
+        if (dstX0 == dstX1 || dstY0 == dstY1) {
+            return true;
+        }
+        (void)impl_->blitFramebuffer(x, y, x + width, y + height,
+                                      dstX0, dstY0, dstX1, dstY1,
+                                      GL_STENCIL_BUFFER_BIT, GL_NEAREST);
         return true;
     }
 
@@ -8197,24 +8309,25 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
 	            impl_->state->isEnabled(GL_STENCIL_TEST);
 	        const bool depthTestEnabled =
 	            impl_->state->isEnabled(GL_DEPTH_TEST);
-	        if (depthTestEnabled) {
-	            if (impl_->state->boundDrawFramebuffer() != 0) {
-	                return false;
+	        const GLuint drawFramebufferName =
+	            impl_->state->boundDrawFramebuffer();
+		        if (depthTestEnabled) {
+		            if (drawFramebufferName != 0) {
+		                return false;
+		            }
+		            impl_->ensureDefaultFramebufferDepthStencilShadow();
+		            if (!impl_->defaultFramebufferDepthShadowValid) {
+		                return false;
+		            }
+		        }
+		        if (stencilTestEnabled) {
+	            if (drawFramebufferName == 0) {
+		            impl_->ensureDefaultFramebufferDepthStencilShadow();
+		            if (!impl_->defaultFramebufferStencilShadowValid) {
+		                return false;
+		            }
 	            }
-	            impl_->ensureDefaultFramebufferDepthStencilShadow();
-	            if (!impl_->defaultFramebufferDepthShadowValid) {
-	                return false;
-	            }
-	        }
-	        if (stencilTestEnabled) {
-	            if (impl_->state->boundDrawFramebuffer() != 0) {
-	                return false;
-	            }
-	            impl_->ensureDefaultFramebufferDepthStencilShadow();
-	            if (!impl_->defaultFramebufferStencilShadowValid) {
-	                return false;
-	            }
-	        }
+		        }
 
 	        const Matrix4 mvp = impl_->matrixState.modelViewProjection();
 	        const auto& vp = impl_->state->viewport();
@@ -8398,38 +8511,41 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
 	                default:          return true;
 	            }
 	        };
-		        auto stencilPasses = [&](GLint gx, GLint gy) {
-		            if (!stencilTestEnabled) {
-		                return true;
-		            }
-	            if (gx < 0 || gy < 0 ||
-	                gx >= impl_->defaultFramebufferDepthStencilShadowWidth ||
-	                gy >= impl_->defaultFramebufferDepthStencilShadowHeight) {
-	                return false;
-	            }
-	            const auto& face = impl_->state->stencilState().front;
-	            const GLuint mask = face.valueMask & 0xffu;
-	            const GLuint ref = static_cast<GLuint>(face.ref) & 0xffu;
-	            const std::size_t stencilOffset =
-	                static_cast<std::size_t>(gy) *
-	                static_cast<std::size_t>(impl_->defaultFramebufferDepthStencilShadowWidth) +
-	                static_cast<std::size_t>(gx);
-	            const GLuint value =
-	                static_cast<GLuint>(impl_->defaultFramebufferStencil8[stencilOffset]) & 0xffu;
-	            const GLuint maskedRef = ref & mask;
-	            const GLuint maskedValue = value & mask;
-	            switch (face.func) {
-	                case GL_NEVER:    return false;
-	                case GL_LESS:     return maskedRef < maskedValue;
+	        auto stencilValuePasses = [&](std::uint8_t current) {
+            const auto& face = impl_->state->stencilState().front;
+            const GLuint mask = face.valueMask & 0xffu;
+            const GLuint ref = static_cast<GLuint>(face.ref) & 0xffu;
+            const GLuint value = static_cast<GLuint>(current) & 0xffu;
+            const GLuint maskedRef = ref & mask;
+            const GLuint maskedValue = value & mask;
+            switch (face.func) {
+                case GL_NEVER:    return false;
+                case GL_LESS:     return maskedRef < maskedValue;
 	                case GL_LEQUAL:   return maskedRef <= maskedValue;
 	                case GL_GREATER:  return maskedRef > maskedValue;
 	                case GL_GEQUAL:   return maskedRef >= maskedValue;
 	                case GL_EQUAL:    return maskedRef == maskedValue;
 	                case GL_NOTEQUAL: return maskedRef != maskedValue;
-	                case GL_ALWAYS:
-		                default:          return true;
-		            }
-		        };
+                case GL_ALWAYS:
+	                default:          return true;
+	            }
+	        };
+	        auto stencilPasses = [&](GLint gx, GLint gy) {
+	            if (!stencilTestEnabled) {
+	                return true;
+	            }
+            if (gx < 0 || gy < 0 ||
+                gx >= impl_->defaultFramebufferDepthStencilShadowWidth ||
+                gy >= impl_->defaultFramebufferDepthStencilShadowHeight) {
+                return false;
+            }
+            const std::size_t stencilOffset =
+                static_cast<std::size_t>(gy) *
+                static_cast<std::size_t>(impl_->defaultFramebufferDepthStencilShadowWidth) +
+                static_cast<std::size_t>(gx);
+            return stencilValuePasses(
+                impl_->defaultFramebufferStencil8[stencilOffset]);
+	        };
 		        auto applyStencilOp = [&](std::uint8_t current, GLenum op) {
 		            const auto& face = impl_->state->stencilState().front;
 		            const std::uint8_t ref =
@@ -8564,13 +8680,85 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
 	            return true;
 	        }
 
-        GLFramebufferObject* fbo =
-            impl_->objects->framebuffers().get(impl_->state->boundDrawFramebuffer());
-        if (fbo == nullptr) {
-            return false;
-        }
-        const bool lowerLeft = impl_->state->clipOrigin() != GL_UPPER_LEFT;
-        bool painted = false;
+	        GLFramebufferObject* fbo =
+	            impl_->objects->framebuffers().get(drawFramebufferName);
+	        if (fbo == nullptr) {
+	            return false;
+	        }
+	        bool hasActiveColorDrawBuffer = false;
+	        for (GLenum drawBuffer : fbo->drawBuffers) {
+	            if (drawBuffer != GL_NONE) {
+	                hasActiveColorDrawBuffer = true;
+	                break;
+	            }
+	        }
+	        if (stencilTestEnabled) {
+	            if (hasActiveColorDrawBuffer) {
+	                return false;
+	            }
+	            const GLFramebufferAttachment* attachment =
+	                impl_->framebufferAttachment(*fbo, GL_STENCIL_ATTACHMENT);
+	            if (attachment == nullptr) {
+	                return true;
+	            }
+	            const auto info = impl_->framebufferAttachmentInfo(*attachment);
+	            if (!info.complete || !isStencilFormat(info.internalFormat)) {
+	                return false;
+	            }
+	            const GLsizei targetWidth = std::max<GLsizei>(info.width, 1);
+	            const GLsizei targetHeight = std::max<GLsizei>(info.height, 1);
+	            const GLint px0 = std::max<GLint>(0, x0);
+	            const GLint py0 = std::max<GLint>(0, y0);
+	            const GLint px1 = std::min<GLint>(targetWidth, x1);
+	            const GLint py1 = std::min<GLint>(targetHeight, y1);
+	            if (px0 >= px1 || py0 >= py1) {
+	                return false;
+	            }
+	            std::vector<std::uint8_t> stencil(
+	                static_cast<std::size_t>(targetWidth) *
+	                    static_cast<std::size_t>(targetHeight),
+	                0);
+	            (void)impl_->readStencilAttachmentPixels(
+	                *attachment, 0, 0, targetWidth, targetHeight,
+	                stencil.data());
+	            bool touchedStencil = false;
+	            for (GLint gy = py0; gy < py1; ++gy) {
+	                for (GLint gx = px0; gx < px1; ++gx) {
+	                    const std::size_t offset =
+	                        static_cast<std::size_t>(gy) *
+	                            static_cast<std::size_t>(targetWidth) +
+	                        static_cast<std::size_t>(gx);
+	                    const auto& face =
+	                        impl_->state->stencilState().front;
+	                    const std::uint8_t writeMask =
+	                        static_cast<std::uint8_t>(
+	                            face.writeMask & 0xffu);
+	                    const bool passed =
+	                        stencilValuePasses(stencil[offset]);
+	                    const std::uint8_t updated = applyStencilOp(
+	                        stencil[offset],
+	                        passed ? face.depthPass : face.fail);
+	                    stencil[offset] = static_cast<std::uint8_t>(
+	                        (stencil[offset] & ~writeMask) |
+	                        (updated & writeMask));
+	                    touchedStencil = true;
+	                }
+	            }
+	            if (!touchedStencil) {
+	                return true;
+	            }
+	            if (!impl_->writeStencilAttachmentPixels(
+	                    *attachment, 0, 0, targetWidth, targetHeight,
+	                    stencil.data())) {
+	                return false;
+	            }
+	            impl_->markFramebufferAttachmentWrite(
+	                *attachment,
+	                kProducerCopyWrite | kProducerFboDepthStencilWrite);
+	            return true;
+	        }
+	        const bool lowerLeft = impl_->state->clipOrigin() != GL_UPPER_LEFT;
+	        bool painted = false;
         for (GLenum drawBuffer : fbo->drawBuffers) {
             if (drawBuffer == GL_NONE) {
                 continue;
