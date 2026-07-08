@@ -2149,6 +2149,331 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
     // (== offset 0) is a valid PBO destination.
     if (pixels == nullptr && !packPBOBound) return true;
 
+    const auto levelImageForReadback = [&]() -> const GLTextureImageLevel* {
+        const auto levelIt = obj->levels.find(level);
+        if (levelIt != obj->levels.end() && levelIt->second.defined) {
+            return &levelIt->second;
+        }
+        return nullptr;
+    };
+    const auto isDecompressibleS3TCInternalFormat = [](GLenum internalFormat) -> bool {
+        switch (internalFormat) {
+            case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+            case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
+            case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
+            case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
+                return true;
+            default:
+                return false;
+        }
+    };
+    const auto textureDepthForReadback = [&](const GLTextureDesc& desc) -> GLsizei {
+        switch (obj->target) {
+            case GL_TEXTURE_3D:
+                return std::max<GLsizei>(desc.depth, 1);
+            case GL_TEXTURE_1D_ARRAY:
+            case GL_TEXTURE_2D_ARRAY:
+            case GL_TEXTURE_CUBE_MAP_ARRAY:
+                return std::max<GLsizei>(
+                    std::max<GLsizei>(desc.depth, desc.layers), 1);
+            default:
+                return 1;
+        }
+    };
+    const auto packRequiredBytesForReadback =
+        [&](const GLTextureDesc& desc, std::size_t dstPixelBytes) -> std::size_t {
+            const GLPixelStoreState& packStore = impl_->state->pixelStore();
+            const std::size_t texW =
+                static_cast<std::size_t>(std::max<GLsizei>(desc.width, 1));
+            const std::size_t texH =
+                static_cast<std::size_t>(std::max<GLsizei>(desc.height, 1));
+            const std::size_t texD =
+                static_cast<std::size_t>(textureDepthForReadback(desc));
+            const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+                ? static_cast<std::size_t>(packStore.packRowLength)
+                : texW;
+            const std::size_t dstRowBytes = alignByteCount(
+                dstRowStridePixels * dstPixelBytes, packStore.packAlignment);
+            const std::size_t dstImageHeight = packStore.packImageHeight > 0
+                ? static_cast<std::size_t>(packStore.packImageHeight)
+                : texH;
+            const std::size_t dstSliceBytes = dstRowBytes * dstImageHeight;
+            const std::size_t dstSkipBytes =
+                static_cast<std::size_t>(packStore.packSkipImages) * dstSliceBytes +
+                static_cast<std::size_t>(packStore.packSkipRows) * dstRowBytes +
+                static_cast<std::size_t>(packStore.packSkipPixels) * dstPixelBytes;
+            return dstSkipBytes +
+                (texD - 1u) * dstSliceBytes +
+                (texH - 1u) * dstRowBytes +
+                texW * dstPixelBytes;
+        };
+    const auto decodeS3TCLevelToRGBA8 =
+        [&](const GLTextureImageLevel& image,
+            std::vector<std::uint8_t>& outRGBA8) -> bool {
+            if (!isDecompressibleS3TCInternalFormat(image.desc.internalFormat) ||
+                image.compressedData.empty()) {
+                return false;
+            }
+            const CompressedBlockInfo block =
+                compressedBlockInfoForInternalFormat(image.desc.internalFormat);
+            if (block.width != 4u || block.height != 4u ||
+                block.depth != 1u ||
+                (block.bytes != 8u && block.bytes != 16u)) {
+                return false;
+            }
+
+            const std::size_t width =
+                static_cast<std::size_t>(std::max<GLsizei>(image.desc.width, 1));
+            const std::size_t height =
+                static_cast<std::size_t>(std::max<GLsizei>(image.desc.height, 1));
+            const std::size_t depth =
+                static_cast<std::size_t>(textureDepthForReadback(image.desc));
+            const std::size_t blocksX =
+                static_cast<std::size_t>(ceilDivBlocks(
+                    static_cast<NSUInteger>(width), block.width));
+            const std::size_t blocksY =
+                static_cast<std::size_t>(ceilDivBlocks(
+                    static_cast<NSUInteger>(height), block.height));
+            const std::size_t bytesPerSlice = blocksX * blocksY * block.bytes;
+            const std::size_t requiredBytes = bytesPerSlice * depth;
+            if (image.compressedData.size() < requiredBytes) {
+                return false;
+            }
+
+            outRGBA8.assign(width * height * depth * 4u, 0u);
+            const auto readLE16 = [](const std::uint8_t* bytes) -> std::uint16_t {
+                return static_cast<std::uint16_t>(
+                    static_cast<std::uint16_t>(bytes[0]) |
+                    (static_cast<std::uint16_t>(bytes[1]) << 8));
+            };
+            const auto expand565 = [](std::uint16_t packed,
+                                      std::uint8_t rgba[4]) {
+                const std::uint8_t r =
+                    static_cast<std::uint8_t>(((packed >> 11) & 0x1fu) * 255u / 31u);
+                const std::uint8_t g =
+                    static_cast<std::uint8_t>(((packed >> 5) & 0x3fu) * 255u / 63u);
+                const std::uint8_t b =
+                    static_cast<std::uint8_t>((packed & 0x1fu) * 255u / 31u);
+                rgba[0] = r;
+                rgba[1] = g;
+                rgba[2] = b;
+                rgba[3] = 255u;
+            };
+            const auto buildColorTable = [&](const std::uint8_t* colorBlock,
+                                             GLenum internalFormat,
+                                             std::uint8_t colors[4][4]) {
+                const std::uint16_t c0 = readLE16(colorBlock);
+                const std::uint16_t c1 = readLE16(colorBlock + 2);
+                expand565(c0, colors[0]);
+                expand565(c1, colors[1]);
+                const bool forceFourColor =
+                    internalFormat == GL_COMPRESSED_RGB_S3TC_DXT1_EXT ||
+                    internalFormat == GL_COMPRESSED_RGBA_S3TC_DXT3_EXT ||
+                    internalFormat == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT ||
+                    c0 > c1;
+                if (forceFourColor) {
+                    for (std::size_t c = 0; c < 3u; ++c) {
+                        colors[2][c] = static_cast<std::uint8_t>(
+                            (2u * colors[0][c] + colors[1][c]) / 3u);
+                        colors[3][c] = static_cast<std::uint8_t>(
+                            (colors[0][c] + 2u * colors[1][c]) / 3u);
+                    }
+                    colors[2][3] = 255u;
+                    colors[3][3] = 255u;
+                    return;
+                }
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    colors[2][c] = static_cast<std::uint8_t>(
+                        (static_cast<unsigned>(colors[0][c]) +
+                         static_cast<unsigned>(colors[1][c])) / 2u);
+                    colors[3][c] = 0u;
+                }
+                colors[2][3] = 255u;
+                colors[3][3] = 0u;
+            };
+            const auto decodeExplicitAlphaDXT3 =
+                [](const std::uint8_t* blockBytes, std::uint8_t alphas[16]) {
+                    for (std::size_t i = 0; i < 16u; ++i) {
+                        const std::uint8_t packed = blockBytes[i / 2u];
+                        const std::uint8_t nibble = (i & 1u) != 0u
+                            ? static_cast<std::uint8_t>(packed >> 4)
+                            : static_cast<std::uint8_t>(packed & 0x0fu);
+                        alphas[i] = static_cast<std::uint8_t>(nibble * 17u);
+                    }
+                };
+            const auto decodeInterpolatedAlphaDXT5 =
+                [](const std::uint8_t* blockBytes, std::uint8_t alphas[16]) {
+                    std::uint8_t table[8] = {};
+                    table[0] = blockBytes[0];
+                    table[1] = blockBytes[1];
+                    if (table[0] > table[1]) {
+                        table[2] = static_cast<std::uint8_t>((6u * table[0] + table[1]) / 7u);
+                        table[3] = static_cast<std::uint8_t>((5u * table[0] + 2u * table[1]) / 7u);
+                        table[4] = static_cast<std::uint8_t>((4u * table[0] + 3u * table[1]) / 7u);
+                        table[5] = static_cast<std::uint8_t>((3u * table[0] + 4u * table[1]) / 7u);
+                        table[6] = static_cast<std::uint8_t>((2u * table[0] + 5u * table[1]) / 7u);
+                        table[7] = static_cast<std::uint8_t>((table[0] + 6u * table[1]) / 7u);
+                    } else {
+                        table[2] = static_cast<std::uint8_t>((4u * table[0] + table[1]) / 5u);
+                        table[3] = static_cast<std::uint8_t>((3u * table[0] + 2u * table[1]) / 5u);
+                        table[4] = static_cast<std::uint8_t>((2u * table[0] + 3u * table[1]) / 5u);
+                        table[5] = static_cast<std::uint8_t>((table[0] + 4u * table[1]) / 5u);
+                        table[6] = 0u;
+                        table[7] = 255u;
+                    }
+                    std::uint64_t alphaBits = 0;
+                    for (std::size_t byte = 0; byte < 6u; ++byte) {
+                        alphaBits |=
+                            static_cast<std::uint64_t>(blockBytes[2u + byte]) <<
+                            (8u * byte);
+                    }
+                    for (std::size_t i = 0; i < 16u; ++i) {
+                        const std::size_t index =
+                            static_cast<std::size_t>((alphaBits >> (3u * i)) & 0x7u);
+                        alphas[i] = table[index];
+                    }
+                };
+
+            for (std::size_t z = 0; z < depth; ++z) {
+                const std::uint8_t* sliceBase =
+                    image.compressedData.data() + z * bytesPerSlice;
+                for (std::size_t blockY = 0; blockY < blocksY; ++blockY) {
+                    for (std::size_t blockX = 0; blockX < blocksX; ++blockX) {
+                        const std::uint8_t* blockBytes =
+                            sliceBase + (blockY * blocksX + blockX) * block.bytes;
+                        const std::uint8_t* colorBlock = blockBytes;
+                        std::uint8_t alphas[16] = {};
+                        for (std::size_t i = 0; i < 16u; ++i) {
+                            alphas[i] = 255u;
+                        }
+                        if (image.desc.internalFormat ==
+                            GL_COMPRESSED_RGBA_S3TC_DXT3_EXT) {
+                            decodeExplicitAlphaDXT3(blockBytes, alphas);
+                            colorBlock = blockBytes + 8u;
+                        } else if (image.desc.internalFormat ==
+                                   GL_COMPRESSED_RGBA_S3TC_DXT5_EXT) {
+                            decodeInterpolatedAlphaDXT5(blockBytes, alphas);
+                            colorBlock = blockBytes + 8u;
+                        }
+
+                        std::uint8_t colors[4][4] = {};
+                        buildColorTable(
+                            colorBlock, image.desc.internalFormat, colors);
+                        const std::uint32_t colorBits =
+                            static_cast<std::uint32_t>(colorBlock[4]) |
+                            (static_cast<std::uint32_t>(colorBlock[5]) << 8u) |
+                            (static_cast<std::uint32_t>(colorBlock[6]) << 16u) |
+                            (static_cast<std::uint32_t>(colorBlock[7]) << 24u);
+                        for (std::size_t localY = 0; localY < 4u; ++localY) {
+                            const std::size_t y = blockY * 4u + localY;
+                            if (y >= height) {
+                                continue;
+                            }
+                            for (std::size_t localX = 0; localX < 4u; ++localX) {
+                                const std::size_t x = blockX * 4u + localX;
+                                if (x >= width) {
+                                    continue;
+                                }
+                                const std::size_t localIndex = localY * 4u + localX;
+                                const std::size_t colorIndex =
+                                    static_cast<std::size_t>(
+                                        (colorBits >> (2u * localIndex)) & 0x3u);
+                                std::uint8_t* dst =
+                                    outRGBA8.data() +
+                                    (((z * height + y) * width + x) * 4u);
+                                dst[0] = colors[colorIndex][0];
+                                dst[1] = colors[colorIndex][1];
+                                dst[2] = colors[colorIndex][2];
+                                dst[3] =
+                                    (image.desc.internalFormat ==
+                                         GL_COMPRESSED_RGBA_S3TC_DXT3_EXT ||
+                                     image.desc.internalFormat ==
+                                         GL_COMPRESSED_RGBA_S3TC_DXT5_EXT)
+                                    ? alphas[localIndex]
+                                    : colors[colorIndex][3];
+                            }
+                        }
+                    }
+                }
+            }
+            return true;
+        };
+    const auto tryCompressedDataDecompressedReadback =
+        [&]() -> std::pair<bool, bool> {
+            const GLTextureImageLevel* image = levelImageForReadback();
+            if (image == nullptr ||
+                !isCompressedInternalFormat(image->desc.internalFormat) ||
+                !isDecompressibleS3TCInternalFormat(image->desc.internalFormat) ||
+                image->compressedData.empty() ||
+                obj->target == GL_TEXTURE_RECTANGLE ||
+                format == GL_DEPTH_COMPONENT ||
+                format == GL_DEPTH_STENCIL ||
+                format == GL_STENCIL_INDEX) {
+                return {false, false};
+            }
+
+            const std::size_t dstPixelBytes = bytesPerPixel(format, type);
+            if (dstPixelBytes == 0) {
+                pushError(GL_INVALID_ENUM);
+                return {true, false};
+            }
+            std::vector<std::uint8_t> decodedRGBA8;
+            if (!decodeS3TCLevelToRGBA8(*image, decodedRGBA8)) {
+                return {false, false};
+            }
+
+            void* dst = pixels;
+            if (packPBOBound) {
+                const std::size_t requiredBytes =
+                    packRequiredBytesForReadback(image->desc, dstPixelBytes);
+                if (bufSize > 0 &&
+                    static_cast<std::size_t>(bufSize) < requiredBytes) {
+                    pushError(GL_INVALID_OPERATION);
+                    return {true, false};
+                }
+                auto [packDest, packOk] = impl_->resolvePackPBO(
+                    pixels,
+                    std::max<std::size_t>(requiredBytes, 1),
+                    std::max<std::size_t>(bytesPerComponent(type), 1));
+                if (!packOk) {
+                    pushError(GL_INVALID_OPERATION);
+                    return {true, false};
+                }
+                dst = packDest;
+            }
+
+            GLTextureImageLevel decoded = *image;
+            decoded.desc.internalFormat = GL_RGBA8;
+            decoded.desc.sourceFormat = GL_RGBA;
+            decoded.desc.sourceType = GL_UNSIGNED_BYTE;
+            decoded.rgba8 = std::move(decodedRGBA8);
+            decoded.nativeData.clear();
+            decoded.nativeBpp = 0;
+            decoded.rawUploadData.clear();
+            decoded.rawUploadBpp = 0;
+            decoded.compressedData.clear();
+            decoded.exactReadbackData.clear();
+            decoded.exactReadbackBpp = 0;
+            decoded.mipShadowEvicted = false;
+            decoded.mipShadowEvictedRgba8Bytes = 0;
+            decoded.mipShadowEvictedNativeBytes = 0;
+            if (!copySimpleTextureLevelShadow(*obj,
+                                              decoded,
+                                              format,
+                                              type,
+                                              bufSize,
+                                              impl_->state->pixelStore(),
+                                              dst,
+                                              false)) {
+                return {false, false};
+            }
+            impl_->drainPendingGpuProducers({
+                {Impl::GpuResourceAccess::Kind::Texture,
+                 texture,
+                 kProducerAll},
+            });
+            return {true, true};
+        };
     const auto legacyCompressedGetTexImageNoErrorFallback =
         [](GLenum internalFormat, GLenum textureTarget) -> bool {
             if (textureTarget != GL_TEXTURE_RECTANGLE) {
@@ -2164,11 +2489,25 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
                     return false;
             }
         };
+    const auto compressedLevelHasReadableBacking =
+        [&](const GLTextureImageLevel* image) -> bool {
+            if (image == nullptr || !image->defined) {
+                return false;
+            }
+            if (!image->rgba8.empty() ||
+                !image->nativeData.empty() ||
+                !image->exactReadbackData.empty()) {
+                return true;
+            }
+            return obj->target != GL_TEXTURE_RECTANGLE &&
+                !image->compressedData.empty() &&
+                isDecompressibleS3TCInternalFormat(image->desc.internalFormat);
+        };
     const auto zeroFillCompressedTextureReadback = [&]() -> std::pair<bool, bool> {
-        const auto levelIt = obj->levels.find(level);
+        const GLTextureImageLevel* image = levelImageForReadback();
         const GLTextureDesc* readDesc = nullptr;
-        if (levelIt != obj->levels.end() && levelIt->second.defined) {
-            readDesc = &levelIt->second.desc;
+        if (image != nullptr) {
+            readDesc = &image->desc;
         } else if (level == 0) {
             readDesc = &obj->desc;
         }
@@ -2179,6 +2518,9 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
             format == GL_DEPTH_COMPONENT ||
             format == GL_DEPTH_STENCIL ||
             format == GL_STENCIL_INDEX) {
+            return {false, false};
+        }
+        if (compressedLevelHasReadableBacking(image)) {
             return {false, false};
         }
 
@@ -2229,6 +2571,14 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
                 materializeLevel,
                 Impl::TextureMipShadowMaterializeConsumer::GetTextureImage);
         };
+
+    {
+        auto [compressedHandled, compressedOk] =
+            tryCompressedDataDecompressedReadback();
+        if (compressedHandled) {
+            return compressedOk;
+        }
+    }
 
     if (appglCompatProfileEnabled() && !packPBOBound) {
         auto levelIt = obj->levels.find(level);
@@ -2428,46 +2778,10 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
             }
         }
         {
-            const auto levelIt = obj->levels.find(level);
-            if (levelIt != obj->levels.end() && levelIt->second.defined &&
-                isCompressedInternalFormat(levelIt->second.desc.internalFormat) &&
-                legacyCompressedGetTexImageNoErrorFallback(
-                    levelIt->second.desc.internalFormat, obj->target) &&
-                format != GL_DEPTH_COMPONENT &&
-                format != GL_DEPTH_STENCIL &&
-                format != GL_STENCIL_INDEX) {
-                const std::size_t dstPixelBytes = bytesPerPixel(format, type);
-                if (dstPixelBytes == 0) {
-                    pushError(GL_INVALID_ENUM);
-                    return false;
-                }
-                const std::size_t width =
-                    static_cast<std::size_t>(std::max<GLsizei>(levelIt->second.desc.width, 1));
-                const std::size_t height =
-                    static_cast<std::size_t>(std::max<GLsizei>(levelIt->second.desc.height, 1));
-                const std::size_t depth =
-                    static_cast<std::size_t>(std::max<GLsizei>(levelIt->second.desc.depth, 1));
-                const std::size_t requiredBytes = width * height * depth * dstPixelBytes;
-                if (bufSize > 0 && static_cast<std::size_t>(bufSize) < requiredBytes) {
-                    pushError(GL_INVALID_OPERATION);
-                    return false;
-                }
-                void* dst = pixels;
-                if (packPBOBound) {
-                    auto [packDest, packOk] = impl_->resolvePackPBO(
-                        pixels,
-                        std::max<std::size_t>(requiredBytes, 1),
-                        std::max<std::size_t>(bytesPerComponent(type), 1));
-                    if (!packOk) {
-                        pushError(GL_INVALID_OPERATION);
-                        return false;
-                    }
-                    dst = packDest;
-                }
-                if (dst != nullptr && requiredBytes > 0) {
-                    std::memset(dst, 0, requiredBytes);
-                }
-                return true;
+            auto [compressedHandled, compressedOk] =
+                zeroFillCompressedTextureReadback();
+            if (compressedHandled) {
+                return compressedOk;
             }
         }
         // Re-upload shadow data to Metal texture (e.g. after copyImageSubData).

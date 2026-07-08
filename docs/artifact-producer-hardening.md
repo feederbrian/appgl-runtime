@@ -69,3 +69,19 @@ tools/publish_gate_dylib_artifact.sh \
 
 Do not use diagnostic-labeled packages for perf gates unless the operator
 explicitly asks for a diagnostic comparison.
+
+Freeze proof assertion checks should use the polarity-aware validator before
+handoff:
+
+```sh
+tools/validate_freeze_asserts.py \
+  gate-artifacts/.../FREEZE-PROOF-R0.6-b2c.json \
+  --source-root . \
+  --profile r06-b2-line \
+  --emit-normalized gate-artifacts/.../FREEZE-ASSERTS.normalized.txt
+```
+
+The validator normalizes `source_worktree_dirty=false` to
+`source_worktree_clean=true` and probes the current B2-line helper tokens:
+`framebufferAttachmentColorChannelSize`, `FboColorAlphaMode`,
+`blendFactorWithEffectiveDestinationAlpha`, and `B2b RGB/no-alpha`.
