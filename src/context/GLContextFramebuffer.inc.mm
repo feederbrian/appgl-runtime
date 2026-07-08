@@ -828,6 +828,235 @@ bool GLContext::blitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint src
     return true;
 }
 
+static GLint framebufferAttachmentColorChannelSize(GLenum fmt, int channel) {
+    auto channelIn = [channel](int count) -> bool {
+        return channel >= 0 && channel < count;
+    };
+    switch (fmt) {
+        case GL_ALPHA:
+        case GL_ALPHA8:
+            return channel == 3 ? 8 : 0;
+        case GL_ALPHA4:
+            return channel == 3 ? 4 : 0;
+        case GL_ALPHA12:
+            return channel == 3 ? 12 : 0;
+        case GL_ALPHA16:
+        case GL_ALPHA16F_ARB:
+            return channel == 3 ? 16 : 0;
+        case GL_ALPHA32F_ARB:
+            return channel == 3 ? 32 : 0;
+        case GL_LUMINANCE:
+        case GL_LUMINANCE8:
+            return 0;
+        case GL_LUMINANCE4:
+            return 0;
+        case GL_LUMINANCE12:
+            return 0;
+        case GL_LUMINANCE16:
+        case GL_LUMINANCE16F_ARB:
+            return 0;
+        case GL_LUMINANCE32F_ARB:
+            return 0;
+        case GL_LUMINANCE_ALPHA:
+        case GL_LUMINANCE8_ALPHA8:
+            return channel == 3 ? 8 : 0;
+        case GL_LUMINANCE4_ALPHA4:
+            return channel == 3 ? 4 : 0;
+        case GL_LUMINANCE6_ALPHA2:
+            return channel == 3 ? 2 : 0;
+        case GL_LUMINANCE12_ALPHA4:
+            return channel == 3 ? 4 : 0;
+        case GL_LUMINANCE12_ALPHA12:
+            return channel == 3 ? 12 : 0;
+        case GL_LUMINANCE16_ALPHA16:
+        case GL_LUMINANCE_ALPHA16F_ARB:
+            return channel == 3 ? 16 : 0;
+        case GL_LUMINANCE_ALPHA32F_ARB:
+            return channel == 3 ? 32 : 0;
+        case GL_INTENSITY:
+        case GL_INTENSITY8:
+        case GL_INTENSITY4:
+        case GL_INTENSITY12:
+        case GL_INTENSITY16:
+        case GL_INTENSITY16F_ARB:
+        case GL_INTENSITY32F_ARB:
+            return 0;
+        case 3:
+            return channelIn(3) ? 8 : 0;
+        case 4:
+            return channelIn(4) ? 8 : 0;
+        case GL_R8:
+        case GL_R8_SNORM:
+        case GL_R8I:
+        case GL_R8UI:
+            return channel == 0 ? 8 : 0;
+        case GL_R16:
+        case GL_R16_SNORM:
+        case GL_R16I:
+        case GL_R16UI:
+        case GL_R16F:
+            return channel == 0 ? 16 : 0;
+        case GL_R32F:
+        case GL_R32I:
+        case GL_R32UI:
+            return channel == 0 ? 32 : 0;
+        case GL_RG8:
+        case GL_RG8_SNORM:
+        case GL_RG8I:
+        case GL_RG8UI:
+            return channelIn(2) ? 8 : 0;
+        case GL_RG16:
+        case GL_RG16_SNORM:
+        case GL_RG16I:
+        case GL_RG16UI:
+        case GL_RG16F:
+            return channelIn(2) ? 16 : 0;
+        case GL_RG32F:
+        case GL_RG32I:
+        case GL_RG32UI:
+            return channelIn(2) ? 32 : 0;
+        case GL_RGB:
+        case GL_RGB8:
+        case GL_RGB8_SNORM:
+        case GL_RGB8I:
+        case GL_RGB8UI:
+        case GL_SRGB:
+        case GL_SRGB8:
+        case GL_COMPRESSED_RGB:
+        case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+            return channelIn(3) ? 8 : 0;
+        case GL_RGB16:
+        case GL_RGB16_SNORM:
+        case GL_RGB16I:
+        case GL_RGB16UI:
+        case GL_RGB16F:
+            return channelIn(3) ? 16 : 0;
+        case GL_RGB32F:
+        case GL_RGB32I:
+        case GL_RGB32UI:
+            return channelIn(3) ? 32 : 0;
+        case GL_RGBA:
+        case GL_RGBA8:
+        case GL_RGBA8_SNORM:
+        case GL_RGBA8I:
+        case GL_RGBA8UI:
+        case GL_SRGB_ALPHA:
+        case GL_SRGB8_ALPHA8:
+        case GL_COMPRESSED_RGBA:
+        case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
+        case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
+            return channelIn(4) ? 8 : 0;
+        case GL_RGBA16:
+        case GL_RGBA16_SNORM:
+        case GL_RGBA16I:
+        case GL_RGBA16UI:
+        case GL_RGBA16F:
+            return channelIn(4) ? 16 : 0;
+        case GL_RGBA32F:
+        case GL_RGBA32I:
+        case GL_RGBA32UI:
+            return channelIn(4) ? 32 : 0;
+        case GL_RGB565:
+            if (channel == 0 || channel == 2) return 5;
+            if (channel == 1) return 6;
+            return 0;
+        case GL_RGB5_A1:
+            return channelIn(3) ? 5 : (channel == 3 ? 1 : 0);
+        case GL_RGBA4:
+            return channelIn(4) ? 4 : 0;
+        case GL_RGB10_A2:
+        case GL_RGB10_A2UI:
+            return channelIn(3) ? 10 : (channel == 3 ? 2 : 0);
+        case GL_RGB10:
+            return channelIn(3) ? 10 : 0;
+        case GL_R11F_G11F_B10F:
+            if (channel == 0 || channel == 1) return 11;
+            if (channel == 2) return 10;
+            return 0;
+        case GL_RGB9_E5:
+            return channelIn(3) ? 9 : 0;
+        case GL_R3_G3_B2:
+            if (channel == 0 || channel == 1) return 3;
+            if (channel == 2) return 2;
+            return 0;
+        case GL_RGB4:
+            return channelIn(3) ? 4 : 0;
+        case GL_RGB5:
+            return channelIn(3) ? 5 : 0;
+        case GL_RGB12:
+            return channelIn(3) ? 12 : 0;
+        case GL_RGBA2:
+            return channelIn(4) ? 2 : 0;
+        case GL_RGBA12:
+            return channelIn(4) ? 12 : 0;
+        default:
+            return isColorFormat(fmt) ? 8 : 0;
+    }
+}
+
+static GLenum framebufferAttachmentComponentTypeForFormat(GLenum fmt) {
+    switch (fmt) {
+        case GL_R16F:
+        case GL_RG16F:
+        case GL_RGB16F:
+        case GL_RGBA16F:
+        case GL_R32F:
+        case GL_RG32F:
+        case GL_RGB32F:
+        case GL_RGBA32F:
+        case GL_R11F_G11F_B10F:
+        case GL_RGB9_E5:
+        case GL_ALPHA16F_ARB:
+        case GL_ALPHA32F_ARB:
+        case GL_LUMINANCE16F_ARB:
+        case GL_LUMINANCE32F_ARB:
+        case GL_LUMINANCE_ALPHA16F_ARB:
+        case GL_LUMINANCE_ALPHA32F_ARB:
+        case GL_INTENSITY16F_ARB:
+        case GL_INTENSITY32F_ARB:
+            return GL_FLOAT;
+        case GL_R8I:
+        case GL_RG8I:
+        case GL_RGB8I:
+        case GL_RGBA8I:
+        case GL_R16I:
+        case GL_RG16I:
+        case GL_RGB16I:
+        case GL_RGBA16I:
+        case GL_R32I:
+        case GL_RG32I:
+        case GL_RGB32I:
+        case GL_RGBA32I:
+            return GL_INT;
+        case GL_R8UI:
+        case GL_RG8UI:
+        case GL_RGB8UI:
+        case GL_RGBA8UI:
+        case GL_R16UI:
+        case GL_RG16UI:
+        case GL_RGB16UI:
+        case GL_RGBA16UI:
+        case GL_R32UI:
+        case GL_RG32UI:
+        case GL_RGB32UI:
+        case GL_RGBA32UI:
+        case GL_RGB10_A2UI:
+            return GL_UNSIGNED_INT;
+        case GL_R8_SNORM:
+        case GL_RG8_SNORM:
+        case GL_RGB8_SNORM:
+        case GL_RGBA8_SNORM:
+        case GL_R16_SNORM:
+        case GL_RG16_SNORM:
+        case GL_RGB16_SNORM:
+        case GL_RGBA16_SNORM:
+            return GL_SIGNED_NORMALIZED;
+        default:
+            return GL_UNSIGNED_NORMALIZED;
+    }
+}
+
 bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum attachment, GLenum pname, GLint* params) const {
     if (params == nullptr) {
         const_cast<GLContext*>(this)->pushError(GL_INVALID_VALUE);
@@ -1033,16 +1262,24 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
             }
             return true;
         case GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE:
-            params[0] = attachmentInfo.complete && isColorFormat(attachmentInfo.internalFormat) ? 8 : 0;
+            params[0] = attachmentInfo.complete
+                ? framebufferAttachmentColorChannelSize(attachmentInfo.internalFormat, 0)
+                : 0;
             return true;
         case GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
-            params[0] = attachmentInfo.complete && isColorFormat(attachmentInfo.internalFormat) ? 8 : 0;
+            params[0] = attachmentInfo.complete
+                ? framebufferAttachmentColorChannelSize(attachmentInfo.internalFormat, 1)
+                : 0;
             return true;
         case GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
-            params[0] = attachmentInfo.complete && isColorFormat(attachmentInfo.internalFormat) ? 8 : 0;
+            params[0] = attachmentInfo.complete
+                ? framebufferAttachmentColorChannelSize(attachmentInfo.internalFormat, 2)
+                : 0;
             return true;
         case GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
-            params[0] = attachmentInfo.complete && (attachmentInfo.internalFormat == GL_RGBA || attachmentInfo.internalFormat == GL_RGBA8) ? 8 : 0;
+            params[0] = attachmentInfo.complete
+                ? framebufferAttachmentColorChannelSize(attachmentInfo.internalFormat, 3)
+                : 0;
             return true;
         case GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
             if (!attachmentInfo.complete || !isDepthFormat(attachmentInfo.internalFormat)) {
@@ -1075,6 +1312,9 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
                        && !isDepthFormat(attachmentInfo.internalFormat)
                        && !isColorFormat(attachmentInfo.internalFormat)) {
                 params[0] = GL_UNSIGNED_INT;
+            } else if (isColorFormat(attachmentInfo.internalFormat)) {
+                params[0] = framebufferAttachmentComponentTypeForFormat(
+                    attachmentInfo.internalFormat);
             } else {
                 params[0] = GL_UNSIGNED_NORMALIZED;
             }

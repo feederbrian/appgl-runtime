@@ -5122,6 +5122,74 @@ static MTLBlendOperation glBlendEqToMTL(GLenum eq) {
     }
 }
 
+static GLenum blendFactorWithEffectiveDestinationAlpha(
+    GLenum factor,
+    TranslatedDrawInfo::FboColorAlphaMode alphaMode)
+{
+    using AlphaMode = TranslatedDrawInfo::FboColorAlphaMode;
+    switch (alphaMode) {
+        case AlphaMode::One:
+            if (factor == GL_DST_ALPHA) return GL_ONE;
+            if (factor == GL_ONE_MINUS_DST_ALPHA) return GL_ZERO;
+            break;
+        case AlphaMode::Intensity:
+            if (factor == GL_DST_ALPHA) return GL_DST_COLOR;
+            if (factor == GL_ONE_MINUS_DST_ALPHA) return GL_ONE_MINUS_DST_COLOR;
+            break;
+        case AlphaMode::Stored:
+            break;
+    }
+    return factor;
+}
+
+static TranslatedDrawInfo::BlendState effectiveBlendStateForFboAlphaMode(
+    const TranslatedDrawInfo::BlendState& blend,
+    TranslatedDrawInfo::FboColorAlphaMode alphaMode)
+{
+    TranslatedDrawInfo::BlendState effective = blend;
+    effective.srcRGB =
+        blendFactorWithEffectiveDestinationAlpha(effective.srcRGB, alphaMode);
+    effective.dstRGB =
+        blendFactorWithEffectiveDestinationAlpha(effective.dstRGB, alphaMode);
+    return effective;
+}
+
+static bool isIntegerColorFormat(MTLPixelFormat fmt);
+
+static void configurePipelineColorAttachmentBlend(
+    MTLRenderPipelineColorAttachmentDescriptor* colorDesc,
+    MTLPixelFormat colorFormat,
+    const TranslatedDrawInfo::BlendState& blend,
+    TranslatedDrawInfo::FboColorAlphaMode alphaMode)
+{
+    if (colorDesc == nil) {
+        return;
+    }
+    const TranslatedDrawInfo::BlendState effective =
+        effectiveBlendStateForFboAlphaMode(blend, alphaMode);
+    const bool integerColorTarget = isIntegerColorFormat(colorFormat);
+    colorDesc.blendingEnabled =
+        (effective.enabled &&
+         !effective.advancedEquation &&
+         !integerColorTarget) ? YES : NO;
+    colorDesc.sourceRGBBlendFactor =
+        glBlendFactorToMTL(effective.srcRGB);
+    colorDesc.destinationRGBBlendFactor =
+        glBlendFactorToMTL(effective.dstRGB);
+    colorDesc.sourceAlphaBlendFactor =
+        glBlendFactorToMTL(effective.srcAlpha);
+    colorDesc.destinationAlphaBlendFactor =
+        glBlendFactorToMTL(effective.dstAlpha);
+    colorDesc.rgbBlendOperation = glBlendEqToMTL(effective.equationRGB);
+    colorDesc.alphaBlendOperation = glBlendEqToMTL(effective.equationAlpha);
+    MTLColorWriteMask writeMask = MTLColorWriteMaskNone;
+    if (effective.colorMaskR) writeMask |= MTLColorWriteMaskRed;
+    if (effective.colorMaskG) writeMask |= MTLColorWriteMaskGreen;
+    if (effective.colorMaskB) writeMask |= MTLColorWriteMaskBlue;
+    if (effective.colorMaskA) writeMask |= MTLColorWriteMaskAlpha;
+    colorDesc.writeMask = writeMask;
+}
+
 static bool isAdvancedBlendEquationKHR(GLenum mode) {
     switch (mode) {
         case GL_MULTIPLY_KHR:
@@ -5572,13 +5640,16 @@ static std::uint64_t computePipelineCacheKeyPrefix(
     const TranslatedDrawInfo& info, MTLPixelFormat colorFormat,
     NSUInteger sampleCount, bool forcePerSampleFS)
 {
+    const TranslatedDrawInfo::BlendState keyBlend =
+        effectiveBlendStateForFboAlphaMode(
+            info.blend, info.fboColorAlphaModes[0]);
     std::uint64_t key = 0;
     key |= static_cast<std::uint64_t>(colorFormat & 0xFF) << 56;
-    key |= (info.blend.enabled    ? 1ULL : 0ULL) << 55;
-    key |= (info.blend.colorMaskA ? 1ULL : 0ULL) << 54;
-    key |= (info.blend.colorMaskB ? 1ULL : 0ULL) << 53;
-    key |= (info.blend.colorMaskG ? 1ULL : 0ULL) << 52;
-    key |= (info.blend.colorMaskR ? 1ULL : 0ULL) << 51;
+    key |= (keyBlend.enabled    ? 1ULL : 0ULL) << 55;
+    key |= (keyBlend.colorMaskA ? 1ULL : 0ULL) << 54;
+    key |= (keyBlend.colorMaskB ? 1ULL : 0ULL) << 53;
+    key |= (keyBlend.colorMaskG ? 1ULL : 0ULL) << 52;
+    key |= (keyBlend.colorMaskR ? 1ULL : 0ULL) << 51;
 
     // Phase 6-1a: mix the MSAA sample count into the cache key so
     // pipelines built for MS attachments don't alias with non-MS
@@ -5598,20 +5669,20 @@ static std::uint64_t computePipelineCacheKeyPrefix(
     key |= (forcePerSampleFS ? 1ULL : 0ULL) << 24;
 
     const std::uint64_t eqRGB = static_cast<std::uint64_t>(
-        glBlendEqToMTL(info.blend.equationRGB)) & 0x7ULL;
+        glBlendEqToMTL(keyBlend.equationRGB)) & 0x7ULL;
     const std::uint64_t eqA = static_cast<std::uint64_t>(
-        glBlendEqToMTL(info.blend.equationAlpha)) & 0x7ULL;
+        glBlendEqToMTL(keyBlend.equationAlpha)) & 0x7ULL;
     key |= eqRGB << 48;
     key |= eqA   << 45;
 
     const std::uint64_t srcRGB = static_cast<std::uint64_t>(
-        glBlendFactorToMTL(info.blend.srcRGB)) & 0xFULL;
+        glBlendFactorToMTL(keyBlend.srcRGB)) & 0xFULL;
     const std::uint64_t dstRGB = static_cast<std::uint64_t>(
-        glBlendFactorToMTL(info.blend.dstRGB)) & 0xFULL;
+        glBlendFactorToMTL(keyBlend.dstRGB)) & 0xFULL;
     const std::uint64_t srcA = static_cast<std::uint64_t>(
-        glBlendFactorToMTL(info.blend.srcAlpha)) & 0xFULL;
+        glBlendFactorToMTL(keyBlend.srcAlpha)) & 0xFULL;
     const std::uint64_t dstA = static_cast<std::uint64_t>(
-        glBlendFactorToMTL(info.blend.dstAlpha)) & 0xFULL;
+        glBlendFactorToMTL(keyBlend.dstAlpha)) & 0xFULL;
     key |= srcRGB << 41;
     key |= dstRGB << 37;
     key |= srcA   << 33;
@@ -5639,9 +5710,9 @@ static std::uint64_t computePipelineCacheKeyPrefix(
         mix(l.glIsInteger ? 1u : 0u);
     };
     mix(static_cast<std::uint32_t>(info.vertexStride));
-    mix(info.blend.advancedEquation ? 1u : 0u);
+    mix(keyBlend.advancedEquation ? 1u : 0u);
     mix(static_cast<std::uint32_t>(
-        info.blend.advancedEquation ? info.blend.equationRGB : 0u));
+        keyBlend.advancedEquation ? keyBlend.equationRGB : 0u));
     for (const auto& l : info.vertexAttributeLayouts) {
         hashLayout(l);
     }
@@ -5660,6 +5731,9 @@ static std::uint64_t computePipelineCacheKeyPrefix(
         }
         id<MTLTexture> extraTex = (__bridge id<MTLTexture>)rawTex;
         mix(static_cast<std::uint32_t>(extraTex.pixelFormat));
+    }
+    for (auto alphaMode : info.fboColorAlphaModes) {
+        mix(static_cast<std::uint32_t>(alphaMode));
     }
     key |= static_cast<std::uint64_t>(hash & 0x0FFFFFFFu);  // 28 bits (bit 28 = rasterizerDiscard)
     return key;
@@ -6722,9 +6796,13 @@ struct MetalFrameGraph::Impl {
         releaseOwnedObjCObject(immediateModeLibrary);
         releaseOwnedObjCObject(immediateModeVertexFn);
         releaseOwnedObjCObject(immediateModeColorFragmentFn);
+        releaseOwnedObjCObject(immediateModeColorMRT2FragmentFn);
         releaseOwnedObjCObject(immediateModeTextured2DFragmentFn);
+        releaseOwnedObjCObject(immediateModeTextured2DMRT2FragmentFn);
         releaseOwnedObjCObject(immediateModeTextured1DFragmentFn);
+        releaseOwnedObjCObject(immediateModeTextured1DMRT2FragmentFn);
         releaseOwnedObjCObject(immediateModeTextured3DFragmentFn);
+        releaseOwnedObjCObject(immediateModeTextured3DMRT2FragmentFn);
         releaseOwnedObjCObject(immediateModeColorPipelineState);
         releaseOwnedObjCObject(immediateModeTextured2DPipelineState);
         releaseOwnedObjCObject(immediateModeTextured1DPipelineState);
@@ -9043,7 +9121,6 @@ struct MetalFrameGraph::Impl {
             // the blend tuple, so a program that uses the same
             // shader with two different blend modes builds two
             // distinct pipelines and keeps both hot.
-            MTLRenderPipelineColorAttachmentDescriptor* colorDesc = desc.colorAttachments[0];
             // Sprint 6 P1 sub-task 3 day 4 (CKPT44 prep): Metal rejects
             // pipelines with `blendingEnabled=YES` when the color
             // attachment's pixelFormat is an integer format
@@ -9058,23 +9135,30 @@ struct MetalFrameGraph::Impl {
             // (CKPT43 cap-bump cascade). Force-disable blending for
             // integer pipeline-color formats so the pipeline-state
             // build matches GL's silent semantics.
-            const bool integerColorTarget = isIntegerColorFormat(colorFormat);
-            colorDesc.blendingEnabled =
-                (info.blend.enabled &&
-                 !info.blend.advancedEquation &&
-                 !integerColorTarget) ? YES : NO;
-            colorDesc.sourceRGBBlendFactor        = glBlendFactorToMTL(info.blend.srcRGB);
-            colorDesc.destinationRGBBlendFactor   = glBlendFactorToMTL(info.blend.dstRGB);
-            colorDesc.sourceAlphaBlendFactor      = glBlendFactorToMTL(info.blend.srcAlpha);
-            colorDesc.destinationAlphaBlendFactor = glBlendFactorToMTL(info.blend.dstAlpha);
-            colorDesc.rgbBlendOperation           = glBlendEqToMTL(info.blend.equationRGB);
-            colorDesc.alphaBlendOperation         = glBlendEqToMTL(info.blend.equationAlpha);
-            MTLColorWriteMask writeMask = MTLColorWriteMaskNone;
-            if (info.blend.colorMaskR) writeMask |= MTLColorWriteMaskRed;
-            if (info.blend.colorMaskG) writeMask |= MTLColorWriteMaskGreen;
-            if (info.blend.colorMaskB) writeMask |= MTLColorWriteMaskBlue;
-            if (info.blend.colorMaskA) writeMask |= MTLColorWriteMaskAlpha;
-            colorDesc.writeMask = writeMask;
+            //
+            // B2b RGB/no-alpha: the effective destination alpha is a GL
+            // attachment-format property, not the physical RGBA Metal
+            // backing lane. Configure every active MRT slot separately so
+            // RGB/L/RG slots map DST_ALPHA to 1 and INTENSITY maps it to
+            // destination intensity while real-alpha slots keep storage
+            // alpha.
+            configurePipelineColorAttachmentBlend(
+                desc.colorAttachments[0],
+                colorFormat,
+                info.blend,
+                info.fboColorAlphaModes[0]);
+            for (std::size_t ei = 0;
+                 ei < info.fboAdditionalColorTextures.size() && ei < 7;
+                 ++ei) {
+                void* rawTex = info.fboAdditionalColorTextures[ei];
+                if (rawTex == nullptr) continue;
+                id<MTLTexture> extraTex = (__bridge id<MTLTexture>)rawTex;
+                configurePipelineColorAttachmentBlend(
+                    desc.colorAttachments[ei + 1],
+                    extraTex.pixelFormat,
+                    info.blend,
+                    info.fboColorAlphaModes[ei + 1]);
+            }
 
             // Phase 8X Group 4d follow-up¹³ — one-shot per-program
             // diagnostic dump of the Metal pipeline descriptor shape.
@@ -18811,12 +18895,32 @@ vertex AppGLImmediateOut appgl_immediate_vs(
     return out;
 }
 
+struct AppGLImmediateMRT2Out {
+    float4 color0 [[color(0)]];
+    float4 color1 [[color(1)]];
+};
+
+static AppGLImmediateMRT2Out appgl_immediate_mrt2_color(float4 color) {
+    AppGLImmediateMRT2Out out;
+    out.color0 = color;
+    out.color1 = color;
+    return out;
+}
+
 fragment float4 appgl_immediate_color_fs(
     AppGLImmediateOut in [[stage_in]],
     constant AppGLImmediateTextureState& textureState [[buffer(0)]]
 ) {
     appgl_immediate_alpha_test(in.color.a, textureState);
     return in.color;
+}
+
+fragment AppGLImmediateMRT2Out appgl_immediate_color_mrt2_fs(
+    AppGLImmediateOut in [[stage_in]],
+    constant AppGLImmediateTextureState& textureState [[buffer(0)]]
+) {
+    appgl_immediate_alpha_test(in.color.a, textureState);
+    return appgl_immediate_mrt2_color(in.color);
 }
 
 fragment float4 appgl_immediate_textured_fs(
@@ -18844,6 +18948,31 @@ fragment float4 appgl_immediate_textured_fs(
     return color;
 }
 
+fragment AppGLImmediateMRT2Out appgl_immediate_textured_mrt2_fs(
+    AppGLImmediateOut in [[stage_in]],
+    texture2d<float> tex [[texture(0)]],
+    sampler samp [[sampler(0)]],
+    constant AppGLImmediateTextureState& textureState [[buffer(0)]]
+) {
+    constexpr uint kTargetTexture1D = 0x0DE0u;
+    const float2 st = appgl_immediate_projected_st(in.texcoord);
+    float2 coord = textureState.target == kTargetTexture1D
+        ? float2(st.x, 0.5f)
+        : st;
+    if (textureState.textureSampleYFlip != 0u &&
+        textureState.target != kTargetTexture1D) {
+        coord.y = 1.0f - coord.y;
+    }
+    const float4 sample = appgl_immediate_apply_border(
+        tex.sample(samp, coord),
+        coord,
+        textureState.target != kTargetTexture1D,
+        textureState);
+    const float4 color = appgl_immediate_finish_sample(in.color, sample, textureState);
+    appgl_immediate_alpha_test(color.a, textureState);
+    return appgl_immediate_mrt2_color(color);
+}
+
 fragment float4 appgl_immediate_textured_1d_fs(
     AppGLImmediateOut in [[stage_in]],
     texture1d<float> tex [[texture(0)]],
@@ -18859,6 +18988,23 @@ fragment float4 appgl_immediate_textured_1d_fs(
     const float4 color = appgl_immediate_finish_sample(in.color, sample, textureState);
     appgl_immediate_alpha_test(color.a, textureState);
     return color;
+}
+
+fragment AppGLImmediateMRT2Out appgl_immediate_textured_1d_mrt2_fs(
+    AppGLImmediateOut in [[stage_in]],
+    texture1d<float> tex [[texture(0)]],
+    sampler samp [[sampler(0)]],
+    constant AppGLImmediateTextureState& textureState [[buffer(0)]]
+) {
+    const float2 st = appgl_immediate_projected_st(in.texcoord);
+    const float4 sample = appgl_immediate_apply_border(
+        tex.sample(samp, st.x),
+        float2(st.x, 0.5f),
+        false,
+        textureState);
+    const float4 color = appgl_immediate_finish_sample(in.color, sample, textureState);
+    appgl_immediate_alpha_test(color.a, textureState);
+    return appgl_immediate_mrt2_color(color);
 }
 
 fragment float4 appgl_immediate_textured_3d_fs(
@@ -18880,6 +19026,26 @@ fragment float4 appgl_immediate_textured_3d_fs(
     appgl_immediate_alpha_test(color.a, textureState);
     return color;
 }
+
+fragment AppGLImmediateMRT2Out appgl_immediate_textured_3d_mrt2_fs(
+    AppGLImmediateOut in [[stage_in]],
+    texture3d<float> tex [[texture(0)]],
+    sampler samp [[sampler(0)]],
+    constant AppGLImmediateTextureState& textureState [[buffer(0)]]
+) {
+    float3 coord = appgl_immediate_projected_str(in.texcoord);
+    if (textureState.textureSampleYFlip != 0u) {
+        coord.y = 1.0f - coord.y;
+    }
+    const float4 sample = appgl_immediate_apply_border(
+        tex.sample(samp, coord),
+        coord.xy,
+        true,
+        textureState);
+    const float4 color = appgl_immediate_finish_sample(in.color, sample, textureState);
+    appgl_immediate_alpha_test(color.a, textureState);
+    return appgl_immediate_mrt2_color(color);
+}
 )MSL";
         NSError* error = nil;
         immediateModeLibrary = [device newLibraryWithSource:source options:nil error:&error];
@@ -18889,50 +19055,83 @@ fragment float4 appgl_immediate_textured_3d_fs(
         }
         immediateModeVertexFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_vs"];
         immediateModeColorFragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_color_fs"];
+        immediateModeColorMRT2FragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_color_mrt2_fs"];
         immediateModeTextured2DFragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_textured_fs"];
+        immediateModeTextured2DMRT2FragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_textured_mrt2_fs"];
         immediateModeTextured1DFragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_textured_1d_fs"];
+        immediateModeTextured1DMRT2FragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_textured_1d_mrt2_fs"];
         immediateModeTextured3DFragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_textured_3d_fs"];
+        immediateModeTextured3DMRT2FragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_textured_3d_mrt2_fs"];
         return immediateModeVertexFn != nil
             && immediateModeColorFragmentFn != nil
+            && immediateModeColorMRT2FragmentFn != nil
             && immediateModeTextured2DFragmentFn != nil
+            && immediateModeTextured2DMRT2FragmentFn != nil
             && immediateModeTextured1DFragmentFn != nil
-            && immediateModeTextured3DFragmentFn != nil;
+            && immediateModeTextured1DMRT2FragmentFn != nil
+            && immediateModeTextured3DFragmentFn != nil
+            && immediateModeTextured3DMRT2FragmentFn != nil;
     }
 
     static std::uint64_t computeImmediateModePipelineKey(
-        MTLPixelFormat colorFormat,
+        MTLPixelFormat colorFormat0,
+        MTLPixelFormat colorFormat1,
         MTLPixelFormat depthFormat,
         MTLPixelFormat stencilFormat,
         NSUInteger sampleCount,
-        const TranslatedDrawInfo::BlendState& blend)
+        const TranslatedDrawInfo::BlendState& blend0,
+        const TranslatedDrawInfo::BlendState& blend1,
+        bool useMRT2)
     {
         std::uint64_t key = 0;
-        key |= static_cast<std::uint64_t>(colorFormat & 0xFF) << 56;
-        key |= (blend.enabled    ? 1ULL : 0ULL) << 55;
-        key |= (blend.colorMaskA ? 1ULL : 0ULL) << 54;
-        key |= (blend.colorMaskB ? 1ULL : 0ULL) << 53;
-        key |= (blend.colorMaskG ? 1ULL : 0ULL) << 52;
-        key |= (blend.colorMaskR ? 1ULL : 0ULL) << 51;
-        key |= (static_cast<std::uint64_t>(glBlendEqToMTL(blend.equationRGB)) & 0x7ULL) << 48;
-        key |= (static_cast<std::uint64_t>(glBlendEqToMTL(blend.equationAlpha)) & 0x7ULL) << 45;
-        key |= (static_cast<std::uint64_t>(glBlendFactorToMTL(blend.srcRGB)) & 0xFULL) << 41;
-        key |= (static_cast<std::uint64_t>(glBlendFactorToMTL(blend.dstRGB)) & 0xFULL) << 37;
-        key |= (static_cast<std::uint64_t>(glBlendFactorToMTL(blend.srcAlpha)) & 0xFULL) << 33;
-        key |= (static_cast<std::uint64_t>(glBlendFactorToMTL(blend.dstAlpha)) & 0xFULL) << 29;
+        key |= static_cast<std::uint64_t>(colorFormat0 & 0xFF) << 56;
+        key |= (blend0.enabled    ? 1ULL : 0ULL) << 55;
+        key |= (blend0.colorMaskA ? 1ULL : 0ULL) << 54;
+        key |= (blend0.colorMaskB ? 1ULL : 0ULL) << 53;
+        key |= (blend0.colorMaskG ? 1ULL : 0ULL) << 52;
+        key |= (blend0.colorMaskR ? 1ULL : 0ULL) << 51;
+        key |= (static_cast<std::uint64_t>(glBlendEqToMTL(blend0.equationRGB)) & 0x7ULL) << 48;
+        key |= (static_cast<std::uint64_t>(glBlendEqToMTL(blend0.equationAlpha)) & 0x7ULL) << 45;
+        key |= (static_cast<std::uint64_t>(glBlendFactorToMTL(blend0.srcRGB)) & 0xFULL) << 41;
+        key |= (static_cast<std::uint64_t>(glBlendFactorToMTL(blend0.dstRGB)) & 0xFULL) << 37;
+        key |= (static_cast<std::uint64_t>(glBlendFactorToMTL(blend0.srcAlpha)) & 0xFULL) << 33;
+        key |= (static_cast<std::uint64_t>(glBlendFactorToMTL(blend0.dstAlpha)) & 0xFULL) << 29;
         key |= (static_cast<std::uint64_t>(std::max<NSUInteger>(sampleCount, 1u)) & 0x1FULL) << 16;
         key |= (static_cast<std::uint64_t>(depthFormat) & 0xFFULL) << 8;
         key |= static_cast<std::uint64_t>(stencilFormat) & 0xFFULL;
+        auto mix = [&key](std::uint64_t value) {
+            key ^= value + 0x9e3779b97f4a7c15ULL + (key << 6u) + (key >> 2u);
+        };
+        mix(useMRT2 ? 1ULL : 0ULL);
+        if (useMRT2) {
+            mix(static_cast<std::uint64_t>(colorFormat1));
+            mix(blend1.enabled ? 1ULL : 0ULL);
+            mix(blend1.colorMaskR ? 1ULL : 0ULL);
+            mix(blend1.colorMaskG ? 1ULL : 0ULL);
+            mix(blend1.colorMaskB ? 1ULL : 0ULL);
+            mix(blend1.colorMaskA ? 1ULL : 0ULL);
+            mix(static_cast<std::uint64_t>(glBlendEqToMTL(blend1.equationRGB)));
+            mix(static_cast<std::uint64_t>(glBlendEqToMTL(blend1.equationAlpha)));
+            mix(static_cast<std::uint64_t>(glBlendFactorToMTL(blend1.srcRGB)));
+            mix(static_cast<std::uint64_t>(glBlendFactorToMTL(blend1.dstRGB)));
+            mix(static_cast<std::uint64_t>(glBlendFactorToMTL(blend1.srcAlpha)));
+            mix(static_cast<std::uint64_t>(glBlendFactorToMTL(blend1.dstAlpha)));
+        }
         return key;
     }
 
-    bool ensureImmediateModePipelines(MTLPixelFormat colorFormat,
+    bool ensureImmediateModePipelines(MTLPixelFormat colorFormat0,
+                                      MTLPixelFormat colorFormat1,
                                       MTLPixelFormat depthFormat,
                                       MTLPixelFormat stencilFormat,
                                       NSUInteger sampleCount,
-                                      const TranslatedDrawInfo::BlendState& blend) {
+                                      const TranslatedDrawInfo::BlendState& blend0,
+                                      const TranslatedDrawInfo::BlendState& blend1,
+                                      bool useMRT2) {
         const std::uint64_t pipelineKey =
             computeImmediateModePipelineKey(
-                colorFormat, depthFormat, stencilFormat, sampleCount, blend);
+                colorFormat0, colorFormat1, depthFormat, stencilFormat,
+                sampleCount, blend0, blend1, useMRT2);
         if (immediateModeColorPipelineState != nil
             && immediateModeTextured2DPipelineState != nil
             && immediateModeTextured1DPipelineState != nil
@@ -18965,21 +19164,20 @@ fragment float4 appgl_immediate_textured_3d_fs(
             desc.fragmentFunction = fragmentFn;
             desc.vertexDescriptor = vertexDescriptor;
             desc.rasterSampleCount = std::max<NSUInteger>(sampleCount, 1u);
-            desc.colorAttachments[0].pixelFormat = colorFormat;
-            MTLRenderPipelineColorAttachmentDescriptor* colorDesc = desc.colorAttachments[0];
-            colorDesc.blendingEnabled = blend.enabled ? YES : NO;
-            colorDesc.sourceRGBBlendFactor = glBlendFactorToMTL(blend.srcRGB);
-            colorDesc.destinationRGBBlendFactor = glBlendFactorToMTL(blend.dstRGB);
-            colorDesc.sourceAlphaBlendFactor = glBlendFactorToMTL(blend.srcAlpha);
-            colorDesc.destinationAlphaBlendFactor = glBlendFactorToMTL(blend.dstAlpha);
-            colorDesc.rgbBlendOperation = glBlendEqToMTL(blend.equationRGB);
-            colorDesc.alphaBlendOperation = glBlendEqToMTL(blend.equationAlpha);
-            MTLColorWriteMask writeMask = 0;
-            if (blend.colorMaskR) writeMask |= MTLColorWriteMaskRed;
-            if (blend.colorMaskG) writeMask |= MTLColorWriteMaskGreen;
-            if (blend.colorMaskB) writeMask |= MTLColorWriteMaskBlue;
-            if (blend.colorMaskA) writeMask |= MTLColorWriteMaskAlpha;
-            colorDesc.writeMask = writeMask;
+            desc.colorAttachments[0].pixelFormat = colorFormat0;
+            configurePipelineColorAttachmentBlend(
+                desc.colorAttachments[0],
+                colorFormat0,
+                blend0,
+                TranslatedDrawInfo::FboColorAlphaMode::Stored);
+            if (useMRT2) {
+                desc.colorAttachments[1].pixelFormat = colorFormat1;
+                configurePipelineColorAttachmentBlend(
+                    desc.colorAttachments[1],
+                    colorFormat1,
+                    blend1,
+                    TranslatedDrawInfo::FboColorAlphaMode::Stored);
+            }
             desc.depthAttachmentPixelFormat = depthFormat;
             desc.stencilAttachmentPixelFormat = stencilFormat;
             NSError* error = nil;
@@ -18990,10 +19188,14 @@ fragment float4 appgl_immediate_textured_3d_fs(
             return state;
         };
 
-        id<MTLRenderPipelineState> colorState = makePipeline(immediateModeColorFragmentFn);
-        id<MTLRenderPipelineState> textured2DState = makePipeline(immediateModeTextured2DFragmentFn);
-        id<MTLRenderPipelineState> textured1DState = makePipeline(immediateModeTextured1DFragmentFn);
-        id<MTLRenderPipelineState> textured3DState = makePipeline(immediateModeTextured3DFragmentFn);
+        id<MTLRenderPipelineState> colorState = makePipeline(
+            useMRT2 ? immediateModeColorMRT2FragmentFn : immediateModeColorFragmentFn);
+        id<MTLRenderPipelineState> textured2DState = makePipeline(
+            useMRT2 ? immediateModeTextured2DMRT2FragmentFn : immediateModeTextured2DFragmentFn);
+        id<MTLRenderPipelineState> textured1DState = makePipeline(
+            useMRT2 ? immediateModeTextured1DMRT2FragmentFn : immediateModeTextured1DFragmentFn);
+        id<MTLRenderPipelineState> textured3DState = makePipeline(
+            useMRT2 ? immediateModeTextured3DMRT2FragmentFn : immediateModeTextured3DFragmentFn);
         if (colorState == nil || textured2DState == nil ||
             textured1DState == nil || textured3DState == nil) {
             releaseOwnedObjCObject(colorState);
@@ -20272,8 +20474,21 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         if (colorTexture == nil) {
             return false;
         }
+        id<MTLTexture> colorTexture1 = nil;
+        if (isFBODraw && info.fboExtraColorTextures[0] != nullptr) {
+            colorTexture1 =
+                (__bridge id<MTLTexture>)(info.fboExtraColorTextures[0]);
+        }
+        const bool useMRT2 = colorTexture1 != nil;
+        if (useMRT2 &&
+            std::max<NSUInteger>(colorTexture1.sampleCount, 1u) !=
+                std::max<NSUInteger>(colorTexture.sampleCount, 1u)) {
+            return false;
+        }
 
         const MTLPixelFormat colorFormat = colorTexture.pixelFormat;
+        const MTLPixelFormat colorFormat1 =
+            useMRT2 ? colorTexture1.pixelFormat : MTLPixelFormatInvalid;
         MTLPixelFormat depthFormat = MTLPixelFormatInvalid;
         MTLPixelFormat stencilFormat = MTLPixelFormatInvalid;
         if (passDepthStencil != nil) {
@@ -20294,12 +20509,25 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         }
         const NSUInteger attachmentSampleCount =
             colorTexture != nil ? std::max<NSUInteger>(colorTexture.sampleCount, 1u) : 1u;
+        const TranslatedDrawInfo::BlendState immediateBlend0 =
+            effectiveBlendStateForFboAlphaMode(
+                info.blend,
+                isFBODraw ? info.fboColorAlphaMode
+                          : TranslatedDrawInfo::FboColorAlphaMode::Stored);
+        const TranslatedDrawInfo::BlendState immediateBlend1 =
+            effectiveBlendStateForFboAlphaMode(
+                info.blend,
+                useMRT2 ? info.fboColorAlphaModes[1]
+                        : TranslatedDrawInfo::FboColorAlphaMode::Stored);
         if (!ensureImmediateModePipelines(
                 colorFormat,
+                colorFormat1,
                 depthFormat,
                 stencilFormat,
                 attachmentSampleCount,
-                info.blend)) {
+                immediateBlend0,
+                immediateBlend1,
+                useMRT2)) {
             return false;
         }
 
@@ -20327,6 +20555,22 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             pass.colorAttachments[0].clearColor = pendingClearColor;
         } else {
             pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        }
+        if (useMRT2) {
+            pass.colorAttachments[1].texture = colorTexture1;
+            pass.colorAttachments[1].level =
+                static_cast<NSUInteger>(info.fboColorLevels[1]);
+            const NSUInteger fboColorSlice1 =
+                static_cast<NSUInteger>(info.fboColorSlices[1]);
+            if (colorTexture1.textureType == MTLTextureType3D) {
+                pass.colorAttachments[1].slice = 0;
+                pass.colorAttachments[1].depthPlane = fboColorSlice1;
+            } else {
+                pass.colorAttachments[1].slice = fboColorSlice1;
+                pass.colorAttachments[1].depthPlane = 0;
+            }
+            pass.colorAttachments[1].storeAction = MTLStoreActionStore;
+            pass.colorAttachments[1].loadAction = MTLLoadActionLoad;
         }
         pass.depthAttachment.texture =
             depthFormat != MTLPixelFormatInvalid ? passDepthStencil : nil;
@@ -26065,9 +26309,13 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         addLibrary(immediateModeLibrary);
         addFunction(immediateModeVertexFn);
         addFunction(immediateModeColorFragmentFn);
+        addFunction(immediateModeColorMRT2FragmentFn);
         addFunction(immediateModeTextured2DFragmentFn);
+        addFunction(immediateModeTextured2DMRT2FragmentFn);
         addFunction(immediateModeTextured1DFragmentFn);
+        addFunction(immediateModeTextured1DMRT2FragmentFn);
         addFunction(immediateModeTextured3DFragmentFn);
+        addFunction(immediateModeTextured3DMRT2FragmentFn);
         addRenderPipeline(immediateModeColorPipelineState);
         addRenderPipeline(immediateModeTextured2DPipelineState);
         addRenderPipeline(immediateModeTextured1DPipelineState);
@@ -26453,9 +26701,13 @@ private:
     id<MTLLibrary> immediateModeLibrary = nil;
     id<MTLFunction> immediateModeVertexFn = nil;
     id<MTLFunction> immediateModeColorFragmentFn = nil;
+    id<MTLFunction> immediateModeColorMRT2FragmentFn = nil;
     id<MTLFunction> immediateModeTextured2DFragmentFn = nil;
+    id<MTLFunction> immediateModeTextured2DMRT2FragmentFn = nil;
     id<MTLFunction> immediateModeTextured1DFragmentFn = nil;
+    id<MTLFunction> immediateModeTextured1DMRT2FragmentFn = nil;
     id<MTLFunction> immediateModeTextured3DFragmentFn = nil;
+    id<MTLFunction> immediateModeTextured3DMRT2FragmentFn = nil;
     id<MTLRenderPipelineState> immediateModeColorPipelineState = nil;
     id<MTLRenderPipelineState> immediateModeTextured2DPipelineState = nil;
     id<MTLRenderPipelineState> immediateModeTextured1DPipelineState = nil;

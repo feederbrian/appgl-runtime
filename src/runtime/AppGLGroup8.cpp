@@ -398,6 +398,38 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                 for (GLenum f : lst) if (f == fmt) return true;
                 return false;
             };
+            auto legacyCompatBackedByRGBA8 = [fmt]() -> bool {
+                switch (fmt) {
+                    case GL_ALPHA:
+                    case GL_ALPHA4:
+                    case GL_ALPHA8:
+                    case GL_ALPHA12:
+                    case GL_ALPHA16:
+                    case GL_LUMINANCE:
+                    case GL_LUMINANCE4:
+                    case GL_LUMINANCE8:
+                    case GL_LUMINANCE12:
+                    case GL_LUMINANCE16:
+                    case GL_LUMINANCE_ALPHA:
+                    case GL_LUMINANCE4_ALPHA4:
+                    case GL_LUMINANCE6_ALPHA2:
+                    case GL_LUMINANCE8_ALPHA8:
+                    case GL_LUMINANCE12_ALPHA4:
+                    case GL_LUMINANCE12_ALPHA12:
+                    case GL_LUMINANCE16_ALPHA16:
+                    case GL_INTENSITY:
+                    case GL_INTENSITY4:
+                    case GL_INTENSITY8:
+                    case GL_INTENSITY12:
+                    case GL_INTENSITY16:
+                        return appglCompatProfileEnabled();
+                    default:
+                        return false;
+                }
+            };
+            auto reportedCompatBits = [legacyCompatBackedByRGBA8]() -> GLint {
+                return legacyCompatBackedByRGBA8() ? 8 : 0;
+            };
             auto legacyLuminanceSize = [&]() -> GLint {
                 if (appglCompatProfileEnabled()) {
                     switch (fmt) {
@@ -418,16 +450,16 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                         return 8;
                     case GL_LUMINANCE4:
                     case GL_LUMINANCE4_ALPHA4:
-                        return 4;
+                        return reportedCompatBits();
                     case GL_LUMINANCE6_ALPHA2:
-                        return 6;
+                        return reportedCompatBits();
                     case GL_LUMINANCE12:
                     case GL_LUMINANCE12_ALPHA4:
                     case GL_LUMINANCE12_ALPHA12:
-                        return 12;
+                        return reportedCompatBits();
                     case GL_LUMINANCE16:
                     case GL_LUMINANCE16_ALPHA16:
-                        return 16;
+                        return reportedCompatBits();
                     case GL_LUMINANCE16F_ARB:
                     case GL_LUMINANCE_ALPHA16F_ARB:
                         return 16;
@@ -444,10 +476,11 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                     case GL_INTENSITY8:
                         return 8;
                     case GL_INTENSITY4:
-                        return 4;
+                        return reportedCompatBits();
                     case GL_INTENSITY12:
-                        return 12;
+                        return reportedCompatBits();
                     case GL_INTENSITY16:
+                        return reportedCompatBits();
                     case GL_INTENSITY16F_ARB:
                         return 16;
                     case GL_INTENSITY32F_ARB:
@@ -461,13 +494,13 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                     return channel == 3 ? 8 : 0;
                 }
                 if (fmt == GL_ALPHA4) {
-                    return channel == 3 ? 4 : 0;
+                    return channel == 3 ? reportedCompatBits() : 0;
                 }
                 if (fmt == GL_ALPHA12) {
-                    return channel == 3 ? 12 : 0;
+                    return channel == 3 ? reportedCompatBits() : 0;
                 }
                 if (fmt == GL_ALPHA16) {
-                    return channel == 3 ? 16 : 0;
+                    return channel == 3 ? reportedCompatBits() : 0;
                 }
                 if (fmt == GL_ALPHA16F_ARB) {
                     return channel == 3 ? 16 : 0;
@@ -487,12 +520,13 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
                                 return appglCompatProfileEnabled() ? 8 : 0;
                             case GL_LUMINANCE4_ALPHA4:
                             case GL_LUMINANCE12_ALPHA4:
-                                return 4;
+                                return reportedCompatBits();
                             case GL_LUMINANCE6_ALPHA2:
-                                return 2;
+                                return reportedCompatBits();
                             case GL_LUMINANCE12_ALPHA12:
-                                return 12;
+                                return reportedCompatBits();
                             case GL_LUMINANCE16_ALPHA16:
+                                return reportedCompatBits();
                             case GL_LUMINANCE_ALPHA16F_ARB:
                                 return 16;
                             case GL_LUMINANCE_ALPHA32F_ARB:

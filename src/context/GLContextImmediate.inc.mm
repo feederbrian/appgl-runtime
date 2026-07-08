@@ -6005,6 +6005,7 @@ void GLContext::endImmediate() {
         std::array<void*, 7> extraColTex = {};
         std::array<std::uint32_t, 8> colSlices = {};
         std::array<std::uint32_t, 8> colLevels = {};
+        std::array<TranslatedDrawInfo::FboColorAlphaMode, 8> colAlphaModes = {};
         void* fboColTex = impl_->resolveFBOColorTarget(
             fboW,
             fboH,
@@ -6013,12 +6014,18 @@ void GLContext::endImmediate() {
             &extraColTex,
             &colSlices,
             &colLevels,
+            &colAlphaModes,
             &fboDSSlice,
             &fboDSLevel);
         info.fboColorTexture = fboColTex;
         info.fboDepthStencilTexture = fboDSTex;
+        info.fboExtraColorTextures = extraColTex;
+        info.fboColorSlices = colSlices;
+        info.fboColorLevels = colLevels;
+        info.fboColorAlphaModes = colAlphaModes;
         info.fboColorSlice = colSlices[0];
         info.fboColorLevel = colLevels[0];
+        info.fboColorAlphaMode = colAlphaModes[0];
         info.fboDepthStencilSlice = fboDSSlice;
         info.fboDepthStencilLevel = fboDSLevel;
         info.fboWidth = fboW;
@@ -8249,6 +8256,7 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         std::array<void*, 7> extraColTex = {};
         std::array<std::uint32_t, 8> colSlices = {};
         std::array<std::uint32_t, 8> colLevels = {};
+        std::array<TranslatedDrawInfo::FboColorAlphaMode, 8> colAlphaModes = {};
         void* fboColTex = impl_->resolveFBOColorTarget(
             fboW,
             fboH,
@@ -8257,12 +8265,18 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
             &extraColTex,
             &colSlices,
             &colLevels,
+            &colAlphaModes,
             &fboDSSlice,
             &fboDSLevel);
         info.fboColorTexture = fboColTex;
         info.fboDepthStencilTexture = fboDSTex;
+        info.fboExtraColorTextures = extraColTex;
+        info.fboColorSlices = colSlices;
+        info.fboColorLevels = colLevels;
+        info.fboColorAlphaModes = colAlphaModes;
         info.fboColorSlice = colSlices[0];
         info.fboColorLevel = colLevels[0];
+        info.fboColorAlphaMode = colAlphaModes[0];
         info.fboDepthStencilSlice = fboDSSlice;
         info.fboDepthStencilLevel = fboDSLevel;
         info.fboWidth = fboW;

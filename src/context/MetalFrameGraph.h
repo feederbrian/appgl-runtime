@@ -566,6 +566,12 @@ struct TranslatedDrawInfo {
     };
     BlendState blend;
 
+    enum class FboColorAlphaMode : std::uint8_t {
+        Stored = 0,
+        One = 1,
+        Intensity = 2
+    };
+
     // Phase-2 plan key Rung-1: compact digest of the fixed-function fields
     // above that are key-visible. Raw fields remain authoritative for encode
     // and semantic decisions; this is refreshed from the current TDI snapshot.
@@ -805,6 +811,11 @@ struct TranslatedDrawInfo {
     // Per-attachment mip level. OpenGL framebufferTexture* attaches a
     // specific texture level; Metal defaults color attachments to level 0.
     std::array<std::uint32_t, 8> fboColorLevels = {};
+    // GL RGB/L/RG targets have no alpha component even when the Metal backing
+    // texture is RGBA; INTENSITY uses destination intensity for DST_ALPHA
+    // blending. The draw encoder uses this per-slot metadata to build the
+    // effective Metal blend descriptor.
+    std::array<FboColorAlphaMode, 8> fboColorAlphaModes = {};
     // Depth/stencil texture attachment slice and mip level for
     // framebufferTextureLayer. Whole-texture layered attachments keep
     // slice 0 and use renderTargetArrayLength routing.
@@ -860,8 +871,14 @@ struct ImmediateDrawInfo {
     GLenum fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
     void* fboColorTexture = nullptr;        // id<MTLTexture> or nullptr
     void* fboDepthStencilTexture = nullptr; // id<MTLTexture> or nullptr
+    std::array<void*, 7> fboExtraColorTextures = {};
+    std::array<std::uint32_t, 8> fboColorSlices = {};
+    std::array<std::uint32_t, 8> fboColorLevels = {};
+    std::array<TranslatedDrawInfo::FboColorAlphaMode, 8> fboColorAlphaModes = {};
     std::uint32_t fboColorSlice = 0;
     std::uint32_t fboColorLevel = 0;
+    TranslatedDrawInfo::FboColorAlphaMode fboColorAlphaMode =
+        TranslatedDrawInfo::FboColorAlphaMode::Stored;
     std::uint32_t fboDepthStencilSlice = 0;
     std::uint32_t fboDepthStencilLevel = 0;
     GLsizei fboWidth = 0;

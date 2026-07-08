@@ -847,9 +847,11 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             std::array<void*, 7> extraColTex = {};
             std::array<std::uint32_t, 8> colSlices = {};
             std::array<std::uint32_t, 8> colLevels = {};
+            std::array<TranslatedDrawInfo::FboColorAlphaMode, 8> colAlphaModes = {};
             void* fboColTex = impl_->resolveFBOColorTarget(
                 fboW, fboH, fboDSTex, &fboArrayLen,
                 &extraColTex, &colSlices, &colLevels,
+                &colAlphaModes,
                 &fboDSSlice, &fboDSLevel);
             if (fboColTex != nullptr || fboDSTex != nullptr ||
                 std::any_of(extraColTex.begin(), extraColTex.end(),
@@ -858,6 +860,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 tdi.fboAdditionalColorTextures = extraColTex;
                 tdi.fboColorSlices = colSlices;
                 tdi.fboColorLevels = colLevels;
+                tdi.fboColorAlphaModes = colAlphaModes;
                 tdi.fboColorArrayLength = fboArrayLen;
                 tdi.fboDepthStencilTexture = fboDSTex;
                 tdi.fboDepthStencilSlice = fboDSSlice;
@@ -1048,9 +1051,11 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                         std::array<void*, 7> extraColTex = {};
                         std::array<std::uint32_t, 8> colSlices = {};
                         std::array<std::uint32_t, 8> colLevels = {};
+                        std::array<TranslatedDrawInfo::FboColorAlphaMode, 8> colAlphaModes = {};
                         void* fboColTex = impl_->resolveFBOColorTarget(
                             fboW, fboH, fboDSTex, &fboArrayLen,
                             &extraColTex, &colSlices, &colLevels,
+                            &colAlphaModes,
                             &fboDSSlice, &fboDSLevel);
                         if (fboColTex != nullptr || fboDSTex != nullptr ||
                             std::any_of(extraColTex.begin(), extraColTex.end(),
@@ -1059,6 +1064,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                             tdi.fboAdditionalColorTextures = extraColTex;
                             tdi.fboColorSlices = colSlices;
                             tdi.fboColorLevels = colLevels;
+                            tdi.fboColorAlphaModes = colAlphaModes;
                             tdi.fboColorArrayLength = fboArrayLen;
                             tdi.fboDepthStencilTexture = fboDSTex;
                             tdi.fboDepthStencilSlice = fboDSSlice;

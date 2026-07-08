@@ -4429,6 +4429,9 @@ static std::uint64_t phase2PlanKeyForDraw(const TranslatedDrawInfo& tdi,
     for (auto value : tdi.fboColorLevels) {
         phase2PlanHashU64(hash, value);
     }
+    for (auto value : tdi.fboColorAlphaModes) {
+        phase2PlanHashU64(hash, static_cast<std::uint64_t>(value));
+    }
     phase2PlanHashU64(hash, tdi.fboDepthStencilSlice);
     phase2PlanHashU64(hash, tdi.fboDepthStencilLevel);
     coldMark(coldFboUs);
@@ -4727,6 +4730,7 @@ struct Phase2PlanKeyMemoSignature {
     std::uint32_t maxEmittedLayer = 0;
     std::array<std::uint32_t, 8> fboColorSlices{};
     std::array<std::uint32_t, 8> fboColorLevels{};
+    std::array<TranslatedDrawInfo::FboColorAlphaMode, 8> fboColorAlphaModes{};
     std::uint32_t fboDepthStencilSlice = 0;
     std::uint32_t fboDepthStencilLevel = 0;
     AppGLSubmissionGroupKind fallbackSubgroupKind =
@@ -4866,6 +4870,7 @@ struct Phase2PlanKeyMemoSignature {
                maxEmittedLayer == other.maxEmittedLayer &&
                fboColorSlices == other.fboColorSlices &&
                fboColorLevels == other.fboColorLevels &&
+               fboColorAlphaModes == other.fboColorAlphaModes &&
                fboDepthStencilSlice == other.fboDepthStencilSlice &&
                fboDepthStencilLevel == other.fboDepthStencilLevel &&
                fallbackSubgroupKind == other.fallbackSubgroupKind &&
@@ -5169,6 +5174,7 @@ static bool phase2PlanBuildKeyMemoSignature(const TranslatedDrawInfo& tdi,
     out.maxEmittedLayer = tdi.maxEmittedLayer;
     out.fboColorSlices = tdi.fboColorSlices;
     out.fboColorLevels = tdi.fboColorLevels;
+    out.fboColorAlphaModes = tdi.fboColorAlphaModes;
     out.fboDepthStencilSlice = tdi.fboDepthStencilSlice;
     out.fboDepthStencilLevel = tdi.fboDepthStencilLevel;
     out.fallbackSubgroupKind = tdi.fallbackSubgroupKind;
@@ -6842,6 +6848,7 @@ bool shouldNormalizeLegacyCompatTextureUpload(GLenum internalFormat, GLenum form
 
 bool isRGBFamilyWithoutAlpha(GLenum internalFormat) {
     switch (internalFormat) {
+        case 3:
         case GL_RGB:
         case GL_RGB8:
         case GL_RGB8_SNORM:
@@ -11834,6 +11841,26 @@ struct GLContext::Impl {
         }
     }
 
+    static TranslatedDrawInfo::FboColorAlphaMode fboColorAlphaModeForInternalFormat(
+        GLenum internalFormat)
+    {
+        using AlphaMode = TranslatedDrawInfo::FboColorAlphaMode;
+        switch (compatUploadBaseForInternalFormat(internalFormat)) {
+            case CompatUploadBase::Red:
+            case CompatUploadBase::Rg:
+            case CompatUploadBase::Rgb:
+            case CompatUploadBase::Luminance:
+                return AlphaMode::One;
+            case CompatUploadBase::Intensity:
+                return AlphaMode::Intensity;
+            case CompatUploadBase::Rgba:
+            case CompatUploadBase::Alpha:
+            case CompatUploadBase::LuminanceAlpha:
+                return AlphaMode::Stored;
+        }
+        return AlphaMode::Stored;
+    }
+
     static void readCompatUploadSourceRGBA(
         const std::uint8_t* pixel,
         GLenum format,
@@ -15972,6 +15999,8 @@ struct GLContext::Impl {
             case GL_ALPHA8:
             case GL_ALPHA12:
             case GL_ALPHA16:
+            case GL_ALPHA16F_ARB:
+            case GL_ALPHA32F_ARB:
                 swizzle = {GL_ZERO, GL_ZERO, GL_ZERO, GL_ALPHA};
                 return true;
             case GL_LUMINANCE:
@@ -15979,6 +16008,8 @@ struct GLContext::Impl {
             case GL_LUMINANCE8:
             case GL_LUMINANCE12:
             case GL_LUMINANCE16:
+            case GL_LUMINANCE16F_ARB:
+            case GL_LUMINANCE32F_ARB:
             case GL_SLUMINANCE8:
                 swizzle = {GL_RED, GL_RED, GL_RED, GL_ONE};
                 return true;
@@ -15989,6 +16020,8 @@ struct GLContext::Impl {
             case GL_LUMINANCE12_ALPHA4:
             case GL_LUMINANCE12_ALPHA12:
             case GL_LUMINANCE16_ALPHA16:
+            case GL_LUMINANCE_ALPHA16F_ARB:
+            case GL_LUMINANCE_ALPHA32F_ARB:
             case GL_SLUMINANCE8_ALPHA8:
                 swizzle = {GL_RED, GL_RED, GL_RED, GL_ALPHA};
                 return true;
@@ -15997,6 +16030,8 @@ struct GLContext::Impl {
             case GL_INTENSITY8:
             case GL_INTENSITY12:
             case GL_INTENSITY16:
+            case GL_INTENSITY16F_ARB:
+            case GL_INTENSITY32F_ARB:
                 swizzle = {GL_RED, GL_RED, GL_RED, GL_RED};
                 return true;
             default:
@@ -17017,8 +17052,20 @@ struct GLContext::Impl {
         const bool needsMipRangeView =
             validMipRange &&
             (viewBaseMip != 0 || viewLastMip + 1 < mipCount);
+        // Sprint 18 texture_swizzle MS+MSAA Mode 1: RGB-family GL
+        // internal formats have no alpha channel, so GL §11.1.3.7 makes
+        // GL_ALPHA reads synthesize 1. The Metal storage is often
+        // promoted to RGBA for renderability; mapping GL_ALPHA to the
+        // physical alpha lane re-exposes that implementation detail.
+        // This mirrors the R4A getTextureImage swizzle sister pattern at
+        // texture-view creation time.
+        const bool alphaReadsOne =
+            isRGBFamilyWithoutAlpha(texObj.desc.internalFormat);
+        const bool needsAlphaOneView =
+            alphaReadsOne && effectiveSwizzle[3] == GL_ALPHA;
         const bool needsView =
             !isDefaultSwizzle(effectiveSwizzle) ||
+            needsAlphaOneView ||
             samplingPixelFormat != baseTex.pixelFormat ||
             depthStencilNeedsSamplingFlip ||
             depthStencilNeedsSwizzleProxy ||
@@ -17081,15 +17128,6 @@ struct GLContext::Impl {
             return NSMakeRange(0, sliceCount);
         };
 
-        // Sprint 18 texture_swizzle MS+MSAA Mode 1: RGB-family GL
-        // internal formats have no alpha channel, so GL §11.1.3.7 makes
-        // GL_ALPHA reads synthesize 1. The Metal storage is often
-        // promoted to RGBA for renderability; mapping GL_ALPHA to the
-        // physical alpha lane re-exposes that implementation detail.
-        // This mirrors the R4A getTextureImage swizzle sister pattern at
-        // texture-view creation time.
-        const bool alphaReadsOne =
-            isRGBFamilyWithoutAlpha(texObj.desc.internalFormat);
         MTLTextureSwizzleChannels channels;
         channels.red   = metalTextureSwizzle(effectiveSwizzle[0], alphaReadsOne);
         channels.green = metalTextureSwizzle(effectiveSwizzle[1], alphaReadsOne);
@@ -23778,12 +23816,18 @@ struct GLContext::Impl {
                                 std::array<void*, 7>* outExtraColorTextures = nullptr,
                                 std::array<std::uint32_t, 8>* outColorSlices = nullptr,
                                 std::array<std::uint32_t, 8>* outColorLevels = nullptr,
+                                std::array<TranslatedDrawInfo::FboColorAlphaMode, 8>*
+                                    outColorAlphaModes = nullptr,
                                 std::uint32_t* outDepthStencilSlice = nullptr,
                                 std::uint32_t* outDepthStencilLevel = nullptr) {
         if (outColorArrayLength != nullptr) *outColorArrayLength = 0;
         if (outExtraColorTextures != nullptr) outExtraColorTextures->fill(nullptr);
         if (outColorSlices != nullptr) outColorSlices->fill(0);
         if (outColorLevels != nullptr) outColorLevels->fill(0);
+        if (outColorAlphaModes != nullptr) {
+            outColorAlphaModes->fill(
+                TranslatedDrawInfo::FboColorAlphaMode::Stored);
+        }
         if (outDepthStencilSlice != nullptr) *outDepthStencilSlice = 0;
         if (outDepthStencilLevel != nullptr) *outDepthStencilLevel = 0;
         const GLuint fboName = state->boundDrawFramebuffer();
@@ -23834,6 +23878,8 @@ struct GLContext::Impl {
             void* tex = nullptr;
             GLsizei w = 0, h = 0;
             bool hasSize = false;
+            TranslatedDrawInfo::FboColorAlphaMode slotAlphaMode =
+                TranslatedDrawInfo::FboColorAlphaMode::Stored;
             if (att->kind == GLFramebufferAttachment::Kind::Texture) {
                 GLTextureObject* texObj = objects->textures().get(att->object);
                 if (texObj != nullptr && texObj->viewSourceTexture != 0) {
@@ -23845,6 +23891,9 @@ struct GLContext::Impl {
                 }
                 if (texObj != nullptr && texObj->metalTexture != nullptr) {
                     tex = texObj->metalTexture;
+                    slotAlphaMode =
+                        fboColorAlphaModeForInternalFormat(
+                            texObj->desc.internalFormat);
                     const ResolvedTextureAttachment resolved =
                         resolveTextureAttachmentStorage(*att);
                     const GLTextureObject* sizeTexture =
@@ -23929,6 +23978,8 @@ struct GLContext::Impl {
                 const GLRenderbufferObject* rb = objects->renderbuffers().get(att->object);
                 if (rb != nullptr && rb->metalTexture != nullptr) {
                     tex = rb->metalTexture;
+                    slotAlphaMode =
+                        fboColorAlphaModeForInternalFormat(rb->internalFormat);
                     w = rb->width;
                     h = rb->height;
                     hasSize = true;
@@ -23961,6 +24012,9 @@ struct GLContext::Impl {
                 }
                 if (outColorSlices != nullptr) (*outColorSlices)[0] = slotSlice;
                 if (outColorLevels != nullptr) (*outColorLevels)[0] = slotLevel;
+                if (outColorAlphaModes != nullptr) {
+                    (*outColorAlphaModes)[0] = slotAlphaMode;
+                }
             } else if (outExtraColorTextures != nullptr) {
                 // bi - 1 is the extras index for Metal slot bi.
                 (*outExtraColorTextures)[bi - 1] = tex;
@@ -23969,6 +24023,10 @@ struct GLContext::Impl {
                 }
                 if (outColorLevels != nullptr && bi < outColorLevels->size()) {
                     (*outColorLevels)[bi] = slotLevel;
+                }
+                if (outColorAlphaModes != nullptr &&
+                    bi < outColorAlphaModes->size()) {
+                    (*outColorAlphaModes)[bi] = slotAlphaMode;
                 }
                 // Fall back to this attachment for outWidth/Height
                 // when slot 0 is GL_NONE (rare but GL allows it).
@@ -47919,9 +47977,11 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
         std::array<void*, 7> extraColTex = {};
         std::array<std::uint32_t, 8> colSlices = {};
         std::array<std::uint32_t, 8> colLevels = {};
+        std::array<TranslatedDrawInfo::FboColorAlphaMode, 8> colAlphaModes = {};
         void* fboColTex = resolveFBOColorTarget(
             fboW, fboH, fboDSTex, &fboArrayLen,
             &extraColTex, &colSlices, &colLevels,
+            &colAlphaModes,
             &fboDSSlice, &fboDSLevel);
         if (fboColTex != nullptr || fboDSTex != nullptr ||
             std::any_of(extraColTex.begin(), extraColTex.end(),
@@ -47930,6 +47990,7 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
             tdi.fboAdditionalColorTextures = extraColTex;
             tdi.fboColorSlices = colSlices;
             tdi.fboColorLevels = colLevels;
+            tdi.fboColorAlphaModes = colAlphaModes;
             tdi.fboColorArrayLength = fboArrayLen;
             tdi.fboDepthStencilTexture = fboDSTex;
             tdi.fboDepthStencilSlice = fboDSSlice;
@@ -47976,9 +48037,11 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     std::array<void*, 7> preExtraColTex = {};
     std::array<std::uint32_t, 8> preColorSlices = {};
     std::array<std::uint32_t, 8> preColorLevels = {};
+    std::array<TranslatedDrawInfo::FboColorAlphaMode, 8> preColorAlphaModes = {};
     void* preFboColTex = resolveFBOColorTarget(
         preFboW, preFboH, preFboDSTex, &preFboArrayLen,
         &preExtraColTex, &preColorSlices, &preColorLevels,
+        &preColorAlphaModes,
         &preFboDSSlice, &preFboDSLevel);
     const GLuint preDrawFboName = state->boundDrawFramebuffer();
     const GLFramebufferObject* preDrawFbo =
@@ -48813,6 +48876,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         tdi.fboAdditionalColorTextures = preExtraColTex;
         tdi.fboColorSlices = preColorSlices;
         tdi.fboColorLevels = preColorLevels;
+        tdi.fboColorAlphaModes = preColorAlphaModes;
         tdi.fboDepthStencilTexture = preFboDSTex;
         tdi.fboDepthStencilSlice = preFboDSSlice;
         tdi.fboDepthStencilLevel = preFboDSLevel;
@@ -48962,9 +49026,11 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
         std::array<void*, 7> extraColTex = {};
         std::array<std::uint32_t, 8> colSlices = {};
         std::array<std::uint32_t, 8> colLevels = {};
+        std::array<TranslatedDrawInfo::FboColorAlphaMode, 8> colAlphaModes = {};
         void* fboColTex = resolveFBOColorTarget(
             fboW, fboH, fboDSTex, &fboArrayLen,
             &extraColTex, &colSlices, &colLevels,
+            &colAlphaModes,
             &fboDSSlice, &fboDSLevel);
         if (fboColTex != nullptr || fboDSTex != nullptr ||
             std::any_of(extraColTex.begin(), extraColTex.end(),
@@ -48973,6 +49039,7 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
             tdi.fboAdditionalColorTextures = extraColTex;
             tdi.fboColorSlices = colSlices;
             tdi.fboColorLevels = colLevels;
+            tdi.fboColorAlphaModes = colAlphaModes;
             tdi.fboColorArrayLength = fboArrayLen;
             tdi.fboDepthStencilTexture = fboDSTex;
             tdi.fboDepthStencilSlice = fboDSSlice;
@@ -49461,9 +49528,11 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                 std::array<void*, 7> extraColTex = {};
                 std::array<std::uint32_t, 8> colSlices = {};
                 std::array<std::uint32_t, 8> colLevels = {};
+                std::array<TranslatedDrawInfo::FboColorAlphaMode, 8> colAlphaModes = {};
                 void* fboColTex = resolveFBOColorTarget(
                     fboW, fboH, fboDSTex, &fboArrayLen,
                     &extraColTex, &colSlices, &colLevels,
+                    &colAlphaModes,
                     &fboDSSlice, &fboDSLevel);
                 if (fboColTex != nullptr || fboDSTex != nullptr ||
                     std::any_of(extraColTex.begin(), extraColTex.end(),
@@ -49472,6 +49541,7 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                     tdi.fboAdditionalColorTextures = extraColTex;
                     tdi.fboColorSlices = colSlices;
                     tdi.fboColorLevels = colLevels;
+                    tdi.fboColorAlphaModes = colAlphaModes;
                     tdi.fboDepthStencilTexture = fboDSTex;
                     tdi.fboDepthStencilSlice = fboDSSlice;
                     tdi.fboDepthStencilLevel = fboDSLevel;
