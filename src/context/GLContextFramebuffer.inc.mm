@@ -182,10 +182,47 @@ bool GLContext::getRenderbufferParameterInteger(GLenum target, GLenum pname, GLi
         }
         switch (component) {
             case GL_RED:
+                if (object->internalFormat == GL_R3_G3_B2) return 3;
+                if (object->internalFormat == GL_RGB4 || object->internalFormat == GL_RGBA4) return 4;
+                if (object->internalFormat == GL_RGB5 || object->internalFormat == GL_RGB5_A1 || object->internalFormat == GL_RGB565) return 5;
+                if (object->internalFormat == GL_RGB10 || object->internalFormat == GL_RGB10_A2) return 10;
+                if (object->internalFormat == GL_RGB12 || object->internalFormat == GL_RGBA12) return 12;
+                if (object->internalFormat == GL_RGB16 || object->internalFormat == GL_RGBA16) return 16;
+                return isColorFormat(object->internalFormat) ? 8 : 0;
             case GL_GREEN:
+                if (object->internalFormat == GL_R3_G3_B2) return 3;
+                if (object->internalFormat == GL_RGB4 || object->internalFormat == GL_RGBA4) return 4;
+                if (object->internalFormat == GL_RGB5 || object->internalFormat == GL_RGB5_A1) return 5;
+                if (object->internalFormat == GL_RGB565) return 6;
+                if (object->internalFormat == GL_RGB10 || object->internalFormat == GL_RGB10_A2) return 10;
+                if (object->internalFormat == GL_RGB12 || object->internalFormat == GL_RGBA12) return 12;
+                if (object->internalFormat == GL_RGB16 || object->internalFormat == GL_RGBA16) return 16;
+                return isColorFormat(object->internalFormat) ? 8 : 0;
             case GL_BLUE:
+                if (object->internalFormat == GL_R3_G3_B2) return 2;
+                if (object->internalFormat == GL_RGB4 || object->internalFormat == GL_RGBA4) return 4;
+                if (object->internalFormat == GL_RGB5 || object->internalFormat == GL_RGB5_A1 || object->internalFormat == GL_RGB565) return 5;
+                if (object->internalFormat == GL_RGB10 || object->internalFormat == GL_RGB10_A2) return 10;
+                if (object->internalFormat == GL_RGB12 || object->internalFormat == GL_RGBA12) return 12;
+                if (object->internalFormat == GL_RGB16 || object->internalFormat == GL_RGBA16) return 16;
                 return isColorFormat(object->internalFormat) ? 8 : 0;
             case GL_ALPHA:
+                if (object->internalFormat == GL_ALPHA4 ||
+                    object->internalFormat == GL_LUMINANCE4_ALPHA4) return 4;
+                if (object->internalFormat == GL_ALPHA8 ||
+                    object->internalFormat == GL_LUMINANCE6_ALPHA2 ||
+                    object->internalFormat == GL_LUMINANCE8_ALPHA8 ||
+                    object->internalFormat == GL_LUMINANCE12_ALPHA4) return 8;
+                if (object->internalFormat == GL_ALPHA12 ||
+                    object->internalFormat == GL_LUMINANCE12_ALPHA12) return 12;
+                if (object->internalFormat == GL_ALPHA16 ||
+                    object->internalFormat == GL_LUMINANCE16_ALPHA16) return 16;
+                if (object->internalFormat == GL_RGBA2) return 2;
+                if (object->internalFormat == GL_RGBA4) return 4;
+                if (object->internalFormat == GL_RGB5_A1) return 1;
+                if (object->internalFormat == GL_RGB10_A2) return 2;
+                if (object->internalFormat == GL_RGBA12) return 12;
+                if (object->internalFormat == GL_RGBA16) return 16;
                 return object->internalFormat == GL_RGBA || object->internalFormat == GL_RGBA8 ? 8 : 0;
             case GL_DEPTH:
                 if (object->internalFormat == GL_DEPTH_COMPONENT16) {
@@ -481,10 +518,11 @@ bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum text
             return false;
         }
     }
-    // Spec: GL_INVALID_VALUE if level is greater than the texture's effective max level.
-    // Immutable textures pin a hard ceiling at desc.levels - 1; mutable textures fall back
-    // on the highest defined level via desc.levels (initialized to 1 by texImage).
-    {
+    // Immutable textures pin a hard ceiling at desc.levels - 1. Mutable
+    // textures may legally attach an as-yet undefined mip level; the attach
+    // itself succeeds and framebuffer completeness reports
+    // GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT until storage exists.
+    if (textureObject->desc.immutable) {
         const GLsizei maxLevel = std::max<GLsizei>(textureObject->desc.levels, 1);
         if (level >= maxLevel) {
             pushError(GL_INVALID_VALUE);
@@ -926,6 +964,12 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
                 attachmentState = depthIt->second;
             }
         }
+    } else if (attachment == GL_DEPTH_ATTACHMENT ||
+               attachment == GL_STENCIL_ATTACHMENT) {
+        if (const GLFramebufferAttachment* aliased =
+                impl_->framebufferAttachment(*framebuffer, attachment)) {
+            attachmentState = *aliased;
+        }
     } else {
         const auto found = framebuffer->attachments.find(attachment);
         attachmentState = found == framebuffer->attachments.end()
@@ -1052,10 +1096,11 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
             }
             return true;
         case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
-            // Not tracked on the attachment state yet. Default to 0 so
-            // the query doesn't raise INVALID_ENUM for implementations
-            // that attached a non-cube texture (spec allows 0 there).
-            params[0] = 0;
+            params[0] = (attachmentState.kind == GLFramebufferAttachment::Kind::Texture &&
+                         attachmentState.textureTarget >= GL_TEXTURE_CUBE_MAP_POSITIVE_X &&
+                         attachmentState.textureTarget <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z)
+                ? attachmentState.textureTarget
+                : 0;
             return true;
         default:
             const_cast<GLContext*>(this)->pushError(GL_INVALID_ENUM);
@@ -1097,6 +1142,7 @@ bool GLContext::drawBuffer(GLenum buffer) {
             }
             framebuffer->drawBuffers = incoming;
         }
+        framebuffer->drawBuffersExplicit = true;
         return true;
     }
     if (isColorAttachmentEnum(buffer)) {
@@ -1229,6 +1275,7 @@ bool GLContext::drawBuffers(GLsizei count, const GLenum* buffers) {
         }
         framebuffer->drawBuffers = incoming;
     }
+    framebuffer->drawBuffersExplicit = true;
     return true;
 }
 
@@ -1240,18 +1287,7 @@ bool GLContext::readBuffer(GLenum buffer) {
         // INVALID_OPERATION when the enum is recognised but
         // inappropriate for the target, INVALID_ENUM when unrecognised.
         if (isDefaultFramebufferBuffer(buffer)) {
-            switch (buffer) {
-                case GL_FRONT_LEFT:
-                case GL_BACK_LEFT:
-                case GL_FRONT:
-                case GL_BACK:
-                case GL_LEFT:
-                case GL_NONE:
-                    return impl_->state->setReadBuffer(buffer);
-                default:
-                    pushError(GL_INVALID_OPERATION);
-                    return false;
-            }
+            return impl_->state->setReadBuffer(buffer);
         }
         if (isColorAttachmentEnum(buffer)) {
             pushError(GL_INVALID_OPERATION);
@@ -1268,6 +1304,7 @@ bool GLContext::readBuffer(GLenum buffer) {
     // User FBO: NONE or COLOR_ATTACHMENTi (where i < MAX).
     if (buffer == GL_NONE) {
         framebuffer->readBuffer = buffer;
+        framebuffer->readBufferExplicit = true;
         return true;
     }
     if (isColorAttachmentEnum(buffer)) {
@@ -1276,6 +1313,7 @@ bool GLContext::readBuffer(GLenum buffer) {
             return false;
         }
         framebuffer->readBuffer = buffer;
+        framebuffer->readBufferExplicit = true;
         return true;
     }
     if (isDefaultFramebufferBuffer(buffer)) {
@@ -1359,6 +1397,22 @@ bool GLContext::getFramebufferParameteriv(GLenum target, GLenum pname, GLint* pa
     const bool isDefaultFb = (fbName == 0);
     if (isDefaultFb) {
         switch (pname) {
+            case GL_READ_BUFFER:
+                *params = impl_->state->readBuffer();
+                return true;
+            case GL_DRAW_BUFFER:
+                *params = impl_->state->drawBuffer(0);
+                return true;
+            case GL_DRAW_BUFFER0:
+            case GL_DRAW_BUFFER1:
+            case GL_DRAW_BUFFER2:
+            case GL_DRAW_BUFFER3:
+            case GL_DRAW_BUFFER4:
+            case GL_DRAW_BUFFER5:
+            case GL_DRAW_BUFFER6:
+            case GL_DRAW_BUFFER7:
+                *params = impl_->state->drawBuffer(static_cast<GLuint>(pname - GL_DRAW_BUFFER0));
+                return true;
             case GL_DOUBLEBUFFER:                     *params = GL_TRUE;  return true;
             case GL_STEREO:                           *params = GL_FALSE; return true;
             case GL_IMPLEMENTATION_COLOR_READ_FORMAT: *params = GL_RGBA;  return true;
@@ -1385,6 +1439,15 @@ bool GLContext::getFramebufferParameteriv(GLenum target, GLenum pname, GLint* pa
     // to cross-validate against the non-DSA query. Only default FB
     // rejects the user-FB-only FRAMEBUFFER_DEFAULT_* pnames.
     const GLFramebufferObject* fb = impl_->objects->framebuffers().get(fbName);
+    if (pname == GL_READ_BUFFER) {
+        *params = (fb != nullptr) ? fb->readBuffer : impl_->state->readBuffer();
+        return true;
+    }
+    if (pname == GL_DRAW_BUFFER || (pname >= GL_DRAW_BUFFER0 && pname <= GL_DRAW_BUFFER7)) {
+        const GLuint index = pname == GL_DRAW_BUFFER ? 0u : static_cast<GLuint>(pname - GL_DRAW_BUFFER0);
+        *params = (fb != nullptr) ? fb->drawBuffers[index] : impl_->state->drawBuffer(index);
+        return true;
+    }
     switch (pname) {
         case GL_FRAMEBUFFER_DEFAULT_WIDTH:
             *params = (fb != nullptr) ? fb->defaultWidth : 0;
@@ -1503,6 +1566,42 @@ bool GLContext::namedFramebufferTexture(GLuint framebuffer, GLenum attachment, G
     // we don't force-check against GL_TEXTURE_2D when the texture was
     // created with a different target (array / cube / 3D).
     bool ok = framebufferTexture(GL_DRAW_FRAMEBUFFER, attachment, 0, texture, level, 0, true);
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
+    return ok;
+}
+
+bool GLContext::namedFramebufferTexture1DEXT(GLuint framebuffer, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
+    DSA_FB_CHECK(framebuffer)
+    GLuint prev = impl_->state->boundDrawFramebuffer();
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    bool ok = framebufferTexture(GL_DRAW_FRAMEBUFFER, attachment, textarget, texture, level, 0, false);
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
+    return ok;
+}
+
+bool GLContext::namedFramebufferTexture2DEXT(GLuint framebuffer, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
+    DSA_FB_CHECK(framebuffer)
+    GLuint prev = impl_->state->boundDrawFramebuffer();
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    bool ok = framebufferTexture(GL_DRAW_FRAMEBUFFER, attachment, textarget, texture, level, 0, false);
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
+    return ok;
+}
+
+bool GLContext::namedFramebufferTexture3DEXT(GLuint framebuffer, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint zoffset) {
+    DSA_FB_CHECK(framebuffer)
+    GLuint prev = impl_->state->boundDrawFramebuffer();
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    bool ok = framebufferTexture(GL_DRAW_FRAMEBUFFER, attachment, textarget, texture, level, zoffset, false);
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
+    return ok;
+}
+
+bool GLContext::namedFramebufferTextureFaceEXT(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLenum face) {
+    DSA_FB_CHECK(framebuffer)
+    GLuint prev = impl_->state->boundDrawFramebuffer();
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    bool ok = framebufferTexture(GL_DRAW_FRAMEBUFFER, attachment, face, texture, level, 0, false);
     bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
     return ok;
 }
@@ -1907,6 +2006,7 @@ bool GLContext::invalidateNamedFramebufferSubData(GLuint framebuffer, GLsizei nu
 bool GLContext::namedRenderbufferStorage(GLuint renderbuffer, GLenum internalformat, GLsizei width, GLsizei height) {
     auto* obj = impl_->objects->renderbuffers().get(renderbuffer);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    obj->instantiated = true;
     GLuint prev = impl_->state->boundRenderbuffer();
     impl_->state->bindRenderbuffer(renderbuffer);
     bool ok = renderbufferStorage(GL_RENDERBUFFER, internalformat, width, height, 0);
@@ -1917,6 +2017,7 @@ bool GLContext::namedRenderbufferStorage(GLuint renderbuffer, GLenum internalfor
 bool GLContext::namedRenderbufferStorageMultisample(GLuint renderbuffer, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height) {
     auto* obj = impl_->objects->renderbuffers().get(renderbuffer);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    obj->instantiated = true;
     GLuint prev = impl_->state->boundRenderbuffer();
     impl_->state->bindRenderbuffer(renderbuffer);
     bool ok = renderbufferStorage(GL_RENDERBUFFER, internalformat, width, height, samples);
@@ -1927,6 +2028,28 @@ bool GLContext::namedRenderbufferStorageMultisample(GLuint renderbuffer, GLsizei
 bool GLContext::getNamedRenderbufferParameteriv(GLuint renderbuffer, GLenum pname, GLint* params) {
     auto* obj = impl_->objects->renderbuffers().get(renderbuffer);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    if (!obj->instantiated) {
+        if (params == nullptr) { pushError(GL_INVALID_VALUE); return false; }
+        switch (pname) {
+            case GL_RENDERBUFFER_WIDTH:
+            case GL_RENDERBUFFER_HEIGHT:
+            case GL_RENDERBUFFER_RED_SIZE:
+            case GL_RENDERBUFFER_GREEN_SIZE:
+            case GL_RENDERBUFFER_BLUE_SIZE:
+            case GL_RENDERBUFFER_ALPHA_SIZE:
+            case GL_RENDERBUFFER_DEPTH_SIZE:
+            case GL_RENDERBUFFER_STENCIL_SIZE:
+            case GL_RENDERBUFFER_SAMPLES:
+                params[0] = 0;
+                return true;
+            case GL_RENDERBUFFER_INTERNAL_FORMAT:
+                params[0] = GL_RGBA;
+                return true;
+            default:
+                pushError(GL_INVALID_ENUM);
+                return false;
+        }
+    }
     GLuint prev = impl_->state->boundRenderbuffer();
     impl_->state->bindRenderbuffer(renderbuffer);
     bool ok = getRenderbufferParameterInteger(GL_RENDERBUFFER, pname, params);

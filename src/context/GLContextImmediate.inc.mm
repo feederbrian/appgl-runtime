@@ -1659,14 +1659,18 @@ bool GLContext::drawPixelsCompat(GLsizei width,
     const bool packedDepthStencil =
         type == GL_UNSIGNED_INT_24_8 ||
         type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV;
+    if (format == GL_DEPTH_STENCIL && !packedDepthStencil) {
+        pushError(GL_INVALID_ENUM, "glDrawPixels",
+                  "depth-stencil format requires a packed depth-stencil type");
+        return false;
+    }
     if ((packedRGB && format != GL_RGB) ||
         (packedRGBA && format != GL_RGBA && format != GL_BGRA)) {
         pushError(GL_INVALID_OPERATION, "glDrawPixels",
                   "packed pixel type is incompatible with format");
         return false;
     }
-    if ((packedDepthStencil && format != GL_DEPTH_STENCIL) ||
-        (format == GL_DEPTH_STENCIL && !packedDepthStencil)) {
+    if (packedDepthStencil && format != GL_DEPTH_STENCIL) {
         pushError(GL_INVALID_OPERATION, "glDrawPixels",
                   "depth-stencil format requires a packed depth-stencil type");
         return false;
@@ -1727,6 +1731,43 @@ bool GLContext::drawPixelsCompat(GLsizei width,
     if (packedPixelBytes == 0u && componentBytes == 0u) {
         pushError(GL_INVALID_ENUM, "glDrawPixels", "type is invalid");
         return false;
+    }
+    const bool colorDrawPixels =
+        format != GL_DEPTH_COMPONENT &&
+        format != GL_STENCIL_INDEX &&
+        format != GL_DEPTH_STENCIL;
+    if (colorDrawPixels && impl_->state->boundDrawFramebuffer() != 0) {
+        const GLFramebufferObject* drawFb =
+            impl_->objects->framebuffers().get(impl_->state->boundDrawFramebuffer());
+        if (drawFb != nullptr) {
+            for (GLenum drawBuffer : drawFb->drawBuffers) {
+                if (drawBuffer == GL_NONE) {
+                    continue;
+                }
+                const GLFramebufferAttachment* attachment =
+                    impl_->framebufferAttachment(*drawFb, drawBuffer);
+                if (attachment == nullptr) {
+                    continue;
+                }
+                GLenum internalFormat = 0;
+                if (attachment->kind == GLFramebufferAttachment::Kind::Texture) {
+                    if (const GLTextureObject* texture =
+                            impl_->objects->textures().get(attachment->object)) {
+                        internalFormat = texture->desc.internalFormat;
+                    }
+                } else if (attachment->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+                    if (const GLRenderbufferObject* renderbuffer =
+                            impl_->objects->renderbuffers().get(attachment->object)) {
+                        internalFormat = renderbuffer->internalFormat;
+                    }
+                }
+                if (Impl::isIntegerInternalFormat(internalFormat)) {
+                    pushError(GL_INVALID_OPERATION, "glDrawPixels",
+                              "fixed-function color draw cannot target integer color attachment");
+                    return false;
+                }
+            }
+        }
     }
     if (pixels == nullptr) {
         return true;
@@ -2054,25 +2095,6 @@ bool GLContext::drawPixelsCompat(GLsizei width,
         std::memcpy(rgba, out, 4u);
     };
 
-    if (impl_->state->boundDrawFramebuffer() == 0 &&
-        !impl_->resolveDefaultFramebufferMsaaColorIfNeeded()) {
-        pushError(GL_INVALID_OPERATION, "glDrawPixels",
-                  "failed to resolve default framebuffer MSAA color");
-        return false;
-    }
-
-    if (format == GL_DEPTH_COMPONENT ||
-        format == GL_STENCIL_INDEX ||
-        format == GL_DEPTH_STENCIL) {
-        impl_->ensureDefaultFramebufferDepthStencilShadow();
-        if (format == GL_DEPTH_COMPONENT) {
-            impl_->ensureDefaultFramebufferShadow();
-            impl_->materializeDefaultFbShadowClear();
-        }
-    } else {
-        impl_->ensureDefaultFramebufferShadow();
-        impl_->materializeDefaultFbShadowClear();
-    }
     const auto& blend = impl_->state->blendState();
     const bool blendEnabled = impl_->state->isEnabled(GL_BLEND);
     auto blendFactor = [](GLenum factor,
@@ -2113,6 +2135,245 @@ bool GLContext::drawPixelsCompat(GLsizei width,
                 return 1.0f;
         }
     };
+    auto insideScissor = [&](GLint dstX, GLint dstY) -> bool {
+        if (!impl_->state->isEnabled(GL_SCISSOR_TEST)) {
+            return true;
+        }
+        const auto& sc = impl_->state->scissor();
+        return dstX >= sc.x && dstY >= sc.y &&
+               dstX < sc.x + sc.width &&
+               dstY < sc.y + sc.height;
+    };
+
+    if (colorDrawPixels && impl_->state->boundDrawFramebuffer() != 0) {
+        GLFramebufferObject* fbo =
+            impl_->objects->framebuffers().get(impl_->state->boundDrawFramebuffer());
+        if (fbo == nullptr) {
+            return false;
+        }
+        const bool lowerLeft = impl_->state->clipOrigin() != GL_UPPER_LEFT;
+        auto applyBlendToTarget = [&](std::uint8_t rgba[4],
+                                      std::vector<std::uint8_t>& target,
+                                      std::size_t offset) {
+            if (!blendEnabled) {
+                return;
+            }
+            GLfloat src[4] = {
+                static_cast<GLfloat>(rgba[0]) / 255.0f,
+                static_cast<GLfloat>(rgba[1]) / 255.0f,
+                static_cast<GLfloat>(rgba[2]) / 255.0f,
+                static_cast<GLfloat>(rgba[3]) / 255.0f,
+            };
+            GLfloat dst[4] = {
+                static_cast<GLfloat>(target[offset + 0]) / 255.0f,
+                static_cast<GLfloat>(target[offset + 1]) / 255.0f,
+                static_cast<GLfloat>(target[offset + 2]) / 255.0f,
+                static_cast<GLfloat>(target[offset + 3]) / 255.0f,
+            };
+            GLfloat out[4] = {};
+            for (int c = 0; c < 3; ++c) {
+                const GLfloat sf = blendFactor(blend.srcRGB, c, src, dst, blend.color);
+                const GLfloat df = blendFactor(blend.dstRGB, c, src, dst, blend.color);
+                out[c] = src[c] * sf + dst[c] * df;
+            }
+            const GLfloat saf = blendFactor(blend.srcAlpha, 3, src, dst, blend.color);
+            const GLfloat daf = blendFactor(blend.dstAlpha, 3, src, dst, blend.color);
+            out[3] = src[3] * saf + dst[3] * daf;
+            for (int c = 0; c < 4; ++c) {
+                rgba[c] = normalizedByte(std::clamp(out[c], 0.0f, 1.0f));
+            }
+        };
+        auto paintToColorTarget = [&](std::vector<std::uint8_t>& target,
+                                      GLsizei targetWidth,
+                                      GLsizei targetHeight,
+                                      bool flipY,
+                                      std::size_t layerOffset) {
+            const std::size_t targetBytes =
+                static_cast<std::size_t>(targetWidth) *
+                static_cast<std::size_t>(targetHeight) * 4u;
+            if (target.size() < layerOffset + targetBytes) {
+                target.resize(layerOffset + targetBytes, 0);
+            }
+            const GLfloat baseX = impl_->fixedFunctionRasterPosition[0];
+            const GLfloat baseY = impl_->fixedFunctionRasterPosition[1];
+            for (GLsizei row = 0; row < height; ++row) {
+                const auto* srcRow = source + static_cast<std::size_t>(row) * rowBytes;
+                GLint y0 = 0;
+                GLint y1 = 0;
+                appglPixelZoomSpan(baseY + static_cast<GLfloat>(row) * zoomY,
+                                   baseY + static_cast<GLfloat>(row + 1) * zoomY,
+                                   y0,
+                                   y1);
+                y0 = std::max<GLint>(y0, 0);
+                y1 = std::min<GLint>(y1, targetHeight);
+                if (y0 >= y1) {
+                    continue;
+                }
+                for (GLsizei col = 0; col < width; ++col) {
+                    GLint x0 = 0;
+                    GLint x1 = 0;
+                    appglPixelZoomSpan(baseX + static_cast<GLfloat>(col) * zoomX,
+                                       baseX + static_cast<GLfloat>(col + 1) * zoomX,
+                                       x0,
+                                       x1);
+                    x0 = std::max<GLint>(x0, 0);
+                    x1 = std::min<GLint>(x1, targetWidth);
+                    if (x0 >= x1) {
+                        continue;
+                    }
+                    const auto* pixel =
+                        srcRow + static_cast<std::size_t>(col) * pixelBytes;
+                    std::uint8_t srcRGBA[4];
+                    readColor(pixel, srcRGBA);
+                    sampleCurrentTexture2D(srcRGBA);
+                    for (GLint dstY = y0; dstY < y1; ++dstY) {
+                        if (!insideScissor(x0, dstY) &&
+                            !insideScissor(x1 - 1, dstY)) {
+                            bool rowVisible = false;
+                            for (GLint dstX = x0; dstX < x1; ++dstX) {
+                                if (insideScissor(dstX, dstY)) {
+                                    rowVisible = true;
+                                    break;
+                                }
+                            }
+                            if (!rowVisible) {
+                                continue;
+                            }
+                        }
+                        const GLint storageY =
+                            flipY ? (targetHeight - 1 - dstY) : dstY;
+                        for (GLint dstX = x0; dstX < x1; ++dstX) {
+                            if (!insideScissor(dstX, dstY)) {
+                                continue;
+                            }
+                            const std::size_t offset =
+                                layerOffset +
+                                (static_cast<std::size_t>(storageY) *
+                                 static_cast<std::size_t>(targetWidth) +
+                                 static_cast<std::size_t>(dstX)) * 4u;
+                            std::uint8_t outRGBA[4] = {
+                                srcRGBA[0], srcRGBA[1], srcRGBA[2], srcRGBA[3]
+                            };
+                            applyBlendToTarget(outRGBA, target, offset);
+                            if (blend.colorMask[0] != GL_FALSE) target[offset + 0] = outRGBA[0];
+                            if (blend.colorMask[1] != GL_FALSE) target[offset + 1] = outRGBA[1];
+                            if (blend.colorMask[2] != GL_FALSE) target[offset + 2] = outRGBA[2];
+                            if (blend.colorMask[3] != GL_FALSE) target[offset + 3] = outRGBA[3];
+                        }
+                    }
+                }
+            }
+        };
+
+        bool ok = true;
+        for (GLenum drawBuffer : fbo->drawBuffers) {
+            if (drawBuffer == GL_NONE) {
+                continue;
+            }
+            const GLFramebufferAttachment* attachment =
+                impl_->framebufferAttachment(*fbo, drawBuffer);
+            if (attachment == nullptr) {
+                continue;
+            }
+            if (attachment->kind == GLFramebufferAttachment::Kind::Texture) {
+                const auto resolved =
+                    impl_->resolveTextureAttachmentStorage(*attachment);
+                GLTextureObject* texture = resolved.storageTexture;
+                if (!resolved.valid || texture == nullptr) {
+                    continue;
+                }
+                auto levelIt = texture->levels.find(resolved.level);
+                if (levelIt == texture->levels.end() ||
+                    !levelIt->second.defined) {
+                    continue;
+                }
+                GLTextureImageLevel& image = levelIt->second;
+                const GLsizei targetWidth =
+                    std::max<GLsizei>(image.desc.width, 1);
+                const GLsizei targetHeight =
+                    texture->target == GL_TEXTURE_1D
+                        ? 1
+                        : std::max<GLsizei>(image.desc.height, 1);
+                const GLint layer = std::max<GLint>(resolved.layer, 0);
+                const GLsizei depth =
+                    std::max<GLsizei>(image.desc.depth, 1);
+                if (layer >= depth) {
+                    continue;
+                }
+                const std::size_t layerBytes =
+                    static_cast<std::size_t>(targetWidth) *
+                    static_cast<std::size_t>(targetHeight) * 4u;
+                paintToColorTarget(image.rgba8,
+                                   targetWidth,
+                                   targetHeight,
+                                   lowerLeft,
+                                   static_cast<std::size_t>(layer) * layerBytes);
+                texture->colorShadowAuthoritative = true;
+                if (lowerLeft) {
+                    texture->wasFramebufferRenderedTo = true;
+                }
+                ok = impl_->replaceMetalTexture(*texture) && ok;
+            } else if (attachment->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+                GLRenderbufferObject* rb =
+                    impl_->objects->renderbuffers().get(attachment->object);
+                if (rb == nullptr || !rb->storageDefined ||
+                    rb->width <= 0 || rb->height <= 0) {
+                    continue;
+                }
+                impl_->materializeRenderbufferRGBA8Clear(*rb);
+                paintToColorTarget(rb->rgba8,
+                                   rb->width,
+                                   rb->height,
+                                   lowerLeft,
+                                   0);
+                rb->rgba8ShadowClearPending = false;
+                rb->colorShadowAuthoritative = true;
+                rb->framebufferReadbackYFlip = lowerLeft;
+                if (rb->metalTexture != nullptr) {
+                    id<MTLTexture> metalTex =
+                        (__bridge id<MTLTexture>)rb->metalTexture;
+                    if (metalTex.sampleCount <= 1 &&
+                        (metalTex.pixelFormat == MTLPixelFormatRGBA8Unorm ||
+                         metalTex.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB)) {
+                        if (impl_->frameGraph != nullptr) {
+                            impl_->frameGraph->materializePendingFboClearsForTexture(
+                                rb->metalTexture);
+                        }
+                        MTLRegion fullRegion = MTLRegionMake2D(
+                            0,
+                            0,
+                            static_cast<NSUInteger>(rb->width),
+                            static_cast<NSUInteger>(rb->height));
+                        [metalTex replaceRegion:fullRegion
+                                    mipmapLevel:0
+                                      withBytes:rb->rgba8.data()
+                                    bytesPerRow:static_cast<NSUInteger>(rb->width) * 4u];
+                    }
+                }
+            }
+        }
+        return ok;
+    }
+
+    if (impl_->state->boundDrawFramebuffer() == 0 &&
+        !impl_->resolveDefaultFramebufferMsaaColorIfNeeded()) {
+        pushError(GL_INVALID_OPERATION, "glDrawPixels",
+                  "failed to resolve default framebuffer MSAA color");
+        return false;
+    }
+
+    if (format == GL_DEPTH_COMPONENT ||
+        format == GL_STENCIL_INDEX ||
+        format == GL_DEPTH_STENCIL) {
+        impl_->ensureDefaultFramebufferDepthStencilShadow();
+        if (format == GL_DEPTH_COMPONENT) {
+            impl_->ensureDefaultFramebufferShadow();
+            impl_->materializeDefaultFbShadowClear();
+        }
+    } else {
+        impl_->ensureDefaultFramebufferShadow();
+        impl_->materializeDefaultFbShadowClear();
+    }
 	    auto applyBlend = [&](std::uint8_t rgba[4], std::size_t offset) {
 	        if (!blendEnabled) {
 	            return;
@@ -2161,15 +2422,6 @@ bool GLContext::drawPixelsCompat(GLsizei width,
         const auto& stencilFace = impl_->state->stencilState().front;
         const std::uint8_t stencilWriteMask =
             static_cast<std::uint8_t>(stencilFace.writeMask & 0xffu);
-    auto insideScissor = [&](GLint dstX, GLint dstY) -> bool {
-        if (!impl_->state->isEnabled(GL_SCISSOR_TEST)) {
-            return true;
-        }
-        const auto& sc = impl_->state->scissor();
-        return dstX >= sc.x && dstY >= sc.y &&
-               dstX < sc.x + sc.width &&
-               dstY < sc.y + sc.height;
-    };
     GLint touchedMinX = std::numeric_limits<GLint>::max();
     GLint touchedMinY = std::numeric_limits<GLint>::max();
     GLint touchedMaxX = std::numeric_limits<GLint>::min();
@@ -3550,6 +3802,41 @@ void GLContext::endImmediate() {
         return;
     }
     impl_->immediate.active = false;
+    if (impl_->state->boundDrawFramebuffer() != 0) {
+        const GLFramebufferObject* drawFb =
+            impl_->objects->framebuffers().get(impl_->state->boundDrawFramebuffer());
+        if (drawFb != nullptr) {
+            for (GLenum drawBuffer : drawFb->drawBuffers) {
+                if (drawBuffer == GL_NONE) {
+                    continue;
+                }
+                const GLFramebufferAttachment* attachment =
+                    impl_->framebufferAttachment(*drawFb, drawBuffer);
+                if (attachment == nullptr) {
+                    continue;
+                }
+                GLenum internalFormat = 0;
+                if (attachment->kind == GLFramebufferAttachment::Kind::Texture) {
+                    if (const GLTextureObject* texture =
+                            impl_->objects->textures().get(attachment->object)) {
+                        internalFormat = texture->desc.internalFormat;
+                    }
+                } else if (attachment->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+                    if (const GLRenderbufferObject* renderbuffer =
+                            impl_->objects->renderbuffers().get(attachment->object)) {
+                        internalFormat = renderbuffer->internalFormat;
+                    }
+                }
+                if (Impl::isIntegerInternalFormat(internalFormat)) {
+                    impl_->immediate.vertices.clear();
+                    impl_->immediate.materialSnapshots.clear();
+                    pushError(GL_INVALID_OPERATION, "glEnd",
+                              "immediate-mode color draw cannot target integer color attachment");
+                    return;
+                }
+            }
+        }
+    }
 
     const GLenum mode = impl_->immediate.mode;
     auto& captured = impl_->immediate.vertices;
@@ -3742,6 +4029,8 @@ void GLContext::endImmediate() {
         !impl_->state->isEnabled(GL_STENCIL_TEST) &&
         (!impl_->state->isEnabled(GL_TEXTURE_2D) ||
          impl_->state->boundTextureOnUnit(0, GL_TEXTURE_2D) == 0) &&
+        (!impl_->state->isEnabled(GL_TEXTURE_3D) ||
+         impl_->state->boundTextureOnUnit(0, GL_TEXTURE_3D) == 0) &&
         (!impl_->state->isEnabled(GL_TEXTURE_1D) ||
          impl_->state->boundTextureOnUnit(0, GL_TEXTURE_1D) == 0) &&
         (mode == GL_LINES || mode == GL_LINE_STRIP || mode == GL_LINE_LOOP) &&
@@ -4257,6 +4546,8 @@ void GLContext::endImmediate() {
         !impl_->state->isEnabled(GL_STENCIL_TEST) &&
         (!impl_->state->isEnabled(GL_TEXTURE_2D) ||
          impl_->state->boundTextureOnUnit(0, GL_TEXTURE_2D) == 0) &&
+        (!impl_->state->isEnabled(GL_TEXTURE_3D) ||
+         impl_->state->boundTextureOnUnit(0, GL_TEXTURE_3D) == 0) &&
         (!impl_->state->isEnabled(GL_TEXTURE_1D) ||
          impl_->state->boundTextureOnUnit(0, GL_TEXTURE_1D) == 0) &&
         drawVerts != nullptr &&
@@ -4832,6 +5123,7 @@ void GLContext::endImmediate() {
             return false;
         }
         const bool texture1D = impl_->state->isEnabled(GL_TEXTURE_1D);
+        const bool texture3D = impl_->state->isEnabled(GL_TEXTURE_3D);
         const bool texture2DEnabled = impl_->state->isEnabled(GL_TEXTURE_2D);
         const bool projectiveTexcoord =
             drawVerts != nullptr &&
@@ -4870,6 +5162,7 @@ void GLContext::endImmediate() {
                    identitySwizzle;
         };
         if (texture1D ||
+            texture3D ||
             (texture2DEnabled && !texture2DShadowPaintSafe())) {
             return false;
         }
@@ -5464,7 +5757,7 @@ void GLContext::endImmediate() {
     bool fixedFunctionTextureParamsValid = false;
     bool fixedFunctionTextureSampleYFlip = false;
     auto resolveFixedFunctionTexture = [&]() -> void* {
-        for (GLenum target : {GL_TEXTURE_2D, GL_TEXTURE_1D}) {
+        for (GLenum target : {GL_TEXTURE_3D, GL_TEXTURE_2D, GL_TEXTURE_1D}) {
             if (!impl_->state->isEnabled(target)) {
                 continue;
             }
@@ -5483,7 +5776,7 @@ void GLContext::endImmediate() {
             fixedFunctionTextureParams = tex->params;
             fixedFunctionTextureParamsValid = true;
             fixedFunctionTextureSampleYFlip =
-                target == GL_TEXTURE_2D &&
+                (target == GL_TEXTURE_2D || target == GL_TEXTURE_3D) &&
                 isColorFormat(tex->desc.internalFormat) &&
                 (tex->wasFramebufferRenderedTo || tex->wasViewportRenderedTo);
             return impl_->resolveSwizzledTexture(*tex);
@@ -5549,9 +5842,28 @@ void GLContext::endImmediate() {
         GLsizei fboW = 0;
         GLsizei fboH = 0;
         void* fboDSTex = nullptr;
-        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex);
+        std::uint32_t fboArrayLen = 0;
+        std::uint32_t fboDSSlice = 0;
+        std::uint32_t fboDSLevel = 0;
+        std::array<void*, 7> extraColTex = {};
+        std::array<std::uint32_t, 8> colSlices = {};
+        std::array<std::uint32_t, 8> colLevels = {};
+        void* fboColTex = impl_->resolveFBOColorTarget(
+            fboW,
+            fboH,
+            fboDSTex,
+            &fboArrayLen,
+            &extraColTex,
+            &colSlices,
+            &colLevels,
+            &fboDSSlice,
+            &fboDSLevel);
         info.fboColorTexture = fboColTex;
         info.fboDepthStencilTexture = fboDSTex;
+        info.fboColorSlice = colSlices[0];
+        info.fboColorLevel = colLevels[0];
+        info.fboDepthStencilSlice = fboDSSlice;
+        info.fboDepthStencilLevel = fboDSLevel;
         info.fboWidth = fboW;
         info.fboHeight = fboH;
         const auto& vp = impl_->state->viewport();
@@ -6916,7 +7228,7 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
     bool fixedFunctionTextureParamsValid = false;
     bool fixedFunctionTextureSampleYFlip = false;
     auto resolveFixedFunctionTexture = [&]() -> void* {
-        for (GLenum target : {GL_TEXTURE_2D, GL_TEXTURE_1D}) {
+        for (GLenum target : {GL_TEXTURE_3D, GL_TEXTURE_2D, GL_TEXTURE_1D}) {
             if (!impl_->state->isEnabled(target)) {
                 continue;
             }
@@ -6935,7 +7247,7 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
             fixedFunctionTextureParams = tex->params;
             fixedFunctionTextureParamsValid = true;
             fixedFunctionTextureSampleYFlip =
-                target == GL_TEXTURE_2D &&
+                (target == GL_TEXTURE_2D || target == GL_TEXTURE_3D) &&
                 isColorFormat(tex->desc.internalFormat) &&
                 (tex->wasFramebufferRenderedTo || tex->wasViewportRenderedTo);
             return impl_->resolveSwizzledTexture(*tex);
@@ -7771,9 +8083,28 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         GLsizei fboW = 0;
         GLsizei fboH = 0;
         void* fboDSTex = nullptr;
-        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex);
+        std::uint32_t fboArrayLen = 0;
+        std::uint32_t fboDSSlice = 0;
+        std::uint32_t fboDSLevel = 0;
+        std::array<void*, 7> extraColTex = {};
+        std::array<std::uint32_t, 8> colSlices = {};
+        std::array<std::uint32_t, 8> colLevels = {};
+        void* fboColTex = impl_->resolveFBOColorTarget(
+            fboW,
+            fboH,
+            fboDSTex,
+            &fboArrayLen,
+            &extraColTex,
+            &colSlices,
+            &colLevels,
+            &fboDSSlice,
+            &fboDSLevel);
         info.fboColorTexture = fboColTex;
         info.fboDepthStencilTexture = fboDSTex;
+        info.fboColorSlice = colSlices[0];
+        info.fboColorLevel = colLevels[0];
+        info.fboDepthStencilSlice = fboDSSlice;
+        info.fboDepthStencilLevel = fboDSLevel;
         info.fboWidth = fboW;
         info.fboHeight = fboH;
         const auto& vp = impl_->state->viewport();

@@ -276,6 +276,10 @@ extern "C" GLenum APIENTRY glCheckFramebufferStatusEXT(GLenum target) {
     return ::glCheckFramebufferStatus(target);
 }
 
+extern "C" GLenum APIENTRY glCheckNamedFramebufferStatusEXT(GLuint framebuffer, GLenum target) {
+    return ::glCheckNamedFramebufferStatus(framebuffer, target);
+}
+
 extern "C" void APIENTRY glClampColorARB(GLenum target, GLenum clamp) {
     ::glClampColor(target, clamp);
 }
@@ -640,6 +644,18 @@ extern "C" void APIENTRY glFogCoordfvEXT(const GLfloat *coord) {
     ::glFogCoordfv(coord);
 }
 
+extern "C" void APIENTRY glFramebufferDrawBufferEXT(GLuint framebuffer, GLenum buf) {
+    ::glNamedFramebufferDrawBuffer(framebuffer, buf);
+}
+
+extern "C" void APIENTRY glFramebufferDrawBuffersEXT(GLuint framebuffer, GLsizei n, const GLenum *bufs) {
+    ::glNamedFramebufferDrawBuffers(framebuffer, n, bufs);
+}
+
+extern "C" void APIENTRY glFramebufferReadBufferEXT(GLuint framebuffer, GLenum src) {
+    ::glNamedFramebufferReadBuffer(framebuffer, src);
+}
+
 extern "C" void APIENTRY glFramebufferRenderbufferEXT(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) {
     ::glFramebufferRenderbuffer(target, attachment, renderbuffertarget, renderbuffer);
 }
@@ -788,6 +804,10 @@ extern "C" void APIENTRY glGetFramebufferAttachmentParameterivEXT(GLenum target,
     ::glGetFramebufferAttachmentParameteriv(target, attachment, pname, params);
 }
 
+extern "C" void APIENTRY glGetFramebufferParameterivEXT(GLuint framebuffer, GLenum pname, GLint *param) {
+    ::glGetNamedFramebufferParameteriv(framebuffer, pname, param);
+}
+
 extern "C" GLenum APIENTRY glGetGraphicsResetStatusEXT(void) {
     return ::glGetGraphicsResetStatus();
 }
@@ -810,6 +830,18 @@ extern "C" void APIENTRY glGetIntegerIndexedvEXT(GLenum target, GLuint index, GL
 
 extern "C" void APIENTRY glGetMultisamplefvNV(GLenum pname, GLuint index, GLfloat *val) {
     ::glGetMultisamplefv(pname, index, val);
+}
+
+extern "C" void APIENTRY glGetNamedFramebufferAttachmentParameterivEXT(GLuint framebuffer, GLenum attachment, GLenum pname, GLint *params) {
+    ::glGetNamedFramebufferAttachmentParameteriv(framebuffer, attachment, pname, params);
+}
+
+extern "C" void APIENTRY glGetNamedFramebufferParameterivEXT(GLuint framebuffer, GLenum pname, GLint *param) {
+    ::glGetNamedFramebufferParameteriv(framebuffer, pname, param);
+}
+
+extern "C" void APIENTRY glGetNamedRenderbufferParameterivEXT(GLuint renderbuffer, GLenum pname, GLint *params) {
+    ::glGetNamedRenderbufferParameteriv(renderbuffer, pname, params);
 }
 
 extern "C" void APIENTRY glGetObjectLabelKHR(GLenum identifier, GLuint name, GLsizei bufSize, GLsizei *length, GLchar *label) {
@@ -1246,6 +1278,30 @@ extern "C" void APIENTRY glNamedBufferStorageEXT(GLuint buffer, GLsizeiptr size,
 
 extern "C" void APIENTRY glNamedBufferSubDataEXT(GLuint buffer, GLintptr offset, GLsizeiptr size, const void *data) {
     ::glNamedBufferSubData(buffer, offset, size, data);
+}
+
+extern "C" void APIENTRY glNamedFramebufferParameteriEXT(GLuint framebuffer, GLenum pname, GLint param) {
+    ::glNamedFramebufferParameteri(framebuffer, pname, param);
+}
+
+extern "C" void APIENTRY glNamedFramebufferRenderbufferEXT(GLuint framebuffer, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) {
+    ::glNamedFramebufferRenderbuffer(framebuffer, attachment, renderbuffertarget, renderbuffer);
+}
+
+extern "C" void APIENTRY glNamedFramebufferTextureEXT(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level) {
+    ::glNamedFramebufferTexture(framebuffer, attachment, texture, level);
+}
+
+extern "C" void APIENTRY glNamedFramebufferTextureLayerEXT(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint layer) {
+    ::glNamedFramebufferTextureLayer(framebuffer, attachment, texture, level, layer);
+}
+
+extern "C" void APIENTRY glNamedRenderbufferStorageEXT(GLuint renderbuffer, GLenum internalformat, GLsizei width, GLsizei height) {
+    ::glNamedRenderbufferStorage(renderbuffer, internalformat, width, height);
+}
+
+extern "C" void APIENTRY glNamedRenderbufferStorageMultisampleEXT(GLuint renderbuffer, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height) {
+    ::glNamedRenderbufferStorageMultisample(renderbuffer, samples, internalformat, width, height);
 }
 
 extern "C" void APIENTRY glObjectLabelKHR(GLenum identifier, GLuint name, GLsizei length, const GLchar *label) {

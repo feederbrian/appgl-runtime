@@ -22,7 +22,10 @@ bool isDepthFormat(GLenum internalFormat) {
 bool isStencilFormat(GLenum internalFormat) {
     switch (internalFormat) {
         case GL_STENCIL_INDEX:
+        case GL_STENCIL_INDEX1:
+        case GL_STENCIL_INDEX4:
         case GL_STENCIL_INDEX8:
+        case GL_STENCIL_INDEX16:
         case GL_DEPTH_STENCIL:
         case GL_DEPTH24_STENCIL8:
         case GL_DEPTH32F_STENCIL8:

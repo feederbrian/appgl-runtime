@@ -33,6 +33,17 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
     if (width == 0 || height == 0) {
         return true;
     }
+    const bool packedDepthStencilType =
+        type == GL_UNSIGNED_INT_24_8 ||
+        type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV;
+    if (format == GL_DEPTH_STENCIL && !packedDepthStencilType) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (format != GL_DEPTH_STENCIL && packedDepthStencilType) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
 
     // When a PBO is bound, resolve the offset into the shadow byte
     // buffer so the downstream readback paths (readFramebufferPixels,

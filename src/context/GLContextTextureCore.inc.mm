@@ -319,9 +319,23 @@ bool GLContext::texImage(
         pushError(GL_INVALID_ENUM);
         return false;
     }
-    if (level < 0 || width < 0 || height < 0 || depth < 0 || border != 0) {
+    const bool legacyTextureBorder =
+        appglCompatProfileEnabled() &&
+        target == GL_TEXTURE_2D &&
+        border == 1;
+    if (level < 0 || width < 0 || height < 0 || depth < 0 ||
+        (border != 0 && !legacyTextureBorder)) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    if (legacyTextureBorder) {
+        if (width < 2 || height < 2 || depth != 1) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        width -= 2;
+        height -= 2;
+        border = 0;
     }
     const GLenum internalFormatEnum = static_cast<GLenum>(internalformat);
     const GLenum storageInternalFormatEnum =
@@ -1009,7 +1023,14 @@ bool GLContext::copyTexImage2DImpl(
 
     if (isDepthStencilCopy) {
         const GLuint readFboName = impl_->state->boundReadFramebuffer();
-        if (readFboName == 0) {
+            if (readFboName == 0) {
+                if (appglCompatProfileEnabled()) {
+                    impl_->ensureDefaultFramebufferDepthStencilShadowAtLeast(
+                        std::max<GLsizei>(x + width, 1),
+                        std::max<GLsizei>(y + height, 1));
+                    impl_->defaultFramebufferDepthShadowValid = true;
+                    impl_->defaultFramebufferStencilShadowValid = true;
+                }
             const std::size_t pixelCount =
                 static_cast<std::size_t>(std::max<GLsizei>(width, 0)) *
                 static_cast<std::size_t>(std::max<GLsizei>(height, 0));
@@ -1382,6 +1403,112 @@ bool GLContext::copyTexSubImage2D(
     if (impl_->boundReadFramebufferHasMultipleViews()) {
         pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
         return false;
+    }
+
+    GLTextureObject* dstObject = impl_->objects->textures().get(texture);
+    if (dstObject == nullptr && texture == 0 && boundFallback != nullptr) {
+        dstObject = boundFallback;
+    }
+    GLenum dstInternalFormat = 0;
+    if (dstObject != nullptr) {
+        const int cubeFace = Impl::cubeFaceIndexForTarget(target);
+        const GLTextureImageLevel* image = nullptr;
+        if (cubeFace >= 0) {
+            const auto& faceLevels =
+                dstObject->cubeFaceLevels[static_cast<std::size_t>(cubeFace)];
+            auto faceIt = faceLevels.find(level);
+            if (faceIt != faceLevels.end() && faceIt->second.defined) {
+                image = &faceIt->second;
+            }
+        }
+        if (image == nullptr) {
+            auto levelIt = dstObject->levels.find(level);
+            if (levelIt != dstObject->levels.end() &&
+                levelIt->second.defined) {
+                image = &levelIt->second;
+            }
+        }
+        dstInternalFormat = image != nullptr
+            ? image->desc.internalFormat
+            : dstObject->desc.internalFormat;
+    }
+    const bool dstDepthStencil =
+        dstInternalFormat == GL_DEPTH_STENCIL ||
+        dstInternalFormat == GL_DEPTH24_STENCIL8 ||
+        dstInternalFormat == GL_DEPTH32F_STENCIL8;
+    if (dstDepthStencil) {
+        const bool depth32fStencil =
+            dstInternalFormat == GL_DEPTH32F_STENCIL8;
+        const GLenum uploadType = depth32fStencil
+            ? GL_FLOAT_32_UNSIGNED_INT_24_8_REV
+            : GL_UNSIGNED_INT_24_8;
+        const std::size_t uploadPixelBytes =
+            depth32fStencil ? 8u : sizeof(std::uint32_t);
+        if (impl_->state->boundReadFramebuffer() == 0 &&
+            appglCompatProfileEnabled()) {
+            impl_->ensureDefaultFramebufferDepthStencilShadowAtLeast(
+                std::max<GLsizei>(x + width, 1),
+                std::max<GLsizei>(y + height, 1));
+            impl_->defaultFramebufferDepthShadowValid = true;
+            impl_->defaultFramebufferStencilShadowValid = true;
+        }
+
+        const std::size_t pixelCount =
+            static_cast<std::size_t>(width) *
+            static_cast<std::size_t>(height);
+        std::vector<std::uint8_t> uploadBytes(
+            pixelCount * uploadPixelBytes, 0);
+        if (pixelCount > 0) {
+            std::vector<GLfloat> depthStage(pixelCount, 1.0f);
+            if (!readPixels(x, y, width, height,
+                            GL_DEPTH_COMPONENT, GL_FLOAT,
+                            depthStage.data())) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            std::vector<std::uint8_t> stencilStage(pixelCount, 0);
+            if (!readPixels(x, y, width, height,
+                            GL_STENCIL_INDEX, GL_UNSIGNED_BYTE,
+                            stencilStage.data())) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            for (std::size_t i = 0; i < pixelCount; ++i) {
+                std::uint8_t* dst =
+                    uploadBytes.data() + i * uploadPixelBytes;
+                const GLfloat depth =
+                    std::clamp(depthStage[i], 0.0f, 1.0f);
+                if (depth32fStencil) {
+                    const std::uint32_t stencilSlot =
+                        static_cast<std::uint32_t>(stencilStage[i]);
+                    std::memcpy(dst, &depth, sizeof(depth));
+                    std::memcpy(dst + sizeof(depth), &stencilSlot,
+                                sizeof(stencilSlot));
+                } else {
+                    const std::uint32_t depth24 =
+                        Impl::packReadbackBits(
+                            static_cast<double>(depth),
+                            0x00ffffffu,
+                            false);
+                    const std::uint32_t packed =
+                        (depth24 << 8) |
+                        static_cast<std::uint32_t>(stencilStage[i]);
+                    std::memcpy(dst, &packed, sizeof(packed));
+                }
+            }
+        }
+        const bool copied =
+            texSubImage(target, level, xoffset, yoffset, 0,
+                        width, height, 1,
+                        GL_DEPTH_STENCIL, uploadType,
+                        uploadBytes.empty() ? nullptr : uploadBytes.data());
+        if (copied) {
+            impl_->markGpuResourceWrites({
+                {Impl::GpuResourceAccess::Kind::Texture, texture,
+                 kProducerCopyWrite}
+            });
+        }
+        return copied;
     }
 
     std::vector<std::uint8_t> uploadBytes(
@@ -1935,7 +2062,6 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
     }
     auto fmtCap = impl_->capabilities->format(internalformat);
     if (!fmtCap.has_value() || !fmtCap->compressed) {
-        pushError(GL_INVALID_ENUM);
         return false;
     }
     const CompressedBlockInfo block = compressedBlockInfoForInternalFormat(internalformat);
@@ -1956,7 +2082,6 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
         }
     } else if (effectiveTarget != GL_TEXTURE_2D &&
                effectiveTarget != GL_TEXTURE_2D_ARRAY) {
-        pushError(GL_INVALID_ENUM);
         return false;
     }
     const MTLPixelFormat pf = static_cast<MTLPixelFormat>(fmtCap->metalPixelFormat);

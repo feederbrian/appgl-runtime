@@ -57,6 +57,20 @@ SUPPORTED_FEATURES = [
 EXTRA_ALIASES = [
     ("glBindFramebufferEXT", "glBindFramebuffer"),
     ("glBindRenderbufferEXT", "glBindRenderbuffer"),
+    ("glCheckNamedFramebufferStatusEXT", "glCheckNamedFramebufferStatus"),
+    ("glFramebufferDrawBufferEXT", "glNamedFramebufferDrawBuffer"),
+    ("glFramebufferDrawBuffersEXT", "glNamedFramebufferDrawBuffers"),
+    ("glFramebufferReadBufferEXT", "glNamedFramebufferReadBuffer"),
+    ("glGetFramebufferParameterivEXT", "glGetNamedFramebufferParameteriv"),
+    ("glGetNamedFramebufferAttachmentParameterivEXT", "glGetNamedFramebufferAttachmentParameteriv"),
+    ("glGetNamedFramebufferParameterivEXT", "glGetNamedFramebufferParameteriv"),
+    ("glGetNamedRenderbufferParameterivEXT", "glGetNamedRenderbufferParameteriv"),
+    ("glNamedFramebufferParameteriEXT", "glNamedFramebufferParameteri"),
+    ("glNamedFramebufferRenderbufferEXT", "glNamedFramebufferRenderbuffer"),
+    ("glNamedFramebufferTextureEXT", "glNamedFramebufferTexture"),
+    ("glNamedFramebufferTextureLayerEXT", "glNamedFramebufferTextureLayer"),
+    ("glNamedRenderbufferStorageEXT", "glNamedRenderbufferStorage"),
+    ("glNamedRenderbufferStorageMultisampleEXT", "glNamedRenderbufferStorageMultisample"),
 ]
 
 # Extension commands whose names aren't reachable through the core-
@@ -170,6 +184,42 @@ EXTRA_EXTENSION_COMMANDS = [
         "glVertexArrayVertexAttribDivisorEXT",
         "void",
         "GLuint vaobj, GLuint index, GLuint divisor",
+        "GL_EXT_direct_state_access",
+    ),
+    (
+        "glGenerateTextureMipmapEXT",
+        "void",
+        "GLuint texture, GLenum target",
+        "GL_EXT_direct_state_access",
+    ),
+    (
+        "glNamedFramebufferTexture1DEXT",
+        "void",
+        "GLuint framebuffer, GLenum attachment, GLenum textarget, GLuint texture, GLint level",
+        "GL_EXT_direct_state_access",
+    ),
+    (
+        "glNamedFramebufferTexture2DEXT",
+        "void",
+        "GLuint framebuffer, GLenum attachment, GLenum textarget, GLuint texture, GLint level",
+        "GL_EXT_direct_state_access",
+    ),
+    (
+        "glNamedFramebufferTexture3DEXT",
+        "void",
+        "GLuint framebuffer, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint zoffset",
+        "GL_EXT_direct_state_access",
+    ),
+    (
+        "glNamedFramebufferTextureFaceEXT",
+        "void",
+        "GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLenum face",
+        "GL_EXT_direct_state_access",
+    ),
+    (
+        "glNamedRenderbufferStorageMultisampleCoverageEXT",
+        "void",
+        "GLuint renderbuffer, GLsizei coverageSamples, GLsizei colorSamples, GLenum internalformat, GLsizei width, GLsizei height",
         "GL_EXT_direct_state_access",
     ),
 ]

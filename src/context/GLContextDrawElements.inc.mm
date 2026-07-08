@@ -851,7 +851,9 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 fboW, fboH, fboDSTex, &fboArrayLen,
                 &extraColTex, &colSlices, &colLevels,
                 &fboDSSlice, &fboDSLevel);
-            if (fboColTex != nullptr || fboDSTex != nullptr) {
+            if (fboColTex != nullptr || fboDSTex != nullptr ||
+                std::any_of(extraColTex.begin(), extraColTex.end(),
+                            [](void* tex) { return tex != nullptr; })) {
                 tdi.fboColorTexture = fboColTex;
                 tdi.fboAdditionalColorTextures = extraColTex;
                 tdi.fboColorSlices = colSlices;
@@ -1050,7 +1052,9 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                             fboW, fboH, fboDSTex, &fboArrayLen,
                             &extraColTex, &colSlices, &colLevels,
                             &fboDSSlice, &fboDSLevel);
-                        if (fboColTex != nullptr || fboDSTex != nullptr) {
+                        if (fboColTex != nullptr || fboDSTex != nullptr ||
+                            std::any_of(extraColTex.begin(), extraColTex.end(),
+                                        [](void* tex) { return tex != nullptr; })) {
                             tdi.fboColorTexture = fboColTex;
                             tdi.fboAdditionalColorTextures = extraColTex;
                             tdi.fboColorSlices = colSlices;

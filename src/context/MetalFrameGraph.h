@@ -860,6 +860,10 @@ struct ImmediateDrawInfo {
     GLenum fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
     void* fboColorTexture = nullptr;        // id<MTLTexture> or nullptr
     void* fboDepthStencilTexture = nullptr; // id<MTLTexture> or nullptr
+    std::uint32_t fboColorSlice = 0;
+    std::uint32_t fboColorLevel = 0;
+    std::uint32_t fboDepthStencilSlice = 0;
+    std::uint32_t fboDepthStencilLevel = 0;
     GLsizei fboWidth = 0;
     GLsizei fboHeight = 0;
     GLint viewportX = 0;

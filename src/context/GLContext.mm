@@ -6434,13 +6434,17 @@ MTLPixelFormat metalRenderbufferFormat(GLenum internalFormat) {
         case GL_DEPTH_COMPONENT32F:
             return MTLPixelFormatDepth32Float;
         case GL_STENCIL_INDEX:
+        case GL_STENCIL_INDEX1:
+        case GL_STENCIL_INDEX4:
         case GL_STENCIL_INDEX8:
+        case GL_STENCIL_INDEX16:
             return MTLPixelFormatStencil8;
         case GL_DEPTH_STENCIL:
         case GL_DEPTH24_STENCIL8:
         case GL_DEPTH32F_STENCIL8:
             return MTLPixelFormatDepth32Float_Stencil8;
         // ── Sized color formats (CTS shader execution harness) ──
+        case GL_RED:
         case GL_R8:                return MTLPixelFormatR8Unorm;
         case GL_R8_SNORM:          return MTLPixelFormatR8Snorm;
         case GL_R16:               return MTLPixelFormatR16Unorm;
@@ -6453,6 +6457,7 @@ MTLPixelFormat metalRenderbufferFormat(GLenum internalFormat) {
         case GL_R16UI:             return MTLPixelFormatR16Uint;
         case GL_R32I:              return MTLPixelFormatR32Sint;
         case GL_R32UI:             return MTLPixelFormatR32Uint;
+        case GL_RG:
         case GL_RG8:               return MTLPixelFormatRG8Unorm;
         case GL_RG8_SNORM:         return MTLPixelFormatRG8Snorm;
         case GL_RG16:              return MTLPixelFormatRG16Unorm;
@@ -6512,7 +6517,36 @@ MTLPixelFormat metalRenderbufferFormat(GLenum internalFormat) {
 }
 
 bool isSupportedRenderbufferFormat(GLenum internalFormat) {
-    return metalRenderbufferFormat(internalFormat) != MTLPixelFormatInvalid;
+    if (metalRenderbufferFormat(internalFormat) != MTLPixelFormatInvalid) {
+        return true;
+    }
+    switch (internalFormat) {
+        case GL_ALPHA:
+        case GL_ALPHA4:
+        case GL_ALPHA8:
+        case GL_ALPHA12:
+        case GL_ALPHA16:
+        case GL_LUMINANCE:
+        case GL_LUMINANCE4:
+        case GL_LUMINANCE8:
+        case GL_LUMINANCE12:
+        case GL_LUMINANCE16:
+        case GL_LUMINANCE_ALPHA:
+        case GL_LUMINANCE4_ALPHA4:
+        case GL_LUMINANCE6_ALPHA2:
+        case GL_LUMINANCE8_ALPHA8:
+        case GL_LUMINANCE12_ALPHA4:
+        case GL_LUMINANCE12_ALPHA12:
+        case GL_LUMINANCE16_ALPHA16:
+        case GL_INTENSITY:
+        case GL_INTENSITY4:
+        case GL_INTENSITY8:
+        case GL_INTENSITY12:
+        case GL_INTENSITY16:
+            return true;
+        default:
+            return false;
+    }
 }
 
 bool isColorAttachment(GLenum attachment) {
@@ -14870,8 +14904,9 @@ struct GLContext::Impl {
         const bool deferHugeShadow =
             samples <= 1 && texelCount >= 64u * 1024u * 1024u;
         void* retainedTexture = nullptr;
-        if (device != nil && width > 0 && height > 0) {
-            const MTLPixelFormat pixelFormat = metalRenderbufferFormat(internalFormat);
+        const MTLPixelFormat pixelFormat = metalRenderbufferFormat(internalFormat);
+        if (device != nil && width > 0 && height > 0 &&
+            pixelFormat != MTLPixelFormatInvalid) {
             id<MTLTexture> texture = nil;
             @autoreleasepool {
                 MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pixelFormat
@@ -23060,6 +23095,19 @@ struct GLContext::Impl {
             if (!info.complete) {
                 return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
             }
+            if (isColorAttachment(attachmentPoint) && !isColorFormat(info.internalFormat)) {
+                return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            }
+            if (attachmentPoint == GL_DEPTH_ATTACHMENT && !isDepthFormat(info.internalFormat)) {
+                return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            }
+            if (attachmentPoint == GL_STENCIL_ATTACHMENT && !isStencilFormat(info.internalFormat)) {
+                return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            }
+            if (attachmentPoint == GL_DEPTH_STENCIL_ATTACHMENT &&
+                (!isDepthFormat(info.internalFormat) || !isStencilFormat(info.internalFormat))) {
+                return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            }
             if (!multiviewAttachmentRangeComplete(attachment)) {
                 return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
             }
@@ -23193,6 +23241,9 @@ struct GLContext::Impl {
                 if (info.present && !info.complete) {
                     return GL_FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER;
                 }
+            } else if (framebuffer.drawBuffersExplicit &&
+                       appglCompatProfileEnabled()) {
+                return GL_FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER;
             }
         }
         if (framebuffer.readBuffer != GL_NONE) {
@@ -23202,9 +23253,37 @@ struct GLContext::Impl {
                 if (info.present && !info.complete) {
                     return GL_FRAMEBUFFER_INCOMPLETE_READ_BUFFER;
                 }
+            } else if (framebuffer.readBufferExplicit &&
+                       appglCompatProfileEnabled()) {
+                return GL_FRAMEBUFFER_INCOMPLETE_READ_BUFFER;
             }
         }
         return GL_FRAMEBUFFER_COMPLETE;
+    }
+
+    bool framebufferIntersectionSize(const GLFramebufferObject& framebuffer,
+                                     GLsizei& width,
+                                     GLsizei& height) const {
+        bool haveAttachmentSize = false;
+        width = 0;
+        height = 0;
+        for (const auto& [attachmentPoint, attachment] :
+             framebuffer.attachments) {
+            (void)attachmentPoint;
+            const AttachmentInfo info = framebufferAttachmentInfo(attachment);
+            if (!info.present || !info.complete) {
+                continue;
+            }
+            if (!haveAttachmentSize) {
+                width = info.width;
+                height = info.height;
+                haveAttachmentSize = true;
+            } else {
+                width = std::min(width, info.width);
+                height = std::min(height, info.height);
+            }
+        }
+        return haveAttachmentSize && width > 0 && height > 0;
     }
 
     GLFramebufferAttachment* framebufferAttachment(GLFramebufferObject& framebuffer, GLenum attachment) {
@@ -23278,6 +23357,19 @@ struct GLContext::Impl {
         outWidth = 0;
         outHeight = 0;
         bool primarySet = false;
+        auto includeFramebufferAttachmentSize =
+            [&](GLsizei width, GLsizei height) {
+                if (width <= 0 || height <= 0) {
+                    return;
+                }
+                if (outWidth <= 0 || outHeight <= 0) {
+                    outWidth = width;
+                    outHeight = height;
+                    return;
+                }
+                outWidth = std::min(outWidth, width);
+                outHeight = std::min(outHeight, height);
+            };
         const std::size_t maxSlots = std::min<std::size_t>(
             fbo->drawBuffers.size(), 8);
         for (std::size_t bi = 0; bi < maxSlots; ++bi) {
@@ -23389,6 +23481,9 @@ struct GLContext::Impl {
                 }
             }
             if (tex == nullptr) continue;
+            if (hasSize) {
+                includeFramebufferAttachmentSize(w, h);
+            }
             // Phase 6-5 — FramebufferTextureLayer stores the target
             // slice in `att->layer`. For FramebufferTexture (whole-
             // texture attachment, `att->layered`), Metal uses
@@ -23446,6 +23541,7 @@ struct GLContext::Impl {
             if (att->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
                 const GLRenderbufferObject* rb = objects->renderbuffers().get(att->object);
                 if (rb == nullptr || rb->metalTexture == nullptr) return nullptr;
+                includeFramebufferAttachmentSize(rb->width, rb->height);
                 if (!primarySet) {
                     outWidth = rb->width;
                     outHeight = rb->height;
@@ -23463,19 +23559,26 @@ struct GLContext::Impl {
                                                           att->object);
                 }
                 if (tex == nullptr || tex->metalTexture == nullptr) return nullptr;
-                if (!primarySet) {
-                    const ResolvedTextureAttachment resolved =
-                        resolveTextureAttachmentStorage(*att);
-                    const GLTextureObject* sizeTexture =
-                        (resolved.valid && resolved.storageTexture != nullptr)
-                            ? resolved.storageTexture
-                            : tex;
-                    const GLint sizeLevel =
-                        resolved.valid ? resolved.level : att->level;
-                    const auto lvl = sizeTexture->levels.find(sizeLevel);
-                    if (lvl != sizeTexture->levels.end()) {
-                        outWidth = lvl->second.desc.width;
-                        outHeight = sizeTexture->target == GL_TEXTURE_1D ? 1 : lvl->second.desc.height;
+                const ResolvedTextureAttachment resolved =
+                    resolveTextureAttachmentStorage(*att);
+                const GLTextureObject* sizeTexture =
+                    (resolved.valid && resolved.storageTexture != nullptr)
+                        ? resolved.storageTexture
+                        : tex;
+                const GLint sizeLevel =
+                    resolved.valid ? resolved.level : att->level;
+                const auto lvl = sizeTexture->levels.find(sizeLevel);
+                if (lvl != sizeTexture->levels.end()) {
+                    const GLsizei attachmentWidth = lvl->second.desc.width;
+                    const GLsizei attachmentHeight =
+                        sizeTexture->target == GL_TEXTURE_1D
+                            ? 1
+                            : lvl->second.desc.height;
+                    includeFramebufferAttachmentSize(attachmentWidth,
+                                                     attachmentHeight);
+                    if (!primarySet) {
+                        outWidth = attachmentWidth;
+                        outHeight = attachmentHeight;
                         primarySet = true;
                     }
                 }
@@ -26043,6 +26146,24 @@ struct GLContext::Impl {
         NSUInteger metalMipLevel = 0;
         NSUInteger metalSlice = 0;
         bool sourceNeedsFboYFlip = true;
+        auto framebufferReadbackFlipHeight =
+            [&](GLsizei attachmentHeight) -> GLsizei {
+                const GLuint readName = state->boundReadFramebuffer();
+                if (readName == 0) {
+                    return attachmentHeight;
+                }
+                const GLFramebufferObject* readFramebuffer =
+                    objects->framebuffers().get(readName);
+                GLsizei intersectionWidth = 0;
+                GLsizei intersectionHeight = 0;
+                if (readFramebuffer == nullptr ||
+                    !framebufferIntersectionSize(*readFramebuffer,
+                                                 intersectionWidth,
+                                                 intersectionHeight)) {
+                    return attachmentHeight;
+                }
+                return std::min(attachmentHeight, intersectionHeight);
+            };
 
         // For 3D textures, `attachment.layer` is a Z coordinate into
         // the texture region, not a Metal slice index. Track separately
@@ -26100,13 +26221,15 @@ struct GLContext::Impl {
                 const bool yFlipCpuReadback =
                     sourceNeedsFboYFlip &&
                     state->clipOrigin() != GL_UPPER_LEFT;
+                const GLsizei yFlipHeight =
+                    framebufferReadbackFlipHeight(sourceHeight);
                 auto* out = static_cast<std::uint8_t*>(pixels);
                 for (GLsizei row = 0; row < height; ++row) {
                     for (GLsizei col = 0; col < width; ++col) {
                         const GLint srcX = x + col;
                         const GLint glY = y + row;
                         const GLint srcY = yFlipCpuReadback
-                            ? (sourceHeight - 1 - glY) : glY;
+                            ? (yFlipHeight - 1 - glY) : glY;
                         const std::size_t dstOffset = static_cast<std::size_t>(row * width + col) * 4u;
                         if (srcX < 0 || srcY < 0 || srcX >= sourceWidth || srcY >= sourceHeight) {
                             std::memset(out + dstOffset, 0, 4);
@@ -26135,6 +26258,8 @@ struct GLContext::Impl {
             const bool yFlipCpuReadback =
                 sourceNeedsFboYFlip &&
                 state->clipOrigin() != GL_UPPER_LEFT;
+            const GLsizei yFlipHeight =
+                framebufferReadbackFlipHeight(sourceHeight);
             const bool preferRenderbufferShadow =
                 rb->colorShadowAuthoritative ||
                 renderbufferColorShadowCoversReadRect(
@@ -26148,7 +26273,7 @@ struct GLContext::Impl {
                         const GLint srcX = x + col;
                         const GLint glY = y + row;
                         const GLint srcY = yFlipCpuReadback
-                            ? (sourceHeight - 1 - glY) : glY;
+                            ? (yFlipHeight - 1 - glY) : glY;
                         const std::size_t dstOffset = static_cast<std::size_t>(row * width + col) * 4u;
                         if (srcX < 0 || srcY < 0 || srcX >= sourceWidth || srcY >= sourceHeight) {
                             std::memset(out + dstOffset, 0, 4);
@@ -26262,6 +26387,8 @@ struct GLContext::Impl {
         const bool yFlipReadback =
             sourceNeedsFboYFlip &&
             state->clipOrigin() != GL_UPPER_LEFT;
+        const GLsizei yFlipHeight =
+            framebufferReadbackFlipHeight(sourceHeight);
         if (readTex.pixelFormat == MTLPixelFormatR8Unorm) {
             const NSUInteger nativeBytesPerRow =
                 static_cast<NSUInteger>(sourceWidth);
@@ -26287,7 +26414,7 @@ struct GLContext::Impl {
                 for (GLsizei col = 0; col < width; ++col) {
                     const GLint srcX = x + col;
                     const GLint glY = y + row;
-                    const GLint srcY = yFlipReadback ? (sourceHeight - 1 - glY) : glY;
+                    const GLint srcY = yFlipReadback ? (yFlipHeight - 1 - glY) : glY;
                     const std::size_t dstOffset =
                         static_cast<std::size_t>(row * width + col) * 4u;
                     if (srcX < 0 || srcY < 0 ||
@@ -26314,7 +26441,7 @@ struct GLContext::Impl {
             x >= 0 && y >= 0 &&
             width <= sourceWidth && height <= sourceHeight &&
             x <= sourceWidth - width &&
-            y <= sourceHeight - height;
+            y <= (yFlipReadback ? yFlipHeight : sourceHeight) - height;
         if (canReadRegionalRGBA8) {
             const NSUInteger regionWidth = static_cast<NSUInteger>(width);
             const NSUInteger regionHeight = static_cast<NSUInteger>(height);
@@ -26322,7 +26449,7 @@ struct GLContext::Impl {
             std::vector<std::uint8_t> region(
                 static_cast<std::size_t>(regionBytesPerRow * regionHeight));
             const NSUInteger metalY = yFlipReadback
-                ? static_cast<NSUInteger>(sourceHeight - y - height)
+                ? static_cast<NSUInteger>(yFlipHeight - y - height)
                 : static_cast<NSUInteger>(y);
             [readTex getBytes:region.data()
                    bytesPerRow:regionBytesPerRow
@@ -26385,7 +26512,7 @@ struct GLContext::Impl {
             for (GLsizei col = 0; col < width; ++col) {
                 const GLint srcX = x + col;
                 const GLint glY = y + row;
-                const GLint srcY = yFlipReadback ? (sourceHeight - 1 - glY) : glY;
+                const GLint srcY = yFlipReadback ? (yFlipHeight - 1 - glY) : glY;
                 const std::size_t dstOffset = static_cast<std::size_t>(row * width + col) * 4u;
                 if (srcX < 0 || srcY < 0 || srcX >= sourceWidth || srcY >= sourceHeight) {
                     std::memset(out + dstOffset, 0, 4);
@@ -29482,6 +29609,24 @@ struct GLContext::Impl {
         // producers.
         bool sourceNeedsFboYFlip = true;  // renderbuffers default to FBO-produced
         GLenum sourceInternalFormat = 0;
+        auto framebufferReadbackFlipHeight =
+            [&](GLsizei attachmentHeight) -> GLsizei {
+                const GLuint readName = state->boundReadFramebuffer();
+                if (readName == 0) {
+                    return attachmentHeight;
+                }
+                const GLFramebufferObject* readFramebuffer =
+                    objects->framebuffers().get(readName);
+                GLsizei intersectionWidth = 0;
+                GLsizei intersectionHeight = 0;
+                if (readFramebuffer == nullptr ||
+                    !framebufferIntersectionSize(*readFramebuffer,
+                                                 intersectionWidth,
+                                                 intersectionHeight)) {
+                    return attachmentHeight;
+                }
+                return std::min(attachmentHeight, intersectionHeight);
+            };
         if (att->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
             const GLRenderbufferObject* rb = objects->renderbuffers().get(att->object);
             if (!rb || !rb->storageDefined || rb->metalTexture == nullptr) return false;
@@ -29862,12 +30007,14 @@ struct GLContext::Impl {
         const bool yFlipNativeReadback =
             sourceNeedsFboYFlip &&
             (state->clipOrigin() != GL_UPPER_LEFT);
+        const GLsizei yFlipHeight =
+            framebufferReadbackFlipHeight(sourceHeight);
         for (GLsizei row = 0; row < height; ++row) {
             for (GLsizei col = 0; col < width; ++col) {
                 const GLint srcX = x + col;
                 const GLint glY = y + row;
                 // RC-A02: OpenGL row 0 = bottom → Metal row 0 = top.
-                const GLint srcY = yFlipNativeReadback ? (sourceHeight - 1 - glY) : glY;
+                const GLint srcY = yFlipNativeReadback ? (yFlipHeight - 1 - glY) : glY;
 
                 // Destination byte offset honours PACK_ALIGNMENT,
                 // PACK_ROW_LENGTH, and PACK_SKIP_{ROWS,PIXELS}.
@@ -47044,7 +47191,9 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
             fboW, fboH, fboDSTex, &fboArrayLen,
             &extraColTex, &colSlices, &colLevels,
             &fboDSSlice, &fboDSLevel);
-        if (fboColTex != nullptr || fboDSTex != nullptr) {
+        if (fboColTex != nullptr || fboDSTex != nullptr ||
+            std::any_of(extraColTex.begin(), extraColTex.end(),
+                        [](void* tex) { return tex != nullptr; })) {
             tdi.fboColorTexture = fboColTex;
             tdi.fboAdditionalColorTextures = extraColTex;
             tdi.fboColorSlices = colSlices;
@@ -47112,8 +47261,12 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             ? static_cast<std::uint32_t>(
                   std::max<GLint>(preDrawFbo->defaultLayers, 0))
             : 0u;
+    const bool preHasExtraFboColorTarget =
+        std::any_of(preExtraColTex.begin(), preExtraColTex.end(),
+                    [](void* tex) { return tex != nullptr; });
     const bool fboIsLayered =
-        (preFboColTex != nullptr && preFboArrayLen > 0) ||
+        ((preFboColTex != nullptr || preHasExtraFboColorTarget) &&
+         preFboArrayLen > 0) ||
         (preAttachmentlessFbo && preAttachmentlessLayers > 0);
     const bool routeLayer = ed.hasLayer && fboIsLayered;
     // Sprint 15 Day 10 [metal-viewport-array]: detect multi-viewport
@@ -47922,7 +48075,8 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     resolveBindingConstructionForTranslatedDraw(
         program, tdi, bindingConstructionUniformPackUs);
 
-    if (preFboColTex != nullptr || preFboDSTex != nullptr || preAttachmentlessFbo) {
+    if (preFboColTex != nullptr || preFboDSTex != nullptr ||
+        preHasExtraFboColorTarget || preAttachmentlessFbo) {
         tdi.fboColorTexture = preFboColTex;
         tdi.fboAdditionalColorTextures = preExtraColTex;
         tdi.fboColorSlices = preColorSlices;
@@ -48080,7 +48234,9 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
             fboW, fboH, fboDSTex, &fboArrayLen,
             &extraColTex, &colSlices, &colLevels,
             &fboDSSlice, &fboDSLevel);
-        if (fboColTex != nullptr || fboDSTex != nullptr) {
+        if (fboColTex != nullptr || fboDSTex != nullptr ||
+            std::any_of(extraColTex.begin(), extraColTex.end(),
+                        [](void* tex) { return tex != nullptr; })) {
             tdi.fboColorTexture = fboColTex;
             tdi.fboAdditionalColorTextures = extraColTex;
             tdi.fboColorSlices = colSlices;
@@ -48577,7 +48733,9 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                     fboW, fboH, fboDSTex, &fboArrayLen,
                     &extraColTex, &colSlices, &colLevels,
                     &fboDSSlice, &fboDSLevel);
-                if (fboColTex != nullptr || fboDSTex != nullptr) {
+                if (fboColTex != nullptr || fboDSTex != nullptr ||
+                    std::any_of(extraColTex.begin(), extraColTex.end(),
+                                [](void* tex) { return tex != nullptr; })) {
                     tdi.fboColorTexture = fboColTex;
                     tdi.fboAdditionalColorTextures = extraColTex;
                     tdi.fboColorSlices = colSlices;

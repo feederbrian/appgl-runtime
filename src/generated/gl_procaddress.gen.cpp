@@ -57,6 +57,7 @@ void APIENTRY glBufferDataARB(GLenum target, GLsizeiptr size, const void *data, 
 void APIENTRY glBufferStorageEXT(GLenum target, GLsizeiptr size, const void *data, GLbitfield flags);
 void APIENTRY glBufferSubDataARB(GLenum target, GLintptr offset, GLsizeiptr size, const void *data);
 GLenum APIENTRY glCheckFramebufferStatusEXT(GLenum target);
+GLenum APIENTRY glCheckNamedFramebufferStatusEXT(GLuint framebuffer, GLenum target);
 void APIENTRY glClampColorARB(GLenum target, GLenum clamp);
 void APIENTRY glClearDepthfOES(GLfloat d);
 void APIENTRY glClearTexImageEXT(GLuint texture, GLint level, GLenum format, GLenum type, const void *data);
@@ -148,6 +149,9 @@ void APIENTRY glFogCoorddEXT(GLdouble coord);
 void APIENTRY glFogCoorddvEXT(const GLdouble *coord);
 void APIENTRY glFogCoordfEXT(GLfloat coord);
 void APIENTRY glFogCoordfvEXT(const GLfloat *coord);
+void APIENTRY glFramebufferDrawBufferEXT(GLuint framebuffer, GLenum buf);
+void APIENTRY glFramebufferDrawBuffersEXT(GLuint framebuffer, GLsizei n, const GLenum *bufs);
+void APIENTRY glFramebufferReadBufferEXT(GLuint framebuffer, GLenum src);
 void APIENTRY glFramebufferRenderbufferEXT(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer);
 void APIENTRY glFramebufferTexture1DEXT(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
 void APIENTRY glFramebufferTexture2DEXT(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
@@ -185,12 +189,16 @@ void APIENTRY glGetFloati_vOES(GLenum target, GLuint index, GLfloat *data);
 GLint APIENTRY glGetFragDataIndexEXT(GLuint program, const GLchar *name);
 GLint APIENTRY glGetFragDataLocationEXT(GLuint program, const GLchar *name);
 void APIENTRY glGetFramebufferAttachmentParameterivEXT(GLenum target, GLenum attachment, GLenum pname, GLint *params);
+void APIENTRY glGetFramebufferParameterivEXT(GLuint framebuffer, GLenum pname, GLint *param);
 GLenum APIENTRY glGetGraphicsResetStatusEXT(void);
 GLenum APIENTRY glGetGraphicsResetStatusKHR(void);
 void APIENTRY glGetInteger64vAPPLE(GLenum pname, GLint64 *data);
 void APIENTRY glGetInteger64vEXT(GLenum pname, GLint64 *data);
 void APIENTRY glGetIntegerIndexedvEXT(GLenum target, GLuint index, GLint *data);
 void APIENTRY glGetMultisamplefvNV(GLenum pname, GLuint index, GLfloat *val);
+void APIENTRY glGetNamedFramebufferAttachmentParameterivEXT(GLuint framebuffer, GLenum attachment, GLenum pname, GLint *params);
+void APIENTRY glGetNamedFramebufferParameterivEXT(GLuint framebuffer, GLenum pname, GLint *param);
+void APIENTRY glGetNamedRenderbufferParameterivEXT(GLuint renderbuffer, GLenum pname, GLint *params);
 void APIENTRY glGetObjectLabelKHR(GLenum identifier, GLuint name, GLsizei bufSize, GLsizei *length, GLchar *label);
 void APIENTRY glGetObjectPtrLabelKHR(const void *ptr, GLsizei bufSize, GLsizei *length, GLchar *label);
 void APIENTRY glGetPointervEXT(GLenum pname, void **params);
@@ -300,6 +308,12 @@ void APIENTRY glMultiTexCoord4sARB(GLenum target, GLshort s, GLshort t, GLshort 
 void APIENTRY glMultiTexCoord4svARB(GLenum target, const GLshort *v);
 void APIENTRY glNamedBufferStorageEXT(GLuint buffer, GLsizeiptr size, const void *data, GLbitfield flags);
 void APIENTRY glNamedBufferSubDataEXT(GLuint buffer, GLintptr offset, GLsizeiptr size, const void *data);
+void APIENTRY glNamedFramebufferParameteriEXT(GLuint framebuffer, GLenum pname, GLint param);
+void APIENTRY glNamedFramebufferRenderbufferEXT(GLuint framebuffer, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer);
+void APIENTRY glNamedFramebufferTextureEXT(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level);
+void APIENTRY glNamedFramebufferTextureLayerEXT(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint layer);
+void APIENTRY glNamedRenderbufferStorageEXT(GLuint renderbuffer, GLenum internalformat, GLsizei width, GLsizei height);
+void APIENTRY glNamedRenderbufferStorageMultisampleEXT(GLuint renderbuffer, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height);
 void APIENTRY glObjectLabelKHR(GLenum identifier, GLuint name, GLsizei length, const GLchar *label);
 void APIENTRY glObjectPtrLabelKHR(const void *ptr, GLsizei length, const GLchar *label);
 void APIENTRY glPatchParameteriEXT(GLenum pname, GLint value);
@@ -1097,6 +1111,7 @@ const ProcEntry kProcTable[] = {
     {"glCheckFramebufferStatus", reinterpret_cast<AppGLProc>(&::glCheckFramebufferStatus)},
     {"glCheckFramebufferStatusEXT", reinterpret_cast<AppGLProc>(&::glCheckFramebufferStatusEXT)},
     {"glCheckNamedFramebufferStatus", reinterpret_cast<AppGLProc>(&::glCheckNamedFramebufferStatus)},
+    {"glCheckNamedFramebufferStatusEXT", reinterpret_cast<AppGLProc>(&::glCheckNamedFramebufferStatusEXT)},
     {"glClampColor", reinterpret_cast<AppGLProc>(&::glClampColor)},
     {"glClampColorARB", reinterpret_cast<AppGLProc>(&::glClampColorARB)},
     {"glClear", reinterpret_cast<AppGLProc>(&::glClear)},
@@ -1380,7 +1395,10 @@ const ProcEntry kProcTable[] = {
     {"glFogfv", reinterpret_cast<AppGLProc>(&::glFogfv)},
     {"glFogi", reinterpret_cast<AppGLProc>(&::glFogi)},
     {"glFogiv", reinterpret_cast<AppGLProc>(&::glFogiv)},
+    {"glFramebufferDrawBufferEXT", reinterpret_cast<AppGLProc>(&::glFramebufferDrawBufferEXT)},
+    {"glFramebufferDrawBuffersEXT", reinterpret_cast<AppGLProc>(&::glFramebufferDrawBuffersEXT)},
     {"glFramebufferParameteri", reinterpret_cast<AppGLProc>(&::glFramebufferParameteri)},
+    {"glFramebufferReadBufferEXT", reinterpret_cast<AppGLProc>(&::glFramebufferReadBufferEXT)},
     {"glFramebufferRenderbuffer", reinterpret_cast<AppGLProc>(&::glFramebufferRenderbuffer)},
     {"glFramebufferRenderbufferEXT", reinterpret_cast<AppGLProc>(&::glFramebufferRenderbufferEXT)},
     {"glFramebufferShadingRateEXT", reinterpret_cast<AppGLProc>(&::glFramebufferShadingRateEXT)},
@@ -1420,6 +1438,7 @@ const ProcEntry kProcTable[] = {
     {"glGenerateMipmap", reinterpret_cast<AppGLProc>(&::glGenerateMipmap)},
     {"glGenerateMipmapEXT", reinterpret_cast<AppGLProc>(&::glGenerateMipmapEXT)},
     {"glGenerateTextureMipmap", reinterpret_cast<AppGLProc>(&::glGenerateTextureMipmap)},
+    {"glGenerateTextureMipmapEXT", reinterpret_cast<AppGLProc>(&::glGenerateTextureMipmapEXT)},
     {"glGetActiveAtomicCounterBufferiv", reinterpret_cast<AppGLProc>(&::glGetActiveAtomicCounterBufferiv)},
     {"glGetActiveAttrib", reinterpret_cast<AppGLProc>(&::glGetActiveAttrib)},
     {"glGetActiveAttribARB", reinterpret_cast<AppGLProc>(&::glGetActiveAttribARB)},
@@ -1473,6 +1492,7 @@ const ProcEntry kProcTable[] = {
     {"glGetFramebufferAttachmentParameteriv", reinterpret_cast<AppGLProc>(&::glGetFramebufferAttachmentParameteriv)},
     {"glGetFramebufferAttachmentParameterivEXT", reinterpret_cast<AppGLProc>(&::glGetFramebufferAttachmentParameterivEXT)},
     {"glGetFramebufferParameteriv", reinterpret_cast<AppGLProc>(&::glGetFramebufferParameteriv)},
+    {"glGetFramebufferParameterivEXT", reinterpret_cast<AppGLProc>(&::glGetFramebufferParameterivEXT)},
     {"glGetGraphicsResetStatus", reinterpret_cast<AppGLProc>(&::glGetGraphicsResetStatus)},
     {"glGetGraphicsResetStatusEXT", reinterpret_cast<AppGLProc>(&::glGetGraphicsResetStatusEXT)},
     {"glGetGraphicsResetStatusKHR", reinterpret_cast<AppGLProc>(&::glGetGraphicsResetStatusKHR)},
@@ -1499,8 +1519,11 @@ const ProcEntry kProcTable[] = {
     {"glGetNamedBufferPointerv", reinterpret_cast<AppGLProc>(&::glGetNamedBufferPointerv)},
     {"glGetNamedBufferSubData", reinterpret_cast<AppGLProc>(&::glGetNamedBufferSubData)},
     {"glGetNamedFramebufferAttachmentParameteriv", reinterpret_cast<AppGLProc>(&::glGetNamedFramebufferAttachmentParameteriv)},
+    {"glGetNamedFramebufferAttachmentParameterivEXT", reinterpret_cast<AppGLProc>(&::glGetNamedFramebufferAttachmentParameterivEXT)},
     {"glGetNamedFramebufferParameteriv", reinterpret_cast<AppGLProc>(&::glGetNamedFramebufferParameteriv)},
+    {"glGetNamedFramebufferParameterivEXT", reinterpret_cast<AppGLProc>(&::glGetNamedFramebufferParameterivEXT)},
     {"glGetNamedRenderbufferParameteriv", reinterpret_cast<AppGLProc>(&::glGetNamedRenderbufferParameteriv)},
+    {"glGetNamedRenderbufferParameterivEXT", reinterpret_cast<AppGLProc>(&::glGetNamedRenderbufferParameterivEXT)},
     {"glGetObjectLabel", reinterpret_cast<AppGLProc>(&::glGetObjectLabel)},
     {"glGetObjectLabelKHR", reinterpret_cast<AppGLProc>(&::glGetObjectLabelKHR)},
     {"glGetObjectPtrLabel", reinterpret_cast<AppGLProc>(&::glGetObjectPtrLabel)},
@@ -1851,13 +1874,24 @@ const ProcEntry kProcTable[] = {
     {"glNamedFramebufferDrawBuffer", reinterpret_cast<AppGLProc>(&::glNamedFramebufferDrawBuffer)},
     {"glNamedFramebufferDrawBuffers", reinterpret_cast<AppGLProc>(&::glNamedFramebufferDrawBuffers)},
     {"glNamedFramebufferParameteri", reinterpret_cast<AppGLProc>(&::glNamedFramebufferParameteri)},
+    {"glNamedFramebufferParameteriEXT", reinterpret_cast<AppGLProc>(&::glNamedFramebufferParameteriEXT)},
     {"glNamedFramebufferReadBuffer", reinterpret_cast<AppGLProc>(&::glNamedFramebufferReadBuffer)},
     {"glNamedFramebufferRenderbuffer", reinterpret_cast<AppGLProc>(&::glNamedFramebufferRenderbuffer)},
+    {"glNamedFramebufferRenderbufferEXT", reinterpret_cast<AppGLProc>(&::glNamedFramebufferRenderbufferEXT)},
     {"glNamedFramebufferTexture", reinterpret_cast<AppGLProc>(&::glNamedFramebufferTexture)},
+    {"glNamedFramebufferTexture1DEXT", reinterpret_cast<AppGLProc>(&::glNamedFramebufferTexture1DEXT)},
+    {"glNamedFramebufferTexture2DEXT", reinterpret_cast<AppGLProc>(&::glNamedFramebufferTexture2DEXT)},
+    {"glNamedFramebufferTexture3DEXT", reinterpret_cast<AppGLProc>(&::glNamedFramebufferTexture3DEXT)},
+    {"glNamedFramebufferTextureEXT", reinterpret_cast<AppGLProc>(&::glNamedFramebufferTextureEXT)},
+    {"glNamedFramebufferTextureFaceEXT", reinterpret_cast<AppGLProc>(&::glNamedFramebufferTextureFaceEXT)},
     {"glNamedFramebufferTextureLayer", reinterpret_cast<AppGLProc>(&::glNamedFramebufferTextureLayer)},
+    {"glNamedFramebufferTextureLayerEXT", reinterpret_cast<AppGLProc>(&::glNamedFramebufferTextureLayerEXT)},
     {"glNamedFramebufferTextureMultiviewOVR", reinterpret_cast<AppGLProc>(&::glNamedFramebufferTextureMultiviewOVR)},
     {"glNamedRenderbufferStorage", reinterpret_cast<AppGLProc>(&::glNamedRenderbufferStorage)},
+    {"glNamedRenderbufferStorageEXT", reinterpret_cast<AppGLProc>(&::glNamedRenderbufferStorageEXT)},
     {"glNamedRenderbufferStorageMultisample", reinterpret_cast<AppGLProc>(&::glNamedRenderbufferStorageMultisample)},
+    {"glNamedRenderbufferStorageMultisampleCoverageEXT", reinterpret_cast<AppGLProc>(&::glNamedRenderbufferStorageMultisampleCoverageEXT)},
+    {"glNamedRenderbufferStorageMultisampleEXT", reinterpret_cast<AppGLProc>(&::glNamedRenderbufferStorageMultisampleEXT)},
     {"glNewList", reinterpret_cast<AppGLProc>(&::glNewList)},
     {"glNormal3b", reinterpret_cast<AppGLProc>(&::glNormal3b)},
     {"glNormal3bv", reinterpret_cast<AppGLProc>(&::glNormal3bv)},

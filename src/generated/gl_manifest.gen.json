@@ -6045,6 +6045,60 @@
       "firstPassingTestId": "",
       "firstPassingBenchmarkId": "",
       "notes": ""
+    },
+    {
+      "name": "glGenerateTextureMipmapEXT",
+      "subsystem": "direct state access",
+      "introducedVersion": "GL_EXT_direct_state_access",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedFramebufferTexture1DEXT",
+      "subsystem": "direct state access",
+      "introducedVersion": "GL_EXT_direct_state_access",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedFramebufferTexture2DEXT",
+      "subsystem": "direct state access",
+      "introducedVersion": "GL_EXT_direct_state_access",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedFramebufferTexture3DEXT",
+      "subsystem": "direct state access",
+      "introducedVersion": "GL_EXT_direct_state_access",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedFramebufferTextureFaceEXT",
+      "subsystem": "direct state access",
+      "introducedVersion": "GL_EXT_direct_state_access",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedRenderbufferStorageMultisampleCoverageEXT",
+      "subsystem": "direct state access",
+      "introducedVersion": "GL_EXT_direct_state_access",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
     }
   ]
 }

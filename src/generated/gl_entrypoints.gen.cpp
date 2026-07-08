@@ -5999,3 +5999,57 @@ extern "C" void APIENTRY glVertexArrayVertexAttribDivisorEXT(GLuint vaobj, GLuin
     }
     appgl::unimplementedReturn<void>(appgl::FunctionId::glVertexArrayVertexAttribDivisorEXT, "glVertexArrayVertexAttribDivisorEXT");
 }
+
+extern "C" void APIENTRY glGenerateTextureMipmapEXT(GLuint texture, GLenum target) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glGenerateTextureMipmapEXT, "glGenerateTextureMipmapEXT");
+    if (auto fn = appgl::Runtime::shared().dispatch().glGenerateTextureMipmapEXT) {
+        fn(texture, target);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glGenerateTextureMipmapEXT, "glGenerateTextureMipmapEXT");
+}
+
+extern "C" void APIENTRY glNamedFramebufferTexture1DEXT(GLuint framebuffer, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glNamedFramebufferTexture1DEXT, "glNamedFramebufferTexture1DEXT");
+    if (auto fn = appgl::Runtime::shared().dispatch().glNamedFramebufferTexture1DEXT) {
+        fn(framebuffer, attachment, textarget, texture, level);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glNamedFramebufferTexture1DEXT, "glNamedFramebufferTexture1DEXT");
+}
+
+extern "C" void APIENTRY glNamedFramebufferTexture2DEXT(GLuint framebuffer, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glNamedFramebufferTexture2DEXT, "glNamedFramebufferTexture2DEXT");
+    if (auto fn = appgl::Runtime::shared().dispatch().glNamedFramebufferTexture2DEXT) {
+        fn(framebuffer, attachment, textarget, texture, level);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glNamedFramebufferTexture2DEXT, "glNamedFramebufferTexture2DEXT");
+}
+
+extern "C" void APIENTRY glNamedFramebufferTexture3DEXT(GLuint framebuffer, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint zoffset) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glNamedFramebufferTexture3DEXT, "glNamedFramebufferTexture3DEXT");
+    if (auto fn = appgl::Runtime::shared().dispatch().glNamedFramebufferTexture3DEXT) {
+        fn(framebuffer, attachment, textarget, texture, level, zoffset);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glNamedFramebufferTexture3DEXT, "glNamedFramebufferTexture3DEXT");
+}
+
+extern "C" void APIENTRY glNamedFramebufferTextureFaceEXT(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLenum face) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glNamedFramebufferTextureFaceEXT, "glNamedFramebufferTextureFaceEXT");
+    if (auto fn = appgl::Runtime::shared().dispatch().glNamedFramebufferTextureFaceEXT) {
+        fn(framebuffer, attachment, texture, level, face);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glNamedFramebufferTextureFaceEXT, "glNamedFramebufferTextureFaceEXT");
+}
+
+extern "C" void APIENTRY glNamedRenderbufferStorageMultisampleCoverageEXT(GLuint renderbuffer, GLsizei coverageSamples, GLsizei colorSamples, GLenum internalformat, GLsizei width, GLsizei height) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glNamedRenderbufferStorageMultisampleCoverageEXT, "glNamedRenderbufferStorageMultisampleCoverageEXT");
+    if (auto fn = appgl::Runtime::shared().dispatch().glNamedRenderbufferStorageMultisampleCoverageEXT) {
+        fn(renderbuffer, coverageSamples, colorSamples, internalformat, width, height);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glNamedRenderbufferStorageMultisampleCoverageEXT, "glNamedRenderbufferStorageMultisampleCoverageEXT");
+}

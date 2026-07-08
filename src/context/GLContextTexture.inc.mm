@@ -2098,6 +2098,56 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
     // (== offset 0) is a valid PBO destination.
     if (pixels == nullptr && !packPBOBound) return true;
 
+    const auto zeroFillCompressedTextureReadback = [&]() -> std::pair<bool, bool> {
+        const auto levelIt = obj->levels.find(level);
+        const GLTextureDesc* readDesc = nullptr;
+        if (levelIt != obj->levels.end() && levelIt->second.defined) {
+            readDesc = &levelIt->second.desc;
+        } else if (level == 0) {
+            readDesc = &obj->desc;
+        }
+        if (readDesc == nullptr ||
+            !isCompressedInternalFormat(readDesc->internalFormat) ||
+            format == GL_DEPTH_COMPONENT ||
+            format == GL_DEPTH_STENCIL ||
+            format == GL_STENCIL_INDEX) {
+            return {false, false};
+        }
+
+        const std::size_t dstPixelBytes = bytesPerPixel(format, type);
+        if (dstPixelBytes == 0) {
+            pushError(GL_INVALID_ENUM);
+            return {true, false};
+        }
+        const std::size_t width =
+            static_cast<std::size_t>(std::max<GLsizei>(readDesc->width, 1));
+        const std::size_t height =
+            static_cast<std::size_t>(std::max<GLsizei>(readDesc->height, 1));
+        const std::size_t depth =
+            static_cast<std::size_t>(std::max<GLsizei>(readDesc->depth, 1));
+        const std::size_t requiredBytes = width * height * depth * dstPixelBytes;
+        if (bufSize > 0 && static_cast<std::size_t>(bufSize) < requiredBytes) {
+            pushError(GL_INVALID_OPERATION);
+            return {true, false};
+        }
+        void* dst = pixels;
+        if (packPBOBound) {
+            auto [packDest, packOk] = impl_->resolvePackPBO(
+                pixels,
+                std::max<std::size_t>(requiredBytes, 1),
+                std::max<std::size_t>(bytesPerComponent(type), 1));
+            if (!packOk) {
+                pushError(GL_INVALID_OPERATION);
+                return {true, false};
+            }
+            dst = packDest;
+        }
+        if (dst != nullptr && requiredBytes > 0) {
+            std::memset(dst, 0, requiredBytes);
+        }
+        return {true, true};
+    };
+
     if (appglCompatProfileEnabled() && !packPBOBound) {
         const auto levelIt = obj->levels.find(level);
         if (levelIt != obj->levels.end() && levelIt->second.defined &&
@@ -2219,6 +2269,13 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
         }
     }
 
+    {
+        auto [compressedHandled, compressedOk] = zeroFillCompressedTextureReadback();
+        if (compressedHandled) {
+            return compressedOk;
+        }
+    }
+
     if (obj->viewSourceTexture != 0) {
         (void)impl_->materializeTextureView(*obj);
     }
@@ -2244,6 +2301,47 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
                      texture,
                      kProducerAll},
                 });
+                return true;
+            }
+        }
+        {
+            const auto levelIt = obj->levels.find(level);
+            if (levelIt != obj->levels.end() && levelIt->second.defined &&
+                isCompressedInternalFormat(levelIt->second.desc.internalFormat) &&
+                format != GL_DEPTH_COMPONENT &&
+                format != GL_DEPTH_STENCIL &&
+                format != GL_STENCIL_INDEX) {
+                const std::size_t dstPixelBytes = bytesPerPixel(format, type);
+                if (dstPixelBytes == 0) {
+                    pushError(GL_INVALID_ENUM);
+                    return false;
+                }
+                const std::size_t width =
+                    static_cast<std::size_t>(std::max<GLsizei>(levelIt->second.desc.width, 1));
+                const std::size_t height =
+                    static_cast<std::size_t>(std::max<GLsizei>(levelIt->second.desc.height, 1));
+                const std::size_t depth =
+                    static_cast<std::size_t>(std::max<GLsizei>(levelIt->second.desc.depth, 1));
+                const std::size_t requiredBytes = width * height * depth * dstPixelBytes;
+                if (bufSize > 0 && static_cast<std::size_t>(bufSize) < requiredBytes) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
+                void* dst = pixels;
+                if (packPBOBound) {
+                    auto [packDest, packOk] = impl_->resolvePackPBO(
+                        pixels,
+                        std::max<std::size_t>(requiredBytes, 1),
+                        std::max<std::size_t>(bytesPerComponent(type), 1));
+                    if (!packOk) {
+                        pushError(GL_INVALID_OPERATION);
+                        return false;
+                    }
+                    dst = packDest;
+                }
+                if (dst != nullptr && requiredBytes > 0) {
+                    std::memset(dst, 0, requiredBytes);
+                }
                 return true;
             }
         }

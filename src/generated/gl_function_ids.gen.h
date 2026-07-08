@@ -676,6 +676,12 @@ enum class FunctionId : std::size_t {
     glFramebufferTextureMultiviewOVR,
     glNamedFramebufferTextureMultiviewOVR,
     glVertexArrayVertexAttribDivisorEXT,
+    glGenerateTextureMipmapEXT,
+    glNamedFramebufferTexture1DEXT,
+    glNamedFramebufferTexture2DEXT,
+    glNamedFramebufferTexture3DEXT,
+    glNamedFramebufferTextureFaceEXT,
+    glNamedRenderbufferStorageMultisampleCoverageEXT,
     Count,
 };
 
@@ -1358,6 +1364,12 @@ inline constexpr GLFunctionMetadata kGLFunctionMetadata[] = {
     {FunctionId::glFramebufferTextureMultiviewOVR, "glFramebufferTextureMultiviewOVR", "framebuffers and renderbuffers", "GL_OVR_multiview"},
     {FunctionId::glNamedFramebufferTextureMultiviewOVR, "glNamedFramebufferTextureMultiviewOVR", "direct state access", "GL_OVR_multiview"},
     {FunctionId::glVertexArrayVertexAttribDivisorEXT, "glVertexArrayVertexAttribDivisorEXT", "direct state access", "GL_EXT_direct_state_access"},
+    {FunctionId::glGenerateTextureMipmapEXT, "glGenerateTextureMipmapEXT", "direct state access", "GL_EXT_direct_state_access"},
+    {FunctionId::glNamedFramebufferTexture1DEXT, "glNamedFramebufferTexture1DEXT", "direct state access", "GL_EXT_direct_state_access"},
+    {FunctionId::glNamedFramebufferTexture2DEXT, "glNamedFramebufferTexture2DEXT", "direct state access", "GL_EXT_direct_state_access"},
+    {FunctionId::glNamedFramebufferTexture3DEXT, "glNamedFramebufferTexture3DEXT", "direct state access", "GL_EXT_direct_state_access"},
+    {FunctionId::glNamedFramebufferTextureFaceEXT, "glNamedFramebufferTextureFaceEXT", "direct state access", "GL_EXT_direct_state_access"},
+    {FunctionId::glNamedRenderbufferStorageMultisampleCoverageEXT, "glNamedRenderbufferStorageMultisampleCoverageEXT", "direct state access", "GL_EXT_direct_state_access"},
 };
 
 inline constexpr std::size_t kGLFunctionCount = static_cast<std::size_t>(FunctionId::Count);

@@ -3213,6 +3213,16 @@ static bool hasAdditionalColorTargets(const TranslatedDrawInfo& info) {
     return false;
 }
 
+static id<MTLTexture> firstAdditionalColorTargetTexture(
+    const TranslatedDrawInfo& info) {
+    for (void* texture : info.fboAdditionalColorTextures) {
+        if (texture != nullptr) {
+            return (__bridge id<MTLTexture>)texture;
+        }
+    }
+    return nil;
+}
+
 static bool translatedDrawUsesSimpleMetalPrimitive(GLenum mode) {
     switch (mode) {
         case GL_POINTS:
@@ -5353,6 +5363,10 @@ static bool rewriteFragmentMSLForColorOutputABI(
         std::string constructorName;
     };
     std::vector<OutputCast> outputCasts;
+    bool hasFragColorBuiltinOutput = false;
+    std::string fragColorOutputType;
+    std::string fragColorOutputName;
+    std::array<std::string, 8> fragDataOutputNames = {};
     bool changed = false;
 
     std::size_t cursor = bodyBegin + 1;
@@ -5409,7 +5423,21 @@ static bool rewriteFragmentMSLForColorOutputABI(
                 bodyEnd = static_cast<std::size_t>(
                     static_cast<std::ptrdiff_t>(bodyEnd) + delta);
                 outputCasts.push_back({fieldName, replacement});
+                fieldType = replacement;
                 changed = true;
+            }
+        }
+
+        if (fieldName == "appgl_FragColor" && loc == 0) {
+            hasFragColorBuiltinOutput = true;
+            fragColorOutputType = fieldType;
+            fragColorOutputName = fieldName;
+        } else {
+            static constexpr const char* kFragDataPrefix =
+                "_RESERVED_IDENTIFIER_FIXUP_gl_FragData_";
+            if (fieldName.rfind(kFragDataPrefix, 0) == 0 &&
+                loc < fragDataOutputNames.size()) {
+                fragDataOutputNames[loc] = fieldName;
             }
         }
 
@@ -5419,6 +5447,81 @@ static bool rewriteFragmentMSLForColorOutputABI(
     for (const auto& cast : outputCasts) {
         changed |= wrapMslOutputAssignments(
             msl, cast.name, cast.constructorName);
+    }
+
+    if (hasFragColorBuiltinOutput &&
+        msl.find("appgl_FragColor_broadcast_") == std::string::npos) {
+        std::string fields;
+        std::string copies;
+        for (std::size_t loc = 1; loc < colorFormats.size(); ++loc) {
+            if (colorFormats[loc] == MTLPixelFormatInvalid) {
+                continue;
+            }
+            const char* convertedType =
+                integerVectorTypeForTarget(fragColorOutputType,
+                                           colorFormats[loc]);
+            const std::string targetType =
+                convertedType != nullptr ? convertedType : fragColorOutputType;
+            const std::string targetName =
+                "appgl_FragColor_broadcast_" + std::to_string(loc);
+            fields.append("    ")
+                .append(targetType)
+                .append(" ")
+                .append(targetName)
+                .append(" [[color(")
+                .append(std::to_string(loc))
+                .append(")]];\n");
+            copies.append("    out.")
+                .append(targetName)
+                .append(" = ");
+            if (convertedType != nullptr) {
+                copies.append(targetType)
+                    .append("(out.")
+                    .append(fragColorOutputName)
+                    .append(")");
+            } else {
+                copies.append("out.")
+                    .append(fragColorOutputName);
+            }
+            copies.append(";\n");
+        }
+        if (!fields.empty()) {
+            msl.insert(bodyEnd, fields);
+            bodyEnd += fields.size();
+            const std::size_t returnPos = msl.rfind("return out;");
+            if (returnPos != std::string::npos) {
+                msl.insert(returnPos, copies);
+            }
+            changed = true;
+        }
+    }
+
+    if (msl.find("_RESERVED_IDENTIFIER_FIXUP_gl_FragData[") !=
+        std::string::npos) {
+        std::string copies;
+        for (std::size_t loc = 0; loc < fragDataOutputNames.size(); ++loc) {
+            const std::string& name = fragDataOutputNames[loc];
+            if (name.empty()) {
+                continue;
+            }
+            const std::string existing =
+                "out." + name +
+                " = _RESERVED_IDENTIFIER_FIXUP_gl_FragData[" +
+                std::to_string(loc) + "];";
+            if (msl.find(existing) != std::string::npos) {
+                continue;
+            }
+            copies.append("    ")
+                .append(existing)
+                .append("\n");
+        }
+        if (!copies.empty()) {
+            const std::size_t returnPos = msl.rfind("return out;");
+            if (returnPos != std::string::npos) {
+                msl.insert(returnPos, copies);
+                changed = true;
+            }
+        }
     }
     return changed;
 }
@@ -6621,9 +6724,11 @@ struct MetalFrameGraph::Impl {
         releaseOwnedObjCObject(immediateModeColorFragmentFn);
         releaseOwnedObjCObject(immediateModeTextured2DFragmentFn);
         releaseOwnedObjCObject(immediateModeTextured1DFragmentFn);
+        releaseOwnedObjCObject(immediateModeTextured3DFragmentFn);
         releaseOwnedObjCObject(immediateModeColorPipelineState);
         releaseOwnedObjCObject(immediateModeTextured2DPipelineState);
         releaseOwnedObjCObject(immediateModeTextured1DPipelineState);
+        releaseOwnedObjCObject(immediateModeTextured3DPipelineState);
         releaseOwnedObjCObject(immediateModeSamplerState);
         releaseOwnedObjCObject(depthStencilUploadLibrary);
         releaseOwnedObjCObject(depthStencilUploadVertexFn);
@@ -7592,6 +7697,9 @@ struct MetalFrameGraph::Impl {
 
         MTLRenderPassDescriptor* pass = getReusablePassDescriptor();  // ADV-4
         pass.colorAttachments[0].texture = colorTexture;
+        pass.colorAttachments[0].level = 0;
+        pass.colorAttachments[0].slice = 0;
+        pass.colorAttachments[0].depthPlane = 0;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         pass.colorAttachments[0].loadAction = (pendingClearMask & GL_COLOR_BUFFER_BIT) ? MTLLoadActionClear : MTLLoadActionLoad;
         pass.colorAttachments[0].clearColor = pendingClearColor;
@@ -7680,6 +7788,9 @@ struct MetalFrameGraph::Impl {
         // Merge any pending clear into this render pass's load action (OPT-4).
         MTLRenderPassDescriptor* pass = getReusablePassDescriptor();  // ADV-4
         pass.colorAttachments[0].texture = colorTexture;
+        pass.colorAttachments[0].level = 0;
+        pass.colorAttachments[0].slice = 0;
+        pass.colorAttachments[0].depthPlane = 0;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         if (hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
             pass.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -7959,16 +8070,20 @@ struct MetalFrameGraph::Impl {
             info.fboAttachmentless &&
             info.fboColorTexture == nullptr &&
             info.fboDepthStencilTexture == nullptr;
+        const bool hasFboExtraColorTargets = hasAdditionalColorTargets(info);
         const bool isFBODraw =
             info.fboColorTexture != nullptr ||
             info.fboDepthStencilTexture != nullptr ||
+            hasFboExtraColorTargets ||
             isAttachmentlessFBODraw;
         // S25 W2 FIX: record this frame's FBO-color-texture targets (frame-scoped)
         // so a later composition draw sampling one routes to the immediate C49
         // path instead of deferral (the write-before-read hazard site).
         if ((!fboCarveDisabled || targetProbeLatched) &&
-            info.fboColorTexture != nullptr) {
-            fboColorTextureSet.insert(info.fboColorTexture);
+            (info.fboColorTexture != nullptr || hasFboExtraColorTargets)) {
+            if (info.fboColorTexture != nullptr) {
+                fboColorTextureSet.insert(info.fboColorTexture);
+            }
             for (void* extra : info.fboAdditionalColorTextures) {
                 if (extra != nullptr) {
                     fboColorTextureSet.insert(extra);
@@ -8023,6 +8138,43 @@ struct MetalFrameGraph::Impl {
                 dsOnlyColorTex = reusableDummyColorTexture(dummyDesc);
             }
             fboColorTex = dsOnlyColorTex;
+        }
+        id<MTLTexture> extraOnlyColorTex = nil;
+        if (isFBODraw && fboColorTex == nil && fboDepthStencilTex == nil &&
+            hasFboExtraColorTargets) {
+            id<MTLTexture> seedTex = firstAdditionalColorTargetTexture(info);
+            if (seedTex != nil) {
+                @autoreleasepool {
+                    MTLTextureDescriptor* dummyDesc =
+                        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:seedTex.pixelFormat
+                                                                            width:seedTex.width
+                                                                           height:seedTex.height
+                                                                        mipmapped:NO];
+                    dummyDesc.storageMode = MTLStorageModePrivate;
+                    dummyDesc.usage = MTLTextureUsageRenderTarget;
+                    if (seedTex.sampleCount > 1) {
+                        dummyDesc.textureType =
+                            seedTex.textureType == MTLTextureType2DMultisampleArray
+                                ? MTLTextureType2DMultisampleArray
+                                : MTLTextureType2DMultisample;
+                        dummyDesc.sampleCount = seedTex.sampleCount;
+                    } else if (seedTex.textureType == MTLTextureType2DArray ||
+                               seedTex.textureType == MTLTextureTypeCube ||
+                               seedTex.textureType == MTLTextureTypeCubeArray) {
+                        dummyDesc.textureType = MTLTextureType2DArray;
+                    }
+                    if (dummyDesc.textureType == MTLTextureType2DArray ||
+                        dummyDesc.textureType == MTLTextureType2DMultisampleArray) {
+                        dummyDesc.arrayLength = std::max<NSUInteger>(
+                            std::max<NSUInteger>(seedTex.arrayLength, 1u),
+                            static_cast<NSUInteger>(
+                                std::max<std::uint32_t>(
+                                    info.fboColorArrayLength, 1u)));
+                    }
+                    extraOnlyColorTex = reusableDummyColorTexture(dummyDesc);
+                }
+                fboColorTex = extraOnlyColorTex;
+            }
         }
         if (profileAny) {
             profileValidationEnd = drawProfileNow();
@@ -9746,13 +9898,18 @@ struct MetalFrameGraph::Impl {
             // attachment. Without this, every layer silently collapses
             // onto slice 0 and the test's per-layer reference data
             // compares against slice-0's value.
-            if (isFBODraw && info.fboColorSlices[0] > 0) {
-                pass.colorAttachments[0].slice =
-                    static_cast<NSUInteger>(info.fboColorSlices[0]);
-            }
-            if (isFBODraw && info.fboColorLevels[0] > 0) {
-                pass.colorAttachments[0].level =
-                    static_cast<NSUInteger>(info.fboColorLevels[0]);
+            const NSUInteger color0Slice = isFBODraw
+                ? static_cast<NSUInteger>(info.fboColorSlices[0])
+                : 0;
+            pass.colorAttachments[0].level = isFBODraw
+                ? static_cast<NSUInteger>(info.fboColorLevels[0])
+                : 0;
+            if (isFBODraw && colorTexture.textureType == MTLTextureType3D) {
+                pass.colorAttachments[0].slice = 0;
+                pass.colorAttachments[0].depthPlane = color0Slice;
+            } else {
+                pass.colorAttachments[0].slice = color0Slice;
+                pass.colorAttachments[0].depthPlane = 0;
             }
             if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
                 pass.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -9788,15 +9945,20 @@ struct MetalFrameGraph::Impl {
                 pass.colorAttachments[ei + 1].storeAction = MTLStoreActionStore;
                 // Phase 6-5: per-slot slice (index ei+1 into fboColorSlices).
                 const std::size_t sliceIdx = ei + 1;
-                if (sliceIdx < info.fboColorSlices.size() &&
-                    info.fboColorSlices[sliceIdx] > 0) {
-                    pass.colorAttachments[ei + 1].slice =
-                        static_cast<NSUInteger>(info.fboColorSlices[sliceIdx]);
-                }
-                if (sliceIdx < info.fboColorLevels.size() &&
-                    info.fboColorLevels[sliceIdx] > 0) {
-                    pass.colorAttachments[ei + 1].level =
-                        static_cast<NSUInteger>(info.fboColorLevels[sliceIdx]);
+                const NSUInteger extraSlice =
+                    sliceIdx < info.fboColorSlices.size()
+                        ? static_cast<NSUInteger>(info.fboColorSlices[sliceIdx])
+                        : 0;
+                pass.colorAttachments[ei + 1].level =
+                    sliceIdx < info.fboColorLevels.size()
+                        ? static_cast<NSUInteger>(info.fboColorLevels[sliceIdx])
+                        : 0;
+                if (extraTex.textureType == MTLTextureType3D) {
+                    pass.colorAttachments[ei + 1].slice = 0;
+                    pass.colorAttachments[ei + 1].depthPlane = extraSlice;
+                } else {
+                    pass.colorAttachments[ei + 1].slice = extraSlice;
+                    pass.colorAttachments[ei + 1].depthPlane = 0;
                 }
             }
             // Layered rendering — GS-emul path only. When the
@@ -18595,6 +18757,11 @@ static float2 appgl_immediate_projected_st(float4 texcoord) {
     return texcoord.xy * invQ;
 }
 
+static float3 appgl_immediate_projected_str(float4 texcoord) {
+    const float invQ = texcoord.w != 0.0f ? 1.0f / texcoord.w : 1.0f;
+    return texcoord.xyz * invQ;
+}
+
 static bool appgl_immediate_coord_oob(float coord) {
     return coord < 0.0f || coord > 1.0f;
 }
@@ -18693,6 +18860,26 @@ fragment float4 appgl_immediate_textured_1d_fs(
     appgl_immediate_alpha_test(color.a, textureState);
     return color;
 }
+
+fragment float4 appgl_immediate_textured_3d_fs(
+    AppGLImmediateOut in [[stage_in]],
+    texture3d<float> tex [[texture(0)]],
+    sampler samp [[sampler(0)]],
+    constant AppGLImmediateTextureState& textureState [[buffer(0)]]
+) {
+    float3 coord = appgl_immediate_projected_str(in.texcoord);
+    if (textureState.textureSampleYFlip != 0u) {
+        coord.y = 1.0f - coord.y;
+    }
+    const float4 sample = appgl_immediate_apply_border(
+        tex.sample(samp, coord),
+        coord.xy,
+        true,
+        textureState);
+    const float4 color = appgl_immediate_finish_sample(in.color, sample, textureState);
+    appgl_immediate_alpha_test(color.a, textureState);
+    return color;
+}
 )MSL";
         NSError* error = nil;
         immediateModeLibrary = [device newLibraryWithSource:source options:nil error:&error];
@@ -18704,10 +18891,12 @@ fragment float4 appgl_immediate_textured_1d_fs(
         immediateModeColorFragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_color_fs"];
         immediateModeTextured2DFragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_textured_fs"];
         immediateModeTextured1DFragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_textured_1d_fs"];
+        immediateModeTextured3DFragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_textured_3d_fs"];
         return immediateModeVertexFn != nil
             && immediateModeColorFragmentFn != nil
             && immediateModeTextured2DFragmentFn != nil
-            && immediateModeTextured1DFragmentFn != nil;
+            && immediateModeTextured1DFragmentFn != nil
+            && immediateModeTextured3DFragmentFn != nil;
     }
 
     static std::uint64_t computeImmediateModePipelineKey(
@@ -18747,6 +18936,7 @@ fragment float4 appgl_immediate_textured_1d_fs(
         if (immediateModeColorPipelineState != nil
             && immediateModeTextured2DPipelineState != nil
             && immediateModeTextured1DPipelineState != nil
+            && immediateModeTextured3DPipelineState != nil
             && immediateModePipelineKey == pipelineKey) {
             return true;
         }
@@ -18803,18 +18993,23 @@ fragment float4 appgl_immediate_textured_1d_fs(
         id<MTLRenderPipelineState> colorState = makePipeline(immediateModeColorFragmentFn);
         id<MTLRenderPipelineState> textured2DState = makePipeline(immediateModeTextured2DFragmentFn);
         id<MTLRenderPipelineState> textured1DState = makePipeline(immediateModeTextured1DFragmentFn);
-        if (colorState == nil || textured2DState == nil || textured1DState == nil) {
+        id<MTLRenderPipelineState> textured3DState = makePipeline(immediateModeTextured3DFragmentFn);
+        if (colorState == nil || textured2DState == nil ||
+            textured1DState == nil || textured3DState == nil) {
             releaseOwnedObjCObject(colorState);
             releaseOwnedObjCObject(textured2DState);
             releaseOwnedObjCObject(textured1DState);
+            releaseOwnedObjCObject(textured3DState);
             return false;
         }
         releaseOwnedObjCObject(immediateModeColorPipelineState);
         releaseOwnedObjCObject(immediateModeTextured2DPipelineState);
         releaseOwnedObjCObject(immediateModeTextured1DPipelineState);
+        releaseOwnedObjCObject(immediateModeTextured3DPipelineState);
         immediateModeColorPipelineState = colorState;
         immediateModeTextured2DPipelineState = textured2DState;
         immediateModeTextured1DPipelineState = textured1DState;
+        immediateModeTextured3DPipelineState = textured3DState;
         immediateModePipelineKey = pipelineKey;
         return true;
     }
@@ -20088,6 +20283,22 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
 
         MTLRenderPassDescriptor* pass = getReusablePassDescriptor();  // ADV-4
         pass.colorAttachments[0].texture = colorTexture;
+        const NSUInteger fboColorLevel =
+            (isFBODraw && info.fboColorTexture != nullptr)
+                ? static_cast<NSUInteger>(info.fboColorLevel)
+                : 0;
+        const NSUInteger fboColorSlice =
+            (isFBODraw && info.fboColorTexture != nullptr)
+                ? static_cast<NSUInteger>(info.fboColorSlice)
+                : 0;
+        pass.colorAttachments[0].level = fboColorLevel;
+        if (isFBODraw && colorTexture.textureType == MTLTextureType3D) {
+            pass.colorAttachments[0].slice = 0;
+            pass.colorAttachments[0].depthPlane = fboColorSlice;
+        } else {
+            pass.colorAttachments[0].slice = fboColorSlice;
+            pass.colorAttachments[0].depthPlane = 0;
+        }
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
             pass.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -20099,6 +20310,18 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             depthFormat != MTLPixelFormatInvalid ? passDepthStencil : nil;
         pass.stencilAttachment.texture =
             stencilFormat != MTLPixelFormatInvalid ? passDepthStencil : nil;
+        pass.depthAttachment.level = isFBODraw
+            ? static_cast<NSUInteger>(info.fboDepthStencilLevel)
+            : 0;
+        pass.depthAttachment.slice = isFBODraw
+            ? static_cast<NSUInteger>(info.fboDepthStencilSlice)
+            : 0;
+        pass.stencilAttachment.level = isFBODraw
+            ? static_cast<NSUInteger>(info.fboDepthStencilLevel)
+            : 0;
+        pass.stencilAttachment.slice = isFBODraw
+            ? static_cast<NSUInteger>(info.fboDepthStencilSlice)
+            : 0;
         if (depthFormat != MTLPixelFormatInvalid) {
             pass.depthAttachment.storeAction = MTLStoreActionStore;
             if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_DEPTH_BUFFER_BIT)) {
@@ -20139,10 +20362,14 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             : nil;
         const bool immediateTextureIsNative1D =
             immediateTexture != nil && immediateTexture.textureType == MTLTextureType1D;
+        const bool immediateTextureIsNative3D =
+            immediateTexture != nil && immediateTexture.textureType == MTLTextureType3D;
         id<MTLRenderPipelineState> pipelineState = immediateTexture != nil
-            ? (immediateTextureIsNative1D
+            ? (immediateTextureIsNative3D
+                ? immediateModeTextured3DPipelineState
+                : (immediateTextureIsNative1D
                 ? immediateModeTextured1DPipelineState
-                : immediateModeTextured2DPipelineState)
+                : immediateModeTextured2DPipelineState))
             : immediateModeColorPipelineState;
         if (pipelineState == nil) {
             return false;
@@ -20318,7 +20545,9 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             compatLegacyTextureState ? info.textureBaseClass : 0u,
             info.textureTarget == GL_TEXTURE_1D
                 ? static_cast<std::uint32_t>(GL_TEXTURE_1D)
-                : 0u,
+                : (info.textureTarget == GL_TEXTURE_3D
+                    ? static_cast<std::uint32_t>(GL_TEXTURE_3D)
+                    : 0u),
             static_cast<std::uint32_t>(info.textureWrapS),
             static_cast<std::uint32_t>(info.textureWrapT),
             static_cast<std::uint32_t>(info.textureMinFilter),
@@ -25816,9 +26045,11 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
         addFunction(immediateModeColorFragmentFn);
         addFunction(immediateModeTextured2DFragmentFn);
         addFunction(immediateModeTextured1DFragmentFn);
+        addFunction(immediateModeTextured3DFragmentFn);
         addRenderPipeline(immediateModeColorPipelineState);
         addRenderPipeline(immediateModeTextured2DPipelineState);
         addRenderPipeline(immediateModeTextured1DPipelineState);
+        addRenderPipeline(immediateModeTextured3DPipelineState);
         addSampler(immediateModeSamplerState);
         addLibrary(depthStencilUploadLibrary);
         addFunction(depthStencilUploadVertexFn);
@@ -26192,7 +26423,7 @@ private:
     id<MTLComputePipelineState> tessDomainPortQuadsPSO = nil;
 
     // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
-    // shader library, three pipeline states, and a default sampler.
+    // shader library, textured pipeline states, and a default sampler.
     // See `ensureImmediateModeLibrary` and `ensureImmediateModePipelines`
     // for the shader source and descriptor layout. These are only
     // touched from `encodeImmediateModeDraw` so no cross-encoder
@@ -26202,9 +26433,11 @@ private:
     id<MTLFunction> immediateModeColorFragmentFn = nil;
     id<MTLFunction> immediateModeTextured2DFragmentFn = nil;
     id<MTLFunction> immediateModeTextured1DFragmentFn = nil;
+    id<MTLFunction> immediateModeTextured3DFragmentFn = nil;
     id<MTLRenderPipelineState> immediateModeColorPipelineState = nil;
     id<MTLRenderPipelineState> immediateModeTextured2DPipelineState = nil;
     id<MTLRenderPipelineState> immediateModeTextured1DPipelineState = nil;
+    id<MTLRenderPipelineState> immediateModeTextured3DPipelineState = nil;
     std::uint64_t immediateModePipelineKey = 0;
     id<MTLSamplerState> immediateModeSamplerState = nil;
     id<MTLLibrary> depthStencilUploadLibrary = nil;

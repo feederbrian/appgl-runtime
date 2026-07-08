@@ -547,6 +547,8 @@ struct GLFramebufferObject {
     std::unordered_map<GLenum, GLFramebufferAttachment> attachments;
     std::array<GLenum, 8> drawBuffers = {GL_COLOR_ATTACHMENT0, GL_NONE, GL_NONE, GL_NONE, GL_NONE, GL_NONE, GL_NONE, GL_NONE};
     GLenum readBuffer = GL_COLOR_ATTACHMENT0;
+    bool drawBuffersExplicit = false;
+    bool readBufferExplicit = false;
     bool instantiated = false;
     // GL 4.3 §9.2.1 — attachment-less (no-attachment) framebuffer
     // defaults. These are set via glFramebufferParameteri and form

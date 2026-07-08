@@ -918,6 +918,7 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glGetCompressedTextureImage = &impl::glGetCompressedTextureImage;
     dispatch.glGetCompressedTextureSubImage = &impl::glGetCompressedTextureSubImage;
     dispatch.glGenerateTextureMipmap = &impl::glGenerateTextureMipmap;
+    dispatch.glGenerateTextureMipmapEXT = &impl::glGenerateTextureMipmapEXT;
     dispatch.glBindTextureUnit = &impl::glBindTextureUnit;
     for (auto id : {FunctionId::glTextureStorage1D, FunctionId::glTextureStorage2D, FunctionId::glTextureStorage3D,
                     FunctionId::glTextureStorage2DMultisample, FunctionId::glTextureStorage3DMultisample,
@@ -934,13 +935,18 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
                     FunctionId::glGetTextureLevelParameterfv, FunctionId::glGetTextureLevelParameteriv,
                     FunctionId::glGetTextureImage, FunctionId::glGetTextureSubImage,
                     FunctionId::glGetCompressedTextureImage, FunctionId::glGetCompressedTextureSubImage,
-                    FunctionId::glGenerateTextureMipmap, FunctionId::glBindTextureUnit}) {
+                    FunctionId::glGenerateTextureMipmap, FunctionId::glGenerateTextureMipmapEXT,
+                    FunctionId::glBindTextureUnit}) {
         coverage.markImplemented(id, "DSA texture wrapper.");
     }
 
     // Pass C — DSA framebuffer / renderbuffer (20 functions)
     dispatch.glNamedFramebufferRenderbuffer = &impl::glNamedFramebufferRenderbuffer;
     dispatch.glNamedFramebufferTexture = &impl::glNamedFramebufferTexture;
+    dispatch.glNamedFramebufferTexture1DEXT = &impl::glNamedFramebufferTexture1DEXT;
+    dispatch.glNamedFramebufferTexture2DEXT = &impl::glNamedFramebufferTexture2DEXT;
+    dispatch.glNamedFramebufferTexture3DEXT = &impl::glNamedFramebufferTexture3DEXT;
+    dispatch.glNamedFramebufferTextureFaceEXT = &impl::glNamedFramebufferTextureFaceEXT;
     dispatch.glNamedFramebufferTextureLayer = &impl::glNamedFramebufferTextureLayer;
     dispatch.glNamedFramebufferTextureMultiviewOVR = &impl::glNamedFramebufferTextureMultiviewOVR;
     dispatch.glNamedFramebufferDrawBuffer = &impl::glNamedFramebufferDrawBuffer;
@@ -959,8 +965,11 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glInvalidateNamedFramebufferSubData = &impl::glInvalidateNamedFramebufferSubData;
     dispatch.glNamedRenderbufferStorage = &impl::glNamedRenderbufferStorage;
     dispatch.glNamedRenderbufferStorageMultisample = &impl::glNamedRenderbufferStorageMultisample;
+    dispatch.glNamedRenderbufferStorageMultisampleCoverageEXT = &impl::glNamedRenderbufferStorageMultisampleCoverageEXT;
     dispatch.glGetNamedRenderbufferParameteriv = &impl::glGetNamedRenderbufferParameteriv;
     for (auto id : {FunctionId::glNamedFramebufferRenderbuffer, FunctionId::glNamedFramebufferTexture,
+                    FunctionId::glNamedFramebufferTexture1DEXT, FunctionId::glNamedFramebufferTexture2DEXT,
+                    FunctionId::glNamedFramebufferTexture3DEXT, FunctionId::glNamedFramebufferTextureFaceEXT,
                     FunctionId::glNamedFramebufferTextureLayer, FunctionId::glNamedFramebufferTextureMultiviewOVR,
                     FunctionId::glNamedFramebufferDrawBuffer,
                     FunctionId::glNamedFramebufferDrawBuffers, FunctionId::glNamedFramebufferReadBuffer,
@@ -971,6 +980,7 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
                     FunctionId::glClearNamedFramebufferfi, FunctionId::glInvalidateNamedFramebufferData,
                     FunctionId::glInvalidateNamedFramebufferSubData,
                     FunctionId::glNamedRenderbufferStorage, FunctionId::glNamedRenderbufferStorageMultisample,
+                    FunctionId::glNamedRenderbufferStorageMultisampleCoverageEXT,
                     FunctionId::glGetNamedRenderbufferParameteriv}) {
         coverage.markImplemented(id, "DSA framebuffer/renderbuffer wrapper.");
     }

@@ -333,6 +333,9 @@ void markStateFunction(FunctionId id, std::string_view note) {
 #ifndef GL_TEXTURE_1D
 #define GL_TEXTURE_1D 0x0DE0
 #endif
+#ifndef GL_TEXTURE_3D
+#define GL_TEXTURE_3D 0x806F
+#endif
 bool isLegacyClientArrayCap(GLenum cap) {
     return cap == GL_VERTEX_ARRAY || cap == GL_COLOR_ARRAY;
 }
@@ -366,6 +369,7 @@ bool isValidEnableCap(GLenum cap) {
         case GL_LIGHTING:
         case GL_TEXTURE_1D:
         case GL_TEXTURE_2D:
+        case GL_TEXTURE_3D:
         case GL_TEXTURE_GEN_S:
         case GL_TEXTURE_GEN_T:
         case GL_TEXTURE_GEN_R:
@@ -1683,6 +1687,8 @@ bool isValidRenderbufferTarget(GLenum target) {
 bool isValidRenderbufferFormat(GLenum internalFormat) {
     switch (internalFormat) {
         // Unsized color
+        case GL_RED:
+        case GL_RG:
         case GL_RGB:
         case GL_RGBA:
         // Sized color (8-bit)
@@ -1768,11 +1774,40 @@ bool isValidRenderbufferFormat(GLenum internalFormat) {
         case GL_DEPTH_COMPONENT32F:
         // Stencil
         case GL_STENCIL_INDEX:
+        case GL_STENCIL_INDEX1:
+        case GL_STENCIL_INDEX4:
         case GL_STENCIL_INDEX8:
+        case GL_STENCIL_INDEX16:
         // Depth-stencil
         case GL_DEPTH_STENCIL:
         case GL_DEPTH24_STENCIL8:
         case GL_DEPTH32F_STENCIL8:
+        // Compatibility-profile legacy renderbuffer formats. Context storage
+        // accepts these as metadata-backed formats even when Metal has no exact
+        // renderbuffer pixel format, which Piglit's GL 3.0 required-format
+        // sweep expects to reach without an API-level enum rejection.
+        case GL_ALPHA:
+        case GL_ALPHA4:
+        case GL_ALPHA8:
+        case GL_ALPHA12:
+        case GL_ALPHA16:
+        case GL_LUMINANCE:
+        case GL_LUMINANCE4:
+        case GL_LUMINANCE8:
+        case GL_LUMINANCE12:
+        case GL_LUMINANCE16:
+        case GL_LUMINANCE_ALPHA:
+        case GL_LUMINANCE4_ALPHA4:
+        case GL_LUMINANCE6_ALPHA2:
+        case GL_LUMINANCE8_ALPHA8:
+        case GL_LUMINANCE12_ALPHA4:
+        case GL_LUMINANCE12_ALPHA12:
+        case GL_LUMINANCE16_ALPHA16:
+        case GL_INTENSITY:
+        case GL_INTENSITY4:
+        case GL_INTENSITY8:
+        case GL_INTENSITY12:
+        case GL_INTENSITY16:
             return true;
         default:
             return false;
@@ -12001,6 +12036,13 @@ void APIENTRY glGetCompressedTextureSubImage(GLuint texture, GLint level, GLint 
 void APIENTRY glGenerateTextureMipmap(GLuint texture) {
     DSA_TEX_FN(glGenerateTextureMipmap, generateTextureMipmap(texture))
 }
+void APIENTRY glGenerateTextureMipmapEXT(GLuint texture, GLenum target) {
+    (void)target;
+    auto* ctx = requireCurrentContext("glGenerateTextureMipmapEXT");
+    if (!ctx) return;
+    if (!ctx->generateTextureMipmap(texture)) return;
+    markTextureFunction(FunctionId::glGenerateTextureMipmapEXT, "EXT DSA texture mipmap generation.");
+}
 void APIENTRY glBindTextureUnit(GLuint unit, GLuint texture) {
     DSA_TEX_FN(glBindTextureUnit, bindTextureUnit(unit, texture))
 }
@@ -12021,6 +12063,18 @@ void APIENTRY glNamedFramebufferRenderbuffer(GLuint framebuffer, GLenum attachme
 }
 void APIENTRY glNamedFramebufferTexture(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level) {
     DSA_FB_FN(glNamedFramebufferTexture, namedFramebufferTexture(framebuffer, attachment, texture, level))
+}
+void APIENTRY glNamedFramebufferTexture1DEXT(GLuint framebuffer, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
+    DSA_FB_FN(glNamedFramebufferTexture1DEXT, namedFramebufferTexture1DEXT(framebuffer, attachment, textarget, texture, level))
+}
+void APIENTRY glNamedFramebufferTexture2DEXT(GLuint framebuffer, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
+    DSA_FB_FN(glNamedFramebufferTexture2DEXT, namedFramebufferTexture2DEXT(framebuffer, attachment, textarget, texture, level))
+}
+void APIENTRY glNamedFramebufferTexture3DEXT(GLuint framebuffer, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint zoffset) {
+    DSA_FB_FN(glNamedFramebufferTexture3DEXT, namedFramebufferTexture3DEXT(framebuffer, attachment, textarget, texture, level, zoffset))
+}
+void APIENTRY glNamedFramebufferTextureFaceEXT(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLenum face) {
+    DSA_FB_FN(glNamedFramebufferTextureFaceEXT, namedFramebufferTextureFaceEXT(framebuffer, attachment, texture, level, face))
 }
 void APIENTRY glNamedFramebufferTextureLayer(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint layer) {
     DSA_FB_FN(glNamedFramebufferTextureLayer, namedFramebufferTextureLayer(framebuffer, attachment, texture, level, layer))
@@ -12088,6 +12142,10 @@ void APIENTRY glNamedRenderbufferStorage(GLuint renderbuffer, GLenum internalfor
 }
 void APIENTRY glNamedRenderbufferStorageMultisample(GLuint renderbuffer, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height) {
     DSA_FB_FN(glNamedRenderbufferStorageMultisample, namedRenderbufferStorageMultisample(renderbuffer, samples, internalformat, width, height))
+}
+void APIENTRY glNamedRenderbufferStorageMultisampleCoverageEXT(GLuint renderbuffer, GLsizei coverageSamples, GLsizei colorSamples, GLenum internalformat, GLsizei width, GLsizei height) {
+    const GLsizei effectiveSamples = colorSamples > 0 ? colorSamples : coverageSamples;
+    DSA_FB_FN(glNamedRenderbufferStorageMultisampleCoverageEXT, namedRenderbufferStorageMultisample(renderbuffer, effectiveSamples, internalformat, width, height))
 }
 void APIENTRY glGetNamedRenderbufferParameteriv(GLuint renderbuffer, GLenum pname, GLint* params) {
     DSA_FB_FN(glGetNamedRenderbufferParameteriv, getNamedRenderbufferParameteriv(renderbuffer, pname, params))
