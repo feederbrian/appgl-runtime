@@ -15524,7 +15524,9 @@ struct GLContext::Impl {
             generated.immutableStorageLevel = baseLevel.immutableStorageLevel;
             const bool legacyIntensityHighPrecision =
                 baseLevel.desc.internalFormat == GL_INTENSITY12 ||
-                baseLevel.desc.internalFormat == GL_INTENSITY16;
+                baseLevel.desc.internalFormat == GL_INTENSITY16 ||
+                baseLevel.desc.internalFormat == GL_INTENSITY16F_ARB ||
+                baseLevel.desc.internalFormat == GL_INTENSITY32F_ARB;
             generated.rgba8 = legacyIntensityHighPrecision
                 ? downsampleRGBA8NearestHigh(
                     previousLevel.rgba8,
@@ -51475,9 +51477,43 @@ static bool writeSimpleDepthComponent(std::uint8_t* dst,
     return true;
 }
 
+static std::uint8_t quantizeSimpleTextureReadbackUNorm(std::uint8_t value,
+                                                       unsigned bits) {
+    if (bits == 0) {
+        return 0u;
+    }
+    if (bits >= 8) {
+        return value;
+    }
+    const unsigned maxValue = (1u << bits) - 1u;
+    const unsigned quantized = static_cast<unsigned>(value) >> (8u - bits);
+    return static_cast<std::uint8_t>((quantized * 255u) / maxValue);
+}
+
 static void canonicalizeSimpleTextureReadbackRGBA8(GLenum internalFormat,
                                                    std::uint8_t rgba[4]) {
     switch (internalFormat) {
+        case GL_RGB5_A1:
+            rgba[0] = quantizeSimpleTextureReadbackUNorm(rgba[0], 5);
+            rgba[1] = quantizeSimpleTextureReadbackUNorm(rgba[1], 5);
+            rgba[2] = quantizeSimpleTextureReadbackUNorm(rgba[2], 5);
+            rgba[3] = quantizeSimpleTextureReadbackUNorm(rgba[3], 1);
+            return;
+        case GL_RGB10_A2:
+            rgba[3] = quantizeSimpleTextureReadbackUNorm(rgba[3], 2);
+            return;
+        case GL_RGBA2:
+            rgba[0] = quantizeSimpleTextureReadbackUNorm(rgba[0], 2);
+            rgba[1] = quantizeSimpleTextureReadbackUNorm(rgba[1], 2);
+            rgba[2] = quantizeSimpleTextureReadbackUNorm(rgba[2], 2);
+            rgba[3] = quantizeSimpleTextureReadbackUNorm(rgba[3], 2);
+            return;
+        case GL_RGBA4:
+            rgba[0] = quantizeSimpleTextureReadbackUNorm(rgba[0], 4);
+            rgba[1] = quantizeSimpleTextureReadbackUNorm(rgba[1], 4);
+            rgba[2] = quantizeSimpleTextureReadbackUNorm(rgba[2], 4);
+            rgba[3] = quantizeSimpleTextureReadbackUNorm(rgba[3], 4);
+            return;
         case 1:
         case GL_LUMINANCE:
         case GL_LUMINANCE4:
@@ -51490,7 +51526,7 @@ static void canonicalizeSimpleTextureReadbackRGBA8(GLenum internalFormat,
             rgba[1] = 0u;
             rgba[2] = 0u;
             rgba[3] = 255u;
-            break;
+            return;
         case 2:
         case GL_LUMINANCE_ALPHA:
         case GL_LUMINANCE4_ALPHA4:
@@ -51504,7 +51540,7 @@ static void canonicalizeSimpleTextureReadbackRGBA8(GLenum internalFormat,
         case GL_SLUMINANCE8_ALPHA8:
             rgba[1] = 0u;
             rgba[2] = 0u;
-            break;
+            return;
         case GL_ALPHA:
         case GL_ALPHA4:
         case GL_ALPHA8:
@@ -51515,7 +51551,7 @@ static void canonicalizeSimpleTextureReadbackRGBA8(GLenum internalFormat,
             rgba[0] = 0u;
             rgba[1] = 0u;
             rgba[2] = 0u;
-            break;
+            return;
         case GL_INTENSITY:
         case GL_INTENSITY4:
         case GL_INTENSITY8:
@@ -51525,6 +51561,22 @@ static void canonicalizeSimpleTextureReadbackRGBA8(GLenum internalFormat,
         case GL_INTENSITY32F_ARB:
             rgba[1] = 0u;
             rgba[2] = 0u;
+            rgba[3] = rgba[0];
+            return;
+        default:
+            break;
+    }
+    switch (compatTextureInternalBaseComponentCount(internalFormat)) {
+        case 1:
+            rgba[1] = 0u;
+            rgba[2] = 0u;
+            rgba[3] = 255u;
+            break;
+        case 2:
+            rgba[2] = 0u;
+            rgba[3] = 255u;
+            break;
+        case 3:
             rgba[3] = 255u;
             break;
         default:
@@ -51539,7 +51591,7 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
                                          GLsizei bufSize,
                                          const GLPixelStoreState& packStore,
                                          void* pixels,
-                                         bool yFlipReadback) {
+                                         bool yFlipShadowReadback) {
     if (pixels == nullptr || !image.defined) {
         return false;
     }
@@ -51556,7 +51608,14 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
         image.rgba8.empty() &&
         object.depthStencilShadowAuthoritative &&
         isDepth32FTextureShadowDropShape(image);
+    const bool preferRGBA8ColorShadow =
+        format == GL_RGBA &&
+        type == GL_FLOAT &&
+        !image.rgba8.empty() &&
+        object.colorShadowAuthoritative &&
+        (object.wasFramebufferRenderedTo || object.wasViewportRenderedTo);
     const bool nativeShadowCanServeRequest =
+        !preferRGBA8ColorShadow &&
         image.nativeBpp >= dstPixelBytes &&
         !image.nativeData.empty();
     const bool useRGBA8ShadowAsFloat =
@@ -51676,13 +51735,14 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
     auto* dstBase = static_cast<std::uint8_t*>(pixels) + dstSkipBytes;
     const bool packSwapBytes = (packStore.packSwapBytes == GL_TRUE);
     const bool applyColorYFlip =
-        yFlipReadback &&
-        object.wasViewportRenderedTo &&
+        sourceIsRGBA8Shadow &&
+        yFlipShadowReadback &&
+        (object.wasViewportRenderedTo || object.colorShadowAuthoritative) &&
         object.target != GL_TEXTURE_1D_ARRAY;
     const bool applyDepthYFlip =
         (useNativeDepth32FAsRgba8 || useNativeFloatDepthAsDepth) &&
         object.depthStencilShadowAuthoritative &&
-        yFlipReadback &&
+        yFlipShadowReadback &&
         object.target != GL_TEXTURE_1D_ARRAY;
     const bool canonicalizeRGBA8ShadowReadback =
         sourceIsRGBA8Shadow &&

@@ -2335,7 +2335,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
         (obj->wasFramebufferRenderedTo || obj->wasViewportRenderedTo) &&
         ((format == GL_RGBA && type == GL_FLOAT) ||
          (format == GL_RGBA && type == GL_UNSIGNED_BYTE))) {
-        auto levelIt = obj->levels.find(level);
+        const auto levelIt = obj->levels.find(level);
         if (levelIt != obj->levels.end() &&
             levelIt->second.defined &&
             !materializeLazyFboCanonicalClearForReadback(level)) {
