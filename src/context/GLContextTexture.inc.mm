@@ -2098,6 +2098,18 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
     // (== offset 0) is a valid PBO destination.
     if (pixels == nullptr && !packPBOBound) return true;
 
+    const auto legacyCompressedGetTexImageNoErrorFallback =
+        [](GLenum internalFormat) -> bool {
+            switch (internalFormat) {
+                case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+                case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
+                case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
+                case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
+                    return true;
+                default:
+                    return false;
+            }
+        };
     const auto zeroFillCompressedTextureReadback = [&]() -> std::pair<bool, bool> {
         const auto levelIt = obj->levels.find(level);
         const GLTextureDesc* readDesc = nullptr;
@@ -2108,6 +2120,8 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
         }
         if (readDesc == nullptr ||
             !isCompressedInternalFormat(readDesc->internalFormat) ||
+            !legacyCompressedGetTexImageNoErrorFallback(
+                readDesc->internalFormat) ||
             format == GL_DEPTH_COMPONENT ||
             format == GL_DEPTH_STENCIL ||
             format == GL_STENCIL_INDEX) {
@@ -2308,6 +2322,8 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
             const auto levelIt = obj->levels.find(level);
             if (levelIt != obj->levels.end() && levelIt->second.defined &&
                 isCompressedInternalFormat(levelIt->second.desc.internalFormat) &&
+                legacyCompressedGetTexImageNoErrorFallback(
+                    levelIt->second.desc.internalFormat) &&
                 format != GL_DEPTH_COMPONENT &&
                 format != GL_DEPTH_STENCIL &&
                 format != GL_STENCIL_INDEX) {
