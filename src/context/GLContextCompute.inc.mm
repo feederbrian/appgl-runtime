@@ -872,6 +872,8 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
 
     impl_->declareComputeDispatchSubmissionGroup(info, computeReads, computeWrites);
     impl_->drainPendingGpuProducers(computeReads);
+    impl_->prepareLazyFboCanonicalClearForTextureGpuWrites(
+        computeWrites, "compute-storage-image-write");
     const bool encoded = impl_->frameGraph->encodeComputeDispatch(info);
     if (encoded) {
         impl_->markGpuResourceWrites(computeWrites);

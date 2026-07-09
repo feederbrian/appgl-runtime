@@ -1373,6 +1373,10 @@ public:
     // so the deferred clear cannot land on top of newer data. Returns
     // true when a clear was materialized.
     bool materializePendingFboClearsForTexture(void* tex);
+    // Drops pending clears for a texture without executing them. Writers call
+    // this after they have produced newer contents so a stale deferred clear
+    // cannot overwrite the write later.
+    bool discardPendingFboClearsForTexture(void* tex);
     // Conservative variant for multi-attachment consumers (e.g.
     // glBlitFramebuffer): land every deferred clear. No-op when the
     // registry is empty or folding is disabled.

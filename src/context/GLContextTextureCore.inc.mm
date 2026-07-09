@@ -618,6 +618,8 @@ bool GLContext::texImage(
         object->levels[level] = std::move(image);
         object->desc = object->levels[level].desc;
         object->desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
+        impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
+            impl_->state->boundTexture(target), "tex-image-color-index");
         if (!impl_->replaceMetalTexture(*object, impl_->state->boundTexture(target))) {
             pushError(GL_OUT_OF_MEMORY);
             return false;
@@ -860,6 +862,8 @@ bool GLContext::texImage(
         }
     }
     const GLuint textureName = impl_->state->boundTexture(target);
+    impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
+        textureName, "tex-image");
     if (!impl_->replaceMetalTexture(*object, textureName)) {
         pushError(GL_OUT_OF_MEMORY);
         return false;
@@ -1215,6 +1219,8 @@ bool GLContext::copyTexImage2DImpl(
         }
         [blit endEncoding];
         lease.commitAndWait(AppGLCommandReason::CopyImageBlit);
+        impl_->finishLazyFboCanonicalClearTextureGpuWrite(
+            impl_->state->boundTexture(target), "copy-tex-image");
         impl_->markGpuResourceWrites({
             {Impl::GpuResourceAccess::Kind::Texture,
              impl_->state->boundTexture(target),
@@ -1981,6 +1987,8 @@ bool GLContext::texSubImage(
         storageObject->depthStencilShadowAuthoritative = true;
     }
 
+    impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
+        storageTextureName, "tex-sub-image");
     if (!impl_->replaceMetalTexture(*storageObject, storageTextureName)) {
         pushError(GL_OUT_OF_MEMORY);
         return false;
@@ -2508,6 +2516,10 @@ bool GLContext::texStorage(
         object->levels[lvl] = std::move(image);
     }
 
+    const GLuint storageTextureName = impl_->state->boundTexture(target);
+    impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
+        storageTextureName, "tex-storage");
+
     if (allocateSparse) {
         if (!extensions::sparse_texture::allocateStorage(extensionContext, *object)) {
             pushError(GL_OUT_OF_MEMORY);
@@ -2516,7 +2528,7 @@ bool GLContext::texStorage(
         return true;
     }
 
-    if (!impl_->replaceMetalTexture(*object, impl_->state->boundTexture(target))) {
+    if (!impl_->replaceMetalTexture(*object, storageTextureName)) {
         pushError(GL_OUT_OF_MEMORY);
         return false;
     }
@@ -2713,6 +2725,10 @@ bool GLContext::texStorageMultisample(
     baseLevel.rgba8.resize(byteCount, 0);
     object->levels[0] = std::move(baseLevel);
 
+    const GLuint storageTextureName = impl_->state->boundTexture(target);
+    impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
+        storageTextureName, "tex-storage-multisample");
+
     if (allocateSparse) {
         if (!extensions::sparse_texture::allocateStorage(extensionContext, *object)) {
             pushError(GL_OUT_OF_MEMORY);
@@ -2721,7 +2737,7 @@ bool GLContext::texStorageMultisample(
         return true;
     }
 
-    if (!impl_->replaceMetalTexture(*object, impl_->state->boundTexture(target))) {
+    if (!impl_->replaceMetalTexture(*object, storageTextureName)) {
         pushError(GL_OUT_OF_MEMORY);
         return false;
     }
@@ -3501,6 +3517,8 @@ bool GLContext::generateMipmap(GLenum target) {
     if (impl_->frameGraph != nullptr) {
         impl_->frameGraph->flushParallelEncodeBoundary();
     }
+    impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
+        impl_->state->boundTexture(target), "generate-mipmap");
     if (!impl_->generateMipmaps(*object)) {
         pushError(GL_INVALID_OPERATION);
         return false;

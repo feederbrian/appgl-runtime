@@ -518,7 +518,8 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
                        level->second.defined &&
                        rgba8ShadowMatchesNativeFormat(
                            level->second.desc.internalFormat) &&
-                       !level->second.rgba8.empty();
+                       (!level->second.rgba8.empty() ||
+                        level->second.lazyFboCanonicalClearPending);
             }
             return false;
         };

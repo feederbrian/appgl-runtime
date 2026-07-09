@@ -69,6 +69,7 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
             img.mipShadowEvicted = false;
             img.mipShadowEvictedRgba8Bytes = 0;
             img.mipShadowEvictedNativeBytes = 0;
+            impl_->clearTextureLazyFboCanonicalClear(img);
             return true;
         }
         if (!isColorFormat(img.desc.internalFormat)) {
@@ -101,6 +102,7 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
         img.mipShadowEvicted = false;
         img.mipShadowEvictedRgba8Bytes = 0;
         img.mipShadowEvictedNativeBytes = 0;
+        impl_->clearTextureLazyFboCanonicalClear(img);
         return true;
     };
     // If level is -1, clear all defined levels to zero.
@@ -128,7 +130,10 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
         tex->colorShadowAuthoritative = true;
         tex->depthStencilShadowAuthoritative = true;
         if (tex->metalTexture != nullptr) {
-            impl_->replaceMetalTexture(*tex, texture);
+            if (impl_->replaceMetalTexture(*tex, texture)) {
+                impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
+                    texture, "clear-tex-image-all-levels");
+            }
         }
         impl_->markGpuResourceWrites({
             {Impl::GpuResourceAccess::Kind::Texture,
@@ -174,7 +179,10 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
         tex->depthStencilShadowAuthoritative = true;
     }
     if (tex->metalTexture != nullptr) {
-        impl_->replaceMetalTexture(*tex, texture);
+        if (impl_->replaceMetalTexture(*tex, texture)) {
+            impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
+                texture, "clear-tex-image");
+        }
     }
     impl_->markGpuResourceWrites({
         {Impl::GpuResourceAccess::Kind::Texture,
@@ -261,6 +269,7 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
             img.mipShadowEvicted = false;
             img.mipShadowEvictedRgba8Bytes = 0;
             img.mipShadowEvictedNativeBytes = 0;
+            impl_->clearTextureLazyFboCanonicalClear(img);
             return true;
         }
         if (!isColorFormat(img.desc.internalFormat)) {
@@ -293,6 +302,7 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
         img.mipShadowEvicted = false;
         img.mipShadowEvictedRgba8Bytes = 0;
         img.mipShadowEvictedNativeBytes = 0;
+        impl_->clearTextureLazyFboCanonicalClear(img);
         return true;
     };
     if (!impl_->materializeTextureMipShadowFromMetal(
@@ -316,7 +326,10 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
         tex->depthStencilShadowAuthoritative = true;
     }
     if (tex->metalTexture != nullptr) {
-        impl_->replaceMetalTexture(*tex, texture);
+        if (impl_->replaceMetalTexture(*tex, texture)) {
+            impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
+                texture, "clear-tex-sub-image");
+        }
     }
     impl_->markGpuResourceWrites({
         {Impl::GpuResourceAccess::Kind::Texture,
@@ -715,6 +728,7 @@ bool GLContext::compressedTextureSubImage2D(GLuint texture, GLint level, GLint x
     image.mipShadowEvicted = false;
     image.mipShadowEvictedRgba8Bytes = 0;
     image.mipShadowEvictedNativeBytes = 0;
+    impl_->clearTextureLazyFboCanonicalClear(image);
     const auto* bytes = static_cast<const std::uint8_t*>(data);
     for (NSUInteger row = 0; row < subBlocksY; ++row) {
         const NSUInteger srcOffset = srcStart + row * srcRowBytes;
@@ -939,6 +953,7 @@ bool GLContext::compressedTextureSubImage3D(GLuint texture, GLint level, GLint x
     image.mipShadowEvicted = false;
     image.mipShadowEvictedRgba8Bytes = 0;
     image.mipShadowEvictedNativeBytes = 0;
+    impl_->clearTextureLazyFboCanonicalClear(image);
     const auto* bytes = static_cast<const std::uint8_t*>(data);
     for (NSUInteger slice = 0; slice < subBlocksZ; ++slice) {
         for (NSUInteger row = 0; row < subBlocksY; ++row) {
@@ -1242,6 +1257,8 @@ bool GLContext::blitReadFBOToTextureSubImage(
                  dstZ)];
     [blit endEncoding];
     lease.commitAndWait(AppGLCommandReason::CopyTextureSubImage);
+    impl_->finishLazyFboCanonicalClearTextureGpuWrite(
+        dstTextureName, "copy-texture-sub-image");
     impl_->markGpuResourceWrites({
         {Impl::GpuResourceAccess::Kind::Texture,
          dstTextureName,
@@ -2165,8 +2182,22 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
         return {true, true};
     };
 
+    auto materializeLazyFboCanonicalClearForReadback =
+        [&](GLint materializeLevel) -> bool {
+            auto lazyIt = obj->levels.find(materializeLevel);
+            if (lazyIt == obj->levels.end() ||
+                !lazyIt->second.defined ||
+                !lazyIt->second.lazyFboCanonicalClearPending) {
+                return true;
+            }
+            return impl_->materializeTextureMipShadowFromMetal(
+                *obj,
+                materializeLevel,
+                Impl::TextureMipShadowMaterializeConsumer::GetTextureImage);
+        };
+
     if (appglCompatProfileEnabled() && !packPBOBound) {
-        const auto levelIt = obj->levels.find(level);
+        auto levelIt = obj->levels.find(level);
         if (levelIt != obj->levels.end() && levelIt->second.defined &&
             isLegacyCompatTextureFormatCombo(
                 levelIt->second.desc.internalFormat,
@@ -2210,6 +2241,10 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
                 !obj->wasFramebufferRenderedTo &&
                 !obj->wasViewportRenderedTo &&
                 !obj->producerPending.hasAny(kProducerAll);
+            if (!materializeLazyFboCanonicalClearForReadback(level)) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
             if ((obj->colorShadowAuthoritative || uploadExactLegacyShadow) &&
                 copySimpleTextureLevelShadow(*obj,
                                              levelImage,
@@ -2234,7 +2269,13 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
     if (!packPBOBound &&
         obj->colorShadowAuthoritative &&
         isSRGBTextureFormat(obj->desc.internalFormat)) {
-        const auto levelIt = obj->levels.find(level);
+        auto levelIt = obj->levels.find(level);
+        if (levelIt != obj->levels.end() &&
+            levelIt->second.defined &&
+            !materializeLazyFboCanonicalClearForReadback(level)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         if (levelIt != obj->levels.end() && levelIt->second.defined &&
             copySimpleTextureLevelShadow(*obj,
                                          levelIt->second,
@@ -2246,6 +2287,37 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
                                          (obj->wasFramebufferRenderedTo ||
                                           obj->wasViewportRenderedTo) &&
                                              impl_->state->clipOrigin() != GL_UPPER_LEFT)) {
+            impl_->drainPendingGpuProducers({
+                {Impl::GpuResourceAccess::Kind::Texture,
+                 texture,
+                 kProducerAll},
+            });
+            return true;
+        }
+    }
+
+    if (!packPBOBound &&
+        obj->colorShadowAuthoritative &&
+        (obj->wasFramebufferRenderedTo || obj->wasViewportRenderedTo) &&
+        ((format == GL_RGBA && type == GL_FLOAT) ||
+         (format == GL_RGBA && type == GL_UNSIGNED_BYTE))) {
+        auto levelIt = obj->levels.find(level);
+        if (levelIt != obj->levels.end() &&
+            levelIt->second.defined &&
+            !materializeLazyFboCanonicalClearForReadback(level)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        if (levelIt != obj->levels.end() && levelIt->second.defined &&
+            !levelIt->second.rgba8.empty() &&
+            copySimpleTextureLevelShadow(*obj,
+                                         levelIt->second,
+                                         format,
+                                         type,
+                                         bufSize,
+                                         impl_->state->pixelStore(),
+                                         pixels,
+                                         impl_->state->clipOrigin() != GL_UPPER_LEFT)) {
             impl_->drainPendingGpuProducers({
                 {Impl::GpuResourceAccess::Kind::Texture,
                  texture,
@@ -3830,6 +3902,127 @@ static GLsizei getTextureSubImagePixelBytes(GLenum format, GLenum type) {
     return components * bpc;
 }
 
+static void canonicalizeTextureReadbackRGBA8ForInternalFormat(GLenum internalFormat,
+                                                              std::uint8_t rgba[4]) {
+    switch (internalFormat) {
+        case 1:
+        case GL_LUMINANCE:
+        case GL_LUMINANCE4:
+        case GL_LUMINANCE8:
+        case GL_LUMINANCE12:
+        case GL_LUMINANCE16:
+        case GL_LUMINANCE16F_ARB:
+        case GL_LUMINANCE32F_ARB:
+        case GL_SLUMINANCE8:
+            rgba[1] = 0u;
+            rgba[2] = 0u;
+            rgba[3] = 255u;
+            break;
+        case 2:
+        case GL_LUMINANCE_ALPHA:
+        case GL_LUMINANCE4_ALPHA4:
+        case GL_LUMINANCE6_ALPHA2:
+        case GL_LUMINANCE8_ALPHA8:
+        case GL_LUMINANCE12_ALPHA4:
+        case GL_LUMINANCE12_ALPHA12:
+        case GL_LUMINANCE16_ALPHA16:
+        case GL_LUMINANCE_ALPHA16F_ARB:
+        case GL_LUMINANCE_ALPHA32F_ARB:
+        case GL_SLUMINANCE8_ALPHA8:
+            rgba[1] = 0u;
+            rgba[2] = 0u;
+            break;
+        case 3:
+        case GL_RGB:
+        case GL_RGB_INTEGER:
+        case GL_R3_G3_B2:
+        case GL_RGB4:
+        case GL_RGB5:
+        case GL_RGB8:
+        case GL_RGB8_SNORM:
+        case GL_SRGB8:
+        case GL_RGB10:
+        case GL_R11F_G11F_B10F:
+        case GL_RGB12:
+        case GL_RGB9_E5:
+        case GL_RGB16:
+        case GL_RGB16F:
+        case GL_RGB16_SNORM:
+        case GL_RGB32F:
+        case GL_RGB8I:
+        case GL_RGB8UI:
+        case GL_RGB16I:
+        case GL_RGB16UI:
+        case GL_RGB32I:
+        case GL_RGB32UI:
+        case GL_RGB565:
+        case GL_COMPRESSED_RGB:
+        case GL_COMPRESSED_SRGB:
+        case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+            rgba[3] = 255u;
+            break;
+        case GL_ALPHA:
+        case GL_ALPHA4:
+        case GL_ALPHA8:
+        case GL_ALPHA12:
+        case GL_ALPHA16:
+        case GL_ALPHA16F_ARB:
+        case GL_ALPHA32F_ARB:
+            rgba[0] = 0u;
+            rgba[1] = 0u;
+            rgba[2] = 0u;
+            break;
+        case GL_INTENSITY:
+        case GL_INTENSITY4:
+        case GL_INTENSITY8:
+        case GL_INTENSITY12:
+        case GL_INTENSITY16:
+        case GL_INTENSITY16F_ARB:
+        case GL_INTENSITY32F_ARB:
+            rgba[1] = 0u;
+            rgba[2] = 0u;
+            rgba[3] = 255u;
+            break;
+        case GL_RED:
+        case GL_RED_INTEGER:
+        case GL_R8:
+        case GL_R8_SNORM:
+        case GL_R16:
+        case GL_R16_SNORM:
+        case GL_R16F:
+        case GL_R32F:
+        case GL_R8I:
+        case GL_R8UI:
+        case GL_R16I:
+        case GL_R16UI:
+        case GL_R32I:
+        case GL_R32UI:
+            rgba[1] = 0u;
+            rgba[2] = 0u;
+            rgba[3] = 255u;
+            break;
+        case GL_RG:
+        case GL_RG_INTEGER:
+        case GL_RG8:
+        case GL_RG8_SNORM:
+        case GL_RG16:
+        case GL_RG16_SNORM:
+        case GL_RG16F:
+        case GL_RG32F:
+        case GL_RG8I:
+        case GL_RG8UI:
+        case GL_RG16I:
+        case GL_RG16UI:
+        case GL_RG32I:
+        case GL_RG32UI:
+            rgba[2] = 0u;
+            rgba[3] = 255u;
+            break;
+        default:
+            break;
+    }
+}
+
 static bool copyRGBA8TextureSubImageShadow(const GLTextureObject& obj,
                                            GLint level,
                                            GLint xoffset,
@@ -3977,14 +4170,23 @@ static bool copyRGBA8TextureSubImageShadow(const GLTextureObject& obj,
                     dstRow[dstOffset + 3u] = 255u;
                 }
             } else {
-                const std::size_t srcOffset =
-                    ((static_cast<std::size_t>(srcZ) * static_cast<std::size_t>(srcH) +
-                      static_cast<std::size_t>(yoffset + row)) *
-                     static_cast<std::size_t>(srcW) +
-                     static_cast<std::size_t>(xoffset)) * dstPixelBytes;
-                std::memcpy(dstRow,
-                            image.rgba8.data() + srcOffset,
-                            static_cast<std::size_t>(width) * dstPixelBytes);
+                for (GLsizei col = 0; col < width; ++col) {
+                    const std::size_t srcOffset =
+                        ((static_cast<std::size_t>(srcZ) *
+                              static_cast<std::size_t>(srcH) +
+                          static_cast<std::size_t>(yoffset + row)) *
+                             static_cast<std::size_t>(srcW) +
+                         static_cast<std::size_t>(xoffset + col)) *
+                        dstPixelBytes;
+                    const std::size_t dstOffset =
+                        static_cast<std::size_t>(col) * dstPixelBytes;
+                    std::memcpy(dstRow + dstOffset,
+                                image.rgba8.data() + srcOffset,
+                                dstPixelBytes);
+                    canonicalizeTextureReadbackRGBA8ForInternalFormat(
+                        image.desc.internalFormat,
+                        dstRow + dstOffset);
+                }
             }
         }
         return true;

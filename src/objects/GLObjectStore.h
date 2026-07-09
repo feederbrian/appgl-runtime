@@ -259,6 +259,8 @@ struct GLTextureImageLevel {
     bool mipShadowEvicted = false;
     std::uint64_t mipShadowEvictedRgba8Bytes = 0;
     std::uint64_t mipShadowEvictedNativeBytes = 0;
+    bool lazyFboCanonicalClearPending = false;
+    std::array<std::uint8_t, 4> lazyFboCanonicalClearRGBA8 = {0, 0, 0, 0};
 };
 
 struct GLTextureParameters {

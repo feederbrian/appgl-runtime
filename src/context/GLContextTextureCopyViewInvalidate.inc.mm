@@ -882,6 +882,8 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     // read, which would otherwise mask the pending re-upload.
     // -----------------------------------------------------------------------
     if (dstTex) {
+        impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
+            dstName, "copy-image-sub-data");
         releaseRetainedMetalObject(dstTex->metalTexture);
         dstTex->metalTexture = nullptr;
     }

@@ -1569,6 +1569,15 @@ bool GLContext::bitmapMaskCompat(GLsizei width,
                     if (layer >= depth) {
                         continue;
                     }
+                    if ((image.mipShadowEvicted ||
+                         image.lazyFboCanonicalClearPending) &&
+                        !impl_->materializeTextureMipShadowFromMetal(
+                            *texture,
+                            resolved.level,
+                            Impl::TextureMipShadowMaterializeConsumer::UploadRebuild)) {
+                        ok = false;
+                        continue;
+                    }
                     const std::size_t layerBytes =
                         static_cast<std::size_t>(targetWidth) *
                         static_cast<std::size_t>(targetHeight) * 4u;
@@ -1577,11 +1586,19 @@ bool GLContext::bitmapMaskCompat(GLsizei width,
                                   targetHeight,
                                   lowerLeft,
                                   static_cast<std::size_t>(layer) * layerBytes);
+                    impl_->clearTextureLazyFboCanonicalClear(image);
                     texture->colorShadowAuthoritative = true;
                     if (lowerLeft) {
                         texture->wasFramebufferRenderedTo = true;
                     }
-                    ok = impl_->replaceMetalTexture(*texture) && ok;
+                    const bool replaced =
+                        impl_->replaceMetalTexture(*texture);
+                    if (replaced) {
+                        impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
+                            attachment->object,
+                            "immediate-texture-paint");
+                    }
+                    ok = replaced && ok;
                 } else if (attachment->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
                     GLRenderbufferObject* rb =
                         impl_->objects->renderbuffers().get(attachment->object);
@@ -2386,6 +2403,15 @@ bool GLContext::drawPixelsCompat(GLsizei width,
                 if (layer >= depth) {
                     continue;
                 }
+                if ((image.mipShadowEvicted ||
+                     image.lazyFboCanonicalClearPending) &&
+                    !impl_->materializeTextureMipShadowFromMetal(
+                        *texture,
+                        resolved.level,
+                        Impl::TextureMipShadowMaterializeConsumer::UploadRebuild)) {
+                    ok = false;
+                    continue;
+                }
                 const std::size_t layerBytes =
                     static_cast<std::size_t>(targetWidth) *
                     static_cast<std::size_t>(targetHeight) * 4u;
@@ -2394,11 +2420,18 @@ bool GLContext::drawPixelsCompat(GLsizei width,
                                    targetHeight,
                                    lowerLeft,
                                    static_cast<std::size_t>(layer) * layerBytes);
+                impl_->clearTextureLazyFboCanonicalClear(image);
                 texture->colorShadowAuthoritative = true;
                 if (lowerLeft) {
                     texture->wasFramebufferRenderedTo = true;
                 }
-                ok = impl_->replaceMetalTexture(*texture) && ok;
+                const bool replaced = impl_->replaceMetalTexture(*texture);
+                if (replaced) {
+                    impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
+                        attachment->object,
+                        "immediate-color-paint");
+                }
+                ok = replaced && ok;
             } else if (attachment->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
                 GLRenderbufferObject* rb =
                     impl_->objects->renderbuffers().get(attachment->object);
@@ -5829,6 +5862,14 @@ void GLContext::endImmediate() {
                 if (layer >= depth) {
                     continue;
                 }
+                if ((image.mipShadowEvicted ||
+                     image.lazyFboCanonicalClearPending) &&
+                    !impl_->materializeTextureMipShadowFromMetal(
+                        *texture,
+                        resolved.level,
+                        Impl::TextureMipShadowMaterializeConsumer::UploadRebuild)) {
+                    return false;
+                }
                 const std::size_t layerBytes =
                     static_cast<std::size_t>(tw) *
                     static_cast<std::size_t>(th) * 4u;
@@ -5852,10 +5893,14 @@ void GLContext::endImmediate() {
                 if (!paintedTexture) {
                     continue;
                 }
+                impl_->clearTextureLazyFboCanonicalClear(image);
                 texture->colorShadowAuthoritative = true;
                 if (lowerLeft) {
                     texture->wasFramebufferRenderedTo = true;
                 }
+                impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
+                    attachment->object,
+                    "immediate-shadow-mirror");
                 painted = true;
             }
         }
@@ -6040,6 +6085,9 @@ void GLContext::endImmediate() {
         info.scissorHeight = sc.height;
     }
 
+    if (!impl_->materializeLazyFboCanonicalClearsForDrawFramebuffer()) {
+        return;
+    }
     const bool ok = impl_->frameGraph->encodeImmediateModeDraw(info);
     bool filledRectShadowPainted = false;
     if (ok) {
@@ -8285,6 +8333,9 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         info.scissorY = sc.y;
         info.scissorWidth = sc.width;
         info.scissorHeight = sc.height;
+        if (!impl_->materializeLazyFboCanonicalClearsForDrawFramebuffer()) {
+            return false;
+        }
         return impl_->frameGraph->encodeImmediateModeDraw(info);
     };
 
@@ -8297,14 +8348,8 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
 	            impl_->state->isEnabled(GL_BLEND) ||
 	            resolveFixedFunctionTexture() != nullptr) {
 	            return false;
-	        }
+        }
         const auto& blend = impl_->state->blendState();
-	        if (blend.colorMask[0] == GL_FALSE ||
-	            blend.colorMask[1] == GL_FALSE ||
-	            blend.colorMask[2] == GL_FALSE ||
-	            blend.colorMask[3] == GL_FALSE) {
-	            return false;
-	        }
 	        const bool stencilTestEnabled =
 	            impl_->state->isEnabled(GL_STENCIL_TEST);
 	        const bool depthTestEnabled =
@@ -8665,9 +8710,12 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
 		                        (static_cast<std::size_t>(gy) *
 		                         static_cast<std::size_t>(impl_->defaultFramebufferShadowWidth) +
                          static_cast<std::size_t>(gx)) * 4u;
-                    std::memcpy(impl_->defaultFramebufferRGBA8.data() + offset,
-                                rgba,
-                                4u);
+                    for (int c = 0; c < 4; ++c) {
+                        if (blend.colorMask[c] != GL_FALSE) {
+                            impl_->defaultFramebufferRGBA8[
+                                offset + static_cast<std::size_t>(c)] = rgba[c];
+                        }
+                    }
                 }
 	            }
 	            impl_->defaultFramebufferShadowValid = true;
@@ -8788,18 +8836,52 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
                 if (rb->rgba8.size() < bytes) {
                     rb->rgba8.assign(bytes, 0);
                 }
-                for (GLint gy = py0; gy < py1; ++gy) {
-                    const GLint sy = lowerLeft ? (rb->height - 1 - gy) : gy;
-                    for (GLint gx = px0; gx < px1; ++gx) {
-                        const std::size_t offset =
-                            (static_cast<std::size_t>(sy) *
-                             static_cast<std::size_t>(rb->width) +
-                             static_cast<std::size_t>(gx)) * 4u;
-                        std::memcpy(rb->rgba8.data() + offset, rgba, 4u);
-                    }
-                }
-                rb->rgba8ShadowClearPending = false;
-                rb->colorShadowAuthoritative = true;
+	                for (GLint gy = py0; gy < py1; ++gy) {
+	                    const GLint sy = lowerLeft ? (rb->height - 1 - gy) : gy;
+	                    for (GLint gx = px0; gx < px1; ++gx) {
+	                        const std::size_t offset =
+	                            (static_cast<std::size_t>(sy) *
+	                             static_cast<std::size_t>(rb->width) +
+	                             static_cast<std::size_t>(gx)) * 4u;
+	                        std::uint8_t storagePixel[4] = {
+	                            rgba[0], rgba[1], rgba[2], rgba[3]
+	                        };
+	                        Impl::canonicalizeFboStorageRGBA8(
+	                            rb->internalFormat, storagePixel);
+	                        for (int c = 0; c < 4; ++c) {
+	                            if (blend.colorMask[c] != GL_FALSE) {
+	                                rb->rgba8[offset + static_cast<std::size_t>(c)] =
+	                                    storagePixel[c];
+	                            }
+	                        }
+	                        if (rb->nativeBpp > 0) {
+	                            const MTLPixelFormat nativeFormat =
+	                                metalRenderbufferFormat(rb->internalFormat);
+	                            const std::size_t nativeBytes =
+	                                static_cast<std::size_t>(rb->width) *
+	                                static_cast<std::size_t>(rb->height) *
+	                                rb->nativeBpp;
+	                            if (rb->nativeData.size() < nativeBytes) {
+	                                rb->nativeData.resize(nativeBytes, 0);
+	                            }
+	                            const std::size_t nativeOffset =
+	                                (static_cast<std::size_t>(sy) *
+	                                 static_cast<std::size_t>(rb->width) +
+	                                 static_cast<std::size_t>(gx)) *
+	                                rb->nativeBpp;
+	                            if (nativeOffset + rb->nativeBpp <=
+	                                rb->nativeData.size()) {
+	                                (void)impl_->encodeColorNativePixelFromRGBA8(
+	                                    nativeFormat,
+	                                    rb->rgba8.data() + offset,
+	                                    rb->nativeData.data() + nativeOffset,
+	                                    rb->nativeBpp);
+	                            }
+	                        }
+	                    }
+	                }
+	                rb->rgba8ShadowClearPending = false;
+	                rb->colorShadowAuthoritative = true;
                 rb->framebufferReadbackYFlip = lowerLeft;
                 painted = true;
             } else if (attachment->kind == GLFramebufferAttachment::Kind::Texture) {
@@ -8830,6 +8912,14 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
                 if (layer >= depth) {
                     continue;
                 }
+                if ((image.mipShadowEvicted ||
+                     image.lazyFboCanonicalClearPending) &&
+                    !impl_->materializeTextureMipShadowFromMetal(
+                        *texture,
+                        resolved.level,
+                        Impl::TextureMipShadowMaterializeConsumer::UploadRebuild)) {
+                    return false;
+                }
                 const std::size_t layerBytes =
                     static_cast<std::size_t>(tw) *
                     static_cast<std::size_t>(th) * 4u;
@@ -8838,22 +8928,46 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
                 if (image.rgba8.size() < bytes) {
                     image.rgba8.assign(bytes, 0);
                 }
-                for (GLint gy = py0; gy < py1; ++gy) {
-                    const GLint sy = lowerLeft ? (th - 1 - gy) : gy;
-                    for (GLint gx = px0; gx < px1; ++gx) {
-                        const std::size_t offset =
-                            static_cast<std::size_t>(layer) * layerBytes +
-                            (static_cast<std::size_t>(sy) *
-                             static_cast<std::size_t>(tw) +
-                             static_cast<std::size_t>(gx)) * 4u;
-                        std::memcpy(image.rgba8.data() + offset, rgba, 4u);
-                    }
-                }
-                texture->colorShadowAuthoritative = true;
-                if (lowerLeft) {
-                    texture->wasFramebufferRenderedTo = true;
-                }
-                painted = true;
+	                for (GLint gy = py0; gy < py1; ++gy) {
+	                    const GLint sy = lowerLeft ? (th - 1 - gy) : gy;
+	                    for (GLint gx = px0; gx < px1; ++gx) {
+	                        const std::size_t offset =
+	                            static_cast<std::size_t>(layer) * layerBytes +
+	                            (static_cast<std::size_t>(sy) *
+	                             static_cast<std::size_t>(tw) +
+	                             static_cast<std::size_t>(gx)) * 4u;
+	                        std::uint8_t storagePixel[4] = {
+	                            rgba[0], rgba[1], rgba[2], rgba[3]
+	                        };
+	                        Impl::canonicalizeFboStorageRGBA8(
+	                            image.desc.internalFormat, storagePixel);
+	                        for (int c = 0; c < 4; ++c) {
+	                            if (blend.colorMask[c] != GL_FALSE) {
+	                                image.rgba8[offset + static_cast<std::size_t>(c)] =
+	                                    storagePixel[c];
+	                            }
+	                        }
+	                        if (image.nativeBpp > 0) {
+	                            (void)impl_->storeColorNativePixelFromRGBA8(
+	                                image,
+	                                tw,
+	                                th,
+	                                layer,
+	                                gx,
+	                                sy,
+	                                image.rgba8.data() + offset);
+	                        }
+	                    }
+	                }
+	                impl_->clearTextureLazyFboCanonicalClear(image);
+	                texture->colorShadowAuthoritative = true;
+	                if (lowerLeft) {
+	                    texture->wasFramebufferRenderedTo = true;
+	                }
+	                impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
+	                    attachment->object,
+	                    "immediate-client-array-shadow-mirror");
+	                painted = true;
             }
         }
         return painted;

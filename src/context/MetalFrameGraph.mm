@@ -19413,6 +19413,28 @@ fragment float4 appgl_immediate_textured_3d_fs(
         return !matched.empty();
     }
 
+    bool discardPendingFboClearsForTexture(void* texVoid) {
+        if (pendingFboClears.empty() || texVoid == nullptr) {
+            return false;
+        }
+        id<MTLTexture> tex = (__bridge id<MTLTexture>)texVoid;
+        void* parent = tex.parentTexture != nil
+            ? (__bridge void*)tex.parentTexture : nullptr;
+        bool discarded = false;
+        for (std::size_t i = 0; i < pendingFboClears.size();) {
+            if (pendingFboClears[i].tex == texVoid ||
+                (parent != nullptr && pendingFboClears[i].tex == parent)) {
+                CFRelease((CFTypeRef)pendingFboClears[i].tex);
+                pendingFboClears.erase(pendingFboClears.begin() +
+                                       static_cast<std::ptrdiff_t>(i));
+                discarded = true;
+            } else {
+                ++i;
+            }
+        }
+        return discarded;
+    }
+
     // A draw that SAMPLES a texture with a pending deferred clear must
     // see the cleared contents — materialize before encoding. Matches
     // the bound texture directly and through Metal's parentTexture
@@ -30255,6 +30277,10 @@ bool MetalFrameGraph::clearTextureStencil(void* tex, std::uint32_t level, std::u
 
 bool MetalFrameGraph::materializePendingFboClearsForTexture(void* tex) {
     return impl_->materializePendingFboClearsForTexture(tex);
+}
+
+bool MetalFrameGraph::discardPendingFboClearsForTexture(void* tex) {
+    return impl_->discardPendingFboClearsForTexture(tex);
 }
 
 bool MetalFrameGraph::materializeAllPendingFboClears() {
