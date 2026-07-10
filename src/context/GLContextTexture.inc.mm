@@ -1642,6 +1642,10 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                     case GL_INTENSITY8:
                     case GL_INTENSITY12:
                     case GL_INTENSITY16:
+                    case GL_COMPRESSED_ALPHA:
+                    case GL_COMPRESSED_LUMINANCE:
+                    case GL_COMPRESSED_LUMINANCE_ALPHA:
+                    case GL_COMPRESSED_INTENSITY:
                         return appglCompatProfileEnabled();
                     default:
                         return false;
@@ -1667,6 +1671,8 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                     case GL_LUMINANCE8:
                     case GL_LUMINANCE_ALPHA:
                     case GL_LUMINANCE8_ALPHA8:
+                    case GL_COMPRESSED_LUMINANCE:
+                    case GL_COMPRESSED_LUMINANCE_ALPHA:
                         return 8;
                     case GL_LUMINANCE4:
                     case GL_LUMINANCE4_ALPHA4:
@@ -1694,6 +1700,7 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                 switch (fmt) {
                     case GL_INTENSITY:
                     case GL_INTENSITY8:
+                    case GL_COMPRESSED_INTENSITY:
                         return 8;
                     case GL_INTENSITY4:
                         return reportedCompatBits();
@@ -1715,7 +1722,8 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                     for (GLenum f : lst) if (f == fmt) return true;
                     return false;
                 };
-                if (fmt == GL_ALPHA || fmt == GL_ALPHA8) {
+                if (fmt == GL_ALPHA || fmt == GL_ALPHA8 ||
+                    fmt == GL_COMPRESSED_ALPHA) {
                     return channel == 3 ? 8 : 0;
                 }
                 if (fmt == GL_ALPHA4) {
@@ -1740,6 +1748,7 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
                             case 2:
                             case GL_LUMINANCE_ALPHA:
                             case GL_LUMINANCE8_ALPHA8:
+                            case GL_COMPRESSED_LUMINANCE_ALPHA:
                                 return 8;
                             case GL_SLUMINANCE8_ALPHA8:
                                 return appglCompatProfileEnabled() ? 8 : 0;

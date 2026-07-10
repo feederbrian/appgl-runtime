@@ -6439,6 +6439,13 @@ MTLPixelFormat metalRenderbufferFormat(GLenum internalFormat) {
         // Generic "compressed" internal formats — resolve to the
         // uncompressed base type on Metal. GL 4.6 §8.5.3 allows the
         // driver to choose compression or keep the texture uncompressed.
+        case GL_COMPRESSED_ALPHA:
+        case GL_COMPRESSED_LUMINANCE:
+        case GL_COMPRESSED_LUMINANCE_ALPHA:
+        case GL_COMPRESSED_INTENSITY:
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatRGBA8Unorm
+                : MTLPixelFormatInvalid;
         case GL_COMPRESSED_RED:          return MTLPixelFormatR8Unorm;
         case GL_COMPRESSED_RG:           return MTLPixelFormatRG8Unorm;
         case GL_COMPRESSED_RGB:          return MTLPixelFormatRGBA8Unorm;
@@ -6694,6 +6701,10 @@ static NSUInteger ceilDivBlocks(NSUInteger value, NSUInteger divisor) {
 
 bool isCompressedInternalFormat(GLenum internalFormat) {
     switch (internalFormat) {
+        case GL_COMPRESSED_ALPHA:
+        case GL_COMPRESSED_LUMINANCE:
+        case GL_COMPRESSED_LUMINANCE_ALPHA:
+        case GL_COMPRESSED_INTENSITY:
         case GL_COMPRESSED_RED:
         case GL_COMPRESSED_RG:
         case GL_COMPRESSED_RGB:
@@ -6804,6 +6815,10 @@ bool isLegacyCompatTextureInternalFormat(GLenum internalFormat) {
         case GL_INTENSITY8UI_EXT:
         case GL_LUMINANCE_ALPHA8I_EXT:
         case GL_LUMINANCE_ALPHA8UI_EXT:
+        case GL_COMPRESSED_ALPHA:
+        case GL_COMPRESSED_LUMINANCE:
+        case GL_COMPRESSED_LUMINANCE_ALPHA:
+        case GL_COMPRESSED_INTENSITY:
             return true;
         default:
             return false;
@@ -6838,6 +6853,9 @@ std::size_t compatTextureInternalBaseComponentCount(GLenum internalFormat) {
         case GL_LUMINANCE8UI_EXT:
         case GL_INTENSITY8I_EXT:
         case GL_INTENSITY8UI_EXT:
+        case GL_COMPRESSED_ALPHA:
+        case GL_COMPRESSED_LUMINANCE:
+        case GL_COMPRESSED_INTENSITY:
             return 1;
         case 2:
         case GL_RG:
@@ -6856,6 +6874,7 @@ std::size_t compatTextureInternalBaseComponentCount(GLenum internalFormat) {
         case GL_RG32UI:
         case GL_LUMINANCE_ALPHA8I_EXT:
         case GL_LUMINANCE_ALPHA8UI_EXT:
+        case GL_COMPRESSED_LUMINANCE_ALPHA:
             return 2;
         case 3:
         case GL_RGB:
@@ -7143,6 +7162,11 @@ bool isSupportedInternalTextureFormat(const GLCapabilities& caps, GLenum interna
         case GL_INTENSITY8UI_EXT:
         case GL_LUMINANCE_ALPHA8I_EXT:
         case GL_LUMINANCE_ALPHA8UI_EXT:
+            return appglCompatProfileEnabled();
+        case GL_COMPRESSED_ALPHA:
+        case GL_COMPRESSED_LUMINANCE:
+        case GL_COMPRESSED_LUMINANCE_ALPHA:
+        case GL_COMPRESSED_INTENSITY:
             return appglCompatProfileEnabled();
         // Generic "please compress this however you like" formats: GL 4.6
         // §8.5.3 permits the driver to choose any compression scheme *or
@@ -11876,6 +11900,7 @@ struct GLContext::Impl {
             case GL_ALPHA32F_ARB:
             case GL_ALPHA8I_EXT:
             case GL_ALPHA8UI_EXT:
+            case GL_COMPRESSED_ALPHA:
                 return CompatUploadBase::Alpha;
             case GL_LUMINANCE:
             case GL_LUMINANCE4:
@@ -11887,6 +11912,7 @@ struct GLContext::Impl {
             case GL_SLUMINANCE8:
             case GL_LUMINANCE8I_EXT:
             case GL_LUMINANCE8UI_EXT:
+            case GL_COMPRESSED_LUMINANCE:
                 return CompatUploadBase::Luminance;
             case GL_LUMINANCE_ALPHA:
             case GL_LUMINANCE4_ALPHA4:
@@ -11900,6 +11926,7 @@ struct GLContext::Impl {
             case GL_SLUMINANCE8_ALPHA8:
             case GL_LUMINANCE_ALPHA8I_EXT:
             case GL_LUMINANCE_ALPHA8UI_EXT:
+            case GL_COMPRESSED_LUMINANCE_ALPHA:
                 return CompatUploadBase::LuminanceAlpha;
             case GL_INTENSITY:
             case GL_INTENSITY4:
@@ -11910,6 +11937,7 @@ struct GLContext::Impl {
             case GL_INTENSITY32F_ARB:
             case GL_INTENSITY8I_EXT:
             case GL_INTENSITY8UI_EXT:
+            case GL_COMPRESSED_INTENSITY:
                 return CompatUploadBase::Intensity;
             case GL_RGBA:
             case GL_RGBA_INTEGER:
@@ -51604,6 +51632,7 @@ static void canonicalizeSimpleTextureReadbackRGBA8(GLenum internalFormat,
         case GL_LUMINANCE16F_ARB:
         case GL_LUMINANCE32F_ARB:
         case GL_SLUMINANCE8:
+        case GL_COMPRESSED_LUMINANCE:
             rgba[1] = 0u;
             rgba[2] = 0u;
             rgba[3] = 255u;
@@ -51619,6 +51648,7 @@ static void canonicalizeSimpleTextureReadbackRGBA8(GLenum internalFormat,
         case GL_LUMINANCE_ALPHA16F_ARB:
         case GL_LUMINANCE_ALPHA32F_ARB:
         case GL_SLUMINANCE8_ALPHA8:
+        case GL_COMPRESSED_LUMINANCE_ALPHA:
             rgba[1] = 0u;
             rgba[2] = 0u;
             return;
@@ -51629,6 +51659,7 @@ static void canonicalizeSimpleTextureReadbackRGBA8(GLenum internalFormat,
         case GL_ALPHA16:
         case GL_ALPHA16F_ARB:
         case GL_ALPHA32F_ARB:
+        case GL_COMPRESSED_ALPHA:
             rgba[0] = 0u;
             rgba[1] = 0u;
             rgba[2] = 0u;
@@ -51640,6 +51671,7 @@ static void canonicalizeSimpleTextureReadbackRGBA8(GLenum internalFormat,
         case GL_INTENSITY16:
         case GL_INTENSITY16F_ARB:
         case GL_INTENSITY32F_ARB:
+        case GL_COMPRESSED_INTENSITY:
             rgba[1] = 0u;
             rgba[2] = 0u;
             rgba[3] = rgba[0];

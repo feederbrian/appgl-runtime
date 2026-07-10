@@ -1135,6 +1135,10 @@ bool isValidLegacyUploadInternalFormat(GLenum internalFormat) {
         case GL_INTENSITY8UI_EXT:
         case GL_LUMINANCE_ALPHA8I_EXT:
         case GL_LUMINANCE_ALPHA8UI_EXT:
+        case GL_COMPRESSED_ALPHA:
+        case GL_COMPRESSED_LUMINANCE:
+        case GL_COMPRESSED_LUMINANCE_ALPHA:
+        case GL_COMPRESSED_INTENSITY:
             return appglCompatProfileEnabled();
         // Generic "compressed" internal formats — GL 4.6 §8.5.3 allows
         // the driver to keep uncompressed, so treat them as aliases to

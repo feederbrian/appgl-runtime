@@ -71,6 +71,7 @@ std::uint32_t appglImmediateTextureBaseClass(
         case GL_ALPHA16:
         case GL_ALPHA16F_ARB:
         case GL_ALPHA32F_ARB:
+        case GL_COMPRESSED_ALPHA:
             return kAppGLImmediateTextureBaseAlpha;
         case GL_LUMINANCE:
         case GL_LUMINANCE4:
@@ -80,6 +81,7 @@ std::uint32_t appglImmediateTextureBaseClass(
         case GL_LUMINANCE16F_ARB:
         case GL_LUMINANCE32F_ARB:
         case GL_SLUMINANCE8:
+        case GL_COMPRESSED_LUMINANCE:
             return kAppGLImmediateTextureBaseLuminance;
         case GL_LUMINANCE_ALPHA:
         case GL_LUMINANCE4_ALPHA4:
@@ -91,6 +93,7 @@ std::uint32_t appglImmediateTextureBaseClass(
         case GL_LUMINANCE_ALPHA16F_ARB:
         case GL_LUMINANCE_ALPHA32F_ARB:
         case GL_SLUMINANCE8_ALPHA8:
+        case GL_COMPRESSED_LUMINANCE_ALPHA:
             return kAppGLImmediateTextureBaseLuminanceAlpha;
         case GL_INTENSITY:
         case GL_INTENSITY4:
@@ -99,6 +102,7 @@ std::uint32_t appglImmediateTextureBaseClass(
         case GL_INTENSITY16:
         case GL_INTENSITY16F_ARB:
         case GL_INTENSITY32F_ARB:
+        case GL_COMPRESSED_INTENSITY:
             return kAppGLImmediateTextureBaseIntensity;
         case GL_RGB:
             return kAppGLImmediateTextureBaseRGB;
