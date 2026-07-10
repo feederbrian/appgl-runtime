@@ -981,6 +981,7 @@ void GLContext::setTexEnvFloatCompat(GLenum target, GLenum pname, const GLfloat*
             case GL_MODULATE:
             case GL_ADD:
             case GL_SUBTRACT:
+            case GL_INTERPOLATE:
                 dst = enumValue;
                 return true;
             default:

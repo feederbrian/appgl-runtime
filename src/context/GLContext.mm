@@ -349,6 +349,9 @@
 #ifndef GL_SUBTRACT
 #define GL_SUBTRACT 0x84E7
 #endif
+#ifndef GL_INTERPOLATE
+#define GL_INTERPOLATE 0x8575
+#endif
 #ifndef GL_MODULATE
 #define GL_MODULATE 0x2100
 #endif

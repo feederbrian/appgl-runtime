@@ -18676,15 +18676,18 @@ static float appgl_immediate_combine_alpha_operand(uint operand, float4 source) 
 
 static float3 appgl_immediate_apply_combine_rgb(uint combine,
                                                 float3 arg0,
-                                                float3 arg1) {
+                                                float3 arg1,
+                                                float3 arg2) {
     constexpr uint kReplace = 0x1E01u;
     constexpr uint kModulate = 0x2100u;
     constexpr uint kAdd = 0x0104u;
     constexpr uint kSubtract = 0x84E7u;
+    constexpr uint kInterpolate = 0x8575u;
     switch (combine) {
         case kModulate: return arg0 * arg1;
         case kAdd: return arg0 + arg1;
         case kSubtract: return arg0 - arg1;
+        case kInterpolate: return arg0 * arg2 + arg1 * (1.0f - arg2);
         case kReplace:
         default:
             return arg0;
@@ -18693,15 +18696,18 @@ static float3 appgl_immediate_apply_combine_rgb(uint combine,
 
 static float appgl_immediate_apply_combine_alpha(uint combine,
                                                  float arg0,
-                                                 float arg1) {
+                                                 float arg1,
+                                                 float arg2) {
     constexpr uint kReplace = 0x1E01u;
     constexpr uint kModulate = 0x2100u;
     constexpr uint kAdd = 0x0104u;
     constexpr uint kSubtract = 0x84E7u;
+    constexpr uint kInterpolate = 0x8575u;
     switch (combine) {
         case kModulate: return arg0 * arg1;
         case kAdd: return arg0 + arg1;
         case kSubtract: return arg0 - arg1;
+        case kInterpolate: return arg0 * arg2 + arg1 * (1.0f - arg2);
         case kReplace:
         default:
             return arg0;
@@ -18730,22 +18736,30 @@ static float4 appgl_immediate_finish_sample(float4 color,
             textureState.sourceRGB0, color, sample, textureState);
         const float4 rgbSrc1 = appgl_immediate_combine_source(
             textureState.sourceRGB1, color, sample, textureState);
+        const float4 rgbSrc2 = appgl_immediate_combine_source(
+            textureState.sourceRGB2, color, sample, textureState);
         const float3 rgb0 = appgl_immediate_combine_rgb_operand(
             textureState.operandRGB0, rgbSrc0);
         const float3 rgb1 = appgl_immediate_combine_rgb_operand(
             textureState.operandRGB1, rgbSrc1);
+        const float3 rgb2 = appgl_immediate_combine_rgb_operand(
+            textureState.operandRGB2, rgbSrc2);
         const float4 alphaSrc0 = appgl_immediate_combine_source(
             textureState.sourceAlpha0, color, sample, textureState);
         const float4 alphaSrc1 = appgl_immediate_combine_source(
             textureState.sourceAlpha1, color, sample, textureState);
+        const float4 alphaSrc2 = appgl_immediate_combine_source(
+            textureState.sourceAlpha2, color, sample, textureState);
         const float alpha0 = appgl_immediate_combine_alpha_operand(
             textureState.operandAlpha0, alphaSrc0);
         const float alpha1 = appgl_immediate_combine_alpha_operand(
             textureState.operandAlpha1, alphaSrc1);
+        const float alpha2 = appgl_immediate_combine_alpha_operand(
+            textureState.operandAlpha2, alphaSrc2);
         return clamp(float4(appgl_immediate_apply_combine_rgb(
-                                textureState.combineRGB, rgb0, rgb1),
+                                textureState.combineRGB, rgb0, rgb1, rgb2),
                             appgl_immediate_apply_combine_alpha(
-                                textureState.combineAlpha, alpha0, alpha1)),
+                                textureState.combineAlpha, alpha0, alpha1, alpha2)),
                      0.0f,
                      1.0f);
     }
