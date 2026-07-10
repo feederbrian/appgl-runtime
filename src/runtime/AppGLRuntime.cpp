@@ -94,6 +94,30 @@
 #ifndef GL_INTENSITY8
 #define GL_INTENSITY8 0x804B
 #endif
+#ifndef GL_ALPHA8UI_EXT
+#define GL_ALPHA8UI_EXT 0x8D7E
+#endif
+#ifndef GL_INTENSITY8UI_EXT
+#define GL_INTENSITY8UI_EXT 0x8D7F
+#endif
+#ifndef GL_LUMINANCE8UI_EXT
+#define GL_LUMINANCE8UI_EXT 0x8D80
+#endif
+#ifndef GL_LUMINANCE_ALPHA8UI_EXT
+#define GL_LUMINANCE_ALPHA8UI_EXT 0x8D81
+#endif
+#ifndef GL_ALPHA8I_EXT
+#define GL_ALPHA8I_EXT 0x8D90
+#endif
+#ifndef GL_INTENSITY8I_EXT
+#define GL_INTENSITY8I_EXT 0x8D91
+#endif
+#ifndef GL_LUMINANCE8I_EXT
+#define GL_LUMINANCE8I_EXT 0x8D92
+#endif
+#ifndef GL_LUMINANCE_ALPHA8I_EXT
+#define GL_LUMINANCE_ALPHA8I_EXT 0x8D93
+#endif
 #ifndef GL_INTENSITY12
 #define GL_INTENSITY12 0x804C
 #endif
@@ -1103,6 +1127,14 @@ bool isValidLegacyUploadInternalFormat(GLenum internalFormat) {
         case GL_INTENSITY32F_ARB:
         case GL_SLUMINANCE8:
         case GL_SLUMINANCE8_ALPHA8:
+        case GL_ALPHA8I_EXT:
+        case GL_ALPHA8UI_EXT:
+        case GL_LUMINANCE8I_EXT:
+        case GL_LUMINANCE8UI_EXT:
+        case GL_INTENSITY8I_EXT:
+        case GL_INTENSITY8UI_EXT:
+        case GL_LUMINANCE_ALPHA8I_EXT:
+        case GL_LUMINANCE_ALPHA8UI_EXT:
             return appglCompatProfileEnabled();
         // Generic "compressed" internal formats — GL 4.6 §8.5.3 allows
         // the driver to keep uncompressed, so treat them as aliases to
@@ -1321,6 +1353,10 @@ bool isFormatCompatibleWithInternalFormat(GLenum format, GLenum internalFormat) 
         case GL_RGB8I: case GL_RGB8UI: case GL_RGB16I: case GL_RGB16UI: case GL_RGB32I: case GL_RGB32UI:
         case GL_RGBA8I: case GL_RGBA8UI: case GL_RGBA16I: case GL_RGBA16UI: case GL_RGBA32I: case GL_RGBA32UI:
         case GL_RGB10_A2UI:
+        case GL_ALPHA8I_EXT: case GL_ALPHA8UI_EXT:
+        case GL_LUMINANCE8I_EXT: case GL_LUMINANCE8UI_EXT:
+        case GL_INTENSITY8I_EXT: case GL_INTENSITY8UI_EXT:
+        case GL_LUMINANCE_ALPHA8I_EXT: case GL_LUMINANCE_ALPHA8UI_EXT:
             return isIntegerFormat;
         // Everything else is a color (non-integer) internal format
         default:

@@ -454,6 +454,30 @@ static bool appglHotpathInvariantHoistSubflagEnabled(const char* name) {
 #ifndef GL_INTENSITY8
 #define GL_INTENSITY8 0x804B
 #endif
+#ifndef GL_ALPHA8UI_EXT
+#define GL_ALPHA8UI_EXT 0x8D7E
+#endif
+#ifndef GL_INTENSITY8UI_EXT
+#define GL_INTENSITY8UI_EXT 0x8D7F
+#endif
+#ifndef GL_LUMINANCE8UI_EXT
+#define GL_LUMINANCE8UI_EXT 0x8D80
+#endif
+#ifndef GL_LUMINANCE_ALPHA8UI_EXT
+#define GL_LUMINANCE_ALPHA8UI_EXT 0x8D81
+#endif
+#ifndef GL_ALPHA8I_EXT
+#define GL_ALPHA8I_EXT 0x8D90
+#endif
+#ifndef GL_INTENSITY8I_EXT
+#define GL_INTENSITY8I_EXT 0x8D91
+#endif
+#ifndef GL_LUMINANCE8I_EXT
+#define GL_LUMINANCE8I_EXT 0x8D92
+#endif
+#ifndef GL_LUMINANCE_ALPHA8I_EXT
+#define GL_LUMINANCE_ALPHA8I_EXT 0x8D93
+#endif
 #ifndef GL_ALPHA32F_ARB
 #define GL_ALPHA32F_ARB 0x8816
 #endif
@@ -6392,6 +6416,26 @@ MTLPixelFormat metalRenderbufferFormat(GLenum internalFormat) {
             return appglCompatProfileEnabled()
                 ? MTLPixelFormatRGBA8Unorm_sRGB
                 : MTLPixelFormatInvalid;
+        case GL_ALPHA8I_EXT:
+        case GL_LUMINANCE8I_EXT:
+        case GL_INTENSITY8I_EXT:
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatR8Sint
+                : MTLPixelFormatInvalid;
+        case GL_LUMINANCE_ALPHA8I_EXT:
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatRG8Sint
+                : MTLPixelFormatInvalid;
+        case GL_ALPHA8UI_EXT:
+        case GL_LUMINANCE8UI_EXT:
+        case GL_INTENSITY8UI_EXT:
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatR8Uint
+                : MTLPixelFormatInvalid;
+        case GL_LUMINANCE_ALPHA8UI_EXT:
+            return appglCompatProfileEnabled()
+                ? MTLPixelFormatRG8Uint
+                : MTLPixelFormatInvalid;
         // Generic "compressed" internal formats — resolve to the
         // uncompressed base type on Metal. GL 4.6 §8.5.3 allows the
         // driver to choose compression or keep the texture uncompressed.
@@ -6752,6 +6796,14 @@ bool isLegacyCompatTextureInternalFormat(GLenum internalFormat) {
         case GL_INTENSITY32F_ARB:
         case GL_SLUMINANCE8:
         case GL_SLUMINANCE8_ALPHA8:
+        case GL_ALPHA8I_EXT:
+        case GL_ALPHA8UI_EXT:
+        case GL_LUMINANCE8I_EXT:
+        case GL_LUMINANCE8UI_EXT:
+        case GL_INTENSITY8I_EXT:
+        case GL_INTENSITY8UI_EXT:
+        case GL_LUMINANCE_ALPHA8I_EXT:
+        case GL_LUMINANCE_ALPHA8UI_EXT:
             return true;
         default:
             return false;
@@ -6780,6 +6832,12 @@ std::size_t compatTextureInternalBaseComponentCount(GLenum internalFormat) {
         case GL_R16UI:
         case GL_R32I:
         case GL_R32UI:
+        case GL_ALPHA8I_EXT:
+        case GL_ALPHA8UI_EXT:
+        case GL_LUMINANCE8I_EXT:
+        case GL_LUMINANCE8UI_EXT:
+        case GL_INTENSITY8I_EXT:
+        case GL_INTENSITY8UI_EXT:
             return 1;
         case 2:
         case GL_RG:
@@ -6796,6 +6854,8 @@ std::size_t compatTextureInternalBaseComponentCount(GLenum internalFormat) {
         case GL_RG16UI:
         case GL_RG32I:
         case GL_RG32UI:
+        case GL_LUMINANCE_ALPHA8I_EXT:
+        case GL_LUMINANCE_ALPHA8UI_EXT:
             return 2;
         case 3:
         case GL_RGB:
@@ -7075,6 +7135,15 @@ bool isSupportedInternalTextureFormat(const GLCapabilities& caps, GLenum interna
         case GL_DEPTH_STENCIL:
         case GL_STENCIL_INDEX:
             return true;
+        case GL_ALPHA8I_EXT:
+        case GL_ALPHA8UI_EXT:
+        case GL_LUMINANCE8I_EXT:
+        case GL_LUMINANCE8UI_EXT:
+        case GL_INTENSITY8I_EXT:
+        case GL_INTENSITY8UI_EXT:
+        case GL_LUMINANCE_ALPHA8I_EXT:
+        case GL_LUMINANCE_ALPHA8UI_EXT:
+            return appglCompatProfileEnabled();
         // Generic "please compress this however you like" formats: GL 4.6
         // §8.5.3 permits the driver to choose any compression scheme *or
         // to keep the texture uncompressed*. On Metal we accept the data
@@ -11805,6 +11874,8 @@ struct GLContext::Impl {
             case GL_ALPHA16:
             case GL_ALPHA16F_ARB:
             case GL_ALPHA32F_ARB:
+            case GL_ALPHA8I_EXT:
+            case GL_ALPHA8UI_EXT:
                 return CompatUploadBase::Alpha;
             case GL_LUMINANCE:
             case GL_LUMINANCE4:
@@ -11814,6 +11885,8 @@ struct GLContext::Impl {
             case GL_LUMINANCE16F_ARB:
             case GL_LUMINANCE32F_ARB:
             case GL_SLUMINANCE8:
+            case GL_LUMINANCE8I_EXT:
+            case GL_LUMINANCE8UI_EXT:
                 return CompatUploadBase::Luminance;
             case GL_LUMINANCE_ALPHA:
             case GL_LUMINANCE4_ALPHA4:
@@ -11825,6 +11898,8 @@ struct GLContext::Impl {
             case GL_LUMINANCE_ALPHA16F_ARB:
             case GL_LUMINANCE_ALPHA32F_ARB:
             case GL_SLUMINANCE8_ALPHA8:
+            case GL_LUMINANCE_ALPHA8I_EXT:
+            case GL_LUMINANCE_ALPHA8UI_EXT:
                 return CompatUploadBase::LuminanceAlpha;
             case GL_INTENSITY:
             case GL_INTENSITY4:
@@ -11833,6 +11908,8 @@ struct GLContext::Impl {
             case GL_INTENSITY16:
             case GL_INTENSITY16F_ARB:
             case GL_INTENSITY32F_ARB:
+            case GL_INTENSITY8I_EXT:
+            case GL_INTENSITY8UI_EXT:
                 return CompatUploadBase::Intensity;
             case GL_RGBA:
             case GL_RGBA_INTEGER:
@@ -32356,6 +32433,10 @@ struct GLContext::Impl {
             case GL_RGBA8I: case GL_RGBA8UI: case GL_RGBA16I: case GL_RGBA16UI:
             case GL_RGBA32I: case GL_RGBA32UI:
             case GL_RGB10_A2UI:
+            case GL_ALPHA8I_EXT: case GL_ALPHA8UI_EXT:
+            case GL_LUMINANCE8I_EXT: case GL_LUMINANCE8UI_EXT:
+            case GL_INTENSITY8I_EXT: case GL_INTENSITY8UI_EXT:
+            case GL_LUMINANCE_ALPHA8I_EXT: case GL_LUMINANCE_ALPHA8UI_EXT:
                 return true;
             default:
                 return false;

@@ -3514,6 +3514,22 @@ bool GLContext::generateMipmap(GLenum target) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    {
+        const GLint baseLevel = std::max<GLint>(object->params.baseLevel, 0);
+        const auto baseIt = object->levels.find(baseLevel);
+        const GLenum internalFormat =
+            (baseIt != object->levels.end() && baseIt->second.defined)
+                ? baseIt->second.desc.internalFormat
+                : object->desc.internalFormat;
+        const bool packedDepthStencil =
+            internalFormat == GL_DEPTH_STENCIL ||
+            internalFormat == GL_DEPTH24_STENCIL8 ||
+            internalFormat == GL_DEPTH32F_STENCIL8;
+        if (Impl::isIntegerInternalFormat(internalFormat) || packedDepthStencil) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
     if (impl_->frameGraph != nullptr) {
         impl_->frameGraph->flushParallelEncodeBoundary();
     }
