@@ -2420,6 +2420,27 @@ bool GLContext::drawPixelsCompat(GLsizei width,
                                    targetHeight,
                                    lowerLeft,
                                    static_cast<std::size_t>(layer) * layerBytes);
+                if (image.nativeBpp > 0) {
+                    const std::size_t layerOffset =
+                        static_cast<std::size_t>(layer) * layerBytes;
+                    for (GLsizei row = 0; row < targetHeight; ++row) {
+                        for (GLsizei col = 0; col < targetWidth; ++col) {
+                            const std::size_t offset =
+                                layerOffset +
+                                (static_cast<std::size_t>(row) *
+                                 static_cast<std::size_t>(targetWidth) +
+                                 static_cast<std::size_t>(col)) * 4u;
+                            (void)impl_->storeColorNativePixelFromRGBA8(
+                                image,
+                                targetWidth,
+                                targetHeight,
+                                layer,
+                                col,
+                                row,
+                                image.rgba8.data() + offset);
+                        }
+                    }
+                }
                 impl_->clearTextureLazyFboCanonicalClear(image);
                 texture->colorShadowAuthoritative = true;
                 if (lowerLeft) {
