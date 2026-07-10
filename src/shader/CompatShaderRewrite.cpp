@@ -816,6 +816,32 @@ static const GpuShader4TextureAlias kGpuShader4TextureAliases[] = {
     {"textureCube", "texture"},
 };
 
+bool startsWith(std::string_view text, std::string_view prefix) {
+    return text.size() >= prefix.size() &&
+           text.substr(0, prefix.size()) == prefix;
+}
+
+bool isLegacyDesktopTextureAlias(std::string_view legacyName) {
+    return startsWith(legacyName, "texture1DArray") ||
+           startsWith(legacyName, "texture2DArray") ||
+           startsWith(legacyName, "texture1D") ||
+           startsWith(legacyName, "texture3D");
+}
+
+bool replaceLegacyDesktopTextureCalls(std::string& src) {
+    bool didReplace = false;
+    for (const auto& alias : kGpuShader4TextureAliases) {
+        if (!isLegacyDesktopTextureAlias(alias.legacyName) ||
+            !containsIdentifier(src, alias.legacyName)) {
+            continue;
+        }
+        didReplace =
+            replaceCodeFunctionIdentifier(src, alias.legacyName, alias.coreName) ||
+            didReplace;
+    }
+    return didReplace;
+}
+
 // Replace every literal occurrence of `from` with `to`. Used for
 // dotted field-access rewrites (`gl_Fog.color` → `appgl_FogColor`)
 // where the leading and trailing boundaries are already partly
@@ -2183,10 +2209,19 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
                 didGpuShader4TextureAliasFixup;
         }
     }
+    const bool legacyTextureAliasPath =
+        result.wasCompatProfile || legacy.upgradedVersion ||
+        versionEol == std::string::npos;
+    bool didLegacyDesktopTextureAliasFixup = false;
+    if (legacyTextureAliasPath && result.source.find("texture") != std::string::npos) {
+        didLegacyDesktopTextureAliasFixup =
+            replaceLegacyDesktopTextureCalls(result.source);
+    }
 
     if (!didAnyRewrite && !didSamplerFixup && !didGpuShader4TruncateFixup &&
         !didGpuShader4LexicalFixup && !didGpuShader4ShadowFixup &&
-        !didGpuShader4TextureAliasFixup) {
+        !didGpuShader4TextureAliasFixup &&
+        !didLegacyDesktopTextureAliasFixup) {
         return result;
     }
     result.didRewrite = true;
