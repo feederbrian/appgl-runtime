@@ -1904,7 +1904,8 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
             const GLenum fmt = desc.internalFormat;
             if (fmt == GL_DEPTH_COMPONENT16) { *params = 16; return true; }
             if (fmt == GL_DEPTH_COMPONENT24 || fmt == GL_DEPTH24_STENCIL8) { *params = 24; return true; }
-            if (fmt == GL_DEPTH_COMPONENT32 || fmt == GL_DEPTH_COMPONENT32F
+            if (fmt == GL_DEPTH_COMPONENT || fmt == GL_DEPTH_COMPONENT32
+                || fmt == GL_DEPTH_COMPONENT32F
                 || fmt == GL_DEPTH32F_STENCIL8) { *params = 32; return true; }
             *params = 0;
             return true;

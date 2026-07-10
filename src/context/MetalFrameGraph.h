@@ -855,6 +855,7 @@ struct ImmediateDrawInfo {
     // 1 = ALPHA, 2 = LUMINANCE, 3 = LUMINANCE_ALPHA, 4 = INTENSITY,
     // 5 = RGB, 6 = RGBA.
     std::uint32_t textureBaseClass = 0;
+    bool textureSampleIsDepth = false;
     bool textureSampleYFlip = false;
     std::array<GLfloat, 4> textureEnvColor = {0.0f, 0.0f, 0.0f, 0.0f};
     GLenum textureCombineRGB = GL_MODULATE;

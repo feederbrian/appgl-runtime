@@ -18595,7 +18595,7 @@ struct AppGLImmediateTextureState {
     uint operandAlpha0;
     uint operandAlpha1;
     uint operandAlpha2;
-    uint _combinePad0;
+    uint textureSampleIsDepth;
     uint _combinePad1;
     uint alphaTestEnabled;
     uint alphaTestFunc;
@@ -18674,6 +18674,26 @@ static float appgl_immediate_combine_alpha_operand(uint operand, float4 source) 
     return operand == kOneMinusSrcAlpha ? 1.0f - source.a : source.a;
 }
 
+static float4 appgl_immediate_expand_combine_sample(
+    float4 sample,
+    constant AppGLImmediateTextureState& textureState) {
+    if (textureState.textureSampleIsDepth == 0u) {
+        return sample;
+    }
+    constexpr uint kBaseAlpha = 1u;
+    constexpr uint kBaseLuminance = 2u;
+    constexpr uint kBaseIntensity = 4u;
+    constexpr uint kBaseRGB = 5u;
+    const float depth = sample.r;
+    switch (textureState.baseClass) {
+        case kBaseAlpha: return float4(1.0f, 1.0f, 1.0f, depth);
+        case kBaseLuminance: return float4(depth, depth, depth, 1.0f);
+        case kBaseIntensity: return float4(depth);
+        case kBaseRGB: return float4(depth, 0.0f, 0.0f, 1.0f);
+        default: return sample;
+    }
+}
+
 static float3 appgl_immediate_apply_combine_rgb(uint combine,
                                                 float3 arg0,
                                                 float3 arg1,
@@ -18732,12 +18752,14 @@ static float4 appgl_immediate_finish_sample(float4 color,
     const float lum = sample.r;
     const float texAlpha = sample.a;
     if (textureState.envMode == kEnvCombine) {
+        const float4 combineSample =
+            appgl_immediate_expand_combine_sample(sample, textureState);
         const float4 rgbSrc0 = appgl_immediate_combine_source(
-            textureState.sourceRGB0, color, sample, textureState);
+            textureState.sourceRGB0, color, combineSample, textureState);
         const float4 rgbSrc1 = appgl_immediate_combine_source(
-            textureState.sourceRGB1, color, sample, textureState);
+            textureState.sourceRGB1, color, combineSample, textureState);
         const float4 rgbSrc2 = appgl_immediate_combine_source(
-            textureState.sourceRGB2, color, sample, textureState);
+            textureState.sourceRGB2, color, combineSample, textureState);
         const float3 rgb0 = appgl_immediate_combine_rgb_operand(
             textureState.operandRGB0, rgbSrc0);
         const float3 rgb1 = appgl_immediate_combine_rgb_operand(
@@ -18745,11 +18767,11 @@ static float4 appgl_immediate_finish_sample(float4 color,
         const float3 rgb2 = appgl_immediate_combine_rgb_operand(
             textureState.operandRGB2, rgbSrc2);
         const float4 alphaSrc0 = appgl_immediate_combine_source(
-            textureState.sourceAlpha0, color, sample, textureState);
+            textureState.sourceAlpha0, color, combineSample, textureState);
         const float4 alphaSrc1 = appgl_immediate_combine_source(
-            textureState.sourceAlpha1, color, sample, textureState);
+            textureState.sourceAlpha1, color, combineSample, textureState);
         const float4 alphaSrc2 = appgl_immediate_combine_source(
-            textureState.sourceAlpha2, color, sample, textureState);
+            textureState.sourceAlpha2, color, combineSample, textureState);
         const float alpha0 = appgl_immediate_combine_alpha_operand(
             textureState.operandAlpha0, alphaSrc0);
         const float alpha1 = appgl_immediate_combine_alpha_operand(
@@ -20805,7 +20827,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             std::uint32_t operandAlpha0;
             std::uint32_t operandAlpha1;
             std::uint32_t operandAlpha2;
-            std::uint32_t combinePad0;
+            std::uint32_t textureSampleIsDepth;
             std::uint32_t combinePad1;
             std::uint32_t alphaTestEnabled;
             std::uint32_t alphaTestFunc;
@@ -20887,7 +20909,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             compatLegacyTextureState
                 ? static_cast<std::uint32_t>(info.textureOperandAlpha[2])
                 : 0u,
-            0u,
+            compatLegacyTextureState && info.textureSampleIsDepth ? 1u : 0u,
             0u,
             compatAlphaTestState ? 1u : 0u,
             static_cast<std::uint32_t>(info.alphaTestFunc),

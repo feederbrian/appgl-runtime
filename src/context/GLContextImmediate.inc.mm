@@ -105,8 +105,12 @@ std::uint32_t appglImmediateTextureBaseClass(
         case GL_COMPRESSED_INTENSITY:
             return kAppGLImmediateTextureBaseIntensity;
         case GL_RGB:
+        case GL_RGB16F:
+        case GL_RGB32F:
             return kAppGLImmediateTextureBaseRGB;
         case GL_RGBA:
+        case GL_RGBA16F:
+        case GL_RGBA32F:
             return kAppGLImmediateTextureBaseRGBA;
         default:
             return 0u;
@@ -6006,6 +6010,8 @@ void GLContext::endImmediate() {
         if (textureBaseClass != 0u) {
             info.textureEnvMode = impl_->texEnv.mode;
             info.textureBaseClass = textureBaseClass;
+            info.textureSampleIsDepth =
+                appglImmediateTextureFormatIsDepth(fixedFunctionTextureInternalFormat);
             info.textureEnvColor = {
                 impl_->texEnv.color[0],
                 impl_->texEnv.color[1],
@@ -8258,6 +8264,8 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
             if (textureBaseClass != 0u) {
                 info.textureEnvMode = impl_->texEnv.mode;
                 info.textureBaseClass = textureBaseClass;
+                info.textureSampleIsDepth =
+                    appglImmediateTextureFormatIsDepth(fixedFunctionTextureInternalFormat);
                 info.textureEnvColor = {
                     impl_->texEnv.color[0],
                     impl_->texEnv.color[1],
