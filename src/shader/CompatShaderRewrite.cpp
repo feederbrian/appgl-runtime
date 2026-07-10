@@ -842,6 +842,105 @@ bool replaceLegacyDesktopTextureCalls(std::string& src) {
     return didReplace;
 }
 
+const char* legacyTextureAliasCoreName(std::string_view legacyName) {
+    for (const auto& alias : kGpuShader4TextureAliases) {
+        if (legacyName == alias.legacyName) {
+            return alias.coreName;
+        }
+    }
+    return nullptr;
+}
+
+bool rewriteLegacyTextureAliasMacros(std::string& src) {
+    bool didRewrite = false;
+    std::size_t lineStart = 0;
+    while (lineStart < src.size()) {
+        std::size_t lineEnd = src.find('\n', lineStart);
+        if (lineEnd == std::string::npos) {
+            lineEnd = src.size();
+        }
+        std::size_t contentEnd = lineEnd;
+        if (contentEnd > lineStart && src[contentEnd - 1] == '\r') {
+            --contentEnd;
+        }
+
+        std::size_t p = lineStart;
+        while (p < contentEnd && (src[p] == ' ' || src[p] == '\t')) {
+            ++p;
+        }
+        if (p >= contentEnd || src.compare(p, 7, "#define") != 0) {
+            if (lineEnd == src.size()) break;
+            lineStart = lineEnd + 1;
+            continue;
+        }
+        p += 7;
+        if (p >= contentEnd || (src[p] != ' ' && src[p] != '\t')) {
+            if (lineEnd == src.size()) break;
+            lineStart = lineEnd + 1;
+            continue;
+        }
+        while (p < contentEnd && (src[p] == ' ' || src[p] == '\t')) {
+            ++p;
+        }
+
+        const std::size_t nameStart = p;
+        while (p < contentEnd && isIdentChar(src[p])) {
+            ++p;
+        }
+        if (p == nameStart ||
+            p >= contentEnd ||
+            (src[p] != ' ' && src[p] != '\t')) {
+            if (lineEnd == src.size()) break;
+            lineStart = lineEnd + 1;
+            continue;
+        }
+        while (p < contentEnd && (src[p] == ' ' || src[p] == '\t')) {
+            ++p;
+        }
+
+        const std::size_t valueStart = p;
+        while (p < contentEnd && isIdentChar(src[p])) {
+            ++p;
+        }
+        if (p == valueStart) {
+            if (lineEnd == src.size()) break;
+            lineStart = lineEnd + 1;
+            continue;
+        }
+        const std::size_t valueEnd = p;
+        while (p < contentEnd && (src[p] == ' ' || src[p] == '\t')) {
+            ++p;
+        }
+        if (p != contentEnd) {
+            if (lineEnd == src.size()) break;
+            lineStart = lineEnd + 1;
+            continue;
+        }
+
+        const std::string_view value(src.data() + valueStart,
+                                     valueEnd - valueStart);
+        const char* replacement = legacyTextureAliasCoreName(value);
+        if (!replacement) {
+            if (lineEnd == src.size()) break;
+            lineStart = lineEnd + 1;
+            continue;
+        }
+
+        const std::size_t oldLen = valueEnd - valueStart;
+        const std::size_t newLen = std::strlen(replacement);
+        src.replace(valueStart, oldLen, replacement);
+        didRewrite = true;
+        if (newLen >= oldLen) {
+            lineEnd += (newLen - oldLen);
+        } else {
+            lineEnd -= (oldLen - newLen);
+        }
+        if (lineEnd == src.size()) break;
+        lineStart = lineEnd + 1;
+    }
+    return didRewrite;
+}
+
 // Replace every literal occurrence of `from` with `to`. Used for
 // dotted field-access rewrites (`gl_Fog.color` → `appgl_FogColor`)
 // where the leading and trailing boundaries are already partly
@@ -2217,11 +2316,19 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         didLegacyDesktopTextureAliasFixup =
             replaceLegacyDesktopTextureCalls(result.source);
     }
+    bool didLegacyTextureAliasMacroFixup = false;
+    if (legacyTextureAliasPath &&
+        result.source.find("#define") != std::string::npos &&
+        result.source.find("texture") != std::string::npos) {
+        didLegacyTextureAliasMacroFixup =
+            rewriteLegacyTextureAliasMacros(result.source);
+    }
 
     if (!didAnyRewrite && !didSamplerFixup && !didGpuShader4TruncateFixup &&
         !didGpuShader4LexicalFixup && !didGpuShader4ShadowFixup &&
         !didGpuShader4TextureAliasFixup &&
-        !didLegacyDesktopTextureAliasFixup) {
+        !didLegacyDesktopTextureAliasFixup &&
+        !didLegacyTextureAliasMacroFixup) {
         return result;
     }
     result.didRewrite = true;
