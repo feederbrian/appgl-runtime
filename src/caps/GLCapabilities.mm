@@ -448,63 +448,60 @@ void GLCapabilities::initializeFormatTable(void* rawMetalDevice) {
     //   GL_LUMINANCE8_A8 : two source bytes → (L, L, L, A)
     //   GL_INTENSITY8    : uploaded byte → (I, I, I, I)
     //
-    // Marked non-renderable because nobody allocates a font atlas as a
-    // color attachment and the replicated-channel storage would make
-    // round-trip writes nonsensical anyway.
-    add(GL_ALPHA8, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-    add(GL_LUMINANCE8, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-    add(GL_LUMINANCE8_ALPHA8, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-    add(GL_INTENSITY8, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+    // Framebuffer completeness follows the effective Metal backing. These
+    // promoted formats use render-target-capable RGBA storage even though
+    // sampling preserves their legacy channel semantics.
+    add(GL_ALPHA8, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+    add(GL_LUMINANCE8, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+    add(GL_LUMINANCE8_ALPHA8, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+    add(GL_INTENSITY8, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
     // Unsized aliases that legacy callers also use as the internalFormat
     // arg to texImage2D. The spec lets the driver pick the precision; we
     // pick the 8-bit tier above and reuse the same RGBA8-backed storage.
-    add(GL_ALPHA, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-    add(GL_LUMINANCE, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-    add(GL_LUMINANCE_ALPHA, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-    add(GL_INTENSITY, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+    add(GL_ALPHA, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+    add(GL_LUMINANCE, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+    add(GL_LUMINANCE_ALPHA, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+    add(GL_INTENSITY, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
     if (appglCompatProfileEnabled()) {
-        add(GL_ALPHA4, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-        add(GL_ALPHA12, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-        add(GL_ALPHA16, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-        add(GL_LUMINANCE4, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-        add(GL_LUMINANCE12, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-        add(GL_LUMINANCE16, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-        add(GL_LUMINANCE4_ALPHA4, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-        add(GL_LUMINANCE6_ALPHA2, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-        add(GL_LUMINANCE12_ALPHA4, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-        add(GL_LUMINANCE12_ALPHA12, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-        add(GL_LUMINANCE16_ALPHA16, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-        add(GL_INTENSITY4, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-        add(GL_INTENSITY12, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-        add(GL_INTENSITY16, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-        add(GL_ALPHA16F_ARB, MTLPixelFormatRGBA16Float, false, true, false, false, false);
-        add(GL_LUMINANCE16F_ARB, MTLPixelFormatRGBA16Float, false, true, false, false, false);
-        add(GL_LUMINANCE_ALPHA16F_ARB, MTLPixelFormatRGBA16Float, false, true, false, false, false);
-        add(GL_INTENSITY16F_ARB, MTLPixelFormatRGBA16Float, false, true, false, false, false);
-        add(GL_ALPHA32F_ARB, MTLPixelFormatRGBA32Float, false, false, false, false, false);
-        add(GL_LUMINANCE32F_ARB, MTLPixelFormatRGBA32Float, false, false, false, false, false);
-        add(GL_LUMINANCE_ALPHA32F_ARB, MTLPixelFormatRGBA32Float, false, false, false, false, false);
-        add(GL_INTENSITY32F_ARB, MTLPixelFormatRGBA32Float, false, false, false, false, false);
-        add(GL_SLUMINANCE8, MTLPixelFormatRGBA8Unorm_sRGB, false, true, false, true, false);
-        add(GL_SLUMINANCE8_ALPHA8, MTLPixelFormatRGBA8Unorm_sRGB, false, true, false, true, false);
+        add(GL_ALPHA4, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+        add(GL_ALPHA12, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+        add(GL_ALPHA16, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+        add(GL_LUMINANCE4, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+        add(GL_LUMINANCE12, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+        add(GL_LUMINANCE16, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+        add(GL_LUMINANCE4_ALPHA4, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+        add(GL_LUMINANCE6_ALPHA2, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+        add(GL_LUMINANCE12_ALPHA4, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+        add(GL_LUMINANCE12_ALPHA12, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+        add(GL_LUMINANCE16_ALPHA16, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+        add(GL_INTENSITY4, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+        add(GL_INTENSITY12, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+        add(GL_INTENSITY16, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+        add(GL_ALPHA16F_ARB, MTLPixelFormatRGBA16Float, true, true, false, false, false);
+        add(GL_LUMINANCE16F_ARB, MTLPixelFormatRGBA16Float, true, true, false, false, false);
+        add(GL_LUMINANCE_ALPHA16F_ARB, MTLPixelFormatRGBA16Float, true, true, false, false, false);
+        add(GL_INTENSITY16F_ARB, MTLPixelFormatRGBA16Float, true, true, false, false, false);
+        add(GL_ALPHA32F_ARB, MTLPixelFormatRGBA32Float, true, false, false, false, false);
+        add(GL_LUMINANCE32F_ARB, MTLPixelFormatRGBA32Float, true, false, false, false, false);
+        add(GL_LUMINANCE_ALPHA32F_ARB, MTLPixelFormatRGBA32Float, true, false, false, false, false);
+        add(GL_INTENSITY32F_ARB, MTLPixelFormatRGBA32Float, true, false, false, false, false);
+        add(GL_SLUMINANCE8, MTLPixelFormatRGBA8Unorm_sRGB, true, true, false, true, false);
+        add(GL_SLUMINANCE8_ALPHA8, MTLPixelFormatRGBA8Unorm_sRGB, true, true, false, true, false);
     }
 
-    // GL_RGB8 has no direct Metal equivalent — Metal only exposes RGBA on
-    // the unorm path, so we re-route to RGBA8 and mark non-renderable so
-    // framebuffer-attachment validation still catches engines trying to use
-    // it as a color target. Texture sampling works because the upload path
-    // expands RGB→RGBA at the driver edge.
-    add(GL_RGB8, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+    // GL_RGB8 has no direct Metal equivalent. The upload path expands RGB to
+    // RGBA and the framebuffer path binds that RGBA8 backing as the target.
+    add(GL_RGB8, MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
     add(GL_RGBA8, MTLPixelFormatRGBA8Unorm, true, true, true, false, false);
 
     // ------------------------------------------------------------------
     // 8-bit snorm — signed [-1, +1] texel coding used for tangent-frame
     // storage by many engines (BAR normal maps included).
     // ------------------------------------------------------------------
-    add(GL_R8_SNORM, MTLPixelFormatR8Snorm, false, true, false, false, false);
-    add(GL_RG8_SNORM, MTLPixelFormatRG8Snorm, false, true, false, false, false);
-    add(GL_RGB8_SNORM, MTLPixelFormatRGBA8Snorm, false, true, false, false, false);
-    add(GL_RGBA8_SNORM, MTLPixelFormatRGBA8Snorm, false, true, false, false, false);
+    add(GL_R8_SNORM, MTLPixelFormatR8Snorm, true, true, false, false, false);
+    add(GL_RG8_SNORM, MTLPixelFormatRG8Snorm, true, true, false, false, false);
+    add(GL_RGB8_SNORM, MTLPixelFormatRGBA8Snorm, true, true, false, false, false);
+    add(GL_RGBA8_SNORM, MTLPixelFormatRGBA8Snorm, true, true, false, false, false);
 
     // ------------------------------------------------------------------
     // 16-bit unorm color — heightmaps and displacement fields.
@@ -514,9 +511,9 @@ void GLCapabilities::initializeFormatTable(void* rawMetalDevice) {
     add(GL_RGBA16, MTLPixelFormatRGBA16Unorm, true, true, false, false, false);
 
     // 16-bit snorm
-    add(GL_R16_SNORM, MTLPixelFormatR16Snorm, false, true, false, false, false);
-    add(GL_RG16_SNORM, MTLPixelFormatRG16Snorm, false, true, false, false, false);
-    add(GL_RGBA16_SNORM, MTLPixelFormatRGBA16Snorm, false, true, false, false, false);
+    add(GL_R16_SNORM, MTLPixelFormatR16Snorm, true, true, false, false, false);
+    add(GL_RG16_SNORM, MTLPixelFormatRG16Snorm, true, true, false, false, false);
+    add(GL_RGBA16_SNORM, MTLPixelFormatRGBA16Snorm, true, true, false, false, false);
 
     // ------------------------------------------------------------------
     // Float color — the HDR pipeline's bread and butter.
@@ -570,7 +567,7 @@ void GLCapabilities::initializeFormatTable(void* rawMetalDevice) {
     // go through the RGBA8_sRGB Metal format and the driver edge handles
     // the channel fill.
     // ------------------------------------------------------------------
-    add(GL_SRGB8, MTLPixelFormatRGBA8Unorm_sRGB, false, true, false, true, false);
+    add(GL_SRGB8, MTLPixelFormatRGBA8Unorm_sRGB, true, true, false, true, false);
     add(GL_SRGB8_ALPHA8, MTLPixelFormatRGBA8Unorm_sRGB, true, true, true, true, false);
 
     // ------------------------------------------------------------------
@@ -581,38 +578,37 @@ void GLCapabilities::initializeFormatTable(void* rawMetalDevice) {
     // (RGB→RGBA padding alpha=1) automatically.
     // ------------------------------------------------------------------
     // Legacy packed / low-bit RGB — promoted to RGBA8Unorm.
-    add(GL_R3_G3_B2,  MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-    add(GL_RGB4,       MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-    add(GL_RGB5,       MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-    add(GL_RGB565,     MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-    add(GL_RGBA2,      MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-    add(GL_RGBA4,      MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
-    add(GL_RGB5_A1,    MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+    add(GL_R3_G3_B2,  MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+    add(GL_RGB4,       MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+    add(GL_RGB5,       MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+    add(GL_RGB565,     MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+    add(GL_RGBA2,      MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+    add(GL_RGBA4,      MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
+    add(GL_RGB5_A1,    MTLPixelFormatRGBA8Unorm, true, true, false, false, false);
     // 10/12-bit per channel — promoted to 16-bit.
-    add(GL_RGB10,      MTLPixelFormatRGBA16Unorm, false, true, false, false, false);
-    add(GL_RGB12,      MTLPixelFormatRGBA16Unorm, false, true, false, false, false);
-    add(GL_RGBA12,     MTLPixelFormatRGBA16Unorm, false, true, false, false, false);
+    add(GL_RGB10,      MTLPixelFormatRGBA16Unorm, true, true, false, false, false);
+    add(GL_RGB12,      MTLPixelFormatRGBA16Unorm, true, true, false, false, false);
+    add(GL_RGBA12,     MTLPixelFormatRGBA16Unorm, true, true, false, false, false);
 
     // ------------------------------------------------------------------
     // RGB-only sized formats (16-bit, float, integer). Metal has no 3-
     // channel pixel formats; we promote to the 4-channel RGBA variant and
-    // pad alpha at upload time. Marked non-renderable because Metal
-    // render targets must match the pipeline output format and we can't
-    // use RGB-only render targets.
+    // pad alpha at upload time. The render pipeline binds the promoted RGBA
+    // backing format, so these remain valid framebuffer targets.
     // ------------------------------------------------------------------
-    add(GL_RGB16,        MTLPixelFormatRGBA16Unorm,  false, true, false, false, false);
-    add(GL_RGB16_SNORM,  MTLPixelFormatRGBA16Snorm,  false, true, false, false, false);
-    add(GL_RGB16F,       MTLPixelFormatRGBA16Float,  false, true, false, false, false);
-    add(GL_RGB32F,       MTLPixelFormatRGBA32Float,  false, false, false, false, false);
-    add(GL_RGB8I,        MTLPixelFormatRGBA8Sint,    false, false, false, false, false);
-    add(GL_RGB8UI,       MTLPixelFormatRGBA8Uint,    false, false, false, false, false);
-    add(GL_RGB16I,       MTLPixelFormatRGBA16Sint,   false, false, false, false, false);
-    add(GL_RGB16UI,      MTLPixelFormatRGBA16Uint,   false, false, false, false, false);
-    add(GL_RGB32I,       MTLPixelFormatRGBA32Sint,   false, false, false, false, false);
-    add(GL_RGB32UI,      MTLPixelFormatRGBA32Uint,   false, false, false, false, false);
+    add(GL_RGB16,        MTLPixelFormatRGBA16Unorm,  true, true, false, false, false);
+    add(GL_RGB16_SNORM,  MTLPixelFormatRGBA16Snorm,  true, true, false, false, false);
+    add(GL_RGB16F,       MTLPixelFormatRGBA16Float,  true, true, false, false, false);
+    add(GL_RGB32F,       MTLPixelFormatRGBA32Float,  true, false, false, false, false);
+    add(GL_RGB8I,        MTLPixelFormatRGBA8Sint,    true, false, false, false, false);
+    add(GL_RGB8UI,       MTLPixelFormatRGBA8Uint,    true, false, false, false, false);
+    add(GL_RGB16I,       MTLPixelFormatRGBA16Sint,   true, false, false, false, false);
+    add(GL_RGB16UI,      MTLPixelFormatRGBA16Uint,   true, false, false, false, false);
+    add(GL_RGB32I,       MTLPixelFormatRGBA32Sint,   true, false, false, false, false);
+    add(GL_RGB32UI,      MTLPixelFormatRGBA32Uint,   true, false, false, false, false);
 
-    // Shared-exponent float (Metal supports it natively for sampling).
-    add(GL_RGB9_E5, MTLPixelFormatRGB9E5Float, false, true, false, false, false);
+    // Shared-exponent float is natively renderable and sampleable on Metal.
+    add(GL_RGB9_E5, MTLPixelFormatRGB9E5Float, true, true, false, false, false);
 
     // ------------------------------------------------------------------
     // Depth / stencil. DEPTH_COMPONENT24 maps to Depth32Float because Metal

@@ -23431,11 +23431,22 @@ struct GLContext::Impl {
     struct AttachmentInfo {
         bool present = false;
         bool complete = false;
+        bool renderable = false;
         GLsizei width = 0;
         GLsizei height = 0;
         GLsizei samples = 0;
         GLenum internalFormat = 0;
     };
+
+    bool framebufferAttachmentFormatRenderable(GLenum internalFormat) const {
+        if (capabilities != nullptr) {
+            const auto capability = capabilities->format(internalFormat);
+            if (capability.has_value()) {
+                return capability->renderable;
+            }
+        }
+        return !isCompressedInternalFormat(internalFormat);
+    }
 
     struct ResolvedTextureAttachment {
         bool valid = false;
@@ -23596,6 +23607,8 @@ struct GLContext::Impl {
             info.internalFormat = attachedTexture->desc.internalFormat != 0
                 ? attachedTexture->desc.internalFormat
                 : level->second.desc.internalFormat;
+            info.renderable =
+                framebufferAttachmentFormatRenderable(info.internalFormat);
             return info;
         }
         if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
@@ -23608,6 +23621,8 @@ struct GLContext::Impl {
             info.height = renderbuffer->height;
             info.samples = renderbuffer->samples;
             info.internalFormat = renderbuffer->internalFormat;
+            info.renderable =
+                framebufferAttachmentFormatRenderable(info.internalFormat);
             return info;
         }
         return info;
@@ -23699,6 +23714,9 @@ struct GLContext::Impl {
             }
             if (isColorAttachment(attachmentPoint) && !isColorFormat(info.internalFormat)) {
                 return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            }
+            if (isColorAttachment(attachmentPoint) && !info.renderable) {
+                return GL_FRAMEBUFFER_UNSUPPORTED;
             }
             if (attachmentPoint == GL_DEPTH_ATTACHMENT && !isDepthFormat(info.internalFormat)) {
                 return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
