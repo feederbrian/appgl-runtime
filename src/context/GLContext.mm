@@ -7471,6 +7471,40 @@ std::uint8_t normalizedByte(GLfloat value) {
     return static_cast<std::uint8_t>(clamped * 255.0f + 0.5f);
 }
 
+bool materializeRGB9E5TextureShadowFromNativeData(
+    GLTextureImageLevel& image) {
+    if (image.nativeBpp != sizeof(std::uint32_t) ||
+        image.nativeData.empty()) {
+        return false;
+    }
+    const std::size_t pixelCount =
+        safeDimension(image.desc.width) *
+        safeDimension(image.desc.height) *
+        safeDimension(image.desc.depth);
+    if (pixelCount == 0 ||
+        image.nativeData.size() < pixelCount * sizeof(std::uint32_t)) {
+        return false;
+    }
+
+    image.rgba8.resize(pixelCount * 4u);
+    for (std::size_t pixel = 0; pixel < pixelCount; ++pixel) {
+        std::uint32_t word = 0;
+        std::memcpy(&word,
+                    image.nativeData.data() + pixel * sizeof(word),
+                    sizeof(word));
+        double r = 0.0;
+        double g = 0.0;
+        double b = 0.0;
+        unpackUF_5_9_9_9_REV(word, r, g, b);
+        std::uint8_t* rgba = image.rgba8.data() + pixel * 4u;
+        rgba[0] = normalizedByte(static_cast<GLfloat>(r));
+        rgba[1] = normalizedByte(static_cast<GLfloat>(g));
+        rgba[2] = normalizedByte(static_cast<GLfloat>(b));
+        rgba[3] = 255u;
+    }
+    return true;
+}
+
 GLfloat linearToSRGBValue(GLfloat value) {
     const GLfloat clamped = std::clamp(value, 0.0f, 1.0f);
     if (clamped <= 0.0031308f) {
@@ -13984,8 +14018,14 @@ struct GLContext::Impl {
         }
 
         id<MTLTexture> texture = (__bridge id<MTLTexture>)object.metalTexture;
-        if (texture == nil || texture.textureType != MTLTextureTypeCube ||
-            texture.pixelFormat != MTLPixelFormatRGBA8Unorm) {
+        if (texture == nil || texture.textureType != MTLTextureTypeCube) {
+            return true;
+        }
+        const bool readRGBA8 =
+            texture.pixelFormat == MTLPixelFormatRGBA8Unorm;
+        const bool readRGB9E5 =
+            texture.pixelFormat == MTLPixelFormatRGB9E5Float;
+        if (!readRGBA8 && !readRGB9E5) {
             return true;
         }
 
@@ -14011,16 +14051,32 @@ struct GLContext::Impl {
                     continue;
                 }
 
-                image.rgba8.assign(static_cast<std::size_t>(bytesPerImage), 0u);
                 const MTLRegion region = MTLRegionMake2D(0, 0, width, height);
-                [texture getBytes:image.rgba8.data()
-                      bytesPerRow:bytesPerRow
-                    bytesPerImage:bytesPerImage
-                       fromRegion:region
-                      mipmapLevel:mipLevel
-                            slice:face];
-                image.nativeData.clear();
-                image.nativeBpp = 0;
+                if (readRGB9E5) {
+                    image.nativeData.assign(
+                        static_cast<std::size_t>(bytesPerImage), 0u);
+                    image.nativeBpp = 4u;
+                    [texture getBytes:image.nativeData.data()
+                          bytesPerRow:bytesPerRow
+                        bytesPerImage:bytesPerImage
+                           fromRegion:region
+                          mipmapLevel:mipLevel
+                                slice:face];
+                    if (!materializeRGB9E5TextureShadowFromNativeData(image)) {
+                        return false;
+                    }
+                } else {
+                    image.rgba8.assign(
+                        static_cast<std::size_t>(bytesPerImage), 0u);
+                    [texture getBytes:image.rgba8.data()
+                          bytesPerRow:bytesPerRow
+                        bytesPerImage:bytesPerImage
+                           fromRegion:region
+                          mipmapLevel:mipLevel
+                                slice:face];
+                    image.nativeData.clear();
+                    image.nativeBpp = 0;
+                }
                 image.mipShadowEvicted = false;
                 image.mipShadowEvictedRgba8Bytes = 0;
                 image.mipShadowEvictedNativeBytes = 0;
@@ -15781,6 +15837,27 @@ struct GLContext::Impl {
                                 (static_cast<unsigned>(rgba[3]) * 3u + 127u) / 255u));
                         const std::uint32_t word =
                             r | (g << 10) | (b << 20) | (a << 30);
+                        std::memcpy(
+                            generated.nativeData.data() + pixel * 4u,
+                            &word,
+                            sizeof(word));
+                    }
+                    generated.nativeBpp = 4;
+                } else if (hasNativeBase &&
+                           chainBase.nativeBpp == 4 &&
+                           chainBase.desc.internalFormat == GL_RGB9_E5) {
+                    const std::size_t pixelCount =
+                        static_cast<std::size_t>(generated.desc.width) *
+                        static_cast<std::size_t>(generated.desc.height) *
+                        static_cast<std::size_t>(generated.desc.depth);
+                    generated.nativeData.resize(pixelCount * 4u, 0);
+                    for (std::size_t pixel = 0; pixel < pixelCount; ++pixel) {
+                        const std::uint8_t* rgba =
+                            generated.rgba8.data() + pixel * 4u;
+                        const std::uint32_t word = packUF_5_9_9_9_REV(
+                            static_cast<double>(rgba[0]) / 255.0,
+                            static_cast<double>(rgba[1]) / 255.0,
+                            static_cast<double>(rgba[2]) / 255.0);
                         std::memcpy(
                             generated.nativeData.data() + pixel * 4u,
                             &word,
