@@ -5104,22 +5104,46 @@ bool GLContext::linkProgram(GLuint program) {
                 // vertex processing feeds a user fragment shader. Synthesize the
                 // legacy immediate-mode vertex stage even when the fragment shader
                 // only consumes gl_FragCoord/uniforms and has no texcoord rewrite.
-                static constexpr const char* kCompatFragmentOnlyVertexSource =
+                bool needsCubeArrayTexcoord = false;
+                for (const auto& uniform : fragmentShader->declaredUniforms) {
+                    switch (uniform.type) {
+                        case GL_SAMPLER_CUBE_MAP_ARRAY:
+                        case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+                        case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+                        case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+                            needsCubeArrayTexcoord = true;
+                            break;
+                        default:
+                            break;
+                    }
+                    if (needsCubeArrayTexcoord) {
+                        break;
+                    }
+                }
+                static constexpr const char* kCompatFragmentOnlyVertexPrefix =
                     "#version 330 core\n"
                     "layout(location = 0) in vec4 piglit_vertex;\n"
-                    "layout(location = 1) in vec4 piglit_texcoord;\n"
+                    "layout(location = 1) in ";
+                static constexpr const char* kCompatFragmentOnlyVertexSuffix =
+                    " piglit_texcoord;\n"
                     "uniform mat4 appgl_ModelViewProjectionMatrix;\n"
                     "out vec4 appgl_TexCoord[8];\n"
                     "void main() {\n"
                     "    gl_Position = appgl_ModelViewProjectionMatrix * piglit_vertex;\n"
                     "    for (int i = 0; i < 8; ++i) {\n"
                     "        appgl_TexCoord[i] = vec4(0.0, 0.0, 0.0, 1.0);\n"
-                    "    }\n"
-                    "    appgl_TexCoord[0] = piglit_texcoord;\n"
-                    "}\n";
+                    "    }\n";
+                std::string compatFragmentOnlyVertexSource =
+                    std::string(kCompatFragmentOnlyVertexPrefix) +
+                    (needsCubeArrayTexcoord ? "vec4" : "vec2") +
+                    kCompatFragmentOnlyVertexSuffix;
+                compatFragmentOnlyVertexSource += needsCubeArrayTexcoord
+                    ? "    appgl_TexCoord[0] = piglit_texcoord;\n"
+                    : "    appgl_TexCoord[0] = vec4(piglit_texcoord, 0.0, 1.0);\n";
+                compatFragmentOnlyVertexSource += "}\n";
                 std::string vsLinkSource =
                     rewriteShaderDrawParametersForSpirv(
-                        kCompatFragmentOnlyVertexSource, GL_VERTEX_SHADER);
+                        compatFragmentOnlyVertexSource, GL_VERTEX_SHADER);
                 std::string fsLinkSource =
                     fsRewrite.didRewrite ? fsRewrite.source : fragmentShader->source;
                 fsLinkSource =

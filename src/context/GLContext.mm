@@ -48227,15 +48227,16 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
         return false;
     }
 
-    auto hasVertexInput = [&](GLuint location) {
+    auto vertexInputAt = [&](GLuint location)
+        -> const ShaderReflection::VertexInput* {
         for (const auto& input : program->vertexReflection.vertexInputs) {
             if (input.location == location || input.sourceLocation == location) {
-                return true;
+                return &input;
             }
         }
-        return false;
+        return nullptr;
     };
-    if (!hasVertexInput(0)) {
+    if (vertexInputAt(0) == nullptr) {
         return false;
     }
 
@@ -48262,13 +48263,15 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
         tdi.vertexAttributeLayouts.push_back(layout);
     };
     addImmediateAttributeLayout(0, 0, 4);
-    if (hasVertexInput(1)) {
-        addImmediateAttributeLayout(1, sizeof(float) * 8u, 4);
+    if (const auto* input = vertexInputAt(1)) {
+        addImmediateAttributeLayout(
+            1, sizeof(float) * 8u,
+            shaderVertexInputComponentCount(input->type));
     }
-    if (hasVertexInput(3)) {
+    if (vertexInputAt(3) != nullptr) {
         addImmediateAttributeLayout(3, sizeof(float) * 4u, 4);
     }
-    if (hasVertexInput(8)) {
+    if (vertexInputAt(8) != nullptr) {
         addImmediateAttributeLayout(8, sizeof(float) * 8u, 4);
     }
 
