@@ -7902,14 +7902,18 @@ std::vector<std::uint8_t> downsampleNative(
         return dest;
     }
 
+    const bool reduceDepth = destDepth < sourceDepth;
+    const GLsizei depthSamples = reduceDepth ? 2 : 1;
     for (GLsizei z = 0; z < destDepth; ++z) {
         for (GLsizei y = 0; y < destHeight; ++y) {
             for (GLsizei x = 0; x < destWidth; ++x) {
-                // Accumulate per-channel sums across the 2×2×2 footprint.
+                // Array layers use a 2x2x1 footprint; true 3D mips use 2x2x2.
                 double sums[4] = {0.0, 0.0, 0.0, 0.0};
                 int samples = 0;
-                for (GLsizei dz = 0; dz < 2; ++dz) {
-                    const GLsizei sz = std::min<GLsizei>(z * 2 + dz, sourceDepth - 1);
+                for (GLsizei dz = 0; dz < depthSamples; ++dz) {
+                    const GLsizei sz = reduceDepth
+                        ? std::min<GLsizei>(z * 2 + dz, sourceDepth - 1)
+                        : std::min<GLsizei>(z, sourceDepth - 1);
                     for (GLsizei dy = 0; dy < 2; ++dy) {
                         const GLsizei sy = std::min<GLsizei>(y * 2 + dy, sourceHeight - 1);
                         for (GLsizei dx = 0; dx < 2; ++dx) {
@@ -7994,13 +7998,17 @@ std::vector<std::uint8_t> downsampleRGBA8(
         return dest;
     }
 
+    const bool reduceDepth = destDepth < sourceDepth;
+    const GLsizei depthSamples = reduceDepth ? 2 : 1;
     for (GLsizei z = 0; z < destDepth; ++z) {
         for (GLsizei y = 0; y < destHeight; ++y) {
             for (GLsizei x = 0; x < destWidth; ++x) {
                 std::uint32_t totals[4] = {};
                 std::uint32_t samples = 0;
-                for (GLsizei dz = 0; dz < 2; ++dz) {
-                    const GLsizei sourceZ = std::min<GLsizei>(z * 2 + dz, sourceDepth - 1);
+                for (GLsizei dz = 0; dz < depthSamples; ++dz) {
+                    const GLsizei sourceZ = reduceDepth
+                        ? std::min<GLsizei>(z * 2 + dz, sourceDepth - 1)
+                        : std::min<GLsizei>(z, sourceDepth - 1);
                     for (GLsizei dy = 0; dy < 2; ++dy) {
                         const GLsizei sourceY = std::min<GLsizei>(y * 2 + dy, sourceHeight - 1);
                         for (GLsizei dx = 0; dx < 2; ++dx) {
@@ -8047,8 +8055,11 @@ std::vector<std::uint8_t> downsampleRGBA8NearestHigh(
     if (source.empty()) {
         return dest;
     }
+    const bool reduceDepth = destDepth < sourceDepth;
     for (GLsizei z = 0; z < destDepth; ++z) {
-        const GLsizei sourceZ = std::min<GLsizei>(z * 2 + 1, sourceDepth - 1);
+        const GLsizei sourceZ = reduceDepth
+            ? std::min<GLsizei>(z * 2 + 1, sourceDepth - 1)
+            : std::min<GLsizei>(z, sourceDepth - 1);
         for (GLsizei y = 0; y < destHeight; ++y) {
             const GLsizei sourceY = std::min<GLsizei>(y * 2 + 1, sourceHeight - 1);
             for (GLsizei x = 0; x < destWidth; ++x) {
@@ -15669,106 +15680,139 @@ struct GLContext::Impl {
             finalLevel = std::min(finalLevel, object.desc.levels - 1);
         }
 
-        // Resolve the native downsample format once: it's shared across
-        // every generated mip level (we only downsample within one
-        // texture's pixel format). Returns kind=UNorm/channels=0 when
-        // the base isn't a native-format texture (rgba8 path still does
-        // the real work), which the caller skips below.
-        const bool hasNativeBase = baseLevel.nativeBpp > 0 && !baseLevel.nativeData.empty();
-        NativeDownsampleFormat nativeFmt{};
-        if (hasNativeBase) {
-            const MTLPixelFormat mtlFmt = metalRenderbufferFormat(baseLevel.desc.internalFormat);
-            const auto info = nativeFormatInfo(mtlFmt);
-            nativeFmt.channels = info.channels;
-            nativeFmt.channelBytes = info.bytesPerChannel;
-            switch (info.compType) {
-                case NativeFormatInfo::UNorm: nativeFmt.kind = NativeDownsampleFormat::UNorm; break;
-                case NativeFormatInfo::SNorm: nativeFmt.kind = NativeDownsampleFormat::SNorm; break;
-                case NativeFormatInfo::UInt:  nativeFmt.kind = NativeDownsampleFormat::UInt; break;
-                case NativeFormatInfo::SInt:  nativeFmt.kind = NativeDownsampleFormat::SInt; break;
-                case NativeFormatInfo::Float: nativeFmt.kind = NativeDownsampleFormat::Float; break;
-            }
-        }
-
-        GLTextureImageLevel previousLevel = baseLevel;
-        for (GLint levelIndex = baseLevelIndex + 1; levelIndex <= finalLevel; ++levelIndex) {
-            const GLint offsetFromBase = levelIndex - baseLevelIndex;
-            GLTextureImageLevel generated;
-            generated.desc = baseLevel.desc;
-            generated.desc.width = glMipDimensionAtLevel(baseLevel.desc.width, offsetFromBase);
-            generated.desc.height = object.target == GL_TEXTURE_1D ? 1 : glMipDimensionAtLevel(baseLevel.desc.height, offsetFromBase);
-            generated.desc.depth = object.target == GL_TEXTURE_3D
-                ? glMipDimensionAtLevel(baseLevel.desc.depth, offsetFromBase)
-                : baseLevel.desc.depth;
-            generated.desc.levels = std::max<GLsizei>(object.desc.levels, levelIndex + 1);
-            generated.defined = true;
-            generated.generatedMipLevel = true;
-            generated.immutableStorageLevel = baseLevel.immutableStorageLevel;
-            const bool legacyIntensityHighPrecision =
-                baseLevel.desc.internalFormat == GL_INTENSITY12 ||
-                baseLevel.desc.internalFormat == GL_INTENSITY16 ||
-                baseLevel.desc.internalFormat == GL_INTENSITY16F_ARB ||
-                baseLevel.desc.internalFormat == GL_INTENSITY32F_ARB;
-            generated.rgba8 = legacyIntensityHighPrecision
-                ? downsampleRGBA8NearestHigh(
-                    previousLevel.rgba8,
-                    previousLevel.desc.width,
-                    previousLevel.desc.height,
-                    previousLevel.desc.depth,
-                    generated.desc.width,
-                    generated.desc.height,
-                    generated.desc.depth)
-                : downsampleRGBA8(
-                    previousLevel.rgba8,
-                    previousLevel.desc.width,
-                    previousLevel.desc.height,
-                    previousLevel.desc.depth,
-                    generated.desc.width,
-                    generated.desc.height,
-                    generated.desc.depth);
-            // Also downsample nativeData when the texture has a non-
-            // RGBA8 Metal pixel format. This matches what replaceMetal-
-            // Texture's upload loop expects and avoids the AGX
-            // `bytes_per_row >= used_bytes_per_row` assertion that
-            // previously destabilised texture_gather / texture_border_clamp
-            // tests (flake cluster surfaced via Golden Diff).
-            if (hasNativeBase && nativeFmt.channels > 0) {
-                generated.nativeData = downsampleNative(
-                    previousLevel.nativeData,
-                    previousLevel.desc.width,
-                    previousLevel.desc.height,
-                    previousLevel.desc.depth,
-                    generated.desc.width,
-                    generated.desc.height,
-                    generated.desc.depth,
-                    nativeFmt
-                );
-                generated.nativeBpp = baseLevel.nativeBpp;
-            } else if (hasNativeBase &&
-                       baseLevel.nativeBpp == 4 &&
-                       baseLevel.desc.internalFormat == GL_RGB10_A2) {
-                const std::size_t pixelCount =
-                    static_cast<std::size_t>(generated.desc.width) *
-                    static_cast<std::size_t>(generated.desc.height) *
-                    static_cast<std::size_t>(generated.desc.depth);
-                generated.nativeData.resize(pixelCount * 4u, 0);
-                for (std::size_t pixel = 0; pixel < pixelCount; ++pixel) {
-                    const std::uint8_t* rgba = generated.rgba8.data() + pixel * 4u;
-                    const std::uint32_t r = static_cast<std::uint32_t>(
-                        std::min<unsigned>(1023u, (static_cast<unsigned>(rgba[0]) * 1023u + 127u) / 255u));
-                    const std::uint32_t g = static_cast<std::uint32_t>(
-                        std::min<unsigned>(1023u, (static_cast<unsigned>(rgba[1]) * 1023u + 127u) / 255u));
-                    const std::uint32_t b = static_cast<std::uint32_t>(
-                        std::min<unsigned>(1023u, (static_cast<unsigned>(rgba[2]) * 1023u + 127u) / 255u));
-                    const std::uint32_t a = static_cast<std::uint32_t>(
-                        std::min<unsigned>(3u, (static_cast<unsigned>(rgba[3]) * 3u + 127u) / 255u));
-                    const std::uint32_t word = r | (g << 10) | (b << 20) | (a << 30);
-                    std::memcpy(generated.nativeData.data() + pixel * 4u, &word, sizeof(word));
+        auto generateChain = [&](auto& levels,
+                                 const GLTextureImageLevel& chainBase) {
+            const bool hasNativeBase =
+                chainBase.nativeBpp > 0 && !chainBase.nativeData.empty();
+            NativeDownsampleFormat nativeFmt{};
+            if (hasNativeBase) {
+                const MTLPixelFormat mtlFmt =
+                    metalRenderbufferFormat(chainBase.desc.internalFormat);
+                const auto info = nativeFormatInfo(mtlFmt);
+                nativeFmt.channels = info.channels;
+                nativeFmt.channelBytes = info.bytesPerChannel;
+                switch (info.compType) {
+                    case NativeFormatInfo::UNorm: nativeFmt.kind = NativeDownsampleFormat::UNorm; break;
+                    case NativeFormatInfo::SNorm: nativeFmt.kind = NativeDownsampleFormat::SNorm; break;
+                    case NativeFormatInfo::UInt:  nativeFmt.kind = NativeDownsampleFormat::UInt; break;
+                    case NativeFormatInfo::SInt:  nativeFmt.kind = NativeDownsampleFormat::SInt; break;
+                    case NativeFormatInfo::Float: nativeFmt.kind = NativeDownsampleFormat::Float; break;
                 }
-                generated.nativeBpp = 4;
             }
-            object.levels[levelIndex] = std::move(generated);
-            previousLevel = object.levels.at(levelIndex);
+
+            GLTextureImageLevel previousLevel = chainBase;
+            for (GLint levelIndex = baseLevelIndex + 1;
+                 levelIndex <= finalLevel;
+                 ++levelIndex) {
+                const GLint offsetFromBase = levelIndex - baseLevelIndex;
+                GLTextureImageLevel generated;
+                generated.desc = chainBase.desc;
+                generated.desc.width = glMipDimensionAtLevel(
+                    chainBase.desc.width, offsetFromBase);
+                generated.desc.height = object.target == GL_TEXTURE_1D
+                    ? 1
+                    : glMipDimensionAtLevel(
+                          chainBase.desc.height, offsetFromBase);
+                generated.desc.depth = object.target == GL_TEXTURE_3D
+                    ? glMipDimensionAtLevel(
+                          chainBase.desc.depth, offsetFromBase)
+                    : chainBase.desc.depth;
+                generated.desc.levels = std::max<GLsizei>(
+                    object.desc.levels, levelIndex + 1);
+                generated.defined = true;
+                generated.generatedMipLevel = true;
+                generated.immutableStorageLevel =
+                    chainBase.immutableStorageLevel;
+                const bool legacyIntensityHighPrecision =
+                    chainBase.desc.internalFormat == GL_INTENSITY12 ||
+                    chainBase.desc.internalFormat == GL_INTENSITY16 ||
+                    chainBase.desc.internalFormat == GL_INTENSITY16F_ARB ||
+                    chainBase.desc.internalFormat == GL_INTENSITY32F_ARB;
+                generated.rgba8 = legacyIntensityHighPrecision
+                    ? downsampleRGBA8NearestHigh(
+                          previousLevel.rgba8,
+                          previousLevel.desc.width,
+                          previousLevel.desc.height,
+                          previousLevel.desc.depth,
+                          generated.desc.width,
+                          generated.desc.height,
+                          generated.desc.depth)
+                    : downsampleRGBA8(
+                          previousLevel.rgba8,
+                          previousLevel.desc.width,
+                          previousLevel.desc.height,
+                          previousLevel.desc.depth,
+                          generated.desc.width,
+                          generated.desc.height,
+                          generated.desc.depth);
+                if (hasNativeBase && nativeFmt.channels > 0) {
+                    generated.nativeData = downsampleNative(
+                        previousLevel.nativeData,
+                        previousLevel.desc.width,
+                        previousLevel.desc.height,
+                        previousLevel.desc.depth,
+                        generated.desc.width,
+                        generated.desc.height,
+                        generated.desc.depth,
+                        nativeFmt);
+                    generated.nativeBpp = chainBase.nativeBpp;
+                } else if (hasNativeBase &&
+                           chainBase.nativeBpp == 4 &&
+                           chainBase.desc.internalFormat == GL_RGB10_A2) {
+                    const std::size_t pixelCount =
+                        static_cast<std::size_t>(generated.desc.width) *
+                        static_cast<std::size_t>(generated.desc.height) *
+                        static_cast<std::size_t>(generated.desc.depth);
+                    generated.nativeData.resize(pixelCount * 4u, 0);
+                    for (std::size_t pixel = 0; pixel < pixelCount; ++pixel) {
+                        const std::uint8_t* rgba =
+                            generated.rgba8.data() + pixel * 4u;
+                        const std::uint32_t r = static_cast<std::uint32_t>(
+                            std::min<unsigned>(1023u,
+                                (static_cast<unsigned>(rgba[0]) * 1023u + 127u) / 255u));
+                        const std::uint32_t g = static_cast<std::uint32_t>(
+                            std::min<unsigned>(1023u,
+                                (static_cast<unsigned>(rgba[1]) * 1023u + 127u) / 255u));
+                        const std::uint32_t b = static_cast<std::uint32_t>(
+                            std::min<unsigned>(1023u,
+                                (static_cast<unsigned>(rgba[2]) * 1023u + 127u) / 255u));
+                        const std::uint32_t a = static_cast<std::uint32_t>(
+                            std::min<unsigned>(3u,
+                                (static_cast<unsigned>(rgba[3]) * 3u + 127u) / 255u));
+                        const std::uint32_t word =
+                            r | (g << 10) | (b << 20) | (a << 30);
+                        std::memcpy(
+                            generated.nativeData.data() + pixel * 4u,
+                            &word,
+                            sizeof(word));
+                    }
+                    generated.nativeBpp = 4;
+                }
+                levels[levelIndex] = std::move(generated);
+                previousLevel = levels.at(levelIndex);
+            }
+        };
+
+        if (object.target == GL_TEXTURE_CUBE_MAP) {
+            for (auto& faceLevels : object.cubeFaceLevels) {
+                const auto faceBaseIt = faceLevels.find(baseLevelIndex);
+                if (faceBaseIt == faceLevels.end() ||
+                    !faceBaseIt->second.defined ||
+                    faceBaseIt->second.rgba8.empty()) {
+                    return false;
+                }
+                const GLTextureImageLevel faceBase = faceBaseIt->second;
+                generateChain(faceLevels, faceBase);
+            }
+            for (GLint levelIndex = baseLevelIndex + 1;
+                 levelIndex <= finalLevel;
+                 ++levelIndex) {
+                object.levels[levelIndex] =
+                    object.cubeFaceLevels[0].at(levelIndex);
+            }
+            object.cubeFaceShadowsAuthoritative = true;
+        } else {
+            generateChain(object.levels, baseLevel);
         }
 
         if (const auto levelZero = object.levels.find(0); levelZero != object.levels.end()) {
@@ -15780,6 +15824,14 @@ struct GLContext::Impl {
         for (auto& [levelIndex, image] : object.levels) {
             (void)levelIndex;
             image.desc.levels = object.desc.levels;
+        }
+        if (object.target == GL_TEXTURE_CUBE_MAP) {
+            for (auto& faceLevels : object.cubeFaceLevels) {
+                for (auto& [levelIndex, image] : faceLevels) {
+                    (void)levelIndex;
+                    image.desc.levels = object.desc.levels;
+                }
+            }
         }
         return replaceMetalTexture(object);
     }
