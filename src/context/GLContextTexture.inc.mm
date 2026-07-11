@@ -2162,7 +2162,9 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
     const int requestedCubeFaceIndex =
         Impl::cubeFaceIndexForTarget(requestTarget);
     const auto levelImageForReadback = [&]() -> const GLTextureImageLevel* {
-        if (obj->target == GL_TEXTURE_CUBE_MAP && requestedCubeFaceIndex >= 0) {
+        if (obj->target == GL_TEXTURE_CUBE_MAP &&
+            !obj->sparseTexture &&
+            requestedCubeFaceIndex >= 0) {
             const auto& faceLevels = obj->cubeFaceLevels[
                 static_cast<std::size_t>(requestedCubeFaceIndex)];
             const auto faceIt = faceLevels.find(level);
@@ -2603,6 +2605,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
 
     if (!packPBOBound &&
         obj->target == GL_TEXTURE_CUBE_MAP &&
+        !obj->sparseTexture &&
         requestedCubeFaceIndex >= 0 &&
         obj->cubeFaceShadowsAuthoritative &&
         ((format == GL_RGBA && type == GL_FLOAT) ||
