@@ -47991,7 +47991,7 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
     auto immediateAttributeLocationSupported = [](GLuint location) {
         switch (location) {
             case 0: // position
-            case 1: // texcoord0 vec2
+            case 1: // texcoord0 vec4
             case 3: // color
             case 8: // texcoord0 vec4
                 return true;
@@ -48059,7 +48059,7 @@ bool GLContext::Impl::encodeImmediateTranslatedProgramDraw(
     };
     addImmediateAttributeLayout(0, 0, 4);
     if (hasVertexInput(1)) {
-        addImmediateAttributeLayout(1, sizeof(float) * 8u, 2);
+        addImmediateAttributeLayout(1, sizeof(float) * 8u, 4);
     }
     if (hasVertexInput(3)) {
         addImmediateAttributeLayout(3, sizeof(float) * 4u, 4);

@@ -5107,7 +5107,7 @@ bool GLContext::linkProgram(GLuint program) {
                 static constexpr const char* kCompatFragmentOnlyVertexSource =
                     "#version 330 core\n"
                     "layout(location = 0) in vec4 piglit_vertex;\n"
-                    "layout(location = 1) in vec2 piglit_texcoord;\n"
+                    "layout(location = 1) in vec4 piglit_texcoord;\n"
                     "uniform mat4 appgl_ModelViewProjectionMatrix;\n"
                     "out vec4 appgl_TexCoord[8];\n"
                     "void main() {\n"
@@ -5115,7 +5115,7 @@ bool GLContext::linkProgram(GLuint program) {
                     "    for (int i = 0; i < 8; ++i) {\n"
                     "        appgl_TexCoord[i] = vec4(0.0, 0.0, 0.0, 1.0);\n"
                     "    }\n"
-                    "    appgl_TexCoord[0] = vec4(piglit_texcoord, 0.0, 1.0);\n"
+                    "    appgl_TexCoord[0] = piglit_texcoord;\n"
                     "}\n";
                 std::string vsLinkSource =
                     rewriteShaderDrawParametersForSpirv(
