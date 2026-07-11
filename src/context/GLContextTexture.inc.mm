@@ -2159,7 +2159,18 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
     // (== offset 0) is a valid PBO destination.
     if (pixels == nullptr && !packPBOBound) return true;
 
+    const int requestedCubeFaceIndex =
+        Impl::cubeFaceIndexForTarget(requestTarget);
     const auto levelImageForReadback = [&]() -> const GLTextureImageLevel* {
+        if (obj->target == GL_TEXTURE_CUBE_MAP && requestedCubeFaceIndex >= 0) {
+            const auto& faceLevels = obj->cubeFaceLevels[
+                static_cast<std::size_t>(requestedCubeFaceIndex)];
+            const auto faceIt = faceLevels.find(level);
+            if (faceIt != faceLevels.end() && faceIt->second.defined) {
+                return &faceIt->second;
+            }
+            return nullptr;
+        }
         const auto levelIt = obj->levels.find(level);
         if (levelIt != obj->levels.end() && levelIt->second.defined) {
             return &levelIt->second;
@@ -2587,6 +2598,34 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format,
             tryCompressedDataDecompressedReadback();
         if (compressedHandled) {
             return compressedOk;
+        }
+    }
+
+    if (!packPBOBound &&
+        obj->target == GL_TEXTURE_CUBE_MAP &&
+        requestedCubeFaceIndex >= 0 &&
+        obj->cubeFaceShadowsAuthoritative &&
+        ((format == GL_RGBA && type == GL_FLOAT) ||
+         (format == GL_RGBA && type == GL_UNSIGNED_BYTE))) {
+        const GLTextureImageLevel* faceImage = levelImageForReadback();
+        if (faceImage != nullptr &&
+            copySimpleTextureLevelShadow(
+                *obj,
+                *faceImage,
+                format,
+                type,
+                bufSize,
+                impl_->state->pixelStore(),
+                pixels,
+                (obj->wasFramebufferRenderedTo ||
+                 obj->wasViewportRenderedTo) &&
+                    impl_->state->clipOrigin() != GL_UPPER_LEFT)) {
+            impl_->drainPendingGpuProducers({
+                {Impl::GpuResourceAccess::Kind::Texture,
+                 texture,
+                 kProducerAll},
+            });
+            return true;
         }
     }
 

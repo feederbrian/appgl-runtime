@@ -106,6 +106,8 @@ bool GLContext::deleteTextures(GLsizei count, const GLuint* textures) {
                         }
                         viewObject.colorShadowAuthoritative =
                             sourceObject.colorShadowAuthoritative;
+                        viewObject.cubeFaceShadowsAuthoritative =
+                            sourceObject.cubeFaceShadowsAuthoritative;
                         viewObject.depthStencilShadowAuthoritative =
                             sourceObject.depthStencilShadowAuthoritative;
                         viewObject.wasFramebufferRenderedTo =
@@ -555,6 +557,12 @@ bool GLContext::texImage(
     if (impl_->frameGraph != nullptr) {
         impl_->frameGraph->flushParallelEncodeBoundary();
     }
+    const int faceIdx = Impl::cubeFaceIndexForTarget(target);
+    if (faceIdx >= 0 &&
+        !impl_->materializeCubeFaceShadowsFromMetal(*object)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
 
     GLTextureImageLevel image;
     image.desc.target = target;
@@ -845,7 +853,6 @@ bool GLContext::texImage(
     }
     object->desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
     image.desc.levels = object->desc.levels;
-    const int faceIdx = Impl::cubeFaceIndexForTarget(target);
     if (faceIdx >= 0) {
         object->cubeFaceLevels[static_cast<std::size_t>(faceIdx)][level] = image;
     }
@@ -1654,6 +1661,10 @@ bool GLContext::texSubImage(
         storageTextureName = rootName;
     }
 
+    if (!impl_->materializeCubeFaceShadowsFromMetal(*storageObject)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     auto levelIt = storageObject->levels.find(storageLevel);
     if (levelIt == storageObject->levels.end() || !levelIt->second.defined) {
         pushError(GL_INVALID_OPERATION);

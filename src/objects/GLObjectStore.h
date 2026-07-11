@@ -405,6 +405,9 @@ struct GLTextureObject {
     // KHR-GL46.direct_state_access.textures_generate_mipmap_errors test.
     // Non-cube targets ignore this field.
     std::uint8_t cubeFacesDefined = 0;
+    // False after a GPU write until every defined plain-cube face shadow has
+    // been refreshed from the Metal cube texture.
+    bool cubeFaceShadowsAuthoritative = true;
     // Sprint 16 Day 17 (CKPT226) [Y-flip Option B + viewport routing
     // dual-fix] / Sprint 17 Day 1 (CKPT236) [A.2 narrow gate]: this
     // texture has been the sink of a draw whose Metal write path

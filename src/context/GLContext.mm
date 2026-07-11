@@ -10110,6 +10110,9 @@ struct GLContext::Impl {
 
     void invalidateTextureColorShadow(GLTextureObject& object) const {
         object.colorShadowAuthoritative = false;
+        if (object.target == GL_TEXTURE_CUBE_MAP) {
+            object.cubeFaceShadowsAuthoritative = false;
+        }
         clearTextureLazyFboCanonicalClear(object);
     }
 
@@ -10980,6 +10983,7 @@ struct GLContext::Impl {
         for (auto& faceLevels : object.cubeFaceLevels) {
             faceLevels.clear();
         }
+        object.cubeFaceShadowsAuthoritative = true;
     }
 
     void clearRenderbufferColorShadowCoverage(GLRenderbufferObject& object) const {
@@ -13962,6 +13966,70 @@ struct GLContext::Impl {
         return true;
     }
 
+    bool materializeCubeFaceShadowsFromMetal(GLTextureObject& object) {
+        if (object.target != GL_TEXTURE_CUBE_MAP ||
+            object.cubeFaceShadowsAuthoritative) {
+            return true;
+        }
+
+        id<MTLTexture> texture = (__bridge id<MTLTexture>)object.metalTexture;
+        if (texture == nil || texture.textureType != MTLTextureTypeCube ||
+            texture.pixelFormat != MTLPixelFormatRGBA8Unorm) {
+            return true;
+        }
+
+        drainPendingGpuProducers(object);
+        bool materializedAny = false;
+        for (NSUInteger face = 0; face < object.cubeFaceLevels.size(); ++face) {
+            auto& faceLevels = object.cubeFaceLevels[face];
+            for (auto& [levelIndex, image] : faceLevels) {
+                if (levelIndex < 0 || !image.defined) {
+                    continue;
+                }
+                const NSUInteger mipLevel = static_cast<NSUInteger>(levelIndex);
+                if (mipLevel >= nonZeroMipLevelCount(texture.mipmapLevelCount)) {
+                    continue;
+                }
+                const NSUInteger width = static_cast<NSUInteger>(
+                    safeDimension(image.desc.width));
+                const NSUInteger height = static_cast<NSUInteger>(
+                    safeDimension(image.desc.height));
+                const NSUInteger bytesPerRow = width * 4u;
+                const NSUInteger bytesPerImage = bytesPerRow * height;
+                if (width == 0 || height == 0 || bytesPerImage == 0) {
+                    continue;
+                }
+
+                image.rgba8.assign(static_cast<std::size_t>(bytesPerImage), 0u);
+                const MTLRegion region = MTLRegionMake2D(0, 0, width, height);
+                [texture getBytes:image.rgba8.data()
+                      bytesPerRow:bytesPerRow
+                    bytesPerImage:bytesPerImage
+                       fromRegion:region
+                      mipmapLevel:mipLevel
+                            slice:face];
+                image.nativeData.clear();
+                image.nativeBpp = 0;
+                image.mipShadowEvicted = false;
+                image.mipShadowEvictedRgba8Bytes = 0;
+                image.mipShadowEvictedNativeBytes = 0;
+                clearTextureLazyFboCanonicalClear(image);
+                materializedAny = true;
+            }
+        }
+
+        if (!materializedAny) {
+            return true;
+        }
+        for (const auto& [levelIndex, image] : object.cubeFaceLevels[0]) {
+            if (image.defined) {
+                object.levels[levelIndex] = image;
+            }
+        }
+        object.cubeFaceShadowsAuthoritative = true;
+        return true;
+    }
+
     void markTextureMipShadowNeedsMetalMaterialize(
         GLTextureObject& object,
         GLTextureImageLevel& image) {
@@ -14155,6 +14223,9 @@ struct GLContext::Impl {
             if (materialized) {
                 frameGraph->flushForReadback();
             }
+        }
+        if (!materializeCubeFaceShadowsFromMetal(object)) {
+            return false;
         }
         object.r5PrimaryTextureEvicted = false;
         releaseTextureBufferExpansion(object);
@@ -15543,6 +15614,9 @@ struct GLContext::Impl {
 
     bool generateMipmaps(GLTextureObject& object) {
         const GLint baseLevelIndex = object.params.baseLevel;
+        if (!materializeCubeFaceShadowsFromMetal(object)) {
+            return false;
+        }
         const auto baseIt = object.levels.find(baseLevelIndex);
         if (baseIt == object.levels.end() || !baseIt->second.defined) {
             return false;
@@ -51746,7 +51820,9 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
         format == GL_RGBA &&
         type == GL_FLOAT &&
         !image.rgba8.empty() &&
-        object.colorShadowAuthoritative &&
+        (object.colorShadowAuthoritative ||
+         (object.target == GL_TEXTURE_CUBE_MAP &&
+          object.cubeFaceShadowsAuthoritative)) &&
         (object.wasFramebufferRenderedTo || object.wasViewportRenderedTo);
     const bool nativeShadowCanServeRequest =
         !preferRGBA8ColorShadow &&
@@ -51871,7 +51947,10 @@ static bool copySimpleTextureLevelShadow(const GLTextureObject& object,
     const bool applyColorYFlip =
         sourceIsRGBA8Shadow &&
         yFlipShadowReadback &&
-        (object.wasViewportRenderedTo || object.colorShadowAuthoritative) &&
+        (object.wasViewportRenderedTo ||
+         object.colorShadowAuthoritative ||
+         (object.target == GL_TEXTURE_CUBE_MAP &&
+          object.cubeFaceShadowsAuthoritative)) &&
         object.target != GL_TEXTURE_1D_ARRAY;
     const bool applyDepthYFlip =
         (useNativeDepth32FAsRgba8 || useNativeFloatDepthAsDepth) &&
