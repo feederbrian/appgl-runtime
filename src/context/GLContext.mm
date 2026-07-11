@@ -14013,6 +14013,7 @@ struct GLContext::Impl {
 
     bool materializeCubeFaceShadowsFromMetal(GLTextureObject& object) {
         if (object.target != GL_TEXTURE_CUBE_MAP ||
+            object.sparseTexture ||
             object.cubeFaceShadowsAuthoritative) {
             return true;
         }
