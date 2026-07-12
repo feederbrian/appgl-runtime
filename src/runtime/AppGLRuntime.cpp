@@ -3933,6 +3933,10 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << metalInventory.r5Eviction.swizzledViewReleaseAttempts << ","
            << "\"swizzledViewReleaseSuccesses\":"
            << metalInventory.r5Eviction.swizzledViewReleaseSuccesses << ","
+           << "\"depthCompareViewReleaseAttempts\":"
+           << metalInventory.r5Eviction.depthCompareViewReleaseAttempts << ","
+           << "\"depthCompareViewReleaseSuccesses\":"
+           << metalInventory.r5Eviction.depthCompareViewReleaseSuccesses << ","
            << "\"expandedIndexClearAttempts\":"
            << metalInventory.r5Eviction.expandedIndexClearAttempts << ","
            << "\"expandedIndexClearSuccesses\":"
@@ -3976,6 +3980,9 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << "\"swizzledTextureView\":"
            << metalInventory.r5Eviction.recordsEvictedSwizzledTextureView
            << ","
+           << "\"depthCompareTextureView\":"
+           << metalInventory.r5Eviction.recordsEvictedDepthCompareView
+           << ","
            << "\"expandedIndexCache\":"
            << metalInventory.r5Eviction.recordsEvictedExpandedIndexCache
            << ","
@@ -3986,6 +3993,9 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << metalInventory.r5Eviction.recordsEvictedTextureView << ","
            << "\"recordsEvictedSwizzledTextureView\":"
            << metalInventory.r5Eviction.recordsEvictedSwizzledTextureView
+           << ","
+           << "\"recordsEvictedDepthCompareView\":"
+           << metalInventory.r5Eviction.recordsEvictedDepthCompareView
            << ","
            << "\"recordsEvictedExpandedIndexCache\":"
            << metalInventory.r5Eviction.recordsEvictedExpandedIndexCache
@@ -4010,6 +4020,9 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << metalInventory.r5Eviction.textureViewRebuildsAfterR5Evict << ","
            << "\"swizzledViewRebuildsAfterR5Evict\":"
            << metalInventory.r5Eviction.swizzledViewRebuildsAfterR5Evict << ","
+           << "\"depthCompareViewRebuildsAfterR5Evict\":"
+           << metalInventory.r5Eviction.depthCompareViewRebuildsAfterR5Evict
+           << ","
            << "\"expandedIndexRebuildsAfterR5Evict\":"
            << metalInventory.r5Eviction.expandedIndexRebuildsAfterR5Evict << ","
            << "\"primaryReconstructions\":"

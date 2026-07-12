@@ -121,6 +121,7 @@ inline constexpr std::uint32_t kMetalR5DiagnosticBucketTextureView = 1;
 inline constexpr std::uint32_t kMetalR5DiagnosticBucketSwizzledTextureView = 2;
 inline constexpr std::uint32_t kMetalR5DiagnosticBucketExpandedIndexCache = 3;
 inline constexpr std::uint32_t kMetalR5DiagnosticBucketPrimaryTexture = 4;
+inline constexpr std::uint32_t kMetalR5DiagnosticBucketDepthCompareView = 5;
 inline constexpr std::uint64_t kMetalR8HeapBucketLimit = 128;
 
 struct ResourceResidencyRecord {
@@ -265,6 +266,8 @@ struct MetalR5EvictionSummary {
     std::uint64_t textureViewBaseReleaseSuccesses = 0;
     std::uint64_t swizzledViewReleaseAttempts = 0;
     std::uint64_t swizzledViewReleaseSuccesses = 0;
+    std::uint64_t depthCompareViewReleaseAttempts = 0;
+    std::uint64_t depthCompareViewReleaseSuccesses = 0;
     std::uint64_t expandedIndexClearAttempts = 0;
     std::uint64_t expandedIndexClearSuccesses = 0;
     std::uint64_t primaryTextureReleaseAttempts = 0;
@@ -285,6 +288,7 @@ struct MetalR5EvictionSummary {
     std::uint64_t pressureLevelAtEvict = 0;
     std::uint64_t recordsEvictedTextureView = 0;
     std::uint64_t recordsEvictedSwizzledTextureView = 0;
+    std::uint64_t recordsEvictedDepthCompareView = 0;
     std::uint64_t recordsEvictedExpandedIndexCache = 0;
     std::uint64_t reconstructablePrimariesEvicted = 0;
     std::uint64_t deviceBytesFreed = 0;
@@ -294,6 +298,7 @@ struct MetalR5EvictionSummary {
     std::uint64_t evictedPrimaryAuthoritativeBytes = 0;
     std::uint64_t textureViewRebuildsAfterR5Evict = 0;
     std::uint64_t swizzledViewRebuildsAfterR5Evict = 0;
+    std::uint64_t depthCompareViewRebuildsAfterR5Evict = 0;
     std::uint64_t expandedIndexRebuildsAfterR5Evict = 0;
     std::uint64_t primaryReconstructions = 0;
     std::uint64_t primaryReconstructionFailures = 0;
@@ -1071,7 +1076,9 @@ inline MetalR5EvictionScope metalR5EvictionScopeForRecord(
         record.kind == MetalResidencyKind::TextureView &&
         (record.diagnosticBucketId == kMetalR5DiagnosticBucketTextureView ||
          record.diagnosticBucketId ==
-             kMetalR5DiagnosticBucketSwizzledTextureView)) {
+             kMetalR5DiagnosticBucketSwizzledTextureView ||
+         record.diagnosticBucketId ==
+             kMetalR5DiagnosticBucketDepthCompareView)) {
         return MetalR5EvictionScope::TextureView;
     }
     if (record.owner == MetalResidencyOwner::Buffer &&

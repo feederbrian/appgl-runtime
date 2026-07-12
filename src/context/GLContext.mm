@@ -1146,10 +1146,12 @@ constexpr R5EvictionBucketMask kR5EvictionBucketTextureView = 1u << 0;
 constexpr R5EvictionBucketMask kR5EvictionBucketSwizzledTextureView = 1u << 1;
 constexpr R5EvictionBucketMask kR5EvictionBucketExpandedIndexCache = 1u << 2;
 constexpr R5EvictionBucketMask kR5EvictionBucketPrimaryTexture = 1u << 3;
+constexpr R5EvictionBucketMask kR5EvictionBucketDepthCompareView = 1u << 4;
 constexpr R5EvictionBucketMask kR5EvictionBucketDerivedCaches =
     kR5EvictionBucketTextureView |
     kR5EvictionBucketSwizzledTextureView |
-    kR5EvictionBucketExpandedIndexCache;
+    kR5EvictionBucketExpandedIndexCache |
+    kR5EvictionBucketDepthCompareView;
 constexpr R5EvictionBucketMask kR5EvictionBucketAll =
     kR5EvictionBucketDerivedCaches |
     kR5EvictionBucketPrimaryTexture;
@@ -1189,6 +1191,8 @@ R5EvictionBucketMask r5EvictionBucketForRecord(
         return kR5EvictionBucketTextureView;
     case kMetalR5DiagnosticBucketSwizzledTextureView:
         return kR5EvictionBucketSwizzledTextureView;
+    case kMetalR5DiagnosticBucketDepthCompareView:
+        return kR5EvictionBucketDepthCompareView;
     case kMetalR5DiagnosticBucketExpandedIndexCache:
         return kR5EvictionBucketExpandedIndexCache;
     case kMetalR5DiagnosticBucketPrimaryTexture:
@@ -11030,6 +11034,7 @@ struct GLContext::Impl {
     }
 
     void releaseTextureBufferMaterializedView(GLTextureObject& object) {
+        releaseDepthCompareTextureView(object);
         releaseRetainedMetalObject(object.metalTexture);
         object.metalTexture = nullptr;
         releaseRetainedMetalObject(object.metalSwizzledView);
@@ -11088,6 +11093,8 @@ struct GLContext::Impl {
 
     void releaseTextureStorage(GLTextureObject& object) {
         drainPendingGpuProducers(object);
+        releaseDepthCompareTextureView(object);
+        object.r5DepthCompareViewEvicted = false;
         releaseRetainedMetalObject(object.metalTexture);
         object.metalTexture = nullptr;
         object.r5PrimaryTextureLastUseSerial = 0;
@@ -14385,6 +14392,8 @@ struct GLContext::Impl {
     // uploaded data, not the initial upload from Recoil we want to
     // fingerprint.
     bool replaceMetalTexture(GLTextureObject& object, GLuint texName = 0) {
+        releaseDepthCompareTextureView(object);
+        object.r5DepthCompareViewEvicted = false;
         // C48: an upload into the existing Metal texture must not be
         // overwritten by a later-materialized deferred FBO clear —
         // land the clear first (correct for both the shape-match
@@ -17371,6 +17380,8 @@ struct GLContext::Impl {
             return false;
         }
 
+        releaseDepthCompareTextureView(viewObj);
+        viewObj.r5DepthCompareViewEvicted = false;
         releaseRetainedMetalObject(viewObj.metalTexture);
         viewObj.metalTexture = transferRetainedMetalObject(viewTex);
         viewObj.instantiated = true;
@@ -17382,6 +17393,125 @@ struct GLContext::Impl {
         touchR5TextureView(viewObj);
         noteR5TextureViewRebuilt(viewObj);
         return true;
+    }
+
+    void releaseDepthCompareTextureView(GLTextureObject& texObj) {
+        releaseRetainedMetalObject(texObj.metalDepthCompareView);
+        texObj.metalDepthCompareView = nullptr;
+        texObj.depthCompareViewSourceTexture = nullptr;
+        texObj.depthCompareViewFirstLevel = 0;
+        texObj.depthCompareViewLevelCount = 0;
+        texObj.depthCompareViewFirstSlice = 0;
+        texObj.depthCompareViewSliceCount = 0;
+        texObj.depthCompareViewTextureType = 0;
+        texObj.depthCompareViewPixelFormat = 0;
+        texObj.r5DepthCompareViewLastUseSerial = 0;
+        texObj.r5DepthCompareViewLastUseBoundarySerial = 0;
+    }
+
+    // Returns a depth-format texture for sample_compare. The ordinary
+    // sampling resolver may apply legacy swizzles or sampling proxies, which
+    // are color-sampling semantics and are invalid for a Metal depth receiver.
+    // This path applies only the GL-visible base/max mip range to the raw
+    // materialized texture, so compare lookup and textureQueryLevels observe
+    // one coherent Metal object.
+    void* resolveDepthCompareTexture(GLTextureObject& texObj) {
+        if (texObj.viewSourceTexture != 0) {
+            (void)materializeTextureView(texObj);
+        } else {
+            (void)restoreR5PrimaryTextureIfNeeded(texObj, 0);
+        }
+
+        void* sourceRaw = texObj.metalTexture;
+        id<MTLTexture> source = metalTextureFromRaw(sourceRaw);
+        if (source == nil) {
+            releaseDepthCompareTextureView(texObj);
+            return nullptr;
+        }
+
+        const NSUInteger mipCount =
+            nonZeroMipLevelCount(source.mipmapLevelCount);
+        const GLint requestedBase = std::max<GLint>(texObj.params.baseLevel, 0);
+        const bool validMipRange =
+            mipCount > 0 &&
+            requestedBase < static_cast<GLint>(mipCount) &&
+            texObj.params.maxLevel >= requestedBase;
+        if (!validMipRange) {
+            releaseDepthCompareTextureView(texObj);
+            return sourceRaw;
+        }
+
+        const NSUInteger firstLevel =
+            static_cast<NSUInteger>(requestedBase);
+        const NSUInteger lastLevel = std::min<NSUInteger>(
+            static_cast<NSUInteger>(texObj.params.maxLevel), mipCount - 1);
+        const NSUInteger levelCount = lastLevel - firstLevel + 1;
+
+        NSUInteger sliceCount = std::max<NSUInteger>(source.arrayLength, 1u);
+        switch (source.textureType) {
+            case MTLTextureTypeCube:
+                sliceCount = 6u;
+                break;
+            case MTLTextureTypeCubeArray:
+                sliceCount = 6u * std::max<NSUInteger>(source.arrayLength, 1u);
+                break;
+            case MTLTextureType3D:
+                sliceCount = std::max<NSUInteger>(source.depth, 1u);
+                break;
+            default:
+                break;
+        }
+
+        const bool needsRangeView = firstLevel != 0 || levelCount != mipCount;
+        if (!needsRangeView) {
+            releaseDepthCompareTextureView(texObj);
+            return sourceRaw;
+        }
+
+        const std::uint32_t textureType =
+            static_cast<std::uint32_t>(source.textureType);
+        const std::uint32_t pixelFormat =
+            static_cast<std::uint32_t>(source.pixelFormat);
+        const bool cacheMatches =
+            texObj.metalDepthCompareView != nullptr &&
+            texObj.depthCompareViewSourceTexture == sourceRaw &&
+            texObj.depthCompareViewFirstLevel == firstLevel &&
+            texObj.depthCompareViewLevelCount == levelCount &&
+            texObj.depthCompareViewFirstSlice == 0u &&
+            texObj.depthCompareViewSliceCount == sliceCount &&
+            texObj.depthCompareViewTextureType == textureType &&
+            texObj.depthCompareViewPixelFormat == pixelFormat;
+        if (cacheMatches) {
+            touchR5DepthCompareTextureView(texObj);
+            return texObj.metalDepthCompareView;
+        }
+
+        releaseDepthCompareTextureView(texObj);
+        id<MTLTexture> compareView =
+            [source newTextureViewWithPixelFormat:source.pixelFormat
+                                      textureType:source.textureType
+                                           levels:NSMakeRange(firstLevel,
+                                                              levelCount)
+                                           slices:NSMakeRange(0, sliceCount)];
+        if (compareView == nil) {
+            return sourceRaw;
+        }
+
+        texObj.metalDepthCompareView =
+            transferRetainedMetalObject(compareView);
+        texObj.depthCompareViewSourceTexture = sourceRaw;
+        texObj.depthCompareViewFirstLevel =
+            static_cast<std::uint32_t>(firstLevel);
+        texObj.depthCompareViewLevelCount =
+            static_cast<std::uint32_t>(levelCount);
+        texObj.depthCompareViewFirstSlice = 0;
+        texObj.depthCompareViewSliceCount =
+            static_cast<std::uint32_t>(sliceCount);
+        texObj.depthCompareViewTextureType = textureType;
+        texObj.depthCompareViewPixelFormat = pixelFormat;
+        noteR5DepthCompareViewRebuilt(texObj);
+        touchR5DepthCompareTextureView(texObj);
+        return texObj.metalDepthCompareView;
     }
 
     // Returns the texture to bind — either the swizzled view (if
@@ -19420,7 +19550,13 @@ struct GLContext::Impl {
                     usedIncompleteFallback = binding.metalTexture != nullptr;
                 }
                 if (binding.metalTexture == nullptr && textureStorageReady) {
-                    binding.metalTexture = resolveSwizzledTexture(*texObject);
+                    const bool depthCompareSampling =
+                        samplerParamsForCompleteness->compareMode ==
+                            GL_COMPARE_REF_TO_TEXTURE &&
+                        isDepthFormat(texObject->desc.internalFormat);
+                    binding.metalTexture = depthCompareSampling
+                        ? resolveDepthCompareTexture(*texObject)
+                        : resolveSwizzledTexture(*texObject);
                 }
                 if (binding.metalTexture == nullptr) {
                     emitSamplerTrace("skip-texture-not-ready",
@@ -31947,6 +32083,19 @@ struct GLContext::Impl {
         texture.r5SwizzledViewEvicted = false;
     }
 
+    void touchR5DepthCompareTextureView(GLTextureObject& texture) noexcept {
+        texture.r5DepthCompareViewLastUseSerial = nextR5ResourceUseSerial();
+        texture.r5DepthCompareViewLastUseBoundarySerial = r5BoundarySerial;
+    }
+
+    void noteR5DepthCompareViewRebuilt(GLTextureObject& texture) noexcept {
+        if (!texture.r5DepthCompareViewEvicted) {
+            return;
+        }
+        ++r5Eviction.depthCompareViewRebuildsAfterR5Evict;
+        texture.r5DepthCompareViewEvicted = false;
+    }
+
     void touchR5ExpandedIndexCache(GLBufferObject& buffer) noexcept {
         buffer.r5ExpandedIndexLastUseSerial = nextR5ResourceUseSerial();
         buffer.r5ExpandedIndexLastUseBoundarySerial = r5BoundarySerial;
@@ -31977,6 +32126,15 @@ struct GLContext::Impl {
             : texture.r5TextureViewLastUseBoundarySerial;
         return serial == record.lastUseCommandSerial &&
                boundary == record.lastUseFrame;
+    }
+
+    bool r5DepthCompareViewRecordLastUseMatches(
+        const GLTextureObject& texture,
+        const ResourceResidencyRecord& record) const noexcept {
+        return texture.r5DepthCompareViewLastUseSerial ==
+                   record.lastUseCommandSerial &&
+               texture.r5DepthCompareViewLastUseBoundarySerial ==
+                   record.lastUseFrame;
     }
 
     bool r5PrimaryTextureRecordLastUseMatches(
@@ -32060,6 +32218,8 @@ struct GLContext::Impl {
         }
 
         ++r5Eviction.primaryTextureReleaseAttempts;
+        releaseDepthCompareTextureView(texture);
+        texture.r5DepthCompareViewEvicted = false;
         releaseRetainedMetalObject(texture.metalSwizzledView);
         texture.metalSwizzledView = nullptr;
         texture.swizzleDirty = true;
@@ -32194,6 +32354,22 @@ struct GLContext::Impl {
                     continue;
                 }
 
+                if (record.diagnosticBucketId ==
+                    kMetalR5DiagnosticBucketDepthCompareView) {
+                    if (texture->metalDepthCompareView == nullptr) {
+                        ++r5Eviction.handleMissingSkipped;
+                        continue;
+                    }
+                    if (!r5DepthCompareViewRecordLastUseMatches(*texture,
+                                                                 record)) {
+                        ++r5Eviction.lastUseMismatchSkipped;
+                        continue;
+                    }
+                    selected.push_back(
+                        {record, kR5EvictionBucketDepthCompareView});
+                    continue;
+                }
+
                 ++r5Eviction.scopeSkipped;
                 continue;
             }
@@ -32242,6 +32418,8 @@ struct GLContext::Impl {
                 }
 
                 ++r5Eviction.textureViewBaseReleaseAttempts;
+                releaseDepthCompareTextureView(*texture);
+                texture->r5DepthCompareViewEvicted = false;
                 releaseRetainedMetalObject(texture->metalTexture);
                 texture->metalTexture = nullptr;
                 texture->instantiated = false;
@@ -32277,6 +32455,28 @@ struct GLContext::Impl {
                 ++r5Eviction.swizzledViewReleaseSuccesses;
                 ++r5Eviction.selectedRecords;
                 ++r5Eviction.recordsEvictedSwizzledTextureView;
+                ++mutated;
+                r5Eviction.reclaimedMetalViewBytes += record.metalBytes;
+                continue;
+            }
+
+            if (candidate.bucket == kR5EvictionBucketDepthCompareView) {
+                if (objects == nullptr) {
+                    continue;
+                }
+                GLTextureObject* texture =
+                    objects->textures().get(record.glName);
+                if (texture == nullptr ||
+                    texture->metalDepthCompareView == nullptr) {
+                    continue;
+                }
+
+                ++r5Eviction.depthCompareViewReleaseAttempts;
+                releaseDepthCompareTextureView(*texture);
+                texture->r5DepthCompareViewEvicted = true;
+                ++r5Eviction.depthCompareViewReleaseSuccesses;
+                ++r5Eviction.selectedRecords;
+                ++r5Eviction.recordsEvictedDepthCompareView;
                 ++mutated;
                 r5Eviction.reclaimedMetalViewBytes += record.metalBytes;
                 continue;
@@ -35441,6 +35641,7 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         r8.reconstructionSuccesses =
             inventory.r5Eviction.textureViewRebuildsAfterR5Evict +
             inventory.r5Eviction.swizzledViewRebuildsAfterR5Evict +
+            inventory.r5Eviction.depthCompareViewRebuildsAfterR5Evict +
             inventory.r5Eviction.expandedIndexRebuildsAfterR5Evict +
             inventory.r5Eviction.primaryReconstructions;
         r8.reconstructionFailures =
@@ -36698,6 +36899,7 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
         }
         if (!texture.instantiated && texture.viewSourceTexture == 0 &&
             texture.metalTexture == nullptr && texture.metalSwizzledView == nullptr &&
+            texture.metalDepthCompareView == nullptr &&
             texture.metalSamplingProxy == nullptr && texture.metalSampler == nullptr &&
             texture.textureBufferExpandedMetalBuffer == nullptr &&
             texture.imageAtomicBuffer == nullptr && hotspot.definedImages == 0 &&
@@ -36815,6 +37017,10 @@ GLContext::MetalResourceInventory GLContext::metalResourceInventory() const {
                        kMetalR5DiagnosticBucketSwizzledTextureView,
                        texture.r5SwizzledViewLastUseSerial,
                        texture.r5SwizzledViewLastUseBoundarySerial);
+        addTextureView(texture.metalDepthCompareView, textureName,
+                       kMetalR5DiagnosticBucketDepthCompareView,
+                       texture.r5DepthCompareViewLastUseSerial,
+                       texture.r5DepthCompareViewLastUseBoundarySerial);
         addTexture(texture.metalSamplingProxy, MetalResidencyOwner::Texture,
                    textureName, MetalResidencyKind::MetalTexture,
                    MetalResidencyAuthorityClass::Reconstructable,

@@ -365,6 +365,23 @@ struct GLTextureObject {
     std::uint64_t r5SwizzledViewLastUseBoundarySerial = 0;
     bool r5SwizzledViewEvicted = false;
 
+    // Sampling-only depth view used by shadow samplers. Unlike the ordinary
+    // swizzled view, this keeps a depth pixel format and applies only the
+    // GL-visible base/max mip range, so sample_compare and textureQueryLevels
+    // observe the same Metal texture. The source/range fields are a cache key;
+    // metalDepthCompareView owns the retained view object.
+    void* metalDepthCompareView = nullptr;
+    void* depthCompareViewSourceTexture = nullptr;
+    std::uint32_t depthCompareViewFirstLevel = 0;
+    std::uint32_t depthCompareViewLevelCount = 0;
+    std::uint32_t depthCompareViewFirstSlice = 0;
+    std::uint32_t depthCompareViewSliceCount = 0;
+    std::uint32_t depthCompareViewTextureType = 0;
+    std::uint32_t depthCompareViewPixelFormat = 0;
+    std::uint64_t r5DepthCompareViewLastUseSerial = 0;
+    std::uint64_t r5DepthCompareViewLastUseBoundarySerial = 0;
+    bool r5DepthCompareViewEvicted = false;
+
     // Sampling-only proxy used when a GL texture view has cube-family
     // semantics that Metal does not reproduce through a direct texture
     // view over the source storage. The render/FBO path still uses

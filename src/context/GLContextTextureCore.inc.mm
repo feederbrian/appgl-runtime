@@ -2217,6 +2217,8 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
             return false;
         }
         if (object->metalTexture != nullptr) {
+            impl_->releaseDepthCompareTextureView(*object);
+            object->r5DepthCompareViewEvicted = false;
             releaseRetainedMetalObject(object->metalTexture);
         }
         object->metalTexture = transferRetainedMetalObject(newTex);

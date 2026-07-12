@@ -888,6 +888,8 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
             *dstTex, dstLevel, srcIsTex && srcFramebufferYFlipped);
         impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
             dstName, "copy-image-sub-data");
+        impl_->releaseDepthCompareTextureView(*dstTex);
+        dstTex->r5DepthCompareViewEvicted = false;
         releaseRetainedMetalObject(dstTex->metalTexture);
         dstTex->metalTexture = nullptr;
     }
@@ -1056,6 +1058,8 @@ bool GLContext::textureView(GLuint texture, GLenum target, GLuint origtexture, G
     viewObj->params = origObj->params;
     viewObj->samplerDirty = true;
 
+    impl_->releaseDepthCompareTextureView(*viewObj);
+    viewObj->r5DepthCompareViewEvicted = false;
     releaseRetainedMetalObject(viewObj->metalTexture);
     viewObj->metalTexture = nullptr;
     viewObj->instantiated = false;
