@@ -5104,7 +5104,182 @@ bool GLContext::linkProgram(GLuint program) {
                 // vertex processing feeds a user fragment shader. Synthesize the
                 // legacy immediate-mode vertex stage even when the fragment shader
                 // only consumes gl_FragCoord/uniforms and has no texcoord rewrite.
+                // Only explicit constructors, macro aliases, or component uses
+                // widen the input; an ambiguous use keeps K4c's vec2 fallback.
+                auto inferredCompatTexcoordWidth =
+                    [](const std::string& source) -> std::uint32_t {
+                    auto isIdent = [](char ch) {
+                        const unsigned char c = static_cast<unsigned char>(ch);
+                        return std::isalnum(c) || ch == '_';
+                    };
+                    auto callUsesTexcoord =
+                        [&](const std::string& callee) {
+                        std::size_t pos = 0;
+                        while ((pos = source.find(callee, pos)) !=
+                               std::string::npos) {
+                            const std::size_t afterName = pos + callee.size();
+                            if ((pos > 0 && isIdent(source[pos - 1])) ||
+                                (afterName < source.size() &&
+                                 isIdent(source[afterName]))) {
+                                pos = afterName;
+                                continue;
+                            }
+                            std::size_t open = afterName;
+                            while (open < source.size() &&
+                                   std::isspace(static_cast<unsigned char>(
+                                       source[open]))) {
+                                ++open;
+                            }
+                            if (open >= source.size() || source[open] != '(') {
+                                pos = afterName;
+                                continue;
+                            }
+                            int depth = 0;
+                            for (std::size_t i = open; i < source.size(); ++i) {
+                                if (source[i] == '(') {
+                                    ++depth;
+                                } else if (source[i] == ')' && --depth == 0) {
+                                    const std::size_t use =
+                                        source.find("gl_TexCoord", open + 1);
+                                    if (use != std::string::npos && use < i) {
+                                        return true;
+                                    }
+                                    pos = i + 1;
+                                    break;
+                                }
+                            }
+                            if (pos <= open) {
+                                break;
+                            }
+                        }
+                        return false;
+                    };
+                    auto vectorWidth = [](const std::string& token) {
+                        if (token == "vec4" || token == "dvec4" ||
+                            token == "ivec4" || token == "uvec4") {
+                            return 4u;
+                        }
+                        if (token == "vec3" || token == "dvec3" ||
+                            token == "ivec3" || token == "uvec3") {
+                            return 3u;
+                        }
+                        return 2u;
+                    };
+
+                    std::uint32_t width = 2;
+                    for (const char* type :
+                         {"vec3", "vec4", "dvec3", "dvec4",
+                          "ivec3", "ivec4", "uvec3", "uvec4"}) {
+                        if (callUsesTexcoord(type)) {
+                            width = std::max(width,
+                                             vectorWidth(type));
+                        }
+                    }
+
+                    std::size_t lineStart = 0;
+                    while (lineStart < source.size()) {
+                        const std::size_t lineEnd = source.find('\n', lineStart);
+                        const std::size_t end = lineEnd == std::string::npos
+                            ? source.size()
+                            : lineEnd;
+                        std::size_t cursor = lineStart;
+                        while (cursor < end &&
+                               std::isspace(static_cast<unsigned char>(
+                                   source[cursor]))) {
+                            ++cursor;
+                        }
+                        static constexpr const char* kDefine = "#define";
+                        if (source.compare(cursor, std::strlen(kDefine),
+                                           kDefine) == 0) {
+                            cursor += std::strlen(kDefine);
+                            while (cursor < end &&
+                                   std::isspace(static_cast<unsigned char>(
+                                       source[cursor]))) {
+                                ++cursor;
+                            }
+                            const std::size_t nameBegin = cursor;
+                            while (cursor < end && isIdent(source[cursor])) {
+                                ++cursor;
+                            }
+                            const std::string name =
+                                source.substr(nameBegin, cursor - nameBegin);
+                            if (cursor >= end || source[cursor] != '(') {
+                                while (cursor < end &&
+                                       std::isspace(static_cast<unsigned char>(
+                                           source[cursor]))) {
+                                    ++cursor;
+                                }
+                                const std::size_t typeBegin = cursor;
+                                while (cursor < end && isIdent(source[cursor])) {
+                                    ++cursor;
+                                }
+                                const std::string type =
+                                    source.substr(typeBegin, cursor - typeBegin);
+                                const std::uint32_t macroWidth =
+                                    vectorWidth(type);
+                                if (!name.empty() && macroWidth > width &&
+                                    callUsesTexcoord(name)) {
+                                    width = macroWidth;
+                                }
+                            }
+                        }
+                        if (lineEnd == std::string::npos) {
+                            break;
+                        }
+                        lineStart = lineEnd + 1;
+                    }
+
+                    std::size_t use = 0;
+                    while ((use = source.find("gl_TexCoord", use)) !=
+                           std::string::npos) {
+                        const std::size_t close = source.find(']', use);
+                        if (close == std::string::npos) {
+                            break;
+                        }
+                        std::size_t after = close + 1;
+                        while (after < source.size() &&
+                               std::isspace(static_cast<unsigned char>(
+                                   source[after]))) {
+                            ++after;
+                        }
+                        if (after < source.size() && source[after] == '.') {
+                            ++after;
+                            while (after < source.size() &&
+                                   isIdent(source[after])) {
+                                switch (source[after]) {
+                                    case 'z': case 'b': case 'p':
+                                        width = std::max(width, 3u);
+                                        break;
+                                    case 'w': case 'a': case 'q':
+                                        width = 4;
+                                        break;
+                                    default:
+                                        break;
+                                }
+                                ++after;
+                            }
+                        } else if (after < source.size() &&
+                                   source[after] == '[') {
+                            ++after;
+                            while (after < source.size() &&
+                                   std::isspace(static_cast<unsigned char>(
+                                       source[after]))) {
+                                ++after;
+                            }
+                            if (after < source.size() &&
+                                source[after] >= '2' && source[after] <= '3') {
+                                width = std::max(
+                                    width,
+                                    static_cast<std::uint32_t>(
+                                        source[after] - '0' + 1));
+                            }
+                        }
+                        use = close + 1;
+                    }
+                    return width;
+                };
                 bool needsCubeArrayTexcoord = false;
+                bool hasShadowSampler = false;
                 for (const auto& uniform : fragmentShader->declaredUniforms) {
                     switch (uniform.type) {
                         case GL_SAMPLER_CUBE_MAP_ARRAY:
@@ -5112,14 +5287,32 @@ bool GLContext::linkProgram(GLuint program) {
                         case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
                         case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
                             needsCubeArrayTexcoord = true;
+                            hasShadowSampler =
+                                hasShadowSampler ||
+                                uniform.type ==
+                                    GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW;
+                            break;
+                        case GL_SAMPLER_1D_SHADOW:
+                        case GL_SAMPLER_2D_SHADOW:
+                        case GL_SAMPLER_CUBE_SHADOW:
+                        case GL_SAMPLER_1D_ARRAY_SHADOW:
+                        case GL_SAMPLER_2D_ARRAY_SHADOW:
+                            hasShadowSampler = true;
                             break;
                         default:
                             break;
                     }
-                    if (needsCubeArrayTexcoord) {
-                        break;
-                    }
                 }
+                const std::uint32_t compatTexcoordWidth =
+                    needsCubeArrayTexcoord
+                    ? 4u
+                    : (hasShadowSampler
+                       ? 2u
+                       : inferredCompatTexcoordWidth(fragmentShader->source));
+                const char* compatTexcoordType =
+                    compatTexcoordWidth >= 4
+                    ? "vec4"
+                    : (compatTexcoordWidth == 3 ? "vec3" : "vec2");
                 static constexpr const char* kCompatFragmentOnlyVertexPrefix =
                     "#version 330 core\n"
                     "layout(location = 0) in vec4 piglit_vertex;\n"
@@ -5135,11 +5328,19 @@ bool GLContext::linkProgram(GLuint program) {
                     "    }\n";
                 std::string compatFragmentOnlyVertexSource =
                     std::string(kCompatFragmentOnlyVertexPrefix) +
-                    (needsCubeArrayTexcoord ? "vec4" : "vec2") +
+                    compatTexcoordType +
                     kCompatFragmentOnlyVertexSuffix;
-                compatFragmentOnlyVertexSource += needsCubeArrayTexcoord
-                    ? "    appgl_TexCoord[0] = piglit_texcoord;\n"
-                    : "    appgl_TexCoord[0] = vec4(piglit_texcoord, 0.0, 1.0);\n";
+                if (compatTexcoordWidth >= 4) {
+                    compatFragmentOnlyVertexSource +=
+                        "    appgl_TexCoord[0] = piglit_texcoord;\n";
+                } else if (compatTexcoordWidth == 3) {
+                    compatFragmentOnlyVertexSource +=
+                        "    appgl_TexCoord[0] = vec4(piglit_texcoord, 1.0);\n";
+                } else {
+                    compatFragmentOnlyVertexSource +=
+                        "    appgl_TexCoord[0] = "
+                        "vec4(piglit_texcoord, 0.0, 1.0);\n";
+                }
                 compatFragmentOnlyVertexSource += "}\n";
                 std::string vsLinkSource =
                     rewriteShaderDrawParametersForSpirv(
