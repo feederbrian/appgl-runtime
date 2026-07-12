@@ -309,6 +309,11 @@ struct TranslatedDrawInfo {
         std::uint32_t imageAtomicBufferSlot = 0xFFFFFFFFu;
         std::uint32_t reductionMode = GL_WEIGHTED_AVERAGE_ARB;
         float lodBias = 0.0f;
+        // Effective GL mip span visible to this sampler binding. Texture
+        // views use logical view levels here; the sampling-orientation
+        // predicate maps them back to the producer's storage levels.
+        GLint sampledMipFirst = 0;
+        GLint sampledMipLast = 0;
         std::uint32_t borderClampMask = 0;
         std::array<std::int32_t, 4> borderColor = {0, 0, 0, 0};
         // Shadow-compare Y fixup factor (0.0 = no flip, 1.0 = flip):

@@ -470,6 +470,7 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     };
 
     GLTextureObject* srcTex = nullptr;
+    bool srcFramebufferYFlipped = false;
     if (srcIsTex) {
         srcTex = impl_->objects->textures().get(srcName);
         if (!srcTex) { pushError(GL_INVALID_VALUE); return false; }
@@ -498,6 +499,7 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
             return false;
         }
         const GLTextureImageLevel& srcImg = *srcImgPtr;
+        srcFramebufferYFlipped = srcImg.framebufferYFlipped;
         srcImgW = srcImg.desc.width;
         srcImgH = srcImg.desc.height;
         srcImgD = srcCubeMap ? 6 : srcImg.desc.depth;
@@ -882,6 +884,8 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     // read, which would otherwise mask the pending re-upload.
     // -----------------------------------------------------------------------
     if (dstTex) {
+        setTextureLevelFramebufferYFlipped(
+            *dstTex, dstLevel, srcIsTex && srcFramebufferYFlipped);
         impl_->finishLazyFboCanonicalClearTextureCpuShadowWrite(
             dstName, "copy-image-sub-data");
         releaseRetainedMetalObject(dstTex->metalTexture);

@@ -738,6 +738,7 @@ bool GLContext::compressedTextureSubImage2D(GLuint texture, GLint level, GLint x
                     bytes + srcOffset,
                     tightRowBytes);
     }
+    image.framebufferYFlipped = false;
 
     id<MTLTexture> metalTex = (__bridge id<MTLTexture>)obj->metalTexture;
     if (metalTex != nil && impl_->capabilities != nullptr) {
@@ -968,6 +969,7 @@ bool GLContext::compressedTextureSubImage3D(GLuint texture, GLint level, GLint x
                         tightRowBytes);
         }
     }
+    image.framebufferYFlipped = false;
 
     id<MTLTexture> metalTex = (__bridge id<MTLTexture>)obj->metalTexture;
     if (metalTex != nil && impl_->capabilities != nullptr) {

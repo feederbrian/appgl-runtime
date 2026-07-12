@@ -9198,6 +9198,111 @@ static constexpr std::uint64_t kSubmittedPipelineStatsQueryMask =
     activeQueryTargetBit(ActiveQueryVerticesSubmitted) |
     activeQueryTargetBit(ActiveQueryVertexShaderInvocations);
 
+struct TextureSampleMipRange {
+    GLint first = 0;
+    GLint last = 0;
+    bool valid = false;
+};
+
+static bool textureMinFilterUsesMipChain(GLint minFilter) {
+    switch (minFilter) {
+        case GL_NEAREST_MIPMAP_NEAREST:
+        case GL_LINEAR_MIPMAP_NEAREST:
+        case GL_NEAREST_MIPMAP_LINEAR:
+        case GL_LINEAR_MIPMAP_LINEAR:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static TextureSampleMipRange effectiveTextureSampleMipRange(
+    const GLTextureObject& texture,
+    const GLTextureParameters& samplerParams)
+{
+    TextureSampleMipRange range;
+    range.first = std::max<GLint>(texture.params.baseLevel, 0);
+    range.last = range.first;
+
+    if (!textureMinFilterUsesMipChain(samplerParams.minFilter)) {
+        range.valid = true;
+        return range;
+    }
+
+    if (texture.viewSourceTexture != 0) {
+        const GLint viewLevelCount = std::max<GLint>(
+            texture.viewNumLevels > 0 ? texture.viewNumLevels
+                                      : texture.desc.levels,
+            1);
+        range.last = std::min<GLint>(texture.params.maxLevel,
+                                    viewLevelCount - 1);
+        range.valid = range.last >= range.first;
+        return range;
+    }
+
+    const auto base = texture.levels.find(range.first);
+    if (base == texture.levels.end() || !base->second.defined) {
+        return range;
+    }
+    const GLenum target = texture.desc.target != 0
+        ? texture.desc.target : texture.target;
+    range.last = std::min(
+        texture.params.maxLevel,
+        range.first + mipTailOffsetForDimensions(
+            base->second.desc.width,
+            target == GL_TEXTURE_1D ? 1 : base->second.desc.height,
+            target == GL_TEXTURE_3D ? base->second.desc.depth : 1));
+    if (texture.desc.immutable && texture.desc.levels > 0) {
+        range.last = std::min<GLint>(
+            range.last, range.first + texture.desc.levels - 1);
+    }
+    range.valid = range.last >= range.first;
+    return range;
+}
+
+static void setTextureLevelFramebufferYFlipped(
+    GLTextureObject& texture,
+    GLint level,
+    bool yFlipped)
+{
+    if (auto image = texture.levels.find(level);
+        image != texture.levels.end() && image->second.defined) {
+        image->second.framebufferYFlipped = yFlipped;
+    }
+    for (auto& faceLevels : texture.cubeFaceLevels) {
+        if (auto image = faceLevels.find(level);
+            image != faceLevels.end() && image->second.defined) {
+            image->second.framebufferYFlipped = yFlipped;
+        }
+    }
+}
+
+static bool textureSampleMipRangeFramebufferYFlipped(
+    const GLTextureObject& sampled,
+    const GLTextureObject& storage,
+    GLint sampledFirst,
+    GLint sampledLast)
+{
+    if (sampledLast < sampledFirst) {
+        return false;
+    }
+    const GLint storageLevelOffset = sampled.viewSourceTexture != 0
+        ? std::max<GLint>(sampled.viewMinLevel, 0)
+        : 0;
+    for (GLint sampledLevel = sampledFirst;
+         sampledLevel <= sampledLast;
+         ++sampledLevel) {
+        const GLint storageLevel = storageLevelOffset + sampledLevel;
+        const auto image = storage.levels.find(storageLevel);
+        if (image == storage.levels.end() ||
+            !image->second.defined ||
+            !image->second.framebufferYFlipped) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 struct GLContext::Impl {
@@ -15777,6 +15882,8 @@ struct GLContext::Impl {
                 generated.desc.levels = std::max<GLsizei>(
                     object.desc.levels, levelIndex + 1);
                 generated.defined = true;
+                generated.framebufferYFlipped =
+                    previousLevel.framebufferYFlipped;
                 generated.generatedMipLevel = true;
                 generated.immutableStorageLevel =
                     chainBase.immutableStorageLevel;
@@ -19257,6 +19364,12 @@ struct GLContext::Impl {
                 TranslatedDrawInfo::TextureBinding binding;
                 binding.metalSlot = sampledTex.metalBinding + static_cast<std::uint32_t>(arrayElement);
                 binding.textureName = texName;
+                const TextureSampleMipRange sampledMipRange =
+                    effectiveTextureSampleMipRange(
+                        *texObject, *samplerParamsForCompleteness);
+                binding.sampledMipFirst = sampledMipRange.first;
+                binding.sampledMipLast = sampledMipRange.valid
+                    ? sampledMipRange.last : sampledMipRange.first;
                 if (samplerParamsForCompleteness->wrapS == GL_CLAMP_TO_BORDER) {
                     binding.borderClampMask |= 0x1u;
                 }
@@ -24929,6 +25042,10 @@ struct GLContext::Impl {
                 color[0], color[1], color[2], color[3]
             };
             canonicalizeFboStorageRGBAF(clearInternalFormat, textureColor);
+            setTextureLevelFramebufferYFlipped(
+                *texture,
+                resolved.level,
+                state->clipOrigin() == GL_LOWER_LEFT);
             if (state->clipOrigin() == GL_LOWER_LEFT) {
                 texture->wasFramebufferRenderedTo = true;
             }
@@ -26256,6 +26373,10 @@ struct GLContext::Impl {
             targetWidth = levelIt->second.desc.width;
             targetHeight = textureTarget->target == GL_TEXTURE_1D ? 1 : levelIt->second.desc.height;
             rgba8 = &levelIt->second.rgba8;
+            setTextureLevelFramebufferYFlipped(
+                *textureTarget,
+                attachment->level,
+                state->clipOrigin() == GL_LOWER_LEFT);
             if (state->clipOrigin() == GL_LOWER_LEFT) {
                 textureTarget->wasFramebufferRenderedTo = true;
             }
@@ -26650,6 +26771,8 @@ struct GLContext::Impl {
                         }
                     }
                 }
+                setTextureLevelFramebufferYFlipped(
+                    *texture, attachment.level, lowerLeft);
                 if (lowerLeft) {
                     texture->wasFramebufferRenderedTo = true;
                 }
@@ -26891,6 +27014,8 @@ struct GLContext::Impl {
                         }
                     }
                 }
+                setTextureLevelFramebufferYFlipped(
+                    *texture, attachment.level, lowerLeft);
                 if (lowerLeft) {
                     texture->wasFramebufferRenderedTo = true;
                 }
@@ -28664,6 +28789,7 @@ struct GLContext::Impl {
         GLTextureObject* writableTexture = nullptr;
         GLTextureImageLevel* writableImage = nullptr;
         GLuint writableTextureName = 0;
+        GLint writableLevel = 0;
         GLenum writableInternalFormat = 0;
 
         if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
@@ -28674,6 +28800,7 @@ struct GLContext::Impl {
                 return false;
             }
             writableTextureName = resolved.storageName;
+            writableLevel = resolved.level;
             auto level = writableTexture->levels.find(resolved.level);
             if (level == writableTexture->levels.end() || !level->second.defined) {
                 return false;
@@ -28719,6 +28846,10 @@ struct GLContext::Impl {
             dest = level->second.rgba8.data();
             destWidth = sourceWidth;
             destHeight = sourceHeight;
+            setTextureLevelFramebufferYFlipped(
+                *writableTexture,
+                writableLevel,
+                state->clipOrigin() == GL_LOWER_LEFT);
             if (state->clipOrigin() == GL_LOWER_LEFT) {
                 writableTexture->wasFramebufferRenderedTo = true;
             }
@@ -29048,6 +29179,8 @@ struct GLContext::Impl {
                         pixels[static_cast<std::size_t>(row * width + col)]);
                 }
             }
+            setTextureLevelFramebufferYFlipped(
+                *texture, attachment.level, lowerLeft);
             if (lowerLeft) {
                 texture->wasFramebufferRenderedTo = true;
             }
@@ -29142,6 +29275,8 @@ struct GLContext::Impl {
                         pixels[static_cast<std::size_t>(row * width + col)]);
                 }
             }
+            setTextureLevelFramebufferYFlipped(
+                *texture, attachment.level, lowerLeft);
             if (lowerLeft) {
                 texture->wasFramebufferRenderedTo = true;
             }
@@ -29872,6 +30007,10 @@ struct GLContext::Impl {
                 if (state->clipOrigin() != GL_UPPER_LEFT) {
                     dstView.textureObject->wasFramebufferRenderedTo = true;
                 }
+                setTextureLevelFramebufferYFlipped(
+                    *dstView.textureObject,
+                    static_cast<GLint>(dstView.level),
+                    state->clipOrigin() != GL_UPPER_LEFT);
                 dstView.textureObject->swizzleDirty = true;
             }
             if (dstView.renderbufferObject != nullptr) {
@@ -33192,6 +33331,151 @@ struct GLContext::Impl {
     };
     static_assert(sizeof(ImmediateModeVertex) == 48,
                   "ImmediateModeVertex must be 48 bytes to match the vertex descriptor in MetalFrameGraph::ensureImmediateModePipeline");
+
+    const GLTextureObject* samplingStorageTexture(
+        const GLTextureObject& sampled) const
+    {
+        const GLTextureObject* storage = &sampled;
+        GLuint sourceName = sampled.viewSourceTexture;
+        std::unordered_set<GLuint> visited;
+        while (sourceName != 0 && objects != nullptr) {
+            if (!visited.insert(sourceName).second) {
+                return nullptr;
+            }
+            storage = objects->textures().get(sourceName);
+            if (storage == nullptr) {
+                return nullptr;
+            }
+            sourceName = storage->viewSourceTexture;
+        }
+        return storage;
+    }
+
+    TextureSampleMipRange fixedFunctionSampleMipRange(
+        const GLTextureObject& texture,
+        const ImmediateModeVertex* vertices,
+        std::size_t vertexCount,
+        const Matrix4& mvp) const
+    {
+        TextureSampleMipRange range =
+            effectiveTextureSampleMipRange(texture, texture.params);
+        if (!range.valid ||
+            !textureMinFilterUsesMipChain(texture.params.minFilter) ||
+            vertices == nullptr || vertexCount == 0) {
+            return range;
+        }
+
+        const GLTextureObject* storage = samplingStorageTexture(texture);
+        if (storage == nullptr) {
+            return range;
+        }
+        const GLint storageBase =
+            (texture.viewSourceTexture != 0
+                ? std::max<GLint>(texture.viewMinLevel, 0)
+                : 0) + range.first;
+        const auto base = storage->levels.find(storageBase);
+        if (base == storage->levels.end() || !base->second.defined) {
+            return range;
+        }
+
+        const auto& viewport = state->viewport();
+        if (viewport.width <= 0 || viewport.height <= 0) {
+            return range;
+        }
+        float minX = std::numeric_limits<float>::infinity();
+        float minY = std::numeric_limits<float>::infinity();
+        float maxX = -std::numeric_limits<float>::infinity();
+        float maxY = -std::numeric_limits<float>::infinity();
+        float minS = std::numeric_limits<float>::infinity();
+        float minT = std::numeric_limits<float>::infinity();
+        float maxS = -std::numeric_limits<float>::infinity();
+        float maxT = -std::numeric_limits<float>::infinity();
+        for (std::size_t index = 0; index < vertexCount; ++index) {
+            const ImmediateModeVertex& vertex = vertices[index];
+            float clip[4] = {};
+            for (int row = 0; row < 4; ++row) {
+                clip[row] =
+                    mvp.m[0 * 4 + row] * vertex.position[0] +
+                    mvp.m[1 * 4 + row] * vertex.position[1] +
+                    mvp.m[2 * 4 + row] * vertex.position[2] +
+                    mvp.m[3 * 4 + row] * vertex.position[3];
+            }
+            if (clip[3] == 0.0f ||
+                !std::isfinite(clip[0]) || !std::isfinite(clip[1]) ||
+                !std::isfinite(clip[3])) {
+                return range;
+            }
+            const float invW = 1.0f / clip[3];
+            const float windowX = static_cast<float>(viewport.x) +
+                (clip[0] * invW + 1.0f) * 0.5f *
+                static_cast<float>(viewport.width);
+            const float windowY = static_cast<float>(viewport.y) +
+                (clip[1] * invW + 1.0f) * 0.5f *
+                static_cast<float>(viewport.height);
+            const float invQ = vertex.texcoord[3] != 0.0f
+                ? 1.0f / vertex.texcoord[3] : 1.0f;
+            const float s = vertex.texcoord[0] * invQ;
+            const float t = vertex.texcoord[1] * invQ;
+            minX = std::min(minX, windowX);
+            minY = std::min(minY, windowY);
+            maxX = std::max(maxX, windowX);
+            maxY = std::max(maxY, windowY);
+            minS = std::min(minS, s);
+            minT = std::min(minT, t);
+            maxS = std::max(maxS, s);
+            maxT = std::max(maxT, t);
+        }
+
+        const float drawWidth = std::max(maxX - minX, 1.0f);
+        const float drawHeight = std::max(maxY - minY, 1.0f);
+        const float dsdx = std::fabs(maxS - minS) *
+            static_cast<float>(std::max<GLsizei>(base->second.desc.width, 1)) /
+            drawWidth;
+        const float dtdy = std::fabs(maxT - minT) *
+            static_cast<float>(std::max<GLsizei>(base->second.desc.height, 1)) /
+            drawHeight;
+        float lambda = std::log2(std::max(dsdx, dtdy));
+        if (!std::isfinite(lambda)) {
+            lambda = 0.0f;
+        }
+        lambda += texture.params.lodBias;
+        lambda = std::clamp(
+            lambda, texture.params.minLod, texture.params.maxLod);
+        lambda = std::max(lambda, 0.0f);
+
+        const bool interpolatesMipLevels =
+            texture.params.minFilter == GL_NEAREST_MIPMAP_LINEAR ||
+            texture.params.minFilter == GL_LINEAR_MIPMAP_LINEAR;
+        GLint firstOffset = 0;
+        GLint lastOffset = 0;
+        if (interpolatesMipLevels) {
+            firstOffset = static_cast<GLint>(std::floor(lambda));
+            lastOffset = static_cast<GLint>(std::ceil(lambda));
+        } else {
+            firstOffset = lastOffset =
+                static_cast<GLint>(std::floor(lambda + 0.5f));
+        }
+        range.first = std::clamp(
+            range.first + firstOffset, range.first, range.last);
+        range.last = std::clamp(
+            range.first + (lastOffset - firstOffset), range.first, range.last);
+        return range;
+    }
+
+    bool fixedFunctionTextureSampleYFlip(
+        const GLTextureObject& texture,
+        const ImmediateModeVertex* vertices,
+        std::size_t vertexCount,
+        const Matrix4& mvp) const
+    {
+        const TextureSampleMipRange range =
+            fixedFunctionSampleMipRange(texture, vertices, vertexCount, mvp);
+        const GLTextureObject* storage = samplingStorageTexture(texture);
+        return range.valid && storage != nullptr &&
+            textureSampleMipRangeFramebufferYFlipped(
+                texture, *storage, range.first, range.last);
+    }
+
     struct ImmediateModeMaterialSnapshot {
         bool valid = false;
         float frontAmbient[4] = {0.2f, 0.2f, 0.2f, 1.0f};
@@ -47627,10 +47911,16 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
                 }
                 if (kv.second.kind !=
                         GLFramebufferAttachment::Kind::Texture) continue;
-                if (GLTextureObject* tex =
-                        objects->textures().get(kv.second.object)) {
+                const ResolvedTextureAttachment resolved =
+                    resolveTextureAttachmentStorage(kv.second);
+                if (GLTextureObject* tex = resolved.storageTexture;
+                    resolved.valid && tex != nullptr) {
                     finishLazyFboCanonicalClearTextureGpuWrite(
                         kv.second.object, "tess-fbo-color-write");
+                    setTextureLevelFramebufferYFlipped(
+                        *tex,
+                        resolved.level,
+                        state->clipOrigin() == GL_LOWER_LEFT);
                     tex->wasFramebufferRenderedTo = true;
                     if (markViewportReadback) {
                         tex->wasViewportRenderedTo = true;
@@ -48503,8 +48793,12 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                     if (!isColorAttachment(kv.first)) continue;
                     if (kv.second.kind !=
                             GLFramebufferAttachment::Kind::Texture) continue;
-                    if (GLTextureObject* mut =
-                            objects->textures().get(kv.second.object)) {
+                    const ResolvedTextureAttachment resolved =
+                        resolveTextureAttachmentStorage(kv.second);
+                    if (GLTextureObject* mut = resolved.storageTexture;
+                        resolved.valid && mut != nullptr) {
+                        setTextureLevelFramebufferYFlipped(
+                            *mut, resolved.level, true);
                         mut->wasViewportRenderedTo = true;
                     }
                 }
@@ -49497,13 +49791,14 @@ static bool textureTargetUsesNormalized2DSampling(const GLTextureObject& texture
 
 static bool textureNeedsDefaultFramebufferSampleYFlip(
     const GLTextureObject& sampled,
-    const GLTextureObject* producer)
+    const GLTextureObject& storage,
+    GLint sampledMipFirst,
+    GLint sampledMipLast)
 {
-    const GLTextureObject& source = producer != nullptr ? *producer : sampled;
     return textureTargetUsesNormalized2DSampling(sampled) &&
            isColorFormat(sampled.desc.internalFormat) &&
-           (sampled.wasFramebufferRenderedTo || sampled.wasViewportRenderedTo ||
-            source.wasFramebufferRenderedTo || source.wasViewportRenderedTo);
+           textureSampleMipRangeFramebufferYFlipped(
+               sampled, storage, sampledMipFirst, sampledMipLast);
 }
 
 static void markDefaultFramebufferFboColorSampleYFlip(
@@ -49524,11 +49819,26 @@ static void markDefaultFramebufferFboColorSampleYFlip(
         if (sampled == nullptr) {
             continue;
         }
-        const GLTextureObject* producer = nullptr;
-        if (sampled->viewSourceTexture != 0) {
-            producer = objects->textures().get(sampled->viewSourceTexture);
+        const GLTextureObject* storage = sampled;
+        GLuint sourceName = sampled->viewSourceTexture;
+        std::unordered_set<GLuint> visited;
+        while (sourceName != 0) {
+            if (!visited.insert(sourceName).second) {
+                storage = nullptr;
+                break;
+            }
+            storage = objects->textures().get(sourceName);
+            if (storage == nullptr) {
+                break;
+            }
+            sourceName = storage->viewSourceTexture;
         }
-        if (textureNeedsDefaultFramebufferSampleYFlip(*sampled, producer)) {
+        if (storage != nullptr &&
+            textureNeedsDefaultFramebufferSampleYFlip(
+                *sampled,
+                *storage,
+                binding.sampledMipFirst,
+                binding.sampledMipLast)) {
             binding.reductionMode |= kTextureReductionModeSampleYFlipBit;
         }
     }
@@ -50281,11 +50591,16 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(
                     if (!isColorAttachment(kv.first)) continue;
                     if (kv.second.kind !=
                             GLFramebufferAttachment::Kind::Texture) continue;
-                    GLTextureObject* tex =
-                        objects->textures().get(kv.second.object);
-                    if (tex == nullptr) continue;
+                    const ResolvedTextureAttachment resolved =
+                        resolveTextureAttachmentStorage(kv.second);
+                    GLTextureObject* tex = resolved.storageTexture;
+                    if (!resolved.valid || tex == nullptr) continue;
                     finishLazyFboCanonicalClearTextureGpuWrite(
                         kv.second.object, "translated-draw-fbo-color-write");
+                    setTextureLevelFramebufferYFlipped(
+                        *tex,
+                        resolved.level,
+                        tdi.clipOrigin == GL_LOWER_LEFT);
                     if (tex->metalTexture == nullptr) continue;
                     id<MTLTexture> metalTex =
                         metalTextureFromRaw(tex->metalTexture);

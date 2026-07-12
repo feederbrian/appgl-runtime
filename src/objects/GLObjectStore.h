@@ -254,6 +254,11 @@ struct GLTextureImageLevel {
     std::vector<std::uint8_t> exactReadbackData;
     std::size_t exactReadbackBpp = 0;
     bool defined = false;
+    // True when this mip's rows currently use the lower-left FBO write
+    // orientation and therefore need a Y flip when sampled as a texture.
+    // This is deliberately level-local: uploaded and rendered mips can
+    // coexist in the same texture object.
+    bool framebufferYFlipped = false;
     bool generatedMipLevel = false;
     bool immutableStorageLevel = false;
     bool mipShadowEvicted = false;

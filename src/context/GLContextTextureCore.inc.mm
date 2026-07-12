@@ -1926,6 +1926,7 @@ bool GLContext::texSubImage(
         image.rawUploadData.clear();
         image.rawUploadBpp = 0;
     }
+    image.framebufferYFlipped = false;
 
     // Phase 8X Group 4d follow-up¹¹ — §Secondary per-subregion
     // fingerprint. Fires at most once per distinct

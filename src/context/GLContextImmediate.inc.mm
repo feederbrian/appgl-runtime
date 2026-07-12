@@ -1597,6 +1597,8 @@ bool GLContext::bitmapMaskCompat(GLsizei width,
                                   static_cast<std::size_t>(layer) * layerBytes);
                     impl_->clearTextureLazyFboCanonicalClear(image);
                     texture->colorShadowAuthoritative = true;
+                    setTextureLevelFramebufferYFlipped(
+                        *texture, resolved.level, lowerLeft);
                     if (lowerLeft) {
                         texture->wasFramebufferRenderedTo = true;
                     }
@@ -2452,6 +2454,8 @@ bool GLContext::drawPixelsCompat(GLsizei width,
                 }
                 impl_->clearTextureLazyFboCanonicalClear(image);
                 texture->colorShadowAuthoritative = true;
+                setTextureLevelFramebufferYFlipped(
+                    *texture, resolved.level, lowerLeft);
                 if (lowerLeft) {
                     texture->wasFramebufferRenderedTo = true;
                 }
@@ -5925,6 +5929,8 @@ void GLContext::endImmediate() {
                 }
                 impl_->clearTextureLazyFboCanonicalClear(image);
                 texture->colorShadowAuthoritative = true;
+                setTextureLevelFramebufferYFlipped(
+                    *texture, resolved.level, lowerLeft);
                 if (lowerLeft) {
                     texture->wasFramebufferRenderedTo = true;
                 }
@@ -5943,7 +5949,9 @@ void GLContext::endImmediate() {
     GLTextureParameters fixedFunctionTextureParams;
     bool fixedFunctionTextureParamsValid = false;
     bool fixedFunctionTextureSampleYFlip = false;
-    auto resolveFixedFunctionTexture = [&]() -> void* {
+    auto resolveFixedFunctionTexture = [&](const Impl::ImmediateModeVertex* sampleVertices,
+                                           std::size_t sampleVertexCount,
+                                           const Matrix4& sampleMvp) -> void* {
         for (GLenum target : {GL_TEXTURE_3D, GL_TEXTURE_2D, GL_TEXTURE_1D}) {
             if (!impl_->state->isEnabled(target)) {
                 continue;
@@ -5965,7 +5973,8 @@ void GLContext::endImmediate() {
             fixedFunctionTextureSampleYFlip =
                 (target == GL_TEXTURE_2D || target == GL_TEXTURE_3D) &&
                 isColorFormat(tex->desc.internalFormat) &&
-                (tex->wasFramebufferRenderedTo || tex->wasViewportRenderedTo);
+                impl_->fixedFunctionTextureSampleYFlip(
+                    *tex, sampleVertices, sampleVertexCount, sampleMvp);
             return impl_->resolveSwizzledTexture(*tex);
         }
         fixedFunctionTextureTarget = 0;
@@ -5989,7 +5998,8 @@ void GLContext::endImmediate() {
     info.vertexCount = drawCount;
     info.vertexStride = sizeof(Impl::ImmediateModeVertex);
     info.mvp = drawMvp;
-    info.metalTexture = resolveFixedFunctionTexture();
+    info.metalTexture = resolveFixedFunctionTexture(
+        drawVerts, drawCount, drawMvp);
     info.metalSamplerState = fixedFunctionSamplerState;
     info.textureTarget = fixedFunctionTextureTarget;
     info.textureSampleYFlip = fixedFunctionTextureSampleYFlip;
@@ -7426,7 +7436,9 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
     GLTextureParameters fixedFunctionTextureParams;
     bool fixedFunctionTextureParamsValid = false;
     bool fixedFunctionTextureSampleYFlip = false;
-    auto resolveFixedFunctionTexture = [&]() -> void* {
+    auto resolveFixedFunctionTexture = [&](const Impl::ImmediateModeVertex* sampleVertices,
+                                           std::size_t sampleVertexCount,
+                                           const Matrix4& sampleMvp) -> void* {
         for (GLenum target : {GL_TEXTURE_3D, GL_TEXTURE_2D, GL_TEXTURE_1D}) {
             if (!impl_->state->isEnabled(target)) {
                 continue;
@@ -7448,7 +7460,8 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
             fixedFunctionTextureSampleYFlip =
                 (target == GL_TEXTURE_2D || target == GL_TEXTURE_3D) &&
                 isColorFormat(tex->desc.internalFormat) &&
-                (tex->wasFramebufferRenderedTo || tex->wasViewportRenderedTo);
+                impl_->fixedFunctionTextureSampleYFlip(
+                    *tex, sampleVertices, sampleVertexCount, sampleMvp);
             return impl_->resolveSwizzledTexture(*tex);
         }
         fixedFunctionTextureTarget = 0;
@@ -8243,7 +8256,8 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         info.vertexCount = batchCount;
         info.vertexStride = sizeof(Impl::ImmediateModeVertex);
         info.mvp = encodeMvp;
-        info.metalTexture = resolveFixedFunctionTexture();
+        info.metalTexture = resolveFixedFunctionTexture(
+            batchVerts, batchCount, encodeMvp);
         info.metalSamplerState = fixedFunctionSamplerState;
         info.textureTarget = fixedFunctionTextureTarget;
         info.textureSampleYFlip = fixedFunctionTextureSampleYFlip;
@@ -8394,7 +8408,10 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
                 !lineVertices.empty() ||
                 !pointVertices.empty() ||
 	            impl_->state->isEnabled(GL_BLEND) ||
-	            resolveFixedFunctionTexture() != nullptr) {
+	            resolveFixedFunctionTexture(
+	                source.data(),
+	                source.size(),
+	                impl_->matrixState.modelViewProjection()) != nullptr) {
 	            return false;
         }
         const auto& blend = impl_->state->blendState();
@@ -9009,6 +9026,8 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
 	                }
 	                impl_->clearTextureLazyFboCanonicalClear(image);
 	                texture->colorShadowAuthoritative = true;
+	                setTextureLevelFramebufferYFlipped(
+	                    *texture, resolved.level, lowerLeft);
 	                if (lowerLeft) {
 	                    texture->wasFramebufferRenderedTo = true;
 	                }
