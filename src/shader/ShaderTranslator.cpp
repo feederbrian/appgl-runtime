@@ -5955,6 +5955,68 @@ bool rewriteTextureSampleLodBiasArg(const std::string& arg,
     return true;
 }
 
+bool rewriteTextureSampleGradientArg(
+    const std::string& arg,
+    const std::string& bufferName,
+    const std::string& implicitCorrectionName,
+    const std::string& slot,
+    std::string& replacement) {
+    const std::string trimmed = trimCopy(arg);
+    const char* intrinsic = nullptr;
+    if (trimmed.rfind("gradient2d", 0) == 0) {
+        intrinsic = "gradient2d";
+    } else if (trimmed.rfind("gradient3d", 0) == 0) {
+        intrinsic = "gradient3d";
+    } else {
+        return false;
+    }
+
+    const std::size_t intrinsicLen = std::strlen(intrinsic);
+    if (trimmed.size() <= intrinsicLen ||
+        (trimmed[intrinsicLen] != '(' &&
+         !std::isspace(static_cast<unsigned char>(trimmed[intrinsicLen])))) {
+        return false;
+    }
+    std::size_t open = intrinsicLen;
+    while (open < trimmed.size() &&
+           std::isspace(static_cast<unsigned char>(trimmed[open]))) {
+        ++open;
+    }
+    if (open >= trimmed.size() || trimmed[open] != '(') {
+        return false;
+    }
+    std::size_t close = 0;
+    if (!findMatchingParen(trimmed, open, close)) {
+        return false;
+    }
+    std::size_t tail = close + 1;
+    while (tail < trimmed.size() &&
+           std::isspace(static_cast<unsigned char>(trimmed[tail]))) {
+        ++tail;
+    }
+    if (tail != trimmed.size() ||
+        trimmed.find(bufferName) != std::string::npos ||
+        trimmed.find(implicitCorrectionName) != std::string::npos) {
+        return false;
+    }
+
+    std::vector<std::string> derivatives = splitTopLevelCommas(
+        trimmed.substr(open + 1, close - open - 1));
+    if (derivatives.size() != 2u ||
+        trimCopy(derivatives[0]).empty() ||
+        trimCopy(derivatives[1]).empty()) {
+        return false;
+    }
+    const std::string totalBias =
+        "(" + bufferName + "[" + slot + "] + " +
+        implicitCorrectionName + ")";
+    const std::string derivativeScale = "exp2(" + totalBias + ")";
+    replacement = std::string(intrinsic) + "((" +
+        trimCopy(derivatives[0]) + ") * " + derivativeScale + ", (" +
+        trimCopy(derivatives[1]) + ") * " + derivativeScale + ")";
+    return true;
+}
+
 void threadTextureLodBiasParamsThroughHelpers(
     std::string& msl,
     const std::string& lodBiasesName,
@@ -6128,12 +6190,9 @@ bool injectTextureLodBiases(std::string& msl,
                 splitTopLevelCommas(msl.substr(open + 1, close - open - 1));
             bool changed = false;
             bool hasExplicitLodControl = false;
+            bool hasRewrittenLevelOrBias = false;
             const std::string slot = std::to_string(param.slot) + "u";
             for (std::string& arg : args) {
-                const std::string trimmed = trimCopy(arg);
-                if (trimmed.rfind("gradient", 0) == 0) {
-                    hasExplicitLodControl = true;
-                }
                 std::string rewritten;
                 if (rewriteTextureSampleLodBiasArg(
                         arg,
@@ -6145,6 +6204,28 @@ bool injectTextureLodBiases(std::string& msl,
                     arg = std::move(rewritten);
                     changed = true;
                     hasExplicitLodControl = true;
+                    hasRewrittenLevelOrBias = true;
+                }
+            }
+            for (std::string& arg : args) {
+                const std::string trimmed = trimCopy(arg);
+                if (trimmed.rfind("gradient", 0) != 0) {
+                    continue;
+                }
+                hasExplicitLodControl = true;
+                if (hasRewrittenLevelOrBias) {
+                    continue;
+                }
+                std::string rewritten;
+                if (rewriteTextureSampleGradientArg(
+                        arg,
+                        kParamName,
+                        kImplicitCorrectionName,
+                        slot,
+                        rewritten)) {
+                    arg = std::move(rewritten);
+                    changed = true;
+                    needsImplicitCorrection = true;
                 }
             }
             const bool supportsMetalBias =
