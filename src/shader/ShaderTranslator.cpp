@@ -5467,8 +5467,9 @@ bool injectIntegerTextureBorderClamp(std::string& msl) {
     return true;
 }
 
-const char* textureReductionHelperSource() {
-    return R"APPGL(
+std::string textureReductionHelperSource(
+    const std::unordered_set<std::string>& lodBiasedHelpers) {
+    std::string source = R"APPGL(
 
 static inline float4 appgl_texred_reduce4(float4 a, float4 b, uint mode) {
     return mode == 0x8007u ? min(a, b) : max(a, b);
@@ -5622,10 +5623,73 @@ static inline float4 appgl_texture_minmax_cube(texturecube<float> tex, sampler s
     return r;
 }
 )APPGL";
+    // Keep injected helper-local samples out of the later resource-name pass,
+    // which would otherwise apply the same LOD bias a second time.
+    const std::string helperTextureName = "_appgl_texred_tex";
+    std::size_t textureNamePos = 0;
+    while ((textureNamePos = source.find("tex", textureNamePos)) !=
+           std::string::npos) {
+        const std::size_t afterName = textureNamePos + std::strlen("tex");
+        if ((textureNamePos == 0 ||
+             !isIdentifierChar(source[textureNamePos - 1])) &&
+            (afterName == source.size() ||
+             !isIdentifierChar(source[afterName]))) {
+            source.replace(textureNamePos,
+                           std::strlen("tex"),
+                           helperTextureName);
+            textureNamePos += helperTextureName.size();
+        } else {
+            textureNamePos = afterName;
+        }
+    }
+    if (lodBiasedHelpers.empty()) {
+        return source;
+    }
+
+    struct Insertion {
+        std::size_t pos = 0;
+        std::string text;
+    };
+    std::vector<Insertion> insertions;
+    const std::string sampleNeedle = helperTextureName + ".sample(";
+    for (const MslFunctionDefinition& fn :
+         findTopLevelFunctionDefinitions(source)) {
+        if (lodBiasedHelpers.find(fn.name) == lodBiasedHelpers.end()) {
+            continue;
+        }
+        insertions.push_back({fn.paramClose, ", float lodBias"});
+        std::size_t samplePos = fn.bodyOpen + 1;
+        while ((samplePos = source.find(sampleNeedle, samplePos)) !=
+                   std::string::npos &&
+               samplePos < fn.bodyClose) {
+            const std::size_t open = samplePos +
+                helperTextureName.size() + std::strlen(".sample");
+            std::size_t close = 0;
+            if (!findMatchingParen(source, open, close) ||
+                close > fn.bodyClose) {
+                break;
+            }
+            insertions.push_back({close, ", bias(lodBias)"});
+            samplePos = close + 1;
+        }
+    }
+    std::sort(insertions.begin(), insertions.end(),
+              [](const Insertion& a, const Insertion& b) {
+                  return a.pos > b.pos;
+              });
+    for (const Insertion& insertion : insertions) {
+        source.insert(insertion.pos, insertion.text);
+    }
+    return source;
 }
 
-bool injectTextureReductionMinmax(std::string& msl) {
+bool injectTextureReductionMinmax(std::string& msl,
+                                  bool applyImplicitLodBias) {
     static constexpr const char* kParamName = "_appgl_TextureReductionModes";
+    static constexpr const char* kLodBiasParamName =
+        "_appgl_TextureLodBiases";
+    static constexpr const char* kImplicitCorrectionName =
+        "_appgl_ImplicitLodBiasCorrection";
     if (msl.find(kParamName) != std::string::npos ||
         msl.find(".sample(") == std::string::npos) {
         return false;
@@ -5642,6 +5706,7 @@ bool injectTextureReductionMinmax(std::string& msl) {
         std::string text;
     };
     std::vector<Replacement> replacements;
+    std::unordered_set<std::string> lodBiasedHelpers;
     for (const TextureReductionParam& param : params) {
         const std::string needle = param.name + ".sample(";
         std::size_t pos = 0;
@@ -5688,6 +5753,32 @@ bool injectTextureReductionMinmax(std::string& msl) {
                     args[0] + ", " + args[1] + ", " + kParamName + ", " + slot + ")";
             }
             if (!replacement.empty()) {
+                // Metal has bias sample options for 2D/3D/cube textures, but
+                // not texture1d; specialize only compatible helper kinds.
+                std::string helperName;
+                switch (param.kind) {
+                    case TextureReductionTextureKind::Texture2D:
+                        helperName = "appgl_texture_minmax_2d";
+                        break;
+                    case TextureReductionTextureKind::Texture2DArray:
+                        helperName = "appgl_texture_minmax_2d_array";
+                        break;
+                    case TextureReductionTextureKind::Texture3D:
+                        helperName = "appgl_texture_minmax_3d";
+                        break;
+                    case TextureReductionTextureKind::TextureCube:
+                        helperName = "appgl_texture_minmax_cube";
+                        break;
+                    default:
+                        break;
+                }
+                if (applyImplicitLodBias && !helperName.empty()) {
+                    replacement.insert(
+                        replacement.size() - 1,
+                        ", (" + std::string(kLodBiasParamName) + "[" + slot +
+                            "] + " + kImplicitCorrectionName + ")");
+                    lodBiasedHelpers.insert(std::move(helperName));
+                }
                 replacements.push_back({pos, close + 1, std::move(replacement)});
             }
             pos = close + 1;
@@ -5721,10 +5812,12 @@ bool injectTextureReductionMinmax(std::string& msl) {
 
     const std::string usingNeedle = "using namespace metal;\n";
     const std::size_t usingPos = msl.find(usingNeedle);
+    const std::string helperSource =
+        textureReductionHelperSource(lodBiasedHelpers);
     if (usingPos != std::string::npos) {
-        msl.insert(usingPos + usingNeedle.size(), textureReductionHelperSource());
+        msl.insert(usingPos + usingNeedle.size(), helperSource);
     } else {
-        msl.insert(0, std::string(textureReductionHelperSource()) + "\n");
+        msl.insert(0, helperSource + "\n");
     }
     return true;
 }
@@ -5914,11 +6007,14 @@ void threadTextureLodBiasParamsThroughHelpers(
     }
 }
 
-bool injectTextureLodBiases(std::string& msl) {
+bool injectTextureLodBiases(std::string& msl,
+                            bool applyImplicitLodBias) {
     static constexpr const char* kParamName = "_appgl_TextureLodBiases";
     static constexpr const char* kImplicitCorrectionName =
         "_appgl_ImplicitLodBiasCorrection";
-    if (msl.find(kParamName) != std::string::npos ||
+    const bool hasReductionLodBiasReference =
+        msl.find(kParamName) != std::string::npos;
+    if (!hasReductionLodBiasReference &&
         msl.find(".sample(") == std::string::npos) {
         return false;
     }
@@ -5935,7 +6031,8 @@ bool injectTextureLodBiases(std::string& msl) {
         std::string text;
     };
     std::vector<Replacement> replacements;
-    bool needsImplicitCorrection = false;
+    bool needsImplicitCorrection =
+        msl.find(kImplicitCorrectionName) != std::string::npos;
     for (const TextureReductionParam& param : params) {
         const std::string needle = param.name + ".sample(";
         std::size_t pos = 0;
@@ -5953,8 +6050,13 @@ bool injectTextureLodBiases(std::string& msl) {
             std::vector<std::string> args =
                 splitTopLevelCommas(msl.substr(open + 1, close - open - 1));
             bool changed = false;
+            bool hasExplicitLodControl = false;
             const std::string slot = std::to_string(param.slot) + "u";
             for (std::string& arg : args) {
+                const std::string trimmed = trimCopy(arg);
+                if (trimmed.rfind("gradient", 0) == 0) {
+                    hasExplicitLodControl = true;
+                }
                 std::string rewritten;
                 if (rewriteTextureSampleLodBiasArg(
                         arg,
@@ -5965,6 +6067,27 @@ bool injectTextureLodBiases(std::string& msl) {
                         &needsImplicitCorrection)) {
                     arg = std::move(rewritten);
                     changed = true;
+                    hasExplicitLodControl = true;
+                }
+            }
+            const bool supportsMetalBias =
+                param.kind != TextureReductionTextureKind::Texture1D &&
+                param.kind != TextureReductionTextureKind::Texture1DArray;
+            if (!hasExplicitLodControl &&
+                applyImplicitLodBias &&
+                supportsMetalBias) {
+                const std::size_t insertIndex =
+                    param.kind == TextureReductionTextureKind::Texture1DArray ||
+                    param.kind == TextureReductionTextureKind::Texture2DArray
+                        ? 3u
+                        : 2u;
+                if (args.size() >= insertIndex) {
+                    args.insert(
+                        args.begin() + static_cast<std::ptrdiff_t>(insertIndex),
+                        "bias((" + std::string(kParamName) + "[" + slot +
+                            "]) + " + kImplicitCorrectionName + ")");
+                    changed = true;
+                    needsImplicitCorrection = true;
                 }
             }
             if (changed) {
@@ -5981,7 +6104,7 @@ bool injectTextureLodBiases(std::string& msl) {
             pos = close + 1;
         }
     }
-    if (replacements.empty()) {
+    if (replacements.empty() && !hasReductionLodBiasReference) {
         return false;
     }
 
@@ -6000,14 +6123,28 @@ bool injectTextureLodBiases(std::string& msl) {
         msl = originalMsl;
         return false;
     }
-    const std::uint32_t bufferSlot =
-        chooseFreeBufferSlot(msl, kTextureLodBiasesPreferredBufferSlot);
-    std::string param =
-        ", constant float* " + std::string(kParamName) +
-        " [[buffer(" + std::to_string(bufferSlot) + ")]]";
-    if (needsImplicitCorrection) {
+    const std::size_t mainPos = msl.find("main0(");
+    const std::string mainParams =
+        mainPos != std::string::npos && mainPos < paramEnd
+            ? msl.substr(mainPos, paramEnd - mainPos)
+            : std::string();
+    const bool hasLodBiasParam =
+        mainParams.find(kParamName) != std::string::npos;
+    const bool hasImplicitCorrectionParam =
+        mainParams.find(kImplicitCorrectionName) != std::string::npos;
+    std::string param;
+    if (!hasLodBiasParam) {
+        const std::uint32_t bufferSlot =
+            chooseFreeBufferSlot(msl, kTextureLodBiasesPreferredBufferSlot);
+        param =
+            ", constant float* " + std::string(kParamName) +
+            " [[buffer(" + std::to_string(bufferSlot) + ")]]";
+    }
+    if (needsImplicitCorrection && !hasImplicitCorrectionParam) {
         std::string withLodBiasParam = msl;
-        withLodBiasParam.insert(paramEnd, param);
+        if (!param.empty()) {
+            withLodBiasParam.insert(paramEnd, param);
+        }
         const std::uint32_t correctionSlot =
             chooseFreeBufferSlot(withLodBiasParam,
                                  kImplicitLodBiasCorrectionPreferredBufferSlot);
@@ -6015,7 +6152,9 @@ bool injectTextureLodBiases(std::string& msl) {
             std::string(kImplicitCorrectionName) +
             " [[buffer(" + std::to_string(correctionSlot) + ")]]";
     }
-    msl.insert(paramEnd, param);
+    if (!param.empty()) {
+        msl.insert(paramEnd, param);
+    }
     threadTextureLodBiasParamsThroughHelpers(
         msl,
         kParamName,
@@ -9008,8 +9147,10 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
 
         if (execModel == spv::ExecutionModelFragment ||
             execModel == spv::ExecutionModelVertex) {
-            injectTextureReductionMinmax(msl);
-            injectTextureLodBiases(msl);
+            const bool applyImplicitLodBias =
+                execModel == spv::ExecutionModelFragment;
+            injectTextureReductionMinmax(msl, applyImplicitLodBias);
+            injectTextureLodBiases(msl, applyImplicitLodBias);
             injectIntegerTextureBorderClamp(msl);
         }
 
