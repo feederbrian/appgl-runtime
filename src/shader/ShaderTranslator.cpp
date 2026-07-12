@@ -5488,6 +5488,18 @@ static inline float2 appgl_texred_sample_coord_2d(float2 coord, uint packedMode)
     return (packedMode & 0x80000000u) != 0u ? float2(coord.x, 1.0f - coord.y) : coord;
 }
 
+static inline float3 appgl_texred_sample_coord_3d(float3 coord, uint packedMode) {
+    return (packedMode & 0x80000000u) != 0u ? float3(coord.x, 1.0f - coord.y, coord.z) : coord;
+}
+
+static inline int2 appgl_texred_sample_offset_2d(int2 offset, uint packedMode) {
+    return (packedMode & 0x80000000u) != 0u ? int2(offset.x, -offset.y) : offset;
+}
+
+static inline int3 appgl_texred_sample_offset_3d(int3 offset, uint packedMode) {
+    return (packedMode & 0x80000000u) != 0u ? int3(offset.x, -offset.y, offset.z) : offset;
+}
+
 static inline float4 appgl_texture_minmax_1d(texture1d<float> tex, sampler smp, float coord, constant uint* modes, uint slot) {
     uint mode = appgl_texred_mode(modes[slot]);
     if (mode == 0x9367u) return tex.sample(smp, coord);
@@ -5551,7 +5563,9 @@ static inline float4 appgl_texture_minmax_2d_array(texture2d_array<float> tex, s
 }
 
 static inline float4 appgl_texture_minmax_3d(texture3d<float> tex, sampler smp, float3 coord, constant uint* modes, uint slot) {
-    uint mode = appgl_texred_mode(modes[slot]);
+    uint packedMode = modes[slot];
+    uint mode = appgl_texred_mode(packedMode);
+    coord = appgl_texred_sample_coord_3d(coord, packedMode);
     if (mode == 0x9367u) return tex.sample(smp, coord);
     uint w = tex.get_width();
     uint h = tex.get_height();
@@ -5724,33 +5738,95 @@ bool injectTextureReductionMinmax(std::string& msl,
             const std::vector<std::string> args =
                 splitTopLevelCommas(msl.substr(open + 1, close - open - 1));
             std::string replacement;
+            bool usesReductionHelper = false;
             const std::string slot = std::to_string(param.slot) + "u";
             if (param.kind == TextureReductionTextureKind::Texture1D &&
                 args.size() == 2) {
                 replacement = "appgl_texture_minmax_1d(" + param.name + ", " +
                     args[0] + ", " + args[1] + ", " + kParamName + ", " + slot + ")";
+                usesReductionHelper = true;
             } else if (param.kind == TextureReductionTextureKind::Texture1DArray &&
                        args.size() == 3) {
                 replacement = "appgl_texture_minmax_1d_array(" + param.name + ", " +
                     args[0] + ", " + args[1] + ", " + args[2] + ", " +
                     kParamName + ", " + slot + ")";
+                usesReductionHelper = true;
             } else if (param.kind == TextureReductionTextureKind::Texture2D &&
                        args.size() == 2) {
                 replacement = "appgl_texture_minmax_2d(" + param.name + ", " +
                     args[0] + ", " + args[1] + ", " + kParamName + ", " + slot + ")";
+                usesReductionHelper = true;
             } else if (param.kind == TextureReductionTextureKind::Texture2DArray &&
                        args.size() == 3) {
                 replacement = "appgl_texture_minmax_2d_array(" + param.name + ", " +
                     args[0] + ", " + args[1] + ", " + args[2] + ", " +
                     kParamName + ", " + slot + ")";
+                usesReductionHelper = true;
             } else if (param.kind == TextureReductionTextureKind::Texture3D &&
                        args.size() == 2) {
                 replacement = "appgl_texture_minmax_3d(" + param.name + ", " +
                     args[0] + ", " + args[1] + ", " + kParamName + ", " + slot + ")";
+                usesReductionHelper = true;
             } else if (param.kind == TextureReductionTextureKind::TextureCube &&
                        args.size() == 2) {
                 replacement = "appgl_texture_minmax_cube(" + param.name + ", " +
                     args[0] + ", " + args[1] + ", " + kParamName + ", " + slot + ")";
+                usesReductionHelper = true;
+            } else {
+                std::vector<std::string> rewrittenArgs = args;
+                std::size_t firstExtraArg = 0;
+                const char* coordHelper = nullptr;
+                const char* offsetType = nullptr;
+                const char* offsetHelper = nullptr;
+                if (param.kind == TextureReductionTextureKind::Texture2D &&
+                    args.size() > 2) {
+                    firstExtraArg = 2;
+                    coordHelper = "appgl_texred_sample_coord_2d";
+                    offsetType = "int2";
+                    offsetHelper = "appgl_texred_sample_offset_2d";
+                } else if (param.kind == TextureReductionTextureKind::Texture2DArray &&
+                           args.size() > 3) {
+                    firstExtraArg = 3;
+                    coordHelper = "appgl_texred_sample_coord_2d";
+                    offsetType = "int2";
+                    offsetHelper = "appgl_texred_sample_offset_2d";
+                } else if (param.kind == TextureReductionTextureKind::Texture3D &&
+                           args.size() > 2) {
+                    firstExtraArg = 2;
+                    coordHelper = "appgl_texred_sample_coord_3d";
+                    offsetType = "int3";
+                    offsetHelper = "appgl_texred_sample_offset_3d";
+                }
+                if (coordHelper != nullptr) {
+                    rewrittenArgs[1] = std::string(coordHelper) + "(" +
+                        trimCopy(rewrittenArgs[1]) + ", " + kParamName + "[" +
+                        slot + "])";
+                    for (std::size_t i = firstExtraArg;
+                         i < rewrittenArgs.size();
+                         ++i) {
+                        const std::string trimmed = trimCopy(rewrittenArgs[i]);
+                        std::size_t afterType = std::strlen(offsetType);
+                        while (afterType < trimmed.size() &&
+                               std::isspace(static_cast<unsigned char>(
+                                   trimmed[afterType]))) {
+                            ++afterType;
+                        }
+                        if (trimmed.rfind(offsetType, 0) == 0 &&
+                            afterType < trimmed.size() &&
+                            trimmed[afterType] == '(') {
+                            rewrittenArgs[i] = std::string(offsetHelper) + "(" +
+                                trimmed + ", " + kParamName + "[" + slot + "])";
+                        }
+                    }
+                    replacement = param.name + ".sample(";
+                    for (std::size_t i = 0; i < rewrittenArgs.size(); ++i) {
+                        if (i > 0) {
+                            replacement += ", ";
+                        }
+                        replacement += trimCopy(rewrittenArgs[i]);
+                    }
+                    replacement += ")";
+                }
             }
             if (!replacement.empty()) {
                 // Metal has bias sample options for 2D/3D/cube textures, but
@@ -5772,7 +5848,8 @@ bool injectTextureReductionMinmax(std::string& msl,
                     default:
                         break;
                 }
-                if (applyImplicitLodBias && !helperName.empty()) {
+                if (usesReductionHelper && applyImplicitLodBias &&
+                    !helperName.empty()) {
                     replacement.insert(
                         replacement.size() - 1,
                         ", (" + std::string(kLodBiasParamName) + "[" + slot +

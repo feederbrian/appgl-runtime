@@ -49813,9 +49813,11 @@ static bool translatedDrawUsesFragCoordParams(
         liveValue);
 }
 
-static bool textureTargetUsesNormalized2DSampling(const GLTextureObject& texture) {
+static bool textureTargetUsesNormalizedSampleY(const GLTextureObject& texture) {
     const GLenum target = texture.desc.target != 0 ? texture.desc.target : texture.target;
-    return target == GL_TEXTURE_2D;
+    return target == GL_TEXTURE_2D ||
+           target == GL_TEXTURE_2D_ARRAY ||
+           target == GL_TEXTURE_3D;
 }
 
 static bool textureNeedsDefaultFramebufferSampleYFlip(
@@ -49824,7 +49826,7 @@ static bool textureNeedsDefaultFramebufferSampleYFlip(
     GLint sampledMipFirst,
     GLint sampledMipLast)
 {
-    return textureTargetUsesNormalized2DSampling(sampled) &&
+    return textureTargetUsesNormalizedSampleY(sampled) &&
            isColorFormat(sampled.desc.internalFormat) &&
            textureSampleMipRangeFramebufferYFlipped(
                sampled, storage, sampledMipFirst, sampledMipLast);
