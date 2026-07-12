@@ -1686,27 +1686,19 @@ bool injectTextureBufferSizeSidecar(
     return true;
 }
 
-// Shadow-compare Y fixup. FBO-rendered depth content is stored
-// y-flipped in the Metal texture (LOWER_LEFT clip-origin rendering);
-// non-compare sampling compensates through the swizzle/proxy paths and
-// readbacks compensate in their own chain, but compare-mode sampling
-// (depth2d/depth2d_array sample_compare / gather_compare) binds the raw
-// texture. Wrap every compare lookup's coordinate so a per-draw, per-
-// texture-slot flip factor at buffer(29) can select GL-correct rows.
-// The factor is 0.0 (no flip — e.g. uploaded depth) or 1.0 (FBO-
-// rendered + LOWER_LEFT), supplied by the frame graph alongside the
-// texture bindings — see TranslatedDrawInfo::TextureBinding::
-// compareFlipY. Depth-cube receivers are intentionally untouched
-// (direction vectors, not 2D coords). Returns false (msl unchanged)
-// when no compare receivers or call sites are present; every anchor
-// failure falls back to the original string per house rewrite rules.
-bool injectDepthCompareFlip(std::string& msl) {
-    static constexpr const char* kFlipName = "_appgl_CmpFlip";
+// Shadow-compare coordinate control. Bit 0 flips FBO-produced 2D depth
+// coordinates for LOWER_LEFT rendering. Bit 1 clamps cube/cube-array
+// directions to the selected face interior when seamless cube sampling is
+// disabled. The cube inset is derived from the actual lookup LOD, including
+// implicit, bias, and explicit-gradient forms. Returns false with the input
+// untouched when a required rewrite anchor is unavailable.
+bool injectDepthCompareControl(std::string& msl) {
+    static constexpr const char* kControlName = "_appgl_CmpControls";
     if (msl.find("sample_compare") == std::string::npos &&
         msl.find("gather_compare") == std::string::npos) {
         return false;
     }
-    if (msl.find(kFlipName) != std::string::npos) {
+    if (msl.find(kControlName) != std::string::npos) {
         return false;
     }
 
@@ -1718,23 +1710,32 @@ bool injectDepthCompareFlip(std::string& msl) {
     const std::size_t paramStart = mainPos + 6;
     const std::string params = msl.substr(paramStart, paramEnd - paramStart);
 
-    // Collect depth2d / depth2d_array receiver names with their Metal
-    // texture slots from the entry-point signature, e.g.
-    //   depth2d_array<float> uShadow [[texture(0)]]
+    // Collect all depth receiver names and Metal texture slots from the
+    // entry-point signature. Cube-array calls place the array index between
+    // the coordinate and compare value, which matters when locating an
+    // optional LOD-control argument.
     struct CompareReceiver {
         std::string name;
         unsigned slot = 0;
+        bool cube = false;
+        bool cubeArray = false;
+        std::string helperControlExpr;
     };
     std::vector<CompareReceiver> receivers;
-    for (const char* typeNeedle : {"depth2d_array<", "depth2d<"}) {
+    struct CompareReceiverType {
+        const char* needle;
+        bool cube;
+        bool cubeArray;
+    };
+    for (const CompareReceiverType receiverType : {
+             CompareReceiverType{"depth2d_array<", false, false},
+             CompareReceiverType{"depth2d<", false, false},
+             CompareReceiverType{"depthcube_array<", true, true},
+             CompareReceiverType{"depthcube<", true, false},
+         }) {
+        const char* typeNeedle = receiverType.needle;
         std::size_t search = 0;
         while ((search = params.find(typeNeedle, search)) != std::string::npos) {
-            // Skip depth2d_array hits when scanning for depth2d.
-            if (std::strcmp(typeNeedle, "depth2d<") == 0 && search > 0 &&
-                params.compare(search >= 6 ? search - 6 : 0, 6, "_array") == 0) {
-                search += std::strlen(typeNeedle);
-                continue;
-            }
             const std::size_t close = params.find('>', search);
             if (close == std::string::npos) break;
             std::size_t nameStart = close + 1;
@@ -1753,8 +1754,13 @@ bool injectDepthCompareFlip(std::string& msl) {
                 const std::size_t slotStart = texAttr + 10;
                 const unsigned slot = static_cast<unsigned>(
                     std::strtoul(params.c_str() + slotStart, nullptr, 10));
-                receivers.push_back(
-                    {params.substr(nameStart, nameEnd - nameStart), slot});
+                receivers.push_back({
+                    params.substr(nameStart, nameEnd - nameStart),
+                    slot,
+                    receiverType.cube,
+                    receiverType.cubeArray,
+                    {},
+                });
             }
             search = nameEnd;
         }
@@ -1782,55 +1788,190 @@ bool injectDepthCompareFlip(std::string& msl) {
     // fall back to the untouched original.
     std::string working = msl;
 
-    // Wrap the coordinate argument (first arg after the sampler) of
-    // every NAME.sample_compare( / NAME.gather_compare( call.
+    static constexpr const char* kHelperControlName =
+        "_appgl_CmpControlForHelper";
+    std::vector<std::string> helperNames;
+    std::vector<std::string> helperReceiverNames;
+    std::size_t helperScan = 0;
+    while (true) {
+        const std::size_t depth2dPos = working.find("depth2d", helperScan);
+        const std::size_t depthCubePos = working.find("depthcube", helperScan);
+        if (depth2dPos == std::string::npos &&
+            depthCubePos == std::string::npos) {
+            break;
+        }
+        const bool cube = depth2dPos == std::string::npos ||
+            (depthCubePos != std::string::npos && depthCubePos < depth2dPos);
+        helperScan = cube ? depthCubePos : depth2dPos;
+        const bool cubeArray = cube &&
+            working.compare(helperScan, 16, "depthcube_array<") == 0;
+        const std::size_t typeLength = cube ? 9u : 7u;
+        const std::size_t open = working.rfind('(', helperScan);
+        const std::size_t prevClose = working.rfind(')', helperScan);
+        if (open == std::string::npos ||
+            (prevClose != std::string::npos && prevClose > open)) {
+            helperScan += typeLength;
+            continue;
+        }
+        std::size_t nameEnd = open;
+        while (nameEnd > 0 &&
+               std::isspace(static_cast<unsigned char>(working[nameEnd - 1]))) {
+            --nameEnd;
+        }
+        std::size_t nameStart = nameEnd;
+        while (nameStart > 0 &&
+               (std::isalnum(static_cast<unsigned char>(working[nameStart - 1])) ||
+                working[nameStart - 1] == '_')) {
+            --nameStart;
+        }
+        const std::string helperName =
+            working.substr(nameStart, nameEnd - nameStart);
+        const std::size_t typeClose = working.find('>', helperScan);
+        if (helperName.empty() || helperName == "main0" ||
+            typeClose == std::string::npos) {
+            helperScan += typeLength;
+            continue;
+        }
+        std::size_t receiverStart = typeClose + 1;
+        while (receiverStart < working.size() &&
+               std::isspace(static_cast<unsigned char>(working[receiverStart]))) {
+            ++receiverStart;
+        }
+        std::size_t receiverEnd = receiverStart;
+        while (receiverEnd < working.size() &&
+               (std::isalnum(static_cast<unsigned char>(working[receiverEnd])) ||
+                working[receiverEnd] == '_')) {
+            ++receiverEnd;
+        }
+        std::size_t signatureDepth = 1;
+        std::size_t signatureCursor = open + 1;
+        while (signatureCursor < working.size() && signatureDepth > 0) {
+            if (working[signatureCursor] == '(') ++signatureDepth;
+            else if (working[signatureCursor] == ')') --signatureDepth;
+            ++signatureCursor;
+        }
+        std::size_t afterSignature = signatureCursor;
+        while (afterSignature < working.size() &&
+               std::isspace(static_cast<unsigned char>(working[afterSignature]))) {
+            ++afterSignature;
+        }
+        if (signatureDepth != 0 || afterSignature >= working.size() ||
+            working[afterSignature] != '{' || receiverEnd <= receiverStart) {
+            helperScan += typeLength;
+            continue;
+        }
+        const std::string receiverName =
+            working.substr(receiverStart, receiverEnd - receiverStart);
+        const auto helperIt =
+            std::find(helperNames.begin(), helperNames.end(), helperName);
+        if (helperIt != helperNames.end()) {
+            const std::size_t index = static_cast<std::size_t>(
+                std::distance(helperNames.begin(), helperIt));
+            if (helperReceiverNames[index] != receiverName) {
+                return abandonRewrite("multi-depth-receiver-helper");
+            }
+        } else {
+            helperNames.push_back(helperName);
+            helperReceiverNames.push_back(receiverName);
+            receivers.push_back({
+                receiverName,
+                0u,
+                cube,
+                cubeArray,
+                kHelperControlName,
+            });
+        }
+        helperScan = receiverEnd;
+    }
+
+    struct ArgumentSpan {
+        std::size_t start = 0;
+        std::size_t end = 0;
+    };
+    const auto trimmed = [](std::string value) {
+        const std::size_t begin = value.find_first_not_of(" \t\r\n");
+        if (begin == std::string::npos) return std::string();
+        const std::size_t end = value.find_last_not_of(" \t\r\n");
+        return value.substr(begin, end - begin + 1);
+    };
+
+    // Wrap the coordinate argument (first arg after the sampler) of every
+    // compare call. Cube receivers select an overload that computes the
+    // face inset from the call's own LOD-control form.
     bool wrapped = false;
     for (const auto& receiver : receivers) {
-        if (receiver.slot >= 32u) continue;
+        if (receiver.helperControlExpr.empty() && receiver.slot >= 32u) continue;
         for (const char* call : {".sample_compare(", ".gather_compare("}) {
+            const bool sampleCompare =
+                std::strcmp(call, ".sample_compare(") == 0;
             const std::string needle = receiver.name + call;
             std::size_t pos = 0;
             while ((pos = working.find(needle, pos)) != std::string::npos) {
                 const std::size_t argsStart = pos + needle.size();
-                // Args: sampler, coord, ... — find the coord argument's
-                // [start, end) at top paren depth.
                 std::size_t cursor = argsStart;
                 std::size_t depth = 1;
-                std::size_t commaCount = 0;
-                std::size_t coordStart = std::string::npos;
-                std::size_t coordEnd = std::string::npos;
+                std::size_t argStart = argsStart;
+                std::vector<ArgumentSpan> args;
                 while (cursor < working.size() && depth > 0) {
                     const char c = working[cursor];
                     if (c == '(') {
                         ++depth;
                     } else if (c == ')') {
                         --depth;
-                        if (depth == 0 && commaCount == 1 &&
-                            coordEnd == std::string::npos) {
-                            coordEnd = cursor;
+                        if (depth == 0) {
+                            args.push_back({argStart, cursor});
                         }
                     } else if (c == ',' && depth == 1) {
-                        ++commaCount;
-                        if (commaCount == 1) {
-                            coordStart = cursor + 1;
-                        } else if (commaCount == 2 &&
-                                   coordEnd == std::string::npos) {
-                            coordEnd = cursor;
-                        }
+                        args.push_back({argStart, cursor});
+                        argStart = cursor + 1;
                     }
                     ++cursor;
                 }
-                if (coordStart == std::string::npos ||
-                    coordEnd == std::string::npos || coordEnd <= coordStart) {
+                if (depth != 0 || args.size() < 2 ||
+                    args[1].end <= args[1].start) {
                     pos = argsStart;
                     continue;
                 }
+                const std::size_t coordStart = args[1].start;
+                const std::size_t coordEnd = args[1].end;
                 const std::string coordExpr =
                     working.substr(coordStart, coordEnd - coordStart);
-                const std::string replacement =
-                    " _appgl_cmpFlipCoord(" + coordExpr + ", " +
-                    std::string(kFlipName) + "[" +
-                    std::to_string(receiver.slot) + "])";
+                const std::string controlExpr =
+                    receiver.helperControlExpr.empty()
+                        ? (std::string(kControlName) + "[" +
+                           std::to_string(receiver.slot) + "]")
+                        : receiver.helperControlExpr;
+                std::string replacement;
+                if (!receiver.cube) {
+                    replacement =
+                        " _appgl_cmpFlip2DCoord(" + coordExpr + ", " +
+                        controlExpr + ".flags)";
+                } else {
+                    std::string helper =
+                        "_appgl_cmpClampCubeImplicitCoord";
+                    std::string option;
+                    const std::size_t optionIndex = receiver.cubeArray ? 4u : 3u;
+                    if (sampleCompare && args.size() > optionIndex) {
+                        option = trimmed(working.substr(
+                            args[optionIndex].start,
+                            args[optionIndex].end - args[optionIndex].start));
+                        if (option.rfind("bias(", 0) == 0) {
+                            helper = "_appgl_cmpClampCubeBiasCoord";
+                        } else if (option.rfind("gradientcube(", 0) == 0) {
+                            helper = "_appgl_cmpClampCubeGradientCoord";
+                        } else if (option.rfind("level(", 0) == 0) {
+                            helper = "_appgl_cmpClampCubeLevelCoord";
+                        } else {
+                            option.clear();
+                        }
+                    }
+                    replacement = " " + helper + "(" + receiver.name +
+                        ", " + coordExpr;
+                    if (!option.empty()) {
+                        replacement += ", " + option;
+                    }
+                    replacement += ", " + controlExpr + ")";
+                }
                 working.replace(coordStart, coordEnd - coordStart, replacement);
                 wrapped = true;
                 pos = coordStart + replacement.size();
@@ -1841,81 +1982,26 @@ bool injectDepthCompareFlip(std::string& msl) {
         return false;
     }
 
-    // Inject the flip-factor parameter into main0(...). Slot selection
+    // Inject the compare-control parameter into main0(...). Slot selection
     // follows the _appgl_ClipControlYSign preferred-slot pattern: take
     // the first fragment-stage buffer index not already present in the
     // generated MSL; the frame graph reads the actual slot back from
-    // the "[[buffer(N)]]" needle (depthCompareFlipBufferSlot).
+    // the "[[buffer(N)]]" needle (depthCompareControlBufferSlot).
     // GLSL helper functions that perform the lookup are emitted by
     // SPIRV-Cross as standalone MSL functions with the texture/sampler
     // threaded through their parameter lists (the Warzone
-    // shadow_mapping.glsl shape). The flip-factor buffer must be
+    // shadow_mapping.glsl shape). The control buffer must be
     // threaded the same way or the wrapped call sites inside helpers
     // reference an out-of-scope identifier — which fails compilation,
     // and an uncached compile failure re-runs per draw (the e2a876d
     // live regression). Mirror SPIRV-Cross: every non-main0 function
-    // whose parameter list contains a depth receiver gets
-    // `constant float* _appgl_CmpFlip` appended, and every CALL of
-    // that function gets the identifier appended (in scope at every
-    // caller: main0 has the attributed parameter; helper callers have
-    // their own appended parameter).
+    // whose parameter list contains a depth receiver gets one control
+    // reference. Calls from main0 select the entry for their actual texture
+    // argument; nested helpers forward their own reference.
     {
-        // Collect helper names: definitions are NAME(...) followed by
-        // optional whitespace and '{'; the receiver type inside the
-        // parameter list marks them.
-        std::vector<std::string> helperNames;
-        std::size_t scan = 0;
-        while ((scan = working.find("depth2d", scan)) != std::string::npos) {
-            // Find the enclosing parameter list: walk back to '(' at
-            // paren depth 0 relative to this position.
-            std::size_t open = working.rfind('(', scan);
-            const std::size_t prevClose = working.rfind(')', scan);
-            if (open == std::string::npos ||
-                (prevClose != std::string::npos && prevClose > open)) {
-                scan += 7;
-                continue;
-            }
-            // Function name directly before '('.
-            std::size_t nameEnd = open;
-            while (nameEnd > 0 &&
-                   std::isspace(static_cast<unsigned char>(working[nameEnd - 1]))) {
-                --nameEnd;
-            }
-            std::size_t nameStart = nameEnd;
-            while (nameStart > 0 &&
-                   (std::isalnum(static_cast<unsigned char>(working[nameStart - 1])) ||
-                    working[nameStart - 1] == '_')) {
-                --nameStart;
-            }
-            if (nameEnd > nameStart) {
-                const std::string name =
-                    working.substr(nameStart, nameEnd - nameStart);
-                if (name != "main0" &&
-                    std::find(helperNames.begin(), helperNames.end(), name) ==
-                        helperNames.end()) {
-                    // Confirm it is a definition: matching ')' followed
-                    // by optional whitespace then '{'.
-                    std::size_t depth = 1;
-                    std::size_t cursor = open + 1;
-                    while (cursor < working.size() && depth > 0) {
-                        if (working[cursor] == '(') ++depth;
-                        else if (working[cursor] == ')') --depth;
-                        ++cursor;
-                    }
-                    std::size_t after = cursor;
-                    while (after < working.size() &&
-                           std::isspace(static_cast<unsigned char>(working[after]))) {
-                        ++after;
-                    }
-                    if (after < working.size() && working[after] == '{') {
-                        helperNames.push_back(name);
-                    }
-                }
-            }
-            scan += 7;
-        }
-        // Thread the parameter through every definition and every call.
-        for (const auto& name : helperNames) {
+        for (std::size_t helperIndex = 0;
+             helperIndex < helperNames.size(); ++helperIndex) {
+            const std::string& name = helperNames[helperIndex];
             const std::string needle = name + "(";
             std::size_t pos = 0;
             while ((pos = working.find(needle, pos)) != std::string::npos) {
@@ -1944,9 +2030,45 @@ bool injectDepthCompareFlip(std::string& msl) {
                 }
                 const bool isDefinition =
                     after < working.size() && working[after] == '{';
-                const std::string insertion = isDefinition
-                    ? (", constant float* " + std::string(kFlipName))
-                    : (", " + std::string(kFlipName));
+                std::string insertion;
+                if (isDefinition) {
+                    insertion = ", constant _appgl_CmpControl& " +
+                        std::string(kHelperControlName);
+                } else {
+                    const std::string callArgs = working.substr(
+                        pos + needle.size(),
+                        closeParen - (pos + needle.size()));
+                    std::string controlArg;
+                    for (const auto& receiver : receivers) {
+                        std::size_t argPos = 0;
+                        while ((argPos = callArgs.find(receiver.name, argPos)) !=
+                               std::string::npos) {
+                            const bool leftBoundary = argPos == 0 ||
+                                (!std::isalnum(static_cast<unsigned char>(
+                                     callArgs[argPos - 1])) &&
+                                 callArgs[argPos - 1] != '_');
+                            const std::size_t argEnd =
+                                argPos + receiver.name.size();
+                            const bool rightBoundary = argEnd == callArgs.size() ||
+                                (!std::isalnum(static_cast<unsigned char>(
+                                     callArgs[argEnd])) &&
+                                 callArgs[argEnd] != '_');
+                            if (leftBoundary && rightBoundary) {
+                                controlArg = receiver.helperControlExpr.empty()
+                                    ? (std::string(kControlName) + "[" +
+                                       std::to_string(receiver.slot) + "]")
+                                    : kHelperControlName;
+                                break;
+                            }
+                            argPos = argEnd;
+                        }
+                        if (!controlArg.empty()) break;
+                    }
+                    if (controlArg.empty()) {
+                        return abandonRewrite("helper-control-argument");
+                    }
+                    insertion = ", " + controlArg;
+                }
                 working.insert(closeParen, insertion);
                 pos = closeParen + insertion.size() + 1;
             }
@@ -1970,7 +2092,7 @@ bool injectDepthCompareFlip(std::string& msl) {
         return abandonRewrite("no-free-buffer-slot");
     }
     const std::string param =
-        ", constant float* " + std::string(kFlipName) +
+        ", constant _appgl_CmpControl* " + std::string(kControlName) +
         " [[buffer(" + std::to_string(chosenSlot) + ")]]";
     working.insert(paramEnd, param);
 
@@ -1978,11 +2100,144 @@ bool injectDepthCompareFlip(std::string& msl) {
     // it — immediately after `using namespace metal;` (helpers precede
     // the fragment entry point in SPIRV-Cross emission, so anchoring on
     // "fragment " placed it too late for helper-body call sites).
-    static constexpr const char* kHelper =
-        "\nstatic inline float2 _appgl_cmpFlipCoord(float2 c, float f)\n"
-        "{\n"
-        "    return float2(c.x, mix(c.y, 1.0f - c.y, f));\n"
-        "}\n";
+    static constexpr const char* kHelper = R"APPGL(
+struct _appgl_CmpControl
+{
+    uint flags;
+    uint mipFilter;
+    float lodBias;
+    float minLod;
+    float maxLod;
+};
+
+static inline float2 _appgl_cmpFlip2DCoord(float2 c, uint flags)
+{
+    return (flags & 1u) != 0u ? float2(c.x, 1.0f - c.y) : c;
+}
+
+static inline float _appgl_cmpCubeRawLod(float3 c, gradientcube gradients,
+                                         float width)
+{
+    float3 a = abs(c);
+    float majorCoord;
+    float2 minor;
+    float2 dMinorDx;
+    float2 dMinorDy;
+    float dMajorDx;
+    float dMajorDy;
+    if (a.x >= a.y && a.x >= a.z) {
+        majorCoord = c.x;
+        minor = c.yz;
+        dMinorDx = gradients.dPdx.yz;
+        dMinorDy = gradients.dPdy.yz;
+        dMajorDx = sign(majorCoord) * gradients.dPdx.x;
+        dMajorDy = sign(majorCoord) * gradients.dPdy.x;
+    } else if (a.y >= a.z) {
+        majorCoord = c.y;
+        minor = c.xz;
+        dMinorDx = gradients.dPdx.xz;
+        dMinorDy = gradients.dPdy.xz;
+        dMajorDx = sign(majorCoord) * gradients.dPdx.y;
+        dMajorDy = sign(majorCoord) * gradients.dPdy.y;
+    } else {
+        majorCoord = c.z;
+        minor = c.xy;
+        dMinorDx = gradients.dPdx.xy;
+        dMinorDy = gradients.dPdy.xy;
+        dMajorDx = sign(majorCoord) * gradients.dPdx.z;
+        dMajorDy = sign(majorCoord) * gradients.dPdy.z;
+    }
+    float major = max(abs(majorCoord), 1.0e-20f);
+    float denominator = major * major;
+    float2 projectedDx =
+        0.5f * (dMinorDx * major - minor * dMajorDx) / denominator;
+    float2 projectedDy =
+        0.5f * (dMinorDy * major - minor * dMajorDy) / denominator;
+    float rho = max(length(projectedDx), length(projectedDy)) *
+        max(width, 1.0f);
+    return log2(max(rho, 1.0e-20f));
+}
+
+template<typename T>
+static inline uint _appgl_cmpCubeLevel(T tex, float lod,
+                                       constant _appgl_CmpControl& control)
+{
+    uint mipCount = max(tex.get_num_mip_levels(), 1u);
+    float maxMip = float(mipCount - 1u);
+    float minLod = clamp(control.minLod, 0.0f, maxMip);
+    float maxLod = clamp(max(control.maxLod, minLod), minLod, maxMip);
+    float clampedLod = clamp(lod, minLod, maxLod);
+    float selectedLod = control.mipFilter == 2u
+        ? ceil(clampedLod) : rint(clampedLod);
+    return uint(clamp(selectedLod, 0.0f, maxMip));
+}
+
+static inline float3 _appgl_cmpClampCubeCoord(float3 c, float width,
+                                              uint flags)
+{
+    if ((flags & 2u) == 0u) return c;
+    float3 a = abs(c);
+    float major = max(a.x, max(a.y, a.z));
+    float edge = major * max(0.0f, 1.0f - 1.0f / max(width, 1.0f));
+    float3 clamped = clamp(c, float3(-edge), float3(edge));
+    if (a.x >= a.y && a.x >= a.z) clamped.x = c.x;
+    else if (a.y >= a.z) clamped.y = c.y;
+    else clamped.z = c.z;
+    return clamped;
+}
+
+template<typename T>
+static inline float3 _appgl_cmpClampCubeImplicitCoord(
+    T tex, float3 c, constant _appgl_CmpControl& control)
+{
+    if ((control.flags & 2u) == 0u) return c;
+    gradientcube gradients(dfdx(c), dfdy(c));
+    float lod = _appgl_cmpCubeRawLod(
+        c, gradients, float(tex.get_width())) + control.lodBias;
+    uint level = _appgl_cmpCubeLevel(tex, lod, control);
+    return _appgl_cmpClampCubeCoord(
+        c, float(tex.get_width(level)), control.flags);
+}
+
+template<typename T>
+static inline float3 _appgl_cmpClampCubeBiasCoord(
+    T tex, float3 c, bias options,
+    constant _appgl_CmpControl& control)
+{
+    if ((control.flags & 2u) == 0u) return c;
+    gradientcube gradients(dfdx(c), dfdy(c));
+    float lod = _appgl_cmpCubeRawLod(
+        c, gradients, float(tex.get_width())) +
+        control.lodBias + options.value;
+    uint level = _appgl_cmpCubeLevel(tex, lod, control);
+    return _appgl_cmpClampCubeCoord(
+        c, float(tex.get_width(level)), control.flags);
+}
+
+template<typename T>
+static inline float3 _appgl_cmpClampCubeGradientCoord(
+    T tex, float3 c, gradientcube gradients,
+    constant _appgl_CmpControl& control)
+{
+    if ((control.flags & 2u) == 0u) return c;
+    float lod = _appgl_cmpCubeRawLod(
+        c, gradients, float(tex.get_width())) + control.lodBias;
+    uint level = _appgl_cmpCubeLevel(tex, lod, control);
+    return _appgl_cmpClampCubeCoord(
+        c, float(tex.get_width(level)), control.flags);
+}
+
+template<typename T>
+static inline float3 _appgl_cmpClampCubeLevelCoord(
+    T tex, float3 c, level options,
+    constant _appgl_CmpControl& control)
+{
+    if ((control.flags & 2u) == 0u) return c;
+    uint selectedLevel = _appgl_cmpCubeLevel(tex, options.lod, control);
+    return _appgl_cmpClampCubeCoord(
+        c, float(tex.get_width(selectedLevel)), control.flags);
+}
+)APPGL";
     static constexpr const char* kUsingAnchor = "using namespace metal;\n";
     const std::size_t usingPos = working.find(kUsingAnchor);
     if (usingPos != std::string::npos) {
@@ -8483,13 +8738,11 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 execModes.get(spv::ExecutionModePixelCenterInteger);
             if (!originUpperLeft) {
                 (void)injectFragmentCoordYFixup(msl, pixelCenterInteger);
-                // Shadow-compare Y fixup: wrap depth2d/_array
-                // sample_compare/gather_compare coordinates so the
-                // frame graph can flip rows per draw for FBO-rendered
-                // depth content (see injectDepthCompareFlip). Same
-                // LOWER_LEFT gate as the gl_FragCoord fixup.
-                (void)injectDepthCompareFlip(msl);
             }
+            // Compare coordinate control also owns nonseamless cube
+            // clamping, so it must be present for UPPER_LEFT shaders even
+            // though their 2D Y-flip flag stays clear.
+            (void)injectDepthCompareControl(msl);
             (void)rewriteFragmentSamplePositionYForGL(msl);
             (void)rewriteFragmentInterpolateAtOffsetYForGL(msl);
         }

@@ -19629,21 +19629,28 @@ struct GLContext::Impl {
                 }
                 binding.reductionMode = static_cast<std::uint32_t>(effectiveReductionMode);
                 binding.lodBias = samplerParamsForCompleteness->lodBias;
-                // Shadow-compare Y fixup predicate. FBO/viewport-rendered
-                // depth content is stored y-flipped in the Metal texture;
-                // compare-mode sampling binds the raw texture (no proxy
-                // compensation), so the translator-injected _appgl_CmpFlip
-                // factor must flip the lookup row. Excluded: uploaded
-                // depth (raw content is GL-oriented), UPPER_LEFT clip
-                // origin, and the packed-2D shapes already served by the
-                // flipped sampling copy (depthStencilNeedsSamplingFlip —
-                // flagging those too would double-flip).
-                binding.compareFlipY = 0.0f;
+                binding.compareFlags = 0;
+                binding.compareMipFilter = static_cast<std::uint32_t>(
+                    metalMipFilter(samplerParamsForCompleteness->minFilter));
+                binding.compareLodBias = samplerParamsForCompleteness->lodBias;
+                if (samplerMinFilterRequiresMipChain(
+                        samplerParamsForCompleteness->minFilter)) {
+                    binding.compareMinLod = std::max(
+                        0.0f, samplerParamsForCompleteness->minLod);
+                    binding.compareMaxLod = std::max(
+                        binding.compareMinLod,
+                        samplerParamsForCompleteness->maxLod);
+                } else {
+                    binding.compareMinLod = 0.0f;
+                    binding.compareMaxLod = 0.0f;
+                }
+                // Compare-mode cube sampling is seamless in Metal. OpenGL
+                // requires face-local filtering while the seamless state is
+                // disabled, so flag cube receivers for an LOD-aware shader
+                // coordinate clamp. Non-cube FBO depth retains the existing
+                // LOWER_LEFT Y correction in a distinct flag bit.
                 if (samplerParamsForCompleteness->compareMode ==
                         GL_COMPARE_REF_TO_TEXTURE &&
-                    (texObject->wasFramebufferRenderedTo ||
-                     texObject->wasViewportRenderedTo) &&
-                    state->clipOrigin() != GL_UPPER_LEFT &&
                     binding.metalTexture != nullptr) {
                     id<MTLTexture> boundTex =
                         (__bridge id<MTLTexture>)binding.metalTexture;
@@ -19653,14 +19660,24 @@ struct GLContext::Impl {
                         pf == MTLPixelFormatDepth16Unorm ||
                         pf == MTLPixelFormatDepth32Float_Stencil8 ||
                         pf == MTLPixelFormatDepth24Unorm_Stencil8;
+                    const bool cubeFamily =
+                        boundTex.textureType == MTLTextureTypeCube ||
+                        boundTex.textureType == MTLTextureTypeCubeArray;
                     const bool servedByFlipCopy =
                         (pf == MTLPixelFormatDepth32Float_Stencil8 ||
                          pf == MTLPixelFormatDepth24Unorm_Stencil8) &&
                         boundTex.textureType == MTLTextureType2D &&
                         boundTex.sampleCount <= 1 &&
                         binding.metalTexture != texObject->metalTexture;
-                    if (depthFamily && !servedByFlipCopy) {
-                        binding.compareFlipY = 1.0f;
+                    if (depthFamily && cubeFamily &&
+                        !state->isEnabled(GL_TEXTURE_CUBE_MAP_SEAMLESS)) {
+                        binding.compareFlags |=
+                            kDepthCompareFlagClampCubeFace;
+                    } else if (depthFamily && !servedByFlipCopy &&
+                               (texObject->wasFramebufferRenderedTo ||
+                                texObject->wasViewportRenderedTo) &&
+                               state->clipOrigin() != GL_UPPER_LEFT) {
+                        binding.compareFlags |= kDepthCompareFlagFlip2DY;
                     }
                 }
                 emitSamplerTrace("bound",
@@ -19756,6 +19773,7 @@ struct GLContext::Impl {
                         "[LB-BOUND] stage=%s sampler='%s' glUnit=%d metalSlot=%u "
                         "texName=%u metalTex=%p mtlSampler=%p samplerName=%u "
                         "lodBias=%f texLodBias=%f samplerLodBias=%f "
+                        "compareFlags=0x%X compareMip=%u compareLod=%f..%f "
                         "target=0x%X viewSrc=%u viewLevel=%d+%d viewLayer=%d+%d "
                         "mtlType=%lu mtlFmt=%lu mtlSize=%lux%lu mtlMips=%lu\n",
                         stageTag, sampledTex.name.c_str(),
@@ -19765,6 +19783,10 @@ struct GLContext::Impl {
                         static_cast<double>(binding.lodBias),
                         static_cast<double>(texObject->params.lodBias),
                         static_cast<double>(samplerParamsForCompleteness->lodBias),
+                        binding.compareFlags,
+                        binding.compareMipFilter,
+                        static_cast<double>(binding.compareMinLod),
+                        static_cast<double>(binding.compareMaxLod),
                         texObject->target,
                         texObject->viewSourceTexture,
                         texObject->viewMinLevel,

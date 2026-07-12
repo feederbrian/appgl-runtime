@@ -48,6 +48,9 @@
 
 namespace appgl {
 
+constexpr std::uint32_t kDepthCompareFlagFlip2DY = 1u << 0;
+constexpr std::uint32_t kDepthCompareFlagClampCubeFace = 1u << 1;
+
 class GLContext;
 class GLObjectStore;
 class GLStateTracker;
@@ -132,7 +135,7 @@ struct TranslatedDrawPlanShaderSlots {
     std::int32_t fragmentBorderClampModesSlot = -1;
     std::int32_t fragmentBorderClampColorsSlot = -1;
     std::int32_t fragmentImplicitLodBiasCorrectionSlot = -1;
-    std::int32_t fragmentDepthCompareFlipSlot = -1;
+    std::int32_t fragmentDepthCompareControlSlot = -1;
     std::int32_t fragmentSampleMaskSlot = 21;
 };
 
@@ -316,13 +319,16 @@ struct TranslatedDrawInfo {
         GLint sampledMipLast = 0;
         std::uint32_t borderClampMask = 0;
         std::array<std::int32_t, 4> borderColor = {0, 0, 0, 0};
-        // Shadow-compare Y fixup factor (0.0 = no flip, 1.0 = flip):
-        // 1.0 when this is a depth texture with COMPARE_REF_TO_TEXTURE
-        // whose Metal content is FBO/viewport-rendered (stored
-        // y-flipped) and not already served by the packed-format
-        // flipped sampling copy. Consumed by the _appgl_CmpFlip
-        // buffer the translator injects for compare lookups.
-        float compareFlipY = 0.0f;
+        // Per-slot shadow-compare coordinate control. Bit 0 flips the Y
+        // coordinate of FBO-produced 2D depth content. Bit 1 clamps cube and
+        // cube-array directions to the selected face while seamless cube
+        // sampling is disabled. The LOD fields let the shader choose the
+        // correct cube-face inset for implicit, bias, and gradient lookups.
+        std::uint32_t compareFlags = 0;
+        std::uint32_t compareMipFilter = 0;
+        float compareLodBias = 0.0f;
+        float compareMinLod = 0.0f;
+        float compareMaxLod = 0.0f;
     };
     std::vector<TextureBinding> fragmentTextures;
     std::vector<TextureBinding> vertexTextures;

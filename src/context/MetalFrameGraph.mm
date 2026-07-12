@@ -3648,16 +3648,16 @@ static std::size_t capturedTranslatedDrawRecordApproxBytes(
     return bytes;
 }
 
-// Shadow-compare Y-fixup slot: the translator injects
-// `constant float* _appgl_CmpFlip [[buffer(N)]]` into fragment shaders
-// that compare-sample depth2d/_array receivers (injectDepthCompareFlip);
+// Shadow-compare coordinate-control slot: the translator injects
+// `constant _appgl_CmpControl* _appgl_CmpControls [[buffer(N)]]` into
+// fragment shaders that compare-sample depth receivers.
 // N is chosen collision-free per shader, so read it back from the MSL —
 // same pattern as clipControlYSignBufferSlot below.
-static NSInteger depthCompareFlipBufferSlot(const std::string* msl) {
+static NSInteger depthCompareControlBufferSlot(const std::string* msl) {
     if (msl == nullptr) {
         return -1;
     }
-    static constexpr const char* kNeedle = "_appgl_CmpFlip [[buffer(";
+    static constexpr const char* kNeedle = "_appgl_CmpControls [[buffer(";
     const std::size_t pos = msl->find(kNeedle);
     if (pos == std::string::npos) {
         return -1;
@@ -3673,6 +3673,17 @@ static NSInteger depthCompareFlipBufferSlot(const std::string* msl) {
     }
     return haveDigit ? slot : -1;
 }
+
+struct DepthCompareControlPayload {
+    std::uint32_t flags = 0;
+    std::uint32_t mipFilter = 0;
+    float lodBias = 0.0f;
+    float minLod = 0.0f;
+    float maxLod = 0.0f;
+};
+
+static_assert(sizeof(DepthCompareControlPayload) == 20,
+              "MSL compare-control payload layout changed");
 
 static NSInteger clipControlYSignBufferSlot(const std::string* msl) {
     if (msl == nullptr) {
@@ -4005,7 +4016,7 @@ struct TranslatedDrawMSLSlots {
     bool vertexNeedsFragmentShadingRateState = false;
     bool vertexUsesMultiviewViewMask = false;
     bool fragmentUsesMultiviewViewMask = false;
-    NSInteger fragmentDepthCompareFlipSlot = -1;
+    NSInteger fragmentDepthCompareControlSlot = -1;
     // C52(b): sample-mask slot, plan-cached like its siblings — the
     // per-draw whole-MSL needle-scan was 10-15% of encode.
     NSInteger fragmentSampleMaskSlot = 21;
@@ -4046,8 +4057,8 @@ static TranslatedDrawPlanShaderSlots phase2PlanShaderSlotsFromMSLSlots(
     planSlots.vertexUsesMultiviewViewMask = slots.vertexUsesMultiviewViewMask;
     planSlots.fragmentUsesMultiviewViewMask =
         slots.fragmentUsesMultiviewViewMask;
-    planSlots.fragmentDepthCompareFlipSlot =
-        phase2PlanSlotFromNSInteger(slots.fragmentDepthCompareFlipSlot);
+    planSlots.fragmentDepthCompareControlSlot =
+        phase2PlanSlotFromNSInteger(slots.fragmentDepthCompareControlSlot);
     planSlots.fragmentSampleMaskSlot =
         phase2PlanSlotFromNSInteger(slots.fragmentSampleMaskSlot);
     planSlots.vertexClipControlYSignSlot =
@@ -4093,8 +4104,8 @@ static TranslatedDrawMSLSlots phase2PlanMSLSlotsFromShaderSlots(
         planSlots.vertexUsesMultiviewViewMask;
     slots.fragmentUsesMultiviewViewMask =
         planSlots.fragmentUsesMultiviewViewMask;
-    slots.fragmentDepthCompareFlipSlot =
-        phase2PlanSlotToNSInteger(planSlots.fragmentDepthCompareFlipSlot);
+    slots.fragmentDepthCompareControlSlot =
+        phase2PlanSlotToNSInteger(planSlots.fragmentDepthCompareControlSlot);
     slots.fragmentSampleMaskSlot =
         phase2PlanSlotToNSInteger(planSlots.fragmentSampleMaskSlot);
     slots.vertexClipControlYSignSlot =
@@ -4152,8 +4163,8 @@ static TranslatedDrawMSLSlots buildTranslatedDrawMSLSlots(
         mslContains(info.vertexMSL, "spvViewMask");
     slots.fragmentUsesMultiviewViewMask =
         mslContains(info.fragmentMSL, "spvViewMask");
-    slots.fragmentDepthCompareFlipSlot =
-        hasFragmentStage ? depthCompareFlipBufferSlot(info.fragmentMSL) : -1;
+    slots.fragmentDepthCompareControlSlot =
+        hasFragmentStage ? depthCompareControlBufferSlot(info.fragmentMSL) : -1;
     slots.fragmentSampleMaskSlot =
         hasFragmentStage ? fixedFunctionSampleMaskBufferSlot(info.fragmentMSL) : 21;
     slots.vertexClipControlYSignSlot =
@@ -8385,7 +8396,7 @@ struct MetalFrameGraph::Impl {
         bool fragmentNeedsGlNumSamplesArgBuf = false;
         bool vertexNeedsFragmentShadingRateState = false;
         NSInteger vertexClipControlYSignSlot = -1;
-        NSInteger fragmentDepthCompareFlipSlot = -1;
+        NSInteger fragmentDepthCompareControlSlot = -1;
         bool clipControlShaderYFixup = false;
         bool clipControlInvertsWinding = false;
         bool vertexUsesMultiviewViewMask = false;
@@ -8444,8 +8455,8 @@ struct MetalFrameGraph::Impl {
                     translatedPlan->vertexNeedsFragmentShadingRateState;
                 vertexClipControlYSignSlot =
                     shaderSlots.vertexClipControlYSignSlot;
-                fragmentDepthCompareFlipSlot =
-                    shaderSlots.fragmentDepthCompareFlipSlot;
+                fragmentDepthCompareControlSlot =
+                    shaderSlots.fragmentDepthCompareControlSlot;
                 clipControlShaderYFixup =
                     translatedPlan->clipControlShaderYFixup;
                 clipControlInvertsWinding =
@@ -8485,8 +8496,8 @@ struct MetalFrameGraph::Impl {
                 shaderSlots.vertexNeedsFragmentShadingRateState;
             vertexClipControlYSignSlot =
                 shaderSlots.vertexClipControlYSignSlot;
-            fragmentDepthCompareFlipSlot =
-                shaderSlots.fragmentDepthCompareFlipSlot;
+            fragmentDepthCompareControlSlot =
+                shaderSlots.fragmentDepthCompareControlSlot;
             clipControlShaderYFixup =
                 vertexClipControlYSignSlot >= 0 &&
                 info.clipControlYSignFixupEnabled &&
@@ -11219,22 +11230,27 @@ struct MetalFrameGraph::Impl {
             setFloorUniformBytesClass(
                 ArgEncoderSetupFloorProfileSample::UniformBytesClass::
                     ShadowCompare);
-            // Shadow-compare Y fixup: per-texture-slot flip factors for
-            // the _appgl_CmpFlip buffer injected by the translator.
+            // Per-texture-slot compare coordinate controls for the
+            // _appgl_CmpControls buffer injected by the translator.
             // Always set when the shader declares the buffer — bindings
-            // without the FBO-rendered predicate read 0.0 (no flip).
-            if (fragmentDepthCompareFlipSlot >= 0) {
-                float compareFlips[32] = {};
+            // without either predicate keep zero flags.
+            if (fragmentDepthCompareControlSlot >= 0) {
+                DepthCompareControlPayload compareControls[32] = {};
                 for (const auto& binding : info.fragmentTextures) {
                     if (binding.metalSlot < 32u) {
-                        compareFlips[binding.metalSlot] = binding.compareFlipY;
+                        auto& control = compareControls[binding.metalSlot];
+                        control.flags = binding.compareFlags;
+                        control.mipFilter = binding.compareMipFilter;
+                        control.lodBias = binding.compareLodBias;
+                        control.minLod = binding.compareMinLod;
+                        control.maxLod = binding.compareMaxLod;
                     }
                 }
                 bindFragmentBytesIfNeeded(
                     encodeSubtimeSamplePtr,
-                    compareFlips,
-                    sizeof(compareFlips),
-                    static_cast<NSUInteger>(fragmentDepthCompareFlipSlot),
+                    compareControls,
+                    sizeof(compareControls),
+                    static_cast<NSUInteger>(fragmentDepthCompareControlSlot),
                     EncodeMarshalClass::SetBytes);
             }
             if (!info.multisampleStorageImageSampleCounts.empty()) {
@@ -27813,8 +27829,8 @@ private:
                    sb.fragmentBorderClampColorsSlot &&
                sa.fragmentImplicitLodBiasCorrectionSlot ==
                    sb.fragmentImplicitLodBiasCorrectionSlot &&
-               sa.fragmentDepthCompareFlipSlot ==
-                   sb.fragmentDepthCompareFlipSlot &&
+               sa.fragmentDepthCompareControlSlot ==
+                   sb.fragmentDepthCompareControlSlot &&
                sa.fragmentSampleMaskSlot == sb.fragmentSampleMaskSlot;
     }
 
