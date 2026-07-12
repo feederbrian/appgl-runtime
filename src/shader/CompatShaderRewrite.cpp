@@ -348,6 +348,7 @@ struct GpuShader4ShadowWrapper {
     const char* helperName;
     const char* commonSource;
     const char* fragmentSource;
+    bool coreLegacyWithoutGpuShader4 = false;
 };
 
 static const GpuShader4ShadowWrapper kGpuShader4ShadowWrappers[] = {
@@ -355,21 +356,23 @@ static const GpuShader4ShadowWrapper kGpuShader4ShadowWrappers[] = {
         "shadow1D",
         "appgl_gpu_shader4_shadow1D",
         "vec4 appgl_gpu_shader4_shadow1D(sampler1DShadow s, vec3 p) {\n"
-        "    return vec4(textureLod(s, p, 0.0));\n"
+        "    return vec4(vec3(texture(s, p)), 1.0);\n"
         "}\n",
         "vec4 appgl_gpu_shader4_shadow1D(sampler1DShadow s, vec3 p, float bias) {\n"
-        "    return vec4(texture(s, p, bias));\n"
+        "    return vec4(vec3(texture(s, p, bias)), 1.0);\n"
         "}\n",
+        true,
     },
     {
         "shadow2D",
         "appgl_gpu_shader4_shadow2D",
         "vec4 appgl_gpu_shader4_shadow2D(sampler2DShadow s, vec3 p) {\n"
-        "    return vec4(textureLod(s, p, 0.0));\n"
+        "    return vec4(vec3(texture(s, p)), 1.0);\n"
         "}\n",
         "vec4 appgl_gpu_shader4_shadow2D(sampler2DShadow s, vec3 p, float bias) {\n"
-        "    return vec4(texture(s, p, bias));\n"
+        "    return vec4(vec3(texture(s, p, bias)), 1.0);\n"
         "}\n",
+        true,
     },
     {
         "shadowCube",
@@ -2276,15 +2279,32 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     }
     bool didGpuShader4ShadowFixup = false;
     std::string gpuShader4ShadowPreamble;
-    if (hasGpuShader4Directive &&
-        result.source.find("shadow") != std::string::npos) {
+    if (result.source.find("shadow") != std::string::npos) {
         for (const auto& wrapper : kGpuShader4ShadowWrappers) {
+            if (!hasGpuShader4Directive &&
+                !wrapper.coreLegacyWithoutGpuShader4) {
+                continue;
+            }
             if (!containsIdentifier(result.source, wrapper.legacyName)) {
                 continue;
             }
-            if (replaceCodeFunctionIdentifier(result.source,
-                                              wrapper.legacyName,
-                                              wrapper.helperName)) {
+            bool replaced = false;
+            if (!hasGpuShader4Directive) {
+                // Legacy Piglit shaders commonly route these two builtins
+                // through an object-like macro (`#define textureInst
+                // shadow1D`). The code-only call rewriter deliberately skips
+                // preprocessor lines, so rewrite the complete identifier for
+                // this narrowly approved pair before adding the wrapper.
+                replaceIdentifier(result.source,
+                                  wrapper.legacyName,
+                                  wrapper.helperName);
+                replaced = true;
+            } else {
+                replaced = replaceCodeFunctionIdentifier(result.source,
+                                                         wrapper.legacyName,
+                                                         wrapper.helperName);
+            }
+            if (replaced) {
                 gpuShader4ShadowPreamble.append(wrapper.commonSource);
                 if (isFragment && wrapper.fragmentSource) {
                     gpuShader4ShadowPreamble.append(wrapper.fragmentSource);
