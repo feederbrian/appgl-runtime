@@ -5311,6 +5311,19 @@ void GLContext::endImmediate() {
                             return std::fabs(v.texcoord[3] - 1.0f) > 0.00001f;
                         });
         const bool blendEnabled = impl_->state->isEnabled(GL_BLEND);
+        auto effectiveSamplerParams = [&](const GLTextureObject& texture)
+            -> const GLTextureParameters& {
+            const GLuint samplerName = impl_->state->boundSampler(
+                impl_->state->activeTextureUnit());
+            if (samplerName != 0) {
+                const GLSamplerObject* sampler =
+                    impl_->objects->samplers().get(samplerName);
+                if (sampler != nullptr && sampler->instantiated) {
+                    return sampler->params;
+                }
+            }
+            return texture.params;
+        };
         auto texture2DShadowPaintSafe = [&]() {
             if (!texture2DEnabled) {
                 return true;
@@ -5322,22 +5335,23 @@ void GLContext::endImmediate() {
             if (texture == nullptr) {
                 return false;
             }
-            const auto& params = texture->params;
+            const auto& textureParams = texture->params;
+            const auto& samplerParams = effectiveSamplerParams(*texture);
             const bool identitySwizzle =
-                params.swizzle[0] == GL_RED &&
-                params.swizzle[1] == GL_GREEN &&
-                params.swizzle[2] == GL_BLUE &&
-                params.swizzle[3] == GL_ALPHA;
+                textureParams.swizzle[0] == GL_RED &&
+                textureParams.swizzle[1] == GL_GREEN &&
+                textureParams.swizzle[2] == GL_BLUE &&
+                textureParams.swizzle[3] == GL_ALPHA;
             const bool clampWrap =
-                params.wrapS == GL_CLAMP_TO_EDGE &&
-                params.wrapT == GL_CLAMP_TO_EDGE;
+                samplerParams.wrapS == GL_CLAMP_TO_EDGE &&
+                samplerParams.wrapT == GL_CLAMP_TO_EDGE;
             const bool legacyBlendTexEnv =
                 blendEnabled &&
                 appglImmediateTextureBaseClass(
-                    texture->desc.internalFormat, &params) != 0u;
+                    texture->desc.internalFormat, &textureParams) != 0u;
             return (clampWrap || legacyBlendTexEnv) &&
-                   params.minFilter == GL_NEAREST &&
-                   params.magFilter == GL_NEAREST &&
+                   samplerParams.minFilter == GL_NEAREST &&
+                   samplerParams.magFilter == GL_NEAREST &&
                    identitySwizzle;
         };
         if (texture1D ||
@@ -5455,16 +5469,17 @@ void GLContext::endImmediate() {
                 return false;
             }
             const GLTextureImageLevel& baseImage = baseIt->second;
+            const auto& samplerParams = effectiveSamplerParams(*texture);
             sampledTextureBaseClass =
                 appglImmediateTextureBaseClass(
                     texture->desc.internalFormat, &texture->params);
             sampledSwizzle = texture->params.swizzle;
-            sampledWrapS = texture->params.wrapS;
-            sampledWrapT = texture->params.wrapT;
-            sampledBorderRGBA[0] = normalizedByte(texture->params.borderColor[0]);
-            sampledBorderRGBA[1] = normalizedByte(texture->params.borderColor[1]);
-            sampledBorderRGBA[2] = normalizedByte(texture->params.borderColor[2]);
-            sampledBorderRGBA[3] = normalizedByte(texture->params.borderColor[3]);
+            sampledWrapS = samplerParams.wrapS;
+            sampledWrapT = samplerParams.wrapT;
+            sampledBorderRGBA[0] = normalizedByte(samplerParams.borderColor[0]);
+            sampledBorderRGBA[1] = normalizedByte(samplerParams.borderColor[1]);
+            sampledBorderRGBA[2] = normalizedByte(samplerParams.borderColor[2]);
+            sampledBorderRGBA[3] = normalizedByte(samplerParams.borderColor[3]);
             for (std::size_t i = 0; i < drawCount; ++i) {
                 const auto st = projectedST(drawVerts[i]);
                 minS = std::min(minS, st[0]);
@@ -5484,7 +5499,7 @@ void GLContext::endImmediate() {
                 }
             };
             auto selectedTextureLevel = [&]() -> GLint {
-                if (!mipmappedMinFilter(texture->params.minFilter)) {
+                if (!mipmappedMinFilter(samplerParams.minFilter)) {
                     return baseLevel;
                 }
                 const float rectWidth = static_cast<float>(std::max<GLint>(x1 - x0, 1));
@@ -5501,8 +5516,8 @@ void GLContext::endImmediate() {
                 if (!std::isfinite(lambda)) {
                     lambda = 0.0f;
                 }
-                lambda += texture->params.lodBias;
-                lambda = std::clamp(lambda, texture->params.minLod, texture->params.maxLod);
+                lambda += samplerParams.lodBias;
+                lambda = std::clamp(lambda, samplerParams.minLod, samplerParams.maxLod);
                 const GLint levelOffset = std::max<GLint>(
                     0,
                     static_cast<GLint>(std::floor(lambda + 0.5f)));
@@ -5957,18 +5972,34 @@ void GLContext::endImmediate() {
                 continue;
             }
             const GLuint texName = impl_->state->boundTextureOnUnit(0, target);
-            GLTextureObject* tex = impl_->currentTexture(target);
+            GLTextureObject* tex = texName != 0
+                ? impl_->objects->textures().get(texName)
+                : impl_->currentTexture(target);
             if (tex == nullptr || tex->metalTexture == nullptr) {
                 continue;
             }
-            if (!impl_->sampledTextureCompleteForSampler(*tex, tex->params)) {
+            const GLTextureParameters effectiveParams =
+                impl_->effectiveFixedFunctionTextureParams(0, *tex);
+            if (!impl_->sampledTextureCompleteForSampler(*tex, effectiveParams)) {
                 continue;
             }
-            (void)impl_->rebuildTextureSamplerState(texName, *tex);
-            fixedFunctionSamplerState = tex->metalSampler;
+            const GLuint samplerName = impl_->state->boundSampler(0);
+            GLSamplerObject* sampler = samplerName != 0
+                ? impl_->objects->samplers().get(samplerName)
+                : nullptr;
+            if (sampler != nullptr && sampler->instantiated) {
+                if (sampler->dirty || sampler->metalSampler == nullptr) {
+                    (void)impl_->rebuildSamplerState(*sampler);
+                }
+                fixedFunctionSamplerState = sampler->metalSampler;
+            }
+            if (fixedFunctionSamplerState == nullptr) {
+                (void)impl_->rebuildTextureSamplerState(texName, *tex);
+                fixedFunctionSamplerState = tex->metalSampler;
+            }
             fixedFunctionTextureInternalFormat = tex->desc.internalFormat;
             fixedFunctionTextureTarget = target;
-            fixedFunctionTextureParams = tex->params;
+            fixedFunctionTextureParams = effectiveParams;
             fixedFunctionTextureParamsValid = true;
             fixedFunctionTextureSampleYFlip =
                 (target == GL_TEXTURE_2D || target == GL_TEXTURE_3D) &&
@@ -7444,18 +7475,34 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
                 continue;
             }
             const GLuint texName = impl_->state->boundTextureOnUnit(0, target);
-            GLTextureObject* tex = impl_->currentTexture(target);
+            GLTextureObject* tex = texName != 0
+                ? impl_->objects->textures().get(texName)
+                : impl_->currentTexture(target);
             if (tex == nullptr || tex->metalTexture == nullptr) {
                 continue;
             }
-            if (!impl_->sampledTextureCompleteForSampler(*tex, tex->params)) {
+            const GLTextureParameters effectiveParams =
+                impl_->effectiveFixedFunctionTextureParams(0, *tex);
+            if (!impl_->sampledTextureCompleteForSampler(*tex, effectiveParams)) {
                 continue;
             }
-            (void)impl_->rebuildTextureSamplerState(texName, *tex);
-            fixedFunctionSamplerState = tex->metalSampler;
+            const GLuint samplerName = impl_->state->boundSampler(0);
+            GLSamplerObject* sampler = samplerName != 0
+                ? impl_->objects->samplers().get(samplerName)
+                : nullptr;
+            if (sampler != nullptr && sampler->instantiated) {
+                if (sampler->dirty || sampler->metalSampler == nullptr) {
+                    (void)impl_->rebuildSamplerState(*sampler);
+                }
+                fixedFunctionSamplerState = sampler->metalSampler;
+            }
+            if (fixedFunctionSamplerState == nullptr) {
+                (void)impl_->rebuildTextureSamplerState(texName, *tex);
+                fixedFunctionSamplerState = tex->metalSampler;
+            }
             fixedFunctionTextureInternalFormat = tex->desc.internalFormat;
             fixedFunctionTextureTarget = target;
-            fixedFunctionTextureParams = tex->params;
+            fixedFunctionTextureParams = effectiveParams;
             fixedFunctionTextureParamsValid = true;
             fixedFunctionTextureSampleYFlip =
                 (target == GL_TEXTURE_2D || target == GL_TEXTURE_3D) &&

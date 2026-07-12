@@ -33351,16 +33351,45 @@ struct GLContext::Impl {
         return storage;
     }
 
+    GLTextureParameters effectiveFixedFunctionTextureParams(
+        GLuint unit,
+        const GLTextureObject& texture) const
+    {
+        GLTextureParameters params = texture.params;
+        const GLuint samplerName = state->boundSampler(unit);
+        if (samplerName != 0) {
+            const GLSamplerObject* sampler = objects->samplers().get(samplerName);
+            if (sampler != nullptr && sampler->instantiated) {
+                params.minFilter = sampler->params.minFilter;
+                params.magFilter = sampler->params.magFilter;
+                params.wrapS = sampler->params.wrapS;
+                params.wrapT = sampler->params.wrapT;
+                params.wrapR = sampler->params.wrapR;
+                params.minLod = sampler->params.minLod;
+                params.maxLod = sampler->params.maxLod;
+                params.compareMode = sampler->params.compareMode;
+                params.compareFunc = sampler->params.compareFunc;
+                params.borderColor = sampler->params.borderColor;
+                params.lodBias = sampler->params.lodBias;
+                params.maxAnisotropy = sampler->params.maxAnisotropy;
+                params.reductionMode = sampler->params.reductionMode;
+            }
+        }
+        return params;
+    }
+
     TextureSampleMipRange fixedFunctionSampleMipRange(
         const GLTextureObject& texture,
         const ImmediateModeVertex* vertices,
         std::size_t vertexCount,
         const Matrix4& mvp) const
     {
+        const GLTextureParameters samplerParams =
+            effectiveFixedFunctionTextureParams(0, texture);
         TextureSampleMipRange range =
-            effectiveTextureSampleMipRange(texture, texture.params);
+            effectiveTextureSampleMipRange(texture, samplerParams);
         if (!range.valid ||
-            !textureMinFilterUsesMipChain(texture.params.minFilter) ||
+            !textureMinFilterUsesMipChain(samplerParams.minFilter) ||
             vertices == nullptr || vertexCount == 0) {
             return range;
         }
@@ -33438,14 +33467,14 @@ struct GLContext::Impl {
         if (!std::isfinite(lambda)) {
             lambda = 0.0f;
         }
-        lambda += texture.params.lodBias;
+        lambda += samplerParams.lodBias;
         lambda = std::clamp(
-            lambda, texture.params.minLod, texture.params.maxLod);
+            lambda, samplerParams.minLod, samplerParams.maxLod);
         lambda = std::max(lambda, 0.0f);
 
         const bool interpolatesMipLevels =
-            texture.params.minFilter == GL_NEAREST_MIPMAP_LINEAR ||
-            texture.params.minFilter == GL_LINEAR_MIPMAP_LINEAR;
+            samplerParams.minFilter == GL_NEAREST_MIPMAP_LINEAR ||
+            samplerParams.minFilter == GL_LINEAR_MIPMAP_LINEAR;
         GLint firstOffset = 0;
         GLint lastOffset = 0;
         if (interpolatesMipLevels) {
