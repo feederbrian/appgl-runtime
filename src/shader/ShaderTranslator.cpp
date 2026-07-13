@@ -1694,6 +1694,14 @@ bool injectTextureBufferSizeSidecar(
 // untouched when a required rewrite anchor is unavailable.
 bool injectDepthCompareControl(std::string& msl) {
     static constexpr const char* kControlName = "_appgl_CmpControls";
+    static constexpr const char* kOneDMipName = "_appgl_Cmp1DMips";
+    static constexpr const char* kHelperOneDMipName =
+        "_appgl_Cmp1DMipsForHelper";
+    const std::string oneDMipGlobalArgs = kOneDMipName;
+    const std::string oneDMipHelperArgs = kHelperOneDMipName;
+    const std::string oneDMipHelperParams =
+        ", texture2d<float> " +
+        std::string(kHelperOneDMipName);
     if (msl.find("sample_compare") == std::string::npos &&
         msl.find("gather_compare") == std::string::npos) {
         return false;
@@ -1709,7 +1717,6 @@ bool injectDepthCompareControl(std::string& msl) {
     const std::size_t mainPos = msl.find("main0(");
     const std::size_t paramStart = mainPos + 6;
     const std::string params = msl.substr(paramStart, paramEnd - paramStart);
-
     // Collect all depth receiver names and Metal texture slots from the
     // entry-point signature. Cube-array calls place the array index between
     // the coordinate and compare value, which matters when locating an
@@ -1899,6 +1906,7 @@ bool injectDepthCompareControl(std::string& msl) {
     // compare call. Cube receivers select an overload that computes the
     // face inset from the call's own LOD-control form.
     bool wrapped = false;
+    bool needs1DMips = false;
     for (const auto& receiver : receivers) {
         if (receiver.helperControlExpr.empty() && receiver.slot >= 32u) continue;
         for (const char* call : {".sample_compare(", ".gather_compare("}) {
@@ -1941,7 +1949,58 @@ bool injectDepthCompareControl(std::string& msl) {
                         ? (std::string(kControlName) + "[" +
                            std::to_string(receiver.slot) + "]")
                         : receiver.helperControlExpr;
+                const std::string normalizedCoord = trimmed(coordExpr);
+                const bool promotedOneDCoord =
+                    normalizedCoord.rfind("float2(", 0) == 0 &&
+                    (normalizedCoord.find(", 0.5)") != std::string::npos ||
+                     normalizedCoord.find(", 0.5f)") != std::string::npos);
                 std::string replacement;
+                if (!receiver.cube && promotedOneDCoord &&
+                    args.size() >= 3u) {
+                    const std::string& mipArgsExpr =
+                        receiver.helperControlExpr.empty()
+                            ? oneDMipGlobalArgs : oneDMipHelperArgs;
+                    const std::string samplerExpr = trimmed(working.substr(
+                        args[0].start, args[0].end - args[0].start));
+                    const std::string compareExpr = trimmed(working.substr(
+                        args[2].start, args[2].end - args[2].start));
+                    std::string helper;
+                    bool recognized = false;
+                    if (sampleCompare) {
+                        if (args.size() >= 4u) {
+                            const std::string option = trimmed(working.substr(
+                                args[3].start,
+                                args[3].end - args[3].start));
+                            if (option.rfind("level(", 0) == 0) {
+                                helper = "_appgl_cmpSample1DLevel";
+                                recognized = args.size() <= 5u;
+                            } else if (option.rfind("gradient2d(", 0) == 0) {
+                                helper = "_appgl_cmpSample1DGradient";
+                                recognized = args.size() <= 5u;
+                            } else if (option.rfind("bias(", 0) == 0) {
+                                helper = "_appgl_cmpSample1DBias";
+                            }
+                        }
+                    }
+                    if (recognized) {
+                        replacement = helper + "(" + receiver.name + ", " +
+                            mipArgsExpr + ", " + samplerExpr + ", " +
+                            coordExpr + ", " + compareExpr + ", " +
+                            controlExpr;
+                        for (std::size_t argIndex = 3u;
+                             argIndex < args.size(); ++argIndex) {
+                            replacement += ", " + trimmed(working.substr(
+                                args[argIndex].start,
+                                args[argIndex].end - args[argIndex].start));
+                        }
+                        replacement += ")";
+                        working.replace(pos, cursor - pos, replacement);
+                        wrapped = true;
+                        needs1DMips = true;
+                        pos += replacement.size();
+                        continue;
+                    }
+                }
                 if (!receiver.cube) {
                     replacement =
                         " _appgl_cmpFlip2DCoord(" + coordExpr + ", " +
@@ -2032,13 +2091,17 @@ bool injectDepthCompareControl(std::string& msl) {
                     after < working.size() && working[after] == '{';
                 std::string insertion;
                 if (isDefinition) {
-                    insertion = ", constant _appgl_CmpControl& " +
+                    if (needs1DMips) {
+                        insertion = oneDMipHelperParams;
+                    }
+                    insertion += ", constant _appgl_CmpControl& " +
                         std::string(kHelperControlName);
                 } else {
                     const std::string callArgs = working.substr(
                         pos + needle.size(),
                         closeParen - (pos + needle.size()));
                     std::string controlArg;
+                    std::string mipArrayArg;
                     for (const auto& receiver : receivers) {
                         std::size_t argPos = 0;
                         while ((argPos = callArgs.find(receiver.name, argPos)) !=
@@ -2054,10 +2117,15 @@ bool injectDepthCompareControl(std::string& msl) {
                                      callArgs[argEnd])) &&
                                  callArgs[argEnd] != '_');
                             if (leftBoundary && rightBoundary) {
-                                controlArg = receiver.helperControlExpr.empty()
-                                    ? (std::string(kControlName) + "[" +
-                                       std::to_string(receiver.slot) + "]")
-                                    : kHelperControlName;
+                                if (receiver.helperControlExpr.empty()) {
+                                    controlArg = std::string(kControlName) +
+                                        "[" + std::to_string(receiver.slot) +
+                                        "]";
+                                    mipArrayArg = oneDMipGlobalArgs;
+                                } else {
+                                    controlArg = kHelperControlName;
+                                    mipArrayArg = oneDMipHelperArgs;
+                                }
                                 break;
                             }
                             argPos = argEnd;
@@ -2067,7 +2135,10 @@ bool injectDepthCompareControl(std::string& msl) {
                     if (controlArg.empty()) {
                         return abandonRewrite("helper-control-argument");
                     }
-                    insertion = ", " + controlArg;
+                    if (needs1DMips) {
+                        insertion = ", " + mipArrayArg;
+                    }
+                    insertion += ", " + controlArg;
                 }
                 working.insert(closeParen, insertion);
                 pos = closeParen + insertion.size() + 1;
@@ -2078,22 +2149,44 @@ bool injectDepthCompareControl(std::string& msl) {
     if (!findMain0ParameterEnd(working, paramEnd)) {
         return abandonRewrite("main0-signature");
     }
-    std::uint32_t chosenSlot = 0;
-    bool haveSlot = false;
+    std::uint32_t chosenControlSlot = 0;
+    std::uint32_t chosenMipSlot = 0;
+    bool haveControlSlot = false;
     for (const std::uint32_t candidate : {29u, 28u, 27u, 26u, 20u, 19u, 18u, 17u}) {
         const std::string attr = "[[buffer(" + std::to_string(candidate) + ")]]";
         if (working.find(attr) == std::string::npos) {
-            chosenSlot = candidate;
-            haveSlot = true;
+            chosenControlSlot = candidate;
+            haveControlSlot = true;
             break;
         }
     }
-    if (!haveSlot) {
+    bool haveMipSlot = !needs1DMips;
+    if (needs1DMips) {
+        for (const std::uint32_t candidate :
+             {2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u, 13u,
+              14u, 15u, 16u, 17u, 18u, 19u, 20u, 21u, 22u, 23u,
+              24u, 25u, 26u, 27u, 28u, 29u, 30u}) {
+            const std::string attr =
+                "[[texture(" + std::to_string(candidate) + ")]]";
+            if (working.find(attr) == std::string::npos) {
+                chosenMipSlot = candidate;
+                haveMipSlot = true;
+                break;
+            }
+        }
+    }
+    if (!haveControlSlot || !haveMipSlot) {
         return abandonRewrite("no-free-buffer-slot");
     }
-    const std::string param =
-        ", constant _appgl_CmpControl* " + std::string(kControlName) +
-        " [[buffer(" + std::to_string(chosenSlot) + ")]]";
+    std::string param;
+    if (needs1DMips) {
+        param = ", texture2d<float> " +
+            std::string(kOneDMipName) + " [[texture(" +
+            std::to_string(chosenMipSlot) + ")]]";
+    }
+    param += ", constant _appgl_CmpControl* " +
+        std::string(kControlName) + " [[buffer(" +
+        std::to_string(chosenControlSlot) + ")]]";
     working.insert(paramEnd, param);
 
     // Inject the coordinate helper ABOVE every function that may call
@@ -2108,11 +2201,263 @@ struct _appgl_CmpControl
     float lodBias;
     float minLod;
     float maxLod;
+    uint oneDSampleState;
+    uint oneDMipCount;
+    float borderDepth;
 };
+
+static inline float _appgl_cmp1DCompare(
+    float depth, float ref, uint compareFunc)
+{
+    return float(compareFunc == 7u) +
+           float(compareFunc == 1u) * float(ref < depth) +
+           float(compareFunc == 2u) * float(ref == depth) +
+           float(compareFunc == 3u) * float(ref <= depth) +
+           float(compareFunc == 4u) * float(ref > depth) +
+           float(compareFunc == 5u) * float(ref != depth) +
+           float(compareFunc == 6u) * float(ref >= depth);
+}
 
 static inline float2 _appgl_cmpFlip2DCoord(float2 c, uint flags)
 {
     return (flags & 1u) != 0u ? float2(c.x, 1.0f - c.y) : c;
+}
+
+static inline float _appgl_cmp1DRawLod(depth2d<float> tex, float2 c)
+{
+    float rho = max(abs(dfdx(c.x)), abs(dfdy(c.x))) *
+        max(float(tex.get_width()), 1.0f);
+    return log2(max(rho, 1.0e-20f));
+}
+
+static inline float _appgl_cmp1DGradientLod(depth2d<float> tex,
+                                             gradient2d gradients)
+{
+    float rho = max(abs(gradients.dPdx.x), abs(gradients.dPdy.x)) *
+        max(float(tex.get_width()), 1.0f);
+    return log2(max(rho, 1.0e-20f));
+}
+
+static inline uint2 _appgl_cmp1DLevels(
+    float lod, constant _appgl_CmpControl& control, thread float& blend)
+{
+    uint mipCount = max(control.oneDMipCount, 1u);
+    float maxMip = float(mipCount - 1u);
+    float minLod = clamp(control.minLod, 0.0f, maxMip);
+    float maxLod = clamp(max(control.maxLod, minLod), minLod, maxMip);
+    float clampedLod = control.mipFilter == 0u
+        ? 0.0f : clamp(lod, minLod, maxLod);
+    if (control.mipFilter == 2u) {
+        float low = floor(clampedLod);
+        float high = min(low + 1.0f, maxMip);
+        blend = clampedLod - low;
+        return uint2(uint(low), uint(high));
+    }
+    blend = 0.0f;
+    uint level = uint(clamp(rint(clampedLod), 0.0f, maxMip));
+    return uint2(level);
+}
+
+static inline uint _appgl_cmp1DMipIndex(
+    uint level, constant _appgl_CmpControl& control)
+{
+    return level;
+}
+
+static inline float _appgl_cmp1DSampleAt(
+    APPGL_CMP1D_MIP_PARAMS, uint index, sampler smp,
+    float2 coord, float ref, bool linear,
+    constant _appgl_CmpControl& control);
+
+static inline float _appgl_cmp1DSampleAtOffset(
+    APPGL_CMP1D_MIP_PARAMS, uint index, sampler smp,
+    float2 coord, float ref, bool linear,
+    constant _appgl_CmpControl& control, int2 offset);
+
+static inline float4 _appgl_cmp1DGatherAt(
+    APPGL_CMP1D_MIP_PARAMS, uint index, sampler smp,
+    float2 coord, float ref, constant _appgl_CmpControl& control);
+
+static inline float4 _appgl_cmp1DGatherAtOffset(
+    APPGL_CMP1D_MIP_PARAMS, uint index, sampler smp,
+    float2 coord, float ref, constant _appgl_CmpControl& control,
+    int2 offset);
+
+static inline float _appgl_cmp1DSampleLod(
+    APPGL_CMP1D_MIP_PARAMS, sampler smp, float2 c, float ref,
+    float lod, constant _appgl_CmpControl& control)
+{
+    float blend = 0.0f;
+    uint2 levels = _appgl_cmp1DLevels(lod, control, blend);
+    float2 coord(c.x, 0.25f);
+    uint filterBit = lod <= 0.0f ? 3u : 2u;
+    bool linear = ((control.oneDSampleState >> filterBit) & 1u) != 0u;
+    float low = _appgl_cmp1DSampleAt(
+        APPGL_CMP1D_MIP_ARGS, _appgl_cmp1DMipIndex(levels.x, control),
+        smp, coord, ref, linear, control);
+    if (levels.x == levels.y) return low;
+    float high = _appgl_cmp1DSampleAt(
+        APPGL_CMP1D_MIP_ARGS, _appgl_cmp1DMipIndex(levels.y, control),
+        smp, coord, ref, linear, control);
+    return mix(low, high, blend);
+}
+
+static inline float _appgl_cmp1DSampleLodOffset(
+    APPGL_CMP1D_MIP_PARAMS, sampler smp, float2 c, float ref,
+    float lod, constant _appgl_CmpControl& control, int2 offset)
+{
+    float blend = 0.0f;
+    uint2 levels = _appgl_cmp1DLevels(lod, control, blend);
+    float2 coord(c.x, 0.25f);
+    int2 oneDOffset(offset.x, 0);
+    uint filterBit = lod <= 0.0f ? 3u : 2u;
+    bool linear = ((control.oneDSampleState >> filterBit) & 1u) != 0u;
+    float low = _appgl_cmp1DSampleAtOffset(
+        APPGL_CMP1D_MIP_ARGS, _appgl_cmp1DMipIndex(levels.x, control),
+        smp, coord, ref, linear, control, oneDOffset);
+    if (levels.x == levels.y) return low;
+    float high = _appgl_cmp1DSampleAtOffset(
+        APPGL_CMP1D_MIP_ARGS, _appgl_cmp1DMipIndex(levels.y, control),
+        smp, coord, ref, linear, control, oneDOffset);
+    return mix(low, high, blend);
+}
+
+static inline float _appgl_cmpSample1DImplicit(
+    depth2d<float> tex, APPGL_CMP1D_MIP_PARAMS, sampler smp,
+    float2 c, float ref, constant _appgl_CmpControl& control)
+{
+    if ((control.flags & 4u) == 0u) {
+        return tex.sample_compare(
+            smp, _appgl_cmpFlip2DCoord(c, control.flags), ref);
+    }
+    return _appgl_cmp1DSampleLod(
+        APPGL_CMP1D_MIP_ARGS, smp, c, ref,
+        _appgl_cmp1DRawLod(tex, c) + control.lodBias, control);
+}
+
+static inline float _appgl_cmpSample1DImplicitOffset(
+    depth2d<float> tex, APPGL_CMP1D_MIP_PARAMS, sampler smp,
+    float2 c, float ref, constant _appgl_CmpControl& control, int2 offset)
+{
+    if ((control.flags & 4u) == 0u) {
+        return tex.sample_compare(
+            smp, _appgl_cmpFlip2DCoord(c, control.flags), ref, offset);
+    }
+    return _appgl_cmp1DSampleLodOffset(
+        APPGL_CMP1D_MIP_ARGS, smp, c, ref,
+        _appgl_cmp1DRawLod(tex, c) + control.lodBias, control, offset);
+}
+
+static inline float _appgl_cmpSample1DLevel(
+    depth2d<float> tex, APPGL_CMP1D_MIP_PARAMS, sampler smp,
+    float2 c, float ref, constant _appgl_CmpControl& control, level options)
+{
+    if ((control.flags & 4u) == 0u) {
+        return tex.sample_compare(
+            smp, _appgl_cmpFlip2DCoord(c, control.flags), ref, options);
+    }
+    return _appgl_cmp1DSampleLod(
+        APPGL_CMP1D_MIP_ARGS, smp, c, ref, options.lod, control);
+}
+
+static inline float _appgl_cmpSample1DLevel(
+    depth2d<float> tex, APPGL_CMP1D_MIP_PARAMS, sampler smp,
+    float2 c, float ref, constant _appgl_CmpControl& control, level options,
+    int2 offset)
+{
+    if ((control.flags & 4u) == 0u) {
+        return tex.sample_compare(
+            smp, _appgl_cmpFlip2DCoord(c, control.flags), ref,
+            options, offset);
+    }
+    return _appgl_cmp1DSampleLodOffset(
+        APPGL_CMP1D_MIP_ARGS, smp, c, ref, options.lod, control, offset);
+}
+
+static inline float _appgl_cmpSample1DGradient(
+    depth2d<float> tex, APPGL_CMP1D_MIP_PARAMS, sampler smp,
+    float2 c, float ref, constant _appgl_CmpControl& control,
+    gradient2d gradients)
+{
+    if ((control.flags & 4u) == 0u) {
+        return tex.sample_compare(
+            smp, _appgl_cmpFlip2DCoord(c, control.flags), ref, gradients);
+    }
+    return _appgl_cmp1DSampleLod(
+        APPGL_CMP1D_MIP_ARGS, smp, c, ref,
+        _appgl_cmp1DGradientLod(tex, gradients) + control.lodBias, control);
+}
+
+static inline float _appgl_cmpSample1DGradient(
+    depth2d<float> tex, APPGL_CMP1D_MIP_PARAMS, sampler smp,
+    float2 c, float ref, constant _appgl_CmpControl& control,
+    gradient2d gradients, int2 offset)
+{
+    if ((control.flags & 4u) == 0u) {
+        return tex.sample_compare(
+            smp, _appgl_cmpFlip2DCoord(c, control.flags), ref,
+            gradients, offset);
+    }
+    return _appgl_cmp1DSampleLodOffset(
+        APPGL_CMP1D_MIP_ARGS, smp, c, ref,
+        _appgl_cmp1DGradientLod(tex, gradients) + control.lodBias,
+        control, offset);
+}
+
+static inline float _appgl_cmpSample1DBias(
+    depth2d<float> tex, APPGL_CMP1D_MIP_PARAMS, sampler smp,
+    float2 c, float ref, constant _appgl_CmpControl& control, bias options)
+{
+    if ((control.flags & 4u) == 0u) {
+        return tex.sample_compare(
+            smp, _appgl_cmpFlip2DCoord(c, control.flags), ref, options);
+    }
+    return _appgl_cmp1DSampleLod(
+        APPGL_CMP1D_MIP_ARGS, smp, c, ref,
+        _appgl_cmp1DRawLod(tex, c) + control.lodBias + options.value,
+        control);
+}
+
+static inline float _appgl_cmpSample1DBias(
+    depth2d<float> tex, APPGL_CMP1D_MIP_PARAMS, sampler smp,
+    float2 c, float ref, constant _appgl_CmpControl& control, bias options,
+    int2 offset)
+{
+    if ((control.flags & 4u) == 0u) {
+        return tex.sample_compare(
+            smp, _appgl_cmpFlip2DCoord(c, control.flags), ref,
+            options, offset);
+    }
+    return _appgl_cmp1DSampleLodOffset(
+        APPGL_CMP1D_MIP_ARGS, smp, c, ref,
+        _appgl_cmp1DRawLod(tex, c) + control.lodBias + options.value,
+        control, offset);
+}
+
+static inline float4 _appgl_cmpGather1D(
+    depth2d<float> tex, APPGL_CMP1D_MIP_PARAMS, sampler smp,
+    float2 c, float ref, constant _appgl_CmpControl& control)
+{
+    if ((control.flags & 4u) == 0u) {
+        return tex.gather_compare(
+            smp, _appgl_cmpFlip2DCoord(c, control.flags), ref);
+    }
+    return _appgl_cmp1DGatherAt(
+        APPGL_CMP1D_MIP_ARGS, _appgl_cmp1DMipIndex(0u, control), smp,
+        float2(c.x, 0.25f), ref, control);
+}
+
+static inline float4 _appgl_cmpGather1DOffset(
+    depth2d<float> tex, APPGL_CMP1D_MIP_PARAMS, sampler smp,
+    float2 c, float ref, constant _appgl_CmpControl& control, int2 offset)
+{
+    if ((control.flags & 4u) == 0u) {
+        return tex.gather_compare(
+            smp, _appgl_cmpFlip2DCoord(c, control.flags), ref, offset);
+    }
+    return _appgl_cmp1DGatherAtOffset(
+        APPGL_CMP1D_MIP_ARGS, _appgl_cmp1DMipIndex(0u, control), smp,
+        float2(c.x, 0.25f), ref, control, int2(offset.x, 0));
 }
 
 static inline float _appgl_cmpCubeRawLod(float3 c, gradientcube gradients,
@@ -2238,16 +2583,113 @@ static inline float3 _appgl_cmpClampCubeLevelCoord(
         c, float(tex.get_width(selectedLevel)), control.flags);
 }
 )APPGL";
+    std::string helperSource = std::string(
+        "#define APPGL_CMP1D_MIP_PARAMS "
+        "texture2d<float> _appgl_cmpMips\n"
+        "#define APPGL_CMP1D_MIP_ARGS _appgl_cmpMips\n") +
+        kHelper;
+    helperSource += R"APPGL(
+static inline int _appgl_cmp1DWrapIndex(
+    int x, int width, uint state, thread bool& border)
+{
+    uint wrap = state & 3u;
+    border = false;
+    if (wrap == 0u) {
+        int wrapped = x % width;
+        return wrapped < 0 ? wrapped + width : wrapped;
+    }
+    if (wrap == 1u) {
+        int period = width * 2;
+        int mirrored = x % period;
+        if (mirrored < 0) mirrored += period;
+        return mirrored < width ? mirrored : period - mirrored - 1;
+    }
+    if (wrap == 3u) {
+        border = x < 0 || x >= width;
+    }
+    return clamp(x, 0, width - 1);
+}
+
+static inline float _appgl_cmp1DTap(
+    APPGL_CMP1D_MIP_PARAMS, uint index, int x, float ref,
+    constant _appgl_CmpControl& control)
+{
+    int logicalWidth = int(max(_appgl_cmpMips.get_width() >> index, 1u));
+    bool border = false;
+    int wrapped = _appgl_cmp1DWrapIndex(
+        x, logicalWidth, control.oneDSampleState, border);
+    float depth = border
+        ? control.borderDepth
+        : _appgl_cmpMips.read(uint2(uint(wrapped), index * 2u)).x;
+    return _appgl_cmp1DCompare(
+        depth, ref, (control.flags >> 8u) & 7u);
+}
+
+static inline float _appgl_cmp1DSampleAtOffset(
+    APPGL_CMP1D_MIP_PARAMS, uint index, sampler smp,
+    float2 coord, float ref, bool linear,
+    constant _appgl_CmpControl& control, int2 offset)
+{
+    float logicalWidth = float(max(
+        _appgl_cmpMips.get_width() >> index, 1u));
+    if (!linear) {
+        int x = int(floor(coord.x * logicalWidth)) + offset.x;
+        return _appgl_cmp1DTap(
+            APPGL_CMP1D_MIP_ARGS, index, x, ref, control);
+    }
+    float footprint = coord.x * logicalWidth - 0.5f;
+    int lowX = int(floor(footprint)) + offset.x;
+    float blend = fract(footprint);
+    float low = _appgl_cmp1DTap(
+        APPGL_CMP1D_MIP_ARGS, index, lowX, ref, control);
+    float high = _appgl_cmp1DTap(
+        APPGL_CMP1D_MIP_ARGS, index, lowX + 1, ref, control);
+    return mix(low, high, blend);
+}
+
+static inline float _appgl_cmp1DSampleAt(
+    APPGL_CMP1D_MIP_PARAMS, uint index, sampler smp,
+    float2 coord, float ref, bool linear,
+    constant _appgl_CmpControl& control)
+{
+    return _appgl_cmp1DSampleAtOffset(
+        APPGL_CMP1D_MIP_ARGS, index, smp, coord, ref, linear,
+        control, int2(0));
+}
+
+static inline float4 _appgl_cmp1DGatherAt(
+    APPGL_CMP1D_MIP_PARAMS, uint index, sampler smp,
+    float2 coord, float ref, constant _appgl_CmpControl& control)
+{
+    float value = _appgl_cmp1DSampleAt(
+        APPGL_CMP1D_MIP_ARGS, index, smp, coord, ref, false,
+        control);
+    return float4(value);
+}
+
+static inline float4 _appgl_cmp1DGatherAtOffset(
+    APPGL_CMP1D_MIP_PARAMS, uint index, sampler smp,
+    float2 coord, float ref, constant _appgl_CmpControl& control,
+    int2 offset)
+{
+    float value = _appgl_cmp1DSampleAtOffset(
+        APPGL_CMP1D_MIP_ARGS, index, smp, coord, ref, false,
+        control, offset);
+    return float4(value);
+}
+#undef APPGL_CMP1D_MIP_ARGS
+#undef APPGL_CMP1D_MIP_PARAMS
+)APPGL";
     static constexpr const char* kUsingAnchor = "using namespace metal;\n";
     const std::size_t usingPos = working.find(kUsingAnchor);
     if (usingPos != std::string::npos) {
-        working.insert(usingPos + std::strlen(kUsingAnchor), kHelper);
+        working.insert(usingPos + std::strlen(kUsingAnchor), helperSource);
     } else {
         const std::size_t entryPos = working.find("fragment ");
         if (entryPos == std::string::npos) {
             return abandonRewrite("no-entry-anchor");
         }
-        working.insert(entryPos, kHelper);
+        working.insert(entryPos, helperSource);
     }
     msl = std::move(working);
     return true;

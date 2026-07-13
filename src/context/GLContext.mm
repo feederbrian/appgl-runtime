@@ -11035,6 +11035,7 @@ struct GLContext::Impl {
 
     void releaseTextureBufferMaterializedView(GLTextureObject& object) {
         releaseDepthCompareTextureView(object);
+        releaseDepthCompare1DMipTextures(object);
         releaseRetainedMetalObject(object.metalTexture);
         object.metalTexture = nullptr;
         releaseRetainedMetalObject(object.metalSwizzledView);
@@ -11094,6 +11095,7 @@ struct GLContext::Impl {
     void releaseTextureStorage(GLTextureObject& object) {
         drainPendingGpuProducers(object);
         releaseDepthCompareTextureView(object);
+        releaseDepthCompare1DMipTextures(object);
         object.r5DepthCompareViewEvicted = false;
         releaseRetainedMetalObject(object.metalTexture);
         object.metalTexture = nullptr;
@@ -14393,6 +14395,7 @@ struct GLContext::Impl {
     // fingerprint.
     bool replaceMetalTexture(GLTextureObject& object, GLuint texName = 0) {
         releaseDepthCompareTextureView(object);
+        releaseDepthCompare1DMipTextures(object);
         object.r5DepthCompareViewEvicted = false;
         // C48: an upload into the existing Metal texture must not be
         // overwritten by a later-materialized deferred FBO clear —
@@ -17381,6 +17384,7 @@ struct GLContext::Impl {
         }
 
         releaseDepthCompareTextureView(viewObj);
+        releaseDepthCompare1DMipTextures(viewObj);
         viewObj.r5DepthCompareViewEvicted = false;
         releaseRetainedMetalObject(viewObj.metalTexture);
         viewObj.metalTexture = transferRetainedMetalObject(viewTex);
@@ -17392,6 +17396,187 @@ struct GLContext::Impl {
         viewObj.metalSamplingProxy = nullptr;
         touchR5TextureView(viewObj);
         noteR5TextureViewRebuilt(viewObj);
+        return true;
+    }
+
+    void releaseDepthCompare1DMipTextures(GLTextureObject& texObj) {
+        releaseRetainedMetalObject(texObj.metalDepthCompare1DMipAtlas);
+        texObj.metalDepthCompare1DMipAtlas = nullptr;
+        releaseRetainedMetalObject(texObj.metalDepthCompare1DScalarAtlas);
+        texObj.metalDepthCompare1DScalarAtlas = nullptr;
+        texObj.depthCompare1DMipSourceTexture = nullptr;
+        texObj.depthCompare1DMipLevelCount = 0;
+        texObj.depthCompare1DMipPixelFormat = 0;
+    }
+
+    bool resolveDepthCompare1DMipTextures(
+        GLTextureObject& texObj,
+        void* sourceRaw,
+        void*& mipArrayOut) {
+        mipArrayOut = nullptr;
+        id<MTLTexture> source = metalTextureFromRaw(sourceRaw);
+        if (source == nil ||
+            source.textureType != MTLTextureType2D ||
+            source.height != 1u || source.sampleCount != 1u) {
+            return false;
+        }
+
+        const NSUInteger levelCount =
+            nonZeroMipLevelCount(source.mipmapLevelCount);
+        if (levelCount == 0u ||
+            levelCount > kDepthCompare1DMipTextureCount) {
+            return false;
+        }
+
+        if (frameGraph != nullptr && texObj.metalTexture != nullptr) {
+            const bool materialized =
+                frameGraph->materializePendingFboClearsForTexture(
+                    texObj.metalTexture);
+            if (materialized) {
+                frameGraph->flushForReadback();
+            }
+        }
+
+        const std::uint32_t pixelFormat =
+            static_cast<std::uint32_t>(source.pixelFormat);
+        MTLPixelFormat scalarPixelFormat = MTLPixelFormatInvalid;
+        NSUInteger scalarBytesPerTexel = 0u;
+        if (source.pixelFormat == MTLPixelFormatDepth32Float) {
+            scalarPixelFormat = MTLPixelFormatR32Float;
+            scalarBytesPerTexel = sizeof(float);
+        } else if (source.pixelFormat == MTLPixelFormatDepth16Unorm) {
+            scalarPixelFormat = MTLPixelFormatR16Unorm;
+            scalarBytesPerTexel = sizeof(std::uint16_t);
+        } else {
+            return false;
+        }
+        const bool cacheMatches =
+            texObj.depthCompare1DMipSourceTexture == sourceRaw &&
+            texObj.depthCompare1DMipLevelCount == levelCount &&
+            texObj.depthCompare1DMipPixelFormat == pixelFormat &&
+            texObj.metalDepthCompare1DMipAtlas != nullptr &&
+            texObj.metalDepthCompare1DScalarAtlas != nullptr;
+        if (!cacheMatches) {
+            releaseDepthCompare1DMipTextures(texObj);
+            MTLTextureDescriptor* descriptor =
+                [[MTLTextureDescriptor alloc] init];
+            ScopedOwnedMetalObject descriptorRelease(descriptor);
+            descriptor.textureType = MTLTextureType2D;
+            descriptor.pixelFormat = source.pixelFormat;
+            descriptor.width = source.width;
+            descriptor.height = levelCount * 2u;
+            descriptor.depth = 1u;
+            descriptor.mipmapLevelCount = 1u;
+            descriptor.arrayLength = 1u;
+            descriptor.sampleCount = 1u;
+            descriptor.usage = MTLTextureUsageShaderRead |
+                               MTLTextureUsageRenderTarget;
+            descriptor.storageMode = source.storageMode;
+            id<MTLTexture> mipAtlas =
+                [device newTextureWithDescriptor:descriptor];
+            if (mipAtlas == nil) {
+                releaseDepthCompare1DMipTextures(texObj);
+                return false;
+            }
+            texObj.metalDepthCompare1DMipAtlas =
+                transferRetainedMetalObject(mipAtlas);
+            descriptor.pixelFormat = scalarPixelFormat;
+            descriptor.usage = MTLTextureUsageShaderRead;
+            descriptor.storageMode = MTLStorageModeShared;
+            id<MTLTexture> scalarAtlas =
+                [device newTextureWithDescriptor:descriptor];
+            if (scalarAtlas == nil) {
+                releaseDepthCompare1DMipTextures(texObj);
+                return false;
+            }
+            texObj.metalDepthCompare1DScalarAtlas =
+                transferRetainedMetalObject(scalarAtlas);
+            texObj.depthCompare1DMipSourceTexture = sourceRaw;
+            texObj.depthCompare1DMipLevelCount =
+                static_cast<std::uint32_t>(levelCount);
+            texObj.depthCompare1DMipPixelFormat = pixelFormat;
+        }
+
+        // The source has already passed drainSamplerGpuProducers. Refresh
+        // every logical mip in one blit command so FBO writes and in-place
+        // uploads cannot leave an otherwise valid sidecar cache stale. Each
+        // band remains physically two rows high; lower logical widths occupy
+        // the prefix of the common-width row and are addressed explicitly
+        // by the shader.
+        auto lease = makeCommandBuffer(AppGLCommandReason::TextureUpload);
+        id<MTLCommandBuffer> commandBuffer = lease.get();
+        if (commandBuffer == nil) {
+            return false;
+        }
+        id<MTLBlitCommandEncoder> blit =
+            [commandBuffer blitCommandEncoder];
+        if (blit == nil) {
+            return false;
+        }
+        const NSUInteger stagingRowBytes =
+            ((source.width * scalarBytesPerTexel + 255u) / 256u) * 256u;
+        id<MTLBuffer> staging = [device
+            newBufferWithLength:stagingRowBytes * levelCount
+                        options:MTLResourceStorageModeShared];
+        ScopedOwnedMetalObject stagingRelease(staging);
+        if (staging == nil) {
+            [blit endEncoding];
+            return false;
+        }
+        for (NSUInteger levelIndex = 0;
+             levelIndex < levelCount; ++levelIndex) {
+            id<MTLTexture> mipAtlas = (__bridge id<MTLTexture>)
+                texObj.metalDepthCompare1DMipAtlas;
+            const NSUInteger width = std::max<NSUInteger>(
+                source.width >> levelIndex, 1u);
+            const MTLSize sourceSize = MTLSizeMake(width, 1u, 1u);
+            const NSUInteger stagingOffset = stagingRowBytes * levelIndex;
+            [blit copyFromTexture:source
+                       sourceSlice:0
+                       sourceLevel:levelIndex
+                      sourceOrigin:MTLOriginMake(0, 0, 0)
+                        sourceSize:sourceSize
+                          toBuffer:staging
+                 destinationOffset:stagingOffset
+            destinationBytesPerRow:stagingRowBytes
+          destinationBytesPerImage:stagingRowBytes];
+            for (NSUInteger row = 0; row < 2u; ++row) {
+                [blit copyFromTexture:source
+                           sourceSlice:0
+                           sourceLevel:levelIndex
+                          sourceOrigin:MTLOriginMake(0, 0, 0)
+                            sourceSize:sourceSize
+                             toTexture:mipAtlas
+                      destinationSlice:0
+                      destinationLevel:0
+                     destinationOrigin:MTLOriginMake(
+                         0, levelIndex * 2u + row, 0)];
+            }
+        }
+        [blit endEncoding];
+        if (!lease.commitAndWait(AppGLCommandReason::TextureUpload)) {
+            return false;
+        }
+        id<MTLTexture> scalarAtlas = (__bridge id<MTLTexture>)
+            texObj.metalDepthCompare1DScalarAtlas;
+        const auto* stagingBytes = static_cast<const std::uint8_t*>(
+            staging.contents);
+        for (NSUInteger levelIndex = 0;
+             levelIndex < levelCount; ++levelIndex) {
+            const NSUInteger width = std::max<NSUInteger>(
+                source.width >> levelIndex, 1u);
+            const void* rowBytes =
+                stagingBytes + stagingRowBytes * levelIndex;
+            for (NSUInteger row = 0; row < 2u; ++row) {
+                [scalarAtlas replaceRegion:MTLRegionMake2D(
+                                               0, levelIndex * 2u + row,
+                                               width, 1u)
+                           mipmapLevel:0
+                             withBytes:rowBytes
+                           bytesPerRow:stagingRowBytes];
+            }
+        }
+        mipArrayOut = texObj.metalDepthCompare1DScalarAtlas;
         return true;
     }
 
@@ -18892,6 +19077,10 @@ struct GLContext::Impl {
                                 const ShaderReflection* reflection,
                                 std::vector<TranslatedDrawInfo::TextureBinding>& outBindings,
                                 const std::string* stageMSL) {
+            const bool uses1DCompareMipArray =
+                stageTag[0] == 'f' && stageMSL != nullptr &&
+                stageMSL->find("_appgl_Cmp1DMips [[texture(") !=
+                    std::string::npos;
             GLSamplerBindingStageRecipe transientRecipe;
             const GLSamplerBindingStageRecipe* recipePtr = nullptr;
             if (samplerRecipeCacheBypassForSparseMdi) {
@@ -18946,6 +19135,8 @@ struct GLContext::Impl {
                     ? ensureMultisampleStorageImageSampleCounts(
                           stageMSL, stageTag[0] == 'f')
                     : nullptr;
+            std::unordered_map<GLTextureObject*, std::uint32_t>
+                oneDMipAllocations;
             for (const auto& sampledTex : recipe.entries) {
                 // Program-static sampler metadata was resolved when the
                 // recipe was built. Keep only the live GL state reads below.
@@ -19549,11 +19740,11 @@ struct GLContext::Impl {
                         resolveIncompleteSampledColorFallbackTexture(resolvedTarget);
                     usedIncompleteFallback = binding.metalTexture != nullptr;
                 }
+                const bool depthCompareSampling =
+                    samplerParamsForCompleteness->compareMode ==
+                        GL_COMPARE_REF_TO_TEXTURE &&
+                    isDepthFormat(texObject->desc.internalFormat);
                 if (binding.metalTexture == nullptr && textureStorageReady) {
-                    const bool depthCompareSampling =
-                        samplerParamsForCompleteness->compareMode ==
-                            GL_COMPARE_REF_TO_TEXTURE &&
-                        isDepthFormat(texObject->desc.internalFormat);
                     binding.metalTexture = depthCompareSampling
                         ? resolveDepthCompareTexture(*texObject)
                         : resolveSwizzledTexture(*texObject);
@@ -19633,6 +19824,35 @@ struct GLContext::Impl {
                 binding.compareMipFilter = static_cast<std::uint32_t>(
                     metalMipFilter(samplerParamsForCompleteness->minFilter));
                 binding.compareLodBias = samplerParamsForCompleteness->lodBias;
+                binding.compareFunc = static_cast<std::uint32_t>(
+                    metalCompareFunction(
+                        samplerParamsForCompleteness->compareFunc));
+                switch (samplerParamsForCompleteness->wrapS) {
+                    case GL_REPEAT:
+                        binding.compare1DSampleState = 0u;
+                        break;
+                    case GL_MIRRORED_REPEAT:
+                        binding.compare1DSampleState = 1u;
+                        break;
+                    case GL_CLAMP_TO_BORDER:
+                        binding.compare1DSampleState = 3u;
+                        break;
+                    default:
+                        binding.compare1DSampleState = 2u;
+                        break;
+                }
+                if (metalMinMagFilter(
+                        samplerParamsForCompleteness->minFilter) ==
+                    MTLSamplerMinMagFilterLinear) {
+                    binding.compare1DSampleState |= 1u << 2u;
+                }
+                if (metalMinMagFilter(
+                        samplerParamsForCompleteness->magFilter) ==
+                    MTLSamplerMinMagFilterLinear) {
+                    binding.compare1DSampleState |= 1u << 3u;
+                }
+                binding.compareBorderDepth =
+                    samplerParamsForCompleteness->borderColor[0];
                 if (samplerMinFilterRequiresMipChain(
                         samplerParamsForCompleteness->minFilter)) {
                     binding.compareMinLod = std::max(
@@ -19680,6 +19900,32 @@ struct GLContext::Impl {
                         binding.compareFlags |= kDepthCompareFlagFlip2DY;
                     }
                 }
+                void* oneDMipArray = nullptr;
+                bool appendOneDMipArray = false;
+                if (uses1DCompareMipArray && depthCompareSampling &&
+                    texObject->target == GL_TEXTURE_1D &&
+                    binding.metalSlot < 32u) {
+                    const auto allocation =
+                        oneDMipAllocations.find(texObject);
+                    if (allocation != oneDMipAllocations.end()) {
+                        binding.compareFlags |=
+                            kDepthCompareFlagUse1DMipSidecars;
+                        binding.compare1DMipCount = allocation->second;
+                    } else if (oneDMipAllocations.empty() &&
+                               resolveDepthCompare1DMipTextures(
+                                   *texObject,
+                                   binding.metalTexture,
+                                   oneDMipArray) &&
+                               oneDMipArray != nullptr) {
+                        binding.compareFlags |=
+                            kDepthCompareFlagUse1DMipSidecars;
+                        binding.compare1DMipCount =
+                            texObject->depthCompare1DMipLevelCount;
+                        oneDMipAllocations.emplace(
+                            texObject, binding.compare1DMipCount);
+                        appendOneDMipArray = true;
+                    }
+                }
                 emitSamplerTrace("bound",
                                  texName,
                                  discoveredTarget,
@@ -19693,6 +19939,12 @@ struct GLContext::Impl {
                                  binding.metalSamplerState,
                                  "resolved");
                 outBindings.push_back(binding);
+                if (appendOneDMipArray) {
+                    TranslatedDrawInfo::TextureBinding sidecarBinding;
+                    sidecarBinding.metalTexture = oneDMipArray;
+                    sidecarBinding.depthCompare1DMipSidecar = true;
+                    outBindings.push_back(sidecarBinding);
+                }
                 if (usesMSSampledSidecars &&
                     extensions::sparse_texture::isMultisampleStorageImageTarget(
                         resolvedTarget)) {
@@ -32241,6 +32493,7 @@ struct GLContext::Impl {
 
         ++r5Eviction.primaryTextureReleaseAttempts;
         releaseDepthCompareTextureView(texture);
+        releaseDepthCompare1DMipTextures(texture);
         texture.r5DepthCompareViewEvicted = false;
         releaseRetainedMetalObject(texture.metalSwizzledView);
         texture.metalSwizzledView = nullptr;
@@ -32441,6 +32694,7 @@ struct GLContext::Impl {
 
                 ++r5Eviction.textureViewBaseReleaseAttempts;
                 releaseDepthCompareTextureView(*texture);
+                releaseDepthCompare1DMipTextures(*texture);
                 texture->r5DepthCompareViewEvicted = false;
                 releaseRetainedMetalObject(texture->metalTexture);
                 texture->metalTexture = nullptr;
@@ -32495,6 +32749,7 @@ struct GLContext::Impl {
 
                 ++r5Eviction.depthCompareViewReleaseAttempts;
                 releaseDepthCompareTextureView(*texture);
+                releaseDepthCompare1DMipTextures(*texture);
                 texture->r5DepthCompareViewEvicted = true;
                 ++r5Eviction.depthCompareViewReleaseSuccesses;
                 ++r5Eviction.selectedRecords;

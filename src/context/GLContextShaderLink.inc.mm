@@ -5280,6 +5280,8 @@ bool GLContext::linkProgram(GLuint program) {
                 };
                 bool needsCubeArrayTexcoord = false;
                 bool hasShadowSampler = false;
+                bool hasOneDShadowSampler = false;
+                bool hasTwoDShadowSampler = false;
                 for (const auto& uniform : fragmentShader->declaredUniforms) {
                     switch (uniform.type) {
                         case GL_SAMPLER_CUBE_MAP_ARRAY:
@@ -5293,22 +5295,55 @@ bool GLContext::linkProgram(GLuint program) {
                                     GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW;
                             break;
                         case GL_SAMPLER_1D_SHADOW:
+                            hasShadowSampler = true;
+                            hasOneDShadowSampler = true;
+                            break;
                         case GL_SAMPLER_2D_SHADOW:
+                            hasShadowSampler = true;
+                            hasTwoDShadowSampler = true;
+                            break;
                         case GL_SAMPLER_CUBE_SHADOW:
                         case GL_SAMPLER_1D_ARRAY_SHADOW:
                         case GL_SAMPLER_2D_ARRAY_SHADOW:
+                        case GL_SAMPLER_2D_RECT_SHADOW:
                             hasShadowSampler = true;
                             break;
                         default:
                             break;
                     }
                 }
+                const bool hasExplicitOneDShadowLookup =
+                    fragmentShader->source.find("Lod") !=
+                        std::string::npos ||
+                    fragmentShader->source.find("Grad") !=
+                        std::string::npos;
+                const bool hasProjectiveOneDShadowLookup =
+                    fragmentShader->source.find("Proj") !=
+                    std::string::npos;
+                const bool needsOneDShadowReference =
+                    hasOneDShadowSampler &&
+                    (hasExplicitOneDShadowLookup ||
+                     !hasProjectiveOneDShadowLookup);
+                const bool needsTwoDShadowReference =
+                    hasTwoDShadowSampler &&
+                    fragmentShader->source.find("Offset") ==
+                        std::string::npos &&
+                    fragmentShader->source.find("Lod") ==
+                        std::string::npos &&
+                    fragmentShader->source.find("Grad") ==
+                        std::string::npos &&
+                    fragmentShader->source.find("Proj") ==
+                        std::string::npos;
                 const std::uint32_t compatTexcoordWidth =
                     needsCubeArrayTexcoord
                     ? 4u
-                    : (hasShadowSampler
-                       ? 2u
-                       : inferredCompatTexcoordWidth(fragmentShader->source));
+                    : (needsOneDShadowReference ||
+                       needsTwoDShadowReference
+                       ? 3u
+                       : (hasShadowSampler
+                          ? 2u
+                          : inferredCompatTexcoordWidth(
+                                fragmentShader->source)));
                 const char* compatTexcoordType =
                     compatTexcoordWidth >= 4
                     ? "vec4"

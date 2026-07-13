@@ -382,6 +382,21 @@ struct GLTextureObject {
     std::uint64_t r5DepthCompareViewLastUseBoundarySerial = 0;
     bool r5DepthCompareViewEvicted = false;
 
+    // Apple Metal depth2d.sample_compare explicit-LOD control is incorrect
+    // when a promoted GL_TEXTURE_1D depth texture has physical height 1.
+    // M5 caches one two-row atlas band per GL-visible logical mip. Mip
+    // selection is an ordinary Y coordinate on one fixed resource, avoiding
+    // both the height-one tail of a padded mip pyramid and Apple's broken
+    // non-uniform resource and array-slice selection.
+    void* metalDepthCompare1DMipAtlas = nullptr;
+    // Scalar mirror of the depth atlas. M5 reads this color-format texture
+    // after Metal proved unable to dynamically address depth resources even
+    // when mip selection was reduced to an atlas coordinate.
+    void* metalDepthCompare1DScalarAtlas = nullptr;
+    void* depthCompare1DMipSourceTexture = nullptr;
+    std::uint32_t depthCompare1DMipLevelCount = 0;
+    std::uint32_t depthCompare1DMipPixelFormat = 0;
+
     // Sampling-only proxy used when a GL texture view has cube-family
     // semantics that Metal does not reproduce through a direct texture
     // view over the source storage. The render/FBO path still uses

@@ -3674,15 +3674,41 @@ static NSInteger depthCompareControlBufferSlot(const std::string* msl) {
     return haveDigit ? slot : -1;
 }
 
+static NSInteger depthCompare1DMipTextureSlot(
+    const std::string* msl) {
+    if (msl == nullptr) {
+        return -1;
+    }
+    static constexpr const char* kNeedle =
+        "_appgl_Cmp1DMips [[texture(";
+    const std::size_t pos = msl->find(kNeedle);
+    if (pos == std::string::npos) {
+        return -1;
+    }
+    std::size_t cursor = pos + std::strlen(kNeedle);
+    NSInteger slot = 0;
+    bool haveDigit = false;
+    while (cursor < msl->size() &&
+           std::isdigit(static_cast<unsigned char>((*msl)[cursor]))) {
+        haveDigit = true;
+        slot = slot * 10 + static_cast<NSInteger>((*msl)[cursor] - '0');
+        ++cursor;
+    }
+    return haveDigit ? slot : -1;
+}
+
 struct DepthCompareControlPayload {
     std::uint32_t flags = 0;
     std::uint32_t mipFilter = 0;
     float lodBias = 0.0f;
     float minLod = 0.0f;
     float maxLod = 0.0f;
+    std::uint32_t oneDSampleState = 0;
+    std::uint32_t oneDMipCount = 0;
+    float borderDepth = 0.0f;
 };
 
-static_assert(sizeof(DepthCompareControlPayload) == 20,
+static_assert(sizeof(DepthCompareControlPayload) == 32,
               "MSL compare-control payload layout changed");
 
 static NSInteger clipControlYSignBufferSlot(const std::string* msl) {
@@ -8397,6 +8423,7 @@ struct MetalFrameGraph::Impl {
         bool vertexNeedsFragmentShadingRateState = false;
         NSInteger vertexClipControlYSignSlot = -1;
         NSInteger fragmentDepthCompareControlSlot = -1;
+        NSInteger fragmentDepthCompare1DMipTextureSlot = -1;
         bool clipControlShaderYFixup = false;
         bool clipControlInvertsWinding = false;
         bool vertexUsesMultiviewViewMask = false;
@@ -8509,6 +8536,8 @@ struct MetalFrameGraph::Impl {
             fragmentUsesMultiviewViewMask =
                 shaderSlots.fragmentUsesMultiviewViewMask;
         }
+        fragmentDepthCompare1DMipTextureSlot =
+            depthCompare1DMipTextureSlot(info.fragmentMSL);
         if (info.translatedPlanOut != nullptr) {
             *info.translatedPlanOut = TranslatedDrawPlan{};
             if (!useArgBuf && !forceArgBufEnv) {
@@ -9612,7 +9641,6 @@ struct MetalFrameGraph::Impl {
                 fragArgEncoderSet1Release.reset(fragArgEncoderSet1);
             }
         }
-
         DrawProfileTimePoint profileEncoderSetupStart = profileValidationEnd;
         if (profileAny) {
             const DrawProfileTimePoint stateResolveEnd = drawProfileNow();
@@ -11237,13 +11265,22 @@ struct MetalFrameGraph::Impl {
             if (fragmentDepthCompareControlSlot >= 0) {
                 DepthCompareControlPayload compareControls[32] = {};
                 for (const auto& binding : info.fragmentTextures) {
+                    if (binding.depthCompare1DMipSidecar) {
+                        continue;
+                    }
                     if (binding.metalSlot < 32u) {
                         auto& control = compareControls[binding.metalSlot];
                         control.flags = binding.compareFlags;
+                        control.flags |=
+                            (binding.compareFunc & 7u) << 8u;
                         control.mipFilter = binding.compareMipFilter;
                         control.lodBias = binding.compareLodBias;
                         control.minLod = binding.compareMinLod;
                         control.maxLod = binding.compareMaxLod;
+                        control.oneDSampleState =
+                            binding.compare1DSampleState;
+                        control.oneDMipCount = binding.compare1DMipCount;
+                        control.borderDepth = binding.compareBorderDepth;
                     }
                 }
                 bindFragmentBytesIfNeeded(
@@ -11689,6 +11726,34 @@ struct MetalFrameGraph::Impl {
                 APPGL_LOG(DRAW, @"[GL]     vbo peek skip=private-or-null-or-empty");
             }
         }
+        // Apple Metal has two independent 1D-depth compare failures: explicit
+        // LOD control on a physical height-one depth2d, and non-uniform
+        // selection among separate depth-compare resources. Keep every
+        // logical mip physically two rows high in one depth2d atlas and select
+        // an ordinary Y coordinate instead. The common-width row prefixes require
+        // explicit logical-width addressing in the injected MSL.
+        if (fragmentDepthCompare1DMipTextureSlot >= 0) {
+            for (const auto& binding : info.fragmentTextures) {
+                if (!binding.depthCompare1DMipSidecar ||
+                    binding.metalTexture == nullptr) {
+                    continue;
+                }
+                id<MTLTexture> texture =
+                    (__bridge id<MTLTexture>)binding.metalTexture;
+                bindFragmentTextureIfNeeded(
+                    encodeSubtimeSamplePtr,
+                    texture,
+                    static_cast<NSUInteger>(
+                        fragmentDepthCompare1DMipTextureSlot),
+                    EncodeMarshalClass::Texture);
+                [currentRenderEncoder
+                    useResource:texture
+                          usage:MTLResourceUsageRead
+                         stages:MTLRenderStageFragment];
+                break;
+            }
+        }
+
         // Step 7-3: argument-buffer binding path. When argbuf is enabled
         // and the pipeline has desc_set 0 (fragment and/or vertex stage),
         // allocate a per-stage argument buffer, populate it via the
@@ -11823,6 +11888,7 @@ struct MetalFrameGraph::Impl {
                 }
                 for (const auto& binding : textures) {
                     if (binding.metalTexture == nullptr) continue;
+                    if (binding.depthCompare1DMipSidecar) continue;
                     id<MTLTexture> tex = (__bridge id<MTLTexture>)binding.metalTexture;
                     // Step 7-3 follow-up: reflection is now argbuf-aware,
                     // so `binding.metalSlot` IS the argbuf `[[id(N)]]`
@@ -12086,8 +12152,12 @@ struct MetalFrameGraph::Impl {
         noteTextureReadsForDraw(info);
         recordFloorResourceBindSlice(
             floorProfileSample.resourceBindHazardValidateUs);
-        if (!fragmentUsesArgBuf) {
+        {
             for (const auto& binding : info.fragmentTextures) {
+                if (binding.depthCompare1DMipSidecar ||
+                    fragmentUsesArgBuf) {
+                    continue;
+                }
                 if (binding.metalTexture == nullptr) {
                     continue;
                 }

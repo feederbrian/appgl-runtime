@@ -50,6 +50,9 @@ namespace appgl {
 
 constexpr std::uint32_t kDepthCompareFlagFlip2DY = 1u << 0;
 constexpr std::uint32_t kDepthCompareFlagClampCubeFace = 1u << 1;
+constexpr std::uint32_t kDepthCompareFlagUse1DMipSidecars = 1u << 2;
+constexpr std::uint32_t kDepthCompare1DMipTextureBase = 48u;
+constexpr std::uint32_t kDepthCompare1DMipTextureCount = 80u;
 
 class GLContext;
 class GLObjectStore;
@@ -329,6 +332,16 @@ struct TranslatedDrawInfo {
         float compareLodBias = 0.0f;
         float compareMinLod = 0.0f;
         float compareMaxLod = 0.0f;
+        // M5 scalar-atlas sampling state: bits 0..1 encode S wrapping,
+        // bit 2 selects linear minification, and bit 3 selects linear
+        // magnification.
+        std::uint32_t compare1DSampleState = 0;
+        std::uint32_t compare1DMipCount = 0;
+        std::uint32_t compareFunc = 7;
+        float compareBorderDepth = 0.0f;
+        // M5's height-two logical-mip atlas is bound at the translator's
+        // dedicated direct texture slot.
+        bool depthCompare1DMipSidecar = false;
     };
     std::vector<TextureBinding> fragmentTextures;
     std::vector<TextureBinding> vertexTextures;
