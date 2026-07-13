@@ -42,7 +42,9 @@ CUBE_SEAMLESS_OPERATIONS = frozenset(("T", "TB", "G", "L"))
 CUBE_DIMENSIONS = frozenset(("DC", "DCA"))
 RESULT_RE = re.compile(r'PIGLIT:\s*\{[^\n]*"result"\s*:\s*"([^"]+)"')
 CELL_RE = re.compile(
-    r"C2D_CELL id=(\S+).*expected_levels=(\d+) queried_levels=(\d+)"
+    r"C2D_CELL id=(\S+).*"
+    r"expected_immutable_levels=(\d+) queried_immutable_levels=(\d+) .*"
+    r"expected_view_levels=(\d+) queried_view_levels=(\d+)"
 )
 PROBE_RE = re.compile(
     r"C2D_RESULT id=(\S+) passed=(\d+) total=(\d+) failures=(\d+)"
@@ -179,8 +181,10 @@ def run_variant(
     result = final_result(stdout, stderr)
     cell_match = CELL_RE.search(stdout + "\n" + stderr)
     probe_match = PROBE_RE.search(stdout + "\n" + stderr)
-    expected_levels = int(cell_match.group(2)) if cell_match else -1
-    queried_levels = int(cell_match.group(3)) if cell_match else -1
+    expected_immutable_levels = int(cell_match.group(2)) if cell_match else -1
+    queried_immutable_levels = int(cell_match.group(3)) if cell_match else -1
+    expected_view_levels = int(cell_match.group(4)) if cell_match else -1
+    queried_view_levels = int(cell_match.group(5)) if cell_match else -1
     passed = int(probe_match.group(2)) if probe_match else -1
     total = int(probe_match.group(3)) if probe_match else -1
     failures = int(probe_match.group(4)) if probe_match else -1
@@ -194,9 +198,18 @@ def run_variant(
         "piglit_result": result,
         "has_cell_record": cell_match is not None,
         "has_probe_record": probe_match is not None,
-        "expected_levels": expected_levels,
-        "queried_levels": queried_levels,
-        "query_match": expected_levels == queried_levels,
+        "expected_immutable_levels": expected_immutable_levels,
+        "queried_immutable_levels": queried_immutable_levels,
+        "immutable_query_match": (
+            expected_immutable_levels == queried_immutable_levels
+        ),
+        "expected_view_levels": expected_view_levels,
+        "queried_view_levels": queried_view_levels,
+        "view_query_match": expected_view_levels == queried_view_levels,
+        "query_match": (
+            expected_immutable_levels == queried_immutable_levels
+            and expected_view_levels == queried_view_levels
+        ),
         "passed": passed,
         "total": total,
         "failures": failures,
@@ -207,13 +220,19 @@ def classify(cell: dict, variants: list[dict]) -> tuple[str, bool, bool]:
     safety = all(
         not item["timed_out"]
         and not item["signaled"]
-        and item["piglit_result"] in {"pass", "fail"}
-        and item["has_cell_record"]
-        and item["has_probe_record"]
         for item in variants
     )
     if not safety:
         return "unsafe", False, False
+    if any(item["piglit_result"] == "skip" for item in variants):
+        return "skip", False, True
+    if any(
+        item["piglit_result"] not in {"pass", "fail"}
+        or not item["has_cell_record"]
+        or not item["has_probe_record"]
+        for item in variants
+    ):
+        return "error", False, True
     all_pass = all(
         item["piglit_result"] == "pass"
         and item["exit_code"] == 0
@@ -335,6 +354,8 @@ def run_manifest(args: argparse.Namespace, manifest: dict) -> int:
         "pass_count": sum(record["observed"] == "pass" for record in records),
         "partial_count": sum(record["observed"] == "partial" for record in records),
         "fail_count": sum(record["observed"] == "fail" for record in records),
+        "skip_count": sum(record["observed"] == "skip" for record in records),
+        "error_count": sum(record["observed"] == "error" for record in records),
         "unsafe_count": sum(record["observed"] == "unsafe" for record in records),
         "expected_mismatch_count": sum(
             not record["expected_match"] for record in records

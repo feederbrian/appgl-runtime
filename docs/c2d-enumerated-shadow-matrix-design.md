@@ -346,8 +346,8 @@ single-purpose twin.
 
 ## 5. Focused Probe Contract
 
-The permanent probe uses Piglit's table-driven `tex-miplevel-selection` engine extended by Piglit
-commit `7c770f035` (`tests/texturing/tex-miplevel-selection.c`). Runtime-repo assets
+The permanent probe uses Piglit's table-driven `tex-miplevel-selection` engine extended through
+Piglit commit `b0f05e82d` (`tests/texturing/tex-miplevel-selection.c`). Runtime-repo assets
 `tools/c2d_shadow_matrix.py` and `tools/c2d_shadow_matrix_manifest.json` generate and validate the
 exact cell inventory. The runner refuses a manifest that differs from its source-of-truth table.
 
@@ -376,10 +376,14 @@ python3 tools/c2d_shadow_matrix.py \
   --out /new/output/directory --flavor default
 ```
 
-Each probe process emits the cell ID, view/seamless/origin state, expected and queried visible level
-counts, per-variant pass total, and terminal Piglit result. The runner rejects timeout, signal,
-skip, missing terminal result, missing cell/probe record, query-count mismatch, empty execution, or
-an outcome that differs from the cell's declared `PASS`/`EXPECTED_PARTIAL` class.
+Each probe process emits the cell ID, view/seamless/origin state, expected and queried immutable
+storage-level and view-level counts, per-variant pass total, and terminal Piglit result. This follows
+`ARB_texture_view`: `GL_TEXTURE_IMMUTABLE_LEVELS` is inherited from the source texture, while
+`GL_TEXTURE_VIEW_NUM_LEVELS` reports the view's visible subset. The runner rejects timeout, signal,
+skip, missing terminal result, missing cell/probe record, either query-count mismatch, empty
+execution, or an outcome that differs from the cell's declared `PASS`/`EXPECTED_PARTIAL` class.
+Its result schema keeps capability `skip` and malformed-result `error` separate from `unsafe`;
+`unsafe` is reserved for timeout or signal termination so the safety-zero claim remains literal.
 
 Deterministic data rules:
 
@@ -396,10 +400,15 @@ Deterministic data rules:
    compare outcomes.
 8. Each legal form runs texture/sampler LOD-bias state 0, +1, and -1. Explicit call-bias forms also
    use a nonzero call bias.
-9. A companion shader queries `textureQueryLevels` from the exact texture object bound for compare;
-   compare and query must report one coherent visible chain.
+9. The probe queries immutable-storage and view-span metadata from the exact texture object bound for
+   compare; the separate six-case CTS hold verifies shader-side `textureQueryLevels` coherence.
 10. The probe rejects compile failure, warning-only fallback, timeout, signal, missing result, and
     resource backstop as non-pass.
+
+The first baseline-attribution run also includes a standalone Objective-C/OpenGL attachment repro in
+the gate artifact. It creates 1D-array, 2D-array, and cube-array depth stores without Piglit and
+attaches mip level 2, layer 9. This distinguishes a probe setup defect from a runtime FBO capability
+gap before matrix skips are classified.
 
 The primary matrix uses VBO attributes. Two extra clones reproduce E850 and E3656 with VBOs while
 the original Piglit rows retain their client arrays. This is the client-packing discriminator.
