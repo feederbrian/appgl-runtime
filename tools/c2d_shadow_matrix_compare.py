@@ -8,7 +8,8 @@ from pathlib import Path
 
 
 FLAVORS = ("default", "f64on")
-UNRESOLVED = frozenset(("unsafe", "error"))
+UNRESOLVED = frozenset(("error",))
+BLOCKERS = frozenset(("candidate-regression", "candidate-safety-regression"))
 
 
 def load_results(path: Path) -> dict[str, dict]:
@@ -46,6 +47,14 @@ def attribute(baseline: dict, candidate: dict) -> str:
     candidate_state = candidate["observed"]
     if baseline_state in UNRESOLVED or candidate_state in UNRESOLVED:
         return "harness-unresolved"
+    if candidate_state == "unsafe" and baseline_state != "unsafe":
+        return "candidate-safety-regression"
+    if baseline_state == "unsafe":
+        return (
+            "candidate-safety-recovery"
+            if candidate_state != "unsafe"
+            else "pre-existing-safety-gap"
+        )
     if baseline_state == "pass":
         return "unchanged-pass" if candidate_state == "pass" else "candidate-regression"
     return "candidate-recovery" if candidate_state == "pass" else "pre-existing-gap"
@@ -65,6 +74,8 @@ def shape(record: dict) -> tuple:
 
 def combined_attribution(per_flavor: dict[str, dict]) -> str:
     values = {item["attribution"] for item in per_flavor.values()}
+    if "candidate-safety-regression" in values:
+        return "candidate-safety-regression"
     if "candidate-regression" in values:
         return "candidate-regression"
     if "harness-unresolved" in values:
@@ -177,9 +188,17 @@ def main() -> int:
                 }
             )
 
-    regressions = [
+    functional_regressions = [
         row for row in rows
         if row["combined_attribution"] == "candidate-regression"
+    ]
+    safety_regressions = [
+        row for row in rows
+        if row["combined_attribution"] == "candidate-safety-regression"
+    ]
+    regressions = [
+        row for row in rows
+        if row["combined_attribution"] in BLOCKERS
     ]
     (args.out / "candidate-regressions.json").write_text(
         json.dumps(regressions, indent=2) + "\n"
@@ -227,7 +246,15 @@ def main() -> int:
             "attribution",
         ),
         "combined": counts(rows, "combined_attribution"),
-        "candidate_regression_count": len(regressions),
+        "candidate_regression_count": len(functional_regressions),
+        "candidate_safety_regression_count": len(safety_regressions),
+        "freeze_blocker_count": len(regressions),
+        "candidate_functional_regression_ids": [
+            row["id"] for row in functional_regressions
+        ],
+        "candidate_safety_regression_ids": [
+            row["id"] for row in safety_regressions
+        ],
         "candidate_regression_ids": [row["id"] for row in regressions],
     }
     (args.out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
