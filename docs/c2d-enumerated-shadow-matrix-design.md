@@ -347,7 +347,7 @@ single-purpose twin.
 ## 5. Focused Probe Contract
 
 The permanent probe uses Piglit's table-driven `tex-miplevel-selection` engine extended through
-Piglit commit `b0f05e82d` (`tests/texturing/tex-miplevel-selection.c`). Runtime-repo assets
+Piglit commit `7828d1ef2` (`tests/texturing/tex-miplevel-selection.c`). Runtime-repo assets
 `tools/c2d_shadow_matrix.py` and `tools/c2d_shadow_matrix_manifest.json` generate and validate the
 exact cell inventory. The runner refuses a manifest that differs from its source-of-truth table.
 
