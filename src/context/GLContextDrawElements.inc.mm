@@ -194,7 +194,11 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             impl_->drawDetailProfile,
             GLDrawDetailBucket::TranslatedIndexRangeValidation);
         vaoName = impl_->state->boundVertexArray();
-        vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+        vao = (vaoName != 0)
+            ? impl_->objects->vertexArrays().get(vaoName)
+            : (appglCompatProfileEnabled()
+                ? impl_->currentVertexArrayOrDefault()
+                : nullptr);
         if (vao == nullptr) {
             pushError(GL_INVALID_OPERATION);
             return false;

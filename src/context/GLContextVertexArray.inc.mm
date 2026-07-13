@@ -249,7 +249,7 @@ bool GLContext::vertexAttribIPointer(GLuint index, GLint size, GLenum type, GLsi
         return false;
     }
     const GLuint buffer = impl_->state->boundBuffer(GL_ARRAY_BUFFER);
-    if (buffer == 0 && pointer != nullptr) {
+    if (buffer == 0 && pointer != nullptr && !appglCompatProfileEnabled()) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
