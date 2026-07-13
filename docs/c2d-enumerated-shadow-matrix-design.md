@@ -1,12 +1,12 @@
 # C2d Enumerated Shadow Matrix Design
 
-Status: M1-M3 accepted; M5 implementation validated; M4 discriminator open  
+Status: M1-M3/M5/M4 accepted; consolidated freeze verification in progress
 Thread: `legacy-piglit`  
 Required implementation base: `f00b14557ddef9b367c55f45a61151618d8b9027`  
 Prepared: 2026-07-12  
 
-Accepted implementation stack: M1 `3728f2d`, M2 `60c6f5f`, M3 `c3197fa`. M5 is intentionally a
-separate commit on that stack. M4 remains excluded until its client-array differential is resolved.
+Accepted implementation stack: M1 `3728f2d`, M2 `60c6f5f`, M3 `c3197fa`, M5 `7eb6217`, and M4
+`84bae63`. Each mechanism remains a separate commit on required base `f00b145`.
 
 ## 1. Decision
 
@@ -20,10 +20,11 @@ mechanisms:
 3. Cube and cube-array compare-coordinate clamping only while
    `GL_TEXTURE_CUBE_MAP_SEAMLESS` is disabled.
 
-Client-attribute packing is not part of the initial stack. It may be added as a fourth, isolated
-commit only after the original two cube-shadow rows fail while VBO-backed clones of the same rows
-pass. That differential is the required proof that the remaining defect is client-array transport
-rather than compare binding, frontend lowering, cube filtering, or test content.
+Client-attribute packing entered the accepted stack only after the original two cube-shadow rows
+failed while VBO-backed clones of the same rows passed. That differential proved the remaining
+defect was client-array transport rather than compare binding, frontend lowering, cube filtering,
+or test content. M4 keeps the repair isolated to compatibility `GL_QUADS` draws whose every
+reflected active input is an enabled, divisor-zero legacy client-memory stream.
 
 The eight-row recovery contract is exact. Other changes are collateral predictions, not reasons to
 accept a candidate.
@@ -62,6 +63,11 @@ Piglit's Less half passed accidentally with `-0.05`, while its Greater half fail
 Restricting the synthesized-width repair to `sampler1DShadow` preserves the compare reference and
 moved E15 from `-1/100` to `153/153 PASS`. E12 is also `153/153 PASS`.
 
+The exact E15 contract is the `-nobias` row and remains `153/153 PASS`. A broader diagnostic run of
+`textureLodOffset 1DShadow` with Piglit's bias-expanded state matrix is `679/780 PASS`. Those 101
+bias-expanded failures are `KP-E15-BIAS`: a known-partial future matrix cell, outside the exact
+eight-row contract and hold set, and not evidence against the accepted explicit-LOD mechanism.
+
 The permanent focused probe assigns edge variants inside the existing 1D explicit-LOD cells:
 
 - clamp-to-edge at the low and high endpoint;
@@ -73,12 +79,20 @@ The permanent focused probe assigns edge variants inside the existing 1D explici
 These are data variants within the 256-cell executable, so the ownership and gate totals remain
 221 focused-owned cells and approximately 346 targeted invocations per flavor.
 
-### 1.2 Current discriminator state
+### 1.2 Accepted discriminator and M4 record
 
-The corrected VBO clones for E850 and E3656 pass while both original client-array programs still
-fail. That differential keeps M4 open and proves the remaining two rows are not M5 failures. M4 is
-not folded into the M5 commit; it requires its own implementation, both historical landmines, and a
-separate verdict.
+Before M4, corrected VBO clones for E850 and E3656 passed while both original client-array programs
+failed. M4 `84bae63` packs a draw-local interleaved record only for the proven compatibility-quad
+shape. It preserves each input's GL type, component count, normalization, and integer flag. Mixed
+VBO/client, separated-format, divisor, transform-feedback, fp64, unsupported packed-format, native
+topology, and `gl_VertexID`/base-sensitive draws retain the prior path.
+
+After M4, the untouched E850 and E3656 client-array programs pass. The two historical landmines,
+`spec@arb_draw_buffers@fbo-mrt-new-bind` and
+`spec@ext_transform_feedback@tessellation triangle_strip flat_last`, also pass on the same binary.
+The corrected-VBO clone executables did not survive the later host reboot; the recorded pre-M4
+clone-pass/original-fail differential is the source of record, while the consolidated freeze reruns
+the untouched originals and both landmines.
 
 ## 2. Source Findings
 
@@ -210,6 +224,7 @@ Expected Piglit tokens:
 | E15 | T2 row 15, `textureLodOffset 1DShadow` |
 | E850 | Full-suite row 850, `texturing@sampler-cube-shadow` |
 | E3656 | Full-suite row 3656, `arb_texture_cube_map_array-sampler-cube-array-shadow` |
+| KP-E15-BIAS | Bias-expanded `textureLodOffset 1DShadow`; known partial `679/780` |
 
 Passing Piglit hold tokens:
 
@@ -251,7 +266,7 @@ means the GLSL overload is invalid.
 | G | F | F | F | F | F | F |
 | GO | E12 | H-GO2 | N/A | F | F | N/A |
 | L | F | F | C-L-DC | F | C-L-D2A | C-L-DCA |
-| LO | E15 | H-LO2 | N/A | F | C-LO-D2A | N/A |
+| LO | E15 + KP-E15-BIAS | H-LO2 | N/A | F | C-LO-D2A | N/A |
 | P | F | F | N/A | N/A | N/A | N/A |
 | PB | F | F | N/A | N/A | N/A | N/A |
 | PO | H-PO1 | H-PO2 | N/A | N/A | N/A | N/A |
@@ -331,10 +346,40 @@ single-purpose twin.
 
 ## 5. Focused Probe Contract
 
-Add one downstream Piglit-style executable, provisionally `c2d-shadow-matrix`, with one process per
-cell. The runner arguments encode view, operation, dimension, and seamless state. Each process emits
-the cell ID, generated GLSL form, selected GL level/layer/face, expected compare result, observed
-result, and queried level count.
+The permanent probe uses Piglit's table-driven `tex-miplevel-selection` engine extended by Piglit
+commit `7c770f035` (`tests/texturing/tex-miplevel-selection.c`). Runtime-repo assets
+`tools/c2d_shadow_matrix.py` and `tools/c2d_shadow_matrix_manifest.json` generate and validate the
+exact cell inventory. The runner refuses a manifest that differs from its source-of-truth table.
+
+The manifest contains 64 cells for each of V0, V1, V2, and V3: 56 legal operation/dimension cells
+at S0 plus the eight legal cube-family S1 expansions. The total is exactly 256. Each logical cell
+has one isolated runner record. V3 records aggregate lower-left and upper-left clip-origin probe
+variants, both of which must produce terminal results. The four `V*-LO-D1-S0` cells are explicitly
+`EXPECTED_PARTIAL`; they still execute and must report a non-vacuous mix of passing and failing
+variants. Every other cell initially requires `PASS`.
+
+Build the probe engine with:
+
+```sh
+cmake --build /Users/excalibur/Documents/Developer/OpenGL\ 4.6\ Mac/specs/piglit/build \
+  --target tex-miplevel-selection -j8
+```
+
+Run a flavor with:
+
+```sh
+python3 tools/c2d_shadow_matrix.py \
+  --manifest tools/c2d_shadow_matrix_manifest.json \
+  --binary /Users/excalibur/Documents/Developer/OpenGL\ 4.6\ Mac/specs/piglit/build/bin/tex-miplevel-selection \
+  --library /absolute/path/to/frozen/libAppGL.dylib \
+  --bridge /Users/excalibur/Documents/Developer/OpenGL\ 4.6\ Mac/live-targets/appgl-bridge/libappgl_bridge.dylib \
+  --out /new/output/directory --flavor default
+```
+
+Each probe process emits the cell ID, view/seamless/origin state, expected and queried visible level
+counts, per-variant pass total, and terminal Piglit result. The runner rejects timeout, signal,
+skip, missing terminal result, missing cell/probe record, query-count mismatch, empty execution, or
+an outcome that differs from the cell's declared `PASS`/`EXPECTED_PARTIAL` class.
 
 Deterministic data rules:
 

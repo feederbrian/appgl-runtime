@@ -1,0 +1,6215 @@
+{
+  "schema": "appgl.c2d-shadow-matrix.v1",
+  "source": "docs/c2d-enumerated-shadow-matrix-design.md sections 3-5",
+  "cell_count": 256,
+  "cells": [
+    {
+      "id": "V0-T-D1-S0",
+      "view": "V0",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-T-D2-S0",
+      "view": "V0",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-T-DC-S0",
+      "view": "V0",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-T-D1A-S0",
+      "view": "V0",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-T-D2A-S0",
+      "view": "V0",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-T-DCA-S0",
+      "view": "V0",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-TB-D1-S0",
+      "view": "V0",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-TB-D2-S0",
+      "view": "V0",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-TB-DC-S0",
+      "view": "V0",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-TB-D1A-S0",
+      "view": "V0",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-TB-D2A-S0",
+      "view": "V0",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-TB-DCA-S0",
+      "view": "V0",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-TO-D1-S0",
+      "view": "V0",
+      "operation": "TO",
+      "operation_cli": "textureOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-TO-D2-S0",
+      "view": "V0",
+      "operation": "TO",
+      "operation_cli": "textureOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-TO-D1A-S0",
+      "view": "V0",
+      "operation": "TO",
+      "operation_cli": "textureOffset",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-TO-D2A-S0",
+      "view": "V0",
+      "operation": "TO",
+      "operation_cli": "textureOffset",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-TOB-D1-S0",
+      "view": "V0",
+      "operation": "TOB",
+      "operation_cli": "textureOffset(bias)",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-TOB-D2-S0",
+      "view": "V0",
+      "operation": "TOB",
+      "operation_cli": "textureOffset(bias)",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-TOB-D1A-S0",
+      "view": "V0",
+      "operation": "TOB",
+      "operation_cli": "textureOffset(bias)",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-TOB-D2A-S0",
+      "view": "V0",
+      "operation": "TOB",
+      "operation_cli": "textureOffset(bias)",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-G-D1-S0",
+      "view": "V0",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-G-D2-S0",
+      "view": "V0",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-G-DC-S0",
+      "view": "V0",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-G-D1A-S0",
+      "view": "V0",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-G-D2A-S0",
+      "view": "V0",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-G-DCA-S0",
+      "view": "V0",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-GO-D1-S0",
+      "view": "V0",
+      "operation": "GO",
+      "operation_cli": "textureGradOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-GO-D2-S0",
+      "view": "V0",
+      "operation": "GO",
+      "operation_cli": "textureGradOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-GO-D1A-S0",
+      "view": "V0",
+      "operation": "GO",
+      "operation_cli": "textureGradOffset",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-GO-D2A-S0",
+      "view": "V0",
+      "operation": "GO",
+      "operation_cli": "textureGradOffset",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-L-D1-S0",
+      "view": "V0",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-L-D2-S0",
+      "view": "V0",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-L-DC-S0",
+      "view": "V0",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-L-D1A-S0",
+      "view": "V0",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-L-D2A-S0",
+      "view": "V0",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-L-DCA-S0",
+      "view": "V0",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-LO-D1-S0",
+      "view": "V0",
+      "operation": "LO",
+      "operation_cli": "textureLodOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "EXPECTED_PARTIAL",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-LO-D2-S0",
+      "view": "V0",
+      "operation": "LO",
+      "operation_cli": "textureLodOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-LO-D1A-S0",
+      "view": "V0",
+      "operation": "LO",
+      "operation_cli": "textureLodOffset",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-LO-D2A-S0",
+      "view": "V0",
+      "operation": "LO",
+      "operation_cli": "textureLodOffset",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-P-D1-S0",
+      "view": "V0",
+      "operation": "P",
+      "operation_cli": "textureProj",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-P-D2-S0",
+      "view": "V0",
+      "operation": "P",
+      "operation_cli": "textureProj",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-PB-D1-S0",
+      "view": "V0",
+      "operation": "PB",
+      "operation_cli": "textureProj(bias)",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-PB-D2-S0",
+      "view": "V0",
+      "operation": "PB",
+      "operation_cli": "textureProj(bias)",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-PO-D1-S0",
+      "view": "V0",
+      "operation": "PO",
+      "operation_cli": "textureProjOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-PO-D2-S0",
+      "view": "V0",
+      "operation": "PO",
+      "operation_cli": "textureProjOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-POB-D1-S0",
+      "view": "V0",
+      "operation": "POB",
+      "operation_cli": "textureProjOffset(bias)",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-POB-D2-S0",
+      "view": "V0",
+      "operation": "POB",
+      "operation_cli": "textureProjOffset(bias)",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-PG-D1-S0",
+      "view": "V0",
+      "operation": "PG",
+      "operation_cli": "textureProjGrad",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-PG-D2-S0",
+      "view": "V0",
+      "operation": "PG",
+      "operation_cli": "textureProjGrad",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-PGO-D1-S0",
+      "view": "V0",
+      "operation": "PGO",
+      "operation_cli": "textureProjGradOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-PGO-D2-S0",
+      "view": "V0",
+      "operation": "PGO",
+      "operation_cli": "textureProjGradOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-PL-D1-S0",
+      "view": "V0",
+      "operation": "PL",
+      "operation_cli": "textureProjLod",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-PL-D2-S0",
+      "view": "V0",
+      "operation": "PL",
+      "operation_cli": "textureProjLod",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-PLO-D1-S0",
+      "view": "V0",
+      "operation": "PLO",
+      "operation_cli": "textureProjLodOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-PLO-D2-S0",
+      "view": "V0",
+      "operation": "PLO",
+      "operation_cli": "textureProjLodOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-T-DC-S1",
+      "view": "V0",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-T-DCA-S1",
+      "view": "V0",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-TB-DC-S1",
+      "view": "V0",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-TB-DCA-S1",
+      "view": "V0",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-G-DC-S1",
+      "view": "V0",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-G-DCA-S1",
+      "view": "V0",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-L-DC-S1",
+      "view": "V0",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V0-L-DCA-S1",
+      "view": "V0",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-T-D1-S0",
+      "view": "V1",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-T-D2-S0",
+      "view": "V1",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-T-DC-S0",
+      "view": "V1",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-T-D1A-S0",
+      "view": "V1",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-T-D2A-S0",
+      "view": "V1",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-T-DCA-S0",
+      "view": "V1",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-TB-D1-S0",
+      "view": "V1",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-TB-D2-S0",
+      "view": "V1",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-TB-DC-S0",
+      "view": "V1",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-TB-D1A-S0",
+      "view": "V1",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-TB-D2A-S0",
+      "view": "V1",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-TB-DCA-S0",
+      "view": "V1",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-TO-D1-S0",
+      "view": "V1",
+      "operation": "TO",
+      "operation_cli": "textureOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-TO-D2-S0",
+      "view": "V1",
+      "operation": "TO",
+      "operation_cli": "textureOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-TO-D1A-S0",
+      "view": "V1",
+      "operation": "TO",
+      "operation_cli": "textureOffset",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-TO-D2A-S0",
+      "view": "V1",
+      "operation": "TO",
+      "operation_cli": "textureOffset",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-TOB-D1-S0",
+      "view": "V1",
+      "operation": "TOB",
+      "operation_cli": "textureOffset(bias)",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-TOB-D2-S0",
+      "view": "V1",
+      "operation": "TOB",
+      "operation_cli": "textureOffset(bias)",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-TOB-D1A-S0",
+      "view": "V1",
+      "operation": "TOB",
+      "operation_cli": "textureOffset(bias)",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-TOB-D2A-S0",
+      "view": "V1",
+      "operation": "TOB",
+      "operation_cli": "textureOffset(bias)",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-G-D1-S0",
+      "view": "V1",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-G-D2-S0",
+      "view": "V1",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-G-DC-S0",
+      "view": "V1",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-G-D1A-S0",
+      "view": "V1",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-G-D2A-S0",
+      "view": "V1",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-G-DCA-S0",
+      "view": "V1",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-GO-D1-S0",
+      "view": "V1",
+      "operation": "GO",
+      "operation_cli": "textureGradOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-GO-D2-S0",
+      "view": "V1",
+      "operation": "GO",
+      "operation_cli": "textureGradOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-GO-D1A-S0",
+      "view": "V1",
+      "operation": "GO",
+      "operation_cli": "textureGradOffset",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-GO-D2A-S0",
+      "view": "V1",
+      "operation": "GO",
+      "operation_cli": "textureGradOffset",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-L-D1-S0",
+      "view": "V1",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-L-D2-S0",
+      "view": "V1",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-L-DC-S0",
+      "view": "V1",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-L-D1A-S0",
+      "view": "V1",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-L-D2A-S0",
+      "view": "V1",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-L-DCA-S0",
+      "view": "V1",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-LO-D1-S0",
+      "view": "V1",
+      "operation": "LO",
+      "operation_cli": "textureLodOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "EXPECTED_PARTIAL",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-LO-D2-S0",
+      "view": "V1",
+      "operation": "LO",
+      "operation_cli": "textureLodOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-LO-D1A-S0",
+      "view": "V1",
+      "operation": "LO",
+      "operation_cli": "textureLodOffset",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-LO-D2A-S0",
+      "view": "V1",
+      "operation": "LO",
+      "operation_cli": "textureLodOffset",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-P-D1-S0",
+      "view": "V1",
+      "operation": "P",
+      "operation_cli": "textureProj",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-P-D2-S0",
+      "view": "V1",
+      "operation": "P",
+      "operation_cli": "textureProj",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-PB-D1-S0",
+      "view": "V1",
+      "operation": "PB",
+      "operation_cli": "textureProj(bias)",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-PB-D2-S0",
+      "view": "V1",
+      "operation": "PB",
+      "operation_cli": "textureProj(bias)",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-PO-D1-S0",
+      "view": "V1",
+      "operation": "PO",
+      "operation_cli": "textureProjOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-PO-D2-S0",
+      "view": "V1",
+      "operation": "PO",
+      "operation_cli": "textureProjOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-POB-D1-S0",
+      "view": "V1",
+      "operation": "POB",
+      "operation_cli": "textureProjOffset(bias)",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-POB-D2-S0",
+      "view": "V1",
+      "operation": "POB",
+      "operation_cli": "textureProjOffset(bias)",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-PG-D1-S0",
+      "view": "V1",
+      "operation": "PG",
+      "operation_cli": "textureProjGrad",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-PG-D2-S0",
+      "view": "V1",
+      "operation": "PG",
+      "operation_cli": "textureProjGrad",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-PGO-D1-S0",
+      "view": "V1",
+      "operation": "PGO",
+      "operation_cli": "textureProjGradOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-PGO-D2-S0",
+      "view": "V1",
+      "operation": "PGO",
+      "operation_cli": "textureProjGradOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-PL-D1-S0",
+      "view": "V1",
+      "operation": "PL",
+      "operation_cli": "textureProjLod",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-PL-D2-S0",
+      "view": "V1",
+      "operation": "PL",
+      "operation_cli": "textureProjLod",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-PLO-D1-S0",
+      "view": "V1",
+      "operation": "PLO",
+      "operation_cli": "textureProjLodOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-PLO-D2-S0",
+      "view": "V1",
+      "operation": "PLO",
+      "operation_cli": "textureProjLodOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-T-DC-S1",
+      "view": "V1",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-T-DCA-S1",
+      "view": "V1",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-TB-DC-S1",
+      "view": "V1",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-TB-DCA-S1",
+      "view": "V1",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-G-DC-S1",
+      "view": "V1",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-G-DCA-S1",
+      "view": "V1",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-L-DC-S1",
+      "view": "V1",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V1-L-DCA-S1",
+      "view": "V1",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-T-D1-S0",
+      "view": "V2",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-T-D2-S0",
+      "view": "V2",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-T-DC-S0",
+      "view": "V2",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-T-D1A-S0",
+      "view": "V2",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-T-D2A-S0",
+      "view": "V2",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-T-DCA-S0",
+      "view": "V2",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-TB-D1-S0",
+      "view": "V2",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-TB-D2-S0",
+      "view": "V2",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-TB-DC-S0",
+      "view": "V2",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-TB-D1A-S0",
+      "view": "V2",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-TB-D2A-S0",
+      "view": "V2",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-TB-DCA-S0",
+      "view": "V2",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-TO-D1-S0",
+      "view": "V2",
+      "operation": "TO",
+      "operation_cli": "textureOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-TO-D2-S0",
+      "view": "V2",
+      "operation": "TO",
+      "operation_cli": "textureOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-TO-D1A-S0",
+      "view": "V2",
+      "operation": "TO",
+      "operation_cli": "textureOffset",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-TO-D2A-S0",
+      "view": "V2",
+      "operation": "TO",
+      "operation_cli": "textureOffset",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-TOB-D1-S0",
+      "view": "V2",
+      "operation": "TOB",
+      "operation_cli": "textureOffset(bias)",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-TOB-D2-S0",
+      "view": "V2",
+      "operation": "TOB",
+      "operation_cli": "textureOffset(bias)",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-TOB-D1A-S0",
+      "view": "V2",
+      "operation": "TOB",
+      "operation_cli": "textureOffset(bias)",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-TOB-D2A-S0",
+      "view": "V2",
+      "operation": "TOB",
+      "operation_cli": "textureOffset(bias)",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-G-D1-S0",
+      "view": "V2",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-G-D2-S0",
+      "view": "V2",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-G-DC-S0",
+      "view": "V2",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-G-D1A-S0",
+      "view": "V2",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-G-D2A-S0",
+      "view": "V2",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-G-DCA-S0",
+      "view": "V2",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-GO-D1-S0",
+      "view": "V2",
+      "operation": "GO",
+      "operation_cli": "textureGradOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-GO-D2-S0",
+      "view": "V2",
+      "operation": "GO",
+      "operation_cli": "textureGradOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-GO-D1A-S0",
+      "view": "V2",
+      "operation": "GO",
+      "operation_cli": "textureGradOffset",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-GO-D2A-S0",
+      "view": "V2",
+      "operation": "GO",
+      "operation_cli": "textureGradOffset",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-L-D1-S0",
+      "view": "V2",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-L-D2-S0",
+      "view": "V2",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-L-DC-S0",
+      "view": "V2",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-L-D1A-S0",
+      "view": "V2",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-L-D2A-S0",
+      "view": "V2",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-L-DCA-S0",
+      "view": "V2",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-LO-D1-S0",
+      "view": "V2",
+      "operation": "LO",
+      "operation_cli": "textureLodOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "EXPECTED_PARTIAL",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-LO-D2-S0",
+      "view": "V2",
+      "operation": "LO",
+      "operation_cli": "textureLodOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-LO-D1A-S0",
+      "view": "V2",
+      "operation": "LO",
+      "operation_cli": "textureLodOffset",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-LO-D2A-S0",
+      "view": "V2",
+      "operation": "LO",
+      "operation_cli": "textureLodOffset",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-P-D1-S0",
+      "view": "V2",
+      "operation": "P",
+      "operation_cli": "textureProj",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-P-D2-S0",
+      "view": "V2",
+      "operation": "P",
+      "operation_cli": "textureProj",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-PB-D1-S0",
+      "view": "V2",
+      "operation": "PB",
+      "operation_cli": "textureProj(bias)",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-PB-D2-S0",
+      "view": "V2",
+      "operation": "PB",
+      "operation_cli": "textureProj(bias)",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-PO-D1-S0",
+      "view": "V2",
+      "operation": "PO",
+      "operation_cli": "textureProjOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-PO-D2-S0",
+      "view": "V2",
+      "operation": "PO",
+      "operation_cli": "textureProjOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-POB-D1-S0",
+      "view": "V2",
+      "operation": "POB",
+      "operation_cli": "textureProjOffset(bias)",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-POB-D2-S0",
+      "view": "V2",
+      "operation": "POB",
+      "operation_cli": "textureProjOffset(bias)",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-PG-D1-S0",
+      "view": "V2",
+      "operation": "PG",
+      "operation_cli": "textureProjGrad",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-PG-D2-S0",
+      "view": "V2",
+      "operation": "PG",
+      "operation_cli": "textureProjGrad",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-PGO-D1-S0",
+      "view": "V2",
+      "operation": "PGO",
+      "operation_cli": "textureProjGradOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-PGO-D2-S0",
+      "view": "V2",
+      "operation": "PGO",
+      "operation_cli": "textureProjGradOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-PL-D1-S0",
+      "view": "V2",
+      "operation": "PL",
+      "operation_cli": "textureProjLod",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-PL-D2-S0",
+      "view": "V2",
+      "operation": "PL",
+      "operation_cli": "textureProjLod",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-PLO-D1-S0",
+      "view": "V2",
+      "operation": "PLO",
+      "operation_cli": "textureProjLodOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-PLO-D2-S0",
+      "view": "V2",
+      "operation": "PLO",
+      "operation_cli": "textureProjLodOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-T-DC-S1",
+      "view": "V2",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-T-DCA-S1",
+      "view": "V2",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-TB-DC-S1",
+      "view": "V2",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-TB-DCA-S1",
+      "view": "V2",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-G-DC-S1",
+      "view": "V2",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-G-DCA-S1",
+      "view": "V2",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-L-DC-S1",
+      "view": "V2",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V2-L-DCA-S1",
+      "view": "V2",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower"
+        ]
+      }
+    },
+    {
+      "id": "V3-T-D1-S0",
+      "view": "V3",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-T-D2-S0",
+      "view": "V3",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-T-DC-S0",
+      "view": "V3",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-T-D1A-S0",
+      "view": "V3",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-T-D2A-S0",
+      "view": "V3",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-T-DCA-S0",
+      "view": "V3",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-TB-D1-S0",
+      "view": "V3",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-TB-D2-S0",
+      "view": "V3",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-TB-DC-S0",
+      "view": "V3",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-TB-D1A-S0",
+      "view": "V3",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-TB-D2A-S0",
+      "view": "V3",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-TB-DCA-S0",
+      "view": "V3",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-TO-D1-S0",
+      "view": "V3",
+      "operation": "TO",
+      "operation_cli": "textureOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-TO-D2-S0",
+      "view": "V3",
+      "operation": "TO",
+      "operation_cli": "textureOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-TO-D1A-S0",
+      "view": "V3",
+      "operation": "TO",
+      "operation_cli": "textureOffset",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-TO-D2A-S0",
+      "view": "V3",
+      "operation": "TO",
+      "operation_cli": "textureOffset",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-TOB-D1-S0",
+      "view": "V3",
+      "operation": "TOB",
+      "operation_cli": "textureOffset(bias)",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-TOB-D2-S0",
+      "view": "V3",
+      "operation": "TOB",
+      "operation_cli": "textureOffset(bias)",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-TOB-D1A-S0",
+      "view": "V3",
+      "operation": "TOB",
+      "operation_cli": "textureOffset(bias)",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-TOB-D2A-S0",
+      "view": "V3",
+      "operation": "TOB",
+      "operation_cli": "textureOffset(bias)",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-G-D1-S0",
+      "view": "V3",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-G-D2-S0",
+      "view": "V3",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-G-DC-S0",
+      "view": "V3",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-G-D1A-S0",
+      "view": "V3",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-G-D2A-S0",
+      "view": "V3",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-G-DCA-S0",
+      "view": "V3",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-GO-D1-S0",
+      "view": "V3",
+      "operation": "GO",
+      "operation_cli": "textureGradOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-GO-D2-S0",
+      "view": "V3",
+      "operation": "GO",
+      "operation_cli": "textureGradOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-GO-D1A-S0",
+      "view": "V3",
+      "operation": "GO",
+      "operation_cli": "textureGradOffset",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-GO-D2A-S0",
+      "view": "V3",
+      "operation": "GO",
+      "operation_cli": "textureGradOffset",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-L-D1-S0",
+      "view": "V3",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-L-D2-S0",
+      "view": "V3",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-L-DC-S0",
+      "view": "V3",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-L-D1A-S0",
+      "view": "V3",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-L-D2A-S0",
+      "view": "V3",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-L-DCA-S0",
+      "view": "V3",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-LO-D1-S0",
+      "view": "V3",
+      "operation": "LO",
+      "operation_cli": "textureLodOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "EXPECTED_PARTIAL",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-LO-D2-S0",
+      "view": "V3",
+      "operation": "LO",
+      "operation_cli": "textureLodOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-LO-D1A-S0",
+      "view": "V3",
+      "operation": "LO",
+      "operation_cli": "textureLodOffset",
+      "dimension": "D1A",
+      "dimension_cli": "1DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-LO-D2A-S0",
+      "view": "V3",
+      "operation": "LO",
+      "operation_cli": "textureLodOffset",
+      "dimension": "D2A",
+      "dimension_cli": "2DArrayShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-P-D1-S0",
+      "view": "V3",
+      "operation": "P",
+      "operation_cli": "textureProj",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-P-D2-S0",
+      "view": "V3",
+      "operation": "P",
+      "operation_cli": "textureProj",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-PB-D1-S0",
+      "view": "V3",
+      "operation": "PB",
+      "operation_cli": "textureProj(bias)",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-PB-D2-S0",
+      "view": "V3",
+      "operation": "PB",
+      "operation_cli": "textureProj(bias)",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-PO-D1-S0",
+      "view": "V3",
+      "operation": "PO",
+      "operation_cli": "textureProjOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-PO-D2-S0",
+      "view": "V3",
+      "operation": "PO",
+      "operation_cli": "textureProjOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-POB-D1-S0",
+      "view": "V3",
+      "operation": "POB",
+      "operation_cli": "textureProjOffset(bias)",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-POB-D2-S0",
+      "view": "V3",
+      "operation": "POB",
+      "operation_cli": "textureProjOffset(bias)",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-PG-D1-S0",
+      "view": "V3",
+      "operation": "PG",
+      "operation_cli": "textureProjGrad",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-PG-D2-S0",
+      "view": "V3",
+      "operation": "PG",
+      "operation_cli": "textureProjGrad",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-PGO-D1-S0",
+      "view": "V3",
+      "operation": "PGO",
+      "operation_cli": "textureProjGradOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-PGO-D2-S0",
+      "view": "V3",
+      "operation": "PGO",
+      "operation_cli": "textureProjGradOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-PL-D1-S0",
+      "view": "V3",
+      "operation": "PL",
+      "operation_cli": "textureProjLod",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-PL-D2-S0",
+      "view": "V3",
+      "operation": "PL",
+      "operation_cli": "textureProjLod",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-PLO-D1-S0",
+      "view": "V3",
+      "operation": "PLO",
+      "operation_cli": "textureProjLodOffset",
+      "dimension": "D1",
+      "dimension_cli": "1DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-PLO-D2-S0",
+      "view": "V3",
+      "operation": "PLO",
+      "operation_cli": "textureProjLodOffset",
+      "dimension": "D2",
+      "dimension_cli": "2DShadow",
+      "seamless": false,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-T-DC-S1",
+      "view": "V3",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-T-DCA-S1",
+      "view": "V3",
+      "operation": "T",
+      "operation_cli": "texture()",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-TB-DC-S1",
+      "view": "V3",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-TB-DCA-S1",
+      "view": "V3",
+      "operation": "TB",
+      "operation_cli": "texture(bias)",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-G-DC-S1",
+      "view": "V3",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-G-DCA-S1",
+      "view": "V3",
+      "operation": "G",
+      "operation_cli": "textureGrad",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-L-DC-S1",
+      "view": "V3",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "DC",
+      "dimension_cli": "CubeShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    },
+    {
+      "id": "V3-L-DCA-S1",
+      "view": "V3",
+      "operation": "L",
+      "operation_cli": "textureLod",
+      "dimension": "DCA",
+      "dimension_cli": "CubeArrayShadow",
+      "seamless": true,
+      "expected": "PASS",
+      "variants": {
+        "lod_bias": [
+          -1,
+          0,
+          1
+        ],
+        "mip_filter": [
+          "nearest",
+          "nearest_mipmap_nearest"
+        ],
+        "clip_origins": [
+          "lower",
+          "upper"
+        ]
+      }
+    }
+  ]
+}
