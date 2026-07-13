@@ -30,6 +30,7 @@
 #include "../src/loader/DispatchInstall.h"
 #include "../src/objects/GLObjectStore.h"
 #include "../src/runtime/AppGLRuntime.h"
+#include "../src/shader/CompatShaderRewrite.h"
 #include "../src/shared/JsonUtil.h"
 #include "../src/state/GLStateTracker.h"
 #include "../src/state/IndexExpansion.h"
@@ -7607,9 +7608,8 @@ private:
 //   2. `varying` → stage-aware `in`/`out`.
 //   3. `gl_Vertex` / `gl_MultiTexCoord0` → synthesized `layout(location=N)`
 //      attribute declarations with the NVIDIA location convention.
-//   4. `gl_ModelViewProjectionMatrix` → the existing `appgl_*` matrix
-//      synthesis path (identity in this scene, so clip-space input
-//      passes through unchanged).
+//   4. `ftransform()` → the existing `appgl_*` vertex/MVP synthesis path
+//      (identity in this scene, so clip-space input passes through).
 //   5. `gl_FragColor` → `layout(location=0) out vec4 appgl_FragColor` and
 //      `texture2D(...)` → `texture(...)`.
 //
@@ -7636,21 +7636,62 @@ public:
     void setup(GLContext& /*context*/) override {
         auto& gl = Runtime::shared().dispatch();
 
+        // Core-profile sentinel: a plain identifier named `ftransform`
+        // (plus a commented-out call) is user code, not the legacy builtin.
+        // It must not activate compat synthesis or alter the source.
+        const std::string coreIdentifierSource =
+            "#version 330 core\n"
+            "const float ftransform = 1.0; // ftransform()\n"
+            "void main() { gl_Position = vec4(ftransform); }\n";
+        const CompatShaderRewriteResult coreIdentifierRewrite =
+            rewriteCompatShader(coreIdentifierSource, GL_VERTEX_SHADER);
+        expectCondition(!coreIdentifierRewrite.legacy.usesFtransform,
+                        "core ftransform identifier does not activate compat lowering");
+        expectCondition(!coreIdentifierRewrite.legacy.attrVertex &&
+                            !coreIdentifierRewrite.usage.modelViewProjection,
+                        "core ftransform identifier does not synthesize vertex or MVP state");
+        expectCondition(coreIdentifierRewrite.source == coreIdentifierSource,
+                        "core ftransform identifier source passes through untouched");
+
+        auto compileCompatFtransformVertex = [&](const char* source,
+                                                  const char* assertion) {
+            const GLuint shader = gl.glCreateShader(GL_VERTEX_SHADER);
+            gl.glShaderSource(shader, 1, &source, nullptr);
+            gl.glCompileShader(shader);
+            GLint compileStatus = GL_FALSE;
+            gl.glGetShaderiv(shader, GL_COMPILE_STATUS, &compileStatus);
+            gl.glDeleteShader(shader);
+            expectCondition(compileStatus == GL_TRUE, assertion);
+        };
+
+        // Cover both legacy entry shapes that occur in Piglit: an explicit
+        // GLSL 1.10 version and the no-version default (also GLSL 1.10).
+        const char* version110FtransformSource =
+            "#version 110\n"
+            "void main() { gl_Position = ftransform(); }\n";
+        compileCompatFtransformVertex(
+            version110FtransformSource,
+            "explicit GLSL 1.10 ftransform vertex shader compiles after rewrite");
+        const char* noVersionFtransformSource =
+            "void main() { gl_Position = ftransform(); }\n";
+        compileCompatFtransformVertex(
+            noVersionFtransformSource,
+            "no-version ftransform vertex shader compiles after rewrite");
+
         // Deliberately legacy shader sources. The rewriter is what makes
         // this land — on an un-rewritten glslang these fail compile.
         //
-        // Vertex stage: `#version 120`, `gl_Vertex` and
-        // `gl_MultiTexCoord0` (→ synthesized attribute locations),
-        // `gl_ModelViewProjectionMatrix` (→ synthesized matrix uniform,
-        // mirror pushes identity so clip-space coordinates pass
-        // through), `varying` (→ `out` on VS side, matched to `in` on
-        // FS side through the rewriter's word-boundary rule).
+        // Vertex stage: `#version 120`, `gl_MultiTexCoord0`
+        // (→ synthesized attribute location),
+        // `ftransform()` (→ synthesized vertex attribute + MVP uniform;
+        // mirror pushes identity so clip-space coordinates pass through),
+        // `varying` (→ `out` on VS side, matched to `in` on FS side).
         const char* vertexSource =
             "#version 120\n"
             "varying vec2 vUV;\n"
             "void main() {\n"
             "    vUV = gl_MultiTexCoord0.xy;\n"
-            "    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\n"
+            "    gl_Position = ftransform();\n"
             "}\n";
         // Fragment stage: `#version 120`, `varying` (→ `in` on FS
         // side), `gl_FragColor` (→ synthesized `layout(location=0) out
@@ -21585,7 +21626,7 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         // Phase 8X Group 4d follow-up¹⁹ — legacy-GLSL rewriter end-to-end.
         // Compiles a `#version 120` shader pair that exercises version
         // upgrade, `varying` translation, `gl_Vertex`/`gl_MultiTexCoord0`
-        // synthesis, `gl_ModelViewProjectionMatrix` push, `gl_FragColor`
+        // synthesis, `ftransform()` lowering/MVP push, `gl_FragColor`
         // rewrite, and `texture2D` → `texture` in one program. If any
         // piece of `rewriteCompatShader` regresses the compile will fail
         // or the golden image will flip. See §fw¹⁹ memo.

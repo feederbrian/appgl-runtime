@@ -234,11 +234,9 @@ bool replaceCodeIdentifier(std::string& src,
     return didReplace;
 }
 
-bool replaceCodeFunctionIdentifier(std::string& src,
-                                   std::string_view from,
-                                   std::string_view to) {
-    bool didReplace = false;
-    std::size_t pos = 0;
+std::size_t findCodeFunctionIdentifier(const std::string& src,
+                                       std::string_view name,
+                                       std::size_t pos = 0) {
     while (pos < src.size()) {
         if (isPreprocessorDirectiveLine(src, pos)) {
             pos = skipPreprocessorDirective(src, pos);
@@ -256,12 +254,12 @@ bool replaceCodeFunctionIdentifier(std::string& src,
             pos = skipStringLiteral(src, pos);
             continue;
         }
-        if (src.compare(pos, from.size(), from) != 0) {
+        if (src.compare(pos, name.size(), name) != 0) {
             ++pos;
             continue;
         }
         const bool leftOk = (pos == 0) || !isIdentChar(src[pos - 1]);
-        const std::size_t end = pos + from.size();
+        const std::size_t end = pos + name.size();
         const bool rightOk =
             (end >= src.size()) || !isIdentChar(src[end]);
         if (!leftOk || !rightOk) {
@@ -274,14 +272,33 @@ bool replaceCodeFunctionIdentifier(std::string& src,
             ++call;
         }
         if (call < src.size() && src[call] == '(') {
-            src.replace(pos, from.size(), to);
-            didReplace = true;
-            pos += to.size();
-        } else {
-            ++pos;
+            return pos;
         }
+        ++pos;
     }
-    return didReplace;
+    return std::string::npos;
+}
+
+bool containsCodeFunctionIdentifier(const std::string& src,
+                                    std::string_view name) {
+    return findCodeFunctionIdentifier(src, name) != std::string::npos;
+}
+
+bool replaceCodeFunctionIdentifier(std::string& src,
+                                   std::string_view from,
+                                   std::string_view to) {
+    bool didReplace = false;
+    std::size_t pos = 0;
+    while (true) {
+        const std::size_t found =
+            findCodeFunctionIdentifier(src, from, pos);
+        if (found == std::string::npos) {
+            return didReplace;
+        }
+        src.replace(found, from.size(), to);
+        didReplace = true;
+        pos = found + to.size();
+    }
 }
 
 bool replaceCodeUnsignedInt(std::string& src) {
@@ -1091,6 +1108,31 @@ int parseVersionNumber(std::string_view versionLine) {
         ++i;
     }
     return value;
+}
+
+// A source without #version uses desktop GLSL 1.10 semantics. Explicit
+// compatibility profiles and pre-1.50 desktop versions likewise expose the
+// fixed-function builtin surface. Core-profile sources must never acquire a
+// synthetic ftransform definition merely because that token appears in user
+// code.
+bool usesLegacyCompatProfile(const std::string& source) {
+    std::size_t versionStart = std::string::npos;
+    const std::size_t versionEol =
+        findVersionLineEnd(source, &versionStart);
+    if (versionEol == std::string::npos) {
+        return true;
+    }
+
+    const std::string_view versionLine(
+        source.data() + versionStart, versionEol - versionStart);
+    if (containsIdentifier(versionLine, "compatibility")) {
+        return true;
+    }
+    if (containsIdentifier(versionLine, "core")) {
+        return false;
+    }
+    const int versionNumber = parseVersionNumber(versionLine);
+    return versionNumber > 0 && versionNumber < 150;
 }
 
 std::string_view trimAscii(std::string_view text) {
@@ -1918,8 +1960,15 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     // source-text rewrites don't race the detection.
     LegacyCompatUsage& legacy = result.legacy;
     legacy.hadVarying = containsIdentifier(source, "varying");
+    legacy.usesFtransform =
+        isVertex && usesLegacyCompatProfile(result.source) &&
+        containsCodeFunctionIdentifier(result.source, "ftransform");
+    if (legacy.usesFtransform) {
+        result.usage.modelViewProjection = true;
+    }
     if (isVertex) {
-        legacy.attrVertex = containsIdentifier(source, "gl_Vertex");
+        legacy.attrVertex = legacy.usesFtransform ||
+                            containsIdentifier(source, "gl_Vertex");
         legacy.attrNormal = containsIdentifier(source, "gl_Normal");
         legacy.attrColor = containsIdentifier(source, "gl_Color");
         scanMultiTexCoord(source, legacy.attrMultiTexCoord);
@@ -2645,6 +2694,15 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
                 addLayoutAttrib(8 + i, "vec4", applName);
             }
         }
+    }
+
+    // 5b.1. GLSL compatibility builtin. Keep the original call spelling and
+    // provide a function-like macro only for legacy vertex sources. This
+    // preserves ordinary identifiers named `ftransform` in core shaders.
+    if (legacy.usesFtransform) {
+        preamble.append(
+            "#define ftransform() "
+            "(appgl_ModelViewProjectionMatrix * appgl_Vertex)\n");
     }
 
     // 5c. fw¹⁹ / fw²⁰ — fragment output declarations.

@@ -110,6 +110,11 @@ struct LegacyCompatUsage {
     bool attrNormal = false;           // gl_Normal -> layout(loc=2) in vec3 appgl_Normal
     bool attrColor = false;            // gl_Color -> layout(loc=3) in vec4 appgl_Color
     std::array<bool, 8> attrMultiTexCoord = {};  // gl_MultiTexCoord[0..7] -> layout(loc=8+N)
+    // Legacy vertex builtin. Lowered only for a callable `ftransform()`
+    // in a legacy/compat source; plain identifiers in core GLSL are left
+    // untouched. The lowering also forces attrVertex and the synthesized
+    // model-view-projection matrix uniform.
+    bool usesFtransform = false;
     // Frag-output rewrites (fragment stage only).
     bool fragColor = false;            // gl_FragColor -> layout(loc=0) out vec4 appgl_FragColor
     // Highest `gl_FragData[N]` index seen. -1 means `gl_FragData` was
@@ -205,7 +210,7 @@ struct LegacyCompatUsage {
                usesFogColor || usesFogDensity || usesFogStart ||
                usesFogEnd || usesFogScale || usesTextureEnvColor ||
                usesLightModelAmbient || anyLight() ||
-               usesClipVertex || rewroteTexture2D ||
+               usesClipVertex || usesFtransform || rewroteTexture2D ||
                rewroteTextureCube || rewroteShadow2DProj;
     }
 };
