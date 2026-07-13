@@ -196,6 +196,15 @@ static std::size_t translatedDrawMSLSlotCacheLimit() {
     return envSizeLimit("APPGL_TRANSLATED_DRAW_MSL_SLOT_CACHE_LIMIT", 0);
 }
 
+static std::size_t commandBufferResourcePressureLimit() {
+    // A single present-less Piglit shadow run can otherwise accumulate tens
+    // of thousands of distinct textures on one command buffer. Keep the
+    // default well below that failure range; 0 is an explicit rollback hatch.
+    static const std::size_t limit =
+        envSizeLimit("APPGL_COMMAND_BUFFER_RESOURCE_PRESSURE_LIMIT", 1024);
+    return limit;
+}
+
 static std::uint64_t stableMslSourceHash(const std::string& source) {
     std::uint64_t hash = 1469598103934665603ull;
     for (unsigned char c : source) {
@@ -7459,8 +7468,8 @@ struct MetalFrameGraph::Impl {
                 cbEncoderPressure = 0;
                 frameResourcePeak = std::max<std::uint64_t>(
                     frameResourcePeak, cbDistinctResources.size());
-                cbDistinctResources.clear();
             }
+            cbDistinctResources.clear();
             attachErrorHandler(currentCommandBuffer, label);
             return true;
         }
@@ -7522,14 +7531,15 @@ struct MetalFrameGraph::Impl {
 
     // RESOURCE axis: insert one MTLResource (texture/buffer) into the current-CB
     // distinct set + FLUSHED-log each new all-time high-water (the LAST line before
-    // a SIGABRT = the resource-cap proxy). Off ⇒ no-op (matrix-safe).
+    // a SIGABRT = the resource-cap proxy). The set also drives the always-on
+    // serial pressure rollover; the env only gates diagnostic logging.
     void noteCbResource(void* resource) {
-        if (!cbPressureProbeLatched || resource == nullptr) {
+        if (resource == nullptr) {
             return;
         }
         if (cbDistinctResources.insert(resource).second) {
             const std::uint64_t size = cbDistinctResources.size();
-            if (size > cbResourceHighWater) {
+            if (cbPressureProbeLatched && size > cbResourceHighWater) {
                 cbResourceHighWater = size;
                 std::fprintf(stderr, "[W2_CB_RESOURCE] cb=%p distinct=%llu\n",
                     (void*)currentCommandBuffer,
@@ -7542,9 +7552,6 @@ struct MetalFrameGraph::Impl {
     // RESOURCE axis: account every distinct resource a lean descriptor references
     // (textures + buffers; NOT samplers/PSO = not MTLResource) onto the current CB.
     void noteDescriptorResources(const LeanDirectTranslatedDrawDescriptor& d) {
-        if (!cbPressureProbeLatched) {
-            return;
-        }
         noteCbResource(d.metalVertexBuffer);
         for (std::size_t i = 0; i < d.extraVertexBufferCount; ++i) {
             noteCbResource(d.extraVertexBuffers[i].metalBuffer);
@@ -7559,6 +7566,63 @@ struct MetalFrameGraph::Impl {
         for (std::size_t i = 0; i < d.uboBindingCount; ++i) {
             noteCbResource(d.uboBindings[i].metalBuffer);
         }
+    }
+
+    // Serial-path twin of noteDescriptorResources. The original probe only
+    // observed lean descriptors, leaving long present-less serial workloads
+    // invisible even though their command buffer accumulates the same Metal
+    // texture and buffer residency entries.
+    void noteTranslatedDrawResources(const TranslatedDrawInfo& info) {
+        noteCbResource(info.metalVertexBuffer);
+        noteCbResource(info.metalIndexBuffer);
+        for (const auto& extra : info.extraVertexBuffers) {
+            noteCbResource(extra.metalBuffer);
+        }
+        for (const auto& texture : info.vertexTextures) {
+            noteCbResource(texture.metalTexture);
+            noteCbResource(texture.textureBufferBackingMetalBuffer);
+            noteCbResource(texture.imageAtomicMetalBuffer);
+        }
+        for (const auto& texture : info.fragmentTextures) {
+            noteCbResource(texture.metalTexture);
+            noteCbResource(texture.textureBufferBackingMetalBuffer);
+            noteCbResource(texture.imageAtomicMetalBuffer);
+        }
+        for (const auto& ubo : info.uboBindings) {
+            noteCbResource(ubo.metalBuffer);
+        }
+        for (const auto& ssbo : info.ssboBindings) {
+            noteCbResource(ssbo.metalBuffer);
+        }
+        for (const auto& atomic : info.atomicCounterBindings) {
+            noteCbResource(atomic.metalBuffer);
+        }
+        noteCbResource(info.fboColorTexture);
+        noteCbResource(info.fboDepthStencilTexture);
+        for (void* texture : info.fboAdditionalColorTextures) {
+            noteCbResource(texture);
+        }
+    }
+
+    bool rotateSerialCommandBufferForResourcePressure(
+        const TranslatedDrawInfo& info) {
+        const std::size_t limit = commandBufferResourcePressureLimit();
+        const std::size_t priorCount = cbDistinctResources.size();
+        noteTranslatedDrawResources(info);
+        if (limit == 0 || priorCount == 0 ||
+            cbDistinctResources.size() <= limit) {
+            return true;
+        }
+
+        // The prospective draw has not been encoded yet. Commit only the
+        // preceding work, preserve frame-semantic state, then account this
+        // draw against the fresh command buffer it will actually use.
+        if (!commitCurrentAsync(AppGLCommandReason::PressureFlush) ||
+            !ensureCurrentCommandBuffer(AppGLCommandReason::TranslatedDraw)) {
+            return false;
+        }
+        noteTranslatedDrawResources(info);
+        return true;
     }
 
     // S25 W2.1 TARGET-PROBE (obs-only, env APPGL_W2_TARGET_PROBE default-OFF):
@@ -9838,6 +9902,9 @@ struct MetalFrameGraph::Impl {
                 if (currentCommandBuffer == nil) {
                     return false;
                 }
+            }
+            if (!rotateSerialCommandBufferForResourcePressure(info)) {
+                return false;
             }
 
             if (isFBODraw) {
@@ -22589,7 +22656,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
 
         if (sourceTexture.storageMode == MTLStorageModeShared) {
             if (currentCommandBuffer != nil) {
-                if (!currentCommandBufferLease.commitAndWait(AppGLCommandReason::FlushForReadback)) {
+                const bool completed = currentCommandBufferLease.commitAndWait(
+                    AppGLCommandReason::FlushForReadback);
+                currentCommandBuffer = nil;
+                if (!completed) {
                     return false;
                 }
                 // OPT-8: GPU finished synchronously — release the ring slot
@@ -22642,6 +22712,7 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             bool completed = false;
             if (consumedCurrentCommandBuffer) {
                 completed = currentCommandBufferLease.commitAndWait(AppGLCommandReason::FlushForReadback);
+                currentCommandBuffer = nil;
             } else {
                 completed = standaloneLease.commitAndWait(AppGLCommandReason::FlushForReadback);
             }
@@ -22704,7 +22775,10 @@ fragment AppGLDSUploadFSOut appgl_ds_upload_fs(
             ParallelEncodeBoundaryReason::CopyReadback);
         endRenderPass();
         if (currentCommandBuffer != nil) {
-            if (!currentCommandBufferLease.commitAndWait(AppGLCommandReason::FlushForReadback)) {
+            const bool completed = currentCommandBufferLease.commitAndWait(
+                AppGLCommandReason::FlushForReadback);
+            currentCommandBuffer = nil;
+            if (!completed) {
                 attributionScope.markFailed();
                 return;
             }

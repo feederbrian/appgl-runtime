@@ -59,7 +59,7 @@ def generate_manifest() -> dict:
                 cell_id = f"{view}-{operation}-{dimension}-S0"
                 expected = (
                     "EXPECTED_PARTIAL"
-                    if operation == "LO" and dimension == "D1"
+                    if operation == "LO" and dimension == "D1" and view != "V2"
                     else "PASS"
                 )
                 cells.append(
@@ -123,7 +123,7 @@ def validate_manifest(manifest: dict) -> None:
         if count != 64:
             raise ValueError(f"{view} must contain 64 cells, found {count}")
     partial = {cell["id"] for cell in cells if cell["expected"] == "EXPECTED_PARTIAL"}
-    expected_partial = {f"{view}-LO-D1-S0" for view in VIEWS}
+    expected_partial = {f"{view}-LO-D1-S0" for view in VIEWS if view != "V2"}
     if partial != expected_partial:
         raise ValueError(
             f"known-partial set mismatch: expected {sorted(expected_partial)}, "

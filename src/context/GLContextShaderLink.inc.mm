@@ -5312,18 +5312,12 @@ bool GLContext::linkProgram(GLuint program) {
                             break;
                     }
                 }
-                const bool hasExplicitOneDShadowLookup =
-                    fragmentShader->source.find("Lod") !=
-                        std::string::npos ||
-                    fragmentShader->source.find("Grad") !=
-                        std::string::npos;
                 const bool hasProjectiveOneDShadowLookup =
                     fragmentShader->source.find("Proj") !=
                     std::string::npos;
                 const bool needsOneDShadowReference =
                     hasOneDShadowSampler &&
-                    (hasExplicitOneDShadowLookup ||
-                     !hasProjectiveOneDShadowLookup);
+                    !hasProjectiveOneDShadowLookup;
                 const bool needsTwoDShadowReference =
                     hasTwoDShadowSampler &&
                     fragmentShader->source.find("Offset") ==

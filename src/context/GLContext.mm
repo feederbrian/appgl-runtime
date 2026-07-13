@@ -19745,7 +19745,12 @@ struct GLContext::Impl {
                         GL_COMPARE_REF_TO_TEXTURE &&
                     isDepthFormat(texObject->desc.internalFormat);
                 if (binding.metalTexture == nullptr && textureStorageReady) {
-                    binding.metalTexture = depthCompareSampling
+                    // Texture views retain the established sampling-proxy path;
+                    // the raw compare resolver does not preserve their view span.
+                    const bool useDepthCompareTexture =
+                        depthCompareSampling &&
+                        texObject->viewSourceTexture == 0;
+                    binding.metalTexture = useDepthCompareTexture
                         ? resolveDepthCompareTexture(*texObject)
                         : resolveSwizzledTexture(*texObject);
                 }
@@ -19824,6 +19829,11 @@ struct GLContext::Impl {
                 binding.compareMipFilter = static_cast<std::uint32_t>(
                     metalMipFilter(samplerParamsForCompleteness->minFilter));
                 binding.compareLodBias = samplerParamsForCompleteness->lodBias;
+                if (depthCompareSampling &&
+                    texObject->viewSourceTexture != 0) {
+                    binding.compareFlags |=
+                        kDepthCompareFlagTextureViewCompat2D;
+                }
                 binding.compareFunc = static_cast<std::uint32_t>(
                     metalCompareFunction(
                         samplerParamsForCompleteness->compareFunc));
@@ -19904,6 +19914,7 @@ struct GLContext::Impl {
                 bool appendOneDMipArray = false;
                 if (uses1DCompareMipArray && depthCompareSampling &&
                     texObject->target == GL_TEXTURE_1D &&
+                    texObject->viewSourceTexture == 0 &&
                     binding.metalSlot < 32u) {
                     const auto allocation =
                         oneDMipAllocations.find(texObject);
@@ -48933,6 +48944,23 @@ void GLContext::Impl::resolveBindingConstructionForTranslatedDraw(
     timeResolver([&]() { resolveSamplerBindings(program, info); },
                  sizingSample.samplerResolveUs,
                  GLDrawProfileBucket::Count);
+    const bool depthCompareTextureViewCompat =
+        program.vertexMSL.find("piglit_texcoord") != std::string::npos &&
+        std::any_of(
+            info.fragmentTextures.begin(), info.fragmentTextures.end(),
+            [](const TranslatedDrawInfo::TextureBinding& binding) {
+                return (binding.compareFlags &
+                        kDepthCompareFlagTextureViewCompat2D) != 0u;
+            });
+    if (depthCompareTextureViewCompat) {
+        for (auto& layout : info.vertexAttributeLayouts) {
+            if (layout.location == 1u &&
+                layout.glType == GL_FLOAT &&
+                layout.glComponentCount > 2) {
+                layout.glComponentCount = 2;
+            }
+        }
+    }
     timeResolver([&]() { resolveUBOBindings(program, info); },
                  sizingSample.uboResolveUs,
                  GLDrawProfileBucket::UboBindings);

@@ -1964,10 +1964,20 @@ bool injectDepthCompareControl(std::string& msl) {
                         args[0].start, args[0].end - args[0].start));
                     const std::string compareExpr = trimmed(working.substr(
                         args[2].start, args[2].end - args[2].start));
+                    // SPIRV-Cross lowers projected 1D shadow calls by dividing
+                    // both the promoted coordinate and compare reference.
+                    // Keep those calls on the direct Metal compare path until
+                    // the manual mip atlas can preserve projective semantics.
+                    const bool projectedOneDCompare =
+                        normalizedCoord.find(") / ") != std::string::npos &&
+                        compareExpr.find(" / ") != std::string::npos;
                     std::string helper;
                     bool recognized = false;
-                    if (sampleCompare) {
-                        if (args.size() >= 4u) {
+                    if (sampleCompare && !projectedOneDCompare) {
+                        if (args.size() == 3u) {
+                            helper = "_appgl_cmpSample1DImplicit";
+                            recognized = true;
+                        } else if (args.size() >= 4u) {
                             const std::string option = trimmed(working.substr(
                                 args[3].start,
                                 args[3].end - args[3].start));
@@ -1979,6 +1989,10 @@ bool injectDepthCompareControl(std::string& msl) {
                                 recognized = args.size() <= 5u;
                             } else if (option.rfind("bias(", 0) == 0) {
                                 helper = "_appgl_cmpSample1DBias";
+                                recognized = args.size() <= 5u;
+                            } else if (option.rfind("int2(", 0) == 0) {
+                                helper = "_appgl_cmpSample1DImplicitOffset";
+                                recognized = args.size() == 4u;
                             }
                         }
                     }
@@ -2002,6 +2016,23 @@ bool injectDepthCompareControl(std::string& msl) {
                     }
                 }
                 if (!receiver.cube) {
+                    if (sampleCompare && args.size() == 3u) {
+                        const std::string samplerExpr = trimmed(working.substr(
+                            args[0].start,
+                            args[0].end - args[0].start));
+                        const std::string compareExpr = trimmed(working.substr(
+                            args[2].start,
+                            args[2].end - args[2].start));
+                        replacement = receiver.name + ".sample_compare(" +
+                            samplerExpr + ", _appgl_cmpFlip2DCoord(" +
+                            coordExpr + ", " + controlExpr + ".flags), " +
+                            compareExpr + ", bias(" + controlExpr +
+                            ".lodBias))";
+                        working.replace(pos, cursor - pos, replacement);
+                        wrapped = true;
+                        pos += replacement.size();
+                        continue;
+                    }
                     replacement =
                         " _appgl_cmpFlip2DCoord(" + coordExpr + ", " +
                         controlExpr + ".flags)";

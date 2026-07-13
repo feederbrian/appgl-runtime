@@ -51,6 +51,7 @@ namespace appgl {
 constexpr std::uint32_t kDepthCompareFlagFlip2DY = 1u << 0;
 constexpr std::uint32_t kDepthCompareFlagClampCubeFace = 1u << 1;
 constexpr std::uint32_t kDepthCompareFlagUse1DMipSidecars = 1u << 2;
+constexpr std::uint32_t kDepthCompareFlagTextureViewCompat2D = 1u << 3;
 constexpr std::uint32_t kDepthCompare1DMipTextureBase = 48u;
 constexpr std::uint32_t kDepthCompare1DMipTextureCount = 80u;
 

@@ -68,6 +68,25 @@ The exact E15 contract is the `-nobias` row and remains `153/153 PASS`. A broade
 bias-expanded failures are `KP-E15-BIAS`: a known-partial future matrix cell, outside the exact
 eight-row contract and hold set, and not evidence against the accepted explicit-LOD mechanism.
 
+The freeze repair applies the following safe-floor exclusions:
+
+- **EXCLUDED-BY-GUARD (texture views):** a texture object with `viewSourceTexture != 0` is excluded
+  from both the M1 raw depth-compare resolver and the M5 1D mip-sidecar allocator. It uses the
+  established swizzled sampling-proxy resolver instead. The compare binding carries
+  `kDepthCompareFlagTextureViewCompat2D`; binding construction then downshifts only the synthetic
+  location-1 `GL_FLOAT` vertex layout from more than two components to two for that draw. The
+  permanent safety probes are
+  `V2-{G,GO,L,LO,PG,PGO,PL,PLO}-D1-S0`; none may signal, time out, or regress below the pin.
+- **EXCLUDED-BY-GUARD (projected/offset lowering):** projected 1D compare calls and the 1D
+  gradient-plus-offset form retain the direct Metal compare path. The atlas rewrite is admitted only
+  for the SPIRV-Cross forms whose reference and coordinate semantics are preserved without widening
+  the compatibility texcoord input.
+- Compatibility linking uses a three-component synthetic input for nonprojective 1D shadow lookups
+  and simple implicit 2D shadow lookups so `appgl_TexCoord[0].z` preserves the compare reference.
+  Link time cannot know whether that sampler will later bind an ARB texture view, so the view guard
+  above restores the pin-compatible two-component client stream at binding time instead of applying
+  a program-wide width change.
+
 The permanent focused probe assigns edge variants inside the existing 1D explicit-LOD cells:
 
 - clamp-to-edge at the low and high endpoint;
@@ -354,9 +373,10 @@ exact cell inventory. The runner refuses a manifest that differs from its source
 The manifest contains 64 cells for each of V0, V1, V2, and V3: 56 legal operation/dimension cells
 at S0 plus the eight legal cube-family S1 expansions. The total is exactly 256. Each logical cell
 has one isolated runner record. V3 records aggregate lower-left and upper-left clip-origin probe
-variants, both of which must produce terminal results. The four `V*-LO-D1-S0` cells are explicitly
-`EXPECTED_PARTIAL`; they still execute and must report a non-vacuous mix of passing and failing
-variants. Every other cell initially requires `PASS`.
+variants, both of which must produce terminal results. `V0-LO-D1-S0`, `V1-LO-D1-S0`, and
+`V3-LO-D1-S0` are explicitly `EXPECTED_PARTIAL`; they still execute and must report a non-vacuous
+mix of passing and failing variants. `V2-LO-D1-S0` is ratcheted to `PASS`. Every other cell initially
+requires `PASS`.
 
 Build the probe engine with:
 

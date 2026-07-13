@@ -1113,7 +1113,8 @@ inline bool MetalCommandBufferLease::commitAndWaitImpl(NSString* label, AppGLCom
     recordSubmitted(state, reason, releaseLabel);
     [commandBuffer_ addCompletedHandler:^(id<MTLCommandBuffer> completed) {
         finalStatus = completed.status;
-        recordCompleted(state, reason, releaseLabel, completed.status);
+        recordCompleted(state, reason, releaseLabel, completed.status,
+                        completed.error);
         recordCompletionLatency(state, reason, releaseLabel, submittedAt);
         releaseToken(state, released, releaseLabel.UTF8String);
         releaseRetainedObjects(retainedObjects);
