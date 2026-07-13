@@ -1757,26 +1757,149 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 genericPosition->type == GL_FLOAT &&
                 genericPosition->size >= 2 &&
                 genericPosition->size <= 4) {
+                // Compatibility quads need one contiguous record before
+                // topology expansion. Pack only wholly client-backed inputs;
+                // every mixed, instanced, TF, or packed-format draw falls back.
+                struct PackedClientAttribute {
+                    const std::uint8_t* base = nullptr;
+                    std::size_t sourceStride = 0;
+                    std::size_t elementBytes = 0;
+                    TranslatedDrawInfo::VertexAttributeLayout layout;
+                };
+                auto clientAttributeScalarBytes = [](GLenum type) -> std::size_t {
+                    switch (type) {
+                        case GL_BYTE:
+                        case GL_UNSIGNED_BYTE:
+                            return 1;
+                        case GL_SHORT:
+                        case GL_UNSIGNED_SHORT:
+                        case GL_HALF_FLOAT:
+                            return 2;
+                        case GL_INT:
+                        case GL_UNSIGNED_INT:
+                        case GL_FLOAT:
+                            return 4;
+                        default:
+                            return 0;
+                    }
+                };
+                auto alignUp = [](std::size_t value, std::size_t alignment) {
+                    return (value + alignment - 1u) & ~(alignment - 1u);
+                };
+
+                std::vector<PackedClientAttribute> packedAttributes;
+                std::vector<TranslatedDrawInfo::VertexAttributeLayout>
+                    packedLayouts;
+                std::vector<std::uint8_t> packedClientVertices;
+                std::size_t packedStride = 0;
+                bool usePackedClientQuad =
+                    mode == GL_QUADS &&
+                    first >= 0 &&
+                    !transformFeedbackActiveForDraw &&
+                    !programUsesDrawArrayVertexBaseBuiltins(
+                        *program, *impl_->objects) &&
+                    !program->vertexReflection.vertexInputs.empty();
+
+                if (usePackedClientQuad) {
+                    for (const auto& input :
+                         program->vertexReflection.vertexInputs) {
+                        if (input.containsFp64 ||
+                            input.sourceLocation >= vao->attributes.size()) {
+                            usePackedClientQuad = false;
+                            break;
+                        }
+                        const auto& attr =
+                            vao->attributes[input.sourceLocation];
+                        const ResolvedVertexAttrib resolved =
+                            resolveVertexAttrib(attr, *vao);
+                        const std::size_t scalarBytes =
+                            clientAttributeScalarBytes(attr.type);
+                        const std::size_t elementBytes = scalarBytes *
+                            static_cast<std::size_t>(std::max(0, attr.size));
+                        if (!attr.enabled || attr.useSeparatedFormat ||
+                            effectiveVertexAttribDivisor(attr, *vao) != 0 ||
+                            resolved.bufferName != 0 || attr.pointer == 0 ||
+                            attr.size < 1 || attr.size > 4 || scalarBytes == 0 ||
+                            resolved.stride < elementBytes) {
+                            usePackedClientQuad = false;
+                            break;
+                        }
+
+                        const std::size_t alignment =
+                            std::min<std::size_t>(scalarBytes, 4u);
+                        packedStride = alignUp(packedStride, alignment);
+                        PackedClientAttribute packed;
+                        packed.base = reinterpret_cast<const std::uint8_t*>(
+                            attr.pointer);
+                        packed.sourceStride = resolved.stride;
+                        packed.elementBytes = elementBytes;
+                        packed.layout.location = input.location;
+                        packed.layout.offset = packedStride;
+                        packed.layout.glType = attr.type;
+                        packed.layout.glComponentCount = attr.size;
+                        packed.layout.glNormalized = attr.normalized;
+                        packed.layout.glIsInteger = attr.integer;
+                        packedAttributes.push_back(packed);
+                        packedStride += elementBytes;
+                    }
+                }
+
+                if (usePackedClientQuad) {
+                    packedStride = alignUp(packedStride, 4u);
+                    const std::size_t vertexCount =
+                        static_cast<std::size_t>(count);
+                    if (packedStride == 0 ||
+                        vertexCount >
+                            std::numeric_limits<std::size_t>::max() /
+                                packedStride) {
+                        usePackedClientQuad = false;
+                    } else {
+                        packedClientVertices.resize(vertexCount * packedStride);
+                        for (std::size_t vertex = 0; vertex < vertexCount;
+                             ++vertex) {
+                            const std::size_t logical =
+                                static_cast<std::size_t>(first) + vertex;
+                            auto* dst = packedClientVertices.data() +
+                                vertex * packedStride;
+                            for (const auto& packed : packedAttributes) {
+                                std::memcpy(
+                                    dst + packed.layout.offset,
+                                    packed.base +
+                                        logical * packed.sourceStride,
+                                    packed.elementBytes);
+                            }
+                        }
+                        packedLayouts.reserve(packedAttributes.size());
+                        for (const auto& packed : packedAttributes) {
+                            packedLayouts.push_back(packed.layout);
+                        }
+                    }
+                }
+
                 const std::size_t genericStride = genericPosition->stride > 0
                     ? static_cast<std::size_t>(genericPosition->stride)
                     : static_cast<std::size_t>(genericPosition->size) * sizeof(GLfloat);
                 const auto* genericBase =
                     reinterpret_cast<const std::uint8_t*>(genericPosition->pointer);
                 std::vector<GLfloat> genericPositions;
-                genericPositions.reserve(static_cast<std::size_t>(count) * 4u);
+                if (!usePackedClientQuad) {
+                    genericPositions.reserve(static_cast<std::size_t>(count) * 4u);
+                }
                 bool genericRangeOk = true;
-                for (GLsizei i = 0; i < count; ++i) {
-                    const GLint logical = first + i;
-                    if (logical < 0) {
-                        genericRangeOk = false;
-                        break;
+                if (!usePackedClientQuad) {
+                    for (GLsizei i = 0; i < count; ++i) {
+                        const GLint logical = first + i;
+                        if (logical < 0) {
+                            genericRangeOk = false;
+                            break;
+                        }
+                        const auto* src = reinterpret_cast<const GLfloat*>(
+                            genericBase + static_cast<std::size_t>(logical) * genericStride);
+                        genericPositions.push_back(src[0]);
+                        genericPositions.push_back(src[1]);
+                        genericPositions.push_back(genericPosition->size >= 3 ? src[2] : 0.0f);
+                        genericPositions.push_back(genericPosition->size >= 4 ? src[3] : 1.0f);
                     }
-                    const auto* src = reinterpret_cast<const GLfloat*>(
-                        genericBase + static_cast<std::size_t>(logical) * genericStride);
-                    genericPositions.push_back(src[0]);
-                    genericPositions.push_back(src[1]);
-                    genericPositions.push_back(genericPosition->size >= 3 ? src[2] : 0.0f);
-                    genericPositions.push_back(genericPosition->size >= 4 ? src[3] : 1.0f);
                 }
                 if (!genericRangeOk) {
                     pushError(GL_INVALID_OPERATION);
@@ -1787,19 +1910,28 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 tdi.mode = mode;
                 tdi.vertexCount = count;
                 tdi.baseVertex = 0;
-                tdi.vertexData = genericPositions.data();
-                tdi.vertexDataByteCount =
-                    genericPositions.size() * sizeof(GLfloat);
-                tdi.vertexStride = sizeof(GLfloat) * 4u;
+                tdi.vertexData = usePackedClientQuad
+                    ? static_cast<const void*>(packedClientVertices.data())
+                    : static_cast<const void*>(genericPositions.data());
+                tdi.vertexDataByteCount = usePackedClientQuad
+                    ? packedClientVertices.size()
+                    : genericPositions.size() * sizeof(GLfloat);
+                tdi.vertexStride = usePackedClientQuad
+                    ? packedStride
+                    : sizeof(GLfloat) * 4u;
                 tdi.vertexAttributeLayouts.clear();
-                TranslatedDrawInfo::VertexAttributeLayout layout;
-                layout.location = 0;
-                layout.offset = 0;
-                layout.glType = GL_FLOAT;
-                layout.glComponentCount = 4;
-                layout.glNormalized = GL_FALSE;
-                layout.glIsInteger = false;
-                tdi.vertexAttributeLayouts.push_back(layout);
+                if (usePackedClientQuad) {
+                    tdi.vertexAttributeLayouts = std::move(packedLayouts);
+                } else {
+                    TranslatedDrawInfo::VertexAttributeLayout layout;
+                    layout.location = 0;
+                    layout.offset = 0;
+                    layout.glType = GL_FLOAT;
+                    layout.glComponentCount = 4;
+                    layout.glNormalized = GL_FALSE;
+                    layout.glIsInteger = false;
+                    tdi.vertexAttributeLayouts.push_back(layout);
+                }
                 populateTranslatedDrawFixedFunctionState(
                     tdi, *impl_->state,
                     effectiveFragmentShadingRateForProgram(*this, program),
