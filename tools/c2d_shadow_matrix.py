@@ -281,9 +281,11 @@ def run_manifest(args: argparse.Namespace, manifest: dict) -> int:
 
     selected = manifest["cells"]
     if args.cell:
-        selected = [cell for cell in selected if cell["id"] == args.cell]
-        if not selected:
-            raise SystemExit(f"unknown cell: {args.cell}")
+        requested = set(args.cell)
+        selected = [cell for cell in selected if cell["id"] in requested]
+        missing = requested - {cell["id"] for cell in selected}
+        if missing:
+            raise SystemExit(f"unknown cells: {', '.join(sorted(missing))}")
 
     records = []
     for ordinal, cell in enumerate(selected, 1):
@@ -376,7 +378,7 @@ def main() -> int:
     parser.add_argument("--bridge", type=Path)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--flavor")
-    parser.add_argument("--cell")
+    parser.add_argument("--cell", action="append")
     parser.add_argument("--timeout", type=float, default=30.0)
     args = parser.parse_args()
 
