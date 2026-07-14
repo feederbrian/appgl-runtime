@@ -1684,6 +1684,28 @@ bool GLContext::linkProgram(GLuint program) {
                 }
             }
         }
+        // CompatShaderRewrite lowers legacy vertex outputs to ordinary
+        // `appgl_*` varyings. The API still names them with their original
+        // compatibility spellings, so resolve those names to the rewritten
+        // output while preserving the API-facing resource name.
+        auto addCompatOutputAlias = [&](const char* legacyName,
+                                        const char* rewrittenName) {
+            auto it = outputTypeMap.find(rewrittenName);
+            if (it == outputTypeMap.end()) {
+                return;
+            }
+            outputTypeMap[legacyName] = it->second;
+            outputTypeMap[legacyName].tfSourceName = rewrittenName;
+        };
+        addCompatOutputAlias("gl_FrontColor", "appgl_FrontColor");
+        addCompatOutputAlias("gl_BackColor", "appgl_BackColor");
+        addCompatOutputAlias("gl_FrontSecondaryColor",
+                             "appgl_FrontSecondaryColor");
+        addCompatOutputAlias("gl_BackSecondaryColor",
+                             "appgl_BackSecondaryColor");
+        addCompatOutputAlias("gl_TexCoord", "appgl_TexCoord");
+        addCompatOutputAlias("gl_ClipVertex", "appgl_ClipVertex");
+
         if (auto fogCoordIt = outputTypeMap.find("appgl_FogFragCoord");
             fogCoordIt != outputTypeMap.end()) {
             outputTypeMap["gl_FogFragCoord"] = fogCoordIt->second;

@@ -7678,6 +7678,39 @@ public:
             noVersionFtransformSource,
             "no-version ftransform vertex shader compiles after rewrite");
 
+        const std::string legacyBuiltinOutputsSource =
+            "#version 110\n"
+            "void main() {\n"
+            "    gl_Position = vec4(0.0);\n"
+            "    gl_FrontColor = vec4(1.0);\n"
+            "    gl_BackColor = vec4(0.5);\n"
+            "    gl_FrontSecondaryColor = vec4(0.25);\n"
+            "    gl_BackSecondaryColor = vec4(0.125);\n"
+            "    gl_TexCoord[0] = vec4(0.75);\n"
+            "    gl_ClipVertex = vec4(0.0);\n"
+            "}\n";
+        const CompatShaderRewriteResult legacyBuiltinOutputsRewrite =
+            rewriteCompatShader(legacyBuiltinOutputsSource, GL_VERTEX_SHADER);
+        expectCondition(legacyBuiltinOutputsRewrite.legacy.usesFrontColor &&
+                            legacyBuiltinOutputsRewrite.legacy.usesBackColor &&
+                            legacyBuiltinOutputsRewrite.legacy.usesFrontSecondaryColor &&
+                            legacyBuiltinOutputsRewrite.legacy.usesBackSecondaryColor &&
+                            legacyBuiltinOutputsRewrite.legacy.texCoordMax == 0 &&
+                            legacyBuiltinOutputsRewrite.legacy.usesClipVertex,
+                        "legacy builtin output usage is recorded independently");
+        expectCondition(
+            legacyBuiltinOutputsRewrite.source.find("out vec4 appgl_BackColor;") !=
+                    std::string::npos &&
+                legacyBuiltinOutputsRewrite.source.find(
+                    "out vec4 appgl_FrontSecondaryColor;") != std::string::npos &&
+                legacyBuiltinOutputsRewrite.source.find(
+                    "out vec4 appgl_BackSecondaryColor;") != std::string::npos,
+            "legacy back and secondary color outputs are synthesized");
+        const char* legacyBuiltinOutputsShader = legacyBuiltinOutputsSource.c_str();
+        compileCompatFtransformVertex(
+            legacyBuiltinOutputsShader,
+            "legacy transform-feedback builtin outputs compile after rewrite");
+
         // Deliberately legacy shader sources. The rewriter is what makes
         // this land — on an un-rewritten glslang these fail compile.
         //

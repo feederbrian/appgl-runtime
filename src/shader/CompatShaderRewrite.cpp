@@ -1992,6 +1992,11 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         isGeometry && containsFogFragCoordInputAccess(source);
     if (isVertex) {
         legacy.usesFrontColor = containsIdentifier(source, "gl_FrontColor");
+        legacy.usesBackColor = containsIdentifier(source, "gl_BackColor");
+        legacy.usesFrontSecondaryColor =
+            containsIdentifier(source, "gl_FrontSecondaryColor");
+        legacy.usesBackSecondaryColor =
+            containsIdentifier(source, "gl_BackSecondaryColor");
     }
     legacy.usesTextureEnvColor =
         containsIdentifier(source, "gl_TextureEnvColor");
@@ -2566,6 +2571,19 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     if (legacy.usesFrontColor) {
         replaceIdentifier(result.source, "gl_FrontColor", "appgl_FrontColor");
     }
+    if (legacy.usesBackColor) {
+        replaceIdentifier(result.source, "gl_BackColor", "appgl_BackColor");
+    }
+    if (legacy.usesFrontSecondaryColor) {
+        replaceIdentifier(result.source,
+                          "gl_FrontSecondaryColor",
+                          "appgl_FrontSecondaryColor");
+    }
+    if (legacy.usesBackSecondaryColor) {
+        replaceIdentifier(result.source,
+                          "gl_BackSecondaryColor",
+                          "appgl_BackSecondaryColor");
+    }
     if (legacy.usesFragmentColor) {
         replaceIdentifier(result.source, "gl_Color", "appgl_FrontColor");
     }
@@ -2785,6 +2803,15 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
 
     if (legacy.usesFrontColor && isVertex) {
         preamble.append("out vec4 appgl_FrontColor;\n");
+    }
+    if (legacy.usesBackColor && isVertex) {
+        preamble.append("out vec4 appgl_BackColor;\n");
+    }
+    if (legacy.usesFrontSecondaryColor && isVertex) {
+        preamble.append("out vec4 appgl_FrontSecondaryColor;\n");
+    }
+    if (legacy.usesBackSecondaryColor && isVertex) {
+        preamble.append("out vec4 appgl_BackSecondaryColor;\n");
     }
     if (legacy.usesFragmentColor && isFragment) {
         preamble.append("in vec4 appgl_FrontColor;\n");

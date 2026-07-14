@@ -138,10 +138,14 @@ struct LegacyCompatUsage {
     // separately from plain read/write use.
     bool usesFogFragCoord = false;
     bool usesFogFragCoordInput = false;
-    // Legacy primary color bridge. VS writes gl_FrontColor from the
-    // current color attribute; FS reads gl_Color as the interpolated
-    // front color.
+    // Legacy color bridges. Vertex shaders may expose the front/back
+    // primary and secondary colors independently; keep each output distinct
+    // so transform feedback can capture the original compatibility names.
     bool usesFrontColor = false;
+    bool usesBackColor = false;
+    bool usesFrontSecondaryColor = false;
+    bool usesBackSecondaryColor = false;
+    // Fragment shaders read gl_Color as the interpolated front color.
     bool usesFragmentColor = false;
     // gl_TextureEnvColor[N] fixed-function texture environment color.
     // Runtime state is mirrored into appgl_TextureEnvColor[] at draw time.
@@ -208,7 +212,10 @@ struct LegacyCompatUsage {
         return upgradedVersion || hadVarying || anyAttribute() ||
                fragColor || fragDataMax >= 0 || texCoordMax >= 0 ||
                usesFogColor || usesFogDensity || usesFogStart ||
-               usesFogEnd || usesFogScale || usesTextureEnvColor ||
+               usesFogEnd || usesFogScale || usesFogFragCoord ||
+               usesFogFragCoordInput || usesFrontColor || usesBackColor ||
+               usesFrontSecondaryColor || usesBackSecondaryColor ||
+               usesFragmentColor || usesTextureEnvColor ||
                usesLightModelAmbient || anyLight() ||
                usesClipVertex || usesFtransform || rewroteTexture2D ||
                rewroteTextureCube || rewroteShadow2DProj;

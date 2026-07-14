@@ -1083,6 +1083,12 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             }
         }
         if (vao != nullptr && !program->vertexSpirv.empty()) {
+            // CPU TF emulation runs before the translated render path packs
+            // draw uniforms. Mirror fixed-function matrices now so legacy
+            // gl_Position expressions observe the current matrix stacks.
+            if (pushSynthesizedMatrixUniforms(*program, impl_->matrixState)) {
+                program->markUniformsDirty();
+            }
             std::vector<std::uint32_t> tfCaptureIndices;
             GLenum tfCaptureTopology = mode;
             const bool useTfCaptureIndices =

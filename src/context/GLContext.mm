@@ -51371,6 +51371,19 @@ static bool buildSequentialTfCaptureIndices(GLenum mode, GLint first, GLsizei co
                 indices.push_back(vertex(i + 1));
             }
             return true;
+        case GL_QUADS:
+            if (n < 4) return false;
+            captureTopology = GL_TRIANGLES;
+            indices.reserve(6 * (n / 4));
+            for (std::size_t i = 0; i + 3 < n; i += 4) {
+                indices.push_back(vertex(i));
+                indices.push_back(vertex(i + 1));
+                indices.push_back(vertex(i + 2));
+                indices.push_back(vertex(i));
+                indices.push_back(vertex(i + 2));
+                indices.push_back(vertex(i + 3));
+            }
+            return true;
         default:
             return false;
     }

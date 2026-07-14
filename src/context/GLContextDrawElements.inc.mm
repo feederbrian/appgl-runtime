@@ -30,7 +30,20 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     if (impl_->shouldSkipDrawForConditionalRender()) {
         return true;
     }
-    if (encodeLegacyClientArrayDraw(mode, 0, count, indices, type, "glDrawElements")) {
+    const GLuint currentProgramNameForLegacyTf = impl_->state->currentProgram();
+    const GLProgramObject* currentProgramForLegacyTf =
+        currentProgramNameForLegacyTf != 0
+            ? impl_->objects->programs().get(currentProgramNameForLegacyTf)
+            : nullptr;
+    const bool requiresTranslatedLegacyTfCapture =
+        isTransformFeedbackActive() &&
+        currentProgramForLegacyTf != nullptr &&
+        currentProgramForLegacyTf->linked &&
+        currentProgramForLegacyTf->hasTranslatedPipeline &&
+        !currentProgramForLegacyTf->transformFeedbackVaryingNames.empty();
+    if (!requiresTranslatedLegacyTfCapture &&
+        encodeLegacyClientArrayDraw(mode, 0, count, indices, type,
+                                    "glDrawElements")) {
         return true;
     }
     if (!impl_->validateCurrentProgramPipelineForDraw()) {
@@ -547,6 +560,54 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         !program->tessellationInterpreted &&
         drawElementsCount > 0 &&
         drawElementsIndexPtr != nullptr) {
+        GLVertexArrayObject legacyClientVao;
+        GLVertexArrayObject* tfVao = vao;
+        if (impl_->state->boundVertexArray() == 0 &&
+            appglCompatProfileEnabled()) {
+            const auto& legacyVertexArray = impl_->legacyVertexArray;
+            if (legacyVertexArray.enabled &&
+                (legacyVertexArray.pointer != nullptr ||
+                 legacyVertexArray.bufferName != 0) &&
+                legacyVertexArray.type == GL_FLOAT &&
+                legacyVertexArray.size >= 2 &&
+                legacyVertexArray.size <= 4) {
+                impl_->objects->initializeVertexArray(legacyClientVao);
+                if (!legacyClientVao.attributes.empty()) {
+                    const std::size_t stride = legacyVertexArray.stride > 0
+                        ? static_cast<std::size_t>(legacyVertexArray.stride)
+                        : static_cast<std::size_t>(legacyVertexArray.size) *
+                              sizeof(GLfloat);
+                    GLVertexAttributeState& attr = legacyClientVao.attributes[0];
+                    attr.enabled = true;
+                    attr.size = legacyVertexArray.size;
+                    attr.type = legacyVertexArray.type;
+                    attr.normalized = GL_FALSE;
+                    attr.stride = static_cast<GLsizei>(stride);
+                    attr.pointer = reinterpret_cast<std::uintptr_t>(
+                        legacyVertexArray.pointer);
+                    attr.buffer = legacyVertexArray.bufferName;
+                    attr.divisor = 0;
+                    attr.integer = false;
+                    attr.longData = false;
+                    attr.bindingIndex = 0;
+                    attr.relativeOffset = 0;
+                    attr.useSeparatedFormat = false;
+                    if (!legacyClientVao.bindingPoints.empty()) {
+                        legacyClientVao.bindingPoints[0].buffer =
+                            legacyVertexArray.bufferName;
+                        legacyClientVao.bindingPoints[0].offset =
+                            static_cast<GLintptr>(attr.pointer);
+                        legacyClientVao.bindingPoints[0].stride =
+                            static_cast<GLsizei>(stride);
+                        legacyClientVao.bindingPoints[0].divisor = 0;
+                    }
+                    tfVao = &legacyClientVao;
+                }
+            }
+        }
+        if (pushSynthesizedMatrixUniforms(*program, impl_->matrixState)) {
+            program->markUniformsDirty();
+        }
         // Resolve the post-primitive-restart drawElements stream
         // (uint16 / uint32) into a uint32 vector matching the
         // emulateVsOnlyDrawForTf elementIndices param shape.
@@ -637,7 +698,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     break;
             }
         }
-        if (!capIdx.empty() && !program->vertexSpirv.empty()) {
+        if (!capIdx.empty() && tfVao != nullptr && !program->vertexSpirv.empty()) {
             // The reassembled discrete-primitive topology fed to
             // writeGsXfbAndCheckDiscard via EmulatedDraw.topology.
             const GLenum capTopology =
@@ -653,7 +714,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 program->vertexSpirv,
                 &program->vertexReflection, *program);
             appgl::EmulatedDraw ed = appgl::emulateVsOnlyDrawForTf(
-                *program, *vao, *impl_->objects, *impl_->state,
+                *program, *tfVao, *impl_->objects, *impl_->state,
                 capTopology, static_cast<GLsizei>(capIdx.size()), /*first=*/0,
                 /*instanceCount=*/1, /*baseInstance=*/0,
                 capIdx.data(),
