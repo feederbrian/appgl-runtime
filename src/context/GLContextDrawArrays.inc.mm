@@ -1890,6 +1890,88 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     }
                 }
 
+                // De-interleave FAN client records into independently indexed
+                // streams; already-tight arrays keep the compatibility fallback.
+                std::vector<TranslatedDrawInfo::ExtraVertexBuffer>
+                    separateFanBuffers;
+                bool useSeparateClientFanAttributes =
+                    mode == GL_TRIANGLE_FAN && first >= 0 &&
+                    !programUsesDrawArrayVertexBaseBuiltins(
+                        *program, *impl_->objects) &&
+                    !program->vertexReflection.vertexInputs.empty();
+                bool hasInterleavedFanClientAttribute = false;
+                if (useSeparateClientFanAttributes) {
+                    const std::size_t vertexCount =
+                        static_cast<std::size_t>(count);
+                    for (const auto& input :
+                         program->vertexReflection.vertexInputs) {
+                        if (input.sourceLocation == 0) {
+                            continue;
+                        }
+                        if (input.containsFp64 ||
+                            input.sourceLocation >= vao->attributes.size()) {
+                            useSeparateClientFanAttributes = false;
+                            break;
+                        }
+
+                        const auto& attr =
+                            vao->attributes[input.sourceLocation];
+                        const ResolvedVertexAttrib resolved =
+                            resolveVertexAttrib(attr, *vao);
+                        const std::size_t scalarBytes =
+                            clientAttributeScalarBytes(attr.type);
+                        const std::size_t elementBytes = scalarBytes *
+                            static_cast<std::size_t>(std::max(0, attr.size));
+                        if (!attr.enabled || attr.useSeparatedFormat ||
+                            effectiveVertexAttribDivisor(attr, *vao) != 0 ||
+                            resolved.bufferName != 0 || attr.pointer == 0 ||
+                            attr.size < 1 || attr.size > 4 || scalarBytes == 0 ||
+                            resolved.stride < elementBytes ||
+                            (elementBytes != 0 &&
+                             vertexCount >
+                                 std::numeric_limits<std::size_t>::max() /
+                                     elementBytes)) {
+                            useSeparateClientFanAttributes = false;
+                            break;
+                        }
+                        hasInterleavedFanClientAttribute =
+                            hasInterleavedFanClientAttribute ||
+                            resolved.stride > elementBytes;
+
+                        TranslatedDrawInfo::ExtraVertexBuffer extra;
+                        extra.byteCount = vertexCount * elementBytes;
+                        extra.stride = elementBytes;
+                        extra.divisor = 0;
+                        extra.ownedData.resize(extra.byteCount);
+                        const auto* source =
+                            reinterpret_cast<const std::uint8_t*>(attr.pointer);
+                        for (std::size_t vertex = 0; vertex < vertexCount;
+                             ++vertex) {
+                            const std::size_t logical =
+                                static_cast<std::size_t>(first) + vertex;
+                            std::memcpy(
+                                extra.ownedData.data() + vertex * elementBytes,
+                                source + logical * resolved.stride,
+                                elementBytes);
+                        }
+
+                        TranslatedDrawInfo::VertexAttributeLayout layout;
+                        layout.location = input.location;
+                        layout.offset = 0;
+                        layout.glType = attr.type;
+                        layout.glComponentCount = attr.size;
+                        layout.glNormalized = attr.normalized;
+                        layout.glIsInteger = attr.integer;
+                        extra.attributes.push_back(layout);
+                        separateFanBuffers.push_back(std::move(extra));
+                    }
+                    if (!useSeparateClientFanAttributes ||
+                        !hasInterleavedFanClientAttribute) {
+                        useSeparateClientFanAttributes = false;
+                        separateFanBuffers.clear();
+                    }
+                }
+
                 const std::size_t genericStride = genericPosition->stride > 0
                     ? static_cast<std::size_t>(genericPosition->stride)
                     : static_cast<std::size_t>(genericPosition->size) * sizeof(GLfloat);
@@ -1945,6 +2027,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     layout.glNormalized = GL_FALSE;
                     layout.glIsInteger = false;
                     tdi.vertexAttributeLayouts.push_back(layout);
+                }
+                if (useSeparateClientFanAttributes) {
+                    tdi.extraVertexBuffers = std::move(separateFanBuffers);
                 }
                 populateTranslatedDrawFixedFunctionState(
                     tdi, *impl_->state,
