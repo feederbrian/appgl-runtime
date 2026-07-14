@@ -40098,18 +40098,31 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
         // storage. Used to implement GL 4.6 §13.2 "if the bytes
         // required for a primitive are not available, TF ends for
         // that primitive and every subsequent primitive".
-        auto primFits = [this](GLenum target, GLuint binding, GLuint bufferName,
+        auto effectiveTfBindingEnd = [this](GLuint bufferName,
+                                            std::size_t rangeStart,
+                                            std::size_t rangeSize) -> std::size_t {
+            GLBufferObject* buf = objects->buffers().get(bufferName);
+            if (buf == nullptr) return 0;
+            const std::size_t liveEnd = static_cast<std::size_t>(
+                std::max<GLsizeiptr>(buf->size, 0));
+            if (rangeSize == 0) return liveEnd;
+            const std::size_t requestedEnd =
+                rangeSize > std::numeric_limits<std::size_t>::max() - rangeStart
+                    ? std::numeric_limits<std::size_t>::max()
+                    : rangeStart + rangeSize;
+            return std::min(liveEnd, requestedEnd);
+        };
+        auto primFits = [&effectiveTfBindingEnd](
+                               GLenum target, GLuint binding, GLuint bufferName,
                                std::size_t cursor, std::size_t rangeStart,
                                std::size_t rangeSize, std::size_t needBytes) -> bool {
             (void)target;
             (void)binding;
             if (bufferName == 0 || needBytes == 0) return false;
-            GLBufferObject* buf = objects->buffers().get(bufferName);
-            if (buf == nullptr) return false;
-            const std::size_t capacity = (rangeSize > 0)
-                ? (rangeStart + rangeSize)
-                : static_cast<std::size_t>(std::max<GLsizeiptr>(buf->size, 0));
-            return cursor + needBytes <= capacity;
+            const std::size_t effectiveEnd = effectiveTfBindingEnd(
+                bufferName, rangeStart, rangeSize);
+            return cursor <= effectiveEnd &&
+                   needBytes <= effectiveEnd - cursor;
         };
         auto writeRawBytesToBuffer = [this, skipCpuTfWriteForSentinel](
                                             GLuint bufferName,
@@ -40186,15 +40199,12 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                 if (interleaved) {
                     auto binding = state->indexedBufferBinding(
                         GL_TRANSFORM_FEEDBACK_BUFFER, 0u);
-                    GLBufferObject* buf = binding.buffer != 0
-                        ? objects->buffers().get(binding.buffer) : nullptr;
-                    if (buf == nullptr) return false;
+                    if (binding.buffer == 0 ||
+                        objects->buffers().get(binding.buffer) == nullptr) {
+                        return false;
+                    }
                     const std::size_t rangeSize =
                         static_cast<std::size_t>(binding.size);
-                    const std::size_t capacity =
-                        (rangeSize > 0)
-                            ? (static_cast<std::size_t>(binding.offset) + rangeSize)
-                            : buf->shadowBytes.size();
                     std::size_t perVertexBytes = 0;
                     for (std::size_t bytes : fieldBytes) perVertexBytes += bytes;
                     const std::size_t perPrimBytes = perVertexBytes * vpp;
@@ -40203,7 +40213,12 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                         capturedVerticesBeforeDraw(0) * perVertexBytes;
                     std::vector<std::uint8_t> scratch;
                     for (std::size_t p = 0; p < nPrim; ++p) {
-                        if (cursor + perPrimBytes > capacity) break;
+                        if (!primFits(GL_TRANSFORM_FEEDBACK_BUFFER, 0,
+                                      binding.buffer, cursor,
+                                      static_cast<std::size_t>(binding.offset),
+                                      rangeSize, perPrimBytes)) {
+                            break;
+                        }
                         for (std::size_t vi = 0; vi < vpp; ++vi) {
                             const std::size_t v = p * vpp + vi;
                             for (std::size_t i = 0; i < tfNames.size(); ++i) {
@@ -40241,15 +40256,12 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                 for (std::size_t p = 0; p < nPrim; ++p) {
                     bool allFit = true;
                     for (std::size_t i = 0; i < tfNames.size(); ++i) {
-                        GLBufferObject* buf = binds[i].buffer != 0
-                            ? objects->buffers().get(binds[i].buffer) : nullptr;
-                        const std::size_t capacity = buf == nullptr
-                            ? 0
-                            : ((binds[i].rangeSize > 0)
-                                ? (binds[i].baseOffset + binds[i].rangeSize)
-                                : buf->shadowBytes.size());
                         if (binds[i].truncated ||
-                            binds[i].cursor + fieldBytes[i] * vpp > capacity) {
+                            !primFits(GL_TRANSFORM_FEEDBACK_BUFFER,
+                                      static_cast<GLuint>(i), binds[i].buffer,
+                                      binds[i].cursor, binds[i].baseOffset,
+                                      binds[i].rangeSize,
+                                      fieldBytes[i] * vpp)) {
                             allFit = false;
                             break;
                         }
