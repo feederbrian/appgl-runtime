@@ -707,6 +707,9 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                  drawElementsMode == GL_LINE_STRIP ||
                  drawElementsMode == GL_LINE_LOOP) ? GL_LINES :
                 GL_TRIANGLES;
+            const bool replayPostVsTriangle =
+                !impl_->state->isEnabled(GL_RASTERIZER_DISCARD) &&
+                capTopology == GL_TRIANGLES;
             const auto vsTexMap = impl_->buildSampledTextureMap(
                 program->vertexSpirv,
                 &program->vertexReflection, *program);
@@ -719,7 +722,8 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 /*instanceCount=*/1, /*baseInstance=*/0,
                 capIdx.data(),
                 vsTexMap.empty() ? nullptr : &vsTexMap,
-                vsImgMap.empty() ? nullptr : &vsImgMap);
+                vsImgMap.empty() ? nullptr : &vsImgMap,
+                replayPostVsTriangle);
             if (ed.ok) {
                 bool discard = false;
                 if (appgl::vsOnlyTfTimingEnabled()) {
@@ -730,16 +734,24 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 } else {
                     discard = impl_->writeGsXfbAndCheckDiscard(*program, ed);
                 }
-                if (discard && !program->gsPresent) {
+                if (!program->gsPresent) {
                     impl_->updatePrimitiveGeneratedForNonGsDraw(
                         capTopology, static_cast<GLsizei>(capIdx.size()), 1);
                 }
                 if (discard) {
                     return true;
                 }
-                // VS-only-TF without rasterizer-discard: fall through
-                // to the regular Metal-side draw so the FS still runs.
-                // The TF buffer was already populated.
+                if (replayPostVsTriangle) {
+                    // Rasterize the already evaluated post-VS triangle
+                    // stream. Line/point replay remains deferred and uses
+                    // the established translated/legacy fallback below.
+                    if (impl_->encodeEmulatedGsDraw(
+                            *program, programName, ed)) {
+                        return true;
+                    }
+                }
+                // Preserve the regular translated/legacy fallback if replay
+                // is out of scope or unavailable for this program shape.
             } else if (!ed.diagnostic.empty()) {
                 APPGL_LOG(SHADER, @"drawElements VS-only-TF: %s",
                           ed.diagnostic.c_str());

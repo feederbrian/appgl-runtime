@@ -11566,7 +11566,8 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     GLuint baseInstance,
     const std::uint32_t* elementIndices,
     const SampledTextureMap* sampledTextures,
-    const SampledTextureMap* storageImages)
+    const SampledTextureMap* storageImages,
+    bool includeRasterVaryings)
 {
     EmulatedDraw d;
     d.topology = drawMode;
@@ -11723,6 +11724,14 @@ EmulatedDraw emulateVsOnlyDrawForTf(
         }
         if (aliasCount == 1 && alias != nullptr) {
             appendCapturedOnce(captured, *alias);
+        }
+    }
+    // Transform-feedback writes only need the requested varyings. A
+    // non-discard CPU replay also feeds the linked fragment stage, so retain
+    // every VS output after the TF-ordered prefix for raster interpolation.
+    if (includeRasterVaryings) {
+        for (const auto& v : allOutputs) {
+            appendCapturedOnce(captured, v);
         }
     }
     // Sum total varying widths to size the per-vertex stride. Even

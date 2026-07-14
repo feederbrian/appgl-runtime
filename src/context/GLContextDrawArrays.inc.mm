@@ -1244,18 +1244,21 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     const bool decomposedCompatTopology =
                         mode == GL_QUADS || mode == GL_QUAD_STRIP ||
                         mode == GL_POLYGON;
-                    if (!program->gsPresent &&
-                        (discard || decomposedCompatTopology)) {
+                    if (discard) {
+                        if (!program->gsPresent) {
+                            impl_->updatePrimitiveGeneratedForNonGsDraw(
+                                vsTfMode, vsTfCount, 1);
+                        }
+                        return true;
+                    }
+                    // The regular translated fallback below performs the
+                    // ordinary-topology generated counter update. Preserve
+                    // the existing decomposed-topology credit here because
+                    // that fallback cannot infer the expanded primitive list.
+                    if (!program->gsPresent && decomposedCompatTopology) {
                         impl_->updatePrimitiveGeneratedForNonGsDraw(
                             vsTfMode, vsTfCount, 1);
                     }
-                    if (discard) {
-                        return true;
-                    }
-                    // VS-only-TF without rasterizer-discard: fall
-                    // through to the regular Metal-side draw so the
-                    // FS still runs. The TF buffer was already
-                    // populated.
                 } else if (!ed.diagnostic.empty()) {
                     APPGL_LOG(SHADER, @"drawArrays VS-only-TF: %s",
                               ed.diagnostic.c_str());

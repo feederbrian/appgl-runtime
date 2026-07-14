@@ -414,7 +414,8 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     // pass nullptr (default).
     const std::uint32_t* elementIndices = nullptr,
     const SampledTextureMap* sampledTextures = nullptr,
-    const SampledTextureMap* storageImages = nullptr);
+    const SampledTextureMap* storageImages = nullptr,
+    bool includeRasterVaryings = false);
 
 // Sprint 20 Decision F Option A Step 0: env-gated aggregate timing
 // counters for the VS-only transform-feedback CPU path. These are no-ops
