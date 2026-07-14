@@ -5073,33 +5073,142 @@ bool GLContext::linkProgram(GLuint program) {
             break;
         }
         case ProgramKind::VertexOnly: {
-            ShaderReflection vsRefl;
-            appgl::TranslatorOptions vsOptions;
-            if (vertexShader != nullptr) {
-                vsOptions.forceArgumentBuffers = spirvNeedsArgumentBuffers(
-                    vertexShader->spirv.data(), vertexShader->spirv.size());
-            }
-            const bool vsOk = translateCachedStage(
-                "vertex", vertexShader, programObject->vertexMSL, vsRefl,
-                vsOptions);
-            if (vsOk) {
-                programObject->vertexReflection = std::move(vsRefl);
-                // A VS-only program is drawable when paired with
-                // GL_RASTERIZER_DISCARD (no fragment stage required).
-                // The CTS SSBO `*-vs` tests bind ONLY a vertex shader,
-                // enable rasterizer discard, and read back SSBO writes
-                // produced by the VS alone. Set hasTranslatedPipeline
-                // = true and let encodeTranslatedDraw drop the FS when
-                // info.rasterizerDiscard is true (the pipeline
-                // descriptor will set fragmentFunction = nil +
-                // rasterizationEnabled = NO at that point).
-                programObject->hasTranslatedPipeline = true;
-                if (vertexShader != nullptr &&
-                    sourceNeedsVertexSsboEmulatedDraw(vertexShader->source)) {
-                    programObject->vertexSsboEmulatedDraw = true;
+            bool synthesizedCompatFragment = false;
+            if (appglCompatProfileEnabled() &&
+                !programObject->separable &&
+                vertexShader != nullptr &&
+                !vertexShader->isSpirvBinary &&
+                !programObject->transformFeedbackVaryingNames.empty()) {
+                CompatShaderRewriteResult vsRewrite =
+                    rewriteCompatShader(vertexShader->source,
+                                        GL_VERTEX_SHADER);
+                const bool hasVersionDirective =
+                    vertexShader->source.find("#version") !=
+                    std::string::npos;
+                const bool isCompatVertexSource =
+                    !hasVersionDirective ||
+                    vsRewrite.wasCompatProfile ||
+                    vsRewrite.legacy.upgradedVersion ||
+                    vsRewrite.legacy.any() ||
+                    vsRewrite.usage.any();
+                if (isCompatVertexSource) {
+                    static constexpr const char* kCompatVertexOnlyFragment =
+                        "#version 110\n"
+                        "void main() {\n"
+                        "    gl_FragColor = gl_Color;\n"
+                        "}\n";
+                    CompatShaderRewriteResult fsRewrite =
+                        rewriteCompatShader(kCompatVertexOnlyFragment,
+                                            GL_FRAGMENT_SHADER);
+                    std::string vsLinkSource = vsRewrite.didRewrite
+                        ? std::move(vsRewrite.source)
+                        : vertexShader->source;
+                    std::string fsLinkSource = fsRewrite.didRewrite
+                        ? std::move(fsRewrite.source)
+                        : std::string(kCompatVertexOnlyFragment);
+                    vsLinkSource = rewriteShaderDrawParametersForSpirv(
+                        vsLinkSource, GL_VERTEX_SHADER);
+                    fsLinkSource = rewriteShaderDrawParametersForSpirv(
+                        fsLinkSource, GL_FRAGMENT_SHADER);
+                    vsLinkSource =
+                        rewriteUnsizedUniformArrayInitializersForSpirv(
+                            vsLinkSource);
+                    fsLinkSource =
+                        rewriteUnsizedUniformArrayInitializersForSpirv(
+                            fsLinkSource);
+                    vsLinkSource = rewriteSsboConsecutiveRuntimeArraysForSpirv(
+                        vsLinkSource);
+                    fsLinkSource = rewriteSsboConsecutiveRuntimeArraysForSpirv(
+                        fsLinkSource);
+                    vsLinkSource = rewrite420packImplicitConversionsForSpirv(
+                        vsLinkSource);
+                    fsLinkSource = rewrite420packImplicitConversionsForSpirv(
+                        fsLinkSource);
+                    vsLinkSource =
+                        rewrite420packQualifierOrderInvariantInputsForSpirv(
+                            vsLinkSource);
+                    fsLinkSource =
+                        rewrite420packQualifierOrderInvariantInputsForSpirv(
+                            fsLinkSource);
+
+                    std::string linkErrorLog;
+                    LinkedProgramSpirv linked = translator.compileGLSLProgram(
+                        vsLinkSource, fsLinkSource, 330, &linkErrorLog);
+                    if (!linked.linkSucceeded) {
+                        Runtime::shared().recordShaderTranslation({
+                            programTag + "-vertexonly-compat-link-spirv",
+                            "link", linkVertexHash, linkVertexHash, "",
+                            linkErrorLog.empty()
+                                ? "compileGLSLProgram failed (no log)"
+                                : linkErrorLog,
+                            "", false
+                        });
+                    } else {
+                        const bool forceRasterArgBuf =
+                            spirvNeedsArgumentBuffers(
+                                linked.vertexSpirv.data(),
+                                linked.vertexSpirv.size()) ||
+                            spirvNeedsArgumentBuffers(
+                                linked.fragmentSpirv.data(),
+                                linked.fragmentSpirv.size());
+                        appgl::TranslatorOptions vsOptions;
+                        vsOptions.forceArgumentBuffers = forceRasterArgBuf;
+                        appgl::TranslatorOptions fsOptions;
+                        fsOptions.forceArgumentBuffers = forceRasterArgBuf;
+                        ShaderReflection vsRefl, fsRefl;
+                        const bool vsOk = translateStage(
+                            "vertex", linked.vertexSpirv.data(),
+                            linked.vertexSpirv.size(), vertexShader->source,
+                            programObject->vertexMSL, vsRefl, vsOptions);
+                        const bool fsOk = translateStage(
+                            "fragment", linked.fragmentSpirv.data(),
+                            linked.fragmentSpirv.size(),
+                            kCompatVertexOnlyFragment,
+                            programObject->fragmentMSL, fsRefl, fsOptions);
+                        if (vsOk && fsOk) {
+                            rewriteMslOutputLocationsForFragmentInputs(
+                                programObject->vertexMSL,
+                                programObject->fragmentMSL);
+                            programObject->vertexReflection =
+                                std::move(vsRefl);
+                            programObject->fragmentReflection =
+                                std::move(fsRefl);
+                            programObject->hasTranslatedPipeline = true;
+                            rasterTranslationOk = true;
+                            synthesizedCompatFragment = true;
+                        }
+                    }
                 }
-                rasterTranslationOk = true;
             }
+            if (!synthesizedCompatFragment) {
+                ShaderReflection vsRefl;
+                appgl::TranslatorOptions vsOptions;
+                if (vertexShader != nullptr) {
+                    vsOptions.forceArgumentBuffers = spirvNeedsArgumentBuffers(
+                        vertexShader->spirv.data(), vertexShader->spirv.size());
+                }
+                const bool vsOk = translateCachedStage(
+                    "vertex", vertexShader, programObject->vertexMSL, vsRefl,
+                    vsOptions);
+                if (vsOk) {
+                    programObject->vertexReflection = std::move(vsRefl);
+                    programObject->hasTranslatedPipeline = true;
+                    if (vertexShader != nullptr &&
+                        sourceNeedsVertexSsboEmulatedDraw(
+                            vertexShader->source)) {
+                        programObject->vertexSsboEmulatedDraw = true;
+                    }
+                    rasterTranslationOk = true;
+                }
+            } else if (vertexShader != nullptr &&
+                       sourceNeedsVertexSsboEmulatedDraw(
+                           vertexShader->source)) {
+                programObject->vertexSsboEmulatedDraw = true;
+            }
+            // A VS-only program remains drawable with rasterizer discard:
+            // encodeTranslatedDraw drops any fragment stage and disables
+            // rasterization. Compatibility GLSL programs may now also carry
+            // the synthetic fixed-function fragment consumer for raster draws.
             if (vertexShader != nullptr &&
                 sourceMatchesSSBOStdLayoutRawCopyFallback(vertexShader->source)) {
                 programObject->ssboStdLayoutRawCopyFallback = true;
