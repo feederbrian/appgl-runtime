@@ -1241,7 +1241,11 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     } else {
                         discard = impl_->writeGsXfbAndCheckDiscard(*program, ed);
                     }
-                    if (discard && !program->gsPresent) {
+                    const bool decomposedCompatTopology =
+                        mode == GL_QUADS || mode == GL_QUAD_STRIP ||
+                        mode == GL_POLYGON;
+                    if (!program->gsPresent &&
+                        (discard || decomposedCompatTopology)) {
                         impl_->updatePrimitiveGeneratedForNonGsDraw(
                             vsTfMode, vsTfCount, 1);
                     }
@@ -1763,9 +1767,10 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 genericPosition->type == GL_FLOAT &&
                 genericPosition->size >= 2 &&
                 genericPosition->size <= 4) {
-                // Compatibility quads need one contiguous record before
-                // topology expansion. Pack only wholly client-backed inputs;
-                // every mixed, instanced, TF, or packed-format draw falls back.
+                // Compatibility triangle-family draws need one contiguous
+                // record before topology expansion and transform-feedback
+                // replay. Pack only wholly client-backed inputs; mixed or
+                // packed-format draws keep the position-only fallback.
                 struct PackedClientAttribute {
                     const std::uint8_t* base = nullptr;
                     std::size_t sourceStride = 0;
@@ -1798,20 +1803,23 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     packedLayouts;
                 std::vector<std::uint8_t> packedClientVertices;
                 std::size_t packedStride = 0;
-                bool usePackedClientQuad =
-                    mode == GL_QUADS &&
+                const bool packableTriangleMode =
+                    mode == GL_TRIANGLES || mode == GL_TRIANGLE_STRIP ||
+                    mode == GL_QUADS || mode == GL_QUAD_STRIP ||
+                    mode == GL_POLYGON;
+                bool usePackedClientAttributes =
+                    packableTriangleMode &&
                     first >= 0 &&
-                    !transformFeedbackActiveForDraw &&
                     !programUsesDrawArrayVertexBaseBuiltins(
                         *program, *impl_->objects) &&
                     !program->vertexReflection.vertexInputs.empty();
 
-                if (usePackedClientQuad) {
+                if (usePackedClientAttributes) {
                     for (const auto& input :
                          program->vertexReflection.vertexInputs) {
                         if (input.containsFp64 ||
                             input.sourceLocation >= vao->attributes.size()) {
-                            usePackedClientQuad = false;
+                            usePackedClientAttributes = false;
                             break;
                         }
                         const auto& attr =
@@ -1827,7 +1835,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                             resolved.bufferName != 0 || attr.pointer == 0 ||
                             attr.size < 1 || attr.size > 4 || scalarBytes == 0 ||
                             resolved.stride < elementBytes) {
-                            usePackedClientQuad = false;
+                            usePackedClientAttributes = false;
                             break;
                         }
 
@@ -1850,7 +1858,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                     }
                 }
 
-                if (usePackedClientQuad) {
+                if (usePackedClientAttributes) {
                     packedStride = alignUp(packedStride, 4u);
                     const std::size_t vertexCount =
                         static_cast<std::size_t>(count);
@@ -1858,7 +1866,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                         vertexCount >
                             std::numeric_limits<std::size_t>::max() /
                                 packedStride) {
-                        usePackedClientQuad = false;
+                        usePackedClientAttributes = false;
                     } else {
                         packedClientVertices.resize(vertexCount * packedStride);
                         for (std::size_t vertex = 0; vertex < vertexCount;
@@ -1888,11 +1896,11 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 const auto* genericBase =
                     reinterpret_cast<const std::uint8_t*>(genericPosition->pointer);
                 std::vector<GLfloat> genericPositions;
-                if (!usePackedClientQuad) {
+                if (!usePackedClientAttributes) {
                     genericPositions.reserve(static_cast<std::size_t>(count) * 4u);
                 }
                 bool genericRangeOk = true;
-                if (!usePackedClientQuad) {
+                if (!usePackedClientAttributes) {
                     for (GLsizei i = 0; i < count; ++i) {
                         const GLint logical = first + i;
                         if (logical < 0) {
@@ -1916,17 +1924,17 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 tdi.mode = mode;
                 tdi.vertexCount = count;
                 tdi.baseVertex = 0;
-                tdi.vertexData = usePackedClientQuad
+                tdi.vertexData = usePackedClientAttributes
                     ? static_cast<const void*>(packedClientVertices.data())
                     : static_cast<const void*>(genericPositions.data());
-                tdi.vertexDataByteCount = usePackedClientQuad
+                tdi.vertexDataByteCount = usePackedClientAttributes
                     ? packedClientVertices.size()
                     : genericPositions.size() * sizeof(GLfloat);
-                tdi.vertexStride = usePackedClientQuad
+                tdi.vertexStride = usePackedClientAttributes
                     ? packedStride
                     : sizeof(GLfloat) * 4u;
                 tdi.vertexAttributeLayouts.clear();
-                if (usePackedClientQuad) {
+                if (usePackedClientAttributes) {
                     tdi.vertexAttributeLayouts = std::move(packedLayouts);
                 } else {
                     TranslatedDrawInfo::VertexAttributeLayout layout;

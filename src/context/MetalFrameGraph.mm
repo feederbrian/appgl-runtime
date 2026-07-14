@@ -31,6 +31,13 @@
 #include <unordered_set>
 #include <vector>
 
+#ifndef GL_QUAD_STRIP
+#define GL_QUAD_STRIP 0x0008
+#endif
+#ifndef GL_POLYGON
+#define GL_POLYGON 0x0009
+#endif
+
 #ifndef APPGL_ENABLE_DCR_SENTINEL_HOOKS
 #define APPGL_ENABLE_DCR_SENTINEL_HOOKS 0
 #endif
@@ -12374,7 +12381,27 @@ struct MetalFrameGraph::Impl {
             case GL_POINTS:         primitive = MTLPrimitiveTypePoint; break;
             case GL_LINES:          primitive = MTLPrimitiveTypeLine; break;
             case GL_LINE_STRIP:     primitive = MTLPrimitiveTypeLineStrip; break;
-            case GL_TRIANGLE_STRIP: primitive = MTLPrimitiveTypeTriangleStrip; break;
+            case GL_TRIANGLE_STRIP: {
+                primitive = MTLPrimitiveTypeTriangleStrip;
+                if (info.vertexData != nullptr && info.indices == nullptr &&
+                    info.metalIndexBuffer == nullptr && info.vertexCount >= 3) {
+                    primitive = MTLPrimitiveTypeTriangle;
+                    const GLsizei n = info.vertexCount;
+                    expandedIndices.reserve(static_cast<std::size_t>(n - 2) * 3);
+                    for (GLsizei i = 0; i + 2 < n; ++i) {
+                        if ((i & 1) == 0) {
+                            expandedIndices.push_back(readPositional(i));
+                            expandedIndices.push_back(readPositional(i + 1));
+                        } else {
+                            expandedIndices.push_back(readPositional(i + 1));
+                            expandedIndices.push_back(readPositional(i));
+                        }
+                        expandedIndices.push_back(readPositional(i + 2));
+                    }
+                    useExpandedIndices = true;
+                }
+                break;
+            }
             case GL_QUADS: {
                 primitive = MTLPrimitiveTypeTriangle;
                 const GLsizei n = (info.indices != nullptr && info.indexCount > 0)
@@ -12390,6 +12417,40 @@ struct MetalFrameGraph::Impl {
                         expandedIndices.push_back(readPositional(base + 0));
                         expandedIndices.push_back(readPositional(base + 2));
                         expandedIndices.push_back(readPositional(base + 3));
+                    }
+                    useExpandedIndices = true;
+                }
+                break;
+            }
+            case GL_QUAD_STRIP: {
+                primitive = MTLPrimitiveTypeTriangle;
+                const GLsizei n = (info.indices != nullptr && info.indexCount > 0)
+                    ? info.indexCount : info.vertexCount;
+                if (n >= 4) {
+                    expandedIndices.reserve(
+                        static_cast<std::size_t>((n - 2) / 2) * 6);
+                    for (GLsizei i = 0; i + 3 < n; i += 2) {
+                        expandedIndices.push_back(readPositional(i));
+                        expandedIndices.push_back(readPositional(i + 1));
+                        expandedIndices.push_back(readPositional(i + 3));
+                        expandedIndices.push_back(readPositional(i));
+                        expandedIndices.push_back(readPositional(i + 3));
+                        expandedIndices.push_back(readPositional(i + 2));
+                    }
+                    useExpandedIndices = true;
+                }
+                break;
+            }
+            case GL_POLYGON: {
+                primitive = MTLPrimitiveTypeTriangle;
+                const GLsizei n = (info.indices != nullptr && info.indexCount > 0)
+                    ? info.indexCount : info.vertexCount;
+                if (n >= 3) {
+                    expandedIndices.reserve(static_cast<std::size_t>(n - 2) * 3);
+                    for (GLsizei i = 1; i + 1 < n; ++i) {
+                        expandedIndices.push_back(readPositional(0));
+                        expandedIndices.push_back(readPositional(i));
+                        expandedIndices.push_back(readPositional(i + 1));
                     }
                     useExpandedIndices = true;
                 }

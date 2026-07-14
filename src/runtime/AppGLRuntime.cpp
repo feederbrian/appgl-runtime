@@ -8701,7 +8701,9 @@ bool isDrawModeCompatibleWithXfb(GLenum drawMode, GLenum xfbMode) {
             return drawMode == GL_TRIANGLES || drawMode == GL_TRIANGLE_STRIP ||
                    drawMode == GL_TRIANGLE_FAN || drawMode == GL_TRIANGLES_ADJACENCY ||
                    drawMode == GL_TRIANGLE_STRIP_ADJACENCY ||
-                   (appglCompatProfileEnabled() && drawMode == GL_QUADS);
+                   (appglCompatProfileEnabled() &&
+                    (drawMode == GL_QUADS || drawMode == GL_QUAD_STRIP ||
+                     drawMode == GL_POLYGON));
         default:
             return true;
     }
