@@ -49,7 +49,13 @@ bool GLContext::isVertexArray(GLuint array) const {
 bool GLContext::bindVertexArray(GLuint array) {
     if (array == 0) {
         impl_->state->bindVertexArray(0);
-        impl_->state->bindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+        GLuint elementArrayBuffer = 0;
+        if (appglCompatProfileEnabled()) {
+            elementArrayBuffer =
+                impl_->currentVertexArrayOrDefault()->elementArrayBuffer;
+        }
+        impl_->state->bindBuffer(
+            GL_ELEMENT_ARRAY_BUFFER, elementArrayBuffer);
         impl_->touchR5Residency(MetalR5ResidencyTouchKind::VertexArrayBind);
         return true;
     }

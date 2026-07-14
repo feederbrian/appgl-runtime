@@ -50,7 +50,11 @@ bool GLContext::bindBuffer(GLenum target, GLuint buffer) {
     if (buffer == 0) {
         impl_->state->bindBuffer(target, 0);
         if (target == GL_ELEMENT_ARRAY_BUFFER) {
-            if (GLVertexArrayObject* vertexArray = impl_->currentVertexArray(); vertexArray != nullptr) {
+            GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
+            if (vertexArray == nullptr && appglCompatProfileEnabled()) {
+                vertexArray = impl_->currentVertexArrayOrDefault();
+            }
+            if (vertexArray != nullptr) {
                 vertexArray->elementArrayBuffer = 0;
             }
         }
@@ -72,7 +76,11 @@ bool GLContext::bindBuffer(GLenum target, GLuint buffer) {
     object->instantiated = true;
     impl_->state->bindBuffer(target, buffer);
     if (target == GL_ELEMENT_ARRAY_BUFFER) {
-        if (GLVertexArrayObject* vertexArray = impl_->currentVertexArray(); vertexArray != nullptr) {
+        GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
+        if (vertexArray == nullptr && appglCompatProfileEnabled()) {
+            vertexArray = impl_->currentVertexArrayOrDefault();
+        }
+        if (vertexArray != nullptr) {
             vertexArray->elementArrayBuffer = buffer;
         }
     }

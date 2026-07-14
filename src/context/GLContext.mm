@@ -22983,9 +22983,18 @@ struct GLContext::Impl {
             object.liveBindSubmitIndex <= frameGraph->completedCommandBufferWatermark()) {
             return BufferWriteLiveness::NoLiveReaders;
         }
+        const std::uint32_t pendingProducerBits = object.producerPending.bits();
+        // writeGsXfbAndCheckDiscard writes TF output synchronously through
+        // the CPU shadow, then leaves this dependency token for later drains.
+        // The token is not evidence that Metal owns newer bytes, so a live
+        // reader may still be preserved by renaming from the authoritative
+        // shadow. Any additional producer bit keeps the conservative path.
+        const bool onlyCpuTfProducerPending =
+            pendingProducerBits != 0 &&
+            (pendingProducerBits & ~kProducerTransformFeedback) == 0;
         const bool renameSafe =
-            !object.gpuAuthoredSinceCpuWrite &&
-            !object.producerPending.hasAny(kProducerAll) &&
+            (!object.gpuAuthoredSinceCpuWrite || onlyCpuTfProducerPending) &&
+            (pendingProducerBits == 0 || onlyCpuTfProducerPending) &&
             !object.mapped &&
             !object.sparseStorage &&
             !object.textureBufferSource &&
