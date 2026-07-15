@@ -9854,6 +9854,11 @@ GLboolean APIENTRY glIsProgramPipeline(GLuint pipeline) {
 void APIENTRY glBindProgramPipeline(GLuint pipeline) {
     auto* ctx = requireCurrentContext("glBindProgramPipeline");
     if (!ctx) return;
+    if (ctx->isTransformFeedbackActive() && !ctx->isTransformFeedbackPaused()) {
+        recordValidationError(ctx, "glBindProgramPipeline", GL_INVALID_OPERATION,
+                              "cannot bind a program pipeline while transform feedback is active");
+        return;
+    }
     if (pipeline != 0) {
         auto* obj = ctx->objects().programPipelines().get(pipeline);
         if (!obj) {
@@ -9883,6 +9888,13 @@ void APIENTRY glBindProgramPipeline(GLuint pipeline) {
 void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint program) {
     auto* ctx = requireCurrentContext("glUseProgramStages");
     if (!ctx) return;
+    if (ctx->isTransformFeedbackActive() &&
+        !ctx->isTransformFeedbackPaused() &&
+        ctx->state().currentProgramPipeline() == pipeline) {
+        recordValidationError(ctx, "glUseProgramStages", GL_INVALID_OPERATION,
+                              "cannot use program stages while transform feedback is active");
+        return;
+    }
     // GL 4.6 §7.4.1 — `stages` must be either GL_ALL_SHADER_BITS
     // (the sentinel, 0xFFFFFFFF) or a subset of the six defined
     // shader-stage bits. Any other bit raises INVALID_VALUE.
