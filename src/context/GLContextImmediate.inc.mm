@@ -7829,6 +7829,9 @@ bool GLContext::encodeLegacyClientArrayDraw(GLenum mode,
         recordSelectPrimitives(mode, source.data(), source.size());
         return true;
     }
+    if (impl_->state->isEnabled(GL_RASTERIZER_DISCARD)) {
+        return true;
+    }
     if (impl_->frameGraph == nullptr) {
         return false;
     }
