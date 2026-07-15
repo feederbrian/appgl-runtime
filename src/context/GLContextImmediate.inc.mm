@@ -3216,7 +3216,9 @@ bool GLContext::copyPixelsCompat(GLint x,
                   "type is not GL_COLOR, GL_DEPTH, GL_STENCIL, or GL_DEPTH_STENCIL");
         return false;
     }
-    if (width == 0 || height == 0 || !impl_->fixedFunctionRasterPositionValid) {
+    if (width == 0 || height == 0 ||
+        !impl_->fixedFunctionRasterPositionValid ||
+        impl_->state->isEnabled(GL_RASTERIZER_DISCARD)) {
         return true;
     }
     const GLfloat zoomX = impl_->fixedFunctionPixelZoomX;
