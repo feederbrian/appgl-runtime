@@ -39,6 +39,7 @@ GLboolean APIENTRY glIsBuffer(GLuint buffer);
 void APIENTRY glBindBuffer(GLenum target, GLuint buffer);
 void APIENTRY glBindBufferBase(GLenum target, GLuint index, GLuint buffer);
 void APIENTRY glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size);
+void APIENTRY glBindBufferOffsetEXT(GLenum target, GLuint index, GLuint buffer, GLintptr offset);
 void APIENTRY glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage);
 void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void* data);
 void APIENTRY glCopyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size);

@@ -135,6 +135,7 @@ public:
     bool bindBuffer(GLenum target, GLuint buffer);
     bool bindBufferBase(GLenum target, GLuint index, GLuint buffer);
     bool bindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size);
+    bool bindBufferOffset(GLenum target, GLuint index, GLuint buffer, GLintptr offset);
     bool bufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage);
     bool bufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void* data);
     bool copyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size);

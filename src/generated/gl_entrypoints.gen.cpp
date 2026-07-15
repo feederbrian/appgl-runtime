@@ -5874,6 +5874,15 @@ extern "C" void APIENTRY glPolygonOffsetClamp(GLfloat factor, GLfloat units, GLf
     appgl::unimplementedReturn<void>(appgl::FunctionId::glPolygonOffsetClamp, "glPolygonOffsetClamp");
 }
 
+extern "C" void APIENTRY glBindBufferOffsetEXT(GLenum target, GLuint index, GLuint buffer, GLintptr offset) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glBindBufferOffsetEXT, "glBindBufferOffsetEXT");
+    if (auto fn = appgl::Runtime::shared().dispatch().glBindBufferOffsetEXT) {
+        fn(target, index, buffer, offset);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glBindBufferOffsetEXT, "glBindBufferOffsetEXT");
+}
+
 extern "C" void APIENTRY glBufferPageCommitmentARB(GLenum target, GLintptr offset, GLsizeiptr size, GLboolean commit) {
     appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glBufferPageCommitmentARB, "glBufferPageCommitmentARB");
     if (auto fn = appgl::Runtime::shared().dispatch().glBufferPageCommitmentARB) {

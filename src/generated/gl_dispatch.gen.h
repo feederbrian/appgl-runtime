@@ -663,6 +663,7 @@ struct GLDispatchTable {
     PFNGLMULTIDRAWARRAYSINDIRECTCOUNTPROC glMultiDrawArraysIndirectCount = nullptr;
     PFNGLMULTIDRAWELEMENTSINDIRECTCOUNTPROC glMultiDrawElementsIndirectCount = nullptr;
     PFNGLPOLYGONOFFSETCLAMPPROC glPolygonOffsetClamp = nullptr;
+    PFNGLBINDBUFFEROFFSETEXTPROC glBindBufferOffsetEXT = nullptr;
     PFNGLBUFFERPAGECOMMITMENTARBPROC glBufferPageCommitmentARB = nullptr;
     PFNGLNAMEDBUFFERPAGECOMMITMENTARBPROC glNamedBufferPageCommitmentARB = nullptr;
     PFNGLNAMEDBUFFERPAGECOMMITMENTEXTPROC glNamedBufferPageCommitmentEXT = nullptr;

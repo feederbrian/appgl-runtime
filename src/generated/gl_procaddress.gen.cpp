@@ -1035,6 +1035,7 @@ const ProcEntry kProcTable[] = {
     {"glBindBufferBase", reinterpret_cast<AppGLProc>(&::glBindBufferBase)},
     {"glBindBufferBaseEXT", reinterpret_cast<AppGLProc>(&::glBindBufferBaseEXT)},
     {"glBindBufferBaseNV", reinterpret_cast<AppGLProc>(&::glBindBufferBaseNV)},
+    {"glBindBufferOffsetEXT", reinterpret_cast<AppGLProc>(&::glBindBufferOffsetEXT)},
     {"glBindBufferRange", reinterpret_cast<AppGLProc>(&::glBindBufferRange)},
     {"glBindBufferRangeEXT", reinterpret_cast<AppGLProc>(&::glBindBufferRangeEXT)},
     {"glBindBufferRangeNV", reinterpret_cast<AppGLProc>(&::glBindBufferRangeNV)},

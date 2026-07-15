@@ -5921,6 +5921,15 @@
       "notes": ""
     },
     {
+      "name": "glBindBufferOffsetEXT",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "GL_EXT_transform_feedback",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
       "name": "glBufferPageCommitmentARB",
       "subsystem": "buffers and memory",
       "introducedVersion": "ARB_sparse_buffer",

@@ -169,6 +169,41 @@ bool GLContext::bindBufferRange(GLenum target, GLuint index, GLuint buffer, GLin
     return true;
 }
 
+bool GLContext::bindBufferOffset(GLenum target, GLuint index, GLuint buffer, GLintptr offset) {
+    if (offset < 0 || (target == GL_TRANSFORM_FEEDBACK_BUFFER && (offset % 4) != 0)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (buffer == 0) {
+        return bindBufferRange(target, index, 0, 0, 0);
+    }
+    auto* object = impl_->objects->buffers().get(buffer);
+    if (object == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (offset > object->size) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    object->instantiated = true;
+    // Preserve the live-size sentinel used by BindBufferBase. EXT offset
+    // bindings are offset-to-end, so a later BufferData resize must update
+    // the effective capacity instead of retaining the bind-time size.
+    impl_->state->bindIndexedBuffer(target, index, buffer, offset, 0);
+    if (target == GL_TRANSFORM_FEEDBACK_BUFFER &&
+        index < GLTransformFeedbackObject::kMaxTfBuffers &&
+        impl_->boundTransformFeedbackId != 0) {
+        if (auto* tf = impl_->objects->transformFeedbacks().get(
+                impl_->boundTransformFeedbackId)) {
+            tf->bufferBindings[index] = {buffer, offset, 0};
+        }
+    }
+    impl_->state->bindBuffer(target, buffer);
+    impl_->touchR5Residency(MetalR5ResidencyTouchKind::BufferBind);
+    return true;
+}
+
 bool GLContext::bindBufferBase(GLenum target, GLuint index, GLuint buffer) {
     if (buffer != 0) {
         GLBufferObject* object = impl_->objects->buffers().get(buffer);

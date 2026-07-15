@@ -5647,6 +5647,26 @@ void APIENTRY glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLin
     }
 }
 
+void APIENTRY glBindBufferOffsetEXT(GLenum target, GLuint index, GLuint buffer, GLintptr offset) {
+    auto* context = requireCurrentContext("glBindBufferOffsetEXT");
+    if (context == nullptr) return;
+    if (!isValidIndexedBufferTarget(target)) {
+        recordValidationError(context, "glBindBufferOffsetEXT", GL_INVALID_ENUM, "target is not an indexed buffer binding point");
+        return;
+    }
+    if (index >= maxIndexedBindings(target)) {
+        recordValidationError(context, "glBindBufferOffsetEXT", GL_INVALID_VALUE, "binding index exceeds maximum for target");
+        return;
+    }
+    if (target == GL_TRANSFORM_FEEDBACK_BUFFER && context->isTransformFeedbackActive() && !context->isTransformFeedbackPaused()) {
+        recordValidationError(context, "glBindBufferOffsetEXT", GL_INVALID_OPERATION, "cannot bind transform feedback buffer while transform feedback is actively recording");
+        return;
+    }
+    if (context->bindBufferOffset(target, index, buffer, offset)) {
+        Runtime::shared().recordBootstrapTrace("glBindBufferOffsetEXT(" + std::to_string(target) + ", " + std::to_string(index) + ")");
+    }
+}
+
 void APIENTRY glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage) {
     auto* context = requireCurrentContext("glBufferData");
     if (context == nullptr) {

@@ -24,6 +24,7 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glBindBuffer = &impl::glBindBuffer;
     dispatch.glBindBufferBase = &impl::glBindBufferBase;
     dispatch.glBindBufferRange = &impl::glBindBufferRange;
+    dispatch.glBindBufferOffsetEXT = &impl::glBindBufferOffsetEXT;
     dispatch.glBufferData = &impl::glBufferData;
     dispatch.glBufferSubData = &impl::glBufferSubData;
     dispatch.glCopyBufferSubData = &impl::glCopyBufferSubData;

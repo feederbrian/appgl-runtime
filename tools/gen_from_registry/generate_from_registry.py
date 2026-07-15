@@ -103,6 +103,12 @@ MANUAL_EXTENSION_COMMANDS = [
 # GLCapabilities::initializeExtensions() and kAppGLExtensionList.
 EXTRA_EXTENSION_COMMANDS = [
     (
+        "glBindBufferOffsetEXT",
+        "void",
+        "GLenum target, GLuint index, GLuint buffer, GLintptr offset",
+        "GL_EXT_transform_feedback",
+    ),
+    (
         "glBufferPageCommitmentARB",
         "void",
         "GLenum target, GLintptr offset, GLsizeiptr size, GLboolean commit",
