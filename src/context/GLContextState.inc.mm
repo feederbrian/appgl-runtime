@@ -18,6 +18,9 @@ void GLContext::clear(GLbitfield mask) {
     if (!recordDisplayListClear(mask)) {
         return;
     }
+    if (impl_->state->isEnabled(GL_RASTERIZER_DISCARD)) {
+        return;
+    }
     if (impl_->state->boundDrawFramebuffer() != 0) {
         if (!impl_->clearBoundFramebuffer(mask)) {
             pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
