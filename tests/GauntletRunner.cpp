@@ -7678,6 +7678,21 @@ public:
             noVersionFtransformSource,
             "no-version ftransform vertex shader compiles after rewrite");
 
+        const std::string maxClipPlanesSource =
+            "#version 130\n"
+            "uniform vec4 clipValues[gl_MaxClipPlanes];\n"
+            "void main() { gl_Position = clipValues[0]; }\n";
+        const CompatShaderRewriteResult maxClipPlanesRewrite =
+            rewriteCompatShader(maxClipPlanesSource, GL_VERTEX_SHADER);
+        expectCondition(
+            maxClipPlanesRewrite.source.find("#define gl_MaxClipPlanes 8") !=
+                std::string::npos,
+            "GLSL 1.30 gl_MaxClipPlanes is rewritten to AppGL's clip capacity");
+        const char* maxClipPlanesShader = maxClipPlanesSource.c_str();
+        compileCompatFtransformVertex(
+            maxClipPlanesShader,
+            "GLSL 1.30 gl_MaxClipPlanes array declaration compiles");
+
         const std::string legacyBuiltinOutputsSource =
             "#version 110\n"
             "void main() {\n"
@@ -7710,6 +7725,49 @@ public:
         compileCompatFtransformVertex(
             legacyBuiltinOutputsShader,
             "legacy transform-feedback builtin outputs compile after rewrite");
+
+        const char* mixedClipOutputsSource =
+            "#version 130\n"
+            "void main() {\n"
+            "    gl_Position = vec4(0.0);\n"
+            "    gl_ClipDistance[0] = 1.0;\n"
+            "    gl_ClipVertex = vec4(0.0);\n"
+            "}\n";
+        const char* mixedClipFragmentSource =
+            "#version 130\n"
+            "void main() { gl_FragColor = vec4(1.0); }\n";
+        const GLuint mixedClipVertex = gl.glCreateShader(GL_VERTEX_SHADER);
+        gl.glShaderSource(mixedClipVertex, 1, &mixedClipOutputsSource, nullptr);
+        gl.glCompileShader(mixedClipVertex);
+        GLint mixedClipCompileStatus = GL_FALSE;
+        gl.glGetShaderiv(
+            mixedClipVertex, GL_COMPILE_STATUS, &mixedClipCompileStatus);
+        expectCondition(
+            mixedClipCompileStatus == GL_TRUE,
+            "mixed legacy clip outputs remain a link-stage validation error");
+        const GLuint mixedClipFragment = gl.glCreateShader(GL_FRAGMENT_SHADER);
+        gl.glShaderSource(
+            mixedClipFragment, 1, &mixedClipFragmentSource, nullptr);
+        gl.glCompileShader(mixedClipFragment);
+        GLint mixedClipFragmentCompileStatus = GL_FALSE;
+        gl.glGetShaderiv(
+            mixedClipFragment, GL_COMPILE_STATUS,
+            &mixedClipFragmentCompileStatus);
+        expectCondition(
+            mixedClipFragmentCompileStatus == GL_TRUE,
+            "mixed clip-output fragment stage compiles before link validation");
+        const GLuint mixedClipProgram = gl.glCreateProgram();
+        gl.glAttachShader(mixedClipProgram, mixedClipVertex);
+        gl.glAttachShader(mixedClipProgram, mixedClipFragment);
+        gl.glLinkProgram(mixedClipProgram);
+        GLint mixedClipLinkStatus = GL_TRUE;
+        gl.glGetProgramiv(mixedClipProgram, GL_LINK_STATUS, &mixedClipLinkStatus);
+        expectCondition(
+            mixedClipLinkStatus == GL_FALSE,
+            "mixed gl_ClipVertex/gl_ClipDistance program is rejected at link");
+        gl.glDeleteProgram(mixedClipProgram);
+        gl.glDeleteShader(mixedClipFragment);
+        gl.glDeleteShader(mixedClipVertex);
 
         // Deliberately legacy shader sources. The rewriter is what makes
         // this land — on an un-rewritten glslang these fail compile.

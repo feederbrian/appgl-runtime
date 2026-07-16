@@ -348,6 +348,47 @@ bool GLContext::linkProgram(GLuint program) {
         }
     }
 
+    // GLSL 1.30 §7.1 makes statically writing both legacy gl_ClipVertex and
+    // gl_ClipDistance a link error. Inspect original sources here because the
+    // compatibility rewrite renames gl_ClipVertex before glslang compilation.
+    auto sourceContainsIdentifier = [](const std::string& source,
+                                       const char* identifier) {
+        const std::size_t length = std::strlen(identifier);
+        std::size_t pos = 0;
+        while ((pos = source.find(identifier, pos)) != std::string::npos) {
+            const bool leftBoundary = pos == 0 ||
+                !(std::isalnum(static_cast<unsigned char>(source[pos - 1])) ||
+                  source[pos - 1] == '_');
+            const std::size_t end = pos + length;
+            const bool rightBoundary = end >= source.size() ||
+                !(std::isalnum(static_cast<unsigned char>(source[end])) ||
+                  source[end] == '_');
+            if (leftBoundary && rightBoundary) {
+                return true;
+            }
+            pos = end;
+        }
+        return false;
+    };
+    bool vertexStageUsesClipVertex = false;
+    bool vertexStageUsesClipDistance = false;
+    for (const GLShaderObject* shader : vertexShaderObjects) {
+        vertexStageUsesClipVertex = vertexStageUsesClipVertex ||
+            sourceContainsIdentifier(shader->source, "gl_ClipVertex");
+        vertexStageUsesClipDistance = vertexStageUsesClipDistance ||
+            sourceContainsIdentifier(shader->source, "gl_ClipDistance");
+    }
+    if (vertexStageUsesClipVertex && vertexStageUsesClipDistance) {
+        programObject->linkLog =
+            "vertex stage must not statically write both gl_ClipVertex and "
+            "gl_ClipDistance[] (GLSL 1.30 section 7.1)";
+        Runtime::shared().recordShaderTranslation({
+            programTag, "link", "", "", "", programObject->linkLog, "", false
+        });
+        restorePriorExecutableForFailedRelink();
+        return false;
+    }
+
     if (!attachedShaderObjects.empty()) {
         const bool firstIsSpirvBinary = attachedShaderObjects.front()->isSpirvBinary;
         for (const GLShaderObject* shader : attachedShaderObjects) {

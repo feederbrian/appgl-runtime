@@ -2064,6 +2064,24 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         }
     }
 
+    // GLSL 1.30 compatibility exposes gl_MaxClipPlanes, but glslang's
+    // Vulkan front-end reports the legacy constant as zero. AppGL exposes
+    // eight legacy clip planes, matching its clip-distance capacity.
+    if (containsIdentifier(source, "gl_MaxClipPlanes") &&
+        result.source.find("#define gl_MaxClipPlanes") == std::string::npos) {
+        const std::string compatDefine = "#define gl_MaxClipPlanes 8\n";
+        const std::size_t versionPos = result.source.find("#version");
+        if (versionPos != std::string::npos) {
+            const std::size_t eol = result.source.find('\n', versionPos);
+            const std::size_t insertAt =
+                eol == std::string::npos ? result.source.size() : eol + 1;
+            result.source.insert(insertAt, compatDefine);
+        } else {
+            result.source.insert(0, compatDefine);
+        }
+        result.didRewrite = true;
+    }
+
     // ---- 2b. Strip extension directives unknown to glslang ----------------
     // Under Vulkan-targeted compilation, some GL_ARB extensions exist as
     // core features in Vulkan/SPIR-V but glslang's Vulkan front-end

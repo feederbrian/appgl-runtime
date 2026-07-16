@@ -2388,7 +2388,8 @@ static inline float _appgl_cmpSample1DLevel(
             smp, _appgl_cmpFlip2DCoord(c, control.flags), ref, options);
     }
     return _appgl_cmp1DSampleLod(
-        APPGL_CMP1D_MIP_ARGS, smp, c, ref, options.lod, control);
+        APPGL_CMP1D_MIP_ARGS, smp, c, ref,
+        options.lod + control.lodBias, control);
 }
 
 static inline float _appgl_cmpSample1DLevel(
@@ -2402,7 +2403,8 @@ static inline float _appgl_cmpSample1DLevel(
             options, offset);
     }
     return _appgl_cmp1DSampleLodOffset(
-        APPGL_CMP1D_MIP_ARGS, smp, c, ref, options.lod, control, offset);
+        APPGL_CMP1D_MIP_ARGS, smp, c, ref,
+        options.lod + control.lodBias, control, offset);
 }
 
 static inline float _appgl_cmpSample1DGradient(
