@@ -3002,7 +3002,8 @@ std::string rewriteGeometryShader4VertexTransport(
 }
 
 CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
-                                              GLenum stage) {
+                                              GLenum stage,
+                                              CompatShaderRewriteMode mode) {
     CompatShaderRewriteResult result;
     result.source.assign(source.begin(), source.end());
     normalizeDuplicatedEsVersionPreamble(result.source);
@@ -3114,6 +3115,10 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     const bool isVertex = (stage == GL_VERTEX_SHADER);
     const bool isFragment = (stage == GL_FRAGMENT_SHADER);
     const bool isGeometry = (stage == GL_GEOMETRY_SHADER);
+    const bool isArbGeometryShader4LinkView =
+        mode == CompatShaderRewriteMode::ArbGeometryShader4LinkView;
+    const bool isArbGeometryStage =
+        isGeometry && isArbGeometryShader4LinkView;
     const bool hasGpuShader4Directive =
         result.source.find("GL_EXT_gpu_shader4") != std::string::npos;
 
@@ -3151,7 +3156,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     if (legacy.usesFtransform) {
         result.usage.modelViewProjection = true;
     }
-    if (isVertex || isGeometry) {
+    if (isVertex || isArbGeometryStage) {
         std::size_t originalVersionStart = std::string::npos;
         const std::size_t originalVersionEnd =
             findVersionLineEnd(result.source, &originalVersionStart);
@@ -3192,7 +3197,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     legacy.usesFogFragCoord = containsIdentifier(source, "gl_FogFragCoord");
     legacy.usesFogFragCoordInput =
         isGeometry && containsFogFragCoordInputAccess(source);
-    if (isVertex || isGeometry) {
+    if (isVertex || isArbGeometryStage) {
         legacy.usesFrontColor = containsIdentifier(source, "gl_FrontColor");
         legacy.usesBackColor = containsIdentifier(source, "gl_BackColor");
         legacy.usesFrontSecondaryColor =
@@ -3699,7 +3704,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         replaceIdentifier(result.source, "textureCube", "texture");
     }
     if (legacy.hadVarying) {
-        if (legacy.texCoordMax >= 0) {
+        if (isArbGeometryShader4LinkView && legacy.texCoordMax >= 0) {
             eraseGlobalStorageDeclaration(result.source, "gl_TexCoord");
         }
         if (isVertex) {
@@ -4015,7 +4020,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
                           "#define gl_TexCoord appgl_TexCoord\n",
                           count);
             preamble.append(buf);
-        } else if (isGeometry) {
+        } else if (isArbGeometryStage) {
             std::snprintf(buf, sizeof(buf),
                           "out vec4 appgl_TexCoord[%u];\n"
                           "#define gl_TexCoord appgl_TexCoord\n",
@@ -4038,16 +4043,18 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         }
     }
 
-    if (legacy.usesFrontColor && (isVertex || isGeometry)) {
+    if (legacy.usesFrontColor && (isVertex || isArbGeometryStage)) {
         preamble.append("out vec4 appgl_FrontColor;\n");
     }
-    if (legacy.usesBackColor && (isVertex || isGeometry)) {
+    if (legacy.usesBackColor && (isVertex || isArbGeometryStage)) {
         preamble.append("out vec4 appgl_BackColor;\n");
     }
-    if (legacy.usesFrontSecondaryColor && (isVertex || isGeometry)) {
+    if (legacy.usesFrontSecondaryColor &&
+        (isVertex || isArbGeometryStage)) {
         preamble.append("out vec4 appgl_FrontSecondaryColor;\n");
     }
-    if (legacy.usesBackSecondaryColor && (isVertex || isGeometry)) {
+    if (legacy.usesBackSecondaryColor &&
+        (isVertex || isArbGeometryStage)) {
         preamble.append("out vec4 appgl_BackSecondaryColor;\n");
     }
     if (legacy.usesFragmentColor && isFragment) {
@@ -4114,7 +4121,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     if (legacy.usesClipVertex) {
         if (isVertex) {
             preamble.append("out vec4 appgl_ClipVertex;\n");
-        } else if (isGeometry) {
+        } else if (isArbGeometryStage) {
             preamble.append("out vec4 appgl_ClipVertex;\n");
         } else if (isFragment) {
             preamble.append("in vec4 appgl_ClipVertex;\n");

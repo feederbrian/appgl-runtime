@@ -528,6 +528,36 @@ void main() {
         vertexShader, mismatchShader, fragmentShader,
         GL_LINES, GL_POINTS, 1, "link.explicit-input-mismatch", false);
 
+    // Keep the base type equal and make only the authored inner extent
+    // disagree. This is the sharp guard for the ARB-only shape half of the
+    // cross-stage varying check; ordinary core stage arrays remain outside
+    // that compatibility rule.
+    const std::string extentVertexSource = R"GLSL(#version 130
+varying float extent_mismatch[1];
+void main() {
+    extent_mismatch[0] = 0.0;
+    gl_Position = vec4(0.0);
+}
+)GLSL";
+    const std::string extentGeometrySource = R"GLSL(#version 130
+#extension GL_ARB_geometry_shader4 : enable
+varying in float extent_mismatch[1][2];
+void main() {
+    gl_Position = vec4(extent_mismatch[0][0]);
+    EmitVertex();
+}
+)GLSL";
+    const GLuint extentVertexShader = compileShader(
+        GL_VERTEX_SHADER, extentVertexSource,
+        "compile.explicit-inner-extent-vertex");
+    const GLuint extentGeometryShader = compileShader(
+        GL_GEOMETRY_SHADER, extentGeometrySource,
+        "compile.explicit-inner-extent-geometry");
+    const GLuint extentMismatchProgram = linkRequested(
+        extentVertexShader, extentGeometryShader, fragmentShader,
+        GL_POINTS, GL_POINTS, 1,
+        "link.equal-type-explicit-inner-extent-mismatch", false);
+
     const std::string builtinVertex = R"GLSL(#version 130
 void main() {
     gl_Position = gl_Vertex;
@@ -606,6 +636,7 @@ void main() {
     runFramebufferSurfaceChecks();
 
     glDeleteProgram(builtinProgram);
+    glDeleteProgram(extentMismatchProgram);
     glDeleteProgram(mismatchProgram);
     glDeleteProgram(layoutProgram);
     glDeleteProgram(adjacencyProgram);
@@ -613,6 +644,8 @@ void main() {
     glDeleteProgram(requestProgram);
     glDeleteShader(builtinGeometryShader);
     glDeleteShader(builtinVertexShader);
+    glDeleteShader(extentGeometryShader);
+    glDeleteShader(extentVertexShader);
     glDeleteShader(mismatchShader);
     glDeleteShader(layoutShader);
     glDeleteShader(warnedShader);

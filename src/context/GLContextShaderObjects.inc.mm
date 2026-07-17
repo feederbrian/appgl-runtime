@@ -182,6 +182,7 @@ bool GLContext::compileShader(GLuint shader) {
     //    declaredUniforms — which linkProgram lifts into
     //    programObject->uniforms with normal sequential locations.
     std::string geometryShader4CompileSource;
+    bool hasGeometryShader4CompileView = false;
     const std::string* compatRewriteSource = &object->source;
     if (object->stage == GL_GEOMETRY_SHADER) {
         const GeometryShader4DirectiveState directive =
@@ -229,10 +230,15 @@ bool GLContext::compileShader(GLuint shader) {
             }
             geometryShader4CompileSource = std::move(geometryRewrite.source);
             compatRewriteSource = &geometryShader4CompileSource;
+            hasGeometryShader4CompileView = true;
         }
     }
     CompatShaderRewriteResult rewrite =
-        rewriteCompatShader(*compatRewriteSource, object->stage);
+        rewriteCompatShader(
+            *compatRewriteSource, object->stage,
+            hasGeometryShader4CompileView
+                ? CompatShaderRewriteMode::ArbGeometryShader4LinkView
+                : CompatShaderRewriteMode::Default);
     // GLSL 4.00 subroutines are unsupported by glslang's SPIR-V
     // backend ("feature not yet implemented"). Rewrite subroutine
     // syntax into plain GLSL that compiles — enough for CTS

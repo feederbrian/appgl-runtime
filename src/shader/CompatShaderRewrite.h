@@ -397,8 +397,15 @@ inline constexpr unsigned int kSynthesizedLightSourceCount = 8;
 // GL_FRAGMENT_SHADER / GL_GEOMETRY_SHADER / GL_TESS_*_SHADER /
 // GL_COMPUTE_SHADER). Affects the direction of `varying` rewrites and
 // the `out`/`in` side of stage-bridged arrays.
+enum class CompatShaderRewriteMode {
+    Default,
+    ArbGeometryShader4LinkView,
+};
+
 CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
-                                              GLenum stage);
+                                              GLenum stage,
+                                              CompatShaderRewriteMode mode =
+                                                  CompatShaderRewriteMode::Default);
 
 // Pre-glslang validation: GLSL 4.60 §4.1.8 allows ONLY precision
 // qualifiers (highp/mediump/lowp) on struct members. Everything else

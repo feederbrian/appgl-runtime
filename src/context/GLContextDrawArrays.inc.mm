@@ -19,7 +19,8 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
         const GLProgramObject* p = progName != 0
             ? impl_->objects->programs().get(progName)
             : nullptr;
-        if (p != nullptr && p->gsPresent && !p->hasTessellation &&
+        if (p != nullptr && p->usesArbGeometryShader4LinkView &&
+            p->gsPresent && !p->hasTessellation &&
             !isDrawModeCompatibleWithGs(mode, p->gsInputTopology)) {
             pushError(GL_INVALID_OPERATION);
             return false;

@@ -1052,9 +1052,10 @@ struct GLProgramObject {
     std::vector<GLuint> attachedShaders;
     std::string linkLog;
     std::string validateLog;
-    // True when this object owns a usable executable. A failed relink leaves
-    // the previous executable installed, so this is intentionally distinct
-    // from the status of the most recent link attempt below.
+    // True when this object owns a usable executable. An active
+    // ARB_geometry_shader4 failed relink leaves the previous executable
+    // installed; ordinary core links retain the pre-c2 behavior. The status
+    // below mirrors `linked` except for that ARB compatibility case.
     bool linked = false;
     bool lastLinkSucceeded = false;
     bool validated = false;

@@ -23,6 +23,21 @@ bool GLContext::linkProgram(GLuint program) {
     APPGL_LOG(SHADER, @"[GL] linkProgram-begin program=%u", program);
     fflush(stderr);
 
+    // The c2 compatibility machinery is deliberately link-attempt local.
+    // Detect the directive before clearing any executable state so failed
+    // ARB relinks can preserve the previous executable without changing the
+    // long-standing failed-relink behavior of ordinary core programs.
+    const bool attemptUsesArbGeometryShader4LinkView = std::any_of(
+        programObject->attachedShaders.begin(),
+        programObject->attachedShaders.end(),
+        [&](GLuint shaderId) {
+            const GLShaderObject* shaderObject =
+                impl_->objects->shaders().get(shaderId);
+            return shaderObject != nullptr &&
+                   shaderObject->stage == GL_GEOMETRY_SHADER &&
+                   !shaderObject->isSpirvBinary &&
+                   scanGeometryShader4Directive(shaderObject->source).active();
+        });
     const bool hadPriorExecutable = programObject->linked;
     const auto priorUniforms = programObject->uniforms;
     const auto priorAttributes = programObject->attributes;
@@ -70,60 +85,141 @@ bool GLContext::linkProgram(GLuint program) {
         programObject->fragmentMslUsesFragCoordParams;
     const auto priorVertexReflection = programObject->vertexReflection;
     const auto priorFragmentReflection = programObject->fragmentReflection;
-    const auto priorGeometryReflection = programObject->geometryReflection;
     const auto priorVertexSourceHash = programObject->vertexSourceHash;
     const auto priorFragmentSourceHash = programObject->fragmentSourceHash;
-    const bool priorGeometryEmulated = programObject->geometryEmulated;
-    const bool priorUsesArbGeometryShader4LinkView =
-        programObject->usesArbGeometryShader4LinkView;
-    const bool priorGeometryEmulatedTransformFeedbackOnly =
-        programObject->geometryEmulatedTransformFeedbackOnly;
-    const auto priorGeometryEmulationDiagnostic =
-        programObject->geometryEmulationDiagnostic;
-    const auto priorGeometrySpirv = programObject->geometrySpirv;
-    const auto priorVertexSpirv = programObject->vertexSpirv;
-    const auto priorVertexSpirvEntryPoint = programObject->vertexSpirvEntryPoint;
-    const auto priorVertexSpirvSpecializationConstants =
-        programObject->vertexSpirvSpecializationConstants;
-    const bool priorGsPresent = programObject->gsPresent;
-    const GLenum priorGsInputTopology = programObject->gsInputTopology;
-    const GLenum priorGsOutputTopology = programObject->gsOutputTopology;
-    const std::uint32_t priorGsMaxVertices = programObject->gsMaxVertices;
-    const std::uint32_t priorGsInvocations = programObject->gsInvocations;
-    const bool priorNeedsCullDistancePrepass =
-        programObject->needsCullDistancePrepass;
-    const auto priorGsPassThroughVertexMSL =
-        programObject->gsPassThroughVertexMSL;
-    const bool priorGsPassThroughVertexMslUsesArgumentBuffer =
-        programObject->gsPassThroughVertexMslUsesArgumentBuffer;
-    const bool priorGsPassThroughVertexMSLLayered =
-        programObject->gsPassThroughVertexMSLLayered;
-    const bool priorGsPassThroughVertexMSLViewportArray =
-        programObject->gsPassThroughVertexMSLViewportArray;
-    const auto priorGsPassThroughReflection =
-        programObject->gsPassThroughReflection;
-    const auto priorGsPassThroughFragmentMSL =
-        programObject->gsPassThroughFragmentMSL;
-    const bool priorGsPassThroughFragmentMslUsesArgumentBuffer =
-        programObject->gsPassThroughFragmentMslUsesArgumentBuffer;
-    const bool priorGsPassThroughFragmentMSLActive =
-        programObject->gsPassThroughFragmentMSLActive;
-    const std::uint32_t priorGsPassThroughFragmentMSLPrimIdLoc =
-        programObject->gsPassThroughFragmentMSLPrimIdLoc;
-    const auto priorGeometryShaderAsMeshMSL =
-        programObject->geometryShaderAsMeshMSL;
-    const auto priorMetalGSVsComputeMSL = programObject->metalGSVsComputeMSL;
-    const bool priorMetalGSVsComputeNeedsDescriptor =
-        programObject->metalGSVsComputeNeedsDescriptor;
-    const auto priorMetalGSTier = programObject->metalGSTier;
+    struct ArbGeometryShader4ExecutableSnapshot {
+        ShaderReflection geometryReflection;
+        bool geometryEmulated;
+        bool usesArbGeometryShader4LinkView;
+        bool geometryEmulatedTransformFeedbackOnly;
+        std::string geometryEmulationDiagnostic;
+        std::vector<std::uint32_t> geometrySpirv;
+        std::vector<std::uint32_t> vertexSpirv;
+        std::string vertexSpirvEntryPoint;
+        std::unordered_map<std::uint32_t, std::uint32_t>
+            vertexSpirvSpecializationConstants;
+        bool gsPresent;
+        GLenum gsInputTopology;
+        GLenum gsOutputTopology;
+        std::uint32_t gsMaxVertices;
+        std::uint32_t gsInvocations;
+        bool needsCullDistancePrepass;
+        std::string gsPassThroughVertexMSL;
+        bool gsPassThroughVertexMslUsesArgumentBuffer;
+        bool gsPassThroughVertexMSLLayered;
+        bool gsPassThroughVertexMSLViewportArray;
+        ShaderReflection gsPassThroughReflection;
+        std::string gsPassThroughFragmentMSL;
+        bool gsPassThroughFragmentMslUsesArgumentBuffer;
+        bool gsPassThroughFragmentMSLActive;
+        std::uint32_t gsPassThroughFragmentMSLPrimIdLoc;
+        std::string geometryShaderAsMeshMSL;
+        std::string metalGSVsComputeMSL;
+        bool metalGSVsComputeNeedsDescriptor;
+        GLProgramObject::MetalGSTier metalGSTier;
+
+        explicit ArbGeometryShader4ExecutableSnapshot(
+            const GLProgramObject& object)
+            : geometryReflection(object.geometryReflection),
+              geometryEmulated(object.geometryEmulated),
+              usesArbGeometryShader4LinkView(
+                  object.usesArbGeometryShader4LinkView),
+              geometryEmulatedTransformFeedbackOnly(
+                  object.geometryEmulatedTransformFeedbackOnly),
+              geometryEmulationDiagnostic(
+                  object.geometryEmulationDiagnostic),
+              geometrySpirv(object.geometrySpirv),
+              vertexSpirv(object.vertexSpirv),
+              vertexSpirvEntryPoint(object.vertexSpirvEntryPoint),
+              vertexSpirvSpecializationConstants(
+                  object.vertexSpirvSpecializationConstants),
+              gsPresent(object.gsPresent),
+              gsInputTopology(object.gsInputTopology),
+              gsOutputTopology(object.gsOutputTopology),
+              gsMaxVertices(object.gsMaxVertices),
+              gsInvocations(object.gsInvocations),
+              needsCullDistancePrepass(object.needsCullDistancePrepass),
+              gsPassThroughVertexMSL(object.gsPassThroughVertexMSL),
+              gsPassThroughVertexMslUsesArgumentBuffer(
+                  object.gsPassThroughVertexMslUsesArgumentBuffer),
+              gsPassThroughVertexMSLLayered(
+                  object.gsPassThroughVertexMSLLayered),
+              gsPassThroughVertexMSLViewportArray(
+                  object.gsPassThroughVertexMSLViewportArray),
+              gsPassThroughReflection(object.gsPassThroughReflection),
+              gsPassThroughFragmentMSL(object.gsPassThroughFragmentMSL),
+              gsPassThroughFragmentMslUsesArgumentBuffer(
+                  object.gsPassThroughFragmentMslUsesArgumentBuffer),
+              gsPassThroughFragmentMSLActive(
+                  object.gsPassThroughFragmentMSLActive),
+              gsPassThroughFragmentMSLPrimIdLoc(
+                  object.gsPassThroughFragmentMSLPrimIdLoc),
+              geometryShaderAsMeshMSL(object.geometryShaderAsMeshMSL),
+              metalGSVsComputeMSL(object.metalGSVsComputeMSL),
+              metalGSVsComputeNeedsDescriptor(
+                  object.metalGSVsComputeNeedsDescriptor),
+              metalGSTier(object.metalGSTier) {}
+
+        void restore(GLProgramObject& object) const {
+            object.geometryReflection = geometryReflection;
+            object.geometryEmulated = geometryEmulated;
+            object.usesArbGeometryShader4LinkView =
+                usesArbGeometryShader4LinkView;
+            object.geometryEmulatedTransformFeedbackOnly =
+                geometryEmulatedTransformFeedbackOnly;
+            object.geometryEmulationDiagnostic = geometryEmulationDiagnostic;
+            object.geometrySpirv = geometrySpirv;
+            object.vertexSpirv = vertexSpirv;
+            object.vertexSpirvEntryPoint = vertexSpirvEntryPoint;
+            object.vertexSpirvSpecializationConstants =
+                vertexSpirvSpecializationConstants;
+            object.gsPresent = gsPresent;
+            object.gsInputTopology = gsInputTopology;
+            object.gsOutputTopology = gsOutputTopology;
+            object.gsMaxVertices = gsMaxVertices;
+            object.gsInvocations = gsInvocations;
+            object.needsCullDistancePrepass = needsCullDistancePrepass;
+            object.gsPassThroughVertexMSL = gsPassThroughVertexMSL;
+            object.gsPassThroughVertexMslUsesArgumentBuffer =
+                gsPassThroughVertexMslUsesArgumentBuffer;
+            object.gsPassThroughVertexMSLLayered =
+                gsPassThroughVertexMSLLayered;
+            object.gsPassThroughVertexMSLViewportArray =
+                gsPassThroughVertexMSLViewportArray;
+            object.gsPassThroughReflection = gsPassThroughReflection;
+            object.gsPassThroughFragmentMSL = gsPassThroughFragmentMSL;
+            object.gsPassThroughFragmentMslUsesArgumentBuffer =
+                gsPassThroughFragmentMslUsesArgumentBuffer;
+            object.gsPassThroughFragmentMSLActive =
+                gsPassThroughFragmentMSLActive;
+            object.gsPassThroughFragmentMSLPrimIdLoc =
+                gsPassThroughFragmentMSLPrimIdLoc;
+            object.geometryShaderAsMeshMSL = geometryShaderAsMeshMSL;
+            object.metalGSVsComputeMSL = metalGSVsComputeMSL;
+            object.metalGSVsComputeNeedsDescriptor =
+                metalGSVsComputeNeedsDescriptor;
+            object.metalGSTier = metalGSTier;
+        }
+    };
+    std::unique_ptr<ArbGeometryShader4ExecutableSnapshot>
+        priorArbGeometryShader4Executable;
+    if (attemptUsesArbGeometryShader4LinkView && hadPriorExecutable) {
+        priorArbGeometryShader4Executable =
+            std::make_unique<ArbGeometryShader4ExecutableSnapshot>(
+                *programObject);
+    }
     const GLsizei priorOvrMultiviewNumViews =
         programObject->ovrMultiviewNumViews;
     bool priorExecutableRestored = false;
     auto restorePriorExecutableForFailedRelink = [&]() {
-        if (!hadPriorExecutable || priorExecutableRestored) {
+        if (!hadPriorExecutable ||
+            (attemptUsesArbGeometryShader4LinkView &&
+             priorExecutableRestored)) {
             return;
         }
-        priorExecutableRestored = true;
+        if (attemptUsesArbGeometryShader4LinkView) {
+            priorExecutableRestored = true;
+        }
         programObject->uniforms = priorUniforms;
         programObject->attributes = priorAttributes;
         programObject->uniformValues = priorUniformValues;
@@ -168,49 +264,11 @@ bool GLContext::linkProgram(GLuint program) {
             priorFragmentMslUsesFragCoordParams;
         programObject->vertexReflection = priorVertexReflection;
         programObject->fragmentReflection = priorFragmentReflection;
-        programObject->geometryReflection = priorGeometryReflection;
         programObject->vertexSourceHash = priorVertexSourceHash;
         programObject->fragmentSourceHash = priorFragmentSourceHash;
-        programObject->geometryEmulated = priorGeometryEmulated;
-        programObject->usesArbGeometryShader4LinkView =
-            priorUsesArbGeometryShader4LinkView;
-        programObject->geometryEmulatedTransformFeedbackOnly =
-            priorGeometryEmulatedTransformFeedbackOnly;
-        programObject->geometryEmulationDiagnostic =
-            priorGeometryEmulationDiagnostic;
-        programObject->geometrySpirv = priorGeometrySpirv;
-        programObject->vertexSpirv = priorVertexSpirv;
-        programObject->vertexSpirvEntryPoint = priorVertexSpirvEntryPoint;
-        programObject->vertexSpirvSpecializationConstants =
-            priorVertexSpirvSpecializationConstants;
-        programObject->gsPresent = priorGsPresent;
-        programObject->gsInputTopology = priorGsInputTopology;
-        programObject->gsOutputTopology = priorGsOutputTopology;
-        programObject->gsMaxVertices = priorGsMaxVertices;
-        programObject->gsInvocations = priorGsInvocations;
-        programObject->needsCullDistancePrepass =
-            priorNeedsCullDistancePrepass;
-        programObject->gsPassThroughVertexMSL = priorGsPassThroughVertexMSL;
-        programObject->gsPassThroughVertexMslUsesArgumentBuffer =
-            priorGsPassThroughVertexMslUsesArgumentBuffer;
-        programObject->gsPassThroughVertexMSLLayered =
-            priorGsPassThroughVertexMSLLayered;
-        programObject->gsPassThroughVertexMSLViewportArray =
-            priorGsPassThroughVertexMSLViewportArray;
-        programObject->gsPassThroughReflection = priorGsPassThroughReflection;
-        programObject->gsPassThroughFragmentMSL =
-            priorGsPassThroughFragmentMSL;
-        programObject->gsPassThroughFragmentMslUsesArgumentBuffer =
-            priorGsPassThroughFragmentMslUsesArgumentBuffer;
-        programObject->gsPassThroughFragmentMSLActive =
-            priorGsPassThroughFragmentMSLActive;
-        programObject->gsPassThroughFragmentMSLPrimIdLoc =
-            priorGsPassThroughFragmentMSLPrimIdLoc;
-        programObject->geometryShaderAsMeshMSL = priorGeometryShaderAsMeshMSL;
-        programObject->metalGSVsComputeMSL = priorMetalGSVsComputeMSL;
-        programObject->metalGSVsComputeNeedsDescriptor =
-            priorMetalGSVsComputeNeedsDescriptor;
-        programObject->metalGSTier = priorMetalGSTier;
+        if (priorArbGeometryShader4Executable != nullptr) {
+            priorArbGeometryShader4Executable->restore(*programObject);
+        }
         programObject->ovrMultiviewNumViews =
             priorOvrMultiviewNumViews;
         programObject->uniformLayoutComputed = false;
@@ -222,18 +280,22 @@ bool GLContext::linkProgram(GLuint program) {
                 &programObject->vertexMSL);
             impl_->frameGraph->invalidateMslHashMemoForStringObject(
                 &programObject->fragmentMSL);
-            impl_->frameGraph->invalidateMslHashMemoForStringObject(
-                &programObject->gsPassThroughVertexMSL);
-            impl_->frameGraph->invalidateMslHashMemoForStringObject(
-                &programObject->gsPassThroughFragmentMSL);
+            if (attemptUsesArbGeometryShader4LinkView) {
+                impl_->frameGraph->invalidateMslHashMemoForStringObject(
+                    &programObject->gsPassThroughVertexMSL);
+                impl_->frameGraph->invalidateMslHashMemoForStringObject(
+                    &programObject->gsPassThroughFragmentMSL);
+            }
         }
-        programObject->linked = true;
+        programObject->linked = attemptUsesArbGeometryShader4LinkView;
     };
     auto failedRelinkDeleter = [&](GLProgramObject*) {
         restorePriorExecutableForFailedRelink();
     };
     std::unique_ptr<GLProgramObject, decltype(failedRelinkDeleter)>
-        failedRelinkGuard(programObject, failedRelinkDeleter);
+        failedRelinkGuard(
+            attemptUsesArbGeometryShader4LinkView ? programObject : nullptr,
+            failedRelinkDeleter);
 
     programObject->uniforms.clear();
     programObject->attributes.clear();
@@ -616,7 +678,9 @@ bool GLContext::linkProgram(GLuint program) {
                 normalized = std::move(geometryRewrite.source);
             }
             CompatShaderRewriteResult compat =
-                rewriteCompatShader(normalized, GL_GEOMETRY_SHADER);
+                rewriteCompatShader(
+                    normalized, GL_GEOMETRY_SHADER,
+                    CompatShaderRewriteMode::ArbGeometryShader4LinkView);
             if (compat.didRewrite) normalized = std::move(compat.source);
             normalized = rewriteShaderDrawParametersForSpirv(
                 normalized, GL_GEOMETRY_SHADER);
@@ -717,7 +781,9 @@ bool GLContext::linkProgram(GLuint program) {
                 if (stage == nullptr) continue;
                 std::string normalizedVertex = stage->source;
                 CompatShaderRewriteResult vertexCompat =
-                    rewriteCompatShader(normalizedVertex, GL_VERTEX_SHADER);
+                    rewriteCompatShader(
+                        normalizedVertex, GL_VERTEX_SHADER,
+                        CompatShaderRewriteMode::ArbGeometryShader4LinkView);
                 if (vertexCompat.didRewrite) {
                     normalizedVertex = std::move(vertexCompat.source);
                 }
@@ -809,7 +875,8 @@ bool GLContext::linkProgram(GLuint program) {
     // missing producer stage to a program pipeline object. ARB link-local
     // transport declarations use the appgl_ prefix and therefore do not turn
     // built-in inputs into user ones.
-    if (!programObject->separable &&
+    if (hasGeometryShader4LinkView &&
+        !programObject->separable &&
         geometryShader != nullptr && vertexShader == nullptr) {
         const bool hasUserGeometryInput = std::any_of(
             geometryShader->declaredInputs.begin(),
@@ -2543,7 +2610,8 @@ bool GLContext::linkProgram(GLuint program) {
                     consumerDimensions.erase(consumerDimensions.begin());
                 }
                 if (it->second.type != decl.type ||
-                    producerDimensions != consumerDimensions) {
+                    (hasGeometryShader4LinkView &&
+                     producerDimensions != consumerDimensions)) {
                     varyingMismatch = true;
                     mismatchMsg = std::string("varying '") + decl.name + "' type/shape mismatch: "
                         + std::string(pair.producerName) + " stage outputs type 0x" +
