@@ -804,10 +804,13 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->usesArbGeometryShader4LinkView =
         hasGeometryShader4LinkView;
 
-    // A separate program may begin at the geometry stage only when its
-    // inputs are built-ins. ARB link-local transport declarations use the
-    // appgl_ prefix and therefore do not turn built-in inputs into user ones.
-    if (geometryShader != nullptr && vertexShader == nullptr) {
+    // A non-separable program may begin at the geometry stage only when its
+    // inputs are built-ins. Separable programs intentionally defer the
+    // missing producer stage to a program pipeline object. ARB link-local
+    // transport declarations use the appgl_ prefix and therefore do not turn
+    // built-in inputs into user ones.
+    if (!programObject->separable &&
+        geometryShader != nullptr && vertexShader == nullptr) {
         const bool hasUserGeometryInput = std::any_of(
             geometryShader->declaredInputs.begin(),
             geometryShader->declaredInputs.end(),

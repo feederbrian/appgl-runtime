@@ -7678,6 +7678,99 @@ public:
             noVersionFtransformSource,
             "no-version ftransform vertex shader compiles after rewrite");
 
+        // Piglit's EXT_transform_feedback/interleaved vertex source is one
+        // physical line. Storage-declaration removal must classify statements,
+        // not erase from the start of that line through a gl_TexCoord write.
+        const char* noVersionSingleLineTransformFeedbackSource =
+            "varying vec3 v3;"
+            "varying vec2 v2;"
+            "void main() {"
+            "  gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;"
+            "  gl_FrontColor = vec4(1.0, 0.9, 0.8, 0.7);"
+            "  gl_TexCoord[0] = vec4(0.5);"
+            "  gl_TexCoord[1] = vec4(0.6, 0.0, 0.1, 0.6);"
+            "  v2 = vec2(0.2, 0.7);"
+            "  v3 = vec3(0.55, 0.66, 0.77);"
+            "}";
+        const CompatShaderRewriteResult singleLineTransformFeedbackRewrite =
+            rewriteCompatShader(noVersionSingleLineTransformFeedbackSource,
+                                GL_VERTEX_SHADER);
+        expectCondition(
+            singleLineTransformFeedbackRewrite.source.find("void main()") !=
+                    std::string::npos &&
+                singleLineTransformFeedbackRewrite.source.find(
+                    "v3 = vec3(0.55, 0.66, 0.77)") != std::string::npos,
+            "one-line transform-feedback rewrite preserves the shader body");
+        compileCompatFtransformVertex(
+            noVersionSingleLineTransformFeedbackSource,
+            "one-line no-version transform-feedback vertex shader compiles");
+
+        const char* oneLineTexCoordRedeclarationSource =
+            "varying vec4 gl_TexCoord[2];"
+            "void main() { gl_Position = vec4(0.0); gl_TexCoord[1] = vec4(1.0); }";
+        const CompatShaderRewriteResult oneLineTexCoordRedeclarationRewrite =
+            rewriteCompatShader(oneLineTexCoordRedeclarationSource,
+                                GL_VERTEX_SHADER);
+        expectCondition(
+            oneLineTexCoordRedeclarationRewrite.source.find(
+                "out vec4 gl_TexCoord[2]") == std::string::npos &&
+                oneLineTexCoordRedeclarationRewrite.source.find("void main()") !=
+                    std::string::npos,
+            "one-line global texcoord declaration is removed at statement bounds");
+        compileCompatFtransformVertex(
+            oneLineTexCoordRedeclarationSource,
+            "one-line global texcoord redeclaration compiles after rewrite");
+
+        const char* geometryOnlyUserInputSource =
+            "#version 150\n"
+            "layout(triangles) in;\n"
+            "layout(triangle_strip, max_vertices = 3) out;\n"
+            "in vec4 vs_output1[3];\n"
+            "out vec4 fs_input1;\n"
+            "void main() {\n"
+            "    for (int i = 0; i < 3; ++i) {\n"
+            "        gl_Position = vs_output1[i];\n"
+            "        fs_input1 = vs_output1[i];\n"
+            "        EmitVertex();\n"
+            "    }\n"
+            "    EndPrimitive();\n"
+            "}\n";
+        const GLuint geometryOnlyShader = gl.glCreateShader(GL_GEOMETRY_SHADER);
+        gl.glShaderSource(geometryOnlyShader, 1,
+                          &geometryOnlyUserInputSource, nullptr);
+        gl.glCompileShader(geometryOnlyShader);
+        GLint geometryOnlyCompileStatus = GL_FALSE;
+        gl.glGetShaderiv(geometryOnlyShader, GL_COMPILE_STATUS,
+                         &geometryOnlyCompileStatus);
+        expectCondition(
+            geometryOnlyCompileStatus == GL_TRUE,
+            "geometry-only user-input regression shader compiles");
+
+        const GLuint separableGeometryProgram = gl.glCreateProgram();
+        gl.glProgramParameteri(separableGeometryProgram,
+                               GL_PROGRAM_SEPARABLE, GL_TRUE);
+        gl.glAttachShader(separableGeometryProgram, geometryOnlyShader);
+        gl.glLinkProgram(separableGeometryProgram);
+        GLint separableGeometryLinkStatus = GL_FALSE;
+        gl.glGetProgramiv(separableGeometryProgram, GL_LINK_STATUS,
+                          &separableGeometryLinkStatus);
+        expectCondition(
+            separableGeometryLinkStatus == GL_TRUE,
+            "separable geometry-only program accepts user inputs");
+
+        const GLuint nonSeparableGeometryProgram = gl.glCreateProgram();
+        gl.glAttachShader(nonSeparableGeometryProgram, geometryOnlyShader);
+        gl.glLinkProgram(nonSeparableGeometryProgram);
+        GLint nonSeparableGeometryLinkStatus = GL_TRUE;
+        gl.glGetProgramiv(nonSeparableGeometryProgram, GL_LINK_STATUS,
+                          &nonSeparableGeometryLinkStatus);
+        expectCondition(
+            nonSeparableGeometryLinkStatus == GL_FALSE,
+            "non-separable geometry-only program still rejects missing vertex stage");
+        gl.glDeleteProgram(nonSeparableGeometryProgram);
+        gl.glDeleteProgram(separableGeometryProgram);
+        gl.glDeleteShader(geometryOnlyShader);
+
         const std::string maxClipPlanesSource =
             "#version 130\n"
             "uniform vec4 clipValues[gl_MaxClipPlanes];\n"
@@ -7919,6 +8012,7 @@ public:
             FunctionId::glCompileShader,
             FunctionId::glCreateProgram,
             FunctionId::glCreateShader,
+            FunctionId::glDeleteProgram,
             FunctionId::glDeleteShader,
             FunctionId::glDrawElements,
             FunctionId::glEnableVertexAttribArray,
@@ -7931,6 +8025,7 @@ public:
             FunctionId::glGetUniformLocation,
             FunctionId::glLinkProgram,
             FunctionId::glPixelStorei,
+            FunctionId::glProgramParameteri,
             FunctionId::glShaderSource,
             FunctionId::glTexImage2D,
             FunctionId::glTexParameteri,

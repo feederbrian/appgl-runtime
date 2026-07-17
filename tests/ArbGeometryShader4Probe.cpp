@@ -327,7 +327,7 @@ void runFramebufferSurfaceChecks() {
 }
 
 void runBlockingSemantics() {
-    blocker("advertisement.absent", !extensionAdvertised());
+    blocker("advertisement.present", extensionAdvertised());
     expectError("advertisement.enumeration-error", GL_NO_ERROR);
 
     GLint value = -1;

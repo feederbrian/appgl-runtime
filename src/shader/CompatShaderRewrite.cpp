@@ -2006,8 +2006,101 @@ bool replaceGeometryShader4VaryingStorage(std::string& source) {
     return changed;
 }
 
-bool eraseSingleLineStorageDeclaration(std::string& source,
-                                       const char* identifier) {
+bool findGlobalStorageDeclaration(const std::string& clean,
+                                  std::size_t identifierPos,
+                                  std::size_t& statementStart,
+                                  std::size_t& semicolon) {
+    int braceDepth = 0;
+    statementStart = 0;
+    for (std::size_t pos = 0; pos < identifierPos;) {
+        if (isPreprocessorDirectiveLine(clean, pos)) {
+            const std::size_t next = skipPreprocessorDirective(clean, pos);
+            if (next > identifierPos) {
+                return false;
+            }
+            if (braceDepth == 0) {
+                statementStart = next;
+            }
+            pos = next;
+            continue;
+        }
+
+        if (clean[pos] == '{') {
+            if (braceDepth == 0) {
+                statementStart = pos + 1;
+            }
+            ++braceDepth;
+        } else if (clean[pos] == '}') {
+            if (braceDepth == 0) {
+                return false;
+            }
+            --braceDepth;
+            if (braceDepth == 0) {
+                statementStart = pos + 1;
+            }
+        } else if (clean[pos] == ';' && braceDepth == 0) {
+            statementStart = pos + 1;
+        }
+        ++pos;
+    }
+    if (braceDepth != 0) {
+        return false;
+    }
+
+    int parenDepth = 0;
+    int bracketDepth = 0;
+    bool hasStorageQualifier = false;
+    bool hasAssignmentBeforeIdentifier = false;
+    for (std::size_t pos = statementStart; pos < clean.size();) {
+        if (isPreprocessorDirectiveLine(clean, pos)) {
+            return false;
+        }
+
+        const char c = clean[pos];
+        if (c == '(') {
+            ++parenDepth;
+        } else if (c == ')') {
+            if (parenDepth == 0) {
+                return false;
+            }
+            --parenDepth;
+        } else if (c == '[') {
+            ++bracketDepth;
+        } else if (c == ']') {
+            if (bracketDepth == 0) {
+                return false;
+            }
+            --bracketDepth;
+        } else if (c == '{' || c == '}') {
+            return false;
+        }
+
+        const bool atTopLevel = parenDepth == 0 && bracketDepth == 0;
+        if (pos < identifierPos && atTopLevel) {
+            if (c == '=') {
+                hasAssignmentBeforeIdentifier = true;
+            }
+            hasStorageQualifier = hasStorageQualifier ||
+                sourceHasWordAt(clean, pos, "varying") ||
+                sourceHasWordAt(clean, pos, "in") ||
+                sourceHasWordAt(clean, pos, "out");
+        }
+        if (pos == identifierPos &&
+            (!atTopLevel || !hasStorageQualifier ||
+             hasAssignmentBeforeIdentifier)) {
+            return false;
+        }
+        if (pos > identifierPos && c == ';' && atTopLevel) {
+            semicolon = pos;
+            return true;
+        }
+        ++pos;
+    }
+    return false;
+}
+
+bool eraseGlobalStorageDeclaration(std::string& source,
+                                   const char* identifier) {
     const std::string clean = maskCommentsAndStrings(source);
     std::size_t pos = 0;
     while ((pos = clean.find(identifier, pos)) != std::string::npos) {
@@ -2015,21 +2108,14 @@ bool eraseSingleLineStorageDeclaration(std::string& source,
             ++pos;
             continue;
         }
-        const std::size_t lineBreak = clean.rfind('\n', pos);
-        const std::size_t lineStart = lineBreak == std::string::npos
-            ? 0 : lineBreak + 1;
-        const std::size_t semicolon = clean.find(';', pos);
-        if (semicolon == std::string::npos) return false;
-        const std::string declaration = clean.substr(
-            lineStart, semicolon + 1 - lineStart);
-        const bool hasStorage = containsCodeIdentifier(declaration, "varying") ||
-            containsCodeIdentifier(declaration, "in") ||
-            containsCodeIdentifier(declaration, "out");
-        if (!hasStorage) {
+        std::size_t statementStart = 0;
+        std::size_t semicolon = 0;
+        if (!findGlobalStorageDeclaration(clean, pos, statementStart,
+                                          semicolon)) {
             pos += std::strlen(identifier);
             continue;
         }
-        for (std::size_t i = lineStart; i <= semicolon; ++i) {
+        for (std::size_t i = statementStart; i <= semicolon; ++i) {
             if (source[i] != '\n') source[i] = ' ';
         }
         return true;
@@ -2484,10 +2570,10 @@ GeometryShader4RewriteResult rewriteGeometryShader4Source(
     }
 
     if (usesClipDistanceIn) {
-        eraseSingleLineStorageDeclaration(result.source, "gl_ClipDistance");
+        eraseGlobalStorageDeclaration(result.source, "gl_ClipDistance");
     }
     if (usesTexCoordIn) {
-        eraseSingleLineStorageDeclaration(result.source, "gl_TexCoordIn");
+        eraseGlobalStorageDeclaration(result.source, "gl_TexCoordIn");
     }
 
     if (usesPositionIn) {
@@ -3614,7 +3700,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     }
     if (legacy.hadVarying) {
         if (legacy.texCoordMax >= 0) {
-            eraseSingleLineStorageDeclaration(result.source, "gl_TexCoord");
+            eraseGlobalStorageDeclaration(result.source, "gl_TexCoord");
         }
         if (isVertex) {
             replaceIdentifier(result.source, "varying", "out");
